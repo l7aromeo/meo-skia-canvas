@@ -17,7 +17,11 @@ use winit::{
 };
 
 use super::{
-    event::AppEvent, session, window::WindowSpec, window_mgr::WindowManager,
+    event::AppEvent,
+    handle::{self, WindowHandle},
+    session,
+    window::WindowSpec,
+    window_mgr::WindowManager,
 };
 use crate::{
     context::{BoxedContext2D, page::Page},
@@ -57,9 +61,9 @@ thread_local!(
     /// on Linux with no `WAYLAND_DISPLAY` and no `DISPLAY` too, and the
     /// panic crossed the binding as `internal error in Neon module`, naming
     /// neither the display nor the window that wanted one.
-    static EVENT_LOOP: RefCell<Option<EventLoop<AppEvent>>> =
+    static EVENT_LOOP: RefCell<Option<EventLoop<LoopEvent>>> =
         RefCell::new(EventLoop::with_user_event().build().ok());
-    static PROXY: RefCell<Option<EventLoopProxy<AppEvent>>> =
+    static PROXY: RefCell<Option<EventLoopProxy<LoopEvent>>> =
         RefCell::new(EVENT_LOOP.with_borrow(|event_loop| {
             event_loop.as_ref().map(EventLoop::create_proxy)
         }));
@@ -87,6 +91,8 @@ pub(crate) enum Frame {
     Opened,
     /// The cadence reached the next frame.
     Tick,
+    /// A [`WindowHandle`] queued a change between frames.
+    Edited,
 }
 
 /// The process-wide application: the event loop, the open windows, and the
@@ -111,11 +117,26 @@ impl Default for App {
     }
 }
 
+/// What the loop is sent from outside it: a request a caller made, or word
+/// that a [`WindowHandle`] has queued a change.
+///
+/// Private, and wrapping [`AppEvent`] rather than adding to it: `AppEvent` is
+/// public and exhaustive, so a new variant would break every `match` on it,
+/// while the loop's own message type is nobody else's to match.
+// Boxed because `AppEvent::Open` carries a whole page and `Edits` nothing:
+// every message would otherwise be the size of the largest. A request to the
+// loop is rare enough that the allocation is not the cost worth avoiding.
+#[derive(Debug)]
+enum LoopEvent {
+    App(Box<AppEvent>),
+    Edits,
+}
+
 fn add_event(event: AppEvent) {
     PROXY.with_borrow_mut(|proxy| {
-        proxy
-            .as_mut()
-            .and_then(|proxy| proxy.send_event(event).ok())
+        proxy.as_mut().and_then(|proxy| {
+            proxy.send_event(LoopEvent::App(Box::new(event))).ok()
+        })
     });
 }
 
@@ -170,6 +191,16 @@ impl App {
     /// Empty before [`run`](Self::run) and after the last window closes.
     pub fn windows() -> Vec<WindowSpec> {
         APP.with_borrow(|app| app.windows.specs())
+    }
+
+    /// A handle to the window with this id, while it is open.
+    ///
+    /// `None` for an id never opened or since closed. A window queued by
+    /// [`Window::open`](super::session::Window::open) counts as open before
+    /// [`run`](Self::run) starts. Answers on any thread, as the handle does.
+    pub fn window(id: u32) -> Option<WindowHandle> {
+        let handle = WindowHandle::new(id);
+        handle.is_open().then_some(handle)
     }
 
     /// Whether the window with this id is still open.
@@ -277,12 +308,27 @@ impl App {
     /// open on, or the platform refused it. Windows queued before the call
     /// are left unopened, so a caller that discards this waits for windows
     /// that cannot appear.
+    pub fn run() -> Result<(), Error> {
+        let outcome = Self::run_windows();
+        // Whichever way the loop ended, no window it held is open any more,
+        // and nothing is left to wake: a handle kept past this point answers
+        // `is_open() == false` and its changes are dropped.
+        handle::set_wake(None);
+        handle::forget_all();
+        outcome
+    }
+
     // Same deprecation as `activate` below, for the same reason: winit's
     // replacement takes an `ApplicationHandler` trait object, and this loop
     // is driven by a closure that borrows the caller's windows.
     #[allow(deprecated)]
-    pub fn run() -> Result<(), Error> {
+    fn run_windows() -> Result<(), Error> {
         let mut windows = session::take_pending();
+
+        // Changes made through a handle between `open` and here -- from this
+        // thread or another -- are the window's settings by the time it
+        // opens.
+        handle::apply_queued(&mut windows);
 
         // Queued before the loop starts, which is the only way in: winit
         // creates windows inside a running loop, so these are picked up as
@@ -302,29 +348,76 @@ impl App {
                         reason: "no display is available".to_string(),
                     });
                 };
-                let dispatch = |_frame: Frame, manager: &mut WindowManager| {
-                    for (id, events) in manager.take_ui_events() {
-                        if let Some(window) =
-                            windows.iter_mut().find(|w| w.spec().id == id)
+                // Woken from another thread by a handle's change: one, or a
+                // dozen queued since the last pass, cost the same single
+                // wake. The proxy is `Send`, which is what lets the wake
+                // cross threads where the windows themselves cannot.
+                let proxy = event_loop.create_proxy();
+                handle::set_wake(Some(Box::new(move || {
+                    // Fails only once the loop has gone, when there is
+                    // nothing left to apply a change to.
+                    let _ = proxy.send_event(LoopEvent::Edits);
+                })));
+
+                let dispatch = |frame: Frame, manager: &mut WindowManager| {
+                    if let Frame::Edited = frame {
+                        // Applied and shown without drawing: the draw
+                        // handler's frame count is the caller's clock, and a
+                        // change of title is not a frame.
+                        let changed = handle::apply_queued(&mut windows);
+                        for window in windows
+                            .iter_mut()
+                            .filter(|w| changed.contains(&w.id()))
                         {
-                            window.deliver(&events);
+                            let page = window.current_page();
+                            manager.update_window(window.spec(), page);
+                        }
+                    } else {
+                        for (id, events) in manager.take_ui_events() {
+                            if let Some(window) =
+                                windows.iter_mut().find(|w| w.spec().id == id)
+                            {
+                                window.deliver(&events);
+                            }
+                        }
+
+                        // The specs come back before the frame is drawn, so
+                        // a handler reading its window mid-draw sees the
+                        // size it actually has rather than the one it was
+                        // opened with.
+                        for spec in manager.specs() {
+                            if let Some(window) = windows
+                                .iter_mut()
+                                .find(|w| w.spec().id == spec.id)
+                            {
+                                window.adopt(spec);
+                            }
+                        }
+
+                        // Changes made in an event handler, or on another
+                        // thread since the last pass, land before the draw.
+                        handle::apply_queued(&mut windows);
+
+                        let pages: Vec<Page> =
+                            windows.iter_mut().map(|w| w.render()).collect();
+
+                        // And those made while drawing land before the frame
+                        // is shown, with the page read again for a window
+                        // they changed.
+                        let changed = handle::apply_queued(&mut windows);
+                        for (window, page) in zip(windows.iter_mut(), pages) {
+                            let page = match changed.contains(&window.id()) {
+                                true => window.current_page(),
+                                false => page,
+                            };
+                            manager.update_window(window.spec(), page);
                         }
                     }
 
-                    // The specs come back before the frame is drawn, so a
-                    // handler reading its window mid-draw sees the size it
-                    // actually has rather than the one it was opened with.
+                    // What a handle reads back: the spec as the window
+                    // system left it, on whichever thread asks.
                     for spec in manager.specs() {
-                        if let Some(window) =
-                            windows.iter_mut().find(|w| w.spec().id == spec.id)
-                        {
-                            window.adopt(spec);
-                        }
-                    }
-
-                    for window in windows.iter_mut() {
-                        let page = window.render();
-                        manager.update_window(window.spec(), page);
+                        handle::record(&spec);
                     }
                 };
 
@@ -368,6 +461,10 @@ impl App {
                                 let payload = match frame {
                                     Frame::Opened => windows.get_geometry(),
                                     Frame::Tick => windows.get_ui_changes(),
+                                    // Only a Rust `WindowHandle` sends this,
+                                    // and JavaScript windows have none: the
+                                    // JS side sets their state itself.
+                                    Frame::Edited => return,
                                 };
                                 // The `.ok()` is where the discard now
                                 // happens, and it is the same discard as
@@ -557,7 +654,7 @@ impl App {
     fn event_handler<F>(
         &mut self,
         mut dispatch: F,
-    ) -> impl FnMut(Event<AppEvent>, &ActiveEventLoop) + use<'_, F>
+    ) -> impl FnMut(Event<LoopEvent>, &ActiveEventLoop) + use<'_, F>
     where
         F: FnMut(Frame, &mut WindowManager),
     {
@@ -623,7 +720,11 @@ impl App {
                 }
             }
 
-            Event::UserEvent(app_event) => match app_event {
+            Event::UserEvent(LoopEvent::Edits) => {
+                dispatch(Frame::Edited, &mut self.windows);
+            }
+
+            Event::UserEvent(LoopEvent::App(app_event)) => match *app_event {
                 AppEvent::Open(spec, page) => {
                     self.windows.add(event_loop, spec, page);
                     dispatch(Frame::Opened, &mut self.windows);

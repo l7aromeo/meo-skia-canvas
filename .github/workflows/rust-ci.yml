@@ -319,6 +319,19 @@ jobs:
           cargo test \
             --no-default-features \
             --features "node-addon,vulkan,window,freetype"
+      # The step above runs `window_handle` with no display, where it reports
+      # a skip. Here it opens a real window: a `WindowHandle` change made on a
+      # worker thread has to reach the window system. Required, so a missing
+      # display or GPU fails the step rather than skipping it.
+      - name: Change a window from another thread on a real display
+        env:
+          MEO_SKIA_CANVAS_REQUIRE_WINDOWING: "1"
+        run: |
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            cargo test \
+              --no-default-features \
+              --features "node-addon,vulkan,window,freetype" \
+              --test window_handle
       # Without the override the optional platform package the install step fetched
       # wins resolution over lib/skia.node, and the suite would quietly exercise
       # the published binary instead of the one just built — the same trap ci.yml

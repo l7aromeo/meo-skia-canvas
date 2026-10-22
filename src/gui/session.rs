@@ -26,11 +26,15 @@
 //! App::run().expect("the event loop runs");
 //! ```
 
-use std::cell::{Cell, RefCell};
+use std::{
+    cell::RefCell,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 use super::{
     app::App,
     event::UiEvent,
+    handle::{self, WindowHandle},
     window::{Cursor, Fit, WindowSpec},
 };
 use crate::{
@@ -46,10 +50,14 @@ thread_local!(
     /// queue that carries specs into the loop is shared with the Node
     /// binding, which has no handlers to carry.
     static PENDING: RefCell<Vec<Window>> = const { RefCell::new(Vec::new()) };
-
-    /// Source of the ids that address windows for the rest of their lives.
-    static NEXT_ID: Cell<u32> = const { Cell::new(1) };
 );
+
+/// Source of the ids that address windows for the rest of their lives.
+///
+/// Process-wide rather than per thread: a [`WindowHandle`] can be used from
+/// any thread, so the id it carries has to name one window wherever it is
+/// read.
+static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 
 /// Takes everything [`Window::open`] has queued.
 pub(crate) fn take_pending() -> Vec<Window> {
@@ -88,11 +96,7 @@ impl Window {
     /// of them a frame belongs to. Reach it again through
     /// [`Window::canvas_mut`].
     pub fn with_canvas(canvas: Canvas) -> Self {
-        let id = NEXT_ID.with(|next| {
-            let id = next.get();
-            next.set(id + 1);
-            id
-        });
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
 
         Self {
             spec: WindowSpec {
@@ -123,6 +127,16 @@ impl Window {
     /// The id addressing this window, for [`App::close_window`].
     pub fn id(&self) -> u32 {
         self.spec.id
+    }
+
+    /// A handle that changes this window after it has opened.
+    ///
+    /// Take it before [`open`](Self::open), which consumes the window; it
+    /// can also be had afterwards from [`App::window`]. Changes made through
+    /// it before the window is opened are dropped -- until then, set the
+    /// window directly.
+    pub fn handle(&self) -> WindowHandle {
+        WindowHandle::new(self.spec.id)
     }
 
     /// The canvas this window shows.
@@ -166,6 +180,16 @@ impl Window {
     /// Sets whether the window opens fullscreen.
     pub fn set_fullscreen(&mut self, fullscreen: bool) {
         self.spec.fullscreen = fullscreen;
+    }
+
+    /// Sets the window's size, in logical pixels.
+    ///
+    /// The window's own size, not the canvas's: the canvas is scaled into it
+    /// by [`fit`](Self::fit), as setting `width` and `height` on a JavaScript
+    /// `Window` does. A window starts at its canvas's size.
+    pub fn set_size(&mut self, width: f32, height: f32) {
+        self.spec.width = width;
+        self.spec.height = height;
     }
 
     /// Places the top-left corner, in logical pixels.
@@ -337,23 +361,23 @@ impl Window {
     ///
     /// This consumes the window: the loop owns it from here, and the
     /// handlers it carries are the only things that run afterwards. So take
-    /// [`id`](Self::id) first if the window has to be addressed later --
-    /// [`App::close_window`](super::app::App::close_window) closes it and
-    /// [`App::window_is_open`](super::app::App::window_is_open) says
-    /// whether it still exists, which is what the JavaScript `Window.closed`
-    /// answers.
+    /// a [`handle`](Self::handle) first if the window has to be changed or
+    /// closed later, from a handler or from another thread; its
+    /// [`is_open`](WindowHandle::is_open) is what the JavaScript
+    /// `Window.closed` answers, inverted.
     ///
     /// ```no_run
     /// use meo_skia_canvas::prelude::*;
     ///
     /// let window = Window::new(400.0, 300.0);
-    /// let id = window.id();
+    /// let handle = window.handle();
     /// window.open();
     ///
-    /// // ... from a handler, or another thread's message:
-    /// App::close_window(id);
+    /// // ... from a handler, or another thread:
+    /// handle.close();
     /// ```
     pub fn open(self) {
+        handle::register(self.spec());
         PENDING.with_borrow_mut(|pending| pending.push(self));
     }
 
@@ -379,6 +403,12 @@ impl Window {
                 handler(event);
             }
         }
+    }
+
+    /// The page the window currently shows, without running the draw
+    /// handler -- what a change made between frames re-shows.
+    pub(crate) fn current_page(&mut self) -> Page {
+        self.canvas.context().inner.page()
     }
 
     /// Runs the draw handler and returns what it left behind.

@@ -19,9 +19,9 @@ independently of the npm package.
 
 ## 📦 ⟩ [v0.16.4] (crate) ⟩ October 19, 2026
 
-**A patch fixing a Vulkan GPU that went unused on a Vulkan 1.4 loader, and two
-CSS colour spellings that resolved to the wrong colour.** No signature moves and
-nothing is removed.
+**A patch fixing a Vulkan GPU that went unused on a Vulkan 1.4 loader and two
+CSS colour spellings that resolved to the wrong colour, and letting a Rust
+window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
@@ -62,6 +62,28 @@ nothing is removed.
   a change to one that leaves the other behind fails.
 
 ### Added
+
+- **A window can be changed after it opens, from any thread.** `open`
+  consumes a `Window`, so its title, size, position, fullscreen state,
+  cursor, visibility, background, fit and page were fixed from then on; the
+  JavaScript `Window` has always taken them as properties. Take
+  `Window::handle()` before opening, or `App::window(id)` afterwards, for a
+  `WindowHandle`: `Copy`, `Send` and `Sync`, with a setter for each of
+  those, plus `close`, `is_open` and `spec`. Each change goes through the
+  `Window` setter of the same name. One made in an event handler lands
+  before that frame draws, one made while drawing before the frame is
+  shown, and one made on another thread wakes the loop and lands at once
+  without running the draw handler. Measured on macOS with the loop at one
+  frame a second: a `set_title` from a worker reached the window in 0.5 ms
+  (median of 20), where waiting for the next frame took 859 ms.
+
+  Changes apply in the order they were queued, so of two threads setting one
+  property the later wins. A change for a window that is not open, never
+  opened or closed since, is dropped, as setting a property on a closed
+  JavaScript `Window` changes nothing; `is_open` tells which. `Window::set_size`
+  is new beside it, for the window's own size rather than the canvas's.
+  Window ids are now unique across the process rather than per thread, so a
+  handle names one window wherever it is used.
 
 - **`color(xyz ...)`, `color(xyz-d50 ...)` and `color(xyz-d65 ...)` are
   accepted**, beside the `srgb`, `srgb-linear`, `display-p3` and `rec2020`

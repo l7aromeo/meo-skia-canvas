@@ -149,6 +149,17 @@ name = "window"
 path = "examples/rust/window.rs"
 required-features = ["window"]
 
+# Opens a real window and changes it through a `WindowHandle` from another
+# thread. That needs a display and the main thread, and `cargo test`'s own
+# harness runs each test on a thread of its own, so this has its own `main`.
+# Gated on `window` for the reason the example above is. Without a display it
+# reports a skip, unless MEO_SKIA_CANVAS_REQUIRE_WINDOWING is set.
+[[test]]
+name = "window_handle"
+path = "tests/window_handle.rs"
+harness = false
+required-features = ["window"]
+
 [dependencies]
 
 # vulkan
