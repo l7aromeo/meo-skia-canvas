@@ -1814,19 +1814,29 @@ why  = """An operation npm exports at module level because a JavaScript caller
 [[capability]]
 name = "an image from a URL or from bytes"
 rust = ["Image::from_url",
-        "ImageData::from_url",
         "Image::from_encoded",
-        "ImageData::from_pixels",
         "load::decode_data_url"]
-npm  = ["loadImage", "loadImageData"]
+npm  = ["loadImage"]
 why  = """One npm function per kind of result, taking a URL, a `data:` URL or the
        bytes themselves; Rust splits the same work by source, because a URL
        load needs the `fetch` feature and bytes in hand do not.
-       `Image::from_url` and `ImageData::from_url` are `loadImage(url)` and
-       `loadImageData(url, width, height)`, and both read `data:` URLs.
-       `Image::from_encoded` and `ImageData::from_pixels` are the same two
-       given bytes. `decode_data_url` is the step npm runs inside the loaders,
-       public in Rust so that a `data:` URL needs no `fetch`."""
+       `Image::from_url` is `loadImage(url)` and reads `data:` URLs, and
+       `Image::from_encoded` is the same given the encoded bytes.
+       `decode_data_url` is the step npm runs inside the loaders, public in
+       Rust so that a `data:` URL needs no `fetch`; `loadImageData` reaches it
+       the same way, through the entry beside this one."""
+
+[[capability]]
+name = "pixels from a URL or from bytes"
+rust = ["ImageData::from_url",
+        "ImageData::from_pixels"]
+npm  = ["loadImageData"]
+why  = """`ImageData::from_url` is `loadImageData(url, width, height)` and reads
+       `data:` URLs, and `ImageData::from_pixels` is the same given the bytes,
+       read as pixels rather than decoded. Apart from the `Image` loaders
+       because an entry offers every Rust function it names to every
+       JavaScript one it names, and the parameter pass would otherwise hold
+       `loadImage`'s encoded bytes to `from_pixels`, which takes raw ones."""
 
 [[capability]]
 name = "how a URL is requested"
