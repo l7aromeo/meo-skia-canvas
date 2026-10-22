@@ -1332,6 +1332,51 @@ why  = "Declared on the JavaScript side only, and the crate does not need it."
     bad += 1;
   }
 
+  // TWO ENTRIES SHARING A NAME are two entries, and the reader of either
+  // cannot tell them apart. Keyed by name, the check above collapsed the
+  // pair into one claimant: the same thirteen ids registered once as
+  // Rust-only and once as paired went through green. So a name is unique,
+  // and `doubled` counts entries rather than names -- both proved here,
+  // with each finding rendered, since a kind `report` has no heading for
+  // prints nothing at all.
+  const sameName = (ids) => `
+[[capability]]
+name = "one name, two entries"
+rust = ["Mem::trim"]
+npm  = []
+why  = "A crate-side call with no JavaScript counterpart to pair against."
+
+[[capability]]
+name = "one name, two entries"
+rust = ["${ids}"]
+npm  = []
+why  = "The second entry under the same name, which is the defect under test."
+
+[[capability]]
+name = "the npm side"
+rust = []
+npm  = ["Unrelated.thing"]
+why  = "Declared on the JavaScript side only, and the crate does not need it."
+`;
+  for (const [label, second, kind] of [
+    ["claiming one id", "Mem::trim", "doubled"],
+    ["claiming different ids", "Mem::drop", "duplicate-name"],
+  ]) {
+    const found = check({
+      rust: surface("rust", [...new Set(["Mem::trim", second])]),
+      npm: surface("npm", ["Unrelated.thing"]),
+      manifest: parseManifest(sameName(second), "self-test"),
+      rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+    });
+    cases += 1;
+    if (!found.some((p) => p.kind === kind) || !report(found).includes(kind)) {
+      console.error(
+        `  self-test FAILED: two entries named alike and ${label} were not reported as ${kind}, got ${JSON.stringify(found.map((p) => `${p.kind}:${p.id}`))}`,
+      );
+      bad += 1;
+    }
+  }
+
   // AN ID AN ENTRY NAMES THAT ALREADY PAIRS falls between the two checks
   // above. `redundant` fires only when EVERY id in an entry pairs unaided, so
   // an entry whose other ids are load-bearing is correctly not redundant;

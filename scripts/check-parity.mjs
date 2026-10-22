@@ -761,6 +761,10 @@ export function check({ rust, npm, manifest, rules: given }) {
   //
   // Per surface, because the two id spaces are separate -- the same string
   // may legitimately name a Rust item and an npm one.
+  //
+  // Claimants are entries, not entry names. Keyed by name, two entries
+  // sharing one collapsed into a single claimant, and thirteen ids registered
+  // once as Rust-only and once as paired went through green.
   for (const [side, label] of [
     ["rust", "Rust"],
     ["npm", "npm"],
@@ -769,22 +773,38 @@ export function check({ rust, npm, manifest, rules: given }) {
     for (const entry of manifest) {
       for (const id of entry[side] ?? []) {
         if (!claimants.has(id)) claimants.set(id, []);
-        if (!claimants.get(id).includes(entry.name)) {
-          claimants.get(id).push(entry.name);
-        }
+        if (!claimants.get(id).includes(entry)) claimants.get(id).push(entry);
       }
     }
-    for (const [id, names] of claimants) {
-      if (names.length > 1) {
+    for (const [id, entries] of claimants) {
+      if (entries.length > 1) {
         note(
           "doubled",
           id,
-          `this ${label} id is named by ${names.length} capability entries -- ` +
-            `${names.map((n) => `'${n}'`).join(" and ")} -- so neither says where it ` +
+          `this ${label} id is named by ${entries.length} capability entries -- ` +
+            `${entries.map((e) => `'${e.name}'`).join(" and ")} -- so neither says where it ` +
             `belongs, and a reader following one of them never learns the other exists. ` +
             `Decide which capability it is part of and remove it from the rest.`,
         );
       }
+    }
+  }
+
+  // A NAME IS HOW A READER FINDS AN ENTRY, so two entries sharing one cannot
+  // be told apart: a `why` pointing at the other entry by name points at
+  // both. Refused whether or not they share an id.
+  const byName = new Map();
+  for (const entry of manifest) {
+    byName.set(entry.name, (byName.get(entry.name) ?? 0) + 1);
+  }
+  for (const [name, count] of byName) {
+    if (count > 1) {
+      note(
+        "duplicate-name",
+        name,
+        `${count} capability entries are named '${name}'. Merge them if they ` +
+          `are one capability, or name each for what separates it.`,
+      );
     }
   }
 
@@ -1442,6 +1462,7 @@ export function report(problems) {
   const order = [
     "input",
     "collision",
+    "duplicate-name",
     "doubled",
     "already-paired",
     "wrong-of-two",
@@ -1457,6 +1478,8 @@ export function report(problems) {
     input: "the extracted lists break the interchange contract",
     collision:
       "two ids normalise to one name, so a rule would pair one of them wrongly",
+    "duplicate-name":
+      "two capability entries share a name, so neither can be found by it",
     doubled:
       "one id named by two capability entries, so neither says where it belongs",
     "suspect-pair":

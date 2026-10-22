@@ -931,29 +931,6 @@ why = """These are the fields of `Error`'s struct variants -- the crate's
       example describes for `Error::InvalidRadius`."""
 
 [[capability]]
-name = "app and window event payload fields"
-rust = ["Move.left",
-        "Move.top",
-        "Wheel.deltaX",
-        "Wheel.deltaY",
-        "Open.0",
-        "Open.1",
-        "Input.0",
-        "Input.1",
-        "Resize.0",
-        "FrameRate.0",
-        "Fullscreen.0",
-        "Focus.0",
-        "Close.0"]
-npm = []
-why = """Payload fields of `AppEvent` and the window event variants -- `AppEvent`
-      declares `Close`, `FrameRate`, `Open` and `Quit`, and the tuple fields `.0` and
-      `.1` are their unnamed payloads. npm receives events as JSON objects through
-      `WindowEvents`, `MouseEventProps` and `KeyboardEventProps`, so the same values
-      arrive as properties of an event object rather than as members of a variant.
-      The capability pairs; the carrier does not."""
-
-[[capability]]
 name = "browser-shaped image and canvas API"
 rust = []
 npm = ["Image.onload",
