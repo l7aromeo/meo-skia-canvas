@@ -47,26 +47,33 @@ on purpose, because they are a legend rather than decoration.
 
 ## Why this has its own `package.json`
 
-The root project is on **TypeScript 7**, which is the native port. Its main
-entry point is `lib/version.cjs`, and the classic compiler API — the
-`SyntaxKind` and `createProgram` that every documentation generator is built
-on — exists only under its `./unstable/*` subpaths:
+The root project is on **TypeScript 7**, which is the native port, and it
+does not ship the classic compiler API that every documentation generator is
+built on. Its main entry point is `lib/version.cjs`, which exports `version`
+and `versionMajorMinor` and nothing else:
 
 ```
 $ node -e "console.log(require('typescript').version, typeof require('typescript').SyntaxKind)"
 7.0.2 undefined
 ```
 
+Of the `./unstable/*` subpaths, `unstable/ast` has `SyntaxKind`, but
+`createProgram` is in none of them: `unstable/sync` and `unstable/async` build
+programs through a different `API` class instead.
+
 So no version of TypeDoc can read this repository's TypeScript. The stable
 line refuses to install against it, and the `1.0.0-dev` line installs and
 then throws `Cannot read properties of undefined (reading
 'TypeAliasDeclaration')` on startup.
 
-Rather than pin the whole project back to TypeScript 5 for the sake of a
+Rather than pin the whole project back to TypeScript 6 for the sake of a
 documentation tool, or carry `--legacy-peer-deps` in every install, the tool
 gets its own directory with its own dependency tree. `.d.ts` syntax is
-stable, so TypeScript 5.9 parses the declarations this repository writes
-without knowing anything about the compiler that type-checks them.
+stable, so TypeScript 6.0 parses the declarations this repository writes
+without knowing anything about the compiler that type-checks them. 6.0 is
+the newest line that ships the classic API, `createProgram` included, and the
+last one TypeDoc's `typescript` peer range accepts, which is why the pin stops
+there.
 
 `scripts/api-surface` pins its own copy for the same reason and reads the
 same file, so this is a pattern with two instances rather than an exception
