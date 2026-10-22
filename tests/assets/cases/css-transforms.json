@@ -695,6 +695,18 @@
     {
       "css": "translate(5px,)",
       "refused": true
+    },
+    {
+      "css": "translate(5.px)",
+      "refused": true
+    },
+    {
+      "css": "rotate(5.deg)",
+      "refused": true
+    },
+    {
+      "css": "scale(2.)",
+      "refused": true
     }
   ]
 }

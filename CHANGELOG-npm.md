@@ -238,7 +238,9 @@ removed and no signature moves.
   with no unit, as in `translate(10, 10)`, where only `0` may go without
   one; a function given extra arguments, as `translateX(5px, 1px)`,
   `scale(2, 3, 4)` and `skewX(10deg, 1deg)`, whose extras were ignored; a
-  length for `rotate3d`'s axis, as `rotate3d(1px, 0, 0, 45deg)`; and the
+  length for `rotate3d`'s axis, as `rotate3d(1px, 0, 0, 45deg)`; a number
+  ending in a point, as `translate(5.px)` and `scale(2.)`, which CSS does
+  not allow and which loaded as the number before the point; and the
   CSS-wide keywords `inherit`, `initial`, `unset`, `revert` and
   `revert-layer`, which loaded as the identity. `none` still means the
   identity on its own, and only on its own.

@@ -144,6 +144,15 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `color(from ... srgb-linear ...)` too. Pinned per notation in
   `the_rust_surface_takes_css_colors`.
 
+- **A number ending in a point is refused.** CSS Syntax needs a digit after
+  a `.`, and Chrome refuses `translate(5.px)`, `scale(2.)` and
+  `blur(5.px)`; `Affine::from_css`, `set_filter_css` and the other CSS
+  string setters read each as the number before the point. A transform
+  number also took `inf` and `NaN`, which are Rust's spellings and not
+  CSS's, so `matrix(NaN, 0, 0, 1, 0, 0)` gave a matrix of NaN rather than
+  `None`. Three of these lists are in the transform table both surfaces are
+  tested against.
+
 ### Added
 
 - **A window can be changed after it opens, from any thread.** `open`
