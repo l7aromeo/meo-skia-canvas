@@ -238,6 +238,18 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `fontVariationSettings`, or in a `ParagraphBuilder`'s `fontVariations`,
   still wins.
 
+- **A style pushed onto a `ParagraphBuilder` is instanced at its own
+  `fontVariations`.** `pushStyle` accepted the key and read nothing from
+  it, so every span drew at the paragraph's axes: a span asking for
+  `"wght" 700` under a paragraph at `"wdth" 50` drew narrow, 179.09 wide
+  for `Hamburgefonstiv` in Amstelvar at 48px where `"wght" 700` alone
+  measures 411.68. A span's list now replaces the paragraph's, as a nested
+  `font-variation-settings` does in CSS and as the crate's
+  `ParagraphBuilder::push_style` already did, and a span without one keeps
+  the paragraph's. A span's weight and stretch now reach `wght` and `wdth`
+  as they do for the paragraph, where they matched against the
+  paragraph's instance before.
+
 - **A GPU recovery could produce wrong or blank pixels with no error; such
   a draw is now retried once and otherwise reported.** When the GPU recovers
   from a fault -- often one in another program -- macOS discards the work

@@ -839,3 +839,76 @@ describe("ParagraphBuilder optical size", () => {
     );
   });
 });
+
+describe("ParagraphBuilder span axes", () => {
+  // A pushed style's `fontVariations` replace the paragraph's, as a nested
+  // `font-variation-settings` replaces its parent's in CSS and as the
+  // crate's `ParagraphBuilder::push_style` does; a style with none of its
+  // own takes the paragraph's. Its weight supplies `wght` unless the list in
+  // force names it. Measured against a paragraph built in the span's style
+  // outright, which instances its face through the same library.
+  const FAMILY = "AmstelvarSpanAxes",
+    TEXT = "Hamburgefonstiv",
+    wdth50 = [{ axis: "wdth", value: 50 }],
+    wght700 = [{ axis: "wght", value: 700 }],
+    wght300 = [{ axis: "wght", value: 300 }];
+
+  const style = (weight, fontVariations) => ({
+    fontFamilies: [FAMILY],
+    fontSize: 48,
+    fontStyle: { weight },
+    fontVariations,
+  });
+
+  const widthOf = (base, span) => {
+    FontLibrary.use(FAMILY, "tests/assets/fonts/AmstelvarAlpha-VF.ttf");
+    try {
+      const builder = ParagraphBuilder.Make({ textStyle: base });
+      if (span) builder.pushStyle(span);
+      builder.addText(TEXT);
+      const paragraph = builder.build();
+      paragraph.layout(10000);
+      return paragraph.getMaxIntrinsicWidth();
+    } finally {
+      FontLibrary.reset();
+    }
+  };
+
+  test("lays a span out at its own axes", () => {
+    assert.ok(
+      Math.abs(
+        widthOf(style(400, wght700)) -
+          widthOf(style(400, [...wdth50, ...wght700])),
+      ) > 1,
+      "wdth 50 has to move the width for the first case to mean anything",
+    );
+    const cases = [
+      [
+        "a span's wght 700 under a paragraph's wdth 50",
+        style(400, wdth50),
+        style(400, wght700),
+        style(400, wght700),
+      ],
+      [
+        "a span's weight 700 and wdth 50 under a paragraph's wght 300",
+        style(400, wght300),
+        style(700, wdth50),
+        style(700, wdth50),
+      ],
+      [
+        "a span with no axes under a paragraph's wdth 50",
+        style(400, wdth50),
+        style(400, undefined),
+        style(400, wdth50),
+      ],
+    ];
+    for (const [what, base, span, alone] of cases) {
+      const pushed = widthOf(base, span),
+        expected = widthOf(alone);
+      assert.ok(
+        Math.abs(pushed - expected) < 1e-3,
+        `${what} measured ${pushed} against ${expected}`,
+      );
+    }
+  });
+});

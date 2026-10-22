@@ -14,6 +14,7 @@ use std::{
 use skia_safe::{
     Data, FontArguments, FontMgr, FourByteTag, Typeface,
     font_arguments::{VariationPosition, variation_position::Coordinate},
+    font_parameters::variation::Axis,
     font_style::{FontStyle, Slant},
     textlayout::{FontCollection, TextStyle, TypefaceFontProvider},
 };
@@ -192,6 +193,54 @@ impl CollectionKey {
             optical_size,
         }
     }
+}
+
+/// Where `style` places each axis of a variable face with `axes`.
+///
+/// An axis `variations` names takes the value given, the last where it is
+/// named twice, as in `font-variation-settings`. Otherwise `wdth` takes the
+/// style's stretch, `wght` its weight and `opsz` its font size -- what
+/// `font-stretch`, `font-weight` and `font-optical-sizing: auto` set -- and
+/// any other axis its default. OpenType defines `wght` on the CSS
+/// `font-weight` scale and `wdth` in the percentages `font-stretch` names,
+/// so neither needs converting. Each value is pinned to its axis.
+///
+/// Every axis rather than the ones asked for, so the position does not
+/// depend on the face it is applied to: a style pushed onto a paragraph
+/// builder applies it over a face already instanced at the paragraph's, and
+/// Skia moves only the axes a position names.
+pub(crate) fn instance_coordinates(
+    axes: &[Axis],
+    style: &TextStyle,
+    variations: &[(FourByteTag, f32)],
+) -> Vec<Coordinate> {
+    let wdth = FourByteTag::from_chars('w', 'd', 't', 'h');
+    let wght = FourByteTag::from_chars('w', 'g', 'h', 't');
+    axes.iter()
+        .map(|axis| {
+            let named = variations
+                .iter()
+                .rev()
+                .find(|(tag, _)| *tag == axis.tag)
+                .map(|(_, value)| *value);
+            let value = named.unwrap_or_else(|| match axis.tag {
+                tag if tag == wdth => {
+                    stretch_percent(*style.font_style().width())
+                }
+                tag if tag == wght => *style.font_style().weight() as f32,
+                _ => {
+                    optical_size(std::slice::from_ref(axis), style.font_size())
+                        .map_or(axis.def, |opsz| opsz.value)
+                }
+            });
+            // `max` then `min` rather than `clamp`, which panics on an axis
+            // whose minimum a malformed font puts above its maximum.
+            Coordinate {
+                axis: axis.tag,
+                value: value.max(axis.min).min(axis.max),
+            }
+        })
+        .collect()
 }
 
 /// How many instanced collections are kept.
@@ -1095,14 +1144,11 @@ impl FontLibrary {
         // instance that matches the current weight settings and add it
         // to a dynamic font mgr
         if variable {
-            // build a set of explicitly-set axis tags for quick lookup
-            let explicit_tags: Vec<u32> =
-                variations.iter().map(|(tag, _)| **tag).collect();
-
             // memoize the generation of FontCollections for instanced variable
             // fonts
-            let optical = (sized && !explicit_tags.contains(&*opsz_tag))
-                .then(|| style.font_size());
+            let explicit_opsz =
+                variations.iter().any(|(tag, _)| *tag == opsz_tag);
+            let optical = (sized && !explicit_opsz).then(|| style.font_size());
             let key = CollectionKey::new(style, variations, optical);
             if let Some(cached) = self.collection_cache.get(&key) {
                 return cached;
@@ -1115,72 +1161,8 @@ impl FontLibrary {
 
             for font in matches.into_iter() {
                 if let Some(params) = variation_axes(&font) {
-                    // build coordinates from explicit variations + auto wdth,
-                    // wght, opsz
-                    let mut coords: Vec<Coordinate> = vec![];
-
-                    // add explicit variations first
-                    for (tag, value) in variations {
-                        // find the matching axis parameter to clamp values
-                        if let Some(param) =
-                            params.iter().find(|p| *p.tag == **tag)
-                        {
-                            coords.push(Coordinate {
-                                axis: param.tag,
-                                value: value.max(param.min).min(param.max),
-                            });
-                        }
-                    }
-
-                    // auto-add wdth if not explicitly set, the way wght is
-                    // just below. Without it `fontStretch` reached only
-                    // families with a separate condensed *face*: a variable
-                    // font carrying a `wdth` axis measured the same at every
-                    // setting, because the same typeface came back unpinned.
-                    // A browser applies `font-stretch` to the axis, and
-                    // fontconfig already resolves the named instance --
-                    // `fc-match "Ubuntu:width=condensed"` picks
-                    // `Ubuntu[wdth,wght].ttf` -- so we were the ones ignoring
-                    // it.
-                    let wdth_tag = FourByteTag::from_chars('w', 'd', 't', 'h');
-                    if !explicit_tags.contains(&*wdth_tag)
-                        && let Some(param) =
-                            params.iter().find(|p| *p.tag == *wdth_tag)
-                    {
-                        let percent =
-                            stretch_percent(*style.font_style().width());
-                        coords.push(Coordinate {
-                            axis: param.tag,
-                            value: percent.max(param.min).min(param.max),
-                        });
-                    }
-
-                    // auto-add wght if not explicitly set. OpenType defines the
-                    // `wght` axis on the CSS `font-weight` scale, so the
-                    // requested weight is the design coordinate as it stands,
-                    // which is what a browser instances at.
-                    let wght_tag = FourByteTag::from_chars('w', 'g', 'h', 't');
-                    if !explicit_tags.contains(&*wght_tag)
-                        && let Some(param) =
-                            params.iter().find(|p| *p.tag == *wght_tag)
-                    {
-                        let weight = *style.font_style().weight();
-                        let value =
-                            (weight as f32).max(param.min).min(param.max);
-                        coords.push(Coordinate {
-                            axis: param.tag,
-                            value,
-                        });
-                    }
-
-                    // auto-add opsz if not explicitly set: the font size,
-                    // clamped to the axis, as `font-optical-sizing: auto`
-                    // has it.
-                    if let Some(size) = optical
-                        && let Some(coordinate) = optical_size(&params, size)
-                    {
-                        coords.push(coordinate);
-                    }
+                    let coords =
+                        instance_coordinates(&params, style, variations);
 
                     if !coords.is_empty() {
                         let v_pos = VariationPosition {
@@ -1395,6 +1377,8 @@ pub fn reset(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
 #[cfg(test)]
 mod tests {
+    use skia_safe::font_style::{Weight, Width};
+
     use super::*;
 
     /// The manager handed to `SkSVGDOM` answers a null family.
@@ -1527,6 +1511,78 @@ mod tests {
         assert!(
             cache.get(&key(COLLECTION_CACHE_SIZE as i32)).is_some(),
             "the new entry is in"
+        );
+    }
+
+    #[test]
+    fn an_instance_places_every_axis_of_the_face() {
+        // Every axis, so a pushed style's position replaces the paragraph's
+        // rather than moving only the axes it names over it.
+        let bytes = std::fs::read("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+            .expect("bundled Amstelvar is readable");
+        let face = FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("Amstelvar parses");
+        let axes = variation_axes(&face).expect("Amstelvar is variable");
+        let [wght, wdth, opsz] = [b"wght", b"wdth", b"opsz"].map(|t| {
+            FourByteTag::from_chars(
+                t[0] as char,
+                t[1] as char,
+                t[2] as char,
+                t[3] as char,
+            )
+        });
+        let other = axes
+            .iter()
+            .find(|axis| ![wght, wdth, opsz].contains(&axis.tag))
+            .expect("Amstelvar has axes beyond the three CSS sets");
+        let mut style = TextStyle::new();
+        style.set_font_size(48.0);
+        style.set_font_style(FontStyle::new(
+            Weight::from(400),
+            Width::CONDENSED,
+            Slant::Upright,
+        ));
+        let value_of = |coordinates: &[Coordinate], tag: FourByteTag| {
+            coordinates
+                .iter()
+                .find(|coordinate| coordinate.axis == tag)
+                .map(|coordinate| coordinate.value)
+        };
+
+        let unnamed = instance_coordinates(&axes, &style, &[]);
+        assert_eq!(unnamed.len(), axes.len(), "one position per axis");
+        assert_eq!(value_of(&unnamed, wght), Some(400.0), "wght is the weight");
+        assert_eq!(
+            value_of(&unnamed, wdth),
+            Some(75.0),
+            "wdth is the stretch, condensed being 75%"
+        );
+        assert_eq!(value_of(&unnamed, opsz), Some(48.0), "opsz is the size");
+        assert_eq!(
+            value_of(&unnamed, other.tag),
+            Some(other.def),
+            "an axis nothing sets is at its default"
+        );
+
+        let named = instance_coordinates(
+            &axes,
+            &style,
+            &[
+                (wght, 300.0),
+                (other.tag, other.max + 1000.0),
+                (wght, 700.0),
+            ],
+        );
+        assert_eq!(
+            value_of(&named, wght),
+            Some(700.0),
+            "the last of two `wght` entries wins"
+        );
+        assert_eq!(
+            value_of(&named, other.tag),
+            Some(other.max),
+            "a named value past its axis is pinned to it"
         );
     }
 

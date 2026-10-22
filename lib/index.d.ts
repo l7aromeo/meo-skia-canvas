@@ -5363,7 +5363,14 @@ export interface TextStyleInput {
    *
    * Each entry must carry a 4-character ASCII `axis` tag; values are
    * clamped to the typeface's declared min/max for that axis. Entries
-   * referring to axes the typeface doesn't expose are silently dropped.
+   * referring to axes the typeface doesn't expose are silently dropped,
+   * and an axis named twice takes the later value.
+   *
+   * A style given to `pushStyle` with a list of its own is instanced at
+   * that list in place of the paragraph's, as a nested
+   * `font-variation-settings` replaces its parent's in CSS; one without
+   * takes the paragraph's. Either way the style's weight, stretch and
+   * font size supply `wght`, `wdth` and `opsz` unless the list names them.
    */
   fontVariations?: FontVariationInput[];
   /**

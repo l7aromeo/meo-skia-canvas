@@ -106,7 +106,9 @@ pub(crate) fn optical_size(
         .find(|axis| axis.tag == opsz)
         .map(|axis| Coordinate {
             axis: axis.tag,
-            value: font_size.clamp(axis.min, axis.max),
+            // `max` then `min` rather than `clamp`, which panics on an axis
+            // whose minimum a malformed font puts above its maximum.
+            value: font_size.max(axis.min).min(axis.max),
         })
 }
 

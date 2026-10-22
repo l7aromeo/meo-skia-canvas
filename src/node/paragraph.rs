@@ -18,8 +18,8 @@ use skia_safe::{
 };
 
 use crate::{
-    font::{optical_size, slant_for_matching, variation_axes},
-    font_library::FontLibrary,
+    font::{slant_for_matching, variation_axes},
+    font_library::{FontLibrary, instance_coordinates},
     text::{
         PlaceholderAlignment as CratePlaceholderAlignment, PlaceholderBaseline,
         RectHeightStyle as CrateRectHeightStyle,
@@ -39,11 +39,11 @@ use crate::{
 pub struct ParagraphBuilderWrap {
     builder: Option<SkParagraphBuilder>,
     /// The collection the builder resolves against, kept alive for it, and
-    /// searched by a pushed style for whether its face has an `opsz` axis.
+    /// searched by a pushed style for the axes its face has.
     collection: FontCollection,
-    /// Whether the paragraph's `fontVariations` name `opsz`, which then
-    /// holds for every span rather than each span's font size.
-    explicit_opsz: bool,
+    /// The paragraph's `fontVariations`, which a pushed style with none of
+    /// its own is instanced at.
+    variations: Vec<(FourByteTag, f32)>,
 }
 
 impl Finalize for ParagraphBuilderWrap {}
@@ -384,13 +384,10 @@ fn parse_text_style(
     // decoration mode
     style.set_decoration_mode(TextDecorationMode::Through);
 
-    // NOTE: `fontVariations` is parsed in `paragraph::new` instead of
-    // here. `SkParagraphBuilder` reads its font collection at
-    // construction time, not per-`pushStyle`, so the instantiated
-    // variable typeface has to be seeded on the builder's collection.
-    // A `style.set_typeface(face)` call here would be ignored by the
-    // layout path (the collection-resident match takes precedence on
-    // every glyph run), so we deliberately don't attempt one.
+    // `fontVariations` is read by the callers rather than here: the
+    // paragraph's by `paragraph::new`, which instances the builder's
+    // collection at it, and a pushed style's by `pushStyle`, which sets
+    // the position as the style's font arguments.
 
     // shadows: [{ color, offset: [dx, dy], blurRadius }]
     if let Ok(shadows_val) = obj.get::<JsValue, _, _>(cx, "shadows")
@@ -662,12 +659,11 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
     });
 
     let builder = SkParagraphBuilder::new(&para_style, &collection);
-    let opsz = FourByteTag::from_chars('o', 'p', 's', 'z');
 
     Ok(cx.boxed(RefCell::new(ParagraphBuilderWrap {
         builder: Some(builder),
         collection,
-        explicit_opsz: variations.iter().any(|(tag, _)| *tag == opsz),
+        variations,
     })))
 }
 
@@ -675,34 +671,42 @@ pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedParagraphBuilder>(0)?;
     let style_obj = cx.argument::<JsObject>(1)?;
     let mut text_style = parse_text_style(&mut cx, &style_obj)?;
+    let own = parse_font_variations(&mut cx, &style_obj)?;
 
     let mut this = this.borrow_mut();
-    // The collection holds the paragraph's faces instanced at its own font
-    // size, so a span sized apart from it moves `opsz` to its own. Skia
-    // applies a style's arguments over the instance's position, so the
-    // other axes keep what the paragraph instanced them at -- measured on
-    // CoreText and FreeType alike, `"wght" 700` cloned again with only
-    // `opsz` draws as both.
-    if !this.explicit_opsz {
-        let families = text_style.font_families();
-        let families: Vec<&str> = families.iter().collect();
-        let opsz = this
-            .collection
-            .find_typefaces(&families, text_style.font_style())
-            .iter()
-            .find_map(variation_axes)
-            .and_then(|axes| optical_size(&axes, text_style.font_size()));
-        if let Some(opsz) = opsz {
-            text_style.set_font_arguments(
-                &FontArguments::new().set_variation_design_position(
-                    VariationPosition {
-                        coordinates: &[opsz],
-                    },
-                ),
-            );
-        }
+    let ParagraphBuilderWrap {
+        builder,
+        collection,
+        variations: paragraph_variations,
+    } = &mut *this;
+    // A style's own `fontVariations` replace the paragraph's, as a nested
+    // `font-variation-settings` replaces its parent's in CSS; with none of its
+    // own it takes the paragraph's. Its weight, stretch and font size supply
+    // `wght`, `wdth` and `opsz` unless the list in force names them. The
+    // collection holds the paragraph's faces instanced at its own style, and
+    // the position set here names every axis, so nothing of the paragraph's
+    // carries over.
+    let variations = match own.is_empty() {
+        true => &*paragraph_variations,
+        false => &own,
+    };
+    let families = text_style.font_families();
+    let families: Vec<&str> = families.iter().collect();
+    let axes = collection
+        .find_typefaces(&families, text_style.font_style())
+        .iter()
+        .find_map(variation_axes);
+    if let Some(axes) = axes {
+        let coordinates = instance_coordinates(&axes, &text_style, variations);
+        text_style.set_font_arguments(
+            &FontArguments::new().set_variation_design_position(
+                VariationPosition {
+                    coordinates: &coordinates,
+                },
+            ),
+        );
     }
-    if let Some(builder) = this.builder.as_mut() {
+    if let Some(builder) = builder.as_mut() {
         builder.push_style(&text_style);
     }
     Ok(cx.undefined())
