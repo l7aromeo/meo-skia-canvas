@@ -1825,6 +1825,7 @@ why  = """npm's loaders take a `RequestInit`, which is TypeScript's own DOM type
        Rust call cannot take an `AbortSignal`, so the token is cancelled from
        another thread instead. `timeout` has no npm counterpart and is what
        `AbortSignal.timeout()` gives a JavaScript caller."""
+status = "deliberate"
 
 [[capability]]
 name = "why a load failed"
@@ -1867,6 +1868,7 @@ why  = """A rejected promise carries an `Error` whose type and message say the
        or a bad header, an `Error` naming the HTTP status, an `AbortError` for
        an aborted signal. JavaScript has no typed error enumeration to pair
        these with, and the npm package exports no error classes."""
+status = "deliberate"
 
 [[capability]]
 name = "Subresource Integrity"
@@ -1890,6 +1892,7 @@ why  = """npm checks `RequestInit.integrity` inside `loadImage` and
        JavaScript has no free-standing integrity checker to pair it with:
        `fetch` takes the metadata as a request option, and so do the
        loaders."""
+status = "deliberate"
 
 [[capability]]
 name = "the crate's canvas defaults"

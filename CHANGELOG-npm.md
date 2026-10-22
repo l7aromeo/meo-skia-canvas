@@ -283,9 +283,12 @@ removed and no signature moves.
 - **At most 20 redirects are followed, as in `fetch`.** The loaders followed
   21, follow-redirects' default, where the Fetch Standard stops at 20: a
   load reaching a twenty-first redirect now rejects instead of following
-  it, with follow-redirects' `ERR_FR_TOO_MANY_REDIRECTS` error. The Rust
-  crate's `Image::from_url` stops at the same place. A `maxRedirects`
-  passed in the options is still used as given.
+  it. It rejects with a `TypeError` saying how many redirects it met, which
+  is what Chrome and Node's `fetch` raise there and what a redirect that
+  `redirect` refuses already rejects with, where follow-redirects raised a
+  plain `Error`; follow-redirects' error is its `cause`. The Rust crate's
+  `Image::from_url` stops at the same place. A `maxRedirects` passed in the
+  options is still used as given.
 
 - **`hsl()` and `hwb()` written with bare numbers name the colour they
   state.** CSS Color 4 types saturation, lightness, whiteness and blackness

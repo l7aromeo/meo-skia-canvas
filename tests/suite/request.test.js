@@ -364,12 +364,16 @@ describe("At most twenty redirects are followed", () => {
     }
   };
 
-  test("twenty load, and twenty-one reject", async () => {
+  // A TypeError, as Chrome 152 and Node 26 raise from `fetch` at the
+  // twenty-first, and as a redirect `redirect` refuses already is here.
+  test("twenty load, and twenty-one reject with a TypeError naming the limit", async () => {
     let [twenty, twentyOne] = [await chain(20), await chain(21)];
     assert.deepEqual(
       {
         twenty,
-        twentyOne: /redirects/i.test(twentyOne) ? "refused" : twentyOne,
+        twentyOne: /^TypeError: .*\b20 redirects\b/.test(twentyOne)
+          ? "refused"
+          : twentyOne,
       },
       { twenty: "load", twentyOne: "refused" },
     );
