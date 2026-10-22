@@ -879,6 +879,80 @@ describe("a face that misreports its kerning is still corrected", () => {
   });
 });
 
+describe("measureText reports a negative width as it is", () => {
+  FontLibrary.use("Oswald", [
+    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+  ]);
+
+  // Chrome 152 at 40px Oswald, loaded as a FontFace with its weight range:
+  // the advance of every glyph and space, letter spacing after each and
+  // word spacing between words, summed and never clamped.
+  test("width is the signed advance, trailing spaces included", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = "40px Oswald";
+    for (const [letter, word, text, chrome] of [
+      ["-23.12px", "0px", "abcd", -23.44],
+      ["-30px", "0px", "ab", -25.08],
+      ["-50px", "0px", "a", -32.96],
+      ["-100px", "0px", "abcd", -330.96],
+      ["0px", "-100px", "a b", -55.92],
+      ["-10px", "0px", " ", -0.84],
+      ["-50px", "0px", "ab ", -105.92],
+      ["-10px", "0px", "a ", 6.2],
+      ["0px", "-100px", " a", 26.2],
+      ["0px", "0px", "a  ", 35.36],
+    ]) {
+      ctx.letterSpacing = letter;
+      ctx.wordSpacing = word;
+      const { width } = ctx.measureText(text);
+      assert.ok(
+        Math.abs(width - chrome) <= 0.01,
+        `${letter} ${word} ${JSON.stringify(text)}: ${width}, Chrome ${chrome}`,
+      );
+    }
+  });
+
+  // Chrome's box for a negative advance reaches back on the left to where
+  // the advance ends -- Blink's plain_text_node.cc moves the left edge of
+  // such a run's ink out to its width -- and keeps the ink's right edge,
+  // before the alignment shifts it by none, half or all of the width. Chrome
+  // 152, 40px Oswald: `a` at -50px reports a left of 32.96 though its ink
+  // begins 1.68 right of the origin.
+  test("a negative advance's box reaches back to where it ends", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = "40px Oswald";
+    for (const [letter, word, text, align, direction, left, right] of [
+      ["-23.12px", "0px", "abcd", "start", "ltr", 23.44, 15.48],
+      ["-50px", "0px", "a", "start", "ltr", 32.96, 15.48],
+      ["-100px", "0px", "abcd", "start", "ltr", 330.96, 15.48],
+      ["-30px", "0px", "ab", "start", "ltr", 25.08, 15.48],
+      ["-23.12px", "0px", "abcd", "right", "ltr", 0, 38.92],
+      ["-50px", "0px", "a", "right", "ltr", 0, 48.44],
+      ["-23.12px", "0px", "abcd", "center", "ltr", 11.72, 27.2],
+      ["-50px", "0px", "a", "center", "ltr", 16.48, 31.96],
+      ["-23.12px", "0px", "abcd", "start", "rtl", 0, 38.92],
+      ["-10px", "0px", " ", "start", "ltr", 0.84, 0],
+      // The ink already reaches past the advance: unchanged.
+      ["0px", "-100px", "a b", "start", "ltr", 71.56, 15.48],
+    ]) {
+      ctx.letterSpacing = letter;
+      ctx.wordSpacing = word;
+      ctx.textAlign = align;
+      ctx.direction = direction;
+      const m = ctx.measureText(text),
+        what = `${letter} ${word} ${JSON.stringify(text)} ${align} ${direction}`;
+      assert.ok(
+        Math.abs(m.actualBoundingBoxLeft - left) <= 0.02,
+        `${what} left: ${m.actualBoundingBoxLeft}, Chrome ${left}`,
+      );
+      assert.ok(
+        Math.abs(m.actualBoundingBoxRight - right) <= 0.02,
+        `${what} right: ${m.actualBoundingBoxRight}, Chrome ${right}`,
+      );
+    }
+  });
+});
+
 describe("measureText reports the laid-out height", () => {
   // `lines[].height` is the ink join of one line, so summing it does not
   // give the laid-out box -- which is the reason `height` is reported
