@@ -468,9 +468,10 @@ name = "premultiplied linear-light colour"
 rust = ["RgbaLinear"]
 npm  = []
 why  = """The crate's colour primitive: premultiplied, linear-light, and the
-       type every drawing call takes. JavaScript passes a CSS colour string
-       and `lib/classes/css.js` parses it, so the capability on that side is
-       the string vocabulary rather than a type."""
+       type every drawing call takes. JavaScript passes a CSS colour string,
+       which the binding reads with the parser `RgbaLinear::from_css` uses, so
+       the capability on that side is the string vocabulary rather than a
+       type."""
 status = "deliberate"
 
 [[capability]]

@@ -890,6 +890,32 @@ fn the_rust_surface_takes_css_colors() -> Result<()> {
         [234, 51, 35, 255],
     );
 
+    // An `oklch()` colour inside P3 and outside sRGB, which reaches a P3
+    // canvas through sRGB with a negative red. Computed through CSS Color 4's
+    // Oklab, XYZ and P3 matrices: `91.4, 221.3, 164.8` before quantising.
+    // Encoding that negative red as `12.92 * x` rather than mirroring the
+    // curve, which is what `csscolorparser` 0.9 does, paints `3, 221, 164`;
+    // on an sRGB canvas the two clip to the same byte, so only a wide one
+    // can tell them apart.
+    //
+    // The same colour in the other notations `csscolorparser` converts in
+    // linear light and this crate's own parsers leave to it: an `xyz` space,
+    // an upper-case `LAB(` that `parse_lab_like` does not claim, and a
+    // relative colour whose space follows an origin with spaces of its own.
+    // Lab rounds its components to four places, which moves no byte here.
+    for css in [
+        "oklch(0.8 0.18 165)",
+        "color(xyz-d65 0.318370 0.555540 0.424442)",
+        "LAB(79.1800% -62.2737 17.5643)",
+        "color(from oklch(0.8 0.18 165) srgb-linear r g b)",
+    ] {
+        assert_eq!(
+            painted(css, PixelColorSpace::DisplayP3)?,
+            [91, 221, 165, 255],
+            "{css}",
+        );
+    }
+
     // A browser keeps the previous fill when the string will not parse. Rust
     // gets told, since it has somewhere to put the answer.
     let mut canvas = Canvas::new(4.0, 4.0);

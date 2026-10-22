@@ -210,6 +210,17 @@ removed and no signature moves.
   `font-weight: 400` and `fontVariationSettings = '"wght" 400'` now name one
   instance rather than two.
 
+- **A colour outside sRGB named in `oklab()`, `oklch()` or an `xyz` space
+  paints as itself on a wide canvas.** A negative channel was
+  encoded on the sRGB curve's linear segment instead of the curve mirrored
+  through zero, so on a `display-p3` or `rec2020` canvas such a colour
+  painted as a different one: `fillStyle = 'oklch(0.8 0.18 165)'` on a P3
+  canvas painted `4, 221, 164` where CSS Color 4 gives `91, 221, 165`. An
+  sRGB canvas clips both to the same byte, which is why nothing caught it.
+  The `fillStyle` getter carried the same error for these colours:
+  `oklch(0.7 0.35 30)` reported a green of about `-1.186` in its
+  `color(srgb ...)` form, and now reports `-0.335`.
+
 ### Added
 
 - **`color(xyz ...)`, `color(xyz-d50 ...)` and `color(xyz-d65 ...)` are
