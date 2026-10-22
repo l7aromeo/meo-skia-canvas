@@ -26,6 +26,7 @@ use vulkano::{
     instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
 };
 
+use super::skia_max_api_version;
 use crate::{context::page::ExportOptions, gpu::ThreadBound};
 
 thread_local!(
@@ -586,14 +587,9 @@ impl VulkanContext {
                         }
                     }
                 }
-                .map(|f| f as _)
-                .unwrap_or_else(|| {
-                    println!(
-                        "Failed to resolve Vulkan proc `{}`",
-                        of.name().to_string_lossy()
-                    );
-                    ptr::null()
-                })
+                // A null answer is how Vulkan says an entry point is not
+                // there, and Skia asks for optional ones expecting it.
+                .map_or(ptr::null(), |f| f as _)
             };
             // SAFETY: every handle below is borrowed from an `Arc` this
             // function holds for longer than the `BackendContext` it builds,
@@ -609,7 +605,7 @@ impl VulkanContext {
                         queue.queue_family_index() as usize,
                     ),
                     &get_proc,
-                    None,
+                    skia_max_api_version(&instance),
                 )
                 .build()
             };
