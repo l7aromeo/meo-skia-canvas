@@ -4,7 +4,7 @@ use crate::{
     context::State,
     css::{FontUnits, is_font_relative, parse_length},
     font::{slant_for_matching, variation_axes},
-    font_library::{FontLibrary, MatchedFace},
+    font_library::FontLibrary,
     text::{
         TextAlign as CrateTextAlign, TextBaseline as CrateTextBaseline,
         TextMetricsLine, TextMetricsRun,
@@ -365,12 +365,13 @@ pub struct Typesetter<'a> {
     condense_to: Option<f32>,
     baseline: Baseline,
     typefaces: FontCollection,
-    /// The face the style matched, where one was.
+    /// The style of the face the style matched first, where one was.
     ///
-    /// Decides the style the paragraph is built with, by
-    /// `synthesis_style`, so Skia synthesises a weight or a slant exactly
-    /// where Chrome does.
-    matched_style: Option<MatchedFace>,
+    /// Decides the style the paragraph is first built with, by
+    /// `synthesis_style`, which is the whole of it when every run is in
+    /// that face. A run another face draws is restyled for its own face in
+    /// `layout`.
+    matched_style: Option<FontStyle>,
     char_style: TextStyle,
     graf_style: ParagraphStyle,
     text_decoration: DecorationStyle,
@@ -458,35 +459,72 @@ pub struct TextLayout {
     pub condensation: f32,
 }
 
-/// The style to lay a run out in once its face is matched, so that
+/// How far below the weight a style asks for SkParagraph needs a face to be
+/// before it fakes a bold: `OneLineShaper` fakes one where the weight is
+/// `kSemiBold_Weight` or more and `wantedWeight - fontStyle().weight() >=
+/// 200`, with the 200 written as a literal.
+const SKIA_FAKE_BOLD_GAP: i32 = 200;
+
+/// The style to lay out a run in once its face is known, so that
 /// SkParagraph synthesises a bold or an italic exactly where Chrome does.
 ///
 /// SkParagraph fakes a bold when the style asks for 600 or more and the
-/// face is 200 or more lighter, and an italic -- a skew of a quarter, which
-/// is Chrome's to the pixel: the stem of an `I` slopes -0.2504 in Chrome
-/// 152 at 40, 100 and 200px -- when the style asks for italic and the face
-/// is not. Handing it the requested style lets both through; handing it the
-/// face's own style stops both. So:
+/// face is [`SKIA_FAKE_BOLD_GAP`] or more lighter, and an italic -- a skew
+/// of a quarter, which is Chrome's to the pixel: the stem of an `I` slopes
+/// -0.2504 in Chrome 152 at 40, 100 and 200px -- when the style asks for
+/// italic and the face is not. The style handed to it is chosen so those
+/// two rules reach Chrome's answer for this face:
 ///
-/// - **The weight is the request's on a static face and the face's on a
-///   variable one.** Chrome fakes bold over a static face lighter than asked --
-///   `bold 100px Monoton` inks 2,237,980 against 1,442,282 -- and none over a
-///   variable face instanced at its axis's end: weight 900 on Oswald, whose
-///   `wght` stops at 700, paints exactly as 700.
+/// - **A bold is faked where 600 or more is asked for and the face is under
+///   600**, which is Chrome's rule, measured on single faces of Montserrat: its
+///   200 and 400 faces are emboldened from 600, by the same amount at 900, and
+///   not at 500, and its 700 face never is. A face under 600 is handed the
+///   weight asked for, or 200 above its own where that is more; any other is
+///   handed its own weight, which fakes nothing. Neither moves the match: a
+///   face under 600 matched for a weight of 600 or more is the heaviest the
+///   family has below it, so a heavier request finds it again. A variable face
+///   is instanced at the weight asked for, so it is under 600 only where its
+///   axis ends below 600 -- weight 900 on Oswald, whose `wght` stops at 700,
+///   paints exactly as 700.
 /// - **The slant is italic where the request is slanted and the face is
 ///   upright**, so the run is skewed; a face that is itself italic or oblique
 ///   keeps its own slant and is not skewed a second time.
-fn synthesis_style(requested: FontStyle, matched: MatchedFace) -> FontStyle {
-    let weight = match matched.variable {
-        true => matched.style.weight(),
-        false => requested.weight(),
+fn synthesis_style(requested: FontStyle, face: FontStyle) -> FontStyle {
+    let (asked, has) = (*requested.weight(), *face.weight());
+    let bold = *Weight::SEMI_BOLD;
+    let weight = match asked >= bold && has < bold {
+        true => asked.max(has + SKIA_FAKE_BOLD_GAP),
+        false => has,
     };
-    let slant = match (requested.slant(), matched.style.slant()) {
+    let slant = match (requested.slant(), face.slant()) {
         (Slant::Upright, face) => face,
         (_, Slant::Upright) => Slant::Italic,
         (_, face) => face,
     };
-    FontStyle::new(weight, matched.style.width(), slant)
+    FontStyle::new(Weight::from(weight), face.width(), slant)
+}
+
+/// The ranges of `paragraph` whose face wants a different style from
+/// `base`, each with the style `synthesis_style` gives it, or none where
+/// every run is in a face `base` already suits.
+fn runs_to_restyle(
+    paragraph: &mut Paragraph,
+    requested: FontStyle,
+    base: FontStyle,
+) -> Vec<(Range<usize>, FontStyle)> {
+    let mut restyled = Vec::new();
+    paragraph.extended_visit(|_line, visit| {
+        let Some(info) = visit else { return };
+        let face = info.font().typeface();
+        let style = synthesis_style(requested, face.font_style());
+        let starts = info.utf8_starts();
+        if style != base
+            && let (Some(first), Some(last)) = (starts.first(), starts.last())
+        {
+            restyled.push((*first as usize..*last as usize, style));
+        }
+    });
+    restyled
 }
 
 /// Scales a measured box horizontally about the anchor.
@@ -580,65 +618,25 @@ impl<'a> Typesetter<'a> {
         // collection and a lookup, 173 nanoseconds of every layout on this
         // machine, to arrive at what `fonts_for_style` had already had in
         // hand.
+        let requested = self.char_style.font_style();
         if let Some(matched) = self.matched_style {
-            char_style.set_font_style(synthesis_style(
-                self.char_style.font_style(),
-                matched,
-            ));
+            char_style.set_font_style(synthesis_style(requested, matched));
         }
 
-        let mut paragraph_builder =
-            ParagraphBuilder::new(&self.graf_style, &self.typefaces);
-
-        // Kerning stops at a word boundary. Skia does not do that on its own
-        // and a browser does it without exception -- Chrome's `"A V"` is
-        // exactly `w("A") + w(" ") + w("V")` across every pair measured,
-        // including ones it kerns tight, where this was 1.33 narrower at 24px
-        // because the `AV` pair reached across the space.
-        //
-        // **The style boundary is what suppresses it, not the feature.** Skia
-        // segments a shaping run where a shaping-relevant style changes, and a
-        // kern pair cannot form across two runs; pushing a different font size
-        // on the separator does the same thing, and pushing a different colour
-        // or an identical letter spacing does not. `kern = 0` is chosen
-        // because it is a boundary that is also honest about what it wants.
-        //
-        // Splitting the text across several `add_text` calls does *not* work
-        // -- Skia concatenates and shapes as one run regardless of how many
-        // calls made it, so the obvious approach measures identically to no
-        // change at all.
-        //
-        // If Skia ever stops treating this feature as shaping-relevant the
-        // runs merge again and the suppression silently disappears, so the
-        // guard is a width assertion rather than a check that this code ran.
-        if self.text.contains(is_word_separator) {
-            let mut unkerned = char_style.clone();
-            unkerned.add_font_feature("kern", 0);
-
-            let mut rest: &str = &self.text;
-            while !rest.is_empty() {
-                let separating = rest.starts_with(is_word_separator);
-                let end = rest
-                    .find(|ch| is_word_separator(ch) != separating)
-                    .unwrap_or(rest.len());
-                let (piece, tail) = rest.split_at(end);
-                paragraph_builder
-                    .push_style(match separating {
-                        true => &unkerned,
-                        false => &char_style,
-                    })
-                    .add_text(piece)
-                    .pop();
-                rest = tail;
-            }
-        } else {
-            // One run, as before: nothing to separate.
-            paragraph_builder.push_style(&char_style);
-            paragraph_builder.add_text(&self.text);
-        }
-
-        let mut paragraph = paragraph_builder.build();
-        paragraph.layout(self.width);
+        // That style is the first face's. A run another face draws -- a
+        // glyph the first family lacks, falling back to the next -- is laid
+        // out again in the style for its own face, since SkParagraph applies
+        // one style's weight to whatever face each run finds: at
+        // `900 48px Montserrat, Raleway`, Chrome draws the Latin as plain
+        // Montserrat 700 and the Cyrillic, which Montserrat lacks, as
+        // Raleway's 900 instance.
+        let mut first = self.paragraph_with(&char_style, &[]);
+        let restyled =
+            runs_to_restyle(&mut first, requested, char_style.font_style());
+        let paragraph = match restyled.is_empty() {
+            true => first,
+            false => self.paragraph_with(&char_style, &restyled),
+        };
 
         let offset = Point::new(
             self.alignment_offset(),
@@ -666,6 +664,83 @@ impl<'a> Typesetter<'a> {
             offset,
             condensation,
         }
+    }
+
+    /// The run laid out in `char_style`, with each range in `restyled` in
+    /// the font style beside it, at the layout width.
+    fn paragraph_with(
+        &self,
+        char_style: &TextStyle,
+        restyled: &[(Range<usize>, FontStyle)],
+    ) -> Paragraph {
+        let mut paragraph_builder =
+            ParagraphBuilder::new(&self.graf_style, &self.typefaces);
+        let mut unkerned = char_style.clone();
+        unkerned.add_font_feature("kern", 0);
+
+        // Kerning stops at a word boundary. Skia does not do that on its own
+        // and a browser does it without exception -- Chrome's `"A V"` is
+        // exactly `w("A") + w(" ") + w("V")` across every pair measured,
+        // including ones it kerns tight, where this was 1.33 narrower at 24px
+        // because the `AV` pair reached across the space.
+        //
+        // **The style boundary is what suppresses it, not the feature.** Skia
+        // segments a shaping run where a shaping-relevant style changes, and a
+        // kern pair cannot form across two runs; pushing a different font size
+        // on the separator does the same thing, and pushing a different colour
+        // or an identical letter spacing does not. `kern = 0` is chosen
+        // because it is a boundary that is also honest about what it wants.
+        //
+        // Splitting the text across several `add_text` calls does *not* work
+        // -- Skia concatenates and shapes as one run regardless of how many
+        // calls made it, so the obvious approach measures identically to no
+        // change at all.
+        //
+        // If Skia ever stops treating this feature as shaping-relevant the
+        // runs merge again and the suppression silently disappears, so the
+        // guard is a width assertion rather than a check that this code ran.
+        //
+        // A restyled range splits a piece further, at a boundary where the
+        // face already changes, so it breaks no kern pair that could form.
+        let text: &str = &self.text;
+        let mut at = 0;
+        while at < text.len() {
+            let separating = text[at..].starts_with(is_word_separator);
+            let mut end = text[at..]
+                .find(|ch| is_word_separator(ch) != separating)
+                .map_or(text.len(), |offset| at + offset);
+            let style = restyled
+                .iter()
+                .find(|(range, _)| range.contains(&at))
+                .map(|(range, style)| {
+                    end = end.min(range.end);
+                    *style
+                });
+            if let Some(next) = restyled
+                .iter()
+                .map(|(range, _)| range.start)
+                .filter(|start| *start > at)
+                .min()
+            {
+                end = end.min(next);
+            }
+            let mut piece_style = match separating {
+                true => unkerned.clone(),
+                false => char_style.clone(),
+            };
+            if let Some(style) = style {
+                piece_style.set_font_style(style);
+            }
+            paragraph_builder
+                .push_style(&piece_style)
+                .add_text(&text[at..end])
+                .pop();
+            at = end;
+        }
+
+        let mut paragraph = paragraph_builder.build();
+        paragraph.layout(self.width);
+        paragraph
     }
 
     /// Measurements of the run, as a struct rather than as JSON.
@@ -2537,17 +2612,10 @@ mod synthesis {
         FontStyle::new(Weight::from(weight), Width::NORMAL, slant)
     }
 
-    fn face(weight: i32, slant: Slant, variable: bool) -> MatchedFace {
-        MatchedFace {
-            style: style(weight, slant),
-            variable,
-        }
-    }
-
     #[test]
     fn a_slanted_request_skews_only_an_upright_face() {
         let asked = style(400, Slant::Italic);
-        for (matched, slant) in [
+        for (face, slant) in [
             (Slant::Upright, Slant::Italic),
             // A face with a slant of its own keeps it, so SkParagraph's
             // fake italic -- which applies to any face not reporting
@@ -2555,23 +2623,61 @@ mod synthesis {
             (Slant::Oblique, Slant::Oblique),
             (Slant::Italic, Slant::Italic),
         ] {
-            let got = synthesis_style(asked, face(400, matched, false));
-            assert_eq!(got.slant(), slant, "{matched:?}");
+            let got = synthesis_style(asked, style(400, face));
+            assert_eq!(got.slant(), slant, "{face:?}");
         }
         // An upright request takes the face as it is.
         let upright = style(400, Slant::Upright);
-        let got = synthesis_style(upright, face(400, Slant::Oblique, false));
+        let got = synthesis_style(upright, style(400, Slant::Oblique));
         assert_eq!(got.slant(), Slant::Oblique);
     }
 
+    /// Skia's rule applied to the weight handed to it gives Chrome's answer
+    /// for every weight asked for and every face weight: a bold faked
+    /// exactly where 600 or more is asked for and the face is under 600.
     #[test]
-    fn the_weight_is_the_request_s_on_a_static_face_only() {
-        let asked = style(900, Slant::Upright);
-        let on_static =
-            synthesis_style(asked, face(400, Slant::Upright, false));
-        assert_eq!(*on_static.weight(), 900);
-        let on_variable =
-            synthesis_style(asked, face(700, Slant::Upright, true));
-        assert_eq!(*on_variable.weight(), 700);
+    fn skia_fakes_a_bold_exactly_where_chrome_does() {
+        let skia_fakes = |weight: i32, face: i32| {
+            weight >= *Weight::SEMI_BOLD && weight - face >= SKIA_FAKE_BOLD_GAP
+        };
+        let chrome_fakes = |asked: i32, face: i32| {
+            asked >= *Weight::SEMI_BOLD && face < *Weight::SEMI_BOLD
+        };
+        for asked in (100..=1000).step_by(50) {
+            for face in (100..=1000).step_by(50) {
+                let handed = *synthesis_style(
+                    style(asked, Slant::Upright),
+                    style(face, Slant::Upright),
+                )
+                .weight();
+                assert_eq!(
+                    skia_fakes(handed, face),
+                    chrome_fakes(asked, face),
+                    "asked {asked}, face {face}, handed {handed}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_weight_handed_on_is_the_request_or_the_face() {
+        for (asked, face, handed) in [
+            // Faked, at the weight asked for where that is 200 above.
+            (900, 400, 900),
+            (600, 400, 600),
+            // Faked, but the request is too close for Skia: 200 above the
+            // face instead, which a heavier request finds the face again at.
+            (600, 500, 700),
+            // Not faked: the face's own weight, whatever was asked.
+            (900, 700, 700),
+            (500, 200, 200),
+            (400, 700, 700),
+        ] {
+            let got = synthesis_style(
+                style(asked, Slant::Upright),
+                style(face, Slant::Upright),
+            );
+            assert_eq!(*got.weight(), handed, "asked {asked}, face {face}");
+        }
     }
 }

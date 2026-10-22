@@ -1297,6 +1297,119 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
     );
   });
 
+  // Chrome 152 fakes a bold over a static face exactly when the weight
+  // asked for is 600 or more and the face is under 600, with one amount of
+  // emboldening whatever the weight: a Montserrat face of weight 200 or 400
+  // inks the same at 600 as at 900, and more than at 500, and its 700 face
+  // inks the same at every weight. Skia's own rule -- 600 or more, and 200
+  // or more above the face -- would embolden the 700 face at 900 and leave
+  // a 500 face plain at 600.
+  const MONTSERRAT = "tests/assets/fonts/montserrat-latin/montserrat-v30-latin";
+  FontLibrary.use("MontserratLight", [`${MONTSERRAT}-200.woff2`]);
+  FontLibrary.use("MontserratRegular", [`${MONTSERRAT}-regular.woff2`]);
+  FontLibrary.use("MontserratBold", [`${MONTSERRAT}-700.woff2`]);
+  FontLibrary.use("Montserrat", [
+    `${MONTSERRAT}-200.woff2`,
+    `${MONTSERRAT}-regular.woff2`,
+    `${MONTSERRAT}-700.woff2`,
+  ]);
+  FontLibrary.use("Raleway", [
+    "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+  ]);
+
+  const drawn = (font, text, x = 4) => {
+    const ctx = new Canvas(600, 100).getContext("2d");
+    ctx.font = font;
+    ctx.fillText(text, x, 70);
+    return ctx.getImageData(0, 0, 600, 100).data;
+  };
+  const same = (a, b) => Buffer.from(a).equals(Buffer.from(b));
+
+  test("a static face is faked bold as Chrome fakes it", () => {
+    for (const [family, plain, bold] of [
+      ["MontserratLight", 500, 600],
+      ["MontserratRegular", 500, 600],
+    ]) {
+      const at = (weight) => drawn(`${weight} 48px ${family}`, "Hamburg");
+      assert.ok(same(at(plain), at(400)), `${family} ${plain} is plain`);
+      assert.ok(!same(at(bold), at(plain)), `${family} ${bold} is faked`);
+      assert.ok(same(at(bold), at(900)), `${family}: one amount of bold`);
+    }
+    for (const weight of [600, 800, 900]) {
+      assert.ok(
+        same(
+          drawn(`${weight} 48px MontserratBold`, "Hamburg"),
+          drawn("700 48px MontserratBold", "Hamburg"),
+        ),
+        `a 700 face is not faked at ${weight}`,
+      );
+    }
+  });
+
+  // Each run is judged against its own face. "ЖЖ" falls back from
+  // Montserrat, which has no Cyrillic, to Raleway, whose `wght` reaches 900;
+  // Chrome inks the Latin exactly as plain Montserrat 700 beside it and the
+  // Cyrillic as Raleway's 900 instance. One weight for the whole run would
+  // be 900, and fake a bold over the Montserrat.
+  test("each run of a family list is judged against its own face", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = "900 48px Montserrat, Raleway";
+    const split = 4 + ctx.measureText("AB").width;
+    const region = (data, from, to) => {
+      const rows = [];
+      for (let y = 0; y < 100; y++)
+        rows.push(
+          Buffer.from(data.subarray((y * 600 + from) * 4, (y * 600 + to) * 4)),
+        );
+      return Buffer.concat(rows);
+    };
+    const mixed = drawn("900 48px Montserrat, Raleway", "ABЖЖ"),
+      left = Math.floor(split) - 2,
+      right = Math.ceil(split) + 2;
+    assert.ok(
+      region(mixed, 0, left).equals(
+        region(drawn("700 48px Montserrat", "AB"), 0, left),
+      ),
+      "the Latin is Montserrat 700, not emboldened",
+    );
+    assert.ok(
+      region(mixed, right, 600).equals(
+        region(drawn("900 48px Raleway", "ЖЖ", split), right, 600),
+      ),
+      "the Cyrillic is Raleway at 900",
+    );
+  });
+
+  // Glyphs a static face lacks fall back to the next family, and a variable
+  // face there is instanced at the weight asked for and not emboldened past
+  // its axis, as on its own. Chrome 152 inks Cyrillic Oswald the same at
+  // `900 48px Monoton, Oswald` as at `700 48px Oswald`, 3092 pixels, while
+  // the Monoton glyphs beside it are still faked bold.
+  test("a variable face after a static one is not emboldened past its axis", () => {
+    const pixels = (font, text) => {
+      const ctx = new Canvas(600, 100).getContext("2d");
+      ctx.font = font;
+      ctx.fillText(text, 4, 70);
+      return Buffer.from(ctx.getImageData(0, 0, 600, 100).data);
+    };
+    assert.ok(
+      pixels("900 48px Monoton, Oswald", "ЖЖЖ").equals(
+        pixels("700 48px Oswald", "ЖЖЖ"),
+      ),
+      "the fallback Oswald draws as its 700 instance",
+    );
+    assert.ok(
+      pixels("900 48px Monoton, Oswald", "AB").equals(
+        pixels("900 48px Monoton", "AB"),
+      ),
+      "the Monoton glyphs are faked bold as on their own",
+    );
+    assert.ok(
+      !pixels("900 48px Monoton", "AB").equals(pixels("48px Monoton", "AB")),
+      "the control: bold Monoton is not plain Monoton",
+    );
+  });
+
   // A family with an italic face of its own: the italic is drawn as it
   // is, and skewed again it would lean by its own slope plus a quarter.
   // Raleway ships one, so the case runs wherever the suite does. Chrome

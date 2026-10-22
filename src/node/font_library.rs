@@ -283,31 +283,6 @@ impl ResolvedFontCache {
     }
 }
 
-/// The face a style matched first: the style it reports, and whether it is
-/// a variable face.
-///
-/// What a layout needs to decide what to synthesise. A variable face is
-/// instanced at the weight asked for, so a shortfall there is the axis's
-/// end and Chrome fakes no bold over it; a static face lighter than asked
-/// is faked bold, by Chrome and by Skia alike.
-#[derive(Clone, Copy, Debug)]
-pub struct MatchedFace {
-    /// The style the face reports -- for an instanced face, the weight it
-    /// was pinned to.
-    pub style: FontStyle,
-    /// Whether the face has variation axes.
-    pub variable: bool,
-}
-
-impl MatchedFace {
-    fn of(face: &Typeface) -> Self {
-        Self {
-            style: face.font_style(),
-            variable: variation_axes(face).is_some(),
-        }
-    }
-}
-
 /// A bounded memoization of [`FontLibrary::fonts_for_style`].
 ///
 /// Pure caching of a deterministic build, so evicting costs one rebuild and
@@ -322,7 +297,7 @@ impl MatchedFace {
 /// finds the map full.
 #[derive(Default)]
 struct CollectionCache {
-    entries: HashMap<CollectionKey, (FontCollection, Option<MatchedFace>, u64)>,
+    entries: HashMap<CollectionKey, (FontCollection, Option<FontStyle>, u64)>,
     uses: u64,
 }
 
@@ -330,7 +305,7 @@ impl CollectionCache {
     fn get(
         &mut self,
         key: &CollectionKey,
-    ) -> Option<(FontCollection, Option<MatchedFace>)> {
+    ) -> Option<(FontCollection, Option<FontStyle>)> {
         self.uses += 1;
         let uses = self.uses;
         self.entries
@@ -345,7 +320,7 @@ impl CollectionCache {
         &mut self,
         key: CollectionKey,
         collection: FontCollection,
-        matched: Option<MatchedFace>,
+        matched: Option<FontStyle>,
     ) {
         if self.entries.len() >= COLLECTION_CACHE_SIZE
             && !self.entries.contains_key(&key)
@@ -1081,7 +1056,7 @@ impl FontLibrary {
         &mut self,
         style: &TextStyle,
         variations: &[(FourByteTag, f32)],
-    ) -> (FontCollection, Option<MatchedFace>) {
+    ) -> (FontCollection, Option<FontStyle>) {
         let families = style.font_families();
         let families: Vec<&str> = families.iter().collect();
         let matches = self
@@ -1199,14 +1174,14 @@ impl FontLibrary {
                 .clone()
                 .find_typefaces(&families, style.font_style())
                 .first()
-                .map(MatchedFace::of);
+                .map(Typeface::font_style);
             self.collection_cache
                 .insert(key, collection.clone(), matched);
             (collection, matched)
         } else {
             // Not variable, so the collection just searched is the one to lay
             // out with and the match is the one already in hand.
-            let matched = matches.first().map(MatchedFace::of);
+            let matched = matches.first().map(Typeface::font_style);
             (self.font_collection(), matched)
         }
     }

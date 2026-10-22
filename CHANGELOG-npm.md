@@ -212,13 +212,18 @@ removed and no signature moves.
   `italic 200px Oswald` drew upright and `bold 100px Monoton` drew regular.
   Chrome skews such an italic by a quarter -- the stem of an `I` slopes
   -0.2504 in Chrome 152, -0.2498 here now -- and emboldens a static face
-  from weight 600 when the face is 200 or more lighter, and so does this
-  now, with `measureText` reporting the slanted or emboldened ink as Chrome
-  does: `italic 40px Oswald` measures `actualBoundingBoxRight` 15.3 for an
-  `I`, where it measured 7.2. A variable face instanced at the weight asked
-  for is still not emboldened past the end of its axis, as before and as in
-  Chrome, and a face that is itself italic or oblique is not skewed a second
-  time.
+  where 600 or more is asked for and the face is under 600, by one amount
+  whatever the weight: Montserrat's 400 face inks the same at 600 as at
+  900, and its 700 face is never emboldened. So does this now, with
+  `measureText` reporting the slanted or emboldened ink as Chrome does:
+  `italic 40px Oswald` measures `actualBoundingBoxRight` 15.3 for an `I`,
+  where it measured 7.2. Each run is judged against its own face, so where
+  a glyph falls back to another family -- the Cyrillic of `900 48px
+Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
+  Cyrillic is Raleway's 900 instance. A variable face instanced at the
+  weight asked for is still not emboldened past the end of its axis, as
+  before and as in Chrome, and a face that is itself italic or oblique is
+  not skewed a second time.
 
 - **A GPU recovery could produce wrong or blank pixels with no error; such
   a draw is now retried once and otherwise reported.** When the GPU recovers
