@@ -95,17 +95,21 @@ name = "pattern repetition"
 rust = ["PatternRepeat"]
 npm = []
 why = """npm declares `createPattern(image, repetition: string | null)` and names the
-      four accepted values in the doc comment rather than in the type. The
-      capability is present; the declaration is weaker than the Rust enum, which is
-      a typing gap rather than a parity one -- recorded in GAPS-A.md."""
+      four accepted values in the doc comment rather than in the type. That is
+      the declaration TypeScript's own DOM library gives `createPattern`, so code
+      typed against the DOM passes unchanged; the four values are the
+      standard's, and the binding refuses any other. Same capability, typed by
+      enum on one side and by the DOM's string on the other."""
 
 [[capability]]
 name = "paragraph text height behavior"
 rust = ["TextHeightBehavior"]
 npm = []
-why = """npm declares `textHeightBehavior?: number` at lib/index.d.ts:5233 and the
-      binding refuses a code outside 0..3 at run time. Four states on each side;
-      again the declaration is weaker than the enum, which GAPS-A.md records."""
+why = """npm declares `textHeightBehavior?: number` in lib/index.d.ts and the
+      binding refuses a code outside 0..3 at run time. Four states on each side,
+      but the npm declaration does not say which numbers mean what, and no DOM
+      type sets the precedent the way it does for `createPattern` and `key`: a
+      typing gap in the npm declaration, which a named union would close."""
 
 [[capability]]
 name = "path boolean operations"
@@ -151,8 +155,9 @@ rust = ["Key"]
 npm = []
 why = """npm types the key as `key: string` on KeyboardEventProps, with the named
       values given in prose. Rust enumerates all 195. The capability is present on
-      both; the JavaScript declaration does not constrain it, which GAPS-A.md
-      records as a typing gap rather than a missing feature."""
+      both, and the string is deliberate: it is how TypeScript's DOM library
+      types `KeyboardEvent.key`, so a handler written for the DOM type-checks
+      here unchanged."""
 
 [[capability]]
 name = "gradient interpolation, space and hue"
@@ -240,10 +245,9 @@ why = """Both surfaces have the whole capability; only the shape differs, and th
       canvas rect filled under `transform(createProjection(quad))` has rows 42 and
       58 wide where an affine transform gives 30 and 30.
       Named as four ids on each side rather than left unregistered because the gate
-      reported them unpaired and that reads as a missing feature. It is the inverse
-      of the failure recorded in GAPS-A.md: there an exception list silences a real
-      gap, here a naming difference reads as a gap. Same root, opposite direction,
-      and the cost here would have been a duplicated API -- `setProjection` and
+      reported them unpaired and that reads as a missing feature. That is the
+      inverse of an exception list silencing a real gap: here a naming
+      difference reads as one, and the cost would have been a duplicated API -- `setProjection` and
       `transformProjection` added beside `setTransform` and `transform`, doing the
       same thing under a second name."""
 
@@ -585,10 +589,9 @@ why  = """Eighteen extra ways to write operators that already pair under another
        Not reachable by member alias: `member_aliases` is single-valued, so
        BlendMode.SourceOver can be given srcOver or src-over and not both, and
        the third spelling would land here regardless.
-       THE OTHER 29 npm IDS OF THIS CAPABILITY ARE NOT HERE, on the assumption
-       that the blend alias in aliases-A2.json is accepted. If it is refused,
-       or if owner_aliases is not made surface-keyed, take the block from this
-       file's header instead."""
+       THE OTHER 29 npm IDS OF THIS CAPABILITY ARE NOT HERE: they pair through
+       the `BlendMode -> GlobalCompositeOperation` owner alias in
+       scripts/parity/rules.json."""
 
 [[capability]]
 name = "chroma subsampling for an AVIF or JPEG export"
@@ -790,8 +793,10 @@ why  = """Both surfaces carry the value; only npm constrains it. Rust models the
        and puts the same five strings in the second field -- src/gui/event.rs:603
        and :612 use 'insertText' and 'deleteContentBackward' by hand. So this is
        the Key entry mirrored: there JavaScript types a key as `string` and Rust
-       enumerates 195, here npm enumerates five and Rust leaves a String. A
-       typing gap on the Rust side, recorded in GAPS-A2.md."""
+       enumerates 195, here npm enumerates five and Rust leaves a String. The
+       crate is the inconsistent side: it names every key as a variant but
+       not these five, so a caller matching on the input type matches string
+       literals with nothing to catch a typo. A typing gap in the crate."""
 
 [[capability]]
 name = "the CSS font-variant keyword set"
@@ -927,8 +932,8 @@ why = """These are the fields of `Error`'s struct variants -- the crate's
       crosses to JavaScript as a value: the binding throws, and the payload becomes
       the message text of a `TypeError`, `RangeError` or a named `DOMException` per
       the rules in AGENTS.md. A caller reads it by catching and reading `.message`,
-      which is not a member of anything. This is the shape `PARITY-SPEC.md`'s own
-      example describes for `Error::InvalidRadius`."""
+      which is not a member of anything. This is the shape the commented example
+      at the head of this file describes for `Error::InvalidRadius`."""
 
 [[capability]]
 name = "browser-shaped image and canvas API"
@@ -1061,10 +1066,12 @@ npm  = ["DOMMatrix.clone",
 why  = """How JavaScript spells construction, copying and serialisation. `clone`
         is `Copy` in Rust, `new` and the `from*` factories are struct literals
         and `Affine::translation` and friends, and `toJSON`/`toString` are the
-        `Serialize` and `Debug` derives. `setMatrixValue` is deliberately NOT in the list above: it parses a
-        CSS transform string, which the crate cannot do for a matrix at all,
-        and registering it here would silence the one real absence in the
-        group. It stays unregistered and is in GAPS-C2.md."""
+        `Serialize` and `Debug` derives. `setMatrixValue` is not in the list
+        above because it pairs: it parses a CSS transform list, which
+        `Affine::from_css` does on the Rust side. Not every list:
+        `from_css` returns `None` for `matrix3d`, `translate3d` and
+        `rotateZ`, which `setMatrixValue` flattens to the 2D matrix -- a gap
+        in the crate that no entry can name, since the two ids pair."""
 
 [[capability]]
 name = "matrix constructors against matrix methods"
@@ -1154,9 +1161,9 @@ why  = """Two one-sided values in an otherwise complete pairing of 34 against 35
         Rust's `ALL` is the all-directions resize cursor, which the CSS
         keyword set spells `all-scroll` and which Rust ALSO carries as
         `AllScroll` -- so `ALL` is a second Rust spelling rather than a
-        capability npm lacks. npm's `none` hides the cursor, which the crate has no variant for; it
-        is left off this entry deliberately, stays unregistered, and is in
-        GAPS-C2.md as a real gap."""
+        capability npm lacks. npm's `none` is the other one, registered in
+        'hiding the cursor rather than choosing one': the crate hides the
+        cursor with `None` in the `Option<Cursor>` its setters take."""
 
 [[capability]]
 name = "the third and fourth coordinates, and DOM construction"
@@ -1411,8 +1418,12 @@ why = """Buffer and page facts the crate exposes and npm does not.
       from the `color_type` that already pairs; `page` is the current page index
       where npm exposes only the `pages` count. npm has `bytesPerPixel`, which is
       `stride` divided by width, so that part is derivable rather than absent -- the
-      rest is not. **`premultiplied` is carried in GAPS-B3.md as a real gap as well
-      as here**, because it is the one a caller would want and cannot compute."""
+      rest is not. `premultiplied` is the one that matters: npm's `ImageData`
+      carries no alpha state, so a buffer read with `alphaType: 'premultiplied'`
+      and handed back to `putImageData` or `drawImage` is read as
+      unpremultiplied -- half-transparent red reads 128,0,0,128 and comes back
+      127,0,0,128, where the crate round-trips it to 255,0,0,128. A gap in npm,
+      and the one entry here a caller gets wrong output from."""
 
 [[capability]]
 name = "font metrics the crate carries and the declaration does not"
@@ -1428,9 +1439,12 @@ why = """`Font.size` and `Font.line_height` are metrics of a resolved font that
       and `width`, which is identity rather than metrics. `italic` is a second rust
       spelling of what `slant` already pairs to npm's `style`. `new` and `parse` are
       constructors returning `Result`. Going the other way, npm's `file` is the path
-      a font was loaded from, which the crate does not retain on the font itself.
-      Grouped as one capability -- what a font object remembers about itself -- and
-      it is the group I am least sure of; see GAPS-B3.md."""
+      a font was loaded from, which the crate does not retain on the font itself:
+      a gap in the crate. `parse` is narrower than the npm `font` property it
+      faces: it takes `<size>px` and a px line height only, and refuses `pt`,
+      `em`, a unitless line height, `small-caps` and the keyword sizes, all of
+      which `ctx.font` accepts -- a second gap in the crate. Grouped as one
+      capability, what a font object remembers about itself."""
 
 [[capability]]
 name = "text rendering settings"

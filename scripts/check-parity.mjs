@@ -482,7 +482,29 @@ function fieldAndItsMethod(a, b) {
   );
 }
 
-export function check({ rust, npm, manifest, rules: given }) {
+/**
+ * The files a manifest's reasons cite, each with the line it names if any.
+ *
+ * A citation is a path or a bare file name with one of the extensions the
+ * tree's sources and documents carry, optionally followed by `:line` or
+ * `:line-line`. Measured against the real manifest before this was trusted:
+ * it finds every file reference there, 24 distinct, and nothing else -- not
+ * `DOMMatrix.toJSON`, whose suffix is not lower-case, nor `Path2D.d`.
+ */
+export function citations(manifest) {
+  const pattern =
+    /(?<![\w./-])((?:[\w.-]+\/)*[\w.-]+\.(?:md|json|rs|mjs|cjs|js|ts|toml|ya?ml))(?::(\d+)(?:-\d+)?)?(?!\w)/g;
+  return manifest.flatMap((entry) =>
+    [...(entry.why ?? "").matchAll(pattern)].map((match) => ({
+      entry: entry.name,
+      file: match[1],
+      line: match[2] === undefined ? undefined : Number(match[2]),
+      text: match[0],
+    })),
+  );
+}
+
+export function check({ rust, npm, manifest, rules: given, files }) {
   const problems = [];
   const note = (kind, id, detail) => problems.push({ kind, id, detail });
 
@@ -785,6 +807,40 @@ export function check({ rust, npm, manifest, rules: given }) {
             `${entries.map((e) => `'${e.name}'`).join(" and ")} -- so neither says where it ` +
             `belongs, and a reader following one of them never learns the other exists. ` +
             `Decide which capability it is part of and remove it from the rest.`,
+        );
+      }
+    }
+  }
+
+  // A FILE A REASON CITES HAS TO EXIST, and so does the line it points at.
+  // A reason that defers its decision to a file nobody committed records
+  // that decision nowhere. `files` maps each tracked path to its line count,
+  // or to `undefined` where the count was not read; it is absent only in
+  // self-test fixtures that are about something else.
+  if (files) {
+    const names = new Map();
+    for (const path of files.keys()) {
+      const name = path.split("/").pop();
+      names.set(name, [...(names.get(name) ?? []), path]);
+    }
+    for (const { entry, file, line, text } of citations(manifest)) {
+      const paths = file.includes("/")
+        ? files.has(file)
+          ? [file]
+          : []
+        : (names.get(file) ?? []);
+      const lines = paths.length === 1 ? files.get(paths[0]) : undefined;
+      if (paths.length === 0) {
+        note(
+          "dangling-citation",
+          text,
+          `'${entry}' cites ${file}, which is not a tracked file. Record what it held in the reason itself, or as an issue.`,
+        );
+      } else if (line !== undefined && lines !== undefined && line > lines) {
+        note(
+          "dangling-citation",
+          text,
+          `'${entry}' cites line ${line} of ${paths[0]}, which has ${lines}.`,
         );
       }
     }
@@ -1463,6 +1519,7 @@ export function report(problems) {
     "input",
     "collision",
     "duplicate-name",
+    "dangling-citation",
     "doubled",
     "already-paired",
     "wrong-of-two",
@@ -1480,6 +1537,8 @@ export function report(problems) {
       "two ids normalise to one name, so a rule would pair one of them wrongly",
     "duplicate-name":
       "two capability entries share a name, so neither can be found by it",
+    "dangling-citation":
+      "a reason cites a file, or a line of one, that is not in the tree",
     doubled:
       "one id named by two capability entries, so neither says where it belongs",
     "suspect-pair":

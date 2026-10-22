@@ -16,7 +16,14 @@
 // is satisfied by a gate that fails everything.
 //
 import { readFileSync } from "node:fs";
-import { check, report, normalise, displayName } from "./check-parity.mjs";
+import { execFileSync } from "node:child_process";
+import {
+  check,
+  citations,
+  report,
+  normalise,
+  displayName,
+} from "./check-parity.mjs";
 import { parseManifest } from "./parity/toml.mjs";
 
 const RULES = JSON.parse(
@@ -1332,6 +1339,58 @@ why  = "Declared on the JavaScript side only, and the crate does not need it."
     bad += 1;
   }
 
+  // A FILE A REASON CITES HAS TO EXIST. Six reasons deferred a decision to
+  // files that were never committed -- four of them a "real gap" recorded
+  // nowhere else -- and nothing noticed, because a citation is prose. A path
+  // must name a tracked file, a bare name must match a tracked file's name,
+  // and a cited line must be inside the file; the accepting case cites one
+  // of each shape correctly.
+  const citing = (why) => `
+[[capability]]
+name = "a crate-side call"
+rust = ["Mem::trim"]
+npm  = []
+why  = """${why}"""
+
+[[capability]]
+name = "the npm side"
+rust = []
+npm  = ["Unrelated.thing"]
+why  = "Declared on the JavaScript side only, and the crate does not need it."
+`;
+  const FILES = new Map([
+    ["src/memory.rs", 40],
+    ["docs/NOTES.md", 12],
+  ]);
+  for (const [label, why, expected] of [
+    [
+      "a path, a line inside it and a bare file name, all present",
+      "Trimmed in `src/memory.rs:12`, and NOTES.md says why.",
+      false,
+    ],
+    ["a missing bare file name", "Recorded in GAPS-Z.md as a real gap.", true],
+    ["a missing path", "See `src/gone.rs` for the reason.", true],
+    ["a line past the end", "As `src/memory.rs:400` says.", true],
+  ]) {
+    const found = check({
+      rust: surface("rust", ["Mem::trim"]),
+      npm: surface("npm", ["Unrelated.thing"]),
+      manifest: parseManifest(citing(why), "self-test"),
+      rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+      files: FILES,
+    });
+    cases += 1;
+    const flagged =
+      found.some((p) => p.kind === "dangling-citation") &&
+      report(found).includes("dangling-citation");
+    if (flagged !== expected) {
+      console.error(
+        `  self-test FAILED: ${label} was ${flagged ? "" : "not "}reported as a dangling citation, got ${JSON.stringify(found.map((p) => `${p.kind}:${p.id}`))}`,
+      );
+      bad += 1;
+    }
+  }
+
   // TWO ENTRIES SHARING A NAME are two entries, and the reader of either
   // cannot tell them apart. Keyed by name, the check above collapsed the
   // pair into one claimant: the same thirteen ids registered once as
@@ -1800,20 +1859,39 @@ if (args.includes("--self-test")) {
   const npmPath = path("--npm", "target/parity-npm.json");
   const manifestPath = path("--manifest", "parity.toml");
 
+  const manifest = parseManifest(
+    readFileSync(manifestPath, "utf8"),
+    manifestPath,
+  );
+  // Every tracked path, and the line count of each one a reason cites by
+  // path -- the only ones a line number can be checked against.
+  const files = new Map(
+    execFileSync("git", ["ls-files", "-z"], { encoding: "utf8" })
+      .split("\0")
+      .filter(Boolean)
+      .map((path) => [path, undefined]),
+  );
+  for (const { file } of citations(manifest)) {
+    if (files.has(file)) {
+      files.set(file, readFileSync(file, "utf8").split("\n").length);
+    }
+  }
   const problems = check({
     rust: JSON.parse(readFileSync(rustPath, "utf8")),
     npm: JSON.parse(readFileSync(npmPath, "utf8")),
-    manifest: parseManifest(readFileSync(manifestPath, "utf8"), manifestPath),
+    manifest,
     rules: RULES,
+    files,
   });
 
   if (problems.length > 0) {
     console.error("parity gate: the two surfaces are not accounted for");
     console.error(report(problems));
     console.error(
-      "\nEvery id above is either missing from a surface or missing from " +
-        `${manifestPath}. Add the item, or register the capability with a ` +
-        "reason saying where it lives instead.",
+      "\nAn unpaired id is either missing from a surface or missing from " +
+        `${manifestPath}: add the item, or register the capability with a ` +
+        "reason saying where it lives instead. The other findings name the " +
+        "entry to correct.",
     );
     process.exit(1);
   }
