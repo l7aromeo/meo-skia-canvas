@@ -119,7 +119,7 @@ fn faded_toward_identity(rows: &[[f32; 3]; 3], amount: f32) -> [f32; 20] {
     matrix
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum FilterSpec {
     Plain {
         name: String,
@@ -177,6 +177,13 @@ impl fmt::Display for Filter {
 }
 
 impl Filter {
+    /// Whether this filter is `css` resolved to `specs`: the same text, and
+    /// the same lengths. Text alone does not say -- `blur(1em)` is a
+    /// different blur under a different font -- so both are compared.
+    pub fn is(&self, css: &str, specs: &[FilterSpec]) -> bool {
+        self.css == css && self.specs == specs
+    }
+
     /// Whether this filter would leave a draw untouched.
     pub fn is_none(&self) -> bool {
         self.specs.is_empty()

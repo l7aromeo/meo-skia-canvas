@@ -155,8 +155,88 @@ describe("CSS filters and spacing", () => {
         wrong.push(
           `${JSON.stringify(css)}: ${got ?? "ignored"}, Chrome ${refused ? "ignores it" : "takes it"}`,
         );
+      // Chrome reads every filter it takes back exactly as it was written.
+      else if (taken && got !== css)
+        wrong.push(
+          `${JSON.stringify(css)}: reads back ${JSON.stringify(got)}, Chrome as written`,
+        );
     }
     assert.deepEqual(wrong, []);
+  });
+
+  // The readback is the string as set and what draws is the parse, so two
+  // spellings of one filter draw the same pixels: the spellings this library
+  // used to read back, against the ones Chrome does.
+  test("a filter draws the same whichever spelling it was set with", () => {
+    const pairs = [
+      ["BLUR(5PX)", "blur(5px)"],
+      ["blur( 5px )", "blur(5px)"],
+      ["blur(5px)  brightness(2)", "blur(5px) brightness(2)"],
+      ["blur(5px)brightness(2)", "blur(5px) brightness(2)"],
+      ["  blur(5px)  ", "blur(5px)"],
+      ["brightness(1E1)", "brightness(1e1)"],
+      ["drop-shadow(red 2px 2px)", "drop-shadow(2px 2px 0px red)"],
+      ["drop-shadow(2px 2px)", "drop-shadow(2px 2px 0px black)"],
+      ["drop-shadow(2px  2px   RED)", "drop-shadow(2px 2px 0px RED)"],
+      [
+        "drop-shadow(2px 2px rgb(255 0 0))",
+        "drop-shadow(2px 2px 0px rgb(255 0 0))",
+      ],
+      ["Drop-Shadow(2px 2px 4px Red)", "drop-shadow(2px 2px 4px Red)"],
+      ["NONE", "none"],
+      [" none ", "none"],
+      ["blur(2PT)", "blur(2pt)"],
+    ];
+    const draw = (filter) => {
+      const ctx = new Canvas(40, 30).getContext("2d");
+      ctx.filter = filter;
+      ctx.fillStyle = "rgba(20, 120, 220, 0.8)";
+      ctx.fillRect(8, 6, 14, 12);
+      ctx.fillStyle = "#c00";
+      ctx.beginPath();
+      ctx.arc(26, 18, 6, 0, Math.PI * 2);
+      ctx.fill();
+      return Buffer.from(ctx.getImageData(0, 0, 40, 30).data);
+    };
+    assert.ok(
+      !draw("blur(5px)").equals(draw("blur(2px)")),
+      "two different blurs draw differently",
+    );
+    const differ = pairs
+      .filter(([asSet, other]) => !draw(asSet).equals(draw(other)))
+      .map(([asSet]) => asSet);
+    assert.deepEqual(differ, []);
+  });
+
+  // Chrome resolves `em` when the filter is set, and setting the same string
+  // again after the font changed resolves it again: in Chrome 152 a 20px
+  // square under `blur(1em)` inks 76 pixels of a 200-pixel row at 10px and
+  // 200 at 40px, and set at 10px then again at 40px it inks 200.
+  test("the same em filter set again after a font change is redrawn", () => {
+    const inked = (setup) => {
+      const ctx = new Canvas(200, 60).getContext("2d");
+      setup(ctx);
+      ctx.fillRect(90, 20, 20, 20);
+      const row = ctx.getImageData(0, 30, 200, 1).data;
+      return row.filter((v, i) => i % 4 == 3 && v > 0).length;
+    };
+    const at40 = inked((ctx) => {
+      ctx.font = "40px sans-serif";
+      ctx.filter = "blur(1em)";
+    });
+    const setAgain = inked((ctx) => {
+      ctx.font = "10px sans-serif";
+      ctx.filter = "blur(1em)";
+      ctx.font = "40px sans-serif";
+      ctx.filter = "blur(1em)";
+    });
+    const notAgain = inked((ctx) => {
+      ctx.font = "10px sans-serif";
+      ctx.filter = "blur(1em)";
+      ctx.font = "40px sans-serif";
+    });
+    assert.equal(setAgain, at40);
+    assert.ok(notAgain < at40, `${notAgain} under the 10px blur kept`);
   });
 
   test("letterSpacing and wordSpacing answer the spacing table", () => {

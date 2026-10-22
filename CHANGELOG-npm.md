@@ -154,6 +154,24 @@ removed and no signature moves.
 
 ### Fixed
 
+- **`ctx.filter` reads back exactly as it was set**, as Chrome reads it:
+  case, spacing, number spelling and a `drop-shadow`'s order and omissions
+  included. It was rewritten into a canonical form -- `BLUR(5PX)` read back
+  as `blur(5px)`, `drop-shadow(red 2px 2px)` as
+  `drop-shadow(2px 2px 0px red)`, `"  blur(5px)  "` as `blur(5px)`, `NONE`
+  as `none`, and two functions written without a space between them with
+  one -- so 14 of 29 filters measured in Chrome 152 read back differently.
+  What draws is unchanged: every one of those spellings draws the same
+  pixels as the form this used to read back.
+
+- **The same `em` filter set again after a font change takes the new
+  size.** `ctx.filter = "blur(1em)"` resolves the `em` against the font in
+  force, as in Chrome, but assigning the same string again after the font
+  changed was skipped as no change, so the blur kept the old size -- a 20px
+  square under it inked 78 pixels of a row at 10px and still 78 after
+  setting it again at 40px, where Chrome inks 200. A filter is now compared
+  by what it resolves to as well as by its text.
+
 - **A GPU recovery could produce wrong or blank pixels with no error; such
   a draw is now retried once and otherwise reported.** When the GPU recovers
   from a fault -- often one in another program -- macOS discards the work
