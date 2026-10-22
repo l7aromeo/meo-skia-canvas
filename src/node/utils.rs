@@ -1795,6 +1795,7 @@ pub fn image_data_arg(
     let color_space = string_for_key(cx, &obj, "colorSpace")?;
     let js_buffer: Handle<JsBuffer> = obj.get(cx, "data")?;
     let buffer = Data::new_copy(js_buffer.as_slice(cx));
+    let alpha_type = opt_alpha_type_arg(cx, idx)?;
 
     Ok(ImageData::new(
         buffer,
@@ -1802,7 +1803,23 @@ pub fn image_data_arg(
         height,
         color_type,
         color_space,
+        alpha_type,
     ))
+}
+
+/// The `alphaType` key of the object at `idx`, unpremultiplied when the key
+/// or the object is absent -- the standard's `ImageData`, which has no such
+/// key, reads as what it is.
+pub fn opt_alpha_type_arg(
+    cx: &mut FunctionContext,
+    idx: usize,
+) -> NeonResult<AlphaType> {
+    match opt_object_arg(cx, idx)
+        .and_then(|obj| opt_string_for_key(cx, &obj, "alphaType"))
+    {
+        Some(name) => alpha_type_or_throw(cx, &name),
+        None => Ok(AlphaType::Unpremul),
+    }
 }
 
 pub fn image_data_settings_arg(

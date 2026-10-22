@@ -295,10 +295,11 @@ describe("the npm parity surface", () => {
     assert.deepEqual(heritage.WindowOptions, ["CanvasOptions"]);
 
     // Must NOT double-count: `ImageDataSettings` is an `interface`, already
-    // read through the members path. If the new reader also walked it the
-    // uniqueness assertion would fire, so this is the cheaper statement of
-    // the same thing.
-    assert.equal(count("ImageDataSettings"), 2);
+    // read through the members path, and declares three members --
+    // `colorSpace`, `colorType` and `alphaType`. If the new reader also
+    // walked it the uniqueness assertion would fire, so this is the cheaper
+    // statement of the same thing.
+    assert.equal(count("ImageDataSettings"), 3);
 
     // And the negative that keeps the reader honest: a type alias whose body
     // is a union, not an object, must contribute no members of this kind.

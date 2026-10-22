@@ -638,8 +638,9 @@ impl PageRecorder {
     /// through `alphaType` on the settings object `getImageData` takes. Skia
     /// converts during readback either way.
     ///
-    /// Not on the one `putImageData` takes, which is the way in: that call
-    /// defines the bytes it consumes, so there is nothing there to choose.
+    /// The way back in reads the mode off the `ImageData` itself, which
+    /// records it as `alphaType`, so a premultiplied readback put back
+    /// through `putImageData` is not taken for a darker colour.
     ///
     /// This form exists for the Rust API, whose `PixelExportOptions` carries
     /// the flag on a different type; the Node path sets
