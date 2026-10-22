@@ -11,10 +11,11 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 
 ## 📦 ⟩ [v6.0.3] (npm) ⟩ October 19, 2026
 
-**A patch fixing a GPU that went unused on a Vulkan 1.4 loader, Vulkan
-messages printed to standard output, and two CSS colour spellings that
-resolved to the wrong colour, and raising the `follow-redirects` floor past
-three security advisories.** Nothing is removed and no signature moves.
+**A patch fixing request headers that could follow a redirect to another
+host, a GPU that went unused on a Vulkan 1.4 loader, Vulkan messages printed
+to standard output, and two CSS colour spellings that resolved to the wrong
+colour, and raising the `follow-redirects` floor past three security
+advisories.** Nothing is removed and no signature moves.
 
 ### Security
 
@@ -47,6 +48,35 @@ three security advisories.** Nothing is removed and no signature moves.
   A fresh install already resolved to 1.16.1, so what this changes is an
   existing lockfile: one holding 1.16.0 or earlier no longer satisfies the
   range and moves.
+
+- **Request headers given as an array of pairs no longer follow a redirect to
+  another host.** `loadImage` and `loadImageData` take `fetch`-style request
+  options, whose `headers` may be a plain object, an array of
+  `[name, value]` pairs or a `Headers` instance, and only the plain object was
+  read correctly. An array was sent as headers named `0`, `1` and so on, each
+  carrying a whole pair as its value: `[["Authorization", "Bearer x"]]`
+  arrived as `0: Authorization, Bearer x`. A redirect to another host, or
+  from `https` to `http`, removes credentials by header name, so those were
+  sent on as well, and the header the caller meant was never sent under its
+  own name. A `Headers` instance lost every header it held, so nothing leaked
+  and nothing was sent. Every published release, from 3.6.0-0 through 6.0.2,
+  behaves this way.
+
+  All three shapes now arrive as the headers they name, and `Authorization`,
+  `Cookie` and `Proxy-Authorization` are removed before such a redirect
+  whichever shape they came in. A custom header such as `X-API-Key` is
+  still sent on, since those three are all `follow-redirects` removes by
+  default. Header names go out in lower case, which HTTP treats as the same
+  names.
+
+  **If you passed credentials as an array of pairs to a URL that may have
+  redirected to another host or to plain `http`, treat them as exposed and
+  rotate them.**
+
+  A `headers` value that is none of the three shapes -- a string, a number, a
+  pair of the wrong length -- now rejects with a `TypeError` before any
+  request is made, where a string used to go out as one header per character.
+  `undefined`, `null`, `false` and `""` still mean no headers.
 
 ### Fixed
 
