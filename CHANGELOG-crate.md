@@ -248,6 +248,40 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `tests/assets/sri-cases.json` holds 45 cases with Chrome's answer beside
   this library's, and both packages' tests read it.
 
+- **`Image::from_url` and `ImageData::from_url` load over `http` and
+  `https`, behind a new `fetch` feature**, as npm's `loadImage` and
+  `loadImageData` do. `ImageData::from_url` reads the body as pixels, and
+  works out the height from its length when given none. The feature is
+  opt-in and not default: it brings ureq, blocking, on rustls with ring and
+  the webpki-roots certificates, and no aws-lc. Without it nothing new is
+  linked but `sha2`, and `just ci` refuses a graph in which that stops
+  being true.
+
+  `LoadOptions` carries what `RequestInit` does here: request headers, a
+  `Redirect` mode, `integrity`, and a `timeout` covering the whole load.
+  Redirects are followed by the crate, not the client, up to Fetch's limit
+  of 20, on 301, 302, 303, 307 and 308 only. `Authorization`, `Cookie` and
+  `Proxy-Authorization` are dropped at a redirect to another host or from
+  `https` to `http`, by the rule npm's loaders apply. `Redirect::Error`
+  and `Redirect::Manual` stop at the redirect and never request its
+  target. A failure is a `LoadError`, a new type rather than new `Error`
+  variants, that says which step failed and names the URL given.
+
+- **`Cancel` stops a load from another thread.** Clone it into any number
+  of loads' `LoadOptions::cancel` and call `cancel()`: each returns
+  `LoadError::Cancelled`. A load waiting on its server -- in a TLS
+  handshake, for the response, or for more of the body -- returns at once,
+  because its connection is closed under it. Resolving the host name and
+  opening the TCP connection cannot be interrupted; a load cancelled during
+  either returns when that call does, which `timeout` bounds.
+
+- **`decode_data_url` decodes a `data:` URL without the `fetch` feature**,
+  as Chrome's `fetch` does: the scheme in any case, the fragment dropped,
+  percent-decoding to bytes, and strict base64 with optional padding.
+  `tests/assets/data-url-cases.json` holds the 67 cases it is checked
+  against, each the bytes Chrome 152 fetched or its refusal.
+  `Image::from_url` takes `data:` URLs through it.
+
 ## 📦 ⟩ [v0.16.3] (crate) ⟩ September 16, 2026
 
 **A patch closing a gap 0.16.2 shipped knowingly.** No signature moves and

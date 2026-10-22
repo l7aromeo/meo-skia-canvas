@@ -54,7 +54,7 @@ default:
 # genuinely re-ran, and at the end of the list the same failure would cost the
 # whole run to reach.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-release-tags check-upstream-notes check-markdown-links check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
+ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-release-tags check-upstream-notes check-markdown-links check-fetch-deps check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
 
 [private]
 ensure-deps:
@@ -227,6 +227,13 @@ check-upstream-notes:
 check-markdown-links:
     node scripts/check-markdown-links.mjs --self-test
     node scripts/check-markdown-links.mjs
+
+# The `fetch` feature's two promises about the dependency graph: no HTTP client
+# or TLS stack without it, and no aws-lc with it. The script says why each
+# matters; it reads every target, not just this host's.
+[doc("Check `fetch` stays opt-in and keeps aws-lc out of the graph.")]
+check-fetch-deps:
+    node scripts/check-fetch-deps.mjs
 
 # A release tag is built from a version in two dozen places and they all have
 # to agree on the prefix. Both known defects of this shape were in `build.yml`,

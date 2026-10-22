@@ -206,6 +206,8 @@
 //! - `node-addon` -- register the `#[neon::main]` entry point so the resulting
 //!   cdylib loads as a Node.js addon. Pure-Rust consumers should leave this
 //!   off.
+//! - `fetch` -- load images over `http` and `https` with `Image::from_url` and
+//!   `ImageData::from_url`. Brings a blocking HTTP client on rustls.
 //!
 //! Pure-Rust consumers typically depend with `default-features = false` and
 //! pick the backend they need:
@@ -261,6 +263,9 @@ pub mod geometry;
 pub mod image;
 /// Subresource Integrity: checking bytes against the hashes a caller expects.
 pub mod integrity;
+/// Loading images from URLs: `data:` URLs always, and `http(s)` with the
+/// `fetch` feature.
+pub mod load;
 /// Returning freed memory to the operating system.
 pub mod memory;
 /// Fill and stroke styling.
@@ -293,8 +298,8 @@ pub mod texture;
 #[doc(inline)]
 pub use crate::{
     canvas::*, color::*, context2d::*, error::*, export::*, filter::*, font::*,
-    geometry::*, image::*, integrity::*, paint::*, path::*, pattern::*,
-    pixels::*, shader::*, text::*, texture::*,
+    geometry::*, image::*, integrity::*, load::*, paint::*, path::*,
+    pattern::*, pixels::*, shader::*, text::*, texture::*,
 };
 
 /// Glob-importable re-export of the whole public API:
@@ -305,8 +310,8 @@ pub use crate::{
 pub mod prelude {
     pub use crate::{
         canvas::*, color::*, context2d::*, error::*, export::*, filter::*,
-        font::*, geometry::*, image::*, integrity::*, paint::*, path::*,
-        pattern::*, pixels::*, shader::*, text::*, texture::*,
+        font::*, geometry::*, image::*, integrity::*, load::*, paint::*,
+        path::*, pattern::*, pixels::*, shader::*, text::*, texture::*,
     };
 
     // Windowing, which is feature-gated and so cannot be globbed with the
