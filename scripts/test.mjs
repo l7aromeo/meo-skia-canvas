@@ -21,7 +21,7 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { report } from "./gpu-events.mjs";
-import { staleness } from "./install-deps.mjs";
+import { lockfileWarning } from "./install-deps.mjs";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url))),
   LOCAL_BUILD = join(ROOT, "lib", "skia.node"),
@@ -48,11 +48,8 @@ console.log(`testing against ${against}`);
 // `npm test` installs nothing, so a rebase that moved bun.lock leaves the suite
 // running against the packages installed before it -- and a failure from that
 // reads as a failure of the code. Say so first; `just test-js` reinstalls.
-const stale = staleness(ROOT);
-if (stale)
-  console.log(
-    `warning: node_modules may not match bun.lock (${stale}); run \`bun install\``,
-  );
+const warning = lockfileWarning(ROOT);
+if (warning) console.log(warning);
 
 const since = new Date();
 const { status, error } = spawnSync(

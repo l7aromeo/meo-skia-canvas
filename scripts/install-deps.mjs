@@ -56,8 +56,27 @@ export function staleness(dir) {
   return null;
 }
 
-// Installing only when run, so that `scripts/test.mjs` can import `staleness`
-// to warn without installing anything.
+/**
+ * What `npm test` prints about `dir`'s `node_modules` before running, or null
+ * for nothing: `scripts/test.mjs` installs nothing, so this is its only say.
+ *
+ * Only a stamp that no longer matches is reported. A missing stamp is what a
+ * plain `bun install` leaves -- every CI leg installs that way, and so may a
+ * developer -- so it says nothing about whether the install is current, and
+ * warning on it put a false alarm in every CI run. `staleness` still counts it,
+ * because there the cost of being wrong is one install rather than noise.
+ */
+export function lockfileWarning(dir) {
+  const stamp = join(dir, "node_modules", STAMP);
+  if (!existsSync(stamp)) return null;
+  const why = staleness(dir);
+  return why
+    ? `warning: node_modules may not match bun.lock (${why}); run \`bun install\``
+    : null;
+}
+
+// Installing only when run, so that `scripts/test.mjs` can import
+// `lockfileWarning` to warn without installing anything.
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const dir = resolve(process.argv[2] ?? ".");
   const want = inputsHash(dir);
