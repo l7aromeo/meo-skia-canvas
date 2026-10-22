@@ -40,6 +40,12 @@ when they disagree. The tests and everything this
 package ships still run under Node, which is what end users have -- nothing in `lib/` may use a
 `Bun.*` API, and `node --test` is the gate that would catch it.
 
+One more bites a tree that is not fresh: a rebase or merge can move `bun.lock` under installed
+packages. The `just` recipes notice and reinstall: `scripts/install-deps.mjs` keeps a hash of
+`package.json` and `bun.lock` in `node_modules` and installs again when either changes. `npm test`
+installs nothing, but says when `node_modules` no longer matches; a bare `node --test` does
+neither, so run `bun install` first.
+
 **Building from source takes about an hour** and needs a Rust toolchain, ninja and CMake 3.9 or
 newer (libaom is built with it), and on x86_64 `yasm` or a NASM older than 3.0, because libaom's
 configure rejects NASM 3.x. Downloading the prebuilt binary for the current release is the fast
