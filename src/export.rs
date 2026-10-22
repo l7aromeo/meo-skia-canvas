@@ -14,7 +14,7 @@ use crate::{
     context::page::{ExportOptions, PageSequence},
     encode::avif,
     error::Error,
-    gpu,
+    gpu::{self, completion::typed},
     pixels::{PixelColorSpace, PixelDepth},
 };
 
@@ -1328,7 +1328,7 @@ impl Pages {
             }
         };
 
-        bytes.map_err(|reason| Error::Encode { reason })
+        bytes.map_err(|reason| typed(reason, |reason| Error::Encode { reason }))
     }
 
     /// Encodes the pages and writes them to `path`.
@@ -1391,7 +1391,7 @@ impl Pages {
     pub(crate) fn write_spanning(self, path: &Path) -> Result<(), Error> {
         self.sequence
             .write_spanning(path, self.options)
-            .map_err(|reason| Error::Encode { reason })
+            .map_err(|reason| typed(reason, |reason| Error::Encode { reason }))
     }
 
     /// Writes each page to its own numbered file.
@@ -1437,7 +1437,7 @@ impl Pages {
 
         self.sequence
             .write_sequence(pattern, digits, self.options)
-            .map_err(|reason| Error::Encode { reason })
+            .map_err(|reason| typed(reason, |reason| Error::Encode { reason }))
     }
 }
 
