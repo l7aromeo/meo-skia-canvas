@@ -4,7 +4,7 @@ use crate::{
     context::State,
     css::{FontUnits, is_font_relative, parse_length},
     font::slant_for_matching,
-    font_library::FontLibrary,
+    font_library::{FontLibrary, MatchedFace},
     text::{
         TextAlign as CrateTextAlign, TextBaseline as CrateTextBaseline,
         TextMetricsLine, TextMetricsRun,
@@ -365,12 +365,12 @@ pub struct Typesetter<'a> {
     condense_to: Option<f32>,
     baseline: Baseline,
     typefaces: FontCollection,
-    /// The style the matched face reports, where a face was matched.
+    /// The face the style matched, where one was.
     ///
-    /// Pinned onto the character style before a paragraph is built, so Skia
-    /// does not synthesise a weight or a slant the face already has -- or
-    /// does not have, and would then fake.
-    matched_style: Option<FontStyle>,
+    /// Decides the style the paragraph is built with, by
+    /// `synthesis_style`, so Skia synthesises a weight or a slant exactly
+    /// where Chrome does.
+    matched_style: Option<MatchedFace>,
     char_style: TextStyle,
     graf_style: ParagraphStyle,
     text_decoration: DecorationStyle,
@@ -458,6 +458,37 @@ pub struct TextLayout {
     pub condensation: f32,
 }
 
+/// The style to lay a run out in once its face is matched, so that
+/// SkParagraph synthesises a bold or an italic exactly where Chrome does.
+///
+/// SkParagraph fakes a bold when the style asks for 600 or more and the
+/// face is 200 or more lighter, and an italic -- a skew of a quarter, which
+/// is Chrome's to the pixel: the stem of an `I` slopes -0.2504 in Chrome
+/// 152 at 40, 100 and 200px -- when the style asks for italic and the face
+/// is not. Handing it the requested style lets both through; handing it the
+/// face's own style stops both. So:
+///
+/// - **The weight is the request's on a static face and the face's on a
+///   variable one.** Chrome fakes bold over a static face lighter than asked --
+///   `bold 100px Monoton` inks 2,237,980 against 1,442,282 -- and none over a
+///   variable face instanced at its axis's end: weight 900 on Oswald, whose
+///   `wght` stops at 700, paints exactly as 700.
+/// - **The slant is italic where the request is slanted and the face is
+///   upright**, so the run is skewed; a face that is itself italic or oblique
+///   keeps its own slant and is not skewed a second time.
+fn synthesis_style(requested: FontStyle, matched: MatchedFace) -> FontStyle {
+    let weight = match matched.variable {
+        true => matched.style.weight(),
+        false => requested.weight(),
+    };
+    let slant = match (requested.slant(), matched.style.slant()) {
+        (Slant::Upright, face) => face,
+        (_, Slant::Upright) => Slant::Italic,
+        (_, face) => face,
+    };
+    FontStyle::new(weight, matched.style.width(), slant)
+}
+
 /// Scales a measured box horizontally about the anchor.
 ///
 /// The vertical extent does not move: condensation is a horizontal transform
@@ -542,14 +573,18 @@ impl<'a> Typesetter<'a> {
             self.decoration_thickness,
         ));
 
-        // Prevent SkParagraph from faking the font style where the match is
-        // not the requested weight or slant. Found once, when the collection
-        // was chosen, rather than by searching it again here: the search
-        // needed a `Vec` of the family names, a clone of the collection and a
-        // lookup, 173 nanoseconds of every layout on this machine, to arrive
-        // at what `fonts_for_style` had already had in hand.
+        // Let SkParagraph synthesise what Chrome synthesises and nothing
+        // else -- see `synthesis_style`. The match was found once, when the
+        // collection was chosen, rather than by searching it again here: the
+        // search needed a `Vec` of the family names, a clone of the
+        // collection and a lookup, 173 nanoseconds of every layout on this
+        // machine, to arrive at what `fonts_for_style` had already had in
+        // hand.
         if let Some(matched) = self.matched_style {
-            char_style.set_font_style(matched);
+            char_style.set_font_style(synthesis_style(
+                self.char_style.font_style(),
+                matched,
+            ));
         }
 
         let mut paragraph_builder =
@@ -2491,5 +2526,52 @@ mod half_kern {
             "reported sits half a kern right of painted: {shift} against {}",
             -kern / 2.0
         );
+    }
+}
+
+#[cfg(test)]
+mod synthesis {
+    use super::*;
+
+    fn style(weight: i32, slant: Slant) -> FontStyle {
+        FontStyle::new(Weight::from(weight), Width::NORMAL, slant)
+    }
+
+    fn face(weight: i32, slant: Slant, variable: bool) -> MatchedFace {
+        MatchedFace {
+            style: style(weight, slant),
+            variable,
+        }
+    }
+
+    #[test]
+    fn a_slanted_request_skews_only_an_upright_face() {
+        let asked = style(400, Slant::Italic);
+        for (matched, slant) in [
+            (Slant::Upright, Slant::Italic),
+            // A face with a slant of its own keeps it, so SkParagraph's
+            // fake italic -- which applies to any face not reporting
+            // `Italic` -- does not lean an oblique face a second time.
+            (Slant::Oblique, Slant::Oblique),
+            (Slant::Italic, Slant::Italic),
+        ] {
+            let got = synthesis_style(asked, face(400, matched, false));
+            assert_eq!(got.slant(), slant, "{matched:?}");
+        }
+        // An upright request takes the face as it is.
+        let upright = style(400, Slant::Upright);
+        let got = synthesis_style(upright, face(400, Slant::Oblique, false));
+        assert_eq!(got.slant(), Slant::Oblique);
+    }
+
+    #[test]
+    fn the_weight_is_the_request_s_on_a_static_face_only() {
+        let asked = style(900, Slant::Upright);
+        let on_static =
+            synthesis_style(asked, face(400, Slant::Upright, false));
+        assert_eq!(*on_static.weight(), 900);
+        let on_variable =
+            synthesis_style(asked, face(700, Slant::Upright, true));
+        assert_eq!(*on_variable.weight(), 700);
     }
 }

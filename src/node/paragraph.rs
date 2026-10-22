@@ -649,8 +649,8 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
     // axis -- a visible parity gap on variable fonts like Dosis vs
     // CanvasKit's render.
     let text_style = para_style.text_style().clone();
-    // The matched style is for a caller pinning it against synthesis; a
-    // paragraph built here carries its own text style and does not.
+    // The matched face is for a caller deciding what Skia may synthesise;
+    // a paragraph built here carries its own text style and does not.
     let (collection, _) = FontLibrary::with_shared(|lib| {
         lib.fonts_for_style(&text_style, &variations)
     });

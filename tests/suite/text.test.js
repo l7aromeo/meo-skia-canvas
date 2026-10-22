@@ -1192,3 +1192,151 @@ describe("a claimed name is also registered under a private alias", () => {
     assert.equal(ctx.font, "36px AClaimedName");
   });
 });
+
+describe("a missing italic or bold is synthesised where Chrome synthesises it", () => {
+  // Every expectation here was read from Chrome 152 on the same fonts,
+  // loaded as FontFace: Oswald declared with its weight range, so `bold`
+  // instances it, and Monoton, a static face of one weight.
+  FontLibrary.use("Oswald", [
+    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+  ]);
+  FontLibrary.use("Monoton", ["tests/assets/fonts/Monoton-Regular.woff"]);
+
+  const near = (actual, expected, tolerance, message) =>
+    assert.ok(
+      Math.abs(actual - expected) <= tolerance,
+      `${message}: ${actual}, expected ${expected} within ${tolerance}`,
+    );
+
+  // The stem of an `I`: the slope of its left edge, fitted over the middle
+  // seventy percent of its rows, and its mean width.
+  const stem = (font) => {
+    const ctx = new Canvas(300, 300).getContext("2d");
+    ctx.font = font;
+    ctx.fillText("I", 100, 250);
+    const data = ctx.getImageData(0, 0, 300, 300).data,
+      rows = [];
+    for (let y = 0; y < 300; y++) {
+      let left = null,
+        right = null;
+      for (let x = 0; x < 300; x++)
+        if (data[(y * 300 + x) * 4 + 3] >= 128) {
+          left ??= x;
+          right = x;
+        }
+      if (left !== null) rows.push([y, left, right]);
+    }
+    const inner = rows.slice(
+        Math.floor(rows.length * 0.15),
+        Math.floor(rows.length * 0.85),
+      ),
+      n = inner.length,
+      meanY = inner.reduce((sum, [y]) => sum + y, 0) / n,
+      meanX = inner.reduce((sum, [, x]) => sum + x, 0) / n;
+    let num = 0,
+      den = 0;
+    for (const [y, x] of inner) {
+      num += (y - meanY) * (x - meanX);
+      den += (y - meanY) ** 2;
+    }
+    const width = inner.reduce((sum, [, l, r]) => sum + r - l + 1, 0) / n;
+    return { slope: num / den, width };
+  };
+
+  const ink = (font) => {
+    const ctx = new Canvas(400, 160).getContext("2d");
+    ctx.font = font;
+    ctx.fillText("IHI", 20, 130);
+    const data = ctx.getImageData(0, 0, 400, 160).data;
+    let sum = 0;
+    for (let i = 3; i < data.length; i += 4) sum += data[i];
+    return sum;
+  };
+
+  const bounds = (font, text) => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = font;
+    const m = ctx.measureText(text);
+    return [m.actualBoundingBoxLeft, m.actualBoundingBoxRight];
+  };
+
+  test("an italic with no italic face is skewed by a quarter", () => {
+    // Chrome: -0.2504 at 200px, with the stem's width unchanged.
+    for (const font of [
+      "italic 200px Oswald",
+      "oblique 200px Oswald",
+      "bold italic 200px Oswald",
+    ]) {
+      near(stem(font).slope, -0.25, 0.005, font);
+    }
+    near(stem("200px Oswald").slope, 0, 0.001, "the control");
+    near(
+      stem("italic 200px Oswald").width,
+      stem("200px Oswald").width,
+      1,
+      "skewed, not widened",
+    );
+  });
+
+  test("a variable face instanced at bold gets no faux bold over it", () => {
+    // Chrome's bold italic stem is 36.62 wide against 36 for bold: the
+    // `wght` instance, skewed, and not emboldened on top. And 900, past the
+    // end of Oswald's `wght` axis at 700, paints exactly as 700 -- the one
+    // case where the face is lighter than asked and still not faked.
+    near(
+      stem("bold italic 200px Oswald").width,
+      stem("bold 200px Oswald").width,
+      1,
+      "bold italic",
+    );
+    near(
+      stem("900 200px Oswald").width,
+      stem("bold 200px Oswald").width,
+      0.5,
+      "900",
+    );
+  });
+
+  // Helvetica's italic is a face of its own whose slant is oblique, not
+  // italic, which is the case where an upright test for "is the face
+  // slanted" matters: skewed again, it would lean twice as far. Chrome 152
+  // on macOS: -0.2125. Skipped where the family is not installed.
+  test(
+    "a face that is itself oblique is not skewed again",
+    { skip: !FontLibrary.has("Helvetica") && "no Helvetica on this system" },
+    () => {
+      near(stem("italic 200px Helvetica").slope, -0.2125, 0.005, "italic");
+      near(
+        stem("bold italic 200px Helvetica").slope,
+        -0.2125,
+        0.005,
+        "bold italic",
+      );
+    },
+  );
+
+  test("a static face lighter than asked is faked bold from 600", () => {
+    // Chrome: 1,442,282 at 400 and 500, 2,237,980 at 600, bold and 900.
+    const regular = ink("100px Monoton");
+    assert.equal(ink("500 100px Monoton"), regular, "500 is not faked");
+    for (const font of ["600 100px Monoton", "bold 100px Monoton"])
+      assert.ok(ink(font) > regular * 1.4, `${font} is emboldened`);
+    assert.equal(ink("900 100px Monoton"), ink("bold 100px Monoton"));
+  });
+
+  test("measureText reports the synthesised ink as Chrome does", () => {
+    // Each pair Chrome 152's actualBoundingBoxLeft and Right; the advance
+    // is unchanged by either synthesis, as Chrome leaves it.
+    for (const [font, text, chrome] of [
+      ["italic 40px Oswald", "I", [-2.76, 15.3]],
+      ["bold italic 40px Oswald", "I", [-2.44, 17.7]],
+      ["bold 100px Monoton", "IHI", [-2.979, 154.736]],
+      ["italic 100px Monoton", "IHI", [-4.541, 173.389]],
+      ["bold italic 100px Monoton", "IHI", [-2.54, 175.39]],
+    ]) {
+      const [left, right] = bounds(font, text);
+      near(left, chrome[0], 0.01, `${font} left`);
+      near(right, chrome[1], 0.01, `${font} right`);
+    }
+  });
+});

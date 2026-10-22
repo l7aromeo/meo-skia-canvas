@@ -205,6 +205,21 @@ removed and no signature moves.
   width, so `skewY(1.07rad)` agrees with Chrome to the last place where it
   differed in the seventh.
 
+- **A family with no italic face is slanted, and a static family with no
+  bold face is emboldened, where Chrome does both.** Text drawn or measured
+  through the context was laid out in the style of the face it matched, so a
+  requested slant or weight the face lacked was dropped:
+  `italic 200px Oswald` drew upright and `bold 100px Monoton` drew regular.
+  Chrome skews such an italic by a quarter -- the stem of an `I` slopes
+  -0.2504 in Chrome 152, -0.2498 here now -- and emboldens a static face
+  from weight 600 when the face is 200 or more lighter, and so does this
+  now, with `measureText` reporting the slanted or emboldened ink as Chrome
+  does: `italic 40px Oswald` measures `actualBoundingBoxRight` 15.3 for an
+  `I`, where it measured 7.2. A variable face instanced at the weight asked
+  for is still not emboldened past the end of its axis, as before and as in
+  Chrome, and a face that is itself italic or oblique is not skewed a second
+  time.
+
 - **A GPU recovery could produce wrong or blank pixels with no error; such
   a draw is now retried once and otherwise reported.** When the GPU recovers
   from a fault -- often one in another program -- macOS discards the work

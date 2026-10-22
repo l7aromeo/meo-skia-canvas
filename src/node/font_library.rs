@@ -282,6 +282,31 @@ impl ResolvedFontCache {
     }
 }
 
+/// The face a style matched first: the style it reports, and whether it is
+/// a variable face.
+///
+/// What a layout needs to decide what to synthesise. A variable face is
+/// instanced at the weight asked for, so a shortfall there is the axis's
+/// end and Chrome fakes no bold over it; a static face lighter than asked
+/// is faked bold, by Chrome and by Skia alike.
+#[derive(Clone, Copy, Debug)]
+pub struct MatchedFace {
+    /// The style the face reports -- for an instanced face, the weight it
+    /// was pinned to.
+    pub style: FontStyle,
+    /// Whether the face has variation axes.
+    pub variable: bool,
+}
+
+impl MatchedFace {
+    fn of(face: &Typeface) -> Self {
+        Self {
+            style: face.font_style(),
+            variable: face.variation_design_parameters().is_some(),
+        }
+    }
+}
+
 /// A bounded memoization of [`FontLibrary::fonts_for_style`].
 ///
 /// Pure caching of a deterministic build, so evicting costs one rebuild and
@@ -296,7 +321,7 @@ impl ResolvedFontCache {
 /// finds the map full.
 #[derive(Default)]
 struct CollectionCache {
-    entries: HashMap<CollectionKey, (FontCollection, Option<FontStyle>, u64)>,
+    entries: HashMap<CollectionKey, (FontCollection, Option<MatchedFace>, u64)>,
     uses: u64,
 }
 
@@ -304,7 +329,7 @@ impl CollectionCache {
     fn get(
         &mut self,
         key: &CollectionKey,
-    ) -> Option<(FontCollection, Option<FontStyle>)> {
+    ) -> Option<(FontCollection, Option<MatchedFace>)> {
         self.uses += 1;
         let uses = self.uses;
         self.entries
@@ -319,7 +344,7 @@ impl CollectionCache {
         &mut self,
         key: CollectionKey,
         collection: FontCollection,
-        matched: Option<FontStyle>,
+        matched: Option<MatchedFace>,
     ) {
         if self.entries.len() >= COLLECTION_CACHE_SIZE
             && !self.entries.contains_key(&key)
@@ -1041,21 +1066,21 @@ impl FontLibrary {
         self
     }
 
-    /// The collection a style should be laid out with, and the style the
-    /// matched face actually has.
+    /// The collection a style should be laid out with, and the face the
+    /// style matched first.
     ///
     /// Two answers from one search. Skia's paragraph builder synthesises a
-    /// bold or an oblique where the face it finds is not the weight or slant
-    /// that was asked for, so a caller pins the style to what the match
-    /// reports -- which used to mean searching the collection a second time,
-    /// in `Typesetter::layout`, on every call. It is the same search: for a
-    /// family with no variable font in it, the collection handed back here
-    /// is the one that was just searched.
+    /// bold or an italic where the face it finds is not the weight or slant
+    /// that was asked for, so a caller decides from the match what it may
+    /// synthesise -- which used to mean searching the collection a second
+    /// time, in `Typesetter::layout`, on every call. It is the same search:
+    /// for a family with no variable font in it, the collection handed back
+    /// here is the one that was just searched.
     pub fn fonts_for_style(
         &mut self,
         style: &TextStyle,
         variations: &[(FourByteTag, f32)],
-    ) -> (FontCollection, Option<FontStyle>) {
+    ) -> (FontCollection, Option<MatchedFace>) {
         let families = style.font_families();
         let families: Vec<&str> = families.iter().collect();
         let matches = self
@@ -1176,14 +1201,14 @@ impl FontLibrary {
                 .clone()
                 .find_typefaces(&families, style.font_style())
                 .first()
-                .map(|face| face.font_style());
+                .map(MatchedFace::of);
             self.collection_cache
                 .insert(key, collection.clone(), matched);
             (collection, matched)
         } else {
             // Not variable, so the collection just searched is the one to lay
             // out with and the match is the one already in hand.
-            let matched = matches.first().map(|face| face.font_style());
+            let matched = matches.first().map(MatchedFace::of);
             (self.font_collection(), matched)
         }
     }
