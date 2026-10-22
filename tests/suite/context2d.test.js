@@ -1798,7 +1798,8 @@ describe("Context2D", () => {
           "rotate(30deg) rotate(-.1turn) rotate(.444rad)":
             "matrix(0.942994450354, 0.332808453321, -0.332808453321, 0.942994450354, 0, 0)",
           none: "matrix(1, 0, 0, 1, 0, 0)",
-          unset: "matrix(1, 0, 0, 1, 0, 0)",
+          // `unset` and the other CSS-wide keywords are refused, as Chrome
+          // refuses them; tests/assets/cases/css-transforms.json pins that.
         };
 
         for (const input in transforms) {

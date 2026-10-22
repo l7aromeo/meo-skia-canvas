@@ -207,6 +207,34 @@ removed and no signature moves.
   `redirect` refuses already was. Every published release, from 3.6.0-0
   through 6.0.2, behaves this way.
 
+- **`DOMMatrix` reads a CSS transform list as Chrome does.** Checked
+  against 77 lists measured in Chrome 152 with `setMatrixValue`, which
+  `Affine::from_css` on the crate side answers too. It now reads
+  `perspective()`, function names and units in any letter case
+  (`ROTATE(45DEG)`), every absolute length unit rather than `px` alone,
+  `grad`, and a bare `0` for an angle, as `rotate(0)`.
+
+  **Strings that loaded before now throw**, because Chrome refuses them and
+  most were read as something other than what they say:
+  `translate3d(1px, 2px)` and `scale3d(2, 3)`, short an argument;
+  `rotate3d(1, 1, 45deg)`, which loaded as no rotation at all; a length
+  with no unit, as in `translate(10, 10)`, where only `0` may go without
+  one; a function given extra arguments, as `translateX(5px, 1px)`,
+  `scale(2, 3, 4)` and `skewX(10deg, 1deg)`, whose extras were ignored; a
+  length for `rotate3d`'s axis, as `rotate3d(1px, 0, 0, 45deg)`; and the
+  CSS-wide keywords `inherit`, `initial`, `unset`, `revert` and
+  `revert-layer`, which loaded as the identity. `none` still means the
+  identity on its own, and only on its own.
+
+  **The error an invalid list throws is now a `SyntaxError`
+  `DOMException`**, which is what the Geometry Interfaces standard names
+  and Chrome throws. It was a `TypeError` for most invalid lists and a
+  plain JavaScript `SyntaxError` for a few; code catching either by class
+  should catch `DOMException` and test `name`. `ctx.setTransform` and
+  `ctx.transform`, which take a string as this library's extension, read
+  the same lists and still refuse with their own `TypeError` naming the
+  cause.
+
 - **`hsl()` and `hwb()` written with bare numbers name the colour they
   state.** CSS Color 4 types saturation, lightness, whiteness and blackness
   as `<percentage> | <number>`, so `ctx.fillStyle = 'hsl(200 40 45)'` and
