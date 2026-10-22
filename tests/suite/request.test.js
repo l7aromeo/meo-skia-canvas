@@ -685,4 +685,33 @@ describe("A fetched image is checked against `integrity`", () => {
       },
     );
   });
+  test("bytes in any other byte-sized view are checked as a Buffer is", async () => {
+    let view = () => new Uint8Array(BUFFER),
+      memory = () =>
+        BUFFER.buffer.slice(
+          BUFFER.byteOffset,
+          BUFFER.byteOffset + BUFFER.byteLength,
+        ),
+      load = (src, integrity) =>
+        settled(
+          loadImage(
+            /** @type {any} */ (src),
+            /** @type {any} */ ({ integrity }),
+          ),
+        );
+    assert.deepEqual(
+      {
+        view: await load(view(), `sha256-${DIGEST.sha256}`),
+        viewWrong: await load(view(), `sha256-${WRONG.sha256}`),
+        memory: await load(memory(), `sha256-${DIGEST.sha256}`),
+        memoryWrong: await load(memory(), `sha256-${WRONG.sha256}`),
+      },
+      {
+        view: "load",
+        viewWrong: REFUSED_HERE,
+        memory: "load",
+        memoryWrong: REFUSED_HERE,
+      },
+    );
+  });
 });

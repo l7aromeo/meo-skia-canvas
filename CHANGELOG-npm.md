@@ -196,6 +196,18 @@ removed and no signature moves.
   parse. A missing optional entry point is normal, and is no longer
   reported.
 
+- **A sharp image created blank loads.** `loadImage(sharp({ create: ... }))`
+  and assigning one to `img.src` failed with "failed to downcast any to
+  string": an image made that way has neither a file nor a `Buffer` behind
+  it, and the loader named it by one or the other. Before the fix for a
+  remote image ending the process, above, that failure was itself thrown
+  where nothing could catch it, so loading one ended the process.
+  `loadImageData` was not affected. A blank image now loads through the same
+  eight-bit RGBA output every sharp image takes, which loses nothing: sharp
+  creates eight-bit sRGB whatever it is asked for, and the alpha arrives
+  as created. With `integrity` set it is still refused, since it has no
+  input bytes to check.
+
 - **A load refused for its HTTP status releases its connection.** A response
   outside 200-299 was never read, so its socket stayed checked out of the
   agent. Through an agent with a socket limit -- an
@@ -244,6 +256,27 @@ removed and no signature moves.
   `color(srgb ...)` form, and now reports `-0.335`.
 
 ### Added
+
+- **The loaders read bytes in any byte-sized view.** `loadImage`,
+  `loadImageData`, `new Image()` and `img.src` take a `Uint8Array`,
+  `Uint8ClampedArray`, `Int8Array`, `DataView`, `ArrayBuffer` or
+  `SharedArrayBuffer` as the bytes it holds, in place and without a copy,
+  as they already took a `Buffer`, and `integrity` checks them the same way.
+  Before, the loaders read any of these as a file path -- a `Uint8Array`
+  from a file named after its comma-separated values -- and `new Image()`
+  refused them. A typed array of wider elements, such as a `Uint16Array` or
+  a `Float32Array`, rejects with a `TypeError` that says how to pass its
+  memory instead, since it could mean its elements or its bytes.
+
+- **`loadImage` declares options for an image already in memory.** The
+  overload taking a `Buffer`, other bytes or a Sharp image had no options
+  parameter in `index.d.ts`, although the function always read one, so a
+  TypeScript caller could not pass `integrity` or `currentColor` there
+  without a cast. It now takes
+  `Pick<RequestInit, "integrity"> & { currentColor?: string }` -- the two
+  options that act on bytes in memory -- so a literal such as `{ headers }`,
+  which has nothing to act on there, is still a type error. An options object
+  typed as a whole `RequestInit` is accepted as before.
 
 - **`color(xyz ...)`, `color(xyz-d50 ...)` and `color(xyz-d65 ...)` are
   accepted**, beside the `srgb`, `srgb-linear`, `display-p3` and `rec2020`

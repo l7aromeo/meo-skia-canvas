@@ -4,7 +4,7 @@
 
 const sharp = require("sharp"),
   { assert, describe, test } = require("../runner"),
-  { Canvas, loadImageData } = require("../../lib"),
+  { Canvas, Image, loadImage, loadImageData } = require("../../lib"),
   { skiaNode } = require("../../lib/classes/neon");
 
 const RED = "#ff0000";
@@ -206,5 +206,62 @@ describe("loadImageData with a sharp source", () => {
     const data = await load({ colorType: "rgba" });
     assert.equal(data.colorType, "rgba");
     assert.equal(data.data.length, 2 * 2 * 4);
+  });
+});
+
+// A sharp image created blank has no input of its own -- no file, no Buffer --
+// so it reaches the loaders with nothing to name it by. It still has pixels,
+// and they arrive through the same raw RGBA output every sharp source takes.
+// `create` makes eight-bit sRGB whatever it is asked for (sharp ignores a
+// `depth`), so eight-bit RGBA loses nothing; the half-transparent background
+// is what shows that the alpha survives.
+describe("A sharp image created blank loads", () => {
+  const blank = () =>
+    sharp({
+      create: {
+        width: 2,
+        height: 1,
+        channels: 4,
+        background: { r: 10, g: 20, b: 30, alpha: 0.5 },
+      },
+    });
+  // The same pixels, as sharp itself reports them.
+  const EXPECTED = [10, 20, 30, 128, 10, 20, 30, 128];
+
+  /** What an `Image` holds, read back through a canvas of its size. */
+  const pixels = (img) => {
+    let canvas = new Canvas(img.width, img.height),
+      ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0);
+    return [...ctx.getImageData(0, 0, img.width, img.height).data];
+  };
+
+  test("through loadImage", async () => {
+    let img = await loadImage(blank());
+    assert.deepEqual(
+      { width: img.width, height: img.height, pixels: pixels(img) },
+      { width: 2, height: 1, pixels: EXPECTED },
+    );
+  });
+
+  test("through loadImageData", async () => {
+    let data = await loadImageData(blank());
+    assert.deepEqual(
+      { width: data.width, height: data.height, pixels: [...data.data] },
+      { width: 2, height: 1, pixels: EXPECTED },
+    );
+  });
+
+  test("through Image.src", async () => {
+    let img = new Image(),
+      fired = await new Promise((ok) => {
+        img.onload = () => ok("load");
+        img.onerror = (e) => ok(`error: ${e?.message ?? e}`);
+        img.src = /** @type {any} */ (blank());
+      });
+    assert.deepEqual(
+      { fired, pixels: fired == "load" ? pixels(img) : null },
+      { fired: "load", pixels: EXPECTED },
+    );
   });
 });
