@@ -94,7 +94,7 @@ jobs:
       - run: cargo fmt --all -- --check
 
   # Clippy axes are the features that gate Rust code behind `#[cfg]`:
-  # node-addon, window, vulkan, metal. `freetype` is a skia-safe *build*
+  # node-addon, window, vulkan, metal, fetch. `freetype` is a skia-safe *build*
   # option (embed-freetype) -- it gates no Rust, so it's pointless here.
   # These four configs cover every `#[cfg]` permutation of our code:
   # everything off, all Linux-gated code on, Metal (macOS only), and both
@@ -118,14 +118,14 @@ jobs:
             os: ubuntu-latest
             features: ""
             cacheKey: none
-          - name: linux (vulkan,window,node-addon)
+          - name: linux (vulkan,window,node-addon,fetch)
             os: ubuntu-latest
-            features: vulkan,window,node-addon
-            cacheKey: vulkan-window-node-addon
-          - name: macos (metal,window,node-addon)
+            features: vulkan,window,node-addon,fetch
+            cacheKey: vulkan-window-node-addon-fetch
+          - name: macos (metal,window,node-addon,fetch)
             os: macos-latest
-            features: metal,window,node-addon
-            cacheKey: metal-window-node-addon
+            features: metal,window,node-addon,fetch
+            cacheKey: metal-window-node-addon-fetch
           # Both backends at once. Cargo features are additive, so a binary
           # depending on two crates that each ask for a different backend gets
           # this set, and `gpu` has to resolve `Engine` and `Renderer` to one of
@@ -180,7 +180,7 @@ jobs:
   test:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
-    name: test (freetype)
+    name: test (freetype,fetch)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -200,12 +200,12 @@ jobs:
             clang libfontconfig1-dev libssl-dev nasm yasm ninja-build pkg-config python3
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: test-freetype
+          key: test-freetype-fetch
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: |
           cargo test \
             --no-default-features \
-            --features "freetype"
+            --features "freetype,fetch"
 
   # The JavaScript suite against a binary built from this commit — the one thing
   # neither of the other gates can do mid-cycle. `cargo test` above covers the
@@ -406,10 +406,11 @@ jobs:
         with:
           key: msrv-${{ steps.declared.outputs.version }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # The Linux feature set, so the cfg-gated code compiles here rather than
-      # being skipped. `--all-targets` is deliberately absent: the MSRV applies
-      # to the library a consumer builds, not to this repo's dev-dependencies.
-      - run: cargo check --no-default-features --features "vulkan,window"
+      # The Linux feature set and `fetch`, so the cfg-gated code and the HTTP
+      # client compile here rather than being skipped. `--all-targets` is
+      # deliberately absent: the MSRV applies to the library a consumer builds,
+      # not to this repo's dev-dependencies.
+      - run: cargo check --no-default-features --features "vulkan,window,fetch"
 
   # The README and the crate docs both promise that no public signature hands
   # you a `skia_safe` or `neon` type, and nothing checked it. The promise was
@@ -450,9 +451,14 @@ jobs:
           key: public-api
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: |
-          cargo rustdoc --no-default-features --features "vulkan,window" \
+          cargo rustdoc --no-default-features --features "vulkan,window,fetch" \
             -- -Z unstable-options --output-format json
       - run: node scripts/check-public-api.mjs target/doc/meo_skia_canvas.json
+      # What the crate's graph holds rather than what its signatures name, but
+      # the same promise from the other side: `fetch` brings no HTTP client or
+      # TLS stack into a build that did not ask for it, and no aws-lc into one
+      # that did. `cargo tree` resolves without building, so it costs seconds.
+      - run: node scripts/check-fetch-deps.mjs
 
   # `git tag` is this gate's reference, so the checkout has to carry the tags
   # AND the history behind them. `actions/checkout` defaults to depth 1 with no
@@ -563,7 +569,7 @@ jobs:
           RUSTDOCFLAGS="-D warnings" cargo doc \
             --no-deps \
             --no-default-features \
-            --features "vulkan,window"
+            --features "vulkan,window,fetch"
 
   # A doc block written above an existing one rather than above its own item
   # reattaches silently: rustdoc joins the two, both land on the following item,

@@ -8,7 +8,8 @@
 //! to be looked up by module first. The modules group them by subject for
 //! reading; the [`prelude`] globs the same set for anyone who prefers one.
 //! No signature anywhere in the crate exposes a `skia_safe` or `neon` type,
-//! [`gui`] included, and the Node/Neon binding lives under the internal
+//! [`gui`] included, nor a `ureq` or `http` one behind the `fetch` feature,
+//! and the Node/Neon binding lives under the internal
 //! `node` module. `scripts/check-public-api.mjs` reads rustdoc's JSON on
 //! every push and fails on a leak, with no module exempted -- the claim is
 //! checked rather than maintained by hand.
@@ -234,8 +235,9 @@ use neon::{prelude::*, types::buffer::TypedArray};
 
 // The public Rust API. Each module sits at the crate root; `prelude`
 // re-exports their contents so `use meo_skia_canvas::prelude::*;` needs no
-// module prefixes. Public signatures never expose `skia_safe` or `neon`
-// types -- the Node/Neon binding lives under the internal `node` module.
+// module prefixes. Public signatures never expose `skia_safe`, `neon`,
+// `ureq` or `http` types -- the Node/Neon binding lives under the internal
+// `node` module.
 /// Entry point: the canvas, its pages, and the engine that draws them.
 pub mod canvas;
 /// Colors and color spaces.

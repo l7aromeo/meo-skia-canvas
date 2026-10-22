@@ -112,7 +112,8 @@ The crate is a consumer API, not a byproduct of building the addon. Every public
 as `meo_skia_canvas::Thing` — the modules group them by subject for reading, but one drawing reaches
 across several and nothing should require knowing which — and the `prelude` globs the same set. The
 Node binding stays behind an internal module, and no signature anywhere in the crate hands you a
-`skia_safe` or `neon` type — windowing included. `scripts/check-public-api.mjs` reads rustdoc's JSON
+`skia_safe` or `neon` type — windowing included — nor, behind `fetch`, a `ureq` or `http` one.
+`scripts/check-public-api.mjs` reads rustdoc's JSON
 in CI and fails on a leak, with no module exempted, so the promise is checked rather than kept by
 hand.
 
@@ -573,7 +574,7 @@ crate and a Node addon are built from the same source, and they are the same API
 the same calls in each language's own spelling, the same argument order, the same state model, one
 colour parser and one font stack underneath. The crate is a consumer API rather than a byproduct
 of building the addon: no signature anywhere hands you a `skia_safe` or `neon` type, windowing
-included, and `scripts/check-public-api.mjs` reads rustdoc's JSON in CI and fails on a leak with
+included, nor a `ureq` or `http` one behind `fetch`, and `scripts/check-public-api.mjs` reads rustdoc's JSON in CI and fails on a leak with
 no module exempted. A Rust program and a Node program drawing the same picture reach the same code.
 
 **The binary arrives without running anything.** One npm package per target, selected by

@@ -16,6 +16,12 @@ and `rustix` and `linux-raw-sys` — Linux-only, and the sole carriers of the LL
 were named nowhere. Over-listing costs a reader nothing; under-listing is what this file exists to
 prevent.
 
+The crate's `fetch` feature is not in that union, because the addon does not enable it, so nothing
+it brings is in a released binary or listed here. A Rust program that enables it links an HTTP
+client and a TLS stack, among them `ring` (Apache-2.0 and ISC), `rustls-webpki` and `untrusted`
+(ISC), `subtle` (BSD-3-Clause) and `webpki-roots`, whose certificate data is CDLA-Permissive-2.0 —
+notices that program owes when it ships a binary, as this file owes the ones below.
+
 Counts here are easy to get wrong in two directions at once, so the recipe pins how this one is
 taken. A bare `cargo metadata` reports more, because it counts build and dev dependencies and every
 platform's targets — and _fewer_, because it resolves only the default features and so misses

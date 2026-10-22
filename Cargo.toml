@@ -107,9 +107,10 @@ fetch = ["dep:ureq"]
 # Verified under `DOCS_RS=1`, which is what makes skia-bindings use the
 # stub: this set documents clean with zero warnings and `gui/index.html`
 # present. `freetype` is deliberately not here -- it changes font loading,
-# not the documented surface.
+# not the documented surface. `fetch` is, because `Image::from_url`,
+# `LoadOptions` and the rest exist only behind it.
 no-default-features = true
-features = ["vulkan", "window"]
+features = ["vulkan", "window", "fetch"]
 
 [lints.clippy]
 # The options structs are built with `..Type::default()` even where every
