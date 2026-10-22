@@ -238,7 +238,9 @@ removed and no signature moves.
   with no unit, as in `translate(10, 10)`, where only `0` may go without
   one; a function given extra arguments, as `translateX(5px, 1px)`,
   `scale(2, 3, 4)` and `skewX(10deg, 1deg)`, whose extras were ignored; a
-  length for `rotate3d`'s axis, as `rotate3d(1px, 0, 0, 45deg)`; and the
+  length for `rotate3d`'s axis, as `rotate3d(1px, 0, 0, 45deg)`; a number
+  ending in a point, as `translate(5.px)` and `scale(2.)`, which CSS does
+  not allow and which loaded as the number before the point; and the
   CSS-wide keywords `inherit`, `initial`, `unset`, `revert` and
   `revert-layer`, which loaded as the identity. `none` still means the
   identity on its own, and only on its own.
@@ -306,6 +308,53 @@ removed and no signature moves.
   other name with a `TypeError`. An `ImageData` built without it is
   unpremultiplied, as the standard defines, so nothing changes for code
   that never asks for premultiplied data.
+
+- **`ctx.font` reads and reports a font as Chrome does.** Checked against
+  101 shorthands measured in Chrome 152, which `Font::from_css` on the crate
+  side is tested against too.
+
+  **What `ctx.font` reads back has changed.** A stretch keyword is still
+  applied but no longer appears in the string, which Chrome reports through
+  `ctx.fontStretch` alone: `condensed 16px Arial` reads back as
+  `16px Arial`, so `ctx.font = ctx.font` resets the stretch, as it does in
+  a browser. `oblique` reads back as `italic`, though the oblique face is
+  still the one selected. The weight comes before `small-caps`, as in
+  `italic 300 small-caps 16px Arial`. A size has six significant digits:
+  `2cm` reads `75.5906px` rather than `75.59055118110236px`. A family that
+  is not one identifier is quoted, with a `"` or `\` inside it escaped, so
+  `16px "12"` reads back as itself rather than as `16px 12`.
+
+  **Sizes resolve as in Chrome.** `em` and `%` are of the canvas default,
+  10px, not 16px: `1em` is 10px and `150%` is 15px. The keywords follow
+  CSS Fonts 4's table, so `small` is 13px rather than 14.2px, `x-small`
+  10px, `xx-small` 9px, `large` 18px and `xxx-large` 48px. `larger` and
+  `smaller` are 12px and 8.33333px, where they were 19.2px and 14.2px.
+
+  **Accepted now**, as in Chrome: `calc()` in a size or a line height,
+  nested parentheses included; a number with an exponent or a sign, as
+  `1e1px` and `+500`; a fractional weight, with the fraction dropped
+  (`550.7` is 550); a bare `0` as the size; and whitespace before or
+  after the shorthand.
+
+  **Ignored now**, because Chrome ignores them: a shorthand with no family,
+  as `16px`, which set a font with an empty family list; an unquoted
+  family that is not made of identifiers, as `16px 12`, and as
+  `50% 16px Arial`, which set an 8px font named `16px Arial`, or
+  `all-small-caps 16px Arial`, whose `small` was read as a size keyword
+  and which set a 14.2px one; `inherit`, `initial`, `unset`, `revert`,
+  `revert-layer` and `default` as a family; an empty name between commas
+  or after a trailing one; a style, variant or weight given twice, as
+  `italic italic` and `bold 700`; five tokens before the size; a second
+  `/`, as `16px/2px/3px`; and a number ending in a point, as `5.px`.
+
+  **`small-caps` in the shorthand no longer turns on old-style figures.**
+  It enabled `onum` beside `smcp`; CSS Fonts 4 maps `small-caps` to `smcp`
+  alone, which is what `ctx.fontVariantCaps = "small-caps"` already did.
+
+  **System font keywords are still ignored, deliberately.** `caption`,
+  `icon`, `menu`, `message-box`, `small-caption` and `status-bar` name the
+  platform's interface font, which Chrome on macOS reads as 16px Arial and
+  which no other platform has to agree with.
 
 - **`hsl()` and `hwb()` written with bare numbers name the colour they
   state.** CSS Color 4 types saturation, lightness, whiteness and blackness

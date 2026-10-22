@@ -67,3 +67,165 @@ fn affine_from_css_answers_the_transform_table() {
         wrong.join("\n")
     );
 }
+
+/// The `font-stretch` keywords the table's `stretch` column holds, as the
+/// variants they name.
+const STRETCHES: [(&str, FontStretch); 9] = [
+    ("ultra-condensed", FontStretch::UltraCondensed),
+    ("extra-condensed", FontStretch::ExtraCondensed),
+    ("condensed", FontStretch::Condensed),
+    ("semi-condensed", FontStretch::SemiCondensed),
+    ("normal", FontStretch::Normal),
+    ("semi-expanded", FontStretch::SemiExpanded),
+    ("expanded", FontStretch::Expanded),
+    ("extra-expanded", FontStretch::ExtraExpanded),
+    ("ultra-expanded", FontStretch::UltraExpanded),
+];
+
+/// Chrome reports a size to six significant digits, `2cm` as `75.5906px`;
+/// a size read here is the `f32` it came from. Relative, so `8.33333` and
+/// `192` are held to the same number of digits.
+const FONT_SIZE_TOLERANCE: f32 = 1e-5;
+
+/// What `Font::from_css` read, set against Chrome's answer taken apart, or
+/// `None` when every part agrees.
+fn font_parts_disagree(font: &Font, parts: &Value) -> Option<String> {
+    let size = parts["size"].as_f64().expect("a size") as f32;
+    let weight = parts["weight"].as_u64().expect("a weight");
+    let italic = parts["style"] == "italic";
+    let families: Vec<&str> = parts["families"]
+        .as_array()
+        .expect("a family list")
+        .iter()
+        .map(|family| family.as_str().expect("a family name"))
+        .collect();
+    let stretch = STRETCHES
+        .iter()
+        .find(|(name, _)| parts["stretch"] == *name)
+        .map(|&(_, stretch)| stretch)
+        .expect("a stretch keyword");
+    // Absent where the case does not say, and `null` for `normal`.
+    let line_height = parts
+        .get("lineHeight")
+        .map(|value| value.as_f64().map(|px| px as f32));
+
+    let agrees = (font.size - size).abs()
+        <= FONT_SIZE_TOLERANCE * size.max(1.0)
+        && u64::from(font.weight) == weight
+        && (font.slant != FontSlant::Normal) == italic
+        && font.families == families
+        && font.stretch == stretch
+        && line_height.is_none_or(|want| font.line_height == want);
+    (!agrees).then(|| {
+        format!(
+            "{} {} {:?} {:?} {:?} line height {:?}",
+            font.size,
+            font.weight,
+            font.slant,
+            font.families,
+            font.stretch,
+            font.line_height
+        )
+    })
+}
+
+/// The caps keyword a context reports, in the table's spelling.
+fn caps_name(caps: FontVariantCaps) -> String {
+    match caps {
+        FontVariantCaps::Normal => "normal".into(),
+        FontVariantCaps::SmallCaps => "small-caps".into(),
+        other => format!("{other:?}"),
+    }
+}
+
+#[test]
+fn font_from_css_answers_the_font_table() {
+    let cases = cases("css-fonts");
+    let wrong: Vec<String> = cases
+        .iter()
+        .filter_map(|case| {
+            let css = case["css"].as_str().expect("each case names its css");
+            let parsed = Font::parse(css);
+            let read = Font::from_css(css);
+            if parsed.is_ok() != read.is_some() {
+                return Some(format!("{css:?}: `parse` and `from_css` differ"));
+            }
+            match (case.get("parts"), read) {
+                (Some(parts), Some(font)) => font_parts_disagree(&font, parts)
+                    .map(|got| {
+                        format!("{css:?}: read as {got}, Chrome {parts}")
+                    }),
+                (Some(parts), None) => {
+                    Some(format!("{css:?}: refused, Chrome {parts}"))
+                }
+                (None, Some(font)) => Some(format!(
+                    "{css:?}: read as {font:?}, Chrome ignores it"
+                )),
+                (None, None) => None,
+            }
+        })
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "{} of {} cases disagree with Chrome:\n{}",
+        wrong.len(),
+        cases.len(),
+        wrong.join("\n")
+    );
+}
+
+#[test]
+fn set_font_css_answers_the_font_table() {
+    /// Set before each case, so a refusal shows as all of it surviving and a
+    /// font taken shows the caps and stretch reset, as Chrome's setter
+    /// resets them.
+    const SENTINEL: &str = "small-caps ultra-expanded 7px Sentinel";
+    /// The sentinel as `font` reads it back: Chrome's form, with no stretch.
+    const SENTINEL_READ: &str = "small-caps 7px Sentinel";
+
+    let cases = cases("css-fonts");
+    let ignored =
+        format!("{SENTINEL_READ:?}, caps small-caps, stretch UltraExpanded");
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    let wrong: Vec<String> = cases
+        .iter()
+        .filter_map(|case| {
+            let css = case["css"].as_str().expect("each case names its css");
+            assert!(ctx.set_font_css(SENTINEL), "the sentinel is a font");
+            let taken = ctx.set_font_css(css);
+            let got = format!(
+                "{:?}, caps {}, stretch {:?}",
+                ctx.font(),
+                caps_name(ctx.font_variant_caps()),
+                ctx.font_stretch()
+            );
+            match case.get("font") {
+                Some(font) => {
+                    let stretch = STRETCHES
+                        .iter()
+                        .find(|(name, _)| case["stretch"] == *name)
+                        .map(|&(_, stretch)| stretch)
+                        .expect("a stretch keyword");
+                    let want = format!(
+                        "{font}, caps {}, stretch {stretch:?}",
+                        case["variantCaps"].as_str().expect("a caps keyword")
+                    );
+                    (!taken || got != want).then(|| {
+                        format!("{css:?}: taken {taken}, {got}; Chrome {want}")
+                    })
+                }
+                None => (taken || got != ignored).then(|| {
+                    format!("{css:?}: taken {taken}, {got}; Chrome ignores it")
+                }),
+            }
+        })
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "{} of {} cases disagree with Chrome:\n{}",
+        wrong.len(),
+        cases.len(),
+        wrong.join("\n")
+    );
+}

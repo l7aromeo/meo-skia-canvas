@@ -99,7 +99,9 @@ pub(crate) fn parse_size(text: &str, em_size: f32) -> Option<f32> {
 /// `e` both continues an exponent and begins `em`, so `0.5em` split that way
 /// gives `0.5e` and `m`, and neither half is anything. An `e` therefore
 /// belongs to the number only when a digit follows it, with an optional
-/// sign in between -- which is exactly when CSS says it is an exponent.
+/// sign in between -- which is exactly when CSS says it is an exponent. A
+/// `.` is the same: it belongs to the number only when a digit follows, so
+/// `5.px` is not five pixels, as Chrome agrees.
 pub(crate) fn split_number(text: &str) -> Option<(f32, &str)> {
     let bytes = text.as_bytes();
     let mut at = 0;
@@ -110,7 +112,9 @@ pub(crate) fn split_number(text: &str) -> Option<(f32, &str)> {
     while matches!(bytes.get(at), Some(c) if c.is_ascii_digit()) {
         at += 1;
     }
-    if bytes.get(at) == Some(&b'.') {
+    if bytes.get(at) == Some(&b'.')
+        && matches!(bytes.get(at + 1), Some(c) if c.is_ascii_digit())
+    {
         at += 1;
         while matches!(bytes.get(at), Some(c) if c.is_ascii_digit()) {
             at += 1;
@@ -186,10 +190,21 @@ pub(crate) fn parse_length(text: &str) -> Option<Length> {
 pub(crate) fn parse_percentage(text: &str) -> Option<f32> {
     let text = text.trim();
     let value = match text.strip_suffix('%') {
-        Some(number) => number.trim().parse::<f32>().ok()? / 100.0,
-        None => text.parse::<f32>().ok()?,
+        Some(number) => parse_number(number)? / 100.0,
+        None => parse_number(text)?,
     };
     value.is_finite().then_some(value)
+}
+
+/// A plain CSS number, as `2` or `-1.5e3`, or `None` for anything with a
+/// unit after it.
+///
+/// Read through [`split_number`] rather than `str::parse`, which takes
+/// spellings CSS does not: `inf`, `NaN`, and `2.`, which Chrome refuses in
+/// `scale(2.)`.
+pub(crate) fn parse_number(text: &str) -> Option<f32> {
+    let (value, unit) = split_number(text.trim())?;
+    unit.is_empty().then_some(value)
 }
 
 /// An angle in CSS units, as degrees.
@@ -510,6 +525,21 @@ mod tests {
         assert_eq!(parse_size("4furlongs", EM), None);
         assert_eq!(parse_size("", EM), None);
         assert_eq!(parse_size("px", EM), None);
+    }
+
+    #[test]
+    fn a_point_needs_a_digit_after_it() {
+        // CSS Syntax's number has digits after any `.`, and Chrome ignores
+        // `ctx.font = "5.px Arial"`.
+        assert_eq!(parse_size("5.px", EM), None);
+        assert_eq!(parse_size("5.", EM), None);
+        assert_eq!(parse_size(".5px", EM), Some(0.5));
+        assert_eq!(parse_percentage("2."), None);
+        assert_eq!(parse_percentage("50.%"), None);
+        assert_eq!(parse_number("2."), None);
+        assert_eq!(parse_number("nan"), None);
+        assert_eq!(parse_number("-1.5e3"), Some(-1500.0));
+        assert_eq!(parse_size("5.0px", EM), Some(5.0));
     }
 
     #[test]
@@ -1283,12 +1313,12 @@ fn transform_function(text: &str) -> Option<Matrix4> {
         // filter grammar shares `parse_angle`.
         let angle = |at: usize| {
             let text = args.get(at)?;
-            match text.parse::<f64>().is_ok_and(|value| value == 0.0) {
+            match parse_number(text).is_some_and(|value| value == 0.0) {
                 true => Some(0.0),
                 false => parse_angle(text).map(f64::from),
             }
         };
-        let number = |at: usize| args.get(at)?.parse::<f64>().ok();
+        let number = |at: usize| parse_number(args.get(at)?).map(f64::from);
         // A scale may be a number or a percentage: Chrome reads `scale(50%)`
         // as half, as CSS Transforms 2 allows.
         let factor = |at: usize| parse_percentage(args.get(at)?).map(f64::from);

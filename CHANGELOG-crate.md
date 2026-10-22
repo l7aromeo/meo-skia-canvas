@@ -144,6 +144,40 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `color(from ... srgb-linear ...)` too. Pinned per notation in
   `the_rust_surface_takes_css_colors`.
 
+- **`Font::parse` reads the font shorthand Chrome reads.** It took a size
+  in `px` and nothing else, refusing `12pt`, `1em`, `150%`, `2rem`, the
+  size keywords, `larger`, `calc()`, a line height written as a number or
+  a percentage, `small-caps`, `bolder` and `lighter`, and any keyword or
+  unit in upper case. It accepted a negative size, an unquoted number as a family
+  (`16px 12`), a CSS-wide keyword as one (`16px inherit`), an empty name
+  between commas or after a trailing one, a style or weight given twice,
+  and more than four tokens before the size, all of which Chrome ignores.
+  A quoted name is unescaped now, so `'A\\B'` is the family `A\B`. Relative
+  sizes resolve as in a browser canvas: `em` and `%` of 10px, `rem` of
+  16px. The error is still `Error::FontRegister`, which is kept so a match
+  on it keeps working; `Font::from_css` reads the same grammar and answers
+  with an `Option`.
+
+- **`Context2D::font()` reports a font as Chrome's `ctx.font` does.** A
+  stretch is no longer in the string -- `font_stretch()` reports it, and
+  Chrome reports it through `fontStretch` alone -- `oblique` reads as
+  `italic` though the oblique face is still the one selected, the weight
+  comes before `small-caps`, a size has six significant digits (`2cm` is
+  `75.5906px`), and a family that is not one identifier is quoted, with a
+  `"` or `\` inside escaped. So `condensed 16px X` reads back as
+  `16px X` and `oblique 16px X` as `italic 16px X`, and re-reading the
+  string loses the stretch and the oblique, as it does in a browser; keep
+  the `Font` to keep them.
+
+- **A number ending in a point is refused.** CSS Syntax needs a digit after
+  a `.`, and Chrome refuses `translate(5.px)`, `scale(2.)` and
+  `blur(5.px)`; `Affine::from_css`, `set_filter_css` and the other CSS
+  string setters read each as the number before the point. A transform
+  number also took `inf` and `NaN`, which are Rust's spellings and not
+  CSS's, so `matrix(NaN, 0, 0, 1, 0, 0)` gave a matrix of NaN rather than
+  `None`. Three of these lists are in the transform table both surfaces are
+  tested against.
+
 ### Added
 
 - **A window can be changed after it opens, from any thread.** `open`
@@ -206,6 +240,16 @@ window be changed after it opens.** No signature moves and nothing is removed.
   Rec. 2020 to sRGB matrix written to four places -- up to `4e-5` out on a
   primary, below a byte in an 8-bit readback. It now carries `f32`
   precision, as does the Display P3 one beside it.
+
+- **`Font::from_css` and `Context2D::set_font_css` take a CSS `font`
+  shorthand as assigning `ctx.font` does in Chrome.** `from_css` returns
+  `None` for a shorthand Chrome ignores. `set_font_css` returns `false`
+  and changes nothing for one, and otherwise sets the font with its caps
+  and stretch -- `small-caps` gives `FontVariantCaps::SmallCaps`, and an
+  absent one resets to `Normal`, as Chrome's setter resets both. Checked
+  against 101 shorthands measured in Chrome 152, which the JavaScript
+  `ctx.font` is tested against too. System font keywords such as `caption`
+  are refused deliberately, since what they name is the platform's choice.
 
 - **`Affine::from_css` reads the 3D transform functions, and any letter
   case.** `matrix3d`, `translate3d`, `translateZ`, `rotateX`, `rotateY`,
