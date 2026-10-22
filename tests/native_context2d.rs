@@ -10755,6 +10755,29 @@ fn a_css_decoration_is_order_insensitive_through_the_setter() {
     );
 }
 
+#[test]
+fn a_decoration_thickness_in_em_follows_the_font_it_is_drawn_in() {
+    // As a spacing does: set under a 12px font and drawn under 24px,
+    // `0.25em` is 6px. Resolved when set, it would be 3px, which the last
+    // assertion refuses.
+    let drawn = |font_at_set: &str, css: &str| {
+        let mut canvas = Canvas::new(120.0, 60.0);
+        {
+            let ctx = canvas.context();
+            ctx.set_font(&Font::parse(font_at_set).expect("a font"));
+            ctx.set_text_decoration_css(css).expect("a decoration");
+            ctx.set_font(&Font::parse("24px Helvetica").expect("a font"));
+            ctx.fill_text("mmm", 10.0, 30.0, None);
+        }
+        canvas
+            .to_buffer(ImageFormat::Raw, &EncodeOptions::default())
+            .expect("raw export")
+    };
+    let relative = drawn("12px Helvetica", "underline 0.25em");
+    assert_eq!(relative, drawn("24px Helvetica", "underline 6px"));
+    assert_ne!(relative, drawn("24px Helvetica", "underline 3px"));
+}
+
 /// A drawing Skia's SVG backend can write out in full, and three it cannot.
 ///
 /// The backend serializes four paint servers and one filter and silently

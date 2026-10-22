@@ -2796,6 +2796,63 @@ describe("Context2D", () => {
       let wavy = drawText("underline wavy");
       assert.notEqual(solid, wavy);
     });
+
+    // `text-decoration-line` takes several lines, and each named is drawn:
+    // keeping only the last would draw `underline overline` as the overline.
+    test("draws every line it names", () => {
+      const drawn = (decoration) => {
+        ctx.clearRect(0, 0, WIDTH, HEIGHT);
+        return drawText(decoration);
+      };
+      const both = drawn("underline overline");
+      assert.ok(both > drawn("underline"), "more than the underline");
+      assert.ok(both > drawn("overline"), "more than the overline");
+    });
+
+    // A colour function keeps its own spaces: split at each one,
+    // `rgb(0 0 255)` is three tokens that are none of them a colour.
+    test("takes a colour function that holds spaces", () => {
+      ctx.fillStyle = "red";
+      ctx.font = "24px Helvetica";
+      ctx.textDecoration = "underline rgb(0 0 255)";
+      assert.equal(ctx.textDecoration, "underline rgb(0 0 255)");
+      ctx.fillText("nnn", 10, 40);
+      assert.deepEqual(underlineColor(), [0, 0, 255]);
+    });
+
+    // As `none` does, on this surface as on the crate's.
+    test("clears on the empty string", () => {
+      ctx.textDecoration = "underline red";
+      ctx.textDecoration = "";
+      assert.equal(ctx.textDecoration, "none");
+    });
+
+    // A thickness in `em` is the font's when the text is laid out, as a
+    // spacing is: set under 12px, drawn under 24px, it is a quarter of 24.
+    test("a thickness in em follows the font it is drawn in", () => {
+      const underline = (setup) => {
+        ctx.clearRect(0, 0, WIDTH, HEIGHT);
+        ctx.fillStyle = "black";
+        setup();
+        ctx.fillText("nnn", 10, 40);
+        return Buffer.from(ctx.getImageData(0, 0, WIDTH, HEIGHT).data);
+      };
+      const relative = underline(() => {
+        ctx.font = "12px Helvetica";
+        ctx.textDecoration = "underline 0.25em";
+        ctx.font = "24px Helvetica";
+      });
+      const absolute = underline(() => {
+        ctx.font = "24px Helvetica";
+        ctx.textDecoration = "underline 6px";
+      });
+      const frozen = underline(() => {
+        ctx.font = "24px Helvetica";
+        ctx.textDecoration = "underline 3px";
+      });
+      assert.ok(relative.equals(absolute), "0.25em of 24px is 6px");
+      assert.ok(!relative.equals(frozen), "not 0.25em of 12px");
+    });
   });
 
   describe("filter angles", () => {

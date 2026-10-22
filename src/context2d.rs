@@ -1916,11 +1916,11 @@ impl Context2D {
     /// cascade here for `inherit` to reach into, so they can only mean the
     /// initial value.
     ///
-    /// A thickness in `em` resolves against the current font size at the
-    /// moment this is called, unlike
-    /// [`set_letter_spacing_css`](Self::set_letter_spacing_css), which keeps
-    /// its unit. The decoration is stored as a resolved style rather than as
-    /// a spacing, so there is nowhere to keep the unit.
+    /// A thickness in `em` or another font-relative unit keeps its unit, as
+    /// [`set_letter_spacing_css`](Self::set_letter_spacing_css) does, so it
+    /// follows the font the text is laid out in rather than the one in force
+    /// when this is called. Several line keywords draw several lines:
+    /// `"underline overline"` is both.
     ///
     /// # Errors
     ///
@@ -1943,24 +1943,10 @@ impl Context2D {
     /// # Ok::<(), meo_skia_canvas::error::Error>(())
     /// ```
     pub fn set_text_decoration_css(&mut self, css: &str) -> Result<(), Error> {
-        let parsed = parse_decoration(css, &self.inner.state.font_units())
+        self.inner.state.text_decoration = decoration_from_css(css)
             .ok_or_else(|| Error::InvalidColor {
                 reason: format!("{css:?}"),
             })?;
-        self.set_text_decoration(
-            parsed.lines,
-            parsed.style,
-            parsed.color,
-            parsed.thickness,
-        );
-        // As with `set_filter_css`: report the shorthand the caller wrote.
-        // The typed setter can only rebuild a canonical ordering, which
-        // turns `underline red wavy` into `underline wavy rgba(255,0,0,1)`
-        // -- the same decoration, spelled by the crate rather than by the
-        // caller. The JavaScript `textDecoration` getter echoes its input.
-        if self.inner.state.text_decoration.css != "none" {
-            self.inner.state.text_decoration.css = css.trim().to_string();
-        }
         Ok(())
     }
 
@@ -2010,25 +1996,10 @@ impl Context2D {
         thickness: Option<f32>,
     ) {
         let css = decoration_css(lines, style, color, thickness);
-        if css == "none" {
-            self.inner.state.text_decoration = DecorationStyle::default();
-            return;
-        }
-
-        self.inner.state.text_decoration = DecorationStyle {
-            css,
-            decoration: Decoration {
-                ty: lines.to_skia_flags(),
-                style: style.to_skia_decoration_style(),
-                // Skia's `Gaps` mode still breaks the line where there is
-                // no descender, so the Node path pins `Through` too.
-                mode: SkDecorationMode::Through,
-                ..Decoration::default()
-            },
-            size: thickness
-                .and_then(|px| Spacing::parse(px, "px".to_string(), px)),
-            color: color.map(rgba_linear_to_skia_color),
-        };
+        let size =
+            thickness.and_then(|px| Spacing::parse(px, "px".to_string(), px));
+        self.inner.state.text_decoration =
+            decoration_style(lines, style, color, size, css);
     }
 
     /// The current text decoration as CSS, or `"none"`.
@@ -3996,17 +3967,65 @@ fn place_capture(
     }
 }
 
-/// The CSS shorthand a decoration corresponds to, or `"none"`.
+/// The decoration a CSS `text-decoration` shorthand names, as the context
+/// holds it, or `None` for a token that is neither a keyword nor a length
+/// nor a colour.
 ///
-/// The internal state stores the string as well as the parsed form, so it
-/// has to be reconstructed here rather than left blank: an empty one makes
-/// the Node setter treat the decoration as invalid and discard it.
+/// The one reading of the shorthand: [`Context2D::set_text_decoration_css`]
+/// and the JavaScript `textDecoration` both come here. It reports back the
+/// shorthand as written, trimmed, as `set_filter_css` does, rather than the
+/// canonical ordering the typed setter has to rebuild -- `underline red
+/// wavy` stays itself instead of becoming `underline wavy rgba(255,0,0,1)`.
+pub(crate) fn decoration_from_css(css: &str) -> Option<DecorationStyle> {
+    let parsed = parse_decoration(css)?;
+    let size = parsed.thickness.and_then(|length| {
+        Spacing::parse(length.value, length.unit, length.pixels)
+    });
+    Some(decoration_style(
+        parsed.lines,
+        parsed.style,
+        parsed.color,
+        size,
+        css.trim().to_string(),
+    ))
+}
+
+/// The decoration state for these lines, or the cleared one -- which reads
+/// back as `"none"` -- where there are none.
+fn decoration_style(
+    lines: TextDecoration,
+    style: TextDecorationStyle,
+    color: Option<RgbaLinear>,
+    size: Option<Spacing>,
+    css: String,
+) -> DecorationStyle {
+    if !(lines.underline || lines.overline || lines.line_through) {
+        return DecorationStyle::default();
+    }
+    DecorationStyle {
+        css,
+        decoration: Decoration {
+            ty: lines.to_skia_flags(),
+            style: style.to_skia_decoration_style(),
+            // Skia's `Gaps` mode still breaks the line where there is
+            // no descender, so the line runs through the glyphs.
+            mode: SkDecorationMode::Through,
+            ..Decoration::default()
+        },
+        size,
+        color: color.map(rgba_linear_to_skia_color),
+    }
+}
+
 /// The `text-decoration` shorthand for a decoration the caller described in
-/// parts.
+/// parts, or `"none"` where it has no lines.
 ///
-/// Order follows the CSS shorthand -- line, style, color, thickness -- so the
-/// result parses back to what it came from. `color` of `None` is
-/// `currentColor`, which the shorthand expresses by leaving it out.
+/// The context holds the string beside the parsed form, and
+/// [`Context2D::text_decoration`] reports it back, so a decoration set from
+/// parts needs one spelled for it. Order follows the CSS shorthand -- line,
+/// style, color, thickness -- so the result parses back to what it came
+/// from. `color` of `None` is `currentColor`, which the shorthand expresses
+/// by leaving it out.
 fn decoration_css(
     lines: TextDecoration,
     style: TextDecorationStyle,

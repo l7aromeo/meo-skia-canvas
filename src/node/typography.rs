@@ -2,7 +2,7 @@
 #![allow(non_snake_case)]
 use crate::{
     context::State,
-    css::{FontUnits, is_font_relative, length_of, parse_length},
+    css::{FontUnits, is_font_relative, parse_length},
     font::slant_for_matching,
     font_library::FontLibrary,
     text::{
@@ -19,8 +19,7 @@ use skia_safe::{
     textlayout::{
         Decoration, FontCollection, Paragraph, ParagraphBuilder,
         ParagraphStyle, RectHeightStyle, RectWidthStyle, TextAlign,
-        TextDecoration, TextDecorationMode, TextDecorationStyle, TextDirection,
-        TextStyle, TypefaceFontProvider,
+        TextDirection, TextStyle, TypefaceFontProvider,
     },
     typeface::TypefaceId,
 };
@@ -1499,83 +1498,6 @@ impl DecorationStyle {
     }
 }
 
-pub fn decoration_arg(
-    cx: &mut FunctionContext,
-    idx: usize,
-) -> NeonResult<Option<DecorationStyle>> {
-    if let Some(deco) = opt_object_arg(cx, idx) {
-        let css = string_for_key(cx, &deco, "str")?;
-
-        let line = string_for_key(cx, &deco, "line")?;
-        let ty = match line.as_str() {
-            "underline" => TextDecoration::UNDERLINE,
-            "overline" => TextDecoration::OVERLINE,
-            "line-through" => TextDecoration::LINE_THROUGH,
-            _ => return Ok(Some(DecorationStyle::default())),
-        };
-
-        let line_style = string_for_key(cx, &deco, "style")?;
-        let style = match line_style.as_str() {
-            "wavy" => TextDecorationStyle::Wavy,
-            "dotted" => TextDecorationStyle::Dotted,
-            "dashed" => TextDecorationStyle::Dashed,
-            "double" => TextDecorationStyle::Double,
-            _ => TextDecorationStyle::Solid,
-        };
-
-        // `currentColor` and an unparseable color are different things, and
-        // conflating them broke the feature for every form that did not name
-        // an explicit color: `underline`, `underline wavy` and
-        // `line-through` were all discarded in silence.
-        //
-        // `None` here is the valid "inherit the fill color" case, which
-        // `DecorationStyle::for_layout` implements by substituting the text
-        // color at layout time. Only a color string Skia cannot parse
-        // invalidates the declaration.
-        let color = match string_for_key(cx, &deco, "color")?.as_str() {
-            "currentColor" => None,
-            color_str => match css_to_color(color_str) {
-                Some(color) => Some(color),
-                None => return Ok(None),
-            },
-        };
-
-        let inherit = string_for_key(cx, &deco, "inherit")?;
-        let size = match inherit.as_str() {
-            "from-font" => None,
-            _ => match opt_object_for_key(cx, &deco, "thickness") {
-                Some(thickness) => Spacing::from_obj(cx, &thickness)?,
-                _ => None,
-            },
-        };
-
-        // an empty declaration is still ignored
-        if css.is_empty() {
-            return Ok(None);
-        }
-
-        // As of skia_safe 0.78.2, `Gaps` mode is too buggy, with random breaks
-        // in places that don't have descenders. It would be nice to
-        // enable this in a future release once it stabilizes…
-        let mode = TextDecorationMode::Through;
-
-        let decoration = Decoration {
-            ty,
-            style,
-            mode,
-            ..Decoration::default()
-        };
-        Ok(Some(DecorationStyle {
-            decoration,
-            size,
-            color,
-            css,
-        }))
-    } else {
-        Ok(None)
-    }
-}
-
 //
 // Font-relative lengths (for text spacing & decoration thickness)
 //
@@ -1597,20 +1519,6 @@ impl Default for Spacing {
 }
 
 impl Spacing {
-    /// A spacing from the number and unit the JavaScript decoration parser
-    /// split a thickness into. The unit is read by [`length_of`], so its
-    /// table is the crate's and not a second one.
-    pub fn from_obj(
-        cx: &mut FunctionContext,
-        spacing: &Handle<JsObject>,
-    ) -> NeonResult<Option<Self>> {
-        let raw_size = float_for_key(cx, spacing, "size")?;
-        let unit = string_for_key(cx, spacing, "unit")?;
-        Ok(length_of(raw_size, &unit).and_then(|length| {
-            Self::parse(length.value, length.unit, length.pixels)
-        }))
-    }
-
     /// A spacing from a CSS length, as `letterSpacing` and `wordSpacing`
     /// take one, or `None` for one Chrome ignores.
     ///
