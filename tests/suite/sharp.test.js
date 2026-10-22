@@ -265,3 +265,28 @@ describe("A sharp image created blank loads", () => {
     );
   });
 });
+
+describe("ImageData.toSharp", () => {
+  test("hands sharp the alpha mode the bytes are in", async () => {
+    // A premultiplied readback is 128,0,0,128. Given to sharp unmarked, it is
+    // taken as unpremultiplied and comes out as a darker red; marked, sharp
+    // reads it as the colour it was.
+    const ctx = new Canvas(1, 1).getContext("2d");
+    ctx.fillStyle = "rgba(255, 0, 0, 0.5)";
+    ctx.fillRect(0, 0, 1, 1);
+    const through = async (alphaType) => [
+      ...(await ctx
+        .getImageData(0, 0, 1, 1, { alphaType })
+        .toSharp()
+        .raw()
+        .toBuffer()),
+    ];
+    assert.deepEqual(
+      {
+        unpremultiplied: await through("unpremultiplied"),
+        premultiplied: await through("premultiplied"),
+      },
+      { unpremultiplied: [255, 0, 0, 128], premultiplied: [255, 0, 0, 128] },
+    );
+  });
+});

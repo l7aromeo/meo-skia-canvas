@@ -290,6 +290,23 @@ removed and no signature moves.
   `Image::from_url` stops at the same place. A `maxRedirects` passed in the
   options is still used as given.
 
+- **A premultiplied `getImageData` goes back in as the colour it was.**
+  `getImageData(x, y, w, h, {alphaType: "premultiplied"})` hands back
+  colour already scaled by alpha, so a 50% red reads `128, 0, 0, 128` --
+  but the `ImageData` did not say so, and `putImageData`, `drawImage` and
+  `createPattern` read those bytes as unpremultiplied: the same pixel put
+  back read `127, 0, 0, 128`, a darker red at half alpha. `ImageData.toSharp`
+  handed sharp the same unmarked bytes. Present since 6.0.0, the release
+  that added `alphaType` to readback.
+
+  An `ImageData` now carries `alphaType`, `"unpremultiplied"` unless it was
+  read or built premultiplied, and every way back in honours it; a copy
+  keeps it. The constructor takes it in its settings, beside `colorType`
+  and `colorSpace`, including when reading an `Image`, and refuses any
+  other name with a `TypeError`. An `ImageData` built without it is
+  unpremultiplied, as the standard defines, so nothing changes for code
+  that never asks for premultiplied data.
+
 - **`hsl()` and `hwb()` written with bare numbers name the colour they
   state.** CSS Color 4 types saturation, lightness, whiteness and blackness
   as `<percentage> | <number>`, so `ctx.fillStyle = 'hsl(200 40 45)'` and

@@ -7,7 +7,7 @@ const fs = require("fs"),
   path = require("path"),
   { execFileSync } = require("child_process"),
   { assert, describe, test, beforeEach, afterEach } = require("../runner"),
-  { Canvas, Image, loadImage, backend } = require("../../lib"),
+  { Canvas, Image, ImageData, loadImage, backend } = require("../../lib"),
   { skiaNode, core } = require("../../lib/classes/neon");
 
 const WHITE = [255, 255, 255, 255],
@@ -2642,6 +2642,82 @@ describe("alphaType on a readback", () => {
     assert.throws(
       () => eightBit().getImageData(0, 0, 1, 1, { alphaType: "straight" }),
       TypeError,
+    );
+  });
+
+  test("the ImageData says which it holds", () => {
+    const ctx = eightBit();
+    assert.deepEqual(
+      ["unpremultiplied", "premultiplied", undefined].map(
+        (alphaType) => ctx.getImageData(0, 0, 1, 1, { alphaType }).alphaType,
+      ),
+      ["unpremultiplied", "premultiplied", "unpremultiplied"],
+    );
+  });
+
+  test("a premultiplied readback goes back in as the colour it was", () => {
+    // Read premultiplied, then put back through each way in, then read the
+    // standard way. Every row must come back as the fill: the bytes are
+    // 128,0,0,128 and only the ImageData's own alphaType says they are not
+    // a darker red at half alpha, which is what 127,0,0,128 would be.
+    const read = eightBit().getImageData(0, 0, 1, 1, {
+      alphaType: "premultiplied",
+    });
+    const into = (draw) => {
+      const ctx = new Canvas(1, 1).getContext("2d");
+      draw(ctx);
+      return [...ctx.getImageData(0, 0, 1, 1).data];
+    };
+    assert.deepEqual(
+      {
+        putImageData: into((ctx) => ctx.putImageData(read, 0, 0)),
+        drawImage: into((ctx) => ctx.drawImage(read, 0, 0)),
+        createPattern: into((ctx) => {
+          ctx.fillStyle = ctx.createPattern(read, "repeat");
+          ctx.fillRect(0, 0, 1, 1);
+        }),
+      },
+      {
+        putImageData: [255, 0, 0, 128],
+        drawImage: [255, 0, 0, 128],
+        createPattern: [255, 0, 0, 128],
+      },
+    );
+  });
+
+  test("the constructor takes it, a copy keeps it, and a third name is refused", () => {
+    const bytes = new Uint8ClampedArray([128, 0, 0, 128]);
+    const premul = new ImageData(bytes, 1, 1, { alphaType: "premultiplied" });
+    assert.deepEqual(
+      {
+        given: premul.alphaType,
+        omitted: new ImageData(bytes, 1, 1).alphaType,
+        blank: new ImageData(1, 1, { alphaType: "premultiplied" }).alphaType,
+        copied: new ImageData(premul).alphaType,
+      },
+      {
+        given: "premultiplied",
+        omitted: "unpremultiplied",
+        blank: "premultiplied",
+        copied: "premultiplied",
+      },
+    );
+    assert.throws(
+      () => new ImageData(bytes, 1, 1, { alphaType: "straight" }),
+      TypeError,
+    );
+  });
+
+  test("reading an Image into an ImageData honours it", async () => {
+    const image = await loadImage(eightBit().canvas.toBufferSync("png"));
+    assert.deepEqual(
+      {
+        omitted: [...new ImageData(image).data],
+        premultiplied: [
+          ...new ImageData(image, { alphaType: "premultiplied" }).data,
+        ],
+      },
+      { omitted: [255, 0, 0, 128], premultiplied: [128, 0, 0, 128] },
     );
   });
 });

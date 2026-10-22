@@ -280,6 +280,7 @@ pub struct ImageData {
     pub buffer: Data,
     color_type: ColorType,
     color_space: ColorSpace,
+    alpha_type: AlphaType,
 }
 
 impl ImageData {
@@ -289,6 +290,7 @@ impl ImageData {
         height: f32,
         color_type: String,
         color_space: String,
+        alpha_type: AlphaType,
     ) -> Self {
         // Both named rather than parsed here: this constructor has no `cx` to
         // throw from, and an unrecognised name must not quietly become the
@@ -306,14 +308,19 @@ impl ImageData {
             height,
             color_type,
             color_space,
+            alpha_type,
         }
     }
 
+    /// The layout the bytes are in, including whether colour is already
+    /// scaled by alpha -- which the `ImageData` records, so a premultiplied
+    /// readback put back through `putImageData`, `drawImage` or
+    /// `createPattern` is read as the colour it was.
     pub fn image_info(&self) -> ImageInfo {
         ImageInfo::new(
             (self.width as _, self.height as _),
             self.color_type,
-            AlphaType::Unpremul,
+            self.alpha_type,
             self.color_space.clone(),
         )
     }
@@ -607,11 +614,12 @@ pub fn pixels(mut cx: FunctionContext) -> JsResult<JsValue> {
     let this = cx.argument::<BoxedImage>(0)?;
     let this = this.borrow_mut();
     let (color_type, color_space) = image_data_settings_arg(&mut cx, 1)?;
+    let alpha_type = opt_alpha_type_arg(&mut cx, 1)?;
 
     let info = ImageInfo::new(
         this.content.size().to_floor(),
         color_type,
-        AlphaType::Unpremul,
+        alpha_type,
         color_space,
     );
     let mut pixels = cx.buffer(

@@ -485,6 +485,19 @@ export interface ImageDataSettings {
    * 🧪 Not in the HTML Canvas standard.
    */
   colorType?: ColorType;
+  /**
+   * Whether `data` holds colour as it is or already scaled by alpha,
+   * defaulting to `"unpremultiplied"`, the standard's only kind.
+   *
+   * Recorded as {@link ImageData.alphaType} and honoured on the way back in,
+   * so a buffer read with `getImageData(..., {alphaType: "premultiplied"})`
+   * goes through `putImageData`, `drawImage` and `createPattern` as the
+   * colour it was rather than as a darker one. Any other name throws a
+   * `TypeError`.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
+  alphaType?: "unpremultiplied" | "premultiplied";
 }
 
 /**
@@ -547,8 +560,10 @@ export interface ImageDataExportSettings {
    * Not in the standard, which fixes `ImageData` at unpremultiplied. This
    * library already answers `getImageData` outside that definition -- F32
    * where the standard allows eight bits -- so the alpha mode is a second
-   * axis of the same departure rather than a new one. The way IN is not a
-   * choice: `putImageData` defines the bytes it consumes.
+   * axis of the same departure rather than a new one. The `ImageData`
+   * handed back says which it holds in {@link ImageData.alphaType}, and
+   * `putImageData` reads it accordingly; one built without the setting is
+   * unpremultiplied, as the standard defines.
    */
   alphaType?: "unpremultiplied" | "premultiplied";
 }
@@ -594,8 +609,8 @@ export class ImageData {
    */
   constructor(image: Image, settings?: ImageDataSettings);
   /**
-   * Copy another `ImageData`, keeping its dimensions, color space and
-   * format. An overload this library adds.
+   * Copy another `ImageData`, keeping its dimensions, color space, format
+   * and alpha type. An overload this library adds.
    */
   constructor(imageData: ImageData);
 
@@ -607,6 +622,14 @@ export class ImageData {
   readonly colorSpace: ColorSpace;
   /** 🧪 Not in the HTML Canvas standard. */
   readonly colorType: ColorType;
+  /**
+   * Whether `data` holds colour as it is or already scaled by alpha:
+   * `"premultiplied"` only when asked for, by
+   * {@link ImageDataSettings.alphaType} or by a `getImageData` readback.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
+  readonly alphaType: "unpremultiplied" | "premultiplied";
   /**
    * Bytes each pixel occupies under {@link ImageData.colorType}. The only way
    * to walk `data` correctly for a non-`rgba` format.

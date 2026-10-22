@@ -725,9 +725,11 @@ why  = """Depth and colour space cross to npm as colorType and colorSpace -- Rus
        `EncodeOptions` has no alpha type, so a raw `to_buffer` is always
        unpremultiplied -- the gap 'export options split across three npm input
        types' records.
-       NOT on ImageDataSettings, which is the way IN. `putImageData` defines
-       the bytes it consumes, so there is nothing there for a caller to choose
-       and the asymmetry is the standard's rather than this library's.
+       ImageDataSettings carries it too now, as the way back IN: an ImageData
+       records the alphaType it was read or built with, and putImageData,
+       drawImage and createPattern read the bytes accordingly. That half pairs
+       in "the alpha state an ImageData carries"; this entry stays about the
+       readback.
        The four nested ids are the two spellings the union accepts, declared
        once per holder. Rust says the same thing with a `bool`, which has no
        variants to name -- the same shape as BackendInfo.renderer.CPU and .GPU
@@ -1519,6 +1521,26 @@ why = """npm's Window is its own handle: its properties stay settable after the
       src/gui/handle.rs and, on a real display, tests/window_handle.rs."""
 
 [[capability]]
+name = "the alpha state an ImageData carries"
+rust = ["ImageData::premultiplied"]
+npm  = ["ImageData.alphaType",
+        "ImageData.alphaType.premultiplied",
+        "ImageData.alphaType.unpremultiplied",
+        "ImageDataSettings.alphaType",
+        "ImageDataSettings.alphaType.premultiplied",
+        "ImageDataSettings.alphaType.unpremultiplied"]
+why  = """Whether an ImageData's bytes are already scaled by alpha, recorded on the
+       buffer so the way back in reads them as what they are. Rust answers it as a
+       bool, `premultiplied()`, and sets it at construction through
+       PixelExportOptions.premultiplied, which "raw pixel buffer layout" pairs. npm
+       names the same two states `alphaType`, the spelling its readback settings
+       already use, both on the ImageData and on the ImageDataSettings that build
+       one. Pinned on the npm side by the `alphaType on a readback` tests in
+       tests/suite/canvas.test.js, which put a premultiplied readback back through
+       putImageData, drawImage and createPattern."""
+status = "deliberate"
+
+[[capability]]
 name = "Rust-only pixel and page introspection"
 rust = ["ImageData::stride",
         "ImageData::options",
@@ -1539,21 +1561,6 @@ why = """Buffer and page facts the crate exposes and npm does not.
       An ImageData's alpha state is a different matter, and is 'the alpha
       state an ImageData carries'."""
 status = "deliberate"
-
-[[capability]]
-name = "the alpha state an ImageData carries"
-rust = ["ImageData::premultiplied"]
-npm = []
-why = """The crate's ImageData records whether its bytes are premultiplied, and
-      `put_image_data` and `Image::from_pixels` read them accordingly. npm's
-      ImageData carries no alpha state, though `getImageData` can produce
-      premultiplied bytes through `alphaType`, so `putImageData` and
-      `drawImage` read such a buffer as unpremultiplied: half-transparent red
-      reads 128,0,0,128 and comes back 127,0,0,128, where the crate
-      round-trips the same readback to 255,0,0,128. A gap in npm, and one that
-      gives a caller wrong output."""
-status = "gap"
-issue = "unfiled"
 
 [[capability]]
 name = "font metrics the crate carries and the declaration does not"
