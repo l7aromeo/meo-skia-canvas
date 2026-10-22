@@ -12,10 +12,42 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 ## 📦 ⟩ [v6.0.3] (npm) ⟩ October 19, 2026
 
 **A patch fixing request headers that could follow a redirect to another
-host, and two CSS colour spellings that resolved to the wrong colour.**
-Nothing is removed and no signature moves.
+host, a GPU that went unused on a Vulkan 1.4 loader, Vulkan messages printed
+to standard output, and two CSS colour spellings that resolved to the wrong
+colour, and raising the `follow-redirects` floor past three security
+advisories.** Nothing is removed and no signature moves.
 
 ### Security
+
+- **`follow-redirects` is required at `^1.16.1`, up from `^1.15.11`.** It is
+  what fetches an `http://` or `https://` image for `loadImage`,
+  `loadImageData` and `Image.src`, and the request options given to
+  `loadImage` and `loadImageData`, `headers` among them, are passed on to
+  it. The old range admitted versions under three advisories, each about a
+  credential header that follows a redirect to another host:
+
+  - [GHSA-r4q5-vmmm-2653](https://github.com/advisories/GHSA-r4q5-vmmm-2653),
+    medium, every version up to 1.15.11. Before a redirect to another host
+    only `Authorization`, `Cookie` and `Proxy-Authorization` are removed, so
+    a custom one such as `X-API-Key` is sent on to the new host. The fix in
+    1.16.0 is an opt-in `sensitiveHeaders` list rather than a wider default,
+    so **a custom header still follows a redirect to another host after this
+    release**. Where an image needs one and its server may redirect, fetch
+    the bytes yourself with `redirect: "error"` or `"manual"` and pass the
+    `Buffer` to `loadImage`: Node's own `fetch` sends a custom header on
+    across hosts too when it follows a redirect.
+  - [GHSA-8r9p-f939-6h3c](https://github.com/advisories/GHSA-8r9p-f939-6h3c),
+    high, 1.16.0. A name in that `sensitiveHeaders` list containing `^` or
+    `|` never matched, so the header it named was sent on anyway. Reached
+    here only by passing `sensitiveHeaders` among those request options,
+    which the type declarations do not list.
+  - [GHSA-q3jh-wrc6-jgq8](https://github.com/advisories/GHSA-q3jh-wrc6-jgq8),
+    high, 1.16.0. Headers given to `follow-redirects` as an array were not
+    removed at all, `Authorization` and `Cookie` included.
+
+  A fresh install already resolved to 1.16.1, so what this changes is an
+  existing lockfile: one holding 1.16.0 or earlier no longer satisfies the
+  range and moves.
 
 - **Request headers given as an array of pairs no longer follow a redirect to
   another host.** `loadImage` and `loadImageData` take `fetch`-style request
@@ -47,6 +79,31 @@ Nothing is removed and no signature moves.
   `undefined`, `null`, `false` and `""` still mean no headers.
 
 ### Fixed
+
+- **The Linux and Windows builds use the GPU on a Vulkan 1.4 loader.** Where
+  the Vulkan loader and the device both report 1.4, `canvas.engine.renderer`
+  read `"CPU"`, with `Failed to create Vulkan backend context` as its
+  `error`, even with a working GPU, and `new Window()` threw
+  `No windowing support: Failed to create Vulkan backend context`. The
+  context was built without telling Skia which API version the Vulkan
+  instance had been created for, so Skia took the loader's 1.4 and required
+  entry points that a device created for 1.3 does not provide. Skia is now
+  given the instance's own version. macOS draws through Metal and was not
+  affected.
+
+  Reproduced and verified with Mesa's llvmpipe on Ubuntu 26.04 (loader
+  1.4.341, device 1.4.335). A 1.3 loader was never affected: llvmpipe
+  reports 1.4 on Ubuntu 24.04 too, and its 1.3.275 loader kept Skia at 1.3.
+  Other drivers that report 1.4 through a 1.4 loader, on Linux or Windows,
+  take the same path and are expected to have been affected, but were not
+  tested.
+
+- **Nothing is written to standard output.** Each Vulkan entry point a driver
+  did not provide printed a `Failed to resolve Vulkan proc` line to stdout,
+  in among whatever the program itself writes there -- so a script that
+  prints JSON, or pipes an image out, produced output its reader could not
+  parse. A missing optional entry point is normal, and is no longer
+  reported.
 
 - **`hsl()` and `hwb()` written with bare numbers name the colour they
   state.** CSS Color 4 types saturation, lightness, whiteness and blackness

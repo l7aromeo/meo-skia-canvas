@@ -44,6 +44,12 @@ jobs:
         with:
           toolchain: stable
 
+      # yasm, because libaom's configure takes yasm before nasm, and the nasm
+      # ubuntu-latest carries from Ubuntu 26.04 on is 3.x, which libaom 3.11
+      # refuses -- "Unsupported nasm: multipass optimization not supported" --
+      # because its probe greps `nasm -hf` for `-Ox` and nasm 3 moved that text.
+      # UPSTREAM: libaom-sys 0.17.2+libaom.3.11.0 -- njaard/libavif-rs#122 -- worked around
+      # Re-check: grep -A1 '^name = "libaom-sys"' Cargo.lock -- drop yasm once it names libaom 3.13.2 or later
       - name: Install Linux build dependencies
         run: |
           .github/scripts/apt-install.sh \
@@ -51,6 +57,7 @@ jobs:
             libfreetype6-dev \
             libssl-dev \
             nasm \
+            yasm \
             pkg-config
 
       - name: Verify Cargo.toml metadata
