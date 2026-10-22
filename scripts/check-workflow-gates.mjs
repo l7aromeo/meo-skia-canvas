@@ -56,6 +56,11 @@ const MUST_COVER = {
     reason: "the published reference is generated from them",
     specs: [":(glob)lib/**/*.d.ts", ":(glob)scripts/typedoc/**"],
   },
+  "markdown.txt": {
+    reason:
+      "a change of prose is checked by nothing else -- the other lists exclude it",
+    specs: [":(glob)**/*.md", "scripts/check-markdown-links.mjs"],
+  },
   "ci.txt": {
     reason: "the packaging and install path is exercised through them",
     specs: [":(glob)lib/**", ":(glob)tests/**", "package.json", "bun.lock"],

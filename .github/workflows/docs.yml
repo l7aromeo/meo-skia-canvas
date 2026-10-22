@@ -81,6 +81,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       relevant: ${{ steps.scan.outputs.relevant }}
+      markdown: ${{ steps.scan.outputs.markdown }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -94,7 +95,19 @@ jobs:
           # builds; only a pull request can decide there is nothing to do.
           if [ -z "$BASE" ]; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
+            echo "markdown=true" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          # The Markdown check has a list of its own: prose is the one change
+          # every other list excludes, so it is the one this has to see.
+          mapfile -t PROSE < <(grep -vE '^[[:space:]]*(#|$)' ".github/workflows/paths/markdown.txt")
+          prose=$(git diff --name-only "$BASE" "$HEAD" -- "${PROSE[@]}")
+          if [ -n "$prose" ]; then
+            echo "markdown=true" >> "$GITHUB_OUTPUT"
+            echo "changed files the Markdown check covers:"
+            echo "$prose"
+          else
+            echo "markdown=false" >> "$GITHUB_OUTPUT"
           fi
           # The pathspecs live beside this workflow rather than in it, so the
           # check that guards them reads the same copy. `mapfile` keeps one
@@ -425,6 +438,34 @@ jobs:
       - id: deploy
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
 
+  # Every relative link and anchor in the tracked Markdown resolves, and the
+  # Markdown is formatted. A change of prose alone runs nothing in ci.yml or
+  # rust-ci.yml, since it cannot change what they test, so without this a
+  # broken link or an unformatted page reached main unchecked.
+  markdown:
+    name: markdown
+    needs: changes
+    if: needs.changes.outputs.markdown == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: lts/*
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+      # Prettier only: `--ignore-scripts` skips the binary download this
+      # package's install would otherwise do.
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Every relative link and anchor resolves
+        run: |
+          node scripts/check-markdown-links.mjs --self-test
+          node scripts/check-markdown-links.mjs
+      - name: The Markdown is formatted
+        run: bunx prettier --check "**/*.md"
+
   # The one context this workflow offers a branch ruleset, and the direct fix
   # for what blocked PR #168: it runs on every pull request, so it reports even
   # when the build below has nothing to do.
@@ -438,7 +479,7 @@ jobs:
   docs:
     name: docs
     if: always()
-    needs: [changes, build, publish]
+    needs: [changes, build, publish, markdown]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
