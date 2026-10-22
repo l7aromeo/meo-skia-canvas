@@ -4589,6 +4589,47 @@ fn an_explicit_wght_wins_over_a_paragraphs_font_weight() {
 }
 
 #[test]
+fn an_instanced_paragraph_is_not_given_a_synthetic_bold() {
+    // An instance is the weight it was instanced at, so nothing about it is
+    // missing for Skia to fake. Chrome 153 paints `font-weight: 700` with
+    // `"wght" 300` exactly as it paints weight 300, and 900 and 1000 exactly
+    // as 700 on Oswald, whose axis stops there -- with or without a
+    // `font-weight` range on the `@font-face`. Without the pin Skia
+    // emboldens each, since the weight asked for is 200 or more above the
+    // instance's: 21% more ink at 700 over 300, 11% at 900 over 700.
+    let engine = oswald_engine();
+    let painted = |style: TextStyle| {
+        let style = TextStyle {
+            color: RgbaLinear::opaque(1.0, 1.0, 1.0),
+            ..style
+        };
+        let layout = engine.layout_text("Hamburgefonstiv", &style, f32::MAX);
+        let mut canvas = Canvas::new(600.0, 100.0);
+        canvas.context().draw_paragraph(&layout, 10.0, 5.0);
+        pixels(&mut canvas)
+    };
+    let pinned_light = TextStyle {
+        font_variations: vec![FontVariation::new(FontAxisTag::WGHT, 300.0)],
+        ..oswald_paragraph(700)
+    };
+    assert!(
+        painted(pinned_light) == painted(oswald_paragraph(300)),
+        "weight 700 pinned to wght 300 painted other than weight 300"
+    );
+    for weight in [900, 1000] {
+        assert!(
+            painted(oswald_paragraph(weight)) == painted(oswald_paragraph(700)),
+            "weight {weight} painted other than 700, the end of the axis"
+        );
+    }
+    // And a weight the axis reaches is not mistaken for one it does not.
+    assert!(
+        painted(oswald_paragraph(700)) != painted(oswald_paragraph(300)),
+        "700 and 300 painted alike, so the comparison cannot fail"
+    );
+}
+
+#[test]
 fn a_paragraph_in_a_static_font_is_not_instanced() {
     // A face with no axes is laid out as it is, at every weight: whatever
     // Skia does with a weight the face lacks, it does the same over the

@@ -82,7 +82,11 @@ nothing is removed.
   `paragraph_builder`, and a span or a pushed style is instanced at its own
   weight. An explicit `wght` in
   `font_variations` still wins, as `font-variation-settings` does over
-  `font-weight` in Chrome. A static font is laid out as before.
+  `font-weight` in Chrome, and a weight past the axis lays out at its end.
+  An instance is not given a synthetic bold: weight 700 pinned to `wght`
+  300 painted 21% more ink than weight 300, and weight 900 on Oswald 11%
+  more than 700, where Chrome paints each exactly as the instance it is. A
+  static font is laid out as before.
 
   Instancing now goes through the text style's `FontArguments` against the
   engine's one `FontCollection` rather than a collection built per layout,

@@ -1155,12 +1155,12 @@ impl TextEngine {
     ) -> Paragraph {
         let collection = self.collection.clone();
         let strut = strut_families(style, &mut collection.clone());
-        let coordinates = instance_coordinates(
+        let instance = instance_for(
             &mut collection.clone(),
             style,
             &style.font_variations,
         );
-        let sk_text_style = build_text_style(style, &coordinates);
+        let sk_text_style = build_text_style(style, &instance);
         let paragraph_style =
             build_paragraph_style(style, &sk_text_style, &strut);
 
@@ -1244,12 +1244,12 @@ impl TextEngine {
     ) -> ParagraphBuilder {
         let collection = self.collection.clone();
         let strut = strut_families(base_style, &mut collection.clone());
-        let coordinates = instance_coordinates(
+        let instance = instance_for(
             &mut collection.clone(),
             base_style,
             &base_style.font_variations,
         );
-        let base_sk_style = build_text_style(base_style, &coordinates);
+        let base_sk_style = build_text_style(base_style, &instance);
         let paragraph_style =
             build_paragraph_style(base_style, &base_sk_style, &strut);
         ParagraphBuilder {
@@ -1314,13 +1314,9 @@ pub struct ParagraphBuilder {
 impl ParagraphBuilder {
     /// Pushes `style` onto the stack. Text added from here on is drawn in it.
     pub fn push_style(&mut self, style: &TextStyle) -> &mut Self {
-        let coordinates = instance_coordinates(
-            &mut self.collection.clone(),
-            style,
-            &self.variations,
-        );
-        self.inner
-            .push_style(&build_text_style(style, &coordinates));
+        let instance =
+            instance_for(&mut self.collection.clone(), style, &self.variations);
+        self.inner.push_style(&build_text_style(style, &instance));
         self
     }
 
@@ -1571,9 +1567,21 @@ fn font_style_for(style: &TextStyle) -> FontStyle {
     )
 }
 
-/// The axis positions `style`'s variable faces are instanced at: the
-/// explicit `variations`, and `wght` from `style`'s own weight unless they
-/// name it.
+/// How a style's variable faces are instanced.
+#[derive(Default)]
+struct Instance {
+    /// The axis positions, handed to Skia as the text style's
+    /// `FontArguments`.
+    coordinates: Vec<Coordinate>,
+    /// The weight the instance has: its `wght` position, clamped to the
+    /// face's axis as Skia clamps it. `None` when nothing is instanced or
+    /// the face has no `wght` axis.
+    weight: Option<i32>,
+}
+
+/// How `style`'s variable faces are instanced: at the explicit
+/// `variations`, and at `wght` from `style`'s own weight unless they name
+/// it.
 ///
 /// OpenType defines `wght` on the CSS `font-weight` scale, so the weight is
 /// the coordinate unchanged. An explicit `wght` wins over it, as
@@ -1582,49 +1590,62 @@ fn font_style_for(style: &TextStyle) -> FontStyle {
 /// clamps each position to the face's range and ignores an axis the face
 /// lacks.
 ///
-/// Empty unless one of the families `style` names resolves to a variable
+/// Nothing unless one of the families `style` names resolves to a variable
 /// face in `collection`. Instancing clones the typeface, and a clone of a
 /// face with no axes is a new typeface with its own glyph cache that draws
 /// nothing different. A style naming no family is left to the platform's
 /// default, which the matcher already resolves by weight.
-fn instance_coordinates(
+fn instance_for(
     collection: &mut FontCollection,
     style: &TextStyle,
     variations: &[FontVariation],
-) -> Vec<Coordinate> {
+) -> Instance {
     let families: Vec<&str> =
         style.font_families.iter().map(String::as_str).collect();
-    if families.is_empty()
-        || !collection
-            .find_typefaces(&families, font_style_for(style))
-            .iter()
-            .any(|face| face.variation_design_parameters().is_some())
-    {
-        return Vec::new();
+    if families.is_empty() {
+        return Instance::default();
     }
-    let explicit = variations.iter().map(|variation| Coordinate {
-        axis: FourByteTag::from(u32::from_be_bytes(*variation.axis.as_bytes())),
-        value: variation.value,
-    });
-    // `SkFontStyle` has already pinned the weight to `0..=1000`.
-    let weight = (!variations
+    let faces = collection.find_typefaces(&families, font_style_for(style));
+    let Some(axes) = faces
         .iter()
-        .any(|variation| variation.axis == FontAxisTag::WGHT))
-    .then(|| Coordinate {
-        axis: FourByteTag::from(u32::from_be_bytes(
-            *FontAxisTag::WGHT.as_bytes(),
-        )),
-        value: *font_style_for(style).weight() as f32,
-    });
-    explicit.chain(weight).collect()
+        .find_map(|face| face.variation_design_parameters())
+    else {
+        return Instance::default();
+    };
+    let wght_tag = u32::from_be_bytes(*FontAxisTag::WGHT.as_bytes());
+    let explicit_wght = variations
+        .iter()
+        .find(|variation| variation.axis == FontAxisTag::WGHT)
+        .map(|variation| variation.value);
+    // `SkFontStyle` has already pinned the weight to `0..=1000`.
+    let wght = explicit_wght.unwrap_or(*font_style_for(style).weight() as f32);
+    let coordinates = variations
+        .iter()
+        .filter(|variation| variation.axis != FontAxisTag::WGHT)
+        .map(|variation| Coordinate {
+            axis: FourByteTag::from(u32::from_be_bytes(
+                *variation.axis.as_bytes(),
+            )),
+            value: variation.value,
+        })
+        .chain([Coordinate {
+            axis: FourByteTag::from(wght_tag),
+            value: wght,
+        }])
+        .collect();
+    let weight = axes
+        .iter()
+        .find(|axis| *axis.tag == wght_tag)
+        .map(|axis| wght.clamp(axis.min, axis.max).round() as i32);
+    Instance {
+        coordinates,
+        weight,
+    }
 }
 
-/// The Skia text style for `style`, instanced at `coordinates` where any
-/// are given.
-fn build_text_style(
-    style: &TextStyle,
-    coordinates: &[Coordinate],
-) -> SkTextStyle {
+/// The Skia text style for `style`, with its variable faces instanced as
+/// `instance` says.
+fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
     let mut sk_style = SkTextStyle::new();
 
     let mut paint = SkPaint::default();
@@ -1656,11 +1677,27 @@ fn build_text_style(
             style.font_families.iter().map(String::as_str).collect();
         sk_style.set_font_families(&families);
     }
-    sk_style.set_font_style(font_style_for(style));
-    if !coordinates.is_empty() {
+    // Pinned to the weight the instance has. Skia fakes a bold wherever the
+    // weight asked for is 200 or more above the face's, and an instance is
+    // the weight it was instanced at, with nothing missing to fake: Chrome
+    // paints weight 700 with `"wght" 300` as weight 300, and weight 900 on a
+    // face whose axis stops at 700 as 700. `Typesetter` pins canvas text the
+    // same way.
+    let mut font_style = font_style_for(style);
+    if let Some(weight) = instance.weight {
+        font_style = FontStyle::new(
+            Weight::from(weight),
+            font_style.width(),
+            font_style.slant(),
+        );
+    }
+    sk_style.set_font_style(font_style);
+    if !instance.coordinates.is_empty() {
         sk_style.set_font_arguments(
             &FontArguments::new().set_variation_design_position(
-                VariationPosition { coordinates },
+                VariationPosition {
+                    coordinates: &instance.coordinates,
+                },
             ),
         );
     }
