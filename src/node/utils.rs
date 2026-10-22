@@ -1065,10 +1065,12 @@ fn parse_color_function(css: &str) -> Option<(Color4f, &'static str)> {
 
 /// Converts `color()` components into extended sRGB.
 ///
-/// Only for reporting: the paint keeps the colour in the space it was named
-/// in, so a P3 colour on a P3 canvas needs no conversion at all. Serialising
-/// it does, and a round trip through sRGB costs about a level of the eight
-/// the readback quantises to.
+/// For the callers that need a colour in sRGB rather than tagged with its
+/// space: a gradient stop, an 8-bit `SkColor`, a getter's report and
+/// `RgbaLinear::from_css`. A paint keeps the colour in the space it was named
+/// in, so a P3 colour on a P3 canvas needs no conversion at all, and a round
+/// trip through sRGB would cost it about a level of the eight the readback
+/// quantises to.
 fn color_function_to_srgb(color: Color4f, space: &str) -> Color4f {
     let apply = |m: [[f32; 3]; 3], v: [f32; 3]| {
         [
@@ -1079,7 +1081,13 @@ fn color_function_to_srgb(color: Color4f, space: &str) -> Color4f {
     };
     let linear = |f: fn(f32) -> f32| [f(color.r), f(color.g), f(color.b)];
 
-    // The CSS Color 4 conversions, applied in linear light.
+    // The CSS Color 4 conversions, applied in linear light. Each matrix is
+    // the `f32` nearest the product of two the specification's sample code
+    // publishes as exact fractions -- `lin_P3_to_XYZ` or `lin_2020_to_XYZ`,
+    // then `XYZ_to_lin_sRGB` -- and the same product derived from each
+    // space's primaries and the D65 white point agrees to nine places.
+    // `colour_from_css` holds a primary of each to `1e-5`, which a matrix
+    // written to four places misses.
     let [r, g, b] = match space {
         "srgb" => return color,
         "srgb-linear" => [
@@ -1089,17 +1097,17 @@ fn color_function_to_srgb(color: Color4f, space: &str) -> Color4f {
         ],
         "display-p3" => {
             const TO_SRGB: [[f32; 3]; 3] = [
-                [1.224_940_1, -0.224_940_4, 0.0],
-                [-0.042_056_9, 1.042_057_1, 0.0],
-                [-0.019_637_6, -0.078_636_1, 1.098_273_5],
+                [1.224_940_2, -0.224_940_18, 0.0],
+                [-0.042_056_955, 1.042_056_9, 0.0],
+                [-0.019_637_555, -0.078_636_04, 1.098_273_6],
             ];
             apply(TO_SRGB, linear(srgb_to_linear)).map(linear_to_srgb)
         }
         "rec2020" => {
             const TO_SRGB: [[f32; 3]; 3] = [
-                [1.660_5, -0.587_6, -0.072_8],
-                [-0.124_6, 1.132_9, -0.008_3],
-                [-0.018_2, -0.100_6, 1.118_7],
+                [1.660_491, -0.587_641_1, -0.072_849_86],
+                [-0.124_550_48, 1.132_899_9, -0.008_349_422],
+                [-0.018_150_764, -0.100_578_9, 1.118_729_7],
             ];
             apply(TO_SRGB, linear(rec2020_decode)).map(linear_to_srgb)
         }

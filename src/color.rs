@@ -1,6 +1,6 @@
 use skia_safe::{Color as SkColor, Color4f, ColorSpace as SkColorSpace};
 
-use crate::error::Error;
+use crate::{error::Error, node::utils::css_to_color4f};
 
 /// Linear-light sRGB color space tag for `Color4f` handoffs to Skia.
 ///
@@ -304,6 +304,55 @@ impl RgbaLinear {
             )),
             _ => Err(reject()),
         }
+    }
+
+    /// Parses a CSS color: any notation `fillStyle` accepts, by the same
+    /// parser [`Context2D::set_fill_style_css`] uses.
+    ///
+    /// Named colors, hex, `rgb()`, `hsl()`, `hwb()`, `lab()`, `lch()`,
+    /// `oklab()`, `oklch()` and `color()` in `srgb`, `srgb-linear`,
+    /// `display-p3` or `rec2020`. An sRGB color comes back exactly as
+    /// [`RgbaLinear::from_srgb8`] builds it, so `from_css("#808080")` and
+    /// `from_srgb8(0x80, 0x80, 0x80, 1.0)` are equal, not merely close.
+    ///
+    /// The result is **linear sRGB, unclamped**: a color named in a wider
+    /// space keeps its hue as components outside `0.0..=1.0`, so
+    /// `"color(display-p3 1 0 0)"` comes back with red above one and green
+    /// and blue below zero, rather than as sRGB red. That is the frame
+    /// [`RgbaLinear::from_srgb`] builds in and the one a drop shadow and a
+    /// text color are read in, so a P3 color reaches those as itself. The
+    /// lighting filters and [`ColorFilter::blend`] hand Skia an 8-bit sRGB
+    /// color and clip it whatever built it. A fill is different again:
+    /// [`Context2D::set_fill_style`] reads an `RgbaLinear` in the canvas's
+    /// own space, so on a Display P3 canvas pass the string to
+    /// [`Context2D::set_fill_style_css`] instead, which keeps the space it
+    /// was named in.
+    ///
+    /// `None` for anything that is not a color, matching
+    /// [`Affine::from_css`](crate::geometry::Affine::from_css): "that is not
+    /// a color" is the whole of what there is to say.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// assert_eq!(
+    ///     RgbaLinear::from_css("rgb(255 0 0 / 50%)"),
+    ///     Some(RgbaLinear::from_srgb8(255, 0, 0, 0.5))
+    /// );
+    ///
+    /// let p3_red = RgbaLinear::from_css("color(display-p3 1 0 0)").unwrap();
+    /// assert!(p3_red.r > 1.0 && p3_red.g < 0.0);
+    ///
+    /// assert_eq!(RgbaLinear::from_css("not a colour"), None);
+    /// ```
+    ///
+    /// [`Context2D::set_fill_style`]: crate::context2d::Context2D::set_fill_style
+    /// [`ColorFilter::blend`]: crate::filter::ColorFilter::blend
+    /// [`Context2D::set_fill_style_css`]: crate::context2d::Context2D::set_fill_style_css
+    pub fn from_css(css: &str) -> Option<Self> {
+        css_to_color4f(css).map(|c| Self::from_srgb(c.r, c.g, c.b, c.a))
     }
 
     /// Builds a fully opaque color.

@@ -164,6 +164,27 @@ window be changed after it opens.** No signature moves and nothing is removed.
   An empty list cannot reset to no axes; a span returns an axis to its
   default by naming the default.
 
+- **`RgbaLinear::from_css` reads any CSS colour `set_fill_style_css`
+  takes**, through the same parser, and returns `None` for anything else,
+  as `Affine::from_css` does. Until now the only way from a CSS string to
+  an `RgbaLinear` was `from_hex`, so `rgb()`, `hsl()`, a named colour or
+  `color(display-p3 ...)` could reach a fill through `set_fill_style_css`
+  but not `ImageFilter::drop_shadow`, `ColorFilter::blend` or a
+  `TextStyle`, which take the value. An sRGB colour comes back exactly as
+  `from_srgb8` builds it. The result is linear sRGB, unclamped: a colour
+  named in a wider space keeps its hue as components outside `0..1` rather
+  than being clipped to the nearest sRGB colour, which is the frame a drop
+  shadow and a text colour are read in. The lighting filters and
+  `ColorFilter::blend` hand Skia an 8-bit sRGB colour and clip it whatever
+  built it. A fill on a canvas built in another space reads an `RgbaLinear` in
+  that space, so there the string belongs in `set_fill_style_css`.
+
+  Its tests compute every expected value from CSS Color 4's published
+  matrices rather than reading it off the parser, and found the parser's
+  Rec. 2020 to sRGB matrix written to four places -- up to `4e-5` out on a
+  primary, below a byte in an 8-bit readback. It now carries `f32`
+  precision, as does the Display P3 one beside it.
+
 - **`color(xyz ...)`, `color(xyz-d50 ...)` and `color(xyz-d65 ...)` are
   accepted**, beside the `srgb`, `srgb-linear`, `display-p3` and `rec2020`
   forms already taken. `xyz` and `xyz-d65` name one space, as CSS Color 4
