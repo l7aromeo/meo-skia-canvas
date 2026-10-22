@@ -218,16 +218,32 @@ export interface DOMRectReadOnly {
  * Decodes an image from a path, a URL, a `data:` URL or a buffer.
  *
  * The source decides how it is read: an `http:` or `https:` string is
- * fetched, where `options` are the `fetch` request options; a `data:` URL is
- * decoded in place; anything else that is a string is read from disk as a
- * path. The promise rejects if the bytes are not an image this build can
- * decode.
+ * requested, with `options` as the request options; a `data:` URL is decoded
+ * in place; anything else that is a string is read from disk as a path. The
+ * promise rejects if the bytes are not an image this build can decode.
+ *
+ * The request is made with Node's `http` and `https` modules rather than
+ * `fetch`, so only these members of `RequestInit` act as they do there:
+ *
+ * - `headers` takes any form `fetch` does -- a record, an array of
+ *   `[name, value]` pairs or a `Headers` -- and a `User-Agent` among them
+ *   replaces the default one. Anything else rejects with a `TypeError` before
+ *   a request is made; a falsy value means no headers.
+ * - `redirect` is `"follow"` by default. `"error"` rejects at a redirect, and
+ *   `"manual"` rejects naming where it leads, since a redirect has no image
+ *   to resolve with; neither requests the redirect's target. Any other value
+ *   rejects with a `TypeError` before a request is made.
+ * - `method` and `signal` are used, and so is a `body` that is a string, a
+ *   `Buffer` or a `Uint8Array`.
+ *
+ * The rest -- `integrity`, `referrer`, `referrerPolicy`, `cache`,
+ * `credentials`, `mode`, `keepalive`, `priority` and `window` -- have no
+ * effect: in particular, a response is not checked against `integrity`.
  *
  * `currentColor` sets what an SVG source's `currentColor` resolves to, and
  * setting it here is the cheap way: the document is recorded once with the
  * colour already applied, where assigning
- * {@link Image.currentColor} afterwards records it again. Everything else in
- * `options` is passed to `fetch`.
+ * {@link Image.currentColor} afterwards records it again.
  *
  * 🧪 `loadImage` is not in the HTML Canvas standard -- a browser assigns to
  * `img.src` and waits for its `load` event -- but {@link Image} is, and the
@@ -270,9 +286,9 @@ export function loadImageData(
  * As above, naming the layout the bytes are in.
  *
  * `settings` carries the `colorType` and `colorSpace` the pixels should be
- * read as, alongside the `fetch` request options used when `src` is a remote
- * URL. Both default to the `putImageData` wire format: `"rgba"` in `"srgb"`,
- * unpremultiplied.
+ * read as, alongside the request options used when `src` is a remote URL,
+ * which are read as {@link loadImage} reads them. The two default to the
+ * `putImageData` wire format: `"rgba"` in `"srgb"`, unpremultiplied.
  *
  * @category Images and Pixel Data
  */

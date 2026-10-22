@@ -11,10 +11,12 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 
 ## 📦 ⟩ [v6.0.3] (npm) ⟩ October 19, 2026
 
-**A patch fixing a GPU that went unused on a Vulkan 1.4 loader, Vulkan
-messages printed to standard output, and two CSS colour spellings that
-resolved to the wrong colour, and raising the `follow-redirects` floor past
-three security advisories.** Nothing is removed and no signature moves.
+**A patch fixing request headers that could follow a redirect to another
+host, a `redirect` request option that was ignored, a GPU that went unused
+on a Vulkan 1.4 loader, Vulkan messages printed to standard output, and two
+CSS colour spellings that resolved to the wrong colour, and raising the
+`follow-redirects` floor past three security advisories.** Nothing is
+removed and no signature moves.
 
 ### Security
 
@@ -47,6 +49,55 @@ three security advisories.** Nothing is removed and no signature moves.
   A fresh install already resolved to 1.16.1, so what this changes is an
   existing lockfile: one holding 1.16.0 or earlier no longer satisfies the
   range and moves.
+
+- **Request headers given as an array of pairs no longer follow a redirect to
+  another host.** `loadImage` and `loadImageData` take `fetch`-style request
+  options, whose `headers` may be a plain object, an array of
+  `[name, value]` pairs or a `Headers` instance, and only the plain object was
+  read correctly. An array was sent as headers named `0`, `1` and so on, each
+  carrying a whole pair as its value: `[["Authorization", "Bearer x"]]`
+  arrived as `0: Authorization, Bearer x`. A redirect to another host, or
+  from `https` to `http`, removes credentials by header name, so those were
+  sent on as well, and the header the caller meant was never sent under its
+  own name. A `Headers` instance lost every header it held, so nothing leaked
+  and nothing was sent. Every published release, from 3.6.0-0 through 6.0.2,
+  behaves this way.
+
+  All three shapes now arrive as the headers they name, and `Authorization`,
+  `Cookie` and `Proxy-Authorization` are removed before such a redirect
+  whichever shape they came in. A custom header such as `X-API-Key` is
+  still sent on, since those three are all `follow-redirects` removes by
+  default. Header names go out in lower case, which HTTP treats as the same
+  names.
+
+  **If you passed credentials as an array of pairs to a URL that may have
+  redirected to another host or to plain `http`, treat them as exposed and
+  rotate them.**
+
+  A `headers` value that is none of the three shapes -- a string, a number, a
+  pair of the wrong length -- now rejects with a `TypeError` before any
+  request is made, where a string used to go out as one header per character.
+  `undefined`, `null`, `false` and `""` still mean no headers.
+
+- **`redirect: "error"` and `redirect: "manual"` stop at a redirect instead
+  of following it.** `loadImage` and `loadImageData` ignored `redirect`:
+  every value, a misspelt one included, followed redirects as `"follow"`
+  does. A caller who chose `"error"` to keep a request's headers away from
+  whatever host it might be redirected to had neither that protection nor an
+  error. Every published release, from 3.6.0-0 through 6.0.2, behaves this
+  way.
+
+  `"error"` now rejects at the first redirect, naming its status. `"manual"`
+  rejects naming the status and the URL the redirect leads to, so it can be
+  followed deliberately: `fetch` would hand back the redirect itself, and a
+  redirect has no image to resolve with. Neither requests the redirect's
+  target. Leaving `redirect` out still means `"follow"`, and any value that
+  is not one of the three rejects with a `TypeError` before a request is
+  made, as `fetch` does.
+
+  **To keep a custom credential header such as `X-API-Key` from reaching
+  another host, pass `redirect: "error"`**, since `follow-redirects` removes
+  only `Authorization`, `Cookie` and `Proxy-Authorization` by default.
 
 ### Fixed
 
@@ -88,6 +139,17 @@ three security advisories.** Nothing is removed and no signature moves.
   and a fill that comes out white reads as the caller's mistake rather than
   the library's. A browser paints these correctly, so this was a divergence
   from Chrome as well as from the standard.
+
+- **A variable font instances at the weight that was asked for.**
+  `ctx.font = "400 16px Oswald"` on a font with a `wght` axis drew and
+  measured the instance at `wght` 399, and every other weight one unit
+  short the same way -- in `fillText`, `strokeText`, `measureText`,
+  `outlineText` and a `ParagraphBuilder`. OpenType defines `wght` on the CSS
+  weight scale, so the weight is the coordinate. The change is small -- on
+  Oswald at 16px, 64 `a`s measure 436.22 rather than 435.93, about 0.07% --
+  and matches Chrome, which instances at the weight requested.
+  `font-weight: 400` and `fontVariationSettings = '"wght" 400'` now name one
+  instance rather than two.
 
 ### Added
 

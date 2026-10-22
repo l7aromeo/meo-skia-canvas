@@ -1349,10 +1349,19 @@ fn text_metrics_report_each_line_and_its_runs() -> Result<()> {
 
 #[test]
 fn both_surfaces_measure_the_same_lines() -> Result<()> {
-    // The numbers below were read off the JavaScript surface for the same
-    // string, font and wrap width. Pinned here rather than compared at
-    // runtime -- the binding is a separate build -- so a change to either
-    // derivation shows up as the two disagreeing.
+    // The breaks and baselines below were read off the JavaScript surface
+    // for the same string, font and wrap width. Pinned here rather than
+    // compared at runtime -- the binding is a separate build -- so a change
+    // to either derivation shows up as the two disagreeing.
+    //
+    // The widths come from neither surface. Each is the ink of its line
+    // computed without Skia: advances from fontTools (`hmtx` plus `HVAR`)
+    // and outline bounds from fontTools (`glyf` plus `gvar`), for Raleway
+    // at `wght` 400, with the GPOS kerning between the glyphs from
+    // HarfBuzz. 400 because that is the weight `Font::new` asks for, and a
+    // variable font instances at the weight requested; Raleway's own
+    // default instance is 100. A bare skia-safe paragraph over the same
+    // instance agrees with every figure to within 0.0003.
     //
     // A font out of `tests/assets`, not a system one. This pinned Helvetica
     // and Helvetica is a macOS font: on Linux fontconfig substitutes Nimbus
@@ -1377,29 +1386,30 @@ fn both_surfaces_measure_the_same_lines() -> Result<()> {
         Some(120.0),
     );
 
-    let from_javascript = [
-        (87.99851f32, 0usize, 7usize, -0.18f32),
-        (107.834755, 8, 18, 27.82),
-        (72.525955, 19, 27, 55.82),
-        (63.320152, 28, 33, 83.82),
-        (107.77818, 34, 44, 111.82),
+    let expected = [
+        (88.00861f32, 0usize, 7usize, -0.18f32),
+        (107.85314, 8, 18, 27.82),
+        (72.53831, 19, 27, 55.82),
+        (63.32698, 28, 33, 83.82),
+        (107.79533, 34, 44, 111.82),
     ];
-    assert_eq!(metrics.lines.len(), from_javascript.len());
+    assert_eq!(metrics.lines.len(), expected.len());
 
-    // `width` is read only where the numbers were taken; see below
-    for (at, (_width, start, end, baseline)) in
-        from_javascript.into_iter().enumerate()
+    // `width` is read on macOS only; see below
+    for (at, (_width, start, end, baseline)) in expected.into_iter().enumerate()
     {
         let line = &metrics.lines[at];
-        // Widths only where the numbers were taken. `line.width` is the
-        // joined ink of the line's glyphs, not its advance, and ink is not
-        // the same on every platform: this font file, wrapped at this width,
-        // measured 91.59 on macOS through CoreText and 89.59 on Linux
-        // through FreeType. Where a line *breaks* and where its baseline
-        // *sits* do not move -- the breaks came out identical on both, and
-        // the baselines are the font's own metrics read out of the file --
-        // so those are asserted everywhere and are what actually catches the
-        // two surfaces drifting apart.
+        // Widths on macOS only, where CoreText agrees with the fontTools
+        // figures. `line.width` is the joined ink of the line's glyphs, not
+        // its advance, and ink is not the same on every platform: FreeType
+        // rounds each glyph's `HVAR` advance delta to a whole font unit,
+        // which CoreText and fontTools do not. This font file, wrapped
+        // at this width, measured 91.59 on macOS through CoreText and 89.59
+        // on Linux through FreeType. Where a line *breaks* and where its
+        // baseline *sits* do not move -- the breaks came out identical on
+        // both, and the baselines are the font's own metrics read out of the
+        // file -- so those are asserted everywhere and are what actually
+        // catches the two surfaces drifting apart.
         //
         // Both figures are pre-#108, when the ink box was the box the glyph
         // was rasterised into: outward-rounded to the pixel grid and padded
