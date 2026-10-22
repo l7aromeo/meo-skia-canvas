@@ -41,8 +41,8 @@
     "lint:fix": "eslint . --fix"
   },
   "dependencies": {
-    "detect-libc": "^2.1.1",
-    "follow-redirects": "^1.15.11",
+    "detect-libc": "^2.1.2",
+    "follow-redirects": "^1.16.1",
     "https-proxy-agent": "^9.1.0",
     "string-split-by": "^1.0.0"
   },
@@ -56,16 +56,16 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@hono/node-server": "^2.1.0",
-    "@types/node": "^26.4.1",
-    "cargo-cp-artifact": "^0.1",
-    "eslint": "^10.10.0",
-    "globals": "^17.12.0",
-    "hono": "^4.9.8",
-    "nock": "^14.0.10",
-    "prettier": "^3.9.6",
-    "sharp": "^0.35.3",
-    "tmp": "^0.2.5",
+    "@hono/node-server": "^2.1.5",
+    "@types/node": "^26.6.5",
+    "cargo-cp-artifact": "^0.1.9",
+    "eslint": "^10.13.0",
+    "globals": "^17.13.0",
+    "hono": "^4.13.13",
+    "nock": "^15.0.5",
+    "prettier": "^3.9.10",
+    "sharp": "^0.35.5",
+    "tmp": "^0.2.7",
     "typescript": "^7.0.2",
     "yaml": "2.9.1"
   },

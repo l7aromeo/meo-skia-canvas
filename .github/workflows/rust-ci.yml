@@ -146,11 +146,17 @@ jobs:
         with:
           toolchain: stable
           components: clippy
+      # yasm, because libaom's configure takes yasm before nasm, and the nasm
+      # ubuntu-latest carries from Ubuntu 26.04 on is 3.x, which libaom 3.11
+      # refuses -- "Unsupported nasm: multipass optimization not supported" --
+      # because its probe greps `nasm -hf` for `-Ox` and nasm 3 moved that text.
+      # UPSTREAM: libaom-sys 0.17.2+libaom.3.11.0 -- njaard/libavif-rs#122 -- worked around
+      # Re-check: grep -A1 '^name = "libaom-sys"' Cargo.lock -- drop yasm once it names libaom 3.13.2 or later
       - name: Install Skia build dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           .github/scripts/apt-install.sh \
-            clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config \
+            clang libfontconfig1-dev libssl-dev nasm yasm ninja-build pkg-config \
             python3 libvulkan-dev
       - name: Install Skia build dependencies (macOS)
         if: runner.os == 'macOS'
@@ -182,10 +188,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
+      # yasm, because libaom's configure takes yasm before nasm, and the nasm
+      # ubuntu-latest carries from Ubuntu 26.04 on is 3.x, which libaom 3.11
+      # refuses -- "Unsupported nasm: multipass optimization not supported" --
+      # because its probe greps `nasm -hf` for `-Ox` and nasm 3 moved that text.
+      # UPSTREAM: libaom-sys 0.17.2+libaom.3.11.0 -- njaard/libavif-rs#122 -- worked around
+      # Re-check: grep -A1 '^name = "libaom-sys"' Cargo.lock -- drop yasm once it names libaom 3.13.2 or later
       - name: Install Skia build dependencies (apt)
         run: |
           .github/scripts/apt-install.sh \
-            clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config python3
+            clang libfontconfig1-dev libssl-dev nasm yasm ninja-build pkg-config python3
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: test-freetype
@@ -229,10 +241,16 @@ jobs:
         with:
           toolchain: stable
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      # yasm, because libaom's configure takes yasm before nasm, and the nasm
+      # ubuntu-latest carries from Ubuntu 26.04 on is 3.x, which libaom 3.11
+      # refuses -- "Unsupported nasm: multipass optimization not supported" --
+      # because its probe greps `nasm -hf` for `-Ox` and nasm 3 moved that text.
+      # UPSTREAM: libaom-sys 0.17.2+libaom.3.11.0 -- njaard/libavif-rs#122 -- worked around
+      # Re-check: grep -A1 '^name = "libaom-sys"' Cargo.lock -- drop yasm once it names libaom 3.13.2 or later
       - name: Install Skia build dependencies (apt)
         run: |
           .github/scripts/apt-install.sh \
-            clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config \
+            clang libfontconfig1-dev libssl-dev nasm yasm ninja-build pkg-config \
             python3 libvulkan-dev
       # What it takes to open a window on a runner with no screen and no GPU,
       # which is the difference between the `gui` suite running here and
@@ -360,10 +378,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: ${{ steps.declared.outputs.version }}
+      # yasm, because libaom's configure takes yasm before nasm, and the nasm
+      # ubuntu-latest carries from Ubuntu 26.04 on is 3.x, which libaom 3.11
+      # refuses -- "Unsupported nasm: multipass optimization not supported" --
+      # because its probe greps `nasm -hf` for `-Ox` and nasm 3 moved that text.
+      # UPSTREAM: libaom-sys 0.17.2+libaom.3.11.0 -- njaard/libavif-rs#122 -- worked around
+      # Re-check: grep -A1 '^name = "libaom-sys"' Cargo.lock -- drop yasm once it names libaom 3.13.2 or later
       - name: Install Skia build dependencies (apt)
         run: |
           .github/scripts/apt-install.sh \
-            clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config \
+            clang libfontconfig1-dev libssl-dev nasm yasm ninja-build pkg-config \
             python3 libvulkan-dev
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -397,10 +421,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: nightly-2026-09-04
+      # yasm, because libaom's configure takes yasm before nasm, and the nasm
+      # ubuntu-latest carries from Ubuntu 26.04 on is 3.x, which libaom 3.11
+      # refuses -- "Unsupported nasm: multipass optimization not supported" --
+      # because its probe greps `nasm -hf` for `-Ox` and nasm 3 moved that text.
+      # UPSTREAM: libaom-sys 0.17.2+libaom.3.11.0 -- njaard/libavif-rs#122 -- worked around
+      # Re-check: grep -A1 '^name = "libaom-sys"' Cargo.lock -- drop yasm once it names libaom 3.13.2 or later
       - name: Install Skia build dependencies (apt)
         run: |
           .github/scripts/apt-install.sh \
-            clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config \
+            clang libfontconfig1-dev libssl-dev nasm yasm ninja-build pkg-config \
             python3 libvulkan-dev
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -466,10 +496,16 @@ jobs:
         with:
           toolchain: nightly-2026-09-04
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      # yasm, because libaom's configure takes yasm before nasm, and the nasm
+      # ubuntu-latest carries from Ubuntu 26.04 on is 3.x, which libaom 3.11
+      # refuses -- "Unsupported nasm: multipass optimization not supported" --
+      # because its probe greps `nasm -hf` for `-Ox` and nasm 3 moved that text.
+      # UPSTREAM: libaom-sys 0.17.2+libaom.3.11.0 -- njaard/libavif-rs#122 -- worked around
+      # Re-check: grep -A1 '^name = "libaom-sys"' Cargo.lock -- drop yasm once it names libaom 3.13.2 or later
       - name: Install Skia build dependencies (apt)
         run: |
           .github/scripts/apt-install.sh \
-            clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config \
+            clang libfontconfig1-dev libssl-dev nasm yasm ninja-build pkg-config \
             python3 libvulkan-dev
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -488,10 +524,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
+      # yasm, because libaom's configure takes yasm before nasm, and the nasm
+      # ubuntu-latest carries from Ubuntu 26.04 on is 3.x, which libaom 3.11
+      # refuses -- "Unsupported nasm: multipass optimization not supported" --
+      # because its probe greps `nasm -hf` for `-Ox` and nasm 3 moved that text.
+      # UPSTREAM: libaom-sys 0.17.2+libaom.3.11.0 -- njaard/libavif-rs#122 -- worked around
+      # Re-check: grep -A1 '^name = "libaom-sys"' Cargo.lock -- drop yasm once it names libaom 3.13.2 or later
       - name: Install Skia build dependencies (apt)
         run: |
           .github/scripts/apt-install.sh \
-            clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config python3
+            clang libfontconfig1-dev libssl-dev nasm yasm ninja-build pkg-config python3
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: docs

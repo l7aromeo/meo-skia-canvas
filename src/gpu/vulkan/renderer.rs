@@ -1,4 +1,4 @@
-use super::{VK_FORMATS, to_sk_format};
+use super::{VK_FORMATS, skia_max_api_version, to_sk_format};
 use crate::{
     context::page::Page,
     gpu::{RenderCache, RenderState::Resizing},
@@ -323,14 +323,9 @@ impl VulkanBackend {
                         get_device_proc_addr(vk_device, name)
                     }
                 }
-                .map(|f| f as _)
-                .unwrap_or_else(|| {
-                    println!(
-                        "Vulkan: failed to resolve {}",
-                        gpo.name().to_string_lossy()
-                    );
-                    ptr::null()
-                })
+                // A null answer is how Vulkan says an entry point is not
+                // there, and Skia asks for optional ones expecting it.
+                .map_or(ptr::null(), |f| f as _)
             };
 
             direct_contexts::make_vulkan(
@@ -343,7 +338,7 @@ impl VulkanBackend {
                         queue.queue_family_index() as usize,
                     ),
                     &get_proc,
-                    None,
+                    skia_max_api_version(instance),
                 )
                 .build(),
                 None,

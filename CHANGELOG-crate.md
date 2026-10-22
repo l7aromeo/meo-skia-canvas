@@ -19,10 +19,31 @@ independently of the npm package.
 
 ## 📦 ⟩ [v0.16.4] (crate) ⟩ October 19, 2026
 
-**A patch fixing two CSS colour spellings that resolved to the wrong colour.**
-No signature moves and nothing is removed.
+**A patch fixing a Vulkan GPU that went unused on a Vulkan 1.4 loader, and two
+CSS colour spellings that resolved to the wrong colour.** No signature moves and
+nothing is removed.
 
 ### Fixed
+
+- **The `vulkan` feature uses the GPU on a Vulkan 1.4 loader.** Where the
+  Vulkan loader and the device both report 1.4, a canvas asked for the GPU
+  rendered on the CPU instead, and a window could not be opened, both with
+  `Failed to create Vulkan backend context`. The context was built without
+  telling Skia which API version the Vulkan instance had been created for,
+  so Skia took the loader's 1.4 and required entry points that a device
+  created for vulkano's default of 1.3 does not provide. Skia is now given
+  the instance's own version.
+
+  Reproduced and verified with Mesa's llvmpipe on Ubuntu 26.04 (loader
+  1.4.341, device 1.4.335). A 1.3 loader was never affected: llvmpipe
+  reports 1.4 on Ubuntu 24.04 too, and its 1.3.275 loader kept Skia at 1.3.
+  Other drivers that report 1.4 through a 1.4 loader take the same path and
+  are expected to have been affected, but were not tested.
+
+- **Nothing is written to standard output.** Each Vulkan entry point a driver
+  did not provide printed a `Failed to resolve Vulkan proc` line to stdout,
+  in among whatever the program itself writes there. A missing optional
+  entry point is normal, and is no longer reported.
 
 - **`hsl()` and `hwb()` written with bare numbers name the colour they
   state.** CSS Color 4 types saturation, lightness, whiteness and blackness
