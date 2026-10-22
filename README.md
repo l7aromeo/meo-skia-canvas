@@ -529,14 +529,15 @@ nothing.
 
 The pages below are written by hand, and are the half a generator has nothing to say about:
 
-| Guide                                      | Covers                                                                   |
-| ------------------------------------------ | ------------------------------------------------------------------------ |
-| [Getting started](docs/getting-started.md) | Install and first render.                                                |
-| [Node API](docs/node.md)                   | Platform notes, JavaScript API, benchmarks.                              |
-| [Rust crate](docs/rust.md)                 | The crate surface, and how it differs from the JavaScript one.           |
-| [Drawing context](docs/api/context.md)     | The illustrated tour — conic curves, textures, dash markers, projection. |
-| [Path geometry](docs/api/path2d.md)        | Boolean operations, trim, jitter, interpolate, with pictures.            |
-| [Changelog](CHANGELOG.md)                  | Index; one file per release channel, linked from there.                  |
+| Guide                                              | Covers                                                                   |
+| -------------------------------------------------- | ------------------------------------------------------------------------ |
+| [Getting started](docs/getting-started.md)         | Install and first render.                                                |
+| [Node API](docs/node.md)                           | Platform notes, JavaScript API, benchmarks.                              |
+| [Rust crate](docs/rust.md)                         | The crate surface, and how it differs from the JavaScript one.           |
+| [Drawing context](docs/api/context.md)             | The illustrated tour — conic curves, textures, dash markers, projection. |
+| [Path geometry](docs/api/path2d.md)                | Boolean operations, trim, jitter, interpolate, with pictures.            |
+| [Browser differences](docs/browser-differences.md) | Where output differs from Chrome on purpose, or because of Skia.         |
+| [Changelog](CHANGELOG.md)                          | Index; one file per release channel, linked from there.                  |
 
 ## Platform support
 
