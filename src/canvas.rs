@@ -382,6 +382,22 @@ impl Canvas {
         self.context().inner.reset_size((width, height));
     }
 
+    /// Takes page `index`'s size as the canvas's, without clearing anything,
+    /// as a window does on showing that page.
+    ///
+    /// `width` and `height` report the newest page's size until a window
+    /// shows another, which is what `window.page = n` does to the canvas in
+    /// JavaScript. Does nothing for an index past the last page. Only a
+    /// window shows a page, so it exists only where windows do.
+    #[cfg(feature = "window")]
+    pub(crate) fn adopt_page_size(&mut self, index: usize) {
+        if let Some(context) = self.contexts.get(index) {
+            let size = context.inner.bounds.size();
+            self.width = size.width;
+            self.height = size.height;
+        }
+    }
+
     /// Borrows an earlier page's context, `0` being the first added.
     ///
     /// [`Canvas::context`] only ever reaches the newest page, so without

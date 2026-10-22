@@ -59,6 +59,12 @@ thread_local!(
 /// read.
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 
+/// The index of a canvas's newest page, which a window shows until told
+/// otherwise -- JavaScript's `canvas.pages.length`, counted from zero.
+fn last_page(canvas: &Canvas) -> u32 {
+    canvas.page_count().saturating_sub(1) as u32
+}
+
 /// Takes everything [`Window::open`] has queued.
 pub(crate) fn take_pending() -> Vec<Window> {
     PENDING.with_borrow_mut(std::mem::take)
@@ -97,6 +103,7 @@ impl Window {
     /// [`Window::canvas_mut`].
     pub fn with_canvas(canvas: Canvas) -> Self {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let page = last_page(&canvas);
 
         Self {
             spec: WindowSpec {
@@ -109,7 +116,7 @@ impl Window {
                 borderless: false,
                 fullscreen: false,
                 background: DEFAULT_BACKGROUND.to_string(),
-                page: 0,
+                page,
                 width: canvas.width(),
                 height: canvas.height(),
                 cursor: "default".to_string(),
@@ -202,8 +209,9 @@ impl Window {
 
     /// Sets the handler drawing each frame.
     ///
-    /// Called with this window's context and the frame number, counting from
-    /// zero. Whatever it leaves on the canvas is what the window shows.
+    /// Called with the context of the page the window shows -- see
+    /// [`page`](Self::page) -- and the frame number, counting from zero.
+    /// Whatever it leaves there is what the window shows.
     pub fn on_draw<F>(&mut self, handler: F)
     where
         F: FnMut(&mut Context2D, u64) + 'static,
@@ -333,16 +341,26 @@ impl Window {
     }
 
     /// Which page of the canvas is displayed, `0` being the first.
+    ///
+    /// The canvas's last page when the window was made, or given its canvas,
+    /// until [`set_page`](Self::set_page) chooses another. A page the canvas
+    /// gains afterwards is not shown until chosen, as in JavaScript, where
+    /// `window.page` stays where it was when `canvas.newPage()` is called.
     pub fn page(&self) -> u32 {
         self.spec.page
     }
 
-    /// Displays a different page of the canvas.
+    /// Displays a different page of the canvas, `0` being the first.
     ///
-    /// A page past the last is clamped by the loop rather than refused
-    /// here, since the canvas can gain pages after this is set.
+    /// The canvas takes that page's size, as assigning `window.page` does in
+    /// JavaScript, and the draw handler draws on it. A page past the last
+    /// changes nothing: JavaScript refuses it with a `RangeError`, and this
+    /// leaves the window showing what it showed.
     pub fn set_page(&mut self, page: u32) {
-        self.spec.page = page;
+        if (page as usize) < self.canvas.page_count() {
+            self.spec.page = page;
+            self.canvas.adopt_page_size(page as usize);
+        }
     }
 
     /// How much the rasterizer thickens small text, from `0.0` to `1.0`.
@@ -405,27 +423,39 @@ impl Window {
         }
     }
 
+    /// The context of the page the window shows.
+    fn shown(&mut self) -> &mut Context2D {
+        // `set_page` refuses an index past the last and a canvas never loses
+        // pages, so the clamp only matters for a spec adopted from the loop.
+        let last = self.canvas.page_count().saturating_sub(1);
+        let index = (self.spec.page as usize).min(last);
+        // SAFETY: `index` is at most the last page's, and a canvas always
+        // has at least one page -- `Canvas::new` seeds one and nothing
+        // removes one.
+        self.canvas
+            .page(index)
+            .expect("the clamped index names a page")
+    }
+
     /// The page the window currently shows, without running the draw
     /// handler -- what a change made between frames re-shows.
     pub(crate) fn current_page(&mut self) -> Page {
-        self.canvas.context().inner.page()
+        self.shown().inner.page()
     }
 
     /// Runs the draw handler and returns what it left behind.
     pub(crate) fn render(&mut self) -> Page {
-        let Self {
-            canvas,
-            on_draw,
-            frame,
-            ..
-        } = self;
-
+        // Taken out for the call so the handler can be given the shown page,
+        // which is borrowed from the same `self`.
+        let mut on_draw = self.on_draw.take();
         if let Some(handler) = on_draw.as_mut() {
-            handler(canvas.context(), *frame);
-            *frame += 1;
+            let frame = self.frame;
+            handler(self.shown(), frame);
+            self.frame += 1;
         }
+        self.on_draw = on_draw;
 
-        canvas.context().inner.page()
+        self.current_page()
     }
 }
 
@@ -453,7 +483,13 @@ mod window_accessor_tests {
         // The surface was setter-only, so a caller could configure a window
         // and never ask what it had configured. These pairs are what the
         // spec already carried; nothing here is new state.
-        let mut window = Window::new(200.0, 100.0);
+        // Four pages, so page 3 is one the canvas has: a page past the last
+        // is refused, as `page_selection` below pins.
+        let mut canvas = Canvas::new(200.0, 100.0);
+        for _ in 0..3 {
+            canvas.new_page();
+        }
+        let mut window = Window::with_canvas(canvas);
 
         window.set_title("a title");
         window.set_background("rgb(1, 2, 3)");
@@ -524,5 +560,72 @@ mod window_accessor_tests {
         assert!(!window.fullscreen());
         assert_eq!(window.page(), 0, "the first page");
         assert_eq!(window.background(), crate::gui::window::DEFAULT_BACKGROUND);
+    }
+}
+
+/// Which page a window shows, measured against the JavaScript `Window` on a
+/// live window before this was written: built on a two-page canvas it shows
+/// page 2 of 2; `canvas.newPage()` while it runs leaves it on page 2;
+/// `window.page = 1` shows page 1 and the canvas reports that page's size;
+/// `window.page = 9` on three pages is a `RangeError` and changes nothing.
+/// JavaScript counts pages from one and Rust from zero, so each case is the
+/// same page one lower.
+#[cfg(test)]
+mod page_selection {
+    use super::*;
+
+    /// A canvas whose pages are told apart by size: 100x50, then 200x80.
+    fn two_pages() -> Canvas {
+        let mut canvas = Canvas::new(100.0, 50.0);
+        canvas.new_page_with(200.0, 80.0);
+        canvas
+    }
+
+    /// The size of the page the draw handler was given on one frame.
+    fn drawn_on(window: &mut Window) -> (f32, f32) {
+        let seen = std::rc::Rc::new(std::cell::Cell::new((0.0, 0.0)));
+        let into = std::rc::Rc::clone(&seen);
+        window.on_draw(move |ctx, _| {
+            let size = ctx.inner.bounds.size();
+            into.set((size.width, size.height));
+        });
+        window.render();
+        seen.get()
+    }
+
+    #[test]
+    fn a_window_shows_its_canvas_last_page_when_made() {
+        let mut window = Window::with_canvas(two_pages());
+        assert_eq!(window.page(), 1, "the second of two");
+        assert_eq!(drawn_on(&mut window), (200.0, 80.0));
+    }
+
+    #[test]
+    fn a_page_added_afterwards_is_not_shown_until_chosen() {
+        let mut window = Window::with_canvas(two_pages());
+        window.canvas_mut().new_page_with(300.0, 120.0);
+        assert_eq!(window.page(), 1, "still the second");
+        assert_eq!(drawn_on(&mut window), (200.0, 80.0));
+    }
+
+    #[test]
+    fn choosing_a_page_shows_it_and_takes_its_size() {
+        let mut window = Window::with_canvas(two_pages());
+        window.set_page(0);
+        assert_eq!(window.page(), 0);
+        assert_eq!(
+            (window.canvas().width(), window.canvas().height()),
+            (100.0, 50.0),
+            "the canvas reports the page shown, as in JavaScript"
+        );
+        assert_eq!(drawn_on(&mut window), (100.0, 50.0));
+    }
+
+    #[test]
+    fn a_page_past_the_last_changes_nothing() {
+        let mut window = Window::with_canvas(two_pages());
+        window.set_page(8);
+        assert_eq!(window.page(), 1);
+        assert_eq!(drawn_on(&mut window), (200.0, 80.0));
     }
 }

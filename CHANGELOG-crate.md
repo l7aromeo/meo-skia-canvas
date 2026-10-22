@@ -45,6 +45,22 @@ window be changed after it opens.** No signature moves and nothing is removed.
   in among whatever the program itself writes there. A missing optional
   entry point is normal, and is no longer reported.
 
+- **`Window::set_page` shows the page it names, and a window chooses its page
+  as the JavaScript `Window` does.** A Rust window always showed its
+  canvas's newest page and drew on it, whatever `set_page` said, while
+  `page()` reported whatever had been set, `0` by default. It now does what
+  the JavaScript `Window` was measured doing on a live window: it shows the
+  canvas's last page as of when it was made, and stays on it when the canvas gains pages; `set_page(n)`
+  shows page `n`, the canvas takes that page's size, and the draw handler
+  draws on it; and a page past the last changes nothing, where JavaScript
+  throws a `RangeError`. `page()` reports the page shown. Pages count from
+  zero here and from one in JavaScript.
+
+  One case looks different: a window whose canvas gains pages while it is
+  open used to follow the newest page and now stays on the one it was made
+  with. To follow the newest, take the window's `handle()` before opening
+  and call `set_page` on it with the new page's index after adding one.
+
 - **`hsl()` and `hwb()` written with bare numbers name the colour they
   state.** CSS Color 4 types saturation, lightness, whiteness and blackness
   as `<percentage> | <number>`, so `hsl(200 40 45)` and `hsl(200 40% 45%)`
