@@ -173,6 +173,17 @@ removed and no signature moves.
   more than 40px costs about 200 microseconds a draw where it cost almost
   nothing, the price of Chrome's picture.
 
+- **`measureText().width` is the same whatever the text alignment, and
+  keeps a letter spacing whole.** The width came from the laid-out boxes,
+  whose edges are rounded where they lie, so where they lie moved the
+  width: a run measured up to 0.019 differently centred than left-aligned -- 7px Oswald measured
+  `"1234.5"` 17.4766 centred -- and 5.17px of spacing at 10px Oswald
+  measured `"00"` 20.67 where Chrome measures 20.68. The width is now the
+  run's advance at every alignment. Over 3,850 cases across seven families,
+  five sizes and five spacings it moved by at most 0.014, and in nine
+  measured in Chrome it is within 0.005 of Chrome's width, where the old
+  one was off by as much as 0.009. A wrapped run (`textWrap`) is unchanged.
+
 - **`measureText().width` is negative where the spacing makes the advance
   negative, and counts a trailing space's spacing, as Chrome does.** At 40px
   Oswald with `letterSpacing = "-23.12px"`, `"abcd"` measured 0 where

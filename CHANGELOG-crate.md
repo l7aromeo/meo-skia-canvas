@@ -35,6 +35,12 @@ window be changed after it opens.** No signature moves and nothing is removed.
   1000px on the GPU engine, and to Chrome's CPU canvas exactly on the CPU
   engine at every radius measured but 200px, which is 0.9% off.
 
+- **`measure_text`'s width is the same whatever the text alignment, and
+  keeps a letter spacing whole.** It was read from the laid-out boxes, whose
+  edges are rounded where they lie, so a centred run measured up to 0.019
+  differently from a left-aligned one, and 5.17px of spacing at 10px Oswald lost a hundredth. The width is
+  now the run's advance, within a hundredth of Chrome's.
+
 - **`measure_text` reports a negative width where the spacing makes the
   advance negative, and counts a trailing space's spacing.** At 40px Oswald
   with a letter spacing of -23.12px, `"abcd"` measured 0 where Chrome

@@ -879,7 +879,7 @@ describe("a face that misreports its kerning is still corrected", () => {
   });
 });
 
-describe("measureText reports a negative width as it is", () => {
+describe("measureText's width is the run's advance", () => {
   FontLibrary.use("Oswald", [
     "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
   ]);
@@ -909,6 +909,51 @@ describe("measureText reports a negative width as it is", () => {
         Math.abs(width - chrome) <= 0.01,
         `${letter} ${word} ${JSON.stringify(text)}: ${width}, Chrome ${chrome}`,
       );
+    }
+  });
+
+  // A letter spacing whose half is not a hundredth: the laid-out boxes are
+  // rounded to hundredths with half the spacing at each end, which lost a
+  // hundredth at 10px. Chrome 152 measures "00" at 5.17px spacing as below,
+  // to the float; SkParagraph keeps hundredths, so within half of one.
+  test("width keeps the spacing whole at every size", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.letterSpacing = "5.17px";
+    for (const [size, chrome] of [
+      [7, 17.577972412109375],
+      [10, 20.67999267578125],
+      [13, 23.781982421875],
+      [40, 51.699981689453125],
+      [100, 113.739990234375],
+    ]) {
+      ctx.font = `${size}px Oswald`;
+      const { width } = ctx.measureText("00");
+      assert.ok(
+        Math.abs(width - chrome) <= 0.005,
+        `${size}px: ${width}, Chrome ${chrome}`,
+      );
+    }
+  });
+
+  // The width is the run's advance, so where the run is aligned cannot move
+  // it, as it cannot in Chrome. Measured from the laid-out boxes, a
+  // centred run's edges were rounded at different places from a left-
+  // aligned one's, and 7px Oswald measured "1234.5" 17.4766 centred.
+  test("width does not depend on the alignment", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    for (const font of ["7px Oswald", "13px Oswald", "40px Oswald"]) {
+      ctx.font = font;
+      for (const text of ["1234.5", "AV To", "Hamburgefonstiv"]) {
+        const widths = ["left", "center", "right"].map((align) => {
+          ctx.textAlign = align;
+          return ctx.measureText(text).width;
+        });
+        assert.deepEqual(
+          widths,
+          [widths[0], widths[0], widths[0]],
+          `${font} ${JSON.stringify(text)}`,
+        );
+      }
     }
   });
 
