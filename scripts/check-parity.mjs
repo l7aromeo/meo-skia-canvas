@@ -504,7 +504,15 @@ export function citations(manifest) {
   );
 }
 
-export function check({ rust, npm, manifest, rules: given, files }) {
+export function check({
+  rust,
+  npm,
+  manifest,
+  rules: given,
+  files,
+  issues,
+  requireFiled = false,
+}) {
   const problems = [];
   const note = (kind, id, detail) => problems.push({ kind, id, detail });
 
@@ -841,6 +849,57 @@ export function check({ rust, npm, manifest, rules: given, files }) {
           text,
           `'${entry}' cites a line of ${file}. Lines move when the file does; name the function, type or comment instead.`,
         );
+      }
+    }
+  }
+
+  // A ONE-SIDED ENTRY SAYS WHETHER IT IS A DECISION OR A GAP. `status` is
+  // `deliberate` -- the capability belongs on one surface, and the reason
+  // says why -- or `gap`, which names the issue in this repository tracking
+  // it, or `unfiled` until one exists. A gap was otherwise prose, and four
+  // reasons deferred theirs to files that were never committed. `issues` is
+  // the prefix an issue URL must start with; absent only in self-test
+  // fixtures about something else. `requireFiled` refuses `unfiled`, for the
+  // release, where an unrecorded gap must not ship.
+  if (issues) {
+    const issueUrl = new RegExp(
+      `^${issues.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[1-9][0-9]*$`,
+    );
+    for (const entry of manifest) {
+      const oneSided = entry.rust.length === 0 || entry.npm.length === 0;
+      const { status, issue } = entry;
+      const refuse = (detail) =>
+        note("status", entry.name, `'${entry.name}' ${detail}`);
+      if (status === undefined) {
+        if (oneSided) {
+          refuse(
+            `has an empty side and no status: say whether it is \`deliberate\` or a \`gap\`.`,
+          );
+        }
+      } else if (status === "deliberate") {
+        if (issue !== undefined) {
+          refuse(
+            `is deliberate and names an issue; a decision is not tracked as a gap.`,
+          );
+        }
+      } else if (status === "gap") {
+        if (issue === undefined) {
+          refuse(
+            `is a gap with no issue: name the issue, or \`unfiled\` until it exists.`,
+          );
+        } else if (issue === "unfiled") {
+          if (requireFiled) {
+            refuse(
+              `is a gap with no issue filed, and a release must not carry one.`,
+            );
+          }
+        } else if (!issueUrl.test(issue)) {
+          refuse(
+            `names '${issue}', which is not an issue in this repository (${issues}N).`,
+          );
+        }
+      } else {
+        refuse(`has status '${status}'; it is \`deliberate\` or \`gap\`.`);
       }
     }
   }
@@ -1557,6 +1616,7 @@ export function report(problems) {
     "dangling-citation",
     "line-citation",
     "unknown-id",
+    "status",
     "doubled",
     "already-paired",
     "wrong-of-two",
@@ -1578,6 +1638,8 @@ export function report(problems) {
     "line-citation":
       "a reason cites a line number, which moves when the file changes",
     "unknown-id": "a reason names an id of ours that neither surface produced",
+    status:
+      "an entry that does not say whether it is a decision or a gap, or says so wrongly",
     doubled:
       "one id named by two capability entries, so neither says where it belongs",
     "suspect-pair":

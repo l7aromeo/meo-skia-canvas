@@ -13,11 +13,20 @@
 # Nothing may be deleted from a surface without its entry going too; the gate
 # reports an id named here that no extractor produced as `stale`.
 
-# The population pass has not run yet, so there are no live entries. The two
-# below are the worked examples from the interchange contract, commented out:
-# a manifest shipped with entries naming ids no extractor produces would fail
-# its own gate as `stale` from the first run, which teaches a reader that a
-# red gate is the normal state.
+# AN ENTRY WITH AN EMPTY SIDE SAYS WHAT IT IS, in `status`: `deliberate`, when
+# the capability belongs on one surface and `why` says so, or `gap`, when it
+# is missing and should not be. A gap names the issue tracking it in `issue`
+# -- this repository's issue URL, or `unfiled` until the issue exists. The
+# gate accepts `unfiled`; `--require-filed` refuses it, for a release. An
+# entry with both sides may carry a status too, where part of it is a gap.
+#
+# A reason cites a file by its path and an item by its name, never by line
+# number, and every id it names in backticks has to exist: the gate checks
+# all three.
+#
+# The two entries below are the worked examples from the interchange
+# contract, commented out: they name ids no extractor produces, so live they
+# would fail the gate as `stale`.
 #
 
 # [[capability]]
@@ -66,11 +75,7 @@ why  = """JavaScript has these because DOMMatrix is a shared web type rather tha
         the crate because Rust returns a new value, but rotateAxisAngleSelf
         would have nothing to rotate about. An entry covering the Self
         spellings should skip these two."""
-
-
-
-
-
+status = "deliberate"
 
 [[capability]]
 name = "the event loop refusing to start"
@@ -82,6 +87,7 @@ why = """`App::run` is the crate's entry to the window loop and returns this whe
       returning a value, so there is nothing on that surface for this variant
       to pair with. The failure is reported on both, in the shape each
       surface uses."""
+status = "deliberate"
 
 [[capability]]
 name = "mask blur style"
@@ -89,6 +95,7 @@ rust = ["BlurStyle"]
 npm = []
 why = """Inline on the parameter: `MaskFilter.MakeBlur(style: 'normal' | 'solid' |
       'outer' | 'inner', sigma)`. Four states on each side."""
+status = "deliberate"
 
 [[capability]]
 name = "pattern repetition"
@@ -100,6 +107,7 @@ why = """npm declares `createPattern(image, repetition: string | null)` and name
       typed against the DOM passes unchanged; the four values are the
       standard's, and the binding refuses any other. Same capability, typed by
       enum on one side and by the DOM's string on the other."""
+status = "deliberate"
 
 [[capability]]
 name = "paragraph text height behavior"
@@ -110,6 +118,8 @@ why = """npm declares `textHeightBehavior?: number` in lib/index.d.ts and the
       but the npm declaration does not say which numbers mean what, and no DOM
       type sets the precedent the way it does for `createPattern` and `key`: a
       typing gap in the npm declaration, which a named union would close."""
+status = "gap"
+issue = "unfiled"
 
 [[capability]]
 name = "path boolean operations"
@@ -120,6 +130,7 @@ why = """JavaScript spells these as five methods on Path2D -- complement, differ
       five names correspond exactly to the five Rust variants. An alias would be
       wrong here: a variant is not a method, and pairing them would assert a
       sameness the shapes do not have."""
+status = "deliberate"
 
 [[capability]]
 name = "modifier key state on an event"
@@ -141,13 +152,7 @@ npm = ["KeyboardEventProps.altKey",
 why = """npm carries the same four states as flat booleans on each event payload --
       `ctrlKey`, `altKey`, `metaKey`, `shiftKey` on MouseEventProps and its keyboard
       twin -- where Rust groups them into a `ModifierKeys` value with four
-      accessors. Same capability, and the DOM's own shape on the JavaScript side.
-      The npm side was EMPTY here until the extractor learned to read members off
-      an object literal, and the eight ids above are the eight this sentence had
-      been naming in prose all along. Nobody was wrong: an empty side asserted
-      the members were one-sided, which was true of a surface nobody could see.
-      It is recorded rather than quietly filled in, because a reader meeting the
-      change otherwise cannot tell it from a correction."""
+      accessors. Same capability, and the DOM's own shape on the JavaScript side."""
 
 [[capability]]
 name = "named key identity"
@@ -158,6 +163,7 @@ why = """npm types the key as `key: string` on KeyboardEventProps, with the name
       both, and the string is deliberate: it is how TypeScript's DOM library
       types `KeyboardEvent.key`, so a handler written for the DOM type-checks
       here unchanged."""
+status = "deliberate"
 
 [[capability]]
 name = "gradient interpolation, space and hue"
@@ -195,6 +201,7 @@ why = """A deprecated alias for `HueMethod`, which is the name both surfaces
       it was importable from the package at `v5.9.0`: `tsc` accepts it there
       and reports `TS2724` without it. Rust has no counterpart because Rust
       had no such rename; `HueMethod` is what the crate has always spelled it."""
+status = "deliberate"
 
 [[capability]]
 name = "two Rust spellings of font slant"
@@ -206,7 +213,7 @@ why = """`TextSlant` and `FontSlant` are the same three states -- upright/normal
       Registered rather than aliased on purpose: two Rust types aliased onto one npm
       type would let a gap in either hide behind the other. The duplication is a
       Rust-side question, not a parity one."""
-
+status = "deliberate"
 
 [[capability]]
 name = "enum helper methods"
@@ -225,6 +232,7 @@ why = """Conveniences for working with a value that JavaScript spells as a strin
       questions the rest answer -- is this format animated, what is its MIME type,
       how many bytes is a pixel -- are answered in the binding before a value
       crosses. Rust-only by design rather than by omission."""
+status = "deliberate"
 
 [[capability]]
 name = "projective transforms"
@@ -263,6 +271,7 @@ why  = """A `FilterOp` variant is one function in a CSS filter string. npm takes
        Brightness, Contrast, DropShadow, Grayscale, HueRotate, Invert, Opacity,
        Saturate and Sepia are all reachable as `ctx.filter = 'blur(5px)'`. The enum is
        the parsed form, which npm never handles as a value."""
+status = "deliberate"
 
 [[capability]]
 name = "drop-shadow filter parameters"
@@ -274,6 +283,7 @@ npm  = []
 why  = """The payload of `FilterOp::DropShadow`. Reachable from npm the same
        way its parent is -- inside the `ctx.filter` string -- and separately as
        `ImageFilter.MakeDropShadow`. Not a value npm names."""
+status = "deliberate"
 
 [[capability]]
 name = "paint state as one object"
@@ -284,6 +294,7 @@ why  = """`Paint` is Skia's paint-state bag. npm has no holder for it
        `globalAlpha`, `globalCompositeOperation`, `lineWidth`, `lineCap`,
        `setLineDash` and `filter`. Every field pairs with a property; the object does
        not exist on that side."""
+status = "deliberate"
 
 [[capability]]
 name = "multi-page document access"
@@ -293,6 +304,7 @@ why  = """`Pages` is the collection type behind a multi-page canvas. npm reaches
        the same capability through `Canvas.pages`, a property, and `Canvas.svg`, a
        method, rather than through a type of its own -- so the members pair with
        `Canvas` members, not with a holder."""
+status = "deliberate"
 
 [[capability]]
 name = "SVG parsing and rasterisation"
@@ -303,6 +315,7 @@ why  = """`Svg::parse`, `rasterize`, `intrinsic_size` and `is_autosized` are
        on the `set_*` rule. npm reaches SVG through
        `Canvas.svg` and through `loadImage` on an SVG source; there is no npm type
        carrying these as members."""
+status = "deliberate"
 
 [[capability]]
 name = "inline placeholders in a paragraph"
@@ -318,6 +331,7 @@ why  = """npm carries these as the parameters of
        exists because of that limitation and should be deleted when both
        extractors emit parameters -- it is not a statement that npm lacks the
        capability."""
+status = "deliberate"
 
 [[capability]]
 name = "typed variable-font axis tags"
@@ -328,6 +342,7 @@ why  = """Rust names the five registered axes as variants -- ITAL, OPSZ, SLNT,
        and `CanvasRenderingContext2D.fontVariationSettings`. Same axes, one side typed
        and one side stringly, so there is nothing on npm for the variants to pair
        with."""
+status = "deliberate"
 
 [[capability]]
 name = "texture spacing"
@@ -340,9 +355,7 @@ why  = """npm takes this as the first positional argument of
        other seven `TextureOptions` fields are members of `CreateTextureOptions`
        and pair directly; only this one is positional. Same extractor limitation
        as the `Placeholder` entry, and deletable on the same condition."""
-
-
-
+status = "deliberate"
 
 [[capability]]
 name = "rectangle geometry"
@@ -361,7 +374,7 @@ why  = """One Rust type answers to two npm ones. `Rect as DOMRect` is declared
        one holder to one holder and cannot express that, which is why this is an
        entry. `Rect` and `DOMRect` are not listed: they pair through the
        declared rename, so only the `Path2DBounds` side needs registering."""
-
+status = "deliberate"
 
 [[capability]]
 name = "matrix initialiser dictionaries"
@@ -371,6 +384,7 @@ why  = """WebIDL init dictionaries: the shape a JavaScript caller passes to
        build a matrix, spelled as a type because JavaScript has no other way
        to name an argument list. Rust takes `Affine` itself, so the
        capability is `Affine` and these are its call syntax."""
+status = "deliberate"
 
 [[capability]]
 name = "point and rect initialiser dictionaries"
@@ -378,6 +392,7 @@ rust = []
 npm  = ["DOMPointInit", "DOMRectInit"]
 why  = """The same WebIDL argument-shape convention as the matrix dictionaries
        above. Rust takes `Point` and `Rect` directly."""
+status = "deliberate"
 
 [[capability]]
 name = "the readonly halves of the DOM geometry types"
@@ -401,7 +416,7 @@ why  = """WebIDL splits each geometry type into a readonly base and a mutable
        pair on their own. Only the members with no Rust counterpart are
        listed -- the third and fourth coordinates, the two `toJSON`s and
        `matrixTransform`."""
-
+status = "deliberate"
 
 [[capability]]
 name = "path construction and inspection"
@@ -428,7 +443,7 @@ why  = """npm builds a path by calling methods on `Path2D` and reads it back
        a struct. Same capability, two different shapes -- the segment
        structs are how Rust spells what a JavaScript caller writes as a
        tuple in a `PathSegment` union."""
-
+status = "deliberate"
 
 [[capability]]
 name = "a size without an origin"
@@ -439,6 +454,7 @@ why  = """`Size` is width and height with no position. npm never needs the type
        image dimensions -- JavaScript passes two numbers. It is a Rust
        argument-shape convenience, the mirror of the WebIDL init
        dictionaries above."""
+status = "deliberate"
 
 [[capability]]
 name = "premultiplied linear-light colour"
@@ -448,7 +464,7 @@ why  = """The crate's colour primitive: premultiplied, linear-light, and the
        type every drawing call takes. JavaScript passes a CSS colour string
        and `lib/classes/css.js` parses it, so the capability on that side is
        the string vocabulary rather than a type."""
-
+status = "deliberate"
 
 [[capability]]
 name = "the `prototype` property on declared classes"
@@ -463,22 +479,27 @@ npm  = ["CanvasGradient.prototype",
 why  = """Not a capability on either side. These are `declare class` artefacts
        in lib/index.d.ts -- every JavaScript constructor has a `prototype`,
        and declaring it explicitly adds nothing a caller can use. One of the
-       same kind was deleted from `ImageData` earlier for this reason. The
-       entry is here so the gate is quiet; the better fix is to stop
-       declaring them, which is the binding lane's call."""
-
+       same kind was deleted from `ImageData` for this reason. The entry is
+       here so the gate is quiet; the fix is to stop declaring them, which
+       would delete it -- a gap in the npm declaration."""
+status = "gap"
+issue = "unfiled"
 
 [[capability]]
 name = "naming a window at construction"
 rust = ["WindowSpec.id"]
-npm  = []
-why  = """The crate lets a caller supply the window's identifier when opening
-        it; npm declares `id` on the live `Window` and reads it back, with no
-        member on `WindowOptions` to set it. The rest of `WindowSpec` pairs
-        through `WindowSpec -> WindowOptions`, which replaced an entry written
-        when that alias was thought impossible: it had been measured against
-        npm's `Window`, where it collides 43 times, rather than against
-        `WindowOptions`, where it collides not at all."""
+npm = []
+why = """The crate lets a caller supply the window's identifier when opening it;
+      npm declares `id` on the live `Window` and reads it back, with no member
+      on `WindowOptions` to set it. The rest of `WindowSpec` pairs through
+      `WindowSpec -> WindowOptions`, which replaced an entry written when that
+      alias was thought impossible: it had been measured against npm's
+      `Window`, where it collides 43 times, rather than against
+      `WindowOptions`, where it collides not at all. A JavaScript caller
+      cannot choose the id a window is opened with, which one restoring
+      windows by id needs: a gap in npm."""
+status = "gap"
+issue = "unfiled"
 
 [[capability]]
 name = "a shadow offset as one member or two"
@@ -523,18 +544,26 @@ why  = """Rust keeps paragraph-level settings on `TextStyle`; npm splits them
 [[capability]]
 name = "export options split across three npm input types"
 rust = []
-npm  = ["RenderOptions",
-        "ImageDataExportSettings",
-        "ImageDataExportSettings.density",
-        "ImageDataExportSettings.matte",
-        "ImageDataExportSettings.msaa"]
-why  = """One Rust `EncodeOptions` answers to three npm types. Aliased to
-        `ExportOptions`, and its fields reach `RenderOptions` and
-        `ImageDataExportSettings` by name, so every Rust field pairs and none
-        is listed here. What is left is npm-side only: the two extra type
-        names, which the crate does not need because it takes the options as
-        arguments rather than as an object, and the three
-        `ImageDataExportSettings` members that no Rust field faces."""
+npm = ["RenderOptions",
+       "ImageDataExportSettings",
+       "ImageDataExportSettings.density",
+       "ImageDataExportSettings.matte",
+       "ImageDataExportSettings.msaa"]
+why = """One Rust `EncodeOptions` answers to three npm types. Aliased to
+      `ExportOptions`, and its fields reach `RenderOptions` and
+      `ImageDataExportSettings` by name, so every Rust field pairs and none is
+      listed here. What is left is npm-side only: the two extra type names,
+      which the crate does not need because it takes the options as arguments
+      rather than as an object, and the three `ImageDataExportSettings`
+      members that no Rust field faces. Those three are a gap in the crate's
+      readback: `get_image_data_as` takes no density, matte or msaa, and
+      `to_buffer` with `ImageFormat::Raw`, which takes them, has no alpha type
+      and is always unpremultiplied -- measured, 255,0,0,128 for
+      half-transparent red at density 1 and 2. Premultiplied pixels at density
+      2 are one `getImageData` call in JavaScript and a readback plus a hand
+      conversion in Rust."""
+status = "gap"
+issue = "unfiled"
 
 [[capability]]
 name = "a second npm name for font stretch"
@@ -555,9 +584,7 @@ why  = """`FontWidthName` declares the same nine members as
         capability, so the second is registered rather than given a second
         alias -- two Rust holders aliased onto one npm type, or the reverse,
         lets a gap in either hide behind the other."""
-
-
-
+status = "deliberate"
 
 [[capability]]
 name = "npm's abbreviated spellings of a blend operator"
@@ -594,6 +621,7 @@ why  = """Eighteen extra ways to write operators that already pair under another
        THE OTHER 29 npm IDS OF THIS CAPABILITY ARE NOT HERE: they pair through
        the `BlendMode -> GlobalCompositeOperation` owner alias in
        scripts/parity/rules.json."""
+status = "deliberate"
 
 [[capability]]
 name = "chroma subsampling for an AVIF or JPEG export"
@@ -634,6 +662,7 @@ why  = """The crate's own doc comment on `ColorAxis` says what this is:
        npm's ColorChannel: Rust already declares its own ColorChannel with Red,
        Green and Blue among its four, and both would claim ColorChannel.Red --
        measured at 3 collisions, the WindowSpec shape rules.json refuses."""
+status = "deliberate"
 
 [[capability]]
 name = "which kind of paint source is in force"
@@ -651,6 +680,7 @@ why  = """The doc comment on `PaintSource` gives the reason the Rust getter
        object, because the binding kept it. Same question asked of the same
        state, and the answer has a different shape because one side can hold the
        handle."""
+status = "deliberate"
 
 [[capability]]
 name = "a three-component point"
@@ -660,6 +690,7 @@ why  = """npm declares Point3 as a positional tuple, so the type pairs and has n
        named members to pair. The mirror of the DOM init dictionaries: there
        JavaScript names a shape Rust passes as arguments, here Rust names a
        shape JavaScript passes as a list."""
+status = "deliberate"
 
 [[capability]]
 name = "raw pixel buffer layout"
@@ -681,7 +712,11 @@ why  = """Depth and colour space cross to npm as colorType and colorSpace -- Rus
        that reach a readback -- ImageDataExportSettings for `getImageData` and
        ExportOptions for `toBuffer`, which `canvas.raw` delegates to. Two npm
        ids against one Rust field, because npm passes the parts here as it does
-       for the other two thirds.
+       for the other two thirds. Only the first has a face in Rust:
+       `PixelExportOptions.premultiplied` reaches `get_image_data_as`, and
+       `EncodeOptions` has no alpha type, so a raw `to_buffer` is always
+       unpremultiplied -- the gap 'export options split across three npm input
+       types' records.
        NOT on ImageDataSettings, which is the way IN. `putImageData` defines
        the bytes it consumes, so there is nothing there for a caller to choose
        and the asymmetry is the standard's rather than this library's.
@@ -756,6 +791,7 @@ why  = """Not exported to JavaScript, and deliberately. A JavaScript caller gets
        radius throws IndexSizeError, not Error::InvalidRadius. Exposing the enum
        would be a second, parallel taxonomy for JavaScript to branch on, and the
        standard's is the one a caller already knows."""
+status = "deliberate"
 
 [[capability]]
 name = "the text engine that owns a font collection"
@@ -773,6 +809,7 @@ why  = """A Rust caller makes an engine, decides whether it sees the system font
        aliased onto ParagraphBuilder: that alias gains two ids and they are
        TextEngine::new against ParagraphBuilder.new, a constructor meeting a
        constructor, which is agreement no two types can fail to reach."""
+status = "deliberate"
 
 [[capability]]
 name = "explicit disposal of a shader"
@@ -781,6 +818,7 @@ npm  = ["Shader.delete"]
 why  = """JavaScript needs a way to release the Skia object early because nothing
        in the language says when a value dies. Rust frees it on drop, which is
        why there is no method to name."""
+status = "deliberate"
 
 [[capability]]
 name = "the five input-event types"
@@ -800,6 +838,8 @@ why  = """Both surfaces carry the value; only npm constrains it. Rust models the
        crate is the inconsistent side: it names every key as a variant but not
        these five, so a caller matching on the input type matches string
        literals with nothing to catch a typo. A typing gap in the crate."""
+status = "gap"
+issue = "unfiled"
 
 [[capability]]
 name = "the CSS font-variant keyword set"
@@ -849,6 +889,7 @@ why  = """The thirty-five keywords a CSS font-variant string may contain, enumer
        CanvasFontVariantCaps: caps is one property of the shorthand, and these
        thirty-five are the whole vocabulary. As with FontWidthName, npm gives a
        name to something Rust never lifts out of the string."""
+status = "deliberate"
 
 [[capability]]
 name = "a second npm name for the backend report"
@@ -875,6 +916,7 @@ why  = """Six of its members are npm's second spelling of BackendInfo, which Rus
        CanvasOptions, WindowSpec and Window. They sit on the engine report in
        JavaScript because that is where a caller asks what rendering settings
        are in force."""
+status = "deliberate"
 
 [[capability]]
 name = "lowercase shorthands in the npm colour type"
@@ -887,6 +929,7 @@ why  = """Three convenience spellings beside the explicit ones -- 'rgba' for
        does not have is a SECOND name for it, and member_aliases is
        single-valued, so PixelDepth.Uint8 can claim RGBA8888 or rgba and not
        both. An npm-side convenience, not an absence."""
+status = "deliberate"
 
 [[capability]]
 name = "constructing a font feature"
@@ -898,6 +941,7 @@ why  = """Three constructors for a value JavaScript writes as an object literal:
        themselves pair, through the FontFeature -> TextFontFeatures alias. Same
        residue as the accepted FontVariation -> FontVariationInput, where `new`
        is likewise the part with no JavaScript member."""
+status = "deliberate"
 
 [[capability]]
 name = "npm's throwing constructor beside its null-returning factories"
@@ -909,6 +953,7 @@ why  = """npm offers each noise shader twice, and the doc comment on `Shader`'s
        instead.' Rust needs one function per kind because it returns a `Result`,
        which is both answers at once, so there is nothing here for the crate to
        be missing."""
+status = "deliberate"
 
 [[capability]]
 name = "error variant payload fields"
@@ -938,6 +983,7 @@ why = """These are the fields of `Error`'s struct variants -- the crate's
       the rules in AGENTS.md. A caller reads it by catching and reading `.message`,
       which is not a member of anything. This is the shape the commented example
       at the head of this file describes for `Error::InvalidRadius`."""
+status = "deliberate"
 
 [[capability]]
 name = "browser-shaped image and canvas API"
@@ -956,10 +1002,7 @@ npm = ["Image.onload",
        "Canvas.toURLSync",
        "Canvas.toSharp",
        "Canvas.toSharpSync",
-       "ImageData.toSharp",
-       "Window.closed",
-       "Window.close",
-       "Window.ctx"]
+       "ImageData.toSharp"]
 why = """These exist so that code written against the DOM runs unchanged. The
       crate has no counterpart by intent rather than by omission: `onload`/`onerror`
       and `complete`/`decode` are the browser's asynchronous decode protocol, which
@@ -969,6 +1012,7 @@ why = """These exist so that code written against the DOM runs unchanged. The
       JavaScript library that has no Rust equivalent. Recorded as npm-by-nature, NOT
       as missing from Rust -- a reader sent looking for a Rust `to_blob` would find
       nothing and conclude wrongly that it should exist."""
+status = "deliberate"
 
 [[capability]]
 name = "borrow-shaped pixel and canvas access"
@@ -989,6 +1033,7 @@ why = """Constructors and accessors whose signature is the capability. A
       `Uint8ClampedArray` is always aliasable and construction throws rather than
       returning. npm reaches the same data through `ImageData.data` and the `Image`
       and `Canvas` constructors. Rust-by-nature, not a gap in npm."""
+status = "deliberate"
 
 [[capability]]
 name = "per-format export shorthands"
@@ -1004,9 +1049,9 @@ why = """Six methods on the npm side against two on the Rust side: the crate
       where npm exposes one method per format as a convenience. Same capability, one
       side parameterised and one side enumerated, which is why no rule can pair them
       -- the format is a value on one side and part of a name on the other."""
+status = "deliberate"
 
-# Lane C2 -- geometry, matrices, paths, filters and the DOM types.
-# Every id below is taken from the live gate report, not from a prior round.
+# Geometry, matrices, paths, filters and the DOM types.
 
 [[capability]]
 name = "the 4x4 accessors of a two-dimensional matrix"
@@ -1034,6 +1079,7 @@ why  = """`DOMMatrix` is a shared web type and exposes the full 4x4 by element.
         the entry on the 3D half of DOMMatrix for why none of it reaches a
         pixel. Registered together rather than split six-and-ten, because a
         caller meets them as one block of accessors."""
+status = "deliberate"
 
 [[capability]]
 name = "matrix operations applied in place"
@@ -1054,6 +1100,7 @@ why  = """Each is the non-`Self` operation applied to the receiver rather than
         writes `m.multiplySelf(n)`. The capability is the operation, which
         pairs; this is the assignment, which a borrow-checked language does
         not need a second method for."""
+status = "deliberate"
 
 [[capability]]
 name = "JavaScript construction and serialisation of a matrix"
@@ -1076,6 +1123,7 @@ why  = """How JavaScript spells construction, copying and serialisation. `clone`
         `from_css` returns `None` for `matrix3d`, `translate3d` and
         `rotateZ`, which `setMatrixValue` flattens to the 2D matrix -- a gap
         in the crate that no entry can name, since the two ids pair."""
+status = "deliberate"
 
 [[capability]]
 name = "matrix constructors against matrix methods"
@@ -1112,6 +1160,7 @@ why  = """npm reads a path back as an array of tuples whose first element names
         `Path2D`; these are the two spellings of what a segment IS. The
         `MoveTo` and `LineTo` fields are members of those structs, so they
         cannot pair with a tuple position."""
+status = "deliberate"
 
 [[capability]]
 name = "explicit construction and disposal of a filter object"
@@ -1141,6 +1190,7 @@ npm  = ["ColorChannel.A", "ColorChannel.B", "ColorChannel.G", "ColorChannel.R"]
 why  = """npm declares `R`, `G`, `B` and `A` beside `red`, `green`, `blue` and
         `alpha`, which are the four the Rust enum carries and which pair. Four
         extra spellings of four values, not four capabilities."""
+status = "deliberate"
 
 [[capability]]
 name = "npm's alias spellings for a colour space"
@@ -1156,6 +1206,7 @@ why  = """The npm union carries an alias for every space it names -- `p3` for
         `display-p3`, `linear` for `srgb-linear`, and the four HDR spellings.
         Rust's `PixelColorSpace` names each space once and they pair on the
         canonical spelling."""
+status = "deliberate"
 
 [[capability]]
 name = "cursor keywords with no counterpart"
@@ -1168,6 +1219,7 @@ why  = """Two one-sided values in an otherwise complete pairing of 34 against 35
         capability npm lacks. npm's `none` is the other one, registered in
         'hiding the cursor rather than choosing one': the crate hides the
         cursor with `None` in the `Option<Cursor>` its setters take."""
+status = "deliberate"
 
 [[capability]]
 name = "the third and fourth coordinates, and DOM construction"
@@ -1185,6 +1237,7 @@ why  = """`DOMPoint` carries `z` and `w` because it is the shared web point type
         under the names the DOM uses, and Rust's `Rect` names the four edges
         instead. `fromPoint`, `fromRect` and `new` are JavaScript construction,
         which Rust does with a struct literal."""
+status = "deliberate"
 
 [[capability]]
 name = "a shadow offset as one point or two numbers"
@@ -1212,6 +1265,7 @@ why  = """The crate parses these strings itself, so it offers a typed setter and
         it reaches the binding, so the npm side has one member where the crate
         has two and the typed one is what pairs. The `_css` half is the
         crate's own convenience, not a capability npm is missing."""
+status = "deliberate"
 
 [[capability]]
 name = "paint sources the crate names as types"
@@ -1238,6 +1292,7 @@ why  = """`is_point_in_path` and `is_point_in_stroke` take a `Path2D`; these two
         reaches by calling the same method with no path argument. One
         capability, spelled as an overload in JavaScript and as a second name
         in Rust, which has no overloading."""
+status = "deliberate"
 
 [[capability]]
 name = "crate-side geometry and paint accessors"
@@ -1268,6 +1323,7 @@ why  = """Constructors, readers and shape types the crate names and JavaScript
         forms of `round_rect` and `save_layer`, which pair; `PaintStyle` is
         the fill-or-stroke choice that npm makes by calling `fill()` or
         `stroke()`."""
+status = "deliberate"
 
 [[capability]]
 name = "the canvas a context belongs to"
@@ -1277,6 +1333,7 @@ why  = """A back-reference from the context to its canvas. Rust hands out a
         context borrowed from the canvas, so the caller already holds the
         canvas and the crate does not need to hand it back -- and could not
         without an owning handle it does not keep."""
+status = "deliberate"
 
 [[capability]]
 name = "boolean operations on a path"
@@ -1312,6 +1369,7 @@ why  = """The crate stores the winding rule on the path; the Canvas standard
         so npm has no member on `Path2D` to pair with. The rule itself pairs:
         `FillRule` against `CanvasFillRule`, aliased. This is where the value
         is kept, not whether it exists."""
+status = "deliberate"
 
 [[capability]]
 name = "building a path before it is a path"
@@ -1327,6 +1385,7 @@ why  = """`PathBuilder` is aliased to npm's `Path2D` and 16 of its methods pair
         path, `is_empty` asks before there is anything to ask of, and
         `round_rect_elliptical` is the crate's wider `roundRect` taking
         per-corner radii."""
+status = "deliberate"
 
 [[capability]]
 name = "the parameter of a CSS filter operation"
@@ -1351,6 +1410,7 @@ why  = """Ten variants of one capability, and npm has no type for any of them
         Registered as one entry because they are one capability with ten
         settings, not ten capabilities; if a rule ever reaches any of them the
         `redundant` check says so."""
+status = "deliberate"
 
 [[capability]]
 name = "the value an error carries"
@@ -1379,55 +1439,78 @@ why  = """Twelve variants of one capability. JavaScript reports a failure as an
         `InvalidFontAxisTag` carries none, which is why it appears here as a
         bare id. What crosses to JavaScript is the exception TYPE, and that
         pairs already through `lib/classes/neon.js`."""
-
+status = "deliberate"
 
 [[capability]]
 name = "windowing callbacks and borrowed canvas access"
-rust = ["Window::on_draw", "Window::on_event", "Window::with_canvas"]
-npm = []
+rust = ["Window::on_draw",
+        "Window::on_event",
+        "Window::with_canvas"]
+npm = ["Window.ctx"]
 why = """What makes these a group is the signature rather than the subject.
-      `on_draw` and `on_event` take a Rust closure invoked during the event loop;
-      `with_canvas` takes one and lends it the canvas for its duration; `canvas_mut`
-      hands back a `&mut`. npm expresses the same two capabilities as event
-      listeners on the window object and as the always-aliasable `Window.canvas`,
-      because JavaScript has no borrow to scope and no way to express a callback
-      that may not outlive its argument. The drawing and the events both cross; the
-      lending is what does not."""
+      `on_draw` and `on_event` take a Rust closure invoked during the event
+      loop; `with_canvas` takes one and lends it the canvas for its duration;
+      `canvas_mut` hands back a `&mut`. npm expresses the same two
+      capabilities as event listeners on the window object and as the
+      always-aliasable `Window.canvas`, because JavaScript has no borrow to
+      scope and no way to express a callback that may not outlive its
+      argument. The drawing and the events both cross; the lending is what
+      does not. `Window.ctx` is npm's shorthand for the context of
+      `Window.canvas`, which a Rust caller reaches through `canvas_mut` and
+      `Canvas::context`."""
 
 [[capability]]
 name = "window and app operations npm reaches through properties"
-rust = ["Window::set_position", "App::close_window", "App::window_is_open", "App::idle"]
-npm = []
-why = """Four calls whose npm counterpart is a property rather than a method.
-      `set_position` is npm's `Window.left` and `Window.top` assigned; `close_window`
-      and `window_is_open` are `Window.close()` and `Window.closed` on the window
-      itself rather than on the app; `idle` is read from `App.running`. Grouped
-      because the shape is one thing -- rust puts the operation on the owner and npm
-      puts the state on the owned -- and separating them would give four entries
-      with one sentence between them."""
+rust = ["Window::set_position",
+        "App::close_window",
+        "App::window_is_open",
+        "App::idle"]
+npm = ["Window.close",
+       "Window.closed"]
+why = """Calls whose npm counterpart is on the window rather than the app, or is
+      a property rather than a method. `set_position` is npm's `Window.left`
+      and `Window.top` assigned; `close_window` and `window_is_open` are
+      `Window.close()` and `Window.closed`, on the window itself rather than
+      on the app; `idle` is read from `App.running`. Grouped because the shape
+      is one thing -- Rust puts the operation on the owner and npm puts the
+      state on the owned."""
 
 [[capability]]
 name = "Rust-only pixel and page introspection"
-rust = ["ImageData::premultiplied",
-        "ImageData::stride",
+rust = ["ImageData::stride",
         "ImageData::options",
         "Image::is_premultiplied",
         "Canvas::compositing_color_type",
         "Canvas::page"]
 npm = []
 why = """Buffer and page facts the crate exposes and npm does not.
-      `premultiplied` and `is_premultiplied` are the alpha state of the pixel buffer;
-      `stride` is its row length in bytes; `options` is the settings the data was
-      built with; `compositing_color_type` is the surface's working format, distinct
-      from the `color_type` that already pairs; `page` is the current page index
-      where npm exposes only the `pages` count. npm has `bytesPerPixel`, which is
-      `stride` divided by width, so that part is derivable rather than absent -- the
-      rest is not. `premultiplied` is the one that matters: npm's `ImageData`
-      carries no alpha state, so a buffer read with `alphaType: 'premultiplied'`
-      and handed back to `putImageData` or `drawImage` is read as
-      unpremultiplied -- half-transparent red reads 128,0,0,128 and comes back
-      127,0,0,128, where the crate round-trips it to 255,0,0,128. A gap in npm,
-      and the one entry here a caller gets wrong output from."""
+      `is_premultiplied` is an Image's alpha state; `stride` is an ImageData's
+      row length in bytes; `options` is the settings the data was built with;
+      `compositing_color_type` is the surface's working format, distinct from
+      the `color_type` that already pairs; `page` is the current page index,
+      where npm exposes the `pages` list whose last entry is the current page.
+      npm has `bytesPerPixel`, which is `stride` divided by width. None of
+      them is something a JavaScript caller gets wrong for want of it: npm
+      never hands out an Image's bytes, so an Image's alpha state cannot be
+      misread there, and the rest are derivable or the binding's own business.
+      An ImageData's alpha state is a different matter, and is 'the alpha
+      state an ImageData carries'."""
+status = "deliberate"
+
+[[capability]]
+name = "the alpha state an ImageData carries"
+rust = ["ImageData::premultiplied"]
+npm = []
+why = """The crate's ImageData records whether its bytes are premultiplied, and
+      `put_image_data` and `Image::from_pixels` read them accordingly. npm's
+      ImageData carries no alpha state, though `getImageData` can produce
+      premultiplied bytes through `alphaType`, so `putImageData` and
+      `drawImage` read such a buffer as unpremultiplied: half-transparent red
+      reads 128,0,0,128 and comes back 127,0,0,128, where the crate
+      round-trips the same readback to 255,0,0,128. A gap in npm, and one that
+      gives a caller wrong output."""
+status = "gap"
+issue = "unfiled"
 
 [[capability]]
 name = "font metrics the crate carries and the declaration does not"
@@ -1435,20 +1518,32 @@ rust = ["Font.size",
         "Font.line_height",
         "Font::line_height",
         "Font::italic",
-        "Font::new",
-        "Font::parse"]
+        "Font::new"]
 npm = ["Font.file"]
 why = """`Font.size` and `Font.line_height` are metrics of a resolved font that
-      npm's `Font` does not declare -- it carries `family`, `file`, `style`, `weight`
-      and `width`, which is identity rather than metrics. `italic` is a second rust
-      spelling of what `slant` already pairs to npm's `style`. `new` and `parse` are
-      constructors returning `Result`. Going the other way, npm's `file` is the path
-      a font was loaded from, which the crate does not retain on the font itself:
-      a gap in the crate. `parse` is narrower than the npm `font` property it
-      faces: it takes `<size>px` and a px line height only, and refuses `pt`,
-      `em`, a unitless line height, `small-caps` and the keyword sizes, all of
-      which `ctx.font` accepts -- a second gap in the crate. Grouped as one
+      npm's `Font` does not declare -- it carries `family`, `file`, `style`,
+      `weight` and `width`, which is identity rather than metrics. `italic` is
+      a second Rust spelling of what `slant` already pairs to npm's `style`.
+      `new` is a constructor returning `Result`. Going the other way, npm's
+      `file` is the path a font was loaded from, which the crate does not
+      retain on the font itself: a gap in the crate. Grouped as one
       capability, what a font object remembers about itself."""
+status = "gap"
+issue = "unfiled"
+
+[[capability]]
+name = "parsing a CSS font shorthand"
+rust = ["Font::parse"]
+npm = []
+why = """`Font::parse` reads the Canvas `font` shorthand, as `ctx.font` does,
+      with a narrower grammar: `<size>px` and a px line height only. It
+      refuses `pt` and `em` sizes, a unitless line height, `small-caps` and
+      the keyword sizes, all of which `ctx.font` accepts -- measured, `12pt`
+      reading back as 16px and `x-large` as 24px there -- and reports the
+      refusal as `Error::FontRegister`, a registration error, rather than as a
+      parse error. A gap in the crate."""
+status = "gap"
+issue = "unfiled"
 
 [[capability]]
 name = "text rendering settings"
@@ -1460,7 +1555,7 @@ why = """Both sides have both settings; only the holder differs. npm takes them
       listed: `CanvasOptions.textContrast` and `textGamma` pair on their own now
       that `WindowOptions` inherits `CanvasOptions`, so only the two Rust
       accessors need an entry, and the holder difference is what this records."""
-
+status = "deliberate"
 
 [[capability]]
 name = "two Rust calls behind one npm method"
@@ -1479,6 +1574,7 @@ why  = """Four cases of the same shape, each refused as a member alias by
         `_css` setters registered above. Every one of them is a second Rust
         spelling of a capability that already pairs, so this entry records
         where the extra name went rather than a gap."""
+status = "deliberate"
 
 [[capability]]
 name = "which side of a break a text position belongs to"
@@ -1491,6 +1587,7 @@ why  = """npm declares affinity as a plain field on `GlyphPosition` with no type
         `GlyphPosition.affinity` at nought characters and says in the same
         breath that the holders differ, which is exactly the reading: same
         word, and the capability is the field rather than the spelling."""
+status = "deliberate"
 
 [[capability]]
 name = "whether a canvas renders on the CPU or the GPU"
@@ -1503,6 +1600,7 @@ why  = """The same two values on both surfaces in different shapes. Rust names
         field rather than to a type. `Canvas.engine_kind -> engine` is already
         a member alias, so the accessor pairs and this is only where the two
         values are named."""
+status = "deliberate"
 
 [[capability]]
 name = "a styled run of text"
@@ -1513,15 +1611,21 @@ why  = """`TextEngine::layout_rich_text` takes a slice of these, each a string
         paragraph builder -- push a style, add text, pop -- so the run is a
         sequence of calls rather than a value, and there is no member for
         either field to pair with."""
+status = "deliberate"
 
 [[capability]]
 name = "the format a multi-page save chooses"
 rust = []
-npm  = ["SaveOptions", "SaveOptions.format"]
-why  = """npm's `saveAs` takes a `format` naming the container to write when the
-        filename does not settle it. The crate takes the format as an argument
-        to the export call rather than as a field on an options object, so
-        `EncodeOptions` has no member facing this one."""
+npm = ["SaveOptions",
+       "SaveOptions.format"]
+why = """npm's `toFile` takes a `format` naming the container to write when the
+      filename does not settle it, and a filename containing `{}` writes one
+      numbered file per page. `Canvas::to_file` takes the format from the
+      extension alone and writes one page, so a Rust caller wanting either
+      passes the format to `to_buffer` and writes the bytes itself, page by
+      page. A gap in the crate's file export."""
+status = "gap"
+issue = "unfiled"
 
 [[capability]]
 name = "releasing cached memory on request"
@@ -1531,7 +1635,7 @@ why  = """A crate-side call asking Skia to release what its caches are holding.
         JavaScript has no counterpart because it does not manage this: the
         addon trims on its own schedule and a caller has no handle to ask
         with."""
-
+status = "deliberate"
 
 [[capability]]
 name = "npm's decomposition of the drawing context"
@@ -1564,22 +1668,28 @@ why  = """Fifteen interfaces the HTML standard splits `CanvasRenderingContext2D`
        this one entry rather than fifteen.
        `Context2D` is named on the Rust side deliberately, and not as padding.
        An entry naming a holder with the OTHER SIDE EMPTY claims that holder's
-       members are one-sided, and the gate now verifies that claim -- it was
-       this lane's own proposal one round earlier. Every member of all fifteen
-       pairs, so the empty-sided form is exactly false here, and the gate said
-       so: fifteen `stale` rows, one per interface. Rust's `Context2D` IS what
+       members are one-sided, and the gate verifies that claim. Every member
+       of all fifteen pairs, so the empty-sided form is exactly false here, and
+       the gate said so: fifteen `stale` rows, one per interface. Rust's `Context2D` IS what
        the fifteen decompose, so naming it states the relation and drops the
        claim that was wrong."""
+status = "deliberate"
 
 [[capability]]
 name = "the two npm unions of drawable sources"
 rust = []
-npm  = ["CanvasDrawable", "CanvasPatternSource"]
-why  = """`Canvas | Image | ImageData` twice over -- what `drawImage` accepts and
-       what `createPattern` accepts. Neither declares a member and nothing
-       inherits either, so they are not part of the mixin decomposition above
-       despite the shared prefix. Rust takes these as trait bounds and generic
-       parameters, which name no type a caller writes."""
+npm = ["CanvasDrawable",
+       "CanvasPatternSource"]
+why = """`Canvas | Image | ImageData` twice over -- what `drawImage` accepts and
+      what `createPattern` accepts. Neither declares a member and nothing
+      inherits either, so they are not part of the mixin decomposition above
+      despite the shared prefix. The crate has a method per source instead:
+      `draw_image` and `create_pattern` take an `Image`, `draw_canvas` and
+      `create_pattern_from_canvas` a `Canvas`, and none takes an `ImageData`,
+      which a Rust caller converts through `Image::from_pixels` first. That
+      conversion is a gap in the crate."""
+status = "gap"
+issue = "unfiled"
 
 [[capability]]
 name = "npm argument shapes that declare no members"
@@ -1603,6 +1713,7 @@ why  = """Type aliases for the shapes an argument may take, each a union or a
        `Color4fInput`. TypeScript needs a name to write the union down;
        Rust says the same thing with an enum parameter or an overload and
        needs no exported type. None of them is a capability."""
+status = "deliberate"
 
 [[capability]]
 name = "the value half of npm's const-object enums"
@@ -1617,6 +1728,7 @@ why  = """Each is `(typeof X)[keyof typeof X]` beside a const object `X`, which 
        is an object. Five pairs, five extra names, and the enums they belong to
        already pair. A Rust enum is one declaration and its variants have a type
        without a second name for it, so there is nothing on that side to pair."""
+status = "deliberate"
 
 [[capability]]
 name = "module-level entry points"
@@ -1641,8 +1753,7 @@ why  = """Three public constants a Rust caller can read before constructing
        anything. JavaScript reaches the same values as default arguments --
        `new Canvas()` with no dimensions -- and has nothing to export, since a
        default argument is not a value with a name."""
-
-
+status = "deliberate"
 
 [[capability]]
 name = "keyboard and mouse event payloads"
@@ -1716,17 +1827,18 @@ why  = """Both sides carry the same events; the shapes differ. Rust models them 
        `x` and `y`; `Mouse.page_point` faces `pageX` and `pageY`.
        `AppEvent` is the exception in this entry and is worth saying so: its
        four variants are commands rather than events, and npm issues them as
-       method calls instead -- `Open` against `Window.open`, `Close` against
-       `Window.close`, `FrameRate` against `App.fps`, `Quit` against `App.quit`.
-       Those four npm methods pair with their Rust counterparts on their own,
-       checked with the gate's `normalise` rather than by reading the member
-       lists; the enum is the Rust-side message form of them and has no npm
-       type.
+       method calls instead -- `Open` against `Window.open`, `Close` against `Window.close`, `FrameRate`
+       against `App.fps`, `Quit` against `App.quit`. Three of those pair with
+       their Rust counterparts on their own -- `Window::open`, `App::set_fps`
+       and `App::quit`; `Window.close` faces `App::close_window` and is
+       registered with it in 'window and app operations npm reaches through
+       properties'. The enum is the Rust-side message form of them and has no
+       npm type.
        `WindowEvents.draw`, `.frame` and `.setup` have no `UiEvent` variant
        because they are not input: they are the render and lifecycle callbacks
        Rust registers through `Window::on_draw` and `Window::on_event`, which
        are registered in `windowing callbacks and borrowed canvas access` --
-       they do NOT pair, and an earlier draft of this sentence said they did."""
+       they do NOT pair."""
 
 [[capability]]
 name = "app and window event payload fields"
@@ -1759,11 +1871,6 @@ why  = """Payload fields of `AppEvent` and the window event variants -- `AppEven
        `KeyboardEventProps`, so the same values arrive as properties of an event
        object rather than as members of a variant. The capability pairs; the
        carrier does not.
-       The npm side was EMPTY here until the extractor learned to read members
-       off an object literal, and the nine ids above are the properties this
-       sentence had been describing in prose. Nobody was wrong: an empty side
-       asserted the members were one-sided, which was true of a surface nobody
-       could see.
        WHERE RUST CARRIES ONE VALUE npm KEEPS THE PARTS, which is why the two
        sides do not count the same. `Resize.0` is one size against
        `.resize.height` and `.width`; `Fullscreen.0` is one flag against
@@ -1783,11 +1890,12 @@ why  = """npm splits the property's vocabulary in two so a caller can see which
        adds -- and unions them as `GlobalCompositeOperation`. Rust has one
        `BlendMode` enum for all twenty-nine, aliased onto the union, so every
        MEMBER of both pairs and neither NAME has anything to face.
-       Two ids, and not the shape the rest of this round is. A bare type id is
+       A bare type id is
        usually left over because an entry registered a holder's members and
        forgot the holder; here no entry ever registered them, because they pair
        on their own through the alias. So there is nothing to append these to,
        which is why they are an entry rather than a line."""
+status = "deliberate"
 
 [[capability]]
 name = "hiding the cursor rather than choosing one"
@@ -1802,7 +1910,7 @@ why  = """npm spells hiding as a keyword inside the cursor union; the crate
         variant spells `none` and that parsing the keyword fails. Same
         capability, expressed as a type in one language and a value in the
         other."""
-
+status = "deliberate"
 
 [[capability]]
 name = "construction, which each surface shapes per type"
@@ -1849,6 +1957,7 @@ why = """Ids of the form `Holder.member.value` -- a union or object written
       rather than paired because the mapping has no form for a member-path
       holder, and that is a decision about the mapping rather than an absence in
       either surface."""
+status = "deliberate"
 
 [[capability]]
 name = "npm's second spellings of an export format"
@@ -1860,6 +1969,7 @@ why = """`jpeg` and `tiff` pair with Rust's `Jpeg` and `Tiff`; `jpg` and `tif`
       one, so there is no second variant for these to pair with. Alias spellings, not
       capabilities -- the same shape as npm's lowercase colour-type shorthands
       already registered."""
+status = "deliberate"
 
 [[capability]]
 name = "a second Rust name for a capability that already pairs"
@@ -1877,24 +1987,39 @@ why = """Each is a Rust spelling beside one that already pairs, and each is
       `Paragraph::line_count` already aliased to `getNumberOfLines`;
       `spans_pages` is
       the predicate beside `is_animated` and `is_vector`, which are registered."""
+status = "deliberate"
 
 [[capability]]
 name = "npm-side conveniences over a value that already pairs"
 rust = []
-npm  = ["Canvas.contexts",
-        "ImageData.bytesPerPixel",
-        "Image.currentColor",
-        "WindowOptions.canvas",
-        "FontLibrary.use"]
-why = """Five npm members with no Rust counterpart, each derivable from or
-      adjacent to something that pairs. `contexts` is a static `WeakMap` registry
-      keyed by canvas -- rejected as an alias for `Canvas::context`, which is an
-      instance accessor. `bytesPerPixel` is `stride` divided by width.
-      `currentColor` is the SVG paint-inheritance colour, which the crate takes when
-      rasterising rather than storing on the image. `canvas` is the surface a window
-      draws on rather than an option about the window -- the residue named when
-      `WindowSpec -> WindowOptions` was measured. `use` registers a font from a path
-      or a buffer, where Rust names the two separately and both are registered."""
+npm = ["Canvas.contexts",
+       "ImageData.bytesPerPixel",
+       "Image.currentColor",
+       "WindowOptions.canvas"]
+why = """Four npm members with no Rust counterpart, each derivable from or
+      adjacent to something that pairs. `contexts` is a static `WeakMap`
+      registry keyed by canvas -- rejected as an alias for `Canvas::context`,
+      which is an instance accessor. `bytesPerPixel` is `stride` divided by
+      width. `currentColor` is the SVG paint-inheritance colour, which the
+      crate takes when rasterising rather than storing on the image. `canvas`
+      is the surface a window draws on rather than an option about the window
+      -- the residue named when `WindowSpec -> WindowOptions` was measured."""
+status = "deliberate"
+
+[[capability]]
+name = "registering several font files, or one under its own family name"
+rust = []
+npm = ["FontLibrary.use"]
+why = """`FontLibrary.use` registers a font from a path or a buffer, which the
+      crate's `register_font_from_path` and `register_font_from_data` do one
+      file at a time, and also several files under one family, several
+      families from one object, and a file under the family name the font
+      itself declares, returning the details of what it registered. The crate
+      takes one file per call, always needs the family name from the caller
+      and returns nothing, so a Rust caller registering a font under its own
+      name has to know that name first. A gap in the crate."""
+status = "gap"
+issue = "unfiled"
 
 [[capability]]
 name = "no decoration, as a value and as a predicate"
@@ -1918,3 +2043,5 @@ why = """The crate carries the same state without a field for it:
       no `Option` to be `None`. So `enabled: false` and Rust's `strut: None` are the
       same state, and `enabled` has no Rust member to pair with because Rust encodes
       it in the shape rather than in a field."""
+status = "deliberate"
+

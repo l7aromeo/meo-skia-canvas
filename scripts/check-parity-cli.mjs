@@ -1372,7 +1372,8 @@ why  = "Declared on the JavaScript side only, and the crate does not need it."
     cases += 1;
     const flagged =
       found.some((p) => p.kind === "dangling-citation") &&
-      report(found).includes("dangling-citation");
+      report(found).includes("dangling-citation") &&
+      !report(found).includes("undefined");
     if (flagged !== expected) {
       console.error(
         `  self-test FAILED: ${label} was ${flagged ? "" : "not "}reported as a dangling citation, got ${JSON.stringify(found.map((p) => `${p.kind}:${p.id}`))}`,
@@ -1403,7 +1404,8 @@ why  = "Declared on the JavaScript side only, and the crate does not need it."
     cases += 1;
     const flagged =
       found.some((p) => p.kind === "line-citation") &&
-      report(found).includes("line-citation");
+      report(found).includes("line-citation") &&
+      !report(found).includes("undefined");
     if (flagged !== expected) {
       console.error(
         `  self-test FAILED: ${label} was ${flagged ? "" : "not "}reported as a line citation, got ${JSON.stringify(found.map((p) => `${p.kind}:${p.id}`))}`,
@@ -1459,10 +1461,110 @@ why  = "Declared on the JavaScript side only, and the crate does not need it."
     cases += 1;
     const flagged =
       found.some((p) => p.kind === "unknown-id") &&
-      report(found).includes("unknown-id");
+      report(found).includes("unknown-id") &&
+      !report(found).includes("undefined");
     if (flagged !== expected) {
       console.error(
         `  self-test FAILED: ${label} was ${flagged ? "" : "not "}reported as an unknown id, got ${JSON.stringify(found.map((p) => `${p.kind}:${p.id}`))}`,
+      );
+      bad += 1;
+    }
+  }
+
+  // A ONE-SIDED ENTRY SAYS WHETHER IT IS A DECISION OR A GAP. A reason can
+  // describe a missing capability as well as a deliberate one, and four
+  // reasons deferred a "real gap" to files nobody committed, so the gaps were
+  // recorded nowhere. Now an entry with an empty side carries `status`:
+  // `deliberate`, with no issue, or `gap`, with the issue in this repository
+  // that tracks it -- or `unfiled`, which passes here and is refused under
+  // `requireFiled`, the release-time form of the check. A two-sided entry may
+  // carry a status and need not.
+  const ISSUES = "https://github.com/example/repo/issues/";
+  const statusEntry = (sides, extra) => `
+[[capability]]
+name = "an entry under test"
+${sides}
+why  = "A reason long enough to count as one, whatever the entry says."
+${extra}
+
+[[capability]]
+name = "the npm side"
+rust = []
+npm  = ["Unrelated.thing"]
+why  = "Declared on the JavaScript side only, and the crate does not need it."
+status = "deliberate"
+`;
+  const ONE = 'rust = ["Mem::trim"]\nnpm  = []';
+  const TWO = 'rust = ["Mem::trim"]\nnpm  = ["Unrelated.thing"]';
+  for (const [label, sides, extra, requireFiled, expected] of [
+    ["a one-sided entry with no status", ONE, "", false, true],
+    ["a status that is neither", ONE, 'status = "maybe"', false, true],
+    ["a gap with no issue", ONE, 'status = "gap"', false, true],
+    [
+      "a gap filed in another repository",
+      ONE,
+      'status = "gap"\nissue = "https://github.com/other/repo/issues/3"',
+      false,
+      true,
+    ],
+    [
+      "a deliberate entry carrying an issue",
+      ONE,
+      `status = "deliberate"\nissue = "${ISSUES}3"`,
+      false,
+      true,
+    ],
+    [
+      "a deliberate one-sided entry",
+      ONE,
+      'status = "deliberate"',
+      false,
+      false,
+    ],
+    [
+      "a gap filed here",
+      ONE,
+      `status = "gap"\nissue = "${ISSUES}3"`,
+      false,
+      false,
+    ],
+    ["an unfiled gap", ONE, 'status = "gap"\nissue = "unfiled"', false, false],
+    [
+      "an unfiled gap at release",
+      ONE,
+      'status = "gap"\nissue = "unfiled"',
+      true,
+      true,
+    ],
+    ["a two-sided entry with no status", TWO, "", false, false],
+  ]) {
+    const npmIds = sides === TWO ? ["Unrelated.thing"] : ["Unrelated.thing"];
+    const manifest =
+      sides === TWO
+        ? `
+[[capability]]
+name = "an entry under test"
+${sides}
+why  = "Both sides, and the gate reads it as a pairing."
+${extra}
+`
+        : statusEntry(sides, extra);
+    const found = check({
+      rust: surface("rust", ["Mem::trim"]),
+      npm: surface("npm", npmIds),
+      manifest: parseManifest(manifest, "self-test"),
+      rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+      issues: ISSUES,
+      requireFiled,
+    });
+    cases += 1;
+    const flagged =
+      found.some((p) => p.kind === "status") &&
+      report(found).includes("status") &&
+      !report(found).includes("undefined");
+    if (flagged !== expected) {
+      console.error(
+        `  self-test FAILED: ${label} was ${flagged ? "" : "not "}refused, got ${JSON.stringify(found.map((p) => `${p.kind}:${p.id}`))}`,
       );
       bad += 1;
     }
@@ -1946,12 +2048,20 @@ if (args.includes("--self-test")) {
       .split("\0")
       .filter(Boolean),
   );
+  // The repository a gap's issue must be filed in, from package.json rather
+  // than spelled here, so a fork's gate asks for its own.
+  const repository = JSON.parse(readFileSync("package.json", "utf8"))
+    .repository.url.replace(/^git\+/, "")
+    .replace(/\.git$/, "");
+  const requireFiled = args.includes("--require-filed");
   const problems = check({
     rust: JSON.parse(readFileSync(rustPath, "utf8")),
     npm: JSON.parse(readFileSync(npmPath, "utf8")),
     manifest,
     rules: RULES,
     files,
+    issues: `${repository}/issues/`,
+    requireFiled,
   });
 
   if (problems.length > 0) {
@@ -1967,5 +2077,18 @@ if (args.includes("--self-test")) {
   }
   console.log(
     `parity gate: every extracted id is paired or registered (${manifestPath})`,
+  );
+  // Passing is not the same as having nothing open, so say what is: a gap
+  // with no issue yet is allowed here and refused by --require-filed.
+  const unfiled = manifest.filter(
+    (e) => e.status === "gap" && e.issue === "unfiled",
+  );
+  const filed = manifest.filter(
+    (e) => e.status === "gap" && e.issue !== "unfiled",
+  );
+  console.log(
+    `parity gate: ${filed.length + unfiled.length} recorded gaps, ` +
+      `${unfiled.length} with no issue filed` +
+      unfiled.map((e) => `\n  unfiled: ${e.name}`).join(""),
   );
 }

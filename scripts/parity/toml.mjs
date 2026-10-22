@@ -14,7 +14,7 @@
 // So every line must be one of the forms below. Anything else throws, naming
 // the line and its number.
 //
-const KEYS = new Set(["name", "rust", "npm", "why"]);
+const KEYS = new Set(["name", "rust", "npm", "why", "status", "issue"]);
 
 /** Parses the manifest subset: `[[capability]]` tables of strings and arrays. */
 export function parseManifest(text, path = "manifest") {
@@ -151,6 +151,13 @@ export function parseManifest(text, path = "manifest") {
       if (!Array.isArray(entry[side])) {
         throw new Error(
           `${path}: capability '${entry.name}' has a '${side}' that is not an array`,
+        );
+      }
+    }
+    for (const key of ["status", "issue"]) {
+      if (key in entry && typeof entry[key] !== "string") {
+        throw new Error(
+          `${path}: capability '${entry.name}' has a '${key}' that is not a string`,
         );
       }
     }
