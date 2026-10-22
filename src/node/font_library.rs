@@ -203,19 +203,24 @@ impl CollectionKey {
 ///
 /// A hundred and twenty-eight is more distinct instances than a page holds --
 /// a handful of families at a handful of weights each. What it deliberately
-/// does not accommodate is an animation tweening an axis, and that is the
-/// point: consecutive frames of a tween ask for values no frame asks for
-/// again, so every one is a miss whatever the bound, and an unbounded map
-/// only keeps them.
+/// does not accommodate is an animation tweening an axis, or tweening the
+/// font size of a face with an `opsz` axis, and that is the point:
+/// consecutive frames of a tween ask for values no frame asks for again, so
+/// every one is a miss whatever the bound, and an unbounded map only keeps
+/// them.
 ///
-/// **This bounds the map; it does not bound the process.** The same three
-/// thousand instances grow RSS by about 130 MB, and only 27 of that is this
-/// map: a cache of one grows the same as a cache of a hundred and
-/// twenty-eight, and `FontLibrary::reset` -- which drops every font, the
-/// collection and this map -- reclaims none of it. The rest is retained
-/// inside Skia per instanced typeface and is not reachable from here. The
-/// lever that would actually bound it is instancing fewer typefaces, which
-/// would change what a caller gets back.
+/// A miss costs about 275 microseconds in a release build on macOS: 74 to
+/// clone the face through CoreText, and most of the rest laying out with a
+/// typeface whose shaping and glyph caches are cold. Chrome 152 pays about
+/// 180 for a font size it has not seen on Amstelvar. Keeping more instances
+/// would only help a caller cycling through more than this many values, at
+/// about 34 KB each.
+///
+/// The process stays bounded with it. Measured in release on macOS, RSS
+/// grows by 35 MB over three thousand `wght` values on Oswald and by 40 over
+/// thirty thousand; Amstelvar at three thousand distinct sizes grows by 43
+/// and at thirty thousand by 90, where a static font at the same thirty
+/// thousand sizes grows by 65 with nothing instanced at all.
 const COLLECTION_CACHE_SIZE: usize = 128;
 
 /// How many resolved fonts to remember.
@@ -1523,6 +1528,50 @@ mod tests {
             cache.get(&key(COLLECTION_CACHE_SIZE as i32)).is_some(),
             "the new entry is in"
         );
+    }
+
+    #[test]
+    fn a_size_per_call_on_an_optical_axis_stays_within_the_cache() {
+        // Each size instances its own `opsz`, so a caller animating a font
+        // size asks for a collection no earlier call built. The map has to
+        // stay at its bound and let the oldest go, or every frame of the
+        // animation stays resident.
+        const FAMILY: &str = "AmstelvarCacheBound";
+        const SIZES: usize = 1000;
+        let bytes = std::fs::read("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+            .expect("bundled Amstelvar is readable");
+        let face = FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("Amstelvar parses");
+        let style = |size: f32| {
+            let mut style = TextStyle::new();
+            style.set_font_families(&[FAMILY]);
+            style.set_font_size(size);
+            style
+        };
+        let first = style(10.0);
+
+        FontLibrary::with_shared(|lib| {
+            lib.register_typeface(face, Some(FAMILY.to_string()));
+            lib.fonts_for_style(&first, &[]);
+            let first_key = CollectionKey::new(&first, &[], Some(10.0));
+            assert!(
+                lib.collection_cache.entries.contains_key(&first_key),
+                "the first size is cached under the key it was built for"
+            );
+            for step in 1..SIZES {
+                lib.fonts_for_style(&style(10.0 + step as f32 * 0.05), &[]);
+            }
+            assert_eq!(
+                lib.collection_cache.entries.len(),
+                COLLECTION_CACHE_SIZE,
+                "a thousand sizes leave the map at its bound"
+            );
+            assert!(
+                !lib.collection_cache.entries.contains_key(&first_key),
+                "and the size asked for first is the one let go"
+            );
+        });
     }
 
     #[test]
