@@ -214,22 +214,27 @@ export function rustParams(doc) {
 
 // ---------------------------------------------------------------- npm
 
+/**
+ * The typed arrays, read off the running platform rather than listed. A
+ * TypeScript type does not carry its element size, so this asks each
+ * constructor: one whose elements are single bytes is bytes, as the
+ * declarations define them -- "any other typed array whose elements are
+ * single bytes" -- and any other is a list of numbers.
+ */
+const TYPED_ARRAYS = Object.getOwnPropertyNames(globalThis).filter(
+  (name) =>
+    /Array$/.test(name) &&
+    Number.isInteger(globalThis[name]?.BYTES_PER_ELEMENT),
+);
+/** Stores of bytes with no element type: a buffer, or a view over one. */
+const BYTE_STORES = ["Buffer", "ArrayBuffer", "SharedArrayBuffer", "DataView"];
 const BYTES = new Set([
-  "Buffer",
-  "ArrayBuffer",
-  "SharedArrayBuffer",
-  "Uint8Array",
-  "Uint8ClampedArray",
+  ...BYTE_STORES,
+  ...TYPED_ARRAYS.filter((name) => globalThis[name].BYTES_PER_ELEMENT === 1),
 ]);
-const NUMERIC_ARRAYS = new Set([
-  "Int8Array",
-  "Int16Array",
-  "Uint16Array",
-  "Int32Array",
-  "Uint32Array",
-  "Float32Array",
-  "Float64Array",
-]);
+const NUMERIC_ARRAYS = new Set(
+  TYPED_ARRAYS.filter((name) => globalThis[name].BYTES_PER_ELEMENT > 1),
+);
 
 /** The classes a TypeScript type accepts. */
 function npmClasses(type, checker, seen = new Set()) {
@@ -508,6 +513,9 @@ function selfTest() {
       "  each(f: (x: number) => void): void;",
       "  maybe(x?: number): void;",
       "  static make(width: number): Case;",
+      "  view(v: DataView): void;",
+      "  signed(a: Int8Array): void;",
+      "  floats(a: Float32Array): void;",
       "}",
       "declare var Point: { new (x: number, y: number): object; fromPoint(p: object): object };",
       "export function loose(a: string, ...rest: number[]): void;",
@@ -553,6 +561,17 @@ function selfTest() {
       "a static declared on a var",
       param("Point.fromPoint", 0)?.classes.join(),
       "object",
+    ],
+    ["a DataView", param("Case.view", 0)?.classes.join(), "bytes"],
+    [
+      "a typed array of single bytes, signed",
+      param("Case.signed", 0)?.classes.join(),
+      "bytes",
+    ],
+    [
+      "a typed array of wider elements",
+      param("Case.floats", 0)?.classes.join(),
+      "array",
     ],
     ["a static method", String(npm["Case.make"]?.overloads[0]?.static), "true"],
     [
