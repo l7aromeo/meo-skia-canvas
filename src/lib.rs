@@ -8,7 +8,8 @@
 //! to be looked up by module first. The modules group them by subject for
 //! reading; the [`prelude`] globs the same set for anyone who prefers one.
 //! No signature anywhere in the crate exposes a `skia_safe` or `neon` type,
-//! [`gui`] included, and the Node/Neon binding lives under the internal
+//! [`gui`] included, nor a `ureq` or `http` one behind the `fetch` feature,
+//! and the Node/Neon binding lives under the internal
 //! `node` module. `scripts/check-public-api.mjs` reads rustdoc's JSON on
 //! every push and fails on a leak, with no module exempted -- the claim is
 //! checked rather than maintained by hand.
@@ -206,6 +207,8 @@
 //! - `node-addon` -- register the `#[neon::main]` entry point so the resulting
 //!   cdylib loads as a Node.js addon. Pure-Rust consumers should leave this
 //!   off.
+//! - `fetch` -- load images over `http` and `https` with `Image::from_url` and
+//!   `ImageData::from_url`. Brings a blocking HTTP client on rustls.
 //!
 //! Pure-Rust consumers typically depend with `default-features = false` and
 //! pick the backend they need:
@@ -228,12 +231,13 @@
 #![warn(missing_docs)]
 
 #[cfg(feature = "node-addon")]
-use neon::prelude::*;
+use neon::{prelude::*, types::buffer::TypedArray};
 
 // The public Rust API. Each module sits at the crate root; `prelude`
 // re-exports their contents so `use meo_skia_canvas::prelude::*;` needs no
-// module prefixes. Public signatures never expose `skia_safe` or `neon`
-// types -- the Node/Neon binding lives under the internal `node` module.
+// module prefixes. Public signatures never expose `skia_safe`, `neon`,
+// `ureq` or `http` types -- the Node/Neon binding lives under the internal
+// `node` module.
 /// Entry point: the canvas, its pages, and the engine that draws them.
 pub mod canvas;
 /// Colors and color spaces.
@@ -259,6 +263,11 @@ pub mod font;
 pub mod geometry;
 /// Decoded raster images, and parsed SVG documents that become them.
 pub mod image;
+/// Subresource Integrity: checking bytes against the hashes a caller expects.
+pub mod integrity;
+/// Loading images from URLs: `data:` URLs always, and `http(s)` with the
+/// `fetch` feature.
+pub mod load;
 /// Returning freed memory to the operating system.
 pub mod memory;
 /// Fill and stroke styling.
@@ -291,8 +300,8 @@ pub mod texture;
 #[doc(inline)]
 pub use crate::{
     canvas::*, color::*, context2d::*, error::*, export::*, filter::*, font::*,
-    geometry::*, image::*, paint::*, path::*, pattern::*, pixels::*, shader::*,
-    text::*, texture::*,
+    geometry::*, image::*, integrity::*, load::*, paint::*, path::*,
+    pattern::*, pixels::*, shader::*, text::*, texture::*,
 };
 
 /// Glob-importable re-export of the whole public API:
@@ -303,8 +312,8 @@ pub use crate::{
 pub mod prelude {
     pub use crate::{
         canvas::*, color::*, context2d::*, error::*, export::*, filter::*,
-        font::*, geometry::*, image::*, paint::*, path::*, pattern::*,
-        pixels::*, shader::*, text::*, texture::*,
+        font::*, geometry::*, image::*, integrity::*, load::*, paint::*,
+        path::*, pattern::*, pixels::*, shader::*, text::*, texture::*,
     };
 
     // Windowing, which is feature-gated and so cannot be globbed with the
@@ -502,6 +511,38 @@ fn discard_gpu_draws(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let times = cx.argument::<JsNumber>(0)?.value(&mut cx);
     gpu::completion::seam::discard(None, times as usize);
     Ok(cx.undefined())
+}
+
+/// Module-level function checking bytes against Subresource Integrity
+/// metadata: `integrityRefusal(bytes, metadata)`.
+///
+/// Returns `null` when the bytes pass, and otherwise the [`IntegrityError`]
+/// text, which `integrityRefusal` in `lib/urls.js` raises as a `TypeError`
+/// naming the source. So `loadImage`'s `integrity` and [`Integrity`] are one
+/// parser and one comparison, not two that agree on today's cases.
+#[cfg(feature = "node-addon")]
+fn integrity_refusal(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let bytes = cx.argument::<JsTypedArray<u8>>(0)?;
+    let metadata = cx.argument::<JsString>(1)?.value(&mut cx);
+    match Integrity::parse(&metadata).verify(bytes.as_slice(&cx)) {
+        Ok(()) => Ok(cx.null().upcast()),
+        Err(refusal) => Ok(cx.string(refusal.to_string()).upcast()),
+    }
+}
+
+/// Module-level function decoding a `data:` URL: `decodeDataURL(url)`.
+///
+/// Returns a `Buffer` of the bytes, or the [`DataUrlError`] text when the URL
+/// is refused, which `decodeDataURL` in `lib/urls.js` raises as a
+/// `TypeError` naming the URL. So npm's loaders and [`decode_data_url`] are
+/// one decoder, and both read `data:` URLs as Chrome's `fetch` does.
+#[cfg(feature = "node-addon")]
+fn data_url_bytes(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let url = cx.argument::<JsString>(0)?.value(&mut cx);
+    match decode_data_url(&url) {
+        Ok(bytes) => Ok(JsBuffer::from_slice(&mut cx, &bytes)?.upcast()),
+        Err(refusal) => Ok(cx.string(refusal.to_string()).upcast()),
+    }
 }
 
 #[cfg(feature = "node-addon")]
@@ -904,6 +945,8 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("colorTypes", color_types)?;
     #[cfg(all(debug_assertions, any(feature = "metal", feature = "vulkan")))]
     cx.export_function("__discardGpuDraws", discard_gpu_draws)?;
+    cx.export_function("integrityRefusal", integrity_refusal)?;
+    cx.export_function("decodeDataURL", data_url_bytes)?;
 
     // -- Canvas ------------------------------------------------------------------------------------
 

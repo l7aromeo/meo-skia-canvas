@@ -340,6 +340,46 @@ const serving = async (body, run, status = 200) => {
   }
 };
 
+// Fetch's limit: "if request's redirect count is 20, then return a network
+// error", so the twentieth redirect is followed and a twenty-first is not.
+// The Rust crate's `Image::from_url` stops at the same place.
+describe("At most twenty redirects are followed", () => {
+  // `/n` redirects to `/n-1`, and `/0` is the image.
+  const chain = async (start) => {
+    let server = http.createServer((req, res) => {
+      let n = Number(req.url?.slice(1));
+      if (n > 0) res.writeHead(302, { Location: `/${n - 1}` }).end();
+      else res.end(BUFFER);
+    });
+    await new Promise((ok) => server.listen(0, "127.0.0.1", () => ok(0)));
+    let { port } = /** @type {import("net").AddressInfo} */ (server.address());
+    try {
+      return await loadImage(`http://127.0.0.1:${port}/${start}`).then(
+        () => "load",
+        (e) => `${e.name}: ${e.message}`,
+      );
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  };
+
+  // A TypeError, as Chrome 152 and Node 26 raise from `fetch` at the
+  // twenty-first, and as a redirect `redirect` refuses already is here.
+  test("twenty load, and twenty-one reject with a TypeError naming the limit", async () => {
+    let [twenty, twentyOne] = [await chain(20), await chain(21)];
+    assert.deepEqual(
+      {
+        twenty,
+        twentyOne: /^TypeError: .*\b20 redirects\b/.test(twentyOne)
+          ? "refused"
+          : twentyOne,
+      },
+      { twenty: "load", twentyOne: "refused" },
+    );
+  });
+});
+
 describe("A load that cannot use what it fetched rejects, and nothing escapes", () => {
   test("a body that does not fit loadImageData's size rejects as the same bytes in a Buffer do", async () => {
     // The control: the Buffer path never had the defect, because a Buffer is
@@ -412,8 +452,8 @@ describe("A refused load releases its connection", () => {
 //
 // The digests are the fixture's, computed with `openssl dgst -sha<n> -binary
 // tests/assets/images/pentagon.png | openssl base64 -A` rather than with the
-// `crypto` module the library itself hashes with, so a wrong digest there
-// cannot agree with a wrong digest here. sha512's carries both "+" and "/",
+// `sha2` crate the library hashes with, so a wrong digest there cannot agree
+// with a wrong digest here. sha512's carries both "+" and "/",
 // which is what lets the base64url case differ from the base64 one.
 describe("A fetched image is checked against `integrity`", () => {
   const DIGEST = {
@@ -712,6 +752,54 @@ describe("A fetched image is checked against `integrity`", () => {
         memory: "load",
         memoryWrong: REFUSED_HERE,
       },
+    );
+  });
+});
+
+// The cases the crate's tests read as well, so the two surfaces answer every
+// one from one table. Its body is not an image, so a load that passes the
+// check still rejects, at decoding; what matters is which of the two stopped
+// it.
+describe("`integrity` answers the shared cases as the Rust crate does", () => {
+  const FIXTURE = JSON.parse(
+    fs.readFileSync("tests/assets/sri-cases.json", "utf8"),
+  );
+  const outcome = (metadata) =>
+    loadImage(
+      Buffer.from(FIXTURE.body),
+      /** @type {any} */ ({ integrity: metadata }),
+    ).then(
+      () => "decoded",
+      (e) =>
+        e instanceof TypeError && /^Integrity check failed/.test(e.message)
+          ? "refuse"
+          : "load",
+    );
+
+  test("every case loads or refuses as tests/assets/sri-cases.json says", async () => {
+    let got = [];
+    for (let { name, metadata, expect } of FIXTURE.cases)
+      got.push([name, await outcome(metadata), expect]);
+    assert.deepEqual(
+      got.map(([name, actual]) => [name, actual]),
+      got.map(([name, , expected]) => [name, expected]),
+    );
+  });
+
+  test("a refusal names the source, the strongest algorithm and the digest the bytes have", async () => {
+    // The SHA-512 of the fixture's body, from `printf %s "body 14" | openssl
+    // dgst -sha512 -binary | openssl base64 -A`.
+    let sha512 =
+      "Z0UKqUh+C/Ed0Bfuopkjn7nwYcE/cIe9j6uEnaE79A1ItVS6qCy27GlhXKDalmq9iEHRFHaCnsmeI4yzHM6RiA==";
+    let error = await loadImage(
+      Buffer.from(FIXTURE.body),
+      /** @type {any} */ ({ integrity: "sha256-AAAA sha512-AAAA" }),
+    ).catch((e) => e);
+    assert.ok(error instanceof TypeError);
+    assert.equal(
+      error.message,
+      `Integrity check failed for a Buffer: its sha512 digest is ` +
+        `"${sha512}", which is not among the sha512 hashes given`,
     );
   });
 });

@@ -25,7 +25,11 @@
 import { readFileSync } from "fs";
 import { surfaceOf } from "./rustdoc-surface.mjs";
 
-const FORBIDDEN = ["skia_safe", "neon"];
+// Skia and the Node binding, and behind the `fetch` feature the HTTP client
+// and the types it is built from: a signature taking `ureq::Agent` or
+// `http::HeaderMap` would tie every caller to that client's major version.
+// rustdoc names a crate with underscores, so `ureq-proto` is `ureq_proto`.
+const FORBIDDEN = ["skia_safe", "neon", "ureq", "ureq_proto", "http", "rustls"];
 
 // Empty, and worth keeping that way. `gui` was exempt while four of its
 // methods passed Skia's Matrix, SurfaceProps and Color through; they now take

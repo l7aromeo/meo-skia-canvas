@@ -71,6 +71,13 @@ export const surfaceOf = (doc) => {
         return body.items ?? [];
       case "impl":
         return body.items ?? [];
+      // A re-export: the item it names, or for a glob the module whose items
+      // it brings in. Without this an item public only through a re-export
+      // from a private module -- `pub use fetch::*` in `load` -- is reachable
+      // by every caller and by no walk, so a type leaked there passed the
+      // check. An id from another crate is not in the index and stops there.
+      case "use":
+        return body.id == null ? [] : [body.id];
       default:
         return [];
     }

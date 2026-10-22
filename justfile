@@ -4,11 +4,16 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 lib := justfile_directory() / "lib" / "skia.node"
 linux_features := "vulkan,window,freetype"
-# The GPU backend this machine can actually compile, with the binding on top,
-# which is the pair the `clippy` matrix in rust-ci.yml runs for this platform.
-# Kept apart from `linux_features` because that set is missing `node-addon`
-# and carries `freetype`, so linting with it leaves the binding unlinted.
-host_features := if os() == "macos" { "metal,window,node-addon" } else { "vulkan,window,node-addon" }
+# The GPU backend this machine can actually compile, with the binding and the
+# URL loader on top, which is the set the `clippy` matrix in rust-ci.yml runs
+# for this platform. Kept apart from `linux_features` because that set is
+# missing `node-addon` and carries `freetype`, so linting with it leaves the
+# binding unlinted.
+#
+# `fetch` is added recipe by recipe rather than to `linux_features`, which
+# `licenses` also reads as what ships: the addon does not enable `fetch`, and
+# counting its crates there would list a TLS stack the binary does not carry.
+host_features := if os() == "macos" { "metal,window,node-addon,fetch" } else { "vulkan,window,node-addon,fetch" }
 # Must match the fmt job in .github/workflows/rust-ci.yml.
 fmt_toolchain := "nightly-2026-09-04"
 # How a changelog heading spells a released version: `[v0.15.0] (crate)`,
@@ -54,7 +59,7 @@ default:
 # genuinely re-ran, and at the end of the list the same failure would cost the
 # whole run to reach.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-release-tags check-upstream-notes check-markdown-links check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
+ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-release-tags check-upstream-notes check-markdown-links check-fetch-deps check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
 
 [private]
 ensure-deps:
@@ -228,6 +233,13 @@ check-markdown-links:
     node scripts/check-markdown-links.mjs --self-test
     node scripts/check-markdown-links.mjs
 
+# The `fetch` feature's two promises about the dependency graph: no HTTP client
+# or TLS stack without it, and no aws-lc with it. The script says why each
+# matters; it reads every target, not just this host's.
+[doc("Check `fetch` stays opt-in and keeps aws-lc out of the graph.")]
+check-fetch-deps:
+    node scripts/check-fetch-deps.mjs
+
 # A release tag is built from a version in two dozen places and they all have
 # to agree on the prefix. Both known defects of this shape were in `build.yml`,
 # left at a bare `v` by the rename to `npm-v` and `rust-v`, and neither showed
@@ -385,7 +397,7 @@ check-parity *flags: ensure-deps
     # time anything runs this, which is what makes it cheap.
     RUSTDOCFLAGS="-D warnings" \
       cargo +{{ fmt_toolchain }} rustdoc --no-default-features \
-      --features "{{ if os() == "macos" { "metal,window" } else { linux_features } }}" \
+      --features "{{ if os() == "macos" { "metal,window" } else { linux_features } }},fetch" \
       -- -Z unstable-options --output-format json
     node scripts/extract-rust-surface.mjs target/doc/meo_skia_canvas.json target/parity-rust.json
     node scripts/check-parity-cli.mjs {{ flags }}
@@ -530,7 +542,7 @@ test-js: ensure-binary
 # suite is the larger of the two.
 [doc("The Rust suite alone. `test` runs this and `test-js` together.")]
 test-rust:
-    node scripts/gpu-events.mjs --run -- cargo test --features "{{ if os() == "macos" { "metal,window,freetype" } else { linux_features } }}"
+    node scripts/gpu-events.mjs --run -- cargo test --features "{{ if os() == "macos" { "metal,window,freetype" } else { linux_features } }},fetch"
 
 # Run the JavaScript suite in watch mode.
 test-watch: ensure-binary
@@ -695,7 +707,7 @@ docs: docs-rust docs-js
 [doc("Fail on a rustdoc warning -- broken intra-doc links above all.")]
 docs-rust:
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --no-default-features \
-      --features "{{ if os() == "macos" { "metal,window" } else { "vulkan,window" } }}"
+      --features "{{ if os() == "macos" { "metal,window" } else { "vulkan,window" } }},fetch"
 
 # The declarations are the published contract, so they get the same treatment
 # the crate's `#![warn(missing_docs)]` gives its Rust half. A broken link or a
@@ -747,11 +759,11 @@ check-dts-surface: ensure-deps ensure-binary
 # in `App::run` that way, reported on every `just ci` and fatal on none of
 # them. Two rustdocs and only one gate is the same gap that let a link to a
 # `pub(crate)` item reach CI.
-[doc("Fail if a public Rust signature exposes a skia_safe or neon type.")]
+[doc("Fail if a public Rust signature exposes a skia_safe, neon, ureq or http type.")]
 check-rust-api: ensure-deps
     RUSTDOCFLAGS="-D warnings" \
       cargo +{{ fmt_toolchain }} rustdoc --no-default-features \
-      --features "{{ if os() == "macos" { "metal,window" } else { linux_features } }}" \
+      --features "{{ if os() == "macos" { "metal,window" } else { linux_features } }},fetch" \
       -- -Z unstable-options --output-format json
     node scripts/check-public-api.mjs target/doc/meo_skia_canvas.json
 

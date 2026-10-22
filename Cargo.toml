@@ -85,6 +85,11 @@ metal = [
 vulkan = ["skia-safe/ganesh", "skia-safe/vulkan", "winit/rwh_05", "dep:ash", "dep:vulkano"]
 window = ["dep:winit", "dep:spin_sleep"]
 
+# `Image::from_url` and `ImageData::from_url`, over `http` and `https`. Opt-in:
+# it brings an HTTP client and TLS, which a caller drawing from bytes does not
+# need, and the npm addon keeps its own loader and does not enable it.
+fetch = ["dep:ureq"]
+
 [package.metadata.docs.rs]
 # The documented surface is the crate-root modules re-exported through
 # `prelude`, plus `gui`; the Neon binding modules are `pub(crate)`, so
@@ -102,9 +107,10 @@ window = ["dep:winit", "dep:spin_sleep"]
 # Verified under `DOCS_RS=1`, which is what makes skia-bindings use the
 # stub: this set documents clean with zero warnings and `gui/index.html`
 # present. `freetype` is deliberately not here -- it changes font loading,
-# not the documented surface.
+# not the documented surface. `fetch` is, because `Image::from_url`,
+# `LoadOptions` and the rest exist only behind it.
 no-default-features = true
-features = ["vulkan", "window"]
+features = ["vulkan", "window", "fetch"]
 
 [lints.clippy]
 # The options structs are built with `..Type::default()` even where every
@@ -215,6 +221,23 @@ quantette = { version = "0.6", default-features = false, features = [
 tiff = "0.11"
 
 neon = "1"
+
+# Subresource Integrity: the digests `Integrity::verify` compares, and the
+# base64 they are written in. Both pure Rust, and `base64` is already linked
+# through `skia-safe`'s `svg` feature.
+base64 = "0.23"
+sha2 = "0.11"
+# Percent-decoding a `data:` URL's body. Already linked through `skia-safe`'s
+# `svg` feature.
+percent-encoding = "2.3"
+# The HTTP client behind `fetch`. Blocking, like the rest of the crate, and on
+# rustls with ring and the webpki-roots certificates: ureq's `rustls` feature,
+# which unlike reqwest's does not bring aws-lc and its CMake build. 3.5 is the
+# first release with `Agent::shutdown`, which is how `Cancel` interrupts a
+# load waiting on its socket.
+ureq = { version = "3.5", default-features = false, features = [
+    "rustls",
+], optional = true }
 
 # metal -- versions match what skia-safe already pins, so the tree keeps one
 # copy of each rather than gaining a second.

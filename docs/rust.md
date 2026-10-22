@@ -131,6 +131,8 @@ The trailing `..` is not a style preference -- it is the compatibility contract.
 
 None of them is `#[non_exhaustive]`, deliberately. That attribute forbids the struct expression _including_ the `..Default::default()` form, so every construction would become a `let mut` followed by a field assignment per override -- measured at 82 sites in this repository alone. It buys protection the rest pattern already provides.
 
+`LoadOptions` is the exception, and is built with methods instead: `LoadOptions::new().header("Accept", "image/png").timeout(limit)`. Its fields are private, so that an option added later breaks no caller, and its values are checked when the load starts -- a header HTTP cannot carry is a `LoadError::Header` before any request.
+
 ## Premultiplied alpha
 
 - `RgbaLinear` channel values are **premultiplied** linear-light RGBA. `RgbaLinear::opaque(1.0, 0.5, 0.5)` is opaque; `RgbaLinear::new_premultiplied(0.5, 0.0, 0.0, 0.5)` is half-alpha red.
@@ -300,6 +302,36 @@ An animated GIF, WebP or APNG decodes to a still first frame plus the rest on re
 - Nothing advances a frame on its own. An animation plays because the caller picks the frame each output frame shows, and `EncodeOptions::frame_delays` takes the same milliseconds back, so an animation can be read in, redrawn and written out with its timing intact.
 - APNG is demuxed by this crate rather than by Skia, which opens one as the still image its `IDAT` holds and reports a single frame. GIF and WebP go through `SkCodec`.
 
+## Loading from a URL
+
+`Image::from_url(url, &options)` and `ImageData::from_url(url, width, height, settings, &options)` are npm's `loadImage` and `loadImageData` for Rust. They need the `fetch` feature, which is off by default and is not built into the npm addon:
+
+```toml
+meo-skia-canvas = { version = "0.16.4", features = ["fetch"] }
+```
+
+```rust
+use std::time::Duration;
+use meo_skia_canvas::{Image, LoadOptions, Redirect};
+
+let options = LoadOptions::new()
+    .redirect(Redirect::Error)
+    .integrity("sha256-Ql6jn9vVPKFySvGSeUJOsakZNmUmbEhintmrRgipg2Y=")
+    .timeout(Duration::from_secs(10));
+let image = Image::from_url("https://example.com/pentagon.png", &options)?;
+```
+
+- **Blocking.** The call returns when the image has arrived, like every other call in the crate. In an async program, run it through `spawn_blocking`.
+- **`http`, `https` and `data:`.** TLS is rustls on ring with the webpki-roots certificates, not the operating system's store. A proxy is read from `ALL_PROXY`, `HTTPS_PROXY` or `HTTP_PROXY` unless `NO_PROXY` exempts the host. `file:` is not taken: `std::fs::read` and `Image::from_encoded` do that.
+- **Redirects** are followed up to 20, Fetch's limit, on 301, 302, 303, 307 and 308. `Authorization`, `Cookie` and `Proxy-Authorization` are not sent past a redirect to another host, or from `https` to `http`. `Redirect::Error` and `Redirect::Manual` stop at the first redirect, never request where it leads, and say where that was in `LoadError::Redirect`.
+- **`integrity`** is checked against the whole body after redirects and before decoding, by `Integrity`, the same check npm runs. `Integrity::parse` and `verify` work on any bytes without the feature.
+- **`ImageData::from_url` reads the body as pixels**, not as an encoded image, as `loadImageData` does. With `height` as `None` it is the number of whole rows the body holds.
+- **A failure is a `LoadError`** naming the step: `Url`, `Header`, `Network`, `Timeout`, `Cancelled`, `Status`, `Redirect`, `TooManyRedirects`, `Integrity` or `Decode`, which wraps the `Error` decoding gave. Every variant naming a URL names the one passed in.
+
+**Cancelling.** Clone a `Cancel` into each load's options and call `cancel()` from any thread; every load holding it returns `LoadError::Cancelled`. A load waiting on its server -- in a TLS handshake, for the response, or partway through the body -- returns at once, because its connection is closed under it. Resolving the host name and opening the TCP connection cannot be interrupted, so a load cancelled during either returns when that call does: give it a `timeout` if that matters.
+
+**`data:` URLs without the feature.** `decode_data_url(url)` returns the bytes, decoded as Chrome's `fetch` decodes them, for `Image::from_encoded` to take.
+
 ## Text
 
 - `FontLibrary::{register_font_from_data, register_font_from_path, has_font, families}` registers TTF / OTF / WOFF / WOFF2 typefaces under family aliases. Internal state is a `parking_lot::Mutex` -- no `RefCell` exposure.
@@ -368,6 +400,8 @@ afterwards breaks every caller:
 - A GPU engine that was asked for and is not reachable (`EngineUnavailable`).
 
 `Error` implements `std::error::Error` and `Display`, and works directly with `anyhow` / `thiserror` callers.
+
+Loading from a URL fails with `LoadError` rather than with new `Error` variants, since adding a variant to an exhaustive enum breaks every `match` on it. `LoadError` is `#[non_exhaustive]` from the start, so it can grow, and `LoadError::Decode` carries the `Error` when the bytes arrived and would not decode.
 
 ## Verification commands
 

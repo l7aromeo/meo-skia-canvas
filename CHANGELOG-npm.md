@@ -125,6 +125,11 @@ removed and no signature moves.
   counts, and a known algorithm with no hash, `sha256-`, refuses. A symbol
   rejects with a `TypeError` before any request, as in `fetch`.
 
+  The check is the Rust crate's `Integrity`, run through the addon, so the
+  npm package and the crate answer every case alike.
+  `tests/assets/sri-cases.json` holds 45 of them, with Chrome's answer
+  beside each, and both packages' tests read it.
+
 - **A remote image `loadImageData` cannot use rejects its promise instead of
   ending the process.** `loadImageData(url, width, height)` turned the
   response into an `ImageData` in the callback that runs when the response
@@ -246,6 +251,44 @@ removed and no signature moves.
   `ctx.transform`, which take a string as this library's extension, read
   the same lists and still refuse with their own `TypeError` naming the
   cause.
+
+- **`data:` URLs decode as `fetch` decodes them, and some that loaded now
+  reject.** The loaders, `new Image(dataURL)` and `img.src` decode a `data:`
+  URL with the Rust crate's `decode_data_url`, which matches Chrome on all 69
+  cases in `tests/assets/data-url-cases.json`. The decoder they replace
+  disagreed with Chrome on 30 of them.
+
+  **These used to load and now reject with a `TypeError`**, as they do in
+  `fetch`: a base64 body using the base64url alphabet (`-` or `_`); a base64
+  body with padding where none belongs or with too much of it (`YQ=`,
+  `aGk==`, `aGk===`); a base64 body holding a character outside the
+  alphabet, such as a `?`, a non-breaking space or an `=` partway through;
+  and a base64 body one character too long to be whole (`a`), which decoded
+  to nothing. A `data:` URL that worked only because the decoder skipped
+  what it could not read needs its base64 fixed.
+
+  **These used to decode to the wrong bytes and now decode correctly:**
+  percent-encoded base64 (`%3D` as padding was read as the digit `3`, and
+  `%61%47%6b%3d` as garbage); a `#fragment`, which was decoded into the image
+  bytes; a `;base64` marker written with spaces (`; base64`), whose body was
+  handed over still encoded; and spaces, tabs or line breaks at the end of
+  the URL, which were kept as body bytes.
+
+  **These used to reject and now decode:** a percent-encoded byte that is not
+  UTF-8 (`%FF`, or a sequence cut short such as `%E2%82`), and a `%` not
+  followed by two hex digits, which is kept as written. And a URL whose
+  scheme is not in lower case (`DATA:`, `Data:`) or that starts with spaces
+  or a tab was read as a file path; it is now read as the `data:` URL it is.
+
+- **At most 20 redirects are followed, as in `fetch`.** The loaders followed
+  21, follow-redirects' default, where the Fetch Standard stops at 20: a
+  load reaching a twenty-first redirect now rejects instead of following
+  it. It rejects with a `TypeError` saying how many redirects it met, which
+  is what Chrome and Node's `fetch` raise there and what a redirect that
+  `redirect` refuses already rejects with, where follow-redirects raised a
+  plain `Error`; follow-redirects' error is its `cause`. The Rust crate's
+  `Image::from_url` stops at the same place. A `maxRedirects` passed in the
+  options is still used as given.
 
 - **`hsl()` and `hwb()` written with bare numbers name the colour they
   state.** CSS Color 4 types saturation, lightness, whiteness and blackness

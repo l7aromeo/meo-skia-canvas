@@ -1,0 +1,281 @@
+{
+  "about": "data: URLs and the bytes Chrome 152 (152.0.7977.149) fetched from each, as lowercase hex, or null where fetch() rejected. Measured with fetch(url).then(r => r.arrayBuffer()).",
+  "cases": [
+    {
+      "url": "data:,hello",
+      "chrome": "68656c6c6f"
+    },
+    {
+      "url": "data:text/plain,hello%20world",
+      "chrome": "68656c6c6f20776f726c64"
+    },
+    {
+      "url": "data:;base64,aGVsbG8=",
+      "chrome": "68656c6c6f"
+    },
+    {
+      "url": "data:;base64,aGVsbG8",
+      "chrome": "68656c6c6f"
+    },
+    {
+      "url": "data:;base64,aGVs bG8=",
+      "chrome": "68656c6c6f"
+    },
+    {
+      "url": "data:;base64,aGVsbG8%3D",
+      "chrome": "68656c6c6f"
+    },
+    {
+      "url": "data:;base64,aGVsbG8-",
+      "chrome": null
+    },
+    {
+      "url": "data:;base64,a",
+      "chrome": null
+    },
+    {
+      "url": "data:;base64,YQ=",
+      "chrome": null
+    },
+    {
+      "url": "data:,%FF",
+      "chrome": "ff"
+    },
+    {
+      "url": "data:,%zz",
+      "chrome": "257a7a"
+    },
+    {
+      "url": "data:,a#frag",
+      "chrome": "61"
+    },
+    {
+      "url": "DATA:,a",
+      "chrome": "61"
+    },
+    {
+      "url": "data:text/plain;charset=utf-8,%E2%82%AC",
+      "chrome": "e282ac"
+    },
+    {
+      "url": "data:,é",
+      "chrome": "c3a9"
+    },
+    {
+      "url": "data:image/svg+xml,<svg/>",
+      "chrome": "3c7376672f3e"
+    },
+    {
+      "url": "data:;BASE64,aGk=",
+      "chrome": "6869"
+    },
+    {
+      "url": "data:; base64,aGk=",
+      "chrome": "6869"
+    },
+    {
+      "url": "data:;base64 ,aGk=",
+      "chrome": "6869"
+    },
+    {
+      "url": "data:a\nb,c",
+      "chrome": "63"
+    },
+    {
+      "url": "data:,a\tb",
+      "chrome": "610962"
+    },
+    {
+      "url": "data:",
+      "chrome": null
+    },
+    {
+      "url": " data:,a",
+      "chrome": "61"
+    },
+    {
+      "url": "data:;base64,aGk=\n",
+      "chrome": "6869"
+    },
+    {
+      "url": "data:;base64,aG=k",
+      "chrome": null
+    },
+    {
+      "url": "data:,a+b",
+      "chrome": "612b62"
+    },
+    {
+      "url": "data:;base64,aGVsbG8==",
+      "chrome": null
+    },
+    {
+      "url": "data:;base64,YQ==",
+      "chrome": "61"
+    },
+    {
+      "url": "data:;base64,YR==",
+      "chrome": "61"
+    },
+    {
+      "url": "data:,%E2%82",
+      "chrome": "e282"
+    },
+    {
+      "url": "data:;base64,",
+      "chrome": ""
+    },
+    {
+      "url": "data:,",
+      "chrome": ""
+    },
+    {
+      "url": "data:;base64,%61%47%6b%3d",
+      "chrome": "6869"
+    },
+    {
+      "url": "data:;charset=x;base64,aGk=",
+      "chrome": "6869"
+    },
+    {
+      "url": "data:text/plain;base64;x=y,aGk=",
+      "chrome": "61476b3d"
+    },
+    {
+      "url": "data:,a%2",
+      "chrome": "612532"
+    },
+    {
+      "url": "data:,\u0000x",
+      "chrome": "0078"
+    },
+    {
+      "url": "data:;base64,aGk=#x",
+      "chrome": "6869"
+    },
+    {
+      "url": "data:;base64,\taGk=\f",
+      "chrome": "6869"
+    },
+    {
+      "url": "data:;base64,aGk =",
+      "chrome": null
+    },
+    {
+      "url": "data:,a\nb",
+      "chrome": "610a62"
+    },
+    {
+      "url": "data:,a\rb",
+      "chrome": "610d62"
+    },
+    {
+      "url": "data:,a b",
+      "chrome": "612062"
+    },
+    {
+      "url": "data:,a b",
+      "chrome": "61c2a062"
+    },
+    {
+      "url": "data:,a  ",
+      "chrome": "61"
+    },
+    {
+      "url": "data:,a\t",
+      "chrome": "61"
+    },
+    {
+      "url": "data:,a\n",
+      "chrome": "61"
+    },
+    {
+      "url": "\tdata:,a",
+      "chrome": "61"
+    },
+    {
+      "url": "data:,a%0Ab",
+      "chrome": "610a62"
+    },
+    {
+      "url": "data:;base64,aG\nk=",
+      "chrome": "6869"
+    },
+    {
+      "url": "data:;base64,aG\tk=",
+      "chrome": "6869"
+    },
+    {
+      "url": "data:te\txt/plain,a",
+      "chrome": "61"
+    },
+    {
+      "url": "data:,%",
+      "chrome": "25"
+    },
+    {
+      "url": "data:,%%41",
+      "chrome": "2541"
+    },
+    {
+      "url": "data:text/plain;base64,aGk=",
+      "chrome": "6869"
+    },
+    {
+      "url": "data:text/plain;Base64,aGk=",
+      "chrome": "6869"
+    },
+    {
+      "url": "data:text/plain; base64 ,aGk=",
+      "chrome": "6869"
+    },
+    {
+      "url": "data:;base64;,aGk=",
+      "chrome": "61476b3d"
+    },
+    {
+      "url": "data:x;base64x,aGk=",
+      "chrome": "61476b3d"
+    },
+    {
+      "url": "data:,😀",
+      "chrome": "f09f9880"
+    },
+    {
+      "url": "data:;base64,aGk=?q",
+      "chrome": null
+    },
+    {
+      "url": "data:,a?q",
+      "chrome": "613f71"
+    },
+    {
+      "url": "data:,a#b#c",
+      "chrome": "61"
+    },
+    {
+      "url": "Data:,a",
+      "chrome": "61"
+    },
+    {
+      "url": "data://x,a",
+      "chrome": "61"
+    },
+    {
+      "url": "data:;base64,aGk==",
+      "chrome": null
+    },
+    {
+      "url": "data:;base64,aGk===",
+      "chrome": null
+    },
+    {
+      "url": "data:;base64,aGk_",
+      "chrome": null
+    },
+    {
+      "url": "data:;base64,aGVsbG8_",
+      "chrome": null
+    }
+  ]
+}

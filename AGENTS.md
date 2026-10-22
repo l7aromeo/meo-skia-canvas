@@ -189,9 +189,10 @@ A recipe's name says what it covers. `test` runs both languages because a
 recipe called `test` that ran one of them is how the Rust suite went unrun
 inside `just ci` for a while, and the halves are `test-rust` and `test-js`.
 The two API gates are named for what they check rather than for each other:
-`check-rust-api` fails when a public Rust signature leaks a `skia_safe` or
-`neon` type, and `check-dts-surface` fails when `lib/index.d.ts` disagrees with
-what the built addon exposes. They are unrelated checks and were previously a
+`check-rust-api` fails when a public Rust signature leaks a type from a crate
+the API hides -- the list is `FORBIDDEN` in `scripts/check-public-api.mjs` --
+and `check-dts-surface` fails when `lib/index.d.ts` disagrees with what the
+built addon exposes. They are unrelated checks and were previously a
 word apart, which cost time more than once.
 
 **A bare `node --test` does not test what you just built.** An installed

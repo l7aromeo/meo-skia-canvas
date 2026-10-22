@@ -1,0 +1,284 @@
+{
+  "about": "Subresource Integrity cases, shared by the Rust tests and the JavaScript tests so the two surfaces cannot drift. Each checks `body` against `metadata`. `chrome` is what Chrome 152 did (fetch of a data: URL); `expect` is what this library does, which differs from Chrome only where `why` says. The digests were computed with `printf %s \"body 14\" | openssl dgst -sha<n> -binary | openssl base64 -A`.",
+  "body": "body 14",
+  "cases": [
+    {
+      "name": "sha256 correct",
+      "metadata": "sha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s=",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "sha384 correct",
+      "metadata": "sha384-uq+v7cOQqJmAKq+xkY/iplqwd+h0AcskvZ9vun8s/zsMFbiyushdwG4YAiDcxMYo",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "sha512 correct",
+      "metadata": "sha512-Z0UKqUh+C/Ed0Bfuopkjn7nwYcE/cIe9j6uEnaE79A1ItVS6qCy27GlhXKDalmq9iEHRFHaCnsmeI4yzHM6RiA==",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "sha256 wrong",
+      "metadata": "sha256-2SmKENGwc1g33EvYXaxkGw887yekfl1TpU8vP1svz/o=",
+      "chrome": "refuse",
+      "expect": "refuse"
+    },
+    {
+      "name": "empty",
+      "metadata": "",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "spaces only",
+      "metadata": "   ",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "tab only",
+      "metadata": "\t",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "md5 only",
+      "metadata": "md5-AAAA",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "sha1 correct only",
+      "metadata": "sha1-FE18wGDgXQoHBcd5gXQL7sU0Ev4=",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "md5 + sha256 correct",
+      "metadata": "md5-AAAA sha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s=",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "md5 + sha256 wrong",
+      "metadata": "md5-AAAA sha256-2SmKENGwc1g33EvYXaxkGw887yekfl1TpU8vP1svz/o=",
+      "chrome": "refuse",
+      "expect": "refuse"
+    },
+    {
+      "name": "strongest: 256 ok, 512 wrong",
+      "metadata": "sha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s= sha512-4lrDhF+MvhKAGi36WonUxV3EeQDztu3Jqe5ZDzwrkxL2ZdADnJOCi3tY8zlQvIF6CVWpxQAKjT4oBWnwh0XKaA==",
+      "chrome": "refuse",
+      "expect": "refuse"
+    },
+    {
+      "name": "strongest: 256 wrong, 512 ok",
+      "metadata": "sha256-2SmKENGwc1g33EvYXaxkGw887yekfl1TpU8vP1svz/o= sha512-Z0UKqUh+C/Ed0Bfuopkjn7nwYcE/cIe9j6uEnaE79A1ItVS6qCy27GlhXKDalmq9iEHRFHaCnsmeI4yzHM6RiA==",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "strongest: 256 wrong, SHA512 ok",
+      "metadata": "sha256-2SmKENGwc1g33EvYXaxkGw887yekfl1TpU8vP1svz/o= SHA512-Z0UKqUh+C/Ed0Bfuopkjn7nwYcE/cIe9j6uEnaE79A1ItVS6qCy27GlhXKDalmq9iEHRFHaCnsmeI4yzHM6RiA==",
+      "chrome": "refuse",
+      "expect": "load",
+      "why": "SHA512 counts, is the strongest given, and matches; Chrome ignores it and refuses on the sha256."
+    },
+    {
+      "name": "strongest: 384 ok, SHA512 wrong",
+      "metadata": "sha384-uq+v7cOQqJmAKq+xkY/iplqwd+h0AcskvZ9vun8s/zsMFbiyushdwG4YAiDcxMYo SHA512-4lrDhF+MvhKAGi36WonUxV3EeQDztu3Jqe5ZDzwrkxL2ZdADnJOCi3tY8zlQvIF6CVWpxQAKjT4oBWnwh0XKaA==",
+      "chrome": "load",
+      "expect": "refuse",
+      "why": "SHA512 counts, is the strongest given, and does not match; Chrome ignores it and loads."
+    },
+    {
+      "name": "two sha256, 2nd ok",
+      "metadata": "sha256-2SmKENGwc1g33EvYXaxkGw887yekfl1TpU8vP1svz/o= sha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s=",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "double space between",
+      "metadata": "sha256-2SmKENGwc1g33EvYXaxkGw887yekfl1TpU8vP1svz/o=  sha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s=",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "?opt suffix",
+      "metadata": "sha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s=?opt",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "?a?b suffix",
+      "metadata": "sha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s=?a?b",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "uppercase SHA256",
+      "metadata": "SHA256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s=",
+      "chrome": "load",
+      "expect": "load",
+      "why": "An upper-case algorithm counts (the SRI text: its ASCII lowercase is in the set); Chrome ignores it, and loads unchecked."
+    },
+    {
+      "name": "sha-256 spelling",
+      "metadata": "sha-256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s=",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "base64url (has - and _)",
+      "metadata": "sha256-nlgC-4KVs6Jc6ADYWC8hYNkDj10yf0X-S6PQWqJF-_s=",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "no padding",
+      "metadata": "sha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "base64url, no padding",
+      "metadata": "sha256-nlgC-4KVs6Jc6ADYWC8hYNkDj10yf0X-S6PQWqJF-_s",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "value then -extra",
+      "metadata": "sha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s=-extra",
+      "chrome": "refuse",
+      "expect": "refuse"
+    },
+    {
+      "name": "'sha256-' empty value",
+      "metadata": "sha256-",
+      "chrome": "load",
+      "expect": "refuse",
+      "why": "A known algorithm with no value is kept and can never match, as the SRI steps say; Chrome skips it and loads unchecked."
+    },
+    {
+      "name": "'sha256' no dash",
+      "metadata": "sha256",
+      "chrome": "load",
+      "expect": "refuse",
+      "why": "A known algorithm with no value, as above."
+    },
+    {
+      "name": "garbage",
+      "metadata": "notahash",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "digest lowercased",
+      "metadata": "sha256-nlgc+4kvs6jc6adywc8hynkdj10yf0x+s6pqwqjf+/s=",
+      "chrome": "refuse",
+      "expect": "refuse"
+    },
+    {
+      "name": "correct, TAB, md5",
+      "metadata": "sha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s=\tmd5-x",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "correct, LF, md5",
+      "metadata": "sha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s=\nmd5-x",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "md5, LF, correct",
+      "metadata": "md5-x\nsha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s=",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "wrong, LF, correct",
+      "metadata": "sha256-2SmKENGwc1g33EvYXaxkGw887yekfl1TpU8vP1svz/o=\nsha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s=",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "leading/trailing space",
+      "metadata": " sha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s= ",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "leading/trailing LF",
+      "metadata": "\nsha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s=\n",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "SHA256 wrong, alone",
+      "metadata": "SHA256-2SmKENGwc1g33EvYXaxkGw887yekfl1TpU8vP1svz/o=",
+      "chrome": "load",
+      "expect": "refuse",
+      "why": "Checked, and it does not match; Chrome ignores the upper-case algorithm and loads unchecked."
+    },
+    {
+      "name": "sha256 ok, extra =",
+      "metadata": "sha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s==",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "sha256 ok, ===",
+      "metadata": "sha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s===",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "sha256 ok, = mid",
+      "metadata": "sha256-nlgC+4KVs6Jc6ADY=WC8hYNkDj10yf0X+S6PQWqJF+/s=",
+      "chrome": "refuse",
+      "expect": "refuse"
+    },
+    {
+      "name": "sha256 ok, CR sep md5",
+      "metadata": "sha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s=\rmd5-x",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "sha256 ok, FF sep md5",
+      "metadata": "sha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s=\fmd5-x",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "sha256 ok, NBSP sep md5",
+      "metadata": "sha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s= md5-x",
+      "chrome": "load",
+      "expect": "refuse",
+      "why": "NBSP is not ASCII whitespace, so it stays in the value, which then fails; Chrome skips the malformed item and loads unchecked."
+    },
+    {
+      "name": "sha256 bad, sha256 bare",
+      "metadata": "sha256-2SmKENGwc1g33EvYXaxkGw887yekfl1TpU8vP1svz/o= sha256",
+      "chrome": "refuse",
+      "expect": "refuse"
+    },
+    {
+      "name": "sha256 ok, sha256- empty",
+      "metadata": "sha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s= sha256-",
+      "chrome": "load",
+      "expect": "load"
+    },
+    {
+      "name": "sha384- empty + sha256 ok",
+      "metadata": "sha256-nlgC+4KVs6Jc6ADYWC8hYNkDj10yf0X+S6PQWqJF+/s= sha384-",
+      "chrome": "load",
+      "expect": "refuse",
+      "why": "The empty sha384 is the strongest given and can never match; Chrome skips it and checks the sha256."
+    }
+  ]
+}

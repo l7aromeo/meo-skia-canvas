@@ -1026,10 +1026,8 @@ status = "deliberate"
 name = "borrow-shaped pixel and canvas access"
 rust = ["ImageData::pixels_mut",
         "ImageData::into_pixels",
-        "ImageData::from_pixels",
         "ImageData::blank",
         "Image::from_pixels",
-        "Image::from_encoded",
         "Image::from_svg_xml",
         "Window::canvas_mut",
         "Canvas::with_options",
@@ -1778,17 +1776,123 @@ status = "deliberate"
 [[capability]]
 name = "module-level entry points"
 rust = ["BackendInfo::query"]
-npm  = ["backend", "loadImage", "loadImageData"]
-why  = """Three operations npm exports at module level because a JavaScript caller
-       has no object to hang them off before one exists. `backend()` answers
-       what `BackendInfo::query` answers.
-       `loadImage` and `loadImageData` face `Image::from_encoded` and
-       `ImageData::from_pixels`, which are NOT named here: they belong to
-       'borrow-shaped pixel and canvas access', whose subject is that a named
-       constructor returning `Result` has no JavaScript expression. Naming them
-       twice would leave neither entry saying where they belong -- the gate
-       reports that as `doubled`, and it reported it against the first draft of
-       this file."""
+npm  = ["backend"]
+why  = """An operation npm exports at module level because a JavaScript caller
+       has no object to hang it off before one exists. `backend()` answers
+       what `BackendInfo::query` answers."""
+
+[[capability]]
+name = "an image from a URL or from bytes"
+rust = ["Image::from_url",
+        "ImageData::from_url",
+        "Image::from_encoded",
+        "ImageData::from_pixels",
+        "load::decode_data_url"]
+npm  = ["loadImage", "loadImageData"]
+why  = """One npm function per kind of result, taking a URL, a `data:` URL or the
+       bytes themselves; Rust splits the same work by source, because a URL
+       load needs the `fetch` feature and bytes in hand do not.
+       `Image::from_url` and `ImageData::from_url` are `loadImage(url)` and
+       `loadImageData(url, width, height)`, and both read `data:` URLs.
+       `Image::from_encoded` and `ImageData::from_pixels` are the same two
+       given bytes. `decode_data_url` is the step npm runs inside the loaders,
+       public in Rust so that a `data:` URL needs no `fetch`."""
+
+[[capability]]
+name = "how a URL is requested"
+rust = ["LoadOptions",
+        "LoadOptions::new",
+        "LoadOptions::header",
+        "LoadOptions::redirect",
+        "LoadOptions::integrity",
+        "LoadOptions::timeout",
+        "LoadOptions::cancel",
+        "Redirect",
+        "Redirect::Follow",
+        "Redirect::Error",
+        "Redirect::Manual",
+        "Cancel",
+        "Cancel::new",
+        "Cancel::cancel",
+        "Cancel::is_cancelled"]
+npm  = []
+why  = """npm's loaders take a `RequestInit`, which is TypeScript's own DOM type
+       and not one this package declares, so no npm id carries it. Its
+       `headers`, `redirect` and `integrity` are `LoadOptions::header`,
+       `redirect` and `integrity`, and `Redirect` is `RequestRedirect`'s three
+       values. `Cancel` is what `RequestInit.signal` does there: an aborted
+       signal rejects a pending `loadImage` with an `AbortError`. A blocking
+       Rust call cannot take an `AbortSignal`, so the token is cancelled from
+       another thread instead. `timeout` has no npm counterpart and is what
+       `AbortSignal.timeout()` gives a JavaScript caller."""
+status = "deliberate"
+
+[[capability]]
+name = "why a load failed"
+rust = ["LoadError",
+        "LoadError::Url",
+        "Url.url",
+        "Url.reason",
+        "LoadError::Header",
+        "Header.name",
+        "Header.reason",
+        "LoadError::Network",
+        "Network.url",
+        "Network.reason",
+        "LoadError::Timeout",
+        "Timeout.url",
+        "LoadError::Cancelled",
+        "Cancelled.url",
+        "LoadError::Status",
+        "Status.url",
+        "Status.status",
+        "LoadError::Redirect",
+        "Redirect.url",
+        "Redirect.status",
+        "Redirect.location",
+        "Redirect.mode",
+        "LoadError::TooManyRedirects",
+        "TooManyRedirects.url",
+        "LoadError::Integrity",
+        "Integrity.url",
+        "Integrity.error",
+        "LoadError::Decode",
+        "Decode.0",
+        "DataUrlError",
+        "DataUrlError::NotData",
+        "DataUrlError::MissingComma",
+        "DataUrlError::InvalidBase64"]
+npm  = []
+why  = """A rejected promise carries an `Error` whose type and message say the
+       same things: a `TypeError` for a refused redirect, an integrity mismatch
+       or a bad header, an `Error` naming the HTTP status, an `AbortError` for
+       an aborted signal. JavaScript has no typed error enumeration to pair
+       these with, and the npm package exports no error classes."""
+status = "deliberate"
+
+[[capability]]
+name = "Subresource Integrity"
+rust = ["Integrity",
+        "Integrity::parse",
+        "Integrity::is_empty",
+        "Integrity::algorithm",
+        "Integrity::verify",
+        "IntegrityAlgorithm",
+        "IntegrityAlgorithm::Sha256",
+        "IntegrityAlgorithm::Sha384",
+        "IntegrityAlgorithm::Sha512",
+        "IntegrityAlgorithm::name",
+        "IntegrityError",
+        "IntegrityError.algorithm",
+        "IntegrityError.actual"]
+npm  = []
+why  = """npm checks `RequestInit.integrity` inside `loadImage` and
+       `loadImageData` by calling this same `Integrity` through the binding, so
+       the two surfaces answer every case in tests/assets/sri-cases.json alike.
+       JavaScript has no free-standing integrity checker to pair it with:
+       `fetch` takes the metadata as a request option, and so do the
+       loaders."""
+status = "deliberate"
 
 [[capability]]
 name = "the crate's canvas defaults"

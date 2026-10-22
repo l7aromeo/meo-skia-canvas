@@ -100,3 +100,52 @@ describe("data URLs are read the way RFC 2397 writes them", () => {
     );
   });
 });
+
+// The cases the crate's tests read as well, each the bytes Chrome fetched from
+// the URL or its refusal, so the two surfaces decode every one alike.
+describe("data URLs decode to the bytes Chrome fetches", () => {
+  const FIXTURE = JSON.parse(
+    require("fs").readFileSync("tests/assets/data-url-cases.json", "utf8"),
+  );
+
+  test("every case in tests/assets/data-url-cases.json", async () => {
+    let got = [];
+    for (let { url, chrome } of FIXTURE.cases)
+      got.push([
+        url,
+        await decode(url).then(
+          (buffer) => Buffer.from(buffer).toString("hex"),
+          () => null,
+        ),
+        chrome,
+      ]);
+    assert.deepEqual(
+      got.map(([url, actual]) => [url, actual]),
+      got.map(([url, , expected]) => [url, expected]),
+    );
+  });
+
+  test("a refusal is a TypeError that names the URL and what is wrong", async () => {
+    let error = await decode("data:;base64,a").catch((e) => e);
+    assert.ok(error instanceof TypeError);
+    assert.equal(
+      error.message,
+      'Expected a valid data URL string (got: "data:;base64,a"): its body ' +
+        "is marked `;base64` and is not valid base64",
+    );
+  });
+
+  // The scheme is case-insensitive and may follow spaces or controls, as in
+  // `fetch`, so the loader has to recognise a data URL by the same rule the
+  // decoder reads it with -- or such a URL is read as a file path.
+  for (let prefix of ["DATA:", "Data:", " data:", "\tdata:"])
+    test(`loadImage takes a URL starting ${JSON.stringify(prefix)}`, async () => {
+      const image = await loadImage(
+        `${prefix}image/png;base64,${PNG.toString("base64")}`,
+      );
+      assert.deepEqual(
+        { width: image.width, height: image.height },
+        { width: 1, height: 1 },
+      );
+    });
+});

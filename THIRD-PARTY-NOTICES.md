@@ -4,8 +4,8 @@ The published `skia.node` is a statically linked binary. Several of the projects
 require their copyright notices to travel with binary distributions, so those notices are collected
 here rather than left in the source trees they came from.
 
-Everything below is under a permissive licence, and no component is copyleft. Audited 2026-10-21
-with `just licenses` over the **237** crate versions that link into a released binary — the union
+Everything below is under a permissive licence, and no component is copyleft. Audited 2026-10-22
+with `just licenses` over the **245** crate versions that link into a released binary — the union
 across every target in `lib/targets.json`, normal dependencies only. The terms found were 0BSD,
 Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause, BSD-3-Clause, ISC, MIT, Unicode-3.0,
 Unlicense and Zlib.
@@ -15,6 +15,12 @@ host-scoped audit describes whoever ran it: this file said 168 while a Linux bin
 and `rustix` and `linux-raw-sys` — Linux-only, and the sole carriers of the LLVM exception above —
 were named nowhere. Over-listing costs a reader nothing; under-listing is what this file exists to
 prevent.
+
+The crate's `fetch` feature is not in that union, because the addon does not enable it, so nothing
+it brings is in a released binary or listed here. A Rust program that enables it links an HTTP
+client and a TLS stack, among them `ring` (Apache-2.0 and ISC), `rustls-webpki` and `untrusted`
+(ISC), `subtle` (BSD-3-Clause) and `webpki-roots`, whose certificate data is CDLA-Permissive-2.0 —
+notices that program owes when it ships a binary, as this file owes the ones below.
 
 Counts here are easy to get wrong in two directions at once, so the recipe pins how this one is
 taken. A bare `cargo metadata` reports more, because it counts build and dev dependencies and every
@@ -251,8 +257,8 @@ packages that actually link — which is the set this file describes, and not wh
 `cargo metadata` returns.
 
 The difference matters. `cargo metadata --all-features` reports every package Cargo knows about,
-including build and dev dependencies and every platform's targets, which is **348** against the
-**237** that link. Either number is defensible; quoting one and computing the other is how the count
+including build and dev dependencies and every platform's targets, which is **369** against the
+**245** that link. Either number is defensible; quoting one and computing the other is how the count
 in this file went stale without anyone noticing. `just licenses` now reads both numbers back out of
 this file and fails when what it counted disagrees, so the two cannot drift apart again silently.
 
