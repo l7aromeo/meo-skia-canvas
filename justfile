@@ -308,6 +308,12 @@ check-release-guards:
         exit 1
     fi
     echo "release guards: README pins ${readme}, matching Cargo.toml ${manifest}"
+    # Both release recipes run `check-parity --require-filed` before bumping,
+    # so neither ships a gap recorded with no issue. Read from the recipes
+    # themselves; the self-test feeds it the justfile with the step deleted,
+    # commented out, stripped of its flag and moved below the bump.
+    node scripts/check-release-parity.mjs --self-test
+    node scripts/check-release-parity.mjs
 
 [doc("Fail when a changelog's prose disagrees with the entries it counts.")]
 check-changelog:
@@ -336,7 +342,7 @@ check-changelog:
 #
 # `--require-filed` also refuses a gap whose issue is still `unfiled`, which
 # work in progress may carry and a release may not; the release recipes pass
-# it.
+# it, and `check-release-guards` fails if either stops doing so.
 [doc("Fail when a capability is on one surface and unaccounted for on the other.")]
 check-parity *flags: ensure-deps
     #!/usr/bin/env bash
