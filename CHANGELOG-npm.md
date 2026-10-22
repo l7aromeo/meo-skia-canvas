@@ -11,9 +11,10 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 
 ## 📦 ⟩ [v6.0.3] (npm) ⟩ October 19, 2026
 
-**A patch fixing two CSS colour spellings that resolved to the wrong colour,
-and raising the `follow-redirects` floor past three security advisories.**
-Nothing is removed and no signature moves.
+**A patch fixing a GPU that went unused on a Vulkan 1.4 loader, Vulkan
+messages printed to standard output, and two CSS colour spellings that
+resolved to the wrong colour, and raising the `follow-redirects` floor past
+three security advisories.** Nothing is removed and no signature moves.
 
 ### Security
 
@@ -48,6 +49,31 @@ Nothing is removed and no signature moves.
   range and moves.
 
 ### Fixed
+
+- **The Linux and Windows builds use the GPU on a Vulkan 1.4 loader.** Where
+  the Vulkan loader and the device both report 1.4, `canvas.engine.renderer`
+  read `"CPU"`, with `Failed to create Vulkan backend context` as its
+  `error`, even with a working GPU, and `new Window()` threw
+  `No windowing support: Failed to create Vulkan backend context`. The
+  context was built without telling Skia which API version the Vulkan
+  instance had been created for, so Skia took the loader's 1.4 and required
+  entry points that a device created for 1.3 does not provide. Skia is now
+  given the instance's own version. macOS draws through Metal and was not
+  affected.
+
+  Reproduced and verified with Mesa's llvmpipe on Ubuntu 26.04 (loader
+  1.4.341, device 1.4.335). A 1.3 loader was never affected: llvmpipe
+  reports 1.4 on Ubuntu 24.04 too, and its 1.3.275 loader kept Skia at 1.3.
+  Other drivers that report 1.4 through a 1.4 loader, on Linux or Windows,
+  take the same path and are expected to have been affected, but were not
+  tested.
+
+- **Nothing is written to standard output.** Each Vulkan entry point a driver
+  did not provide printed a `Failed to resolve Vulkan proc` line to stdout,
+  in among whatever the program itself writes there -- so a script that
+  prints JSON, or pipes an image out, produced output its reader could not
+  parse. A missing optional entry point is normal, and is no longer
+  reported.
 
 - **`hsl()` and `hwb()` written with bare numbers name the colour they
   state.** CSS Color 4 types saturation, lightness, whiteness and blackness
