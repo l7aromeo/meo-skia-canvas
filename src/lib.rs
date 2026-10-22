@@ -486,6 +486,24 @@ fn color_types(mut cx: FunctionContext) -> JsResult<JsString> {
     Ok(cx.string(serde_json::json!(described).to_string()))
 }
 
+/// Test-only: makes the next `times` GPU draws report that the GPU discarded
+/// them, through the seam in [`gpu::completion`]. A real discard needs a GPU
+/// fault no test can cause safely.
+///
+/// Exported by debug builds only, which are what the JavaScript suite runs
+/// against; a release build, and so every published binary, has neither this
+/// function nor the seam behind it.
+#[cfg(all(
+    feature = "node-addon",
+    debug_assertions,
+    any(feature = "metal", feature = "vulkan")
+))]
+fn discard_gpu_draws(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+    let times = cx.argument::<JsNumber>(0)?.value(&mut cx);
+    gpu::completion::seam::discard(None, times as usize);
+    Ok(cx.undefined())
+}
+
 #[cfg(feature = "node-addon")]
 #[neon::main]
 fn main(mut cx: ModuleContext) -> NeonResult<()> {
@@ -884,6 +902,8 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("backend", backend)?;
     cx.export_function("formats", formats)?;
     cx.export_function("colorTypes", color_types)?;
+    #[cfg(all(debug_assertions, any(feature = "metal", feature = "vulkan")))]
+    cx.export_function("__discardGpuDraws", discard_gpu_draws)?;
 
     // -- Canvas ------------------------------------------------------------------------------------
 

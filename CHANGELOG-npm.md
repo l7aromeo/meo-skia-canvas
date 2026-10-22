@@ -149,6 +149,28 @@ removed and no signature moves.
 
 ### Fixed
 
+- **A GPU recovery could produce wrong or blank pixels with no error; such
+  a draw is now retried once and otherwise reported.** When the GPU recovers
+  from a fault -- often one in another program -- macOS discards the work
+  every other process had in flight, and the drawing library underneath
+  did not notice. An export or a `getImageData` on the GPU engine then
+  handed back zeros, or an earlier drawing's pixels, as if nothing were
+  wrong. Every export, the frames for GIF, BMP, TIFF, AVIF and APNG, and
+  every `getImageData` now confirm that the GPU ran the drawing before
+  reading it back. A drawing that did not run is drawn again; if that fails
+  too, the call rejects or throws an `Error` that says the GPU discarded the
+  work and in which stage, rather than returning the pixels.
+
+  The confirmation costs one extra GPU round trip per export or read:
+  about 100 microseconds, measured as a 64x48 PNG export going from 0.38 to
+  0.50 ms and a small `getImageData` from 0.22 to 0.30 ms on Apple Silicon,
+  and lost in the noise on large canvases. The CPU engine is unaffected.
+  Reproduced on macOS with Metal; the Vulkan path on Linux and Windows has
+  the same check but was not tested against a real fault. The copy that
+  reads the pixels back is still not checked, because the library
+  underneath does not report its failure; a drawing is, and it is the
+  longer-lived of the two.
+
 - **The Linux and Windows builds use the GPU on a Vulkan 1.4 loader.** Where
   the Vulkan loader and the device both report 1.4, `canvas.engine.renderer`
   read `"CPU"`, with `Failed to create Vulkan backend context` as its

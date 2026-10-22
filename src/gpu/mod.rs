@@ -10,6 +10,8 @@ use skia_safe::{
 };
 use std::sync::OnceLock;
 
+/// Confirming the GPU ran a page's draws before they are read back.
+pub(crate) mod completion;
 /// The one thread that owns a GPU context for exporting.
 pub mod owner;
 

@@ -25,6 +25,28 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A GPU recovery could produce wrong or blank pixels with no error; such
+  a draw is now retried once and otherwise reported.** On Metal, a GPU
+  recovery discards the command buffers every process had in flight, and
+  Skia's Ganesh backend does not check them, so an export or a readback on
+  the GPU engine handed back zeros or an earlier draw's pixels as success.
+  Every path that draws a page and reads it back -- `to_buffer`, `to_file`,
+  `Pages::encode`, the frames other encoders take, and `get_image_data`
+  through the page or its tiles -- now flushes and waits with
+  `submit(SyncCpu::Yes)`, whose answer is the status of that buffer. A draw
+  that did not run is drawn again on a fresh surface; a second failure is
+  `Error::Render`, with a message naming the stage, where these paths
+  otherwise report `Encode` or `PixelReadback`.
+
+  It costs one GPU round trip per readback: a 64x48 PNG export went from
+  379 to 502 microseconds and a small `get_image_data` from 221 to 300 on a
+  release build, Apple M4 Pro, with large pages inside the noise. Reproduced
+  on Metal; the Vulkan path has the same check and was not tested against a
+  real fault. The readback's own command buffer is still unchecked -- Skia
+  drops its status, recorded as an `UPSTREAM` marker at the readback. Skia
+  commits the draws and the copy in separate buffers, so this wait stays
+  until it reports a failure of either.
+
 - **The `vulkan` feature uses the GPU on a Vulkan 1.4 loader.** Where the
   Vulkan loader and the device both report 1.4, a canvas asked for the GPU
   rendered on the CPU instead, and a window could not be opened, both with

@@ -43,7 +43,11 @@ use crate::{
         QUALITY_SCALE, VectorFeatures, dots_per_inch, encoder_quality,
         pixels_per_metre,
     },
-    gpu::{RenderingEngine, owner},
+    gpu::{
+        RenderingEngine,
+        completion::{DRAW_ATTEMPTS, discarded, draws_ran},
+        owner,
+    },
     node::canvas::BoxedCanvas,
     pixels::PixelColorSpace,
 };
@@ -684,7 +688,7 @@ impl PageRecorder {
         // whole point: a hit test asked for sixty-four pixels and used to
         // composite and keep a megapixel. Anything wider than the grid is
         // worth is served by the page, as before.
-        if self.surface.try_tiled(&page, &opts, &engine, crop) {
+        if self.surface.try_tiled(&page, &opts, &engine, crop)? {
             let served = self.surface.read_tiled(
                 &dst_info,
                 crop,
@@ -696,7 +700,7 @@ impl PageRecorder {
             }
         }
 
-        self.surface.update(&page, &opts, &engine);
+        self.surface.confirmed_update(&page, &opts, &engine)?;
 
         match self.surface.copy_pixels(
             &dst_info,
@@ -1450,7 +1454,7 @@ impl RecordingSurface {
         opts: &ExportOptions,
         engine: &RenderingEngine,
         crop: IRect,
-    ) -> bool {
+    ) -> Result<bool, String> {
         if self.is_config_stale(opts)
             || self.gpu != Some(matches!(engine, RenderingEngine::GPU))
         {
@@ -1470,16 +1474,33 @@ impl RecordingSurface {
 
         // A current page composite is the cheaper answer; leave it to serve.
         if self.surface.is_some() && self.depth == page.layers.len() {
-            return false;
+            return Ok(false);
         }
 
         let page_size = page.scaled_dimensions(opts.density);
         let wanted = Self::tiles_covering(crop, page_size);
         if wanted.is_empty() || wanted.len() > TILES_PER_READ as usize {
-            return false;
+            return Ok(false);
         }
 
-        self.refresh_tiles(&wanted, page, opts, engine)
+        // The tiles share this thread's context, so one wait confirms every
+        // one just drawn. A failed wait leaves them holding anything, so they
+        // are dropped and drawn again from nothing. See
+        // `crate::gpu::completion`.
+        for _ in 0..DRAW_ATTEMPTS {
+            if !self.refresh_tiles(&wanted, page, opts, engine) {
+                return Ok(false);
+            }
+            let ran = wanted
+                .first()
+                .and_then(|origin| self.tiles.get_mut(origin))
+                .is_none_or(|tile| draws_ran(&mut tile.surface, page.id));
+            if ran {
+                return Ok(true);
+            }
+            self.tiles.clear();
+        }
+        Err(discarded("drawing tiles for a read"))
     }
 
     /// Serves a read out of the grid prepared by [`Self::try_tiled`].
@@ -1517,6 +1538,34 @@ impl RecordingSurface {
             || self.matte != opts.matte
             || self.msaa != opts.msaa
             || self.color_space != opts.surface_color_space
+    }
+
+    /// [`Self::update`], with the draws confirmed to have run on the GPU
+    /// before a read depends on them: drawn again on a fresh surface if not,
+    /// and an error if that fails too. See [`crate::gpu::completion`].
+    pub fn confirmed_update(
+        &mut self,
+        page: &Page,
+        opts: &ExportOptions,
+        engine: &RenderingEngine,
+    ) -> Result<(), String> {
+        for _ in 0..DRAW_ATTEMPTS {
+            self.update(page, opts, engine);
+            let ran = self
+                .surface
+                .as_mut()
+                .is_none_or(|surface| draws_ran(surface, page.id));
+            if ran {
+                return Ok(());
+            }
+            // What the surface holds is unknown, so start it again: no
+            // surface means `update` allocates one and replays every layer.
+            self.surface = None;
+            self.raster = None;
+            self.served_at = None;
+            self.depth = 0;
+        }
+        Err(discarded("drawing the page for a read"))
     }
 
     pub fn update(
@@ -2119,19 +2168,34 @@ impl Page {
                     img_dims,
                     options.color_space.clone(),
                 );
-                match engine.make_surface(&out_info, options) {
-                    Ok(mut converted) => {
-                        converted.canvas().draw_image(&image, (0, 0), None);
-                        converted.image_snapshot()
-                    }
-                    Err(_) => image,
-                }
+                self.converted(image, &out_info, options, engine)?
             }
         };
 
         let image = match image.is_texture_backed() {
             false => image,
             true => {
+                // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+                // Re-check: GrMtlGpu::onReadPixels checks its submit
+                //
+                // Skia M153's `GrMtlGpu::onReadPixels`, in
+                // `skia/src/gpu/ganesh/mtl/GrMtlGpu.mm` under the
+                // skia-bindings crate, waits on the command buffer that
+                // copies the texture out with
+                // `submitCommandBuffer(kForce_SyncQueue)`, drops the answer,
+                // and copies whatever the transfer buffer holds. So a
+                // readback whose own buffer the GPU discarded hands back
+                // zeros or stale bytes as success, and nothing here can tell.
+                // The draws before it are confirmed by `confirmed_surface`;
+                // this copy is not, and it is short-lived, which is the whole
+                // of the argument for living with it.
+                //
+                // Checking that submit covers the copy only. The draws were
+                // committed earlier in a buffer of their own, by the
+                // `submit()` `SurfaceContext::readPixels` makes before the
+                // copy, and nothing waits on that one -- so
+                // `crate::gpu::completion::draws_ran` and its extra wait stay
+                // until Skia reports that buffer too.
                 let mut context = surface.direct_context();
                 image.make_non_texture_image(context.as_mut()).ok_or_else(
                     || "Could not read the page back from the GPU".to_string(),
@@ -2144,6 +2208,28 @@ impl Page {
         }
 
         Ok(image)
+    }
+
+    /// `image` redrawn into a surface of `out_info`'s space, with the draw
+    /// confirmed to have run on the GPU, or `image` itself when no such
+    /// surface can be made.
+    fn converted(
+        &self,
+        image: SkImage,
+        out_info: &ImageInfo,
+        options: &ExportOptions,
+        engine: RenderingEngine,
+    ) -> Result<SkImage, String> {
+        for _ in 0..DRAW_ATTEMPTS {
+            let Ok(mut surface) = engine.make_surface(out_info, options) else {
+                return Ok(image);
+            };
+            surface.canvas().draw_image(&image, (0, 0), None);
+            if draws_ran(&mut surface, self.id) {
+                return Ok(surface.image_snapshot());
+            }
+        }
+        Err(discarded("converting the page to its export colour space"))
     }
 
     /// Composites this page on the thread that calls it, always answering with
@@ -2165,8 +2251,27 @@ impl Page {
         engine: RenderingEngine,
     ) -> Result<SkImage, String> {
         let (mut surface, cache_depth) =
-            self.composited_surface(options, engine)?;
+            self.confirmed_surface(options, engine)?;
         self.image_from(&mut surface, options, engine, cache_depth)
+    }
+
+    /// [`Self::composited_surface`], with its draws confirmed to have run
+    /// on the GPU before anything reads them: drawn once more on a fresh
+    /// surface if they did not, and an error if that fails too. See
+    /// [`crate::gpu::completion`].
+    fn confirmed_surface(
+        &self,
+        options: &ExportOptions,
+        engine: RenderingEngine,
+    ) -> Result<(Surface, usize), String> {
+        for _ in 0..DRAW_ATTEMPTS {
+            let (mut surface, cache_depth) =
+                self.composited_surface(options, engine)?;
+            if draws_ran(&mut surface, self.id) {
+                return Ok((surface, cache_depth));
+            }
+        }
+        Err(discarded("compositing the page"))
     }
 
     /// Composites this page and reads it straight into `dst_info`'s layout.
@@ -2193,7 +2298,7 @@ impl Page {
         dst_info: &ImageInfo,
     ) -> Result<Vec<u8>, String> {
         let (mut surface, cache_depth) =
-            self.composited_surface(options, engine)?;
+            self.confirmed_surface(options, engine)?;
 
         let stride = dst_info.min_row_bytes();
         let mut buffer: Vec<u8> = vec![0; checked_byte_size(dst_info)?];
@@ -2256,21 +2361,33 @@ impl Page {
         let img_dims = self.scaled_dimensions(options.density);
         let img_scale =
             M44::from(Matrix::scale((options.density, options.density)));
-        let mut surface = make_compositing_surface(
-            &engine,
-            options,
-            img_dims,
-            &options.surface_color_space,
-        )?;
-
-        let canvas = surface.canvas();
-        if let Some(color) = options.matte {
-            canvas.clear(color);
+        let draw = || -> Result<Surface, String> {
+            let mut surface = make_compositing_surface(
+                &engine,
+                options,
+                img_dims,
+                &options.surface_color_space,
+            )?;
+            let canvas = surface.canvas();
+            if let Some(color) = options.matte {
+                canvas.clear(color);
+            }
+            canvas.set_matrix(&img_scale);
+            for pict in self.layers.iter() {
+                pict.playback(canvas);
+            }
+            Ok(surface)
+        };
+        let mut surface = None;
+        for _ in 0..DRAW_ATTEMPTS {
+            let mut drawn = draw()?;
+            if draws_ran(&mut drawn, self.id) {
+                surface = Some(drawn);
+                break;
+            }
         }
-        canvas.set_matrix(&img_scale);
-        for pict in self.layers.iter() {
-            pict.playback(canvas);
-        }
+        let mut surface =
+            surface.ok_or_else(|| discarded("compositing the page"))?;
 
         let stride = info.min_row_bytes();
         let mut buffer: Vec<u8> = vec![0; checked_byte_size(info)?];

@@ -43,7 +43,7 @@ use crate::{
     filter::{ColorFilter, FilterOp, ImageFilter, MaskFilter},
     font::{FontVariation, slant_for_matching},
     geometry::{Affine, Point, Projection, Rect},
-    gpu::RenderingEngine,
+    gpu::{RenderingEngine, completion::typed},
     image::Image,
     node::{
         filter::{Filter, SamplingQuality},
@@ -3115,7 +3115,9 @@ impl Context2D {
         let pixels = self
             .inner
             .pixels_as(crop, internal, engine, options.to_alpha_type())
-            .map_err(|reason| Error::PixelReadback { reason })?;
+            .map_err(|reason| {
+                typed(reason, |reason| Error::PixelReadback { reason })
+            })?;
 
         ImageData::from_pixels(width as u32, height as u32, options, pixels)
     }
