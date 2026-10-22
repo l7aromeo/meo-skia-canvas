@@ -135,6 +135,15 @@ pub enum FontSlant {
 }
 
 impl FontSlant {
+    /// The slant Skia reports for a face, as one of the three keywords.
+    pub(crate) fn from_skia(slant: Slant) -> Self {
+        match slant {
+            Slant::Upright => Self::Normal,
+            Slant::Italic => Self::Italic,
+            Slant::Oblique => Self::Oblique,
+        }
+    }
+
     /// The CSS `font-style` keyword, or `None` for the initial value --
     /// which a serialized font string leaves out rather than spelling.
     fn to_css(self) -> Option<&'static str> {
@@ -183,7 +192,7 @@ pub enum FontStretch {
 }
 
 impl FontStretch {
-    fn from_skia(width: Width) -> Self {
+    pub(crate) fn from_skia(width: Width) -> Self {
         match width {
             w if w == Width::ULTRA_CONDENSED => Self::UltraCondensed,
             w if w == Width::EXTRA_CONDENSED => Self::ExtraCondensed,
