@@ -472,6 +472,29 @@ removed and no signature moves.
   it cost 0.91, and 1.65 for a chain of ten functions where it cost 2.75,
   in a release build.
 
+- **`ctx.font` takes the CSS math functions, the font-relative units and an
+  `oblique` angle**, as Chrome 152 does. The size, the weight and the line
+  height may be `calc()`, `min()`, `clamp()` or any of the others, with a
+  percentage of the size taken of the 10px parent -- `calc(50% + 2px)` is
+  7px -- and a computed value held where Chrome holds it: a size to 0
+  through 10000px, a weight to 1 through 1000. `ex`, `ch`, `cap` and `ic`
+  in a size are those of 10px `serif`, Chrome's standard family, and `rem`
+  and the other root forms of 16px. `oblique 10deg` and any other angle from
+  -90deg to 90deg is taken: any angle but zero selects the family's italic,
+  as in Chrome, and only the default 14deg reads back as `italic`. A family
+  with no italic face draws upright for now, where Chrome synthesises a
+  slant from 14deg up. A size above 10000px, which was taken as written, is
+  now 10000px. 113 shorthands measured in Chrome join
+  `tests/assets/cases/css-fonts.json`, and the JavaScript tests that held
+  the old parser to its own internals are rows there instead.
+
+  The string is read by the crate's own shorthand parser, the one
+  `Context2D::set_font_css` uses, in place of a second one in JavaScript,
+  and the binding remembers each string it has resolved. A string set
+  before costs what it did -- 0.25 microseconds in a release build, 0.35
+  for a full shorthand -- and a new one costs less: 1.47 microseconds where
+  it cost 3.65, and 2.76 for a full shorthand where it cost 6.15.
+
 - **Every CSS length unit in `ctx.filter`, `letterSpacing` and
   `wordSpacing`.** `ex`, `ch`, `cap` and `ic` are measured on the face the
   context font resolves to -- for a variable font, the instance at its

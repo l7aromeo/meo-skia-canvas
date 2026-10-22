@@ -1192,6 +1192,9 @@ pub struct FontSpec {
     /// initial values and the line height left out, as the Canvas API
     /// requires. Never a cache key -- two line heights serialize alike.
     pub serialized: String,
+    /// The angle of an `oblique` other than zero and the default 14deg, for
+    /// the drawing to decide on, or `None`.
+    pub oblique_degrees: Option<f32>,
 }
 
 impl FontSpec {
@@ -1205,48 +1208,6 @@ impl FontSpec {
     pub fn style(&self) -> FontStyle {
         FontStyle::new(self.weight, self.width, slant_for_matching(self.slant))
     }
-}
-
-pub fn font_arg(
-    cx: &mut FunctionContext,
-    idx: usize,
-) -> NeonResult<Option<FontSpec>> {
-    let arg = cx.argument::<JsValue>(idx)?;
-    if arg.is_a::<JsNull, _>(cx) {
-        return Ok(None);
-    }
-
-    let font_desc = cx.argument::<JsObject>(idx)?;
-    let families = strings_at_key(cx, &font_desc, "family")?;
-    let canonical = string_for_key(cx, &font_desc, "canonical")?;
-    let serialized = string_for_key(cx, &font_desc, "serialized")?;
-    let variant = string_for_key(cx, &font_desc, "variant")?;
-    let size = float_for_key(cx, &font_desc, "size")?;
-    let weight = Weight::from(float_for_key(cx, &font_desc, "weight")? as i32);
-    let slant = to_slant(string_for_key(cx, &font_desc, "style")?.as_str());
-    let width = to_width(string_for_key(cx, &font_desc, "stretch")?.as_str());
-    let line_height = opt_float_for_key(cx, &font_desc, "lineHeight")
-        .map(|pt_size| pt_size / size);
-
-    let feat_obj: Handle<JsObject> = font_desc.get(cx, "features")?;
-    let features = font_features(cx, &feat_obj)?;
-
-    Ok(match families[0].is_empty() {
-        true => None, /* silently fail if a family name was omitted (e.g., */
-        // "bold 50px")
-        false => Some(FontSpec {
-            families,
-            size,
-            line_height,
-            weight,
-            slant,
-            width,
-            features,
-            variant,
-            canonical,
-            serialized,
-        }),
-    })
 }
 
 pub fn font_features(

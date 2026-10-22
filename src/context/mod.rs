@@ -295,8 +295,9 @@ impl Default for State {
 }
 
 /// The face the generic `serif` family resolves to at the normal weight,
-/// width and slant: what an initial root font is set in.
-fn initial_root_face() -> Option<Typeface> {
+/// width and slant: what an initial root font is set in, and what a canvas
+/// font shorthand's parent is set in.
+pub(crate) fn initial_root_face() -> Option<Typeface> {
     FontLibrary::with_shared(|library| {
         let mut collection = library.font_collection();
         collection

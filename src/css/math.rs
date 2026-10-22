@@ -112,13 +112,26 @@ impl Quantity {
     }
 }
 
+/// What a `%` inside a math function means, which depends on the property.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Percent {
+    /// Not allowed at all. A property that takes no percentage refuses the
+    /// token, not just the result: Chrome refuses `blur(calc(10% + 1px))`.
+    Refused,
+    /// A dimension of its own, as in `brightness()`, which takes a number or
+    /// a percentage and refuses `calc(50% + 0.5)`.
+    Own,
+    /// A length, as that percentage of this many pixels -- a font size's
+    /// percentage is of its parent's size, so Chrome reads
+    /// `calc(50% + 2px)` in a canvas font as 7px.
+    Of(f64),
+}
+
 /// What a math function may contain, which depends on where it is written.
 #[derive(Clone, Copy)]
 pub(crate) struct Expect<'a> {
-    /// Whether a `%` may appear anywhere inside. A property that takes no
-    /// percentage refuses the token, not just the result: Chrome refuses
-    /// `blur(calc(10% + 1px))`.
-    pub percent: bool,
+    /// What a `%` means here.
+    pub percent: Percent,
     /// What the font-relative lengths resolve against.
     pub units: &'a FontUnits<'a>,
 }
@@ -343,10 +356,16 @@ impl Parser<'_, '_> {
         let value: f64 = self.rest().get(..length)?.parse().ok()?;
         self.at += length;
         if self.eat(b'%').is_some() {
-            return self
-                .expect
-                .percent
-                .then(|| Quantity::new(value / 100.0, Dimension::PERCENT));
+            let fraction = value / 100.0;
+            return match self.expect.percent {
+                Percent::Refused => None,
+                Percent::Own => {
+                    Some(Quantity::new(fraction, Dimension::PERCENT))
+                }
+                Percent::Of(basis) => {
+                    Some(Quantity::new(fraction * basis, Dimension::LENGTH))
+                }
+            };
         }
         let Some(unit) = self.identifier() else {
             return Some(Quantity::number(value));
@@ -718,7 +737,7 @@ mod tests {
     fn number(text: &str) -> f64 {
         let units = FontUnits::assumed(16.0);
         let expect = Expect {
-            percent: true,
+            percent: Percent::Own,
             units: &units,
         };
         let quantity = evaluate(text, &expect)
@@ -770,7 +789,7 @@ mod tests {
     fn a_sum_needs_its_operator_spaced_and_its_sides_alike() {
         let units = FontUnits::assumed(16.0);
         let expect = Expect {
-            percent: false,
+            percent: Percent::Refused,
             units: &units,
         };
         for text in [
@@ -796,7 +815,7 @@ mod tests {
     fn nan_censors_to_zero_only_when_finished() {
         let units = FontUnits::assumed(16.0);
         let expect = Expect {
-            percent: false,
+            percent: Percent::Refused,
             units: &units,
         };
         let nan = evaluate("calc(NaN * 1px)", &expect).expect("a length");

@@ -13,7 +13,6 @@ const { assert, describe, test, beforeEach, afterEach } = require("../runner"),
     FontLibrary,
     loadImage,
   } = require("../../lib"),
-  css = require("../../lib/classes/css"),
   fs = require("fs"),
   { loadSkiaNode } = require("../../lib/binary.js");
 
@@ -68,12 +67,11 @@ describe("Context2D", () => {
 
     test("font", () => {
       assert.equal(ctx.font, "10px sans-serif");
-      let font = "16px Baskerville, serif",
-        serialized = css.font(font).serialized;
+      let font = "16px Baskerville, serif";
       ctx.font = font;
-      assert.equal(ctx.font, serialized);
+      assert.equal(ctx.font, font);
       ctx.font = "invalid";
-      assert.equal(ctx.font, serialized);
+      assert.equal(ctx.font, font);
     });
 
     test("globalAlpha", () => {
@@ -1829,140 +1827,12 @@ describe("Context2D", () => {
   });
 
   describe("parses", () => {
-    test("fonts", () => {
-      let cases = {
-        "20px Arial": { size: 20, family: ["Arial"] },
-        "33pt Arial": { size: 44, family: ["Arial"] },
-        "75pt Arial": { size: 100, family: ["Arial"] },
-        // Of the canvas's default 10px font, as Chrome resolves it.
-        "20% Arial": { size: 10 * 0.2, family: ["Arial"] },
-        "20mm Arial": { size: 75.59055118110237, family: ["Arial"] },
-        "20px serif": { size: 20, family: ["serif"] },
-        "20px sans-serif": { size: 20, family: ["sans-serif"] },
-        "20px monospace": { size: 20, family: ["monospace"] },
-        "50px Arial, sans-serif": { size: 50, family: ["Arial", "sans-serif"] },
-        "bold italic 50px Arial, sans-serif": {
-          style: "italic",
-          weight: 700,
-          size: 50,
-          family: ["Arial", "sans-serif"],
-        },
-        "50px Helvetica ,  Arial, sans-serif": {
-          size: 50,
-          family: ["Helvetica", "Arial", "sans-serif"],
-        },
-        '50px "Helvetica Neue", sans-serif': {
-          size: 50,
-          family: ["Helvetica Neue", "sans-serif"],
-        },
-        '50px "Helvetica Neue", "foo bar baz" , sans-serif': {
-          size: 50,
-          family: ["Helvetica Neue", "foo bar baz", "sans-serif"],
-        },
-        "50px 'Helvetica Neue'": { size: 50, family: ["Helvetica Neue"] },
-        "italic 20px Arial": { size: 20, style: "italic", family: ["Arial"] },
-        "oblique 20px Arial": { size: 20, style: "oblique", family: ["Arial"] },
-        "normal 20px Arial": { size: 20, style: "normal", family: ["Arial"] },
-        "300 20px Arial": { size: 20, weight: 300, family: ["Arial"] },
-        "800 20px Arial": { size: 20, weight: 800, family: ["Arial"] },
-        "bolder 20px Arial": { size: 20, weight: 700, family: ["Arial"] },
-        "lighter 20px Arial": { size: 20, weight: 100, family: ["Arial"] },
-        "normal normal normal 16px Impact": {
-          size: 16,
-          weight: 400,
-          family: ["Impact"],
-          style: "normal",
-          variant: "normal",
-        },
-        "italic small-caps bolder 16px cursive": {
-          size: 16,
-          style: "italic",
-          variant: "small-caps",
-          weight: 700,
-          family: ["cursive"],
-        },
-        '20px "new century schoolbook", serif': {
-          size: 20,
-          family: ["new century schoolbook", "serif"],
-        },
-        '20px "Arial bold 300"': {
-          size: 20,
-          family: ["Arial bold 300"],
-          variant: "normal",
-        }, // synthetic case with weight keyword inside family
-      };
-
-      _each(cases, (spec, font) => {
-        let expected = {
-            style: "normal",
-            stretch: "normal",
-            variant: "normal",
-            ...spec,
-          },
-          parsed = css.font(font);
-        assert.matchesSubset(parsed, expected);
-      });
-    });
-
-    // Units and keywords in CSS are ASCII case-insensitive, so every one of
-    // these is a valid font that was being dropped. The value is normalised
-    // on the way in, so the canonical form a caller reads back is lowercase
-    // whatever case they wrote -- which is what a browser reports.
-    test("fonts, in any case", () => {
-      for (let [font, canonical] of [
-        ["5PX serif", "normal 400 5px serif"],
-        ["5Px serif", "normal 400 5px serif"],
-        ["1EM serif", "normal 400 10px serif"],
-        // Written as the parser computes it -- `size * (96 / 72)` rather
-        // than `size / 0.75`, which can differ in the last bit.
-        ["5PT serif", `normal 400 ${5 * (96 / 72)}px serif`],
-        ["2Q serif", "normal 400 1.8897637795275593px serif"],
-        ["5REM serif", "normal 400 80px serif"],
-        ["MEDIUM serif", "normal 400 16px serif"],
-        ["X-LARGE serif", "normal 400 24px serif"],
-        ["ITALIC 20px serif", "italic normal 400 20px serif"],
-        ["Oblique 20px serif", "oblique normal 400 20px serif"],
-        ["SMALL-CAPS 20px serif", "normal small-caps 400 20px serif"],
-        ["CONDENSED 20px serif", "normal 400 condensed 20px serif"],
-        ["BOLD 20px serif", "normal 700 20px serif"],
-        ["Bolder 20px serif", "normal 700 20px serif"],
-        ["LIGHTER 20px serif", "normal 100 20px serif"],
-      ]) {
-        assert.equal(css.font(font)?.canonical, canonical, font);
-      }
-    });
-
     test("a mixed-case font reaches ctx.font", () => {
       ctx.font = "ITALIC BOLD 20PX serif";
       // The getter reports the serialized form, so `bold` rather than 700
       // and no `normal` variant; the table above is the canonical string,
       // which is the addon's cache key and keeps both.
       assert.equal(ctx.font, "italic bold 20px serif");
-    });
-
-    // CSS defines `font-size` over a non-negative length, and `line-height`
-    // the same way, so a negative one makes the whole shorthand invalid and
-    // the assignment is ignored. Zero is not negative and stays legal.
-    test("fonts, refusing a negative size", () => {
-      for (let font of [
-        "-5px serif",
-        "-0.5em serif",
-        "-1pt serif",
-        "normal -5px serif",
-        "bold italic -20px Arial, sans-serif",
-        "12px/-1.2 serif",
-        "-5px/1.2 serif",
-      ]) {
-        assert.equal(css.font(font), null, `${font} should not parse`);
-      }
-
-      for (let [font, size] of [
-        ["0px serif", 0],
-        ["5px serif", 5],
-        ["0.5em serif", 5],
-      ]) {
-        assert.matchesSubset(css.font(font), { size }, font);
-      }
     });
 
     test("a negative size leaves ctx.font alone", () => {
@@ -4063,43 +3933,11 @@ describe("bolder and lighter resolve against the inherited weight", () => {
   const FAMILY = "RelativeWeightVF";
 
   test("both keywords land on the row the specification gives for 400", () => {
-    assert.equal(css.font("bolder 16px serif").weight, 700);
-    assert.equal(css.font("lighter 16px serif").weight, 100);
-  });
-
-  test("the mapping is the specification's table, not a step", () => {
-    // Only the 350-550 row is reachable through `ctx.font`, so the rest is
-    // asserted directly. Every row is written out against CSS Fonts 4 section
-    // 2.2.1 rather than derived, so a table that drifts into arithmetic fails
-    // here: no offset reproduces these, since both ends saturate and 600 gives
-    // 900 against 400.
-    const table = [
-      // inherited, bolder, lighter
-      [50, 400, 50],
-      [100, 400, 100],
-      [300, 400, 100],
-      [350, 700, 100],
-      [400, 700, 100],
-      [500, 700, 100],
-      [550, 900, 400],
-      [700, 900, 400],
-      [750, 900, 700],
-      [900, 900, 700],
-      [1000, 1000, 700],
-    ];
-
-    for (let [inherited, bolder, lighter] of table) {
-      assert.equal(
-        css.relativeWeight("bolder", inherited),
-        bolder,
-        `bolder from ${inherited}`,
-      );
-      assert.equal(
-        css.relativeWeight("lighter", inherited),
-        lighter,
-        `lighter from ${inherited}`,
-      );
-    }
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = "bolder 16px serif";
+    assert.equal(ctx.font, "bold 16px serif");
+    ctx.font = "lighter 16px serif";
+    assert.equal(ctx.font, "100 16px serif");
   });
 
   test("the keyword picks a different face, not just a different number", () => {

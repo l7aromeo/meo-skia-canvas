@@ -1,8 +1,8 @@
 {
   "about": "Canvas `font` shorthands and what each sets. Read by tests/css_grammar.rs for the Rust font grammar and by tests/suite/css-grammar.test.js for `ctx.font`, so the two surfaces answer one table rather than two.",
-  "source": "Chrome 152.0.7977.149: ctx.font set on a fresh 2D context after a sentinel font, then ctx.font, ctx.fontVariantCaps and ctx.fontStretch read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving the sentinel. `parts` is Chrome's serialized font taken apart; `lineHeight`, which Chrome does not expose, is CSS Fonts 4's: a number or percentage multiplies the size, `normal` is none. Relative sizes resolve against the canvas's default 10px font and `rem` against 16px, as Chrome does.",
+  "source": "Chrome 152.0.7977.149: ctx.font set on a fresh 2D context after a sentinel font, then ctx.font, ctx.fontVariantCaps and ctx.fontStretch read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving the sentinel. `parts` is Chrome's serialized font taken apart; `lineHeight`, which Chrome does not expose, is CSS Fonts 4's: a number or percentage multiplies the size, `normal` is none. Relative sizes resolve against the canvas's default 10px font and `rem` against 16px, as Chrome does. Sizes are clamped to 10000px, as Chrome reads `20000px Arial`, and a computed negative size to zero; computed weights are held to 1 to 1000. For `oblique` with an angle, `parts.style` says which face Chrome draws rather than what it reads back: any angle but zero selects a family's italic -- measured as the slant of Arial's italic at 0.5deg, 10deg, -14deg and 90deg alike -- while only the default 14deg reads back as `italic`.",
   "notMeasured": "System-font keywords (caption, icon, menu, message-box, small-caption, status-bar) and `oblique 10deg 16px Arial` are left out: Chrome on macOS read every system font as 16px Arial, which is platform-specific, and serialized the oblique angle away.",
-  "knownDifferences": "Measured and left out, because neither surface matches Chrome yet: `2ex Arial` and `1ch Arial`, which Chrome resolves against its default face (8.97461px and 5px on macOS) and both surfaces refuse; and `16px \"serif\"` and `16px \"inherit\"`, which Chrome keeps quoted because a quoted generic or keyword names a family literally, and which a `Font` cannot tell from the unquoted name.",
+  "knownDifferences": "Measured and left out: a font size in `ex`, `ch` or `cap`, or in `rex`, `rch` or `rcap`, which Chrome resolves against 10px, or 16px for the root forms, of its standard family -- Times on macOS, so `1ex Oswald` is 4.4873px whatever family is named -- and which resolves here against the face `serif` resolves to, which differs by platform; `lh`, `rlh`, the viewport and container units, which Chrome resolves against the document and which read as zero here; and `16px \"serif\"` and `16px \"inherit\"`, which Chrome keeps quoted because a quoted generic or keyword names a family literally, and which a `Font` cannot tell from the unquoted name. Drawing an `oblique` angle in a family with no italic face: Chrome slants it synthetically from 14deg up and draws it upright below, and this library draws every such angle upright, since it does not yet synthesise a slant at all.",
   "cases": [
     {
       "css": "16px Arial",
@@ -1297,6 +1297,1588 @@
     },
     {
       "css": "16px Arial, inherit",
+      "refused": true
+    },
+    {
+      "css": "min(10px, 20px) Oswald",
+      "font": "10px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 10.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "max(10px, 20px) Oswald",
+      "font": "20px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 20.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "clamp(1px, 12px, 20px) Oswald",
+      "font": "12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "abs(-12px) Oswald",
+      "font": "12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "round(12.4px, 1px) Oswald",
+      "font": "12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "calc(1em + 1px) Oswald",
+      "font": "11px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 11.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "calc(50% + 2px) Oswald",
+      "font": "7px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 7.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "CALC(10px + 2px) Oswald",
+      "font": "12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "-webkit-calc(12px) Oswald",
+      "font": "12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "calc(-5px) Oswald",
+      "font": "0px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 0.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "calc(1px * infinity) Oswald",
+      "font": "10000px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 10000.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "calc(1px * NaN) Oswald",
+      "font": "0px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 0.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "calc(1px / 0) Oswald",
+      "font": "10000px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 10000.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "20000px Oswald",
+      "font": "10000px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 10000.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "10001px Oswald",
+      "font": "10000px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 10000.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "calc(20000px) Oswald",
+      "font": "10000px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 10000.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "1rem Oswald",
+      "font": "16px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "calc(1rem + 1em) Oswald",
+      "font": "26px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 26.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "1ic Oswald",
+      "font": "10px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 10.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "calc(12px * progress(5, 0, 10)) Oswald",
+      "font": "6px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 6.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "calc(sibling-index() * 12px) Oswald",
+      "font": "12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "calc(2px * 6) Oswald",
+      "font": "12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "calc(12px * sign(-1) * -1) Oswald",
+      "font": "12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "calc(400 + 300) 12px Oswald",
+      "font": "bold 12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 700,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "calc(950 + 100) 12px Oswald",
+      "font": "1000 12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 1000,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "calc(-1) 12px Oswald",
+      "font": "1 12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 1,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "min(800, 900) 12px Oswald",
+      "font": "800 12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 800,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "clamp(1, 650, 1000) 12px Oswald",
+      "font": "650 12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 650,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "sin(30deg) 12px Oswald",
+      "font": "1 12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 1,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "calc(400) 12px Oswald",
+      "font": "12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "bold calc(12px) Oswald",
+      "font": "bold 12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 700,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "italic calc(300 + 1) small-caps calc(10px + 2px) Oswald",
+      "font": "italic 301 small-caps 12px Oswald",
+      "variantCaps": "small-caps",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 301,
+        "style": "italic",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "small-caps",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "12px/calc(1 + 1) Oswald",
+      "font": "12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal",
+        "lineHeight": 24
+      }
+    },
+    {
+      "css": "12px/calc(10px + 2px) Oswald",
+      "font": "12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal",
+        "lineHeight": 12
+      }
+    },
+    {
+      "css": "12px/min(2, 3) Oswald",
+      "font": "12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal",
+        "lineHeight": 24
+      }
+    },
+    {
+      "css": "12px/calc(50% + 6px) Oswald",
+      "font": "12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal",
+        "lineHeight": 12
+      }
+    },
+    {
+      "css": "calc(10px + 2px)/calc(1.5 * 2) Oswald",
+      "font": "12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal",
+        "lineHeight": 36
+      }
+    },
+    {
+      "css": "calc() Oswald",
+      "refused": true
+    },
+    {
+      "css": "calc(10px + 2) Oswald",
+      "refused": true
+    },
+    {
+      "css": "calc(10px Oswald",
+      "refused": true
+    },
+    {
+      "css": "calc(10px+2px) Oswald",
+      "refused": true
+    },
+    {
+      "css": "calc(1px) 12px Oswald",
+      "refused": true
+    },
+    {
+      "css": "bold calc(-1) 12px Oswald",
+      "refused": true
+    },
+    {
+      "css": "calc(1 * 400) bold 12px Oswald",
+      "refused": true
+    },
+    {
+      "css": "-5px Oswald",
+      "refused": true
+    },
+    {
+      "css": "random(1px, 2px) Oswald",
+      "refused": true
+    },
+    {
+      "css": "calc(10%) 12px Oswald",
+      "refused": true
+    },
+    {
+      "css": "20px Arial",
+      "font": "20px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 20.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "33pt Arial",
+      "font": "44px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 44.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "75pt Arial",
+      "font": "100px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 100.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "20% Arial",
+      "font": "2px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 2.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "20mm Arial",
+      "font": "75.5906px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 75.59055118110237,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "20px serif",
+      "font": "20px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 20.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "20px sans-serif",
+      "font": "20px sans-serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 20.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "sans-serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "20px monospace",
+      "font": "20px monospace",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 20.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "monospace"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "50px Arial, sans-serif",
+      "font": "50px Arial, sans-serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 50.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial",
+          "sans-serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "bold italic 50px Arial, sans-serif",
+      "font": "italic bold 50px Arial, sans-serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 50.0,
+        "weight": 700,
+        "style": "italic",
+        "families": [
+          "Arial",
+          "sans-serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "50px Helvetica ,  Arial, sans-serif",
+      "font": "50px Helvetica, Arial, sans-serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 50.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Helvetica",
+          "Arial",
+          "sans-serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "50px 'Helvetica Neue'",
+      "font": "50px \"Helvetica Neue\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 50.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Helvetica Neue"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "italic 20px Arial",
+      "font": "italic 20px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 20.0,
+        "weight": 400,
+        "style": "italic",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "oblique 20px Arial",
+      "font": "italic 20px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 20.0,
+        "weight": 400,
+        "style": "italic",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "normal 20px Arial",
+      "font": "20px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 20.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "300 20px Arial",
+      "font": "300 20px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 20.0,
+        "weight": 300,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "800 20px Arial",
+      "font": "800 20px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 20.0,
+        "weight": 800,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "bolder 20px Arial",
+      "font": "bold 20px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 20.0,
+        "weight": 700,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "lighter 20px Arial",
+      "font": "100 20px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 20.0,
+        "weight": 100,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "normal normal normal 16px Impact",
+      "font": "16px Impact",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Impact"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "italic small-caps bolder 16px cursive",
+      "font": "italic bold small-caps 16px cursive",
+      "variantCaps": "small-caps",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 700,
+        "style": "italic",
+        "families": [
+          "cursive"
+        ],
+        "variantCaps": "small-caps",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "5PX serif",
+      "font": "5px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 5.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "5Px serif",
+      "font": "5px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 5.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "1EM serif",
+      "font": "10px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 10.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "5PT serif",
+      "font": "6.66667px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 6.666666666666667,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "2Q serif",
+      "font": "1.88976px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 1.8897637795275593,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "5REM serif",
+      "font": "80px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 80.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "MEDIUM serif",
+      "font": "16px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "X-LARGE serif",
+      "font": "24px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 24.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "ITALIC 20px serif",
+      "font": "italic 20px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 20.0,
+        "weight": 400,
+        "style": "italic",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "Oblique 20px serif",
+      "font": "italic 20px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 20.0,
+        "weight": 400,
+        "style": "italic",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "SMALL-CAPS 20px serif",
+      "font": "small-caps 20px serif",
+      "variantCaps": "small-caps",
+      "stretch": "normal",
+      "parts": {
+        "size": 20.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "small-caps",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "CONDENSED 20px serif",
+      "font": "20px serif",
+      "variantCaps": "normal",
+      "stretch": "condensed",
+      "parts": {
+        "size": 20.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "condensed"
+      }
+    },
+    {
+      "css": "BOLD 20px serif",
+      "font": "bold 20px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 20.0,
+        "weight": 700,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "Bolder 20px serif",
+      "font": "bold 20px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 20.0,
+        "weight": 700,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "LIGHTER 20px serif",
+      "font": "100 20px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 20.0,
+        "weight": 100,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "-5px serif",
+      "refused": true
+    },
+    {
+      "css": "-0.5em serif",
+      "refused": true
+    },
+    {
+      "css": "-1pt serif",
+      "refused": true
+    },
+    {
+      "css": "normal -5px serif",
+      "refused": true
+    },
+    {
+      "css": "bold italic -20px Arial, sans-serif",
+      "refused": true
+    },
+    {
+      "css": "12px/-1.2 serif",
+      "refused": true
+    },
+    {
+      "css": "-5px/1.2 serif",
+      "refused": true
+    },
+    {
+      "css": "0px serif",
+      "font": "0px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 0.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "0.5em serif",
+      "font": "5px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 5.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "16px Baskerville, serif",
+      "font": "16px Baskerville, serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Baskerville",
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "12px/1.5 serif",
+      "font": "12px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal",
+        "lineHeight": 18
+      }
+    },
+    {
+      "css": "12px/150% serif",
+      "font": "12px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal",
+        "lineHeight": 18
+      }
+    },
+    {
+      "css": "12px/normal serif",
+      "font": "12px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "12px/2em serif",
+      "font": "12px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal",
+        "lineHeight": 24
+      }
+    },
+    {
+      "css": "12px/20px serif",
+      "font": "12px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal",
+        "lineHeight": 20
+      }
+    },
+    {
+      "css": "oblique 14deg 16px Oswald",
+      "font": "italic 16px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "italic",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "oblique 14DEG 16px Oswald",
+      "font": "italic 16px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "italic",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "oblique calc(14deg) 16px Oswald",
+      "font": "italic 16px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "italic",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "oblique calc(10deg + 4deg) 12px Oswald",
+      "font": "italic 12px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "italic",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "oblique 10deg 16px Oswald",
+      "font": "16px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "italic",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "oblique -14deg 16px Oswald",
+      "font": "16px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "italic",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "oblique 90deg 16px Oswald",
+      "font": "16px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "italic",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "oblique 0.25turn 16px Oswald",
+      "font": "16px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "italic",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "oblique calc(100deg) 16px Oswald",
+      "font": "16px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "italic",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "oblique 0deg 16px Oswald",
+      "font": "16px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "oblique 14 16px Oswald",
+      "font": "italic 14 16px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 14,
+        "style": "italic",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "oblique 10deg bold 16px Oswald",
+      "font": "bold 16px Oswald",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 700,
+        "style": "italic",
+        "families": [
+          "Oswald"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "oblique 91deg 16px Oswald",
+      "refused": true
+    },
+    {
+      "css": "oblique 0 16px Oswald",
+      "refused": true
+    },
+    {
+      "css": "italic 14deg 16px Oswald",
       "refused": true
     }
   ]
