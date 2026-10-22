@@ -763,6 +763,24 @@ impl PathBuilder {
         self
     }
 
+    /// Appends another path as a new subpath, with `transform` applied to
+    /// every point of it.
+    ///
+    /// JavaScript's `Path2D.addPath(path, transform)`. Only the added path
+    /// moves: what this builder already holds stays where it is, and `path`
+    /// itself is not changed.
+    pub fn add_path_transformed(
+        &mut self,
+        path: &Path2D,
+        transform: &Affine,
+    ) -> &mut Self {
+        self.inner.add_path(
+            &path.inner.make_transform(&affine_to_matrix(*transform)),
+            AddPathMode::Append,
+        );
+        self
+    }
+
     /// Closes the current subpath back to its start.
     pub fn close_path(&mut self) -> &mut Self {
         self.inner.close();

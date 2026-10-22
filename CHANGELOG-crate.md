@@ -327,6 +327,17 @@ window be changed after it opens.** No signature moves and nothing is removed.
   into the canvas's space. Checked against the Node binding's
   `drawImage(imageData)` and `createPattern(imageData)` on the same buffer.
 
+- **`Affine::scale_about` and `PathBuilder::add_path_transformed` take the
+  arguments JavaScript's `DOMMatrix.scale` and `Path2D.addPath` may leave
+  out.** `scale_about(sx, sy, origin)` scales about a point rather than
+  about `(0, 0)` -- `m.multiply(&Affine::scale_about(2.0, 3.0, origin))` is
+  `m.scale(2, 3, 1, origin.x, origin.y)` -- and
+  `add_path_transformed(&path, &transform)` appends a path with a transform
+  applied to it alone. Both were reachable before by composing
+  `Affine::translation` and `Affine::scale`, or through `Path2D::transform`;
+  these spell the JavaScript forms directly. Checked against Chrome 152's
+  `DOMMatrix.scale` and `isPointInPath` on the same values.
+
 - **`color(xyz ...)`, `color(xyz-d50 ...)` and `color(xyz-d65 ...)` are
   accepted**, beside the `srgb`, `srgb-linear`, `display-p3` and `rec2020`
   forms already taken. `xyz` and `xyz-d65` name one space, as CSS Color 4
