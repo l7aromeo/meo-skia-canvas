@@ -475,6 +475,9 @@ impl CollectionCache {
 pub struct FontLibrary {
     mgr: FontMgr,
     collection: Option<FontCollection>,
+    /// What every collection is built over, from
+    /// [`collection_parts`](Self::collection_parts).
+    collection_parts: Option<(FontMgr, Option<String>)>,
     fonts: Vec<(Typeface, Option<String>)>,
     generics_cache: Vec<(Typeface, Option<String>)>,
     collection_cache: CollectionCache,
@@ -537,6 +540,7 @@ impl FontLibrary {
                     mgr: FontMgr::default(),
                     fonts: vec![],
                     collection: None,
+                    collection_parts: None,
                     collection_cache: CollectionCache::default(),
                     resolved_fonts: ResolvedFontCache::default(),
                     collection_hinted: false,
@@ -560,7 +564,41 @@ impl FontLibrary {
         self.collection.as_ref().unwrap().clone()
     }
 
+    /// A collection over the registered and generic faces, falling back to
+    /// the system's.
+    ///
+    /// The faces and the default family come from [`collection_parts`],
+    /// which builds them once per set of registered fonts. Every
+    /// instanced collection [`fonts_for_style`] makes is one of these, so
+    /// building them per collection put a font-manager search on every
+    /// font size a face with an `opsz` axis had not been drawn at: about
+    /// 100 microseconds on Linux, where the system manager is fontconfig,
+    /// and a few on macOS.
+    ///
+    /// [`collection_parts`]: Self::collection_parts
+    /// [`fonts_for_style`]: Self::fonts_for_style
     fn new_font_collection(&mut self) -> FontCollection {
+        let (assets, default_family) = self.collection_parts();
+        let mut collection = FontCollection::new();
+        collection.set_default_font_manager(
+            self.mgr.clone(),
+            default_family.as_deref(),
+        );
+        collection.set_asset_font_manager(Some(assets));
+        collection
+    }
+
+    /// The provider of registered and generic faces every collection is
+    /// built over, and the family its default manager falls back to.
+    ///
+    /// Shared by every collection rather than built for each: the provider
+    /// is not changed once built, and [`invalidate`](Self::invalidate)
+    /// drops it with the collections whenever the set of registered fonts
+    /// changes.
+    fn collection_parts(&mut self) -> (FontMgr, Option<String>) {
+        if let Some(parts) = &self.collection_parts {
+            return parts.clone();
+        }
         let mut assets = TypefaceFontProvider::new();
         let claimed = self.claimed_aliases();
         for (font, alias) in self.generics() {
@@ -598,11 +636,9 @@ impl FontLibrary {
         }
         .map(|f| f.family_name());
 
-        let mut collection = FontCollection::new();
-        collection
-            .set_default_font_manager(self.mgr.clone(), default_fam.as_deref());
-        collection.set_asset_font_manager(Some(assets.into()));
-        collection
+        let parts: (FontMgr, Option<String>) = (assets.into(), default_fam);
+        self.collection_parts = Some(parts.clone());
+        parts
     }
 
     /// The aliases a caller has registered faces under.
@@ -1154,6 +1190,7 @@ impl FontLibrary {
     /// lookups happens to win.
     fn invalidate(&mut self) {
         self.collection = None;
+        self.collection_parts = None;
         self.collection_cache.clear();
         self.resolved_fonts.clear();
     }
@@ -1854,6 +1891,49 @@ mod tests {
             assert!(
                 !lib.collection_cache.entries.contains_key(&first_key),
                 "and the size asked for first is the one let go"
+            );
+        });
+    }
+
+    #[test]
+    fn a_font_registered_after_a_collection_is_built_is_found() {
+        // Every collection shares the provider of registered faces, so a
+        // registration has to replace it, not only the collections built
+        // over it. A static face, so the answer comes from the provider and
+        // not from an instance carrying its alias.
+        let face = |path: &str| {
+            let bytes = std::fs::read(path).expect(path);
+            FontMgr::new()
+                .new_from_data(Data::new_copy(&bytes), None)
+                .expect(path)
+        };
+        let style = |family: &str| {
+            let mut style = TextStyle::new();
+            style.set_font_families(&[family]);
+            style
+        };
+        let monoton = face("tests/assets/fonts/Monoton-Regular.woff");
+
+        FontLibrary::with_shared(|lib| {
+            lib.register_typeface(
+                face("tests/assets/fonts/AmstelvarAlpha-VF.ttf"),
+                Some("PartsFirst".to_string()),
+            );
+            lib.fonts_for_style(&style("PartsFirst"), &[]);
+            lib.font_collection();
+
+            lib.register_typeface(
+                monoton.clone(),
+                Some("PartsLater".to_string()),
+            );
+            let (mut collection, _) =
+                lib.fonts_for_style(&style("PartsLater"), &[]);
+            assert_eq!(
+                collection
+                    .find_typefaces(&["PartsLater"], FontStyle::default())
+                    .first()
+                    .map(Typeface::family_name),
+                Some(monoton.family_name()),
             );
         });
     }
