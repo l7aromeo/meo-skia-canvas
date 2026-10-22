@@ -20,6 +20,8 @@ import { existsSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { report } from "./gpu-events.mjs";
+
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url))),
   LOCAL_BUILD = join(ROOT, "lib", "skia.node"),
   OVERRIDE = "MEO_SKIA_CANVAS_BINARY";
@@ -42,6 +44,7 @@ if (env[OVERRIDE]) {
 
 console.log(`testing against ${against}`);
 
+const since = new Date();
 const { status, error } = spawnSync(
   process.execPath,
   ["--test", ...process.argv.slice(2)],
@@ -50,4 +53,7 @@ const { status, error } = spawnSync(
 
 if (error) throw error;
 // A signal death leaves `status` null, which must not read as success.
-process.exit(status ?? 1);
+const code = status ?? 1;
+// What macOS recorded about the GPU while the suite ran; see gpu-events.mjs.
+if (code !== 0) report(since, new Date());
+process.exit(code);

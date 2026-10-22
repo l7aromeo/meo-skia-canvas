@@ -502,12 +502,20 @@ build-custom: ensure-deps
 [doc("The whole suite, both languages, against the local build.")]
 test: test-rust test-js
 
+# Both halves run under `scripts/gpu-events.mjs --run`, which passes the exit
+# status through untouched and, only when the suite fails on macOS, prints the
+# GPU restart reports and failed Metal command buffers recorded while it ran.
+# A test that read back blank pixels with no error is what a GPU recovery looks
+# like from inside the library, and the system's record is the only thing that
+# can say afterwards whether one happened.
+
 # Without the override a platform package from node_modules wins over lib/skia.node,
 # so `bun run build && bun run test` silently exercises the published binary instead of
 # the one just compiled.
 [doc("The JavaScript suite alone, against the local build.")]
 test-js: ensure-binary
-    MEO_SKIA_CANVAS_BINARY="{{ lib }}" node --test
+    node scripts/gpu-events.mjs --self-test
+    MEO_SKIA_CANVAS_BINARY="{{ lib }}" node scripts/gpu-events.mjs --run -- node --test
 
 # The Rust suite. `test` is the JavaScript one; `ci` runs both.
 #
@@ -522,7 +530,7 @@ test-js: ensure-binary
 # suite is the larger of the two.
 [doc("The Rust suite alone. `test` runs this and `test-js` together.")]
 test-rust:
-    cargo test --features "{{ if os() == "macos" { "metal,window,freetype" } else { linux_features } }}"
+    node scripts/gpu-events.mjs --run -- cargo test --features "{{ if os() == "macos" { "metal,window,freetype" } else { linux_features } }}"
 
 # Run the JavaScript suite in watch mode.
 test-watch: ensure-binary
