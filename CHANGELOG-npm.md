@@ -12,10 +12,11 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 ## 📦 ⟩ [v6.0.3] (npm) ⟩ October 19, 2026
 
 **A patch fixing request headers that could follow a redirect to another
-host, a GPU that went unused on a Vulkan 1.4 loader, Vulkan messages printed
-to standard output, and two CSS colour spellings that resolved to the wrong
-colour, and raising the `follow-redirects` floor past three security
-advisories.** Nothing is removed and no signature moves.
+host, a `redirect` request option that was ignored, a GPU that went unused
+on a Vulkan 1.4 loader, Vulkan messages printed to standard output, and two
+CSS colour spellings that resolved to the wrong colour, and raising the
+`follow-redirects` floor past three security advisories.** Nothing is
+removed and no signature moves.
 
 ### Security
 
@@ -77,6 +78,26 @@ advisories.** Nothing is removed and no signature moves.
   pair of the wrong length -- now rejects with a `TypeError` before any
   request is made, where a string used to go out as one header per character.
   `undefined`, `null`, `false` and `""` still mean no headers.
+
+- **`redirect: "error"` and `redirect: "manual"` stop at a redirect instead
+  of following it.** `loadImage` and `loadImageData` ignored `redirect`:
+  every value, a misspelt one included, followed redirects as `"follow"`
+  does. A caller who chose `"error"` to keep a request's headers away from
+  whatever host it might be redirected to had neither that protection nor an
+  error. Every published release, from 3.6.0-0 through 6.0.2, behaves this
+  way.
+
+  `"error"` now rejects at the first redirect, naming its status. `"manual"`
+  rejects naming the status and the URL the redirect leads to, so it can be
+  followed deliberately: `fetch` would hand back the redirect itself, and a
+  redirect has no image to resolve with. Neither requests the redirect's
+  target. Leaving `redirect` out still means `"follow"`, and any value that
+  is not one of the three rejects with a `TypeError` before a request is
+  made, as `fetch` does.
+
+  **To keep a custom credential header such as `X-API-Key` from reaching
+  another host, pass `redirect: "error"`**, since `follow-redirects` removes
+  only `Authorization`, `Cookie` and `Proxy-Authorization` by default.
 
 ### Fixed
 
