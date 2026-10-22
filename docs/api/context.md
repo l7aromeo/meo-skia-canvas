@@ -235,7 +235,7 @@ setTransform(...matrix);
 These behave just like the standard [transform][transform()] and [setTransform][setTransform()] methods, but can accept their matrix argument in a variety of forms:
 
 - a [DOMMatrix][DOMMatrix] object
-- a [CSS transform][css_transform] string (supporting all [transform functions][css_transform_fns] except `perspective`)
+- a [CSS transform][css_transform] string (supporting every [transform function][css_transform_fns], with a 3D list flattened to its 2D part as `DOMMatrix` reports it; a string Chrome refuses throws a `SyntaxError` `DOMException`)
 - a matrix-like object with numeric attributes named `a`, `b`, `c`, `d`, `e`, & `f`
 - a 6-element array of numbers
 - 6 individual numeric arguments
@@ -244,7 +244,7 @@ For example all of these invocations result in setting the context to the same t
 
 ```js
 ctx.setTransform(new DOMMatrix().scale(2, 0.5).rotate(180).translate(10, 10)); // DOMMatrix
-ctx.setTransform("scale(2, 50%) rotate(180deg) translate(10, 10)"); // CSS transform
+ctx.setTransform("scale(2, 50%) rotate(180deg) translate(10px, 10px)"); // CSS transform
 ctx.setTransform({ a: -2, b: 0, c: 0, d: -0.5, e: -20, f: -5 }); // matrix-like object
 ctx.setTransform([-2, 0, 0, -0.5, -20, -5]); // array
 ctx.setTransform(-2, 0, 0, -0.5, -20, -5); // numeric arguments

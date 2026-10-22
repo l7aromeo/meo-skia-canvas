@@ -1132,13 +1132,112 @@ mod tests {
     }
 }
 
-/// One CSS `transform` function as the matrix it names.
+/// A 4x4 transform in the layout `DOMMatrix` uses: `m[column][row]`, so
+/// `m[0][1]` is `m12`, which is `b`, and `m[3][0]` is `m41`, which is `e`.
+///
+/// A transform list is composed at this size and projected to an [`Affine`]
+/// once at the end, because a 3D step can move the 2D result: under
+/// `rotateX(30deg) translate3d(10px, 20px, 30px)` the `z` of the translation
+/// reaches `f`, and Chrome reports `f = 2.32`, where projecting each step on
+/// its own would give 20. Composed in `f64` as a browser does, and narrowed
+/// to `f32` only in that last step.
+#[derive(Clone, Copy)]
+struct Matrix4([[f64; 4]; 4]);
+
+impl Matrix4 {
+    const IDENTITY: Self = Self([
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]);
+
+    /// The 2D matrix `a b c d e f`, as `matrix()` and `DOMMatrix` spell it.
+    fn planar(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> Self {
+        let mut m = Self::IDENTITY;
+        m.0[0][0] = a;
+        m.0[0][1] = b;
+        m.0[1][0] = c;
+        m.0[1][1] = d;
+        m.0[3][0] = e;
+        m.0[3][1] = f;
+        m
+    }
+
+    fn translation(x: f64, y: f64, z: f64) -> Self {
+        let mut m = Self::IDENTITY;
+        m.0[3] = [x, y, z, 1.0];
+        m
+    }
+
+    fn scale(x: f64, y: f64, z: f64) -> Self {
+        let mut m = Self::IDENTITY;
+        m.0[0][0] = x;
+        m.0[1][1] = y;
+        m.0[2][2] = z;
+        m
+    }
+
+    /// A rotation of `degrees` about the axis `(x, y, z)`, which need not be
+    /// a unit vector, by the formula the Geometry Interfaces specification
+    /// gives for `rotateAxisAngle`. A zero-length axis is no rotation at
+    /// all, which is what Chrome returns for `rotate3d(0, 0, 0, 45deg)`.
+    fn rotation(x: f64, y: f64, z: f64, degrees: f64) -> Self {
+        let length = (x * x + y * y + z * z).sqrt();
+        if length == 0.0 {
+            return Self::IDENTITY;
+        }
+        let (x, y, z) = (x / length, y / length, z / length);
+        let half = degrees.to_radians() / 2.0;
+        let sc = half.sin() * half.cos();
+        let sq = half.sin() * half.sin();
+        let mut m = Self::IDENTITY;
+        m.0[0][0] = 1.0 - 2.0 * (y * y + z * z) * sq;
+        m.0[0][1] = 2.0 * (x * y * sq + z * sc);
+        m.0[0][2] = 2.0 * (x * z * sq - y * sc);
+        m.0[1][0] = 2.0 * (x * y * sq - z * sc);
+        m.0[1][1] = 1.0 - 2.0 * (x * x + z * z) * sq;
+        m.0[1][2] = 2.0 * (y * z * sq + x * sc);
+        m.0[2][0] = 2.0 * (x * z * sq + y * sc);
+        m.0[2][1] = 2.0 * (y * z * sq - x * sc);
+        m.0[2][2] = 1.0 - 2.0 * (x * x + y * y) * sq;
+        m
+    }
+
+    /// `self` with `other` applied first, as a transform list composes left
+    /// to right.
+    fn then(&self, other: &Self) -> Self {
+        let mut out = [[0.0; 4]; 4];
+        for (column, out_column) in out.iter_mut().enumerate() {
+            for (row, cell) in out_column.iter_mut().enumerate() {
+                *cell =
+                    (0..4).map(|k| self.0[k][row] * other.0[column][k]).sum();
+            }
+        }
+        Self(out)
+    }
+
+    /// The 2D part, `a b c d e f`, as `DOMMatrix` reports it.
+    fn to_affine(self) -> Affine {
+        let m = self.0;
+        Affine {
+            a: m[0][0] as f32,
+            b: m[0][1] as f32,
+            c: m[1][0] as f32,
+            d: m[1][1] as f32,
+            tx: m[3][0] as f32,
+            ty: m[3][1] as f32,
+        }
+    }
+}
+
+/// One CSS `transform` function as the matrix it names, given in lower case.
 ///
 /// Every argument goes through the same primitives the rest of this module
 /// uses, so a unit CSS does not define is refused here for the same reason
 /// it is refused in a filter: `rotate(45)` has no unit and browsers reject
 /// it, and [`parse_angle`] already says so.
-fn transform_function(text: &str) -> Option<Affine> {
+fn transform_function(text: &str) -> Option<Matrix4> {
     let args = |name: &str| -> Option<Vec<&str>> {
         Some(call(text, name)?.split(',').map(str::trim).collect())
     };
@@ -1149,80 +1248,171 @@ fn transform_function(text: &str) -> Option<Affine> {
     // changed no test, which is what showed the claim was wrong rather than
     // untested.
     for name in [
-        "translateX",
-        "translateY",
+        "translatex",
+        "translatey",
+        "translatez",
+        "translate3d",
         "translate",
+        "rotatex",
+        "rotatey",
+        "rotatez",
+        "rotate3d",
         "rotate",
-        "scaleX",
-        "scaleY",
+        "scalex",
+        "scaley",
+        "scalez",
+        "scale3d",
         "scale",
-        "skewX",
-        "skewY",
+        "skewx",
+        "skewy",
         "skew",
+        "matrix3d",
         "matrix",
+        "perspective",
     ] {
         let Some(args) = args(name) else { continue };
         // `parse_length` gives NaN for `em` and `rem`, whose pixel value needs
         // a font size this function does not have. Refused rather than
         // silently placed at NaN, which would put the drawing nowhere.
-        let length = |at: usize| -> Option<f32> {
+        let length = |at: usize| -> Option<f64> {
             let pixels = parse_length(args.get(at)?)?.pixels;
-            pixels.is_finite().then_some(pixels)
+            pixels.is_finite().then_some(f64::from(pixels))
         };
-        let angle = |at: usize| parse_angle(args.get(at)?);
-        let number = |at: usize| args.get(at)?.parse::<f32>().ok();
-        return match (name, args.len()) {
-            ("translateX", 1) => Some(Affine::translation(length(0)?, 0.0)),
-            ("translateY", 1) => Some(Affine::translation(0.0, length(0)?)),
-            ("translate", 1) => Some(Affine::translation(length(0)?, 0.0)),
-            ("translate", 2) => {
-                Some(Affine::translation(length(0)?, length(1)?))
+        // An angle needs a unit, but a transform takes a bare zero too:
+        // Chrome reads `rotate(0)` and `skewX(0)`. Only here, because the
+        // filter grammar shares `parse_angle`.
+        let angle = |at: usize| {
+            let text = args.get(at)?;
+            match text.parse::<f64>().is_ok_and(|value| value == 0.0) {
+                true => Some(0.0),
+                false => parse_angle(text).map(f64::from),
             }
-            ("rotate", 1) => Some(Affine::rotation_degrees(angle(0)?)),
-            ("scaleX", 1) => Some(Affine::scale(number(0)?, 1.0)),
-            ("scaleY", 1) => Some(Affine::scale(1.0, number(0)?)),
+        };
+        let number = |at: usize| args.get(at)?.parse::<f64>().ok();
+        // A scale may be a number or a percentage: Chrome reads `scale(50%)`
+        // as half, as CSS Transforms 2 allows.
+        let factor = |at: usize| parse_percentage(args.get(at)?).map(f64::from);
+        let tan = |degrees: f64| degrees.to_radians().tan();
+        return match (name, args.len()) {
+            ("translatex", 1) => {
+                Some(Matrix4::translation(length(0)?, 0.0, 0.0))
+            }
+            ("translatey", 1) => {
+                Some(Matrix4::translation(0.0, length(0)?, 0.0))
+            }
+            ("translatez", 1) => {
+                Some(Matrix4::translation(0.0, 0.0, length(0)?))
+            }
+            ("translate", 1) => {
+                Some(Matrix4::translation(length(0)?, 0.0, 0.0))
+            }
+            ("translate", 2) => {
+                Some(Matrix4::translation(length(0)?, length(1)?, 0.0))
+            }
+            ("translate3d", 3) => {
+                Some(Matrix4::translation(length(0)?, length(1)?, length(2)?))
+            }
+            ("rotatex", 1) => Some(Matrix4::rotation(1.0, 0.0, 0.0, angle(0)?)),
+            ("rotatey", 1) => Some(Matrix4::rotation(0.0, 1.0, 0.0, angle(0)?)),
+            ("rotate" | "rotatez", 1) => {
+                Some(Matrix4::rotation(0.0, 0.0, 1.0, angle(0)?))
+            }
+            ("rotate3d", 4) => Some(Matrix4::rotation(
+                number(0)?,
+                number(1)?,
+                number(2)?,
+                angle(3)?,
+            )),
+            ("scalex", 1) => Some(Matrix4::scale(factor(0)?, 1.0, 1.0)),
+            ("scaley", 1) => Some(Matrix4::scale(1.0, factor(0)?, 1.0)),
+            ("scalez", 1) => Some(Matrix4::scale(1.0, 1.0, factor(0)?)),
             // `scale(2)` scales both axes; `scale(2, 3)` names them apart.
-            ("scale", 1) => Some(Affine::scale(number(0)?, number(0)?)),
-            ("scale", 2) => Some(Affine::scale(number(0)?, number(1)?)),
-            ("skewX", 1) => Some(Affine::skew_x_degrees(angle(0)?)),
-            ("skewY", 1) => Some(Affine::skew_y_degrees(angle(0)?)),
-            ("skew", 1) => Some(Affine::skew_degrees(angle(0)?, 0.0)),
-            ("skew", 2) => Some(Affine::skew_degrees(angle(0)?, angle(1)?)),
-            ("matrix", 6) => Some(Affine {
-                a: number(0)?,
-                b: number(1)?,
-                c: number(2)?,
-                d: number(3)?,
-                tx: number(4)?,
-                ty: number(5)?,
-            }),
+            ("scale", 1) => Some(Matrix4::scale(factor(0)?, factor(0)?, 1.0)),
+            ("scale", 2) => Some(Matrix4::scale(factor(0)?, factor(1)?, 1.0)),
+            ("scale3d", 3) => {
+                Some(Matrix4::scale(factor(0)?, factor(1)?, factor(2)?))
+            }
+            ("skewx", 1) => {
+                Some(Matrix4::planar(1.0, 0.0, tan(angle(0)?), 1.0, 0.0, 0.0))
+            }
+            ("skewy", 1) => {
+                Some(Matrix4::planar(1.0, tan(angle(0)?), 0.0, 1.0, 0.0, 0.0))
+            }
+            ("skew", 1) => {
+                Some(Matrix4::planar(1.0, 0.0, tan(angle(0)?), 1.0, 0.0, 0.0))
+            }
+            ("skew", 2) => Some(Matrix4::planar(
+                1.0,
+                tan(angle(1)?),
+                tan(angle(0)?),
+                1.0,
+                0.0,
+                0.0,
+            )),
+            ("matrix", 6) => Some(Matrix4::planar(
+                number(0)?,
+                number(1)?,
+                number(2)?,
+                number(3)?,
+                number(4)?,
+                number(5)?,
+            )),
+            // Sixteen values, column by column, as `DOMMatrix` lists them.
+            ("matrix3d", 16) => {
+                let mut m = Matrix4::IDENTITY;
+                for (at, cell) in m.0.iter_mut().flatten().enumerate() {
+                    *cell = number(at)?;
+                }
+                Some(m)
+            }
+            // `none` is no perspective, a negative distance is refused, and
+            // zero is taken as one pixel, which is what Chrome reports for
+            // `perspective(0px)`. Only `m34` is set, and no composition carries
+            // `m34` into `a` through `f`, so the 2D result is the same whatever
+            // the distance: the refusal is the part a caller can observe.
+            ("perspective", 1) if args[0] == "none" => Some(Matrix4::IDENTITY),
+            ("perspective", 1) => {
+                let distance = length(0)?;
+                if distance < 0.0 {
+                    return None;
+                }
+                let mut m = Matrix4::IDENTITY;
+                m.0[2][3] = -1.0 / distance.max(1.0);
+                Some(m)
+            }
             // A name this module knows, given the wrong number of arguments.
-            // Refused rather than filled in: `scale()` is not `scale(1)`.
+            // Refused rather than filled in: `scale()` is not `scale(1)`, and
+            // `translate3d(1px, 2px)` is not a translation by zero in `z`.
             _ => None,
         };
     }
     None
 }
 
-/// A CSS `transform` list as the matrix it composes to.
+/// A CSS `transform` list as the 2D matrix it composes to.
 ///
 /// `"none"` and the empty string are the identity, which is how the property
-/// spells "no transform".
+/// spells "no transform". Names and units are case-insensitive, as they are
+/// in CSS: Chrome reads `ROTATE(45DEG)`.
 ///
 /// The whole string is refused if any function in it is, for the reason
 /// [`parse_filter`] refuses a chain: a transform list missing one step is a
 /// different place on the canvas, and dropping the step nobody could read is
 /// how a typo becomes a rendering bug.
 pub(crate) fn parse_transform(text: &str) -> Option<Affine> {
-    let text = text.trim();
-    if text.is_empty() || text.eq_ignore_ascii_case("none") {
+    let text = text.trim().to_ascii_lowercase();
+    if text.is_empty() || text == "none" {
         return Some(Affine::IDENTITY);
     }
-    let mut out = Affine::IDENTITY;
-    for part in split_functions(text) {
-        out = out.multiply(&transform_function(part)?);
+    // Functions may abut: Chrome reads `translate(10px,20px)rotate(45deg)`.
+    // A transform has no nested parentheses, so a space after each `)` is
+    // enough to split it the way `split_functions` already splits a filter.
+    let text = text.replace(')', ") ");
+    let mut out = Matrix4::IDENTITY;
+    for part in split_functions(&text) {
+        out = out.then(&transform_function(part)?);
     }
-    Some(out)
+    Some(out.to_affine())
 }
 
 #[cfg(test)]

@@ -1,0 +1,700 @@
+{
+  "about": "CSS transform lists and the 2D matrix each composes to, as a, b, c, d, e, f. Read by tests/css_grammar.rs for Affine::from_css and by tests/suite/css-grammar.test.js for DOMMatrix.setMatrixValue, so the two surfaces answer one table rather than two.",
+  "source": "Chrome 152.0.7977.149: new DOMMatrix().setMatrixValue(css), then a through f, measured 2026-10-22. A 3D list is composed in 4x4 and projected, which is why rotateX(30deg) before translate3d moves f. Chrome resolves a length in float32, so `2cm` reads 75.59055328 where 2 * 96 / 2.54 is 75.59055118; the tests compare within a tolerance that admits that.",
+  "cases": [
+    {
+      "css": "none",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "NONE",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "matrix(1, 2, 3, 4, 5, 6)",
+      "matrix": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ]
+    },
+    {
+      "css": "translate(10px, 20px) rotate(30deg) scale(2)",
+      "matrix": [
+        1.7320508075688774,
+        0.9999999999999999,
+        -0.9999999999999999,
+        1.7320508075688774,
+        10,
+        20
+      ]
+    },
+    {
+      "css": "rotate(0.25turn)",
+      "matrix": [
+        0,
+        1,
+        -1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "rotate(1rad)",
+      "matrix": [
+        0.5403023058681397,
+        0.8414709848078965,
+        -0.8414709848078965,
+        0.5403023058681397,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "skewX(10deg) skewY(5deg)",
+      "matrix": [
+        1.015426611885745,
+        0.087488663525924,
+        0.17632698070846498,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "translateX(5px) translateY(-3px)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        5,
+        -3
+      ]
+    },
+    {
+      "css": "scale(2, 3)",
+      "matrix": [
+        2,
+        0,
+        0,
+        3,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "ROTATE(45DEG)",
+      "matrix": [
+        0.7071067811865476,
+        0.7071067811865476,
+        -0.7071067811865476,
+        0.7071067811865476,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "Translate(10PX, 20Px)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        10,
+        20
+      ]
+    },
+    {
+      "css": "scale(2) TRANSLATEX(5px)",
+      "matrix": [
+        2,
+        0,
+        0,
+        2,
+        10,
+        0
+      ]
+    },
+    {
+      "css": "matrix3d(1,0,0,0, 0,1,0,0, 0,0,1,0, 10,20,0,1)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        10,
+        20
+      ]
+    },
+    {
+      "css": "matrix3d(2,0.5,0,0, -0.25,3,0,0, 0,0,1,0, 7,-9,4,1)",
+      "matrix": [
+        2,
+        0.5,
+        -0.25,
+        3,
+        7,
+        -9
+      ]
+    },
+    {
+      "css": "translate3d(1px, 2px, 3px)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        1,
+        2
+      ]
+    },
+    {
+      "css": "translateZ(5px)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "translateZ(0)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "scale3d(2, 3, 4)",
+      "matrix": [
+        2,
+        0,
+        0,
+        3,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "scale3d(2, 3, 0)",
+      "matrix": [
+        2,
+        0,
+        0,
+        3,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "scaleZ(4)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "rotateZ(45deg)",
+      "matrix": [
+        0.7071067811865476,
+        0.7071067811865476,
+        -0.7071067811865476,
+        0.7071067811865476,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "rotateX(30deg)",
+      "matrix": [
+        1,
+        0,
+        0,
+        0.8660254037844387,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "ROTATEX(30DEG)",
+      "matrix": [
+        1,
+        0,
+        0,
+        0.8660254037844387,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "rotateY(30deg)",
+      "matrix": [
+        0.8660254037844387,
+        0,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "rotateY(0.5turn)",
+      "matrix": [
+        -1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "rotate3d(1, 1, 0, 45deg)",
+      "matrix": [
+        0.8535533905932737,
+        0.14644660940672619,
+        0.14644660940672619,
+        0.8535533905932737,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "rotate3d(0, 0, 1, 90deg)",
+      "matrix": [
+        0,
+        1,
+        -1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "rotate3d(0, 0, 0, 45deg)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "perspective(100px)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "perspective(0px)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "translate3d(10px, 20px, 30px) rotateX(30deg)",
+      "matrix": [
+        1,
+        0,
+        0,
+        0.8660254037844387,
+        10,
+        20
+      ]
+    },
+    {
+      "css": "rotateX(30deg) translate3d(10px, 20px, 30px)",
+      "matrix": [
+        1,
+        0,
+        0,
+        0.8660254037844387,
+        10,
+        2.3205080756887764
+      ]
+    },
+    {
+      "css": "rotateY(60deg) translate(10px, 0) scale(2)",
+      "matrix": [
+        0.9999999999999999,
+        0,
+        0,
+        2,
+        4.999999999999999,
+        0
+      ]
+    },
+    {
+      "css": "perspective(200px) rotateY(45deg) translateZ(50px)",
+      "matrix": [
+        0.7071067811865476,
+        0,
+        0,
+        1,
+        35.35533905932738,
+        0
+      ]
+    },
+    {
+      "css": "rotate(45deg) perspective(100px) translateZ(10px)",
+      "matrix": [
+        0.7071067811865476,
+        0.7071067811865476,
+        -0.7071067811865476,
+        0.7071067811865476,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "rotateZ(45deg) translate(10px, 0)",
+      "matrix": [
+        0.7071067811865476,
+        0.7071067811865476,
+        -0.7071067811865476,
+        0.7071067811865476,
+        7.0710678118654755,
+        7.0710678118654755
+      ]
+    },
+    {
+      "css": "matrix3d(1,0,0,0, 0,1,0,0, 0,0,1,0, 10,20,0,1) rotate(90deg)",
+      "matrix": [
+        0,
+        1,
+        -1,
+        0,
+        10,
+        20
+      ]
+    },
+    {
+      "css": "perspective(none)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "from": "CSS Transforms 2: perspective(none) is the identity. Chrome 152's renderer crashed on this input each of three times it was asked, so there is no browser value."
+    },
+    {
+      "css": "translate(1in, 2cm)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        96,
+        75.5905532836914
+      ]
+    },
+    {
+      "css": "translate(0, 0)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "translate(1pt)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        1.3333333730697632,
+        0
+      ]
+    },
+    {
+      "css": "scale(50%)",
+      "matrix": [
+        0.5,
+        0,
+        0,
+        0.5,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "scale(50%, 2)",
+      "matrix": [
+        0.5,
+        0,
+        0,
+        2,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "rotate(100grad)",
+      "matrix": [
+        0,
+        1,
+        -1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "skew(10deg, 20deg)",
+      "matrix": [
+        1,
+        0.36397023426620234,
+        0.17632698070846498,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "translate(10px,20px)rotate(45deg)",
+      "matrix": [
+        0.7071067811865476,
+        0.7071067811865476,
+        -0.7071067811865476,
+        0.7071067811865476,
+        10,
+        20
+      ]
+    },
+    {
+      "css": "translate( 10px , 20px )",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        10,
+        20
+      ]
+    },
+    {
+      "css": "rotate(0)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "skewX(0)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "rotate(0deg)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "translate(1mm, 1q)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        3.7795276641845703,
+        0.9448819160461426
+      ]
+    },
+    {
+      "css": "translate(1pc)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        16,
+        0
+      ]
+    },
+    {
+      "css": "scale(1e1)",
+      "matrix": [
+        10,
+        0,
+        0,
+        10,
+        0,
+        0
+      ]
+    },
+    {
+      "css": "translate(+5px, -.5px)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        5,
+        -0.5
+      ]
+    },
+    {
+      "css": "translate(10%, 0)",
+      "refused": true
+    },
+    {
+      "css": "translate(1em, 0)",
+      "refused": true
+    },
+    {
+      "css": "garbage(",
+      "refused": true
+    },
+    {
+      "css": "rotate(45)",
+      "refused": true
+    },
+    {
+      "css": "rotateX(30)",
+      "refused": true
+    },
+    {
+      "css": "translate3d(1px, 2px)",
+      "refused": true
+    },
+    {
+      "css": "matrix3d(1,0,0,0, 0,1,0,0, 0,0,1,0, 10,20,0)",
+      "refused": true
+    },
+    {
+      "css": "scale3d(2, 3)",
+      "refused": true
+    },
+    {
+      "css": "rotate3d(1, 1, 45deg)",
+      "refused": true
+    },
+    {
+      "css": "translateZ(10%)",
+      "refused": true
+    },
+    {
+      "css": "perspective(-10px)",
+      "refused": true
+    },
+    {
+      "css": "translate3d(1px, 2px, 3%)",
+      "refused": true
+    },
+    {
+      "css": "translate(10, 0)",
+      "refused": true
+    },
+    {
+      "css": "rotate(45deg, 1)",
+      "refused": true
+    },
+    {
+      "css": "translateX(5px, 1px)",
+      "refused": true
+    },
+    {
+      "css": "rotate3d(1px, 0, 0, 45deg)",
+      "refused": true
+    },
+    {
+      "css": "matrix(1,0,0,1,0)",
+      "refused": true
+    },
+    {
+      "css": "inherit",
+      "refused": true
+    },
+    {
+      "css": "initial",
+      "refused": true
+    },
+    {
+      "css": "unset",
+      "refused": true
+    },
+    {
+      "css": "none rotate(45deg)",
+      "refused": true
+    },
+    {
+      "css": "translate(5px,)",
+      "refused": true
+    }
+  ]
+}
