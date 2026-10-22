@@ -67,16 +67,15 @@ const GRADIANS_PER_TURN: f32 = 400.0;
 /// unit at all: CSS requires one on every length but zero, and accepting a
 /// bare number here would take `blur(4)` that a browser refuses.
 ///
-/// A percentage is not a length and is refused. It reads like one -- and the
-/// JavaScript side's `parseSize` accepts it, which is why `blur(50%)` is
-/// honoured there and rejected by Chrome. The properties where a percentage
-/// *is* legal are font sizes, and those are parsed by `Font::parse`, not
-/// here.
+/// A percentage is not a length and is refused, as Chrome refuses
+/// `blur(50%)`. The properties where a percentage *is* legal are font sizes,
+/// and those are parsed by `Font::from_css`, not here. Nor may anything come
+/// between the number and its unit: Chrome refuses `blur(5 px)`.
 pub(crate) fn parse_size(text: &str, em_size: f32) -> Option<f32> {
     let text = text.trim();
     let (value, unit) = split_number(text)?;
 
-    let per_px = match unit.trim().to_ascii_lowercase().as_str() {
+    let per_px = match unit.to_ascii_lowercase().as_str() {
         "px" => 1.0,
         "pt" => PX_PER_INCH / PT_PER_INCH,
         "pc" => PX_PER_INCH / PC_PER_INCH,
@@ -164,7 +163,7 @@ pub(crate) struct Length {
 pub(crate) fn parse_length(text: &str) -> Option<Length> {
     let text = text.trim();
     let (value, unit) = split_number(text)?;
-    let unit = unit.trim().to_ascii_lowercase();
+    let unit = unit.to_ascii_lowercase();
     match unit.as_str() {
         // Relative, so the pixel value is not knowable yet.
         "em" | "rem" => Some(Length {
@@ -188,10 +187,16 @@ pub(crate) fn parse_length(text: &str) -> Option<Length> {
 /// `"150%"` and `"1.5"` both give 1.5, which is what the CSS filter
 /// functions accept interchangeably.
 pub(crate) fn parse_percentage(text: &str) -> Option<f32> {
+    // Split here rather than through `parse_number`, which trims: nothing
+    // may come between a number and its `%`, and Chrome refuses `50 %`.
+    let plain = |number: &str| match split_number(number)? {
+        (value, "") => Some(value),
+        _ => None,
+    };
     let text = text.trim();
     let value = match text.strip_suffix('%') {
-        Some(number) => parse_number(number)? / 100.0,
-        None => parse_number(text)?,
+        Some(number) => plain(number)? / 100.0,
+        None => plain(text)?,
     };
     value.is_finite().then_some(value)
 }
@@ -209,12 +214,14 @@ pub(crate) fn parse_number(text: &str) -> Option<f32> {
 
 /// An angle in CSS units, as degrees.
 ///
-/// Returns `None` for a bare number: CSS requires a unit on an angle, and
-/// `hue-rotate(45)` is rejected by browsers.
+/// Returns `None` for a bare number other than zero: CSS requires a unit on
+/// an angle, and Chrome refuses `hue-rotate(45)` but reads `hue-rotate(0)`,
+/// `rotate(0)` and `skewX(0)`.
 pub(crate) fn parse_angle(text: &str) -> Option<f32> {
     let (value, unit) = split_number(text.trim())?;
     // Case-insensitive: CSS units are, and a browser takes `45DEG`.
-    let degrees = match unit.trim().to_ascii_lowercase().as_str() {
+    let degrees = match unit.to_ascii_lowercase().as_str() {
+        "" if value == 0.0 => 0.0,
         "deg" => value,
         "rad" => value.to_degrees(),
         "grad" => value * DEGREES_PER_TURN / GRADIANS_PER_TURN,
@@ -301,17 +308,26 @@ pub(crate) fn parse_decoration(text: &str, em_size: f32) -> Option<Decoration> {
     Some(parsed)
 }
 
-/// Splits `text` on whitespace that is not inside parentheses.
+/// Splits `text` on whitespace that is not inside parentheses, and after
+/// each `)` that closes a call.
 ///
 /// A filter chain is space-separated and its arguments are too, so a plain
-/// split would cut `drop-shadow(2px 2px 4px red)` into four pieces.
+/// split would cut `drop-shadow(2px 2px 4px red)` into four pieces. Calls
+/// may also abut: Chrome reads `blur(2px)brightness(2)` and
+/// `translate(10px,20px)rotate(45deg)` as two functions each.
 fn split_functions(text: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let (mut depth, mut start) = (0usize, 0usize);
     for (at, character) in text.char_indices() {
         match character {
             '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    parts.push(&text[start..=at]);
+                    start = at + 1;
+                }
+            }
             c if c.is_whitespace() && depth == 0 => {
                 if at > start {
                     parts.push(&text[start..at]);
@@ -362,27 +378,50 @@ pub(crate) fn parse_filter(
 
     let mut ops = Vec::new();
     for part in split_functions(trimmed) {
-        // `drop-shadow` first: its arguments are themselves space-separated,
-        // so it is the one function that cannot share the shape below.
-        if let Some(args) = call(part, "drop-shadow") {
-            ops.push(drop_shadow(args, em_size).ok_or_else(|| refuse(part))?);
-            continue;
-        }
-
         let (name, argument) = part
             .split_once('(')
             .and_then(|(name, rest)| {
                 rest.strip_suffix(')').map(|argument| (name, argument))
             })
             .ok_or_else(|| refuse(part))?;
+        // A function name is an identifier, so any case: Chrome reads
+        // `BLUR(5px)`.
+        let name = name.to_ascii_lowercase();
+        // Every function but `drop-shadow` may leave its argument out, and
+        // then takes the value that changes nothing.
+        let omitted = argument.trim().is_empty();
 
-        let percent = || parse_percentage(argument).ok_or_else(|| refuse(part));
-        ops.push(match name {
+        // A negative amount is outside every one of these functions'
+        // ranges, and Chrome refuses it rather than clamping.
+        let percent = || {
+            match omitted {
+                true => Some(OMITTED_FILTER_AMOUNT),
+                false => {
+                    parse_percentage(argument).filter(|&amount| amount >= 0.0)
+                }
+            }
+            .ok_or_else(|| refuse(part))
+        };
+        ops.push(match name.as_str() {
+            // Its arguments are themselves space-separated, so it is the one
+            // function that cannot share the shape below.
+            "drop-shadow" => {
+                drop_shadow(argument, em_size).ok_or_else(|| refuse(part))?
+            }
             "blur" => FilterOp::Blur(
-                parse_size(argument, em_size).ok_or_else(|| refuse(part))?,
+                match omitted {
+                    true => Some(0.0),
+                    false => parse_size(argument, em_size)
+                        .filter(|&radius| radius >= 0.0),
+                }
+                .ok_or_else(|| refuse(part))?,
             ),
             "hue-rotate" => FilterOp::HueRotate(
-                parse_angle(argument).ok_or_else(|| refuse(part))?,
+                match omitted {
+                    true => Some(0.0),
+                    false => parse_angle(argument),
+                }
+                .ok_or_else(|| refuse(part))?,
             ),
             "brightness" => FilterOp::Brightness(percent()?),
             "contrast" => FilterOp::Contrast(percent()?),
@@ -396,6 +435,13 @@ pub(crate) fn parse_filter(
     }
     Ok(ops)
 }
+
+/// What `brightness()`, `contrast()`, `grayscale()`, `invert()`, `opacity()`,
+/// `saturate()` and `sepia()` take when their argument is left out: Filter
+/// Effects 1 gives each a default of 1, which for `brightness`, `contrast`,
+/// `opacity` and `saturate` changes nothing and for the other three is the
+/// full effect.
+const OMITTED_FILTER_AMOUNT: f32 = 1.0;
 
 /// The lengths and optional colour a `drop-shadow` carries.
 ///
@@ -437,7 +483,11 @@ fn drop_shadow(args: &str, em_size: f32) -> Option<FilterOp> {
 
     // Colour after the lengths first, since that is the common spelling.
     for (lengths, rest) in [leading(&words), trailing(&words)] {
-        if !(2..=3).contains(&lengths.len()) {
+        // The offsets may be negative; the blur radius may not, and Chrome
+        // refuses `drop-shadow(2px 2px -3px)`.
+        if !(2..=3).contains(&lengths.len())
+            || lengths.get(2).is_some_and(|&radius| radius < 0.0)
+        {
             continue;
         }
         let color = match rest.is_empty() {
@@ -506,10 +556,8 @@ mod tests {
 
     #[test]
     fn a_percentage_is_not_a_length() {
-        // It reads like one, and the JavaScript side's `parseSize` takes it
-        // -- which is why `blur(50%)` is honoured there and refused by
-        // Chrome. CSS defines `blur()` over `<length>`, and a percentage is
-        // not one.
+        // It reads like one, and Chrome refuses `blur(50%)`: CSS defines
+        // `blur()` over `<length>`, and a percentage is not one.
         assert_eq!(parse_size("50%", EM), None);
         assert!(parse_filter("blur(50%)", EM).is_err());
     }
@@ -785,7 +833,6 @@ mod tests {
         for text in [
             "blur(",
             "blur)",
-            "blur()",
             "()",
             "(((",
             ")))",
@@ -878,15 +925,14 @@ mod tests {
     }
 
     #[test]
-    fn a_function_name_is_matched_exactly() {
-        // Neither a prefix nor a suffix of a known name is that name. CSS
-        // function names are case-insensitive, which this deliberately is
-        // not -- matching the JavaScript side, which lowercases nothing.
+    fn a_function_name_is_matched_whole_in_any_case() {
+        // Neither a prefix nor a suffix of a known name is that name, and
+        // the case of a name does not matter: CSS names are identifiers,
+        // and Chrome reads `BLUR(5px)`.
         for text in [
             "blu(4px)",
             "blurr(4px)",
             "xblur(4px)",
-            "BLUR(4px)",
             "drop-shadows(1px 2px 3px red)",
             "shadow(1px 2px 3px red)",
         ] {
@@ -895,7 +941,9 @@ mod tests {
                 "{text:?} should not parse"
             );
         }
-        assert!(parse_filter("blur(4px)", EM).is_ok());
+        for text in ["blur(4px)", "BLUR(4px)", "Drop-Shadow(1px 2px red)"] {
+            assert!(parse_filter(text, EM).is_ok(), "{text:?} should parse");
+        }
     }
 
     #[test]
@@ -1308,16 +1356,7 @@ fn transform_function(text: &str) -> Option<Matrix4> {
             let pixels = parse_length(args.get(at)?)?.pixels;
             pixels.is_finite().then_some(f64::from(pixels))
         };
-        // An angle needs a unit, but a transform takes a bare zero too:
-        // Chrome reads `rotate(0)` and `skewX(0)`. Only here, because the
-        // filter grammar shares `parse_angle`.
-        let angle = |at: usize| {
-            let text = args.get(at)?;
-            match parse_number(text).is_some_and(|value| value == 0.0) {
-                true => Some(0.0),
-                false => parse_angle(text).map(f64::from),
-            }
-        };
+        let angle = |at: usize| parse_angle(args.get(at)?).map(f64::from);
         let number = |at: usize| parse_number(args.get(at)?).map(f64::from);
         // A scale may be a number or a percentage: Chrome reads `scale(50%)`
         // as half, as CSS Transforms 2 allows.
@@ -1434,10 +1473,6 @@ pub(crate) fn parse_transform(text: &str) -> Option<Affine> {
     if text.is_empty() || text == "none" {
         return Some(Affine::IDENTITY);
     }
-    // Functions may abut: Chrome reads `translate(10px,20px)rotate(45deg)`.
-    // A transform has no nested parentheses, so a space after each `)` is
-    // enough to split it the way `split_functions` already splits a filter.
-    let text = text.replace(')', ") ");
     let mut out = Matrix4::IDENTITY;
     for part in split_functions(&text) {
         out = out.then(&transform_function(part)?);

@@ -229,3 +229,86 @@ fn set_font_css_answers_the_font_table() {
         wrong.join("\n")
     );
 }
+
+#[test]
+fn set_filter_css_answers_the_filter_table() {
+    let cases = cases("css-filters");
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    let wrong: Vec<String> = cases
+        .iter()
+        .filter_map(|case| {
+            let css = case["css"].as_str().expect("each case names its css");
+            let refused = case.get("refused").is_some();
+            match (ctx.set_filter_css(css), refused) {
+                (Ok(()), true) => {
+                    Some(format!("{css:?}: taken, Chrome ignores it"))
+                }
+                (Err(error), false) => Some(format!("{css:?}: {error}")),
+                _ => None,
+            }
+        })
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "{} of {} cases disagree with Chrome:\n{}",
+        wrong.len(),
+        cases.len(),
+        wrong.join("\n")
+    );
+}
+
+#[test]
+fn the_spacing_setters_answer_the_spacing_table() {
+    /// The canvas's default font size, which `em` and `rem` resolve
+    /// against here since no font is set.
+    const DEFAULT_FONT_PX: f32 = 10.0;
+
+    let cases = cases("css-spacing");
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    let mut wrong = Vec::new();
+    for case in &cases {
+        let css = case["css"].as_str().expect("each case names its css");
+        // Chrome's reading in pixels: a number and a unit, `em` and `rem`
+        // of the font in force.
+        let want = case["read"].as_str().map(|read| {
+            let (number, per) = match read.strip_suffix("rem") {
+                Some(number) => (number, DEFAULT_FONT_PX),
+                None => match read.strip_suffix("em") {
+                    Some(number) => (number, DEFAULT_FONT_PX),
+                    None => {
+                        (read.strip_suffix("px").expect("a px reading"), 1.0)
+                    }
+                },
+            };
+            number.parse::<f32>().expect("a number") * per
+        });
+        let letter = ctx
+            .set_letter_spacing_css(css)
+            .map(|()| ctx.letter_spacing());
+        let word = ctx.set_word_spacing_css(css).map(|()| ctx.word_spacing());
+        for (property, got) in [("letter", letter), ("word", word)] {
+            let agrees = match (&got, want) {
+                (Ok(got), Some(want)) => {
+                    (got - want).abs() < f32::EPSILON * 16.0
+                }
+                (Err(_), None) => true,
+                _ => false,
+            };
+            if !agrees {
+                wrong.push(format!(
+                    "{property} spacing {css:?}: {got:?}, Chrome {:?}",
+                    case.get("read")
+                ));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} disagreements with Chrome over {} cases:\n{}",
+        wrong.len(),
+        cases.len(),
+        wrong.join("\n")
+    );
+}

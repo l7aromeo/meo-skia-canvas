@@ -1,0 +1,83 @@
+{
+  "about": "`letterSpacing` and `wordSpacing` strings, what Chrome reads back for each, or that it ignores it. Both properties gave the same answer for every row. Read by tests/css_grammar.rs for `set_letter_spacing_css` and `set_word_spacing_css` and by tests/suite/css-grammar.test.js for the two properties.",
+  "source": "Chrome 152.0.7977.149: the property set on a fresh 2D context after `3px`, then read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving `3px`. Chrome resolves `em` when the text is laid out, against the font then in force, and `rem` the same way on a canvas outside a document.",
+  "knownDifferences": "Measured and left out: `2ex` and `1ch`, which Chrome takes and both surfaces refuse, since they need the font's metrics; and a bare `0`, which Chrome ignores although CSS Values lets a zero length go without a unit, and which the crate takes.",
+  "cases": [
+    {
+      "css": "+5px",
+      "read": "5px"
+    },
+    {
+      "css": "1e1px",
+      "read": "10px"
+    },
+    {
+      "css": ".5px",
+      "read": "0.5px"
+    },
+    {
+      "css": "5PX",
+      "read": "5px"
+    },
+    {
+      "css": "-2px",
+      "read": "-2px"
+    },
+    {
+      "css": "1em",
+      "read": "1em"
+    },
+    {
+      "css": "1rem",
+      "read": "1rem"
+    },
+    {
+      "css": "1e1PX",
+      "read": "10px"
+    },
+    {
+      "css": "5.0px",
+      "read": "5px"
+    },
+    {
+      "css": "5.px",
+      "refused": true
+    },
+    {
+      "css": "1.2.3px",
+      "refused": true
+    },
+    {
+      "css": "5pxx",
+      "refused": true
+    },
+    {
+      "css": " 5px ",
+      "refused": true
+    },
+    {
+      "css": "5",
+      "refused": true
+    },
+    {
+      "css": "50%",
+      "refused": true
+    },
+    {
+      "css": "calc(1px + 2px)",
+      "refused": true
+    },
+    {
+      "css": "5 px",
+      "refused": true
+    },
+    {
+      "css": "0x10px",
+      "refused": true
+    },
+    {
+      "css": "5px5",
+      "refused": true
+    }
+  ]
+}

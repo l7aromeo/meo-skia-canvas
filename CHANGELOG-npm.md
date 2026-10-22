@@ -356,6 +356,36 @@ removed and no signature moves.
   platform's interface font, which Chrome on macOS reads as 16px Arial and
   which no other platform has to agree with.
 
+- **`ctx.filter`, `letterSpacing` and `wordSpacing` read numbers and
+  lengths as Chrome does.** Checked against 99 filters and 19 spacings
+  measured in Chrome 152, which the crate's `set_filter_css`,
+  `set_letter_spacing_css` and `set_word_spacing_css` are tested against
+  too.
+
+  **`letterSpacing` and `wordSpacing` no longer throw.** `1em` and `1rem`
+  threw a `TypeError`; they are taken now, and resolved against the font in
+  force when the text is laid out, as in Chrome. A percentage threw too, and
+  is now ignored.
+
+  **Ignored now**, because Chrome ignores them: a number CSS does not have,
+  as `5.px`, `1.2.3px`, `brightness(2.)` and `blur(0.)`, and
+  `brightness(0x10)`, which was read as 0; anything written after the
+  unit, as `5pxx` and `5px5`, which read as `5px`; a space around a spacing
+  or before a unit, as `" 5px "` and `"5 px"`; a negative blur, shadow
+  radius or amount, as `blur(-2px)`, `drop-shadow(2px 2px -3px)` and
+  `brightness(-1)`; and a filter in which any function does not parse or
+  is not a filter function, which kept the functions that did --
+  `blur(2px) wobble(3)` was read as `blur(2px)` -- together with
+  `blur(small)`, read as a size keyword, and `blur(2px,3px)`.
+
+  **Taken now**, as in Chrome: a sign or an exponent, as `+5px`, `1e1px`
+  and `brightness(1e1)`; a fractional percentage, as `brightness(50.5%)`,
+  where only whole ones were read; a function with its argument left out,
+  which takes its default -- `blur()` and `hue-rotate()` are zero,
+  `brightness()` and the other amounts 1; `NONE`; and functions with no
+  space between them, as `blur(2px)brightness(2)`, which read as the blur
+  alone.
+
 - **`hsl()` and `hwb()` written with bare numbers name the colour they
   state.** CSS Color 4 types saturation, lightness, whiteness and blackness
   as `<percentage> | <number>`, so `ctx.fillStyle = 'hsl(200 40 45)'` and
