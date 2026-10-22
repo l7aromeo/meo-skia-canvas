@@ -846,6 +846,42 @@ export function check({ rust, npm, manifest, rules: given, files }) {
     }
   }
 
+  // AN ID A REASON NAMES HAS TO EXIST. A backticked `Holder::member` or
+  // `Holder.member`, or a deeper `Holder.member.value`, whose holder either
+  // surface produced must be an id one of them produced, or a key the rules
+  // name. A holder neither produced -- `KeyboardEvent`, a Skia type -- is
+  // someone else's and is not checked; nor is a bare name, which in prose is
+  // as often `Copy` or `Result` as one of ours. A crate-private item is not
+  // an id, so a reason names it by the file it is in rather than qualified.
+  {
+    const known = new Set([...rust.items, ...npm.items].map((i) => i.id));
+    // Every holder an id is reached through, whether or not the extractor
+    // recorded an owner: the prefix up to the first separator.
+    const holders = new Set(
+      [...rust.items, ...npm.items].map(
+        (i) => i.owner ?? i.id.split(/::|\./)[0],
+      ),
+    );
+    const aliased = new Set([
+      ...Object.keys(rules.member_aliases ?? {}),
+      ...Object.keys(rules.owner_aliases ?? {}),
+    ]);
+    const qualified = /^([A-Z][A-Za-z0-9_]*)((?:::|\.)[A-Za-z0-9_]+)+/;
+    for (const entry of manifest) {
+      for (const [, quoted] of (entry.why ?? "").matchAll(/`([^`\n]+)`/g)) {
+        const id = quoted.match(qualified);
+        if (!id || !holders.has(id[1])) continue;
+        if (known.has(id[0]) || aliased.has(id[0])) continue;
+        note(
+          "unknown-id",
+          id[0],
+          `'${entry.name}' names \`${id[0]}\`, which neither extractor produced. ` +
+            `Correct the name, or describe what it was if it is gone.`,
+        );
+      }
+    }
+  }
+
   // A NAME IS HOW A READER FINDS AN ENTRY, so two entries sharing one cannot
   // be told apart: a `why` pointing at the other entry by name points at
   // both. Refused whether or not they share an id.
@@ -1520,6 +1556,7 @@ export function report(problems) {
     "collision",
     "duplicate-name",
     "dangling-citation",
+    "unknown-id",
     "doubled",
     "already-paired",
     "wrong-of-two",
@@ -1539,6 +1576,7 @@ export function report(problems) {
       "two capability entries share a name, so neither can be found by it",
     "dangling-citation":
       "a reason cites a file, or a line of one, that is not in the tree",
+    "unknown-id": "a reason names an id of ours that neither surface produced",
     doubled:
       "one id named by two capability entries, so neither says where it belongs",
     "suspect-pair":

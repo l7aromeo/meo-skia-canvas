@@ -180,8 +180,7 @@ why = """Rust passes one `GradientInterpolation` value to the gradient factories
       shape difference -- space, hue and alpha. The alpha half is
       `GradientInterpolation.alpha` against `CanvasGradient.alphaInterpolationMethod`,
       with npm declaring the `AlphaInterpolation` union for its two values, and
-      `AlphaInterpolation::to_skia` in src/shader.rs maps them onto Skia's
-      `InPremul`. Canvas interpolates unpremultiplied where CSS premultiplies, which
+      the enum's `to_skia` in src/shader.rs maps them onto Skia's `InPremul`. Canvas interpolates unpremultiplied where CSS premultiplies, which
       is why the option exists at all."""
 
 [[capability]]
@@ -963,7 +962,7 @@ why = """These exist so that code written against the DOM runs unchanged. The
       `saveAs` are browser and Node conveniences over what `Canvas::to_buffer` and
       `Canvas::to_file` do directly; `toSharp` hands pixels to a third-party
       JavaScript library that has no Rust equivalent. Recorded as npm-by-nature, NOT
-      as missing from Rust -- a reader sent looking for `Canvas::to_blob` would find
+      as missing from Rust -- a reader sent looking for a Rust `to_blob` would find
       nothing and conclude wrongly that it should exist."""
 
 [[capability]]
@@ -1468,7 +1467,7 @@ npm  = []
 why  = """Four cases of the same shape, each refused as a member alias by
         measurement rather than taste: two keys mapping to one npm member make
         both ids claim that name and the collision check stops the run.
-        `FontLibrary::use` registers a font from a path or from a buffer where
+        `FontLibrary.use` registers a font from a path or from a buffer where
         Rust names the two separately; `new_page_with` is the arity-carrying
         form of `new_page`, which pairs; `set_cursor_css` is the string-taking
         second setter beside `set_cursor`, the same shape as the Context2D
@@ -1905,10 +1904,9 @@ why = """The same state under two forms. `TextDecoration` is a bitflag on both
 name = "whether a strut applies, as a flag and as an option"
 rust = []
 npm  = ["StrutStyleInput.enabled"]
-why = """Fourth round for this id and the first time it is measured rather than
-      deferred. The crate carries the same state without a field for it:
-      `TextStyle::strut` is `Option<StrutStyle>` (`src/text.rs:493`), so a strut is
-      enabled by being present, and `src/text.rs:1821` sets
+why = """The crate carries the same state without a field for it:
+      `TextStyle.strut` is `Option<StrutStyle>`, so a strut is enabled by being
+      present, and `build_paragraph_style` in src/text.rs sets
       `sk_strut.set_strut_enabled(true)` unconditionally whenever one is attached.
       npm needs the explicit key because its options object always exists -- there is
       no `Option` to be `None`. So `enabled: false` and Rust's `strut: None` are the

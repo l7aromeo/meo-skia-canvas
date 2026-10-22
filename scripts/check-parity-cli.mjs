@@ -1391,6 +1391,62 @@ why  = "Declared on the JavaScript side only, and the crate does not need it."
     }
   }
 
+  // AN ID A REASON NAMES HAS TO EXIST. A reason that says what pairs with
+  // what is only as good as the names in it, and one naming an item that
+  // was renamed or removed reads exactly as well as one that is true. A
+  // backticked `Holder::member` or `Holder.member` whose holder is on either
+  // surface must name an id one of them produced, or a key in rules.json;
+  // a holder on neither -- `KeyboardEvent`, a Skia type -- is not ours to
+  // check.
+  for (const [label, why, expected] of [
+    [
+      "a present id, an alias key and a foreign holder",
+      "Pairs with `Context2D::fill_rect`; `Canvas.engine_kind` is a key in rules.json; `KeyboardEvent.key` is the DOM's.",
+      false,
+    ],
+    [
+      "an id under our holder that no extractor produced",
+      "Pairs with `Context2D::vanished`.",
+      true,
+    ],
+    [
+      "an id spelled with the other surface's separator",
+      "Pairs with `Canvas::toBuffer`.",
+      true,
+    ],
+  ]) {
+    const found = check({
+      rust: surface("rust", [
+        "Canvas::engine_kind",
+        "Canvas::to_buffer",
+        "Context2D::fill_rect",
+        "Mem::trim",
+      ]),
+      npm: surface("npm", [
+        "Canvas.engine",
+        "Canvas.toBuffer",
+        "CanvasRenderingContext2D.fillRect",
+        "Unrelated.thing",
+      ]),
+      manifest: parseManifest(citing(why), "self-test"),
+      rules: {
+        ...RULES,
+        owner_aliases: {},
+        member_aliases: { "Canvas.engine_kind": "engine" },
+      },
+    });
+    cases += 1;
+    const flagged =
+      found.some((p) => p.kind === "unknown-id") &&
+      report(found).includes("unknown-id");
+    if (flagged !== expected) {
+      console.error(
+        `  self-test FAILED: ${label} was ${flagged ? "" : "not "}reported as an unknown id, got ${JSON.stringify(found.map((p) => `${p.kind}:${p.id}`))}`,
+      );
+      bad += 1;
+    }
+  }
+
   // TWO ENTRIES SHARING A NAME are two entries, and the reader of either
   // cannot tell them apart. Keyed by name, the check above collapsed the
   // pair into one claimant: the same thirteen ids registered once as
