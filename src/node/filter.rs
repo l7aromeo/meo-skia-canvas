@@ -119,6 +119,84 @@ fn faded_toward_identity(rows: &[[f32; 3]; 3], amount: f32) -> [f32; 20] {
     matrix
 }
 
+/// The largest blur, as a standard deviation in device pixels, that a
+/// rectangle's coverage blur agrees with Chrome as closely as the image
+/// blur does.
+///
+/// Measured against Chrome 152 on a blurred square at 100, 200 and 400
+/// pixels a side, along its middle row: up to 40 the coverage blur is
+/// within 5 levels of Chrome's alpha and no further off than the image
+/// blur, which strays as far at 20 and 40 itself; from 50 the image blur
+/// is within a level and the coverage blur up to 5 off -- and past
+/// Skia's own cap, [`MASK_BLUR_MAX_SIGMA`], it stops spreading at all.
+const RECT_COVERAGE_BLUR_MAX_SIGMA: f32 = 40.0;
+
+/// The largest blur a rounded rectangle's or an oval's coverage blur is
+/// cheaper at than the image blur: 11 and 58 microseconds a draw at a
+/// sigma of 2 against 156 and 166, about the same as the image blur from
+/// 20, in a release build. A rectangle's stays nearly free at every sigma
+/// measured, Skia caching its blurred mask.
+const ROUNDED_COVERAGE_BLUR_MAX_SIGMA: f32 = 10.0;
+
+/// The largest sigma Skia's coverage blur takes: `SkBlurMaskFilterImpl::
+/// computeXformedSigma` holds it to `kMaxBlurSigma`, 128, so a larger one
+/// draws exactly as 128 -- `blur(1000px)` on a 100 pixel square kept an
+/// alpha of 9 where Chrome's is gone.
+const MASK_BLUR_MAX_SIGMA: f32 = 128.0;
+
+// Every coverage blur stays under Skia's cap, so none draws as a smaller
+// blur than it names.
+const _: () = assert!(
+    RECT_COVERAGE_BLUR_MAX_SIGMA <= MASK_BLUR_MAX_SIGMA
+        && ROUNDED_COVERAGE_BLUR_MAX_SIGMA <= MASK_BLUR_MAX_SIGMA
+);
+
+/// The largest side, in device pixels, of a glyph Skia keeps as a cached
+/// mask: `SkGlyph::kSkSideTooBigForAtlas`. A glyph with a coverage blur is
+/// as large as its outline plus the blur's window, and one past this is
+/// drawn as a path and blurred again on every draw -- 48px text cost 22
+/// microseconds a draw at a sigma of 38 and 2,537 at 42.
+const GLYPH_ATLAS_SIDE: f32 = 256.0;
+
+/// How many sigmas wide a coverage blur's window is: `SkBlurMask` sizes it
+/// `ceil(6 * sigma)`, three to each side.
+const BLUR_WINDOW_SIGMAS: f32 = 6.0;
+
+/// What a draw covers, as far as choosing how to blur it goes.
+#[derive(Clone, Copy, Debug)]
+pub enum Coverage {
+    /// A rectangle that stays one on the device.
+    Rect,
+    /// A rounded rectangle or an oval that stays one on the device.
+    Rounded,
+    /// Text set at this many device pixels to the em.
+    Text {
+        /// The em, in device pixels.
+        em: f32,
+    },
+    /// Any other geometry.
+    Path,
+}
+
+impl Coverage {
+    /// Whether a blur of `sigma` device pixels is better made on this
+    /// coverage than on the drawn result: where it matches Chrome as
+    /// closely and costs less. Other paths are blurred as a result at
+    /// every sigma: a circle took 145 microseconds a draw through its
+    /// coverage at a sigma of 2 against 82, and a star no less.
+    fn blurs_alike(self, sigma: f32) -> bool {
+        match self {
+            Coverage::Rect => sigma <= RECT_COVERAGE_BLUR_MAX_SIGMA,
+            Coverage::Rounded => sigma <= ROUNDED_COVERAGE_BLUR_MAX_SIGMA,
+            Coverage::Text { em } => {
+                sigma <= RECT_COVERAGE_BLUR_MAX_SIGMA
+                    && em + BLUR_WINDOW_SIGMAS * sigma <= GLYPH_ATLAS_SIDE
+            }
+            Coverage::Path => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum FilterSpec {
     Plain {
@@ -200,6 +278,18 @@ impl Filter {
         }
     }
 
+    /// Whether every blur in this filter is better made on the coverage of
+    /// a draw like `coverage` than on its result. True where there is no
+    /// blur, since nothing else here differs between the two.
+    pub fn blurs_coverage(&self, coverage: Coverage) -> bool {
+        self.specs.iter().all(|spec| match spec {
+            FilterSpec::Plain { name, value } if name == "blur" => {
+                coverage.blurs_alike(*value)
+            }
+            _ => true,
+        })
+    }
+
     /// Puts this filter onto `paint`.
     ///
     /// `rendered` asks for the draw's result to be blurred rather than its
@@ -221,12 +311,15 @@ impl Filter {
     ///
     /// A blur becomes one of two different Skia objects. Blurring the drawn
     /// result needs an image filter; blurring a shape's coverage is a mask
-    /// filter, which is cheaper -- 93.6 microseconds against 167.9 on a
-    /// rectangle, 67.7 against 284.2 on text -- and gives the same picture
-    /// only while the paint is one flat colour, because blurred coverage
-    /// times a constant is that constant times blurred coverage.
+    /// filter. The two approximate a Gaussian differently, so they are
+    /// close rather than the same picture even for one flat colour, and the
+    /// mask filter is held to a sigma of 128; which of them a flat-colour
+    /// draw gets is `Coverage`'s to say, from what each costs and how near
+    /// each comes to Chrome. The image filter is the one that reaches
+    /// Chrome's blur of a large radius.
     ///
-    /// It stops being the same picture the moment the paint has structure.
+    /// The coverage blur stops being even a near picture the moment the
+    /// paint has structure.
     /// A coverage blur never touches the paint, so the stripes inside a
     /// blurred pattern came out byte-identical to no blur, and a shader that
     /// painted nothing outside its own rectangle had nothing to spread, so
@@ -840,6 +933,38 @@ mod tests {
                 .filter(|(was, now)| **was != *now)
                 .count();
             assert_eq!(differing, moved, "contrast({amount})");
+        }
+    }
+
+    #[test]
+    fn a_rectangle_takes_the_coverage_blur_up_to_its_limit() {
+        assert!(Coverage::Rect.blurs_alike(RECT_COVERAGE_BLUR_MAX_SIGMA));
+        assert!(
+            !Coverage::Rect.blurs_alike(RECT_COVERAGE_BLUR_MAX_SIGMA + 1.0)
+        );
+        assert!(Coverage::Rounded.blurs_alike(ROUNDED_COVERAGE_BLUR_MAX_SIGMA));
+        assert!(
+            !Coverage::Rounded
+                .blurs_alike(ROUNDED_COVERAGE_BLUR_MAX_SIGMA + 1.0)
+        );
+        assert!(!Coverage::Path.blurs_alike(1.0));
+    }
+
+    /// The switch for text falls before the cliff measured at each size --
+    /// a blurred glyph costs about 20 microseconds a draw below it and
+    /// over 1,000 past it -- since the em stands in for the glyph's
+    /// largest side, which is smaller: 48px text measured cheap at a sigma
+    /// of 38 and dear at 40, and switches at 34.
+    #[test]
+    fn text_takes_the_coverage_blur_while_its_glyph_fits_the_cache() {
+        for (em, cheap_at, dear_at) in
+            [(24.0, 42.0, 45.0), (48.0, 38.0, 40.0), (96.0, 30.0, 35.0)]
+        {
+            let text = Coverage::Text { em };
+            assert!(!text.blurs_alike(dear_at), "{em}px at {dear_at}");
+            let switch = (GLYPH_ATLAS_SIDE - em) / BLUR_WINDOW_SIGMAS;
+            assert!(switch <= cheap_at, "{em}px switches at {switch}");
+            assert!(text.blurs_alike(switch.min(RECT_COVERAGE_BLUR_MAX_SIGMA)));
         }
     }
 }

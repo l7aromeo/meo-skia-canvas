@@ -2877,6 +2877,83 @@ describe("Context2D", () => {
     });
   });
 
+  describe("a blur draws as Chrome's at every radius", () => {
+    // A red square over the middle 60% of a canvas, blurred, its alpha
+    // summed. Skia's coverage blur is held to a sigma of 128, so a
+    // flat-colour square stopped spreading there: 1000, 500 and 200px all
+    // drew as 128 did, on either engine.
+    //
+    // Chrome's canvas blurs a large radius differently on the GPU and on the
+    // CPU, so each engine is held to Chrome's same engine. The CPU rows are
+    // Chrome 152's CPU canvas, which `willReadFrequently` selects, and read
+    // the same on macOS and on Linux (Chrome 156); this engine matches them
+    // exactly but at 200px, 0.92% off. The GPU rows are Chrome 152's GPU
+    // canvas on a Mac and run only there: another GPU's blur rounds its own
+    // way -- Mesa's lavapipe sums 50000 at 200px.
+    const blurred = (side, blur, gpu) => {
+      const canvas = new Canvas(side, side);
+      canvas.gpu = gpu;
+      const ctx = canvas.getContext("2d");
+      ctx.filter = `blur(${blur}px)`;
+      ctx.fillStyle = "red";
+      ctx.fillRect(side * 0.2, side * 0.2, side * 0.6, side * 0.6);
+      const data = ctx.getImageData(0, 0, side, side).data;
+      let sum = 0;
+      for (let i = 3; i < data.length; i += 4) sum += data[i];
+      const centre = ((side / 2) * side + side / 2) * 4 + 3;
+      return { sum, centre: data[centre] };
+    };
+
+    const engines = [
+      {
+        gpu: false,
+        tolerance: 0.01,
+        centre: 8,
+        rows: [
+          [1000, 10000],
+          [500, 10000],
+          [200, 37296],
+          [100, 133468],
+          [50, 407096],
+        ],
+      },
+      ...(process.platform === "darwin"
+        ? [
+            {
+              gpu: true,
+              tolerance: 0.005,
+              centre: 9,
+              rows: [
+                [1000, 0],
+                [500, 10000],
+                [200, 49252],
+                [100, 109412],
+                [50, 403200],
+              ],
+            },
+          ]
+        : []),
+    ];
+
+    test("a square blurred past Skia's mask cap keeps spreading", () => {
+      for (const { gpu, tolerance, centre, rows } of engines) {
+        const engine = gpu ? "GPU" : "CPU";
+        for (const [blur, chrome] of rows) {
+          const { sum } = blurred(100, blur, gpu);
+          assert.ok(
+            Math.abs(sum - chrome) <= chrome * tolerance,
+            `${engine} blur(${blur}px): ${sum}, Chrome ${chrome}`,
+          );
+        }
+        const wide = blurred(400, 1000, gpu);
+        assert.ok(
+          Math.abs(wide.centre - centre) <= 1,
+          `${engine} 400px canvas, blur(1000px): centre ${wide.centre}, Chrome ${centre}`,
+        );
+      }
+    });
+  });
+
   describe("filter angles", () => {
     // The angle regex did not capture a leading sign, so `hue-rotate(-45deg)`
     // parsed as +45 and rotated the wrong way.

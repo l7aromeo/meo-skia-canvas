@@ -25,6 +25,15 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A large blur in `set_filter_css` draws as Chrome's.** A flat-colour
+  shape or text was blurred on its coverage, which Skia holds to a sigma of
+  128, so `blur(200px)`, `blur(500px)` and `blur(1000px)` drew alike. A
+  draw is now blurred on its result wherever that is nearer Chrome or
+  cheaper. Chrome's own canvas blurs a large radius differently on its GPU
+  and on its CPU, and each engine here now matches Chrome's same engine:
+  a square sums to within half a percent of Chrome's GPU canvas from 50 to
+  1000px on the GPU engine, and to Chrome's CPU canvas exactly on the CPU
+  engine at every radius measured but 200px, which is 0.9% off.
 - **A read on the GPU unpremultiplies as the raster engine does.**
   `get_image_data` on the GPU engine read a translucent pixel up to a level
   low wherever the unpremultiplied value fell on a half: red 128 at half
