@@ -58,7 +58,13 @@ npm  = ["DOMMatrix.scale3d",
         "DOMMatrix.scale3dSelf",
         "DOMMatrix.rotateAxisAngle",
         "DOMMatrix.rotateAxisAngleSelf",
-        "DOMMatrix.is2D"]
+        "DOMMatrix.is2D",
+        "DOMMatrix.rotate(rotZ)",
+        "DOMMatrix.scale(originZ)",
+        "DOMMatrix.scale(scaleZ)",
+        "DOMMatrix.translate(tz)",
+        "DOMPoint.new(w)",
+        "DOMPoint.new(z)"]
 why  = """JavaScript has these because DOMMatrix is a shared web type rather than
         a canvas one: CSS transforms and WebGL use the same object, so a
         browser exposes 3D whether or not the 2D canvas can draw it, and
@@ -333,11 +339,11 @@ why  = """npm carries these as the parameters of
        lib/classes/typography.js, declared in lib/index.d.ts, with
        `PlaceholderAlignment` supplying the alignment values. The mapping is
        one-to-one: `width`, `height`, `alignment` to `align`, `baseline`, and
-       `baseline_offset` to `offset`. The npm extractor emits declarations and
-       not parameters, so none of those five has an id to pair with. This entry
-       exists because of that limitation and should be deleted when both
-       extractors emit parameters -- it is not a statement that npm lacks the
-       capability."""
+       `baseline_offset` to `offset`. This gate pairs declarations, and a
+       struct npm spells as five arguments has no declaration to pair with;
+       the parameter pass holds those five arguments to the struct's fields
+       and reports any that stops reaching one. So this is not a statement
+       that npm lacks the capability."""
 status = "deliberate"
 
 [[capability]]
@@ -354,14 +360,19 @@ status = "deliberate"
 [[capability]]
 name = "texture spacing"
 rust = ["TextureOptions.spacing"]
-npm  = []
+npm  = ["CanvasFillStrokeStyles.createTexture(spacing)",
+        "CanvasTexture.new(spacing)"]
 why  = """npm takes this as the first positional argument of
        `createTexture(spacing, options)` in lib/classes/context.js, normalised
        to a pair by the `CanvasTexture` constructor in lib/classes/canvas.js and
        read by the binding's texture constructor in src/node/texture.rs. The
        other seven `TextureOptions` fields are members of `CreateTextureOptions`
-       and pair directly; only this one is positional. Same extractor limitation
-       as the `Placeholder` entry, and deletable on the same condition."""
+       and pair directly; only this one is positional, and the parameter pass
+       holds it to the field by name.
+       What it reports is a shorthand: JavaScript also takes a single number,
+       one spacing for both axes, where the field is a pair. A Rust caller
+       writes the number twice, which is the whole of the difference, so the
+       two parameter ids here record that rather than a missing capability."""
 status = "deliberate"
 
 [[capability]]
@@ -1176,12 +1187,15 @@ rust = ["ColorFilter::luma",
         "ImageFilter::color_matrix",
         "ImageFilter::from_color_filter"]
 npm  = ["ColorFilter.new",
+        "ColorFilter.new(*)",
         "ColorFilter.delete",
         "ColorFilter.MakeLumaColorFilter",
         "ImageFilter.new",
+        "ImageFilter.new(*)",
         "ImageFilter.delete",
         "ImageFilter.MakeColorFilter",
         "MaskFilter.new",
+        "MaskFilter.new(*)",
         "MaskFilter.delete",
         "CanvasPattern.new"]
 why  = """`new` and `delete` are the CanvasKit object protocol: a WASM caller
@@ -1189,7 +1203,14 @@ why  = """`new` and `delete` are the CanvasKit object protocol: a WASM caller
         nothing to pair `delete` with and `new` is a struct literal. The three
         Rust-side entries are the constructors whose npm `Make` spellings are
         declared on a different holder than the rule reaches, and the two
-        colour-matrix names are the same capability under CanvasKit's naming."""
+        colour-matrix names are the same capability under CanvasKit's naming.
+        Each `new` takes a kind's name and then that kind's own arguments,
+        which the per-kind Rust constructor takes: `new("blend", ...)` is
+        `ColorFilter::blend`, `new("blur", ...)` is `ImageFilter::blur`, and
+        `MaskFilter.new` is `MakeBlur` under the protocol's spelling. One
+        signature per kind against one dispatching signature cannot be held
+        argument by argument, so the three parameter ids here record every
+        argument of the three."""
 
 [[capability]]
 name = "single-letter colour channel shorthands"
@@ -1575,7 +1596,8 @@ why = """`Font.size` and `Font.line_height` are metrics of a resolved font that
       npm's `Font` does not declare -- it carries `family`, `file`, `style`,
       `weight` and `width`, which is identity rather than metrics. `italic` is
       a second Rust spelling of what `slant` already pairs to npm's `style`.
-      `new` is a constructor returning `Result`. Going the other way, npm's
+      `new` builds one from a family and a size, and npm's `Font` declares no
+      constructor. Going the other way, npm's
       `file` is the path a font was loaded from, which the crate does not
       retain on the font itself: a gap in the crate. Grouped as one
       capability, what a font object remembers about itself."""
@@ -2076,7 +2098,9 @@ npm  = ["ParagraphBuilder.Make",
         "Paragraph.new",
         "ParagraphBuilder.new",
         "Image.new",
-        "ImageData.new"]
+        "Image.new(*)",
+        "ImageData.new",
+        "ImageData.new(*)"]
 why = """`ParagraphBuilder.Make` is a second npm spelling of the one beside it,
       not a third mechanism: in lib/classes/typography.js it is
       `static Make(style) { return new ParagraphBuilder(style); }`, and the comment
@@ -2093,7 +2117,11 @@ why = """`ParagraphBuilder.Make` is a second npm spelling of the one beside it,
       `createImageData` on the context.
       `Canvas` is the control: it declares `new` on both sides and pairs, so the
       extractor does emit construction on both surfaces and these six are absences
-      rather than a blind spot."""
+      rather than a blind spot.
+      An entry naming both a Rust and an npm id offers the one to the other's
+      parameters, and here that would hold `Image.new` to `FontLibrary::new`.
+      The two parameter ids record that neither JavaScript constructor has a
+      Rust counterpart to be held to."""
 
 [[capability]]
 name = "enum values npm carries inside a member's type"
@@ -2202,3 +2230,87 @@ why = """The crate carries the same state without a field for it:
       it in the shape rather than in a field."""
 status = "deliberate"
 
+# ---------------------------------------------------------------- arguments
+#
+# Entries that record one argument rather than a declaration. Their ids are
+# `Holder.method(param)`; `check-parity-params.mjs` holds each JavaScript
+# argument to the Rust function its method pairs with and fails on a row
+# none of these records, and on one of these that records no row.
+
+[[capability]]
+name = "a window's settings as one options object"
+rust = []
+npm  = ["Window.new(options)"]
+why  = """JavaScript builds a window from `new Window(width, height, options)`
+       or `new Window(options)`, the options carrying title, background,
+       fit, cursor and the rest. Rust builds it from `Window::new(width,
+       height)` and sets each of those through its own setter --
+       `Window::set_title`, `Window::set_background`, `Window::set_fit`,
+       `Window::set_cursor`. The settings are the same; one surface takes
+       them together and the other one at a time."""
+status = "deliberate"
+
+[[capability]]
+name = "the context type a canvas is asked for"
+rust = []
+npm  = ["Canvas.getContext(type)"]
+why  = """`getContext("2d")` names the kind of context because the web platform
+       has several. The crate has one, so `Canvas::context` takes no argument;
+       a type string would have one legal value."""
+status = "deliberate"
+
+[[capability]]
+name = "one radius for every corner of a rounded rectangle"
+rust = []
+npm  = ["CanvasPath.roundRect(radii)"]
+why  = """The Canvas standard's `roundRect` takes a single number, a
+       `DOMPointInit`, or a list of one to four of either. `Context2D::round_rect`
+       takes four radii and `Context2D::round_rect_elliptical` four pairs, so a
+       list reaches one or the other; the single number is the shorthand for
+       four equal radii, which a Rust caller writes as an array."""
+status = "deliberate"
+
+[[capability]]
+name = "a convolution kernel's size and offset as pairs"
+rust = []
+npm  = ["ImageFilter.MakeMatrixConvolution(kernelOffset)",
+        "ImageFilter.MakeMatrixConvolution(kernelSize)"]
+why  = """CanvasKit takes `kernelSize` and `kernelOffset` as `[number, number]`;
+       `ImageFilter::matrix_convolution` takes the same four values as
+       `kernel_width`, `kernel_height`, `kernel_offset_x` and
+       `kernel_offset_y`. Same values, a tuple on one side and two arguments
+       on the other."""
+status = "deliberate"
+
+[[capability]]
+name = "scaling about an origin"
+rust = []
+npm  = ["DOMMatrix.scale(originX)",
+        "DOMMatrix.scale(originY)"]
+why  = """`DOMMatrix.scale(scaleX, scaleY, scaleZ, originX, originY, originZ)`
+       scales about a point; `Affine::scale` scales about the origin only, so
+       a Rust caller composes a translation either side by hand. The third
+       axis is the 3D half, recorded there."""
+status = "gap"
+issue = "unfiled"
+
+[[capability]]
+name = "a blank ImageData shaped like an existing one"
+rust = []
+npm  = ["CanvasImageData.createImageData(imagedata)"]
+why  = """`createImageData(imagedata)` returns a blank buffer with another
+       one's size and layout. `Context2D::create_image_data_as` takes a size
+       and the layout options, so a Rust caller reads them off the existing
+       buffer and passes them: the same buffer, from the values the overload
+       would read, rather than a capability Rust lacks."""
+status = "deliberate"
+
+[[capability]]
+name = "appending a path under a transform"
+rust = []
+npm  = ["Path2D.addPath(transform)"]
+why  = """`addPath(path, transform)` appends a path through a matrix;
+       `PathBuilder::add_path` appends it as it is, so a Rust caller transforms
+       a copy with `Path2D::transform` first."""
+status = "gap"
+issue = "unfiled"

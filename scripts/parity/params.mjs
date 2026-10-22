@@ -19,7 +19,14 @@
 // systems agree on little finer. A union keeps every class it can hold, so
 // `string | URL | Buffer` is three classes and a Rust `&[u8]` covers one of
 // them. `unknown` is a type this cannot classify, and is reported rather
-// than guessed.
+// than guessed. `range` is a Rust `Range`, which JavaScript passes as two
+// numbers.
+//
+// BEYOND THE CLASSES, three things the two surfaces spell differently: a
+// Rust struct with only public fields lists them, since JavaScript passes
+// such a struct as its fields; a Rust method records that it takes `self`;
+// and an npm member records whether it is static, since a static helper
+// passes as its first argument what the Rust method takes as `self`.
 
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -29,8 +36,61 @@ import { ts } from "../api-surface/typescript.mjs";
 
 // ---------------------------------------------------------------- Rust
 
-/** The classes a rustdoc type accepts, and whether it is an `Option`. */
-function rustType(type, index) {
+/**
+ * A struct as a parameter: an `object`, and also what it can be spelled as.
+ *
+ * `fields` lists its public fields, one level deep, when every field is
+ * public -- JavaScript passes such a struct as its fields, either spread into
+ * positional arguments (`setTransform(a, b, c, d, e, f)` for an `Affine`) or
+ * as an options object whose keys are the field names. A struct with a
+ * private field has no such spelling and gets no list.
+ *
+ * A struct with an inherent `from_css(&str)` takes a string too, since that
+ * is how the crate reads the CSS spelling JavaScript passes: a CSS transform
+ * for an `Affine`.
+ */
+function structType(target, index, nested) {
+  const plain = target?.inner?.struct?.kind?.plain;
+  const fieldItems = (plain?.fields ?? []).map((id) => index[String(id)]);
+  const open =
+    plain != null &&
+    !plain.has_stripped_fields &&
+    fieldItems.length > 0 &&
+    fieldItems.every((f) => f?.visibility === "public");
+  const parses = (target?.inner?.struct?.impls ?? []).some((id) => {
+    const impl = index[String(id)]?.inner?.impl;
+    if (impl == null || impl.trait != null) return false;
+    return impl.items.some((m) => {
+      const fn = index[String(m)];
+      const inputs = fn?.inner?.function?.sig?.inputs ?? [];
+      return (
+        fn?.name === "from_css" &&
+        inputs.length === 1 &&
+        inputs[0][1]?.borrowed_ref?.type?.primitive === "str"
+      );
+    });
+  });
+  return {
+    classes: parses ? ["object", "string"] : ["object"],
+    optional: false,
+    ...(open && !nested
+      ? {
+          fields: fieldItems.map((f) => ({
+            name: f.name,
+            ...rustType(f.inner.struct_field, index, true),
+          })),
+        }
+      : {}),
+  };
+}
+
+/**
+ * The classes a rustdoc type accepts, and whether it is an `Option`.
+ *
+ * `nested` is set for a struct's own fields, which are classified but not
+ * expanded further: JavaScript spreads one level of a struct, never two.
+ */
+function rustType(type, index, nested = false) {
   if (type == null) return { classes: ["unknown"], optional: false };
   const [kind] = Object.keys(type);
   const body = type[kind];
@@ -41,7 +101,7 @@ function rustType(type, index) {
       if (body === "str" || body === "char") return one("string");
       return one("number");
     case "borrowed_ref":
-      return rustType(body.type, index);
+      return rustType(body.type, index, nested);
     // A run of `u8` is bytes as well as a list: `[u8; 256]` is a lookup
     // table JavaScript passes as a `Uint8Array` or a `number[]`.
     case "slice":
@@ -78,11 +138,11 @@ function rustType(type, index) {
       const name = body.path.split("::").pop();
       const arg = body.args?.angle_bracketed?.args?.[0]?.type;
       if (name === "Option") {
-        const inner = rustType(arg, index);
-        return { classes: inner.classes, optional: true };
+        const inner = rustType(arg, index, nested);
+        return { ...inner, optional: true };
       }
       if (name === "Box" || name === "Rc" || name === "Arc")
-        return rustType(arg, index);
+        return rustType(arg, index, nested);
       if (name === "String") return one("string");
       if (name === "Path" || name === "PathBuf") return one("path");
       if (name === "Vec") {
@@ -96,13 +156,29 @@ function rustType(type, index) {
       const target = index[String(body.id)];
       const targetKind = Object.keys(target?.inner ?? {})[0];
       if (targetKind === "enum") return one("enum");
-      return one("object");
+      return structType(target, index, nested);
     }
     case "dyn_trait":
       return one("callback");
     default:
       return one("unknown");
   }
+}
+
+/** One function's record: its receiver, if any, and its parameters. */
+function functionRecord(node, index) {
+  const all = node.inner.function.sig.inputs;
+  const inputs = all.filter(([name]) => name !== "self");
+  return {
+    // A method's receiver, which a JavaScript static helper passes as its
+    // first argument: `ColorMatrix.postTranslate(m, dx, dy)` for
+    // `ColorMatrix::post_translate(&mut self, dx, dy)`.
+    receiver: inputs.length < all.length,
+    params: inputs.map(([name, type]) => ({
+      name,
+      ...rustType(type, index),
+    })),
+  };
 }
 
 /**
@@ -131,15 +207,7 @@ export function rustParams(doc) {
     const on = namedAncestor(id);
     const key = on ? `${on}::${node.name}` : node.name;
     if (out[key]) continue;
-    const inputs = node.inner.function.sig.inputs.filter(
-      ([name]) => name !== "self",
-    );
-    out[key] = {
-      params: inputs.map(([name, type]) => ({
-        name,
-        ...rustType(type, doc.index),
-      })),
-    };
+    out[key] = functionRecord(node, doc.index);
   }
   return out;
 }
@@ -206,7 +274,7 @@ export function npmParams(entry) {
   const checker = program.getTypeChecker();
   const source = program.getSourceFile(entry);
   const out = {};
-  const add = (key, decl) => {
+  const add = (key, decl, isStatic = false) => {
     const params = decl.parameters.map((p) => {
       const type = checker.getTypeAtLocation(p);
       const classes = npmClasses(type, checker);
@@ -222,7 +290,10 @@ export function npmParams(entry) {
         rest: Boolean(p.dotDotDotToken),
       };
     });
-    (out[key] ??= { overloads: [] }).overloads.push({ params });
+    (out[key] ??= { overloads: [] }).overloads.push({
+      params,
+      static: isStatic,
+    });
   };
   const visit = (node) => {
     if (
@@ -240,7 +311,12 @@ export function npmParams(entry) {
           (ts.isMethodDeclaration(m) || ts.isMethodSignature(m)) &&
           m.name
         ) {
-          add(`${holder}.${m.name.getText(source)}`, m);
+          const flags = ts.getCombinedModifierFlags(m);
+          add(
+            `${holder}.${m.name.getText(source)}`,
+            m,
+            (flags & ts.ModifierFlags.Static) !== 0,
+          );
         }
       }
     } else if (ts.isFunctionDeclaration(node) && node.name) {
@@ -258,7 +334,7 @@ export function npmParams(entry) {
       for (const m of node.type.members) {
         if (ts.isConstructSignatureDeclaration(m)) add(`${holder}.new`, m);
         else if (ts.isMethodSignature(m) && m.name) {
-          add(`${holder}.${m.name.getText(source)}`, m);
+          add(`${holder}.${m.name.getText(source)}`, m, true);
         }
       }
     }
@@ -297,7 +373,38 @@ function selfTest() {
       },
     ],
   };
-  const index = { 1: { inner: { enum: {} } }, 2: { inner: { struct: {} } } };
+  const field = (name, type, visibility = "public") => ({
+    name,
+    visibility,
+    inner: { struct_field: type },
+  });
+  const struct = (fields, impls = []) => ({
+    inner: { struct: { kind: { plain: { fields } }, impls } },
+  });
+  const fromCss = {
+    name: "from_css",
+    inner: {
+      function: {
+        sig: {
+          inputs: [["css", { borrowed_ref: { type: prim("str") } }]],
+        },
+      },
+    },
+  };
+  const index = {
+    1: { inner: { enum: {} } },
+    2: { inner: { struct: {} } },
+    3: struct([10, 11]),
+    4: struct([10, 12]),
+    5: struct([10], [20]),
+    6: struct([13]),
+    10: field("x", prim("f32")),
+    11: field("y", prim("f32")),
+    12: field("hidden", prim("f32"), "default"),
+    13: field("origin", path("Point", [], 3)),
+    20: { inner: { impl: { trait: null, items: [21] } } },
+    21: fromCss,
+  };
   const rustCases = [
     ["f32", prim("f32"), "number", false],
     ["bool", prim("bool"), "boolean", false],
@@ -324,6 +431,7 @@ function selfTest() {
     ["impl AsRef<Path>", asRefPath, "path", false],
     ["an enum", path("BlendMode", [], 1), "enum", false],
     ["a struct", path("Rect", [], 2), "object", false],
+    ["a struct with a from_css", path("Affine", [], 5), "object,string", false],
   ];
   let bad = 0;
   for (const [label, type, classes, optional] of rustCases) {
@@ -331,6 +439,56 @@ function selfTest() {
     if (got.classes.join() !== classes || got.optional !== optional) {
       console.error(
         `  self-test FAILED: Rust ${label} read as ${JSON.stringify(got)}`,
+      );
+      bad += 1;
+    }
+  }
+  // What a struct can be spelled as: its public fields one level down, and
+  // nothing for a struct with a private one.
+  const fieldsOf = (id) =>
+    (rustType(path("S", [], id), index).fields ?? [])
+      .map((f) => `${f.name}:${f.classes.join("|")}${f.fields ? "+" : ""}`)
+      .join(" ");
+  const receiverOf = (inputs) =>
+    functionRecord({ inner: { function: { sig: { inputs } } } }, index);
+  const shapeCases = [
+    ["a struct of public fields", fieldsOf(3), "x:number y:number"],
+    ["a struct with a private field", fieldsOf(4), ""],
+    [
+      "a field that is itself a struct, unexpanded",
+      fieldsOf(6),
+      "origin:object",
+    ],
+    [
+      "a method's receiver",
+      String(
+        receiverOf([
+          ["self", { generic: "Self" }],
+          ["dx", prim("f32")],
+        ]).receiver,
+      ),
+      "true",
+    ],
+    [
+      "a receiver is not a parameter",
+      receiverOf([
+        ["self", { generic: "Self" }],
+        ["dx", prim("f32")],
+      ])
+        .params.map((q) => q.name)
+        .join(),
+      "dx",
+    ],
+    [
+      "an associated function has no receiver",
+      String(receiverOf([["dx", prim("f32")]]).receiver),
+      "false",
+    ],
+  ];
+  for (const [label, got, want] of shapeCases) {
+    if (got !== want) {
+      console.error(
+        `  self-test FAILED: Rust ${label} read as ${JSON.stringify(got)}, expected ${JSON.stringify(want)}`,
       );
       bad += 1;
     }
@@ -349,6 +507,7 @@ function selfTest() {
       "  table(t: Uint8Array | number[]): void;",
       "  each(f: (x: number) => void): void;",
       "  maybe(x?: number): void;",
+      "  static make(width: number): Case;",
       "}",
       "declare var Point: { new (x: number, y: number): object; fromPoint(p: object): object };",
       "export function loose(a: string, ...rest: number[]): void;",
@@ -395,6 +554,17 @@ function selfTest() {
       param("Point.fromPoint", 0)?.classes.join(),
       "object",
     ],
+    ["a static method", String(npm["Case.make"]?.overloads[0]?.static), "true"],
+    [
+      "an instance method",
+      String(npm["Case.load"]?.overloads[0]?.static),
+      "false",
+    ],
+    [
+      "a member of a var's type literal",
+      String(npm["Point.fromPoint"]?.overloads[0]?.static),
+      "true",
+    ],
     [
       "a top-level function's rest argument",
       String(param("loose", 1)?.rest),
@@ -411,8 +581,8 @@ function selfTest() {
   }
   if (bad > 0) process.exit(1);
   console.log(
-    `parameters: self-test, ${rustCases.length} Rust types and ` +
-      `${npmCases.length} npm declarations`,
+    `parameters: self-test, ${rustCases.length} Rust types, ` +
+      `${shapeCases.length} Rust shapes and ${npmCases.length} npm declarations`,
   );
 }
 

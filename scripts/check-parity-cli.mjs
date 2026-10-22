@@ -138,6 +138,34 @@ npm  = ["CanvasRenderingContext2D.vanished"]
       ["stale"],
     ],
     [
+      "an entry holding only parameter ids, which this gate leaves alone",
+      BASE_RUST,
+      BASE_NPM,
+      BASE_MANIFEST +
+        `
+[[capability]]
+name = "an argument recorded"
+rust = []
+npm  = ["CanvasRenderingContext2D.vanished(x)", "Nowhere.at(*)"]
+why  = "Neither names an item, so neither can be stale here."
+`,
+      [],
+    ],
+    [
+      "a parameter id beside an item id still leaves the item id checked",
+      BASE_RUST,
+      BASE_NPM,
+      BASE_MANIFEST +
+        `
+[[capability]]
+name = "a capability that was removed"
+rust = []
+npm  = ["CanvasRenderingContext2D.vanished", "CanvasRenderingContext2D.vanished(x)"]
+why  = "The item id is stale; the parameter id is not this gate's."
+`,
+      ["stale"],
+    ],
+    [
       "an empty side with no reason",
       BASE_RUST,
       BASE_NPM,
