@@ -4,7 +4,7 @@ use crate::{
     context::State,
     css::{FontUnits, is_font_relative, parse_length},
     font::{slant_for_matching, variation_axes},
-    font_library::FontLibrary,
+    font_library::{FontLibrary, base_face},
     text::{
         TextAlign as CrateTextAlign, TextBaseline as CrateTextBaseline,
         TextMetricsLine, TextMetricsRun,
@@ -27,6 +27,15 @@ use std::{
     borrow::Cow, cell::RefCell, collections::HashMap, fmt, iter::zip,
     ops::Range,
 };
+
+thread_local! {
+    /// [`face_reports_half_kerns`]'s verdicts, by the face's [`base_face`].
+    static KERN_VERDICTS: RefCell<HashMap<TypefaceId, Option<bool>>> =
+        RefCell::new(HashMap::new());
+    /// [`family_of`]'s answers, by the face's [`base_face`].
+    static FAMILIES: RefCell<HashMap<TypefaceId, String>> =
+        RefCell::new(HashMap::new());
+}
 
 /// Whether this face reports half-kerned positions at all, decided once and
 /// remembered.
@@ -73,21 +82,34 @@ use std::{
 /// run-level checks already refuse those runs, but that is an assumption
 /// rather than something measured.
 fn face_reports_half_kerns(font: &Font) -> Option<bool> {
-    thread_local! {
-        static DECIDED: RefCell<HashMap<TypefaceId, Option<bool>>> =
-            RefCell::new(HashMap::new());
-    }
-
     let typeface = font.typeface();
-    let id = typeface.unique_id();
-    if let Some(known) = DECIDED.with(|c| c.borrow().get(&id).copied()) {
+    // The face's, not the instance's: which kerning path the shaper takes
+    // is a property of the font's tables, which every instance shares.
+    let id = base_face(typeface.unique_id());
+    if let Some(known) = KERN_VERDICTS.with(|c| c.borrow().get(&id).copied()) {
         return known;
     }
     let verdict = classify_face(font, typeface);
-    DECIDED.with(|c| {
+    KERN_VERDICTS.with(|c| {
         c.borrow_mut().insert(id, verdict);
     });
     verdict
+}
+
+/// The family `typeface` reports, remembered per face.
+///
+/// Per face rather than per instance, as [`face_reports_half_kerns`] is:
+/// every instance of a variable font reports its family, and CoreText builds
+/// the font's name table again for each new instance it is asked about.
+fn family_of(typeface: &Typeface) -> String {
+    let id = base_face(typeface.unique_id());
+    FAMILIES.with(|families| {
+        families
+            .borrow_mut()
+            .entry(id)
+            .or_insert_with(|| typeface.family_name())
+            .clone()
+    })
 }
 
 /// The probe behind [`face_reports_half_kerns`], run once per face.
@@ -827,7 +849,7 @@ impl<'a> Typesetter<'a> {
                     })
                     .reduce(Rect::join2)
                     .unwrap_or(Rect::new_empty()),
-                    family: info.font().typeface().family_name(),
+                    family: family_of(&info.font().typeface()),
                     metrics: info.font().metrics().1,
                 });
             }
@@ -2092,8 +2114,47 @@ mod tests {
 
 #[cfg(test)]
 mod half_kern {
-    use super::{face_reports_half_kerns, painted_positions, reconstruct_run};
+    use super::{
+        FAMILIES, KERN_VERDICTS, face_reports_half_kerns, painted_positions,
+        reconstruct_run,
+    };
+    use crate::{canvas::Canvas, context2d::Font, font::FontLibrary as Fonts};
     use skia_safe::{Data, FontMgr, Point};
+
+    #[test]
+    fn every_size_of_a_variable_face_is_probed_and_named_once() {
+        // Each size of a face with an `opsz` axis is an instance of its own,
+        // with an id of its own. The kerning verdict and the family belong
+        // to the font, so a measurement at a size not seen before reuses
+        // them rather than laying out the probe pairs again.
+        const FAMILY: &str = "AmstelvarProbedOnce";
+        let fonts = Fonts::new();
+        fonts
+            .register_font_from_path(
+                FAMILY,
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/assets/fonts/AmstelvarAlpha-VF.ttf"
+                ),
+            )
+            .expect("bundled Amstelvar registers");
+        let mut canvas = Canvas::new(10.0, 10.0);
+        let ctx = canvas.context();
+        for step in 0..20 {
+            ctx.set_font(&Font::new(FAMILY, 12.0 + step as f32));
+            ctx.measure_text("Hamburgefonstiv", None);
+        }
+        assert_eq!(
+            KERN_VERDICTS.with(|verdicts| verdicts.borrow().len()),
+            1,
+            "twenty sizes of one face decide its kerning once"
+        );
+        assert_eq!(
+            FAMILIES.with(|families| families.borrow().len()),
+            1,
+            "and look its family up once"
+        );
+    }
 
     fn raleway() -> skia_safe::Font {
         let bytes = std::fs::read(concat!(

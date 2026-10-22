@@ -17,6 +17,7 @@ use skia_safe::{
     font_parameters::variation::Axis,
     font_style::{FontStyle, Slant},
     textlayout::{FontCollection, TextStyle, TypefaceFontProvider},
+    typeface::TypefaceId,
 };
 
 use crate::{
@@ -364,8 +365,51 @@ impl ResolvedFontCache {
 /// finds the map full.
 #[derive(Default)]
 struct CollectionCache {
-    entries: HashMap<CollectionKey, (FontCollection, Option<FontStyle>, u64)>,
+    /// Each collection, the style its search matched first, the use it was
+    /// last read at, and the variable-font instances registered in it, which
+    /// [`base_face`] answers for while the entry is here.
+    entries: HashMap<
+        CollectionKey,
+        (FontCollection, Option<FontStyle>, u64, Vec<TypefaceId>),
+    >,
     uses: u64,
+}
+
+thread_local! {
+    /// The face each instance in a [`CollectionCache`] entry was cloned
+    /// from, by id. Thread-local as the library is.
+    static INSTANCE_BASES: RefCell<HashMap<TypefaceId, TypefaceId>> =
+        RefCell::new(HashMap::new());
+}
+
+/// The face `id` was instanced from by [`FontLibrary::fonts_for_style`], or
+/// `id` itself for any other face.
+///
+/// What belongs to the font file rather than to a position on its axes --
+/// its family name, which kerning path the shaper takes -- is the same for
+/// every instance of it. Remembered per instance, it would be worked out
+/// again for each size of a face with an `opsz` axis, since each size is an
+/// instance of its own: the kerning probe alone lays out up to twenty-four
+/// paragraphs, about two fifths of a `measureText` at a size not seen
+/// before.
+pub(crate) fn base_face(id: TypefaceId) -> TypefaceId {
+    INSTANCE_BASES.with(|bases| bases.borrow().get(&id).copied().unwrap_or(id))
+}
+
+/// Records each of `instances` as cloned from the face beside it.
+fn remember_instances(instances: &[(TypefaceId, TypefaceId)]) {
+    INSTANCE_BASES
+        .with(|bases| bases.borrow_mut().extend(instances.iter().copied()));
+}
+
+/// Forgets `instances`, whose collection has left the cache.
+fn forget_instances(instances: &[TypefaceId]) {
+    INSTANCE_BASES.with(|bases| {
+        let mut bases = bases.borrow_mut();
+        instances.iter().for_each(|id| {
+            bases.remove(id);
+        });
+    });
 }
 
 impl CollectionCache {
@@ -377,7 +421,7 @@ impl CollectionCache {
         let uses = self.uses;
         self.entries
             .get_mut(key)
-            .map(|(collection, matched, stamp)| {
+            .map(|(collection, matched, stamp, _)| {
                 *stamp = uses;
                 (collection.clone(), *matched)
             })
@@ -388,6 +432,7 @@ impl CollectionCache {
         key: CollectionKey,
         collection: FontCollection,
         matched: Option<FontStyle>,
+        instances: &[(TypefaceId, TypefaceId)],
     ) {
         if self.entries.len() >= COLLECTION_CACHE_SIZE
             && !self.entries.contains_key(&key)
@@ -395,18 +440,29 @@ impl CollectionCache {
             let oldest = self
                 .entries
                 .iter()
-                .min_by_key(|(_, (.., stamp))| *stamp)
+                .min_by_key(|(_, (_, _, stamp, _))| *stamp)
                 .map(|(key, _)| key.clone());
-            if let Some(oldest) = oldest {
-                self.entries.remove(&oldest);
+            if let Some((.., evicted)) =
+                oldest.and_then(|oldest| self.entries.remove(&oldest))
+            {
+                forget_instances(&evicted);
             }
         }
         self.uses += 1;
-        self.entries.insert(key, (collection, matched, self.uses));
+        remember_instances(instances);
+        let ids = instances.iter().map(|(instance, _)| *instance).collect();
+        if let Some((.., replaced)) = self
+            .entries
+            .insert(key, (collection, matched, self.uses, ids))
+        {
+            forget_instances(&replaced);
+        }
     }
 
     fn clear(&mut self) {
-        self.entries.clear();
+        self.entries
+            .drain()
+            .for_each(|(_, (.., instances))| forget_instances(&instances));
     }
 
     fn clear_caches(&mut self) {
@@ -1186,6 +1242,7 @@ impl FontLibrary {
             // the 'dynamic' font mgr (which is searched before the
             // 'asset' or the 'default' mgr)
             let mut dynamic = TypefaceFontProvider::new();
+            let mut instances = vec![];
 
             for font in matches.into_iter() {
                 if let Some(params) = variation_axes(&font) {
@@ -1199,6 +1256,8 @@ impl FontLibrary {
                         let args = FontArguments::new()
                             .set_variation_design_position(v_pos);
                         if let Some(face) = font.clone_with_arguments(&args) {
+                            instances
+                                .push((face.unique_id(), font.unique_id()));
                             let alias =
                                 self.fonts.iter().find_map(|(orig, alias)| {
                                     if Typeface::equal(&font, orig) {
@@ -1225,8 +1284,12 @@ impl FontLibrary {
                 .find_typefaces(&families, style.font_style())
                 .first()
                 .map(Typeface::font_style);
-            self.collection_cache
-                .insert(key, collection.clone(), matched);
+            self.collection_cache.insert(
+                key,
+                collection.clone(),
+                matched,
+                &instances,
+            );
             (collection, matched)
         } else {
             // Not variable, so the collection just searched is the one to lay
@@ -1521,7 +1584,7 @@ mod tests {
         let collection = FontCollection::new();
 
         for n in 0..COLLECTION_CACHE_SIZE as i32 {
-            cache.insert(key(n), collection.clone(), None);
+            cache.insert(key(n), collection.clone(), None, &[]);
         }
         assert_eq!(cache.entries.len(), COLLECTION_CACHE_SIZE);
 
@@ -1532,6 +1595,7 @@ mod tests {
             key(COLLECTION_CACHE_SIZE as i32),
             collection.clone(),
             None,
+            &[],
         );
 
         assert_eq!(cache.entries.len(), COLLECTION_CACHE_SIZE, "still bounded");
@@ -1687,6 +1751,70 @@ mod tests {
     }
 
     #[test]
+    fn an_instance_answers_for_its_face_while_its_collection_is_cached() {
+        // What the face's instances share is looked up by the face, which is
+        // sound only while the mapping lasts as long as the collection that
+        // holds the instance, and no longer.
+        const FAMILY: &str = "AmstelvarInstanceBase";
+        let bytes = std::fs::read("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+            .expect("bundled Amstelvar is readable");
+        let face = FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("Amstelvar parses");
+        let style = |size: f32| {
+            let mut style = TextStyle::new();
+            style.set_font_families(&[FAMILY]);
+            style.set_font_size(size);
+            style
+        };
+
+        FontLibrary::with_shared(|lib| {
+            lib.register_typeface(face.clone(), Some(FAMILY.to_string()));
+            let instance_at = |lib: &mut FontLibrary, size: f32| {
+                let (mut collection, _) =
+                    lib.fonts_for_style(&style(size), &[]);
+                collection
+                    .find_typefaces(&[FAMILY], FontStyle::default())
+                    .first()
+                    .cloned()
+                    .expect("the family resolves")
+            };
+            let base = face.unique_id();
+
+            let first = instance_at(lib, 10.0);
+            assert_ne!(
+                first.unique_id(),
+                base,
+                "an instance is a face of its own"
+            );
+            assert_eq!(base_face(first.unique_id()), base);
+            assert_eq!(
+                first.family_name(),
+                face.family_name(),
+                "and reports the family its face does"
+            );
+
+            for step in 1..=COLLECTION_CACHE_SIZE {
+                instance_at(lib, 10.0 + step as f32 * 0.25);
+            }
+            assert_eq!(
+                base_face(first.unique_id()),
+                first.unique_id(),
+                "evicting its collection forgets it"
+            );
+
+            let last = instance_at(lib, 9.0);
+            assert_eq!(base_face(last.unique_id()), base);
+            lib.collection_cache.clear();
+            assert_eq!(
+                base_face(last.unique_id()),
+                last.unique_id(),
+                "and so does clearing the cache"
+            );
+        });
+    }
+
+    #[test]
     fn a_size_per_call_on_an_optical_axis_stays_within_the_cache() {
         // Each size instances its own `opsz`, so a caller animating a font
         // size asks for a collection no earlier call built. The map has to
@@ -1731,15 +1859,32 @@ mod tests {
     }
 
     #[test]
+    fn replacing_an_entry_forgets_its_instances() {
+        // Ids no typeface carries, so nothing else on this thread can have
+        // recorded them.
+        let (old, new, face) = (u32::MAX - 2, u32::MAX - 1, u32::MAX);
+        let mut cache = CollectionCache::default();
+        cache.insert(key(0), FontCollection::new(), None, &[(old, face)]);
+        assert_eq!(base_face(old), face);
+        cache.insert(key(0), FontCollection::new(), None, &[(new, face)]);
+        assert_eq!(
+            base_face(old),
+            old,
+            "the replaced entry's instance is forgotten"
+        );
+        assert_eq!(base_face(new), face, "and the new one's recorded");
+    }
+
+    #[test]
     fn re_inserting_a_key_does_not_evict() {
         // A repeated draw at the same style writes the same key back. That is
         // a replacement, not growth, and must not cost an unrelated entry.
         let mut cache = CollectionCache::default();
         let collection = FontCollection::new();
         for n in 0..COLLECTION_CACHE_SIZE as i32 {
-            cache.insert(key(n), collection.clone(), None);
+            cache.insert(key(n), collection.clone(), None, &[]);
         }
-        cache.insert(key(0), collection.clone(), None);
+        cache.insert(key(0), collection.clone(), None, &[]);
         assert_eq!(cache.entries.len(), COLLECTION_CACHE_SIZE);
         for n in 0..COLLECTION_CACHE_SIZE as i32 {
             assert!(cache.get(&key(n)).is_some(), "entry {n} survived");
