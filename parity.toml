@@ -59,6 +59,7 @@ npm  = ["DOMMatrix.scale3d",
         "DOMMatrix.rotateAxisAngle",
         "DOMMatrix.rotateAxisAngleSelf",
         "DOMMatrix.is2D",
+        "DOMMatrix.rotate(rotY)",
         "DOMMatrix.rotate(rotZ)",
         "DOMMatrix.scale(originZ)",
         "DOMMatrix.scale(scaleZ)",
@@ -753,22 +754,32 @@ why  = """Depth and colour space cross to npm as colorType and colorSpace -- Rus
        layout once."""
 
 [[capability]]
-name = "the shader constructors behind the gradient factories"
-rust = ["Shader::linear_gradient",
-        "Shader::radial_gradient",
-        "Shader::sweep_gradient",
-        "Shader::two_point_conical_gradient"]
-npm  = ["CanvasFillStrokeStyles.createLinearGradient",
-        "CanvasFillStrokeStyles.createRadialGradient",
-        "CanvasFillStrokeStyles.createConicGradient"]
-why  = """Four Rust constructors against three JavaScript factories, and the
-       capability is the same one: sweep and conic are one gradient under two
-       names, Skia's and CSS's, and two_point_conical is what the standard's
-       createRadialGradient actually is -- two circles, not one. Rust's
-       radial_gradient is the single-circle convenience a JavaScript caller
-       writes by passing equal centres. Not aliasable in either direction: the
-       crate re-exports Shader as CanvasGradient, so the constructors normalise
-       under the gradient OBJECT's name while npm declares them on the context."""
+name = "the shader constructors behind the gradient factories: linear"
+rust = ["Shader::linear_gradient"]
+npm  = ["CanvasFillStrokeStyles.createLinearGradient"]
+why  = """The same capability under two names. Not aliasable in either
+       direction: the crate re-exports Shader as CanvasGradient, so the
+       constructors normalise under the gradient OBJECT's name while npm
+       declares them on the context. One entry per factory, because the
+       parameter pass offers an entry's Rust functions to each of its npm
+       methods, and held to `Shader::two_point_conical_gradient` a conic
+       gradient's start angle would read as a start radius."""
+
+[[capability]]
+name = "the shader constructors behind the gradient factories: radial"
+rust = ["Shader::two_point_conical_gradient", "Shader::radial_gradient"]
+npm  = ["CanvasFillStrokeStyles.createRadialGradient"]
+why  = """two_point_conical is what the standard's createRadialGradient actually
+       is -- two circles, not one. Rust's radial_gradient is the
+       single-circle convenience a JavaScript caller writes by passing equal
+       centres. Not aliasable, as the linear pair."""
+
+[[capability]]
+name = "the shader constructors behind the gradient factories: conic"
+rust = ["Shader::sweep_gradient"]
+npm  = ["CanvasFillStrokeStyles.createConicGradient"]
+why  = """Sweep and conic are one gradient under two names, Skia's and CSS's.
+       Not aliasable, as the linear pair."""
 
 [[capability]]
 name = "adding a colour stop"
@@ -1145,20 +1156,39 @@ why  = """How JavaScript spells construction, copying and serialisation. `clone`
 status = "deliberate"
 
 [[capability]]
-name = "matrix constructors against matrix methods"
-rust = ["Affine::IDENTITY",
-        "Affine::rotation_degrees",
-        "Affine::rotation_from_vector",
-        "Affine::rotation_radians",
-        "Affine::translation"]
-npm  = ["DOMMatrix.rotate", "DOMMatrix.translate", "DOMMatrix.rotateFromVector"]
+name = "matrix constructors against matrix methods: rotating"
+rust = ["Affine::rotation_degrees", "Affine::rotation_radians"]
+npm  = ["DOMMatrix.rotate"]
 why  = """Same capability reached from opposite ends. npm composes onto an
         existing matrix -- `m.rotate(30)` -- where Rust builds the matrix and
         composes explicitly: `m.multiply(&Affine::rotation_degrees(30.0))`.
         `Affine::scale` and npm's `scale` happen to share a name and pair on
         their own; the rest do not, which is a spelling accident rather than a
-        difference in kind. `IDENTITY` is the same shape: npm writes `new
-        DOMMatrix()`."""
+        difference in kind. One entry per pair, because the parameter pass
+        offers an entry's Rust functions to each of its npm methods, and
+        `rotate` held to `Affine::translation` would take `rotY` as `ty`."""
+
+[[capability]]
+name = "matrix constructors against matrix methods: translating"
+rust = ["Affine::translation"]
+npm  = ["DOMMatrix.translate"]
+why  = """As the rotating pair: `m.translate(10, 20)` in npm,
+        `m.multiply(&Affine::translation(10.0, 20.0))` in Rust."""
+
+[[capability]]
+name = "matrix constructors against matrix methods: rotating to a vector"
+rust = ["Affine::rotation_from_vector"]
+npm  = ["DOMMatrix.rotateFromVector"]
+why  = """As the rotating pair: `m.rotateFromVector(x, y)` in npm,
+        `m.multiply(&Affine::rotation_from_vector(x, y))` in Rust."""
+
+[[capability]]
+name = "the identity matrix as a constant"
+rust = ["Affine::IDENTITY"]
+npm  = []
+why  = """Rust names the identity as a constant; npm writes `new DOMMatrix()`,
+        which is the identity, and has no name for it."""
+status = "deliberate"
 
 [[capability]]
 name = "path segments as Rust structs against a JavaScript tuple union"
@@ -1183,34 +1213,38 @@ status = "deliberate"
 
 [[capability]]
 name = "explicit construction and disposal of a filter object"
-rust = ["ColorFilter::luma",
-        "ImageFilter::color_matrix",
-        "ImageFilter::from_color_filter"]
+rust = []
 npm  = ["ColorFilter.new",
-        "ColorFilter.new(*)",
         "ColorFilter.delete",
-        "ColorFilter.MakeLumaColorFilter",
         "ImageFilter.new",
-        "ImageFilter.new(*)",
         "ImageFilter.delete",
-        "ImageFilter.MakeColorFilter",
         "MaskFilter.new",
-        "MaskFilter.new(*)",
         "MaskFilter.delete",
         "CanvasPattern.new"]
 why  = """`new` and `delete` are the CanvasKit object protocol: a WASM caller
         allocates and frees explicitly. Rust frees on drop, so there is
-        nothing to pair `delete` with and `new` is a struct literal. The three
-        Rust-side entries are the constructors whose npm `Make` spellings are
-        declared on a different holder than the rule reaches, and the two
-        colour-matrix names are the same capability under CanvasKit's naming.
+        nothing to pair `delete` with and `new` is a struct literal.
         Each `new` takes a kind's name and then that kind's own arguments,
         which the per-kind Rust constructor takes: `new("blend", ...)` is
         `ColorFilter::blend`, `new("blur", ...)` is `ImageFilter::blur`, and
         `MaskFilter.new` is `MakeBlur` under the protocol's spelling. One
         signature per kind against one dispatching signature cannot be held
-        argument by argument, so the three parameter ids here record every
-        argument of the three."""
+        argument by argument without dispatching on the kind, which the
+        parameter pass does not, so it does not compare these."""
+status = "deliberate"
+
+[[capability]]
+name = "filter constructors CanvasKit declares on another holder"
+rust = ["ColorFilter::luma",
+        "ImageFilter::color_matrix",
+        "ImageFilter::from_color_filter"]
+npm  = ["ColorFilter.MakeLumaColorFilter",
+        "ImageFilter.MakeColorFilter"]
+why  = """The three Rust constructors are those whose npm `Make` spellings are
+        declared on a different holder than the rule reaches, and the two
+        colour-matrix names are the same capability under CanvasKit's naming.
+        Kept apart from the object protocol, whose `new` and `delete` are not
+        their counterparts."""
 
 [[capability]]
 name = "single-letter colour channel shorthands"
@@ -2102,36 +2136,41 @@ why  = """npm spells hiding as a keyword inside the cursor union; the crate
 status = "deliberate"
 
 [[capability]]
-name = "construction, which each surface shapes per type"
-rust = ["FontLibrary::new", "FontVariation::new"]
+name = "construction npm declares and Rust does not"
+rust = []
 npm  = ["ParagraphBuilder.Make",
         "Paragraph.new",
         "ParagraphBuilder.new",
         "Image.new",
-        "Image.new(*)",
-        "ImageData.new",
-        "ImageData.new(*)"]
+        "ImageData.new"]
 why = """`ParagraphBuilder.Make` is a second npm spelling of the one beside it,
       not a third mechanism: in lib/classes/typography.js it is
       `static Make(style) { return new ParagraphBuilder(style); }`, and the comment
       above it says allocating in the constructor rather than in `Make` is what
       makes `new` usable at all. It is the CanvasKit spelling kept beside the
       JavaScript one. Read rather than inferred from the naming.
-      Six ids, one mechanism, and the direction differs by type rather than
-      by surface -- which is what makes them a group and not two.
-      Rust names a constructor where npm does not: `FontLibrary` is reached as a
-      singleton in JavaScript and `FontVariation` as an object literal, so neither
-      has a `new` to declare. npm declares one where Rust does not: `Paragraph` and
+      npm declares a constructor where Rust does not: `Paragraph` and
       `ParagraphBuilder` are built through the builder rather than constructed,
       `Image` is produced by `loadImage` returning a promise, and `ImageData` by
       `createImageData` on the context.
       `Canvas` is the control: it declares `new` on both sides and pairs, so the
-      extractor does emit construction on both surfaces and these six are absences
-      rather than a blind spot.
-      An entry naming both a Rust and an npm id offers the one to the other's
-      parameters, and here that would hold `Image.new` to `FontLibrary::new`.
-      The two parameter ids record that neither JavaScript constructor has a
-      Rust counterpart to be held to."""
+      extractor does emit construction on both surfaces and these are absences
+      rather than a blind spot. The opposite direction is the entry after this
+      one, and apart from it because the parameter pass reads an entry naming
+      both sides as offering each side's functions to the other's, and these
+      have no Rust counterpart to be held to."""
+status = "deliberate"
+
+[[capability]]
+name = "construction Rust names and npm does not"
+rust = ["FontLibrary::new", "FontVariation::new"]
+npm  = []
+why = """Rust names a constructor where npm does not: `FontLibrary` is reached as a
+      singleton in JavaScript and `FontVariation` as an object literal, so neither
+      has a `new` to declare. The same mechanism as the entry before this one,
+      in the other direction, and kept apart from it so that neither
+      constructor is read as the other side's counterpart."""
+status = "deliberate"
 
 [[capability]]
 name = "enum values npm carries inside a member's type"
