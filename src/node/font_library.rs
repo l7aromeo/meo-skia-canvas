@@ -1120,13 +1120,16 @@ impl FontLibrary {
                         });
                     }
 
-                    // auto-add wght if not explicitly set
+                    // auto-add wght if not explicitly set. OpenType defines the
+                    // `wght` axis on the CSS `font-weight` scale, so the
+                    // requested weight is the design coordinate as it stands,
+                    // which is what a browser instances at.
                     let wght_tag = FourByteTag::from_chars('w', 'g', 'h', 't');
                     if !explicit_tags.contains(&*wght_tag)
                         && let Some(param) =
                             params.iter().find(|p| *p.tag == *wght_tag)
                     {
-                        let weight = *style.font_style().weight() - 1;
+                        let weight = *style.font_style().weight();
                         let value =
                             (weight as f32).max(param.min).min(param.max);
                         coords.push(Coordinate {
