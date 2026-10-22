@@ -72,7 +72,38 @@ nothing is removed.
   `set_font_variation_settings` with `wght` 400 and a weight of 400 now name
   one instance rather than two.
 
+- **A paragraph's `font_weight` reaches a variable font.** `TextEngine`
+  instanced a variable typeface only when `TextStyle::font_variations` was
+  non-empty, so a style setting just `font_weight` laid out the font's
+  default instance: "Hamburgefonstiv" in Oswald at 64px measured 395.14 at
+  weight 200, 400 and 700 alike, where the instances measure 359.04, 395.14
+  and 446.46. The weight is now the `wght` coordinate whether or not other
+  axes are set, in `layout_text`, `layout_rich_text` and
+  `paragraph_builder`, and a span or a pushed style is instanced at its own
+  weight. An explicit `wght` in `font_variations` still wins, as
+  `font-variation-settings` does over `font-weight` in Chrome, and a
+  weight past the axis lays out at its end.
+  An instance is not given a synthetic bold: weight 700 pinned to `wght`
+  300 painted 21% more ink than weight 300, and weight 900 on Oswald 11%
+  more than 700, where Chrome paints each exactly as the instance it is. A
+  static font is laid out as before.
+
+  Instancing now goes through the text style's `FontArguments` against the
+  engine's one `FontCollection` rather than a collection built per layout,
+  so Skia's caches survive between layouts: a 61-character line in Oswald
+  carrying a `wght` variation lays out in 10.5 microseconds where it took
+  119.9.
+
 ### Added
+
+- **A rich-text span's own `font_variations` apply.** `layout_rich_text`
+  and `ParagraphBuilder::push_style` instanced every span at the base
+  style's axes and ignored the span's. A span's list now replaces the base
+  style's, as a nested `font-variation-settings` replaces its parent's in
+  CSS -- Chrome 153 measures `"wght" 700` inside a `"wdth" 50` parent as
+  `"wght" 700` alone -- and a span with none still inherits the base's.
+  An empty list cannot reset to no axes; a span returns an axis to its
+  default by naming the default.
 
 - **`color(xyz ...)`, `color(xyz-d50 ...)` and `color(xyz-d65 ...)` are
   accepted**, beside the `srgb`, `srgb-linear`, `display-p3` and `rec2020`

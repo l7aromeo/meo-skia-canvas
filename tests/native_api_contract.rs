@@ -340,27 +340,22 @@ fn facade_draws_a_layout_at_the_axis_it_was_laid_out_with() -> Result<()> {
     Ok(())
 }
 
-/// One system `FontMgr` shared across layouts still measures each axis
-/// position on its own.
+/// One collection shared across layouts still draws each axis position on
+/// its own.
 ///
-/// `collection_for` called `FontMgr::new()` for every layout carrying
-/// `font_variations`. That is not a handle to a singleton -- it stands up a
-/// manager over the installed fonts, and it measured 9.0 ms of a 9.6 ms
-/// layout on macOS, so a Rust caller drawing variable text in a loop paid it
-/// per draw. The engine holds one now.
+/// Every layout an engine builds resolves against its one `FontCollection`,
+/// which caches each variable-font instance by typeface and axes. What that
+/// could plausibly break is an instance carried from one layout into the
+/// next, so this asks for the same axis twice with a different one in
+/// between and requires the two answers to be equal exactly. A third layout
+/// that drifts is the failure this exists for; the heavier-than-lighter check
+/// alone would not see it, because both readings would still be lighter than
+/// 700.
 ///
-/// What that could plausibly break is a manager carrying state from one
-/// layout into the next, so this asks for the same axis twice with a
-/// different one in between and requires the two answers to be equal exactly.
-/// A third layout that drifts is the failure this exists for; the
-/// heavier-than-lighter check alone would not see it, because both readings
-/// would still be lighter than 700.
-///
-/// The signal is inked pixels rather than advance width. Oswald's advances do
-/// not move with `wght` -- 200 and 700 both measure 296.35 for the same
-/// string -- so a width assertion would fail on a correct build.
+/// The signal is inked pixels, which take in the outlines as well as the
+/// advances: "Studio" at 36px measures 74.77 at `wght` 200 and 94.43 at 700.
 #[test]
-fn a_shared_font_manager_keeps_each_axis_position_apart() -> Result<()> {
+fn a_shared_collection_keeps_each_axis_position_apart() -> Result<()> {
     let font_bytes =
         std::fs::read("tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf")
             .context("oswald-vf")?;
@@ -2649,14 +2644,12 @@ fn a_condensed_face_is_selected_when_the_family_has_one() -> Result<()> {
 
 /// A variable font is instanced under the name it was registered under.
 ///
-/// The instance built for a `font_variations` request is registered into a
-/// dynamic provider, and it has to go in under a name the subsequent lookup
-/// will search by -- which is the family the caller asked for, not the name
-/// inside the font file. Those differ whenever a caller registers under an
-/// alias, and the two used to be conflated: the alias was recovered by
-/// matching the typeface's intrinsic `family_name()` against the registered
-/// list, so a mismatch found nothing, filed the instance under the intrinsic
-/// name, and left the request falling through to the uninstanced face.
+/// A `font_variations` request is resolved by the family the caller asked
+/// for, not the name inside the font file, and the instance is cloned from
+/// whatever that resolved to. The two names differ whenever a caller
+/// registers under an alias, and a lookup keyed on the intrinsic
+/// `family_name()` finds nothing for the alias and lays the request out in
+/// the uninstanced face.
 ///
 /// Silent, and only visible as the wrong weight on the page. Advance width
 /// is what catches it here: Oswald's `wght` moves it about 24% across the

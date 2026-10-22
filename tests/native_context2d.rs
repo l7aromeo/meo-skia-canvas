@@ -4281,43 +4281,70 @@ fn clearing_font_variation_settings_restores_the_default_instance() {
     );
 }
 
-/// The width SkParagraph measures for `text` in `wght`'s instance of the
-/// variable font at `path`, with nothing of this crate in between.
+/// SkParagraph laid out over the font at `path` alone, with nothing of this
+/// crate in between.
 ///
-/// The typeface is instanced through skia-safe directly and is the only one
-/// the paragraph can see, so this is what the font's own design says at that
-/// coordinate on this platform's scaler. Measured the way `measure_text`
-/// reports `width`: the union of the tight boxes over the whole string, with
-/// hinting off.
-fn bare_skia_width(path: &str, wght: f32, size: f32, text: &str) -> f32 {
+/// The typeface comes straight from the font's bytes, instanced at `wght`
+/// through skia-safe when one is given, and is the only one the paragraph
+/// can see -- so this is what the font's own design says on this platform's
+/// scaler. `weight` is the style's requested weight, which is what Skia
+/// decides whether to fake a bold from. Hinting is off, as it is on every
+/// route this crate lays text out by.
+fn bare_skia_paragraph(
+    path: &str,
+    wght: Option<f32>,
+    weight: i32,
+    size: f32,
+    text: &str,
+) -> skia_safe::textlayout::Paragraph {
+    let axes: Vec<([u8; 4], f32)> =
+        wght.map(|wght| (*b"wght", wght)).into_iter().collect();
+    bare_skia_paragraph_at(path, &axes, weight, size, text)
+}
+
+/// [`bare_skia_paragraph`] instanced at any `axes`, each a tag and a
+/// position; none leaves the face as the file has it.
+fn bare_skia_paragraph_at(
+    path: &str,
+    axes: &[([u8; 4], f32)],
+    weight: i32,
+    size: f32,
+    text: &str,
+) -> skia_safe::textlayout::Paragraph {
     use skia_safe::{
-        Data, FontArguments, FontMgr, FourByteTag,
+        Data, FontArguments, FontMgr, FontStyle, FourByteTag,
         font_arguments::{VariationPosition, variation_position::Coordinate},
+        font_style::{Slant, Weight, Width},
         textlayout::{
-            FontCollection, ParagraphBuilder, ParagraphStyle, RectHeightStyle,
-            RectWidthStyle, TextStyle, TypefaceFontProvider,
+            FontCollection, ParagraphBuilder, ParagraphStyle, TextStyle,
+            TypefaceFontProvider,
         },
     };
     let bytes = std::fs::read(path).expect("a font out of tests/assets");
-    let typeface = FontMgr::new()
+    let mut typeface = FontMgr::new()
         .new_from_data(Data::new_copy(&bytes), None)
         .expect("a typeface from the font's bytes");
-    let coordinates = [Coordinate {
-        axis: FourByteTag::from_chars('w', 'g', 'h', 't'),
-        value: wght,
-    }];
-    let instance = typeface
-        .clone_with_arguments(
-            &FontArguments::new().set_variation_design_position(
-                VariationPosition {
-                    coordinates: &coordinates,
-                },
-            ),
-        )
-        .expect("an instance at the requested wght");
+    if !axes.is_empty() {
+        let coordinates: Vec<Coordinate> = axes
+            .iter()
+            .map(|(tag, value)| Coordinate {
+                axis: FourByteTag::from(u32::from_be_bytes(*tag)),
+                value: *value,
+            })
+            .collect();
+        typeface = typeface
+            .clone_with_arguments(
+                &FontArguments::new().set_variation_design_position(
+                    VariationPosition {
+                        coordinates: &coordinates,
+                    },
+                ),
+            )
+            .expect("an instance at the requested axes");
+    }
 
     let mut provider = TypefaceFontProvider::new();
-    provider.register_typeface(instance, Some("Bare"));
+    provider.register_typeface(typeface, Some("Bare"));
     let mut fonts = FontCollection::new();
     fonts.set_default_font_manager(Some(FontMgr::from(provider)), None);
     let mut paragraph_style = ParagraphStyle::new();
@@ -4325,11 +4352,25 @@ fn bare_skia_width(path: &str, wght: f32, size: f32, text: &str) -> f32 {
     let mut style = TextStyle::new();
     style.set_font_size(size);
     style.set_font_families(&["Bare"]);
+    style.set_font_style(FontStyle::new(
+        Weight::from(weight),
+        Width::NORMAL,
+        Slant::Upright,
+    ));
     let mut builder = ParagraphBuilder::new(&paragraph_style, fonts);
     builder.push_style(&style);
     builder.add_text(text);
     let mut paragraph = builder.build();
     paragraph.layout(f32::MAX);
+    paragraph
+}
+
+/// The width SkParagraph measures for `text` in `wght`'s instance of the
+/// variable font at `path`, measured the way `measure_text` reports `width`:
+/// the union of the tight boxes over the whole string.
+fn bare_skia_width(path: &str, wght: f32, size: f32, text: &str) -> f32 {
+    use skia_safe::textlayout::{RectHeightStyle, RectWidthStyle};
+    let paragraph = bare_skia_paragraph(path, Some(wght), 400, size, text);
     let (left, right) = paragraph
         .get_rects_for_range(
             0..text.encode_utf16().count(),
@@ -4437,6 +4478,356 @@ fn a_font_weight_and_a_wght_variation_are_one_instance() {
             width(&[]),
             width(&[FontVariation::new(FontAxisTag::WGHT, f32::from(weight))]),
             "weight {weight} against wght {weight}"
+        );
+    }
+}
+
+/// Oswald's variable font, the file `oswald()` registers.
+const OSWALD_TTF: &str =
+    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf";
+
+/// The unwrapped width `engine` lays `text` out at in `style`.
+fn engine_width(engine: &TextEngine, style: &TextStyle, text: &str) -> f32 {
+    engine
+        .layout_text(text, style, f32::MAX)
+        .max_intrinsic_width()
+}
+
+/// Family alias `oswald_engine` registers Oswald's variable font under.
+const OSWALD_PARAGRAPH: &str = "OswaldParagraph";
+
+/// A `TextEngine` over a library holding Oswald's variable font.
+///
+/// Its own library: `oswald()` registers into a library of its own, which a
+/// `TextEngine` built over another one does not see. That registration
+/// reaches `set_font` through the registry every library writes to.
+fn oswald_engine() -> TextEngine {
+    let fonts = FontLibrary::new();
+    fonts
+        .register_font_from_path(OSWALD_PARAGRAPH, OSWALD_TTF)
+        .expect("bundled Oswald registers");
+    TextEngine::new(&fonts)
+}
+
+/// A paragraph style in Oswald at `weight`, 64px.
+fn oswald_paragraph(weight: i32) -> TextStyle {
+    TextStyle {
+        font_families: vec![OSWALD_PARAGRAPH.to_string()],
+        font_size: 64.0,
+        font_weight: weight,
+        ..TextStyle::default()
+    }
+}
+
+#[test]
+fn a_paragraph_instances_a_variable_font_at_its_font_weight() {
+    // OpenType defines `wght` on the CSS weight scale, so a paragraph's
+    // `font_weight` is the instance it lays out, with or without other axes
+    // set. Held against bare Skia's instance at that weight.
+    const TEXT: &str = "Hamburgefonstiv";
+    let engine = oswald_engine();
+    let widths = [200, 400, 700].map(|weight| {
+        let measured = engine_width(&engine, &oswald_paragraph(weight), TEXT);
+        let expected = bare_skia_paragraph(
+            OSWALD_TTF,
+            Some(weight as f32),
+            weight,
+            64.0,
+            TEXT,
+        )
+        .max_intrinsic_width();
+        assert!(
+            (measured - expected).abs() < 1e-3,
+            "weight {weight} measured {measured}, where the wght {weight} \
+             instance measures {expected}"
+        );
+        measured
+    });
+    assert!(
+        widths[0] < widths[1] && widths[1] < widths[2],
+        "200, 400 and 700 should widen in turn: {widths:?}"
+    );
+}
+
+#[test]
+fn a_paragraph_weight_outside_the_axis_lays_out_at_its_end() {
+    // Oswald's `wght` runs 200 to 700. A weight past either end is that end,
+    // as a browser draws it -- Chrome 152 measures `font-weight: 900` at the
+    // width of 700 -- held against bare Skia's instance at the end itself
+    // rather than at the weight asked for.
+    const TEXT: &str = "Hamburgefonstiv";
+    let engine = oswald_engine();
+    let bare = |wght: f32, weight: i32| {
+        bare_skia_paragraph(OSWALD_TTF, Some(wght), weight, 64.0, TEXT)
+            .max_intrinsic_width()
+    };
+    for (weight, end, inside) in [
+        (100, 200.0, 250.0),
+        (900, 700.0, 650.0),
+        (1000, 700.0, 650.0),
+    ] {
+        let measured = engine_width(&engine, &oswald_paragraph(weight), TEXT);
+        let expected = bare(end, weight);
+        // The case has to tell the end from a point just inside it, or a
+        // weight that missed the end by a little would pass.
+        assert!(
+            (expected - bare(inside, weight)).abs() > 1.0,
+            "wght {end} and {inside} measure alike, so the case cannot tell \
+             them apart"
+        );
+        assert!(
+            (measured - expected).abs() < 1e-3,
+            "weight {weight} measured {measured}, where the wght {end} \
+             instance measures {expected}"
+        );
+    }
+}
+
+#[test]
+fn a_spans_own_axes_replace_the_base_styles() {
+    // As nested `font-variation-settings` do in CSS, where a child's list
+    // replaces its parent's rather than merging with it. Chrome 153, on
+    // Amstelvar at 48px with optical sizing off: `"wght" 700` inside a
+    // `"wdth" 50` parent measures 449.16, as `"wght" 700` alone does, and
+    // not the 276.02 of both axes; and weight 700 with `"wdth" 50` inside a
+    // `"wght" 300` parent measures 276.02, as weight 700 with `"wdth" 50`
+    // alone does -- the span's list does not name `wght`, so its weight
+    // supplies it. A span with no list of its own inherits the base's.
+    const AMSTELVAR: &str = "tests/assets/fonts/AmstelvarAlpha-VF.ttf";
+    const TEXT: &str = "Hamburgefonstiv";
+    const SIZE: f32 = 48.0;
+    let fonts = FontLibrary::new();
+    fonts
+        .register_font_from_path("AmstelvarSpans", AMSTELVAR)
+        .expect("bundled Amstelvar registers");
+    let engine = TextEngine::new(&fonts);
+    let style = |weight: i32, axes: &[(FontAxisTag, f32)]| TextStyle {
+        font_families: vec!["AmstelvarSpans".to_string()],
+        font_size: SIZE,
+        font_weight: weight,
+        font_variations: axes
+            .iter()
+            .map(|(tag, value)| FontVariation::new(*tag, *value))
+            .collect(),
+        ..TextStyle::default()
+    };
+    let rich = |base: &TextStyle, span: TextStyle| {
+        engine
+            .layout_rich_text(
+                &[RichTextSpan {
+                    text: TEXT.to_string(),
+                    style: span,
+                }],
+                base,
+                f32::MAX,
+            )
+            .max_intrinsic_width()
+    };
+    let pushed = |base: &TextStyle, span: &TextStyle| {
+        let mut builder = engine.paragraph_builder(base);
+        builder.push_style(span).add_text(TEXT);
+        builder.build(f32::MAX).max_intrinsic_width()
+    };
+    let bare = |axes: &[([u8; 4], f32)], weight: i32| {
+        bare_skia_paragraph_at(AMSTELVAR, axes, weight, SIZE, TEXT)
+            .max_intrinsic_width()
+    };
+    let wdth = FontAxisTag::new(b"wdth");
+
+    let cases = [
+        (
+            "a span's wght 700 under a base's wdth 50",
+            style(400, &[(wdth, 50.0)]),
+            style(400, &[(FontAxisTag::WGHT, 700.0)]),
+            bare(&[(*b"wght", 700.0)], 400),
+        ),
+        (
+            "a span's weight 700 and wdth 50 under a base's wght 300",
+            style(400, &[(FontAxisTag::WGHT, 300.0)]),
+            style(700, &[(wdth, 50.0)]),
+            bare(&[(*b"wdth", 50.0), (*b"wght", 700.0)], 700),
+        ),
+        (
+            "a span with no axes under a base's wdth 50",
+            style(400, &[(wdth, 50.0)]),
+            style(400, &[]),
+            bare(&[(*b"wdth", 50.0), (*b"wght", 400.0)], 400),
+        ),
+    ];
+    // The first case separates replacing from merging only if the two
+    // answers differ.
+    assert!(
+        (bare(&[(*b"wght", 700.0)], 400)
+            - bare(&[(*b"wdth", 50.0), (*b"wght", 700.0)], 400))
+        .abs()
+            > 1.0,
+        "wdth 50 does not move the width, so the case cannot tell a merge \
+         from a replacement"
+    );
+    for (case, base, span, expected) in cases {
+        for (route, measured) in [
+            ("a rich-text span", rich(&base, span.clone())),
+            ("a pushed style", pushed(&base, &span)),
+        ] {
+            assert!(
+                (measured - expected).abs() < 1e-3,
+                "{case}, as {route}, measured {measured} against {expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_explicit_wght_wins_over_a_paragraphs_font_weight() {
+    // As `font-variation-settings` wins over `font-weight` in CSS: Chrome
+    // 152 lays `font-weight: 700` with `"wght" 300` out at the width of
+    // weight 300.
+    const TEXT: &str = "Hamburgefonstiv";
+    let engine = oswald_engine();
+    let style = TextStyle {
+        font_variations: vec![FontVariation::new(FontAxisTag::WGHT, 300.0)],
+        ..oswald_paragraph(700)
+    };
+    let measured = engine_width(&engine, &style, TEXT);
+    let expected =
+        bare_skia_paragraph(OSWALD_TTF, Some(300.0), 700, 64.0, TEXT)
+            .max_intrinsic_width();
+    assert!(
+        (measured - expected).abs() < 1e-3,
+        "weight 700 with wght 300 measured {measured}, where the wght 300 \
+         instance measures {expected}"
+    );
+}
+
+#[test]
+fn an_instanced_paragraph_is_not_given_a_synthetic_bold() {
+    // An instance is the weight it was instanced at, so nothing about it is
+    // missing for Skia to fake. Chrome 153 paints `font-weight: 700` with
+    // `"wght" 300` exactly as it paints weight 300, and 900 and 1000 exactly
+    // as 700 on Oswald, whose axis stops there -- with or without a
+    // `font-weight` range on the `@font-face`. Without the pin Skia
+    // emboldens each, since the weight asked for is 200 or more above the
+    // instance's: 21% more ink at 700 over 300, 11% at 900 over 700.
+    let engine = oswald_engine();
+    let painted = |style: TextStyle| {
+        let style = TextStyle {
+            color: RgbaLinear::opaque(1.0, 1.0, 1.0),
+            ..style
+        };
+        let layout = engine.layout_text("Hamburgefonstiv", &style, f32::MAX);
+        let mut canvas = Canvas::new(600.0, 100.0);
+        canvas.context().draw_paragraph(&layout, 10.0, 5.0);
+        pixels(&mut canvas)
+    };
+    let pinned_light = TextStyle {
+        font_variations: vec![FontVariation::new(FontAxisTag::WGHT, 300.0)],
+        ..oswald_paragraph(700)
+    };
+    assert!(
+        painted(pinned_light) == painted(oswald_paragraph(300)),
+        "weight 700 pinned to wght 300 painted other than weight 300"
+    );
+    for weight in [900, 1000] {
+        assert!(
+            painted(oswald_paragraph(weight)) == painted(oswald_paragraph(700)),
+            "weight {weight} painted other than 700, the end of the axis"
+        );
+    }
+    // And a weight the axis reaches is not mistaken for one it does not.
+    assert!(
+        painted(oswald_paragraph(700)) != painted(oswald_paragraph(300)),
+        "700 and 300 painted alike, so the comparison cannot fail"
+    );
+}
+
+#[test]
+fn a_paragraph_in_a_static_font_is_not_instanced() {
+    // A face with no axes is laid out as it is, at every weight: whatever
+    // Skia does with a weight the face lacks, it does the same over the
+    // bare face.
+    const TEXT: &str = "Hamburgefonstiv";
+    const MONOTON: &str = "tests/assets/fonts/Monoton-Regular.woff2";
+    let fonts = FontLibrary::new();
+    fonts
+        .register_font_from_path("MonotonStatic", MONOTON)
+        .expect("bundled Monoton registers");
+    let engine = TextEngine::new(&fonts);
+    for weight in [200, 400, 700] {
+        let style = TextStyle {
+            font_families: vec!["MonotonStatic".to_string()],
+            font_size: 64.0,
+            font_weight: weight,
+            ..TextStyle::default()
+        };
+        let measured = engine_width(&engine, &style, TEXT);
+        let expected = bare_skia_paragraph(MONOTON, None, weight, 64.0, TEXT)
+            .max_intrinsic_width();
+        assert!(
+            (measured - expected).abs() < 1e-3,
+            "Monoton at weight {weight} measured {measured} against \
+             {expected}"
+        );
+    }
+}
+
+#[test]
+fn a_span_instances_a_variable_font_at_its_own_font_weight() {
+    // A span's weight is its own, in a paragraph whose base weight differs,
+    // whether it arrives as a rich-text span or through `push_style`. An
+    // axis the base style pins still reaches every span, which is what the
+    // documentation of both promises.
+    const TEXT: &str = "Hamburgefonstiv";
+    let engine = oswald_engine();
+    let bare = |wght: f32, weight: i32| {
+        bare_skia_paragraph(OSWALD_TTF, Some(wght), weight, 64.0, TEXT)
+            .max_intrinsic_width()
+    };
+    let rich = |base: &TextStyle, span: TextStyle| {
+        engine
+            .layout_rich_text(
+                &[RichTextSpan {
+                    text: TEXT.to_string(),
+                    style: span,
+                }],
+                base,
+                f32::MAX,
+            )
+            .max_intrinsic_width()
+    };
+    let pushed = |base: &TextStyle, span: &TextStyle| {
+        let mut builder = engine.paragraph_builder(base);
+        builder.push_style(span).add_text(TEXT);
+        builder.build(f32::MAX).max_intrinsic_width()
+    };
+
+    let heavy = oswald_paragraph(700);
+    let light = oswald_paragraph(300);
+    for (route, measured) in [
+        ("a rich-text span", rich(&heavy, light.clone())),
+        ("a pushed style", pushed(&heavy, &light)),
+    ] {
+        assert!(
+            (measured - bare(300.0, 300)).abs() < 1e-3,
+            "{route} at weight 300 in a weight 700 paragraph measured \
+             {measured}, where the wght 300 instance measures {}",
+            bare(300.0, 300)
+        );
+    }
+
+    let pinned = TextStyle {
+        font_variations: vec![FontVariation::new(FontAxisTag::WGHT, 300.0)],
+        ..oswald_paragraph(400)
+    };
+    let heavy_span = oswald_paragraph(700);
+    for (route, measured) in [
+        ("a rich-text span", rich(&pinned, heavy_span.clone())),
+        ("a pushed style", pushed(&pinned, &heavy_span)),
+    ] {
+        assert!(
+            (measured - bare(300.0, 700)).abs() < 1e-3,
+            "{route} under a base pinned to wght 300 measured {measured}, \
+             where the wght 300 instance measures {}",
+            bare(300.0, 700)
         );
     }
 }
