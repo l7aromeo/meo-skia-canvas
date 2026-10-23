@@ -42,6 +42,70 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+/// How many glyphs' outline bounds [`glyph_ink`] remembers.
+///
+/// Each entry is a key and a rectangle, about sixty bytes, so the bound is a
+/// quarter of a megabyte -- several faces' worth of the glyphs a page uses at
+/// a handful of sizes each.
+const GLYPH_INK_CACHE: usize = 4096;
+
+/// What a glyph's outline depends on: the face, the size, the horizontal
+/// scale and skew, whether it is emboldened, the hinting, and the glyph.
+type GlyphKey = (TypefaceId, u32, u32, u32, bool, i32, GlyphId);
+
+/// [`glyph_ink`]'s answers, each with the insertion it was made at, and the
+/// count of insertions.
+type GlyphInkCache = (HashMap<GlyphKey, (Option<Rect>, u64)>, u64);
+
+thread_local! {
+    static GLYPH_INK: RefCell<GlyphInkCache> =
+        RefCell::new((HashMap::with_capacity(GLYPH_INK_CACHE), 0));
+}
+
+/// The tight bounds of `glyph`'s outline in `font`, or `None` for a glyph
+/// with no outline -- a space, a bitmap or a colour emoji -- or an empty
+/// one. Remembered.
+///
+/// The outline is what an ink box is joined from, and making it was two
+/// thirds of working out a run's ink with every cache in Skia already warm:
+/// `SkFont::getPath` builds a strike description and copies the path at the
+/// font's size for every glyph, and `ComputeTightBounds` then walks it. A
+/// glyph's outline depends on nothing but what the key holds, so the
+/// second time a glyph is measured at a size it is a lookup.
+///
+/// When the map is full the older half goes, by insertion, so that finding
+/// what to drop is paid once per two thousand glyphs rather than on each.
+fn glyph_ink(font: &Font, glyph: GlyphId) -> Option<Rect> {
+    let key = (
+        font.typeface().unique_id(),
+        font.size().to_bits(),
+        font.scale_x().to_bits(),
+        font.skew_x().to_bits(),
+        font.is_embolden(),
+        font.hinting() as i32,
+        glyph,
+    );
+    if let Some(found) = GLYPH_INK
+        .with(|cache| cache.borrow().0.get(&key).map(|(bounds, _)| *bounds))
+    {
+        return found;
+    }
+    let bounds = font
+        .get_path(glyph)
+        .map(|outline| outline.compute_tight_bounds())
+        .filter(|outline| !outline.is_empty());
+    GLYPH_INK.with(|cache| {
+        let (entries, made) = &mut *cache.borrow_mut();
+        if entries.len() >= GLYPH_INK_CACHE {
+            let cutoff = *made - (GLYPH_INK_CACHE / 2) as u64;
+            entries.retain(|_, (_, at)| *at > cutoff);
+        }
+        *made += 1;
+        entries.insert(key, (bounds, *made));
+    });
+    bounds
+}
+
 /// Whether this face reports half-kerned positions at all, decided once and
 /// remembered.
 ///
@@ -1694,12 +1758,8 @@ impl Measured {
                         // A glyph with no outline, a bitmap or colour emoji,
                         // keeps the reported box: it is the only one there is
                         // for a glyph that is not a path.
-                        let ink = info
-                            .font()
-                            .get_path(*glyph)
-                            .map(|outline| outline.compute_tight_bounds())
-                            .filter(|outline| !outline.is_empty())
-                            .unwrap_or(*rect);
+                        let ink =
+                            glyph_ink(info.font(), *glyph).unwrap_or(*rect);
                         // `info.origin()` as reported, rounding and all.
                         // Its `y` is the run's baseline snapped to a whole
                         // pixel -- 37 against 36.960938 at 48px -- and
@@ -2487,6 +2547,53 @@ mod half_kern {
         let (ink, lines) = pending.ink().expect("not yet read");
         assert_eq!(ink, measured_then.ink);
         assert_eq!(lines, measured_then.line_details);
+    }
+
+    #[test]
+    fn a_glyphs_remembered_ink_is_its_outlines_at_that_size() {
+        // The bounds come back from the map the second time, and have to be
+        // what the outline gives -- at the size asked for, not at the size
+        // the glyph was first measured at.
+        use super::{GLYPH_INK, GLYPH_INK_CACHE, glyph_ink};
+
+        let font = raleway();
+        let ids: Vec<u16> = font.str_to_glyphs_vec("Hamburgefonstiv");
+        let outline = |font: &skia_safe::Font, glyph: u16| {
+            font.get_path(glyph)
+                .map(|path| path.compute_tight_bounds())
+                .filter(|bounds| !bounds.is_empty())
+        };
+        let mut half = font.clone();
+        half.set_size(font.size() / 2.0);
+        for _ in 0..2 {
+            for &glyph in &ids {
+                assert_eq!(glyph_ink(&font, glyph), outline(&font, glyph));
+                assert_eq!(glyph_ink(&half, glyph), outline(&half, glyph));
+            }
+        }
+        let a = ids[0];
+        assert_ne!(
+            glyph_ink(&font, a),
+            glyph_ink(&half, a),
+            "two sizes of a glyph are two entries"
+        );
+
+        let spaces = font.str_to_glyphs_vec(" ");
+        assert_eq!(glyph_ink(&font, spaces[0]), None, "a space has no ink");
+
+        // Every glyph id of the face, at a run of sizes, is more than the
+        // map holds.
+        let mut sized = font.clone();
+        for step in 0..(GLYPH_INK_CACHE / 64 + 4) {
+            sized.set_size(10.0 + step as f32);
+            for glyph in 0..64 {
+                glyph_ink(&sized, glyph);
+            }
+        }
+        assert!(
+            GLYPH_INK.with(|cache| cache.borrow().0.len()) <= GLYPH_INK_CACHE,
+            "the map stays at its bound"
+        );
     }
 
     #[test]

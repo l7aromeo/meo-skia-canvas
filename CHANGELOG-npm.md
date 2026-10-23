@@ -672,8 +672,10 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `actualBoundingBox` values and `lines` come from the outline of every
   glyph, and a caller reading only `width` paid for them on every call.
   They are now worked out when the first of them is read and kept for the
-  rest: `measureText("Hello world")` with only `width` read takes about 5.4
-  µs where it took 7.7, and reading the ink as well about 9.1. Nothing a
+  rest, and each glyph's outline bounds are remembered by face, size and
+  glyph rather than outlined again: `measureText("Hello world")` with only
+  `width` read takes about 5.5 µs where it took 7.7, and reading the ink as
+  well about 7.4. Nothing a
   caller sees moves: the values are still the frozen object's own
   properties, in the same order, and `JSON.stringify` and a spread give
   what they gave, the ink then worked out once.

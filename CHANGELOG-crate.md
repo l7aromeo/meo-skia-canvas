@@ -585,6 +585,15 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   against, each the bytes Chrome 152 fetched or its refusal.
   `Image::from_url` takes `data:` URLs through it.
 
+### Changed
+
+- **`measure_text` remembers each glyph's outline bounds.** The ink box is
+  joined from the outline of every glyph, and building the outline was two
+  thirds of working out a run's ink with every cache in Skia warm. A glyph's
+  bounds are now remembered by face, size and glyph, up to 4,096 of them:
+  `measure_text("Hello world")` takes about 4.3 µs in release on macOS where
+  it took 5.6, and a seventy-character line about 15 where it took 25.
+
 ## 📦 ⟩ [v0.16.3] (crate) ⟩ September 16, 2026
 
 **A patch closing a gap 0.16.2 shipped knowingly.** No signature moves and
