@@ -790,7 +790,10 @@ impl<'a> Typesetter<'a> {
 
     /// The run's advance -- every glyph and space, with the letter spacing
     /// after each and the word spacing between words -- signed, as Chrome
-    /// reports it for `measureText().width`.
+    /// reports it for `measureText().width`. The rule is Blink's, from
+    /// `text_metrics.cc`, which adds up the runs' advances into the width and
+    /// does not clamp the sum; what follows is how it is reached through
+    /// SkParagraph, which does.
     ///
     /// `max_intrinsic_width` is that advance wherever it is not negative,
     /// trailing spaces included, which the line's own width leaves out. A
