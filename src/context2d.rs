@@ -1401,15 +1401,15 @@ impl Context2D {
         let em = self.inner.state.char_style.font_size();
         let ops = parse_filter(css, em)?;
         self.set_filter(&ops)?;
-        // Echo the caller's own text rather than what `set_filter` derived
-        // from the parsed chain. `saturate(150%)` and `saturate(1.5)` are
-        // the same filter, and re-serializing handed back the second when
-        // the first was written -- where the JavaScript `filter` getter
-        // returns the string it was given. A chain that parsed to nothing
-        // keeps the canonical `"none"`, since there is no source form of
-        // "no filter" worth preserving.
-        if !ops.is_empty() {
-            self.inner.state.filter.css = css.trim().to_string();
+        // Echo the caller's own text, exactly -- case, spacing and spelling,
+        // `"  NONE "` included -- as Chrome and the JavaScript `filter`
+        // getter read it back, rather than what `set_filter` derived from
+        // the parse: `saturate(150%)` and `saturate(1.5)` are one filter,
+        // and what draws is the parse. Only the empty string, which clears
+        // the filter here and which Chrome ignores, has no text to echo and
+        // reads back as `"none"`.
+        if !css.trim().is_empty() {
+            self.inner.state.filter.css = css.to_string();
         }
         Ok(())
     }
@@ -1417,9 +1417,10 @@ impl Context2D {
     /// The current filter chain as CSS, or `"none"`.
     ///
     /// A chain set through [`set_filter_css`](Self::set_filter_css) comes
-    /// back as it was written: `saturate(150%)` stays a percentage, and a
-    /// `drop-shadow` keeps its `red`. That is what the JavaScript `filter`
-    /// getter does, and what the Canvas API asks for.
+    /// back exactly as it was written, whitespace and letter case included:
+    /// `saturate(150%)` stays a percentage, `BLUR(5PX)` stays upper case,
+    /// and `"NONE"` reads `"NONE"`. That is what Chrome and the JavaScript
+    /// `filter` getter do. The empty string reads back as `"none"`.
     ///
     /// A chain set through the typed [`set_filter`](Self::set_filter) has no
     /// source text to echo, so it is serialized from the operations --

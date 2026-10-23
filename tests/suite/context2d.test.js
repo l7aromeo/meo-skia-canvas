@@ -2031,19 +2031,32 @@ describe("Context2D", () => {
         ctx.textDecoration = "none";
       });
 
+      // The getter echoes the string as set, as Chrome's does, so what
+      // shows the case was matched is the drawing: each spelling draws the
+      // pixels its lower-case form draws.
       test("filter function names", () => {
-        for (let [written, expected] of [
-          ["blur(3px)", "blur(3px)"],
+        const drawn = (filter) => {
+          ctx.filter = filter;
+          ctx.fillStyle = "rgb(20, 120, 220)";
+          ctx.fillRect(4, 4, 8, 8);
+          const px = Buffer.from(ctx.getImageData(0, 0, 16, 16).data);
+          ctx.filter = "none";
+          ctx.clearRect(0, 0, WIDTH, HEIGHT);
+          return px;
+        };
+        for (let [written, lower] of [
           ["BLUR(3px)", "blur(3px)"],
           ["blur(3PX)", "blur(3px)"],
           ["Drop-Shadow(2px 2px 2px red)", "drop-shadow(2px 2px 2px red)"],
           ["HUE-ROTATE(45DEG)", "hue-rotate(45deg)"],
           ["Grayscale(50%)", "grayscale(50%)"],
         ]) {
+          ctx.filter = "none";
           ctx.filter = written;
-          assert.equal(ctx.filter, expected, written);
+          assert.equal(ctx.filter, written, written);
+          assert.ok(drawn(written).equals(drawn(lower)), written);
         }
-        ctx.filter = "none";
+        assert.ok(!drawn("blur(3px)").equals(drawn("none")), "control");
       });
 
       // A unit matched in any case and then missed by a case-sensitive
@@ -2944,6 +2957,17 @@ describe("Context2D", () => {
       // `<color>? && <length>{2,3}` -- Filter Effects 1. The parser used to
       // read exactly three lengths from the front and require a colour after
       // them, so four of these five were dropped while Chrome drew each one.
+      // The getter echoes each as set, so each is checked against the
+      // pixels of its fully spelled form: colour last, blur and colour given.
+      const drawn = (filter) => {
+        ctx.filter = filter;
+        ctx.fillStyle = "rgb(20, 120, 220)";
+        ctx.fillRect(4, 4, 8, 8);
+        const px = Buffer.from(ctx.getImageData(0, 0, 24, 24).data);
+        ctx.filter = "none";
+        ctx.clearRect(0, 0, WIDTH, HEIGHT);
+        return px;
+      };
       _each(
         {
           "drop-shadow(2px 4px 6px red)": "drop-shadow(2px 4px 6px red)",
@@ -2952,11 +2976,18 @@ describe("Context2D", () => {
           "drop-shadow(red 2px 4px)": "drop-shadow(2px 4px 0px red)",
           "drop-shadow(2px 4px 6px)": "drop-shadow(2px 4px 6px black)",
         },
-        (expected, spec) => {
+        (spelled, spec) => {
           ctx.filter = "none";
           ctx.filter = spec;
-          assert.equal(ctx.filter, expected, spec);
+          assert.equal(ctx.filter, spec, spec);
+          assert.ok(drawn(spec).equals(drawn(spelled)), spec);
         },
+      );
+      assert.ok(
+        !drawn("drop-shadow(2px 4px 6px red)").equals(
+          drawn("drop-shadow(2px 4px 6px blue)"),
+        ),
+        "control",
       );
     });
 

@@ -25,6 +25,13 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **`Context2D::filter()` reports a chain set through `set_filter_css`
+  exactly as it was written**, as Chrome and the JavaScript `filter` getter
+  do. Surrounding whitespace was trimmed and `"NONE"` or `" none "` read back
+  as `"none"`; now only the empty string, which clears the filter here and
+  which Chrome ignores, reads back as `"none"`. The parse still trims, so
+  nothing draws differently.
+
 - **A GPU recovery could produce wrong or blank pixels with no error; such
   a draw is now retried once and otherwise reported.** On Metal, a GPU
   recovery discards the command buffers every process had in flight, and

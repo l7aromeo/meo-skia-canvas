@@ -244,6 +244,11 @@ fn set_filter_css_answers_the_filter_table() {
                 (Ok(()), true) => {
                     Some(format!("{css:?}: taken, Chrome ignores it"))
                 }
+                // Chrome reads every filter it takes back as it was written.
+                (Ok(()), false) if ctx.filter() != css => Some(format!(
+                    "{css:?}: reads back {:?}, Chrome as written",
+                    ctx.filter()
+                )),
                 (Err(error), false) => Some(format!("{css:?}: {error}")),
                 _ => None,
             }

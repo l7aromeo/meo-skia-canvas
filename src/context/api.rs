@@ -1832,8 +1832,11 @@ pub fn set_filter(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     if !cx.argument::<JsValue>(1)?.is_a::<JsNull, _>(&mut cx) {
         // `None` is a declaration that did not parse, and the Canvas API
         // ignores one of those: the filter already in place stands.
+        // Compared by what it resolves to as well as by its text: the same
+        // `blur(1em)` set again after the font changed is a different blur,
+        // and Chrome redraws it at the new size.
         if let Some((filter_text, specs)) = filter_arg(&mut cx, 1)?
-            && filter_text != this.state.filter.to_string()
+            && !this.state.filter.is(&filter_text, &specs)
         {
             this.state.filter = Filter::new(&filter_text, &specs);
         }
