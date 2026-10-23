@@ -238,6 +238,13 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `fontVariationSettings`, or in a `ParagraphBuilder`'s `fontVariations`,
   still wins.
 
+  A canvas that is never cleared keeps the typeface every text draw it
+  recorded was laid out in, for export, so drawing a face with an `opsz`
+  axis at many sizes holds one instance per distinct size, about 36 KB
+  each, until a `clearRect` covering the canvas, `reset()` or an opaque
+  fill of the whole canvas releases them. Fonts without an `opsz` axis are
+  unaffected.
+
 - **A style pushed onto a `ParagraphBuilder` is instanced at its own
   `fontVariations`.** `pushStyle` accepted the key and read nothing from
   it, so every span drew at the paragraph's axes: a span asking for

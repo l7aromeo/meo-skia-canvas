@@ -120,6 +120,13 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   CSS one, not the size on the device. A `FontAxisTag::OPSZ` named in
   `font_variations` or `set_font_variation_settings` still wins.
 
+  A canvas that is never cleared keeps the typeface every text draw it
+  recorded was laid out in, for export, so drawing a face with an `opsz`
+  axis at many sizes holds one instance per distinct size, about 36 KB
+  each, until a `clear_rect` covering the canvas, `reset` or an opaque
+  `fill_rect` of the whole canvas releases them. Fonts without an `opsz`
+  axis are unaffected.
+
 - **A GPU recovery could produce wrong or blank pixels with no error; such
   a draw is now retried once and otherwise reported.** On Metal, a GPU
   recovery discards the command buffers every process had in flight, and
