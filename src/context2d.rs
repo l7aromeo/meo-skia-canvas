@@ -775,6 +775,11 @@ fn font_size(text: &str) -> Option<f32> {
         };
         let quantity = evaluate(&lower, &expect)
             .filter(|quantity| quantity.dimension == Dimension::LENGTH)?;
+        // Clamped rather than refused, an infinity included: the rule is
+        // Blink's `ClampToCSSLengthRange`, in `css_primitive_value.cc`,
+        // which pins a computed length into range before the font's own
+        // limit applies, and Chrome 152 reads `calc(1px * infinity)` back
+        // as `10000px`.
         return Some(
             quantity.finished().clamp(0.0, f64::from(MAX_FONT_PX)) as f32
         );
