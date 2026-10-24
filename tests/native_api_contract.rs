@@ -1276,6 +1276,60 @@ fn a_neutral_origin_has_no_hue() -> Result<()> {
     Ok(())
 }
 
+/// A colour whose string ends before its brackets do is read with them
+/// closed, as CSS Syntax 3 closes every open block at the end of the input:
+/// each row measured in Chrome 153's canvas on a Display P3 canvas. A
+/// function closed that way reads what follows it, so one left open inside
+/// another takes the outer one's channels with it and is refused, and a `)`
+/// that closes nothing is refused as before.
+#[test]
+fn a_colour_missing_its_closing_brackets_is_read_closed() -> Result<()> {
+    for (css, chrome) in [
+        ("rgb(255 0 0", [234, 51, 35, 255]),
+        ("RGB(255 0 0", [234, 51, 35, 255]),
+        ("rgb(255 0 0 ", [234, 51, 35, 255]),
+        ("  rgb(255 0 0  ", [234, 51, 35, 255]),
+        ("rgba(255, 0, 0, 0.5", [233, 52, 36, 128]),
+        ("rgb(255 0 0 / 0.5", [233, 52, 36, 128]),
+        ("hsl(0 100% 50%", [234, 51, 35, 255]),
+        ("hsl(0, 100%, 50%", [234, 51, 35, 255]),
+        ("hwb(0 0% 0%", [234, 51, 35, 255]),
+        ("lab(50 40 30", [175, 93, 76, 255]),
+        ("lch(50 40 30", [167, 98, 90, 255]),
+        ("oklab(0.6 0.2 0.1", [213, 61, 55, 255]),
+        ("oklch(0.6 0.2 30", [205, 75, 56, 255]),
+        ("color(display-p3 1 0 0", [255, 0, 0, 255]),
+        ("color(srgb 1 0 0", [234, 51, 35, 255]),
+        ("color(xyz 0.3 0.2 0.1", [191, 92, 85, 255]),
+        ("rgb(from red r g b", [234, 51, 35, 255]),
+        ("hsl(from red h s l / 0.5", [233, 52, 36, 128]),
+        ("lab(from red l a b", [234, 51, 35, 255]),
+        ("color(from red srgb r g b", [234, 51, 35, 255]),
+        // Two left open, both closed.
+        ("hsl(from red h s calc(l / 2", [116, 20, 12, 255]),
+        ("rgb(from rgb(0 0 255) r g calc(b / 2", [0, 0, 122, 255]),
+    ] {
+        assert_eq!(painted_p3(css)?, chrome, "{css:?}");
+    }
+
+    // Each refused by Chrome.
+    let mut canvas = Canvas::new(4.0, 4.0);
+    let ctx = canvas.context();
+    for css in [
+        "rgb(",
+        "rgb(255",
+        "rgb(255 0 0 /",
+        "rgb(255 0 0))",
+        ")rgb(255 0 0",
+        "rgb(calc(255 0 0",
+        "rgb(from rgb(255 0 0 r g b",
+        "rgb(from red calc(r / 2 g b",
+    ] {
+        assert!(ctx.set_fill_style_css(css).is_err(), "{css:?} is refused");
+    }
+    Ok(())
+}
+
 /// The colour forms no browser reads that `csscolorparser` always has --
 /// `hwba()`, `hsv()`, `hsva()` and hex without its `#` -- still paint, as
 /// they did, until npm 7.0 and crate 0.17 refuse them. Chrome 153 refuses

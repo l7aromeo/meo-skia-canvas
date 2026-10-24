@@ -564,6 +564,16 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `COLOR(display-p3 1 0 0)` and `color(DISPLAY-P3 1 0 0)` were ignored
   too, and now parse, since CSS names are case-insensitive.
 
+- **A colour missing its closing `)` is read closed.**
+  `fillStyle = 'rgb(255 0 0'` was ignored where Chrome 153 paints red, as
+  it paints every colour function and relative colour left open at the
+  end of the string: CSS Syntax 3 closes every open block when the input
+  ends. Colours are now read with what is open closed, two deep included,
+  in `fillStyle`, `strokeStyle`, `shadowColor`, gradient stops and
+  anywhere else a CSS colour is taken. A function closed that way reads
+  to the end, so `rgb(calc(255 0 0` is still ignored, as it is in Chrome,
+  and so is a `)` that closes nothing.
+
 - **A relative colour reads its origin as CSS means it.**
   `fillStyle = 'rgb(from oklch(0.8 0.18 165) r g b)'` on a `display-p3`
   canvas painted `4, 221, 164` where Chrome paints `91, 221, 165`: the
@@ -575,7 +585,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   agree byte for byte -- in `fillStyle`, `strokeStyle`, `shadowColor`,
   gradient stops and anywhere else a CSS colour is taken. Nine are the
   neutral-origin hue below, one is a level apart where the exact value
-  lands on a rounding boundary, and one is missing its closing `)`.
+  lands on a rounding boundary, and one is `hwba(from ...)`, which Chrome
+  refuses and which is deprecated below.
 
   `hsl()` and `hwb()` went further wrong: their origin was clamped to sRGB
   before its hue was found, so `hsl(from color(srgb 1.2 0.2 0.1) h s l)`

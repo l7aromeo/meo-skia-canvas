@@ -263,6 +263,16 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `color(DISPLAY-P3 1 0 0)`, were refused too; CSS names are
   case-insensitive, and both now parse.
 
+- **A colour missing its closing `)` is read closed.** `rgb(255 0 0`
+  failed to parse where Chrome 153's canvas paints red, as it paints
+  every colour function and relative colour left open at the end of the
+  string: CSS Syntax 3 closes every open block when the input ends. Every
+  `set_*_css` setter and `RgbaLinear::from_css` now close what is open
+  before reading, two deep included, so `hsl(from red h s calc(l / 2` is
+  read as Chrome reads it. A function closed that way reads to the end,
+  so `rgb(calc(255 0 0` is still refused, as it is in Chrome, and so is a
+  `)` that closes nothing.
+
 - **A relative colour reads its origin as CSS means it.** A relative colour
   takes its channels from its origin in its own space, and the parser
   underneath kept one encoded value per colour and read it in two
@@ -278,7 +288,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   the crate's own parser first. Of 235 relative colours measured in
   Chrome 153, nesting included, 224 now agree byte for byte; nine are the
   neutral-origin hue below, one is a level apart where the exact value
-  lands on a rounding boundary, and one is missing its closing `)`.
+  lands on a rounding boundary, and one is `hwba(from ...)`, which Chrome
+  refuses and which is deprecated below.
 
   `hsl()` and `hwb()` went further wrong. The parser clamped their
   origin to sRGB before finding its hue, which painted
