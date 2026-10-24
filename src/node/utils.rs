@@ -1227,8 +1227,8 @@ const LAB_WHITE_D50: [f32; 3] =
 ///
 /// CSS Color 4 [section 12.1] requires this step between Lab's D50 reference
 /// and sRGB's D65 one: "chromatic adaptation ... using the Bradford method".
-/// Omitting it is the defect this parser exists to avoid -- see
-/// [`parse_lab_like`].
+/// Omitting it shifts blues and yellows while leaving greys alone;
+/// [`parse_lab_like`] says why this crate reads Lab itself.
 ///
 /// [section 12.1]: https://www.w3.org/TR/css-color-4/#color-conversion-code
 const BRADFORD_D50_TO_D65: [[f32; 3]; 3] = [
@@ -1321,19 +1321,30 @@ fn lab_hue_degrees(token: &str) -> Option<f32> {
     token.parse::<f32>().ok()
 }
 
-/// Parses CSS Color 4's `lab()` and `lch()`, adapting D50 to D65.
+/// Parses CSS Color 4's `lab()` and `lch()`, adapting D50 to D65, in either
+/// case: CSS function names are ASCII case-insensitive, so `LAB(` is the
+/// same function and takes the same conversion.
 ///
-/// Written here because `csscolorparser` converted Lab as though its
-/// components were already D65-referred, skipping the chromatic adaptation
-/// [`BRADFORD_D50_TO_D65`] performs. The error was zero on the neutral axis
-/// -- `lab(50% 0 0)` is the same grey either way -- and grew along `b`, so it
-/// read as a slight shift in blues and yellows rather than as an obviously
-/// wrong colour. For `lab(30% 30 -60)`: red 63 here and in Chrome, 31
-/// unadapted.
+/// This is CSS Color 4's conversion -- Lab's D50 white, the Bradford step
+/// [`BRADFORD_D50_TO_D65`] performs, and the XYZ-to-sRGB matrix -- and it
+/// runs before `csscolorparser` does, which reads Lab too, because the two
+/// are not the same reading. Over a grid of every form the grammar takes,
+/// 17,712 inputs, this lands within 8.5e-6 of the specification's own
+/// conversion done in `f64`, and `csscolorparser` 0.9 alone within 2.2e-3:
+/// close enough to agree on most rows, and a whole 8-bit level apart on 121,
+/// one of which `the_rust_surface_takes_css_colors` pins against Chrome.
+/// Chrome sits nearer this side than that one in the tail of the grid. So
+/// this is not
+/// redundant with the dependency, and
+/// `lab_and_lch_follow_css_color_4_across_their_grammar` fails if Lab is
+/// left to it.
 ///
-/// `csscolorparser` 0.9 adapts, and agrees with this function on every row
-/// `the_rust_surface_takes_css_colors` pins. This still runs first, so it is
-/// what those rows measure.
+/// The step it adds exists because `csscolorparser` once skipped the
+/// adaptation outright, treating Lab's components as D65-referred: zero
+/// error on the neutral axis, where `lab(50% 0 0)` is the same grey either
+/// way, growing along `b`, so it read as a slight shift in blues and
+/// yellows -- red 31 rather than 63 for `lab(30% 30 -60)`. 0.9 adapts; the
+/// difference left is precision.
 ///
 /// `oklab()` and `oklch()` are deliberately left to the crate. Oklab is
 /// defined D65-referred and has no adaptation step to get wrong. Its encode
@@ -1342,10 +1353,13 @@ fn lab_hue_degrees(token: &str) -> Option<f32> {
 /// in linear light.
 fn parse_lab_like(css: &str) -> Option<Color4f> {
     let css = css.trim();
-    let (inner, polar) = match css.strip_prefix("lab(") {
-        Some(inner) => (inner, false),
-        None => (css.strip_prefix("lch(")?, true),
+    let name = css.get(..4)?;
+    let polar = match name {
+        _ if name.eq_ignore_ascii_case("lab(") => false,
+        _ if name.eq_ignore_ascii_case("lch(") => true,
+        _ => return None,
     };
+    let inner = &css[4..];
     let inner = inner.strip_suffix(')')?;
 
     let (components, alpha) = match inner.split_once('/') {
@@ -1421,8 +1435,8 @@ fn parse_lab_like(css: &str) -> Option<Color4f> {
 /// `css_to_color4f_in_space` repairs, and a negative in the second, such as
 /// `color(srgb -0.1 0 0)`, already means what it says. Some of the first
 /// group are normally read by this crate's own parsers before this is asked;
-/// what reaches `csscolorparser` is what they refused, an upper-case `LAB(`
-/// among it.
+/// what reaches `csscolorparser` is what they refused, a relative
+/// `lab(from ...)` among it.
 fn built_from_linear_light(css: &str) -> bool {
     let Some((name, rest)) = css.trim_start().split_once('(') else {
         return false;

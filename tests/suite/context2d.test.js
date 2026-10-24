@@ -2187,6 +2187,13 @@ describe("Context2D", () => {
       ctx.fillStyle = "lch(50% 70 50)";
       assert.equal(ctx.fillStyle, "#c55218", "lch() resolves against D50");
 
+      // Function names are case-insensitive, so upper case is the same
+      // conversion. Chrome 153 paints this red 4, the CSS Color 4 value is
+      // 4.38, and a reading that is close but not exact gives 4.75, so 5.
+      ctx.fillStyle = "#000";
+      ctx.fillStyle = "LAB(79.18% -50% 30)";
+      assert.equal(ctx.fillStyle, "#04e188", "LAB() is lab()");
+
       // Oklab is defined D65-referred and has no adaptation step, so it is
       // the control: it was correct throughout and must stay so.
       ctx.fillStyle = "#000";

@@ -173,6 +173,12 @@ removed and no signature moves.
   it: `blur(2px` draws as `blur(2px)`, and
   `drop-shadow(2px 2px rgb(255 0 0` with both closed. It was ignored.
 
+- **`LAB(` and `LCH(` in upper case paint what `lab(` and `lch(` paint.**
+  CSS function names are case-insensitive, but only the lower-case names
+  took the exact CSS Color 4 conversion, so
+  `fillStyle = 'LAB(79.18% -50% 30)'` painted red 5 where Chrome 153 and
+  the lower-case spelling paint 4.
+
 - **`ctx.filter` reads back exactly as it was set**, as Chrome reads it:
   case, spacing, number spelling and a `drop-shadow`'s order and omissions
   included. It was rewritten into a canonical form -- `BLUR(5PX)` read back

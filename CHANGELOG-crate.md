@@ -25,6 +25,13 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **`LAB(` and `LCH(` in upper case take the same conversion as `lab(`
+  and `lch(`.** CSS function names are case-insensitive, and the crate's
+  own Lab reading, which is CSS Color 4's conversion to within 8.5e-6,
+  matched only the lower-case names, so the upper-case ones fell through
+  to `csscolorparser`, up to 2.2e-3 away. `LAB(79.18% -50% 30)` painted
+  red 5 where Chrome 153 and the lower-case spelling paint 4.
+
 - **`Context2D::filter()` reports a chain set through `set_filter_css`
   exactly as it was written**, as Chrome and the JavaScript `filter` getter
   do. Surrounding whitespace was trimmed and `"NONE"` or `" none "` read back
@@ -242,9 +249,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   canvas painted `4, 221, 164` where CSS Color 4 gives `91, 221, 165`. An
   sRGB canvas clips both to the same byte, which is why nothing caught it.
   The repair is in the one parser behind every CSS colour string the crate
-  takes, and covers an upper-case `LAB(` and a relative
-  `color(from ... srgb-linear ...)` too. Pinned per notation in
-  `the_rust_surface_takes_css_colors`.
+  takes, and covers a relative `color(from ... srgb-linear ...)` too.
+  Pinned per notation in `the_rust_surface_takes_css_colors`.
 
 - **A relative colour reads its origin as CSS means it.** A relative colour
   takes its channels from its origin in its own space, and the parser
