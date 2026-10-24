@@ -88,6 +88,16 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   and Chrome's two paths agree, so this library follows Chrome: the choice
   was the maintainer's, and `parse_font_shorthand` in `src/context2d.rs`
   carries the reasoning.
+- _A transform angle past the `float` range is not matched._ Chrome 152's
+  `DOMMatrix` reads `rotate(1e38deg)`, `rotate(1e300deg)` and
+  `rotate(calc(infinity * 1deg))` as no rotation, and `skewX()` of any of
+  them as a shear of 3.964681007867002e-6. Reducing the largest `float` by
+  whole turns gives exactly no rotation and `1e38deg` does not, so no
+  reading of the angle explains both functions, and neither answer is a
+  rotation anyone could have meant. Here the angle is held to the `float`
+  range and used as it stands. `TransformArguments::angle` in `src/css.rs`
+  says so at the site, and tests/assets/cases/css-transforms.json leaves
+  those rows out.
 - _A filter's `em` follows the context font in a worker too._ Chrome 152's
   worker `OffscreenCanvas` resolves `blur(1em)` to 16px whatever the font,
   while it resolves `blur(1ex)` against the font and a canvas in a document

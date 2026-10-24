@@ -1760,8 +1760,10 @@ describe("Context2D", () => {
         // try a range of string inits
         const transforms = {
           "matrix(1, 2, 3, 4, 5, 6)": "matrix(1, 2, 3, 4, 5, 6)",
+          // A 3D function makes the list 3D whatever its values, as Chrome
+          // reads it, so the identity still serializes as `matrix3d`.
           "matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)":
-            "matrix(1, 0, 0, 1, 0, 0)",
+            "matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)",
           "rotate(0.5turn)": "matrix(-1, 0, 0, -1, 0, 0)",
           "rotate3d(1, 2, 3, 10deg)":
             "matrix3d(0.985892913511, 0.141398603856, -0.089563373741, 0, -0.137057961859, 0.989148395009, 0.052920390614, 0, 0.096074336736, -0.039898464624, 0.994574197504, 0, 0, 0, 0, 1)",
@@ -1779,12 +1781,14 @@ describe("Context2D", () => {
           "translateZ(2px)":
             "matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1)",
           "scale(2, 0.5)": "matrix(2, 0, 0, 0.5, 0, 0)",
+          // A scale factor is a float, as Chrome keeps it: `0.3` is
+          // 0.30000001192092896 there, and here to the places shown.
           "scale3d(2.5, 120%, 0.3)":
-            "matrix3d(2.5, 0, 0, 0, 0, 1.2, 0, 0, 0, 0, 0.3, 0, 0, 0, 0, 1)",
+            "matrix3d(2.5, 0, 0, 0, 0, 1.200000047684, 0, 0, 0, 0, 0.300000011921, 0, 0, 0, 0, 1)",
           "scaleX(2)": "matrix(2, 0, 0, 1, 0, 0)",
           "scaleY(0.5)": "matrix(1, 0, 0, 0.5, 0, 0)",
           "scaleZ(0.3)":
-            "matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0.3, 0, 0, 0, 0, 1)",
+            "matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0.300000011921, 0, 0, 0, 0, 1)",
           "skew(30deg, 20deg)":
             "matrix(1, 0.363970234266, 0.577350269190, 1, 0, 0)",
           "skewX(30deg)": "matrix(1, 0, 0.577350269190, 1, 0, 0)",
@@ -1816,10 +1820,21 @@ describe("Context2D", () => {
       });
 
       test("rejects invalid args", () => {
-        assert.throws(
+        // A `TypeError`, as the context's matrix arguments raise, carrying
+        // the `SyntaxError` DOMException `DOMMatrix` raised for the string.
+        for (const call of [
           () => ctx.transform("nonesuch"),
-          /Invalid transform matrix/,
-        );
+          () => ctx.setTransform("translate(1em)"),
+        ]) {
+          assert.throws(
+            call,
+            (error) =>
+              error instanceof TypeError &&
+              /Invalid transform matrix/.test(error.message) &&
+              error.cause instanceof DOMException &&
+              error.cause.name === "SyntaxError",
+          );
+        }
         assert.throws(() => ctx.transform(0, 0, 0), /not enough arguments/);
         assert.doesNotThrow(() => ctx.transform(0, 0, 0, NaN, 0, 0));
       });

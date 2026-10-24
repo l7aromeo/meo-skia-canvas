@@ -319,6 +319,14 @@ impl Affine {
     /// `rotate3d`, `scale3d`, `scaleZ`, `matrix3d` and `perspective`. Names
     /// and units are case-insensitive, as in CSS.
     ///
+    /// Any argument may be a CSS math function -- `calc()`, `min()`,
+    /// `clamp()`, `round()`, `sin()` and the rest -- of the argument's own
+    /// type, and a function left open at the end of the list is closed, as
+    /// Chrome's `DOMMatrix` reads both. Lengths are in absolute units only,
+    /// since a transform has no font or document to measure `em` or `vw`
+    /// against, and are held where Chrome holds them: `translate(1e40px)` is
+    /// 33554428 pixels, the largest length Blink keeps.
+    ///
     /// A 3D list is composed in full and then flattened to its 2D part, the
     /// `a` to `f` that `DOMMatrix` reports for it in Chrome. That is not the
     /// same as dropping each step's third dimension: under
@@ -348,6 +356,10 @@ impl Affine {
     ///
     /// assert_eq!(Affine::from_css("none"), Some(Affine::IDENTITY));
     /// assert_eq!(Affine::from_css("rotate(45)"), None);
+    ///
+    /// let m = Affine::from_css("translate(calc(10px + 5px), 0").unwrap();
+    /// assert_eq!(m.tx, 15.0);
+    /// assert_eq!(Affine::from_css("translate(calc(1em), 0)"), None);
     ///
     /// let m = Affine::from_css("translate3d(1px, 2px, 3px)").unwrap();
     /// assert_eq!((m.tx, m.ty), (1.0, 2.0));

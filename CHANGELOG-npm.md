@@ -192,6 +192,19 @@ removed and no signature moves.
   font-relative unit still follows the font the text is drawn in, and `""`
   and `"none"` still clear the decoration.
 
+- **A `DOMMatrix` read from a string reports `is2D` and its values as
+  Chrome does.** A list holding a 3D function is 3D whatever its values:
+  `new DOMMatrix("translate3d(0, 0, 0)")`, `"rotateX(0deg)"` and an identity
+  `matrix3d()` reported `is2D` true and serialised as `matrix()`, and now
+  report false and `matrix3d()`, as in Chrome and as Geometry Interfaces 1
+  says. A length and a scale factor are a `float`, as Chrome keeps them, so
+  `translate(0.1px)` gives an `e` of 0.10000000149011612 and `scale(0.3)` an
+  `a` of 0.30000001192092896, where they were 0.1 and 0.3. And a length is
+  held to the range Chrome holds it to, so `translate(1e40px)` is
+  33554428px where it was 1e40. An angle in `rad` is converted at full
+  width, so `skewY(1.07rad)` agrees with Chrome to the last place where it
+  differed in the seventh.
+
 - **A GPU recovery could produce wrong or blank pixels with no error; such
   a draw is now retried once and otherwise reported.** When the GPU recovers
   from a fault -- often one in another program -- macOS discards the work
@@ -498,6 +511,23 @@ removed and no signature moves.
   and setting it costs less: 0.34 microseconds for a repeated string where
   it cost 0.91, and 1.65 for a chain of ten functions where it cost 2.75,
   in a release build.
+
+- **`DOMMatrix`, `setMatrixValue` and a transform string given to the
+  context take the CSS math functions and an unclosed list**, as Chrome
+  152's `DOMMatrix` does: any argument may be `calc()`, `min()`, `clamp()`,
+  `round()`, `atan2()` or any of the others, of the argument's own type, and
+  `translate(10px) rotate(45deg` is read with its last function closed.
+  What Chrome refuses stays refused -- `em`, `rem`, `vw`, `lh` and `%` in a
+  length, inside `calc()` or out; `calc(0)` where an angle or a length
+  belongs; `calc(50%)` as a scale -- and raises the same `SyntaxError`
+  `DOMException`. 92 lists measured in Chrome join
+  `tests/assets/cases/css-transforms.json`.
+
+  The string is now read by the crate's own parser, the one
+  `Affine::from_css` uses, in place of a second one in JavaScript, and costs
+  less: 0.76 microseconds for a two-function list where it cost 1.64, 2.07
+  for a nine-function 3D list where it cost 7.40, and 0.80 for a string
+  set again where it cost 2.33, in a release build.
 
 - **`ctx.font` takes the CSS math functions, the font-relative units and an
   `oblique` angle**, as Chrome 152 does. The size, the weight and the line

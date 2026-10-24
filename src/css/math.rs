@@ -378,7 +378,7 @@ impl Parser<'_, '_> {
             ));
         }
         angle_degrees(&unit)
-            .map(|per| Quantity::new(value * f64::from(per), Dimension::ANGLE))
+            .map(|per| Quantity::new(value * per, Dimension::ANGLE))
     }
 
     /// One math function call, from its name to its `)`.

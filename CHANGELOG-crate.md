@@ -263,6 +263,18 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `tests/assets/cases/css-math.json`, which the JavaScript `ctx.filter` is
   held to as well.
 
+- **`Affine::from_css` takes the CSS math functions and an unclosed list**,
+  as Chrome 152's `DOMMatrix` does: any argument may be `calc()`, `min()`,
+  `clamp()`, `round()`, `atan2()` or any of the others, of the argument's own
+  type, and `translate(10px) rotate(45deg` is read with its last function
+  closed. `em`, `rem`, `vw`, `lh` and `%` in a length stay refused, inside
+  `calc()` or out, as Chrome refuses them. A length is held to the range
+  Blink holds one to, so `translate(1e40px)`, which was refused, is
+  33554428px, and an angle in `rad` is converted at full width, here and in
+  a filter's `hue-rotate()`, which moves `skewY(1.07rad)` in the seventh
+  place onto Chrome's value. The JavaScript `DOMMatrix` now reads strings through this
+  parser, so the two are one.
+
 - **`Font::from_css`, `Font::parse` and `set_font_css` take the CSS math
   functions, the font-relative units and an `oblique` angle**, as Chrome
   152's `ctx.font` does. The size, the weight and the line height may be
