@@ -105,6 +105,41 @@ fn a_rec2020_primary_converts_through_the_full_matrix() {
 }
 
 #[test]
+fn a98_rgb_decodes_with_its_own_gamma_before_converting() {
+    // `lin_a98rgb` then `lin_a98rgb_to_XYZ` and `XYZ_to_lin_sRGB`, CSS Color
+    // 4's sample code, with the power `563/256` mirrored through zero for the
+    // negative red. The second lands outside sRGB on both sides.
+    expect(
+        "color(a98-rgb 0.5 0.2 0.1)",
+        [0.292_936_358, 0.029_027_662, 0.005_346_157, 1.0],
+    );
+    expect(
+        "color(a98-rgb -0.2 0.5 1.1)",
+        [-0.127_335_164, 0.217_755_528, 1.276_786_24, 1.0],
+    );
+}
+
+#[test]
+fn prophoto_rgb_adapts_from_d50_and_keeps_its_linear_toe() {
+    // `lin_ProPhoto`, `lin_ProPhoto_to_XYZ`, `D50_to_D65` and
+    // `XYZ_to_lin_sRGB`. `0.01` sits below `16/512`, on the linear segment
+    // that divides by 16; the others are on the 1.8 power, mirrored for the
+    // negative red.
+    expect(
+        "color(prophoto-rgb 0.5 0.2 0.1)",
+        [0.539_203_275, 0.002_219_705, 0.007_497_151, 1.0],
+    );
+    expect(
+        "color(prophoto-rgb 0.01 0.5 0.9)",
+        [-0.461_441_72, 0.351_169_212, 0.917_099_946, 1.0],
+    );
+    expect(
+        "color(prophoto-rgb -0.2 0.5 1.1)",
+        [-0.685_387_767, 0.362_891_163, 1.335_723_158, 1.0],
+    );
+}
+
+#[test]
 fn srgb_linear_passes_through_unchanged() {
     expect("color(srgb-linear 0.5 0.25 0)", [0.5, 0.25, 0.0, 1.0]);
 }

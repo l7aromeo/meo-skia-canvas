@@ -565,6 +565,14 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `oklch(0.7 0.35 30)` reported a green of about `-1.186` in its
   `color(srgb ...)` form, and now reports `-0.335`.
 
+- **`color()` reads `a98-rgb` and `prophoto-rgb`, and any case.**
+  `fillStyle = 'color(a98-rgb 0.5 0.2 0.1)'` was ignored where Chrome 153
+  paints `136, 55, 29` on a `display-p3` canvas, and the same held for
+  `prophoto-rgb` and for a relative colour with either as its origin.
+  Both now convert through CSS Color 4's matrices and transfer functions.
+  `COLOR(display-p3 1 0 0)` and `color(DISPLAY-P3 1 0 0)` were ignored
+  too, and now parse, since CSS names are case-insensitive.
+
 - **A relative colour reads its origin as CSS means it.**
   `fillStyle = 'rgb(from oklch(0.8 0.18 165) r g b)'` on a `display-p3`
   canvas painted `4, 221, 164` where Chrome paints `91, 221, 165`: the

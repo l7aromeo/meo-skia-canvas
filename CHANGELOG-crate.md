@@ -252,6 +252,17 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   takes, and covers a relative `color(from ... srgb-linear ...)` too.
   Pinned per notation in `the_rust_surface_takes_css_colors`.
 
+- **`color()` reads `a98-rgb` and `prophoto-rgb`, and any case.** Both
+  spaces are CSS Color 4's and Chrome draws them; every `set_*_css`
+  setter and `RgbaLinear::from_css` refused them, so
+  `color(a98-rgb 0.5 0.2 0.1)` failed to parse where Chrome 153 paints
+  `136, 55, 29` on a P3 canvas, and a relative colour with either as its
+  origin failed with it. They convert to extended sRGB through CSS Color
+  4's matrices and transfer functions, negative components and
+  ProPhoto's linear toe included. `COLOR(` and an upper-case space name,
+  `color(DISPLAY-P3 1 0 0)`, were refused too; CSS names are
+  case-insensitive, and both now parse.
+
 - **A relative colour reads its origin as CSS means it.** A relative colour
   takes its channels from its origin in its own space, and the parser
   underneath kept one encoded value per colour and read it in two

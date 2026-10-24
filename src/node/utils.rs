@@ -1022,14 +1022,20 @@ fn rec2020_decode(encoded: f32) -> f32 {
 
 /// Parses CSS Color 4's `color(<space> r g b[ / a])`.
 ///
-/// Handled here for the two spaces `csscolorparser` refuses, `display-p3`
-/// and `rec2020`. It parses `srgb`, `srgb-linear` and the three `xyz` forms
-/// itself as of 0.9, and this runs first, so every space a canvas can hold is
-/// read by one function. The components are carried with the name of the space
-/// they were written in rather than converted here, which is what lets a P3
-/// colour reach a P3 canvas without a trip through sRGB.
+/// Handled here for the four spaces `csscolorparser` refuses, `display-p3`,
+/// `rec2020`, `a98-rgb` and `prophoto-rgb`. It parses `srgb`, `srgb-linear`
+/// and the three `xyz` forms itself as of 0.9, and this runs first, so every
+/// space a canvas can hold is read by one function. The components of a
+/// space a canvas can hold are carried with its name rather than converted
+/// here, which is what lets a P3 colour reach a P3 canvas without a trip
+/// through sRGB; `a98-rgb` and `prophoto-rgb` come back in sRGB. The function
+/// name and the space are ASCII case-insensitive, as CSS names are.
 fn parse_color_function(css: &str) -> Option<(Color4f, &'static str)> {
-    let inner = css.trim().strip_prefix("color(")?.strip_suffix(')')?;
+    let css = css.trim();
+    let inner = css
+        .get(..6)
+        .filter(|name| name.eq_ignore_ascii_case("color("))
+        .and_then(|_| css[6..].strip_suffix(')'))?;
     let (space, components) = inner.trim().split_once(char::is_whitespace)?;
 
     let (components, alpha) = match components.split_once('/') {
@@ -1060,11 +1066,17 @@ fn parse_color_function(css: &str) -> Option<(Color4f, &'static str)> {
 
     let _ = (&linear, &apply);
     // Borrowed from the input otherwise, which outlives nothing.
-    let name = match space {
+    let name = match space.to_ascii_lowercase().as_str() {
         "srgb" => "srgb",
         "srgb-linear" => "srgb-linear",
         "display-p3" => "display-p3",
         "rec2020" => "rec2020",
+        // No canvas holds these two, so there is no space to carry them in
+        // and they convert to sRGB here.
+        name @ ("a98-rgb" | "prophoto-rgb") => {
+            let color = Color4f::new(r, g, b, alpha);
+            return Some((color_function_to_srgb(color, name), "srgb"));
+        }
         _ => return None,
     };
     Some((Color4f::new(r, g, b, alpha), name))
@@ -1090,6 +1102,55 @@ const LINEAR_REC2020_TO_LINEAR_SRGB: [[f32; 3]; 3] = [
     [-0.124_550_48, 1.132_899_9, -0.008_349_422],
     [-0.018_150_764, -0.100_578_9, 1.118_729_7],
 ];
+
+/// Linear-light A98 RGB into linear-light sRGB.
+///
+/// The `f32` nearest the product of CSS Color 4's `lin_a98rgb_to_XYZ` and
+/// `XYZ_to_lin_sRGB`, both published as exact fractions; the same product
+/// derived from Adobe RGB (1998)'s primaries and the D65 white point agrees
+/// to fifteen places. The two spaces share their red and blue primaries and
+/// their white, so A98's red and blue land on sRGB's own, scaled, and only
+/// its green mixes.
+const LINEAR_A98_TO_LINEAR_SRGB: [[f32; 3]; 3] = [
+    [1.398_355_7, -0.398_355_75, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, -0.042_928_99, 1.042_928_9],
+];
+
+/// Linear-light ProPhoto RGB into linear-light sRGB: CSS Color 4's
+/// `lin_ProPhoto_to_XYZ`, then `D50_to_D65`, since ProPhoto is referred to
+/// D50, then `XYZ_to_lin_sRGB`. The product derived from ProPhoto's
+/// primaries and the D50 white point agrees with it to seventeen places.
+const LINEAR_PROPHOTO_TO_LINEAR_SRGB: [[f32; 3]; 3] = [
+    [2.034_381, -0.727_635_8, -0.306_745_05],
+    [-0.228_825_73, 1.231_742_5, -0.002_916_809_6],
+    [-0.008_558_828, -0.153_266_7, 1.161_825_5],
+];
+
+/// A98 RGB's transfer function, CSS Color 4's `lin_a98rgb`: a pure power,
+/// mirrored through zero so a negative component keeps its sign.
+fn a98_decode(encoded: f32) -> f32 {
+    /// The exponent Adobe RGB (1998) specifies as 2 51/256.
+    const EXPONENT: f32 = 563.0 / 256.0;
+    encoded.abs().powf(EXPONENT).copysign(encoded)
+}
+
+/// ProPhoto RGB's transfer function, CSS Color 4's `lin_ProPhoto`: a 1.8
+/// power above a short linear toe, mirrored through zero.
+fn prophoto_decode(encoded: f32) -> f32 {
+    /// Where the toe ends, on the encoded side.
+    const TOE: f32 = 16.0 / 512.0;
+    /// The toe's slope, as the encoded value over the linear one.
+    const TOE_SLOPE: f32 = 16.0;
+    /// The power above the toe.
+    const EXPONENT: f32 = 1.8;
+    let magnitude = encoded.abs();
+    let linear = match magnitude <= TOE {
+        true => magnitude / TOE_SLOPE,
+        false => magnitude.powf(EXPONENT),
+    };
+    linear.copysign(encoded)
+}
 
 /// The inverse of a 3x3 matrix, by its adjugate, in `f64` so the inverse
 /// carries no more error than the `f32` matrix it came from.
@@ -1187,6 +1248,12 @@ fn color_function_to_srgb(color: Color4f, space: &str) -> Color4f {
             .map(linear_to_srgb),
         "rec2020" => {
             apply(LINEAR_REC2020_TO_LINEAR_SRGB, linear(rec2020_decode))
+                .map(linear_to_srgb)
+        }
+        "a98-rgb" => apply(LINEAR_A98_TO_LINEAR_SRGB, linear(a98_decode))
+            .map(linear_to_srgb),
+        "prophoto-rgb" => {
+            apply(LINEAR_PROPHOTO_TO_LINEAR_SRGB, linear(prophoto_decode))
                 .map(linear_to_srgb)
         }
         _ => return color,
