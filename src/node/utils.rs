@@ -2,7 +2,7 @@
 use core::ops::Range;
 use neon::prelude::*;
 use skia_safe::{Color, Color4f, ColorSpace, Data, Matrix, Path, Point, RGB};
-use std::cmp;
+use std::{borrow::Cow, cmp};
 
 // One definition of the sRGB transfer function for the whole crate. This
 // file carried its own copy of each direction plus a third inlined into
@@ -2168,12 +2168,34 @@ fn relative_channels(
     Some((Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32), space))
 }
 
+/// `css` with every bracket still open at its end closed, as CSS Syntax 3
+/// closes every open block when the input ends: `rgb(255 0 0` is
+/// `rgb(255 0 0)`, as Chrome 153's canvas reads it.
+///
+/// A function closed this way reads everything after its `(`, so
+/// `rgb(calc(255 0 0` closes as `calc(255 0 0)` and is refused, as it is in
+/// Chrome. A `)` that closes nothing is not this function's to repair; the
+/// parsers refuse it, as Chrome does `)rgb(255 0 0`.
+fn closed_at_end(css: &str) -> Cow<'_, str> {
+    let depth = css.chars().fold(0usize, |depth, c| match c {
+        '(' => depth + 1,
+        ')' => depth.saturating_sub(1),
+        _ => depth,
+    });
+    match depth {
+        0 => Cow::Borrowed(css),
+        open => Cow::Owned(format!("{css}{}", ")".repeat(open))),
+    }
+}
+
 /// Parses a CSS color, keeping the space it was named in.
 ///
 /// `color(display-p3 1 0 0)` on a Display P3 canvas is then an identity --
 /// Skia converts at the paint, and converting via sRGB first would cost a
 /// level of the eight the readback quantises to.
 pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
+    let css = closed_at_end(css);
+    let css = css.as_ref();
     if let Some(relative) = relative_color(css) {
         // SAFETY: `relative_color` only returns names this builds.
         return relative
