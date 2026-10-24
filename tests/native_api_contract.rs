@@ -924,8 +924,8 @@ fn the_rust_surface_takes_css_colors() -> Result<()> {
         // `color(xyz ...)`, which names the space the other `color()`
         // forms are defined in terms of. The D50 form differs only by the
         // chromatic adaptation, so the pair records that the white point
-        // is read rather than ignored -- the defect `parse_lab_like` was
-        // written for, in the one `color()` space that can show it.
+        // is read rather than ignored -- the defect `lab_to_srgb` guards
+        // against for Lab, in the one `color()` space that can show it.
         ("color(xyz 0.2 0.15 0.1)", [163, 85, 83, 255]),
         ("color(xyz-d50 0.2 0.15 0.1)", [157, 87, 97, 255]),
     ] {
@@ -978,7 +978,8 @@ fn the_rust_surface_takes_css_colors() -> Result<()> {
     // channel, an origin `csscolorparser` cannot read, and channel arithmetic
     // on top. Left to `csscolorparser`, the first two kinds read `4` and `97`
     // for red, the third paints black, and the `calc` rows read `61` and `93`;
-    // `relative_color` in the binding's colour parser is what changes that.
+    // `read_color_function` in the binding's colour parser is what changes
+    // that.
     // `oklch(from rgb(from oklch(...) r g b) l c h)` would be right there too
     // -- `csscolorparser`'s decode undoes its own encode -- and is here to
     // stay right.
@@ -1028,7 +1029,7 @@ fn the_rust_surface_takes_css_colors() -> Result<()> {
     // The channels come from the origin as it is, so the oklch origin comes
     // back whole and one above one keeps its red. `csscolorparser` clips the
     // origin to sRGB before finding its hue, which reads `102` for red on the
-    // oklch rows and `235, 72, 47` on the last; `relative_color` in the
+    // oklch rows and `235, 72, 47` on the last; `read_color_function` in the
     // binding's colour parser is what changes that. Its grammar is
     // `hsl_and_hwb_evaluate_relative_channels_as_chrome_does` and
     // `every_relative_function_reads_its_channels_as_chrome_does`.
@@ -1272,6 +1273,91 @@ fn a_neutral_origin_has_no_hue() -> Result<()> {
             got.iter().zip(want).all(|(&g, w)| g.abs_diff(w) <= 1),
             "{relative}: {got:?} against {want:?}",
         );
+    }
+    Ok(())
+}
+
+/// An absolute colour reads its channels as CSS Color 4 types them, each row
+/// measured in Chrome 153's canvas on a Display P3 canvas: a math function
+/// in any channel, `none`, a percentage or `none` alpha in every space, and
+/// the clamps CSS Color 4 applies when it parses each function -- `rgb()`
+/// into `0..=255`, `hsl()` saturation and lightness and `hwb()` whiteness and
+/// blackness at zero, Lab and Oklab lightness into range and a polar chroma
+/// at zero. `color()` clamps nothing.
+#[test]
+fn absolute_colours_read_their_channels_as_chrome_does() -> Result<()> {
+    for (css, chrome) in [
+        ("rgb(calc(255) 0 0)", [234, 51, 35, 255]),
+        ("rgb(calc(50%) 0 0)", [116, 20, 12, 255]),
+        ("rgb(max(100, 200) 0 0)", [183, 38, 25, 255]),
+        ("rgb(calc(e * 50) 0 0)", [124, 22, 13, 255]),
+        ("rgb(calc(infinity) 0 0)", [234, 51, 35, 255]),
+        ("rgb(255 0 0 / calc(0.5))", [233, 52, 36, 128]),
+        ("rgb(255, 0, 0, calc(0.5))", [233, 52, 36, 128]),
+        ("rgba(calc(255), 0, 0)", [234, 51, 35, 255]),
+        ("rgb(300 -20 0)", [234, 51, 35, 255]),
+        ("rgb(120% -10% 0%)", [234, 51, 35, 255]),
+        ("hsl(calc(120) 100% 50%)", [117, 251, 76, 255]),
+        ("hsl(calc(120deg) 100% 50%)", [117, 251, 76, 255]),
+        ("hsl(120 calc(50% + 50%) 50%)", [117, 251, 76, 255]),
+        ("hsl(120 100% calc(25% * 2))", [117, 251, 76, 255]),
+        ("hsl(0 calc(150%) 50%)", [255, 18, 0, 255]),
+        ("hsl(0 -50% 50%)", [128, 127, 127, 255]),
+        // Legacy syntax holds saturation and lightness to `0%..=100%`.
+        ("hsl(0, 150%, 50%)", [234, 51, 35, 255]),
+        ("hwb(calc(120) 0% 0%)", [117, 251, 76, 255]),
+        ("hwb(0 -10% 0%)", [234, 51, 35, 255]),
+        ("lab(calc(50) 40 30)", [175, 93, 76, 255]),
+        ("lab(calc(50%) 40 30)", [175, 93, 76, 255]),
+        ("lab(50 40 30 / calc(0.5))", [173, 94, 76, 128]),
+        ("lab(50 40 30 / 50%)", [173, 94, 76, 128]),
+        ("lab(110 0 50)", [255, 254, 168, 255]),
+        ("lch(50 40 calc(30deg))", [167, 98, 90, 255]),
+        ("lch(50 -10 30)", [119, 119, 119, 255]),
+        ("lch(150 40 30)", [255, 233, 221, 255]),
+        ("oklch(calc(0.6) 0.2 30)", [205, 75, 56, 255]),
+        ("oklch(1.5 0.2 30)", [255, 207, 180, 255]),
+        ("oklch(0.5 -0.1 30)", [99, 99, 99, 255]),
+        ("oklch(0.6 0.2 30 / none)", [0, 0, 0, 0]),
+        ("oklab(calc(0.6) 0.1 0.1)", [182, 101, 58, 255]),
+        ("color(srgb calc(0.5) 0 0)", [116, 20, 12, 255]),
+        ("color(srgb 1 0 0 / none)", [0, 0, 0, 0]),
+        ("color(srgb-linear calc(0.25) 0 0)", [125, 23, 14, 255]),
+        ("color(display-p3 1 0 0 / none)", [0, 0, 0, 0]),
+        ("color(display-p3 0.5 0.2 0.1 / 50%)", [128, 52, 26, 128]),
+        ("color(display-p3 1.5 -0.2 0)", [255, 0, 0, 255]),
+        ("color(rec2020 1 0 0 / 50%)", [255, 0, 10, 128]),
+        ("color(rec2020 1 0 0 / calc(0.5))", [255, 0, 10, 128]),
+        ("color(a98-rgb calc(0.5) 0.2 0.1)", [136, 55, 29, 255]),
+        ("color(xyz-d65 calc(0.3) 0.2 0.1)", [191, 92, 85, 255]),
+    ] {
+        assert_eq!(painted_p3(css)?, chrome, "{css}");
+    }
+
+    // Each refused by Chrome. A fourth channel was read as an alpha of zero.
+    let mut canvas = Canvas::new(4.0, 4.0);
+    let ctx = canvas.context();
+    for css in [
+        "rgb(255 0 0 0)",
+        "color(srgb 1 0 0 0)",
+        "rgb(e 0 0)",
+        "color(srgb 1 0)",
+        "lch(50 40 calc(30deg + 1))",
+    ] {
+        assert!(ctx.set_fill_style_css(css).is_err(), "{css} is refused");
+    }
+
+    // Chrome refuses each of these too, and this library has always painted
+    // them; they still paint as they did.
+    for (css, painted) in [
+        ("rgb(255, 0%, 0)", [234, 51, 35, 255]),
+        ("rgb(255,0 0)", [234, 51, 35, 255]),
+        ("hsl(120, 100, 50)", [117, 251, 76, 255]),
+        ("hwb(120, 0%, 0%)", [117, 251, 76, 255]),
+        ("lab(50, 40, 30)", [175, 93, 76, 255]),
+        ("color(srgb 1, 0, 0)", [234, 51, 35, 255]),
+    ] {
+        assert_eq!(painted_p3(css)?, painted, "{css}");
     }
     Ok(())
 }

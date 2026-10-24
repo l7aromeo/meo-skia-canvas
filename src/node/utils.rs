@@ -16,8 +16,8 @@ use crate::{
         srgb_to_linear,
     },
     css::{
-        DEGREES_PER_TURN, Dimension, Expect, FontUnits, Percent, evaluate,
-        is_math, literal,
+        DEGREES_PER_TURN, Dimension, Expect, FontUnits, Percent, Quantity,
+        evaluate, is_math, literal,
     },
 };
 
@@ -1034,68 +1034,6 @@ fn rec2020_encode(linear: f32) -> f32 {
     encoded.copysign(linear)
 }
 
-/// Parses CSS Color 4's `color(<space> r g b[ / a])`.
-///
-/// Handled here for the four spaces `csscolorparser` refuses, `display-p3`,
-/// `rec2020`, `a98-rgb` and `prophoto-rgb`. It parses `srgb`, `srgb-linear`
-/// and the three `xyz` forms itself as of 0.9, and this runs first, so every
-/// space a canvas can hold is read by one function. The components of a
-/// space a canvas can hold are carried with its name rather than converted
-/// here, which is what lets a P3 colour reach a P3 canvas without a trip
-/// through sRGB; `a98-rgb` and `prophoto-rgb` come back in sRGB. The function
-/// name and the space are ASCII case-insensitive, as CSS names are.
-fn parse_color_function(css: &str) -> Option<(Color4f, &'static str)> {
-    let css = css.trim();
-    let inner = css
-        .get(..6)
-        .filter(|name| name.eq_ignore_ascii_case("color("))
-        .and_then(|_| css[6..].strip_suffix(')'))?;
-    let (space, components) = inner.trim().split_once(char::is_whitespace)?;
-
-    let (components, alpha) = match components.split_once('/') {
-        Some((rgb, a)) => (rgb, a.trim().parse::<f32>().ok()?),
-        None => (components, 1.0),
-    };
-    let parts: Vec<f32> = components
-        .split_whitespace()
-        .map(|n| match n.strip_suffix('%') {
-            Some(pct) => pct.parse::<f32>().map(|v| v / 100.0),
-            None => n.parse::<f32>(),
-        })
-        .collect::<Result<_, _>>()
-        .ok()?;
-    let [r, g, b] = parts[..] else { return None };
-
-    // Into linear light in the named space, through the matrix that takes it
-    // to linear sRGB, then back out through the sRGB transfer function. The
-    // matrices are the CSS Color 4 conversions, applied in linear light.
-    let linear = |f: fn(f32) -> f32| [f(r), f(g), f(b)];
-    let apply = |m: [[f32; 3]; 3], v: [f32; 3]| {
-        [
-            m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
-            m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
-            m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
-        ]
-    };
-
-    let _ = (&linear, &apply);
-    // Borrowed from the input otherwise, which outlives nothing.
-    let name = match space.to_ascii_lowercase().as_str() {
-        "srgb" => "srgb",
-        "srgb-linear" => "srgb-linear",
-        "display-p3" => "display-p3",
-        "rec2020" => "rec2020",
-        // No canvas holds these two, so there is no space to carry them in
-        // and they convert to sRGB here.
-        name @ ("a98-rgb" | "prophoto-rgb") => {
-            let color = Color4f::new(r, g, b, alpha);
-            return Some((color_function_to_srgb(color, name), "srgb"));
-        }
-        _ => return None,
-    };
-    Some((Color4f::new(r, g, b, alpha), name))
-}
-
 /// Linear-light Display P3 into linear-light sRGB.
 ///
 /// The `f32` nearest the product of two matrices CSS Color 4's sample code
@@ -1380,7 +1318,7 @@ const LAB_WHITE_D50: [f32; 3] =
 /// CSS Color 4 [section 12.1] requires this step between Lab's D50 reference
 /// and sRGB's D65 one: "chromatic adaptation ... using the Bradford method".
 /// Omitting it shifts blues and yellows while leaving greys alone;
-/// [`parse_lab_like`] says why this crate reads Lab itself.
+/// [`lab_to_srgb`] says why this crate converts Lab itself.
 ///
 /// [section 12.1]: https://www.w3.org/TR/css-color-4/#color-conversion-code
 const BRADFORD_D50_TO_D65: [[f32; 3]; 3] = [
@@ -1428,125 +1366,17 @@ const LAB_AB_FULL_SCALE: f32 = 125.0;
 /// [section 10.2]: https://www.w3.org/TR/css-color-4/#specifying-lab-lch
 const LCH_CHROMA_FULL_SCALE: f32 = 150.0;
 
-/// Reads one `lab()`/`lch()` component, resolving a percentage against
-/// `full_scale` and the CSS-wide `none` keyword to zero.
-///
-/// `none` is a missing component rather than a value, and CSS Color 4
-/// [section 4.4] resolves a missing component to zero everywhere it is not
-/// being interpolated. Nothing here interpolates.
-///
-/// [section 4.4]: https://www.w3.org/TR/css-color-4/#missing
-fn lab_component(token: &str, full_scale: f32) -> Option<f32> {
-    let token = token.trim();
-    if token.eq_ignore_ascii_case("none") {
-        return Some(0.0);
-    }
-    match token.strip_suffix('%') {
-        Some(pct) => pct.parse::<f32>().ok().map(|v| v / 100.0 * full_scale),
-        None => token.parse::<f32>().ok(),
-    }
-}
-
-/// Reads an `lch()` hue, which CSS Color 4 types as an `<angle>`.
-///
-/// A bare number is degrees, and all four of CSS's angle units are accepted
-/// because the grammar admits them. Refusing one would not reject the colour
-/// -- it would fall through to `csscolorparser` and be converted without the
-/// adaptation, which is the outcome this function exists to prevent.
-fn lab_hue_degrees(token: &str) -> Option<f32> {
-    let token = token.trim().to_ascii_lowercase();
-    if token == "none" {
-        return Some(0.0);
-    }
-    // `grad` before `rad`, which is a suffix of it: matching `rad` first would
-    // read `100grad` as 100 radians and silently place the hue elsewhere.
-    for (unit, per_turn) in [
-        ("deg", 360.0),
-        ("grad", 400.0),
-        ("rad", core::f32::consts::TAU),
-        ("turn", 1.0),
-    ] {
-        if let Some(value) = token.strip_suffix(unit) {
-            return value.parse::<f32>().ok().map(|v| v / per_turn * 360.0);
-        }
-    }
-    token.parse::<f32>().ok()
-}
-
-/// Parses CSS Color 4's `lab()` and `lch()`, adapting D50 to D65, in either
-/// case: CSS function names are ASCII case-insensitive, so `LAB(` is the
-/// same function and takes the same conversion.
-///
-/// This is CSS Color 4's conversion -- Lab's D50 white, the Bradford step
-/// [`BRADFORD_D50_TO_D65`] performs, and the XYZ-to-sRGB matrix -- and it
-/// runs before `csscolorparser` does, which reads Lab too, because the two
-/// are not the same reading. Over a grid of every form the grammar takes,
-/// 17,712 inputs, this lands within 8.5e-6 of the specification's own
-/// conversion done in `f64`, and `csscolorparser` 0.9 alone within 2.2e-3:
-/// close enough to agree on most rows, and a whole 8-bit level apart on 121,
-/// one of which `the_rust_surface_takes_css_colors` pins against Chrome.
-/// Chrome sits nearer this side than that one in the tail of the grid. So
-/// this is not
-/// redundant with the dependency, and
-/// `lab_and_lch_follow_css_color_4_across_their_grammar` fails if Lab is
-/// left to it.
-///
-/// The step it adds exists because `csscolorparser` once skipped the
-/// adaptation outright, treating Lab's components as D65-referred: zero
-/// error on the neutral axis, where `lab(50% 0 0)` is the same grey either
-/// way, growing along `b`, so it read as a slight shift in blues and
-/// yellows -- red 31 rather than 63 for `lab(30% 30 -60)`. 0.9 adapts; the
-/// difference left is precision.
-///
-/// `oklab()` and `oklch()` are deliberately left to the crate. Oklab is
-/// defined D65-referred and has no adaptation step to get wrong. Its encode
-/// of a colour outside sRGB is wrong in another way, which
-/// `css_to_color4f_in_space` repairs for every notation the crate converts
-/// in linear light.
-fn parse_lab_like(css: &str) -> Option<Color4f> {
-    let css = css.trim();
-    let name = css.get(..4)?;
-    let polar = match name {
-        _ if name.eq_ignore_ascii_case("lab(") => false,
-        _ if name.eq_ignore_ascii_case("lch(") => true,
-        _ => return None,
-    };
-    let inner = &css[4..];
-    let inner = inner.strip_suffix(')')?;
-
-    let (components, alpha) = match inner.split_once('/') {
-        Some((components, alpha)) => (components, lab_component(alpha, 1.0)?),
-        None => (inner, 1.0),
-    };
-    let parts: Vec<&str> = components.split_whitespace().collect();
-    let [lightness, second, third] = parts[..] else {
-        return None;
-    };
-
-    // `L` is a percentage of 100 in both functions, and a bare number is
-    // already on that scale.
-    let l = lab_component(lightness, 100.0)?;
-    let (a, b) = if polar {
-        let chroma = lab_component(second, LCH_CHROMA_FULL_SCALE)?;
-        let hue = lab_hue_degrees(third)?.to_radians();
-        (chroma * hue.cos(), chroma * hue.sin())
-    } else {
-        (
-            lab_component(second, LAB_AB_FULL_SCALE)?,
-            lab_component(third, LAB_AB_FULL_SCALE)?,
-        )
-    };
-
-    let [r, g, blue] = lab_to_srgb([l, a, b]);
-    // Unclamped, for the reason `css_to_color4f` gives: Lab names colours
-    // outside the sRGB gamut and clamping here would lose them before the
-    // surface that can hold them.
-    Some(Color4f::new(r, g, blue, alpha))
-}
-
 /// CIE Lab into extended sRGB: to XYZ against Lab's own D50 white, CSS
-/// Color 4 section 12.1, then [`BRADFORD_D50_TO_D65`] and the sRGB matrix.
-/// Nothing is clipped, a lightness outside `0..=100` included.
+/// Color 4 section 12.1, then [`BRADFORD_D50_TO_D65`] and the sRGB matrix,
+/// clipping nothing, a lightness outside `0..=100` included.
+///
+/// `csscolorparser` reads Lab too, and the two are not the same reading.
+/// Over a grid of every form the `lab()` and `lch()` grammar takes, 17,712
+/// inputs, this lands within 8.5e-6 of the specification's own conversion
+/// done in `f64`, and `csscolorparser` 0.9 within 2.2e-3: a whole 8-bit level
+/// apart on 121 of them, one of which `the_rust_surface_takes_css_colors`
+/// pins against Chrome. `lab_and_lch_follow_css_color_4_across_their_grammar`
+/// fails if Lab is left to it.
 fn lab_to_srgb([l, a, b]: [f32; 3]) -> [f32; 3] {
     let fy = (l + 16.0) / 116.0;
     let fx = a / 500.0 + fy;
@@ -1644,10 +1474,10 @@ fn oklab_to_srgb(oklab: [f32; 3]) -> [f32; 3] {
 /// `hwb()` and `color(srgb ...)` are stored as written. The distinction
 /// matters because only the first group can carry the encode defect
 /// `css_to_color4f_in_space` repairs, and a negative in the second, such as
-/// `color(srgb -0.1 0 0)`, already means what it says. Some of the first
-/// group are normally read by this crate's own parsers before this is asked;
-/// what reaches `csscolorparser` is what they refused. A relative colour
-/// never reaches it.
+/// `color(srgb -0.1 0 0)`, already means what it says. Every colour function
+/// is read by [`read_color_function`] before this is asked; what reaches
+/// `csscolorparser` from the first group is a legacy comma form
+/// [`legacy_channels`] leaves to it, `oklch(0.8, 0.18, 165)` among them.
 fn built_from_linear_light(css: &str) -> bool {
     let Some((name, rest)) = css.trim_start().split_once('(') else {
         return false;
@@ -1847,6 +1677,21 @@ impl Relative {
         })
     }
 
+    /// An absolute colour's channels with the clamps CSS Color 4 applies
+    /// when it parses the function, as Chrome 153 applies them: `rgb()` into
+    /// `0..=255`, `hsl()` saturation and lightness and `hwb()` whiteness and
+    /// blackness at zero. Lightness and chroma are clamped for Lab and Oklab
+    /// by [`color`](Self::color), for a relative colour too; these are not,
+    /// since a relative `rgb(from red calc(r - 300) g b)` keeps its negative
+    /// red there.
+    fn parsed(self, [x, y, z]: [f64; 3]) -> [f64; 3] {
+        match self {
+            Self::Rgb => [x, y, z].map(|c| c.clamp(0.0, RGB_CHANNEL_SCALE)),
+            Self::Hsl | Self::Hwb => [x, y.max(0.0), z.max(0.0)],
+            _ => [x, y, z],
+        }
+    }
+
     /// The colour the evaluated channels name, and the space it is in: the
     /// space `color()` named where a canvas can hold it, sRGB otherwise.
     ///
@@ -1993,21 +1838,24 @@ fn hwb_to_srgb(hue: f64, white: f64, black: f64) -> [f64; 3] {
     hsl_to_srgb(hue, 1.0, 0.5).map(|c| c * (1.0 - white - black) + white)
 }
 
-/// A relative colour -- `rgb(from <origin> r g b)` and the rest -- read by
-/// this crate rather than by `csscolorparser`, with the space the result is
-/// in, or `None` for anything that is not one.
+/// A colour function -- `rgb(255 0 0)`, `lab(from red l a b)` and the rest --
+/// read by this crate rather than by `csscolorparser`, with the space the
+/// result is in, or `None` for what is left to `csscolorparser`: hex and
+/// named colours, the deprecated forms `css_to_color4f_in_space` lists, and
+/// the legacy comma forms [`legacy_channels`] does not read.
 ///
-/// `Some(None)` when it is one and does not parse, which is a refusal rather
-/// than a cue to read it some other way. `hwba(from ...)`, `hsv(from ...)`
-/// and `hsva(from ...)` are read too, as `csscolorparser` always read them,
-/// and are deprecated with the forms `css_to_color4f_in_space` lists.
+/// `Some(None)` when it is a colour function and does not parse, which is a
+/// refusal rather than a cue to read it some other way.
 ///
-/// The origin is resolved by this crate's own parser, its channels found in
-/// the function's own space from it as it is, and each channel expression
-/// evaluated by the CSS math evaluator with the channel keywords bound -- so
-/// nothing is clipped to sRGB between the origin and the result, which is
-/// what Chrome does and what CSS Color 5 describes.
-fn relative_color(css: &str) -> Option<Option<(Color4f, &'static str)>> {
+/// Every channel is evaluated by the CSS math evaluator, so a math function
+/// may stand in any of them. A relative colour's origin is resolved by this
+/// crate's own parser, its channels found in the function's own space from
+/// it as it is, and its channel keywords bound -- so nothing is clipped to
+/// sRGB between the origin and the result, which is what Chrome does and
+/// what CSS Color 5 describes. `hwba(from ...)`, `hsv(from ...)` and
+/// `hsva(from ...)` are read too, as `csscolorparser` always read them, and
+/// are deprecated.
+fn read_color_function(css: &str) -> Option<Option<(Color4f, &'static str)>> {
     // UPSTREAM: csscolorparser 0.9.0 -- unfiled -- worked around
     // Re-check: return `None` here, then cargo test
     // the_rust_surface_takes_css_colors; its `rgb(from oklch(0.8 0.18 165) r g
@@ -2020,10 +1868,9 @@ fn relative_color(css: &str) -> Option<Option<(Color4f, &'static str)>> {
     // reaches an sRGB function with its negative channel on the wrong curve,
     // and the mirror of that holds the other way. `Color::to_hsla` and
     // `to_hwba` clamp the origin to 0..1 before finding its hue. It cannot
-    // read an origin in `display-p3`, `rec2020`, `a98-rgb` or
-    // `prophoto-rgb`, nor relative `color()` into those spaces, and its
-    // channel grammar refuses percentages, angle units, `calc(e)` and
-    // infinities.
+    // read `display-p3`, `rec2020`, `a98-rgb` or `prophoto-rgb`, absolute or
+    // relative, and its channel grammar refuses math functions, percentages
+    // where CSS takes them, angle units, `calc(e)` and infinities.
     let (name, args) = css.trim().split_once('(')?;
     let function = match name.to_ascii_lowercase().as_str() {
         "rgb" | "rgba" => Relative::Rgb,
@@ -2040,14 +1887,139 @@ fn relative_color(css: &str) -> Option<Option<(Color4f, &'static str)>> {
         "color" => Relative::Color(""),
         _ => return None,
     };
-    let &(from, from_end) = top_level_spans(args).first()?;
-    if !args[from..from_end].eq_ignore_ascii_case("from") {
-        return None;
+    let relative = top_level_spans(args)
+        .first()
+        .is_some_and(|&(from, to)| args[from..to].eq_ignore_ascii_case("from"));
+    match relative {
+        true => Some(relative_channels(args, function)),
+        // The absolute deprecated forms stay with `csscolorparser`, which
+        // reads them as it always has.
+        false
+            if function == Relative::Hsv
+                || name.eq_ignore_ascii_case("hwba") =>
+        {
+            None
+        }
+        false => absolute_channels(args, function),
     }
-    Some(relative_channels(args, function))
 }
 
-/// The colour `relative_color` reads, given what follows the `(`.
+/// The `color()` space `token` names, in lower case, or `None` for none.
+fn color_space(token: &str) -> Option<&'static str> {
+    Some(match token.to_ascii_lowercase().as_str() {
+        "srgb" => "srgb",
+        "srgb-linear" => "srgb-linear",
+        "display-p3" => "display-p3",
+        "rec2020" => "rec2020",
+        "a98-rgb" => "a98-rgb",
+        "prophoto-rgb" => "prophoto-rgb",
+        "xyz" => "xyz",
+        "xyz-d50" => "xyz-d50",
+        "xyz-d65" => "xyz-d65",
+        _ => return None,
+    })
+}
+
+/// `text`, which follows a function's `(` or its space, split into its
+/// three channels and the alpha after a `/`, if there is one: exactly three
+/// and at most one, or `None`.
+fn channels_and_alpha(text: &str) -> Option<([&str; 3], Option<&str>)> {
+    fn token(text: &str, (from, to): (usize, usize)) -> &str {
+        &text[from..to]
+    }
+    let mut depth = 0usize;
+    let slash = text.char_indices().find_map(|(at, c)| {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            '/' if depth == 0 => return Some(at),
+            _ => {}
+        }
+        None
+    });
+    let (channels, alpha) = match slash {
+        Some(at) => (&text[..at], Some(&text[at + 1..])),
+        None => (text, None),
+    };
+    let [first, second, third] = top_level_spans(channels)[..] else {
+        return None;
+    };
+    let alpha = match alpha.map(|text| (text, top_level_spans(text))) {
+        Some((text, spans)) => match spans[..] {
+            [span] => Some(token(text, span)),
+            _ => return None,
+        },
+        None => None,
+    };
+    Some((
+        [
+            token(channels, first),
+            token(channels, second),
+            token(channels, third),
+        ],
+        alpha,
+    ))
+}
+
+/// One channel's value as written, by the CSS math evaluator: a math
+/// function, or a number, percentage or angle on its own. `bound` are the
+/// channel keywords a relative colour has, which only a math function may
+/// name here; `none` and a bare keyword are the caller's.
+fn channel_quantity(text: &str, bound: &[(&str, f64)]) -> Option<Quantity> {
+    let units = FontUnits::assumed(f32::NAN);
+    // A percentage may appear inside a hue's math function so long as the
+    // result is not one: Chrome 153 reads `calc(50% / 1%)` as a hue of 50 and
+    // refuses `50%`. The dimension is what decides, in `scaled`.
+    let expect = Expect {
+        percent: Percent::Own,
+        units: &units,
+        channels: bound,
+    };
+    match is_math(text) {
+        true => evaluate(text, &expect),
+        false => literal(text, &expect),
+    }
+}
+
+/// `quantity` as the number `channel` takes, or `None` for a dimension it
+/// does not take.
+///
+/// CSS Values 4 section 10.9 clamps an infinity to the largest value the
+/// property can hold, which for these is the `f32` the colour carries. That
+/// is a whole number of turns, so an infinite hue is red, as it is in
+/// Chrome 153.
+fn scaled(quantity: Quantity, channel: Channel) -> Option<f64> {
+    let value = match (channel, quantity.dimension) {
+        (_, Dimension::NUMBER) | (Channel::Hue, Dimension::ANGLE) => {
+            quantity.finished()
+        }
+        (Channel::Scaled(scale), Dimension::PERCENT) => {
+            quantity.finished() * scale
+        }
+        _ => return None,
+    };
+    let largest = f64::from(f32::MAX);
+    Some(value.clamp(-largest, largest))
+}
+
+/// One channel read: `none` as zero, a channel keyword as its value in
+/// `bound`, and anything else through [`channel_quantity`] and [`scaled`].
+fn read_channel(
+    text: &str,
+    channel: Channel,
+    bound: &[(&str, f64)],
+) -> Option<f64> {
+    let keyword = text.to_ascii_lowercase();
+    if keyword == "none" {
+        return Some(0.0);
+    }
+    if let Some(&(_, value)) = bound.iter().find(|(name, _)| *name == keyword) {
+        return Some(value);
+    }
+    scaled(channel_quantity(text, bound)?, channel)
+}
+
+/// The colour a relative colour function names, given what follows the `(`.
 fn relative_channels(
     args: &str,
     function: Relative,
@@ -2069,103 +2041,188 @@ fn relative_channels(
     let (function, rest) = match function {
         Relative::Color(_) => {
             let &space @ (_, space_end) = spans.get(2)?;
-            let space = match token(body, space).to_ascii_lowercase().as_str() {
-                "srgb" => "srgb",
-                "srgb-linear" => "srgb-linear",
-                "display-p3" => "display-p3",
-                "rec2020" => "rec2020",
-                "a98-rgb" => "a98-rgb",
-                "prophoto-rgb" => "prophoto-rgb",
-                "xyz" => "xyz",
-                "xyz-d50" => "xyz-d50",
-                "xyz-d65" => "xyz-d65",
-                _ => return None,
-            };
+            let space = color_space(token(body, space))?;
             (Relative::Color(space), &body[space_end..])
         }
         other => (other, &body[origin_end..]),
     };
-
-    let mut depth = 0usize;
-    let slash = rest.char_indices().find_map(|(at, c)| {
-        match c {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            '/' if depth == 0 => return Some(at),
-            _ => {}
-        }
-        None
-    });
-    let (channels, alpha) = match slash {
-        Some(at) => (&rest[..at], Some(&rest[at + 1..])),
-        None => (rest, None),
-    };
-    let [first, second, third] = top_level_spans(channels)[..] else {
-        return None;
-    };
-    let alpha = match alpha.map(|text| (text, top_level_spans(text))) {
-        Some((text, spans)) => match spans[..] {
-            [span] => Some(token(text, span)),
-            _ => return None,
-        },
-        None => None,
-    };
+    let ([t0, t1, t2], alpha) = channels_and_alpha(rest)?;
 
     let [k0, k1, k2, k_alpha] = function.keywords();
     let [o0, o1, o2] = function.origin([origin.r, origin.g, origin.b])?;
     let bound = [(k0, o0), (k1, o1), (k2, o2), (k_alpha, f64::from(origin.a))];
-    let units = FontUnits::assumed(f32::NAN);
-    let read = |text: &str, channel: Channel| -> Option<f64> {
-        let keyword = text.to_ascii_lowercase();
-        if keyword == "none" {
-            return Some(0.0);
-        }
-        if let Some(&(_, value)) =
-            bound.iter().find(|(name, _)| *name == keyword)
-        {
-            return Some(value);
-        }
-        // A percentage may appear inside a hue's math function so long as
-        // the result is not one: Chrome 153 reads `calc(50% / 1%)` as a hue
-        // of 50 and refuses `50%`. The dimension is what decides, below.
-        let expect = Expect {
-            percent: Percent::Own,
-            units: &units,
-            channels: &bound,
-        };
-        let quantity = match is_math(text) {
-            true => evaluate(text, &expect)?,
-            false => literal(text, &expect)?,
-        };
-        let value = match (channel, quantity.dimension) {
-            (_, Dimension::NUMBER) | (Channel::Hue, Dimension::ANGLE) => {
-                quantity.finished()
-            }
-            (Channel::Scaled(scale), Dimension::PERCENT) => {
-                quantity.finished() * scale
-            }
-            _ => return None,
-        };
-        // CSS Values 4 section 10.9 clamps an infinity to the largest value
-        // the property can hold, which for these is the `f32` the colour
-        // carries. That is a whole number of turns, so an infinite hue is
-        // red, as it is in Chrome 153.
-        let largest = f64::from(f32::MAX);
-        Some(value.clamp(-largest, largest))
-    };
-
     let [c0, c1, c2] = function.channels();
     let values = [
-        read(token(channels, first), c0)?,
-        read(token(channels, second), c1)?,
-        read(token(channels, third), c2)?,
+        read_channel(t0, c0, &bound)?,
+        read_channel(t1, c1, &bound)?,
+        read_channel(t2, c2, &bound)?,
     ];
     let alpha = match alpha {
-        Some(text) => read(text, Channel::Scaled(1.0))?,
+        Some(text) => read_channel(text, Channel::Scaled(1.0), &bound)?,
         None => f64::from(origin.a),
     };
     let ([r, g, b], space) = function.color(values);
     Some((Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32), space))
+}
+
+/// The colour an absolute colour function names, given what follows the
+/// `(`, on the terms [`read_color_function`] gives: `Some(None)` refuses it,
+/// `None` leaves it to `csscolorparser`.
+fn absolute_channels(
+    args: &str,
+    function: Relative,
+) -> Option<Option<(Color4f, &'static str)>> {
+    let Some(body) = args.trim_end().strip_suffix(')') else {
+        return Some(None);
+    };
+    let body = body.trim();
+    match has_top_level_comma(body) {
+        true => legacy_channels(body, function),
+        false => Some(modern_channels(body, function)),
+    }
+}
+
+/// Whether `text` has a comma outside every bracket in it.
+fn has_top_level_comma(text: &str) -> bool {
+    let mut depth = 0usize;
+    text.chars().any(|c| {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => return true,
+            _ => {}
+        }
+        false
+    })
+}
+
+/// An absolute colour in the space-separated syntax CSS Color 4 gives every
+/// function, given what follows its `(` without the `)`.
+fn modern_channels(
+    body: &str,
+    function: Relative,
+) -> Option<(Color4f, &'static str)> {
+    let spans = top_level_spans(body);
+    // A `)` before the end stops the spans short of it.
+    if spans.last()?.1 != body.len() {
+        return None;
+    }
+    let (function, rest) = match function {
+        Relative::Color(_) => {
+            let &(from, to) = spans.first()?;
+            (Relative::Color(color_space(&body[from..to])?), &body[to..])
+        }
+        other => (other, body),
+    };
+    let ([t0, t1, t2], alpha) = channels_and_alpha(rest)?;
+    let [c0, c1, c2] = function.channels();
+    let values = [
+        read_channel(t0, c0, &[])?,
+        read_channel(t1, c1, &[])?,
+        read_channel(t2, c2, &[])?,
+    ];
+    let alpha = match alpha {
+        Some(text) => read_channel(text, Channel::Scaled(1.0), &[])?,
+        None => 1.0,
+    };
+    let ([r, g, b], space) = function.color(function.parsed(values));
+    Some((Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32), space))
+}
+
+/// An absolute `rgb()` or `hsl()` in the comma-separated legacy syntax, given
+/// what follows its `(` without the `)`.
+///
+/// CSS Color 4 section 5.1 and 7.1 give that syntax three channels and an
+/// optional alpha, no `none`, and for `rgb()` channels all numbers or all
+/// percentages, for `hsl()` percentages after the hue. What follows that is
+/// read here, a math function in any channel included -- Chrome 153 reads
+/// `rgba(calc(255), 0, 0)` -- with `hsl()` saturation and lightness held
+/// to `0%..=100%`, which keeps a legacy colour inside sRGB. What does not is
+/// `None` and left to `csscolorparser`, which has always read it and still
+/// does, though Chrome refuses each: `rgb(255, 0%, 0)`, `hsl(120, 100, 50)`,
+/// `lab(50, 40, 30)`, `rgb(255, 0, 0, none)`.
+/// `absolute_colours_read_their_channels_as_chrome_does` holds what they paint.
+fn legacy_channels(
+    body: &str,
+    function: Relative,
+) -> Option<Option<(Color4f, &'static str)>> {
+    if !matches!(function, Relative::Rgb | Relative::Hsl) {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for (at, c) in body.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(body[start..at].trim());
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(body[start..].trim());
+    let (channels, alpha) = match parts[..] {
+        [a, b, c] => ([a, b, c], None),
+        [a, b, c, alpha] => ([a, b, c], Some(alpha)),
+        _ => return None,
+    };
+    if parts.iter().any(|part| {
+        part.eq_ignore_ascii_case("none") || top_level_spans(part).len() != 1
+    }) {
+        return None;
+    }
+    let quantities = [
+        channel_quantity(channels[0], &[])?,
+        channel_quantity(channels[1], &[])?,
+        channel_quantity(channels[2], &[])?,
+    ];
+    let kinds = quantities.map(|q| q.dimension);
+    let lawful = match function {
+        Relative::Rgb => {
+            kinds.iter().all(|&kind| kind == Dimension::NUMBER)
+                || kinds.iter().all(|&kind| kind == Dimension::PERCENT)
+        }
+        _ => {
+            matches!(kinds[0], Dimension::NUMBER | Dimension::ANGLE)
+                && kinds[1] == Dimension::PERCENT
+                && kinds[2] == Dimension::PERCENT
+        }
+    };
+    if !lawful {
+        return None;
+    }
+    let [c0, c1, c2] = function.channels();
+    let values = [
+        scaled(quantities[0], c0)?,
+        scaled(quantities[1], c1)?,
+        scaled(quantities[2], c2)?,
+    ];
+    let alpha = match alpha {
+        Some(text) => read_channel(text, Channel::Scaled(1.0), &[])?,
+        None => 1.0,
+    };
+    // Legacy `hsl()` holds saturation and lightness to `0%..=100%`, so a
+    // legacy colour stays inside sRGB: Chrome 153 reads `hsl(370, 120%,
+    // 42%)` as `#d62400`, which is `hsl(10, 100%, 42%)`, and computes
+    // `hsl(0, 150%, 50%)` as `color(srgb 1 0 0)` where the space-separated
+    // `hsl(0 150% 50%)` keeps its 1.25.
+    let [x, y, z] = function.parsed(values);
+    let values = match function {
+        Relative::Hsl => [
+            x,
+            y.min(PERCENT_CHANNEL_SCALE),
+            z.min(PERCENT_CHANNEL_SCALE),
+        ],
+        _ => [x, y, z],
+    };
+    let ([r, g, b], space) = function.color(values);
+    Some(Some((
+        Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32),
+        space,
+    )))
 }
 
 /// `css` with every bracket still open at its end closed, as CSS Syntax 3
@@ -2196,22 +2253,16 @@ fn closed_at_end(css: &str) -> Cow<'_, str> {
 pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
     let css = closed_at_end(css);
     let css = css.as_ref();
-    if let Some(relative) = relative_color(css) {
-        // SAFETY: `relative_color` only returns names this builds.
-        return relative
+    if let Some(color) = read_color_function(css) {
+        // SAFETY: `read_color_function` only returns names this builds.
+        return color
             .and_then(|(color, space)| Some((color, opt_color_space(space)?)));
     }
-    if let Some((color, space)) = parse_color_function(css) {
-        // SAFETY: `parse_color_function` only returns names this builds.
-        return Some((color, opt_color_space(space)?));
-    }
-    if let Some(color) = parse_lab_like(css) {
-        return Some((color, ColorSpace::new_srgb()));
-    }
     // UPSTREAM: csscolorparser 0.9.0 -- unfiled -- worked around
-    // Re-check: return `c.r`, `c.g` and `c.b` unchanged, then cargo test
-    // the_rust_surface_takes_css_colors; its `oklch(0.8 0.18 165)` row on a
-    // Display P3 canvas reads 4 rather than 91 if the defect is still there.
+    // Re-check: return `c.r`, `c.g` and `c.b` unchanged, then fill
+    // `oklch(0.8, 0.18, 165)` -- a comma form `legacy_channels` leaves to
+    // `csscolorparser` -- on a Display P3 canvas and read it back in P3; red
+    // reads 4 rather than 91 if the defect is still there.
     //
     // `Color::from_linear_rgba` encodes every value below the sRGB breakpoint
     // as `12.92 * x`, negatives included, where CSS Color 4 mirrors the curve
@@ -2222,7 +2273,8 @@ pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
     // meant is exactly the value over the slope, and re-encoding it through
     // the mirrored curve gives the CSS answer. Only a negative channel of a
     // colour built that way is touched; see `built_from_linear_light`. A
-    // relative colour never gets this far; see `relative_color`.
+    // colour function reaches it only in the legacy forms `legacy_channels`
+    // leaves here.
     let from_linear = built_from_linear_light(css);
     let channel = |v: f32| match from_linear && v < 0.0 {
         true => linear_to_srgb(v / SRGB_SLOPE),
@@ -2232,7 +2284,7 @@ pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
     // `hsva()` and hex without its `#`. `csscolorparser` reads all four and
     // no browser does -- Chrome 153 refuses each -- so they reach it here
     // unchanged until then. `the_deprecated_colour_forms_still_paint` holds
-    // them, and their relative forms are read by `relative_color`.
+    // them, and their relative forms are read by `read_color_function`.
     csscolorparser::parse(css).ok().map(|c| {
         (
             Color4f::new(channel(c.r), channel(c.g), channel(c.b), c.a),
