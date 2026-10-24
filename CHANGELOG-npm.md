@@ -5525,7 +5525,7 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 
 - Glob-handling has been removed from [FontLibrary.use()][FontLibrary.use]. If you want the old behavior, try using the [`fast-glob`](https://www.npmjs.com/package/fast-glob) or [`glob`](https://www.npmjs.com/package/glob) modules to [prepare the file-list][font_globbing] you pass to the method.
 
-[font_globbing]: /docs/api/font-library.md#with-a-list-of-glob-patterns
+[font_globbing]: https://github.com/samizdatco/skia-canvas/blob/v3.0.2/docs/api/font-library.md#with-a-list-of-glob-patterns
 
 ## 📦 ⟩ [v3.0.1] ⟩ Aug 16, 2025
 
@@ -5613,39 +5613,39 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 - [`measureText()`][measureText()] now correctly calculates widths when letterSpacing has been set
 - `startRange` and `endRange` in TextMetrics.lines[] now correspond to character indices in the string passed to measureText(), not byte indices into the UTF-8 buffer backing it
 
-[App.launch()]: /docs/api/app.md#launch
-[app_eventLoop]: /docs/api/app.md#eventLoop
-[app_idle]: /docs/api/app.md#idle
-[win_close]: /docs/api/window.md#close
-[win_closed]: /docs/api/window.md#closed
-[win_open()]: /docs/api/window.md#open
-[win_borderless]: /docs/api/window.md#borderless
+[App.launch()]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/app.md#launch
+[app_eventLoop]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/app.md#eventloop
+[app_idle]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/app.md#idle
+[win_close]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/window.md#close
+[win_closed]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/window.md#closed
+[win_open()]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/window.md#open
+[win_borderless]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/window.md#borderless
 [winit_caveats]: https://docs.rs/winit/latest/winit/platform/pump_events/trait.EventLoopExtPumpEvents.html#platform-specific
 [mdn_buttons]: https://developer.mozilla.org/en-US/docs/Web/API/MouseEvent/buttons
-[textAlign]: /docs/api/context.md#textalign
+[textAlign]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/context.md#textalign
 [roundRect]: https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/roundRect
-[loadImageData()]: /docs/api/imagedata.md#loadimagedata
+[loadImageData()]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/imagedata.md#loadimagedata
 [fetch_opts]: https://developer.mozilla.org/en-US/docs/Web/API/RequestInit
-[export_outline]: /docs/api/canvas.md#outline
+[export_outline]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/canvas.md#outline
 [sharp]: https://sharp.pixelplumbing.com
-[canvas_toSharp]: /docs/api/canvas.md#tosharp
-[id_toSharp]: /docs/api/imagedata.md#tosharp
-[downsample]: /docs/api/canvas.md#downsample
-[canvas_text_rendering]: /docs/api/canvas.md#controlling-font-rendering
-[window_text_rendering]: /docs/api/window.md#controlling-font-rendering
-[running_lambda]: /docs/getting-started.md#running-on-aws-lambda
+[canvas_toSharp]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/canvas.md#tosharp
+[id_toSharp]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/imagedata.md#tosharp
+[downsample]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/canvas.md#downsample
+[canvas_text_rendering]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/canvas.md#controlling-font-rendering
+[window_text_rendering]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/window.md#controlling-font-rendering
+[running_lambda]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/getting-started.md#aws-lambda
 [node_url]: https://nodejs.org/api/url.html#class-url
 [meta_url]: https://nodejs.org/api/esm.html#importmetaurl
-[Image.src]: /docs/api/image.md#src
-[createTexture_cap]: /docs/api/context.md#cap
-[createTexture_outline]: /docs/api/context.md#outline
-[ctx_font]: /docs/api/context.md#font
-[measureText.runs]: /docs/api/context.md#per-font-metrics
-[Canvas.toFile]: /docs/api/canvas.md#tofile
+[Image.src]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/image.md#src
+[createTexture_cap]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/context.md#cap
+[createTexture_outline]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/context.md#outline
+[ctx_font]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/context.md#font
+[measureText.runs]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/context.md#per-font-metrics
+[Canvas.toFile]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/canvas.md#tofile
 [toDataURL]: https://developer.mozilla.org/en-US/docs/Web/API/HTMLCanvasElement/toDataURL
-[toURL]: /docs/api/canvas.md#tourl
-[gpu_opt]: /docs/api/canvas.md#choosing-a-rendering-engine
-[image_constructor]: /docs/api/image.md#constructor
+[toURL]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/canvas.md#tourl
+[gpu_opt]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/canvas.md#choosing-a-rendering-engine
+[image_constructor]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/image.md#constructor
 
 ## 📦 ⟩ [v2.0.2] ⟩ Jan 27, 2025
 
@@ -5753,16 +5753,16 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 - Added support for non-default imports (e.g., `import {Image} from "skia-canvas"`) when used as an ES Module.
 - The [getImageData()][mdn_getImageData] method now makes use of the GPU (if enabled) and caches data between calls, greatly improving performance for sequential queries
 
-[resizable]: /docs/api/window.md#resizable
+[resizable]: https://github.com/samizdatco/skia-canvas/blob/v2.0.0/docs/api/window.md#resizable
 [key_location]: https://developer.mozilla.org/en-US/docs/Web/API/KeyboardEvent/location
 [vulkano_demo]: https://github.com/vulkano-rs/vulkano/blob/master/examples/triangle/main.rs
 [pragmatrix_emergent]: https://github.com/pragmatrix/emergent/blob/master/src/skia_renderer.rs
 [woff_wiki]: https://en.wikipedia.org/wiki/Web_Open_Font_Format
 [css_transform]: https://developer.mozilla.org/en-US/docs/Web/CSS/transform
 [DOMMatrix]: https://developer.mozilla.org/en-US/docs/Web/API/DOMMatrix
-[FontLibrary.use]: /docs/api/font-library.md#use
-[Canvas.toFile]: /docs/api/canvas.md#tofile
-[Canvas.toBuffer]: /docs/api/canvas.md#tobuffer
+[FontLibrary.use]: https://github.com/samizdatco/skia-canvas/blob/v2.0.0/docs/api/font-library.md#use
+[Canvas.toFile]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/canvas.md#tofile
+[Canvas.toBuffer]: https://github.com/samizdatco/skia-canvas/blob/v2.0.0/docs/api/canvas.md#tobuffer
 [letterSpacing]: https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/letterSpacing
 [wordSpacing]: https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/wordSpacing
 [fontStretch]: https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/fontStretch
@@ -5770,15 +5770,15 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 [isPointInStroke()]: https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/isPointInStroke
 [node_napi]: https://nodejs.org/api/n-api.html#node-api-version-matrix
 [neon_rs]: https://neon-rs.dev
-[msaa]: /docs/api/canvas.md#msaa
-[multithreading]: /docs/getting-started.md#multithreading
+[msaa]: https://github.com/samizdatco/skia-canvas/blob/v2.0.0/docs/api/canvas.md#msaa
+[multithreading]: https://github.com/samizdatco/skia-canvas/blob/v2.0.0/docs/getting-started.md#multithreading
 [compositionstart]: https://developer.mozilla.org/en-US/docs/Web/API/Element/compositionstart_event
 [compositionupdate]: https://developer.mozilla.org/en-US/docs/Web/API/Element/compositionupdate_event
 [compositionend]: https://developer.mozilla.org/en-US/docs/Web/API/Element/compositionend_event
 [input]: https://developer.mozilla.org/en-US/docs/Web/API/HTMLElement/input_event
-[win_bind]: /docs/api/window.md#on--off--once
-[ImageData]: /docs/api/imagedata.md
-[colorType]: /docs/api/imagedata.md#colortype
+[win_bind]: https://github.com/samizdatco/skia-canvas/blob/v2.0.0/docs/api/window.md#on--off--once
+[ImageData]: https://github.com/samizdatco/skia-canvas/blob/v2.0.0/docs/api/imagedata.md
+[colorType]: https://github.com/samizdatco/skia-canvas/blob/v2.0.0/docs/api/imagedata.md#colortype
 [mdn_createPattern]: https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/createPattern
 [mdn_getImageData]: https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/getImageData
 [mdn_createImageData]: https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/createImageData
@@ -5827,10 +5827,10 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 - Calling `clearRect()` with dimensions that fully enclose the canvas will now discard all the vector objects that have been drawn so far (rather than simply covering them up).
 - Upgraded Skia to milestone 103
 
-[window]: /docs/api/window.md
-[window_anim]: /docs/api/window.md#events-for-animation
-[window_events]: /docs/api/window.md#on--off--once
-[canvas_gpu]: /docs/api/canvas.md#gpu
+[window]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/window.md
+[window_anim]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/window.md#events-for-animation
+[window_events]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/window.md#on--off--once
+[canvas_gpu]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/canvas.md#gpu
 [filter]: https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/filter
 [chrome_reset]: https://developer.chrome.com/blog/canvas2d/#context-reset
 [chrome_rrect]: https://developer.chrome.com/blog/canvas2d/#round-rect
@@ -5859,8 +5859,8 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 
 - Upgraded Skia to milestone 101
 
-[conicCurveTo]: /docs/api/context.md#coniccurveto
-[FontLibrary.reset]: /docs/api/font-library.md#reset
+[conicCurveTo]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/context.md#coniccurveto
+[FontLibrary.reset]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/font-library.md#reset
 
 ## 📦 ⟩ [v0.9.29] ⟩ Feb 7, 2022
 
@@ -5881,7 +5881,7 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 
 - Upgraded Skia to milestone 97
 
-[drawCanvas]: /docs/api/context.md#drawcanvas
+[drawCanvas]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/context.md#drawcanvas
 [mdn_clip]: https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/clip
 [mdn_clearRect]: https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/clearRect
 
@@ -5914,8 +5914,8 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 - Upgraded Skia to milestone 96
 - Added workflow for creating docker build environments
 
-[createProjection()]: /docs/api/context.md#createprojection
-[shorthands]: /docs/api/canvas.md#pdf-svg-png-jpg-webp--raw
+[createProjection()]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/context.md#createprojection
+[shorthands]: https://github.com/samizdatco/skia-canvas/blob/v3.0.0/docs/api/canvas.md#pdf-svg-png-jpg-webp--raw
 [async_depr]: https://github.com/samizdatco/skia-canvas/tree/v0.9.28#async
 
 ## 📦 ⟩ [v0.9.27] ⟩ Oct 23, 2021
@@ -5955,7 +5955,7 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 - Now using [Neon](https://github.com/neon-bindings/neon) v0.9 (with enhanced async event scheduling)
 
 [mdn_drawImage]: https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/drawImage
-[measureText()]: /docs/api/context.md#measuretext
+[measureText()]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/context.md#measuretext
 
 ## 📦 ⟩ [v0.9.24] ⟩ Aug 18, 2021
 
@@ -5967,11 +5967,11 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 - The marker used when `setLineDash` is active can now be customized by assigning a **Path2D** to the context’s [`lineDashMarker`][lineDashMarker] property (default dashing can be restored by assigning `null`)
 - The marker’s orientation & shape relative to the path being stroked can be controlled by the [`lineDashFit`][lineDashFit] property which defaults to `"turn"` but can be set to `"move"` (which preserves orientation) or `"follow"` (which distorts the marker’s shape to match the contour)
 
-[p2d_d]: /docs/api/path2d.md#d
-[p2d_unwind]: /docs/api/path2d.md#unwind
-[createTexture()]: /docs/api/context.md#createtexture
-[lineDashMarker]: /docs/api/context.md#linedashmarker
-[lineDashFit]: /docs/api/context.md#linedashfit
+[p2d_d]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/path2d.md#d
+[p2d_unwind]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/path2d.md#unwind
+[createTexture()]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/context.md#createtexture
+[lineDashMarker]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/context.md#linedashmarker
+[lineDashFit]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/context.md#linedashfit
 
 ### Bugfixes
 
@@ -6014,18 +6014,18 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 
 [conic_bezier]: https://docs.microsoft.com/en-us/xamarin/xamarin-forms/user-interface/graphics/skiasharp/curves/beziers#the-conic-bézier-curve
 [conic_curveto]: https://github.com/samizdatco/skia-canvas#coniccurvetocpx-cpy-x-y-weight
-[outline_text]: /docs/api/context.md#outlinetext
-[matte]: /docs/api/canvas.md#matte
-[edges]: /docs/api/path2d.md#edges
-[contains]: /docs/api/path2d.md#contains
-[points]: /docs/api/path2d.md#points
-[offset]: /docs/api/path2d.md#offset
-[transform]: /docs/api/context.md#transform--settransform
-[interpolate]: /docs/api/path2d.md#interpolate
-[jitter]: /docs/api/path2d.md#jitter
-[round]: /docs/api/path2d.md#round
-[simplify]: /docs/api/path2d.md#simplify
-[trim]: /docs/api/path2d.md#trim
+[outline_text]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/context.md#outlinetext
+[matte]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/canvas.md#matte
+[edges]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/path2d.md#edges
+[contains]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/path2d.md#contains
+[points]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/path2d.md#points
+[offset]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/path2d.md#offset
+[transform]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/context.md#transform--settransform
+[interpolate]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/path2d.md#interpolate
+[jitter]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/path2d.md#jitter
+[round]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/path2d.md#round
+[simplify]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/path2d.md#simplify
+[trim]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/path2d.md#trim
 
 ## 📦 ⟩ [v0.9.22] ⟩ Jun 09, 2021
 
@@ -6045,8 +6045,8 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 - `measureText` was reporting zero when asked to measure a string that was entirely made of whitespace. This is still the case for ‘blank‘ lines when `textWrap` is set to `true` but in the default, single-line mode the metrics will now report the width of the whitespace.
 - Changed the way text rendering was staged so that SVG exports didn’t _entirely omit(!)_ text from their output. As a result, `Context2D`s now use an external `Typesetter` struct to manage layout and rendering.
 
-[density]: /docs/api/canvas.md#density
-[outline]: /docs/api/canvas.md#outline
+[density]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/canvas.md#density
+[outline]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/canvas.md#outline
 [async_orig]: https://github.com/samizdatco/skia-canvas/tree/v0.9.22#async
 
 ## 📦 ⟩ [v0.9.21] ⟩ May 22, 2021
@@ -6073,10 +6073,10 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 - Added new test suites for `Path2D`, `Image`, and `Canvas`’s format support.
 - Created [workflows](https://github.com/samizdatco/skia-canvas/tree/master/.github/workflows) to automate precompiled binary builds, testing, and npm package updating.
 
-[boolean-ops]: /docs/api/path2d.md#complement-difference-intersect-union-and-xor
-[p2d_bounds]: /docs/api/path2d.md#bounds
+[boolean-ops]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/path2d.md#complement-difference-intersect-union-and-xor
+[p2d_bounds]: https://github.com/samizdatco/skia-canvas/blob/v1.1.0/docs/api/path2d.md#bounds
 [createConicGradient()]: https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/createConicGradient
-[loadImage()]: /docs/api/image.md#loadimage
+[loadImage()]: https://github.com/samizdatco/skia-canvas/blob/v2.0.0/docs/api/image.md#loadimage
 
 ## 📦 ⟩ [v0.9.20] ⟩ Mar 27, 2021
 

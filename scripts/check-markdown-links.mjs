@@ -24,31 +24,6 @@ import { posix } from "node:path";
 // do not carry.
 const SKIP = /^vendor\//;
 
-// The npm changelog continues phyron-skia-canvas, and every section before
-// this package's first release (CHANGELOG.md's channel table) is upstream's
-// notes, written in upstream's tree. They link to `/docs/api/canvas.md` and
-// pages like it, which this tree has never carried, so they are history, not
-// links to fix -- as the changelog-count check leaves released sections alone.
-// Everything from the first such section down is not read.
-const UPSTREAM_HISTORY = { file: "CHANGELOG-npm.md", before: [3, 6, 0] };
-
-/** `text` with upstream's sections blanked, line numbers kept, or null if the
- * boundary is not where it should be. */
-export function withoutUpstreamHistory(text, before = UPSTREAM_HISTORY.before) {
-  const lines = text.split("\n"),
-    older = (v) => {
-      for (let i = 0; i < 3; i++)
-        if (v[i] !== before[i]) return v[i] < before[i];
-      return false;
-    };
-  const start = lines.findIndex((line) => {
-    const m = line.match(/^## .*\[v(\d+)\.(\d+)\.(\d+)[^\]]*\]/);
-    return m && older(m.slice(1, 4).map(Number));
-  });
-  if (start < 0) return null;
-  return lines.map((line, i) => (i < start ? line : "")).join("\n");
-}
-
 /** The text with fenced code blocks and code spans blanked out, lines kept. */
 function withoutCode(text) {
   let fence = null;
@@ -65,8 +40,15 @@ function withoutCode(text) {
     }
     return line;
   });
-  // A code span is a run of backticks closed by a run of the same length.
-  return lines.join("\n").replace(/(`+)[^`]*?\1/g, (m) => " ".repeat(m.length));
+  // A code span is a run of backticks closed by a run of the same length,
+  // within one paragraph: it may run onto the next line but never across a
+  // blank one. Blanked with its line breaks kept, so that line numbers after
+  // it stay true.
+  return lines
+    .join("\n")
+    .replace(/(`+)(?:[^`\n]|\n(?![ \t]*\n))*?\1/g, (m) =>
+      m.replace(/[^\n]/g, " "),
+    );
 }
 
 /** Every link target in `text`, with the line it is on. */
@@ -113,7 +95,7 @@ export function slug(text) {
 export function anchors(text) {
   const out = new Set(),
     seen = new Map(),
-    lines = withoutCodeKeepingHeadings(text).split("\n");
+    lines = withoutCodeKeepingHeadings(withoutFrontMatter(text)).split("\n");
   const add = (base) => {
     const n = seen.get(base) ?? 0;
     seen.set(base, n + 1);
@@ -137,6 +119,18 @@ export function anchors(text) {
   for (const m of text.matchAll(/\b(?:id|name)\s*=\s*"([^"]+)"/g))
     out.add(m[1]);
   return out;
+}
+
+// A front-matter block -- `---` on the first line, closed by the next `---` --
+// renders on GitHub as a table, not as Markdown, so its closing `---` must not
+// underline the line above it into a setext heading. Blanked, not removed, so
+// line numbers stay true.
+function withoutFrontMatter(text) {
+  const lines = text.split("\n");
+  if (lines[0]?.trimEnd() !== "---") return text;
+  const end = lines.findIndex((line, i) => i > 0 && line.trimEnd() === "---");
+  if (end < 0) return text;
+  return lines.map((line, i) => (i <= end ? "" : line)).join("\n");
 }
 
 // Headings are read from the text with code removed, but a heading's own code
@@ -327,6 +321,35 @@ Under
       1,
       "#nowhere",
     ],
+    // GitHub renders a leading front-matter block as a table, so its closing
+    // `---` does not make the line above it a setext heading.
+    [
+      "front matter is not a heading",
+      [
+        ["a.md", "[b](b.md#description-the-api)"],
+        ["b.md", "---\ndescription: The API\n---\n\n# Real\n"],
+      ],
+      1,
+      "#description-the-api",
+    ],
+    [
+      "a heading after front matter is still an anchor",
+      [
+        ["a.md", "[b](b.md#real)"],
+        ["b.md", "---\ndescription: The API\n---\n\n# Real\n"],
+      ],
+      0,
+    ],
+    // Only a block on the first line is front matter; the same lines further
+    // down are a setext heading.
+    [
+      "a setext heading further down is not front matter",
+      [
+        ["a.md", "[b](b.md#description-the-api)"],
+        ["b.md", "# T\n\n---\ndescription: The API\n---\n"],
+      ],
+      0,
+    ],
     [
       "an anchor in the same file is checked",
       [["a.md", "# Top\n\n[up](#top) [down](#bottom)"]],
@@ -342,6 +365,22 @@ Under
       0,
     ],
     ["a missing image fails", [["a.md", "![x](img.png)"]], 1, "img.png"],
+    // A code span may run onto the next line; blanking it must keep the line
+    // break, or every later line number in the file is off by one.
+    [
+      "a code span across a line break keeps later line numbers",
+      [["a.md", "a `code\nspan` b\n\n[x](gone.md)"]],
+      1,
+      "a.md:4",
+    ],
+    // A code span never crosses a blank line, so a stray backtick cannot pair
+    // with one paragraphs later and blank the links in between.
+    [
+      "a stray backtick does not hide a link in a later paragraph",
+      [["a.md", "one ` stray\n\n[x](gone.md)\n\nand ` another"]],
+      1,
+      "gone.md",
+    ],
     [
       "a reference definition is checked",
       [["a.md", "[x][r]\n\n[r]: gone.md"]],
@@ -378,32 +417,7 @@ Under
       0,
     ],
   ];
-  // Upstream's history is cut at the first section older than the boundary.
-  const log = (link) =>
-    `## [v6.0.0]\n\n[x](${link})\n\n## [v3.6.0]\n\n## [v3.5.1]\n\n[y](gone.md)\n`;
-  const cut = withoutUpstreamHistory(log("ok.md"));
-  cases.push(
-    [
-      "upstream's history is not read",
-      [
-        ["c.md", cut],
-        ["ok.md", "# T"],
-      ],
-      0,
-    ],
-    [
-      "this package's own sections still are",
-      [["c.md", withoutUpstreamHistory(log("missing.md"))]],
-      1,
-      "missing.md",
-    ],
-  );
-  if (withoutUpstreamHistory("## [v6.0.0]\n") !== null) {
-    console.error(
-      "  self-test FAILED: a changelog with no upstream section should be refused",
-    );
-    process.exit(1);
-  }
+
   let bad = 0;
   for (const [label, entries, expected, mustSay] of cases) {
     const { files, tracked } = tree(entries);
@@ -437,18 +451,6 @@ function main() {
       .filter((p) => p.endsWith(".md") && !SKIP.test(p))
       .map((p) => [p, readFileSync(p, "utf8")]),
   );
-  if (files.has(UPSTREAM_HISTORY.file)) {
-    const own = withoutUpstreamHistory(files.get(UPSTREAM_HISTORY.file));
-    if (own === null) {
-      console.error(
-        `markdown-links: ${UPSTREAM_HISTORY.file} has no section older than ` +
-          `${UPSTREAM_HISTORY.before.join(".")} -- the boundary has moved; ` +
-          `update UPSTREAM_HISTORY rather than read upstream's notes.`,
-      );
-      process.exit(1);
-    }
-    files.set(UPSTREAM_HISTORY.file, own);
-  }
   // Asserted non-empty: a pattern that has stopped matching would otherwise
   // report a clean tree.
   const links = [...files.values()].reduce(
