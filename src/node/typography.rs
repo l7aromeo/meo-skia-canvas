@@ -1052,18 +1052,20 @@ impl<'a> Typesetter<'a> {
                 (norm - ascent, descent - norm)
             });
 
-        // The laid-out width, not `max_intrinsic_width`: that is what the
-        // run would take unwrapped, so it contradicts both the ink bounds
-        // beside it and the pixels actually drawn. Except where a spacing
-        // is negative on an unwrapped run: the laid-out boxes are sorted
-        // rectangles and cannot be negative, and they leave out a trailing
-        // space's negative spacing -- `"a "` at -10px measured 7.04 where
-        // the advance is 6.2 -- so the advance is taken from the run.
-        let negative_spacing = self.char_style.letter_spacing() < 0.0
-            || self.char_style.word_spacing() < 0.0;
-        let width = match negative_spacing && !self.text_wrap {
-            true => self.signed_advance(&paragraph) * condensation,
-            false => width,
+        // An unwrapped run measures its advance, every glyph and space with
+        // its spacing, signed -- what Chrome reports. Not the laid-out boxes:
+        // those are sorted rectangles, so never negative; they leave out a
+        // trailing space's negative spacing, so `"a "` at -10px measured 7.04
+        // where the advance is 6.2; and their edges are rounded where they
+        // lie -- to hundredths, with half the letter spacing at each end, on
+        // a left-aligned run -- so 5.17px of spacing at 10px lost a
+        // hundredth and a centred run measured differently from the same
+        // run aligned left. A wrapped run measures its laid-out lines, since
+        // the advance is what it would take unwrapped and would contradict
+        // both the ink bounds beside it and the pixels drawn.
+        let width = match self.text_wrap {
+            false => self.signed_advance(&paragraph) * condensation,
+            true => width,
         };
         // Where the advance is negative, what `Measured::ink` reaches back
         // to on the left -- see `NegativeAdvance`.
