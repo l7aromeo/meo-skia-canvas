@@ -264,13 +264,25 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   in a space the parser does not read, such as
   `rgb(from color(display-p3 ...) r g b)`, refused the whole colour. Every
   `set_*_css` setter and `RgbaLinear::from_css` now resolve the origin with
-  the crate's own parser first, and every relative form measured agrees
-  with Chrome 153 byte for byte, `calc()` channels and nesting included.
+  the crate's own parser first, and every relative form measured whose
+  channels are keywords, numbers and `calc()` over them agrees with
+  Chrome 153 byte for byte, nesting included.
 
-  Not yet right: `hsl()` and `hwb()` over an origin outside sRGB still
-  clamp it, so `hsl(from color(srgb 1.2 0.2 0.1) h s l)` paints
-  `235, 72, 47` on a P3 canvas where Chrome paints `255, 81, 54`. No sRGB
-  canvas shows it.
+  `hsl()` and `hwb()` went further wrong. The parser clamped their
+  origin to sRGB before finding its hue, which painted
+  `hsl(from color(srgb 1.2 0.2 0.1) h s l)` as `235, 72, 47` on a P3
+  canvas where Chrome paints `255, 81, 54`, and it refused a channel
+  written as an angle or a percentage, an alpha as a percentage,
+  `calc(e)` and an infinity. The
+  crate now reads both itself, from the origin unclipped and with every
+  math function, and refuses `hwba(from ...)`, which is not a CSS
+  function.
+
+  Not yet right: `rgb()`, `lab()`, `lch()`, `oklab()`, `oklch()` and
+  `color()` relative colours still take the narrower grammar, and each
+  refuses a channel written as a percentage --
+  `rgb(from red r g b / 50%)` is refused where Chrome paints at half
+  alpha.
 
 - **`Font::parse` reads the font shorthand Chrome reads.** It took a size
   in `px` and nothing else, refusing `12pt`, `1em`, `150%`, `2rem`, the

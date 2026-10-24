@@ -27,7 +27,7 @@ use std::{borrow::Cow, cell::OnceCell};
 use skia_safe::{Font as SkFont, FontHinting, Typeface};
 
 pub(crate) use math::{
-    Dimension, Expect, Percent, Quantity, evaluate, is_math,
+    Dimension, Expect, Percent, Quantity, evaluate, is_math, literal,
 };
 
 use crate::{
@@ -66,7 +66,7 @@ const MM_PER_CM: f32 = 10.0;
 const Q_PER_CM: f32 = 4.0 * MM_PER_CM;
 
 /// Degrees in a full turn.
-const DEGREES_PER_TURN: f64 = 360.0;
+pub(crate) const DEGREES_PER_TURN: f64 = 360.0;
 
 /// Gradians in a full turn.
 const GRADIANS_PER_TURN: f64 = 400.0;
@@ -764,9 +764,16 @@ fn math(
 ) -> Option<Option<f32>> {
     let argument = argument.trim();
     is_math(argument).then(|| {
-        evaluate(argument, &Expect { percent, units })
-            .filter(|quantity| dimensions.contains(&quantity.dimension))
-            .map(|quantity| held(quantity, low))
+        evaluate(
+            argument,
+            &Expect {
+                percent,
+                units,
+                channels: &[],
+            },
+        )
+        .filter(|quantity| dimensions.contains(&quantity.dimension))
+        .map(|quantity| held(quantity, low))
     })
 }
 
@@ -1853,6 +1860,7 @@ impl TransformArguments<'_> {
                 &Expect {
                     percent: Percent::Refused,
                     units: &self.units,
+                    channels: &[],
                 },
             )
             .filter(|quantity| quantity.dimension == dimension)

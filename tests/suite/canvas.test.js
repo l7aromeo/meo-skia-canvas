@@ -578,15 +578,26 @@ describe("Canvas", () => {
       // origin's channels in its own space: here an sRGB function over an
       // origin built in linear light, a linear-light function over an origin
       // written in sRGB with a negative channel, and an origin named in a
-      // space the colour parser underneath cannot read. Each is the colour
-      // above, so each reads `91, 221, 165`; red reads 4, 97 and black when
-      // the origin is not resolved first.
+      // space the colour parser underneath cannot read, then `hsl()` and
+      // `hwb()`, whose channels come from the origin unclipped. Each is the
+      // colour above, so each reads `91, 221, 165`; red reads 4, 97, black
+      // and 102 when the origin is not resolved first or is clipped. The
+      // last is outside sRGB above one, and read clipped is `235, 72, 47`.
       let wide = new Canvas(2, 2, { colorSpace: "display-p3" });
       let wideCtx = wide.getContext("2d");
-      for (let css of [
-        "rgb(from oklch(0.8 0.18 165) r g b)",
-        "oklch(from color(srgb -0.202919 0.881504 0.628696) l c h)",
-        "rgb(from color(display-p3 0.357 0.866 0.647) r g b)",
+      for (let [css, chrome] of [
+        ["rgb(from oklch(0.8 0.18 165) r g b)", [91, 221, 165, 255]],
+        [
+          "oklch(from color(srgb -0.202919 0.881504 0.628696) l c h)",
+          [91, 221, 165, 255],
+        ],
+        [
+          "rgb(from color(display-p3 0.357 0.866 0.647) r g b)",
+          [91, 221, 165, 255],
+        ],
+        ["hsl(from oklch(0.8 0.18 165) h s l)", [91, 221, 165, 255]],
+        ["hwb(from oklch(0.8 0.18 165) h w b)", [91, 221, 165, 255]],
+        ["hsl(from color(srgb 1.2 0.2 0.1) h s l)", [255, 81, 54, 255]],
       ]) {
         wideCtx.fillStyle = "#000";
         wideCtx.fillStyle = css;
@@ -595,7 +606,7 @@ describe("Canvas", () => {
           Array.from(
             wideCtx.getImageData(0, 0, 1, 1, { colorSpace: "display-p3" }).data,
           ),
-          [91, 221, 165, 255],
+          chrome,
           css,
         );
       }

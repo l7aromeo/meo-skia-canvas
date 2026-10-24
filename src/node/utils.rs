@@ -10,8 +10,15 @@ use std::cmp;
 // uncited at every one -- and the decode here was extended through zero
 // while the one in `color` was not, so the same negative component came
 // back as two different numbers.
-use crate::color::{
-    RgbaLinear, SRGB_SLOPE, linear_to_srgb, linear_to_srgb_byte, srgb_to_linear,
+use crate::{
+    color::{
+        RgbaLinear, SRGB_SLOPE, linear_to_srgb, linear_to_srgb_byte,
+        srgb_to_linear,
+    },
+    css::{
+        DEGREES_PER_TURN, Dimension, Expect, FontUnits, Percent, evaluate,
+        is_math, literal,
+    },
 };
 
 //
@@ -1504,9 +1511,9 @@ fn color_function_space(args: &str) -> Option<&str> {
 ///
 /// `csscolorparser` keeps one sRGB value per colour, encoded with the
 /// transfer function `css_to_color4f_in_space` describes, and reads a
-/// relative colour's channels out of it: as stored for `rgb()`, `hsl()`,
-/// `hwb()` and `color(srgb ...)`, and decoded by the matching inverse for
-/// the functions that work in linear light. The pair cancels, so an origin
+/// relative colour's channels out of it: as stored for `rgb()` and
+/// `color(srgb ...)`, and decoded by the matching inverse for the functions
+/// that work in linear light. The pair cancels, so an origin
 /// it built in linear light reaches a linear-light function intact -- and
 /// reaches an sRGB one with its negative channel on the wrong curve, while
 /// an origin written in sRGB with a negative channel reaches a linear-light
@@ -1519,7 +1526,8 @@ fn color_function_space(args: &str) -> Option<&str> {
 /// `color(srgb-linear ...)` for the others, whose stored encoding the
 /// matching decode then undoes exactly. The origin may itself be relative,
 /// and is resolved the same way. A `color()` in a space `csscolorparser`
-/// does not offer is left as it is, and refused.
+/// does not offer is left as it is, and refused. `hsl()` and `hwb()` never
+/// reach here: [`relative_hue_color`] reads them whole.
 fn with_resolved_origin(css: &str) -> Option<String> {
     // UPSTREAM: csscolorparser 0.9.0 -- unfiled -- worked around
     // Re-check: return `None` here, then cargo test
@@ -1528,18 +1536,6 @@ fn with_resolved_origin(css: &str) -> Option<String> {
     // still there. The defect is the encode `css_to_color4f_in_space` repairs,
     // seen from inside a relative colour, where a repair afterwards is too
     // late.
-    //
-    // UPSTREAM: csscolorparser 0.9.0 -- unfiled -- not worked around
-    // Re-check: fill `hsl(from color(srgb 1.2 0.2 0.1) h s l)` on a Display P3
-    // canvas and read it back in P3; Chrome 153 reads 255, 81, 54, and
-    // 235, 72, 47 means `Color::to_hsla` still clamps. An sRGB canvas cannot
-    // tell: both clip to the same byte there.
-    //
-    // `to_hsla` and `to_hwba` clamp a colour to 0..1 before converting it, so
-    // `hsl()` and `hwb()` over an origin outside sRGB read a different colour,
-    // however well the origin is resolved. A repair would evaluate the
-    // channel expressions here, `calc()` included, and `csscolorparser`'s
-    // evaluator, `utils::calc::parse_values`, is `pub(crate)`.
     let (name, args) = css.trim().split_once('(')?;
     let spans = top_level_spans(args);
     let [(from, from_end), (origin, origin_end), ..] = spans[..] else {
@@ -1549,7 +1545,7 @@ fn with_resolved_origin(css: &str) -> Option<String> {
         return None;
     }
     let linear = match name.to_ascii_lowercase().as_str() {
-        "rgb" | "rgba" | "hsl" | "hsla" | "hwb" => false,
+        "rgb" | "rgba" => false,
         "lab" | "lch" | "oklab" | "oklch" => true,
         "color" => {
             match color_function_space(args)?.to_ascii_lowercase().as_str() {
@@ -1576,6 +1572,263 @@ fn with_resolved_origin(css: &str) -> Option<String> {
         &args[..origin],
         &args[origin_end..]
     ))
+}
+
+/// What a relative `hsl()` or `hwb()` channel keyword reads saturation,
+/// lightness, whiteness and blackness out of.
+///
+/// CSS Color 5 resolves each to a `<number>` on the scale of its percentage,
+/// so `s` in `hsl(from red h s l)` is 100 rather than 1, and a percentage
+/// written in its place is the same number: `50%` and `50` are one value.
+const HUE_CHANNEL_SCALE: f64 = 100.0;
+
+/// Which channel of a relative `hsl()` or `hwb()` a token is, which decides
+/// what it may be written as besides a number.
+#[derive(Clone, Copy)]
+enum HueChannel {
+    /// The hue, in degrees or as an angle.
+    Hue,
+    /// Saturation, lightness, whiteness or blackness, out of
+    /// [`HUE_CHANNEL_SCALE`] or as a percentage.
+    Scaled,
+    /// The alpha, out of one or as a percentage.
+    Alpha,
+}
+
+/// The hue of an sRGB colour in degrees, `[0, 360)`, as CSS Color 4's
+/// `rgbToHue` finds it ([section 8.2]); zero when it has no chroma.
+///
+/// Unclipped, so a colour outside sRGB keeps the hue it has. The hue of a
+/// colour without chroma is powerless, and a relative colour reads a
+/// powerless channel as zero. Where the sample code calls a colour
+/// achromatic within an epsilon, Chrome 153 does not: `hwb(from color(srgb
+/// 0.5 0.5 0.500001) h 0 0)` is blue there, and is blue here.
+///
+/// [section 8.2]: https://www.w3.org/TR/css-color-4/#rgb-to-hwb
+fn srgb_hue([r, g, b]: [f64; 3]) -> f64 {
+    let max = r.max(g).max(b);
+    let chroma = max - r.min(g).min(b);
+    if chroma == 0.0 {
+        return 0.0;
+    }
+    let sector = match max {
+        _ if max == r => (g - b) / chroma,
+        _ if max == g => (b - r) / chroma + 2.0,
+        _ => (r - g) / chroma + 4.0,
+    };
+    (sector * 60.0).rem_euclid(DEGREES_PER_TURN)
+}
+
+/// An sRGB colour as `hsl()` channels -- hue in degrees, saturation and
+/// lightness as fractions -- by CSS Color 4's `rgbToHsl` ([section 7.2]).
+///
+/// Unclipped. A colour far enough outside sRGB gives a negative saturation,
+/// which the sample code turns into a positive one by rotating the hue half
+/// a turn, and Chrome 153 does the same.
+///
+/// [section 7.2]: https://www.w3.org/TR/css-color-4/#rgb-to-hsl
+fn srgb_to_hsl(rgb @ [r, g, b]: [f64; 3]) -> [f64; 3] {
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let lightness = (max + min) / 2.0;
+    let saturation = match max == min || lightness == 0.0 || lightness == 1.0 {
+        true => 0.0,
+        false => (max - lightness) / lightness.min(1.0 - lightness),
+    };
+    let hue = srgb_hue(rgb);
+    match saturation < 0.0 {
+        true => [
+            (hue + DEGREES_PER_TURN / 2.0).rem_euclid(DEGREES_PER_TURN),
+            -saturation,
+            lightness,
+        ],
+        false => [hue, saturation, lightness],
+    }
+}
+
+/// `hsl()` channels into sRGB by CSS Color 4's `hslToRgb` ([section 7.1]),
+/// with saturation and lightness as fractions and neither clipped.
+///
+/// [section 7.1]: https://www.w3.org/TR/css-color-4/#hsl-to-rgb
+fn hsl_to_srgb(hue: f64, saturation: f64, lightness: f64) -> [f64; 3] {
+    let hue = hue.rem_euclid(DEGREES_PER_TURN);
+    let amount = saturation * lightness.min(1.0 - lightness);
+    [0.0, 8.0, 4.0].map(|n: f64| {
+        let k = (n + hue / 30.0) % 12.0;
+        lightness - amount * (k - 3.0).min(9.0 - k).clamp(-1.0, 1.0)
+    })
+}
+
+/// `hwb()` channels into sRGB by CSS Color 4's `hwbToRgb` ([section 8.1]),
+/// with whiteness and blackness as fractions and neither clipped.
+///
+/// [section 8.1]: https://www.w3.org/TR/css-color-4/#hwb-to-rgb
+fn hwb_to_srgb(hue: f64, white: f64, black: f64) -> [f64; 3] {
+    if white + black >= 1.0 {
+        return [white / (white + black); 3];
+    }
+    hsl_to_srgb(hue, 1.0, 0.5).map(|c| c * (1.0 - white - black) + white)
+}
+
+/// A relative `hsl()` or `hwb()` -- `hsl(from <origin> h s l)` -- read by
+/// this crate rather than by `csscolorparser`, or `None` for any other
+/// colour.
+///
+/// `Some(None)` when it is one and does not parse, which is a refusal rather
+/// than a cue to read it some other way. `hwba(from ...)` is refused here:
+/// Chrome 153 has no such function, and `csscolorparser` reads it as `hwb()`.
+///
+/// The origin is resolved by this crate's own parser, its channels found
+/// from it as it is, and each channel expression evaluated by the CSS math
+/// evaluator with the channel keywords bound -- so nothing is clipped to
+/// sRGB anywhere between the origin and the result, which is what Chrome
+/// does and what CSS Color 5 describes.
+fn relative_hue_color(css: &str) -> Option<Option<Color4f>> {
+    // UPSTREAM: csscolorparser 0.9.0 -- unfiled -- worked around
+    // Re-check: return `None` here, then cargo test
+    // the_rust_surface_takes_css_colors; on a Display P3 canvas its
+    // `hsl(from oklch(0.8 0.18 165) h s l)` row reads 102 rather than 91 for
+    // red, and `hsl(from color(srgb 1.2 0.2 0.1) h s l)` 235, 72, 47 rather
+    // than 255, 81, 54, if `Color::to_hsla` still clamps. An sRGB canvas
+    // cannot tell: both clip to the same byte there.
+    //
+    // `to_hsla` and `to_hwba` clamp a colour to 0..1 before converting it, so
+    // `csscolorparser` reads `hsl()` and `hwb()` over an origin outside sRGB
+    // as a different colour, however well the origin is resolved. Its channel
+    // grammar is narrower than the standard's too: it refuses an angle unit,
+    // a percentage, `calc(e)` and an infinity, and reads a negative
+    // saturation as zero.
+    let (name, args) = css.trim().split_once('(')?;
+    let hwb = match name.to_ascii_lowercase().as_str() {
+        "hsl" | "hsla" => false,
+        "hwb" | "hwba" => true,
+        _ => return None,
+    };
+    let &(from, from_end) = top_level_spans(args).first()?;
+    if !args[from..from_end].eq_ignore_ascii_case("from") {
+        return None;
+    }
+    if name.eq_ignore_ascii_case("hwba") {
+        return Some(None);
+    }
+    Some(relative_hue_channels(args, hwb))
+}
+
+/// The colour `relative_hue_color` reads, given what follows the `(`.
+fn relative_hue_channels(args: &str, hwb: bool) -> Option<Color4f> {
+    let body = args.trim_end().strip_suffix(')')?.trim_end();
+    let spans = top_level_spans(body);
+    // A `)` before the end stops the spans short of it: `hsl(from red h s
+    // l))` is refused for the second.
+    if spans.last()?.1 != body.len() {
+        return None;
+    }
+    let [_, (origin, origin_end), ..] = spans[..] else {
+        return None;
+    };
+    let origin = css_to_color4f(&body[origin..origin_end])?;
+    let rest = &body[origin_end..];
+
+    let mut depth = 0usize;
+    let slash = rest.char_indices().find_map(|(at, c)| {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            '/' if depth == 0 => return Some(at),
+            _ => {}
+        }
+        None
+    });
+    let (channels, alpha) = match slash {
+        Some(at) => (&rest[..at], Some(&rest[at + 1..])),
+        None => (rest, None),
+    };
+    fn token(text: &str, (from, to): (usize, usize)) -> &str {
+        &text[from..to]
+    }
+    let [first, second, third] = top_level_spans(channels)[..] else {
+        return None;
+    };
+    let alpha = match alpha.map(|text| (text, top_level_spans(text))) {
+        Some((text, spans)) => match spans[..] {
+            [span] => Some(token(text, span)),
+            _ => return None,
+        },
+        None => None,
+    };
+
+    let rgb = [origin.r, origin.g, origin.b].map(f64::from);
+    let [hue, x, y] = match hwb {
+        true => {
+            let [r, g, b] = rgb;
+            [srgb_hue(rgb), r.min(g).min(b), 1.0 - r.max(g).max(b)]
+        }
+        false => srgb_to_hsl(rgb),
+    };
+    let names = match hwb {
+        true => ["h", "w", "b"],
+        false => ["h", "s", "l"],
+    };
+    let bound = [
+        (names[0], hue),
+        (names[1], x * HUE_CHANNEL_SCALE),
+        (names[2], y * HUE_CHANNEL_SCALE),
+        ("alpha", f64::from(origin.a)),
+    ];
+    let units = FontUnits::assumed(f32::NAN);
+    let read = |text: &str, channel: HueChannel| -> Option<f64> {
+        let keyword = text.to_ascii_lowercase();
+        if keyword == "none" {
+            return Some(0.0);
+        }
+        if let Some(&(_, value)) =
+            bound.iter().find(|(name, _)| *name == keyword)
+        {
+            return Some(value);
+        }
+        // A percentage may appear inside a hue's math function so long as
+        // the result is not one: Chrome 153 reads `calc(50% / 1%)` as a hue
+        // of 50 and refuses `50%`. The dimension is what decides, below.
+        let expect = Expect {
+            percent: Percent::Own,
+            units: &units,
+            channels: &bound,
+        };
+        let quantity = match is_math(text) {
+            true => evaluate(text, &expect)?,
+            false => literal(text, &expect)?,
+        };
+        let value = match (channel, quantity.dimension) {
+            (_, Dimension::NUMBER) | (HueChannel::Hue, Dimension::ANGLE) => {
+                quantity.finished()
+            }
+            (HueChannel::Scaled, Dimension::PERCENT) => {
+                quantity.finished() * HUE_CHANNEL_SCALE
+            }
+            (HueChannel::Alpha, Dimension::PERCENT) => quantity.finished(),
+            _ => return None,
+        };
+        // CSS Values 4 section 10.9 clamps an infinity to the largest value
+        // the property can hold, which for these is the `f32` the colour
+        // carries. That is a whole number of turns, so an infinite hue is
+        // red, as it is in Chrome 153.
+        let largest = f64::from(f32::MAX);
+        Some(value.clamp(-largest, largest))
+    };
+
+    let hue = read(token(channels, first), HueChannel::Hue)?;
+    let x = read(token(channels, second), HueChannel::Scaled)?;
+    let y = read(token(channels, third), HueChannel::Scaled)?;
+    let alpha = match alpha {
+        Some(text) => read(text, HueChannel::Alpha)?,
+        None => f64::from(origin.a),
+    };
+    let (x, y) = (x / HUE_CHANNEL_SCALE, y / HUE_CHANNEL_SCALE);
+    let [r, g, b] = match hwb {
+        true => hwb_to_srgb(hue, x, y),
+        false => hsl_to_srgb(hue, x, y),
+    }
+    .map(|c| c as f32);
+    Some(Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32))
 }
 
 /// Parses a CSS color, keeping the space it was named in.
@@ -1607,6 +1860,9 @@ pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
     // colour built that way is touched; see `built_from_linear_light`. A
     // relative colour reads its origin before any of this runs, so its origin
     // is resolved first; see `with_resolved_origin`.
+    if let Some(color) = relative_hue_color(css) {
+        return color.map(|color| (color, ColorSpace::new_srgb()));
+    }
     let resolved = with_resolved_origin(css);
     let css = resolved.as_deref().unwrap_or(css);
     let from_linear = built_from_linear_light(css);

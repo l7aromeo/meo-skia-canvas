@@ -563,14 +563,24 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   colour saw them. The same held, mirrored, for a linear-light function
   such as `oklch(from color(srgb -0.2 0.88 0.63) l c h)`, and an origin
   named in `display-p3` or `rec2020` made the whole colour unparseable.
-  Every relative form measured now agrees with Chrome 153 byte for byte,
-  `calc()` channels and nesting included -- in `fillStyle`, `strokeStyle`,
-  `shadowColor`, gradient stops and anywhere else a CSS colour is taken.
+  Every relative form measured whose channels are keywords, numbers and
+  `calc()` over them now agrees with Chrome 153 byte for byte, nesting
+  included -- in `fillStyle`, `strokeStyle`, `shadowColor`, gradient stops
+  and anywhere else a CSS colour is taken.
 
-  Not yet right: `hsl()` and `hwb()` over an origin outside sRGB still
-  clamp it, so `hsl(from color(srgb 1.2 0.2 0.1) h s l)` paints
-  `235, 72, 47` on a P3 canvas where Chrome paints `255, 81, 54`. No sRGB
-  canvas shows it.
+  `hsl()` and `hwb()` went further wrong: their origin was clamped to sRGB
+  before its hue was found, so `hsl(from color(srgb 1.2 0.2 0.1) h s l)`
+  painted `235, 72, 47` on a `display-p3` canvas where Chrome paints
+  `255, 81, 54`, and a channel written as an angle or a percentage, an
+  alpha as a percentage, `calc(e)` and an infinity were refused. Both now
+  read the origin unclipped and take every math function, and
+  `hwba(from ...)`, which is not a CSS function, is refused.
+
+  Not yet right: `rgb()`, `lab()`, `lch()`, `oklab()`, `oklch()` and
+  `color()` relative colours still take the narrower grammar, and each
+  refuses a channel written as a percentage --
+  `fillStyle = 'rgb(from red r g b / 50%)'` is ignored where Chrome
+  paints at half alpha.
 
 ### Added
 

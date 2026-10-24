@@ -781,6 +781,7 @@ fn font_size(text: &str) -> Option<f32> {
         let expect = Expect {
             percent: Percent::Of(f64::from(CANVAS_DEFAULT_FONT_PX)),
             units: &units,
+            channels: &[],
         };
         let quantity = evaluate(&lower, &expect)
             .filter(|quantity| quantity.dimension == Dimension::LENGTH)?;
@@ -841,6 +842,7 @@ fn font_line_height(text: &str, size: f32) -> Option<Option<f32>> {
             let expect = Expect {
                 percent: Percent::Of(f64::from(size)),
                 units: &units,
+                channels: &[],
             };
             let quantity = evaluate(&lower, &expect)?;
             let value = quantity.finished() as f32;
@@ -1009,6 +1011,7 @@ fn computed_weight(text: &str) -> Option<u16> {
     let expect = Expect {
         percent: Percent::Refused,
         units: &units,
+        channels: &[],
     };
     let quantity = evaluate(text, &expect)
         .filter(|quantity| quantity.dimension == Dimension::NUMBER)?;
@@ -1037,6 +1040,7 @@ fn oblique_angle(text: &str) -> Option<f32> {
         let expect = Expect {
             percent: Percent::Refused,
             units: &units,
+            channels: &[],
         };
         let quantity = evaluate(text, &expect)
             .filter(|quantity| quantity.dimension == Dimension::ANGLE)?;
