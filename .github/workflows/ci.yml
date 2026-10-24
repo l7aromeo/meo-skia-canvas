@@ -240,8 +240,8 @@ jobs:
       # the extractor throws on the first use of `ts.ScriptTarget`. Measured on
       # a cold checkout: 10 of 40 static tests fail that way, on every platform.
       #
-      # Unconditional rather than the recipe's `test -d` guard, because CI is
-      # always cold and the guard would only ever take the install branch. The
+      # A plain install rather than the recipes' scripts/install-deps.mjs,
+      # because CI is always cold and its check would only ever install. The
       # root install above cannot cover this -- hoisting the two together is
       # what the pin exists to prevent.
       - name: Install the pinned TypeScript the surface extractor needs

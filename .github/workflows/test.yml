@@ -145,6 +145,15 @@ jobs:
       - name: Build module
         run: just build-release
 
+      # `bun run test` takes in tests/static, and parity-npm.test.js there runs
+      # the npm surface extractor, which needs the TypeScript 6 pinned under
+      # scripts/api-surface -- the root is on 7, which has no compiler API.
+      # `just build-release` installs only the root, so without this step 10
+      # static tests failed on every leg of every run, as ci.yml's comment on
+      # its own copy of this step describes.
+      - name: Install the pinned TypeScript the surface extractor needs
+        run: node scripts/install-deps.mjs scripts/api-surface
+
       # Pinned to the build above. `just build-release` depends on `ensure-deps`,
       # which installs the optional platform packages, and those win resolution
       # over lib/skia.node -- so without this the suite exercises the published
