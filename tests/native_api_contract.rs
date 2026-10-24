@@ -1,7 +1,7 @@
-use std::{
-    env,
-    process::{self, Command},
-};
+// `process::id` is only read where `ps` measures the child, on macOS.
+#[cfg(target_os = "macos")]
+use std::process;
+use std::{env, process::Command};
 
 use anyhow::{Context, Result};
 use meo_skia_canvas::prelude::*;
