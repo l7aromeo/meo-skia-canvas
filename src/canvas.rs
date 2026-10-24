@@ -33,7 +33,7 @@ use crate::{
     error::Error,
     export::{EncodeOptions, ImageFormat, Pages},
     gpu::RenderingEngine,
-    pixels::{PixelColorSpace, PixelDepth},
+    pixels::{ImageData, ImageDataExport, PixelColorSpace, PixelDepth},
 };
 
 /// What this build renders through, and what it found to render with.
@@ -407,6 +407,66 @@ impl Canvas {
     /// Returns `None` when `index` is past the last page.
     pub fn page(&mut self, index: usize) -> Option<&mut Context2D> {
         self.contexts.get_mut(index)
+    }
+
+    /// Reads a whole page's pixels back, `page` counting from `0` and `None`
+    /// meaning the current page.
+    ///
+    /// The Rust counterpart of JavaScript's `toBuffer("raw", ..)`: the
+    /// page's bytes at a `density`, over a `matte`, in the layout
+    /// `export.pixels` names -- premultiplied when it says so, which is what
+    /// the `alphaType` option asks for there -- returned with that layout
+    /// attached rather than as bare bytes. The same readback
+    /// [`Context2D::get_image_data_with`] performs, over the page's whole
+    /// area.
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let mut canvas = Canvas::new(4.0, 2.0);
+    /// canvas
+    ///     .context()
+    ///     .set_fill_style(RgbaLinear::opaque(1.0, 0.0, 0.0));
+    /// canvas.context().set_global_alpha(0.5);
+    /// canvas.context().fill_rect(0.0, 0.0, 4.0, 2.0);
+    /// let options = ImageDataExport {
+    ///     pixels: PixelExportOptions {
+    ///         premultiplied: true,
+    ///         ..PixelExportOptions::default()
+    ///     },
+    ///     ..ImageDataExport::default()
+    /// };
+    /// let page = canvas.to_image_data(None, &options)?;
+    /// assert_eq!((page.width(), page.height()), (4, 2));
+    /// assert_eq!(&page.pixels()[..4], [128, 0, 0, 128]);
+    /// # Ok::<(), meo_skia_canvas::error::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::PixelReadback`] for a `page` past the last one, and
+    /// everything [`Context2D::get_image_data_with`] returns.
+    pub fn to_image_data(
+        &mut self,
+        page: Option<usize>,
+        export: &ImageDataExport,
+    ) -> Result<ImageData, Error> {
+        let pages = self.contexts.len();
+        let context = match page {
+            None => self.context(),
+            Some(index) => {
+                self.page(index).ok_or_else(|| Error::PixelReadback {
+                    reason: format!(
+                        "page {index} is past the last of {pages}, which is \
+                         {}",
+                        pages - 1
+                    ),
+                })?
+            }
+        };
+        let (width, height) =
+            (context.inner.bounds.width(), context.inner.bounds.height());
+        context.get_image_data_with(0.0, 0.0, width, height, export)
     }
 
     /// Whether rendering may use the GPU. Defaults to `true`, falling back to

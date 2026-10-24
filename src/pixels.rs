@@ -5,7 +5,7 @@ use skia_safe::{
     named_transfer_fn,
 };
 
-use crate::error::Error;
+use crate::{color::RgbaLinear, error::Error};
 
 /// Image sampling strategy for `draw_image_src` and similar resampled draws.
 ///
@@ -230,6 +230,55 @@ impl PixelExportOptions {
         match self.premultiplied {
             true => AlphaType::Premul,
             false => AlphaType::Unpremul,
+        }
+    }
+}
+
+/// How to rasterize a region when reading its pixels back, beyond the layout
+/// the pixels arrive in.
+///
+/// The Rust shape of the settings JavaScript's `getImageData` takes after its
+/// rectangle -- `density`, `matte` and `msaa` alongside the layout -- and
+/// what [`Canvas::to_image_data`](crate::canvas::Canvas::to_image_data) takes
+/// for a whole page. Construct by updating the default, as with the other
+/// option structs in this crate:
+///
+/// ```
+/// use meo_skia_canvas::prelude::*;
+///
+/// let options = ImageDataExport {
+///     density: 2,
+///     ..ImageDataExport::default()
+/// };
+/// assert_eq!(options.pixels, PixelExportOptions::default());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImageDataExport {
+    /// The layout the pixels are handed back in.
+    pub pixels: PixelExportOptions,
+    /// Pixels per canvas unit, `1` or more. Defaults to `1`.
+    ///
+    /// A whole number, as JavaScript's `getImageData` requires: a fractional
+    /// scale has no pixel count that is right for every region, since
+    /// rounding each edge makes the width depend on where the region
+    /// starts. A density of `0` is refused.
+    pub density: u32,
+    /// Colour composited beneath the drawing before it is read, or `None` to
+    /// keep transparency. Defaults to `None`.
+    pub matte: Option<RgbaLinear>,
+    /// Multisample count for the rasterizing pass, or `None` for the
+    /// backend's default. `Some(0)` and `Some(1)` both mean one sample a
+    /// pixel -- no multisampling.
+    pub msaa: Option<usize>,
+}
+
+impl Default for ImageDataExport {
+    fn default() -> Self {
+        Self {
+            pixels: PixelExportOptions::default(),
+            density: 1,
+            matte: None,
+            msaa: None,
         }
     }
 }

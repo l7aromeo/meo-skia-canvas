@@ -139,6 +139,7 @@ None of them is `#[non_exhaustive]`, deliberately. That attribute forbids the st
 - Canvases composite in premultiplied alpha space.
 - `Context2D::get_image_data` returns **unpremultiplied** components -- the wire format `putImageData` expects, and what a browser hands back.
 - `get_image_data_as(PixelExportOptions { premultiplied: true, .. })` keeps the premultiplied values, and takes the depth and colour space alongside.
+- `get_image_data_with(.., &ImageDataExport { density, matte, msaa, pixels })` reads at a density, over a matte and with an MSAA count as well, which is JavaScript's `getImageData` settings object; `Canvas::to_image_data(page, ..)` reads a whole page the same way, which is `toBuffer("raw", { alphaType })` with the layout returned beside the bytes.
 
 ## Pixel formats and depths
 
