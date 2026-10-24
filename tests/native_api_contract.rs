@@ -1,3 +1,8 @@
+use std::{
+    env,
+    process::{self, Command},
+};
+
 use anyhow::{Context, Result};
 use meo_skia_canvas::prelude::*;
 
@@ -3663,15 +3668,6 @@ fn one_changed_pixel_at_an_odd_coordinate_is_one_pixel() -> Result<()> {
     Ok(())
 }
 
-/// Drawing one canvas into another must not compound.
-///
-/// The Rust API reaches this by its own door -- `draw_canvas` and
-/// `create_pattern` take a `Canvas` directly rather than through the binding's
-/// source resolver -- so the rule that stops a nested picture nesting again
-/// has to hold here too. It did not: both doors kept the source's picture
-/// unconditionally, and a page copied into a canvas and drawn back doubled the
-/// work of the eventual rasterization every round.
-///
 /// What this process has resident, in megabytes, or `None` where the platform
 /// is one this does not know how to ask.
 ///
@@ -3688,8 +3684,8 @@ fn resident_mb() -> Option<f64> {
     }
     #[cfg(target_os = "macos")]
     {
-        let out = std::process::Command::new("ps")
-            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        let out = Command::new("ps")
+            .args(["-o", "rss=", "-p", &process::id().to_string()])
             .output()
             .ok()?;
         let kb: f64 =
@@ -3698,6 +3694,40 @@ fn resident_mb() -> Option<f64> {
     }
     #[allow(unreachable_code)]
     None
+}
+
+/// Runs `scene` in a process of its own, so that what it reads of the
+/// process is what it did rather than what the tests beside it did.
+///
+/// libtest runs a binary's tests on threads of one process, so a reading of
+/// resident memory counts every test running at the same time. On fourteen
+/// cores that put the clip test below at 273 to 307 MB against its 250 MB
+/// bound with nothing wrong, while it passed alone.
+///
+/// The test's first run re-runs this binary filtered to `name` alone, with
+/// `ALONE` set, and that run executes `scene`. Its report has to say one test
+/// passed: a name that matches nothing runs no test and exits cleanly, and
+/// would otherwise read as green.
+fn in_own_process(name: &str, scene: impl FnOnce()) {
+    /// Set in the child, so that it runs the scene rather than spawning again.
+    const ALONE: &str = "MEO_SKIA_CANVAS_TEST_ALONE";
+
+    if env::var_os(ALONE).is_some() {
+        return scene();
+    }
+    let output =
+        Command::new(env::current_exe().expect("a test binary has a path"))
+            .args([name, "--exact", "--test-threads=1", "--nocapture"])
+            .env(ALONE, "1")
+            .output()
+            .expect("the test binary runs again");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success()
+            && stdout.contains("test result: ok. 1 passed;"),
+        "{name}, run in its own process:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// A nested source drawn through a clip must rasterize only the clip.
@@ -3710,9 +3740,19 @@ fn resident_mb() -> Option<f64> {
 /// Skia serves a repeated rasterization from its own cache, so sixty
 /// whole-page flattens run in 0.26 seconds against 0.24 for sixty slivers
 /// while holding an order of magnitude more. Three earlier attempts at a timed
-/// version of this passed against the unfixed code.
+/// version of this passed against the unfixed code. Read in a process of its
+/// own, by [`in_own_process`], because the reading is of the whole process.
 #[test]
 fn a_nested_canvas_drawn_through_a_clip_is_not_rasterized_whole() {
+    in_own_process(
+        "a_nested_canvas_drawn_through_a_clip_is_not_rasterized_whole",
+        sixty_clipped_draws_of_a_nested_source,
+    );
+}
+
+/// The scene behind
+/// [`a_nested_canvas_drawn_through_a_clip_is_not_rasterized_whole`].
+fn sixty_clipped_draws_of_a_nested_source() {
     const SIDE: f32 = 1400.0;
 
     let Some(before) = resident_mb() else {
@@ -3750,8 +3790,8 @@ fn a_nested_canvas_drawn_through_a_clip_is_not_rasterized_whole() {
         .expect("the page rasterizes");
 
     let grew = resident_mb().unwrap_or(before) - before;
-    // Sixty whole 1400-square rasterizations held about 490 MB; sixty slivers
-    // hold about 40. The bound sits far from both.
+    // Sixty whole 1400-square rasterizations hold about 480 MB; sixty slivers
+    // hold about 20, on macOS and Linux alike. The bound sits far from both.
     assert!(
         grew < 250.0,
         "sixty clipped draws must not each rasterize the whole source: grew \
