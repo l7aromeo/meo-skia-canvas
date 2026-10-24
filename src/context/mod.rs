@@ -29,7 +29,9 @@ use crate::{
     gpu::RenderingEngine,
     gradient::{BoxedCanvasGradient, CanvasGradient},
     node::{
-        filter::{Filter, SamplingFilter, SamplingQuality, ScalingOperation},
+        filter::{
+            Coverage, Filter, SamplingFilter, SamplingQuality, ScalingOperation,
+        },
         image::ImageData,
         pattern::{BoxedCanvasPattern, CanvasPattern},
         shader::BoxedShader,
@@ -945,7 +947,8 @@ impl Context2D {
             });
         }
 
-        let paint = self.paint_for_drawing(style);
+        let coverage = coverage_of(&path, &self.state.matrix);
+        let paint = self.paint_for_drawing(style, coverage);
         let features = self.vector_features(&paint, Some(style));
         self.render_to_canvas(&paint, features, |canvas, paint| {
             if let Some(tile) = self.state.texture(style) {
@@ -1100,7 +1103,8 @@ impl Context2D {
 
         let is_in = match style {
             PaintStyle::Stroke => {
-                let paint = self.paint_for_drawing(PaintStyle::Stroke);
+                let paint =
+                    self.paint_for_drawing(PaintStyle::Stroke, Coverage::Path);
                 let precision = 0.3; // this is what Chrome uses to compute this
                 let scale = Matrix::scale((precision, precision));
 
@@ -1562,7 +1566,9 @@ impl Context2D {
         width: Option<f32>,
         style: PaintStyle,
     ) {
-        let paint = self.paint_for_drawing(style);
+        let em = self.state.char_style.font_size()
+            * self.state.matrix.max_scale().max(0.0);
+        let paint = self.paint_for_drawing(style, Coverage::Text { em });
         let mut typesetter = Typesetter::new(&self.state, text, width);
         let origin = Point::new(x, y);
 
@@ -1628,7 +1634,11 @@ impl Context2D {
         (extents, PendingInk::new(inputs, measured))
     }
 
-    pub fn paint_for_drawing(&mut self, style: PaintStyle) -> Paint {
+    pub fn paint_for_drawing(
+        &mut self,
+        style: PaintStyle,
+        coverage: Coverage,
+    ) -> Paint {
         let mut paint = self.state.paint.clone();
 
         // 1. Apply Skia colorFilter (operates on source colors before blend)
@@ -1639,15 +1649,19 @@ impl Context2D {
         // 2. Apply CSS filter (image_filter + mask_filter)
         //
         // A shader asks for the drawn result to be blurred rather than the
-        // shape's coverage. The cheap coverage blur is only the same picture
-        // while the paint is one flat colour; a pattern or a gradient has
+        // shape's coverage. The coverage blur is only the same picture while
+        // the paint is one flat colour; a pattern or a gradient has
         // structure of its own that a coverage blur leaves untouched, and a
         // shader painting nothing outside its own bounds has nothing for the
-        // blur to spread into. See `Filter::filters_for`.
+        // blur to spread into. See `Filter::filters_for`. And where the
+        // coverage blur differs from Chrome's or costs more, the result is
+        // blurred for a flat colour too -- see `Coverage`.
         let has_shader = !matches!(self.state.dye(style), Dye::Color(..));
+        let rendered =
+            has_shader || !self.state.filter.blurs_coverage(coverage);
         self.state
             .filter
-            .mix_into(&mut paint, self.state.matrix, has_shader);
+            .mix_into(&mut paint, self.state.matrix, rendered);
 
         // 3. Compose Skia imageFilter with CSS imageFilter (if both present)
         if let Some(skia_imgf) = &self.state.skia_image_filter {
@@ -1930,6 +1944,23 @@ impl Dye {
                 paint.set_shader(Some(shader.clone())).set_alpha_f(alpha);
             }
         };
+    }
+}
+
+/// What `path` covers once `matrix` puts it on the device, for choosing how
+/// to blur it: a rectangle or a rounded rectangle only while the matrix
+/// keeps it one, since Skia's cheap coverage blur for those shapes works on
+/// axis-aligned device rectangles.
+fn coverage_of(path: &Path, matrix: &Matrix) -> Coverage {
+    if !matrix.rect_stays_rect() {
+        return Coverage::Path;
+    }
+    if path.is_rect().is_some() {
+        Coverage::Rect
+    } else if path.is_oval().is_some() || path.is_rrect().is_some() {
+        Coverage::Rounded
+    } else {
+        Coverage::Path
     }
 }
 

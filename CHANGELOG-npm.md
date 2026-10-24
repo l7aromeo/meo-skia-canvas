@@ -154,6 +154,24 @@ removed and no signature moves.
 
 ### Fixed
 
+- **A large `blur()` in `ctx.filter` draws as Chrome's.** A flat-colour
+  shape or text was blurred on its coverage, which Skia holds to a sigma of
+  128, so a larger blur drew as 128 did: on a 100 pixel canvas a square
+  blurred by 200, 500 and 1000px all summed to the same alpha, where
+  Chrome's GPU canvas fades to nothing at 1000px, and on a 400 pixel one
+  `blur(1000px)` left a centre alpha of 108 where Chrome's is 9. A draw is now blurred on its
+  result wherever that is nearer Chrome or cheaper -- a rectangle above
+  40px, a rounded rectangle or an oval above 10px, other paths always, and
+  text once its blurred glyphs outgrow Skia's glyph cache. Chrome blurs a
+  large radius differently on its GPU canvas and on its CPU one -- the
+  CPU canvas, which `willReadFrequently` selects, leaves an alpha of 1 at
+  1000px rather than nothing -- and each engine here now matches Chrome's
+  same engine: the square sums to within half a percent of Chrome's GPU
+  canvas at 50, 100, 200, 500 and 1000px on the GPU engine, and to its CPU
+  canvas exactly on the CPU engine at all of them but 200px, 0.9% off. 48px text blurred by 40px or more draws 5 to 11 times faster,
+  as Skia no longer re-blurs each glyph on every draw; a rectangle blurred by
+  more than 40px costs about 200 microseconds a draw where it cost almost
+  nothing, the price of Chrome's picture.
 - **`getImageData` on the GPU unpremultiplies as the CPU does.** On the
   GPU engine, the default on macOS, a translucent pixel read back up to a
   level low wherever its unpremultiplied value fell on a half:
