@@ -163,6 +163,18 @@ removed and no signature moves.
   throws. Each now declares `Symbol.hasInstance`, so the check compiles and
   narrows to the instance type.
 
+- **A context keeps its canvas alive, as a browser's does.**
+  `const ctx = new Canvas(3, 2).getContext("2d")` keeps only the context,
+  and once the canvas was collected `ctx.canvas` was `undefined` and
+  `getImageData`, `createImageData` and `createPattern` with an image threw
+  a `TypeError` reading the canvas they reach through it. It showed as an
+  intermittent failure wherever a canvas was built inline, and a forced
+  collection makes it certain. The context held the canvas through a
+  `WeakRef`, added upstream to break the reference between the two; the
+  pair is plain JavaScript and nothing native holds either, so the
+  collector frees it whole without one. A dropped canvas and its context
+  are still collected together.
+
 - **A filter function written twice applies twice**, as in Chrome:
   `brightness(2) brightness(2)` draws as `brightness(4)` and
   `opacity(0.5) opacity(0.5)` as `opacity(0.25)`. The parser kept one entry

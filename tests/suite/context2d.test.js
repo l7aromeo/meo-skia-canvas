@@ -5156,3 +5156,59 @@ describe("gradient interpolation", () => {
     });
   });
 });
+
+describe("a context and its canvas", () => {
+  // `node --test` does not expose `gc`. The flag can be set at run time, and
+  // the function then fetched from a fresh context, which is what makes a
+  // collection here deterministic rather than a matter of allocation luck.
+  require("v8").setFlagsFromString("--expose-gc");
+  /** @type {() => void} */
+  const gc = require("vm").runInNewContext("gc");
+  // A finaliser runs on a later turn of the event loop, so each pass yields
+  // before collecting again.
+  const collect = async () => {
+    for (let pass = 0; pass < 3; pass++) {
+      await new Promise((resolve) => setImmediate(resolve));
+      gc();
+    }
+  };
+
+  test("the context keeps its canvas alive, as a browser's does", async () => {
+    // Only the context is kept. A browser's `ctx.canvas` holds the canvas,
+    // so everything that reaches it through the context still works after
+    // a collection.
+    const ctx = new Canvas(3, 2).getContext("2d");
+    const image = await loadImage("tests/assets/images/quadrants.png");
+    await collect();
+    assert.equal(ctx.canvas?.width, 3, "ctx.canvas");
+    assert.equal(ctx.getImageData(0, 0, 1, 1).data.length, 4, "getImageData");
+    assert.equal(ctx.createImageData(1, 1).data.length, 4, "createImageData");
+    assert.ok(ctx.createPattern(image, "repeat"), "createPattern");
+  });
+
+  test("a canvas and its context are let go of together", async () => {
+    // Each holds the other, which a tracing collector frees as one: neither
+    // is reachable from outside. Counted by finaliser rather than by memory,
+    // which a collection does not return promptly enough to read.
+    const COUNT = 32;
+    let freed = 0;
+    const registry = new FinalizationRegistry(() => freed++);
+    // Built in a function of its own: a local in this async function would
+    // survive in its suspended frame across the awaits below, and the last
+    // canvas with it.
+    const draw = (i) => {
+      const canvas = new Canvas(2, 2);
+      canvas.getContext("2d").fillRect(0, 0, 1, 1);
+      registry.register(canvas, i);
+    };
+    for (let i = 0; i < COUNT; i++) draw(i);
+    // The draw list keeps the context whose verbs are still batched until
+    // another object draws, and that context its canvas: one held, however
+    // many were drawn. Another canvas drawing hands the batch over.
+    ((other) => other.getContext("2d").fillRect(0, 0, 1, 1))(new Canvas(1, 1));
+    for (let attempt = 0; attempt < 20 && freed < COUNT; attempt++) {
+      await collect();
+    }
+    assert.equal(freed, COUNT);
+  });
+});
