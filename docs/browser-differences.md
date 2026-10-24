@@ -117,6 +117,14 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   20.918px in Chrome on a Mac. Faces whose metric and glyph agree, as
   Oswald's do at 578/1000, read the same in both. The order is
   `x_height_ratio` in `src/image.rs`.
+- _`ex` is half an em on a face with neither an x-height nor an `x`._ CSS
+  Values 4 says to assume 0.5em "in the cases where it is impossible or
+  impractical to determine the x-height", and a face that states no
+  `sxHeight` and has no `x` glyph is that case. Skia reports a figure for it
+  anyway and Chrome takes it: Chrome 152 on macOS sets `1ex` of Oswald with
+  no `sxHeight` and its `x` unmapped at 0.698em, CoreText's own figure, and
+  Skia's FreeType port reports that face's ascent, 1.193em, where Chrome on
+  Linux was not measured. `declares_x_height` in `src/image.rs` is the check.
 
 - _A system font keyword in `ctx.font` is ignored_ -- `caption`, `icon`,
   `menu`, `message-box`, `small-caption` and `status-bar`, which Chrome takes.

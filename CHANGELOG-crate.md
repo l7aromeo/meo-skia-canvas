@@ -59,6 +59,16 @@ window be changed after it opens.** No signature moves and nothing is removed.
   a second read at `density: 2` drew whatever was new at four times the
   size.
 
+- **`ex` is half an em on a face that has neither an x-height nor an `x`**,
+  as CSS Values 4 says to assume where the x-height cannot be determined.
+  Skia reports a figure for such a face regardless -- the ascent on Linux,
+  1.193em of Oswald with no `sxHeight` and its `x` unmapped, and CoreText's
+  own 0.698em on macOS -- and `Svg::parse` and `Image::from_svg_xml` sized
+  an SVG's `ex` lengths by it. `set_filter_css` and the CSS spacing setters,
+  which take `ex` from this release, measure it the same way. A face that
+  states an `sxHeight`, or has an `x` to measure, reads as before. Chrome
+  takes Skia's figure; docs/browser-differences.md records the difference.
+
 - **`Context2D::filter()` reports a chain set through `set_filter_css`
   exactly as it was written**, as Chrome and the JavaScript `filter` getter
   do. Surrounding whitespace was trimmed and `"NONE"` or `" none "` read back

@@ -4,7 +4,8 @@ use quick_xml::{Reader, events::Event};
 
 use skia_safe::{
     AlphaType, Color4f, ColorSpace, ColorType, Data, Font, FontHinting,
-    FontMgr, FontStyle, Image as SkImage, ImageInfo, Size as SkSize, Typeface,
+    FontMgr, FontStyle, FourByteTag, Image as SkImage, ImageInfo,
+    Size as SkSize, Typeface,
     codec::{self, Codec},
     images, surfaces,
     svg::{self, FontSize, Length, LengthUnit, TypedNode},
@@ -92,8 +93,21 @@ const PX_PER_EM: f32 = 16.0;
 /// or impractical to determine the x-height, a value of 0.5em must be
 /// assumed." The modal verb is the specification's own. An SVG here never
 /// loads its font, so that is always the case there; `FontUnits` in
-/// `crate::css` reaches it only when no typeface resolves.
+/// `crate::css` and [`ex_ratio_for`] reach it when no typeface resolves, or
+/// when the one that does has neither an x-height nor an `x` -- see
+/// [`x_height_ratio`].
 pub(crate) const EX_PER_EM: f32 = 0.5;
+
+/// The `OS/2` table's tag, from the OpenType specification's "OS/2 -- OS/2
+/// and Windows Metrics Table".
+const OS2_TABLE: FourByteTag = FourByteTag::from_chars('O', 'S', '/', '2');
+
+/// The first `OS/2` version to carry `sxHeight`, by the same specification.
+/// A version 0 or 1 table ends before the field.
+const OS2_VERSION_WITH_X_HEIGHT: u16 = 2;
+
+/// The byte offset of `sxHeight`, an `int16`, within the `OS/2` table.
+const OS2_X_HEIGHT_AT: usize = 86;
 
 /// An immutable decoded raster image.
 ///
@@ -1161,11 +1175,13 @@ fn relative_list_in_px(
 /// registered face, so asking it here reaches the same face `SkSVGText.cpp`
 /// will draw with. The two agree by construction rather than by ordering.
 ///
-/// [`EX_PER_EM`] is reached only when no face resolves and no glyph can be
-/// measured -- an empty font set, where nothing will be drawn either. A
-/// constant is honest there because there is no rendering for it to disagree
-/// with. It is the last resort rather than the first, which is the whole
-/// point: a face that resolves and draws must not be measured by a constant.
+/// [`EX_PER_EM`] is reached when no face resolves -- an empty font set, where
+/// nothing will be drawn either -- and when the face that does resolve has
+/// neither an x-height nor an `x`, which is the case CSS Values 4 names for
+/// it. A constant is honest in both, because there is no x-height in the
+/// rendering for it to disagree with. It is the last resort rather than the
+/// first, which is the whole point: a face that has an x-height must not be
+/// measured by a constant.
 fn ex_ratio_for(family: Option<&str>, font_mgr: &FontMgr) -> f32 {
     family
         .and_then(|family| {
@@ -1188,6 +1204,19 @@ fn ex_ratio_for(family: Option<&str>, font_mgr: &FontMgr) -> f32 {
 /// "the cases where it is impossible or impractical to determine the
 /// x-height", and a face that answers either of these is neither.
 ///
+/// **A face with neither is `None`, and that is asked of the face rather than
+/// of Skia**, whose metric is not zero for one. Given no `sxHeight` -- an
+/// `OS/2` table before version 2, or a zero -- and no `x` to derive one from,
+/// its FreeType port reports the ascent and CoreText a figure of its own:
+/// Oswald with no `sxHeight` and its `x` unmapped measures 1.193em on Linux,
+/// its ascent, and 0.698em on macOS. Neither is an x-height. Measuring the
+/// string `"x"` on that face measures `.notdef`, 0.83em of Oswald's, so
+/// whether there is an `x` is asked before anything is measured.
+///
+/// **That is a deliberate divergence from Chrome**, which takes Skia's metric
+/// as it comes -- Chrome 152 on macOS sets `1ex` of that face at 0.698em --
+/// and docs/browser-differences.md records it with the measurement.
+///
 /// **Metric first is a deliberate divergence from Chrome on macOS**, where
 /// Blink measures the `x` glyph's ink ahead of the metric, so `1ex` of 40px
 /// `sans-serif` is 20.918px there. Chrome reads the metric on every other
@@ -1202,6 +1231,10 @@ fn ex_ratio_for(family: Option<&str>, font_mgr: &FontMgr) -> f32 {
 /// which is what put `4ex` at exactly `2em` on Windows while a named family
 /// measured 0.525 in the same document.
 pub(crate) fn x_height_ratio(typeface: Typeface) -> Option<f32> {
+    let x = typeface.unichar_to_glyph('x' as i32);
+    if x == 0 && !declares_x_height(&typeface) {
+        return None;
+    }
     // Measured at a nominal size and divided back out, so the ratio is the
     // face's rather than this call's -- and unhinted, because FreeType hints
     // an x-height it derives from the `x` glyph for a face whose `OS/2` table
@@ -1213,9 +1246,28 @@ pub(crate) fn x_height_ratio(typeface: Typeface) -> Option<f32> {
     if metrics.x_height.is_finite() && metrics.x_height > 0.0 {
         return Some(metrics.x_height / 100.0);
     }
+    if x == 0 {
+        return None;
+    }
     let (_, bounds) = font.measure_str("x", None);
     (bounds.height().is_finite() && bounds.height() > 0.0)
         .then(|| bounds.height() / 100.0)
+}
+
+/// Whether `typeface` states its x-height: an `OS/2` table of version 2 or
+/// later, with a positive `sxHeight`.
+///
+/// Read from the table rather than from Skia's metric, which is never zero
+/// for an outline face -- see [`x_height_ratio`]. The bytes past the end of a
+/// table too short to hold the field, or of no table at all, stay zero, and
+/// a zero states nothing.
+fn declares_x_height(typeface: &Typeface) -> bool {
+    let mut head = [0u8; OS2_X_HEIGHT_AT + 2];
+    typeface.get_table_data(*OS2_TABLE, &mut head);
+    let version = u16::from_be_bytes([head[0], head[1]]);
+    let x_height =
+        i16::from_be_bytes([head[OS2_X_HEIGHT_AT], head[OS2_X_HEIGHT_AT + 1]]);
+    version >= OS2_VERSION_WITH_X_HEIGHT && x_height > 0
 }
 
 /// The x-height ratio of each family a document has asked about.
@@ -2339,6 +2391,7 @@ fn labelled_bmp(image: SkImage, bytes: &[u8]) -> SkImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use skia_safe::textlayout::TypefaceFontProvider;
 
     /// A one-pixel PNG, which is a still image however it is asked about.
     fn still() -> Vec<u8> {
@@ -4006,39 +4059,184 @@ mod tests {
         assert!(matches!(Svg::parse("<svg"), Err(Error::DecodeImage { .. })));
     }
 
-    /// Oswald with its `OS/2` table relabelled as version 1, which predates
-    /// `sxHeight`: the bytes of the field are still there, and nothing that
-    /// reads the version is allowed to look at them.
-    fn oswald_without_an_x_height() -> Typeface {
-        /// The `OS/2` table's tag in the table directory.
-        const OS2: &[u8; 4] = b"OS/2";
+    /// Two big-endian bytes of a font, as an offset or count.
+    fn be16(bytes: &[u8], at: usize) -> usize {
+        u16::from_be_bytes([bytes[at], bytes[at + 1]]) as usize
+    }
+
+    /// Four big-endian bytes of a font, as an offset.
+    fn be32(bytes: &[u8], at: usize) -> usize {
+        u32::from_be_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+            as usize
+    }
+
+    /// Where table `tag` starts in a TrueType font.
+    fn table_at(bytes: &[u8], tag: &[u8; 4]) -> usize {
         /// The table directory starts after the offset subtable's 12 bytes and
         /// holds one 16-byte record per table, the offset at byte 8 -- the
         /// OpenType specification's "Table directory".
         const DIRECTORY: usize = 12;
         const RECORD: usize = 16;
         const RECORD_OFFSET: usize = 8;
-        /// The first version of `OS/2` to carry `sxHeight` is 2.
-        const BEFORE_SX_HEIGHT: u16 = 1;
 
-        let mut bytes = std::fs::read(
-            "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
-        )
-        .expect("the fixture is checked in");
-        let tables = u16::from_be_bytes([bytes[4], bytes[5]]) as usize;
-        let record = (0..tables)
+        let record = (0..be16(bytes, 4))
             .map(|i| DIRECTORY + i * RECORD)
-            .find(|&record| &bytes[record..record + 4] == OS2)
-            .expect("Oswald has an OS/2 table");
-        let at = record + RECORD_OFFSET;
-        let table = u32::from_be_bytes(
-            bytes[at..at + 4].try_into().expect("four bytes"),
-        ) as usize;
-        bytes[table..table + 2]
-            .copy_from_slice(&BEFORE_SX_HEIGHT.to_be_bytes());
+            .find(|&record| &bytes[record..record + 4] == tag)
+            .expect("Oswald has the table");
+        be32(bytes, record + RECORD_OFFSET)
+    }
+
+    /// Oswald's bytes, to be altered.
+    fn oswald_bytes() -> Vec<u8> {
+        std::fs::read("tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf")
+            .expect("the fixture is checked in")
+    }
+
+    /// Relabels the `OS/2` table as version 1, which predates `sxHeight`:
+    /// the bytes of the field are still there, and nothing that reads the
+    /// version is allowed to look at them.
+    fn relabel_before_x_height(bytes: &mut [u8]) {
+        let table = table_at(bytes, b"OS/2");
+        bytes[table..table + 2].copy_from_slice(&1u16.to_be_bytes());
+    }
+
+    /// Zeroes `sxHeight`, an `int16` at byte 86 of `OS/2` by the OpenType
+    /// specification -- written out here rather than read from the constant
+    /// the code under test uses.
+    fn zero_sx_height(bytes: &mut [u8]) {
+        const SX_HEIGHT: usize = 86;
+        let table = table_at(bytes, b"OS/2");
+        bytes[table + SX_HEIGHT..table + SX_HEIGHT + 2].fill(0);
+    }
+
+    /// Maps `x` to no glyph in each of Oswald's `cmap` subtables.
+    ///
+    /// The layout is the OpenType specification's "cmap -- Character to Glyph
+    /// Index Mapping Table". The header is a version and a count of 8-byte
+    /// encoding records, each with its subtable's offset at byte 4. Format 4
+    /// keeps `segCountX2` at byte 6, then `endCode` from byte 14, a pad, and
+    /// `startCode`, `idDelta` and `idRangeOffset`, each `segCountX2` long. A
+    /// segment with a nonzero `idRangeOffset` reads its glyph that many bytes
+    /// past its own entry, two bytes per code point after `startCode`, and a
+    /// glyph of 0 there is the missing glyph.
+    fn unmap_x(bytes: &mut [u8]) {
+        const RECORDS: usize = 4;
+        const RECORD: usize = 8;
+        const SUBTABLE_OFFSET: usize = 4;
+        const FORMAT_4: usize = 4;
+        const SEG_COUNT_X2: usize = 6;
+        const END_CODES: usize = 14;
+        const PAD: usize = 2;
+
+        let x = 'x' as usize;
+        let cmap = table_at(bytes, b"cmap");
+        for record in
+            (0..be16(bytes, cmap + 2)).map(|i| cmap + RECORDS + i * RECORD)
+        {
+            let subtable = cmap + be32(bytes, record + SUBTABLE_OFFSET);
+            assert_eq!(
+                be16(bytes, subtable),
+                FORMAT_4,
+                "Oswald's are format 4"
+            );
+            let width = be16(bytes, subtable + SEG_COUNT_X2);
+            let ends = subtable + END_CODES;
+            let starts = ends + width + PAD;
+            let range_offsets = starts + 2 * width;
+            let segment = (0..width / 2)
+                .find(|&k| be16(bytes, ends + 2 * k) >= x)
+                .expect("a segment ends at or past x");
+            let start = be16(bytes, starts + 2 * segment);
+            assert!(start <= x, "and starts at or before it");
+            let entry = range_offsets + 2 * segment;
+            let range_offset = be16(bytes, entry);
+            assert_ne!(
+                range_offset, 0,
+                "x maps through the glyph array, so it can be zeroed in place"
+            );
+            let glyph = entry + range_offset + 2 * (x - start);
+            bytes[glyph..glyph + 2].fill(0);
+        }
+    }
+
+    /// A face from altered bytes.
+    fn face_of(bytes: &[u8]) -> Typeface {
         FontMgr::new()
-            .new_from_data(Data::new_copy(&bytes), None)
+            .new_from_data(Data::new_copy(bytes), None)
             .expect("still a font")
+    }
+
+    /// Oswald with its `OS/2` table relabelled as version 1.
+    fn oswald_without_an_x_height() -> Typeface {
+        let mut bytes = oswald_bytes();
+        relabel_before_x_height(&mut bytes);
+        face_of(&bytes)
+    }
+
+    /// Oswald stating an x-height or not, and with an `x` or not.
+    ///
+    /// Stating none is a version 1 `OS/2` table with the field's bytes zeroed
+    /// too, since CoreText reads them whatever the version says, and neither
+    /// backend should be left anything to find.
+    fn oswald(declares_x_height: bool, has_x: bool) -> Typeface {
+        let mut bytes = oswald_bytes();
+        if !declares_x_height {
+            relabel_before_x_height(&mut bytes);
+            zero_sx_height(&mut bytes);
+        }
+        if !has_x {
+            unmap_x(&mut bytes);
+        }
+        face_of(&bytes)
+    }
+
+    #[test]
+    fn a_face_with_neither_an_x_height_nor_an_x_has_half_an_em() {
+        // Oswald's sxHeight is 578/1000. Derived from the glyph instead, it
+        // comes back 0.5779 from FreeType and 0.582 from CoreText, whose
+        // figure includes the overshoot, so the band is wider there.
+        const SX_HEIGHT: f32 = 0.578;
+        for (declares, has_x, band) in
+            [(true, true, 1e-3), (true, false, 1e-3), (false, true, 5e-3)]
+        {
+            let ratio = x_height_ratio(oswald(declares, has_x));
+            assert!(
+                ratio.is_some_and(|ratio| (ratio - SX_HEIGHT).abs() < band),
+                "declared {declares}, x {has_x}: {ratio:?}"
+            );
+        }
+
+        // Skia answers 1.193em, the ascent, on FreeType for this face and
+        // 0.698em on CoreText, so a metric read as it comes is not `None`.
+        let neither = oswald(false, false);
+        assert_eq!(
+            neither.unichar_to_glyph('x' as i32),
+            0,
+            "the x is gone, or this asks nothing"
+        );
+        assert_eq!(x_height_ratio(neither.clone()), None);
+
+        // A version 1 table states nothing even with bytes where `sxHeight`
+        // would be, which CoreText reads anyway and finds 578 in.
+        let mut relabelled = oswald_bytes();
+        relabel_before_x_height(&mut relabelled);
+        unmap_x(&mut relabelled);
+        assert_eq!(x_height_ratio(face_of(&relabelled)), None);
+
+        // Nor does a current table whose `sxHeight` is zero.
+        let mut zeroed = oswald_bytes();
+        zero_sx_height(&mut zeroed);
+        unmap_x(&mut zeroed);
+        assert_eq!(x_height_ratio(face_of(&zeroed)), None);
+
+        // And what an `ex` resolves to through a font manager that has it.
+        let mut provider = TypefaceFontProvider::new();
+        provider.register_typeface(neither, Some("Oswald without x"));
+        let font_mgr: FontMgr = provider.into();
+        assert_eq!(
+            ex_ratio_for(Some("Oswald without x"), &font_mgr),
+            EX_PER_EM
+        );
     }
 
     #[test]
