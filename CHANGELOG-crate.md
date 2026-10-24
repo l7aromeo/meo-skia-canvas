@@ -246,6 +246,26 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `color(from ... srgb-linear ...)` too. Pinned per notation in
   `the_rust_surface_takes_css_colors`.
 
+- **A relative colour reads its origin as CSS means it.** A relative colour
+  takes its channels from its origin in its own space, and the parser
+  underneath kept one encoded value per colour and read it in two
+  directions on the same wrong curve. So an `rgb()`, `hsl()`, `hwb()` or
+  `color(from ... srgb ...)` over an origin outside sRGB built in linear
+  light read the wrong channel -- `rgb(from oklch(0.8 0.18 165) r g b)` on
+  a P3 canvas painted `4, 221, 164` where Chrome paints `91, 221, 165` --
+  and a linear-light function over an origin written in sRGB with a
+  negative channel read the mirror of that, `97` against `91`. An origin
+  in a space the parser does not read, such as
+  `rgb(from color(display-p3 ...) r g b)`, refused the whole colour. Every
+  `set_*_css` setter and `RgbaLinear::from_css` now resolve the origin with
+  the crate's own parser first, and every relative form measured agrees
+  with Chrome 153 byte for byte, `calc()` channels and nesting included.
+
+  Not yet right: `hsl()` and `hwb()` over an origin outside sRGB still
+  clamp it, so `hsl(from color(srgb 1.2 0.2 0.1) h s l)` paints
+  `235, 72, 47` on a P3 canvas where Chrome paints `255, 81, 54`. No sRGB
+  canvas shows it.
+
 - **`Font::parse` reads the font shorthand Chrome reads.** It took a size
   in `px` and nothing else, refusing `12pt`, `1em`, `150%`, `2rem`, the
   size keywords, `larger`, `calc()`, a line height written as a number or

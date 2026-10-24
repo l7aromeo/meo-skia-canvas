@@ -573,6 +573,34 @@ describe("Canvas", () => {
       }
     });
 
+    test("a relative colour reads its origin as CSS means it", () => {
+      // Measured in Chrome 153 on a P3 canvas. A relative colour reads its
+      // origin's channels in its own space: here an sRGB function over an
+      // origin built in linear light, a linear-light function over an origin
+      // written in sRGB with a negative channel, and an origin named in a
+      // space the colour parser underneath cannot read. Each is the colour
+      // above, so each reads `91, 221, 165`; red reads 4, 97 and black when
+      // the origin is not resolved first.
+      let wide = new Canvas(2, 2, { colorSpace: "display-p3" });
+      let wideCtx = wide.getContext("2d");
+      for (let css of [
+        "rgb(from oklch(0.8 0.18 165) r g b)",
+        "oklch(from color(srgb -0.202919 0.881504 0.628696) l c h)",
+        "rgb(from color(display-p3 0.357 0.866 0.647) r g b)",
+      ]) {
+        wideCtx.fillStyle = "#000";
+        wideCtx.fillStyle = css;
+        wideCtx.fillRect(0, 0, 2, 2);
+        assert.deepEqual(
+          Array.from(
+            wideCtx.getImageData(0, 0, 1, 1, { colorSpace: "display-p3" }).data,
+          ),
+          [91, 221, 165, 255],
+          css,
+        );
+      }
+    });
+
     test("the canvas composites in the space it was constructed with", () => {
       // A canvas's color space is fixed when it is made, and an export
       // converts out of it -- the way a browser's context does. It used to be
