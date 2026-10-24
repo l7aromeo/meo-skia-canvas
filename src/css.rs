@@ -26,7 +26,9 @@ use std::{borrow::Cow, cell::OnceCell};
 
 use skia_safe::{Font as SkFont, FontHinting, Typeface};
 
-pub(crate) use math::{Dimension, Expect, Quantity, evaluate, is_math};
+pub(crate) use math::{
+    Dimension, Expect, Percent, Quantity, evaluate, is_math,
+};
 
 use crate::{
     color::{RgbaLinear, skia_color_to_rgba_linear},
@@ -675,7 +677,7 @@ pub(crate) fn parse_filter(
                 true => Some(OMITTED_FILTER_AMOUNT),
                 false => math(
                     argument,
-                    true,
+                    Percent::Own,
                     units,
                     &[Dimension::NUMBER, Dimension::PERCENT],
                     0.0,
@@ -695,13 +697,17 @@ pub(crate) fn parse_filter(
             "blur" => FilterOp::Blur(
                 match omitted {
                     true => Some(0.0),
-                    false => {
-                        math(argument, false, units, &[Dimension::LENGTH], 0.0)
-                            .unwrap_or_else(|| {
-                                parse_size(argument, units)
-                                    .filter(|&radius| radius >= 0.0)
-                            })
-                    }
+                    false => math(
+                        argument,
+                        Percent::Refused,
+                        units,
+                        &[Dimension::LENGTH],
+                        0.0,
+                    )
+                    .unwrap_or_else(|| {
+                        parse_size(argument, units)
+                            .filter(|&radius| radius >= 0.0)
+                    }),
                 }
                 .ok_or_else(|| refuse(part))?,
             ),
@@ -710,7 +716,7 @@ pub(crate) fn parse_filter(
                     true => Some(0.0),
                     false => math(
                         argument,
-                        false,
+                        Percent::Refused,
                         units,
                         &[Dimension::ANGLE],
                         f32::MIN,
@@ -748,7 +754,7 @@ const OMITTED_FILTER_AMOUNT: f32 = 1.0;
 /// reading.
 fn math(
     argument: &str,
-    percent: bool,
+    percent: Percent,
     units: &FontUnits,
     dimensions: &[Dimension],
     low: f32,
@@ -811,7 +817,7 @@ fn drop_shadow(args: &str, units: &FontUnits) -> Option<FilterOp> {
     // radius below zero is clamped, where a written one is refused.
     let length = |word: &&str| match math(
         word,
-        false,
+        Percent::Refused,
         units,
         &[Dimension::LENGTH],
         f32::MIN,

@@ -38,10 +38,12 @@ use crate::{
         rgba_linear_to_unpremul_color4f, skia_color_to_rgba_linear,
         unpremul_color4f_to_rgba_linear,
     },
-    context::{Context2D as Inner, Dye, page::ExportOptions},
+    context::{
+        Context2D as Inner, Dye, initial_root_face, page::ExportOptions,
+    },
     css::{
-        FontUnits, ROOT_FONT_PX, parse_decoration, parse_filter, parse_number,
-        parse_size, split_number,
+        Dimension, Expect, FontUnits, Percent, ROOT_FONT_PX, evaluate, is_math,
+        parse_angle, parse_decoration, parse_filter, split_number,
     },
     error::Error,
     export::VectorFeatures,
@@ -492,19 +494,29 @@ impl Font {
     /// for one Chrome ignores.
     ///
     /// Before the size, in any order and each at most once: a style
-    /// (`italic`, `oblique`), `small-caps`, a weight (`normal`, `bold`,
-    /// `bolder`, `lighter`, or 1 to 1000), and a `font-stretch` keyword such
-    /// as `condensed`; `normal` fills any of them. Then the size -- any
-    /// absolute unit, `em` or `%` of the canvas's default 10px, `rem` of
-    /// 16px, a keyword from `xx-small` to `xxx-large`, `larger` or
-    /// `smaller`, or `calc()` -- optionally followed by `/` and a line
-    /// height, and a comma-separated family list, quoted or not. Keywords
+    /// (`italic`, or `oblique` with an optional angle from -90deg to 90deg),
+    /// `small-caps`, a weight (`normal`, `bold`, `bolder`, `lighter`, or 1 to
+    /// 1000), and a `font-stretch` keyword such as `condensed`; `normal`
+    /// fills any of them. Then the size -- any length unit, `em` and the other
+    /// font-relative units of the canvas's default 10px font in the `serif`
+    /// family, `%` of that 10px, `rem` of 16px, a keyword from `xx-small` to
+    /// `xxx-large`, `larger` or `smaller` -- optionally followed by `/` and a
+    /// line height, and a comma-separated family list, quoted or not. Keywords
     /// are case-insensitive; family names keep their case.
     ///
+    /// The size, the weight, the oblique angle and the line height may each
+    /// be a CSS math function -- `calc()`, `min()`, `clamp()` and the rest --
+    /// whose result is held where Chrome holds it: a size to 0 through
+    /// 10000px, a weight to 1 through 1000, an angle to -90deg through 90deg,
+    /// where written out, a negative size or an angle past 90deg is refused.
+    ///
     /// `small-caps` has no place on a [`Font`]; [`Context2D::set_font_css`]
-    /// applies it as [`FontVariantCaps::SmallCaps`]. A system font keyword
-    /// such as `caption` is refused, deliberately: what it means is the
-    /// platform's choice.
+    /// applies it as [`FontVariantCaps::SmallCaps`]. Nor has an `oblique`
+    /// angle: any angle but zero selects the family's italic, as
+    /// [`FontSlant::Oblique`] does, and only the default 14deg reads back as
+    /// `italic` from [`Context2D::font`], as Chrome reads it. A system font
+    /// keyword such as `caption` is refused, deliberately: what it means is
+    /// the platform's choice.
     ///
     /// ```
     /// use meo_skia_canvas::prelude::*;
@@ -585,6 +597,7 @@ impl Font {
             variant: variant.to_string(),
             canonical,
             serialized: self.serialized(small_caps),
+            oblique_degrees: None,
         }
     }
 
@@ -692,19 +705,86 @@ const LIGHTER_FROM_NORMAL: u16 = 100;
 struct FontShorthand {
     font: Font,
     small_caps: bool,
+    /// An `oblique` angle other than zero and the default 14deg, which a
+    /// [`Font`] has no field for: it selects the family's italic as
+    /// `oblique` does, but reads back with no style, as Chrome reads it.
+    oblique_degrees: Option<f32>,
 }
 
-/// A font size: a length, a percentage or `em` of the canvas default, a
-/// `rem`, a keyword, or a `calc()` of those. `None` for anything else and
-/// for a negative size, which the `font-size` property does not allow.
+/// The specification a Canvas `font` shorthand names, or `None` where Chrome
+/// would ignore the string -- for the Node binding, which hands `ctx.font`
+/// straight to this parser.
+pub(crate) fn font_spec_from_css(css: &str) -> Option<FontSpec> {
+    parse_font_shorthand(css)
+        .ok()
+        .map(|shorthand| shorthand.to_spec())
+}
+
+impl FontShorthand {
+    /// The specification the shorthand names, angle included.
+    fn to_spec(&self) -> FontSpec {
+        let mut spec = self.font.to_spec_with(self.small_caps);
+        if let Some(degrees) = self.oblique_degrees {
+            spec.oblique_degrees = Some(degrees);
+            // Another angle is another font, so the cache key says which.
+            spec.canonical = spec.canonical.replacen(
+                "oblique",
+                &format!("oblique {degrees}deg"),
+                1,
+            );
+            spec.serialized = spec
+                .serialized
+                .strip_prefix("italic ")
+                .unwrap_or(&spec.serialized)
+                .to_string();
+        }
+        spec
+    }
+}
+
+/// The largest font size Chrome lays out: `10001px Arial`, `20000px Arial`
+/// and `calc(1px * infinity) Arial` all read back as `10000px Arial` in
+/// Chrome 152, where a smaller size reads back as itself.
+const MAX_FONT_PX: f32 = 10_000.0;
+
+/// What a canvas font shorthand's relative lengths resolve against: its
+/// parent, which a canvas has none of, so the default font -- 10px, set in
+/// the standard family, `serif` -- with a 16px root in the same family.
+///
+/// Chrome 152 reads `1ex Oswald` as 4.4873px and `2ch Oswald` as 10px: the
+/// x-height and the zero of 10px Times, its standard font, and not of the
+/// family being named. `lh`, `rlh`, the viewport units and the container
+/// units read as zero, as they do in Chrome's worker canvas.
+fn parent_units() -> FontUnits<'static> {
+    FontUnits::new(CANVAS_DEFAULT_FONT_PX, initial_root_face)
+        .with_root(FontUnits::new(ROOT_FONT_PX, initial_root_face))
+}
+
+/// A font size: a length, a percentage of the parent, a keyword, or a math
+/// function of those. `None` for anything else and for a negative size
+/// written out, which the `font-size` property does not allow; a computed
+/// one is clamped to zero, and every size to [`MAX_FONT_PX`], as Chrome
+/// does.
 fn font_size(text: &str) -> Option<f32> {
     let lower = text.to_ascii_lowercase();
-    let size = if let Some(inner) = calc_body(&lower) {
-        match calc(inner)? {
-            (px, true) => px,
-            (_, false) => return None,
-        }
-    } else if let Some(&(_, px)) =
+    if is_math(&lower) {
+        let units = parent_units();
+        let expect = Expect {
+            percent: Percent::Of(f64::from(CANVAS_DEFAULT_FONT_PX)),
+            units: &units,
+        };
+        let quantity = evaluate(&lower, &expect)
+            .filter(|quantity| quantity.dimension == Dimension::LENGTH)?;
+        // Clamped rather than refused, an infinity included: the rule is
+        // Blink's `ClampToCSSLengthRange`, in `css_primitive_value.cc`,
+        // which pins a computed length into range before the font's own
+        // limit applies, and Chrome 152 reads `calc(1px * infinity)` back
+        // as `10000px`.
+        return Some(
+            quantity.finished().clamp(0.0, f64::from(MAX_FONT_PX)) as f32
+        );
+    }
+    let size = if let Some(&(_, px)) =
         ABSOLUTE_FONT_SIZES.iter().find(|(name, _)| *name == lower)
     {
         px
@@ -715,135 +795,62 @@ fn font_size(text: &str) -> Option<f32> {
             _ => font_length(&lower)?,
         }
     };
-    (size.is_finite() && size >= 0.0).then_some(size)
+    (size.is_finite() && size >= 0.0).then_some(size.min(MAX_FONT_PX))
 }
 
-/// One length in a font shorthand, in pixels: an absolute unit, or `em`,
-/// `rem` or `%`, which resolve against the canvas and root defaults.
+/// One length in a font shorthand, in pixels: an absolute unit, a
+/// font-relative one of [`parent_units`], a percentage of the parent's
+/// size, or a bare zero.
 fn font_length(text: &str) -> Option<f32> {
     let (value, unit) = split_number(text)?;
-    match unit {
-        "em" => Some(value * CANVAS_DEFAULT_FONT_PX),
-        "rem" => Some(value * ROOT_FONT_PX),
+    let unit = unit.to_ascii_lowercase();
+    match unit.as_str() {
         "%" => Some(value / 100.0 * CANVAS_DEFAULT_FONT_PX),
-        _ => parse_size(text, &FontUnits::assumed(f32::NAN))
-            .filter(|px| px.is_finite()),
+        "" => (value == 0.0).then_some(0.0),
+        _ => Some(value * parent_units().px_per(&unit)?),
     }
-}
-
-/// What is inside `calc(...)`, when `text` is one call to it and nothing
-/// else.
-fn calc_body(text: &str) -> Option<&str> {
-    let lower = text.get(..5)?;
-    (lower.eq_ignore_ascii_case("calc(")
-        && past_closing_paren(text)? == text.len())
-    .then(|| &text[5..text.len() - 1])
-}
-
-/// The byte offset just past the `)` that closes the first `(` in `text`,
-/// counting nested pairs, so `calc((1px + 2px) * 2)` ends at its last `)`.
-fn past_closing_paren(text: &str) -> Option<usize> {
-    let mut depth = 0usize;
-    for (at, c) in text.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(at + 1);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// A `calc()` body made of font lengths and numbers joined by `+`, `-`, `*`
-/// and `/`, with parentheses: its value, in pixels when it is a length, and
-/// whether it is one -- `calc(2)` is a number, which a size refuses and a
-/// line height takes as a multiplier. `None` when it does not parse.
-fn calc(text: &str) -> Option<(f32, bool)> {
-    // Each value carries whether it is a length, so `2px * 3` is a length
-    // and `2px * 3px` is refused, as CSS types them.
-    fn expression(tokens: &[&str], at: &mut usize) -> Option<(f32, bool)> {
-        let mut left = term(tokens, at)?;
-        while let Some(&op @ ("+" | "-")) = tokens.get(*at) {
-            *at += 1;
-            let right = term(tokens, at)?;
-            if left.1 != right.1 {
-                return None;
-            }
-            left.0 = if op == "+" {
-                left.0 + right.0
-            } else {
-                left.0 - right.0
-            };
-        }
-        Some(left)
-    }
-    fn term(tokens: &[&str], at: &mut usize) -> Option<(f32, bool)> {
-        let mut left = factor(tokens, at)?;
-        while let Some(&op @ ("*" | "/")) = tokens.get(*at) {
-            *at += 1;
-            let right = factor(tokens, at)?;
-            left = match (op, left.1, right.1) {
-                ("*", a, b) if !(a && b) => (left.0 * right.0, a || b),
-                ("/", a, false) => (left.0 / right.0, a),
-                _ => return None,
-            };
-        }
-        Some(left)
-    }
-    fn factor(tokens: &[&str], at: &mut usize) -> Option<(f32, bool)> {
-        let token = *tokens.get(*at)?;
-        *at += 1;
-        if token == "(" {
-            let inner = expression(tokens, at)?;
-            (tokens.get(*at) == Some(&")")).then(|| *at += 1)?;
-            return Some(inner);
-        }
-        match parse_number(token) {
-            Some(number) => Some((number, false)),
-            None => Some((font_length(token)?, true)),
-        }
-    }
-
-    let spaced = text.replace('(', " ( ").replace(')', " ) ");
-    let spaced = spaced.replace('*', " * ").replace('/', " / ");
-    let tokens: Vec<&str> = spaced.split_whitespace().collect();
-    let mut at = 0;
-    let value = expression(&tokens, &mut at)?;
-    (at == tokens.len()).then_some(value)
+    .filter(|px| px.is_finite())
 }
 
 /// A line height after the `/`, in pixels for a font of `size`: `normal` is
-/// none, a number or a percentage multiplies the size, and a length is
-/// itself, with `em` taken of the font's own size.
+/// none, a number or a percentage multiplies the size, a length is itself
+/// with `em` taken of the font's own size, and a math function of those.
+///
+/// The other font-relative units take the standard family's face at `size`
+/// rather than the family being named, which is not read until after the
+/// line height. Chrome does not expose a canvas font's line height and
+/// lays text out without it, so there is no measurement to hold that to.
 fn font_line_height(text: &str, size: f32) -> Option<Option<f32>> {
     let lower = text.to_ascii_lowercase();
     if lower == "normal" {
         return Some(None);
     }
-    let px = match calc_body(&lower) {
-        Some(inner) => match calc(inner)? {
-            (px, true) => px,
-            (multiple, false) => multiple * size,
-        },
-        None => line_height_px(&lower, size)?,
+    let units = FontUnits::new(size, initial_root_face)
+        .with_root(FontUnits::new(ROOT_FONT_PX, initial_root_face));
+    let px = match is_math(&lower) {
+        true => {
+            let expect = Expect {
+                percent: Percent::Of(f64::from(size)),
+                units: &units,
+            };
+            let quantity = evaluate(&lower, &expect)?;
+            let value = quantity.finished() as f32;
+            match quantity.dimension {
+                Dimension::LENGTH => value,
+                Dimension::NUMBER => value * size,
+                _ => return None,
+            }
+        }
+        false => {
+            let (value, unit) = split_number(&lower)?;
+            match unit {
+                "" => value * size,
+                "%" => value / 100.0 * size,
+                unit => value * units.px_per(unit)?,
+            }
+        }
     };
     (px.is_finite() && px >= 0.0).then_some(Some(px))
-}
-
-/// A line height that is not `normal` or `calc()`, in pixels.
-fn line_height_px(lower: &str, size: f32) -> Option<f32> {
-    let (value, unit) = split_number(lower)?;
-    match unit {
-        "" => Some(value * size),
-        "%" => Some(value / 100.0 * size),
-        "em" => Some(value * size),
-        _ => font_length(lower),
-    }
 }
 
 /// A family name list, each name quoted or written as identifiers, with
@@ -939,26 +946,101 @@ fn css_string(text: &str, quote: char) -> Option<(String, &str)> {
     None
 }
 
+/// The lightest and heaviest weights CSS Fonts 4 allows.
+const MIN_WEIGHT: u16 = 1;
+const MAX_WEIGHT: u16 = 1000;
+
 /// A weight written as a number: 1 to 1000, any CSS number, with the
-/// fraction dropped -- Chrome reads `550.7` as 550 and refuses `0.9`.
+/// fraction dropped -- Chrome reads `550.7` as 550 and refuses `0.9` -- or
+/// a math function of one, held to that range.
 fn font_weight(text: &str) -> Option<u16> {
+    if is_math(text) {
+        return computed_weight(text);
+    }
     let (weight, unit) = split_number(text)?;
-    (unit.is_empty() && (1.0..=1000.0).contains(&weight))
-        .then(|| weight.trunc() as u16)
+    (unit.is_empty()
+        && (f32::from(MIN_WEIGHT)..=f32::from(MAX_WEIGHT)).contains(&weight))
+    .then(|| weight.trunc() as u16)
 }
 
 /// Where the token opening `text` ends: at the first character `stop`
-/// accepts, or past the `)` closing a leading `calc(`, which may hold spaces
-/// and slashes of its own.
+/// accepts, or past the `)` closing a leading math function, which may hold
+/// spaces and slashes of its own.
 fn font_token_end(text: &str, stop: impl Fn(char) -> bool) -> usize {
-    match text
-        .get(..5)
-        .is_some_and(|head| head.eq_ignore_ascii_case("calc("))
-    {
+    match is_math(text) {
         true => past_closing_paren(text),
         false => text.find(stop),
     }
     .unwrap_or(text.len())
+}
+
+/// The byte offset just past the `)` that closes the first `(` in `text`,
+/// counting nested pairs, so `calc((1px + 2px) * 2)` ends at its last `)`.
+fn past_closing_paren(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (at, c) in text.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(at + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A weight written as a math function, held to 1 to 1000 as Chrome holds
+/// it: `calc(950 + 100)` reads back as 1000 and `sin(30deg)` as 1.
+fn computed_weight(text: &str) -> Option<u16> {
+    let units = parent_units();
+    let expect = Expect {
+        percent: Percent::Refused,
+        units: &units,
+    };
+    let quantity = evaluate(text, &expect)
+        .filter(|quantity| quantity.dimension == Dimension::NUMBER)?;
+    Some(
+        quantity
+            .finished()
+            .clamp(f64::from(MIN_WEIGHT), f64::from(MAX_WEIGHT)) as u16,
+    )
+}
+
+/// CSS Fonts 4's default oblique angle, what a bare `oblique` means. Chrome
+/// 152 reads `oblique 14deg` back as `italic`, and every other angle back
+/// with no style at all.
+const DEFAULT_OBLIQUE_DEGREES: f32 = 14.0;
+
+/// The largest oblique angle CSS Fonts 4 allows, either way. Chrome refuses
+/// `oblique 91deg` written out and clamps a computed one.
+const MAX_OBLIQUE_DEGREES: f32 = 90.0;
+
+/// An angle following `oblique`, in degrees: one with a unit, or a math
+/// function of one. `None` when `text` is neither, so it is read as the next
+/// token instead -- `oblique 14 16px Arial` is a weight of 14.
+fn oblique_angle(text: &str) -> Option<f32> {
+    if is_math(text) {
+        let units = parent_units();
+        let expect = Expect {
+            percent: Percent::Refused,
+            units: &units,
+        };
+        let quantity = evaluate(text, &expect)
+            .filter(|quantity| quantity.dimension == Dimension::ANGLE)?;
+        let limit = f64::from(MAX_OBLIQUE_DEGREES);
+        return Some(quantity.finished().clamp(-limit, limit) as f32);
+    }
+    // A unit, which `parse_angle` lets a zero go without and this does not:
+    // Chrome refuses `oblique 0 16px Arial`.
+    let (_, unit) = split_number(text)?;
+    if unit.is_empty() {
+        return None;
+    }
+    parse_angle(text)
 }
 
 /// The Canvas `font` shorthand as Chrome reads it. See [`Font::from_css`]
@@ -968,6 +1050,7 @@ fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
     let text = shorthand.trim();
     let mut font = Font::new(String::new(), 0.0);
     let mut small_caps = false;
+    let mut oblique_degrees = None;
     let (mut style, mut variant, mut weight, mut stretch) =
         (false, false, false, false);
     let mut prefix_tokens = 0;
@@ -992,12 +1075,42 @@ fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
         let lower = token.to_ascii_lowercase();
         let taken = match lower.as_str() {
             "normal" => true,
-            "italic" | "oblique" if !style => {
+            "italic" if !style => {
                 style = true;
-                font.slant = match lower.as_str() {
-                    "italic" => FontSlant::Italic,
-                    _ => FontSlant::Oblique,
-                };
+                font.slant = FontSlant::Italic;
+                true
+            }
+            "oblique" if !style => {
+                style = true;
+                font.slant = FontSlant::Oblique;
+                // An angle may follow. Written out it has to be within the
+                // range; computed it is clamped into it.
+                let next_end =
+                    font_token_end(after, |c| c.is_whitespace() || c == '/');
+                if let Some(degrees) = oblique_angle(&after[..next_end]) {
+                    if degrees.abs() > MAX_OBLIQUE_DEGREES {
+                        return Err(format!(
+                            "oblique angle out of range in {shorthand:?}"
+                        ));
+                    }
+                    // What each angle draws is Chrome's, not CSS Fonts 4's:
+                    // the standard shears a face with no oblique to the
+                    // angle asked for, and Chrome -- in a canvas and in CSS
+                    // alike, measured on both -- takes a family's italic
+                    // for any angle but zero and synthesises a slant only
+                    // from the default angle up. The standard's wording is
+                    // permissive ("may be synthesized"), and Chrome's two
+                    // paths agree, so this follows them;
+                    // docs/browser-differences.md records the choice.
+                    match degrees {
+                        0.0 => font.slant = FontSlant::Normal,
+                        DEFAULT_OBLIQUE_DEGREES => {}
+                        degrees => oblique_degrees = Some(degrees),
+                    }
+                    rest = after[next_end..].trim_start();
+                    prefix_tokens += 1;
+                    continue;
+                }
                 true
             }
             "small-caps" if !variant => {
@@ -1052,7 +1165,11 @@ fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
 
     font.families = font_families(rest)
         .ok_or_else(|| format!("no font family in {shorthand:?}"))?;
-    Ok(FontShorthand { font, small_caps })
+    Ok(FontShorthand {
+        font,
+        small_caps,
+        oblique_degrees,
+    })
 }
 
 /// The drawing surface of a [`Canvas`] page.
@@ -1491,13 +1608,12 @@ impl Context2D {
     /// assert_eq!(ctx.font(), "italic 300 small-caps 16px Arial");
     /// ```
     pub fn set_font_css(&mut self, css: &str) -> bool {
-        let Ok(FontShorthand { font, small_caps }) = parse_font_shorthand(css)
-        else {
+        let Ok(shorthand) = parse_font_shorthand(css) else {
             return false;
         };
         // The spec carries the stretch and the caps features, and applying
         // it replaces both, which is the reset Chrome's setter performs.
-        self.inner.set_font_spec(font.to_spec_with(small_caps));
+        self.inner.set_font_spec(shorthand.to_spec());
         true
     }
 

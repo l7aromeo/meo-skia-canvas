@@ -748,7 +748,6 @@ describe("The JavaScript/Rust boundary", () => {
       "drawCanvas()": "wants its source as a picture, not as pixels",
       "drawParagraph()": "a Paragraph, and no slot resolves one",
       "currentTransform =": "a matrix object",
-      "font =": "a parsed object; and the crossing is not its cost",
       "letterSpacing =": "a parsed object",
       "wordSpacing =": "a parsed object",
       "fontVariant =": "a parsed object",
@@ -759,6 +758,7 @@ describe("The JavaScript/Rust boundary", () => {
       "imageFilter =": "a boxed handle no slot resolves",
       "maskFilter =": "a boxed handle no slot resolves",
       // Could be recorded, and is not.
+      "font =": "a string the binding resolves; the crossing is not its cost",
       "filter =": "a string the binding parses, not yet a verb",
       "lineDashMarker =": "a Path2D or null, and a slot cannot hold the null",
       "d =": "a whole path replaced, which a drawing does once if at all",

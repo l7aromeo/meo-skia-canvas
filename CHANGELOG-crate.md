@@ -263,6 +263,20 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `tests/assets/cases/css-math.json`, which the JavaScript `ctx.filter` is
   held to as well.
 
+- **`Font::from_css`, `Font::parse` and `set_font_css` take the CSS math
+  functions, the font-relative units and an `oblique` angle**, as Chrome
+  152's `ctx.font` does. The size, the weight and the line height may be
+  any math function, with a percentage of the size taken of the 10px
+  parent, and a computed value held where Chrome holds it: a size to 0
+  through 10000px, a weight to 1 through 1000. `ex`, `ch`, `cap` and `ic`
+  in a size are those of 10px `serif`, and `rem` and the other root forms
+  of 16px. An `oblique` angle from -90deg to 90deg is taken, and any angle
+  but zero is `FontSlant::Oblique`, which selects the family's italic as in
+  Chrome; only the default 14deg reads back as `italic` from `font()`. A
+  family with no italic face draws upright for now, where Chrome
+  synthesises a slant from 14deg up. A size written above 10000px is now
+  10000px, as Chrome reads it.
+
 - **Every CSS length unit in `set_filter_css`, `set_letter_spacing_css`,
   `set_word_spacing_css` and a `set_text_decoration_css` thickness.** `ex`,
   `ch`, `cap` and `ic` are measured on the face the context font resolves to

@@ -985,6 +985,12 @@ impl FontLibrary {
         self.resolved_fonts.get(canonical)
     }
 
+    /// Remembers `font` under another name than its canonical one: the
+    /// string a caller set it with.
+    pub fn remember(&mut self, name: String, font: ResolvedFont) {
+        self.resolved_fonts.insert(name, font);
+    }
+
     /// Matches `spec` against the library, and remembers the answer.
     ///
     /// `None` where no family in the specification names a font this library

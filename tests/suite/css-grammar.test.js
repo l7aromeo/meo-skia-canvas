@@ -8,7 +8,6 @@
 
 const { assert, describe, test } = require("../runner"),
   { Canvas, DOMMatrix, FontLibrary } = require("../../lib"),
-  css = require("../../lib/classes/css"),
   filters = require("../assets/cases/css-filters.json"),
   fonts = require("../assets/cases/css-fonts.json"),
   math = require("../assets/cases/css-math.json"),
@@ -81,57 +80,6 @@ describe("CSS font shorthands", () => {
       if (got !== want)
         wrong.push(
           `${JSON.stringify(css)}: ${got}; Chrome ${font === undefined ? "ignores it" : want}`,
-        );
-    }
-    assert.deepEqual(wrong, []);
-  });
-
-  // What the addon is handed, against Chrome's answer taken apart: the parts
-  // the getters do not show, the line height and the caps features among
-  // them.
-  test("the parsed font matches the table's parts", () => {
-    // Chrome reports a size to six significant digits, `2cm` as `75.5906px`.
-    const SIZE_TOLERANCE = 1e-5;
-
-    const wrong = [];
-    for (const { css: text, parts } of fonts.cases) {
-      const spec = css.font(text);
-      if (!parts) {
-        if (spec)
-          wrong.push(`${JSON.stringify(text)}: read, Chrome ignores it`);
-        continue;
-      }
-      if (!spec) {
-        wrong.push(`${JSON.stringify(text)}: refused`);
-        continue;
-      }
-      const got = {
-          size: spec.size,
-          weight: spec.weight,
-          italic: spec.style != "normal",
-          families: spec.family,
-          features: spec.features.on ?? [],
-          stretch: spec.stretch,
-          lineHeight: spec.lineHeight ?? null,
-        },
-        want = {
-          size: parts.size,
-          weight: parts.weight,
-          italic: parts.style == "italic",
-          families: parts.families,
-          // CSS Fonts 4 section 6.7: `small-caps` is `smcp`, and nothing else.
-          features: parts.variantCaps == "small-caps" ? ["smcp"] : [],
-          stretch: parts.stretch,
-          lineHeight: "lineHeight" in parts ? parts.lineHeight : got.lineHeight,
-        };
-      const agrees =
-        Math.abs(got.size - want.size) <=
-          SIZE_TOLERANCE * Math.max(1, want.size) &&
-        JSON.stringify({ ...got, size: 0 }) ==
-          JSON.stringify({ ...want, size: 0 });
-      if (!agrees)
-        wrong.push(
-          `${JSON.stringify(text)}: ${JSON.stringify(got)}, Chrome ${JSON.stringify(want)}`,
         );
     }
     assert.deepEqual(wrong, []);

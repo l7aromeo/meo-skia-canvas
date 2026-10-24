@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use super::{BoxedContext2D, Context2D, Dye, page::ExportOptions};
 use crate::{
     color_filter::BoxedColorFilter,
+    context2d::font_spec_from_css,
     css::parse_filter,
     export::VectorFeatures,
     filter::FilterOp,
@@ -25,9 +26,9 @@ use crate::{
         path::{Path2D, conic_or_line},
     },
     typography::{
-        decoration_arg, font_arg, font_features, from_text_align,
-        from_text_baseline, from_width, js_text_metrics, opt_spacing_arg,
-        to_text_align, to_text_baseline, to_width,
+        decoration_arg, font_features, from_text_align, from_text_baseline,
+        from_width, js_text_metrics, opt_spacing_arg, to_text_align,
+        to_text_baseline, to_width,
     },
     utils::*,
 };
@@ -1590,27 +1591,22 @@ pub fn get_font(mut cx: FunctionContext) -> JsResult<JsString> {
 
 pub fn set_font(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
+    let css = cx.argument::<JsString>(1)?.value(&mut cx);
 
-    // The canonical string arrives on its own, ahead of the object it was
-    // taken from, because it is the whole of the fast path: it names the
-    // specification uniquely, so the object behind it only has to be read
-    // the first time that name is seen. Reading it costs over a microsecond
-    // -- ten keyed property lookups at roughly a hundred nanoseconds each,
-    // then a typeface lookup -- where the CSS parse that produced it,
-    // memoized on the JavaScript side, costs five nanoseconds.
-    let font = match opt_string_arg(&mut cx, 1)
-        .and_then(|name| FontLibrary::with_shared(|lib| lib.resolved(&name)))
-    {
-        Some(font) => Some(font),
-        // Either the first time this font was named, or the string was not
-        // one -- `null` for a specification JavaScript could not parse,
-        // which reads the object at index 2 and finds nothing there either.
-        None => match font_arg(&mut cx, 2)? {
-            Some(spec) => FontLibrary::with_shared(|lib| lib.resolve(spec)),
-            None => None,
-        },
-    };
-
+    // Read by the crate's own shorthand parser, so the two surfaces take one
+    // grammar from one implementation, and remembered under the string as
+    // given: a drawing loop sets the same few strings over and over, and a
+    // hit is one lookup. A string that does not parse, or names no family
+    // the library has, leaves the font alone, as the Canvas API says.
+    let font =
+        FontLibrary::with_shared(|lib| lib.resolved(&css)).or_else(|| {
+            let spec = font_spec_from_css(&css)?;
+            FontLibrary::with_shared(|lib| {
+                let font = lib.resolve(spec)?;
+                lib.remember(css, font.clone());
+                Some(font)
+            })
+        });
     if let Some(font) = font {
         this.borrow_mut().set_font(&font);
     }
