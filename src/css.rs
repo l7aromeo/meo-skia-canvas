@@ -24,7 +24,7 @@ mod math;
 
 use std::{borrow::Cow, cell::OnceCell};
 
-use skia_safe::{Font as SkFont, Typeface};
+use skia_safe::{Font as SkFont, FontHinting, Typeface};
 
 pub(crate) use math::{Dimension, Expect, Quantity, evaluate, is_math};
 
@@ -213,7 +213,12 @@ impl FaceRatios {
     /// `ch` the 517/1000 advance of its `0`, and `cap` its 810/1000
     /// capHeight, each exactly.
     fn of(typeface: Typeface) -> Self {
-        let font = SkFont::from_typeface(typeface.clone(), MEASURE_SIZE);
+        let mut font = SkFont::from_typeface(typeface.clone(), MEASURE_SIZE);
+        // Unhinted, because a hinted advance is snapped to the pixel grid at
+        // the size it is measured at. FreeType does that and CoreText does
+        // not: with Skia's default hinting, Oswald's `0` measures 52 at
+        // 100px on Linux, `1ch` 0.52em, where its advance is 517/1000.
+        font.set_hinting(FontHinting::None);
         let advance = |glyph: char| {
             let id = font.unichar_to_glyph(glyph as i32);
             (id != 0).then(|| {
