@@ -95,7 +95,7 @@ export function slug(text) {
 export function anchors(text) {
   const out = new Set(),
     seen = new Map(),
-    lines = withoutCodeKeepingHeadings(text).split("\n");
+    lines = withoutCodeKeepingHeadings(withoutFrontMatter(text)).split("\n");
   const add = (base) => {
     const n = seen.get(base) ?? 0;
     seen.set(base, n + 1);
@@ -119,6 +119,18 @@ export function anchors(text) {
   for (const m of text.matchAll(/\b(?:id|name)\s*=\s*"([^"]+)"/g))
     out.add(m[1]);
   return out;
+}
+
+// A front-matter block -- `---` on the first line, closed by the next `---` --
+// renders on GitHub as a table, not as Markdown, so its closing `---` must not
+// underline the line above it into a setext heading. Blanked, not removed, so
+// line numbers stay true.
+function withoutFrontMatter(text) {
+  const lines = text.split("\n");
+  if (lines[0]?.trimEnd() !== "---") return text;
+  const end = lines.findIndex((line, i) => i > 0 && line.trimEnd() === "---");
+  if (end < 0) return text;
+  return lines.map((line, i) => (i <= end ? "" : line)).join("\n");
 }
 
 // Headings are read from the text with code removed, but a heading's own code
@@ -308,6 +320,35 @@ Under
       ],
       1,
       "#nowhere",
+    ],
+    // GitHub renders a leading front-matter block as a table, so its closing
+    // `---` does not make the line above it a setext heading.
+    [
+      "front matter is not a heading",
+      [
+        ["a.md", "[b](b.md#description-the-api)"],
+        ["b.md", "---\ndescription: The API\n---\n\n# Real\n"],
+      ],
+      1,
+      "#description-the-api",
+    ],
+    [
+      "a heading after front matter is still an anchor",
+      [
+        ["a.md", "[b](b.md#real)"],
+        ["b.md", "---\ndescription: The API\n---\n\n# Real\n"],
+      ],
+      0,
+    ],
+    // Only a block on the first line is front matter; the same lines further
+    // down are a setext heading.
+    [
+      "a setext heading further down is not front matter",
+      [
+        ["a.md", "[b](b.md#description-the-api)"],
+        ["b.md", "# T\n\n---\ndescription: The API\n---\n"],
+      ],
+      0,
     ],
     [
       "an anchor in the same file is checked",
