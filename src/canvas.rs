@@ -766,6 +766,20 @@ impl Canvas {
     /// Without braces it is one file: every page of a format that gathers
     /// them, and the current page of the rest.
     ///
+    /// An `@` and a whole number before an `x` at the end of the name's stem
+    /// is a density, as in JavaScript: `"chart@2x.png"` writes at
+    /// [`EncodeOptions::density`] 2, and `"frame-{}@2x.png"` writes every
+    /// page at it. Only when the options leave the density at its default of
+    /// 1 -- a density they name wins. `@1.5x` is not a suffix, and neither is
+    /// one with more of the name after it, as in `"a@2x-b.png"`. The stem is
+    /// the name less its own extension whatever the format, so
+    /// [`Canvas::to_file_as`] reads `"chart@2x.dat"` as 2x too.
+    ///
+    /// One difference from JavaScript: there, an explicit `{ density: 1 }`
+    /// wins over the suffix, and here it cannot, because
+    /// [`EncodeOptions::density`] has no unset state to tell the default from
+    /// a 1 the caller wrote.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Encode`] when the extension names no known format,
@@ -812,8 +826,9 @@ impl Canvas {
     ///
     /// # Errors
     ///
-    /// As [`Canvas::to_file`], and [`Error::Encode`] for an
-    /// [`EncodeOptions::page`] past the last page.
+    /// As [`Canvas::to_file`], [`Error::Encode`] for an
+    /// [`EncodeOptions::page`] past the last page, and
+    /// [`Error::InvalidExportOption`] naming `density` for an `@0x` suffix.
     pub fn to_file_as(
         &mut self,
         path: impl AsRef<Path>,
@@ -821,6 +836,32 @@ impl Canvas {
         options: &EncodeOptions,
     ) -> Result<(), Error> {
         let path = path.as_ref();
+        let suffixed;
+        let options = match density_suffix(path) {
+            Some(digits)
+                if options.density == EncodeOptions::default().density =>
+            {
+                let density = digits
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|&density| density > 0)
+                    .ok_or_else(|| Error::InvalidExportOption {
+                        option: "density",
+                        reason: format!(
+                            "the file name's @{digits}x asks for a density \
+                             of {digits}; it must be a whole number from 1 \
+                             to {}",
+                            u32::MAX
+                        ),
+                    })?;
+                suffixed = EncodeOptions {
+                    density: density as f32,
+                    ..options.clone()
+                };
+                &suffixed
+            }
+            _ => options,
+        };
         let Some((pattern, digits)) = path.to_str().and_then(folio_pattern)
         else {
             return self.prepare_export(format, options)?.write(path);
@@ -846,6 +887,18 @@ impl Canvas {
         self.prepare_pages(format, &options, true)?
             .write_each(&pattern, digits)
     }
+}
+
+/// The digits of an `@2x` density suffix ending `path`'s stem -- the name
+/// without its last extension, or the whole name when it has none -- or
+/// `None` when the stem does not end in one. Case-insensitive in the `x`, as
+/// JavaScript's `/@(\d+)x$/i` is.
+fn density_suffix(path: &Path) -> Option<&str> {
+    let stem = path.file_stem()?.to_str()?;
+    let body = stem.strip_suffix(['x', 'X'])?;
+    let digits = &body[body.rfind('@')? + 1..];
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then_some(digits)
 }
 
 /// A file name with every `{}` or `{N}` in it rewritten as `{}`, and the

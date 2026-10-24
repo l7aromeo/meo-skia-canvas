@@ -2721,3 +2721,73 @@ describe("alphaType on a readback", () => {
     );
   });
 });
+
+describe("a density suffix in a file name", () => {
+  // A 10x4 page and a 6x4 one; `toFile` writes the current, 6x4, unless the
+  // name asks for every page. The crate's `to_file` reads the same rows in
+  // tests/to_file_density_suffix.rs.
+  const twoPages = () => {
+    const canvas = new Canvas(10, 4);
+    canvas.getContext("2d").fillRect(0, 0, 1, 1);
+    canvas.newPage(6, 4);
+    return canvas;
+  };
+  const written = (name, options) => {
+    const dir = tmp.dirSync().name;
+    twoPages().toFileSync(path.join(dir, name), options);
+    return fs
+      .readdirSync(dir)
+      .sort()
+      .map((file) => {
+        const image = new Image();
+        image.src = fs.readFileSync(path.join(dir, file));
+        return `${file} ${image.width}x${image.height}`;
+      });
+  };
+
+  test("a whole number ending the stem is the density", () => {
+    assert.deepEqual(written("a@2x.png"), ["a@2x.png 12x8"]);
+    assert.deepEqual(written("a@3X.png"), ["a@3X.png 18x12"]);
+    assert.deepEqual(written("a@02x.png"), ["a@02x.png 12x8"]);
+    assert.deepEqual(written("f-{}@2x.png"), [
+      "f-1@2x.png 20x8",
+      "f-2@2x.png 12x8",
+    ]);
+  });
+
+  test("anything else is part of the name", () => {
+    assert.deepEqual(written("a@1.5x.png"), ["a@1.5x.png 6x4"]);
+    assert.deepEqual(written("a@2x-b.png"), ["a@2x-b.png 6x4"]);
+    assert.deepEqual(written("f@2x-{}.png"), [
+      "f@2x-1.png 10x4",
+      "f@2x-2.png 6x4",
+    ]);
+  });
+
+  test("a density the options give wins", () => {
+    assert.deepEqual(written("a@2x.png", { density: 3 }), ["a@2x.png 18x12"]);
+    assert.deepEqual(written("a@2x.png", { density: 1.5 }), ["a@2x.png 9x6"]);
+  });
+
+  test("the stem is the name less its extension, whatever the format", () => {
+    // Naming the format the extension already gives used to switch the
+    // suffix off, and a name ending in the format's letters switched it on:
+    // the format's name was stripped from the end rather than the extension.
+    assert.deepEqual(written("f@2x", { format: "png" }), ["f@2x 12x8"]);
+    assert.deepEqual(written("f@2x.png", { format: "png" }), ["f@2x.png 12x8"]);
+    assert.deepEqual(written("f@2x.dat", { format: "png" }), ["f@2x.dat 12x8"]);
+    assert.deepEqual(written("f@2x.png", { format: "jpg" }), ["f@2x.png 12x8"]);
+    assert.deepEqual(written("f@2xjpg", { format: "jpg" }), ["f@2xjpg 6x4"]);
+  });
+
+  test("a zero is refused as a zero density option is", () => {
+    const dir = tmp.dirSync().name;
+    assert.throws(
+      () => twoPages().toFileSync(path.join(dir, "a@0x.png")),
+      (error) =>
+        error instanceof TypeError &&
+        error.message == "Expected a positive number for `density`",
+    );
+    assert.deepEqual(fs.readdirSync(dir), [], "nothing written");
+  });
+});

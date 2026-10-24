@@ -425,6 +425,21 @@ window be changed after it opens.** No signature moves and nothing is removed.
   called `frame-{}.png` holding the current page; it now produces one file
   per page. A name meant literally has to avoid the two spellings.
 
+- **An `@2x` at the end of a file name's stem sets the density, as
+  JavaScript's `toFile` reads it.** `to_file("chart@2x.png", ..)` writes a
+  2x image, `"frame-{}@2x.png"` writes every page at 2x, and `to_file_as`
+  reads it from a name with no extension, as in `"chart@2x"`. A whole number
+  only, ending the stem: `@1.5x` and `"a@2x-b.png"` are part of the name. It
+  applies only while `EncodeOptions::density` is at its default of 1, so a
+  density the options name wins, as in JavaScript -- where, unlike here, an
+  explicit `1` also wins, since the crate cannot tell it from the default.
+  `@0x` is refused as `Error::InvalidExportOption` naming `density`.
+
+  **A file name already ending in `@` and digits and `x` before its
+  extension now writes at that density.** `to_file("icon@2x.png", ..)` wrote
+  the page at 1x under that name and now writes it at 2x; `"icon@0x.png"`
+  wrote it and is now refused.
+
 - **`color(xyz ...)`, `color(xyz-d50 ...)` and `color(xyz-d65 ...)` are
   accepted**, beside the `srgb`, `srgb-linear`, `display-p3` and `rec2020`
   forms already taken. `xyz` and `xyz-d65` name one space, as CSS Color 4

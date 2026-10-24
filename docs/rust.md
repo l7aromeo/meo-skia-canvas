@@ -161,7 +161,7 @@ A canvas holds one or more pages, and each page is a recording materialised at e
 
 ## Exports
 
-`to_buffer(format, &options)` returns the encoded bytes, `to_file(path, &options)` writes them with the format taken from the path's extension -- an unrecognized or absent one is an error rather than a silent PNG, and `to_file_as(path, format, &options)` names the format instead; a path carrying `{}` or `{N}` writes one numbered file per page, as JavaScript's `toFile` does -- and `to_data_url(format, &options)` returns the same bytes base64-encoded behind their media type, ready for an `<img src>` or a CSS `url()`. Base64 costs a third more bytes than the buffer it wraps.
+`to_buffer(format, &options)` returns the encoded bytes, `to_file(path, &options)` writes them with the format taken from the path's extension -- an unrecognized or absent one is an error rather than a silent PNG, and `to_file_as(path, format, &options)` names the format instead; a path carrying `{}` or `{N}` writes one numbered file per page, as JavaScript's `toFile` does, and an `@2x` ending the name's stem sets the density unless the options set one -- and `to_data_url(format, &options)` returns the same bytes base64-encoded behind their media type, ready for an `<img src>` or a CSS `url()`. Base64 costs a third more bytes than the buffer it wraps.
 
 A format that spans pages emits all of them as one file: PDF, TIFF, ICO and the three animated formats. The rest encode the page `Canvas::context` currently hands back, unless `EncodeOptions::page` names another.
 
