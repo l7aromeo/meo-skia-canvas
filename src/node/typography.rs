@@ -1279,9 +1279,6 @@ pub struct FontSpec {
     /// initial values and the line height left out, as the Canvas API
     /// requires. Never a cache key -- two line heights serialize alike.
     pub serialized: String,
-    /// The angle of an `oblique` other than zero and the default 14deg, for
-    /// the drawing to decide on, or `None`.
-    pub oblique_degrees: Option<f32>,
 }
 
 impl FontSpec {

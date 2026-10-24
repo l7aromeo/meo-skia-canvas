@@ -759,12 +759,14 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   7px -- and a computed value held where Chrome holds it: a size to 0
   through 10000px, a weight to 1 through 1000. `ex`, `ch`, `cap` and `ic`
   in a size are those of 10px `serif`, Chrome's standard family, and `rem`
-  and the other root forms of 16px. `oblique 10deg` and any other angle from
-  -90deg to 90deg is taken: any angle but zero selects the family's italic,
-  as in Chrome, and only the default 14deg reads back as `italic`. A family
-  with no italic face draws upright for now, where Chrome synthesises a
-  slant from 14deg up. A size above 10000px, which was taken as written, is
-  now 10000px. 113 shorthands measured in Chrome join
+  and the other root forms of 16px. An `oblique` angle from -90deg to 90deg
+  is taken: one of 14deg or more draws the family's italic or oblique face,
+  or a synthesised slant where it has neither, and one below 14deg or
+  negative draws upright, as Chrome draws a font loaded as a `FontFace`.
+  Every family follows that rule, though Chrome draws a system family by
+  its platform's own -- docs/browser-differences.md has them. Only the
+  default 14deg reads back as `italic`. A size above 10000px, which was
+  taken as written, is now 10000px. 113 shorthands measured in Chrome join
   `tests/assets/cases/css-fonts.json`, and the JavaScript tests that held
   the old parser to its own internals are rows there instead.
 
