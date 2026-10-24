@@ -32,6 +32,21 @@ window be changed after it opens.** No signature moves and nothing is removed.
   to `csscolorparser`, up to 2.2e-3 away. `LAB(79.18% -50% 30)` painted
   red 5 where Chrome 153 and the lower-case spelling paint 4.
 
+- **A read after an export returns the page, not the page drawn twice.**
+  Any raster export files the page it drew in the page cache, and the next
+  `get_image_data` that composited the whole page drew that cached bitmap
+  onto its surface again each time, on top of what was there. A
+  half-alpha fill over a 300-pixel canvas read back with an alpha of 128
+  once, then 192, then 224 after a second export; opaque content hid it.
+  A read that fits one 256-pixel square is served by the tile grid, which
+  never consults the cache, so only a larger read showed it. Every release
+  with `get_image_data`, from 0.4.0, carries it. Exports themselves were
+  right throughout.
+
+  The same surface left its density scale applied after each update, so
+  a second read at `density: 2` drew whatever was new at four times the
+  size.
+
 - **`Context2D::filter()` reports a chain set through `set_filter_css`
   exactly as it was written**, as Chrome and the JavaScript `filter` getter
   do. Surrounding whitespace was trimmed and `"NONE"` or `" none "` read back

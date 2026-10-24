@@ -1630,22 +1630,37 @@ impl RecordingSurface {
             let (cache_image, cache_depth) =
                 PageCache::get(page.id, opts, page.depth());
 
-            if let Some(image) = cache_image {
-                // use the cached bitmap as the background (if present)
-                canvas.draw_image(image, (0, 0), None);
-                self.depth = cache_depth;
-            } else if self.depth == 0 {
-                // otherwise, fill the canvas if requested
-                canvas.clear(self.matte.unwrap_or(Color::TRANSPARENT));
+            match cache_image {
+                // A cached bitmap replaces what the surface holds: it is the
+                // page as it stood at its depth, background included. Drawn
+                // over a surface that already had it, or part of it, a
+                // translucent fill composited twice -- half alpha read back
+                // as three quarters after an export. The clear is what makes
+                // that right; the depth test only skips the redraw when the
+                // surface is as far on as the cache already.
+                Some(image) if cache_depth > self.depth => {
+                    canvas.clear(Color::TRANSPARENT);
+                    canvas.draw_image(image, (0, 0), None);
+                    self.depth = cache_depth;
+                }
+                // Nothing on the surface yet, and no cache to start from.
+                _ if self.depth == 0 => {
+                    canvas.clear(self.matte.unwrap_or(Color::TRANSPARENT));
+                }
+                // The surface is as far on as the cache or further.
+                _ => {}
             }
 
-            // only add new layers to surface
+            // Draw only the layers the surface has not seen, at the read's
+            // density. Inside a save, since the scale is the canvas's own
+            // state: left on it, every later update multiplied it again, and
+            // a page read twice at density two drew its new layers at four.
+            canvas.save();
             canvas.scale((self.density, self.density));
-
-            // draw newly added layers
             for pict in page.layers.iter().skip(self.depth) {
                 pict.playback(canvas);
             }
+            canvas.restore();
             self.depth = page.layers.len();
         }
 
