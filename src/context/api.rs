@@ -26,9 +26,9 @@ use crate::{
         path::{Path2D, conic_or_line},
     },
     typography::{
-        font_features, from_text_align, from_text_baseline, from_width,
-        js_text_metrics, opt_spacing_arg, to_text_align, to_text_baseline,
-        to_width,
+        PendingInk, font_features, from_text_align, from_text_baseline,
+        from_width, js_text_ink, js_text_metrics, opt_spacing_arg,
+        to_text_align, to_text_baseline, to_width,
     },
     utils::*,
 };
@@ -1563,8 +1563,27 @@ pub fn measureText(mut cx: FunctionContext) -> JsResult<JsValue> {
     let this = this.borrow();
     let text = string_arg(&mut cx, 1, "text")?;
     let width = opt_float_arg(&mut cx, 2);
-    let extents = this.measure_text_extents(&text, width);
-    Ok(js_text_metrics(&mut cx, &extents)?.upcast())
+    let (extents, pending) = this.measure_text_lazily(&text, width);
+    let values = js_text_metrics(&mut cx, &extents)?;
+    let pending = cx.boxed(pending);
+    let pair = JsArray::new(&mut cx, 2);
+    pair.set(&mut cx, 0u32, values)?;
+    pair.set(&mut cx, 1u32, pending)?;
+    Ok(pair.upcast())
+}
+
+/// The ink of a measurement `measureText` left pending, once.
+///
+/// A second call on the same measurement is a `TypeError`: JavaScript keeps
+/// what the first returned, so reaching here twice means it did not.
+pub fn measureTextInk(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let pending = cx.argument::<JsBox<PendingInk>>(0)?;
+    let Some((ink, line_details)) = pending.ink() else {
+        // Rule 5: the argument is a measurement already spent, not one
+        // whose ink is still to be worked out.
+        return cx.throw_type_error("this measurement's ink was already read");
+    };
+    Ok(js_text_ink(&mut cx, &ink, &line_details)?.upcast())
 }
 
 pub fn outlineText(mut cx: FunctionContext) -> JsResult<JsValue> {

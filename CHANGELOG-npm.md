@@ -225,6 +225,38 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   before and as in Chrome, and a face that is itself italic or oblique is
   not skewed a second time.
 
+- **A variable font with an optical-size axis is drawn in the design for
+  its font size, as in Chrome.** Nothing set `opsz`, so such a font drew
+  whatever its platform picked: its default instance on Linux, and on macOS
+  the design CoreText picks for its own 12pt default. Chrome sets `opsz` to
+  the CSS font size, clamped to the axis, and so does this now, for
+  `ctx.font` and for each style in a `ParagraphBuilder`: `Hamburgefonstiv`
+  in Amstelvar measures 352.22 at 48px, as in Chrome 152, where it measured
+  402.88 on macOS, and 100.72 at 12px where it measured 97.42 on Linux. The
+  size is the CSS one, not the size on the device, so 24px under
+  `scale(2)` is the 24px design drawn twice as large. An `opsz` named in
+  `fontVariationSettings`, or in a `ParagraphBuilder`'s `fontVariations`,
+  still wins.
+
+  A canvas that is never cleared keeps the typeface every text draw it
+  recorded was laid out in, for export, so drawing a face with an `opsz`
+  axis at many sizes holds one instance per distinct size, about 36 KB
+  each, until a `clearRect` covering the canvas, `reset()` or an opaque
+  fill of the whole canvas releases them. Fonts without an `opsz` axis are
+  unaffected.
+
+- **A style pushed onto a `ParagraphBuilder` is instanced at its own
+  `fontVariations`.** `pushStyle` accepted the key and read nothing from
+  it, so every span drew at the paragraph's axes: a span asking for
+  `"wght" 700` under a paragraph at `"wdth" 50` drew narrow, 179.09 wide
+  for `Hamburgefonstiv` in Amstelvar at 48px where `"wght" 700` alone
+  measures 411.68. A span's list now replaces the paragraph's, as a nested
+  `font-variation-settings` does in CSS and as the crate's
+  `ParagraphBuilder::push_style` already did, and a span without one keeps
+  the paragraph's. A span's weight and stretch now reach `wght` and `wdth`
+  as they do for the paragraph, where they matched against the
+  paragraph's instance before.
+
 - **A GPU recovery could produce wrong or blank pixels with no error; such
   a draw is now retried once and otherwise reported.** When the GPU recovers
   from a fault -- often one in another program -- macOS discards the work
@@ -633,6 +665,31 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 - **Relative colours parse in the `color()` function.**
   `color(from red srgb 0 g b)` takes red's green and blue, replaces its red
   channel with zero, and is therefore black.
+
+### Changed
+
+- **`measureText` works out the ink box only when it is read.** The four
+  `actualBoundingBox` values and `lines` come from the outline of every
+  glyph, and a caller reading only `width` paid for them on every call.
+  They are now worked out when the first of them is read and kept for the
+  rest, and each glyph's outline bounds are remembered by face, size and
+  glyph rather than outlined again: `measureText("Hello world")` with only
+  `width` read takes about 5.5 µs where it took 7.7, and reading the ink as
+  well about 7.4. Nothing a
+  caller sees moves: the values are still the frozen object's own
+  properties, in the same order, and `JSON.stringify` and a spread give
+  what they gave, the ink then worked out once.
+
+### Deprecated
+
+- **`TextMetrics` values as own properties.** In 7.0 they become getters on
+  `TextMetrics.prototype` alone, as Chrome's are, and the object has no
+  properties of its own: `Object.keys` is empty, `JSON.stringify` gives
+  `"{}"` and a spread copies nothing, for this library's `emHeightAscent`,
+  `emHeightDescent`, `height` and `lines` as for the standard values. Read
+  the values by name and nothing changes. `TextMetrics.prototype`, its
+  `Symbol.toStringTag` and the constructor that refuses to be called are
+  Chrome's already.
 
 ## 📦 ⟩ [v6.0.2] (npm) ⟩ September 16, 2026
 

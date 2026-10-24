@@ -776,3 +776,139 @@ describe("the numeric style codes", () => {
     assert.ok(paragraph.getRectsForRange(0, 2, 0, 0));
   });
 });
+
+describe("ParagraphBuilder optical size", () => {
+  // Chrome 152 widths of `Hamburgefonstiv` in Amstelvar, whose `opsz` axis
+  // runs 10 to 72: measureText with `opsz` left to follow the font size,
+  // and a DOM span with `"opsz" 30` (in 1/64 px layout units).
+  const AT_SIZE = { 12: 100.7189, 48: 352.2238 },
+    AT_OPSZ_30 = { 12: 93.015625, 48: 372.0625 },
+    FAMILY = "AmstelvarOptical",
+    // FreeType interpolates the advances up to 0.03 from where CoreText and
+    // Chrome on macOS put them; one step along the axis moves the width at
+    // least 0.32.
+    TOLERANCE = 0.05;
+
+  const widthOf = (base, span) => {
+    FontLibrary.use(FAMILY, "tests/assets/fonts/AmstelvarAlpha-VF.ttf");
+    try {
+      const builder = ParagraphBuilder.Make({
+        textStyle: { fontFamilies: [FAMILY], ...base },
+      });
+      if (span) builder.pushStyle({ fontFamilies: [FAMILY], ...span });
+      builder.addText("Hamburgefonstiv");
+      const paragraph = builder.build();
+      paragraph.layout(10000);
+      return paragraph.getMaxIntrinsicWidth();
+    } finally {
+      FontLibrary.reset();
+    }
+  };
+
+  const near = (width, expected, what) =>
+    assert.ok(
+      Math.abs(width - expected) < TOLERANCE,
+      `${what} measured ${width} against Chrome's ${expected}`,
+    );
+
+  test("instances opsz at each style's own font size", () => {
+    near(widthOf({ fontSize: 48 }), AT_SIZE[48], "a 48px paragraph");
+    near(
+      widthOf({ fontSize: 12 }, { fontSize: 48 }),
+      AT_SIZE[48],
+      "a 48px span in a 12px paragraph",
+    );
+    near(
+      widthOf({ fontSize: 48 }, { fontSize: 12 }),
+      AT_SIZE[12],
+      "a 12px span in a 48px paragraph",
+    );
+  });
+
+  test("lets an explicit opsz win over the font size", () => {
+    const opsz30 = { fontVariations: [{ axis: "opsz", value: 30 }] };
+    near(
+      widthOf({ fontSize: 48, ...opsz30 }),
+      AT_OPSZ_30[48],
+      'a 48px paragraph at "opsz" 30',
+    );
+    near(
+      widthOf({ fontSize: 48, ...opsz30 }, { fontSize: 12 }),
+      AT_OPSZ_30[12],
+      'a 12px span in a 48px paragraph at "opsz" 30',
+    );
+  });
+});
+
+describe("ParagraphBuilder span axes", () => {
+  // A pushed style's `fontVariations` replace the paragraph's, as a nested
+  // `font-variation-settings` replaces its parent's in CSS and as the
+  // crate's `ParagraphBuilder::push_style` does; a style with none of its
+  // own takes the paragraph's. Its weight supplies `wght` unless the list in
+  // force names it. Measured against a paragraph built in the span's style
+  // outright, which instances its face through the same library.
+  const FAMILY = "AmstelvarSpanAxes",
+    TEXT = "Hamburgefonstiv",
+    wdth50 = [{ axis: "wdth", value: 50 }],
+    wght700 = [{ axis: "wght", value: 700 }],
+    wght300 = [{ axis: "wght", value: 300 }];
+
+  const style = (weight, fontVariations) => ({
+    fontFamilies: [FAMILY],
+    fontSize: 48,
+    fontStyle: { weight },
+    fontVariations,
+  });
+
+  const widthOf = (base, span) => {
+    FontLibrary.use(FAMILY, "tests/assets/fonts/AmstelvarAlpha-VF.ttf");
+    try {
+      const builder = ParagraphBuilder.Make({ textStyle: base });
+      if (span) builder.pushStyle(span);
+      builder.addText(TEXT);
+      const paragraph = builder.build();
+      paragraph.layout(10000);
+      return paragraph.getMaxIntrinsicWidth();
+    } finally {
+      FontLibrary.reset();
+    }
+  };
+
+  test("lays a span out at its own axes", () => {
+    assert.ok(
+      Math.abs(
+        widthOf(style(400, wght700)) -
+          widthOf(style(400, [...wdth50, ...wght700])),
+      ) > 1,
+      "wdth 50 has to move the width for the first case to mean anything",
+    );
+    const cases = [
+      [
+        "a span's wght 700 under a paragraph's wdth 50",
+        style(400, wdth50),
+        style(400, wght700),
+        style(400, wght700),
+      ],
+      [
+        "a span's weight 700 and wdth 50 under a paragraph's wght 300",
+        style(400, wght300),
+        style(700, wdth50),
+        style(700, wdth50),
+      ],
+      [
+        "a span with no axes under a paragraph's wdth 50",
+        style(400, wdth50),
+        style(400, undefined),
+        style(400, wdth50),
+      ],
+    ];
+    for (const [what, base, span, alone] of cases) {
+      const pushed = widthOf(base, span),
+        expected = widthOf(alone);
+      assert.ok(
+        Math.abs(pushed - expected) < 1e-3,
+        `${what} measured ${pushed} against ${expected}`,
+      );
+    }
+  });
+});

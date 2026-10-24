@@ -4636,8 +4636,12 @@ fn a_spans_own_axes_replace_the_base_styles() {
         builder.push_style(span).add_text(TEXT);
         builder.build(f32::MAX).max_intrinsic_width()
     };
+    // Every style here is also instanced at `opsz` 48, its font size, so the
+    // bare instance is too.
     let bare = |axes: &[([u8; 4], f32)], weight: i32| {
-        bare_skia_paragraph_at(AMSTELVAR, axes, weight, SIZE, TEXT)
+        let axes: Vec<([u8; 4], f32)> =
+            axes.iter().copied().chain([(*b"opsz", SIZE)]).collect();
+        bare_skia_paragraph_at(AMSTELVAR, &axes, weight, SIZE, TEXT)
             .max_intrinsic_width()
     };
     let wdth = FontAxisTag::new(b"wdth");
@@ -4682,6 +4686,181 @@ fn a_spans_own_axes_replace_the_base_styles() {
                 "{case}, as {route}, measured {measured} against {expected}"
             );
         }
+    }
+}
+
+/// `Hamburgefonstiv` in Amstelvar, whose `opsz` axis runs 10 to 72, as
+/// Chrome 152's `measureText` lays it out at each size with nothing set but
+/// the font: `opsz` follows the CSS font size, clamped to the axis, because
+/// `font-optical-sizing` is `auto` and a canvas cannot change it.
+const AMSTELVAR_OPTICAL_WIDTHS: [(f32, f32); 10] = [
+    (8.0, 69.3439),
+    (10.0, 86.6799),
+    (12.0, 100.7189),
+    (14.0, 113.6589),
+    (18.0, 144.4799),
+    (24.0, 189.3339),
+    (36.0, 274.0829),
+    (48.0, 352.2238),
+    (72.0, 488.6639),
+    (100.0, 678.7),
+];
+
+/// Chrome 152's DOM width for the same string with
+/// `font-variation-settings: "opsz" 30`, in its 1/64 px layout units. Its
+/// canvas accepts `fontVariationSettings` and draws nothing differently, so
+/// the DOM is the measurement.
+const AMSTELVAR_AT_OPSZ_30: [(f32, f32); 2] =
+    [(12.0, 93.015625), (48.0, 372.0625)];
+
+/// How far a width may sit from Chrome's. FreeType interpolates Amstelvar's
+/// advances up to 0.03 from where CoreText and Chrome on macOS put them,
+/// with an explicit `opsz` as much as without, and a DOM width is snapped to
+/// a 1/64 px layout unit. One step along the axis moves the width at least
+/// 0.32 at every size above, so this still tells one `opsz` from the next.
+const OPTICAL_TOLERANCE: f32 = 0.05;
+
+fn amstelvar_optical(family: &str) -> FontLibrary {
+    let fonts = FontLibrary::new();
+    fonts
+        .register_font_from_path(
+            family,
+            "tests/assets/fonts/AmstelvarAlpha-VF.ttf",
+        )
+        .expect("bundled Amstelvar registers");
+    fonts
+}
+
+#[test]
+fn a_variable_fonts_optical_size_follows_the_font_size() {
+    // Left unset, the face draws whatever the platform picks: its default
+    // instance on FreeType, CoreText's 12pt optical size on macOS. Both are
+    // right at one size at most.
+    const FAMILY: &str = "AmstelvarOpticalCanvas";
+    let _fonts = amstelvar_optical(FAMILY);
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    for (size, chrome) in AMSTELVAR_OPTICAL_WIDTHS {
+        ctx.set_font(&Font::new(FAMILY, size));
+        let width = ctx.measure_text("Hamburgefonstiv", None).width;
+        assert!(
+            (width - chrome).abs() < OPTICAL_TOLERANCE,
+            "{size}px measured {width} against Chrome's {chrome}"
+        );
+    }
+
+    // From the font size and not the size on the device: Chrome measures
+    // 24px under `scale(2)` as it does unscaled, not as 48px.
+    ctx.scale(2.0, 2.0);
+    ctx.set_font(&Font::new(FAMILY, 24.0));
+    let width = ctx.measure_text("Hamburgefonstiv", None).width;
+    let chrome = AMSTELVAR_OPTICAL_WIDTHS[5].1;
+    assert!(
+        (width - chrome).abs() < OPTICAL_TOLERANCE,
+        "24px under scale(2) measured {width} against Chrome's {chrome}"
+    );
+
+    // An explicit `opsz` wins, as `font-variation-settings` wins over
+    // `font-optical-sizing` in CSS.
+    ctx.set_font_variation_settings(&[FontVariation::new(
+        FontAxisTag::OPSZ,
+        30.0,
+    )]);
+    for (size, chrome) in AMSTELVAR_AT_OPSZ_30 {
+        ctx.set_font(&Font::new(FAMILY, size));
+        let width = ctx.measure_text("Hamburgefonstiv", None).width;
+        assert!(
+            (width - chrome).abs() < OPTICAL_TOLERANCE,
+            "{size}px at \"opsz\" 30 measured {width} against Chrome's {chrome}"
+        );
+    }
+}
+
+#[test]
+fn laid_out_text_takes_its_optical_size_from_each_styles_font_size() {
+    // `layout_text`, `layout_rich_text` and `paragraph_builder` instance
+    // their faces apart from the canvas, and a span is sized apart from the
+    // paragraph around it: a 48px span inside a 12px paragraph is drawn at
+    // `opsz` 48.
+    const FAMILY: &str = "AmstelvarOpticalLayout";
+    const TEXT: &str = "Hamburgefonstiv";
+    let fonts = amstelvar_optical(FAMILY);
+    let engine = TextEngine::new(&fonts);
+    let style = |size: f32, axes: &[(FontAxisTag, f32)]| TextStyle {
+        font_families: vec![FAMILY.to_string()],
+        font_size: size,
+        font_variations: axes
+            .iter()
+            .map(|(tag, value)| FontVariation::new(*tag, *value))
+            .collect(),
+        ..TextStyle::default()
+    };
+    let laid_out = |style: &TextStyle| {
+        engine
+            .layout_text(TEXT, style, f32::MAX)
+            .max_intrinsic_width()
+    };
+    let rich = |base: &TextStyle, span: TextStyle| {
+        engine
+            .layout_rich_text(
+                &[RichTextSpan {
+                    text: TEXT.to_string(),
+                    style: span,
+                }],
+                base,
+                f32::MAX,
+            )
+            .max_intrinsic_width()
+    };
+    let pushed = |base: &TextStyle, span: &TextStyle| {
+        let mut builder = engine.paragraph_builder(base);
+        builder.push_style(span).add_text(TEXT);
+        builder.build(f32::MAX).max_intrinsic_width()
+    };
+    let opsz_30 = [(FontAxisTag::OPSZ, 30.0)];
+
+    let cases = [
+        (
+            "layout_text at 48px",
+            laid_out(&style(48.0, &[])),
+            AMSTELVAR_OPTICAL_WIDTHS[7].1,
+        ),
+        (
+            "a 48px rich-text span in a 12px paragraph",
+            rich(&style(12.0, &[]), style(48.0, &[])),
+            AMSTELVAR_OPTICAL_WIDTHS[7].1,
+        ),
+        (
+            "a 48px pushed style in a 12px paragraph",
+            pushed(&style(12.0, &[]), &style(48.0, &[])),
+            AMSTELVAR_OPTICAL_WIDTHS[7].1,
+        ),
+        (
+            "a 12px pushed style in a 48px paragraph",
+            pushed(&style(48.0, &[]), &style(12.0, &[])),
+            AMSTELVAR_OPTICAL_WIDTHS[2].1,
+        ),
+        (
+            "layout_text at 48px with \"opsz\" 30",
+            laid_out(&style(48.0, &opsz_30)),
+            AMSTELVAR_AT_OPSZ_30[1].1,
+        ),
+        (
+            "a 12px rich-text span with \"opsz\" 30 in a 48px paragraph",
+            rich(&style(48.0, &[]), style(12.0, &opsz_30)),
+            AMSTELVAR_AT_OPSZ_30[0].1,
+        ),
+        (
+            "a 12px pushed style under a 48px paragraph at \"opsz\" 30",
+            pushed(&style(48.0, &opsz_30), &style(12.0, &[])),
+            AMSTELVAR_AT_OPSZ_30[0].1,
+        ),
+    ];
+    for (case, measured, chrome) in cases {
+        assert!(
+            (measured - chrome).abs() < OPTICAL_TOLERANCE,
+            "{case} measured {measured} against Chrome's {chrome}"
+        );
     }
 }
 

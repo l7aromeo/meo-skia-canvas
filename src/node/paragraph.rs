@@ -6,7 +6,8 @@ use neon::prelude::*;
 use std::{cell::RefCell, sync::OnceLock};
 
 use skia_safe::{
-    Color, ColorSpace, FourByteTag, Paint, PaintStyle, Point,
+    Color, ColorSpace, FontArguments, FourByteTag, Paint, PaintStyle, Point,
+    font_arguments::VariationPosition,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
         FontCollection, Paragraph as SkParagraph,
@@ -17,8 +18,8 @@ use skia_safe::{
 };
 
 use crate::{
-    font::slant_for_matching,
-    font_library::FontLibrary,
+    font::{slant_for_matching, variation_axes},
+    font_library::{FontLibrary, instance_coordinates},
     text::{
         PlaceholderAlignment as CratePlaceholderAlignment, PlaceholderBaseline,
         RectHeightStyle as CrateRectHeightStyle,
@@ -37,7 +38,12 @@ use crate::{
 
 pub struct ParagraphBuilderWrap {
     builder: Option<SkParagraphBuilder>,
-    _collection: FontCollection,
+    /// The collection the builder resolves against, kept alive for it, and
+    /// searched by a pushed style for the axes its face has.
+    collection: FontCollection,
+    /// The paragraph's `fontVariations`, which a pushed style with none of
+    /// its own is instanced at.
+    variations: Vec<(FourByteTag, f32)>,
 }
 
 impl Finalize for ParagraphBuilderWrap {}
@@ -378,13 +384,10 @@ fn parse_text_style(
     // decoration mode
     style.set_decoration_mode(TextDecorationMode::Through);
 
-    // NOTE: `fontVariations` is parsed in `paragraph::new` instead of
-    // here. `SkParagraphBuilder` reads its font collection at
-    // construction time, not per-`pushStyle`, so the instantiated
-    // variable typeface has to be seeded on the builder's collection.
-    // A `style.set_typeface(face)` call here would be ignored by the
-    // layout path (the collection-resident match takes precedence on
-    // every glyph run), so we deliberately don't attempt one.
+    // `fontVariations` is read by the callers rather than here: the
+    // paragraph's by `paragraph::new`, which instances the builder's
+    // collection at it, and a pushed style's by `pushStyle`, which sets
+    // the position as the style's font arguments.
 
     // shadows: [{ color, offset: [dx, dy], blurRadius }]
     if let Ok(shadows_val) = obj.get::<JsValue, _, _>(cx, "shadows")
@@ -659,17 +662,56 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
 
     Ok(cx.boxed(RefCell::new(ParagraphBuilderWrap {
         builder: Some(builder),
-        _collection: collection,
+        collection,
+        variations,
     })))
 }
 
 pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedParagraphBuilder>(0)?;
     let style_obj = cx.argument::<JsObject>(1)?;
-    let text_style = parse_text_style(&mut cx, &style_obj)?;
+    let mut text_style = parse_text_style(&mut cx, &style_obj)?;
+    let own = parse_font_variations(&mut cx, &style_obj)?;
 
     let mut this = this.borrow_mut();
-    if let Some(builder) = this.builder.as_mut() {
+    let ParagraphBuilderWrap {
+        builder,
+        collection,
+        variations: paragraph_variations,
+    } = &mut *this;
+    // A style's own `fontVariations` replace the paragraph's, as a nested
+    // `font-variation-settings` replaces its parent's in CSS; with none of its
+    // own it takes the paragraph's. Its weight, stretch and font size supply
+    // `wght`, `wdth` and `opsz` unless the list in force names them. The
+    // collection holds the paragraph's faces instanced at its own style, and
+    // the position set here names every axis, so nothing of the paragraph's
+    // carries over.
+    let variations = match own.is_empty() {
+        true => &*paragraph_variations,
+        false => &own,
+    };
+    let families = text_style.font_families();
+    let families: Vec<&str> = families.iter().collect();
+    let axes = collection
+        .find_typefaces(&families, text_style.font_style())
+        .iter()
+        .find_map(variation_axes);
+    if let Some(axes) = axes {
+        let coordinates = instance_coordinates(&axes, &text_style, variations);
+        if FontLibrary::with_shared(|lib| {
+            lib.admit_position(&families, &coordinates)
+        }) {
+            collection.clear_caches();
+        }
+        text_style.set_font_arguments(
+            &FontArguments::new().set_variation_design_position(
+                VariationPosition {
+                    coordinates: &coordinates,
+                },
+            ),
+        );
+    }
+    if let Some(builder) = builder.as_mut() {
         builder.push_style(&text_style);
     }
     Ok(cx.undefined())

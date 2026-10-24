@@ -5,21 +5,24 @@
 use neon::{prelude::*, types::buffer::TypedArray};
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs,
     path::Path,
+    rc::Rc,
     sync::{Arc, OnceLock},
 };
 
 use skia_safe::{
     Data, FontArguments, FontMgr, FourByteTag, Typeface,
     font_arguments::{VariationPosition, variation_position::Coordinate},
+    font_parameters::variation::Axis,
     font_style::{FontStyle, Slant},
     textlayout::{FontCollection, TextStyle, TypefaceFontProvider},
+    typeface::TypefaceId,
 };
 
 use crate::{
-    font::variation_axes,
+    font::{InstancedPositions, optical_size, variation_axes},
     image::x_height_ratio,
     typography::{
         FontSpec, from_slant, from_width, typeface_details, typeface_wght_range,
@@ -147,6 +150,12 @@ pub struct CollectionKey {
     /// ten-thousandth apart instance the same typeface and should not cache
     /// two of it.
     variations: Vec<(u32, i32)>,
+    /// The font size, at [`AXIS_KEY_STEPS`] per pixel, where it is the
+    /// `opsz` coordinate: `None` unless a matched face has the axis and
+    /// `variations` leaves it to the size. Otherwise the size instances
+    /// nothing, and keying on it would cache one collection per size for
+    /// fonts that draw every size from the same one.
+    optical_size: Option<i32>,
 }
 
 /// Steps per axis unit in a [`CollectionKey`].
@@ -158,7 +167,11 @@ pub struct CollectionKey {
 const AXIS_KEY_STEPS: f32 = 1000.0;
 
 impl CollectionKey {
-    pub fn new(style: &TextStyle, variations: &[(FourByteTag, f32)]) -> Self {
+    pub fn new(
+        style: &TextStyle,
+        variations: &[(FourByteTag, f32)],
+        optical_size: Option<f32>,
+    ) -> Self {
         let families = style.font_families();
         let families = families.iter().collect::<Vec<&str>>().join(", ");
         let weight = *style.font_style().weight();
@@ -171,14 +184,65 @@ impl CollectionKey {
             .iter()
             .map(|(tag, val)| (**tag, (*val * AXIS_KEY_STEPS).round() as i32))
             .collect();
+        let optical_size =
+            optical_size.map(|size| (size * AXIS_KEY_STEPS).round() as i32);
         CollectionKey {
             families,
             weight,
             width,
             slant,
             variations,
+            optical_size,
         }
     }
+}
+
+/// Where `style` places each axis of a variable face with `axes`.
+///
+/// An axis `variations` names takes the value given, the last where it is
+/// named twice, as in `font-variation-settings`. Otherwise `wdth` takes the
+/// style's stretch, `wght` its weight and `opsz` its font size -- what
+/// `font-stretch`, `font-weight` and `font-optical-sizing: auto` set -- and
+/// any other axis its default. OpenType defines `wght` on the CSS
+/// `font-weight` scale and `wdth` in the percentages `font-stretch` names,
+/// so neither needs converting. Each value is pinned to its axis.
+///
+/// Every axis rather than the ones asked for, so the position does not
+/// depend on the face it is applied to: a style pushed onto a paragraph
+/// builder applies it over a face already instanced at the paragraph's, and
+/// Skia moves only the axes a position names.
+pub(crate) fn instance_coordinates(
+    axes: &[Axis],
+    style: &TextStyle,
+    variations: &[(FourByteTag, f32)],
+) -> Vec<Coordinate> {
+    let wdth = FourByteTag::from_chars('w', 'd', 't', 'h');
+    let wght = FourByteTag::from_chars('w', 'g', 'h', 't');
+    axes.iter()
+        .map(|axis| {
+            let named = variations
+                .iter()
+                .rev()
+                .find(|(tag, _)| *tag == axis.tag)
+                .map(|(_, value)| *value);
+            let value = named.unwrap_or_else(|| match axis.tag {
+                tag if tag == wdth => {
+                    stretch_percent(*style.font_style().width())
+                }
+                tag if tag == wght => *style.font_style().weight() as f32,
+                _ => {
+                    optical_size(std::slice::from_ref(axis), style.font_size())
+                        .map_or(axis.def, |opsz| opsz.value)
+                }
+            });
+            // `max` then `min` rather than `clamp`, which panics on an axis
+            // whose minimum a malformed font puts above its maximum.
+            Coordinate {
+                axis: axis.tag,
+                value: value.max(axis.min).min(axis.max),
+            }
+        })
+        .collect()
 }
 
 /// How many instanced collections are kept.
@@ -190,19 +254,24 @@ impl CollectionKey {
 ///
 /// A hundred and twenty-eight is more distinct instances than a page holds --
 /// a handful of families at a handful of weights each. What it deliberately
-/// does not accommodate is an animation tweening an axis, and that is the
-/// point: consecutive frames of a tween ask for values no frame asks for
-/// again, so every one is a miss whatever the bound, and an unbounded map
-/// only keeps them.
+/// does not accommodate is an animation tweening an axis, or tweening the
+/// font size of a face with an `opsz` axis, and that is the point:
+/// consecutive frames of a tween ask for values no frame asks for again, so
+/// every one is a miss whatever the bound, and an unbounded map only keeps
+/// them.
 ///
-/// **This bounds the map; it does not bound the process.** The same three
-/// thousand instances grow RSS by about 130 MB, and only 27 of that is this
-/// map: a cache of one grows the same as a cache of a hundred and
-/// twenty-eight, and `FontLibrary::reset` -- which drops every font, the
-/// collection and this map -- reclaims none of it. The rest is retained
-/// inside Skia per instanced typeface and is not reachable from here. The
-/// lever that would actually bound it is instancing fewer typefaces, which
-/// would change what a caller gets back.
+/// A miss costs about 275 microseconds in a release build on macOS: 74 to
+/// clone the face through CoreText, and most of the rest laying out with a
+/// typeface whose shaping and glyph caches are cold. Chrome 152 pays about
+/// 180 for a font size it has not seen on Amstelvar. Keeping more instances
+/// would only help a caller cycling through more than this many values, at
+/// about 34 KB each.
+///
+/// The process stays bounded with it. Measured in release on macOS, RSS
+/// grows by 35 MB over three thousand `wght` values on Oswald and by 40 over
+/// thirty thousand; Amstelvar at three thousand distinct sizes grows by 43
+/// and at thirty thousand by 90, where a static font at the same thirty
+/// thousand sizes grows by 65 with nothing instanced at all.
 const COLLECTION_CACHE_SIZE: usize = 128;
 
 /// How many resolved fonts to remember.
@@ -301,6 +370,151 @@ struct CollectionCache {
     uses: u64,
 }
 
+thread_local! {
+    /// The face each instance an [`InstanceCache`] holds was cloned from, by
+    /// id. Thread-local as the library is, and outside it so that a lookup
+    /// never has to borrow the library.
+    static INSTANCE_BASES: RefCell<HashMap<TypefaceId, TypefaceId>> =
+        RefCell::new(HashMap::new());
+}
+
+/// The face `id` was instanced from by [`FontLibrary::fonts_for_style`], or
+/// `id` itself for any other face.
+///
+/// What belongs to the font file rather than to a position on its axes --
+/// its family name, which kerning path the shaper takes -- is the same for
+/// every instance of it. Remembered per instance, it would be worked out
+/// again for each size of a face with an `opsz` axis, since each size is an
+/// instance of its own: the kerning probe alone lays out up to twenty-four
+/// paragraphs, about two fifths of a `measureText` at a size not seen
+/// before. Answered for as long as the [`InstanceCache`] holds the instance.
+pub(crate) fn base_face(id: TypefaceId) -> TypefaceId {
+    INSTANCE_BASES.with(|bases| bases.borrow().get(&id).copied().unwrap_or(id))
+}
+
+/// What one instance a [`InstanceCache`] holds is charged against
+/// [`INSTANCE_CACHE_BYTES`]: an estimate, because the real cost cannot be
+/// observed.
+///
+/// Neither Skia nor CoreText nor FreeType reports what a typeface holds, and
+/// nearly all of it arrives on first use rather than at the clone -- the
+/// caches CoreText keeps per font object on macOS, the `FT_Face`, its blend
+/// data and the autohinter's globals on Linux -- and grows with the glyphs
+/// drawn. Measured on 2026-10-23 in release builds, as the growth in resident
+/// memory per instance held over three thousand made with
+/// `clone_with_arguments`, cold and after shaping and outlining the fifteen
+/// glyphs of `Hamburgefonstiv` at 24px:
+///
+/// ```text
+///                        glyphs  file    macOS 26 (arm64)   Linux arm64 container
+///                                        cold    warm       cold    warm
+/// Amstelvar Alpha VF        115  145 KB  13.8    39.2 KB    0.9     52.2 KB
+/// Oswald VF                 754  149 KB   8.8    35.3 KB    0.3     26.5 KB
+/// Raleway VF               1067  302 KB   8.6    33.1 KB    0.0     30.9 KB
+/// ```
+///
+/// It follows neither the file's size nor its glyph count, so nothing a face
+/// reports would make a better per-face charge, and the bound this sets is a
+/// count of instances in practice. Re-measure with the same shape of probe
+/// before changing it.
+const INSTANCE_BYTES_ESTIMATE: usize = 34 * 1024;
+
+/// How many bytes of instances an [`InstanceCache`] keeps, at
+/// [`INSTANCE_BYTES_ESTIMATE`] each.
+///
+/// 34 MB holds about a thousand: enough for a caller cycling through a
+/// thousand font sizes of a face with an `opsz` axis to find every one
+/// already made, which measured 290 microseconds a `measureText` rebuilt and
+/// 51 held, at about 34 KB each. A tween never asks for a size twice and
+/// gains nothing from any bound.
+const INSTANCE_CACHE_BYTES: usize = 34 * 1024 * 1024;
+
+/// An instance's face and position: the face's id and each coordinate by
+/// its axis and the bits of its value, since Skia tells two positions apart
+/// by exact equality.
+type InstanceKey = (TypefaceId, Vec<(u32, u32)>);
+
+/// The variable-font instances [`FontLibrary::fonts_for_style`] has made,
+/// kept across the collections that hold them.
+///
+/// A collection evicted from the [`CollectionCache`] takes nothing with it
+/// that is expensive to make again; its instances are. Each new typeface
+/// costs a clone and starts with cold shaping and glyph caches, which Skia
+/// keys on the typeface, so holding the instance is what makes a size seen
+/// before cheap again. And a recording pins the typeface every text draw it
+/// holds was made with, so a position asked for twice is one typeface
+/// pinned rather than two.
+///
+/// Least recently used, by a counter, with the order kept in a second map so
+/// that eviction does not scan.
+#[derive(Default)]
+struct InstanceCache {
+    entries: HashMap<InstanceKey, (Typeface, u64)>,
+    order: BTreeMap<u64, InstanceKey>,
+    bytes: usize,
+    uses: u64,
+}
+
+impl InstanceCache {
+    /// `face` at `coordinates`, made now or held from before.
+    fn instance(
+        &mut self,
+        face: &Typeface,
+        coordinates: &[Coordinate],
+    ) -> Option<Typeface> {
+        let key = (
+            face.unique_id(),
+            coordinates
+                .iter()
+                .map(|coordinate| {
+                    (*coordinate.axis, coordinate.value.to_bits())
+                })
+                .collect(),
+        );
+        self.uses += 1;
+        let uses = self.uses;
+        if let Some((instance, stamp)) = self.entries.get_mut(&key) {
+            self.order.remove(stamp);
+            *stamp = uses;
+            self.order.insert(uses, key);
+            return Some(instance.clone());
+        }
+
+        let args = FontArguments::new()
+            .set_variation_design_position(VariationPosition { coordinates });
+        let instance = face.clone_with_arguments(&args)?;
+        INSTANCE_BASES.with(|bases| {
+            bases
+                .borrow_mut()
+                .insert(instance.unique_id(), face.unique_id())
+        });
+        self.bytes += INSTANCE_BYTES_ESTIMATE;
+        while self.bytes > INSTANCE_CACHE_BYTES
+            && let Some((_, oldest)) = self.order.pop_first()
+        {
+            self.forget(&oldest);
+        }
+        self.order.insert(uses, key.clone());
+        self.entries.insert(key, (instance.clone(), uses));
+        Some(instance)
+    }
+
+    /// Drops the entry at `key`, and its instance's face with it.
+    fn forget(&mut self, key: &InstanceKey) {
+        if let Some((instance, _)) = self.entries.remove(key) {
+            self.bytes -= INSTANCE_BYTES_ESTIMATE;
+            INSTANCE_BASES
+                .with(|bases| bases.borrow_mut().remove(&instance.unique_id()));
+        }
+    }
+
+    fn clear(&mut self) {
+        let keys: Vec<InstanceKey> = self.order.values().cloned().collect();
+        keys.iter().for_each(|key| self.forget(key));
+        self.order.clear();
+    }
+}
+
 impl CollectionCache {
     fn get(
         &mut self,
@@ -349,14 +563,36 @@ impl CollectionCache {
     }
 }
 
+/// The registered fonts as they stood between two changes to them.
+///
+/// Shared by everything laid out in that time, so a measurement whose ink
+/// is worked out later can lay its run out again against the faces it was
+/// measured with, even after a font has been registered or the library
+/// reset. Only the registered faces: they are what a change replaces, and
+/// the library holds them anyway while the epoch is current.
+pub struct FontEpoch {
+    fonts: Vec<(Typeface, Option<String>)>,
+}
+
 pub struct FontLibrary {
     mgr: FontMgr,
+    /// The registered fonts as they stand, shared with what is laid out
+    /// against them. Replaced by [`invalidate`](Self::invalidate).
+    epoch: Rc<FontEpoch>,
     collection: Option<FontCollection>,
+    /// What every collection is built over, from
+    /// [`collection_parts`](Self::collection_parts).
+    collection_parts: Option<(FontMgr, Option<String>)>,
     fonts: Vec<(Typeface, Option<String>)>,
     generics_cache: Vec<(Typeface, Option<String>)>,
     collection_cache: CollectionCache,
+    /// The instances the cached collections were built from, kept longer.
+    instances: InstanceCache,
     resolved_fonts: ResolvedFontCache,
     collection_hinted: bool,
+    /// The positions paragraph builders have instanced through font
+    /// arguments on the collections this hands out.
+    positions: InstancedPositions,
 }
 
 /// The prefix every private alias carries.
@@ -396,6 +632,58 @@ fn claims(claimed: &[String], alias: Option<&str>) -> bool {
 }
 
 impl FontLibrary {
+    /// A library holding `fonts` and nothing derived from them yet.
+    fn with_fonts(fonts: Vec<(Typeface, Option<String>)>) -> Self {
+        FontLibrary {
+            mgr: FontMgr::default(),
+            epoch: Rc::new(FontEpoch {
+                fonts: fonts.clone(),
+            }),
+            fonts,
+            collection: None,
+            collection_parts: None,
+            collection_cache: CollectionCache::default(),
+            instances: InstanceCache::default(),
+            resolved_fonts: ResolvedFontCache::default(),
+            collection_hinted: false,
+            generics_cache: vec![],
+            positions: InstancedPositions::default(),
+        }
+    }
+
+    /// The registered fonts as they stand now.
+    pub fn epoch(&self) -> Rc<FontEpoch> {
+        self.epoch.clone()
+    }
+
+    /// [`fonts_for_style`](Self::fonts_for_style) against the fonts
+    /// registered in `epoch`, which need not be the ones registered now.
+    ///
+    /// The shared library answers while `epoch` is current. After a change,
+    /// a library is built from `epoch`'s fonts for the one search and
+    /// dropped, its instances forgotten with it: a run laid out again after
+    /// a font was registered is laid out in the faces it was first laid out
+    /// in, rather than reporting one font's ink beside another's width.
+    pub fn fonts_for_style_in(
+        epoch: &Rc<FontEpoch>,
+        hinting: bool,
+        style: &TextStyle,
+        variations: &[(FourByteTag, f32)],
+    ) -> (FontCollection, Option<FontStyle>) {
+        let current = FontLibrary::with_shared(|lib| {
+            Rc::ptr_eq(&lib.epoch, epoch).then(|| {
+                lib.set_hinting(hinting).fonts_for_style(style, variations)
+            })
+        });
+        current.unwrap_or_else(|| {
+            let mut then = FontLibrary::with_fonts(epoch.fonts.clone());
+            let found =
+                then.set_hinting(hinting).fonts_for_style(style, variations);
+            then.instances.clear();
+            found
+        })
+    }
+
     pub fn with_shared<T, F>(f: F) -> T
     where
         F: FnOnce(&mut FontLibrary) -> T,
@@ -407,15 +695,7 @@ impl FontLibrary {
                 // one has. Idempotent, so the ordinary case pays a `Once`.
                 install_fontconfig_fallback();
 
-                RefCell::new(FontLibrary {
-                    mgr: FontMgr::default(),
-                    fonts: vec![],
-                    collection: None,
-                    collection_cache: CollectionCache::default(),
-                    resolved_fonts: ResolvedFontCache::default(),
-                    collection_hinted: false,
-                    generics_cache: vec![],
-                })
+                RefCell::new(FontLibrary::with_fonts(vec![]))
             });
 
             f(&mut shared_lib.borrow_mut())
@@ -433,7 +713,41 @@ impl FontLibrary {
         self.collection.as_ref().unwrap().clone()
     }
 
+    /// A collection over the registered and generic faces, falling back to
+    /// the system's.
+    ///
+    /// The faces and the default family come from [`collection_parts`],
+    /// which builds them once per set of registered fonts. Every
+    /// instanced collection [`fonts_for_style`] makes is one of these, so
+    /// building them per collection put a font-manager search on every
+    /// font size a face with an `opsz` axis had not been drawn at: about
+    /// 100 microseconds on Linux, where the system manager is fontconfig,
+    /// and a few on macOS.
+    ///
+    /// [`collection_parts`]: Self::collection_parts
+    /// [`fonts_for_style`]: Self::fonts_for_style
     fn new_font_collection(&mut self) -> FontCollection {
+        let (assets, default_family) = self.collection_parts();
+        let mut collection = FontCollection::new();
+        collection.set_default_font_manager(
+            self.mgr.clone(),
+            default_family.as_deref(),
+        );
+        collection.set_asset_font_manager(Some(assets));
+        collection
+    }
+
+    /// The provider of registered and generic faces every collection is
+    /// built over, and the family its default manager falls back to.
+    ///
+    /// Shared by every collection rather than built for each: the provider
+    /// is not changed once built, and [`invalidate`](Self::invalidate)
+    /// drops it with the collections whenever the set of registered fonts
+    /// changes.
+    fn collection_parts(&mut self) -> (FontMgr, Option<String>) {
+        if let Some(parts) = &self.collection_parts {
+            return parts.clone();
+        }
         let mut assets = TypefaceFontProvider::new();
         let claimed = self.claimed_aliases();
         for (font, alias) in self.generics() {
@@ -471,11 +785,9 @@ impl FontLibrary {
         }
         .map(|f| f.family_name());
 
-        let mut collection = FontCollection::new();
-        collection
-            .set_default_font_manager(self.mgr.clone(), default_fam.as_deref());
-        collection.set_asset_font_manager(Some(assets.into()));
-        collection
+        let parts: (FontMgr, Option<String>) = (assets.into(), default_fam);
+        self.collection_parts = Some(parts.clone());
+        parts
     }
 
     /// The aliases a caller has registered faces under.
@@ -1026,9 +1338,38 @@ impl FontLibrary {
     /// alternative is a cache whose correctness rests on which of two
     /// lookups happens to win.
     fn invalidate(&mut self) {
+        self.epoch = Rc::new(FontEpoch {
+            fonts: self.fonts.clone(),
+        });
         self.collection = None;
+        self.collection_parts = None;
         self.collection_cache.clear();
+        self.instances.clear();
         self.resolved_fonts.clear();
+    }
+
+    /// Records that a paragraph builder is about to instance `families` at
+    /// `coordinates` through a style's font arguments, and answers whether
+    /// the caller has to drop its own collection's caches first.
+    ///
+    /// Skia keeps every typeface a collection instances that way, and the
+    /// builders share the collections handed out here, so past
+    /// [`INSTANCED_POSITIONS`](crate::font::INSTANCED_POSITIONS) this drops
+    /// the caches of every collection it holds. The caller's may be one the
+    /// cache has already let go, which is why it is asked to drop its own.
+    pub fn admit_position(
+        &mut self,
+        families: &[&str],
+        coordinates: &[Coordinate],
+    ) -> bool {
+        let full = self.positions.admit(families, coordinates);
+        if full {
+            self.collection_cache.clear_caches();
+            if let Some(collection) = self.collection.as_mut() {
+                collection.clear_caches();
+            }
+        }
+        full
     }
 
     pub fn set_hinting(&mut self, hinting: bool) -> &mut Self {
@@ -1063,20 +1404,29 @@ impl FontLibrary {
             .font_collection()
             .find_typefaces(&families, style.font_style());
 
+        let opsz_tag = FourByteTag::from_chars('o', 'p', 's', 'z');
+        // One pass over the matches' axes, for both questions the cache key
+        // needs answered before the cache can be asked.
+        let (variable, sized) = matches.iter().filter_map(variation_axes).fold(
+            (false, false),
+            |(_, sized), axes| {
+                (true, sized || axes.iter().any(|axis| axis.tag == opsz_tag))
+            },
+        );
+
         // if any of the matched typefaces is a variable font, create an
         // instance that matches the current weight settings and add it
         // to a dynamic font mgr
-        if matches.iter().any(|font| variation_axes(font).is_some()) {
+        if variable {
             // memoize the generation of FontCollections for instanced variable
             // fonts
-            let key = CollectionKey::new(style, variations);
+            let explicit_opsz =
+                variations.iter().any(|(tag, _)| *tag == opsz_tag);
+            let optical = (sized && !explicit_opsz).then(|| style.font_size());
+            let key = CollectionKey::new(style, variations, optical);
             if let Some(cached) = self.collection_cache.get(&key) {
                 return cached;
             }
-
-            // build a set of explicitly-set axis tags for quick lookup
-            let explicit_tags: Vec<u32> =
-                variations.iter().map(|(tag, _)| **tag).collect();
 
             // collect any instantiated variable fonts in a TFP to be used as
             // the 'dynamic' font mgr (which is searched before the
@@ -1085,80 +1435,22 @@ impl FontLibrary {
 
             for font in matches.into_iter() {
                 if let Some(params) = variation_axes(&font) {
-                    // build coordinates from explicit variations + auto wght
-                    let mut coords: Vec<Coordinate> = vec![];
+                    let coords =
+                        instance_coordinates(&params, style, variations);
 
-                    // add explicit variations first
-                    for (tag, value) in variations {
-                        // find the matching axis parameter to clamp values
-                        if let Some(param) =
-                            params.iter().find(|p| *p.tag == **tag)
-                        {
-                            coords.push(Coordinate {
-                                axis: param.tag,
-                                value: value.max(param.min).min(param.max),
+                    if !coords.is_empty()
+                        && let Some(face) =
+                            self.instances.instance(&font, &coords)
+                    {
+                        let alias =
+                            self.fonts.iter().find_map(|(orig, alias)| {
+                                if Typeface::equal(&font, orig) {
+                                    alias.clone()
+                                } else {
+                                    None
+                                }
                             });
-                        }
-                    }
-
-                    // auto-add wdth if not explicitly set, the way wght is
-                    // just below. Without it `fontStretch` reached only
-                    // families with a separate condensed *face*: a variable
-                    // font carrying a `wdth` axis measured the same at every
-                    // setting, because the same typeface came back unpinned.
-                    // A browser applies `font-stretch` to the axis, and
-                    // fontconfig already resolves the named instance --
-                    // `fc-match "Ubuntu:width=condensed"` picks
-                    // `Ubuntu[wdth,wght].ttf` -- so we were the ones ignoring
-                    // it.
-                    let wdth_tag = FourByteTag::from_chars('w', 'd', 't', 'h');
-                    if !explicit_tags.contains(&*wdth_tag)
-                        && let Some(param) =
-                            params.iter().find(|p| *p.tag == *wdth_tag)
-                    {
-                        let percent =
-                            stretch_percent(*style.font_style().width());
-                        coords.push(Coordinate {
-                            axis: param.tag,
-                            value: percent.max(param.min).min(param.max),
-                        });
-                    }
-
-                    // auto-add wght if not explicitly set. OpenType defines the
-                    // `wght` axis on the CSS `font-weight` scale, so the
-                    // requested weight is the design coordinate as it stands,
-                    // which is what a browser instances at.
-                    let wght_tag = FourByteTag::from_chars('w', 'g', 'h', 't');
-                    if !explicit_tags.contains(&*wght_tag)
-                        && let Some(param) =
-                            params.iter().find(|p| *p.tag == *wght_tag)
-                    {
-                        let weight = *style.font_style().weight();
-                        let value =
-                            (weight as f32).max(param.min).min(param.max);
-                        coords.push(Coordinate {
-                            axis: param.tag,
-                            value,
-                        });
-                    }
-
-                    if !coords.is_empty() {
-                        let v_pos = VariationPosition {
-                            coordinates: &coords,
-                        };
-                        let args = FontArguments::new()
-                            .set_variation_design_position(v_pos);
-                        if let Some(face) = font.clone_with_arguments(&args) {
-                            let alias =
-                                self.fonts.iter().find_map(|(orig, alias)| {
-                                    if Typeface::equal(&font, orig) {
-                                        alias.clone()
-                                    } else {
-                                        None
-                                    }
-                                });
-                            dynamic.register_typeface(face, alias.as_deref());
-                        }
+                        dynamic.register_typeface(face, alias.as_deref());
                     }
                 }
             }
@@ -1184,60 +1476,6 @@ impl FontLibrary {
             let matched = matches.first().map(Typeface::font_style);
             (self.font_collection(), matched)
         }
-    }
-
-    /// Instantiate a typeface at explicit variable-axis positions for use
-    /// with `TextStyle::set_typeface`. Picks the first matched typeface
-    /// that exposes variation parameters, intersects the caller's
-    /// requested axes with the typeface's design space (clamping out-of-
-    /// range values), and clones via `FontArguments`. Returns `None` if
-    /// no matched typeface is variable or all requested axes miss the
-    /// typeface's design parameters.
-    ///
-    /// Used by the paragraph builder's `pushStyle` path (paragraph.rs) so
-    /// callers passing explicit `fontVariations` get a typeface bound to
-    /// the text style directly -- matching CanvasKit's behaviour, where
-    /// the paragraph engine respects the requested axis values instead
-    /// of relying on the font collection's nominal weight match.
-    pub fn instantiate_variable_typeface(
-        &mut self,
-        style: &TextStyle,
-        variations: &[(FourByteTag, f32)],
-    ) -> Option<Typeface> {
-        if variations.is_empty() {
-            return None;
-        }
-        let families = style.font_families();
-        let families: Vec<&str> = families.iter().collect();
-        let matches = self
-            .font_collection()
-            .find_typefaces(&families, style.font_style());
-        for font in matches.into_iter() {
-            let Some(params) = variation_axes(&font) else {
-                continue;
-            };
-            let mut coords: Vec<Coordinate> = Vec::new();
-            for (tag, value) in variations {
-                if let Some(param) = params.iter().find(|p| *p.tag == **tag) {
-                    coords.push(Coordinate {
-                        axis: param.tag,
-                        value: value.max(param.min).min(param.max),
-                    });
-                }
-            }
-            if coords.is_empty() {
-                continue;
-            }
-            let v_pos = VariationPosition {
-                coordinates: &coords,
-            };
-            let args =
-                FontArguments::new().set_variation_design_position(v_pos);
-            if let Some(face) = font.clone_with_arguments(&args) {
-                return Some(face);
-            }
-        }
-        None
     }
 }
 
@@ -1409,7 +1647,13 @@ pub fn reset(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
 #[cfg(test)]
 mod tests {
+    use skia_safe::{
+        font_style::{Weight, Width},
+        textlayout::{ParagraphBuilder as SkParagraphBuilder, ParagraphStyle},
+    };
+
     use super::*;
+    use crate::font::INSTANCED_POSITIONS;
 
     /// The manager handed to `SkSVGDOM` answers a null family.
     ///
@@ -1504,6 +1748,7 @@ mod tests {
             width: 5,
             slant: Slant::Upright,
             variations: vec![],
+            optical_size: None,
         }
     }
 
@@ -1541,6 +1786,307 @@ mod tests {
             cache.get(&key(COLLECTION_CACHE_SIZE as i32)).is_some(),
             "the new entry is in"
         );
+    }
+
+    #[test]
+    fn an_instance_places_every_axis_of_the_face() {
+        // Every axis, so a pushed style's position replaces the paragraph's
+        // rather than moving only the axes it names over it.
+        let bytes = std::fs::read("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+            .expect("bundled Amstelvar is readable");
+        let face = FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("Amstelvar parses");
+        let axes = variation_axes(&face).expect("Amstelvar is variable");
+        let [wght, wdth, opsz] = [b"wght", b"wdth", b"opsz"].map(|t| {
+            FourByteTag::from_chars(
+                t[0] as char,
+                t[1] as char,
+                t[2] as char,
+                t[3] as char,
+            )
+        });
+        let other = axes
+            .iter()
+            .find(|axis| ![wght, wdth, opsz].contains(&axis.tag))
+            .expect("Amstelvar has axes beyond the three CSS sets");
+        let mut style = TextStyle::new();
+        style.set_font_size(48.0);
+        style.set_font_style(FontStyle::new(
+            Weight::from(400),
+            Width::CONDENSED,
+            Slant::Upright,
+        ));
+        let value_of = |coordinates: &[Coordinate], tag: FourByteTag| {
+            coordinates
+                .iter()
+                .find(|coordinate| coordinate.axis == tag)
+                .map(|coordinate| coordinate.value)
+        };
+
+        let unnamed = instance_coordinates(&axes, &style, &[]);
+        assert_eq!(unnamed.len(), axes.len(), "one position per axis");
+        assert_eq!(value_of(&unnamed, wght), Some(400.0), "wght is the weight");
+        assert_eq!(
+            value_of(&unnamed, wdth),
+            Some(75.0),
+            "wdth is the stretch, condensed being 75%"
+        );
+        assert_eq!(value_of(&unnamed, opsz), Some(48.0), "opsz is the size");
+        assert_eq!(
+            value_of(&unnamed, other.tag),
+            Some(other.def),
+            "an axis nothing sets is at its default"
+        );
+
+        let named = instance_coordinates(
+            &axes,
+            &style,
+            &[
+                (wght, 300.0),
+                (other.tag, other.max + 1000.0),
+                (wght, 700.0),
+            ],
+        );
+        assert_eq!(
+            value_of(&named, wght),
+            Some(700.0),
+            "the last of two `wght` entries wins"
+        );
+        assert_eq!(
+            value_of(&named, other.tag),
+            Some(other.max),
+            "a named value past its axis is pinned to it"
+        );
+    }
+
+    #[test]
+    fn a_builders_positions_past_the_bound_drop_every_held_collection() {
+        // A paragraph builder instances a pushed style through font arguments
+        // on whichever collection it was handed, cached or not, and Skia
+        // keeps each typeface that makes. Laying a paragraph out through a
+        // collection caches it there, which is what shows the drop.
+        const FAMILY: &str = "AmstelvarBuilderBound";
+        let bytes = std::fs::read("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+            .expect("bundled Amstelvar is readable");
+        let face = FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("Amstelvar parses");
+        let cache_paragraph = |collection: &FontCollection| {
+            let mut builder =
+                SkParagraphBuilder::new(&ParagraphStyle::new(), collection);
+            builder.add_text("Hamburgefonstiv");
+            builder.build().layout(f32::MAX);
+        };
+        let opsz = FourByteTag::from_chars('o', 'p', 's', 'z');
+        let at = |n: usize| {
+            [Coordinate {
+                axis: opsz,
+                value: 10.0 + n as f32 * 0.25,
+            }]
+        };
+
+        FontLibrary::with_shared(|lib| {
+            lib.register_typeface(face, Some(FAMILY.to_string()));
+            let mut style = TextStyle::new();
+            style.set_font_families(&[FAMILY]);
+            let (mut instanced, _) = lib.fonts_for_style(&style, &[]);
+            let mut main = lib.font_collection();
+            cache_paragraph(&instanced);
+            cache_paragraph(&main);
+            let held = |instanced: &mut FontCollection,
+                        main: &mut FontCollection| {
+                (
+                    instanced.paragraph_cache_mut().count(),
+                    main.paragraph_cache_mut().count(),
+                )
+            };
+            assert_eq!(held(&mut instanced, &mut main), (1, 1));
+
+            for n in 0..INSTANCED_POSITIONS {
+                assert!(!lib.admit_position(&[FAMILY], &at(n)), "position {n}");
+            }
+            assert!(
+                !lib.admit_position(&[FAMILY], &at(0)),
+                "a position already recorded drops nothing"
+            );
+            assert_eq!(
+                held(&mut instanced, &mut main),
+                (1, 1),
+                "nothing is dropped up to the bound"
+            );
+
+            assert!(
+                lib.admit_position(&[FAMILY], &at(INSTANCED_POSITIONS)),
+                "one past the bound asks the caller to drop its own"
+            );
+            assert_eq!(
+                held(&mut instanced, &mut main),
+                (0, 0),
+                "and the cached and the main collection are dropped here"
+            );
+        });
+    }
+
+    #[test]
+    fn an_instance_outlives_its_collection_until_the_byte_bound() {
+        // The collection cache lets a collection go after 128 others; the
+        // instance in it is kept until the instances held reach their byte
+        // bound, so the same position finds the same typeface again, and
+        // what the face's instances share stays answerable by the face.
+        const FAMILY: &str = "AmstelvarInstanceHeld";
+        let bytes = std::fs::read("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+            .expect("bundled Amstelvar is readable");
+        let face = FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("Amstelvar parses");
+        let held = INSTANCE_CACHE_BYTES / INSTANCE_BYTES_ESTIMATE;
+        // Distinct positions: Amstelvar's `opsz` runs 10 to 72, so every size
+        // here lands on its own coordinate.
+        let size = |step: usize| 10.0 + step as f32 * 0.05;
+        assert!(size(held + COLLECTION_CACHE_SIZE + 1) < 72.0);
+        let style = |size: f32| {
+            let mut style = TextStyle::new();
+            style.set_font_families(&[FAMILY]);
+            style.set_font_size(size);
+            style
+        };
+
+        FontLibrary::with_shared(|lib| {
+            lib.register_typeface(face.clone(), Some(FAMILY.to_string()));
+            let instance_at = |lib: &mut FontLibrary, size: f32| {
+                let (mut collection, _) =
+                    lib.fonts_for_style(&style(size), &[]);
+                collection
+                    .find_typefaces(&[FAMILY], FontStyle::default())
+                    .first()
+                    .map(Typeface::unique_id)
+                    .expect("the family resolves")
+            };
+            let base = face.unique_id();
+
+            let first = instance_at(lib, size(0));
+            assert_ne!(first, base, "an instance is a face of its own");
+            assert_eq!(base_face(first), base);
+
+            for step in 1..=COLLECTION_CACHE_SIZE {
+                instance_at(lib, size(step));
+            }
+            assert_eq!(
+                instance_at(lib, size(0)),
+                first,
+                "a position whose collection was let go finds its instance"
+            );
+
+            for step in 1..=held {
+                instance_at(lib, size(COLLECTION_CACHE_SIZE + step));
+            }
+            assert_eq!(lib.instances.entries.len(), held);
+            assert!(lib.instances.bytes <= INSTANCE_CACHE_BYTES);
+            assert_eq!(
+                base_face(first),
+                first,
+                "past the bound the least recently used instance is let go"
+            );
+            assert_ne!(
+                instance_at(lib, size(0)),
+                first,
+                "and its position is made again"
+            );
+
+            let last = instance_at(lib, size(1));
+            assert_eq!(base_face(last), base);
+            lib.instances.clear();
+            assert_eq!(lib.instances.bytes, 0);
+            assert_eq!(base_face(last), last, "clearing forgets every one");
+        });
+    }
+
+    #[test]
+    fn a_size_per_call_on_an_optical_axis_stays_within_the_cache() {
+        // Each size instances its own `opsz`, so a caller animating a font
+        // size asks for a collection no earlier call built. The map has to
+        // stay at its bound and let the oldest go, or every frame of the
+        // animation stays resident.
+        const FAMILY: &str = "AmstelvarCacheBound";
+        const SIZES: usize = 1000;
+        let bytes = std::fs::read("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+            .expect("bundled Amstelvar is readable");
+        let face = FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("Amstelvar parses");
+        let style = |size: f32| {
+            let mut style = TextStyle::new();
+            style.set_font_families(&[FAMILY]);
+            style.set_font_size(size);
+            style
+        };
+        let first = style(10.0);
+
+        FontLibrary::with_shared(|lib| {
+            lib.register_typeface(face, Some(FAMILY.to_string()));
+            lib.fonts_for_style(&first, &[]);
+            let first_key = CollectionKey::new(&first, &[], Some(10.0));
+            assert!(
+                lib.collection_cache.entries.contains_key(&first_key),
+                "the first size is cached under the key it was built for"
+            );
+            for step in 1..SIZES {
+                lib.fonts_for_style(&style(10.0 + step as f32 * 0.05), &[]);
+            }
+            assert_eq!(
+                lib.collection_cache.entries.len(),
+                COLLECTION_CACHE_SIZE,
+                "a thousand sizes leave the map at its bound"
+            );
+            assert!(
+                !lib.collection_cache.entries.contains_key(&first_key),
+                "and the size asked for first is the one let go"
+            );
+        });
+    }
+
+    #[test]
+    fn a_font_registered_after_a_collection_is_built_is_found() {
+        // Every collection shares the provider of registered faces, so a
+        // registration has to replace it, not only the collections built
+        // over it. A static face, so the answer comes from the provider and
+        // not from an instance carrying its alias.
+        let face = |path: &str| {
+            let bytes = std::fs::read(path).expect(path);
+            FontMgr::new()
+                .new_from_data(Data::new_copy(&bytes), None)
+                .expect(path)
+        };
+        let style = |family: &str| {
+            let mut style = TextStyle::new();
+            style.set_font_families(&[family]);
+            style
+        };
+        let monoton = face("tests/assets/fonts/Monoton-Regular.woff");
+
+        FontLibrary::with_shared(|lib| {
+            lib.register_typeface(
+                face("tests/assets/fonts/AmstelvarAlpha-VF.ttf"),
+                Some("PartsFirst".to_string()),
+            );
+            lib.fonts_for_style(&style("PartsFirst"), &[]);
+            lib.font_collection();
+
+            lib.register_typeface(
+                monoton.clone(),
+                Some("PartsLater".to_string()),
+            );
+            let (mut collection, _) =
+                lib.fonts_for_style(&style("PartsLater"), &[]);
+            assert_eq!(
+                collection
+                    .find_typefaces(&["PartsLater"], FontStyle::default())
+                    .first()
+                    .map(Typeface::family_name),
+                Some(monoton.family_name()),
+            );
+        });
     }
 
     #[test]

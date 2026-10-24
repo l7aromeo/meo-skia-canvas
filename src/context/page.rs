@@ -304,6 +304,22 @@ impl Drop for PageId {
     }
 }
 
+/// The draws made on one page, recorded rather than rasterised.
+///
+/// Kept until the page is erased -- by `reset()`, an opaque fill covering the
+/// page, or a `clearRect` covering it, all through
+/// [`set_bounds`](Self::set_bounds) -- because vector export replays them;
+/// the raster surface only caches a replay. Nothing rasterises and drops
+/// them early.
+///
+/// So what a recorded draw holds lives as long as the page does, and a text
+/// draw holds the typeface it was laid out in. A face with an `opsz` axis is
+/// a typeface of its own at every font size, so an uncleared page of such
+/// text keeps one instance per distinct size it was drawn at, about 36 KB
+/// each: ten thousand `fillText` calls at distinct Amstelvar sizes measured
+/// 403 MB of resident memory, where the same draws laid out in one typeface
+/// across every size, as they were before `opsz` followed the size,
+/// measured 50.
 pub struct PageRecorder {
     current: PictureRecorder,
     layers: Vec<Picture>,

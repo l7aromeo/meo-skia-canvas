@@ -1,9 +1,14 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use parking_lot::Mutex;
 use skia_safe::{
-    Data, FontMgr, Typeface, font_parameters::variation::Axis,
-    font_style::Slant, textlayout::TypefaceFontProvider,
+    Data, FontMgr, FourByteTag, Typeface,
+    font_arguments::variation_position::Coordinate,
+    font_parameters::variation::Axis, font_style::Slant,
+    textlayout::TypefaceFontProvider,
 };
 
 // The process-wide registry the JavaScript `FontLibrary.use()` writes to.
@@ -79,6 +84,101 @@ pub(crate) fn slant_for_matching(slant: Slant) -> Slant {
 pub(crate) fn variation_axes(face: &Typeface) -> Option<Vec<Axis>> {
     face.variation_design_parameters()
         .filter(|axes| !axes.is_empty())
+}
+
+/// The `opsz` position for text set at `font_size` CSS pixels in a face with
+/// `axes`: the size, clamped to the axis. `None` for a face with no `opsz`
+/// axis.
+///
+/// What CSS `font-optical-sizing: auto` asks for, and a canvas has no way to
+/// ask for anything else. Chrome 152 instances Amstelvar, whose axis runs 10
+/// to 72, at the CSS size: its canvas widths match its DOM's at `"opsz"`
+/// equal to the size, and 24px under `scale(2)` measures as 24px, not 48px.
+/// A face left uninstanced draws whatever its platform picks instead --
+/// FreeType the default instance, CoreText the optical size of its own 12pt
+/// default -- which is right at one size at most.
+///
+/// Callers skip this where the axes asked for name `opsz`, as
+/// `font-variation-settings` wins over `font-optical-sizing` in CSS.
+pub(crate) fn optical_size(
+    axes: &[Axis],
+    font_size: f32,
+) -> Option<Coordinate> {
+    let opsz = FourByteTag::from(u32::from_be_bytes(FontAxisTag::OPSZ.0));
+    axes.iter()
+        .find(|axis| axis.tag == opsz)
+        .map(|axis| Coordinate {
+            axis: axis.tag,
+            // `max` then `min` rather than `clamp`, which panics on an axis
+            // whose minimum a malformed font puts above its maximum.
+            value: font_size.max(axis.min).min(axis.max),
+        })
+}
+
+/// How many variable-font positions a `FontCollection` instances through
+/// a text style's `FontArguments` before its caches are dropped.
+///
+/// Skia's `FontCollection` keeps every typeface it clones for a style's font
+/// arguments, in a face cache and a variation cache that nothing evicts and
+/// only `clear_caches` empties. `opsz` makes every font size of a face with
+/// the axis a position of its own, so a collection laying out an animated
+/// size keeps a clone per frame unless something drops them. Measured in
+/// release on macOS, the crate's `TextEngine` grows by 43 MB over three
+/// thousand Amstelvar sizes and 45 over thirty thousand with this bound, and
+/// by 91 and 167 without it; a static font grows by 16 at either count.
+///
+/// The same bound as the binding's cache of instanced collections, for the
+/// same reason: it is more positions than a page uses, and a tween asks for
+/// values no later frame asks for again, so a larger bound would only keep
+/// them. Dropping the caches costs the next layouts a rebuild of what they
+/// still use.
+pub(crate) const INSTANCED_POSITIONS: usize = 128;
+
+/// The positions a `FontCollection` has instanced through font arguments
+/// since its caches were last dropped. See [`INSTANCED_POSITIONS`].
+#[derive(Debug, Default)]
+pub(crate) struct InstancedPositions {
+    /// Families and coordinates, the coordinates by their bits because Skia
+    /// tells two argument lists apart by exact equality.
+    seen: HashSet<(String, Vec<(u32, u32)>)>,
+}
+
+impl InstancedPositions {
+    /// Records that a collection is about to instance `families` at
+    /// `coordinates`, and answers whether its caches have to be dropped
+    /// first: when that position would be one past the bound. The record
+    /// then starts again from it.
+    #[must_use]
+    pub(crate) fn admit(
+        &mut self,
+        families: &[&str],
+        coordinates: &[Coordinate],
+    ) -> bool {
+        let key = (
+            families.join(", "),
+            coordinates
+                .iter()
+                .map(|coordinate| {
+                    (*coordinate.axis, coordinate.value.to_bits())
+                })
+                .collect(),
+        );
+        if self.seen.contains(&key) {
+            return false;
+        }
+        let full = self.seen.len() >= INSTANCED_POSITIONS;
+        if full {
+            self.seen.clear();
+        }
+        self.seen.insert(key);
+        full
+    }
+
+    /// How many positions are recorded.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.seen.len()
+    }
 }
 
 impl FontAxisTag {
@@ -516,19 +616,20 @@ mod tests {
 
     use skia_safe::{Data, FontMgr, FourByteTag};
 
-    use super::{FontAxisTag, variation_axes};
+    use super::{FontAxisTag, optical_size, variation_axes};
+
+    fn face(path: &str) -> skia_safe::Typeface {
+        let bytes = fs::read(path).expect(path);
+        FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect(path)
+    }
 
     /// Only a FreeType or DirectWrite build can tell this test from one
     /// asking `is_some()`: CoreText answers a static face with `None`
     /// either way, and those two answer it with an empty list.
     #[test]
     fn a_static_face_has_no_variation_axes_and_a_variable_one_does() {
-        let face = |path: &str| {
-            let bytes = fs::read(path).expect(path);
-            FontMgr::new()
-                .new_from_data(Data::new_copy(&bytes), None)
-                .expect(path)
-        };
         let monoton = face("tests/assets/fonts/Monoton-Regular.woff");
         assert!(variation_axes(&monoton).is_none(), "Monoton is static");
 
@@ -541,6 +642,35 @@ mod tests {
             variation_axes(&oswald)
                 .is_some_and(|axes| axes.iter().any(|axis| axis.tag == wght)),
             "Oswald varies its weight"
+        );
+    }
+
+    /// Clamped here as well as by the platform. CoreText and FreeType both
+    /// pin a position to the axis themselves, so no width can tell the two
+    /// apart; this is the check that the coordinate handed over is the one
+    /// `font-optical-sizing: auto` names.
+    #[test]
+    fn the_optical_size_is_the_font_size_clamped_to_the_axis() {
+        // Amstelvar's fvar runs `opsz` from 10 to 72.
+        let amstelvar =
+            variation_axes(&face("tests/assets/fonts/AmstelvarAlpha-VF.ttf"))
+                .expect("Amstelvar is variable");
+        for (size, opsz) in [(8.0, 10.0), (24.0, 24.0), (100.0, 72.0)] {
+            assert_eq!(
+                optical_size(&amstelvar, size).map(|c| c.value),
+                Some(opsz),
+                "{size}px"
+            );
+        }
+
+        let oswald = variation_axes(&face(
+            "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+        ))
+        .expect("Oswald is variable");
+        assert_eq!(
+            optical_size(&oswald, 24.0).map(|c| c.value),
+            None,
+            "Oswald varies its weight and nothing else"
         );
     }
 }

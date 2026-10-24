@@ -106,6 +106,27 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   from the frame it closes, as it is by event delivery and by handle
   changes.
 
+- **A variable font with an optical-size axis is drawn in the design for
+  its font size, as in Chrome.** Nothing set `opsz`, so such a font drew
+  whatever its platform picked: its default instance on Linux, and on macOS
+  the design CoreText picks for its own 12pt default. Chrome sets `opsz` to
+  the CSS font size, clamped to the axis, and so does this now, for
+  `Context2D::set_font` and for `TextEngine::layout_text`,
+  `layout_rich_text` and `paragraph_builder`, where each span and pushed
+  style takes its own `TextStyle::font_size`: `Hamburgefonstiv` in
+  Amstelvar measures 352.22 at 48px, as in Chrome 152, where it measured
+  402.88 on macOS, and 100.72 at 12px where it measured 97.42 on Linux, and
+  a 48px span inside a 12px paragraph is the 48px design. The size is the
+  CSS one, not the size on the device. A `FontAxisTag::OPSZ` named in
+  `font_variations` or `set_font_variation_settings` still wins.
+
+  A canvas that is never cleared keeps the typeface every text draw it
+  recorded was laid out in, for export, so drawing a face with an `opsz`
+  axis at many sizes holds one instance per distinct size, about 36 KB
+  each, until a `clear_rect` covering the canvas, `reset` or an opaque
+  `fill_rect` of the whole canvas releases them. Fonts without an `opsz`
+  axis are unaffected.
+
 - **A GPU recovery could produce wrong or blank pixels with no error; such
   a draw is now retried once and otherwise reported.** On Metal, a GPU
   recovery discards the command buffers every process had in flight, and
@@ -563,6 +584,15 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `tests/assets/data-url-cases.json` holds the 69 cases it is checked
   against, each the bytes Chrome 152 fetched or its refusal.
   `Image::from_url` takes `data:` URLs through it.
+
+### Changed
+
+- **`measure_text` remembers each glyph's outline bounds.** The ink box is
+  joined from the outline of every glyph, and building the outline was two
+  thirds of working out a run's ink with every cache in Skia warm. A glyph's
+  bounds are now remembered by face, size and glyph, up to 4,096 of them:
+  `measure_text("Hello world")` takes about 4.3 µs in release on macOS where
+  it took 5.6, and a seventy-character line about 15 where it took 25.
 
 ## 📦 ⟩ [v0.16.3] (crate) ⟩ September 16, 2026
 

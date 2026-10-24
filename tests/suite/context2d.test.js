@@ -3833,6 +3833,7 @@ describe("measureText's return shape", () => {
       }
     };
     check(fields.metrics, m, "metrics");
+    check(fields.ink, m, "ink");
     check(fields.line, m.lines[0], "line");
     check(fields.run, m.lines[0].runs[0], "run");
   });
@@ -3847,6 +3848,90 @@ describe("measureText's return shape", () => {
       // matters is that the value did not change.
     }
     assert.equal(m.width, before);
+  });
+
+  test("keeps 6.0.2's own properties, frozen, in their order", () => {
+    // Deprecated, and kept until 7.0: the values are own properties, as they
+    // were, so `Object.keys`, a spread and `JSON.stringify` see every one,
+    // `lines` included, and the object is frozen.
+    const OWN = [
+      "width",
+      "actualBoundingBoxLeft",
+      "actualBoundingBoxRight",
+      "actualBoundingBoxAscent",
+      "actualBoundingBoxDescent",
+      "fontBoundingBoxAscent",
+      "fontBoundingBoxDescent",
+      "emHeightAscent",
+      "emHeightDescent",
+      "hangingBaseline",
+      "alphabeticBaseline",
+      "ideographicBaseline",
+      "height",
+      "lines",
+    ];
+    const m = measured().measureText("Hamburgefonstiv");
+    assert.deepEqual(Object.keys(m), OWN);
+    assert.deepEqual(Object.getOwnPropertyNames(m), OWN);
+    assert.deepEqual(Object.keys({ ...m }), OWN);
+    assert.ok(Object.isFrozen(m));
+
+    const json = JSON.parse(JSON.stringify(m));
+    assert.deepEqual(Object.keys(json), OWN);
+    for (const name of OWN) assert.deepEqual(json[name], m[name], name);
+    assert.deepEqual(Object.keys(json.lines[0]).at(-1), "runs");
+    assert.equal(typeof json.lines[0].runs[0].family, "string");
+  });
+
+  test("has the prototype and constructor Chrome's TextMetrics has", () => {
+    // What of Chrome 152's shape costs nothing to keep alongside the own
+    // properties: the prototype, its tag, and a constructor that refuses.
+    const { TextMetrics } = require("../../lib");
+    const m = measured().measureText("Hamburgefonstiv");
+    assert.equal(Object.getPrototypeOf(m), TextMetrics.prototype);
+    assert.equal(
+      Object.getPrototypeOf(TextMetrics.prototype),
+      Object.prototype,
+    );
+    assert.equal(Object.prototype.toString.call(m), "[object TextMetrics]");
+    assert.equal(TextMetrics.length, 0);
+    assert.throws(() => new TextMetrics(), TypeError);
+  });
+
+  test("computes the ink box when it is read, and once", () => {
+    // The ink box is the outline of every glyph, which nothing but the four
+    // `actualBoundingBox` values and `lines` needs.
+    const { neon } = require("../../lib/classes/neon");
+    const ink = neon.CanvasRenderingContext2D.measureTextInk;
+    assert.equal(typeof ink, "function", "the binding computes the ink apart");
+    let calls = 0;
+    neon.CanvasRenderingContext2D.measureTextInk = (...args) => {
+      calls++;
+      return ink(...args);
+    };
+    try {
+      const m = measured().measureText("Hamburgefonstiv");
+      const { width, fontBoundingBoxAscent, alphabeticBaseline, height } = m;
+      assert.ok(width > 0 && fontBoundingBoxAscent > 0 && height > 0);
+      assert.equal(typeof alphabeticBaseline, "number");
+      assert.equal(calls, 0, "nothing but the ink box needs the ink");
+
+      const left = m.actualBoundingBoxLeft;
+      assert.equal(calls, 1);
+      assert.equal(m.actualBoundingBoxLeft, left);
+      m.actualBoundingBoxRight;
+      m.actualBoundingBoxAscent;
+      m.actualBoundingBoxDescent;
+      assert.ok(m.lines[0].runs.length > 0);
+      JSON.stringify(m);
+      ({ ...m });
+      assert.equal(calls, 1, "and the ink is computed once per measurement");
+
+      JSON.stringify(measured().measureText("Hamburgefonstiv"));
+      assert.equal(calls, 2, "a serialisation reads it, once");
+    } finally {
+      neon.CanvasRenderingContext2D.measureTextInk = ink;
+    }
   });
 });
 
