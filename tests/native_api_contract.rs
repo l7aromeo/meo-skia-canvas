@@ -1056,6 +1056,56 @@ fn the_rust_surface_takes_css_colors() -> Result<()> {
     Ok(())
 }
 
+/// `color()` in `a98-rgb` and `prophoto-rgb`, the two CSS Color 4 spaces no
+/// canvas holds, measured in Chrome 153 on a Display P3 canvas read back in
+/// P3. Both convert to sRGB on the way in, outside its gamut where they
+/// name a colour outside it. The function and space names are
+/// case-insensitive, for every space.
+#[test]
+fn a98_rgb_and_prophoto_rgb_paint_as_chrome_does() -> Result<()> {
+    for (css, chrome) in [
+        ("COLOR(display-p3 1 0 0)", [255, 0, 0, 255]),
+        ("color(DISPLAY-P3 1 0 0)", [255, 0, 0, 255]),
+        ("color(a98-rgb 0.5 0.2 0.1)", [136, 55, 29, 255]),
+        ("color(A98-RGB 0.5 0.2 0.1)", [136, 55, 29, 255]),
+        ("color(a98-rgb -0.2 0.5 1.1)", [0, 125, 255, 255]),
+        ("color(a98-rgb 0 1 0)", [0, 250, 45, 255]),
+        ("color(a98-rgb 0.3 0.6 0.9 / 0.5)", [50, 151, 225, 128]),
+        ("color(prophoto-rgb 0.5 0.2 0.1)", [178, 39, 34, 255]),
+        ("color(prophoto-rgb 50% 20% 10%)", [178, 39, 34, 255]),
+        ("color(prophoto-rgb 0.01 0.5 0.9)", [0, 154, 238, 255]),
+        ("color(prophoto-rgb -0.2 0.5 1.1)", [0, 155, 255, 255]),
+        (
+            "rgb(from color(a98-rgb 0.5 0.2 0.1) r g b)",
+            [136, 55, 29, 255],
+        ),
+        (
+            "rgb(from color(prophoto-rgb 0.5 0.2 0.1) r g b)",
+            [178, 39, 34, 255],
+        ),
+    ] {
+        let mut canvas = Canvas::with_options(
+            4.0,
+            4.0,
+            CanvasOptions {
+                color_space: PixelColorSpace::DisplayP3,
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )?;
+        {
+            let ctx = canvas.context();
+            ctx.set_fill_style_css(css)
+                .with_context(|| format!("{css} is a colour"))?;
+            ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+        }
+        let pixels =
+            canvas.to_buffer(ImageFormat::Raw, &EncodeOptions::default())?;
+        assert_eq!(&pixels[..4], &chrome[..], "{css}");
+    }
+    Ok(())
+}
+
 /// A relative `hsl()` or `hwb()` reads its channels as CSS Color 5 types
 /// them, each row measured in Chrome 153 on a Display P3 canvas read back in
 /// P3.
