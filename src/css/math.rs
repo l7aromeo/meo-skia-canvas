@@ -134,6 +134,11 @@ pub(crate) struct Expect<'a> {
     pub percent: Percent,
     /// What the font-relative lengths resolve against.
     pub units: &'a FontUnits<'a>,
+    /// The keywords a relative colour binds, in lower case, each to a plain
+    /// number: `h`, `s`, `l` and `alpha` inside `hsl(from ...)`. Empty
+    /// everywhere else. CSS Color 5 types every channel keyword as a
+    /// `<number>`, so `calc(h + 30deg)` is refused as `calc(1 + 30deg)` is.
+    pub channels: &'a [(&'a str, f64)],
 }
 
 /// The names that open a math function, in lower case.
@@ -191,6 +196,22 @@ pub(crate) fn evaluate(text: &str, expect: &Expect) -> Option<Quantity> {
         expect,
     };
     let quantity = parser.function()?;
+    (parser.at == parser.text.len()).then_some(quantity)
+}
+
+/// `text` as one number, percentage or dimension and nothing else: a value
+/// written without a math function, read by the same rules as one inside.
+///
+/// `None` for anything else, a constant included, since only a math function
+/// may name one: Chrome refuses `hsl(from red e s l)` and reads
+/// `hsl(from red calc(e) s l)`.
+pub(crate) fn literal(text: &str, expect: &Expect) -> Option<Quantity> {
+    let mut parser = Parser {
+        text: text.trim(),
+        at: 0,
+        expect,
+    };
+    let quantity = parser.dimension()?;
     (parser.at == parser.text.len()).then_some(quantity)
 }
 
@@ -317,8 +338,8 @@ impl Parser<'_, '_> {
         }
     }
 
-    /// `calc-value`: a number, a dimension, a percentage, a constant, a
-    /// parenthesised sum, or another math function.
+    /// `calc-value`: a number, a dimension, a percentage, a constant or a
+    /// channel keyword, a parenthesised sum, or another math function.
     fn value(&mut self) -> Option<Quantity> {
         match self.peek()? {
             b'(' => {
@@ -345,7 +366,13 @@ impl Parser<'_, '_> {
                     self.at = before;
                     return self.function();
                 }
-                constant(&name).map(Quantity::number)
+                self.expect
+                    .channels
+                    .iter()
+                    .find(|(channel, _)| *channel == name)
+                    .map(|&(_, value)| value)
+                    .or_else(|| constant(&name))
+                    .map(Quantity::number)
             }
         }
     }
@@ -739,6 +766,7 @@ mod tests {
         let expect = Expect {
             percent: Percent::Own,
             units: &units,
+            channels: &[],
         };
         let quantity = evaluate(text, &expect)
             .unwrap_or_else(|| panic!("{text:?} evaluates"));
@@ -791,6 +819,7 @@ mod tests {
         let expect = Expect {
             percent: Percent::Refused,
             units: &units,
+            channels: &[],
         };
         for text in [
             "calc(1px+2px)",
@@ -817,6 +846,7 @@ mod tests {
         let expect = Expect {
             percent: Percent::Refused,
             units: &units,
+            channels: &[],
         };
         let nan = evaluate("calc(NaN * 1px)", &expect).expect("a length");
         assert!(nan.value.is_nan());

@@ -1024,6 +1024,28 @@ fn the_rust_surface_takes_css_colors() -> Result<()> {
         assert_eq!(painted(css, PixelColorSpace::DisplayP3)?, chrome, "{css}");
     }
 
+    // `hsl()` and `hwb()` over an origin outside sRGB, measured the same way.
+    // The channels come from the origin as it is, so the oklch origin comes
+    // back whole and one above one keeps its red. `csscolorparser` clips the
+    // origin to sRGB before finding its hue, which reads `102` for red on the
+    // oklch rows and `235, 72, 47` on the last; `relative_hue_color` in the
+    // binding's colour parser is what changes that. Its grammar is
+    // `hsl_and_hwb_evaluate_relative_channels_as_chrome_does`.
+    for (css, chrome) in [
+        ("hsl(from oklch(0.8 0.18 165) h s l)", [91, 221, 165, 255]),
+        ("hwb(from oklch(0.8 0.18 165) h w b)", [91, 221, 165, 255]),
+        (
+            "rgb(from hsl(from oklch(0.8 0.18 165) h s l) r g b)",
+            [91, 221, 165, 255],
+        ),
+        (
+            "hsl(from color(srgb 1.2 0.2 0.1) h s l)",
+            [255, 81, 54, 255],
+        ),
+    ] {
+        assert_eq!(painted(css, PixelColorSpace::DisplayP3)?, chrome, "{css}");
+    }
+
     // A browser keeps the previous fill when the string will not parse. Rust
     // gets told, since it has somewhere to put the answer.
     let mut canvas = Canvas::new(4.0, 4.0);
@@ -1031,6 +1053,122 @@ fn the_rust_surface_takes_css_colors() -> Result<()> {
     assert!(ctx.set_fill_style_css("not-a-color").is_err());
     assert!(ctx.set_stroke_style_css("also not").is_err());
     assert!(ctx.set_shadow_color_css("nope").is_err());
+    Ok(())
+}
+
+/// A relative `hsl()` or `hwb()` reads its channels as CSS Color 5 types
+/// them, each row measured in Chrome 153 on a Display P3 canvas read back in
+/// P3.
+///
+/// The channel keywords are numbers -- `h` in degrees, `s`, `l`, `w` and `b`
+/// out of 100, `alpha` out of 1 -- so they meet an angle only through typed
+/// arithmetic, and a percentage not at all. A hue may be written as an
+/// angle, the others as a percentage. Nothing is clipped on the way:
+/// saturation may go negative, and whiteness and blackness too. An origin
+/// whose saturation comes out negative turns its `hsl()` hue half a turn,
+/// and its `hwb()` hue stays put.
+#[test]
+fn hsl_and_hwb_evaluate_relative_channels_as_chrome_does() -> Result<()> {
+    let painted = |css: &str| -> Result<[u8; 4]> {
+        let mut canvas = Canvas::with_options(
+            4.0,
+            4.0,
+            CanvasOptions {
+                color_space: PixelColorSpace::DisplayP3,
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )?;
+        {
+            let ctx = canvas.context();
+            ctx.set_fill_style_css(css)
+                .with_context(|| format!("{css} is a colour"))?;
+            ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+        }
+        let pixels =
+            canvas.to_buffer(ImageFormat::Raw, &EncodeOptions::default())?;
+        Ok([pixels[0], pixels[1], pixels[2], pixels[3]])
+    };
+
+    for (css, chrome) in [
+        // Units, percentages and `none` where the grammar takes them.
+        ("hsl(from red 120deg s l)", [117, 251, 76, 255]),
+        ("hsl(from red .5turn s l)", [117, 251, 253, 255]),
+        ("hsl(from red 1e3 s l)", [156, 30, 246, 255]),
+        ("hsl(from red h 50% l)", [177, 73, 69, 255]),
+        ("hwb(from red h 60% 60%)", [128, 127, 127, 255]),
+        ("hsl(from red none s l)", [234, 51, 35, 255]),
+        ("hsl(from red h s l / 50%)", [233, 52, 36, 128]),
+        ("hsl(from red h s l / none)", [0, 0, 0, 0]),
+        ("hsl(from red h s l/0.5)", [233, 52, 36, 128]),
+        ("HSL(from red H S L)", [234, 51, 35, 255]),
+        ("hsl( from red h s l )", [234, 51, 35, 255]),
+        // The alpha is the origin's unless one is given.
+        (
+            "hsl(from color(srgb 1 0 0 / 0.4) h s l)",
+            [235, 50, 35, 102],
+        ),
+        // Math functions, with the channels and constants inside them.
+        ("hsl(from red calc(e) s l)", [234, 54, 36, 255]),
+        ("hsl(from red max(h, 30) s l)", [239, 134, 51, 255]),
+        (
+            "hsl(from red calc(h * 1deg + 30deg) s l)",
+            [239, 134, 51, 255],
+        ),
+        ("hsl(from red h s calc(l * 2%))", [255, 255, 255, 255]),
+        ("hsl(from red calc(50% / 1%) s l)", [248, 214, 72, 255]),
+        (
+            "hwb(from red calc(h + 120) w b / calc(alpha - 0.25))",
+            [117, 251, 76, 191],
+        ),
+        // An infinity is the largest finite `f32`, a whole number of turns.
+        ("hsl(from red calc(infinity) s l)", [234, 51, 35, 255]),
+        ("hsl(from red h s l / calc(-infinity))", [0, 0, 0, 0]),
+        ("hwb(from red h calc(infinity) 0)", [255, 255, 255, 255]),
+        // Nothing clipped, and the hue an origin gives each function.
+        ("hsl(from red h calc(s - 200) l)", [117, 251, 253, 255]),
+        (
+            "hwb(from red h calc(w - 20) calc(b - 20))",
+            [255, 37, 0, 255],
+        ),
+        ("hsl(from white h 100 50)", [234, 51, 35, 255]),
+        (
+            "hsl(from color(srgb 1.5 1.5 1.4) h 100 50)",
+            [0, 0, 245, 255],
+        ),
+        (
+            "hwb(from color(srgb 1.5 1.5 1.4) h 0 0)",
+            [255, 255, 84, 255],
+        ),
+    ] {
+        assert_eq!(painted(css)?, chrome, "{css}");
+    }
+
+    // Each refused by Chrome, which keeps the previous fill.
+    let mut canvas = Canvas::new(4.0, 4.0);
+    let ctx = canvas.context();
+    for css in [
+        "hsl(from red calc(h + 120deg) s l)",
+        "hsl(from red h calc(s + 50%) l)",
+        "hsl(from red 50% s l)",
+        "hsl(from red h s calc(1em))",
+        "hsl(from red e s l)",
+        "hsl(from red infinity s l)",
+        "hsl(from red w s l)",
+        "hwb(from red h s b)",
+        "hsl(from red h, s, l)",
+        "hsl(from red h s)",
+        "hsl(from red h s l l)",
+        "hsl(from red h s l /)",
+        "hsl(from red h s l / alpha alpha)",
+        "hsl(from red h s l / 0.5 / 0.5)",
+        "hsl(from red h s l) x",
+        "hsl(from red h s l))",
+        "hsl(from h s l)",
+        "hwba(from red h w b)",
+    ] {
+        assert!(ctx.set_fill_style_css(css).is_err(), "{css} is refused");
+    }
     Ok(())
 }
 
