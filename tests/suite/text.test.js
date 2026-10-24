@@ -912,6 +912,44 @@ describe("measureText reports a negative width as it is", () => {
     }
   });
 
+  // A run that falls back from one family to another is laid out face by
+  // face, and its advance follows the weight each face draws at. Chrome
+  // 152, with Montserrat's 200, 400 and 700 faces and Raleway's variable
+  // face loaded as FontFace with their weights: "ЖЖ" falls back to Raleway,
+  // which reaches 900 where Montserrat stops at 700, so at -60px the run is
+  // 6.9 longer at 900 than at 700 over the same Latin. Within a hundredth
+  // and a half: SkParagraph keeps hundredths, and FreeType's advances for
+  // these faces sum a hundredth below CoreText's at 700 -- 176.30 against
+  // 176.31 with no spacing at all, where Chrome's is 176.3113.
+  const MONTSERRAT = "tests/assets/fonts/montserrat-latin/montserrat-v30-latin";
+  FontLibrary.use("MontserratAdvance", [
+    `${MONTSERRAT}-200.woff2`,
+    `${MONTSERRAT}-regular.woff2`,
+    `${MONTSERRAT}-700.woff2`,
+  ]);
+  FontLibrary.use("RalewayAdvance", [
+    "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+  ]);
+
+  test("a negative advance follows each face's own weight", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    for (const [weight, letter, text, chrome] of [
+      [900, "-60px", "ABЖЖ", -56.78401184082031],
+      [700, "-60px", "ABЖЖ", -63.68867492675781],
+      [400, "-60px", "ABЖЖ", -74.8394775390625],
+      [900, "-60px", "AB ЖЖ", -103.20001220703125],
+      [900, "-30px", "ABЖЖ", 63.21598815917969],
+    ]) {
+      ctx.font = `${weight} 48px MontserratAdvance, RalewayAdvance`;
+      ctx.letterSpacing = letter;
+      const { width } = ctx.measureText(text);
+      assert.ok(
+        Math.abs(width - chrome) <= 0.015,
+        `${weight} ${letter} ${JSON.stringify(text)}: ${width}, Chrome ${chrome}`,
+      );
+    }
+  });
+
   // Chrome's box for a negative advance reaches back on the left to where
   // the advance ends -- Blink's plain_text_node.cc moves the left edge of
   // such a run's ink out to its width -- and keeps the ink's right edge,
