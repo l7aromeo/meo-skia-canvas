@@ -212,16 +212,26 @@ at the thresholds to the last `f32` step. The conversion is `to_polar` in
 
 **Kept until 7.0, and deprecated.**
 
-- _Four colour forms no browser reads still paint._ `hwba()`, `hsv()`,
-  `hsva()` and hex without its `#` are `csscolorparser`'s, the CSS parser
-  underneath, and have always been accepted here. Chrome 153 refuses each,
-  so `fillStyle = "hwba(0 0% 0%)"`, `"hsv(0 100% 100%)"`,
-  `"hsva(0 100% 100% / 0.5)"` and `"ff0000"` keep the previous fill there
-  and paint red here, as do `hwba(from ...)`, `hsv(from ...)` and
-  `hsva(from ...)`. npm 7.0 and crate 0.17 refuse them; until then
+- _Colour forms no browser reads still paint._ The CSS parser underneath,
+  `csscolorparser`, has always accepted them here, and Chrome 153 refuses
+  each, keeping the previous fill:
+  - `hwba()`, `hsv()` and `hsva()`, `"hwba(0 0% 0%)"` and
+    `"hsv(0 100% 100%)"` among them, and their relative forms;
+  - hex without its `#`, `"ff0000"`;
+  - legacy comma syntax CSS Color 4 does not allow: numbers and percentages
+    mixed, `"rgb(255, 0%, 0)"`; separators mixed, `"rgb(255,0 0)"`;
+    `hsl()` with bare numbers, `"hsl(120, 100, 50)"`; `none` in a channel,
+    `"rgb(none, 0, 0)"`; and commas in a function that has no legacy
+    syntax, `"hwb(120, 0%, 0%)"`, `"lab(50, 40, 30)"`,
+    `"oklch(0.6, 0.2, 30)"`, `"color(srgb 1, 0, 0)"`.
+
+  npm 7.0 and crate 0.17 refuse them; until then
   `the_deprecated_colour_forms_still_paint` in
-  `tests/native_api_contract.rs` holds them. Write `#` before the digits
-  and `hwb()` for the rest.
+  `tests/native_api_contract.rs` holds what each paints. Write `#` before
+  hex digits, spaces between channels, and `hwb()` for `hsv()`. A `none`
+  alpha in legacy syntax, `rgb(255, 0, 0, none)`, painted transparent and
+  is refused already.
+
 - _`TextMetrics` carries its values as its own properties._ Chrome 152 puts
   the ten it defines on `TextMetrics.prototype` as enumerable getters and
   gives the object none of its own, so there `Object.keys` is empty,
