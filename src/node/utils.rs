@@ -1439,13 +1439,12 @@ fn built_from_linear_light(css: &str) -> bool {
     }
 }
 
-/// The space a `color()` call names, given what follows its `(`.
-///
-/// The first argument, or for a relative colour -- `color(from <colour>
-/// <space> ...)` -- the one after the origin, which may itself be a call
-/// with spaces inside it, so arguments are split only outside parentheses.
-fn color_function_space(args: &str) -> Option<&str> {
-    let mut tokens = Vec::new();
+/// The arguments of a call, given what follows its `(`, as spans of `args`:
+/// split at whitespace outside parentheses, and ending at the `)` that closes
+/// the call. An argument that is itself a call -- a relative colour's origin
+/// -- is one span, spaces and all.
+fn top_level_spans(args: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
     let mut depth = 0usize;
     let mut start = None;
     let mut end = args.len();
@@ -1461,20 +1460,108 @@ fn color_function_space(args: &str) -> Option<&str> {
                 start.get_or_insert(at);
             }
             c if c.is_whitespace() && depth == 0 => {
-                tokens.extend(start.take().map(|from| &args[from..at]));
+                spans.extend(start.take().map(|from| (from, at)));
             }
             _ => {
                 start.get_or_insert(at);
             }
         }
     }
-    tokens.extend(start.map(|from| &args[from..end]));
-    match tokens.first() {
-        Some(first) if first.eq_ignore_ascii_case("from") => {
-            tokens.get(2).copied()
-        }
-        first => first.copied(),
+    spans.extend(start.map(|from| (from, end)));
+    spans
+}
+
+/// The space a `color()` call names, given what follows its `(`.
+///
+/// The first argument, or for a relative colour -- `color(from <colour>
+/// <space> ...)` -- the one after the origin.
+fn color_function_space(args: &str) -> Option<&str> {
+    let spans = top_level_spans(args);
+    let token = |at: usize| spans.get(at).map(|&(from, to)| &args[from..to]);
+    match token(0) {
+        Some(first) if first.eq_ignore_ascii_case("from") => token(2),
+        first => first,
     }
+}
+
+/// A relative colour -- `rgb(from <origin> r g b)` -- rewritten so that
+/// `csscolorparser` reads its origin as CSS means it, or `None` for anything
+/// else.
+///
+/// `csscolorparser` keeps one sRGB value per colour, encoded with the
+/// transfer function `css_to_color4f_in_space` describes, and reads a
+/// relative colour's channels out of it: as stored for `rgb()`, `hsl()`,
+/// `hwb()` and `color(srgb ...)`, and decoded by the matching inverse for
+/// the functions that work in linear light. The pair cancels, so an origin
+/// it built in linear light reaches a linear-light function intact -- and
+/// reaches an sRGB one with its negative channel on the wrong curve, while
+/// an origin written in sRGB with a negative channel reaches a linear-light
+/// function on the wrong curve. An origin it cannot read at all, such as
+/// `color(display-p3 ...)`, refuses the whole colour.
+///
+/// So the origin is resolved by this crate's own parser, which is right in
+/// every space, and handed over as a literal in the space the function
+/// reads: `color(srgb ...)` with the CSS encoding for the sRGB functions,
+/// `color(srgb-linear ...)` for the others, whose stored encoding the
+/// matching decode then undoes exactly. The origin may itself be relative,
+/// and is resolved the same way. A `color()` in a space `csscolorparser`
+/// does not offer is left as it is, and refused.
+fn with_resolved_origin(css: &str) -> Option<String> {
+    // UPSTREAM: csscolorparser 0.9.0 -- unfiled -- worked around
+    // Re-check: return `None` here, then cargo test
+    // the_rust_surface_takes_css_colors; its `rgb(from oklch(0.8 0.18 165) r g
+    // b)` row on a Display P3 canvas reads 4 rather than 91 if the defect is
+    // still there. The defect is the encode `css_to_color4f_in_space` repairs,
+    // seen from inside a relative colour, where a repair afterwards is too
+    // late.
+    //
+    // UPSTREAM: csscolorparser 0.9.0 -- unfiled -- not worked around
+    // Re-check: fill `hsl(from color(srgb 1.2 0.2 0.1) h s l)` on a Display P3
+    // canvas and read it back in P3; Chrome 153 reads 255, 81, 54, and
+    // 235, 72, 47 means `Color::to_hsla` still clamps. An sRGB canvas cannot
+    // tell: both clip to the same byte there.
+    //
+    // `to_hsla` and `to_hwba` clamp a colour to 0..1 before converting it, so
+    // `hsl()` and `hwb()` over an origin outside sRGB read a different colour,
+    // however well the origin is resolved. A repair would evaluate the
+    // channel expressions here, `calc()` included, and `csscolorparser`'s
+    // evaluator, `utils::calc::parse_values`, is `pub(crate)`.
+    let (name, args) = css.trim().split_once('(')?;
+    let spans = top_level_spans(args);
+    let [(from, from_end), (origin, origin_end), ..] = spans[..] else {
+        return None;
+    };
+    if !args[from..from_end].eq_ignore_ascii_case("from") {
+        return None;
+    }
+    let linear = match name.to_ascii_lowercase().as_str() {
+        "rgb" | "rgba" | "hsl" | "hsla" | "hwb" => false,
+        "lab" | "lch" | "oklab" | "oklch" => true,
+        "color" => {
+            match color_function_space(args)?.to_ascii_lowercase().as_str() {
+                "srgb" => false,
+                "srgb-linear" | "xyz" | "xyz-d50" | "xyz-d65" => true,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    let c = css_to_color4f(&args[origin..origin_end])?;
+    let literal = match linear {
+        true => format!(
+            "color(srgb-linear {} {} {} / {})",
+            srgb_to_linear(c.r),
+            srgb_to_linear(c.g),
+            srgb_to_linear(c.b),
+            c.a,
+        ),
+        false => format!("color(srgb {} {} {} / {})", c.r, c.g, c.b, c.a),
+    };
+    Some(format!(
+        "{name}({}{literal}{}",
+        &args[..origin],
+        &args[origin_end..]
+    ))
 }
 
 /// Parses a CSS color, keeping the space it was named in.
@@ -1503,7 +1590,11 @@ pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
     // wider one. Below the breakpoint that encode is linear, so the light it
     // meant is exactly the value over the slope, and re-encoding it through
     // the mirrored curve gives the CSS answer. Only a negative channel of a
-    // colour built that way is touched; see `built_from_linear_light`.
+    // colour built that way is touched; see `built_from_linear_light`. A
+    // relative colour reads its origin before any of this runs, so its origin
+    // is resolved first; see `with_resolved_origin`.
+    let resolved = with_resolved_origin(css);
+    let css = resolved.as_deref().unwrap_or(css);
     let from_linear = built_from_linear_light(css);
     let channel = |v: f32| match from_linear && v < 0.0 {
         true => linear_to_srgb(v / SRGB_SLOPE),

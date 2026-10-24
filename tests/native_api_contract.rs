@@ -964,6 +964,60 @@ fn the_rust_surface_takes_css_colors() -> Result<()> {
         );
     }
 
+    // Relative colours, measured in Chrome 153 on a Display P3 canvas read
+    // back in P3. A relative colour reads its origin's channels in its own
+    // space, so each row crosses between sRGB and linear light at a
+    // different point: an sRGB function over an origin built in linear light,
+    // a linear-light function over an origin written in sRGB with a negative
+    // channel, an origin `csscolorparser` cannot read, and channel arithmetic
+    // on top. Left to `csscolorparser`, the first two kinds read `4` and `97`
+    // for red, the third paints black, and the `calc` rows read `61` and `93`;
+    // `with_resolved_origin` in the binding's colour parser is what changes
+    // that. `oklch(from rgb(from oklch(...) r g b) l c h)` is right either
+    // way -- `csscolorparser`'s decode undoes its own encode -- and is here to
+    // stay right.
+    for (css, chrome) in [
+        ("rgb(from oklch(0.8 0.18 165) r g b)", [91, 221, 165, 255]),
+        (
+            "color(from oklch(0.8 0.18 165) srgb r g b)",
+            [91, 221, 165, 255],
+        ),
+        (
+            "rgb(from color(xyz-d65 0.318370 0.555540 0.424442) r g b)",
+            [91, 221, 165, 255],
+        ),
+        (
+            "oklch(from color(srgb -0.202919 0.881504 0.628696) l c h)",
+            [91, 221, 165, 255],
+        ),
+        (
+            "lab(from color(srgb -0.202919 0.881504 0.628696) l a b)",
+            [91, 221, 165, 255],
+        ),
+        (
+            "oklch(from rgb(from oklch(0.8 0.18 165) r g b) l c h)",
+            [91, 221, 165, 255],
+        ),
+        (
+            "rgb(from color(display-p3 0.357 0.866 0.647) r g b)",
+            [91, 221, 165, 255],
+        ),
+        (
+            "rgb(from oklch(0.8 0.18 165) calc(r + 20) g b)",
+            [98, 221, 165, 255],
+        ),
+        (
+            "oklch(from rgb(from oklch(0.8 0.18 165) calc(r + 20) g b) l c h)",
+            [98, 221, 165, 255],
+        ),
+        (
+            "rgb(from oklch(0.8 0.18 165) r g b / 0.5)",
+            [92, 221, 163, 128],
+        ),
+    ] {
+        assert_eq!(painted(css, PixelColorSpace::DisplayP3)?, chrome, "{css}");
+    }
+
     // A browser keeps the previous fill when the string will not parse. Rust
     // gets told, since it has somewhere to put the answer.
     let mut canvas = Canvas::new(4.0, 4.0);

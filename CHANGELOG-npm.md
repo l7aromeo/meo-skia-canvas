@@ -559,6 +559,22 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `oklch(0.7 0.35 30)` reported a green of about `-1.186` in its
   `color(srgb ...)` form, and now reports `-0.335`.
 
+- **A relative colour reads its origin as CSS means it.**
+  `fillStyle = 'rgb(from oklch(0.8 0.18 165) r g b)'` on a `display-p3`
+  canvas painted `4, 221, 164` where Chrome paints `91, 221, 165`: the
+  origin's channels were read on the wrong curve before the relative
+  colour saw them. The same held, mirrored, for a linear-light function
+  such as `oklch(from color(srgb -0.2 0.88 0.63) l c h)`, and an origin
+  named in `display-p3` or `rec2020` made the whole colour unparseable.
+  Every relative form measured now agrees with Chrome 153 byte for byte,
+  `calc()` channels and nesting included -- in `fillStyle`, `strokeStyle`,
+  `shadowColor`, gradient stops and anywhere else a CSS colour is taken.
+
+  Not yet right: `hsl()` and `hwb()` over an origin outside sRGB still
+  clamp it, so `hsl(from color(srgb 1.2 0.2 0.1) h s l)` paints
+  `235, 72, 47` on a P3 canvas where Chrome paints `255, 81, 54`. No sRGB
+  canvas shows it.
+
 ### Added
 
 - **`TextHeightBehavior` names the four codes `textHeightBehavior` takes**,
