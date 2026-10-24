@@ -32,6 +32,36 @@ window be changed after it opens.** No signature moves and nothing is removed.
   which Chrome ignores, reads back as `"none"`. The parse still trims, so
   nothing draws differently.
 
+- **A `drop-shadow` colour in `set_filter_css`, and a decoration colour in
+  `set_text_decoration_css`, draw the colour they name.** Both read the
+  CSS colour's sRGB-encoded components as linear light and encoded them a
+  second time on the way to Skia, so every colour off the 0 and 1 corners
+  came out lighter: `drop-shadow(10px 10px 0px rebeccapurple)` drew
+  170, 124, 203 where Chrome draws 102, 51, 153. They now go through the
+  same parser as `set_fill_style_css` and land on Chrome's bytes, measured
+  for six colours from `#742` to `oklch()`, including Chrome's rounding of
+  a half step at parse: `rgb(10.5 20.4 30.6)` is 11, 20, 31. The typed
+  `set_filter` and `set_text_decoration`, which take an `RgbaLinear`, were
+  not affected.
+
+- **`Context2D::fill_style()` and `stroke_style()` report a colour set
+  from CSS as the colour it paints.** They handed back the components
+  `set_fill_style_css` held, sRGB-encoded in the space the colour was named
+  in, as if they were linear light in the canvas's working space, which is
+  what an `RgbaLinear` is. So `"rebeccapurple"` read back as 0.4, 0.2, 0.6,
+  and passing that to `set_fill_style` painted 170, 124, 203 where the CSS
+  had painted 102, 51, 153; on a Display P3 canvas even `rgb(255 0 0 / 50%)`
+  came back off. The report is now converted the way a paint converts the
+  colour, into linear light in the working primaries: on an sRGB canvas it
+  is `RgbaLinear::from_css`, and on both an sRGB and a Display P3 canvas,
+  seven colours named in sRGB, linear sRGB, P3 and Rec. 2020 repaint
+  byte-identical from their report. A colour set through `set_fill_style`
+  reads back unchanged, as before.
+
+- **`set_text_decoration_css` reads a colour function that holds spaces.**
+  `"underline hsl(120 50% 50%)"` was split at every space and refused; a
+  function's parentheses now hold it together, as in `set_filter_css`.
+
 - **A GPU recovery could produce wrong or blank pixels with no error; such
   a draw is now retried once and otherwise reported.** On Metal, a GPU
   recovery discards the command buffers every process had in flight, and
