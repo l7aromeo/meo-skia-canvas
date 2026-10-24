@@ -125,15 +125,21 @@ status = "deliberate"
 
 [[capability]]
 name = "paragraph text height behavior"
-rust = ["TextHeightBehavior"]
+rust = ["TextHeightBehavior::All",
+        "TextHeightBehavior::DisableFirstAscent",
+        "TextHeightBehavior::DisableLastDescent",
+        "TextHeightBehavior::DisableAll"]
 npm = []
-why = """npm declares `textHeightBehavior?: number` in lib/index.d.ts and the
-      binding refuses a code outside 0..3 at run time. Four states on each side,
-      but the npm declaration does not say which numbers mean what, and no DOM
-      type sets the precedent the way it does for `createPattern` and `key`: a
-      typing gap in the npm declaration, which a named union would close."""
-status = "gap"
-issue = "unfiled"
+why = """Four states on each side, and the two `TextHeightBehavior` types pair by
+      name. The crate names the states as variants; npm's type is the codes 0
+      to 3 its `textHeightBehavior` option takes, the numbers CanvasKit's
+      enum carries, so the variants have no member to pair with and the type's
+      doc comment says which code is which. The option is typed
+      `TextHeightBehavior | (number & {})` so that code passing a `number`
+      keeps compiling, and a non-integer is truncated today; npm 7.0 narrows
+      the option to `TextHeightBehavior` and refuses a non-integer with a
+      `RangeError`, after which the two sides hold the same four values."""
+status = "deliberate"
 
 [[capability]]
 name = "path boolean operations"

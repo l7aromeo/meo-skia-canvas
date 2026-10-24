@@ -18,5 +18,10 @@
     "target": "es2022",
     "types": ["node"]
   },
-  "files": ["lib/index.d.ts", "lib/browser.d.ts", "tests/types/constructors.ts"]
+  "files": [
+    "lib/index.d.ts",
+    "lib/browser.d.ts",
+    "tests/types/constructors.ts",
+    "tests/types/paragraph.ts"
+  ]
 }

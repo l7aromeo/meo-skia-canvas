@@ -561,6 +561,11 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Added
 
+- **`TextHeightBehavior` names the four codes `textHeightBehavior` takes**,
+  `0` to `3`, with what each trims in its doc comment, so an editor offers
+  them. The option is typed `TextHeightBehavior | (number & {})`, so code
+  passing a `number` compiles as before.
+
 - **`ctx.filter` takes the CSS math functions**, as Chrome 152 does:
   `calc()` and `-webkit-calc()`, `min()`, `max()`, `clamp()`, `round()`,
   `mod()`, `rem()`, `abs()`, `sign()`, `sin()` through `atan2()`, `pow()`,
@@ -690,6 +695,12 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   what they gave, the ink then worked out once.
 
 ### Deprecated
+
+- **A `textHeightBehavior` that is not an integer.** `ParagraphBuilder`
+  truncates `1.5` toward zero, to `1`, and ignores `NaN` and the
+  infinities, leaving the default `0`. In 7.0 each is a `RangeError`, as
+  an integer outside `0` to `3` is already, and the option is typed as
+  `TextHeightBehavior` alone.
 
 - **`TextMetrics` values as own properties.** In 7.0 they become getters on
   `TextMetrics.prototype` alone, as Chrome's are, and the object has no
