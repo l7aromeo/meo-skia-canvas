@@ -65,8 +65,15 @@ function withoutCode(text) {
     }
     return line;
   });
-  // A code span is a run of backticks closed by a run of the same length.
-  return lines.join("\n").replace(/(`+)[^`]*?\1/g, (m) => " ".repeat(m.length));
+  // A code span is a run of backticks closed by a run of the same length,
+  // within one paragraph: it may run onto the next line but never across a
+  // blank one. Blanked with its line breaks kept, so that line numbers after
+  // it stay true.
+  return lines
+    .join("\n")
+    .replace(/(`+)(?:[^`\n]|\n(?![ \t]*\n))*?\1/g, (m) =>
+      m.replace(/[^\n]/g, " "),
+    );
 }
 
 /** Every link target in `text`, with the line it is on. */
@@ -342,6 +349,22 @@ Under
       0,
     ],
     ["a missing image fails", [["a.md", "![x](img.png)"]], 1, "img.png"],
+    // A code span may run onto the next line; blanking it must keep the line
+    // break, or every later line number in the file is off by one.
+    [
+      "a code span across a line break keeps later line numbers",
+      [["a.md", "a `code\nspan` b\n\n[x](gone.md)"]],
+      1,
+      "a.md:4",
+    ],
+    // A code span never crosses a blank line, so a stray backtick cannot pair
+    // with one paragraphs later and blank the links in between.
+    [
+      "a stray backtick does not hide a link in a later paragraph",
+      [["a.md", "one ` stray\n\n[x](gone.md)\n\nand ` another"]],
+      1,
+      "gone.md",
+    ],
     [
       "a reference definition is checked",
       [["a.md", "[x][r]\n\n[r]: gone.md"]],
