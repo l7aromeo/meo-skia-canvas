@@ -7,7 +7,14 @@ against a browser flags one of these, it is not a regression -- read this first.
 few percent of pixels, confined to stem edges; metrics are unchanged. A contour
 of a single `moveTo` no longer survives, so `Path2D.d`, `.edges` and `.bounds`
 lose the orphan point -- no pixel effect, since a move-only contour paints
-nothing.
+nothing. On the GPU engine, a translucent colour can be stored one
+premultiplied step away from where the raster engine and Chrome's software
+canvas store it, because Skia's GPU rasteriser rounds the premultiply
+differently: `color(display-p3 1 0 0 / 0.5)` stores red 128 and reads back as
+255, where the raster engine and Chrome store 127 and read 253, and
+`color(display-p3 1 0 0 / 0.1)` stores alpha 25 and reads 255, 0, 0, 25,
+against 26 and 245, 0, 0, 26. The read itself converts exactly on both
+engines; the step is in what was drawn.
 
 `actualBoundingBoxAscent` and `actualBoundingBoxDescent` differ from Chrome
 because `SkParagraph` snaps a run's baseline to a whole pixel and Chrome does
