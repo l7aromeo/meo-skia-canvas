@@ -210,6 +210,43 @@ hue, and `a_hue_is_powerless_at_the_chroma_css_color_4_names_and_no_further`
 at the thresholds to the last `f32` step. The conversion is `to_polar` in
 `src/node/utils.rs`.
 
+**A colour is painted at the precision it names, whatever its spelling,
+and Chrome rounds some spellings to 8 bits. Ours is the specification's
+answer.** CSS Color 4 rounds `rgb()` channels to integers only when it
+serialises them; parsing keeps the value, and nothing in CSS lets the
+spelling of a colour change which colour it is. Chrome 153's canvas paints
+some spellings of a legacy colour as 8-bit RGBA and others as floats, by
+which of its parsers reads them, and the getter reports 8 bits for all of
+them. Measured on a Display P3 canvas read back in P3:
+
+        rgb(127.5 0 0)               Chrome 117,20,12      here 116,20,12
+        RGB(127.5 0 0)               Chrome 116,20,12      here 116,20,12
+        rgb(50%, 0%, 0%)             Chrome 117,20,12      here 116,20,12
+        rgb(50% 0 0)                 Chrome 116,20,12      here 116,20,12
+        rgb(127.5 calc(0) 0)         Chrome 116,20,12      here 116,20,12
+        rgb(0 255 0 / 0.5)           Chrome 118,251,76,128 here 116,251,76,128
+        rgb(0 255 0 / 50%)           Chrome 116,251,76,128 here 116,251,76,128
+        rgb(0 255 0 / calc(0.5))     Chrome 116,251,76,128 here 116,251,76,128
+        rgb(none 255 0 / 0.5)        Chrome 116,251,76,128 here 116,251,76,128
+        hsl(0deg 150% 50%)           Chrome 234,51,35      here 255,18,0
+        hsl(0 150 50)                Chrome 255,18,0       here 255,18,0
+        hwb(0 0% 50%)                Chrome 116,20,12      here 116,20,12
+        #00ff0080                    Chrome 118,251,76,128 here 118,251,76,128
+
+Chrome rounds a lower-case `rgb()` with number channels to 128 and leaves
+the same colour written `RGB(` or with percentages at 127.5; it rounds a
+number alpha to 128/255 and leaves `50%` and `calc(0.5)` at 0.5; it clips
+`hsl()` written with percentages to sRGB and not written with numbers; and a
+math function or `none` anywhere, or `hwb()`, keeps the whole colour in
+floats. Its getter reports `#800000` for `rgb(127.5 0 0)`, for
+`RGB(127.5 0 0)` and for `rgb(127.5 calc(0) 0)` alike, so there a colour can
+read back differently from how it paints. Hex is 8-bit by what it writes,
+and paints the same here. Following Chrome would mean reproducing which
+spellings take its 8-bit path, case included, and a colour whose bytes
+depend on how its function name is cased is not one CSS describes. The
+difference is a level at most where Chrome rounds, and more where its 8-bit
+path clips an `hsl()` outside sRGB that this library keeps.
+
 **Kept until 7.0, and deprecated.**
 
 - _Colour forms no browser reads still paint._ The CSS parser underneath,
@@ -231,6 +268,9 @@ at the thresholds to the last `f32` step. The conversion is `to_polar` in
   hex digits, spaces between channels, and `hwb()` for `hsv()`. A `none`
   alpha in legacy syntax, `rgb(255, 0, 0, none)`, painted transparent and
   is refused already.
+
+  Hex and named colours are read by the library itself, so in 7.0
+  `csscolorparser` goes with the forms above.
 
 - _`TextMetrics` carries its values as its own properties._ Chrome 152 puts
   the ten it defines on `TextMetrics.prototype` as enumerable getters and
