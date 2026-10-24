@@ -580,10 +580,11 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   colour saw them. The same held, mirrored, for a linear-light function
   such as `oklch(from color(srgb -0.2 0.88 0.63) l c h)`, and an origin
   named in `display-p3` or `rec2020` made the whole colour unparseable.
-  Every relative form measured whose channels are keywords, numbers and
-  `calc()` over them now agrees with Chrome 153 byte for byte, nesting
-  included -- in `fillStyle`, `strokeStyle`, `shadowColor`, gradient stops
-  and anywhere else a CSS colour is taken.
+  Of 235 relative colours measured in Chrome 153, nesting included, 224 now
+  agree byte for byte -- in `fillStyle`, `strokeStyle`, `shadowColor`,
+  gradient stops and anywhere else a CSS colour is taken. Nine are the
+  neutral-origin hue below, one is a level apart where the exact value
+  lands on a rounding boundary, and one is missing its closing `)`.
 
   `hsl()` and `hwb()` went further wrong: their origin was clamped to sRGB
   before its hue was found, so `hsl(from color(srgb 1.2 0.2 0.1) h s l)`
@@ -593,11 +594,22 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   read the origin unclipped and take every math function, and
   `hwba(from ...)`, which is not a CSS function, is refused.
 
-  Not yet right: `rgb()`, `lab()`, `lch()`, `oklab()`, `oklch()` and
-  `color()` relative colours still take the narrower grammar, and each
-  refuses a channel written as a percentage --
-  `fillStyle = 'rgb(from red r g b / 50%)'` is ignored where Chrome
-  paints at half alpha.
+  The other relative functions took the narrower grammar too:
+  `fillStyle = 'rgb(from red r g b / 50%)'` was ignored where Chrome
+  paints at half alpha, and `rgb()`, `lab()`, `lch()`, `oklab()`,
+  `oklch()` and `color()` each refused a percentage channel. Angle units,
+  `calc(e)` and infinities were refused too, and so was
+  `color(from ...)` into `display-p3`, `rec2020`, `a98-rgb` or
+  `prophoto-rgb`. Every relative colour is now read by the library
+  itself, with each function's own percentage scale and Lab and Oklab
+  lightness clamped into range as Chrome clamps it.
+
+  One reading differs from Chrome on purpose. A relative `lch()` or
+  `oklch()` over a neutral origin, such as `lch(from white 50 100 h)`,
+  takes a hue of zero, as CSS Color 4 makes a hue powerless at a chroma
+  of 0.0015 or less (0.000004 for OkLCh). Chrome reads a hue of about
+  356.6 or 23.7 degrees off its own rounding instead.
+  `docs/browser-differences.md` has the measurements.
 
 ### Added
 

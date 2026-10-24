@@ -275,9 +275,10 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   in a space the parser does not read, such as
   `rgb(from color(display-p3 ...) r g b)`, refused the whole colour. Every
   `set_*_css` setter and `RgbaLinear::from_css` now resolve the origin with
-  the crate's own parser first, and every relative form measured whose
-  channels are keywords, numbers and `calc()` over them agrees with
-  Chrome 153 byte for byte, nesting included.
+  the crate's own parser first. Of 235 relative colours measured in
+  Chrome 153, nesting included, 224 now agree byte for byte; nine are the
+  neutral-origin hue below, one is a level apart where the exact value
+  lands on a rounding boundary, and one is missing its closing `)`.
 
   `hsl()` and `hwb()` went further wrong. The parser clamped their
   origin to sRGB before finding its hue, which painted
@@ -289,11 +290,22 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   math function, and refuses `hwba(from ...)`, which is not a CSS
   function.
 
-  Not yet right: `rgb()`, `lab()`, `lch()`, `oklab()`, `oklch()` and
-  `color()` relative colours still take the narrower grammar, and each
-  refuses a channel written as a percentage --
-  `rgb(from red r g b / 50%)` is refused where Chrome paints at half
-  alpha.
+  The other relative functions took the narrower grammar too: each of
+  `rgb()`, `lab()`, `lch()`, `oklab()`, `oklch()` and `color()` refused a
+  channel written as a percentage, so `rgb(from red r g b / 50%)` was
+  refused where Chrome paints at half alpha. Angle units, `calc(e)` and
+  infinities were refused there as well, and so was `color(from ...)`
+  into `display-p3`, `rec2020`, `a98-rgb` or `prophoto-rgb`. Every
+  relative colour is now read by the crate, in every function and every
+  `color()` space, with each function's own percentage scale and Lab and
+  Oklab lightness clamped into range as Chrome clamps it.
+
+  One reading differs from Chrome on purpose. A relative `lch()` or
+  `oklch()` over a neutral origin, such as `lch(from white 50 100 h)`,
+  takes a hue of zero, as CSS Color 4 makes a hue powerless at a chroma
+  of 0.0015 or less (0.000004 for OkLCh). Chrome reads a hue of about
+  356.6 or 23.7 degrees off its own rounding instead.
+  `docs/browser-differences.md` has the measurements.
 
 - **`Font::parse` reads the font shorthand Chrome reads.** It took a size
   in `px` and nothing else, refusing `12pt`, `1em`, `150%`, `2rem`, the

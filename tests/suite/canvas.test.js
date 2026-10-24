@@ -582,7 +582,11 @@ describe("Canvas", () => {
       // `hwb()`, whose channels come from the origin unclipped. Each is the
       // colour above, so each reads `91, 221, 165`; red reads 4, 97, black
       // and 102 when the origin is not resolved first or is clipped. The
-      // last is outside sRGB above one, and read clipped is `235, 72, 47`.
+      // hsl() row after them is outside sRGB above one, and read clipped is
+      // `235, 72, 47`. The last three are the channel grammar: a Lab
+      // function over that origin, a `color()` into Display P3, and a
+      // percentage alpha, which were refused before every relative colour
+      // was read by the crate's own parser.
       let wide = new Canvas(2, 2, { colorSpace: "display-p3" });
       let wideCtx = wide.getContext("2d");
       for (let [css, chrome] of [
@@ -598,7 +602,11 @@ describe("Canvas", () => {
         ["hsl(from oklch(0.8 0.18 165) h s l)", [91, 221, 165, 255]],
         ["hwb(from oklch(0.8 0.18 165) h w b)", [91, 221, 165, 255]],
         ["hsl(from color(srgb 1.2 0.2 0.1) h s l)", [255, 81, 54, 255]],
+        ["lab(from color(srgb 1.2 0.2 0.1) l a b)", [255, 81, 54, 255]],
+        ["color(from red display-p3 calc(r + 0.1) g b)", [255, 51, 35, 255]],
+        ["rgb(from red r g b / 50%)", [233, 52, 36, 128]],
       ]) {
+        wideCtx.clearRect(0, 0, 2, 2);
         wideCtx.fillStyle = "#000";
         wideCtx.fillStyle = css;
         wideCtx.fillRect(0, 0, 2, 2);

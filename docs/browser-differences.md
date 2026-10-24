@@ -177,6 +177,39 @@ This is the clearest case of
 choosing correctness over the baseline, and the reasoning is written out because that is
 what makes it a decision rather than a bug.
 
+**A relative `lch()` or `oklch()` over a neutral origin reads a hue of zero,
+and Chrome reads one off its rounding. Ours is the specification's answer.**
+CSS Color 4 makes the hue powerless near the neutral axis -- section 9.3:
+"If the chroma of an LCH color is 0%, the hue component is powerless", with
+the threshold its table gives as `C <= 0.0015`, and section 9.4 the same for
+OkLCh at `C <= 0.000004` -- and a relative colour reads a powerless channel
+of its origin as zero. White and grey have no chroma at all: the
+specification's matrices take sRGB white to Lab and Oklab `a` and `b` within
+1e-15 of zero. Chrome 153 reads a hue anyway. Measured on a Display P3 canvas
+read back in P3:
+
+        lch(from white 50 100 h)                     Chrome 231,0,131   here 233,0,123
+        lch(from gray l 100 h)                       Chrome 242,0,141   here 244,0,132
+        oklch(from white 0.6 0.3 h)                  Chrome 237,0,28    here 228,0,119
+        oklch(from gray l 0.3 h)                     Chrome 237,0,29    here 227,0,119
+        lch(from lab(50 0 0.001) l 50 h)             Chrome 133,118,44  here 179,85,121
+        oklch(from oklab(0.5 0 0.000003) l 0.1 h)    Chrome 117,97,31   here 135,77,96
+
+Fitting Chrome's own floats against the CSS Color 4 conversion puts its hue
+for white and grey alike at about 356.6 degrees in LCH and 23.7 in OkLCh --
+`lch(from white l 50 h)` is magenta there and `oklch(from white l 0.2 h)`
+salmon. One angle for two different neutrals is the signature of its
+arithmetic rather than of either colour: the direction of the rounding error
+its matrices leave on the neutral axis. Nothing in the colour gives it, so
+it cannot be reproduced without reproducing that arithmetic, and the last
+two rows show the threshold itself is absent -- a chroma of 0.001 keeps its
+quarter-turn hue there. Here the hue is zero at and below each threshold and
+the origin's above it, which `a_neutral_origin_has_no_hue` in
+`tests/native_api_contract.rs` pins against the absolute colours with that
+hue, and `a_hue_is_powerless_at_the_chroma_css_color_4_names_and_no_further`
+at the thresholds to the last `f32` step. The conversion is `to_polar` in
+`src/node/utils.rs`.
+
 **Kept until 7.0, and deprecated.**
 
 - _`TextMetrics` carries its values as its own properties._ Chrome 152 puts

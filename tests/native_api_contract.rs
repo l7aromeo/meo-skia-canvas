@@ -978,9 +978,9 @@ fn the_rust_surface_takes_css_colors() -> Result<()> {
     // channel, an origin `csscolorparser` cannot read, and channel arithmetic
     // on top. Left to `csscolorparser`, the first two kinds read `4` and `97`
     // for red, the third paints black, and the `calc` rows read `61` and `93`;
-    // `with_resolved_origin` in the binding's colour parser is what changes
-    // that. `oklch(from rgb(from oklch(...) r g b) l c h)` is right either
-    // way -- `csscolorparser`'s decode undoes its own encode -- and is here to
+    // `relative_color` in the binding's colour parser is what changes that.
+    // `oklch(from rgb(from oklch(...) r g b) l c h)` would be right there too
+    // -- `csscolorparser`'s decode undoes its own encode -- and is here to
     // stay right.
     for (css, chrome) in [
         ("rgb(from oklch(0.8 0.18 165) r g b)", [91, 221, 165, 255]),
@@ -1028,9 +1028,10 @@ fn the_rust_surface_takes_css_colors() -> Result<()> {
     // The channels come from the origin as it is, so the oklch origin comes
     // back whole and one above one keeps its red. `csscolorparser` clips the
     // origin to sRGB before finding its hue, which reads `102` for red on the
-    // oklch rows and `235, 72, 47` on the last; `relative_hue_color` in the
+    // oklch rows and `235, 72, 47` on the last; `relative_color` in the
     // binding's colour parser is what changes that. Its grammar is
-    // `hsl_and_hwb_evaluate_relative_channels_as_chrome_does`.
+    // `hsl_and_hwb_evaluate_relative_channels_as_chrome_does` and
+    // `every_relative_function_reads_its_channels_as_chrome_does`.
     for (css, chrome) in [
         ("hsl(from oklch(0.8 0.18 165) h s l)", [91, 221, 165, 255]),
         ("hwb(from oklch(0.8 0.18 165) h w b)", [91, 221, 165, 255]),
@@ -1053,6 +1054,225 @@ fn the_rust_surface_takes_css_colors() -> Result<()> {
     assert!(ctx.set_fill_style_css("not-a-color").is_err());
     assert!(ctx.set_stroke_style_css("also not").is_err());
     assert!(ctx.set_shadow_color_css("nope").is_err());
+    Ok(())
+}
+
+/// Paints `css` on a Display P3 canvas and reads the first pixel back in P3,
+/// which is how every relative-colour row below was measured in Chrome 153.
+fn painted_p3(css: &str) -> Result<[u8; 4]> {
+    let mut canvas = Canvas::with_options(
+        4.0,
+        4.0,
+        CanvasOptions {
+            color_space: PixelColorSpace::DisplayP3,
+            gpu: false,
+            ..CanvasOptions::default()
+        },
+    )?;
+    {
+        let ctx = canvas.context();
+        ctx.set_fill_style_css(css)
+            .with_context(|| format!("{css} is a colour"))?;
+        ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+    }
+    let pixels =
+        canvas.to_buffer(ImageFormat::Raw, &EncodeOptions::default())?;
+    Ok([pixels[0], pixels[1], pixels[2], pixels[3]])
+}
+
+/// Every relative function reads its channels as CSS Color 5 types them,
+/// each row measured in Chrome 153.
+///
+/// Each function has its own scale for a percentage -- 255 for `rgb()`, 125
+/// for Lab's `a` and `b`, 0.4 for Oklab's, one for every `color()` space --
+/// and its own channel keywords. A computed Lab or Oklab lightness is
+/// clamped into its range and a computed chroma below zero is zero -- what
+/// CSS Color 4 clamps when it parses the function -- while the origin's
+/// channels are read as they are, an out-of-range lightness included.
+#[test]
+fn every_relative_function_reads_its_channels_as_chrome_does() -> Result<()> {
+    for (css, chrome) in [
+        ("rgb(from red calc(r / 2) g b)", [116, 20, 12, 255]),
+        ("rgb(from red 50% g b)", [116, 20, 12, 255]),
+        ("rgb(from red calc(r * 1%) g b)", [255, 147, 108, 255]),
+        (
+            "rgb(from red calc(r - 300) calc(g + 300) b)",
+            [133, 255, 91, 255],
+        ),
+        ("rgba(from red r g b / 0.5)", [233, 52, 36, 128]),
+        ("rgb(from red r g b / 50%)", [233, 52, 36, 128]),
+        ("rgb(from red none g b)", [0, 0, 0, 255]),
+        ("rgb(from red calc(e * 50) g b)", [124, 22, 13, 255]),
+        ("rgb(from red calc(infinity) g b)", [255, 255, 255, 255]),
+        (
+            "rgb(from color(srgb 1.2 0.2 0.1) r g b)",
+            [255, 81, 54, 255],
+        ),
+        ("lab(from red calc(l - 200) a b)", [78, 0, 0, 255]),
+        ("lab(from red calc(l + 100) a b)", [255, 192, 141, 255]),
+        ("lab(from red l 50% b)", [215, 81, 32, 255]),
+        ("lab(from red 50% a b)", [220, 32, 28, 255]),
+        ("lab(from red l calc(a * 1%) b)", [255, 0, 39, 255]),
+        ("lab(from red l a b / 50%)", [233, 52, 36, 128]),
+        (
+            "lab(from color(srgb 1.2 0.2 0.1) l a b)",
+            [255, 81, 54, 255],
+        ),
+        (
+            "lab(from color(srgb 1.5 1.5 1.5) l a b)",
+            [255, 255, 255, 255],
+        ),
+        ("lab(from color(srgb -0.5 -0.5 -0.5) l a b)", [0, 0, 0, 255]),
+        (
+            "lab(from color(srgb 1.05 1.05 1.05) calc(l - 30) a b)",
+            [183, 183, 183, 255],
+        ),
+        (
+            "lab(from color(srgb -0.05 -0.05 -0.05) calc(l + 30) a b)",
+            [63, 63, 63, 255],
+        ),
+        ("lch(from red l calc(c - 200) h)", [130, 130, 130, 255]),
+        ("lch(from red l 40% h)", [194, 100, 73, 255]),
+        ("lch(from red l c 120deg)", [74, 149, 0, 255]),
+        ("lch(from red l c h / 50%)", [233, 52, 36, 128]),
+        (
+            "lch(from color(srgb 1.5 1.5 1.4) l c h)",
+            [255, 255, 235, 255],
+        ),
+        ("oklab(from red calc(l + 1) a b)", [255, 187, 158, 255]),
+        ("oklab(from red calc(l - 2) a b)", [13, 1, 0, 255]),
+        ("oklab(from red l 50% b)", [227, 68, 37, 255]),
+        ("oklab(from red 50% a b)", [188, 0, 0, 255]),
+        ("oklab(from red calc(l * e / e) a b)", [234, 51, 35, 255]),
+        (
+            "oklab(from color(srgb 1.5 1.5 1.5) l a b)",
+            [255, 255, 255, 255],
+        ),
+        (
+            "oklab(from color(srgb -0.5 -0.5 -0.5) l a b)",
+            [0, 0, 0, 255],
+        ),
+        (
+            "oklab(from color(srgb 1.05 1.05 1.05) calc(l - 0.3) a b)",
+            [170, 170, 170, 255],
+        ),
+        ("oklch(from red l calc(c - 1) h)", [136, 136, 136, 255]),
+        ("oklch(from red l 50% h)", [215, 84, 66, 255]),
+        ("oklch(from red l c 120deg)", [127, 152, 0, 255]),
+        ("oklch(from red calc(l + 1) c h)", [255, 187, 158, 255]),
+        (
+            "oklch(from color(srgb 1.5 1.5 1.4) l c h)",
+            [255, 255, 236, 255],
+        ),
+        ("color(from red display-p3 r g b)", [234, 51, 35, 255]),
+        (
+            "color(from red display-p3 calc(r + 0.1) g b)",
+            [255, 51, 35, 255],
+        ),
+        (
+            "color(from color(display-p3 1 0 0) display-p3 r g b)",
+            [255, 0, 0, 255],
+        ),
+        (
+            "color(from red rec2020 calc(r / 2) g b)",
+            [126, 71, 34, 255],
+        ),
+        (
+            "color(from red a98-rgb calc(r / 2) g b)",
+            [117, 20, 12, 255],
+        ),
+        (
+            "color(from red prophoto-rgb calc(r / 2) g b)",
+            [125, 85, 30, 255],
+        ),
+        (
+            "color(from red srgb-linear calc(r / 2) g b)",
+            [172, 35, 23, 255],
+        ),
+        ("color(from red xyz calc(x / 2) y z)", [151, 125, 25, 255]),
+        (
+            "color(from red xyz-d50 calc(x / 2) y z)",
+            [149, 128, 19, 255],
+        ),
+        ("color(from red srgb 50% g b)", [116, 20, 12, 255]),
+        ("color(from red srgb calc(r * 1%) g b)", [2, 0, 0, 255]),
+        ("color(from red srgb calc(r - 2) g b)", [0, 0, 0, 255]),
+        ("color(from red srgb r g b / 50%)", [233, 52, 36, 128]),
+    ] {
+        assert_eq!(painted_p3(css)?, chrome, "{css}");
+    }
+
+    // Each refused by Chrome.
+    let mut canvas = Canvas::new(4.0, 4.0);
+    let ctx = canvas.context();
+    for css in [
+        "rgb(from red r g b 0.5)",
+        "rgb(from red r, g, b)",
+        "rgb(from red h g b)",
+        "rgb(from red 120deg g b)",
+        "lch(from red l c calc(h + 120deg))",
+        "color(from red xyz r g b)",
+        "color(from red srgb x y z)",
+        "color(from red srgb r g)",
+        "color(from red srgb r g b b)",
+        "color(from red srgb 120deg g b)",
+        "color(from red unknown r g b)",
+        "color(from red r g b)",
+    ] {
+        assert!(ctx.set_fill_style_css(css).is_err(), "{css} is refused");
+    }
+    Ok(())
+}
+
+/// A neutral origin's `lch()` or `oklch()` hue is powerless, so it reads
+/// zero, by CSS Color 4's thresholds: a chroma at or below 0.0015 for LCH
+/// and 0.000004 for OkLCh.
+///
+/// Chrome 153 does not do this. It reads whatever hue its own arithmetic
+/// leaves on white -- about 356.6 degrees in LCH and 23.7 in OkLCh -- so
+/// `lch(from white l 50 h)` is magenta there, `255, 222, 255` on a P3
+/// canvas, and `oklch(from white l 0.2 h)` salmon, `255, 205, 194`. The rows
+/// set a lightness and a chroma where a few degrees of hue change the
+/// bytes, which they do not at white's own lightness.
+/// `docs/browser-differences.md` says why this follows the standard.
+#[test]
+fn a_neutral_origin_has_no_hue() -> Result<()> {
+    for (relative, absolute) in [
+        ("lch(from white 50 100 h)", "lch(50 100 0)"),
+        ("lch(from black 50 100 h)", "lch(50 100 0)"),
+        ("lch(from gray l 100 h)", "lch(53.585 100 0)"),
+        ("lch(from lab(50 0 0.001) l 50 h)", "lch(50 50 0)"),
+        ("oklch(from white 0.6 0.3 h)", "oklch(0.6 0.3 0)"),
+        ("oklch(from gray l 0.3 h)", "oklch(0.59987 0.3 0)"),
+        (
+            "oklch(from oklab(0.5 0 0.000003) l 0.1 h)",
+            "oklch(0.5 0.1 0)",
+        ),
+    ] {
+        assert_eq!(painted_p3(relative)?, painted_p3(absolute)?, "{relative}");
+    }
+    // Above the thresholds the hue is the origin's, a quarter turn here,
+    // which paints differently from the hue a powerless one reads.
+    for (relative, absolute, powerless) in [
+        (
+            "lch(from lab(50 0 0.004) l 50 h)",
+            "lch(50 50 90)",
+            "lch(50 50 0)",
+        ),
+        (
+            "oklch(from oklab(0.5 0 0.00002) l 0.1 h)",
+            "oklch(0.5 0.1 90)",
+            "oklch(0.5 0.1 0)",
+        ),
+    ] {
+        let got = painted_p3(relative)?;
+        assert_ne!(got, painted_p3(powerless)?, "{relative}");
+        let want = painted_p3(absolute)?;
+        assert!(
+            got.iter().zip(want).all(|(&g, w)| g.abs_diff(w) <= 1),
+            "{relative}: {got:?} against {want:?}",
+        );
+    }
     Ok(())
 }
 
