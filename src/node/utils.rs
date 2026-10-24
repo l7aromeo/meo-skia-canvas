@@ -2140,8 +2140,10 @@ fn modern_channels(
 /// to `0%..=100%`, which keeps a legacy colour inside sRGB. What does not is
 /// `None` and left to `csscolorparser`, which has always read it and still
 /// does, though Chrome refuses each: `rgb(255, 0%, 0)`, `hsl(120, 100, 50)`,
-/// `lab(50, 40, 30)`, `rgb(255, 0, 0, none)`.
-/// `absolute_colours_read_their_channels_as_chrome_does` holds what they paint.
+/// `lab(50, 40, 30)`, `rgb(none, 0, 0)`. Those are deprecated, and refused
+/// from crate 0.17 and npm 7.0; `the_deprecated_colour_forms_still_paint`
+/// holds what they paint. A `none` alpha is refused now, since
+/// `rgb(255, 0, 0, none)` painted transparent.
 fn legacy_channels(
     body: &str,
     function: Relative,
@@ -2169,6 +2171,13 @@ fn legacy_channels(
         [a, b, c, alpha] => ([a, b, c], Some(alpha)),
         _ => return None,
     };
+    // A `none` alpha painted transparent, where Chrome 153 refuses the
+    // colour: legacy syntax has no `none`, and an alpha of zero is not what
+    // was asked for. Every other malformed legacy form keeps painting as it
+    // always has, deprecated.
+    if alpha.is_some_and(|alpha| alpha.eq_ignore_ascii_case("none")) {
+        return Some(None);
+    }
     if parts.iter().any(|part| {
         part.eq_ignore_ascii_case("none") || top_level_spans(part).len() != 1
     }) {
@@ -2281,10 +2290,12 @@ pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
         false => v,
     };
     // Deprecated, and refused from crate 0.17 and npm 7.0: `hwba()`, `hsv()`,
-    // `hsva()` and hex without its `#`. `csscolorparser` reads all four and
-    // no browser does -- Chrome 153 refuses each -- so they reach it here
+    // `hsva()`, hex without its `#`, and the legacy comma forms
+    // `legacy_channels` leaves here. `csscolorparser` reads them and no
+    // browser does -- Chrome 153 refuses each -- so they reach it here
     // unchanged until then. `the_deprecated_colour_forms_still_paint` holds
-    // them, and their relative forms are read by `read_color_function`.
+    // them, and the relative forms of the first three are read by
+    // `read_color_function`.
     csscolorparser::parse(css).ok().map(|c| {
         (
             Color4f::new(channel(c.r), channel(c.g), channel(c.b), c.a),

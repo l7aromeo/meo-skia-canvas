@@ -1343,22 +1343,14 @@ fn absolute_colours_read_their_channels_as_chrome_does() -> Result<()> {
         "rgb(e 0 0)",
         "color(srgb 1 0)",
         "lch(50 40 calc(30deg + 1))",
+        // Legacy syntax has no `none`, and this painted transparent.
+        "rgb(255, 0, 0, none)",
+        "rgba(255, 0, 0, none)",
+        "hsl(0, 100%, 50%, none)",
     ] {
         assert!(ctx.set_fill_style_css(css).is_err(), "{css} is refused");
     }
 
-    // Chrome refuses each of these too, and this library has always painted
-    // them; they still paint as they did.
-    for (css, painted) in [
-        ("rgb(255, 0%, 0)", [234, 51, 35, 255]),
-        ("rgb(255,0 0)", [234, 51, 35, 255]),
-        ("hsl(120, 100, 50)", [117, 251, 76, 255]),
-        ("hwb(120, 0%, 0%)", [117, 251, 76, 255]),
-        ("lab(50, 40, 30)", [175, 93, 76, 255]),
-        ("color(srgb 1, 0, 0)", [234, 51, 35, 255]),
-    ] {
-        assert_eq!(painted_p3(css)?, painted, "{css}");
-    }
     Ok(())
 }
 
@@ -1417,8 +1409,9 @@ fn a_colour_missing_its_closing_brackets_is_read_closed() -> Result<()> {
 }
 
 /// The colour forms no browser reads that `csscolorparser` always has --
-/// `hwba()`, `hsv()`, `hsva()` and hex without its `#` -- still paint, as
-/// they did, until npm 7.0 and crate 0.17 refuse them. Chrome 153 refuses
+/// `hwba()`, `hsv()`, `hsva()`, hex without its `#`, and legacy comma syntax
+/// CSS Color 4 does not allow -- still paint, as they did, until npm 7.0 and
+/// crate 0.17 refuse them. Chrome 153 refuses
 /// every one. Their relative forms are read with the others, from the
 /// origin unclipped, so a relative `hsv()` names the colour its absolute
 /// spelling does.
@@ -1437,6 +1430,24 @@ fn the_deprecated_colour_forms_still_paint() -> Result<()> {
         ("hsv(from red h s v)", [234, 51, 35, 255]),
         ("hsva(from red h s v / 0.5)", [233, 52, 36, 128]),
         ("hsv(from black h s v)", [0, 0, 0, 255]),
+        // Malformed legacy syntax: numbers and percentages mixed, separators
+        // mixed, `hsl()` without its percentages, `none` in a channel, and
+        // commas where a function has none.
+        ("rgb(255, 0%, 0)", [234, 51, 35, 255]),
+        ("rgb(100%, 0, 0)", [234, 51, 35, 255]),
+        ("rgb(255,0 0)", [234, 51, 35, 255]),
+        ("rgb(255 0,0)", [234, 51, 35, 255]),
+        ("rgb(255, 0, 0 / 0.5)", [233, 52, 36, 128]),
+        ("hsl(120, 100, 50)", [117, 251, 76, 255]),
+        ("hsl(120, 100%, 50)", [117, 251, 76, 255]),
+        ("rgb(none, 0, 0)", [0, 0, 0, 255]),
+        ("hsl(none, 100%, 50%)", [234, 51, 35, 255]),
+        ("hwb(120, 0%, 0%)", [117, 251, 76, 255]),
+        ("lab(50, 40, 30)", [175, 93, 76, 255]),
+        ("lch(50, 40, 30)", [167, 98, 90, 255]),
+        ("oklab(0.6, 0.1, 0.1)", [182, 101, 58, 255]),
+        ("oklch(0.6, 0.2, 30)", [205, 75, 56, 255]),
+        ("color(srgb 1, 0, 0)", [234, 51, 35, 255]),
     ] {
         assert_eq!(painted_p3(css)?, painted, "{css}");
     }

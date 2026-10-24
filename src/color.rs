@@ -313,9 +313,10 @@ impl RgbaLinear {
     /// `oklab()`, `oklch()` and `color()` in `srgb`, `srgb-linear`,
     /// `display-p3`, `rec2020`, `a98-rgb`, `prophoto-rgb`, `xyz`, `xyz-d50`
     /// or `xyz-d65`, each in its relative form too. `hwba()`, `hsv()`,
-    /// `hsva()` and hex without its `#` are read as well and are deprecated:
-    /// no browser reads them, and 0.17 refuses them. An sRGB color comes back
-    /// exactly as
+    /// `hsva()`, hex without its `#` and legacy comma syntax CSS Color 4 does
+    /// not allow, such as `rgb(255, 0%, 0)` or `lab(50, 40, 30)`, are read as
+    /// well and are deprecated: no browser reads them, and 0.17 refuses them.
+    /// An sRGB color comes back exactly as
     /// [`RgbaLinear::from_srgb8`] builds it, so `from_css("#808080")` and
     /// `from_srgb8(0x80, 0x80, 0x80, 1.0)` are equal, not merely close.
     ///

@@ -263,6 +263,11 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `color(DISPLAY-P3 1 0 0)`, were refused too; CSS names are
   case-insensitive, and both now parse.
 
+- **A `none` alpha in legacy syntax is refused.** `rgb(255, 0, 0, none)`,
+  `rgba(255, 0, 0, none)` and `hsl(0, 100%, 50%, none)` painted
+  transparent. Legacy syntax has no `none`, Chrome 153 refuses each, and
+  so does every `set_*_css` setter now.
+
 - **An absolute colour takes a math function and every alpha, as Chrome
   does.** `rgb(calc(255) 0 0)`, `hsl(120 calc(50% + 50%) 50%)`,
   `lab(calc(50) 40 30)`, `oklch(calc(0.6) 0.2 30)` and
@@ -687,6 +692,16 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   relative forms included, and 0.17 refuses them. Write `#` before the
   hex digits and `hwb()` for the rest: `hsv(h s v)` with `s` and `v` out
   of 100 is `hwb(h calc((100 - s) * v / 100) calc(100 - v))`.
+
+- **Legacy comma syntax CSS Color 4 does not allow.** Each of these paints
+  here and is refused by Chrome 153: numbers and percentages mixed,
+  `rgb(255, 0%, 0)`; separators mixed, `rgb(255,0 0)`; `hsl()` with bare
+  numbers, `hsl(120, 100, 50)`; `none` in a channel, `rgb(none, 0, 0)`;
+  and commas in a function with no legacy syntax, `hwb(120, 0%, 0%)`,
+  `lab(50, 40, 30)`, `oklch(0.6, 0.2, 30)` and `color(srgb 1, 0, 0)`.
+  They keep painting as they did, and 0.17 refuses them. Write the
+  channels space-separated, `rgb(255 0 0)`, or in the legacy form the
+  function allows, `rgb(255, 0, 0)`.
 
 ## 📦 ⟩ [v0.16.3] (crate) ⟩ September 16, 2026
 
