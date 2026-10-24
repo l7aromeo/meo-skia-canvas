@@ -111,6 +111,13 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   Oswald's do at 578/1000, read the same in both. The order is
   `x_height_ratio` in `src/image.rs`.
 
+- _A system font keyword in `ctx.font` is ignored_ -- `caption`, `icon`,
+  `menu`, `message-box`, `small-caption` and `status-bar`, which Chrome takes.
+  What each names is the platform's interface font: Chrome 152 on macOS read
+  every one as `16px Arial`, which no other platform has to agree with and no
+  test here could pin. The crate's `Font::parse` refuses them for the same
+  reason.
+
 **Gradient stops interpolate in sRGB, and Chrome does not. Ours is the
 specification's answer.** The HTML Standard, section 4.12.5.1.10 "Fill and
 stroke styles", requires that "the colors and the alpha component must be

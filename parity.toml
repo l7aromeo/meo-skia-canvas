@@ -1633,18 +1633,34 @@ rust = ["Font.size",
         "Font::line_height",
         "Font::italic",
         "Font::new"]
-npm = ["Font.file"]
+npm = []
 why = """`Font.size` and `Font.line_height` are metrics of a resolved font that
       npm's `Font` does not declare -- it carries `family`, `file`, `style`,
       `weight` and `width`, which is identity rather than metrics. `italic` is
       a second Rust spelling of what `slant` already pairs to npm's `style`.
       `new` builds one from a family and a size, and npm's `Font` declares no
-      constructor. Going the other way, npm's
-      `file` is the path a font was loaded from, which the crate does not
-      retain on the font itself: a gap in the crate. Grouped as one
-      capability, what a font object remembers about itself."""
-status = "gap"
-issue = "unfiled"
+      constructor. Grouped as one capability, what a font selection
+      remembers about itself."""
+status = "deliberate"
+
+[[capability]]
+name = "a registered face, as registering it describes it"
+rust = ["FontFace",
+        "FontFace.family",
+        "FontFace.weight",
+        "FontFace.slant",
+        "FontFace.stretch",
+        "FontFace.file",
+        "FontLibrary::use_paths",
+        "FontLibrary::use_data"]
+npm = ["Font.file"]
+why = """npm's `Font` is what `FontLibrary.use()` returns for each face it
+      registered: `family`, `weight`, `style`, `width` and `file`. The crate's
+      `Font` is a font selection and pairs with npm's by name, so the face
+      description is a type of its own, `FontFace`, which
+      `FontLibrary::use_paths` and `FontLibrary::use_data` return -- the two
+      forms of `use()`, from files and from bytes. `FontFace.file` is npm's
+      `Font.file`, `None` where npm reports `"<buffer>"`."""
 
 [[capability]]
 name = "reading a font shorthand without setting it"

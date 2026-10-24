@@ -356,6 +356,17 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   that is not open. A replacement queued between other changes keeps its
   place among them.
 
+- **`FontLibrary::use_paths` and `FontLibrary::use_data` register fonts as
+  JavaScript's `FontLibrary.use()` does, and say what they registered.** The
+  alias is optional -- without one each font is filed under the family it
+  declares -- `use_paths` takes any number of files, and both return a
+  `FontFace` per face: family, weight, slant, stretch, and the file it was
+  read from, `None` for bytes where JavaScript reports `"<buffer>"`. The
+  faces match what the Node binding returns for the same Raleway files. A
+  batch is all or nothing on both surfaces: every file is read and parsed
+  before any is registered.
+  `register_font_from_path` and `register_font_from_data` are unchanged.
+
 - **A rich-text span's own `font_variations` apply.** `layout_rich_text`
   and `ParagraphBuilder::push_style` instanced every span at the base
   style's axes and ignored the span's. A span's list now replaces the base

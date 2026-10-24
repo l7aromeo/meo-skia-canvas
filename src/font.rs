@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
 use skia_safe::{
@@ -10,7 +10,9 @@ use skia_safe::{
 // Aliased because the public type below now carries the same name: this one
 // is the shared store, that one is the handle a caller holds.
 use crate::{
-    error::Error, node::font_library::FontLibrary as SharedFontRegistry,
+    context2d::{FontSlant, FontStretch},
+    error::Error,
+    node::font_library::FontLibrary as SharedFontRegistry,
 };
 
 /// Four-byte OpenType axis tag (e.g. `"wght"`, `"wdth"`, `"opsz"`).
@@ -176,6 +178,26 @@ pub struct FontFamily {
     pub styles: Vec<String>,
 }
 
+/// One face a [`FontLibrary::use_paths`] or [`FontLibrary::use_data`] call
+/// registered, as JavaScript's `FontLibrary.use()` describes each `Font` it
+/// returns.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FontFace {
+    /// The name the face is filed under: the alias the call gave, or the
+    /// family name the font itself declares.
+    pub family: String,
+    /// CSS numeric weight, as the face reports it. A variable font reports
+    /// its default instance, so Raleway's reports 100.
+    pub weight: u16,
+    /// The face's slant.
+    pub slant: FontSlant,
+    /// The face's width.
+    pub stretch: FontStretch,
+    /// The file the face was read from, or `None` when it was registered
+    /// from bytes -- where JavaScript reports the literal `"<buffer>"`.
+    pub file: Option<PathBuf>,
+}
+
 /// Owned font registry for the Rust facade.
 ///
 /// Holds typefaces registered from disk or from in-memory bytes and exposes
@@ -288,6 +310,120 @@ impl FontLibrary {
             inner.families.push(family.to_string());
         }
         Ok(())
+    }
+
+    /// Registers the font in each file, filed under `alias` or, without one,
+    /// under the family name each font declares, and describes every face
+    /// registered.
+    ///
+    /// JavaScript's `FontLibrary.use(paths)` and `FontLibrary.use(alias,
+    /// paths)`: what [`register_font_from_path`](Self::register_font_from_path)
+    /// does a file at a time with an alias it requires, and returning what was
+    /// registered rather than nothing. The faces are in the order the files
+    /// were given.
+    ///
+    /// All or nothing, as `use()` is: every file is read and parsed before
+    /// any is registered, so a failure leaves the registry as it was.
+    ///
+    /// ```no_run
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let library = FontLibrary::new();
+    /// let faces = library.use_paths(None, ["fonts/Raleway.ttf"])?;
+    /// assert_eq!(faces[0].family, "Raleway");
+    /// # Ok::<(), meo_skia_canvas::error::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FontRegister`] naming the first file that cannot be
+    /// read or is not a font this build can parse.
+    pub fn use_paths<P: AsRef<Path>>(
+        &self,
+        alias: Option<&str>,
+        paths: impl IntoIterator<Item = P>,
+    ) -> Result<Vec<FontFace>, Error> {
+        let parsed = paths
+            .into_iter()
+            .map(|path| {
+                let path = path.as_ref();
+                let bytes =
+                    std::fs::read(path).map_err(|e| Error::FontRegister {
+                        reason: format!(
+                            "could not read font file {}: {e}",
+                            path.display()
+                        ),
+                    })?;
+                let typeface =
+                    self.parse(&bytes, &path.display().to_string())?;
+                Ok((typeface, Some(path.to_path_buf())))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(parsed
+            .into_iter()
+            .map(|(typeface, file)| self.file(typeface, alias, file))
+            .collect())
+    }
+
+    /// Registers the font in `bytes`, filed under `alias` or, without one,
+    /// under the family name the font declares, and describes the face.
+    ///
+    /// JavaScript's `FontLibrary.use(alias, buffer)`. The face's
+    /// [`file`](FontFace::file) is `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FontRegister`] when the bytes are not a font this
+    /// build can parse.
+    pub fn use_data(
+        &self,
+        alias: Option<&str>,
+        bytes: &[u8],
+    ) -> Result<FontFace, Error> {
+        let typeface = self.parse(bytes, "the data given")?;
+        Ok(self.file(typeface, alias, None))
+    }
+
+    /// The typeface in `bytes`, or an error naming `source`.
+    fn parse(&self, bytes: &[u8], source: &str) -> Result<Typeface, Error> {
+        self.inner
+            .lock()
+            .font_mgr
+            .new_from_data(Data::new_copy(bytes), None)
+            .ok_or_else(|| Error::FontRegister {
+                reason: format!("could not parse a typeface in {source}"),
+            })
+    }
+
+    /// Registers `typeface` under `alias` or its own family name, in both
+    /// registries, and describes it.
+    fn file(
+        &self,
+        typeface: Typeface,
+        alias: Option<&str>,
+        file: Option<PathBuf>,
+    ) -> FontFace {
+        let family =
+            alias.map_or_else(|| typeface.family_name(), str::to_string);
+        let style = typeface.font_style();
+        let face = FontFace {
+            family: family.clone(),
+            weight: u16::try_from(*style.weight()).unwrap_or(u16::MAX),
+            slant: FontSlant::from_skia(style.slant()),
+            stretch: FontStretch::from_skia(style.width()),
+            file,
+        };
+        let mut inner = self.inner.lock();
+        inner
+            .provider
+            .register_typeface(typeface.clone(), Some(family.as_str()));
+        SharedFontRegistry::with_shared(|library| {
+            library.register_typeface(typeface, Some(family.clone()));
+        });
+        if !inner.families.contains(&family) {
+            inner.families.push(family);
+        }
+        face
     }
 
     /// Registers a typeface loaded from a file under `path` under the given
