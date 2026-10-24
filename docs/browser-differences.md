@@ -212,6 +212,16 @@ at the thresholds to the last `f32` step. The conversion is `to_polar` in
 
 **Kept until 7.0, and deprecated.**
 
+- _Four colour forms no browser reads still paint._ `hwba()`, `hsv()`,
+  `hsva()` and hex without its `#` are `csscolorparser`'s, the CSS parser
+  underneath, and have always been accepted here. Chrome 153 refuses each,
+  so `fillStyle = "hwba(0 0% 0%)"`, `"hsv(0 100% 100%)"`,
+  `"hsva(0 100% 100% / 0.5)"` and `"ff0000"` keep the previous fill there
+  and paint red here, as do `hwba(from ...)`, `hsv(from ...)` and
+  `hsva(from ...)`. npm 7.0 and crate 0.17 refuse them; until then
+  `the_deprecated_colour_forms_still_paint` in
+  `tests/native_api_contract.rs` holds them. Write `#` before the digits
+  and `hwb()` for the rest.
 - _`TextMetrics` carries its values as its own properties._ Chrome 152 puts
   the ten it defines on `TextMetrics.prototype` as enumerable getters and
   gives the object none of its own, so there `Object.keys` is empty,
