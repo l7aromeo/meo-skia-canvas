@@ -564,6 +564,18 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `COLOR(display-p3 1 0 0)` and `color(DISPLAY-P3 1 0 0)` were ignored
   too, and now parse, since CSS names are case-insensitive.
 
+- **An absolute colour takes a math function and every alpha, as Chrome
+  does.** `fillStyle = 'rgb(calc(255) 0 0)'` was ignored where Chrome 153
+  paints red, and so were `hsl(120 calc(50% + 50%) 50%)`,
+  `lab(calc(50) 40 30)`, `oklch(calc(0.6) 0.2 30)`,
+  `color(srgb calc(0.5) 0 0)` and a percentage or `none` alpha in
+  `display-p3` and `rec2020`. Every channel now takes a math function. The
+  clamps CSS Color 4 applies when it parses a function now apply, as they
+  do in Chrome: `lch(150 40 30)` painted white, and is `lch(100 40 30)`;
+  `lch(50 -10 30)` painted a colour, and is grey. `rgb(255 0 0 0)` and
+  `color(srgb 1 0 0 0)`, a fourth channel, painted transparent and are
+  ignored, as a browser ignores them.
+
 - **A colour missing its closing `)` is read closed.**
   `fillStyle = 'rgb(255 0 0'` was ignored where Chrome 153 paints red, as
   it paints every colour function and relative colour left open at the

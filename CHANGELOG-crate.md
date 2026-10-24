@@ -263,6 +263,19 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `color(DISPLAY-P3 1 0 0)`, were refused too; CSS names are
   case-insensitive, and both now parse.
 
+- **An absolute colour takes a math function and every alpha, as Chrome
+  does.** `rgb(calc(255) 0 0)`, `hsl(120 calc(50% + 50%) 50%)`,
+  `lab(calc(50) 40 30)`, `oklch(calc(0.6) 0.2 30)` and
+  `color(srgb calc(0.5) 0 0)` were refused in every `set_*_css` setter and
+  `RgbaLinear::from_css`, where Chrome 153 paints them, and so were a
+  percentage or `none` alpha in `display-p3` and `rec2020`. Absolute colours
+  are now read by the crate's own reader, the one relative colours use, so
+  every channel takes a math function. The clamps CSS Color 4 applies when
+  it parses a function now apply, as they do in Chrome: `lch(150 40 30)`
+  painted white, and is `lch(100 40 30)`; `lch(50 -10 30)` painted a
+  colour, and is grey. `rgb(255 0 0 0)` and `color(srgb 1 0 0 0)`, a
+  fourth channel, painted transparent and are refused.
+
 - **A colour missing its closing `)` is read closed.** `rgb(255 0 0`
   failed to parse where Chrome 153's canvas paints red, as it paints
   every colour function and relative colour left open at the end of the
