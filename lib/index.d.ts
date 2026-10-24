@@ -2349,13 +2349,20 @@ export interface CanvasGradient {
  *
  * Instances come from `CanvasRenderingContext2D.createLinearGradient()` and
  * its siblings rather than being constructed: calling this directly throws,
- * so no construct signature is declared even though `lib.dom.d.ts` has one.
+ * so no construct signature is declared even though `lib.dom.d.ts` has one,
+ * and `Symbol.hasInstance` is declared instead for `instanceof`.
  *
  * @category Drawing Styles
  */
 declare var CanvasGradient: {
   /** The prototype every instance inherits from. */
   prototype: CanvasGradient;
+  /**
+   * What `instanceof` asks. Declared because a type with no construct
+   * signature is not one `instanceof` accepts on its right; the inherited
+   * `Function.prototype[Symbol.hasInstance]` is what answers at run time.
+   */
+  [Symbol.hasInstance](value: unknown): value is CanvasGradient;
 };
 
 /**
@@ -4449,13 +4456,20 @@ export interface CanvasRenderingContext2D
  *
  * Instances come from {@link Canvas.getContext} rather than being
  * constructed: calling this directly throws, which is why no construct
- * signature is declared even though `lib.dom.d.ts` has one.
+ * signature is declared even though `lib.dom.d.ts` has one, and
+ * `Symbol.hasInstance` is declared instead for `instanceof`.
  *
  * @category Canvas
  */
 declare var CanvasRenderingContext2D: {
   /** The prototype every instance inherits from. */
   prototype: CanvasRenderingContext2D;
+  /**
+   * What `instanceof` asks. Declared because a type with no construct
+   * signature is not one `instanceof` accepts on its right; the inherited
+   * `Function.prototype[Symbol.hasInstance]` is what answers at run time.
+   */
+  [Symbol.hasInstance](value: unknown): value is CanvasRenderingContext2D;
 };
 
 //
@@ -4768,7 +4782,8 @@ export interface TextMetrics {
 
 // No construct signature: measurements come from
 // {@link CanvasRenderingContext2D.measureText}, and the browser has no
-// `TextMetrics` constructor either. `prototype` stays so `instanceof` works.
+// `TextMetrics` constructor either. `Symbol.hasInstance` is declared so that
+// `instanceof` still accepts it.
 /**
  * The TextMetrics constructor object. Instances are returned by {@link CanvasText.measureText} rather than constructed.
  *
@@ -4777,6 +4792,12 @@ export interface TextMetrics {
 declare var TextMetrics: {
   /** The prototype every instance inherits from. */
   prototype: TextMetrics;
+  /**
+   * What `instanceof` asks. Declared because a type with no construct
+   * signature is not one `instanceof` accepts on its right; the inherited
+   * `Function.prototype[Symbol.hasInstance]` is what answers at run time.
+   */
+  [Symbol.hasInstance](value: unknown): value is TextMetrics;
 };
 
 /**

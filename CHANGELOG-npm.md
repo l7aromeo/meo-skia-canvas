@@ -154,6 +154,15 @@ removed and no signature moves.
 
 ### Fixed
 
+- **`instanceof CanvasGradient`, `instanceof TextMetrics` and
+  `instanceof CanvasRenderingContext2D` type-check.** At run time they always
+  worked; TypeScript refused all three -- "The right-hand side of an
+  'instanceof' expression must be ... a class, function, or ... an object
+  type with a 'Symbol.hasInstance' method" -- because their constructor
+  objects are declared without a construct signature, since calling them
+  throws. Each now declares `Symbol.hasInstance`, so the check compiles and
+  narrows to the instance type.
+
 - **A filter function written twice applies twice**, as in Chrome:
   `brightness(2) brightness(2)` draws as `brightness(4)` and
   `opacity(0.5) opacity(0.5)` as `opacity(0.25)`. The parser kept one entry
