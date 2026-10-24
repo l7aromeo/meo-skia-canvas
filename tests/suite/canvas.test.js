@@ -2884,3 +2884,34 @@ describe("a read after an export", () => {
     }
   }
 });
+
+describe("a GPU read", () => {
+  // The GPU engine reads the surface as it holds it and converts on the CPU,
+  // as the raster engine does, so the two agree on every first read of a
+  // state -- the GPU's own conversion rounded down, 127 for 128. A
+  // destination in the other byte order takes the same conversion with red
+  // and blue exchanged.
+  const read = (gpu, colorType) => {
+    const canvas = new Canvas(4, 4, { colorSpace: "display-p3" });
+    canvas.gpu = gpu;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "color(display-p3 0.5 0.2 0.1 / 0.5)";
+    ctx.fillRect(0, 0, 4, 4);
+    ctx.fillStyle = "color(display-p3 0.3 0.6 0.9 / 0.3)";
+    ctx.fillRect(2, 0, 2, 4);
+    const settings = { colorSpace: "display-p3", colorType };
+    return Array.from(ctx.getImageData(0, 0, 4, 1, settings).data);
+  };
+
+  test("unpremultiplies as the raster engine does, in either byte order", () => {
+    const cpu = read(false, "rgba");
+    assert.deepEqual(cpu.slice(0, 4), [128, 52, 26, 128]);
+    assert.deepEqual(read(true, "rgba"), cpu, "rgba");
+    const bgra = read(true, "BGRA8888");
+    const swapped = [];
+    for (let i = 0; i < bgra.length; i += 4) {
+      swapped.push(bgra[i + 2], bgra[i + 1], bgra[i], bgra[i + 3]);
+    }
+    assert.deepEqual(swapped, cpu, "BGRA8888");
+  });
+});

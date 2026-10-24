@@ -154,6 +154,19 @@ removed and no signature moves.
 
 ### Fixed
 
+- **`getImageData` on the GPU unpremultiplies as the CPU does.** On the
+  GPU engine, the default on macOS, a translucent pixel read back up to a
+  level low wherever its unpremultiplied value fell on a half:
+  `rgba(128, 52, 26, 0.5)` read as `127, 52, 26, 128` where the CPU engine
+  and Chrome 153 give `128`. From 5.5.1, a second read of the same unchanged
+  canvas gave 128, so the answer depended on how many times it was asked.
+  Every published version measured, from 3.6.0, rounds the first read down.
+  Both engines now give the same bytes on every read. An 8x8 read is
+  faster, about 130 microseconds against 200 on Apple silicon; a full
+  1200x900 read is slower, about 1.3 milliseconds against 0.6, the cost of
+  reading the GPU surface without its own conversion, with the conversion
+  of a large read shared across threads.
+
 - **`getImageData` after an export returns the canvas, not the canvas
   drawn twice.** Any raster export -- `toBuffer`, `toBufferSync`,
   `toDataURL`, `toFile` and the `png` getter -- files the page it drew in

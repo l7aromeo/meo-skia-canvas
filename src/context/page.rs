@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use skia_safe::{
     AlphaType, Canvas as SkCanvas, ClipOp, Color, ColorSpace, ColorType,
     Document, IRect, ISize, Image as SkImage, ImageInfo, M44, Matrix, Paint,
-    Path, Picture, PictureRecorder, PixelGeometry, Rect, Size, Surface,
+    Path, Picture, PictureRecorder, PixelGeometry, Pixmap, Rect, Size, Surface,
     SurfaceProps, SurfacePropsFlags, XYZD50Hash,
     canvas::SrcRectConstraint,
     image::{BitDepth, CachingHint},
@@ -1016,7 +1016,13 @@ impl Tile {
         let repeat = self.served_at == Some(self.depth);
         if !repeat {
             self.served_at = Some(self.depth);
-            return self.surface.read_pixels(info, pixels, row_bytes, at);
+            return read_converted_on_cpu(
+                &mut self.surface,
+                info,
+                pixels,
+                row_bytes,
+                at,
+            );
         }
 
         let snapshot = self.surface.image_snapshot();
@@ -1044,6 +1050,133 @@ impl Tile {
             None => self.surface.read_pixels(info, pixels, row_bytes, at),
         }
     }
+}
+
+/// One 8-bit channel unpremultiplied, indexed by alpha and then by the
+/// premultiplied channel, rounded exactly as Skia's raster pipeline rounds it:
+/// both normalised by multiplying by 1/255, the channel multiplied by the
+/// alpha's reciprocal, held at one, and scaled back with ties to even.
+/// `unpremultiplying_matches_the_raster_pipeline` holds it to that pipeline
+/// for all 65,536 pairs. Alpha 0 gives 0, as the pipeline does.
+fn unpremultiply_table() -> &'static [[u8; 256]; 256] {
+    static TABLE: OnceLock<Box<[[u8; 256]; 256]>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let scale = 1.0 / f32::from(u8::MAX);
+        let mut table = Box::new([[0u8; 256]; 256]);
+        for (alpha, row) in table.iter_mut().enumerate().skip(1) {
+            let reciprocal = 1.0 / (alpha as f32 * scale);
+            for (channel, out) in row.iter_mut().enumerate() {
+                let value = (channel as f32 * scale * reciprocal).min(1.0);
+                *out = (value * f32::from(u8::MAX)).round_ties_even() as u8;
+            }
+        }
+        table
+    })
+}
+
+/// The read, in pixels, from which [`read_converted_on_cpu`] unpremultiplies
+/// its rows across threads rather than on the calling one.
+///
+/// Measured in release on Apple silicon, first GPU reads of a 1200x900 page,
+/// medians of three rounds: handing rows to the pool costs about 100
+/// microseconds a read -- a 16x16 read takes 135 to 156 on one thread and
+/// 237 to 265 across them -- and the threads earn it back only on the
+/// largest reads. At 600x600, 360,000 pixels, the two are level, 682 to 782
+/// against 746 to 777; at 800x900, 720,000, threads take 937 to 988 against
+/// 1109 to 1138, and a full read 1270 to 1317 against 1617 to 1638. So the
+/// line is drawn between those two sizes, at 2^19.
+const PARALLEL_UNPREMULTIPLY_PIXELS: usize = 1 << 19;
+
+/// Unpremultiplies one row of eight-bit pixels in place through
+/// [`unpremultiply_table`], alpha fourth.
+fn unpremultiply_row(row: &mut [u8]) {
+    let table = unpremultiply_table();
+    for pixel in row.as_chunks_mut::<4>().0 {
+        // Opaque needs nothing, and so does clear: a premultiplied pixel
+        // with no alpha has no colour either.
+        let alpha = pixel[3];
+        if alpha == u8::MAX || alpha == 0 {
+            continue;
+        }
+        let divide = &table[usize::from(alpha)];
+        for channel in &mut pixel[..3] {
+            *channel = divide[usize::from(*channel)];
+        }
+    }
+}
+
+/// Reads `surface` into `pixels` as `info` describes, with any conversion
+/// made on the CPU.
+///
+/// On a raster surface that is `read_pixels` itself. On a GPU surface the
+/// pixels come back as the surface holds them, which converts nothing, and
+/// are converted here. Do not hand the conversion back to the GPU: its
+/// readback unpremultiplies by rounding down, so a premultiplied 64 at an
+/// alpha of 128 comes back 127 where the raster path and Chrome 153 give
+/// 128, and a repeated read of the same state, served from a raster copy,
+/// gives 128 -- the answer would depend on how many times it was asked.
+///
+/// A read that differs from the surface only in wanting unpremultiplied
+/// pixels, which is what `getImageData` asks of an eight-bit canvas, reads
+/// premultiplied pixels into the destination and unpremultiplies them there
+/// through [`unpremultiply_table`]; anything else goes through Skia's CPU
+/// conversion from a copy. The cost is the GPU's: on Apple silicon a
+/// premultiplied read of a 1200x900 page costs about 0.95 milliseconds, where
+/// the GPU's own unpremultiplying read costs 0.78 and rounds down, and the
+/// table adds about 0.55 nanoseconds a pixel on one thread -- shared across
+/// threads from [`PARALLEL_UNPREMULTIPLY_PIXELS`], which brings the whole
+/// read to about 1.3 milliseconds. An 8x8 read costs about 130 microseconds
+/// against that conversion's 200.
+fn read_converted_on_cpu(
+    surface: &mut Surface,
+    info: &ImageInfo,
+    pixels: &mut [u8],
+    row_bytes: usize,
+    at: (i32, i32),
+) -> bool {
+    if surface.recording_context().is_none() {
+        return surface.read_pixels(info, pixels, row_bytes, at);
+    }
+    let native = surface.image_info().with_dimensions(info.dimensions());
+    if &native == info {
+        return surface.read_pixels(info, pixels, row_bytes, at);
+    }
+    let eight_bit = |kind: ColorType| {
+        matches!(kind, ColorType::RGBA8888 | ColorType::BGRA8888)
+    };
+    let only_unpremultiplied = eight_bit(native.color_type())
+        && eight_bit(info.color_type())
+        && native.color_space() == info.color_space()
+        && native.alpha_type() == AlphaType::Premul
+        && info.alpha_type() == AlphaType::Unpremul;
+    if only_unpremultiplied {
+        // Premultiplied straight into the destination, in its own byte
+        // order, and unpremultiplied where it lies: one pass, no copy.
+        let premultiplied = info.with_alpha_type(AlphaType::Premul);
+        if !surface.read_pixels(&premultiplied, pixels, row_bytes, at) {
+            return false;
+        }
+        let width = info.min_row_bytes();
+        let height = info.height() as usize;
+        let area = info.width() as usize * height;
+        match area >= PARALLEL_UNPREMULTIPLY_PIXELS {
+            true => pixels
+                .par_chunks_mut(row_bytes)
+                .take(height)
+                .for_each(|row| unpremultiply_row(&mut row[..width])),
+            false => pixels
+                .chunks_mut(row_bytes)
+                .take(height)
+                .for_each(|row| unpremultiply_row(&mut row[..width])),
+        }
+        return true;
+    }
+    let native_row_bytes = native.min_row_bytes();
+    let mut held = vec![0u8; native.compute_byte_size(native_row_bytes)];
+    surface.read_pixels(&native, &mut held, native_row_bytes, at)
+        && Pixmap::new(&native, &mut held, native_row_bytes).is_some_and(
+            |pixmap| pixmap.read_pixels(info, pixels, row_bytes, (0, 0)),
+        )
 }
 
 /// The edge of a tile, in page pixels.
@@ -1745,7 +1878,9 @@ impl RecordingSurface {
         let repeat = self.served_at == Some(self.depth);
         if !repeat || !gpu {
             self.served_at = Some(self.depth);
-            if surface.read_pixels(dst_info, pixels, row_bytes, origin) {
+            if read_converted_on_cpu(
+                surface, dst_info, pixels, row_bytes, origin,
+            ) {
                 return true;
             }
             // A GPU surface refuses destination formats that the same pixels
@@ -4046,6 +4181,43 @@ impl ExportOptions {
         };
         let at = |frame: usize| (frame as f64 * MS_PER_SECOND / fps).round();
         (at(index + 1) - at(index)) as u32
+    }
+}
+
+#[cfg(test)]
+mod unpremultiply_tests {
+    use super::*;
+
+    #[test]
+    fn unpremultiplying_matches_the_raster_pipeline() {
+        // Every channel against every alpha, through Skia's own raster
+        // conversion: the table must agree byte for byte, including where
+        // Skia's rounding is not round-to-nearest -- 1 over an alpha of 6 is
+        // 42, not 43 -- and where a channel above its alpha is held at 255.
+        let premul = ImageInfo::new(
+            (256, 256),
+            ColorType::RGBA8888,
+            AlphaType::Premul,
+            None,
+        );
+        let unpremul = premul.with_alpha_type(AlphaType::Unpremul);
+        let mut src = vec![0u8; 256 * 256 * 4];
+        for (i, px) in src.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let (alpha, channel) = ((i / 256) as u8, (i % 256) as u8);
+            px.copy_from_slice(&[channel, channel, channel, alpha]);
+        }
+        let mut dst = vec![0u8; src.len()];
+        let pixmap = Pixmap::new(&premul, &mut src, 256 * 4).expect("pixmap");
+        assert!(pixmap.read_pixels(&unpremul, &mut dst, 256 * 4, (0, 0)));
+        let table = unpremultiply_table();
+        for (i, px) in dst.as_chunks::<4>().0.iter().enumerate() {
+            let (alpha, channel) = (i / 256, i % 256);
+            let want = match alpha {
+                0 => 0,
+                _ => table[alpha][channel],
+            };
+            assert_eq!(px[0], want, "channel {channel} at alpha {alpha}");
+        }
     }
 }
 

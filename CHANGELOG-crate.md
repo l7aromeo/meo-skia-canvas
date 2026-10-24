@@ -25,6 +25,18 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A read on the GPU unpremultiplies as the raster engine does.**
+  `get_image_data` on the GPU engine read a translucent pixel up to a level
+  low wherever the unpremultiplied value fell on a half: red 128 at half
+  alpha came back 127, where the raster engine and Chrome 153 give 128.
+  Skia's GPU readback rounds down where its raster pipeline does not. The
+  GPU engine now reads the surface premultiplied and unpremultiplies on the
+  CPU with the raster pipeline's own rounding, so both engines give the
+  same bytes. An 8x8 read is faster, about 130 microseconds against 200 on
+  Apple silicon; a full 1200x900 read is slower, about 1.3 milliseconds
+  against 0.6, which is the cost of the GPU's unconverted readback, with
+  the conversion of a large read shared across threads.
+
 - **`LAB(` and `LCH(` in upper case take the same conversion as `lab(`
   and `lch(`.** CSS function names are case-insensitive, and the crate's
   own Lab reading, which is CSS Color 4's conversion to within 8.5e-6,
