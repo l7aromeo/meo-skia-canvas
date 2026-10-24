@@ -609,15 +609,30 @@ export function nameMaps({ rust, npm, rules: given }) {
   };
 }
 
+/**
+ * A parameter id in `parity.toml`: `Holder.method(param)`, or
+ * `Holder.method(*)` for every parameter of every overload. They sit in an
+ * entry's `npm` list beside item ids and record a decision or a gap about
+ * one argument rather than about a whole declaration. This gate leaves them
+ * to `check-parity-params.mjs`, which refuses one naming no real argument
+ * and one that records nothing; the entry they sit in is still held to
+ * every rule here about its name, its status and its reason.
+ */
+export const PARAMETER_ID = /^(?<method>[^()]+)\((?<param>[^()]*)\)$/;
+
 export function check({
   rust,
   npm,
-  manifest,
+  manifest: written,
   rules: given,
   files,
   issues,
   requireFiled = false,
 }) {
+  const manifest = written.map((entry) => ({
+    ...entry,
+    npm: entry.npm.filter((id) => !PARAMETER_ID.test(id)),
+  }));
   const problems = [];
   const note = (kind, id, detail) => problems.push({ kind, id, detail });
 

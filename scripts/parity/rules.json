@@ -308,5 +308,27 @@
     "TextShadow.blur_sigma": "blurRadius",
     "TextStyle.line_height_multiplier": "heightMultiplier",
     "TextStyle.slant": "fontStyle"
+  },
+  "parameter_aliases": {
+    "_comment": [
+      "For the parameter pass only. A JavaScript parameter name, and the Rust",
+      "parameter or field names it is the same argument as. Additive, like",
+      "the rest of this file: the snake-cased name still matches."
+    ],
+    "inverted": ["invert"],
+    "src": ["url", "bytes", "pixels"]
+  },
+  "parameter_links": {
+    "_comment": [
+      "For the parameter pass only. A JavaScript method, and Rust functions",
+      "that take what it takes under a name no rule pairs. Each adds",
+      "candidates and removes none; the pass refuses a link to a Rust",
+      "function that does not exist or from a method with no parameters."
+    ],
+    "Canvas.new": ["Canvas::with_options"],
+    "CanvasDrawPath.isPointInPath": ["Context2D::is_point_in_filled_path"],
+    "CanvasDrawPath.isPointInStroke": ["Context2D::is_point_in_stroked_path"],
+    "CanvasFillStrokeStyles.createTexture": ["Texture::new"],
+    "Path2D.new": ["Path2D::from_svg", "PathBuilder::from_path"]
   }
 }

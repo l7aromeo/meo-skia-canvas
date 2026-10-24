@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 //
-// The parameter pass of the parity gate, report only.
+// The parameter pass of the parity gate.
 //
 // The item gate passes `loadImage` against `Image::from_encoded` because the
 // names pair; one takes a URL and the other only bytes. This pass holds each
@@ -13,23 +13,32 @@
 // by name, exactly as the gate pairs them (`nameMaps`); the siblings of those
 // in the same holder whose name extends theirs, which is how the crate spells
 // a wider form -- `save_layer` and `save_layer_with`, `draw_image` and
-// `draw_image_region`; and the Rust functions of a two-sided entry naming the
-// method. Each overload is held to whichever candidate covers most of it,
-// matching a parameter by name first and then by position, with a compatible
-// class either way. A method with no candidate is the item gate's business,
-// not this pass's.
+// `draw_image_region`; the Rust functions of a two-sided entry naming the
+// method; and those `parameter_links` in `rules.json` names. Each overload
+// is held to whichever candidate covers most of it, as `fit` describes, and
+// a union several equally good candidates serve between them is served. A
+// method with no candidate is the item gate's business, not this pass's.
 //
-// REPORT ONLY. It prints what it finds and exits 0 unless its own inputs are
-// broken. Its first run measures this instrument as much as the surfaces, so
-// the rows are triaged before anything is allowed to fail on them.
+// THE REGISTER is `parity.toml`. An entry's `npm` list may hold parameter
+// ids, `Holder.method(param)` or `Holder.method(*)`, and a row such an id
+// names is recorded under that entry's status and reason. A row nothing
+// records fails, and so does an id naming no real argument or recording no
+// row, so the register cannot outlive what it describes. An argument id is
+// coarse -- it records that argument in every overload -- and
+// `Holder.method(param:object)` narrows it to rows whose every lost class
+// the qualifier names.
 //
-// Usage: node scripts/check-parity-params.mjs [--self-test | --summary]
-//   reads target/parity-rust.json, target/parity-npm.json,
-//   target/parity-params.json and parity.toml; `just report-parity-params`
-//   writes all four and prints every row.
+// `--report-only` prints the same and exits 0, for listing rows without
+// failing on them, which `report-parity-params` does. `--all` lists
+// recorded rows too.
+//
+// Usage: node scripts/check-parity-params.mjs [--self-test | --all]
+//   [--report-only], reading target/parity-rust.json,
+//   target/parity-npm.json, target/parity-params.json and parity.toml;
+//   `just report-parity-params` writes all four and prints every row.
 
 import { readFileSync } from "node:fs";
-import { nameMaps } from "./check-parity.mjs";
+import { PARAMETER_ID, nameMaps } from "./check-parity.mjs";
 import { parseManifest } from "./parity/toml.mjs";
 
 /** `fillRule` -> `fill_rule`; `dx` stays `dx`. */
@@ -43,9 +52,14 @@ const snake = (name) =>
  * The JavaScript classes a Rust class takes, beyond its own: the same values
  * under another spelling. A Rust enum takes JavaScript's string literals and
  * also the numeric codes the CanvasKit-shaped declarations use for one. A
- * struct and a list take each other, because JavaScript spells a point, a
- * rectangle or a size as a tuple where the crate names a struct -- the
- * coarsest of these, and the one most able to hide a real difference.
+ * struct takes a list, because JavaScript spells a point, a rectangle or a
+ * size as a tuple where the crate names a struct -- the coarsest of these,
+ * and the one most able to hide a real difference.
+ *
+ * Not the other way: a Rust list does not take a JavaScript object. That
+ * direction let `use(families: {name: paths})` pass against
+ * `use_paths(alias, paths)`, a map against a list of paths, and let an
+ * options object stand in for an unrelated array field.
  */
 const ACCEPTS = {
   string: ["string", "enum", "path"],
@@ -54,11 +68,14 @@ const ACCEPTS = {
   number: ["number"],
   boolean: ["boolean"],
   bytes: ["bytes"],
-  array: ["array", "object"],
+  array: ["array"],
   object: ["object", "array"],
   callback: ["callback"],
   range: ["number"],
 };
+
+/** Every class a JavaScript argument can be read as, for a qualifier to name. */
+const CLASSES = new Set([...Object.keys(ACCEPTS), "unknown"]);
 
 /** The JavaScript classes `rust` covers, out of `js`. */
 const covered = (js, rust) =>
@@ -67,122 +84,316 @@ const covered = (js, rust) =>
     : js.filter((c) => rust.some((r) => (ACCEPTS[r] ?? [r]).includes(c)));
 
 /**
- * How one JavaScript overload maps onto one Rust function: every name match
- * first, then the remaining parameters by position. One pass doing both lets
- * an earlier parameter take, by position, the slot a later one names -- `x`
- * claiming `max_width` before `maxWidth` is reached.
+ * Whether JavaScript parameter `p` names `name`: in snake case, as written,
+ * or through `parameter_aliases` in `rules.json`, which records a synonym
+ * the two surfaces spell differently -- `inverted` for `invert`.
  */
-function fit(overload, fn) {
-  const taken = new Set();
-  const slot = new Array(overload.params.length).fill(-1);
+const names = (p, name, aliases) =>
+  name === snake(p.name) ||
+  name === p.name ||
+  (aliases[p.name] ?? []).includes(name);
+
+/**
+ * How one JavaScript overload maps onto one Rust function.
+ *
+ * A static JavaScript helper's first argument is the value a Rust method
+ * takes as `self`. Then every name match, against a Rust parameter or a
+ * field of a Rust struct parameter -- `toDataURL(type, quality)` reaches the
+ * `quality` field of `EncodeOptions`, and `originX` reaches `x` of a
+ * parameter named `origin`. Then the rest by position, as a cursor
+ * following the last slot used: a `Range` takes two numbers, and a struct
+ * whose fields are all public takes consecutive arguments field by field
+ * when the argument is not the struct itself -- six numbers for an
+ * `Affine`, `width, height, align, baseline, offset` for a `Placeholder`.
+ * One pass doing names before positions lets a name keep its slot from an
+ * earlier positional claim: `x` claiming `max_width` before `maxWidth` is
+ * reached.
+ */
+function fit(overload, fn, aliases) {
+  const slot = new Array(overload.params.length).fill(null);
+  const whole = new Set();
+  const parts = new Map();
+  let start = 0;
+  if (
+    overload.static &&
+    fn.receiver &&
+    overload.params.length > 0 &&
+    covered(overload.params[0].classes, ["object"]).length > 0
+  ) {
+    slot[0] = { receiver: true };
+    start = 1;
+  }
   overload.params.forEach((p, at) => {
-    const i = fn.params.findIndex(
-      (r, k) =>
-        !taken.has(k) &&
-        (r.name === snake(p.name) || r.name === p.name) &&
+    if (at < start) return;
+    // A struct some fields of which were taken by name can still be named
+    // whole by an object, which then carries the rest of it:
+    // `createTexture(spacing, options)` passes `TextureOptions.spacing` on
+    // its own and every other field in `options`.
+    const k = fn.params.findIndex(
+      (r, i) =>
+        !whole.has(i) &&
+        (!parts.has(i) || p.classes.includes("object")) &&
+        names(p, r.name, aliases) &&
         covered(p.classes, r.classes).length > 0,
     );
-    if (i !== -1) {
-      slot[at] = i;
-      taken.add(i);
+    if (k !== -1) {
+      slot[at] = { k };
+      whole.add(k);
+      return;
+    }
+    for (const [i, r] of fn.params.entries()) {
+      if (whole.has(i)) continue;
+      const j = (r.fields ?? []).findIndex(
+        (f, n) =>
+          !parts.get(i)?.has(n) &&
+          (names(p, f.name, aliases) ||
+            snake(p.name) === `${r.name}_${f.name}`) &&
+          covered(p.classes, f.classes).length > 0,
+      );
+      if (j !== -1) {
+        slot[at] = { k: i, field: j };
+        parts.set(i, (parts.get(i) ?? new Set()).add(j));
+        return;
+      }
     }
   });
-  // Then by position, as a cursor that follows the last slot used rather
-  // than the JavaScript index, so one Rust parameter standing for two does
-  // not shift every one after it. That is a `Range`: two JavaScript numbers,
-  // `start` and `end`, and the second takes the slot the first did.
   let previous = -1;
+  let spread = null;
   overload.params.forEach((p, at) => {
-    if (slot[at] !== -1) {
-      previous = slot[at];
+    if (at < start) return;
+    // A field matched by name leaves the cursor inside its struct, so the
+    // next argument takes the next field still free: `a, b, c, d` meet an
+    // `Affine`'s fields by name and `e, f` then take `tx` and `ty`.
+    if (slot[at]) {
+      previous = slot[at].k;
+      spread =
+        slot[at].field === undefined
+          ? null
+          : { k: slot[at].k, next: slot[at].field + 1 };
       return;
     }
     if (
       previous !== -1 &&
       fn.params[previous].classes.includes("range") &&
       p.classes.includes("number") &&
-      slot.filter((s) => s === previous).length === 1
+      slot.filter((s) => s?.k === previous).length === 1
     ) {
-      slot[at] = previous;
+      slot[at] = { k: previous };
       return;
     }
-    const next = fn.params.findIndex((_, k) => k > previous && !taken.has(k));
-    if (next === -1) return;
-    if (covered(p.classes, fn.params[next].classes).length > 0) {
-      slot[at] = next;
-      taken.add(next);
-      previous = next;
+    if (spread) {
+      const taken = parts.get(spread.k) ?? new Set();
+      while (taken.has(spread.next)) spread.next += 1;
+      const f = fn.params[spread.k].fields?.[spread.next];
+      if (f && covered(p.classes, f.classes).length > 0) {
+        slot[at] = { k: spread.k, field: spread.next };
+        parts.set(spread.k, taken.add(spread.next));
+        spread.next += 1;
+        return;
+      }
+      spread = null;
+    }
+    // The next free Rust slot, passing over an optional one the argument
+    // does not fit: JavaScript omits an argument where Rust passes `None`,
+    // so `use(fontPaths)` reaches `use_paths(alias, paths)` at `paths`. A
+    // required slot it does not fit stops the search.
+    for (let next = previous + 1; next < fn.params.length; next += 1) {
+      if (whole.has(next) || parts.has(next)) continue;
+      const r = fn.params[next];
+      if (covered(p.classes, r.classes).length > 0) {
+        slot[at] = { k: next };
+        whole.add(next);
+        previous = next;
+        return;
+      }
+      if (r.fields && covered(p.classes, r.fields[0].classes).length > 0) {
+        slot[at] = { k: next, field: 0 };
+        whole.add(next);
+        spread = { k: next, next: 1 };
+        previous = next;
+        return;
+      }
+      if (!r.optional) return;
     }
   });
   const outcome = overload.params.map((p, at) => {
-    if (slot[at] === -1) return { param: p, rust: null, lost: p.classes };
-    const r = fn.params[slot[at]];
-    const kept = covered(p.classes, r.classes);
-    return {
-      param: p,
-      rust: r,
-      lost: p.classes.filter((c) => !kept.includes(c)),
-    };
+    const s = slot[at];
+    if (!s) return { param: p, rust: null, kept: [] };
+    const target = s.receiver
+      ? { name: "self", classes: ["object"] }
+      : s.field === undefined
+        ? fn.params[s.k]
+        : {
+            ...fn.params[s.k].fields[s.field],
+            name: `${fn.params[s.k].name}.${fn.params[s.k].fields[s.field].name}`,
+          };
+    return { param: p, rust: target, kept: covered(p.classes, target.classes) };
   });
   return { score: outcome.filter((o) => o.rust).length, outcome };
 }
 
-/** Every row the pass reports, as `{ npm, overload, param, kind, rust, detail }`. */
+/**
+ * Every row the pass reports, as `{ npm, overload, param, kind, rust,
+ * detail, recorded }`, with `recorded` the name of the entry that records
+ * it or `null`; the methods compared; the problems with the parameter ids
+ * and links themselves, which fail whatever the rows say; and, per overload,
+ * the candidates it was held to with the slot each argument took.
+ */
 export function paramReport({ rust, npm, manifest, rules, params }) {
   const { rustNames, npmNames } = nameMaps({ rust, npm, rules });
+  const aliases = rules.parameter_aliases ?? {};
+  const links = rules.parameter_links ?? {};
+  const problems = [];
   const byName = new Map();
   for (const [id, names] of rustNames) {
     if (!params.rust[id]) continue;
     for (const n of names) byName.set(n, [...(byName.get(n) ?? []), id]);
   }
+  for (const [id, targets] of Object.entries(links)) {
+    if (id.startsWith("_")) continue;
+    if (!params.npm[id])
+      problems.push(
+        `parameter_links names \`${id}\`, which declares no parameters`,
+      );
+    for (const r of targets)
+      if (!params.rust[r])
+        problems.push(
+          `parameter_links sends \`${id}\` to \`${r}\`, which is not a Rust function`,
+        );
+  }
   const rustFns = Object.keys(params.rust);
   const rows = [];
+  // Which candidates each overload was held to and where each argument
+  // landed in them, for a change to the pass to be measured by more than
+  // the rows it moves: an argument that newly finds a slot moves none.
+  const traces = [];
   const compared = new Set();
   for (const [id, record] of Object.entries(params.npm)) {
     const paired = new Set();
     for (const n of npmNames.get(id) ?? [])
       for (const r of byName.get(n) ?? []) paired.add(r);
+    // An entry naming the method serves it with its Rust functions. Not
+    // narrowed to the method's own holder: `createLinearGradient` is served
+    // by `Shader::linear_gradient` across holders, and an entry that groups
+    // absences rather than counterparts records its parameters instead.
     for (const entry of manifest) {
-      if (entry.rust.length && entry.npm.includes(id)) {
-        for (const r of entry.rust) if (params.rust[r]) paired.add(r);
-      }
+      if (!entry.rust.length || !entry.npm.includes(id)) continue;
+      for (const r of entry.rust) if (params.rust[r]) paired.add(r);
     }
     for (const r of [...paired]) {
       const prefix = `${r}_`;
       for (const f of rustFns) if (f.startsWith(prefix)) paired.add(f);
     }
+    for (const r of links[id] ?? []) if (params.rust[r]) paired.add(r);
     if (paired.size === 0) continue;
     compared.add(id);
     record.overloads.forEach((overload, at) => {
-      let best = null;
-      for (const r of [...paired].sort()) {
-        const f = fit(overload, params.rust[r]);
-        if (!best || f.score > best.score) best = { ...f, rust: r };
-      }
-      for (const o of best.outcome) {
-        if (!o.rust) {
+      const fits = [...paired]
+        .sort()
+        .map((r) => ({ rust: r, ...fit(overload, params.rust[r], aliases) }));
+      const best = fits.reduce((a, b) => (b.score > a.score ? b : a));
+      // A JavaScript union several Rust functions serve between them is
+      // served: `new Path2D(path: string | Path2D)` is `Path2D::from_svg`
+      // for the one and `PathBuilder::from_path` for the other. Only the
+      // candidates fitting as many arguments as the best one count.
+      const peers = fits.filter((f) => f.score === best.score);
+      traces.push({
+        npm: id,
+        overload: at,
+        slots: peers.map(
+          (f) =>
+            `${f.rust}(${f.outcome.map((o) => o.rust?.name ?? "-").join(", ")})`,
+        ),
+      });
+      best.outcome.forEach((o, i) => {
+        const kept = new Set(peers.flatMap((f) => f.outcome[i].kept));
+        const lost = o.param.classes.filter((c) => !kept.has(c));
+        const base = { npm: id, overload: at, param: o.param.name };
+        if (!peers.some((f) => f.outcome[i].rust)) {
           rows.push({
-            npm: id,
-            overload: at,
-            param: o.param.name,
+            ...base,
             kind: "missing",
+            lost: o.param.classes,
             rust: best.rust,
             detail: `${o.param.classes.join(" | ")}${o.param.optional ? ", optional" : ""}`,
           });
-        } else if (o.lost.length > 0) {
+        } else if (lost.length > 0) {
           rows.push({
-            npm: id,
-            overload: at,
-            param: o.param.name,
+            ...base,
             kind: "narrower",
-            rust: `${best.rust}(${o.rust.name})`,
-            detail: `${o.lost.join(" | ")} not taken; Rust has ${o.rust.classes.join(" | ")}`,
+            lost,
+            rust: `${best.rust}(${o.rust?.name ?? "?"})`,
+            detail: `${lost.join(" | ")} not taken; Rust has ${(o.rust?.classes ?? []).join(" | ")}`,
           });
         }
-      }
+      });
     });
   }
-  return { rows, compared };
+  // The register. A parameter id records every row for that argument of
+  // that method, in any overload; `(*)` records every row for the method.
+  // `(param:object)` records only a row whose every lost class is one the
+  // qualifier names, so a record of the `Sharp` arm of `src` does not also
+  // swallow a later failure of its URL or bytes arms.
+  const registered = new Map();
+  const qualified = [];
+  for (const entry of manifest) {
+    for (const id of entry.npm) {
+      const m = PARAMETER_ID.exec(id);
+      if (!m) continue;
+      const { method } = m.groups;
+      const [param, qualifier] = m.groups.param.split(":");
+      const record = params.npm[method];
+      if (!record) {
+        problems.push(
+          `\`${id}\` in '${entry.name}': \`${method}\` declares no parameters`,
+        );
+        continue;
+      }
+      if (
+        param !== "*" &&
+        !record.overloads.some((o) => o.params.some((p) => p.name === param))
+      ) {
+        problems.push(
+          `\`${id}\` in '${entry.name}': \`${method}\` has no parameter \`${param}\``,
+        );
+        continue;
+      }
+      const classes = qualifier?.split("|") ?? null;
+      const unknown = (classes ?? []).filter((c) => !CLASSES.has(c));
+      if (classes && (param === "*" || unknown.length > 0 || !classes[0])) {
+        problems.push(
+          `\`${id}\` in '${entry.name}': a qualifier names classes of one argument -- ` +
+            (param === "*"
+              ? "`(*)` takes none"
+              : `${unknown.join(", ") || "an empty one"} is not a class`),
+        );
+        continue;
+      }
+      const slot = { entry: entry.name, used: false };
+      registered.set(id, slot);
+      if (classes) qualified.push({ method, param, classes, slot });
+    }
+  }
+  for (const r of rows) {
+    const hit =
+      qualified.find(
+        (q) =>
+          q.method === r.npm &&
+          q.param === r.param &&
+          r.lost.every((c) => q.classes.includes(c)),
+      )?.slot ??
+      registered.get(`${r.npm}(${r.param})`) ??
+      registered.get(`${r.npm}(*)`);
+    r.recorded = hit?.entry ?? null;
+    if (hit) hit.used = true;
+  }
+  for (const [id, { entry, used }] of registered) {
+    if (!used)
+      problems.push(
+        `\`${id}\` in '${entry}' records no row: the argument it describes is now served, so the id is stale`,
+      );
+  }
+  return { rows, compared, problems, traces };
 }
 
 function selfTest() {
@@ -226,6 +437,94 @@ function selfTest() {
         ],
       },
       "Canvas::table": { params: [p("table", ["bytes", "array"])] },
+      "Canvas::encode": {
+        params: [
+          p("format", ["enum"]),
+          {
+            ...p("options", ["object"]),
+            fields: [p("path", ["object"]), p("quality", ["number"])],
+          },
+        ],
+      },
+      "Canvas::set_transform": {
+        params: [
+          {
+            ...p("transform", ["object", "string"]),
+            fields: ["a", "b", "c", "d", "tx", "ty"].map((n) =>
+              p(n, ["number"]),
+            ),
+          },
+        ],
+      },
+      "Canvas::place": {
+        params: [
+          {
+            ...p("placeholder", ["object"]),
+            fields: [
+              p("width", ["number"]),
+              p("height", ["number"]),
+              p("alignment", ["enum"]),
+            ],
+          },
+        ],
+      },
+      "Matrix::post_translate": {
+        receiver: true,
+        params: [p("dx", ["number"]), p("dy", ["number"])],
+      },
+      "Canvas::trim": {
+        params: [
+          p("start", ["number"]),
+          p("end", ["number"]),
+          p("invert", ["boolean"]),
+        ],
+      },
+      "Canvas::probe": { params: [p("x", ["number"])] },
+      "Canvas::hit_inside": {
+        params: [p("path", ["object"]), p("x", ["number"])],
+      },
+      "Canvas::open": { params: [p("data", ["string"])] },
+      "Canvas::feed": { params: [p("bytes", ["bytes"])] },
+      "Canvas::pixels": {
+        params: [
+          p("width", ["number"]),
+          p("height", ["number"]),
+          {
+            ...p("options", ["object"]),
+            fields: [p("color_space", ["enum"])],
+          },
+          p("pixels", ["bytes", "array"]),
+        ],
+      },
+      "Canvas::use_paths": {
+        params: [p("alias", ["string"], true), p("paths", ["array"])],
+      },
+      "Canvas::use_map": {
+        params: [p("alias", ["string"], true), p("paths", ["array"])],
+      },
+      "Canvas::texture": {
+        params: [
+          {
+            ...p("options", ["object"]),
+            fields: [
+              p("line", ["number"]),
+              p("spacing", ["array"]),
+              p("offset", ["array"]),
+            ],
+          },
+        ],
+      },
+      "Canvas::zoom": {
+        params: [
+          p("sx", ["number"]),
+          p("sy", ["number"]),
+          {
+            ...p("origin", ["object"]),
+            fields: [p("x", ["number"]), p("y", ["number"])],
+          },
+        ],
+      },
+      "Canvas::from_path": { params: [p("path", ["object"])] },
     },
     npm: {
       "Canvas.save": {
@@ -304,6 +603,94 @@ function selfTest() {
           },
         ],
       },
+      "Canvas.encode": {
+        overloads: [
+          { params: [p("type", ["enum"]), p("quality", ["number"], true)] },
+        ],
+      },
+      "Canvas.setTransform": {
+        overloads: [
+          {
+            params: ["a", "b", "c", "d", "e", "f"].map((n) => p(n, ["number"])),
+          },
+          { params: [p("transform", ["string"])] },
+        ],
+      },
+      "Canvas.place": {
+        overloads: [
+          {
+            params: [
+              p("w", ["number"]),
+              p("h", ["number"]),
+              p("align", ["number"]),
+            ],
+          },
+        ],
+      },
+      "Matrix.postTranslate": {
+        overloads: [
+          {
+            static: true,
+            params: [
+              p("m", ["array"]),
+              p("dx", ["number"]),
+              p("dy", ["number"]),
+            ],
+          },
+        ],
+      },
+      "Canvas.trim": {
+        overloads: [
+          { params: [p("start", ["number"]), p("inverted", ["boolean"])] },
+        ],
+      },
+      "Canvas.probe": {
+        overloads: [{ params: [p("path", ["object"]), p("x", ["number"])] }],
+      },
+      "Canvas.open": {
+        overloads: [{ params: [p("path", ["string", "object"])] }],
+      },
+      "Canvas.feed": {
+        overloads: [
+          { params: [p("src", ["object", "bytes"])] },
+          { params: [p("src", ["object", "string", "bytes"])] },
+        ],
+      },
+      "Canvas.pixels": {
+        overloads: [
+          {
+            params: [
+              p("src", ["bytes"]),
+              p("width", ["number"]),
+              p("height", ["number"]),
+            ],
+          },
+        ],
+      },
+      "Canvas.usePaths": {
+        overloads: [{ params: [p("fontPaths", ["array"])] }],
+      },
+      "Canvas.useMap": {
+        overloads: [{ params: [p("families", ["object"])] }],
+      },
+      "Canvas.texture": {
+        overloads: [
+          { params: [p("spacing", ["array"]), p("options", ["object"], true)] },
+        ],
+      },
+      "Canvas.zoom": {
+        overloads: [
+          {
+            params: [
+              p("scaleX", ["number"], true),
+              p("scaleY", ["number"], true),
+              p("scaleZ", ["number"], true),
+              p("originX", ["number"], true),
+              p("originY", ["number"], true),
+            ],
+          },
+        ],
+      },
     },
   };
   const rust = surface("rust", Object.keys(params.rust));
@@ -315,19 +702,61 @@ name = "hit testing"
 rust = ["Canvas::hit", "Canvas::hit_path"]
 npm  = ["Canvas.hitTest"]
 why  = "Two Rust names for one overloaded JavaScript method."
+
+[[capability]]
+name = "recorded arguments"
+rust = []
+npm  = ["Canvas.fill(extra)", "Canvas.load(*)"]
+why  = "One argument and one whole method, each recording rows."
+
+[[capability]]
+name = "one class of an argument"
+rust = []
+npm  = ["Canvas.feed(src:object)"]
+why  = "Records a row that lost only an object, and no other."
+
+[[capability]]
+name = "broken records"
+rust = []
+npm  = ["Canvas.nothing(x)", "Canvas.fill(zzz)", "Canvas.draw(dx)",
+        "Canvas.feed(src:widget)", "Canvas.load(*:bytes)"]
+why  = "A method with no parameters, an argument it lacks, and a stale one."
 `,
     "self-test",
   );
   const rules = JSON.parse(
     readFileSync(new URL("./parity/rules.json", import.meta.url), "utf8"),
   );
-  const { rows, compared } = paramReport({
-    rust,
-    npm,
-    manifest,
-    rules: { ...rules, owner_aliases: {}, member_aliases: {} },
-    params,
-  });
+  const testRules = {
+    ...rules,
+    owner_aliases: {},
+    member_aliases: {},
+    parameter_aliases: { inverted: ["invert"] },
+    parameter_links: {
+      "Canvas.probe": ["Canvas::hit_inside"],
+      "Canvas.open": ["Canvas::from_path"],
+      "Canvas.ghost": ["Canvas::fill"],
+      "Canvas.fill": ["Canvas::nowhere"],
+    },
+  };
+  const run = (overrides = {}) =>
+    paramReport({
+      rust,
+      npm,
+      manifest,
+      rules: { ...testRules, ...overrides },
+      params,
+    });
+  const { rows, compared, problems } = run();
+  // The same surfaces without the alias and without the links, so each case
+  // below that relies on one can be shown to need it.
+  const bare = run({ parameter_aliases: {}, parameter_links: {} }).rows;
+  // With the alias table `rules.json` actually ships, rather than this
+  // test's own: the case below is about that table's `src` line.
+  const shipped = run({ parameter_aliases: rules.parameter_aliases });
+  const clean = (npmId) =>
+    compared.has(npmId) && !rows.some((r) => r.npm === npmId);
+  const problem = (text) => problems.some((q) => q.includes(text));
   const has = (npmId, param, kind) =>
     rows.some((r) => r.npm === npmId && r.param === param && r.kind === kind);
   const cases = [
@@ -375,6 +804,123 @@ why  = "Two Rust names for one overloaded JavaScript method."
       compared.has("Canvas.hitTest") &&
         !rows.some((r) => r.npm === "Canvas.hitTest"),
     ],
+    [
+      "a positional argument reaches a field of an options struct by name",
+      clean("Canvas.encode"),
+    ],
+    [
+      "six numbers meet a struct's fields, four by name and two after them",
+      clean("Canvas.setTransform"),
+    ],
+    [
+      "a struct is spread positionally, an enum field taking a number",
+      clean("Canvas.place"),
+    ],
+    [
+      "a static helper's first argument is the Rust method's receiver",
+      clean("Matrix.postTranslate"),
+    ],
+    [
+      "an aliased name matches, and is missing without the alias",
+      clean("Canvas.trim") &&
+        bare.some((r) => r.npm === "Canvas.trim" && r.param === "inverted"),
+    ],
+    [
+      "a linked function serves an argument, which is missing unlinked",
+      clean("Canvas.probe") &&
+        bare.some((r) => r.npm === "Canvas.probe" && r.param === "path"),
+    ],
+    [
+      "a union two Rust functions serve between them is served",
+      clean("Canvas.open") &&
+        bare.some((r) => r.npm === "Canvas.open" && r.kind === "narrower"),
+    ],
+    [
+      "originX and originY reach an origin's fields by name, leaving scaleZ out",
+      compared.has("Canvas.zoom") &&
+        rows
+          .filter((r) => r.npm === "Canvas.zoom")
+          .map((r) => r.param)
+          .join() === "scaleZ",
+    ],
+    [
+      "an argument passes over an optional Rust slot it does not fit",
+      clean("Canvas.usePaths"),
+    ],
+    [
+      "a JavaScript object does not stand in for a Rust list",
+      rows.some((r) => r.npm === "Canvas.useMap" && r.param === "families"),
+    ],
+    [
+      "an object names the rest of a struct whose field went by name",
+      clean("Canvas.texture"),
+    ],
+    [
+      "`src` reaches a `pixels` no position reaches, through the shipped alias",
+      shipped.compared.has("Canvas.pixels") &&
+        !shipped.rows.some((r) => r.npm === "Canvas.pixels") &&
+        bare.some((r) => r.npm === "Canvas.pixels" && r.param === "src"),
+    ],
+    [
+      "a parameter id records the row for that argument",
+      rows.find((r) => r.npm === "Canvas.fill" && r.param === "extra")
+        ?.recorded === "recorded arguments",
+    ],
+    [
+      "a (*) id records every row of the method",
+      rows
+        .filter((r) => r.npm === "Canvas.load")
+        .every((r) => r.recorded === "recorded arguments") &&
+        rows.some((r) => r.npm === "Canvas.load"),
+    ],
+    [
+      "a row no id names stays unrecorded",
+      rows.find((r) => r.npm === "Canvas.text" && r.param === "x")?.recorded ===
+        null,
+    ],
+    [
+      "an id for a method with no parameters is refused",
+      problem(
+        "`Canvas.nothing(x)` in 'broken records': `Canvas.nothing` declares no parameters",
+      ),
+    ],
+    [
+      "an id for an argument the method lacks is refused",
+      problem(
+        "`Canvas.fill(zzz)` in 'broken records': `Canvas.fill` has no parameter `zzz`",
+      ),
+    ],
+    [
+      "an id recording no row is refused as stale",
+      problem("`Canvas.draw(dx)` in 'broken records' records no row"),
+    ],
+    [
+      "a link from a method without parameters is refused",
+      problem("`Canvas.ghost`"),
+    ],
+    [
+      "a link to a Rust function that does not exist is refused",
+      problem("`Canvas::nowhere`"),
+    ],
+    [
+      "a qualified id records a row whose only lost class it names",
+      rows.find((r) => r.npm === "Canvas.feed" && r.overload === 0)
+        ?.recorded === "one class of an argument",
+    ],
+    [
+      "and leaves open a row that also lost a class it does not name",
+      rows.find((r) => r.npm === "Canvas.feed" && r.overload === 1)
+        ?.recorded === null,
+    ],
+    [
+      "a qualifier naming no class is refused",
+      problem("`Canvas.feed(src:widget)` in 'broken records': a qualifier"),
+    ],
+    [
+      "a qualifier on every argument at once is refused",
+      problem("`Canvas.load(*:bytes)` in 'broken records': a qualifier"),
+    ],
+    ["nothing else is refused", problems.length === 7],
   ];
   let bad = 0;
   for (const [label, ok] of cases) {
@@ -398,7 +944,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const rules = JSON.parse(
       readFileSync(new URL("./parity/rules.json", import.meta.url), "utf8"),
     );
-    const { rows, compared } = paramReport({
+    const { rows, compared, problems } = paramReport({
       rust: read("target/parity-rust.json"),
       npm: read("target/parity-npm.json"),
       manifest: parseManifest(
@@ -408,16 +954,24 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       rules,
       params: read("target/parity-params.json"),
     });
-    // `--summary` is the headline alone, for `check-parity`, where rows
-    // nobody is yet asked to act on would bury the gate's own output.
-    for (const r of process.argv.includes("--summary") ? [] : rows) {
+    // `--all` lists every row, recorded or not, for triage. Otherwise the
+    // output is what fails: rows nothing records, and problems with the
+    // register itself. `--report-only` prints the same and exits 0.
+    const all = process.argv.includes("--all");
+    const open = rows.filter((r) => r.recorded === null);
+    for (const r of all ? rows : open) {
       console.log(
-        `${r.kind.padEnd(9)} ${r.npm}#${r.overload} ${r.param}  -> ${r.rust}  [${r.detail}]`,
+        `${r.kind.padEnd(9)} ${r.npm}#${r.overload} ${r.param}  -> ${r.rust}  [${r.detail}]${r.recorded ? `  recorded: ${r.recorded}` : ""}`,
       );
     }
+    for (const p of problems) console.error(`  ${p}`);
     const methods = new Set(rows.map((r) => r.npm)).size;
+    const failing = open.length > 0 || problems.length > 0;
+    const reportOnly = process.argv.includes("--report-only");
     console.log(
-      `parity params (report only): ${rows.length} rows across ${methods} of ${compared.size} compared methods`,
+      `parity params${reportOnly ? " (report only)" : ""}: ${rows.length} rows across ${methods} of ${compared.size} compared methods, ` +
+        `${rows.length - open.length} recorded, ${open.length} not, ${problems.length} register problems`,
     );
+    if (failing && !reportOnly) process.exit(1);
   }
 }
