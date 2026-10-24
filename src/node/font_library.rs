@@ -19,6 +19,7 @@ use skia_safe::{
 };
 
 use crate::{
+    font::variation_axes,
     image::x_height_ratio,
     typography::{
         FontSpec, from_slant, from_width, typeface_details, typeface_wght_range,
@@ -1041,16 +1042,16 @@ impl FontLibrary {
         self
     }
 
-    /// The collection a style should be laid out with, and the style the
-    /// matched face actually has.
+    /// The collection a style should be laid out with, and the face the
+    /// style matched first.
     ///
     /// Two answers from one search. Skia's paragraph builder synthesises a
-    /// bold or an oblique where the face it finds is not the weight or slant
-    /// that was asked for, so a caller pins the style to what the match
-    /// reports -- which used to mean searching the collection a second time,
-    /// in `Typesetter::layout`, on every call. It is the same search: for a
-    /// family with no variable font in it, the collection handed back here
-    /// is the one that was just searched.
+    /// bold or an italic where the face it finds is not the weight or slant
+    /// that was asked for, so a caller decides from the match what it may
+    /// synthesise -- which used to mean searching the collection a second
+    /// time, in `Typesetter::layout`, on every call. It is the same search:
+    /// for a family with no variable font in it, the collection handed back
+    /// here is the one that was just searched.
     pub fn fonts_for_style(
         &mut self,
         style: &TextStyle,
@@ -1065,10 +1066,7 @@ impl FontLibrary {
         // if any of the matched typefaces is a variable font, create an
         // instance that matches the current weight settings and add it
         // to a dynamic font mgr
-        if matches
-            .iter()
-            .any(|font| font.variation_design_parameters().is_some())
-        {
+        if matches.iter().any(|font| variation_axes(font).is_some()) {
             // memoize the generation of FontCollections for instanced variable
             // fonts
             let key = CollectionKey::new(style, variations);
@@ -1086,7 +1084,7 @@ impl FontLibrary {
             let mut dynamic = TypefaceFontProvider::new();
 
             for font in matches.into_iter() {
-                if let Some(params) = font.variation_design_parameters() {
+                if let Some(params) = variation_axes(&font) {
                     // build coordinates from explicit variations + auto wght
                     let mut coords: Vec<Coordinate> = vec![];
 
@@ -1176,14 +1174,14 @@ impl FontLibrary {
                 .clone()
                 .find_typefaces(&families, style.font_style())
                 .first()
-                .map(|face| face.font_style());
+                .map(Typeface::font_style);
             self.collection_cache
                 .insert(key, collection.clone(), matched);
             (collection, matched)
         } else {
             // Not variable, so the collection just searched is the one to lay
             // out with and the match is the one already in hand.
-            let matched = matches.first().map(|face| face.font_style());
+            let matched = matches.first().map(Typeface::font_style);
             (self.font_collection(), matched)
         }
     }
@@ -1215,7 +1213,7 @@ impl FontLibrary {
             .font_collection()
             .find_typefaces(&families, style.font_style());
         for font in matches.into_iter() {
-            let Some(params) = font.variation_design_parameters() else {
+            let Some(params) = variation_axes(&font) else {
                 continue;
             };
             let mut coords: Vec<Coordinate> = Vec::new();

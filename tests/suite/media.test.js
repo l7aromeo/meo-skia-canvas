@@ -986,16 +986,13 @@ describe("FontLibrary", () => {
     assert.equal(ctx.measureText("MMM").width, width, "and the same metrics");
   });
 
-  test("does not fake a weight or a slant a family does not have", () => {
-    // Skia's paragraph builder synthesises a bold or an oblique when the
-    // face it finds is not the one asked for, so the character style is
-    // pinned to what the match actually reports. Monoton has one face, so
-    // asking it for bold is asking for the synthesis.
-    //
-    // That pin used to be found by searching the font collection a second
-    // time, inside `layout`, on every call; it comes back with the
-    // collection now. This is what says it still arrives -- without it all
-    // three of these render differently from the plain one.
+  test("fakes a weight or a slant a family does not have where Chrome does", () => {
+    // The style a run is laid out in is decided from the face its search
+    // matched, which comes back with the collection rather than from a
+    // second search inside `layout`. Monoton has one face, of weight 400, so
+    // what it draws under each style shows what that decision allowed:
+    // Chrome 152 emboldens it from 600 and skews its italic, and leaves 500
+    // as it is.
     FontLibrary.use(findFont("Monoton-Regular.woff"));
     const drawn = (font) => {
       const canvas = new Canvas(300, 80);
@@ -1007,12 +1004,13 @@ describe("FontLibrary", () => {
     };
 
     const plain = drawn("32px Monoton");
+    assert.equal(drawn("500 32px Monoton"), plain, "500 is not faked");
     for (const font of [
       "bold 32px Monoton",
       "900 32px Monoton",
       "italic 32px Monoton",
     ]) {
-      assert.equal(drawn(font), plain, `${font} was synthesised`);
+      assert.notEqual(drawn(font), plain, `${font} was not synthesised`);
     }
   });
 

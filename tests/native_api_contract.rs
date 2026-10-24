@@ -340,6 +340,54 @@ fn facade_draws_a_layout_at_the_axis_it_was_laid_out_with() -> Result<()> {
     Ok(())
 }
 
+/// A variable face later in the family list is still the instance: a static
+/// face ahead of it does not stop the search for one.
+///
+/// "ЖЖЖ" is Cyrillic, which Monoton lacks, so it falls back to Oswald, and
+/// Chrome 152 inks it the same at `900 48px Monoton, Oswald` as at
+/// `700 48px Oswald`: the instance at the end of its axis, with no bold
+/// faked over it. Only a FreeType or DirectWrite build can fail this, where
+/// a static face reports an empty list of axes rather than none.
+#[test]
+fn a_static_family_first_does_not_hide_the_variable_one() -> Result<()> {
+    let fonts = FontLibrary::new();
+    fonts.register_font_from_data(
+        "Monoton",
+        &std::fs::read("tests/assets/fonts/Monoton-Regular.woff")
+            .context("monoton")?,
+    )?;
+    fonts.register_font_from_data(
+        "Oswald",
+        &std::fs::read(
+            "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+        )
+        .context("oswald-vf")?,
+    )?;
+    let engine = TextEngine::new(&fonts);
+
+    let pixels = |families: &[&str], weight: i32| -> Result<Vec<u8>> {
+        let style = TextStyle {
+            font_families: families.iter().map(|f| f.to_string()).collect(),
+            color: RgbaLinear::opaque(1.0, 1.0, 1.0),
+            font_size: 48.0,
+            font_weight: weight,
+            ..TextStyle::default()
+        };
+        let layout = engine.layout_text("ЖЖЖ", &style, 600.0);
+        facade_pixels(600.0, 100.0, |ctx| {
+            ctx.set_fill_style(RgbaLinear::opaque(0.0, 0.0, 0.0));
+            ctx.fill_rect(0.0, 0.0, 600.0, 100.0);
+            ctx.draw_paragraph(&layout, 4.0, 4.0);
+        })
+    };
+
+    assert!(
+        pixels(&["Monoton", "Oswald"], 900)? == pixels(&["Oswald"], 700)?,
+        "the fallback Oswald draws as its 700 instance",
+    );
+    Ok(())
+}
+
 /// One collection shared across layouts still draws each axis position on
 /// its own.
 ///
