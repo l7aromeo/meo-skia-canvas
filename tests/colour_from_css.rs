@@ -336,3 +336,170 @@ fn a_fill_set_from_a_colour_reads_back_as_that_colour() {
         }
     }
 }
+
+#[test]
+fn lab_and_lch_are_read_the_same_in_either_case() {
+    // CSS function names are ASCII case-insensitive, so the upper-case
+    // spellings are the same colours. Both rows sit where a conversion
+    // that is close but not exact lands on a different value, so equality
+    // here means both cases took the same path.
+    for (lower, upper) in [
+        ("lab(60% 20 -30)", "LAB(60% 20 -30)"),
+        ("lch(50% 70 0)", "LCH(50% 70 0)"),
+        ("lab(79.18% -50% 30)", "Lab(79.18% -50% 30)"),
+    ] {
+        let a = RgbaLinear::from_css(lower).expect("lower case");
+        let b = RgbaLinear::from_css(upper).expect("upper case");
+        assert_eq!(a, b, "{upper} against {lower}");
+    }
+}
+
+/// CSS Color 4's conversion from Lab to sRGB, in `f64`, from its sample code
+/// rather than from this crate: Lab's D50 white, the specification's Bradford
+/// matrix to D65, and the rational XYZ-to-linear-sRGB matrix. Returns linear
+/// sRGB, unclamped, premultiplied by `alpha`, as `RgbaLinear::from_css` does.
+fn css_color_4_lab(l: f64, a: f64, b: f64, alpha: f64) -> [f64; 4] {
+    const KAPPA: f64 = 24389.0 / 27.0;
+    const EPSILON: f64 = 216.0 / 24389.0;
+    let white = [0.3457 / 0.3585, 1.0, (1.0 - 0.3457 - 0.3585) / 0.3585];
+    let bradford = [
+        [0.955473421488075, -0.02309845494876471, 0.06325924320057072],
+        [
+            -0.0283697093338637,
+            1.0099953980813041,
+            0.021041441191917323,
+        ],
+        [
+            0.012314014864481998,
+            -0.020507649298898964,
+            1.330365926242124,
+        ],
+    ];
+    let to_srgb = [
+        [12831.0 / 3959.0, -329.0 / 214.0, -1974.0 / 3959.0],
+        [
+            -851781.0 / 878810.0,
+            1648619.0 / 878810.0,
+            36519.0 / 878810.0,
+        ],
+        [705.0 / 12673.0, -2585.0 / 12673.0, 705.0 / 667.0],
+    ];
+    let apply = |m: [[f64; 3]; 3], v: [f64; 3]| {
+        [0, 1, 2].map(|i| m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2])
+    };
+    let f1 = (l + 16.0) / 116.0;
+    let (f0, f2) = (a / 500.0 + f1, f1 - b / 200.0);
+    let cube = |f: f64| match f * f * f > EPSILON {
+        true => f * f * f,
+        false => (116.0 * f - 16.0) / KAPPA,
+    };
+    let y = match l > KAPPA * EPSILON {
+        true => f1 * f1 * f1,
+        false => l / KAPPA,
+    };
+    let xyz = [cube(f0) * white[0], y * white[1], cube(f2) * white[2]];
+    let [r, g, bl] = apply(to_srgb, apply(bradford, xyz));
+    [r * alpha, g * alpha, bl * alpha, alpha]
+}
+
+/// The largest error `lab()` and `lch()` may carry against CSS Color 4.
+///
+/// Above what `f32` arithmetic accumulates through Lab, two matrices and the
+/// sRGB curve and back, which on this grid is at most 2.4e-6; far below the
+/// 1.07e-3 the dependency underneath reaches on its own, which is what this
+/// exists to refuse.
+const LAB_TOLERANCE: f64 = 4e-5;
+
+#[test]
+fn lab_and_lch_follow_css_color_4_across_their_grammar() {
+    // Every lightness, both axes and the chroma and hue forms the grammar
+    // takes -- numbers, percentages, `none`, every angle unit, and values
+    // outside sRGB -- against the reference above. A claim that the
+    // dependency underneath reads Lab well enough to drop this crate's own
+    // reading is a claim about every one of these, and this is where it is
+    // tested: the dependency alone misses by 1.07e-3 in linear light, which
+    // is 2.2e-3 once encoded and a whole level in 8-bit on 121 inputs of a
+    // grid this one samples.
+    let number = |t: &str, full: f64| match t {
+        "none" => 0.0,
+        t => match t.strip_suffix('%') {
+            Some(p) => p.parse::<f64>().expect("number") / 100.0 * full,
+            None => t.parse::<f64>().expect("number"),
+        },
+    };
+    let angle = |t: &str| -> f64 {
+        let turn = std::f64::consts::TAU;
+        [
+            ("deg", 360.0),
+            ("grad", 400.0),
+            ("rad", turn),
+            ("turn", 1.0),
+        ]
+        .iter()
+        .find_map(|(unit, per)| {
+            t.strip_suffix(unit)
+                .map(|v| v.parse::<f64>().expect("angle") / per * 360.0)
+        })
+        .unwrap_or_else(|| number(t, 1.0))
+    };
+    let lightness = ["0", "12.5", "25%", "50", "79.18%", "100", "none"];
+    let axis = [
+        "-160", "-62.27", "-30", "0", "17.56", "60", "125", "-50%", "100%",
+        "none",
+    ];
+    let chroma = ["0", "40", "70", "150", "230", "50%", "none"];
+    let hue = [
+        "0", "30", "165", "400", "-30", "30deg", "100grad", "1rad", "0.5turn",
+        "none",
+    ];
+    let alpha = [("", 1.0), (" / 0.5", 0.5), (" / 50%", 0.5)];
+    let mut cases = Vec::new();
+    for l in lightness {
+        for (al, alpha) in alpha {
+            for a in axis {
+                for b in axis {
+                    let want = css_color_4_lab(
+                        number(l, 100.0),
+                        number(a, 125.0),
+                        number(b, 125.0),
+                        alpha,
+                    );
+                    cases.push((format!("lab({l} {a} {b}{al})"), want));
+                }
+            }
+            for c in chroma {
+                for h in hue {
+                    let (c_, h_) = (number(c, 150.0), angle(h).to_radians());
+                    let want = css_color_4_lab(
+                        number(l, 100.0),
+                        c_ * h_.cos(),
+                        c_ * h_.sin(),
+                        alpha,
+                    );
+                    cases.push((format!("lch({l} {c} {h}{al})"), want));
+                }
+            }
+        }
+    }
+    let mut worst = (0.0, String::new());
+    for (css, want) in &cases {
+        let got =
+            RgbaLinear::from_css(css).unwrap_or_else(|| panic!("{css} parses"));
+        let error = [got.r, got.g, got.b, got.a]
+            .iter()
+            .zip(want)
+            .map(|(g, w)| (f64::from(*g) - w).abs())
+            .fold(0.0, f64::max);
+        if error > worst.0 {
+            worst = (error, css.clone());
+        }
+    }
+    assert!(
+        worst.0 <= LAB_TOLERANCE,
+        "{} cases checked; {} is {:e} from CSS Color 4",
+        cases.len(),
+        worst.1,
+        worst.0,
+    );
+    assert!(cases.len() > 2000, "the grid is the point: {}", cases.len());
+}

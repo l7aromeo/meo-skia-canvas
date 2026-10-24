@@ -902,6 +902,12 @@ fn the_rust_surface_takes_css_colors() -> Result<()> {
         // On the neutral axis the two conversions coincide exactly. Kept to
         // record that this row proves nothing about the white point.
         ("lab(50% 0 0)", [119, 119, 119, 255]),
+        // Measured in Chrome 153. Red is 4.38 through CSS Color 4's own
+        // conversion and 4.04 in Chrome, and 4.75 through `csscolorparser`
+        // alone, so the byte says which reading ran; upper case is the same
+        // function and takes the same one.
+        ("lab(79.18% -50% 30)", [4, 225, 136, 255]),
+        ("LAB(79.18% -50% 30)", [4, 225, 136, 255]),
         ("hwb(90 10% 20%)", [115, 204, 26, 255]),
         ("color(srgb 0.2 0.4 0.9)", [51, 102, 230, 255]),
         // CSS Color 4 types the saturation, lightness, whiteness and
@@ -946,11 +952,11 @@ fn the_rust_surface_takes_css_colors() -> Result<()> {
     // on an sRGB canvas the two clip to the same byte, so only a wide one
     // can tell them apart.
     //
-    // The same colour in the other notations `csscolorparser` converts in
-    // linear light and this crate's own parsers leave to it: an `xyz` space,
-    // an upper-case `LAB(` that `parse_lab_like` does not claim, and a
-    // relative colour whose space follows an origin with spaces of its own.
-    // Lab rounds its components to four places, which moves no byte here.
+    // The same colour in other notations: an `xyz` space and a relative
+    // colour whose space follows an origin with spaces of its own, both
+    // converted in linear light by `csscolorparser`, and the same Lab colour
+    // in upper case, read by this crate's own Lab conversion. Lab rounds its
+    // components to four places, which moves no byte here.
     for css in [
         "oklch(0.8 0.18 165)",
         "color(xyz-d65 0.318370 0.555540 0.424442)",
