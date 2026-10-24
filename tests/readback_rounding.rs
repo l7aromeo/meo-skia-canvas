@@ -76,3 +76,57 @@ fn either_engine_unpremultiplies_as_chrome_does() -> Result<(), Error> {
     }
     Ok(())
 }
+
+#[test]
+fn a_large_read_unpremultiplies_across_threads_as_a_small_one_does()
+-> Result<(), Error> {
+    // A read of more than 2^19 pixels splits its rows across threads. The
+    // same page read in quarters, each under that, is unpremultiplied on one
+    // thread from the same surface, so the two have to agree byte for byte.
+    // The engines are not compared with each other: the GPU rasterizes some
+    // translucent colours a premultiplied step away from the raster engine.
+    for gpu in [false, true] {
+        let mut canvas = Canvas::with_options(
+            1200.0,
+            900.0,
+            CanvasOptions {
+                color_space: PixelColorSpace::DisplayP3,
+                gpu,
+                ..CanvasOptions::default()
+            },
+        )?;
+        let ctx = canvas.context();
+        for i in 0..20u8 {
+            let css = format!("rgba({}, 100, 50, 0.{})", i * 12, i % 9 + 1);
+            ctx.set_fill_style_css(&css)?;
+            let (x, y) =
+                (f32::from(i) * 37.0 % 1200.0, f32::from(i) * 53.0 % 900.0);
+            ctx.fill_rect(x, y, 400.0, 300.0);
+        }
+        let options = PixelExportOptions {
+            color_space: PixelColorSpace::DisplayP3,
+            ..PixelExportOptions::default()
+        };
+        let whole = ctx.get_image_data_as(0.0, 0.0, 1200.0, 900.0, options)?;
+        let whole = whole.pixels();
+        let translucent = whole
+            .chunks(4)
+            .filter(|px| px[3] != 0 && px[3] != 255)
+            .count();
+        assert!(translucent > 1 << 19, "mostly translucent: {translucent}");
+        for (x, y) in [(0, 0), (600, 0), (0, 450), (600, 450)] {
+            let part = ctx
+                .get_image_data_as(x as f32, y as f32, 600.0, 450.0, options)?;
+            for row in 0..450 {
+                let from = ((y + row) * 1200 + x) * 4;
+                assert!(
+                    part.pixels()[row * 600 * 4..(row + 1) * 600 * 4]
+                        == whole[from..from + 600 * 4],
+                    "gpu {gpu}: row {} of the quarter at ({x}, {y})",
+                    row,
+                );
+            }
+        }
+    }
+    Ok(())
+}

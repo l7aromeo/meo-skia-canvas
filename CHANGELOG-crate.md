@@ -33,8 +33,9 @@ window be changed after it opens.** No signature moves and nothing is removed.
   GPU engine now reads the surface premultiplied and unpremultiplies on the
   CPU with the raster pipeline's own rounding, so both engines give the
   same bytes. An 8x8 read is faster, about 130 microseconds against 200 on
-  Apple silicon; a full 1200x900 read is slower, about 1.5 milliseconds
-  against 0.6, which is the cost of the GPU's unconverted readback.
+  Apple silicon; a full 1200x900 read is slower, about 1.3 milliseconds
+  against 0.6, which is the cost of the GPU's unconverted readback, with
+  the conversion of a large read shared across threads.
 
 - **`LAB(` and `LCH(` in upper case take the same conversion as `lab(`
   and `lch(`.** CSS function names are case-insensitive, and the crate's

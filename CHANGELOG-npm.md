@@ -163,8 +163,9 @@ removed and no signature moves.
   Every published version measured, from 3.6.0, rounds the first read down.
   Both engines now give the same bytes on every read. An 8x8 read is
   faster, about 130 microseconds against 200 on Apple silicon; a full
-  1200x900 read is slower, about 1.5 milliseconds against 0.6, the cost of
-  reading the GPU surface without its own conversion.
+  1200x900 read is slower, about 1.3 milliseconds against 0.6, the cost of
+  reading the GPU surface without its own conversion, with the conversion
+  of a large read shared across threads.
 
 - **`getImageData` after an export returns the canvas, not the canvas
   drawn twice.** Any raster export -- `toBuffer`, `toBufferSync`,

@@ -1074,6 +1074,37 @@ fn unpremultiply_table() -> &'static [[u8; 256]; 256] {
     })
 }
 
+/// The read, in pixels, from which [`read_converted_on_cpu`] unpremultiplies
+/// its rows across threads rather than on the calling one.
+///
+/// Measured in release on Apple silicon, first GPU reads of a 1200x900 page,
+/// medians of three rounds: handing rows to the pool costs about 100
+/// microseconds a read -- a 16x16 read takes 135 to 156 on one thread and
+/// 237 to 265 across them -- and the threads earn it back only on the
+/// largest reads. At 600x600, 360,000 pixels, the two are level, 682 to 782
+/// against 746 to 777; at 800x900, 720,000, threads take 937 to 988 against
+/// 1109 to 1138, and a full read 1270 to 1317 against 1617 to 1638. So the
+/// line is drawn between those two sizes, at 2^19.
+const PARALLEL_UNPREMULTIPLY_PIXELS: usize = 1 << 19;
+
+/// Unpremultiplies one row of eight-bit pixels in place through
+/// [`unpremultiply_table`], alpha fourth.
+fn unpremultiply_row(row: &mut [u8]) {
+    let table = unpremultiply_table();
+    for pixel in row.as_chunks_mut::<4>().0 {
+        // Opaque needs nothing, and so does clear: a premultiplied pixel
+        // with no alpha has no colour either.
+        let alpha = pixel[3];
+        if alpha == u8::MAX || alpha == 0 {
+            continue;
+        }
+        let divide = &table[usize::from(alpha)];
+        for channel in &mut pixel[..3] {
+            *channel = divide[usize::from(*channel)];
+        }
+    }
+}
+
 /// Reads `surface` into `pixels` as `info` describes, with any conversion
 /// made on the CPU.
 ///
@@ -1092,8 +1123,10 @@ fn unpremultiply_table() -> &'static [[u8; 256]; 256] {
 /// conversion from a copy. The cost is the GPU's: on Apple silicon a
 /// premultiplied read of a 1200x900 page costs about 0.95 milliseconds, where
 /// the GPU's own unpremultiplying read costs 0.78 and rounds down, and the
-/// table adds about 0.55 nanoseconds a pixel. An 8x8 read costs about 130
-/// microseconds against that conversion's 200.
+/// table adds about 0.55 nanoseconds a pixel on one thread -- shared across
+/// threads from [`PARALLEL_UNPREMULTIPLY_PIXELS`], which brings the whole
+/// read to about 1.3 milliseconds. An 8x8 read costs about 130 microseconds
+/// against that conversion's 200.
 fn read_converted_on_cpu(
     surface: &mut Surface,
     info: &ImageInfo,
@@ -1123,21 +1156,18 @@ fn read_converted_on_cpu(
         if !surface.read_pixels(&premultiplied, pixels, row_bytes, at) {
             return false;
         }
-        let table = unpremultiply_table();
         let width = info.min_row_bytes();
-        for row in pixels.chunks_mut(row_bytes).take(info.height() as usize) {
-            for pixel in row[..width].as_chunks_mut::<4>().0 {
-                // Opaque needs nothing, and so does clear: a premultiplied
-                // pixel with no alpha has no colour either.
-                let alpha = pixel[3];
-                if alpha == u8::MAX || alpha == 0 {
-                    continue;
-                }
-                let divide = &table[usize::from(alpha)];
-                for channel in &mut pixel[..3] {
-                    *channel = divide[usize::from(*channel)];
-                }
-            }
+        let height = info.height() as usize;
+        let area = info.width() as usize * height;
+        match area >= PARALLEL_UNPREMULTIPLY_PIXELS {
+            true => pixels
+                .par_chunks_mut(row_bytes)
+                .take(height)
+                .for_each(|row| unpremultiply_row(&mut row[..width])),
+            false => pixels
+                .chunks_mut(row_bytes)
+                .take(height)
+                .for_each(|row| unpremultiply_row(&mut row[..width])),
         }
         return true;
     }
