@@ -2255,18 +2255,27 @@ status = "deliberate"
 
 [[capability]]
 name = "registering several font files, or one under its own family name"
-rust = []
-npm = ["FontLibrary.use"]
-why = """`FontLibrary.use` registers a font from a path or a buffer, which the
-      crate's `register_font_from_path` and `register_font_from_data` do one
-      file at a time, and also several files under one family, several
-      families from one object, and a file under the family name the font
-      itself declares, returning the details of what it registered. The crate
-      takes one file per call, always needs the family name from the caller
-      and returns nothing, so a Rust caller registering a font under its own
-      name has to know that name first. A gap in the crate."""
-status = "gap"
-issue = "unfiled"
+rust = ["FontLibrary::use_data_all",
+        "FontLibrary::use_families"]
+npm = ["FontLibrary.use",
+       "FontLibrary.use(fontPaths:string)",
+       "FontLibrary.use(families)"]
+why = """`FontLibrary.use` is one overloaded call and the crate spells each form as
+      a method. From files under one alias or under each font's own family it
+      is `FontLibrary::use_paths`, and from one buffer `FontLibrary::use_data`,
+      both paired with `FontFace` in "a registered face, as registering it
+      describes it". From several buffers it is `FontLibrary::use_data_all`,
+      and from a map of aliases to files `FontLibrary::use_families`, which
+      answers one list per group where npm answers an object keyed by alias.
+      Every form is all or nothing on both surfaces: a font that cannot be
+      read or parsed registers nothing from the call.
+      Two argument shapes differ and are meant to. npm takes one path as a
+      bare string where `FontLibrary::use_paths` takes any iterator of paths,
+      so a single path is `[path]`. And npm's map of aliases is a list of
+      `(alias, paths)` pairs for `FontLibrary::use_families`: a Rust caller
+      writes it as an array literal without building a map, the order given
+      is the order answered, and a group may have no alias, which a map key
+      cannot express."""
 
 [[capability]]
 name = "no decoration, as a value and as a predicate"

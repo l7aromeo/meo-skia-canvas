@@ -405,6 +405,17 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   before any is registered.
   `register_font_from_path` and `register_font_from_data` are unchanged.
 
+- **`FontLibrary::use_data_all` and `FontLibrary::use_families` register
+  several fonts in one all-or-nothing call**, as `FontLibrary.use()` does
+  with an array of buffers and with an object mapping aliases to files.
+  `use_data_all(alias, faces)` takes the bytes of several faces;
+  `use_families(groups)` takes `(alias, paths)` pairs and returns one
+  `FontFace` list per group, in order. Every face is parsed before any is
+  registered, so a bad buffer, or a missing file in one family, registers
+  nothing from the call -- which looping over `use_data`, or over
+  `use_paths` once per family, cannot give. The faces match what the Node
+  binding returns for the same Raleway and Oswald files.
+
 - **A rich-text span's own `font_variations` apply.** `layout_rich_text`
   and `ParagraphBuilder::push_style` instanced every span at the base
   style's axes and ignored the span's. A span's list now replaces the base

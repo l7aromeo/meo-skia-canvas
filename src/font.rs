@@ -443,7 +443,62 @@ impl FontLibrary {
         alias: Option<&str>,
         paths: impl IntoIterator<Item = P>,
     ) -> Result<Vec<FontFace>, Error> {
-        let parsed = paths
+        let parsed = self.read_paths(paths)?;
+        Ok(self.file_all(parsed, alias))
+    }
+
+    /// Registers several families at once, each group's files filed under
+    /// its alias or, without one, under the family name each font declares,
+    /// and describes every face registered, one list per group in the order
+    /// given.
+    ///
+    /// JavaScript's `FontLibrary.use({ alias: paths, ... })`, and
+    /// [`use_paths`](Self::use_paths) for several aliases in one call. All or
+    /// nothing across the whole call, as `use()` is: every file of every
+    /// group is read and parsed before any is registered, so a failure in one
+    /// family leaves the families before it unregistered too, which a
+    /// `use_paths` call per family cannot do.
+    ///
+    /// ```no_run
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let library = FontLibrary::new();
+    /// let faces = library.use_families([
+    ///     (
+    ///         Some("Body"),
+    ///         vec!["fonts/Inter.ttf", "fonts/Inter-Bold.ttf"],
+    ///     ),
+    ///     (Some("Headline"), vec!["fonts/Playfair.ttf"]),
+    /// ])?;
+    /// assert_eq!(faces[1][0].family, "Headline");
+    /// # Ok::<(), meo_skia_canvas::error::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FontRegister`] naming the first file that cannot be
+    /// read or is not a font this build can parse.
+    pub fn use_families<'a, P: AsRef<Path>, I: IntoIterator<Item = P>>(
+        &self,
+        groups: impl IntoIterator<Item = (Option<&'a str>, I)>,
+    ) -> Result<Vec<Vec<FontFace>>, Error> {
+        let parsed = groups
+            .into_iter()
+            .map(|(alias, paths)| Ok((alias, self.read_paths(paths)?)))
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(parsed
+            .into_iter()
+            .map(|(alias, faces)| self.file_all(faces, alias))
+            .collect())
+    }
+
+    /// The typeface in each file, with the file it came from, or the first
+    /// file's failure.
+    fn read_paths<P: AsRef<Path>>(
+        &self,
+        paths: impl IntoIterator<Item = P>,
+    ) -> Result<Vec<(Typeface, Option<PathBuf>)>, Error> {
+        paths
             .into_iter()
             .map(|path| {
                 let path = path.as_ref();
@@ -458,11 +513,19 @@ impl FontLibrary {
                     self.parse(&bytes, &path.display().to_string())?;
                 Ok((typeface, Some(path.to_path_buf())))
             })
-            .collect::<Result<Vec<_>, Error>>()?;
-        Ok(parsed
+            .collect()
+    }
+
+    /// Registers every parsed face under `alias` or its own family name.
+    fn file_all(
+        &self,
+        faces: Vec<(Typeface, Option<PathBuf>)>,
+        alias: Option<&str>,
+    ) -> Vec<FontFace> {
+        faces
             .into_iter()
             .map(|(typeface, file)| self.file(typeface, alias, file))
-            .collect())
+            .collect()
     }
 
     /// Registers the font in `bytes`, filed under `alias` or, without one,
@@ -482,6 +545,37 @@ impl FontLibrary {
     ) -> Result<FontFace, Error> {
         let typeface = self.parse(bytes, "the data given")?;
         Ok(self.file(typeface, alias, None))
+    }
+
+    /// Registers the font in each of `faces`, all filed under `alias` or,
+    /// without one, each under the family name it declares, and describes
+    /// every face registered, in the order given. Each face's
+    /// [`file`](FontFace::file) is `None`.
+    ///
+    /// JavaScript's `FontLibrary.use(alias, [buffer, ...])`: several faces of
+    /// one family, typically its weights and styles. All or nothing, as
+    /// `use()` is: every face is parsed before any is registered, which a
+    /// [`use_data`](Self::use_data) call per face cannot do.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FontRegister`] naming the index of the first face
+    /// this build cannot parse.
+    pub fn use_data_all<'a>(
+        &self,
+        alias: Option<&str>,
+        faces: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<Vec<FontFace>, Error> {
+        let parsed = faces
+            .into_iter()
+            .enumerate()
+            .map(|(i, bytes)| {
+                let typeface =
+                    self.parse(bytes, &format!("the data at index {i}"))?;
+                Ok((typeface, None))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(self.file_all(parsed, alias))
     }
 
     /// The typeface in `bytes`, or an error naming `source`.

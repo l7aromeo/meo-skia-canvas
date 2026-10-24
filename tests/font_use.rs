@@ -11,6 +11,8 @@ const RALEWAY: &str =
 const RALEWAY_ITALIC: &str =
     "tests/assets/fonts/Raleway/Raleway-Italic-VariableFont_wght.ttf";
 
+const OSWALD: &str = "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf";
+
 fn face(family: &str, slant: FontSlant, file: Option<&str>) -> FontFace {
     FontFace {
         family: family.to_string(),
@@ -21,6 +23,18 @@ fn face(family: &str, slant: FontSlant, file: Option<&str>) -> FontFace {
         stretch: FontStretch::Normal,
         file: file.map(PathBuf::from),
     }
+}
+
+/// Oswald's default instance is its regular weight.
+fn oswald(family: &str, file: Option<&str>) -> FontFace {
+    FontFace {
+        weight: 400,
+        ..face(family, FontSlant::Normal, file)
+    }
+}
+
+fn read(path: &str) -> Vec<u8> {
+    std::fs::read(path).expect("a bundled font")
 }
 
 #[test]
@@ -116,4 +130,109 @@ fn bytes_that_are_not_a_font_are_refused() {
         "{result:?}"
     );
     assert!(!library.has_font("UseGarbage"));
+}
+
+#[test]
+fn several_faces_from_bytes_file_under_one_alias() {
+    // `FontLibrary.use("Batch", [raleway, ralewayItalic])` answers two faces
+    // filed under `Batch`, at 100, normal then italic, from "<buffer>".
+    let library = FontLibrary::new();
+    let (raleway, italic) = (read(RALEWAY), read(RALEWAY_ITALIC));
+    let faces = library
+        .use_data_all(Some("UseDataBatch"), [&raleway[..], &italic[..]])
+        .expect("both register");
+    assert_eq!(
+        faces,
+        [
+            face("UseDataBatch", FontSlant::Normal, None),
+            face("UseDataBatch", FontSlant::Italic, None),
+        ]
+    );
+    assert!(library.has_font("UseDataBatch"));
+}
+
+#[test]
+fn several_faces_from_bytes_keep_their_own_families() {
+    // `FontLibrary.use([raleway, oswald])` answers Raleway at 100 and Oswald
+    // at 400.
+    let library = FontLibrary::new();
+    let (raleway, oswald_) = (read(RALEWAY), read(OSWALD));
+    let faces = library
+        .use_data_all(None, [&raleway[..], &oswald_[..]])
+        .expect("both register");
+    assert_eq!(
+        faces,
+        [
+            face("Raleway", FontSlant::Normal, None),
+            oswald("Oswald", None)
+        ]
+    );
+}
+
+#[test]
+fn a_bad_face_among_bytes_registers_none() {
+    let library = FontLibrary::new();
+    let raleway = read(RALEWAY);
+    let result = library.use_data_all(
+        Some("UseDataAtomic"),
+        [&raleway[..], b"not a font".as_slice()],
+    );
+    let Err(Error::FontRegister { reason }) = result else {
+        panic!("bytes that are not a font are refused: {result:?}");
+    };
+    assert!(reason.contains("index 1"), "{reason}");
+    assert!(
+        !library.has_font("UseDataAtomic"),
+        "the first face was not kept"
+    );
+}
+
+#[test]
+fn several_families_register_in_one_call() {
+    // `FontLibrary.use({ A: [raleway, ralewayItalic], B: oswald })` answers
+    // one list per family, in the order given.
+    let library = FontLibrary::new();
+    let faces = library
+        .use_families([
+            (Some("UseFamiliesA"), vec![RALEWAY, RALEWAY_ITALIC]),
+            (Some("UseFamiliesB"), vec![OSWALD]),
+            (None, vec![OSWALD]),
+        ])
+        .expect("all register");
+    assert_eq!(
+        faces,
+        [
+            vec![
+                face("UseFamiliesA", FontSlant::Normal, Some(RALEWAY)),
+                face("UseFamiliesA", FontSlant::Italic, Some(RALEWAY_ITALIC)),
+            ],
+            vec![oswald("UseFamiliesB", Some(OSWALD))],
+            vec![oswald("Oswald", Some(OSWALD))],
+        ]
+    );
+    assert!(library.has_font("UseFamiliesA"));
+    assert!(library.has_font("UseFamiliesB"));
+}
+
+#[test]
+fn a_bad_file_in_one_family_registers_no_family() {
+    // `FontLibrary.use({ MapOk: raleway, MapBad: missing })` throws and leaves
+    // `MapOk` unregistered.
+    let library = FontLibrary::new();
+    let result = library.use_families([
+        (Some("UseFamiliesOk"), vec![RALEWAY]),
+        (
+            Some("UseFamiliesBad"),
+            vec!["tests/assets/no-such-font.ttf"],
+        ),
+    ]);
+    let Err(Error::FontRegister { reason }) = result else {
+        panic!("a missing file is refused: {result:?}");
+    };
+    assert!(reason.contains("no-such-font.ttf"), "{reason}");
+    assert!(
+        !library.has_font("UseFamiliesOk"),
+        "the earlier family was not kept"
+    );
+    assert!(!library.has_font("UseFamiliesBad"));
 }
