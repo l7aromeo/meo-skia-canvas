@@ -61,9 +61,12 @@ default:
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
 ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-release-tags check-upstream-notes check-markdown-links check-fetch-deps check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
 
+# Installs when node_modules is missing *or* no longer matches bun.lock, which
+# a rebase or merge can move under a warm worktree. scripts/install-deps.mjs
+# says how it tells, and why it is not a `test -d`.
 [private]
 ensure-deps:
-    @test -d node_modules || bun install --frozen-lockfile
+    @node scripts/install-deps.mjs
 
 # Always builds, never just checks the file exists. A stale `lib/skia.node`
 # kept `just test` green for a day after `node-addon` stopped compiling: the
@@ -379,7 +382,7 @@ check-parity *flags: ensure-deps
     # It passed here without it only because this worktree had run that recipe
     # and kept the directory: broken from cold, fine from warm, and CI is
     # always cold.
-    test -d scripts/api-surface/node_modules || bun install --cwd scripts/api-surface --frozen-lockfile
+    node scripts/install-deps.mjs scripts/api-surface
     for f in scripts/api-surface/npm-items.mjs scripts/extract-rust-surface.mjs; do
         if [ ! -f "$f" ]; then
             echo "parity gate: $f is missing, so the surfaces cannot be extracted" >&2
@@ -723,7 +726,7 @@ docs-rust:
 # had not.
 [doc("Build the JavaScript API reference from lib/*.d.ts.")]
 docs-js: ensure-deps
-    @test -d scripts/typedoc/node_modules || bun install --cwd scripts/typedoc --frozen-lockfile
+    @node scripts/install-deps.mjs scripts/typedoc
     node scripts/typedoc/build.mjs
 
 # `lib/index.d.ts` is a claim about the runtime, and nothing else checks that
@@ -744,7 +747,7 @@ docs-js: ensure-deps
 # `ensure-binary` because the runtime half introspects the built addon.
 [doc("Check lib/index.d.ts declares what the built addon actually exposes.")]
 check-dts-surface: ensure-deps ensure-binary
-    @test -d scripts/api-surface/node_modules || bun install --cwd scripts/api-surface --frozen-lockfile
+    @node scripts/install-deps.mjs scripts/api-surface
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node scripts/api-surface/check.mjs "{{ justfile_directory() }}"
 
 # Uses the same pinned nightly as the fmt job: rustdoc's JSON output is
