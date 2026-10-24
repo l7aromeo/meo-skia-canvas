@@ -465,12 +465,15 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   parent, and a computed value held where Chrome holds it: a size to 0
   through 10000px, a weight to 1 through 1000. `ex`, `ch`, `cap` and `ic`
   in a size are those of 10px `serif`, and `rem` and the other root forms
-  of 16px. An `oblique` angle from -90deg to 90deg is taken, and any angle
-  but zero is `FontSlant::Oblique`, which selects the family's italic as in
-  Chrome; only the default 14deg reads back as `italic` from `font()`. A
-  family with no italic face draws upright for now, where Chrome
-  synthesises a slant from 14deg up. A size written above 10000px is now
-  10000px, as Chrome reads it.
+  of 16px. An `oblique` angle from -90deg to 90deg is taken: one of 14deg
+  or more is `FontSlant::Oblique`, which draws the family's italic or
+  oblique face, or a synthesised slant where it has neither, and one below
+  14deg or negative is `FontSlant::Normal` and draws upright, as Chrome
+  draws a font loaded as a `FontFace`. Every family follows that rule,
+  though Chrome draws a system family by its platform's own --
+  docs/browser-differences.md has them. Only the default 14deg reads back
+  as `italic` from `font()`. A size written above 10000px is now 10000px,
+  as Chrome reads it.
 
 - **Every CSS length unit in `set_filter_css`, `set_letter_spacing_css`,
   `set_word_spacing_css` and a `set_text_decoration_css` thickness.** `ex`,

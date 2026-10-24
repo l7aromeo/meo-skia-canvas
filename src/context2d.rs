@@ -521,9 +521,12 @@ impl Font {
     ///
     /// `small-caps` has no place on a [`Font`]; [`Context2D::set_font_css`]
     /// applies it as [`FontVariantCaps::SmallCaps`]. Nor has an `oblique`
-    /// angle: any angle but zero selects the family's italic, as
-    /// [`FontSlant::Oblique`] does, and only the default 14deg reads back as
-    /// `italic` from [`Context2D::font`], as Chrome reads it. A system font
+    /// angle: one of 14deg or more is [`FontSlant::Oblique`], which draws the
+    /// family's italic or oblique face, or a synthesised slant where it has
+    /// neither, and one below 14deg or negative is [`FontSlant::Normal`] and
+    /// draws upright -- as Chrome draws a font loaded as a `FontFace`. Only
+    /// the default 14deg reads back as `italic` from [`Context2D::font`], as
+    /// Chrome reads it. A system font
     /// keyword such as `caption` is refused, deliberately: what it means is
     /// the platform's choice.
     ///
@@ -606,7 +609,6 @@ impl Font {
             variant: variant.to_string(),
             canonical,
             serialized: self.serialized(small_caps),
-            oblique_degrees: None,
         }
     }
 
@@ -714,9 +716,9 @@ const LIGHTER_FROM_NORMAL: u16 = 100;
 struct FontShorthand {
     font: Font,
     small_caps: bool,
-    /// An `oblique` angle other than zero and the default 14deg, which a
-    /// [`Font`] has no field for: it selects the family's italic as
-    /// `oblique` does, but reads back with no style, as Chrome reads it.
+    /// An `oblique` angle above the default 14deg, which a [`Font`] has no
+    /// field for: it draws as `oblique` does, but reads back with no style,
+    /// as Chrome reads it.
     oblique_degrees: Option<f32>,
 }
 
@@ -734,8 +736,8 @@ impl FontShorthand {
     fn to_spec(&self) -> FontSpec {
         let mut spec = self.font.to_spec_with(self.small_caps);
         if let Some(degrees) = self.oblique_degrees {
-            spec.oblique_degrees = Some(degrees);
-            // Another angle is another font, so the cache key says which.
+            // Another angle reads back as another font, so the cache key
+            // says which.
             spec.canonical = spec.canonical.replacen(
                 "oblique",
                 &format!("oblique {degrees}deg"),
@@ -1027,6 +1029,13 @@ fn computed_weight(text: &str) -> Option<u16> {
 /// with no style at all.
 const DEFAULT_OBLIQUE_DEGREES: f32 = 14.0;
 
+/// The smallest `oblique` angle that slants. Chrome 152 draws a font loaded
+/// as a `FontFace` upright at 13.9deg and below, and at every negative angle,
+/// and slanted from 14deg -- measured on Oswald and Raleway, on macOS, and on
+/// Linux in Chrome 156. It is the default angle, where CSS Fonts 4's matching
+/// changes at 11deg. See docs/browser-differences.md.
+const OBLIQUE_SLANTS_FROM_DEGREES: f32 = DEFAULT_OBLIQUE_DEGREES;
+
 /// The largest oblique angle CSS Fonts 4 allows, either way. Chrome refuses
 /// `oblique 91deg` written out and clamps a computed one.
 const MAX_OBLIQUE_DEGREES: f32 = 90.0;
@@ -1106,17 +1115,20 @@ fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
                             "oblique angle out of range in {shorthand:?}"
                         ));
                     }
-                    // What each angle draws is Chrome's, not CSS Fonts 4's:
-                    // the standard shears a face with no oblique to the
-                    // angle asked for, and Chrome -- in a canvas and in CSS
-                    // alike, measured on both -- takes a family's italic
-                    // for any angle but zero and synthesises a slant only
-                    // from the default angle up. The standard's wording is
-                    // permissive ("may be synthesized"), and Chrome's two
-                    // paths agree, so this follows them;
-                    // docs/browser-differences.md records the choice.
+                    // What each angle draws is Chrome's for a font loaded as
+                    // a `FontFace`, in a canvas and in CSS alike: from 14deg
+                    // the family's italic or oblique face, or a slant
+                    // synthesised at one fixed skew where it has neither,
+                    // and below 14deg or at any negative angle the upright
+                    // face. Every family follows it, a system one included,
+                    // though Chrome's system families do not; CSS Fonts 4
+                    // shears to the angle asked for instead. The choice was
+                    // the maintainer's, and docs/browser-differences.md
+                    // records all three with the measurements.
                     match degrees {
-                        0.0 => font.slant = FontSlant::Normal,
+                        degrees if degrees < OBLIQUE_SLANTS_FROM_DEGREES => {
+                            font.slant = FontSlant::Normal
+                        }
                         DEFAULT_OBLIQUE_DEGREES => {}
                         degrees => oblique_degrees = Some(degrees),
                     }

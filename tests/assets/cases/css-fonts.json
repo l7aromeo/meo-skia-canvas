@@ -1,8 +1,8 @@
 {
   "about": "Canvas `font` shorthands and what each sets. Read by tests/css_grammar.rs for the Rust font grammar and by tests/suite/css-grammar.test.js for `ctx.font`, so the two surfaces answer one table rather than two.",
-  "source": "Chrome 152.0.7977.149: ctx.font set on a fresh 2D context after a sentinel font, then ctx.font, ctx.fontVariantCaps and ctx.fontStretch read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving the sentinel. `parts` is Chrome's serialized font taken apart; `lineHeight`, which Chrome does not expose, is CSS Fonts 4's: a number or percentage multiplies the size, `normal` is none. Relative sizes resolve against the canvas's default 10px font and `rem` against 16px, as Chrome does. Sizes are clamped to 10000px, as Chrome reads `20000px Arial`, and a computed negative size to zero; computed weights are held to 1 to 1000. For `oblique` with an angle, `parts.style` says which face Chrome draws rather than what it reads back: any angle but zero selects a family's italic -- measured as the slant of Arial's italic at 0.5deg, 10deg, -14deg and 90deg alike -- while only the default 14deg reads back as `italic`.",
+  "source": "Chrome 152.0.7977.149: ctx.font set on a fresh 2D context after a sentinel font, then ctx.font, ctx.fontVariantCaps and ctx.fontStretch read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving the sentinel. `parts` is Chrome's serialized font taken apart; `lineHeight`, which Chrome does not expose, is CSS Fonts 4's: a number or percentage multiplies the size, `normal` is none. Relative sizes resolve against the canvas's default 10px font and `rem` against 16px, as Chrome does. Sizes are clamped to 10000px, as Chrome reads `20000px Arial`, and a computed negative size to zero; computed weights are held to 1 to 1000. For `oblique` with an angle, `parts.style` says how Chrome draws a font loaded as a FontFace rather than what it reads back: an angle of 14deg or more slants and one below 14deg, or negative, draws upright -- measured 2026-10-24 as the slant of Oswald and of Raleway with its italic face, loaded as FontFace -- while only the default 14deg reads back as `italic`. These rows once took the slant of Arial, a macOS system font, which slants at any angle but zero; docs/browser-differences.md has both.",
   "notMeasured": "System-font keywords (caption, icon, menu, message-box, small-caption, status-bar) and `oblique 10deg 16px Arial` are left out: Chrome on macOS read every system font as 16px Arial, which is platform-specific, and serialized the oblique angle away.",
-  "knownDifferences": "Measured and left out: a font size in `ex`, `ch` or `cap`, or in `rex`, `rch` or `rcap`, which Chrome resolves against 10px, or 16px for the root forms, of its standard family -- Times on macOS, so `1ex Oswald` is 4.4873px whatever family is named -- and which resolves here against the face `serif` resolves to, which differs by platform; `lh`, `rlh`, the viewport and container units, which Chrome resolves against the document and which read as zero here; and `16px \"serif\"` and `16px \"inherit\"`, which Chrome keeps quoted because a quoted generic or keyword names a family literally, and which a `Font` cannot tell from the unquoted name. Drawing an `oblique` angle in a family with no italic face: Chrome slants it synthetically from 14deg up and draws it upright below, and this library draws every such angle upright, since it does not yet synthesise a slant at all.",
+  "knownDifferences": "Measured and left out: a font size in `ex`, `ch` or `cap`, or in `rex`, `rch` or `rcap`, which Chrome resolves against 10px, or 16px for the root forms, of its standard family -- Times on macOS, so `1ex Oswald` is 4.4873px whatever family is named -- and which resolves here against the face `serif` resolves to, which differs by platform; `lh`, `rlh`, the viewport and container units, which Chrome resolves against the document and which read as zero here; and `16px \"serif\"` and `16px \"inherit\"`, which Chrome keeps quoted because a quoted generic or keyword names a family literally, and which a `Font` cannot tell from the unquoted name.",
   "cases": [
     {
       "css": "16px Arial",
@@ -2749,7 +2749,7 @@
       "parts": {
         "size": 16.0,
         "weight": 400,
-        "style": "italic",
+        "style": "normal",
         "families": [
           "Oswald"
         ],
@@ -2765,7 +2765,7 @@
       "parts": {
         "size": 16.0,
         "weight": 400,
-        "style": "italic",
+        "style": "normal",
         "families": [
           "Oswald"
         ],
@@ -2861,7 +2861,7 @@
       "parts": {
         "size": 16.0,
         "weight": 700,
-        "style": "italic",
+        "style": "normal",
         "families": [
           "Oswald"
         ],

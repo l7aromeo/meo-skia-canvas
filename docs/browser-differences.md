@@ -85,16 +85,63 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   of its standard font, 10px Times, whatever family is named, with `rem`
   and the other root forms of 16px Times. This library uses the face its
   `serif` resolves to, which is Times where the system's `serif` is Times.
-- _`oblique <angle>` draws as Chrome draws it, not as CSS Fonts 4 says._ The
-  standard shears a family with no oblique face to the angle asked for,
-  before it would fall back to the italic. Chrome selects the family's
-  italic for any angle but zero, and in a family with no italic synthesises
-  a slant only from the default 14deg up, at the same skew whatever the
-  angle -- in a canvas and in ordinary CSS text alike, measured on both.
-  The standard's wording on synthesis is permissive ("may be synthesized"),
-  and Chrome's two paths agree, so this library follows Chrome: the choice
-  was the maintainer's, and `parse_font_shorthand` in `src/context2d.rs`
-  carries the reasoning.
+- _`oblique <angle>` draws as Chrome draws a `FontFace`, in every family._
+  An angle of 14deg or more slants -- the family's italic or oblique face,
+  or where it has neither a slant synthesised at one skew whatever the
+  angle, the quarter that slopes an `I` by -0.2504 -- and an angle below
+  14deg, or a negative one, draws upright. That is Chrome's rule for a font
+  loaded as a `FontFace`, in a canvas and in CSS text alike, on Oswald,
+  Raleway with its italic face, and Arial, Georgia, Impact, Liberation,
+  FreeSans and DejaVu loaded from their files: upright at 0.5, 10 and
+  13.9deg and at every negative angle measured, slanted at 14 and 30deg, and
+  on Oswald and Raleway also upright at 10.9, 11, 12, 13 and 13.75deg and
+  slanted at 14.1, 20 and 90deg, `0.25turn` and `calc(10deg + 4deg)`.
+  Measured by the slope of an `I` stem at 200px and by text widths, in
+  Chrome 152 on macOS and Chrome 156 on Linux. `OBLIQUE_SLANTS_FROM_DEGREES` in
+  `src/context2d.rs` is the threshold.
+
+  Chrome draws a system family by other rules, and by different ones on each
+  platform -- they follow the platform's font matcher rather than the
+  `FontFace` matching. This library does not reproduce them: a system
+  family follows the same rule as a registered one, which was the
+  maintainer's choice. Slope of an `I` stem at 200px, 0 upright:
+
+  | Chrome 152, macOS (CoreText)    | `italic` | 0.5deg  | 10deg   | 13.9deg | 14deg   | 30deg   | -14deg  | -30deg  |
+  | ------------------------------- | -------- | ------- | ------- | ------- | ------- | ------- | ------- | ------- |
+  | Arial, system                   | -0.2096  | -0.2096 | -0.2096 | -0.2096 | -0.2096 | -0.2096 | -0.2096 | -0.2096 |
+  | Arial, `FontFace`               | -0.2096  | 0       | 0       | 0       | -0.2096 | -0.2096 | 0       | 0       |
+  | Georgia, system                 | -0.2301  | -0.2301 | -0.2301 | -0.2301 | -0.2301 | -0.2301 | -0.2301 | -0.2301 |
+  | Impact, system (no italic face) | -0.2501  | -0.2501 | -0.2501 | -0.2501 | -0.2501 | -0.2501 | -0.2501 | -0.2501 |
+  | Impact, `FontFace`              | -0.2501  | 0       | 0       | 0       | -0.2501 | -0.2501 | 0       | 0       |
+
+  | Chrome 156, Linux (fontconfig)     | `italic` | 0.5deg  | 10deg   | 13.9deg | 14deg   | 30deg   | -14deg | -30deg |
+  | ---------------------------------- | -------- | ------- | ------- | ------- | ------- | ------- | ------ | ------ |
+  | Liberation Sans, system            | -0.1947  | -0.1947 | -0.1947 | -0.1947 | -0.1947 | -0.1947 | 0      | 0      |
+  | Liberation Sans, `FontFace`        | -0.1947  | 0       | 0       | 0       | -0.1947 | -0.1947 | 0      | 0      |
+  | FreeSans, system (an oblique face) | -0.2124  | -0.2124 | -0.2124 | -0.2124 | -0.2124 | -0.2124 | 0      | 0      |
+  | DejaVu Sans, system (no italic)    | -0.2501  | 0       | 0       | 0       | -0.2501 | 0       | 0      | 0      |
+  | DejaVu Sans, `FontFace`            | -0.2501  | 0       | 0       | 0       | -0.2501 | -0.2501 | 0      | 0      |
+
+  So on macOS a system family slants at every angle but zero, negative ones
+  included, with its italic face or a synthesised slant. On Linux one with
+  an italic or oblique face takes it at every positive angle and draws
+  upright at a negative one, and one with neither synthesises at 14deg
+  alone: DejaVu Sans and Serif slant at 14, 14.01 and 14.1deg and draw
+  upright at 13.99, 15, 20, 25, 45, 60 and 90deg.
+
+  CSS Fonts 4 is different again. Its section 5.2, "Matching font styles",
+  changes at 11deg rather than 14, and where a family has no oblique face it
+  shears before it looks for an italic: "a fallback match is produced by
+  geometric shearing to the specified oblique value". `oblique 10deg` would
+  lean ten degrees and `oblique 20deg` twenty, in Raleway as in Oswald;
+  Chrome follows that on no origin.
+
+  An earlier entry here said Chrome selects a family's italic for any angle
+  but zero and synthesises a slant only from 14deg up. That was two origins
+  read as one rule: the italic half was measured on Arial, a macOS system
+  font, and the synthesis half on Oswald, a `FontFace`. No family in Chrome
+  behaves that way.
+
 - _A transform angle past the `float` range is not matched._ Chrome 152's
   `DOMMatrix` reads `rotate(1e38deg)`, `rotate(1e300deg)` and
   `rotate(calc(infinity * 1deg))` as no rotation, and `skewX()` of any of

@@ -1436,6 +1436,49 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
     near(stem("200px RalewayWithItalic").slope, 0, 0.001, "the control");
   });
 
+  // An `oblique` angle slants from 14deg up and draws upright below it,
+  // whether the family has a slanted face or not. Chrome 152 on these
+  // families loaded as FontFace, by the same stem: Oswald, which has no
+  // italic, is skewed by a quarter at 14, 14.1, 20, 30 and 90deg, 0.25turn
+  // and `calc(10deg + 4deg)` alike, and Raleway takes its italic face over
+  // the same angles; at 0.5, 10 and 13.9deg and at every negative angle
+  // both draw upright. A system family does not always do this in Chrome --
+  // docs/browser-differences.md has the measurements -- and this library
+  // draws every family by the rule a FontFace follows.
+  test("an oblique angle slants from 14deg up and not below", () => {
+    const slanted = [
+      "14deg",
+      "14.1deg",
+      "20deg",
+      "30deg",
+      "90deg",
+      "0.25turn",
+      "calc(10deg + 4deg)",
+    ];
+    const upright = [
+      "0.5deg",
+      "10deg",
+      "13.9deg",
+      "-1deg",
+      "-14deg",
+      "-20deg",
+      "-90deg",
+    ];
+    for (const [family, slope] of [
+      ["Oswald", -0.25],
+      ["RalewayWithItalic", -0.2139],
+    ]) {
+      for (const angle of slanted) {
+        const font = `oblique ${angle} 200px ${family}`;
+        near(stem(font).slope, slope, 0.005, font);
+      }
+      for (const angle of upright) {
+        const font = `oblique ${angle} 200px ${family}`;
+        near(stem(font).slope, 0, 0.001, font);
+      }
+    }
+  });
+
   test("a static face lighter than asked is faked bold from 600", () => {
     // Chrome: 1,442,282 at 400 and 500, 2,237,980 at 600, bold and 900.
     const regular = ink("100px Monoton");
