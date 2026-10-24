@@ -2353,18 +2353,6 @@ why  = """CanvasKit takes `kernelSize` and `kernelOffset` as `[number, number]`;
 status = "deliberate"
 
 [[capability]]
-name = "scaling about an origin"
-rust = []
-npm  = ["DOMMatrix.scale(originX)",
-        "DOMMatrix.scale(originY)"]
-why  = """`DOMMatrix.scale(scaleX, scaleY, scaleZ, originX, originY, originZ)`
-       scales about a point; `Affine::scale` scales about the origin only, so
-       a Rust caller composes a translation either side by hand. The third
-       axis is the 3D half, recorded there."""
-status = "gap"
-issue = "unfiled"
-
-[[capability]]
 name = "a blank ImageData shaped like an existing one"
 rust = []
 npm  = ["CanvasImageData.createImageData(imagedata)"]
@@ -2376,16 +2364,6 @@ why  = """`createImageData(imagedata)` returns a blank buffer with another
 status = "deliberate"
 
 [[capability]]
-name = "appending a path under a transform"
-rust = []
-npm  = ["Path2D.addPath(transform)"]
-why  = """`addPath(path, transform)` appends a path through a matrix;
-       `PathBuilder::add_path` appends it as it is, so a Rust caller transforms
-       a copy with `Path2D::transform` first."""
-status = "gap"
-issue = "unfiled"
-
-[[capability]]
 name = "a Sharp image as a source"
 rust = []
 npm  = ["loadImage(src:object)", "loadImageData(src:object)"]
@@ -2395,4 +2373,17 @@ why  = """Both loaders take a Sharp image, from the Node library of that name,
        passes the bytes or pixels Sharp produced, to `Image::from_encoded` or
        `ImageData::from_pixels`. Recorded by class, so that the loaders' URL
        and bytes arms are still held to their Rust pairs."""
+status = "deliberate"
+
+[[capability]]
+name = "an optional JavaScript argument the crate spells as a method"
+rust = ["Affine::scale_about", "PathBuilder::add_path_transformed"]
+npm = []
+why = """JavaScript reaches both through an argument it may leave out:
+      `DOMMatrix.scale` takes an origin after its factors, and `Path2D.addPath`
+      a transform after its path. Rust has no optional arguments, and
+      `Affine::scale` and `PathBuilder::add_path` cannot gain one without
+      breaking every call, so the longer form is a method of its own.
+      `scale_about` is the matrix `scale` composes with an origin, and
+      `add_path_transformed` is `addPath` with its second argument."""
 status = "deliberate"

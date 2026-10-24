@@ -144,6 +144,27 @@ impl Affine {
         }
     }
 
+    /// Creates a transform that scales about `origin` rather than about
+    /// `(0, 0)`: `origin` stays where it is and every other point moves away
+    /// from it, or towards it, by the factors given.
+    ///
+    /// This is the matrix `DOMMatrix.scale(sx, sy, 1, ox, oy)` composes, so
+    /// `m.multiply(&Affine::scale_about(sx, sy, origin))` is what that method
+    /// returns. About `(0, 0)` it is [`Affine::scale`].
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// // `new DOMMatrix().scale(2, 3, 1, 10, 20)` in Chrome.
+    /// let m = Affine::scale_about(2.0, 3.0, Point { x: 10.0, y: 20.0 });
+    /// assert_eq!([m.a, m.d, m.tx, m.ty], [2.0, 3.0, -10.0, -40.0]);
+    /// ```
+    pub fn scale_about(sx: f32, sy: f32, origin: Point) -> Self {
+        Self::translation(origin.x, origin.y)
+            .multiply(&Self::scale(sx, sy))
+            .multiply(&Self::translation(-origin.x, -origin.y))
+    }
+
     /// Creates a rotation about the origin, `angle` in radians.
     ///
     /// Positive angles turn clockwise on screen, because `y` grows
