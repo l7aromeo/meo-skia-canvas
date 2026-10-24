@@ -184,8 +184,6 @@ pub enum Error {
         /// What prevented the loop from running.
         reason: String,
     },
-    /// Encoding a drawing to an image or document format failed.
-    ///
     /// An export option held a value the crate will not act on.
     ///
     /// Distinct from [`Error::Encode`]: nothing was drawn or encoded, the
@@ -201,6 +199,8 @@ pub enum Error {
         /// What was wrong with it.
         reason: String,
     },
+    /// Encoding a drawing to an image or document format failed.
+    ///
     /// Distinct from [`Error::Render`]: the drawing itself succeeded and the
     /// encoder rejected it, most often because the page had a zero dimension
     /// or the format could not represent it.
