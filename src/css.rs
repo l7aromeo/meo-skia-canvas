@@ -411,7 +411,7 @@ pub(crate) fn parse_length(text: &str) -> Option<Length> {
 
 /// A [`Length`] from a number and its unit as written, by the rules
 /// [`parse_length`] reads them with.
-pub(crate) fn length_of(value: f32, unit: &str) -> Option<Length> {
+fn length_of(value: f32, unit: &str) -> Option<Length> {
     let unit = unit.to_ascii_lowercase();
     if unit.is_empty() {
         // Zero is the one length CSS lets go unitless.
@@ -492,8 +492,10 @@ pub(crate) struct Decoration {
     pub style: TextDecorationStyle,
     /// The line's colour, or `None` to follow the fill.
     pub color: Option<RgbaLinear>,
-    /// The line's thickness in pixels, or `None` for the font's own.
-    pub thickness: Option<f32>,
+    /// The line's thickness as written, or `None` for the font's own. A
+    /// font-relative one is carried rather than resolved, so it follows the
+    /// font the text is laid out in, as a spacing does.
+    pub thickness: Option<Length>,
 }
 
 /// A CSS `text-decoration` shorthand.
@@ -511,10 +513,7 @@ pub(crate) struct Decoration {
 /// Returns `None` for a token that is none of those things -- most often a
 /// colour that does not parse, which is the only way a caller can get this
 /// wrong without misspelling a keyword.
-pub(crate) fn parse_decoration(
-    text: &str,
-    units: &FontUnits,
-) -> Option<Decoration> {
+pub(crate) fn parse_decoration(text: &str) -> Option<Decoration> {
     let mut parsed = Decoration {
         lines: TextDecoration::default(),
         style: TextDecorationStyle::Solid,
@@ -549,7 +548,7 @@ pub(crate) fn parse_decoration(
             // reaches the colour arm otherwise and fails there, since no
             // colour parser resolves it without a fill to resolve against.
             "currentcolor" => parsed.color = None,
-            _ => match parse_size(token, units) {
+            _ => match parse_length(token) {
                 Some(thickness) => parsed.thickness = Some(thickness),
                 // Anything left has to be a colour, and a token that is not
                 // one is a token nobody can act on.
@@ -1442,7 +1441,7 @@ mod tests {
             "wavy red underline",
             "underline red wavy",
         ] {
-            let d = parse_decoration(text, &em())
+            let d = parse_decoration(text)
                 .unwrap_or_else(|| panic!("{text:?} did not parse"));
             assert!(d.lines.underline, "{text:?}");
             assert!(!d.lines.overline && !d.lines.line_through, "{text:?}");
@@ -1453,12 +1452,12 @@ mod tests {
 
     #[test]
     fn several_lines_combine_and_none_clears_them() {
-        let both = parse_decoration("underline line-through", &em())
-            .expect("two lines");
+        let both =
+            parse_decoration("underline line-through").expect("two lines");
         assert!(both.lines.underline && both.lines.line_through);
         assert!(!both.lines.overline);
 
-        let all = parse_decoration("underline overline line-through", &em())
+        let all = parse_decoration("underline overline line-through")
             .expect("three lines");
         assert!(
             all.lines.underline && all.lines.overline && all.lines.line_through
@@ -1476,7 +1475,7 @@ mod tests {
             "",
             "   ",
         ] {
-            let cleared = parse_decoration(text, &em())
+            let cleared = parse_decoration(text)
                 .unwrap_or_else(|| panic!("{text:?} did not parse"));
             assert_eq!(
                 cleared.lines,
@@ -1487,8 +1486,7 @@ mod tests {
 
         // And a later `none` clears an earlier line, which is what makes
         // the tokens order-dependent in exactly this one way.
-        let overridden =
-            parse_decoration("underline none", &em()).expect("parsed");
+        let overridden = parse_decoration("underline none").expect("parsed");
         assert_eq!(overridden.lines, TextDecoration::default());
     }
 
@@ -1501,34 +1499,36 @@ mod tests {
             ("underline dashed", TextDecorationStyle::Dashed),
             ("underline wavy", TextDecorationStyle::Wavy),
         ] {
-            let d = parse_decoration(text, &em()).expect("parsed");
+            let d = parse_decoration(text).expect("parsed");
             assert_eq!(d.style, style, "{text:?}");
         }
         // Solid is the default when none is named.
         assert_eq!(
-            parse_decoration("underline", &em()).expect("parsed").style,
+            parse_decoration("underline").expect("parsed").style,
             TextDecorationStyle::Solid
         );
     }
 
     #[test]
     fn a_thickness_is_a_length_and_auto_is_not_one() {
-        let thick = parse_decoration("underline 3px", &em()).expect("parsed");
-        assert_eq!(thick.thickness, Some(3.0));
+        let thick = parse_decoration("underline 3px")
+            .and_then(|parsed| parsed.thickness)
+            .expect("a thickness");
+        assert_eq!((thick.unit.as_str(), thick.pixels), ("px", 3.0));
 
-        // Relative to the font, resolved now: the decoration is stored as a
-        // resolved style, so there is nowhere to keep the unit.
-        let relative =
-            parse_decoration("underline 0.25em", &FontUnits::assumed(40.0))
-                .expect("parsed");
-        assert_eq!(relative.thickness, Some(10.0));
+        // Relative to the font, and kept so: the font the text is laid out
+        // in decides it, as it does a spacing.
+        let relative = parse_decoration("underline 0.25em")
+            .and_then(|parsed| parsed.thickness)
+            .expect("a thickness");
+        assert_eq!((relative.value, relative.unit.as_str()), (0.25, "em"));
+        assert!(relative.pixels.is_nan(), "not resolved yet");
 
         // `auto` and `from-font` both mean the font's own, which is what
         // `None` already says.
         for text in ["underline auto", "underline from-font", "underline"] {
-            assert_eq!(
-                parse_decoration(text, &em()).expect("parsed").thickness,
-                None,
+            assert!(
+                parse_decoration(text).expect("parsed").thickness.is_none(),
                 "{text:?}"
             );
         }
@@ -1565,7 +1565,7 @@ mod tests {
             // A half step rounds up at parse, as Chrome rounds it.
             ("rgb(10.5 20.4 30.6)", [11, 20, 31]),
         ] {
-            let parsed = parse_decoration(&format!("underline {css}"), &em())
+            let parsed = parse_decoration(&format!("underline {css}"))
                 .expect("a decoration");
             let color =
                 rgba_linear_to_skia_color(parsed.color.expect("a colour"));
@@ -1582,10 +1582,7 @@ mod tests {
             "underline rgb(255,0,0)",
             "underline currentColor",
         ] {
-            assert!(
-                parse_decoration(text, &em()).is_some(),
-                "{text:?} should parse"
-            );
+            assert!(parse_decoration(text).is_some(), "{text:?} should parse");
         }
     }
 
@@ -1600,7 +1597,7 @@ mod tests {
             "underline \u{1f600}",
         ] {
             assert!(
-                parse_decoration(text, &em()).is_none(),
+                parse_decoration(text).is_none(),
                 "{text:?} should not parse"
             );
         }
@@ -1608,11 +1605,11 @@ mod tests {
 
     #[test]
     fn keywords_are_case_insensitive_as_css_keywords_are() {
-        let d = parse_decoration("UNDERLINE WAVY", &em()).expect("parsed");
+        let d = parse_decoration("UNDERLINE WAVY").expect("parsed");
         assert!(d.lines.underline);
         assert_eq!(d.style, TextDecorationStyle::Wavy);
         assert_eq!(
-            parse_decoration("NONE", &em()).expect("parsed").lines,
+            parse_decoration("NONE").expect("parsed").lines,
             TextDecoration::default()
         );
     }

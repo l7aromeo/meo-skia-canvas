@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use super::{BoxedContext2D, Context2D, Dye, page::ExportOptions};
 use crate::{
     color_filter::BoxedColorFilter,
-    context2d::font_spec_from_css,
+    context2d::{decoration_from_css, font_spec_from_css},
     css::parse_filter,
     export::VectorFeatures,
     filter::FilterOp,
@@ -26,9 +26,9 @@ use crate::{
         path::{Path2D, conic_or_line},
     },
     typography::{
-        decoration_arg, font_features, from_text_align, from_text_baseline,
-        from_width, js_text_metrics, opt_spacing_arg, to_text_align,
-        to_text_baseline, to_width,
+        font_features, from_text_align, from_text_baseline, from_width,
+        js_text_metrics, opt_spacing_arg, to_text_align, to_text_baseline,
+        to_width,
     },
     utils::*,
 };
@@ -1734,11 +1734,14 @@ pub fn get_textDecoration(mut cx: FunctionContext) -> JsResult<JsString> {
 
 pub fn set_textDecoration(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
-    if let Ok(Some(deco_style)) = decoration_arg(&mut cx, 1) {
-        let mut this = this.borrow_mut();
-        this.state.text_decoration = deco_style;
+    let css = cx.argument::<JsString>(1)?.value(&mut cx);
+    // Read by the crate's own `text-decoration` parser, as
+    // `Context2D::set_text_decoration_css` reads it. A declaration that does
+    // not parse leaves the decoration alone, as an invalid value does
+    // throughout the Canvas API; `"none"` and the empty string clear it.
+    if let Some(decoration) = decoration_from_css(&css) {
+        this.borrow_mut().state.text_decoration = decoration;
     }
-
     Ok(cx.undefined())
 }
 

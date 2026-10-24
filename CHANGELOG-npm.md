@@ -182,6 +182,16 @@ removed and no signature moves.
   setting it again at 40px, where Chrome inks 200. A filter is now compared
   by what it resolves to as well as by its text.
 
+- **`ctx.textDecoration` draws every line it names and takes a colour
+  function written with spaces.** `"underline overline"` drew the overline
+  alone, although it read back as both, and `"underline rgb(0 0 255)"` or
+  `"underline hsl(120 50% 50%) 3px"` was split at each space and ignored,
+  leaving the previous decoration in place. The string is now read by the
+  crate's own parser, the one `Context2D::set_text_decoration_css` uses, in
+  place of a second one in JavaScript. A thickness in `em` or another
+  font-relative unit still follows the font the text is drawn in, and `""`
+  and `"none"` still clear the decoration.
+
 - **A GPU recovery could produce wrong or blank pixels with no error; such
   a draw is now retried once and otherwise reported.** When the GPU recovers
   from a fault -- often one in another program -- macOS discards the work
