@@ -28,7 +28,13 @@
 
 use std::{
     cell::RefCell,
-    sync::atomic::{AtomicU32, Ordering},
+    collections::HashSet,
+    fmt,
+    num::NonZeroU32,
+    sync::{
+        LazyLock, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicU32, Ordering},
+    },
 };
 
 use super::{
@@ -59,6 +65,40 @@ thread_local!(
 /// read.
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 
+/// The id of every [`Window`] that exists, whether or not it has opened.
+///
+/// What [`Window::set_id`] checks a chosen id against. A window queued or
+/// open is still a `Window`, so this covers those; and it covers two windows
+/// built and given one id before either opens, which a check of the open
+/// ones alone would let through, the second to open then taking the first's
+/// place. A window leaves it when it closes, through [`close_on`],
+/// though the loop keeps the closed `Window` until it stops.
+static HELD: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(Default::default);
+
+/// The held ids, whether or not a thread panicked holding them: the set is
+/// left consistent between statements.
+fn held() -> MutexGuard<'static, HashSet<u32>> {
+    HELD.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// An id [`Window::set_id`] was asked for that another window holds.
+///
+/// A window holds its id from the moment it is built until it closes, or is
+/// dropped without having opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WindowIdTaken {
+    /// The id that was asked for.
+    pub id: u32,
+}
+
+impl fmt::Display for WindowIdTaken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "window id {} is held by another window", self.id)
+    }
+}
+
+impl std::error::Error for WindowIdTaken {}
+
 /// The index of a canvas's newest page, which a window shows until told
 /// otherwise -- JavaScript's `canvas.pages.length`, counted from zero.
 fn last_page(canvas: &Canvas) -> u32 {
@@ -68,6 +108,28 @@ fn last_page(canvas: &Canvas) -> u32 {
 /// Takes everything [`Window::open`] has queued.
 pub(crate) fn take_pending() -> Vec<Window> {
     PENDING.with_borrow_mut(std::mem::take)
+}
+
+/// Marks every window in `windows` that `open` named on an earlier pass
+/// and no longer does as closed, and frees its id.
+///
+/// Called by the loop at the top of each pass with the ids its window
+/// manager still has. The id is freed here and nowhere else, so no other
+/// window can be given it before the closed one is marked -- which is
+/// what lets the loop's lookups by id pass over closed windows and never
+/// hand one window's events to another.
+pub(crate) fn close_on(windows: &mut [Window], open: &[u32]) {
+    for window in windows.iter_mut().filter(|w| !w.closed) {
+        match open.contains(&window.spec.id) {
+            true => window.shown = true,
+            // Absent before it was ever shown is not yet open.
+            false if window.shown => {
+                window.closed = true;
+                held().remove(&window.spec.id);
+            }
+            false => {}
+        }
+    }
 }
 
 /// The draw handler: this window's context, and the frame number.
@@ -87,6 +149,14 @@ pub struct Window {
     on_draw: Option<DrawHandler>,
     on_event: Option<EventHandler>,
     frame: u64,
+    /// Whether the loop's window manager has had this window open. Until it
+    /// has, its absence there means it has not opened yet, not that it
+    /// closed.
+    shown: bool,
+    /// Whether the loop has closed this window. A closed window stays in the
+    /// loop's list until [`App::run`] returns, but has given up its id, so
+    /// every lookup by id passes over it.
+    closed: bool,
 }
 
 impl Window {
@@ -103,6 +173,7 @@ impl Window {
     /// [`Window::canvas_mut`].
     pub fn with_canvas(canvas: Canvas) -> Self {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        held().insert(id);
         let page = last_page(&canvas);
 
         Self {
@@ -128,12 +199,58 @@ impl Window {
             on_draw: None,
             on_event: None,
             frame: 0,
+            shown: false,
+            closed: false,
         }
     }
 
     /// The id addressing this window, for [`App::close_window`].
     pub fn id(&self) -> u32 {
         self.spec.id
+    }
+
+    /// Addresses this window by an id of the caller's choosing rather than
+    /// the next one counted out, as JavaScript's `new Window({ id })` does.
+    ///
+    /// The id has to be free: one another window holds -- built and not yet
+    /// dropped or closed, which covers one open or queued to open -- is
+    /// refused, and this window keeps the id it had. A closed window's id is
+    /// free at once, as JavaScript's is. Once chosen, the counter that numbers
+    /// windows moves past it, so no window built later is handed it.
+    ///
+    /// ```no_run
+    /// use meo_skia_canvas::prelude::*;
+    /// use std::num::NonZeroU32;
+    ///
+    /// let mut window = Window::new(320.0, 240.0);
+    /// window.set_id(NonZeroU32::new(5).expect("not zero"))?;
+    /// assert_eq!(window.id(), 5);
+    ///
+    /// let mut other = Window::new(320.0, 240.0);
+    /// let taken = other.set_id(NonZeroU32::new(5).expect("not zero"));
+    /// assert_eq!(taken.map_err(|e| e.id), Err(5));
+    /// # Ok::<(), WindowIdTaken>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowIdTaken`] naming the id when another window holds it.
+    pub fn set_id(&mut self, id: NonZeroU32) -> Result<(), WindowIdTaken> {
+        let id = id.get();
+        if id == self.spec.id {
+            return Ok(());
+        }
+        let mut held = held();
+        if held.contains(&id) {
+            return Err(WindowIdTaken { id });
+        }
+        held.remove(&self.spec.id);
+        held.insert(id);
+        if let Some(next) = id.checked_add(1) {
+            NEXT_ID.fetch_max(next, Ordering::Relaxed);
+        }
+        self.spec.id = id;
+        Ok(())
     }
 
     /// A handle that changes this window after it has opened.
@@ -425,6 +542,11 @@ impl Window {
         self.spec = spec;
     }
 
+    /// Whether the loop has closed this window.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed
+    }
+
     /// Hands each event to the caller's handler.
     pub(crate) fn deliver(&mut self, events: &[UiEvent]) {
         if let Some(handler) = self.on_event.as_mut() {
@@ -467,6 +589,16 @@ impl Window {
         self.on_draw = on_draw;
 
         self.current_page()
+    }
+}
+
+impl Drop for Window {
+    /// Frees the window's id for another to choose, unless closing it
+    /// already did -- by now another window may hold that id.
+    fn drop(&mut self) {
+        if !self.closed {
+            held().remove(&self.spec.id);
+        }
     }
 }
 
@@ -646,5 +778,112 @@ mod page_selection {
         window.set_canvas(two_pages());
         assert_eq!(window.page(), 1);
         assert_eq!(drawn_on(&mut window), (200.0, 80.0));
+    }
+}
+
+#[cfg(test)]
+mod chosen_ids {
+    use super::*;
+
+    /// Ids far from anything the counter reaches in this test binary, a
+    /// range per test: the held set and the counter are process-wide and the
+    /// tests run in parallel.
+    fn id(n: u32) -> NonZeroU32 {
+        NonZeroU32::new(3_000_000_000 + n).expect("not zero")
+    }
+
+    #[test]
+    fn a_free_id_is_taken_and_reported() {
+        let mut window = Window::new(10.0, 10.0);
+        assert_eq!(window.set_id(id(1)), Ok(()));
+        assert_eq!(window.id(), id(1).get());
+        assert_eq!(window.handle().id(), id(1).get());
+        assert_eq!(window.set_id(id(1)), Ok(()), "its own id is free to it");
+    }
+
+    #[test]
+    fn an_id_another_window_holds_is_refused_by_name() {
+        let mut holder = Window::new(10.0, 10.0);
+        holder.set_id(id(10)).expect("free");
+        let mut other = Window::new(10.0, 10.0);
+        let before = other.id();
+        let taken = other.set_id(id(10));
+        assert_eq!(taken, Err(WindowIdTaken { id: id(10).get() }));
+        assert_eq!(other.id(), before, "keeps the id it had");
+        let message = taken.expect_err("refused").to_string();
+        assert!(message.contains(&id(10).get().to_string()), "{message}");
+    }
+
+    #[test]
+    fn a_counted_id_is_held_too() {
+        // Two windows built and given one id before either opens would both
+        // pass a check of the open ones alone.
+        let counted = Window::new(10.0, 10.0);
+        let mut other = Window::new(10.0, 10.0);
+        let taken = NonZeroU32::new(counted.id()).expect("counted from 1");
+        assert!(other.set_id(taken).is_err());
+    }
+
+    #[test]
+    fn a_dropped_window_frees_its_id() {
+        let mut first = Window::new(10.0, 10.0);
+        first.set_id(id(20)).expect("free");
+        drop(first);
+        let mut second = Window::new(10.0, 10.0);
+        assert_eq!(second.set_id(id(20)), Ok(()));
+    }
+
+    #[test]
+    fn changing_an_id_frees_the_old_one() {
+        let mut window = Window::new(10.0, 10.0);
+        window.set_id(id(30)).expect("free");
+        window.set_id(id(31)).expect("free");
+        let mut other = Window::new(10.0, 10.0);
+        assert_eq!(other.set_id(id(30)), Ok(()));
+    }
+
+    #[test]
+    fn a_queued_window_holds_its_id() {
+        let mut queued = Window::new(10.0, 10.0);
+        queued.set_id(id(40)).expect("free");
+        queued.open();
+        let mut other = Window::new(10.0, 10.0);
+        assert!(other.set_id(id(40)).is_err());
+        // Nothing runs the loop here, so take it back off the queue and
+        // close it, which forgets it as the loop would.
+        drop(take_pending());
+        handle::forget(id(40).get());
+        assert_eq!(other.set_id(id(40)), Ok(()));
+    }
+
+    #[test]
+    fn a_closed_window_frees_its_id_and_dropping_it_frees_nothing_else() {
+        let mut closing = vec![Window::new(10.0, 10.0)];
+        closing[0].set_id(id(60)).expect("free");
+
+        // Not yet in the manager: not open yet, rather than closed.
+        close_on(&mut closing, &[]);
+        assert!(!closing[0].is_closed());
+        let mut other = Window::new(10.0, 10.0);
+        assert!(other.set_id(id(60)).is_err(), "still held");
+
+        // Shown, then gone: closed, and its id free.
+        close_on(&mut closing, &[id(60).get()]);
+        close_on(&mut closing, &[]);
+        assert!(closing[0].is_closed());
+        assert_eq!(other.set_id(id(60)), Ok(()));
+
+        // Dropping the closed one leaves the new claim alone.
+        drop(closing);
+        let mut third = Window::new(10.0, 10.0);
+        assert!(third.set_id(id(60)).is_err(), "the new window holds it");
+    }
+
+    #[test]
+    fn the_counter_moves_past_a_chosen_id() {
+        let mut window = Window::new(10.0, 10.0);
+        window.set_id(id(50)).expect("free");
+        let later = Window::new(10.0, 10.0);
+        assert!(later.id() > id(50).get(), "{} after {}", later.id(), id(50));
     }
 }

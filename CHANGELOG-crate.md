@@ -98,6 +98,14 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   before and as in Chrome, and a face that is itself italic or oblique is
   not skewed a second time.
 
+- **A closed window's draw handler stops.** `App::run` kept every window it
+  was given until it returned and drew all of them each frame, so a window
+  closed by its handle or by the user went on running its draw handler --
+  ten more frames at 30 fps in the end-to-end test before this change -- and
+  handing the page to a window that no longer existed. It is passed over
+  from the frame it closes, as it is by event delivery and by handle
+  changes.
+
 - **A GPU recovery could produce wrong or blank pixels with no error; such
   a draw is now retried once and otherwise reported.** On Metal, a GPU
   recovery discards the command buffers every process had in flight, and
@@ -324,6 +332,15 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   viewport units and the container units read as zero, since there is no
   line box, window or container to measure. docs/browser-differences.md
   lists where that departs from a canvas in a Chrome document.
+
+- **`Window::set_id` gives a window an id of the caller's choosing**, as
+  JavaScript's `new Window({ id })` does. The id has to be free, and one
+  another window holds is refused as a `WindowIdTaken` naming it -- a type of
+  its own, since `Error` cannot gain a variant until 0.17. A window holds its
+  id from when it is built until it closes, or is dropped unopened; a closed
+  window's id is free at once, while the loop runs on, as JavaScript's is.
+  The counter that numbers windows moves past a chosen id, so no window built
+  later is handed it.
 
 - **A window can be changed after it opens, from any thread.** `open`
   consumes a `Window`, so its title, size, position, fullscreen state,

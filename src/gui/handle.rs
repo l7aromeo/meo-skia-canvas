@@ -231,7 +231,11 @@ fn take_changes() -> Vec<(u32, Change)> {
 pub(crate) fn apply_queued(windows: &mut [Window]) -> Vec<u32> {
     let mut changed = Vec::new();
     for (id, change) in take_changes() {
-        if let Some(window) = windows.iter_mut().find(|w| w.id() == id) {
+        // A closed window has given its id up, so it is passed over: the
+        // change may be for another window the id now names.
+        if let Some(window) =
+            windows.iter_mut().find(|w| !w.is_closed() && w.id() == id)
+        {
             match change {
                 Change::Edit(edit) => edit.apply(window),
                 Change::Canvas(canvas) => window.set_canvas(canvas),

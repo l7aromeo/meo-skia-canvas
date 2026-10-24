@@ -615,6 +615,14 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   which has nothing to act on there, is still a type error. An options object
   typed as a whole `RequestInit` is accepted as before.
 
+- **`new Window({ id })` chooses a window's id**, rather than taking the next
+  one counted out: a whole number from 1 to 2³² − 1. One an open window holds
+  throws a `RangeError` naming it, as does reopening a closed window whose id
+  another has taken in the meantime; anything that is not a number throws a
+  `TypeError`. The count moves past a chosen id. Passing `id` threw
+  "Window IDs are immutable" before, since the option reached the
+  property's setter.
+
 - **`color(xyz ...)`, `color(xyz-d50 ...)` and `color(xyz-d65 ...)` are
   accepted**, beside the `srgb`, `srgb-linear`, `display-p3` and `rec2020`
   forms already taken. `xyz` and `xyz-d65` name one space, as CSS Color 4

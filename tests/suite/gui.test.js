@@ -456,3 +456,75 @@ describe("the event loop, where a window can be opened", () => {
     },
   );
 });
+
+describe("a chosen window id", () => {
+  // The crate's `Window::set_id` takes the same ids under the same rule.
+  const make = (id) => new Window(10, 10, { visible: false, id });
+
+  test("is the window's id", { skip: noWindowing }, () => {
+    const window = make(7001);
+    try {
+      assert.equal(window.id, 7001);
+    } finally {
+      window.close();
+    }
+  });
+
+  test(
+    "is refused while another open window holds it",
+    { skip: noWindowing },
+    () => {
+      const holder = make(7010);
+      try {
+        assert.throws(
+          () => make(7010),
+          (e) => e instanceof RangeError && /7010/.test(e.message),
+        );
+      } finally {
+        holder.close();
+      }
+      const after = make(7010);
+      after.close();
+      assert.equal(after.id, 7010, "free again once the holder closed");
+    },
+  );
+
+  test(
+    "is refused when a closed window reopens onto it",
+    { skip: noWindowing },
+    () => {
+      const first = make(7020);
+      first.close();
+      const second = make(7020);
+      try {
+        assert.throws(
+          () => first.open(),
+          (e) => e instanceof RangeError && /7020/.test(e.message),
+        );
+        assert.equal(first.closed, true, "it stays closed");
+      } finally {
+        second.close();
+      }
+    },
+  );
+
+  test("moves the counter past it", { skip: noWindowing }, () => {
+    const chosen = make(9000);
+    const counted = new Window(10, 10, { visible: false });
+    try {
+      assert.ok(counted.id > 9000, `${counted.id} after 9000`);
+    } finally {
+      chosen.close();
+      counted.close();
+    }
+  });
+
+  test("is a whole number of 1 or more", { skip: noWindowing }, () => {
+    for (const id of [0, -1, 1.5, 2 ** 32, NaN, Infinity]) {
+      assert.throws(() => make(id), RangeError, String(id));
+    }
+    for (const id of ["5", {}, true]) {
+      assert.throws(() => make(id), TypeError, JSON.stringify(id));
+    }
+  });
+});

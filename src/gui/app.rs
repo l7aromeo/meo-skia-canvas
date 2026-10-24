@@ -360,6 +360,13 @@ impl App {
                 })));
 
                 let dispatch = |frame: Frame, manager: &mut WindowManager| {
+                    // A window the manager has closed gives its id up here,
+                    // before anything looks a window up by id, and every
+                    // lookup below passes over it.
+                    let open: Vec<u32> =
+                        manager.specs().iter().map(|spec| spec.id).collect();
+                    session::close_on(&mut windows, &open);
+
                     if let Frame::Edited = frame {
                         // Applied and shown without drawing: the draw
                         // handler's frame count is the caller's clock, and a
@@ -374,8 +381,9 @@ impl App {
                         }
                     } else {
                         for (id, events) in manager.take_ui_events() {
-                            if let Some(window) =
-                                windows.iter_mut().find(|w| w.spec().id == id)
+                            if let Some(window) = windows
+                                .iter_mut()
+                                .find(|w| !w.is_closed() && w.spec().id == id)
                             {
                                 window.deliver(&events);
                             }
@@ -386,10 +394,9 @@ impl App {
                         // size it actually has rather than the one it was
                         // opened with.
                         for spec in manager.specs() {
-                            if let Some(window) = windows
-                                .iter_mut()
-                                .find(|w| w.spec().id == spec.id)
-                            {
+                            if let Some(window) = windows.iter_mut().find(|w| {
+                                !w.is_closed() && w.spec().id == spec.id
+                            }) {
                                 window.adopt(spec);
                             }
                         }
@@ -398,14 +405,21 @@ impl App {
                         // thread since the last pass, land before the draw.
                         handle::apply_queued(&mut windows);
 
-                        let pages: Vec<Page> =
-                            windows.iter_mut().map(|w| w.render()).collect();
+                        // A closed window is not drawn: its page would reach
+                        // the manager under an id another window may hold.
+                        let pages: Vec<Page> = windows
+                            .iter_mut()
+                            .filter(|w| !w.is_closed())
+                            .map(|w| w.render())
+                            .collect();
 
                         // And those made while drawing land before the frame
                         // is shown, with the page read again for a window
                         // whose canvas was replaced.
                         let changed = handle::apply_queued(&mut windows);
-                        for (window, page) in zip(windows.iter_mut(), pages) {
+                        let drawn =
+                            windows.iter_mut().filter(|w| !w.is_closed());
+                        for (window, page) in zip(drawn, pages) {
                             let page = match changed.contains(&window.id()) {
                                 true => window.current_page(),
                                 false => page,

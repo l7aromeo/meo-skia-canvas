@@ -288,7 +288,8 @@ describe("the npm parity surface", () => {
     assert.equal(count("KeyboardEventProps"), 8);
     assert.equal(count("MouseEventProps"), 10);
     assert.equal(count("WindowEvents"), 16);
-    assert.equal(count("WindowOptions"), 14);
+    // Fifteen with `id`, which chooses a window's id at construction.
+    assert.equal(count("WindowOptions"), 15);
 
     // An intersection confers membership where a union of named types does
     // not, so its named arm is containment and belongs in `heritage`.

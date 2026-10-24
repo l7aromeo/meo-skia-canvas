@@ -5823,6 +5823,13 @@ export type CursorStyle =
  * @category GPU and Windowing
  */
 export type WindowOptions = {
+  /**
+   * The window's {@link Window.id}, rather than the next one counted out: a
+   * whole number from 1 to 2³² − 1. One an open window holds throws a
+   * `RangeError` naming it, and the count moves past a chosen id so no
+   * window created later is handed it.
+   */
+  id?: number;
   /** Title-bar text. */
   title?: string;
   /** Position of the window's left edge on screen, in points. */
@@ -6040,9 +6047,12 @@ export class Window extends EventEmitter<{
    * A number identifying this window, unique within the process and fixed
    * for its lifetime.
    *
-   * Assigned in order as windows are created. Assigning a different value
+   * Assigned in order as windows are created, unless the `id` in
+   * {@link WindowOptions} chooses one. Assigning a different value
    * throws; the setter exists so the event loop can echo a window's own
-   * state back to it without special-casing this field.
+   * state back to it without special-casing this field. A closed window
+   * whose id another window has since taken throws a `RangeError` on
+   * {@link Window.open}.
    *
    * 🧪 Not in any browser standard -- a browser has no `Window` of this
    * kind to number.
