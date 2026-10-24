@@ -151,7 +151,8 @@ jobs:
 
       # The declaration files are what the package ships as its `types`, and until this
       # existed nothing checked them -- `just typecheck` was Rust-only. Runs with
-      # `skipLibCheck` off, which is how a consumer who disables it sees the package.
+      # `skipLibCheck` off, which is how a consumer who disables it sees the package, and
+      # checks tests/types, which uses them as a caller would.
       # Needs no native binary, so it sits with the other pre-download checks.
       - name: Type-check the shipped declarations
         run: bun run typecheck

@@ -1,8 +1,9 @@
 {
   "//": [
-    "Typechecks the declaration files this package ships as its `types`.",
-    "Scoped to those two files on purpose: the runtime is plain JavaScript and",
-    "is not compiled, so widening `files` would start typechecking lib/*.js.",
+    "Typechecks the declaration files this package ships as its `types`, and",
+    "tests/types, which uses them as a caller would. Listed file by file on",
+    "purpose: the runtime is plain JavaScript and is not compiled, so a glob",
+    "over lib would start typechecking lib/*.js.",
     "",
     "`skipLibCheck` is off deliberately. It defaults to true almost everywhere,",
     "which is exactly why nothing had ever checked these 2400 lines -- and why",
@@ -17,5 +18,10 @@
     "target": "es2022",
     "types": ["node"]
   },
-  "files": ["lib/index.d.ts", "lib/browser.d.ts"]
+  "files": [
+    "lib/index.d.ts",
+    "lib/browser.d.ts",
+    "tests/types/constructors.ts",
+    "tests/types/paragraph.ts"
+  ]
 }

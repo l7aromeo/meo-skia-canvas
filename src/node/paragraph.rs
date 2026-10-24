@@ -557,7 +557,9 @@ fn parse_paragraph_style(
     }
 
     // textHeightBehavior: 0 = All, 1 = DisableFirstAscent,
-    // 2 = DisableLastDescent, 3 = DisableAll.
+    // 2 = DisableLastDescent, 3 = DisableAll. A non-integer is truncated by
+    // the cast and a non-finite one never arrives, so both pass; that is
+    // deprecated in lib/index.d.ts, and 7.0 refuses them by rule 4.
     if let Some(thb) = opt_float_for_key(cx, obj, "textHeightBehavior") {
         let behavior = match thb as i32 {
             0 => CrateTextHeightBehavior::All,

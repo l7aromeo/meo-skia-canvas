@@ -331,6 +331,7 @@
     "CanvasDrawPath.isPointInPath": ["Context2D::is_point_in_filled_path"],
     "CanvasDrawPath.isPointInStroke": ["Context2D::is_point_in_stroked_path"],
     "CanvasFillStrokeStyles.createTexture": ["Texture::new"],
+    "FontLibrary.use": ["FontLibrary::use_paths", "FontLibrary::use_data"],
     "Path2D.new": ["Path2D::from_svg", "PathBuilder::from_path"]
   }
 }

@@ -125,15 +125,21 @@ status = "deliberate"
 
 [[capability]]
 name = "paragraph text height behavior"
-rust = ["TextHeightBehavior"]
+rust = ["TextHeightBehavior::All",
+        "TextHeightBehavior::DisableFirstAscent",
+        "TextHeightBehavior::DisableLastDescent",
+        "TextHeightBehavior::DisableAll"]
 npm = []
-why = """npm declares `textHeightBehavior?: number` in lib/index.d.ts and the
-      binding refuses a code outside 0..3 at run time. Four states on each side,
-      but the npm declaration does not say which numbers mean what, and no DOM
-      type sets the precedent the way it does for `createPattern` and `key`: a
-      typing gap in the npm declaration, which a named union would close."""
-status = "gap"
-issue = "unfiled"
+why = """Four states on each side, and the two `TextHeightBehavior` types pair by
+      name. The crate names the states as variants; npm's type is the codes 0
+      to 3 its `textHeightBehavior` option takes, the numbers CanvasKit's
+      enum carries, so the variants have no member to pair with and the type's
+      doc comment says which code is which. The option is typed
+      `TextHeightBehavior | (number & {})` so that code passing a `number`
+      keeps compiling, and a non-integer is truncated today; npm 7.0 narrows
+      the option to `TextHeightBehavior` and refuses a non-integer with a
+      `RangeError`, after which the two sides hold the same four values."""
+status = "deliberate"
 
 [[capability]]
 name = "path boolean operations"
@@ -487,7 +493,7 @@ why  = """The crate's colour primitive: premultiplied, linear-light, and the
 status = "deliberate"
 
 [[capability]]
-name = "the `prototype` property on declared classes"
+name = "the `prototype` property on declared constructor objects"
 rust = []
 npm  = ["CanvasGradient.prototype",
         "CanvasRenderingContext2D.prototype",
@@ -496,14 +502,17 @@ npm  = ["CanvasGradient.prototype",
         "DOMRect.prototype",
         "Path2D.prototype",
         "TextMetrics.prototype"]
-why  = """Not a capability on either side. These are `declare class` artefacts
-       in lib/index.d.ts -- every JavaScript constructor has a `prototype`,
-       and declaring it explicitly adds nothing a caller can use. One of the
-       same kind was deleted from `ImageData` for this reason. The entry is
-       here so the gate is quiet; the fix is to stop declaring them, which
-       would delete it -- a gap in the npm declaration."""
-status = "gap"
-issue = "unfiled"
+why  = """Not a capability on either side: the declaration shape of the DOM's own
+       types. lib/index.d.ts declares these seven as TypeScript's own DOM
+       library does, an interface for the instance and a `declare var` for
+       the constructor object, and TypeScript supplies a `prototype` only for
+       a class, never for a `declare var`. Without the declaration, `X.prototype` does not
+       compile on the three with no construct signature -- `CanvasGradient`,
+       `CanvasRenderingContext2D` and `TextMetrics`, whose constructors throw
+       -- and is `any` on the other four, from `Function.prototype`.
+       tests/types/constructors.ts checks each is exactly the instance type.
+       `ImageData` is declared as a class, so TypeScript gives it one."""
+status = "deliberate"
 
 [[capability]]
 name = "a shadow offset as one member or two"
@@ -844,7 +853,7 @@ why  = """Both surfaces carry the value; only npm constrains it. Rust models the
        these five, so a caller matching on the input type matches string
        literals with nothing to catch a typo. A typing gap in the crate."""
 status = "gap"
-issue = "unfiled"
+issue = "https://github.com/l7aromeo/meo-skia-canvas/issues/273"
 
 [[capability]]
 name = "the CSS font-variant keyword set"
@@ -1733,14 +1742,17 @@ name = "the format a multi-page save chooses"
 rust = []
 npm = ["SaveOptions",
        "SaveOptions.format"]
-why = """npm's `toFile` takes a `format` naming the container to write when the
-      filename does not settle it, and a filename containing `{}` writes one
-      numbered file per page. `Canvas::to_file` takes the format from the
-      extension alone and writes one page, so a Rust caller wanting either
-      passes the format to `to_buffer` and writes the bytes itself, page by
-      page. A gap in the crate's file export."""
-status = "gap"
-issue = "unfiled"
+why = """npm's `toFile` takes the container to write as `format` in its options,
+      for a filename that does not settle it. The crate takes it as an
+      argument: `Canvas::to_file_as(path, format, options)` is
+      `toFile(path, { format })`, and `Canvas::to_file` reads the format from
+      the extension, as `toFile` does without one. `EncodeOptions` has no
+      format field because `Canvas::to_buffer` takes the format as an
+      argument too, as npm's `toBuffer` does, and one struct serves both. So
+      SaveOptions has nothing left to add: a filename with `{}` or `{N}`
+      writes one numbered file per page through either method, as it does
+      through `toFile`."""
+status = "deliberate"
 
 [[capability]]
 name = "releasing cached memory on request"
@@ -1800,11 +1812,13 @@ why = """`Canvas | Image | ImageData` twice over -- what `drawImage` accepts and
       inherits either, so they are not part of the mixin decomposition above
       despite the shared prefix. The crate has a method per source instead:
       `draw_image` and `create_pattern` take an `Image`, `draw_canvas` and
-      `create_pattern_from_canvas` a `Canvas`, and none takes an `ImageData`,
-      which a Rust caller converts through `Image::from_pixels` first. That
-      conversion is a gap in the crate."""
-status = "gap"
-issue = "unfiled"
+      `create_pattern_from_canvas` a `Canvas`. An `ImageData` reaches the
+      `Image` methods through the crate's `TryFrom<&ImageData>` for `Image`
+      in src/image.rs, a trait implementation rather than a method of its
+      own, which draws it as `drawImage` draws one. A union would need a
+      trait or an enum standing in for three types a Rust caller already
+      names, so the crate keeps a method per source."""
+status = "deliberate"
 
 [[capability]]
 name = "npm argument shapes that declare no members"
@@ -2250,18 +2264,27 @@ status = "deliberate"
 
 [[capability]]
 name = "registering several font files, or one under its own family name"
-rust = []
-npm = ["FontLibrary.use"]
-why = """`FontLibrary.use` registers a font from a path or a buffer, which the
-      crate's `register_font_from_path` and `register_font_from_data` do one
-      file at a time, and also several files under one family, several
-      families from one object, and a file under the family name the font
-      itself declares, returning the details of what it registered. The crate
-      takes one file per call, always needs the family name from the caller
-      and returns nothing, so a Rust caller registering a font under its own
-      name has to know that name first. A gap in the crate."""
-status = "gap"
-issue = "unfiled"
+rust = ["FontLibrary::use_data_all",
+        "FontLibrary::use_families"]
+npm = ["FontLibrary.use",
+       "FontLibrary.use(fontPaths:string)",
+       "FontLibrary.use(families)"]
+why = """`FontLibrary.use` is one overloaded call and the crate spells each form as
+      a method. From files under one alias or under each font's own family it
+      is `FontLibrary::use_paths`, and from one buffer `FontLibrary::use_data`,
+      both paired with `FontFace` in "a registered face, as registering it
+      describes it". From several buffers it is `FontLibrary::use_data_all`,
+      and from a map of aliases to files `FontLibrary::use_families`, which
+      answers one list per group where npm answers an object keyed by alias.
+      Every form is all or nothing on both surfaces: a font that cannot be
+      read or parsed registers nothing from the call.
+      Two argument shapes differ and are meant to. npm takes one path as a
+      bare string where `FontLibrary::use_paths` takes any iterator of paths,
+      so a single path is `[path]`. And npm's map of aliases is a list of
+      `(alias, paths)` pairs for `FontLibrary::use_families`: a Rust caller
+      writes it as an array literal without building a map, the order given
+      is the order answered, and a group may have no alias, which a map key
+      cannot express."""
 
 [[capability]]
 name = "no decoration, as a value and as a predicate"

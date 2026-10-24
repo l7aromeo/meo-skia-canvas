@@ -2349,13 +2349,20 @@ export interface CanvasGradient {
  *
  * Instances come from `CanvasRenderingContext2D.createLinearGradient()` and
  * its siblings rather than being constructed: calling this directly throws,
- * so no construct signature is declared even though `lib.dom.d.ts` has one.
+ * so no construct signature is declared even though `lib.dom.d.ts` has one,
+ * and `Symbol.hasInstance` is declared instead for `instanceof`.
  *
  * @category Drawing Styles
  */
 declare var CanvasGradient: {
   /** The prototype every instance inherits from. */
   prototype: CanvasGradient;
+  /**
+   * What `instanceof` asks. Declared because a type with no construct
+   * signature is not one `instanceof` accepts on its right; the inherited
+   * `Function.prototype[Symbol.hasInstance]` is what answers at run time.
+   */
+  [Symbol.hasInstance](value: unknown): value is CanvasGradient;
 };
 
 /**
@@ -4449,13 +4456,20 @@ export interface CanvasRenderingContext2D
  *
  * Instances come from {@link Canvas.getContext} rather than being
  * constructed: calling this directly throws, which is why no construct
- * signature is declared even though `lib.dom.d.ts` has one.
+ * signature is declared even though `lib.dom.d.ts` has one, and
+ * `Symbol.hasInstance` is declared instead for `instanceof`.
  *
  * @category Canvas
  */
 declare var CanvasRenderingContext2D: {
   /** The prototype every instance inherits from. */
   prototype: CanvasRenderingContext2D;
+  /**
+   * What `instanceof` asks. Declared because a type with no construct
+   * signature is not one `instanceof` accepts on its right; the inherited
+   * `Function.prototype[Symbol.hasInstance]` is what answers at run time.
+   */
+  [Symbol.hasInstance](value: unknown): value is CanvasRenderingContext2D;
 };
 
 //
@@ -4768,7 +4782,8 @@ export interface TextMetrics {
 
 // No construct signature: measurements come from
 // {@link CanvasRenderingContext2D.measureText}, and the browser has no
-// `TextMetrics` constructor either. `prototype` stays so `instanceof` works.
+// `TextMetrics` constructor either. `Symbol.hasInstance` is declared so that
+// `instanceof` still accepts it.
 /**
  * The TextMetrics constructor object. Instances are returned by {@link CanvasText.measureText} rather than constructed.
  *
@@ -4777,6 +4792,12 @@ export interface TextMetrics {
 declare var TextMetrics: {
   /** The prototype every instance inherits from. */
   prototype: TextMetrics;
+  /**
+   * What `instanceof` asks. Declared because a type with no construct
+   * signature is not one `instanceof` accepts on its right; the inherited
+   * `Function.prototype[Symbol.hasInstance]` is what answers at run time.
+   */
+  [Symbol.hasInstance](value: unknown): value is TextMetrics;
 };
 
 /**
@@ -5432,6 +5453,23 @@ export interface StrutStyleInput {
 }
 
 /**
+ * Whether a paragraph's line height applies to the ascent of its first line
+ * and the descent of its last, as CanvasKit's `TextHeightBehavior`:
+ *
+ * - `0`, All: to both. The default.
+ * - `1`, DisableFirstAscent: not to the first line's ascent, trimming the
+ *   leading above it.
+ * - `2`, DisableLastDescent: not to the last line's descent, trimming the
+ *   leading below it.
+ * - `3`, DisableAll: to neither.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
+ */
+export type TextHeightBehavior = 0 | 1 | 2 | 3;
+
+/**
  * 🧪 Not in the HTML Canvas standard.
  *
  * @category Paragraph Layout
@@ -5464,11 +5502,18 @@ export interface ParagraphStyleInput {
   /** Fixed line box for deterministic leading. */
   strutStyle?: StrutStyleInput;
   /**
-   * First/last-line leading trim: `0` All, `1` DisableFirstAscent,
-   * `2` DisableLastDescent, `3` DisableAll. Mirrors CanvasKit's
-   * `TextHeightBehavior`.
+   * First/last-line leading trim, one of the four {@link TextHeightBehavior}
+   * values. Any other integer is a `RangeError`.
+   *
+   * Typed open, as `number`, so code passing a `number` keeps compiling; 7.0
+   * narrows it to {@link TextHeightBehavior}.
+   *
+   * Deprecated: a number that is not an integer. Today `1.5` is truncated
+   * toward zero, to `1`, and `NaN` or an infinity is ignored, leaving the
+   * default `0`. In 7.0 each is a `RangeError`. Not marked `@deprecated`,
+   * because the option itself is not.
    */
-  textHeightBehavior?: number;
+  textHeightBehavior?: TextHeightBehavior | (number & {});
 }
 
 /**
