@@ -10835,6 +10835,27 @@ fn css_spacing_reaches_the_layout_it_configures() {
 }
 
 #[test]
+fn a_negative_spacing_measures_a_negative_width() {
+    // Chrome 152 at 40px Oswald: the advances with the spacing added,
+    // summed and never clamped, trailing spaces included.
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::parse(&format!("40px {}", oswald())).expect("a font"));
+    for (letter, text, chrome) in [
+        ("-23.12px", "abcd", -23.44),
+        ("-50px", "ab ", -105.92),
+        ("-10px", "a ", 6.2),
+    ] {
+        ctx.set_letter_spacing_css(letter).expect("a length");
+        let width = ctx.measure_text(text, None).width;
+        assert!(
+            (width - chrome).abs() <= 0.01,
+            "{letter} {text:?}: {width}, Chrome {chrome}"
+        );
+    }
+}
+
+#[test]
 fn a_css_length_that_is_not_one_is_refused_by_name() {
     let mut canvas = Canvas::new(64.0, 64.0);
     let ctx = canvas.context();

@@ -758,40 +758,7 @@ impl<'a> Typesetter<'a> {
 
     /// Lays the run out, and works out how far it has to be squeezed.
     pub fn layout(&self, paint: &Paint) -> TextLayout {
-        let mut char_style = TextStyle::clone(&self.char_style);
-        char_style.set_foreground_paint(paint);
-        char_style.set_decoration(&self.text_decoration.for_layout(
-            &char_style,
-            paint.color(),
-            self.decoration_thickness,
-        ));
-
-        // Let SkParagraph synthesise what Chrome synthesises and nothing
-        // else -- see `synthesis_style`. The match was found once, when the
-        // collection was chosen, rather than by searching it again here: the
-        // search needed a `Vec` of the family names, a clone of the
-        // collection and a lookup, 173 nanoseconds of every layout on this
-        // machine, to arrive at what `fonts_for_style` had already had in
-        // hand.
-        let requested = self.char_style.font_style();
-        if let Some(matched) = self.matched_style {
-            char_style.set_font_style(synthesis_style(requested, matched));
-        }
-
-        // That style is the first face's. A run another face draws -- a
-        // glyph the first family lacks, falling back to the next -- is laid
-        // out again in the style for its own face, since SkParagraph applies
-        // one style's weight to whatever face each run finds: at
-        // `900 48px Montserrat, Raleway`, Chrome draws the Latin as plain
-        // Montserrat 700 and the Cyrillic, which Montserrat lacks, as
-        // Raleway's 900 instance.
-        let mut first = self.paragraph_with(&char_style, &[]);
-        let restyled =
-            runs_to_restyle(&mut first, requested, char_style.font_style());
-        let paragraph = match restyled.is_empty() {
-            true => first,
-            false => self.paragraph_with(&char_style, &restyled),
-        };
+        let paragraph = self.restyled_paragraph(&self.layout_style(paint));
 
         let offset = Point::new(
             self.alignment_offset(),
@@ -818,6 +785,97 @@ impl<'a> Typesetter<'a> {
             paragraph,
             offset,
             condensation,
+        }
+    }
+
+    /// The run's advance -- every glyph and space, with the letter spacing
+    /// after each and the word spacing between words -- signed, as Chrome
+    /// reports it for `measureText().width`. The rule is Blink's, from
+    /// `text_metrics.cc`, which adds up the runs' advances into the width and
+    /// does not clamp the sum; what follows is how it is reached through
+    /// SkParagraph, which does.
+    ///
+    /// `max_intrinsic_width` is that advance wherever it is not negative,
+    /// trailing spaces included, which the line's own width leaves out. A
+    /// negative one it reports as zero: SkParagraph's `TextWrapper` starts
+    /// its maximum at `std::numeric_limits<SkScalar>::min()`, the smallest
+    /// positive float, and keeps the larger of that and each line. The
+    /// advance is linear in the letter spacing, which every cluster carries
+    /// once, so two layouts at spacings large enough to be positive give the
+    /// slope -- the number of clusters -- and the line through them gives
+    /// the advance at the spacing asked for. Each layout is restyled face by
+    /// face as the drawing is, so the advance is of the weights drawn.
+    fn signed_advance(&self, paragraph: &Paragraph) -> f32 {
+        let natural = paragraph.max_intrinsic_width();
+        if natural > 0.0 || self.text.is_empty() {
+            return natural;
+        }
+        let letter = self.char_style.letter_spacing();
+        // Enough to make either layout positive: a cluster loses at most
+        // its letter and word spacing, and the font size on top keeps the
+        // advance clear of zero for every cluster there is.
+        let step = letter.abs()
+            + self.char_style.word_spacing().abs()
+            + self.char_style.font_size();
+        let style = self.layout_style(&Paint::default());
+        let at = |spacing: f32| {
+            let mut style = style.clone();
+            style.set_letter_spacing(spacing);
+            self.restyled_paragraph(&style).max_intrinsic_width()
+        };
+        let (near, far) = (at(letter + step), at(letter + 2.0 * step));
+        // A whole number of clusters, rounded because SkParagraph rounds an
+        // intrinsic width to hundredths (`littleRound`); left unrounded it is
+        // off by at most a hundredth over `step`, too little to see at the
+        // two decimals the width is good to.
+        let clusters = ((far - near) / step).round();
+        near - clusters * step
+    }
+
+    /// The style the run is laid out in, painted with `paint`.
+    fn layout_style(&self, paint: &Paint) -> TextStyle {
+        let mut char_style = TextStyle::clone(&self.char_style);
+        char_style.set_foreground_paint(paint);
+        char_style.set_decoration(&self.text_decoration.for_layout(
+            &char_style,
+            paint.color(),
+            self.decoration_thickness,
+        ));
+
+        // Let SkParagraph synthesise what Chrome synthesises and nothing
+        // else -- see `synthesis_style`. The match was found once, when the
+        // collection was chosen, rather than by searching it again here: the
+        // search needed a `Vec` of the family names, a clone of the
+        // collection and a lookup, 173 nanoseconds of every layout on this
+        // machine, to arrive at what `fonts_for_style` had already had in
+        // hand.
+        if let Some(matched) = self.matched_style {
+            char_style.set_font_style(synthesis_style(
+                self.char_style.font_style(),
+                matched,
+            ));
+        }
+        char_style
+    }
+
+    /// The run laid out in `char_style`, which is the first face's style,
+    /// and again with each run another face draws in the style for its own
+    /// face.
+    ///
+    /// SkParagraph applies one style's weight to whatever face each run
+    /// finds: at `900 48px Montserrat, Raleway`, Chrome draws the Latin as
+    /// plain Montserrat 700 and the Cyrillic, which Montserrat lacks, as
+    /// Raleway's 900 instance.
+    fn restyled_paragraph(&self, char_style: &TextStyle) -> Paragraph {
+        let mut first = self.paragraph_with(char_style, &[]);
+        let restyled = runs_to_restyle(
+            &mut first,
+            self.char_style.font_style(),
+            char_style.font_style(),
+        );
+        match restyled.is_empty() {
+            true => first,
+            false => self.paragraph_with(char_style, &restyled),
         }
     }
 
@@ -994,6 +1052,31 @@ impl<'a> Typesetter<'a> {
                 (norm - ascent, descent - norm)
             });
 
+        // The laid-out width, not `max_intrinsic_width`: that is what the
+        // run would take unwrapped, so it contradicts both the ink bounds
+        // beside it and the pixels actually drawn. Except where a spacing
+        // is negative on an unwrapped run: the laid-out boxes are sorted
+        // rectangles and cannot be negative, and they leave out a trailing
+        // space's negative spacing -- `"a "` at -10px measured 7.04 where
+        // the advance is 6.2 -- so the advance is taken from the run.
+        let negative_spacing = self.char_style.letter_spacing() < 0.0
+            || self.char_style.word_spacing() < 0.0;
+        let width = match negative_spacing && !self.text_wrap {
+            true => self.signed_advance(&paragraph) * condensation,
+            false => width,
+        };
+        // Where the advance is negative, what `Measured::ink` reaches back
+        // to on the left -- see `NegativeAdvance`.
+        let negative_advance =
+            (width < 0.0 && !self.text_wrap).then(|| NegativeAdvance {
+                width,
+                shift: match self.gravity() {
+                    TextAlign::Center => width / 2.0,
+                    TextAlign::Right => width,
+                    _ => 0.0,
+                },
+            });
+
         let extents = TextExtents {
             width,
             ink: Rect::new_empty(),
@@ -1015,6 +1098,7 @@ impl<'a> Typesetter<'a> {
             norm,
             ideo,
             char_ranges,
+            negative_advance,
         };
         (extents, measured)
     }
@@ -1101,9 +1185,10 @@ impl<'a> Typesetter<'a> {
         }
     }
 
-    fn alignment_offset(&self) -> f32 {
-        // convert start/end to left/right depending on writing system
-        let gravity = match (
+    /// The alignment with `start` and `end` resolved to a side by the
+    /// direction.
+    fn gravity(&self) -> TextAlign {
+        match (
             self.graf_style.text_direction(),
             self.graf_style.text_align(),
         ) {
@@ -1112,7 +1197,11 @@ impl<'a> Typesetter<'a> {
             (TextDirection::LTR, TextAlign::End)
             | (TextDirection::RTL, TextAlign::Start) => TextAlign::Right,
             (_, alignment) => alignment,
-        };
+        }
+    }
+
+    fn alignment_offset(&self) -> f32 {
+        let gravity = self.gravity();
 
         // `alignment_factor` shifts the whole line to left/right/centre align
         // it. `spacing_step` is the letter-spacing correction, and it is only
@@ -1692,6 +1781,27 @@ pub struct Measured {
     ideo: f32,
     /// Each line's text, in UTF-16 code units.
     char_ranges: Vec<Range<usize>>,
+    /// Where an unwrapped run's advance is negative, how far left its ink
+    /// box reaches.
+    negative_advance: Option<NegativeAdvance>,
+}
+
+/// An unwrapped run whose advance is negative, as its ink box needs it.
+///
+/// Chrome's box for such a run reaches back on the left to where the advance
+/// ends: Blink's plain_text_node.cc moves the left edge of the run's ink out
+/// to the smaller of its width and its ink's width -- the width, the ink's
+/// being never negative -- to cover the glyphs a negative advance carries
+/// left without measuring each, and leaves the right edge as it is. So `a`
+/// at -50px of letter spacing reports `actualBoundingBoxLeft` 32.96, its
+/// advance, though its ink begins 1.68 right of the origin. Applied where
+/// Chrome applies it, before the alignment shifts the run by none, half or
+/// all of the width.
+struct NegativeAdvance {
+    /// The signed advance, condensed.
+    width: f32,
+    /// How far the alignment moves the run: none, half or all of `width`.
+    shift: f32,
 }
 
 impl Measured {
@@ -1708,6 +1818,7 @@ impl Measured {
             norm,
             ideo,
             char_ranges,
+            negative_advance,
         } = self;
         let (origin, condensation, half_leading) =
             (*origin, *condensation, *half_leading);
@@ -1889,6 +2000,15 @@ impl Measured {
                 }
             }
         }
+        let ink_bounds = match negative_advance {
+            Some(NegativeAdvance { width, shift }) => Rect::new(
+                (ink_bounds.left + *shift).min(*width) - *shift,
+                ink_bounds.top,
+                ink_bounds.right,
+                ink_bounds.bottom,
+            ),
+            None => ink_bounds,
+        };
         (ink_bounds, line_details)
     }
 }
@@ -1900,7 +2020,9 @@ impl Measured {
 pub struct TextExtents {
     /// Advance width of the run.
     pub width: f32,
-    /// Union of the per-glyph inked bounds, baseline-relative.
+    /// Union of the per-glyph inked bounds, baseline-relative -- reaching
+    /// back on the left to the end of a negative advance, as Chrome's box
+    /// does.
     pub ink: Rect,
     /// Distance the face can reach above the baseline, positive.
     pub font_ascent: f32,

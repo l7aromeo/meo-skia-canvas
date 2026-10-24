@@ -172,6 +172,19 @@ removed and no signature moves.
   as Skia no longer re-blurs each glyph on every draw; a rectangle blurred by
   more than 40px costs about 200 microseconds a draw where it cost almost
   nothing, the price of Chrome's picture.
+
+- **`measureText().width` is negative where the spacing makes the advance
+  negative, and counts a trailing space's spacing, as Chrome does.** At 40px
+  Oswald with `letterSpacing = "-23.12px"`, `"abcd"` measured 0 where
+  Chrome measures -23.44, and `"ab "` at -50px measured 40.84 where it is
+  -105.92; even a positive width came out wrong once a trailing space was
+  narrowed, as `"a "` at -10px, 7.04 where Chrome measures 6.2. The width
+  is now the advance of every glyph and space with its spacing, which is
+  what Chrome reports and what the drawing already used: where the text is
+  drawn does not move. And the bounding box of a negative advance reaches
+  back on the left to where the advance ends, as Chrome's does: `a` at
+  -50px reports `actualBoundingBoxLeft` 32.96, its advance, though its ink
+  begins 1.68 right of the origin.
 - **`getImageData` on the GPU unpremultiplies as the CPU does.** On the
   GPU engine, the default on macOS, a translucent pixel read back up to a
   level low wherever its unpremultiplied value fell on a half:
