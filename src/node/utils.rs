@@ -988,8 +988,7 @@ pub fn float_args_or_bail_at(
 // Colors
 //
 
-/// Rec. 2020's transfer function, extended through zero the way
-/// [`srgb_to_linear`] is.
+/// Rec. 2020's power segment's scale, and the offset that follows from it.
 ///
 /// ITU-R BT.2020 writes the encode as
 ///
@@ -998,26 +997,41 @@ pub fn float_args_or_bail_at(
 /// V = alpha L^0.45 - (alpha - 1)   otherwise
 /// ```
 ///
-/// and this is its inverse. The constants are the standard's own, to the
-/// precision it gives for ten-bit systems.
-fn rec2020_decode(encoded: f32) -> f32 {
-    /// Scale of the power segment, and the offset that follows from it.
-    const ALPHA: f32 = 1.099_296_8;
-    /// Breakpoint, on the linear-light side.
-    const BETA: f32 = 0.018_053_97;
-    /// Slope of the linear segment near black. Steeper than sRGB's 12.92
-    /// because the breakpoint sits higher.
-    const SLOPE: f32 = 4.5;
-    /// Exponent of the power segment. Unlike sRGB, the standard states this
-    /// one on the encode side, so the decode raises to its reciprocal.
-    const EXPONENT: f32 = 0.45;
+/// and these are the standard's own constants, to the precision it gives
+/// for ten-bit systems.
+const REC2020_ALPHA: f32 = 1.099_296_8;
+/// Rec. 2020's breakpoint, on the linear-light side.
+const REC2020_BETA: f32 = 0.018_053_97;
+/// Rec. 2020's slope near black. Steeper than sRGB's 12.92 because the
+/// breakpoint sits higher.
+const REC2020_SLOPE: f32 = 4.5;
+/// Rec. 2020's exponent. Unlike sRGB, the standard states this one on the
+/// encode side, so the decode raises to its reciprocal.
+const REC2020_EXPONENT: f32 = 0.45;
 
+/// Rec. 2020's transfer function, extended through zero the way
+/// [`srgb_to_linear`] is: the inverse of the encode [`REC2020_ALPHA`] gives.
+fn rec2020_decode(encoded: f32) -> f32 {
     let magnitude = encoded.abs();
-    let linear = match magnitude < BETA * SLOPE {
-        true => magnitude / SLOPE,
-        false => ((magnitude + ALPHA - 1.0) / ALPHA).powf(1.0 / EXPONENT),
+    let linear = match magnitude < REC2020_BETA * REC2020_SLOPE {
+        true => magnitude / REC2020_SLOPE,
+        false => ((magnitude + REC2020_ALPHA - 1.0) / REC2020_ALPHA)
+            .powf(1.0 / REC2020_EXPONENT),
     };
     linear.copysign(encoded)
+}
+
+/// Rec. 2020's encode, the inverse of [`rec2020_decode`].
+fn rec2020_encode(linear: f32) -> f32 {
+    let magnitude = linear.abs();
+    let encoded = match magnitude < REC2020_BETA {
+        true => magnitude * REC2020_SLOPE,
+        false => {
+            REC2020_ALPHA * magnitude.powf(REC2020_EXPONENT)
+                - (REC2020_ALPHA - 1.0)
+        }
+    };
+    encoded.copysign(linear)
 }
 
 /// Parses CSS Color 4's `color(<space> r g b[ / a])`.
@@ -1127,29 +1141,54 @@ const LINEAR_PROPHOTO_TO_LINEAR_SRGB: [[f32; 3]; 3] = [
     [-0.008_558_828, -0.153_266_7, 1.161_825_5],
 ];
 
+/// A98 RGB's exponent, which Adobe RGB (1998) specifies as 2 51/256.
+const A98_EXPONENT: f32 = 563.0 / 256.0;
+
 /// A98 RGB's transfer function, CSS Color 4's `lin_a98rgb`: a pure power,
 /// mirrored through zero so a negative component keeps its sign.
 fn a98_decode(encoded: f32) -> f32 {
-    /// The exponent Adobe RGB (1998) specifies as 2 51/256.
-    const EXPONENT: f32 = 563.0 / 256.0;
-    encoded.abs().powf(EXPONENT).copysign(encoded)
+    encoded.abs().powf(A98_EXPONENT).copysign(encoded)
 }
+
+/// A98 RGB's encode, CSS Color 4's `gam_a98rgb`.
+fn a98_encode(linear: f32) -> f32 {
+    linear.abs().powf(1.0 / A98_EXPONENT).copysign(linear)
+}
+
+/// Where ProPhoto RGB's linear toe ends, on the encoded side: CSS Color 4's
+/// `Et2`.
+const PROPHOTO_TOE: f32 = 16.0 / 512.0;
+/// The toe's slope, as the encoded value over the linear one.
+const PROPHOTO_TOE_SLOPE: f32 = 16.0;
+/// ProPhoto RGB's power above the toe.
+const PROPHOTO_EXPONENT: f32 = 1.8;
 
 /// ProPhoto RGB's transfer function, CSS Color 4's `lin_ProPhoto`: a 1.8
 /// power above a short linear toe, mirrored through zero.
 fn prophoto_decode(encoded: f32) -> f32 {
-    /// Where the toe ends, on the encoded side.
-    const TOE: f32 = 16.0 / 512.0;
-    /// The toe's slope, as the encoded value over the linear one.
-    const TOE_SLOPE: f32 = 16.0;
-    /// The power above the toe.
-    const EXPONENT: f32 = 1.8;
     let magnitude = encoded.abs();
-    let linear = match magnitude <= TOE {
-        true => magnitude / TOE_SLOPE,
-        false => magnitude.powf(EXPONENT),
+    let linear = match magnitude <= PROPHOTO_TOE {
+        true => magnitude / PROPHOTO_TOE_SLOPE,
+        false => magnitude.powf(PROPHOTO_EXPONENT),
     };
     linear.copysign(encoded)
+}
+
+/// ProPhoto RGB's encode, CSS Color 4's `gam_ProPhoto`, mirrored through
+/// zero as the decode is. The toe ends at `Et`, 1/512, on the linear side,
+/// which is where it ends on the encoded side over its slope.
+fn prophoto_encode(linear: f32) -> f32 {
+    let magnitude = linear.abs();
+    let encoded = match magnitude >= PROPHOTO_TOE / PROPHOTO_TOE_SLOPE {
+        true => magnitude.powf(1.0 / PROPHOTO_EXPONENT),
+        false => magnitude * PROPHOTO_TOE_SLOPE,
+    };
+    encoded.copysign(linear)
+}
+
+/// `m` times `v`.
+fn apply_matrix(m: [[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
+    m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
 }
 
 /// The inverse of a 3x3 matrix, by its adjugate, in `f64` so the inverse
@@ -1221,8 +1260,9 @@ pub(crate) fn color4f_to_working_linear(
 /// Converts `color()` components into extended sRGB.
 ///
 /// For the callers that need a colour in sRGB rather than tagged with its
-/// space: a gradient stop, an 8-bit `SkColor`, a getter's report and
-/// `RgbaLinear::from_css`. A paint keeps the colour in the space it was named
+/// space: a gradient stop, an 8-bit `SkColor`, a getter's report,
+/// `RgbaLinear::from_css`, and a colour in a space no canvas holds, `xyz`
+/// among them. A paint keeps the colour in the space it was named
 /// in, so a P3 colour on a P3 canvas needs no conversion at all, and a round
 /// trip through sRGB would cost it about a level of the eight the readback
 /// quantises to.
@@ -1256,9 +1296,47 @@ fn color_function_to_srgb(color: Color4f, space: &str) -> Color4f {
             apply(LINEAR_PROPHOTO_TO_LINEAR_SRGB, linear(prophoto_decode))
                 .map(linear_to_srgb)
         }
+        "xyz" | "xyz-d65" => {
+            apply(XYZ_D65_TO_LINEAR_SRGB, [color.r, color.g, color.b])
+                .map(linear_to_srgb)
+        }
+        "xyz-d50" => apply(
+            XYZ_D65_TO_LINEAR_SRGB,
+            apply(BRADFORD_D50_TO_D65, [color.r, color.g, color.b]),
+        )
+        .map(linear_to_srgb),
         _ => return color,
     };
     Color4f::new(r, g, b, color.a)
+}
+
+/// Extended sRGB into the components `color()` names in `space`, the
+/// inverse of [`color_function_to_srgb`]: into linear light, through the
+/// inverse of the matrix that space converts by, and out through its own
+/// transfer function. `None` for a space `color()` does not name.
+fn srgb_to_color_function(rgb: [f32; 3], space: &str) -> Option<[f32; 3]> {
+    let linear = rgb.map(srgb_to_linear);
+    let through = |m: [[f32; 3]; 3], encode: fn(f32) -> f32| {
+        apply_matrix(inverse(m), linear).map(encode)
+    };
+    Some(match space {
+        "srgb" => rgb,
+        "srgb-linear" => linear,
+        "display-p3" => through(LINEAR_P3_TO_LINEAR_SRGB, linear_to_srgb),
+        "rec2020" => through(LINEAR_REC2020_TO_LINEAR_SRGB, rec2020_encode),
+        "a98-rgb" => through(LINEAR_A98_TO_LINEAR_SRGB, a98_encode),
+        "prophoto-rgb" => {
+            through(LINEAR_PROPHOTO_TO_LINEAR_SRGB, prophoto_encode)
+        }
+        "xyz" | "xyz-d65" => {
+            apply_matrix(inverse(XYZ_D65_TO_LINEAR_SRGB), linear)
+        }
+        "xyz-d50" => apply_matrix(
+            inverse(BRADFORD_D50_TO_D65),
+            apply_matrix(inverse(XYZ_D65_TO_LINEAR_SRGB), linear),
+        ),
+        _ => return None,
+    })
 }
 
 /// The name of a color space this crate can build, by comparing against each.
@@ -1459,7 +1537,17 @@ fn parse_lab_like(css: &str) -> Option<Color4f> {
         )
     };
 
-    // Lab to XYZ against Lab's own D50 white, CSS Color 4 section 12.1.
+    let [r, g, blue] = lab_to_srgb([l, a, b]);
+    // Unclamped, for the reason `css_to_color4f` gives: Lab names colours
+    // outside the sRGB gamut and clamping here would lose them before the
+    // surface that can hold them.
+    Some(Color4f::new(r, g, blue, alpha))
+}
+
+/// CIE Lab into extended sRGB: to XYZ against Lab's own D50 white, CSS
+/// Color 4 section 12.1, then [`BRADFORD_D50_TO_D65`] and the sRGB matrix.
+/// Nothing is clipped, a lightness outside `0..=100` included.
+fn lab_to_srgb([l, a, b]: [f32; 3]) -> [f32; 3] {
     let fy = (l + 16.0) / 116.0;
     let fx = a / 500.0 + fy;
     let fz = fy - b / 200.0;
@@ -1481,22 +1569,71 @@ fn parse_lab_like(css: &str) -> Option<Color4f> {
         y * LAB_WHITE_D50[1],
         inverse(fz) * LAB_WHITE_D50[2],
     ];
+    apply_matrix(
+        XYZ_D65_TO_LINEAR_SRGB,
+        apply_matrix(BRADFORD_D50_TO_D65, xyz_d50),
+    )
+    .map(linear_to_srgb)
+}
 
-    let apply = |m: [[f32; 3]; 3], v: [f32; 3]| {
-        [
-            m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
-            m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
-            m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
-        ]
-    };
-    let [r, g, blue] =
-        apply(XYZ_D65_TO_LINEAR_SRGB, apply(BRADFORD_D50_TO_D65, xyz_d50))
-            .map(linear_to_srgb);
+/// Extended sRGB into CIE Lab, CSS Color 4's `XYZ_to_Lab` after the
+/// inverses of the matrices [`lab_to_srgb`] applies, so the two are a pair.
+fn srgb_to_lab(rgb: [f32; 3]) -> [f32; 3] {
+    let xyz_d50 = apply_matrix(
+        inverse(BRADFORD_D50_TO_D65),
+        apply_matrix(inverse(XYZ_D65_TO_LINEAR_SRGB), rgb.map(srgb_to_linear)),
+    );
+    let [fx, fy, fz] = std::array::from_fn(|i| {
+        let scaled = xyz_d50[i] / LAB_WHITE_D50[i];
+        match scaled > LAB_EPSILON {
+            true => scaled.cbrt(),
+            false => (LAB_KAPPA * scaled + 16.0) / 116.0,
+        }
+    });
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+}
 
-    // Unclamped, for the reason `css_to_color4f` gives: Lab names colours
-    // outside the sRGB gamut and clamping here would lose them before the
-    // surface that can hold them.
-    Some(Color4f::new(r, g, blue, alpha))
+/// XYZ with a D65 white into Oklab's cone responses: the first matrix of
+/// CSS Color 4's `XYZ_to_OKLab` ([section 19]), recalculated there for a
+/// consistent white.
+///
+/// [section 19]: https://www.w3.org/TR/css-color-4/#color-conversion-code
+const XYZ_D65_TO_OKLAB_LMS: [[f32; 3]; 3] = [
+    [0.819_022_4, 0.361_906_26, -0.128_873_78],
+    [0.032_983_654, 0.929_286_86, 0.036_144_666],
+    [0.048_177_19, 0.264_239_53, 0.633_547_8],
+];
+
+/// Oklab's cube-rooted cone responses into `L`, `a` and `b`, the second
+/// matrix of CSS Color 4's `XYZ_to_OKLab`.
+const OKLAB_LMS_TO_OKLAB: [[f32; 3]; 3] = [
+    [0.210_454_27, 0.793_617_8, -0.004_072_043],
+    [1.977_998_5, -2.428_592_2, 0.450_593_7],
+    [0.025_904_042, 0.782_771_7, -0.808_675_77],
+];
+
+/// Extended sRGB into Oklab, by CSS Color 4's `XYZ_to_OKLab`. The cube root
+/// keeps its sign, as the sample code warns a port must.
+fn srgb_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
+    let xyz =
+        apply_matrix(inverse(XYZ_D65_TO_LINEAR_SRGB), rgb.map(srgb_to_linear));
+    apply_matrix(
+        OKLAB_LMS_TO_OKLAB,
+        apply_matrix(XYZ_D65_TO_OKLAB_LMS, xyz).map(f32::cbrt),
+    )
+}
+
+/// Oklab into extended sRGB, by the inverses of the matrices
+/// [`srgb_to_oklab`] applies, so the two are a pair -- CSS Color 4 publishes
+/// its own inverses, which agree with these to their precision.
+fn oklab_to_srgb(oklab: [f32; 3]) -> [f32; 3] {
+    let lms =
+        apply_matrix(inverse(OKLAB_LMS_TO_OKLAB), oklab).map(|c| c * c * c);
+    apply_matrix(
+        XYZ_D65_TO_LINEAR_SRGB,
+        apply_matrix(inverse(XYZ_D65_TO_OKLAB_LMS), lms),
+    )
+    .map(linear_to_srgb)
 }
 
 /// Whether `csscolorparser` builds `css` through `Color::from_linear_rgba`.
@@ -1509,8 +1646,8 @@ fn parse_lab_like(css: &str) -> Option<Color4f> {
 /// `css_to_color4f_in_space` repairs, and a negative in the second, such as
 /// `color(srgb -0.1 0 0)`, already means what it says. Some of the first
 /// group are normally read by this crate's own parsers before this is asked;
-/// what reaches `csscolorparser` is what they refused, a relative
-/// `lab(from ...)` among it.
+/// what reaches `csscolorparser` is what they refused. A relative colour
+/// never reaches it.
 fn built_from_linear_light(css: &str) -> bool {
     let Some((name, rest)) = css.trim_start().split_once('(') else {
         return false;
@@ -1572,94 +1709,188 @@ fn color_function_space(args: &str) -> Option<&str> {
     }
 }
 
-/// A relative colour -- `rgb(from <origin> r g b)` -- rewritten so that
-/// `csscolorparser` reads its origin as CSS means it, or `None` for anything
-/// else.
-///
-/// `csscolorparser` keeps one sRGB value per colour, encoded with the
-/// transfer function `css_to_color4f_in_space` describes, and reads a
-/// relative colour's channels out of it: as stored for `rgb()` and
-/// `color(srgb ...)`, and decoded by the matching inverse for the functions
-/// that work in linear light. The pair cancels, so an origin
-/// it built in linear light reaches a linear-light function intact -- and
-/// reaches an sRGB one with its negative channel on the wrong curve, while
-/// an origin written in sRGB with a negative channel reaches a linear-light
-/// function on the wrong curve. An origin it cannot read at all, such as
-/// `color(display-p3 ...)`, refuses the whole colour.
-///
-/// So the origin is resolved by this crate's own parser, which is right in
-/// every space, and handed over as a literal in the space the function
-/// reads: `color(srgb ...)` with the CSS encoding for the sRGB functions,
-/// `color(srgb-linear ...)` for the others, whose stored encoding the
-/// matching decode then undoes exactly. The origin may itself be relative,
-/// and is resolved the same way. A `color()` in a space `csscolorparser`
-/// does not offer is left as it is, and refused. `hsl()` and `hwb()` never
-/// reach here: [`relative_hue_color`] reads them whole.
-fn with_resolved_origin(css: &str) -> Option<String> {
-    // UPSTREAM: csscolorparser 0.9.0 -- unfiled -- worked around
-    // Re-check: return `None` here, then cargo test
-    // the_rust_surface_takes_css_colors; its `rgb(from oklch(0.8 0.18 165) r g
-    // b)` row on a Display P3 canvas reads 4 rather than 91 if the defect is
-    // still there. The defect is the encode `css_to_color4f_in_space` repairs,
-    // seen from inside a relative colour, where a repair afterwards is too
-    // late.
-    let (name, args) = css.trim().split_once('(')?;
-    let spans = top_level_spans(args);
-    let [(from, from_end), (origin, origin_end), ..] = spans[..] else {
-        return None;
-    };
-    if !args[from..from_end].eq_ignore_ascii_case("from") {
-        return None;
-    }
-    let linear = match name.to_ascii_lowercase().as_str() {
-        "rgb" | "rgba" => false,
-        "lab" | "lch" | "oklab" | "oklch" => true,
-        "color" => {
-            match color_function_space(args)?.to_ascii_lowercase().as_str() {
-                "srgb" => false,
-                "srgb-linear" | "xyz" | "xyz-d50" | "xyz-d65" => true,
-                _ => return None,
-            }
-        }
-        _ => return None,
-    };
-    let c = css_to_color4f(&args[origin..origin_end])?;
-    let literal = match linear {
-        true => format!(
-            "color(srgb-linear {} {} {} / {})",
-            srgb_to_linear(c.r),
-            srgb_to_linear(c.g),
-            srgb_to_linear(c.b),
-            c.a,
-        ),
-        false => format!("color(srgb {} {} {} / {})", c.r, c.g, c.b, c.a),
-    };
-    Some(format!(
-        "{name}({}{literal}{}",
-        &args[..origin],
-        &args[origin_end..]
-    ))
+/// The scale a relative colour's channel keyword is on where CSS Color 4
+/// writes a percentage of 100: `hsl()` saturation and lightness, `hwb()`
+/// whiteness and blackness, and Lab and LCH lightness. CSS Color 5 resolves
+/// each keyword to that `<number>`, so `s` in `hsl(from red h s l)` is 100
+/// rather than 1, and `50%` written in its place is 50.
+const PERCENT_CHANNEL_SCALE: f64 = 100.0;
+
+/// What an `rgb()` percentage is out of: CSS Color 4 section 5.1, "100%
+/// corresponds to 255". The `r`, `g` and `b` keywords are on the same scale.
+const RGB_CHANNEL_SCALE: f64 = 255.0;
+
+/// What an `oklab()` percentage on the `a` and `b` axes is, and an
+/// `oklch()` chroma's: CSS Color 4 section 9.4, "100% = 0.4" for both.
+const OKLAB_CHROMA_FULL_SCALE: f64 = 0.4;
+
+/// Where an LCH hue becomes powerless: CSS Color 4 section 9.3's table,
+/// "C <= 0.0015", the `epsilon` of its `Lab_to_LCH`.
+const LCH_POWERLESS_CHROMA: f32 = 0.0015;
+
+/// Where an OkLCh hue becomes powerless: CSS Color 4 section 9.4's table,
+/// "C <= 0.000004", the `epsilon` of its `OKLab_to_OKLCH`.
+const OKLCH_POWERLESS_CHROMA: f32 = 0.000_004;
+
+/// What one channel of a relative colour may be written as besides a
+/// number.
+#[derive(Clone, Copy)]
+enum Channel {
+    /// A hue, in degrees or as an angle.
+    Hue,
+    /// A number on this scale, or a percentage of it.
+    Scaled(f64),
 }
 
-/// What a relative `hsl()` or `hwb()` channel keyword reads saturation,
-/// lightness, whiteness and blackness out of.
-///
-/// CSS Color 5 resolves each to a `<number>` on the scale of its percentage,
-/// so `s` in `hsl(from red h s l)` is 100 rather than 1, and a percentage
-/// written in its place is the same number: `50%` and `50` are one value.
-const HUE_CHANNEL_SCALE: f64 = 100.0;
+/// The function a relative colour is written in, which decides its channel
+/// keywords, the scale of each, and how the result becomes a colour.
+#[derive(Clone, Copy, PartialEq)]
+enum Relative {
+    Rgb,
+    Hsl,
+    Hwb,
+    Lab,
+    Lch,
+    Oklab,
+    Oklch,
+    /// `color(from <origin> <space> ...)`, in a space `color()` names.
+    Color(&'static str),
+}
 
-/// Which channel of a relative `hsl()` or `hwb()` a token is, which decides
-/// what it may be written as besides a number.
-#[derive(Clone, Copy)]
-enum HueChannel {
-    /// The hue, in degrees or as an angle.
-    Hue,
-    /// Saturation, lightness, whiteness or blackness, out of
-    /// [`HUE_CHANNEL_SCALE`] or as a percentage.
-    Scaled,
-    /// The alpha, out of one or as a percentage.
-    Alpha,
+impl Relative {
+    /// The function's channel keywords, in order, then `alpha`.
+    fn keywords(self) -> [&'static str; 4] {
+        match self {
+            Self::Rgb => ["r", "g", "b", "alpha"],
+            Self::Hsl => ["h", "s", "l", "alpha"],
+            Self::Hwb => ["h", "w", "b", "alpha"],
+            Self::Lab | Self::Oklab => ["l", "a", "b", "alpha"],
+            Self::Lch | Self::Oklch => ["l", "c", "h", "alpha"],
+            Self::Color(space) if space.starts_with("xyz") => {
+                ["x", "y", "z", "alpha"]
+            }
+            Self::Color(_) => ["r", "g", "b", "alpha"],
+        }
+    }
+
+    /// What each of the three channels may be written as.
+    fn channels(self) -> [Channel; 3] {
+        let lab_ab = Channel::Scaled(f64::from(LAB_AB_FULL_SCALE));
+        let oklab_ab = Channel::Scaled(OKLAB_CHROMA_FULL_SCALE);
+        let percent = Channel::Scaled(PERCENT_CHANNEL_SCALE);
+        match self {
+            Self::Rgb => [Channel::Scaled(RGB_CHANNEL_SCALE); 3],
+            Self::Hsl | Self::Hwb => [Channel::Hue, percent, percent],
+            Self::Lab => [percent, lab_ab, lab_ab],
+            Self::Lch => [
+                percent,
+                Channel::Scaled(f64::from(LCH_CHROMA_FULL_SCALE)),
+                Channel::Hue,
+            ],
+            Self::Oklab => [Channel::Scaled(1.0), oklab_ab, oklab_ab],
+            Self::Oklch => [Channel::Scaled(1.0), oklab_ab, Channel::Hue],
+            Self::Color(_) => [Channel::Scaled(1.0); 3],
+        }
+    }
+
+    /// The origin's three channels as the keywords read them, or `None` for
+    /// a `color()` space it does not name.
+    ///
+    /// Unclamped, a lightness outside its range included: Chrome 153 reads
+    /// `l` as 104.4 in `lab(from color(srgb 1.05 1.05 1.05) calc(l - 30) a
+    /// b)`, which paints `lab(74.4 0 0)`. Only the result is clamped, by
+    /// [`color`](Self::color).
+    fn origin(self, rgb: [f32; 3]) -> Option<[f64; 3]> {
+        let wide = rgb.map(f64::from);
+        let lab = || srgb_to_lab(rgb);
+        let oklab = || srgb_to_oklab(rgb);
+        let scaled = |[x, y, z]: [f32; 3]| [x, y, z].map(f64::from);
+        Some(match self {
+            Self::Rgb => wide.map(|c| c * RGB_CHANNEL_SCALE),
+            Self::Hsl => {
+                let [h, s, l] = srgb_to_hsl(wide);
+                [h, s * PERCENT_CHANNEL_SCALE, l * PERCENT_CHANNEL_SCALE]
+            }
+            Self::Hwb => {
+                let [r, g, b] = wide;
+                [
+                    srgb_hue(wide),
+                    r.min(g).min(b) * PERCENT_CHANNEL_SCALE,
+                    (1.0 - r.max(g).max(b)) * PERCENT_CHANNEL_SCALE,
+                ]
+            }
+            Self::Lab => scaled(lab()),
+            Self::Lch => scaled(to_polar(lab(), LCH_POWERLESS_CHROMA)),
+            Self::Oklab => scaled(oklab()),
+            Self::Oklch => scaled(to_polar(oklab(), OKLCH_POWERLESS_CHROMA)),
+            Self::Color(space) => scaled(srgb_to_color_function(rgb, space)?),
+        })
+    }
+
+    /// The colour the evaluated channels name, and the space it is in: the
+    /// space `color()` named where a canvas can hold it, sRGB otherwise.
+    ///
+    /// Nothing is clipped but what CSS Color 4 clamps when it parses the
+    /// function: Lab and Oklab lightness into its range, and a polar chroma
+    /// at zero. Chrome 153 does both -- `lab(from red calc(l - 200) a b)` is
+    /// `lab(0 a b)` there and `lch(from red l calc(c - 200) h)` grey -- and
+    /// clips nothing else.
+    fn color(self, [x, y, z]: [f64; 3]) -> ([f32; 3], &'static str) {
+        let narrow = |v: [f64; 3]| v.map(|c| c as f32);
+        let lab_l = x.clamp(0.0, PERCENT_CHANNEL_SCALE);
+        let oklab_l = x.clamp(0.0, 1.0);
+        let from_polar = |l: f64, c: f64, h: f64| {
+            let (sin, cos) = h.to_radians().sin_cos();
+            narrow([l, c.max(0.0) * cos, c.max(0.0) * sin])
+        };
+        let srgb = match self {
+            Self::Rgb => narrow([x, y, z].map(|c| c / RGB_CHANNEL_SCALE)),
+            Self::Hsl => narrow(hsl_to_srgb(
+                x,
+                y / PERCENT_CHANNEL_SCALE,
+                z / PERCENT_CHANNEL_SCALE,
+            )),
+            Self::Hwb => narrow(hwb_to_srgb(
+                x,
+                y / PERCENT_CHANNEL_SCALE,
+                z / PERCENT_CHANNEL_SCALE,
+            )),
+            Self::Lab => lab_to_srgb(narrow([lab_l, y, z])),
+            Self::Lch => lab_to_srgb(from_polar(lab_l, y, z)),
+            Self::Oklab => oklab_to_srgb(narrow([oklab_l, y, z])),
+            Self::Oklch => oklab_to_srgb(from_polar(oklab_l, y, z)),
+            Self::Color(
+                space @ ("srgb" | "srgb-linear" | "display-p3" | "rec2020"),
+            ) => {
+                return (narrow([x, y, z]), space);
+            }
+            Self::Color(space) => {
+                let [r, g, b] = narrow([x, y, z]);
+                let c =
+                    color_function_to_srgb(Color4f::new(r, g, b, 1.0), space);
+                [c.r, c.g, c.b]
+            }
+        };
+        (srgb, "srgb")
+    }
+}
+
+/// Lab or Oklab as lightness, chroma and hue in degrees, the hue zero where
+/// it is powerless: at a chroma of `powerless` or less, which CSS Color 4
+/// sets per space.
+///
+/// Chrome 153 reads a hue off a neutral origin instead, whatever its own
+/// arithmetic leaves there -- about 356.6 degrees for white in LCH and 23.7
+/// in OkLCh -- so `lch(from white l 50 h)` is magenta there, where here its
+/// hue is zero. That hue is rounding noise, and this follows the standard;
+/// `docs/browser-differences.md` has the measurements.
+fn to_polar([l, a, b]: [f32; 3], powerless: f32) -> [f32; 3] {
+    let chroma = a.hypot(b);
+    let hue = match chroma <= powerless {
+        true => 0.0,
+        false => b.atan2(a).to_degrees().rem_euclid(DEGREES_PER_TURN as f32),
+    };
+    [l, chroma, hue]
 }
 
 /// The hue of an sRGB colour in degrees, `[0, 360)`, as CSS Color 4's
@@ -1736,38 +1967,47 @@ fn hwb_to_srgb(hue: f64, white: f64, black: f64) -> [f64; 3] {
     hsl_to_srgb(hue, 1.0, 0.5).map(|c| c * (1.0 - white - black) + white)
 }
 
-/// A relative `hsl()` or `hwb()` -- `hsl(from <origin> h s l)` -- read by
-/// this crate rather than by `csscolorparser`, or `None` for any other
-/// colour.
+/// A relative colour -- `rgb(from <origin> r g b)` and the rest -- read by
+/// this crate rather than by `csscolorparser`, with the space the result is
+/// in, or `None` for anything that is not one.
 ///
 /// `Some(None)` when it is one and does not parse, which is a refusal rather
 /// than a cue to read it some other way. `hwba(from ...)` is refused here:
 /// Chrome 153 has no such function, and `csscolorparser` reads it as `hwb()`.
 ///
-/// The origin is resolved by this crate's own parser, its channels found
-/// from it as it is, and each channel expression evaluated by the CSS math
-/// evaluator with the channel keywords bound -- so nothing is clipped to
-/// sRGB anywhere between the origin and the result, which is what Chrome
-/// does and what CSS Color 5 describes.
-fn relative_hue_color(css: &str) -> Option<Option<Color4f>> {
+/// The origin is resolved by this crate's own parser, its channels found in
+/// the function's own space from it as it is, and each channel expression
+/// evaluated by the CSS math evaluator with the channel keywords bound -- so
+/// nothing is clipped to sRGB between the origin and the result, which is
+/// what Chrome does and what CSS Color 5 describes.
+fn relative_color(css: &str) -> Option<Option<(Color4f, &'static str)>> {
     // UPSTREAM: csscolorparser 0.9.0 -- unfiled -- worked around
     // Re-check: return `None` here, then cargo test
-    // the_rust_surface_takes_css_colors; on a Display P3 canvas its
-    // `hsl(from oklch(0.8 0.18 165) h s l)` row reads 102 rather than 91 for
-    // red, and `hsl(from color(srgb 1.2 0.2 0.1) h s l)` 235, 72, 47 rather
-    // than 255, 81, 54, if `Color::to_hsla` still clamps. An sRGB canvas
-    // cannot tell: both clip to the same byte there.
+    // the_rust_surface_takes_css_colors; its `rgb(from oklch(0.8 0.18 165) r g
+    // b)` row on a Display P3 canvas reads 4 rather than 91 if the defects are
+    // still there.
     //
-    // `to_hsla` and `to_hwba` clamp a colour to 0..1 before converting it, so
-    // `csscolorparser` reads `hsl()` and `hwb()` over an origin outside sRGB
-    // as a different colour, however well the origin is resolved. Its channel
-    // grammar is narrower than the standard's too: it refuses an angle unit,
-    // a percentage, `calc(e)` and an infinity, and reads a negative
-    // saturation as zero.
+    // `csscolorparser` reads a relative colour's channels out of the one
+    // encoded sRGB value it keeps per colour. The encode is the one
+    // `css_to_color4f_in_space` repairs, so an origin it built in linear light
+    // reaches an sRGB function with its negative channel on the wrong curve,
+    // and the mirror of that holds the other way. `Color::to_hsla` and
+    // `to_hwba` clamp the origin to 0..1 before finding its hue. It cannot
+    // read an origin in `display-p3`, `rec2020`, `a98-rgb` or
+    // `prophoto-rgb`, nor relative `color()` into those spaces, and its
+    // channel grammar refuses percentages, angle units, `calc(e)` and
+    // infinities.
     let (name, args) = css.trim().split_once('(')?;
-    let hwb = match name.to_ascii_lowercase().as_str() {
-        "hsl" | "hsla" => false,
-        "hwb" | "hwba" => true,
+    let function = match name.to_ascii_lowercase().as_str() {
+        "rgb" | "rgba" => Relative::Rgb,
+        "hsl" | "hsla" => Relative::Hsl,
+        "hwb" | "hwba" => Relative::Hwb,
+        "lab" => Relative::Lab,
+        "lch" => Relative::Lch,
+        "oklab" => Relative::Oklab,
+        "oklch" => Relative::Oklch,
+        // The space is read with the channels, below.
+        "color" => Relative::Color(""),
         _ => return None,
     };
     let &(from, from_end) = top_level_spans(args).first()?;
@@ -1777,11 +2017,17 @@ fn relative_hue_color(css: &str) -> Option<Option<Color4f>> {
     if name.eq_ignore_ascii_case("hwba") {
         return Some(None);
     }
-    Some(relative_hue_channels(args, hwb))
+    Some(relative_channels(args, function))
 }
 
-/// The colour `relative_hue_color` reads, given what follows the `(`.
-fn relative_hue_channels(args: &str, hwb: bool) -> Option<Color4f> {
+/// The colour `relative_color` reads, given what follows the `(`.
+fn relative_channels(
+    args: &str,
+    function: Relative,
+) -> Option<(Color4f, &'static str)> {
+    fn token(text: &str, (from, to): (usize, usize)) -> &str {
+        &text[from..to]
+    }
     let body = args.trim_end().strip_suffix(')')?.trim_end();
     let spans = top_level_spans(body);
     // A `)` before the end stops the spans short of it: `hsl(from red h s
@@ -1789,11 +2035,29 @@ fn relative_hue_channels(args: &str, hwb: bool) -> Option<Color4f> {
     if spans.last()?.1 != body.len() {
         return None;
     }
-    let [_, (origin, origin_end), ..] = spans[..] else {
+    let [_, origin @ (_, origin_end), ..] = spans[..] else {
         return None;
     };
-    let origin = css_to_color4f(&body[origin..origin_end])?;
-    let rest = &body[origin_end..];
+    let origin = css_to_color4f(token(body, origin))?;
+    let (function, rest) = match function {
+        Relative::Color(_) => {
+            let &space @ (_, space_end) = spans.get(2)?;
+            let space = match token(body, space).to_ascii_lowercase().as_str() {
+                "srgb" => "srgb",
+                "srgb-linear" => "srgb-linear",
+                "display-p3" => "display-p3",
+                "rec2020" => "rec2020",
+                "a98-rgb" => "a98-rgb",
+                "prophoto-rgb" => "prophoto-rgb",
+                "xyz" => "xyz",
+                "xyz-d50" => "xyz-d50",
+                "xyz-d65" => "xyz-d65",
+                _ => return None,
+            };
+            (Relative::Color(space), &body[space_end..])
+        }
+        other => (other, &body[origin_end..]),
+    };
 
     let mut depth = 0usize;
     let slash = rest.char_indices().find_map(|(at, c)| {
@@ -1809,9 +2073,6 @@ fn relative_hue_channels(args: &str, hwb: bool) -> Option<Color4f> {
         Some(at) => (&rest[..at], Some(&rest[at + 1..])),
         None => (rest, None),
     };
-    fn token(text: &str, (from, to): (usize, usize)) -> &str {
-        &text[from..to]
-    }
     let [first, second, third] = top_level_spans(channels)[..] else {
         return None;
     };
@@ -1823,26 +2084,11 @@ fn relative_hue_channels(args: &str, hwb: bool) -> Option<Color4f> {
         None => None,
     };
 
-    let rgb = [origin.r, origin.g, origin.b].map(f64::from);
-    let [hue, x, y] = match hwb {
-        true => {
-            let [r, g, b] = rgb;
-            [srgb_hue(rgb), r.min(g).min(b), 1.0 - r.max(g).max(b)]
-        }
-        false => srgb_to_hsl(rgb),
-    };
-    let names = match hwb {
-        true => ["h", "w", "b"],
-        false => ["h", "s", "l"],
-    };
-    let bound = [
-        (names[0], hue),
-        (names[1], x * HUE_CHANNEL_SCALE),
-        (names[2], y * HUE_CHANNEL_SCALE),
-        ("alpha", f64::from(origin.a)),
-    ];
+    let [k0, k1, k2, k_alpha] = function.keywords();
+    let [o0, o1, o2] = function.origin([origin.r, origin.g, origin.b])?;
+    let bound = [(k0, o0), (k1, o1), (k2, o2), (k_alpha, f64::from(origin.a))];
     let units = FontUnits::assumed(f32::NAN);
-    let read = |text: &str, channel: HueChannel| -> Option<f64> {
+    let read = |text: &str, channel: Channel| -> Option<f64> {
         let keyword = text.to_ascii_lowercase();
         if keyword == "none" {
             return Some(0.0);
@@ -1865,13 +2111,12 @@ fn relative_hue_channels(args: &str, hwb: bool) -> Option<Color4f> {
             false => literal(text, &expect)?,
         };
         let value = match (channel, quantity.dimension) {
-            (_, Dimension::NUMBER) | (HueChannel::Hue, Dimension::ANGLE) => {
+            (_, Dimension::NUMBER) | (Channel::Hue, Dimension::ANGLE) => {
                 quantity.finished()
             }
-            (HueChannel::Scaled, Dimension::PERCENT) => {
-                quantity.finished() * HUE_CHANNEL_SCALE
+            (Channel::Scaled(scale), Dimension::PERCENT) => {
+                quantity.finished() * scale
             }
-            (HueChannel::Alpha, Dimension::PERCENT) => quantity.finished(),
             _ => return None,
         };
         // CSS Values 4 section 10.9 clamps an infinity to the largest value
@@ -1882,20 +2127,18 @@ fn relative_hue_channels(args: &str, hwb: bool) -> Option<Color4f> {
         Some(value.clamp(-largest, largest))
     };
 
-    let hue = read(token(channels, first), HueChannel::Hue)?;
-    let x = read(token(channels, second), HueChannel::Scaled)?;
-    let y = read(token(channels, third), HueChannel::Scaled)?;
+    let [c0, c1, c2] = function.channels();
+    let values = [
+        read(token(channels, first), c0)?,
+        read(token(channels, second), c1)?,
+        read(token(channels, third), c2)?,
+    ];
     let alpha = match alpha {
-        Some(text) => read(text, HueChannel::Alpha)?,
+        Some(text) => read(text, Channel::Scaled(1.0))?,
         None => f64::from(origin.a),
     };
-    let (x, y) = (x / HUE_CHANNEL_SCALE, y / HUE_CHANNEL_SCALE);
-    let [r, g, b] = match hwb {
-        true => hwb_to_srgb(hue, x, y),
-        false => hsl_to_srgb(hue, x, y),
-    }
-    .map(|c| c as f32);
-    Some(Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32))
+    let ([r, g, b], space) = function.color(values);
+    Some((Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32), space))
 }
 
 /// Parses a CSS color, keeping the space it was named in.
@@ -1904,6 +2147,11 @@ fn relative_hue_channels(args: &str, hwb: bool) -> Option<Color4f> {
 /// Skia converts at the paint, and converting via sRGB first would cost a
 /// level of the eight the readback quantises to.
 pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
+    if let Some(relative) = relative_color(css) {
+        // SAFETY: `relative_color` only returns names this builds.
+        return relative
+            .and_then(|(color, space)| Some((color, opt_color_space(space)?)));
+    }
     if let Some((color, space)) = parse_color_function(css) {
         // SAFETY: `parse_color_function` only returns names this builds.
         return Some((color, opt_color_space(space)?));
@@ -1925,13 +2173,7 @@ pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
     // meant is exactly the value over the slope, and re-encoding it through
     // the mirrored curve gives the CSS answer. Only a negative channel of a
     // colour built that way is touched; see `built_from_linear_light`. A
-    // relative colour reads its origin before any of this runs, so its origin
-    // is resolved first; see `with_resolved_origin`.
-    if let Some(color) = relative_hue_color(css) {
-        return color.map(|color| (color, ColorSpace::new_srgb()));
-    }
-    let resolved = with_resolved_origin(css);
-    let css = resolved.as_deref().unwrap_or(css);
+    // relative colour never gets this far; see `relative_color`.
     let from_linear = built_from_linear_light(css);
     let channel = |v: f32| match from_linear && v < 0.0 {
         true => linear_to_srgb(v / SRGB_SLOPE),
@@ -3287,6 +3529,20 @@ pub fn from_engine(engine: RenderingEngine) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hue_is_powerless_at_the_chroma_css_color_4_names_and_no_further() {
+        // CSS Color 4's tables: LCH at C <= 0.0015, OkLCh at C <= 0.000004.
+        // At the threshold the hue reads zero; one `f32` step past it, the
+        // quarter turn `b` alone gives.
+        for powerless in [LCH_POWERLESS_CHROMA, OKLCH_POWERLESS_CHROMA] {
+            let [_, chroma, hue] = to_polar([50.0, 0.0, powerless], powerless);
+            assert_eq!((chroma, hue), (powerless, 0.0), "at {powerless}");
+            let past = powerless.next_up();
+            let [_, _, hue] = to_polar([50.0, 0.0, past], powerless);
+            assert_eq!(hue, 90.0, "past {powerless}");
+        }
+    }
 
     #[test]
     fn an_argument_index_gets_the_ordinal_english_gives_it() {
