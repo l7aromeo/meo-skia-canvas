@@ -2838,3 +2838,49 @@ describe("a density suffix in a file name", () => {
     assert.deepEqual(fs.readdirSync(dir), [], "nothing written");
   });
 });
+
+describe("a read after an export", () => {
+  // An export files the page it drew in the page cache, and a read of the
+  // whole page draws from that cache. Drawn over a read surface that
+  // already held it, a half-alpha fill read back as three quarters, and
+  // again over that after the next export -- 128, 192, 224. Only a page
+  // wider than one 256-pixel square reaches the cache: a smaller read is
+  // served by the grid, which never consults it.
+  const SIDE = 300;
+  const halfRed = (gpu) => {
+    const canvas = new Canvas(SIDE, SIDE);
+    canvas.gpu = gpu;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "rgba(255, 0, 0, 0.5)";
+    ctx.fillRect(0, 0, SIDE, SIDE);
+    return canvas;
+  };
+  const alpha = (canvas) =>
+    canvas.getContext("2d").getImageData(0, 0, SIDE, SIDE).data[3];
+  const dir = tmp.dirSync({ unsafeCleanup: true }).name;
+  const exports = {
+    "toBufferSync png": (c) => c.toBufferSync("png"),
+    "toBufferSync raw": (c) => c.toBufferSync("raw"),
+    "toBufferSync jpeg": (c) => c.toBufferSync("jpeg"),
+    "toBuffer png": (c) => c.toBuffer("png"),
+    toDataURLSync: (c) => c.toDataURLSync("png"),
+    toDataURL: (c) => c.toDataURL("png"),
+    toFileSync: (c) => c.toFileSync(path.join(dir, "page.png")),
+    toFile: (c) => c.toFile(path.join(dir, "page.webp")),
+    "png getter": (c) => c.png,
+    "pdf, which files nothing": (c) => c.toBufferSync("pdf"),
+  };
+
+  for (const gpu of [false, true]) {
+    for (const [name, exported] of Object.entries(exports)) {
+      test(`sees the page once after ${name} (gpu ${gpu})`, async () => {
+        const canvas = halfRed(gpu);
+        await exported(canvas);
+        const reads = [alpha(canvas), alpha(canvas)];
+        await exported(canvas);
+        reads.push(alpha(canvas));
+        assert.deepEqual(reads, [128, 128, 128]);
+      });
+    }
+  }
+});

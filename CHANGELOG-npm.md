@@ -154,6 +154,22 @@ removed and no signature moves.
 
 ### Fixed
 
+- **`getImageData` after an export returns the canvas, not the canvas
+  drawn twice.** Any raster export -- `toBuffer`, `toBufferSync`,
+  `toDataURL`, `toFile` and the `png` getter -- files the page it drew in
+  a cache, and the next `getImageData` that composited the whole canvas
+  drew that cached bitmap onto its own surface again each time, on top of
+  what was there. A half-alpha fill over a 300-pixel canvas read back with
+  an alpha of 128 once, then 192, then 224 after a second export; opaque
+  content hid it. Every published version carries it: measured in 3.6.0,
+  4.0.0, 5.0.0 and 5.5.1 at every canvas size, and in 5.6.0 to 6.0.2 only
+  for a read wider than 256 pixels, which 5.6.0 began serving from tiles
+  that never consult the cache. Exports themselves were right throughout.
+
+  The same surface left its density scale applied after each update, so a
+  second `getImageData` at `density: 2` drew whatever was new at four
+  times the size. Every version measured carries that too.
+
 - **`instanceof CanvasGradient`, `instanceof TextMetrics` and
   `instanceof CanvasRenderingContext2D` type-check.** At run time they always
   worked; TypeScript refused all three -- "The right-hand side of an
