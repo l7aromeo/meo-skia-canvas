@@ -582,8 +582,7 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   painted `235, 72, 47` on a `display-p3` canvas where Chrome paints
   `255, 81, 54`, and a channel written as an angle or a percentage, an
   alpha as a percentage, `calc(e)` and an infinity were refused. Both now
-  read the origin unclipped and take every math function, and
-  `hwba(from ...)`, which is not a CSS function, is refused.
+  read the origin unclipped and take every math function.
 
   The other relative functions took the narrower grammar too:
   `fillStyle = 'rgb(from red r g b / 50%)'` was ignored where Chrome
@@ -742,6 +741,15 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   the values by name and nothing changes. `TextMetrics.prototype`, its
   `Symbol.toStringTag` and the constructor that refuses to be called are
   Chrome's already.
+
+- **`hwba()`, `hsv()`, `hsva()` and hex without its `#` as colours.**
+  The CSS parser underneath has always read them and no browser does:
+  Chrome 153 ignores `fillStyle = 'hwba(0 0% 0%)'`, `'hsv(0 100% 100%)'`,
+  `'hsva(0 100% 100% / 0.5)'` and `'ff0000'`, each of which paints red
+  here. They keep painting as they did, relative forms included, until
+  7.0 ignores them as a browser does. Write `#` before the hex digits and
+  `hwb()` for the rest: `hsv(h s v)` with `s` and `v` out of 100 is
+  `hwb(h calc((100 - s) * v / 100) calc(100 - v))`.
 
 ## 📦 ⟩ [v6.0.2] (npm) ⟩ September 16, 2026
 

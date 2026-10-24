@@ -285,10 +285,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `hsl(from color(srgb 1.2 0.2 0.1) h s l)` as `235, 72, 47` on a P3
   canvas where Chrome paints `255, 81, 54`, and it refused a channel
   written as an angle or a percentage, an alpha as a percentage,
-  `calc(e)` and an infinity. The
-  crate now reads both itself, from the origin unclipped and with every
-  math function, and refuses `hwba(from ...)`, which is not a CSS
-  function.
+  `calc(e)` and an infinity. The crate now reads both itself, from the
+  origin unclipped and with every math function.
 
   The other relative functions took the narrower grammar too: each of
   `rgb()`, `lab()`, `lch()`, `oklab()`, `oklch()` and `color()` refused a
@@ -654,6 +652,17 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   bounds are now remembered by face, size and glyph, up to 4,096 of them:
   `measure_text("Hello world")` takes about 4.3 µs in release on macOS where
   it took 5.6, and a seventy-character line about 15 where it took 25.
+
+### Deprecated
+
+- **`hwba()`, `hsv()`, `hsva()` and hex without its `#`.** The CSS parser
+  underneath has always read them and no browser does: Chrome 153 refuses
+  `hwba(0 0% 0%)`, `hsv(0 100% 100%)`, `hsva(0 100% 100% / 0.5)` and
+  `"ff0000"`, each of which every `set_*_css` setter and
+  `RgbaLinear::from_css` paint as red. They keep painting as they did,
+  relative forms included, and 0.17 refuses them. Write `#` before the
+  hex digits and `hwb()` for the rest: `hsv(h s v)` with `s` and `v` out
+  of 100 is `hwb(h calc((100 - s) * v / 100) calc(100 - v))`.
 
 ## 📦 ⟩ [v0.16.3] (crate) ⟩ September 16, 2026
 

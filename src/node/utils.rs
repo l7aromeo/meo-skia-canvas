@@ -1749,6 +1749,10 @@ enum Relative {
     Rgb,
     Hsl,
     Hwb,
+    /// `csscolorparser`'s own `hsv()`, which no browser reads. Deprecated:
+    /// it paints until crate 0.17 and npm 7.0 refuse it with the other
+    /// non-CSS forms `css_to_color4f_in_space` lists.
+    Hsv,
     Lab,
     Lch,
     Oklab,
@@ -1764,6 +1768,7 @@ impl Relative {
             Self::Rgb => ["r", "g", "b", "alpha"],
             Self::Hsl => ["h", "s", "l", "alpha"],
             Self::Hwb => ["h", "w", "b", "alpha"],
+            Self::Hsv => ["h", "s", "v", "alpha"],
             Self::Lab | Self::Oklab => ["l", "a", "b", "alpha"],
             Self::Lch | Self::Oklch => ["l", "c", "h", "alpha"],
             Self::Color(space) if space.starts_with("xyz") => {
@@ -1780,7 +1785,9 @@ impl Relative {
         let percent = Channel::Scaled(PERCENT_CHANNEL_SCALE);
         match self {
             Self::Rgb => [Channel::Scaled(RGB_CHANNEL_SCALE); 3],
-            Self::Hsl | Self::Hwb => [Channel::Hue, percent, percent],
+            Self::Hsl | Self::Hwb | Self::Hsv => {
+                [Channel::Hue, percent, percent]
+            }
             Self::Lab => [percent, lab_ab, lab_ab],
             Self::Lch => [
                 percent,
@@ -1819,6 +1826,19 @@ impl Relative {
                     (1.0 - r.max(g).max(b)) * PERCENT_CHANNEL_SCALE,
                 ]
             }
+            Self::Hsv => {
+                let [r, g, b] = wide;
+                let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+                let saturation = match max == 0.0 {
+                    true => 0.0,
+                    false => (max - min) / max,
+                };
+                [
+                    srgb_hue(wide),
+                    saturation * PERCENT_CHANNEL_SCALE,
+                    max * PERCENT_CHANNEL_SCALE,
+                ]
+            }
             Self::Lab => scaled(lab()),
             Self::Lch => scaled(to_polar(lab(), LCH_POWERLESS_CHROMA)),
             Self::Oklab => scaled(oklab()),
@@ -1855,6 +1875,12 @@ impl Relative {
                 y / PERCENT_CHANNEL_SCALE,
                 z / PERCENT_CHANNEL_SCALE,
             )),
+            // HSV is HWB with whiteness `(1 - s) v` and blackness `1 - v`.
+            Self::Hsv => {
+                let (s, v) =
+                    (y / PERCENT_CHANNEL_SCALE, z / PERCENT_CHANNEL_SCALE);
+                narrow(hwb_to_srgb(x, (1.0 - s) * v, 1.0 - v))
+            }
             Self::Lab => lab_to_srgb(narrow([lab_l, y, z])),
             Self::Lch => lab_to_srgb(from_polar(lab_l, y, z)),
             Self::Oklab => oklab_to_srgb(narrow([oklab_l, y, z])),
@@ -1972,8 +1998,9 @@ fn hwb_to_srgb(hue: f64, white: f64, black: f64) -> [f64; 3] {
 /// in, or `None` for anything that is not one.
 ///
 /// `Some(None)` when it is one and does not parse, which is a refusal rather
-/// than a cue to read it some other way. `hwba(from ...)` is refused here:
-/// Chrome 153 has no such function, and `csscolorparser` reads it as `hwb()`.
+/// than a cue to read it some other way. `hwba(from ...)`, `hsv(from ...)`
+/// and `hsva(from ...)` are read too, as `csscolorparser` always read them,
+/// and are deprecated with the forms `css_to_color4f_in_space` lists.
 ///
 /// The origin is resolved by this crate's own parser, its channels found in
 /// the function's own space from it as it is, and each channel expression
@@ -2001,7 +2028,10 @@ fn relative_color(css: &str) -> Option<Option<(Color4f, &'static str)>> {
     let function = match name.to_ascii_lowercase().as_str() {
         "rgb" | "rgba" => Relative::Rgb,
         "hsl" | "hsla" => Relative::Hsl,
+        // `hwba()` is no CSS function, and `csscolorparser` reads it as
+        // `hwb()`; deprecated with `hsv()`, below.
         "hwb" | "hwba" => Relative::Hwb,
+        "hsv" | "hsva" => Relative::Hsv,
         "lab" => Relative::Lab,
         "lch" => Relative::Lch,
         "oklab" => Relative::Oklab,
@@ -2013,9 +2043,6 @@ fn relative_color(css: &str) -> Option<Option<(Color4f, &'static str)>> {
     let &(from, from_end) = top_level_spans(args).first()?;
     if !args[from..from_end].eq_ignore_ascii_case("from") {
         return None;
-    }
-    if name.eq_ignore_ascii_case("hwba") {
-        return Some(None);
     }
     Some(relative_channels(args, function))
 }
@@ -2179,6 +2206,11 @@ pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
         true => linear_to_srgb(v / SRGB_SLOPE),
         false => v,
     };
+    // Deprecated, and refused from crate 0.17 and npm 7.0: `hwba()`, `hsv()`,
+    // `hsva()` and hex without its `#`. `csscolorparser` reads all four and
+    // no browser does -- Chrome 153 refuses each -- so they reach it here
+    // unchanged until then. `the_deprecated_colour_forms_still_paint` holds
+    // them, and their relative forms are read by `relative_color`.
     csscolorparser::parse(css).ok().map(|c| {
         (
             Color4f::new(channel(c.r), channel(c.g), channel(c.b), c.a),

@@ -1276,6 +1276,51 @@ fn a_neutral_origin_has_no_hue() -> Result<()> {
     Ok(())
 }
 
+/// The colour forms no browser reads that `csscolorparser` always has --
+/// `hwba()`, `hsv()`, `hsva()` and hex without its `#` -- still paint, as
+/// they did, until npm 7.0 and crate 0.17 refuse them. Chrome 153 refuses
+/// every one. Their relative forms are read with the others, from the
+/// origin unclipped, so a relative `hsv()` names the colour its absolute
+/// spelling does.
+#[test]
+fn the_deprecated_colour_forms_still_paint() -> Result<()> {
+    for (css, painted) in [
+        ("hwba(0 0% 0%)", [234, 51, 35, 255]),
+        ("HWBA(0 0% 0%)", [234, 51, 35, 255]),
+        ("hwba(0 0% 0% / 0.5)", [233, 52, 36, 128]),
+        ("hsv(0 100% 100%)", [234, 51, 35, 255]),
+        ("hsva(0 100% 100% / 0.5)", [233, 52, 36, 128]),
+        ("ff0000", [234, 51, 35, 255]),
+        ("f00", [234, 51, 35, 255]),
+        ("ff000080", [233, 52, 36, 128]),
+        ("hwba(from red h w b)", [234, 51, 35, 255]),
+        ("hsv(from red h s v)", [234, 51, 35, 255]),
+        ("hsva(from red h s v / 0.5)", [233, 52, 36, 128]),
+        ("hsv(from black h s v)", [0, 0, 0, 255]),
+    ] {
+        assert_eq!(painted_p3(css)?, painted, "{css}");
+    }
+    for (relative, absolute) in [
+        ("hsv(from red h 50% v)", "hsv(0 50% 100%)"),
+        (
+            "hsv(from red calc(h + 120) s calc(v / 2))",
+            "hsv(120 100% 50%)",
+        ),
+        ("hsv(from rgb(51 102 153) h s v)", "hsv(210 66.67% 60%)"),
+        (
+            "hwba(from color(srgb 1.2 0.2 0.1) h w b)",
+            "color(srgb 1.2 0.2 0.1)",
+        ),
+        (
+            "hsv(from color(srgb 1.2 0.2 0.1) h s v)",
+            "color(srgb 1.2 0.2 0.1)",
+        ),
+    ] {
+        assert_eq!(painted_p3(relative)?, painted_p3(absolute)?, "{relative}");
+    }
+    Ok(())
+}
+
 /// `color()` in `a98-rgb` and `prophoto-rgb`, the two CSS Color 4 spaces no
 /// canvas holds, measured in Chrome 153 on a Display P3 canvas read back in
 /// P3. Both convert to sRGB on the way in, outside its gamut where they
@@ -1435,7 +1480,6 @@ fn hsl_and_hwb_evaluate_relative_channels_as_chrome_does() -> Result<()> {
         "hsl(from red h s l) x",
         "hsl(from red h s l))",
         "hsl(from h s l)",
-        "hwba(from red h w b)",
     ] {
         assert!(ctx.set_fill_style_css(css).is_err(), "{css} is refused");
     }
