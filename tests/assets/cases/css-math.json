@@ -1,0 +1,984 @@
+{
+  "about": "CSS math functions, font-relative lengths, repeated functions and unclosed ones in `ctx.filter`, each paired with the plain filter it draws identically to, or marked refused. Read by tests/css_grammar.rs for `Context2D::set_filter_css` and by tests/suite/css-grammar.test.js for `ctx.filter`. A row with a `font` sets that font first, with Oswald registered from tests/assets/fonts/Oswald, so the lengths that need a face are the same on every platform.",
+  "source": "Chrome 152.0.7977.149, 2026-10-22, on a canvas in a document: each `css` and its `draws` drew byte-identical pixels on the same scene, and every refused row left the previous filter standing. Oswald was loaded as a FontFace declared with its weight range, `200 700`, so `bold` instances the variable face rather than synthesising a weight. `blur(1rem)` and `blur(1ric)` are the document root's 16px; `1rch`, `1rex` and `1rcap` depend on the root's family and are left out. An infinity is drawn as the largest float, 3.4028234e38, and NaN as zero.",
+  "knownDifferences": "The units a canvas outside a document has nothing to measure with -- `lh`, `rlh`, the viewport units and the container units -- read as zero here, which is Chrome's answer in a worker's OffscreenCanvas and in `letterSpacing` everywhere, and not its answer in a document, where `blur(1vw)` follows the window. Left out of the table for that reason; docs/browser-differences.md says so.",
+  "cases": [
+    {
+      "css": "blur(calc(1px + 2px))",
+      "draws": "blur(3px)"
+    },
+    {
+      "css": "blur(calc(1px - -2px))",
+      "draws": "blur(3px)"
+    },
+    {
+      "css": "blur(calc(2px * 3))",
+      "draws": "blur(6px)"
+    },
+    {
+      "css": "blur(calc(2 * 3px))",
+      "draws": "blur(6px)"
+    },
+    {
+      "css": "blur(calc(6px / 2 / 3))",
+      "draws": "blur(1px)"
+    },
+    {
+      "css": "blur(calc((1px + 1px) * 2))",
+      "draws": "blur(4px)"
+    },
+    {
+      "css": "blur(calc(1px * (2 + 1)))",
+      "draws": "blur(3px)"
+    },
+    {
+      "css": "blur(calc(calc(1px) + 1px))",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(-webkit-calc(2px))",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(CALC(1px + 1px))",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(Calc(2px))",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur( calc( 2px ) )",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(calc(\t1px\t+\t2px\t))",
+      "draws": "blur(3px)"
+    },
+    {
+      "css": "blur(calc(1PX + 2Px))",
+      "draws": "blur(3px)"
+    },
+    {
+      "css": "blur(calc(1e1px + 1px))",
+      "draws": "blur(11px)"
+    },
+    {
+      "css": "blur(calc(.5px + .5px))",
+      "draws": "blur(1px)"
+    },
+    {
+      "css": "blur(calc(1px * 1px / 1px))",
+      "draws": "blur(1px)"
+    },
+    {
+      "css": "blur(calc(2px * 3px / 1px / 3px * 1px))",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(calc(0px))",
+      "draws": "blur(0px)"
+    },
+    {
+      "css": "blur(calc(-1px))",
+      "draws": "blur(0px)"
+    },
+    {
+      "css": "blur(calc(10px - 20px))",
+      "draws": "blur(0px)"
+    },
+    {
+      "css": "blur(calc(-1px)) brightness(2)",
+      "draws": "blur(0px) brightness(2)"
+    },
+    {
+      "css": "brightness(2) blur(calc(-5px))",
+      "draws": "brightness(2)"
+    },
+    {
+      "css": "drop-shadow(2px 2px calc(-3px) red) brightness(2)",
+      "draws": "drop-shadow(2px 2px 0px red) brightness(2)"
+    },
+    {
+      "css": "blur(calc(1px * NaN))",
+      "draws": "blur(0px)"
+    },
+    {
+      "css": "blur(calc(1px * -infinity))",
+      "draws": "blur(0px)"
+    },
+    {
+      "css": "blur(calc(1px * infinity))",
+      "draws": "blur(3.4028234e38px)"
+    },
+    {
+      "css": "blur(calc(1px / 0))",
+      "draws": "blur(3.4028234e38px)"
+    },
+    {
+      "css": "blur(calc(1px * e))",
+      "draws": "blur(2.718281828459045px)"
+    },
+    {
+      "css": "blur(calc(pi * 1px))",
+      "draws": "blur(3.141592653589793px)"
+    },
+    {
+      "css": "blur(calc(1px * E))",
+      "draws": "blur(2.718281828459045px)"
+    },
+    {
+      "css": "blur(min(1px, 2px, 0.5px))",
+      "draws": "blur(0.5px)"
+    },
+    {
+      "css": "blur(min(2px))",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(max(1px, 3px))",
+      "draws": "blur(3px)"
+    },
+    {
+      "css": "blur(clamp(1px, 5px, 3px))",
+      "draws": "blur(3px)"
+    },
+    {
+      "css": "blur(clamp(3px, 1px, 2px))",
+      "draws": "blur(3px)"
+    },
+    {
+      "css": "blur(clamp(none, 5px, 3px))",
+      "draws": "blur(3px)"
+    },
+    {
+      "css": "blur(clamp(1px, 5px, none))",
+      "draws": "blur(5px)"
+    },
+    {
+      "css": "blur(clamp(1px, calc(1px * NaN), 3px))",
+      "draws": "blur(0px)"
+    },
+    {
+      "css": "blur(abs(-2px))",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(calc(1px * sign(-2px) * -3))",
+      "draws": "blur(3px)"
+    },
+    {
+      "css": "blur(round(2.5px, 1px))",
+      "draws": "blur(3px)"
+    },
+    {
+      "css": "blur(round(-2.5px, 1px))",
+      "draws": "blur(0px)"
+    },
+    {
+      "css": "blur(round(up, 2.1px, 1px))",
+      "draws": "blur(3px)"
+    },
+    {
+      "css": "blur(round(down, 2.9px, 1px))",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(round(to-zero, 2.9px, 1px))",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(round(nearest, 2.5px, 1px))",
+      "draws": "blur(3px)"
+    },
+    {
+      "css": "blur(round(UP, 2.1px, 1px))",
+      "draws": "blur(3px)"
+    },
+    {
+      "css": "blur(round(7px, 2px))",
+      "draws": "blur(8px)"
+    },
+    {
+      "css": "blur(round(5px, 0px))",
+      "draws": "blur(0px)"
+    },
+    {
+      "css": "blur(round(2.5px, -1px))",
+      "draws": "blur(3px)"
+    },
+    {
+      "css": "blur(mod(7px, 3px))",
+      "draws": "blur(1px)"
+    },
+    {
+      "css": "blur(mod(-7px, 3px))",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(rem(7px, 3px))",
+      "draws": "blur(1px)"
+    },
+    {
+      "css": "blur(rem(7px, -3px))",
+      "draws": "blur(1px)"
+    },
+    {
+      "css": "blur(mod(7px, 0px))",
+      "draws": "blur(0px)"
+    },
+    {
+      "css": "blur(hypot(3px, 4px))",
+      "draws": "blur(5px)"
+    },
+    {
+      "css": "blur(hypot(-3px))",
+      "draws": "blur(3px)"
+    },
+    {
+      "css": "blur(calc(1px * pow(2, 3)))",
+      "draws": "blur(8px)"
+    },
+    {
+      "css": "blur(calc(1px * sqrt(16)))",
+      "draws": "blur(4px)"
+    },
+    {
+      "css": "blur(calc(1px * log(8, 2)))",
+      "draws": "blur(3px)"
+    },
+    {
+      "css": "blur(calc(1px * log(e)))",
+      "draws": "blur(1px)"
+    },
+    {
+      "css": "blur(calc(1px * exp(0)))",
+      "draws": "blur(1px)"
+    },
+    {
+      "css": "blur(calc(1px * progress(5, 0, 10) * 4))",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(calc(1px * progress(15, 0, 10)))",
+      "draws": "blur(1px)"
+    },
+    {
+      "css": "blur(calc(1px * progress(-5, 0, 10)))",
+      "draws": "blur(0px)"
+    },
+    {
+      "css": "blur(calc(1px * progress(5, 10, 0) * 4))",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(calc(4px * progress(1px, 0px, 2px)))",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(calc(1px * sibling-index() * 2))",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(calc(1px * sibling-count() * 2))",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(calc(1px * (1px / 1px) * 2))",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(calc(1px * sin(30deg) * 4))",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(calc(1px * cos(0deg) * 2))",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(calc(1px * tan(45deg) * 2))",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(calc(1px * tan(90deg)))",
+      "draws": "blur(3.4028234e38px)"
+    },
+    {
+      "css": "blur(calc(1px * sqrt(-1)))",
+      "draws": "blur(0px)"
+    },
+    {
+      "css": "blur(calc(1px * pow(0, -1)))",
+      "draws": "blur(3.4028234e38px)"
+    },
+    {
+      "css": "blur(calc(1px * exp(1000)))",
+      "draws": "blur(3.4028234e38px)"
+    },
+    {
+      "css": "blur(calc(1px * log(0)))",
+      "draws": "blur(0px)"
+    },
+    {
+      "css": "brightness(calc(1 + 1))",
+      "draws": "brightness(2)"
+    },
+    {
+      "css": "brightness(calc(50% + 10%))",
+      "draws": "brightness(0.6)"
+    },
+    {
+      "css": "brightness(calc(2 * 50%))",
+      "draws": "brightness(1)"
+    },
+    {
+      "css": "brightness(calc(50% * 2))",
+      "draws": "brightness(1)"
+    },
+    {
+      "css": "brightness(calc(50% / 2))",
+      "draws": "brightness(0.25)"
+    },
+    {
+      "css": "brightness(calc(50% / 1%))",
+      "draws": "brightness(50)"
+    },
+    {
+      "css": "brightness(calc(-1))",
+      "draws": "brightness(0)"
+    },
+    {
+      "css": "brightness(calc(infinity))",
+      "draws": "brightness(3.4028234e38)"
+    },
+    {
+      "css": "brightness(calc(NaN))",
+      "draws": "brightness(0)"
+    },
+    {
+      "css": "brightness(calc(e))",
+      "draws": "brightness(2.718281828459045)"
+    },
+    {
+      "css": "brightness(abs(-2))",
+      "draws": "brightness(2)"
+    },
+    {
+      "css": "brightness(abs(-150%))",
+      "draws": "brightness(1.5)"
+    },
+    {
+      "css": "brightness(sign(-2px))",
+      "draws": "brightness(0)"
+    },
+    {
+      "css": "brightness(sign(3))",
+      "draws": "brightness(1)"
+    },
+    {
+      "css": "brightness(sign(50%))",
+      "draws": "brightness(1)"
+    },
+    {
+      "css": "brightness(round(2.5))",
+      "draws": "brightness(3)"
+    },
+    {
+      "css": "brightness(round(nearest, 2.5))",
+      "draws": "brightness(3)"
+    },
+    {
+      "css": "brightness(round(2.5, 1))",
+      "draws": "brightness(3)"
+    },
+    {
+      "css": "brightness(mod(7, 3))",
+      "draws": "brightness(1)"
+    },
+    {
+      "css": "brightness(pow(2, 3))",
+      "draws": "brightness(8)"
+    },
+    {
+      "css": "brightness(sqrt(4))",
+      "draws": "brightness(2)"
+    },
+    {
+      "css": "brightness(hypot(3, 4))",
+      "draws": "brightness(5)"
+    },
+    {
+      "css": "brightness(log(8, 2))",
+      "draws": "brightness(3)"
+    },
+    {
+      "css": "brightness(exp(1))",
+      "draws": "brightness(2.718281828459045)"
+    },
+    {
+      "css": "brightness(progress(5, 0, 10))",
+      "draws": "brightness(0.5)"
+    },
+    {
+      "css": "brightness(progress(5, 5, 5))",
+      "draws": "brightness(1)"
+    },
+    {
+      "css": "brightness(progress(50%, 0%, 100%))",
+      "draws": "brightness(0.5)"
+    },
+    {
+      "css": "brightness(sin(0.5))",
+      "draws": "brightness(0.479425538604203)"
+    },
+    {
+      "css": "brightness(cos(pi))",
+      "draws": "brightness(0)"
+    },
+    {
+      "css": "brightness(calc(cos(pi) * -2))",
+      "draws": "brightness(2)"
+    },
+    {
+      "css": "brightness(calc(1deg / 1rad * 100))",
+      "draws": "brightness(1.7453292519943295)"
+    },
+    {
+      "css": "brightness(sibling-index())",
+      "draws": "brightness(1)"
+    },
+    {
+      "css": "brightness(min(10%, 20%))",
+      "draws": "brightness(0.1)"
+    },
+    {
+      "css": "brightness(clamp(0, 5, 3))",
+      "draws": "brightness(3)"
+    },
+    {
+      "css": "opacity(calc(200%))",
+      "draws": "opacity(1)"
+    },
+    {
+      "css": "opacity(calc(-50%))",
+      "draws": "opacity(0)"
+    },
+    {
+      "css": "grayscale(calc(2))",
+      "draws": "grayscale(1)"
+    },
+    {
+      "css": "saturate(calc(1 + 2))",
+      "draws": "saturate(3)"
+    },
+    {
+      "css": "sepia(calc(25% * 2))",
+      "draws": "sepia(0.5)"
+    },
+    {
+      "css": "invert(calc(1 - 0.25))",
+      "draws": "invert(0.75)"
+    },
+    {
+      "css": "contrast(calc(3 / 2))",
+      "draws": "contrast(1.5)"
+    },
+    {
+      "css": "hue-rotate(calc(10deg + 20deg))",
+      "draws": "hue-rotate(30deg)"
+    },
+    {
+      "css": "hue-rotate(calc(1turn / 2))",
+      "draws": "hue-rotate(180deg)"
+    },
+    {
+      "css": "hue-rotate(calc(90deg + 0.25turn))",
+      "draws": "hue-rotate(180deg)"
+    },
+    {
+      "css": "hue-rotate(calc(-90deg))",
+      "draws": "hue-rotate(270deg)"
+    },
+    {
+      "css": "hue-rotate(calc(1rad * 2))",
+      "draws": "hue-rotate(114.59155902616465deg)"
+    },
+    {
+      "css": "hue-rotate(calc(100grad))",
+      "draws": "hue-rotate(90deg)"
+    },
+    {
+      "css": "hue-rotate(calc(NaN * 1deg))",
+      "draws": "hue-rotate(0deg)"
+    },
+    {
+      "css": "hue-rotate(calc(infinity * 1deg))",
+      "draws": "hue-rotate(3.4028234e38deg)"
+    },
+    {
+      "css": "hue-rotate(abs(-90deg))",
+      "draws": "hue-rotate(90deg)"
+    },
+    {
+      "css": "hue-rotate(mod(370deg, 360deg))",
+      "draws": "hue-rotate(10deg)"
+    },
+    {
+      "css": "hue-rotate(asin(1))",
+      "draws": "hue-rotate(90deg)"
+    },
+    {
+      "css": "hue-rotate(acos(0.5))",
+      "draws": "hue-rotate(60deg)"
+    },
+    {
+      "css": "hue-rotate(acos(2))",
+      "draws": "hue-rotate(0deg)"
+    },
+    {
+      "css": "hue-rotate(atan(1))",
+      "draws": "hue-rotate(45deg)"
+    },
+    {
+      "css": "hue-rotate(atan(infinity))",
+      "draws": "hue-rotate(90deg)"
+    },
+    {
+      "css": "hue-rotate(atan2(1px, 1px))",
+      "draws": "hue-rotate(45deg)"
+    },
+    {
+      "css": "hue-rotate(atan2(1, -1))",
+      "draws": "hue-rotate(135deg)"
+    },
+    {
+      "css": "hue-rotate(atan2(1deg, 1deg))",
+      "draws": "hue-rotate(45deg)"
+    },
+    {
+      "css": "hue-rotate(round(100deg, 45deg))",
+      "draws": "hue-rotate(90deg)"
+    },
+    {
+      "css": "hue-rotate(calc(90deg * sign(-1)))",
+      "draws": "hue-rotate(-90deg)"
+    },
+    {
+      "css": "drop-shadow(calc(1px + 1px) 2px red)",
+      "draws": "drop-shadow(2px 2px red)"
+    },
+    {
+      "css": "drop-shadow(red calc(1px + 1px) 2px)",
+      "draws": "drop-shadow(2px 2px red)"
+    },
+    {
+      "css": "drop-shadow(1px 2px calc(-3px) red)",
+      "draws": "drop-shadow(1px 2px 0px red)"
+    },
+    {
+      "css": "drop-shadow(1px 2px calc(3px) red)",
+      "draws": "drop-shadow(1px 2px 3px red)"
+    },
+    {
+      "css": "drop-shadow(calc(-1px) 2px red)",
+      "draws": "drop-shadow(-1px 2px red)"
+    },
+    {
+      "css": "drop-shadow(calc(1px * -infinity) 2px red)",
+      "draws": "drop-shadow(-3.4028234e38px 2px red)"
+    },
+    {
+      "css": "drop-shadow(min(2px, 4px) max(1px, 3px) blue)",
+      "draws": "drop-shadow(2px 3px blue)"
+    },
+    {
+      "css": "drop-shadow(calc(1px + 1px) calc(2px * 2) calc(3px / 3) rgb(0 128 0))",
+      "draws": "drop-shadow(2px 4px 1px rgb(0 128 0))"
+    },
+    {
+      "css": "blur(calc(1px + 2px)) blur(1px)",
+      "draws": "blur(3px) blur(1px)"
+    },
+    {
+      "css": "blur(calc(1px + 2px))brightness(2)",
+      "draws": "blur(3px) brightness(2)"
+    },
+    {
+      "css": "brightness(2) brightness(2)",
+      "draws": "brightness(4)"
+    },
+    {
+      "css": "brightness(0.5) brightness(0.5)",
+      "draws": "brightness(0.25)"
+    },
+    {
+      "css": "opacity(0.5) opacity(0.5)",
+      "draws": "opacity(0.25)"
+    },
+    {
+      "css": "blur(2px",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(calc(1px)",
+      "draws": "blur(1px)"
+    },
+    {
+      "css": "blur(calc(1px + 1px",
+      "draws": "blur(2px)"
+    },
+    {
+      "css": "blur(min(1px, 2px",
+      "draws": "blur(1px)"
+    },
+    {
+      "css": "brightness(2",
+      "draws": "brightness(2)"
+    },
+    {
+      "css": "hue-rotate(90deg",
+      "draws": "hue-rotate(90deg)"
+    },
+    {
+      "css": "blur(1px) brightness(2",
+      "draws": "blur(1px) brightness(2)"
+    },
+    {
+      "css": "drop-shadow(2px 2px red",
+      "draws": "drop-shadow(2px 2px red)"
+    },
+    {
+      "css": "drop-shadow(2px 2px rgb(255 0 0",
+      "draws": "drop-shadow(2px 2px rgb(255 0 0))"
+    },
+    {
+      "font": "40px Oswald",
+      "css": "blur(1ex)",
+      "draws": "blur(23.12px)"
+    },
+    {
+      "font": "40px Oswald",
+      "css": "blur(1ch)",
+      "draws": "blur(20.68px)"
+    },
+    {
+      "font": "40px Oswald",
+      "css": "blur(1cap)",
+      "draws": "blur(32.4px)"
+    },
+    {
+      "font": "40px Oswald",
+      "css": "blur(1ic)",
+      "draws": "blur(40px)"
+    },
+    {
+      "font": "40px Oswald",
+      "css": "blur(0.5em)",
+      "draws": "blur(20px)"
+    },
+    {
+      "font": "40px Oswald",
+      "css": "blur(calc(1ex + 1ch))",
+      "draws": "blur(43.8px)"
+    },
+    {
+      "font": "40px Oswald",
+      "css": "blur(0.5EX)",
+      "draws": "blur(11.56px)"
+    },
+    {
+      "font": "40px Oswald",
+      "css": "drop-shadow(1ch 1ex red)",
+      "draws": "drop-shadow(20.68px 23.12px red)"
+    },
+    {
+      "font": "40px Oswald",
+      "css": "drop-shadow(0.1ch -0.1ex 0.2cap blue)",
+      "draws": "drop-shadow(2.068px -2.312px 6.48px blue)"
+    },
+    {
+      "font": "10px Oswald",
+      "css": "blur(1ex)",
+      "draws": "blur(5.78px)"
+    },
+    {
+      "font": "10px Oswald",
+      "css": "blur(2ch)",
+      "draws": "blur(10.34px)"
+    },
+    {
+      "font": "10px Oswald",
+      "css": "blur(1cap)",
+      "draws": "blur(8.1px)"
+    },
+    {
+      "font": "bold 40px Oswald",
+      "css": "blur(1ch)",
+      "draws": "blur(22px)"
+    },
+    {
+      "font": "bold 40px Oswald",
+      "css": "blur(1ex)",
+      "draws": "blur(23.12px)"
+    },
+    {
+      "font": "200 40px Oswald",
+      "css": "blur(1ch)",
+      "draws": "blur(20.68px)"
+    },
+    {
+      "font": "40px Oswald",
+      "css": "blur(1rem)",
+      "draws": "blur(16px)"
+    },
+    {
+      "font": "40px Oswald",
+      "css": "blur(1ric)",
+      "draws": "blur(16px)"
+    },
+    {
+      "css": "blur(calc(1px+2px))",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(1px +2px))",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(1px -1px))",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(1px- 1px))",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(1px + 2))",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(10% + 1px))",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(2 / 1px))",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(2px * 2px))",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(0))",
+      "refused": true
+    },
+    {
+      "css": "blur(calc())",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(1px + ))",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(1px)px)",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(1px)calc(1px))",
+      "refused": true
+    },
+    {
+      "css": "blur(-calc(1px))",
+      "refused": true
+    },
+    {
+      "css": "blur(+calc(1px))",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(1px) 2px)",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(1px / 0px))",
+      "refused": true
+    },
+    {
+      "css": "blur(min())",
+      "refused": true
+    },
+    {
+      "css": "blur(min(1px, 2))",
+      "refused": true
+    },
+    {
+      "css": "blur(clamp(1px, 2px))",
+      "refused": true
+    },
+    {
+      "css": "blur(round(2.5px))",
+      "refused": true
+    },
+    {
+      "css": "blur(round(2.5px, 1))",
+      "refused": true
+    },
+    {
+      "css": "blur(mod(7px, 3))",
+      "refused": true
+    },
+    {
+      "css": "blur(sqrt(4px))",
+      "refused": true
+    },
+    {
+      "css": "blur(pow(2px, 2))",
+      "refused": true
+    },
+    {
+      "css": "blur(sign(-2px))",
+      "refused": true
+    },
+    {
+      "css": "blur(hypot())",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(e))",
+      "refused": true
+    },
+    {
+      "css": "blur(e)",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(1px * random(0, 1)))",
+      "refused": true
+    },
+    {
+      "css": "blur(calc-size(any, 1px))",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(1px * var(--x, 1)))",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(1px * env(x, 1)))",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(1px * nosuch(1)))",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(1px * -e))",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(1px * -pi))",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(1px * progress(1px, 0%, 2px)))",
+      "refused": true
+    },
+    {
+      "css": "brightness(calc(50% + 0.5))",
+      "refused": true
+    },
+    {
+      "css": "brightness(calc(1px))",
+      "refused": true
+    },
+    {
+      "css": "brightness(e)",
+      "refused": true
+    },
+    {
+      "css": "brightness(pi)",
+      "refused": true
+    },
+    {
+      "css": "brightness(round(-2.5) * -1)",
+      "refused": true
+    },
+    {
+      "css": "brightness(atan2(1, 1))",
+      "refused": true
+    },
+    {
+      "css": "brightness(asin(1))",
+      "refused": true
+    },
+    {
+      "css": "brightness(log(8, 2, 3))",
+      "refused": true
+    },
+    {
+      "css": "brightness(exp())",
+      "refused": true
+    },
+    {
+      "css": "brightness(pow(2))",
+      "refused": true
+    },
+    {
+      "css": "brightness(sin(1px))",
+      "refused": true
+    },
+    {
+      "css": "brightness(calc(2) 1)",
+      "refused": true
+    },
+    {
+      "css": "hue-rotate(calc(0))",
+      "refused": true
+    },
+    {
+      "css": "hue-rotate(calc(90))",
+      "refused": true
+    },
+    {
+      "css": "hue-rotate(calc(90deg * 2deg))",
+      "refused": true
+    },
+    {
+      "css": "hue-rotate(asin(1px))",
+      "refused": true
+    },
+    {
+      "css": "hue-rotate(atan2(1px, 1))",
+      "refused": true
+    },
+    {
+      "css": "hue-rotate(sin(30deg))",
+      "refused": true
+    },
+    {
+      "css": "hue-rotate(calc(10%))",
+      "refused": true
+    },
+    {
+      "css": "opacity(calc(1px))",
+      "refused": true
+    },
+    {
+      "css": "drop-shadow(calc(1px + 1) 2px red)",
+      "refused": true
+    },
+    {
+      "css": "drop-shadow(1px 2px calc(3%) red)",
+      "refused": true
+    },
+    {
+      "css": "blur(calc(1px) blur(1px))",
+      "refused": true
+    },
+    {
+      "css": "blur((1px)",
+      "refused": true
+    }
+  ]
+}

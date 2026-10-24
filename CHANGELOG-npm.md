@@ -154,6 +154,16 @@ removed and no signature moves.
 
 ### Fixed
 
+- **A filter function written twice applies twice**, as in Chrome:
+  `brightness(2) brightness(2)` draws as `brightness(4)` and
+  `opacity(0.5) opacity(0.5)` as `opacity(0.25)`. The parser kept one entry
+  per function name, so the last of each won and moved to where the first
+  had stood: both drew as `brightness(2)` and `opacity(0.5)`.
+
+- **A filter left unclosed at the end is taken**, as in Chrome, which closes
+  it: `blur(2px` draws as `blur(2px)`, and
+  `drop-shadow(2px 2px rgb(255 0 0` with both closed. It was ignored.
+
 - **`ctx.filter` reads back exactly as it was set**, as Chrome reads it:
   case, spacing, number spelling and a `drop-shadow`'s order and omissions
   included. It was rewritten into a canonical form -- `BLUR(5PX)` read back
@@ -441,6 +451,40 @@ removed and no signature moves.
   `color(srgb ...)` form, and now reports `-0.335`.
 
 ### Added
+
+- **`ctx.filter` takes the CSS math functions**, as Chrome 152 does:
+  `calc()` and `-webkit-calc()`, `min()`, `max()`, `clamp()`, `round()`,
+  `mod()`, `rem()`, `abs()`, `sign()`, `sin()` through `atan2()`, `pow()`,
+  `sqrt()`, `hypot()`, `log()`, `exp()` and `progress()`, nested and with
+  the constants `e`, `pi`, `infinity` and `NaN`, in any argument of any
+  filter function. A computed value outside a function's range is clamped
+  into it rather than refused, as Chrome clamps it -- `blur(calc(-1px))` is
+  no blur and `brightness(calc(-1))` black -- an infinity is the largest
+  float and NaN zero. What Chrome refuses is ignored here too: types that
+  do not add up, as `calc(1px + 2)`, a `+` or `-` without a space on both
+  sides, `+calc()`, and `random()`, `var()` and the other functions Chrome
+  does not take in a canvas filter. 237 filters measured in Chrome are
+  pinned in `tests/assets/cases/css-math.json`.
+
+  The string is now read by the crate's own parser, the one
+  `Context2D::set_filter_css` uses, in place of a second one in JavaScript,
+  and setting it costs less: 0.34 microseconds for a repeated string where
+  it cost 0.91, and 1.65 for a chain of ten functions where it cost 2.75,
+  in a release build.
+
+- **Every CSS length unit in `ctx.filter`, `letterSpacing` and
+  `wordSpacing`.** `ex`, `ch`, `cap` and `ic` are measured on the face the
+  context font resolves to -- for a variable font, the instance at its
+  weight and axes, so `1ch` of bold Oswald is 22px, as in Chrome, and not
+  the 20.68px of its default instance. `rem` and the other root forms
+  follow the context font in the spacing properties and a 16px root in
+  `ctx.filter`, as Chrome resolves each -- so `blur(1rem)`, which was the
+  context font's size, is now 16px whatever the font. `lh`, `rlh`, the viewport units and
+  the container units read as zero, since a canvas here has no line box,
+  window or container to measure; Chrome gives zero in a worker and in the
+  spacing properties, but resolves `blur(1vw)` against the window on a
+  canvas in a document. docs/browser-differences.md lists this with the
+  root font's family.
 
 - **The loaders read bytes in any byte-sized view.** `loadImage`,
   `loadImageData`, `new Image()` and `img.src` take a `Uint8Array`,

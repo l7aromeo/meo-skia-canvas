@@ -56,6 +56,35 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
 - _`saveLayer` composites one 8-bit step darker_ than the equivalent
   `globalAlpha` fill, because Skia rasterises the layer to 8 bits before
   blending. Exact at 0 and 1.
+- _`lh`, `rlh`, the viewport units and the container units read as zero_ in
+  `ctx.filter`, `letterSpacing` and `wordSpacing`, so `blur(1vw)` is taken
+  and draws no blur at all. There is no line box, window or container here
+  to measure. Chrome 152 gives zero too in `letterSpacing` everywhere and in a
+  worker's `OffscreenCanvas`, the context closest to this library, but on a
+  canvas in a document it resolves `blur(1vw)` against the window -- 8px at
+  800 wide -- and `blur(1lh)` to 12px. The list is `ZERO_LENGTH_UNITS` in
+  `src/css.rs`.
+- _A filter's root units resolve against a 16px root set in `serif`._ Chrome
+  resolves `rem`, `rex`, `rch`, `rcap` and `ric` in `ctx.filter` against the
+  document root -- 16px Times unless the page says otherwise -- and in
+  `letterSpacing` against the context font, and so does this library, with
+  no document: `blur(1rem)` and `blur(1ric)` are 16px on both. `rex`, `rch`
+  and `rcap` follow the face the generic `serif` family resolves to here,
+  which is Times where the system's `serif` is Times and something else where
+  it is not. `State::filter_units` in `src/context/mod.rs` says so at the
+  site.
+- _A filter's `em` follows the context font in a worker too._ Chrome 152's
+  worker `OffscreenCanvas` resolves `blur(1em)` to 16px whatever the font,
+  while it resolves `blur(1ex)` against the font and a canvas in a document
+  resolves both against it. The document behaviour is the consistent one and
+  is what this library does everywhere.
+- _`ex` reads the face's x-height metric first._ CSS Values 4 prefers the
+  metric, and Chrome reads it on every platform but one: on macOS Blink
+  measures the `x` glyph's ink instead, so a face whose `x` overshoots its
+  declared x-height measures larger there -- `1ex` of 40px `sans-serif` is
+  20.918px in Chrome on a Mac. Faces whose metric and glyph agree, as
+  Oswald's do at 578/1000, read the same in both. The order is
+  `x_height_ratio` in `src/image.rs`.
 
 **Gradient stops interpolate in sRGB, and Chrome does not. Ours is the
 specification's answer.** The HTML Standard, section 4.12.5.1.10 "Fill and

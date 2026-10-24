@@ -6,7 +6,7 @@ use skia_safe::{
     FourByteTag, IRect, Image, ImageFilter as SkImageFilter, ImageInfo,
     MaskFilter as SkMaskFilter, Paint, PaintStyle, Path, PathBuilder,
     PathFillType, PathOp, Picture, PictureRecorder, Point, Rect, RoundOut,
-    Shader as SkShader, Size,
+    Shader as SkShader, Size, Typeface,
     canvas::{SaveLayerRec, SrcRectConstraint::Strict},
     dash_path_effect,
     font_style::{FontStyle, Width},
@@ -23,6 +23,7 @@ pub mod api;
 pub mod page;
 
 use crate::{
+    css::{FontUnits, ROOT_FONT_PX},
     export::VectorFeatures,
     font_library::{FontLibrary, ResolvedFont},
     gpu::RenderingEngine,
@@ -293,16 +294,77 @@ impl Default for State {
     }
 }
 
+/// The face the generic `serif` family resolves to at the normal weight,
+/// width and slant: what an initial root font is set in.
+fn initial_root_face() -> Option<Typeface> {
+    FontLibrary::with_shared(|library| {
+        let mut collection = library.font_collection();
+        collection
+            .find_typefaces(&[ROOT_FONT_FAMILY], FontStyle::normal())
+            .into_iter()
+            .next()
+            .or_else(|| collection.default_fallback())
+    })
+}
+
+/// The family an initial root font is set in: the generic `serif`, which is
+/// CSS's usual initial value and Chrome's default standard font.
+const ROOT_FONT_FAMILY: &str = "serif";
+
 impl State {
+    /// The typeface the context font resolves to first, as text is drawn
+    /// with it.
+    ///
+    /// Through `FontLibrary::fonts_for_style`, so a variable face comes back
+    /// instanced at the weight, width and axes this state asks for, and its
+    /// metrics and advances are that instance's: Chrome reads `1ch` of bold
+    /// Oswald, declared with its weight range, as 22px at 40px, the advance
+    /// of the `wght` 700 zero, where the default instance's is 20.68px.
+    /// `None` only when nothing at all resolves.
+    pub fn primary_face(&self) -> Option<Typeface> {
+        FontLibrary::with_shared(|library| {
+            let (mut collection, _) =
+                library.fonts_for_style(&self.char_style, &self.variations);
+            let families = self.char_style.font_families();
+            let families: Vec<&str> = families.iter().collect();
+            collection
+                .find_typefaces(&families, self.char_style.font_style())
+                .into_iter()
+                .next()
+                .or_else(|| collection.default_fallback())
+        })
+    }
+
+    /// What the font-relative length units resolve against: the context
+    /// font's size, and [`primary_face`](Self::primary_face) when a unit
+    /// needs more than the size.
+    pub(crate) fn font_units(&self) -> FontUnits<'_> {
+        FontUnits::new(self.char_style.font_size(), || self.primary_face())
+    }
+
+    /// [`font_units`](Self::font_units) as `ctx.filter` reads them, with the
+    /// root forms resolving against a root font rather than this one.
+    ///
+    /// Chrome resolves a filter's `rem` against the document root: 16px
+    /// whatever the context font, so `blur(1rem)` at 40px Oswald is
+    /// `blur(16px)`. This library has no document, so the root is CSS's
+    /// initial one -- `ROOT_FONT_PX`, set in the generic `serif` family,
+    /// which is what Chrome's root uses unless a page says otherwise. Where
+    /// that family resolves to a different face than Chrome's Times, `rex`,
+    /// `rch` and `rcap` follow the face this library resolves;
+    /// docs/browser-differences.md says so.
+    pub(crate) fn filter_units(&self) -> FontUnits<'_> {
+        self.font_units()
+            .with_root(FontUnits::new(ROOT_FONT_PX, initial_root_face))
+    }
+
     pub fn typography(
         &self,
     ) -> (TextStyle, ParagraphStyle, DecorationStyle, Baseline, bool) {
         let mut char_style = self.char_style.clone(); // use font size & style to calculate spacing
-        char_style
-            .set_word_spacing(self.word_spacing.in_px(char_style.font_size()));
-        char_style.set_letter_spacing(
-            self.letter_spacing.in_px(char_style.font_size()),
-        );
+        let units = self.font_units();
+        char_style.set_word_spacing(self.word_spacing.in_px(&units));
+        char_style.set_letter_spacing(self.letter_spacing.in_px(&units));
         char_style
             .set_baseline_shift(self.text_baseline.get_offset(&char_style));
 

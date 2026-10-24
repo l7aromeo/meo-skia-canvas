@@ -3,8 +3,8 @@ use std::{borrow::Cow, ops::Range, sync::Mutex};
 use quick_xml::{Reader, events::Event};
 
 use skia_safe::{
-    AlphaType, Color4f, ColorSpace, ColorType, Data, Font, FontMgr, FontStyle,
-    Image as SkImage, ImageInfo, Size as SkSize, Typeface,
+    AlphaType, Color4f, ColorSpace, ColorType, Data, Font, FontHinting,
+    FontMgr, FontStyle, Image as SkImage, ImageInfo, Size as SkSize, Typeface,
     codec::{self, Codec},
     images, surfaces,
     svg::{self, FontSize, Length, LengthUnit, TypedNode},
@@ -90,9 +90,10 @@ const PX_PER_EM: f32 = 16.0;
 ///
 /// CSS Values and Units 3, section 5.1.1: "In the cases where it is impossible
 /// or impractical to determine the x-height, a value of 0.5em must be
-/// assumed." Nothing here loads the font, so that is the case, and the modal
-/// verb is the specification's own.
-const EX_PER_EM: f32 = 0.5;
+/// assumed." The modal verb is the specification's own. An SVG here never
+/// loads its font, so that is always the case there; `FontUnits` in
+/// `crate::css` reaches it only when no typeface resolves.
+pub(crate) const EX_PER_EM: f32 = 0.5;
 
 /// An immutable decoded raster image.
 ///
@@ -1187,6 +1188,13 @@ fn ex_ratio_for(family: Option<&str>, font_mgr: &FontMgr) -> f32 {
 /// "the cases where it is impossible or impractical to determine the
 /// x-height", and a face that answers either of these is neither.
 ///
+/// **Metric first is a deliberate divergence from Chrome on macOS**, where
+/// Blink measures the `x` glyph's ink ahead of the metric, so `1ex` of 40px
+/// `sans-serif` is 20.918px there. Chrome reads the metric on every other
+/// platform, and Skia's `fXHeight` is the metric everywhere; the two agree
+/// for a face whose `x` sits on its declared x-height, as Oswald's does at
+/// 578/1000. docs/browser-differences.md records it.
+///
 /// **Shared with `FontLibrary::svg_font_mgr` on purpose.** That function picks
 /// the face a null family resolves to, and it picks the first one this answers
 /// for. Two definitions of "has an x-height" -- one choosing the face, one
@@ -1195,8 +1203,12 @@ fn ex_ratio_for(family: Option<&str>, font_mgr: &FontMgr) -> f32 {
 /// measured 0.525 in the same document.
 pub(crate) fn x_height_ratio(typeface: Typeface) -> Option<f32> {
     // Measured at a nominal size and divided back out, so the ratio is the
-    // face's rather than this call's.
-    let font = Font::from_typeface(typeface, 100.0);
+    // face's rather than this call's -- and unhinted, because FreeType hints
+    // an x-height it derives from the `x` glyph for a face whose `OS/2` table
+    // declares none, snapping it to whole pixels at that size, where CoreText
+    // does not. `FaceRatios::of` measures `ch` the same way.
+    let mut font = Font::from_typeface(typeface, 100.0);
+    font.set_hinting(FontHinting::None);
     let (_, metrics) = font.metrics();
     if metrics.x_height.is_finite() && metrics.x_height > 0.0 {
         return Some(metrics.x_height / 100.0);
@@ -2503,9 +2515,8 @@ mod tests {
     /// A document stating no font size resolves `em` against 16 px.
     ///
     /// `PX_PER_EM` states the assumption, and 16 is the initial value of CSS
-    /// `font-size`. `1ex` is half of it, which CSS Values and Units 3 section
-    /// 5.1.1 says "must be assumed" where the x-height cannot be determined --
-    /// and nothing here loads the font.
+    /// `font-size`. `1ex` is the x-height of the face the document draws with
+    /// at that size, as `ex_ratio_for` resolves it.
     ///
     /// This replaces a test that asserted the opposite. It was written to
     /// assert the limitation deliberately, so that converting these lengths
@@ -2541,12 +2552,18 @@ mod tests {
     ///
     /// Derived here rather than through `ex_ratio_for` so the expectations
     /// below are not the implementation restating itself, and computed rather
-    /// than pinned because which face this is depends on the machine.
+    /// than pinned because which face this is depends on the machine. Read
+    /// unhinted, because a hinted x-height is the pixel grid's at 100px rather
+    /// than the face's -- DejaVu Sans, the fallback on a Linux machine, comes
+    /// back 0.55 hinted and 0.546875 unhinted, because its `OS/2` table is
+    /// version 1 and carries no `sxHeight`.
     fn fallback_ex_ratio() -> f32 {
         let typeface = FontMgr::new()
             .legacy_make_typeface(None, FontStyle::normal())
             .expect("a machine with no fonts at all cannot draw text");
-        let (_, metrics) = Font::from_typeface(typeface, 100.0).metrics();
+        let mut font = Font::from_typeface(typeface, 100.0);
+        font.set_hinting(FontHinting::None);
+        let (_, metrics) = font.metrics();
         metrics.x_height / 100.0
     }
 
@@ -3987,5 +4004,64 @@ mod tests {
     #[test]
     fn unparseable_xml_is_an_error_rather_than_a_default_document() {
         assert!(matches!(Svg::parse("<svg"), Err(Error::DecodeImage { .. })));
+    }
+
+    /// Oswald with its `OS/2` table relabelled as version 1, which predates
+    /// `sxHeight`: the bytes of the field are still there, and nothing that
+    /// reads the version is allowed to look at them.
+    fn oswald_without_an_x_height() -> Typeface {
+        /// The `OS/2` table's tag in the table directory.
+        const OS2: &[u8; 4] = b"OS/2";
+        /// The table directory starts after the offset subtable's 12 bytes and
+        /// holds one 16-byte record per table, the offset at byte 8 -- the
+        /// OpenType specification's "Table directory".
+        const DIRECTORY: usize = 12;
+        const RECORD: usize = 16;
+        const RECORD_OFFSET: usize = 8;
+        /// The first version of `OS/2` to carry `sxHeight` is 2.
+        const BEFORE_SX_HEIGHT: u16 = 1;
+
+        let mut bytes = std::fs::read(
+            "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+        )
+        .expect("the fixture is checked in");
+        let tables = u16::from_be_bytes([bytes[4], bytes[5]]) as usize;
+        let record = (0..tables)
+            .map(|i| DIRECTORY + i * RECORD)
+            .find(|&record| &bytes[record..record + 4] == OS2)
+            .expect("Oswald has an OS/2 table");
+        let at = record + RECORD_OFFSET;
+        let table = u32::from_be_bytes(
+            bytes[at..at + 4].try_into().expect("four bytes"),
+        ) as usize;
+        bytes[table..table + 2]
+            .copy_from_slice(&BEFORE_SX_HEIGHT.to_be_bytes());
+        FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("still a font")
+    }
+
+    #[test]
+    fn an_x_height_the_face_does_not_declare_is_its_x_unrounded() {
+        // With no metric to read, FreeType derives one from the `x` glyph and
+        // hints it like an advance: at the 100px this measures at, a hinted
+        // Oswald is 58px tall -- 0.58em, where its `x` is 0.5779em. The
+        // reference is the glyph's outline, which no hinting setting reaches.
+        let face = oswald_without_an_x_height();
+        let em = face.units_per_em().expect("a scalable face") as f32;
+        let font = Font::from_typeface(face.clone(), em);
+        let x = font.unichar_to_glyph('x' as i32);
+        let outline = font
+            .get_path(x)
+            .expect("x has an outline")
+            .bounds()
+            .height()
+            / em;
+
+        let ratio = x_height_ratio(face).expect("the x is there to measure");
+        assert!(
+            (ratio - outline).abs() < 0.0005,
+            "x-height {ratio}em, the x outline {outline}em",
+        );
     }
 }

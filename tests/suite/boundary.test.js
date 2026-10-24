@@ -755,11 +755,11 @@ describe("The JavaScript/Rust boundary", () => {
       "fontVariantCaps =": "reads and rewrites fontVariant",
       "textDecoration =": "a parsed object",
       "fontVariationSettings =": "a parsed object",
-      "filter =": "a parsed object",
       "colorFilter =": "a boxed handle no slot resolves",
       "imageFilter =": "a boxed handle no slot resolves",
       "maskFilter =": "a boxed handle no slot resolves",
       // Could be recorded, and is not.
+      "filter =": "a string the binding parses, not yet a verb",
       "lineDashMarker =": "a Path2D or null, and a slot cannot hold the null",
       "d =": "a whole path replaced, which a drawing does once if at all",
       // Not a crossing at all.

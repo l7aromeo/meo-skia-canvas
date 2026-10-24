@@ -40,8 +40,8 @@ use crate::{
     },
     context::{Context2D as Inner, Dye, page::ExportOptions},
     css::{
-        parse_decoration, parse_filter, parse_length, parse_number, parse_size,
-        split_number,
+        FontUnits, ROOT_FONT_PX, parse_decoration, parse_filter, parse_number,
+        parse_size, split_number,
     },
     error::Error,
     export::VectorFeatures,
@@ -659,10 +659,6 @@ const MAX_CSS_ESCAPE_HEX_DIGITS: usize = 6;
 /// default font is `10px sans-serif`, and Chrome reads `1em` there as 10px.
 const CANVAS_DEFAULT_FONT_PX: f32 = 10.0;
 
-/// The size `rem` resolves against: the root element's default, CSS's
-/// `medium`. Chrome reads `2rem` in a canvas font as 32px.
-const ROOT_FONT_PX: f32 = 16.0;
-
 /// CSS Fonts 4's absolute-size keywords, in pixels at the default `medium`
 /// of 16px -- the table Chrome reads `xx-small` through `xxx-large` from.
 const ABSOLUTE_FONT_SIZES: [(&str, f32); 8] = [
@@ -730,7 +726,8 @@ fn font_length(text: &str) -> Option<f32> {
         "em" => Some(value * CANVAS_DEFAULT_FONT_PX),
         "rem" => Some(value * ROOT_FONT_PX),
         "%" => Some(value / 100.0 * CANVAS_DEFAULT_FONT_PX),
-        _ => parse_size(text, f32::NAN).filter(|px| px.is_finite()),
+        _ => parse_size(text, &FontUnits::assumed(f32::NAN))
+            .filter(|px| px.is_finite()),
     }
 }
 
@@ -1373,13 +1370,28 @@ impl Context2D {
     ///
     /// The grammar is what Chrome reads for `ctx.filter`: function names in
     /// any case, functions that abut, an argument left out taking its
-    /// default (`brightness()` is `brightness(1)`), and a negative blur,
-    /// shadow radius or amount refused. `"none"` clears the filter, and so
-    /// does the empty string, which Chrome ignores instead.
+    /// default (`brightness()` is `brightness(1)`), a function still open at
+    /// the end of the string closed (`blur(2px` is `blur(2px)`), and a
+    /// negative blur, shadow radius or amount refused where it is written
+    /// out. `"none"` clears the filter, and so does the empty string, which
+    /// Chrome ignores instead.
     ///
-    /// Lengths in `em` and `rem` resolve against the context's current font
-    /// size, which is what a browser does -- so `blur(0.5em)` is half the
-    /// current text size and changes when the font does.
+    /// Any argument may be a CSS math function -- `calc()`, `min()`,
+    /// `max()`, `clamp()`, `round()`, `mod()`, `rem()`, `abs()`, `sign()`,
+    /// the trigonometric functions, `pow()`, `sqrt()`, `hypot()`, `log()`,
+    /// `exp()` and `progress()` -- with the constants `e`, `pi`, `infinity`
+    /// and `NaN`. A computed value outside a function's range is clamped
+    /// into it rather than refused, as Chrome clamps it: `blur(calc(-1px))`
+    /// is no blur, and an infinity is the largest `f32`.
+    ///
+    /// Lengths take every CSS unit. The font-relative ones -- `em`, `ex`,
+    /// `ch`, `cap` and `ic` -- resolve against the context's font when the
+    /// filter is set, as a browser resolves them: a filter already set does
+    /// not move when the font changes, and the same string set again after
+    /// it does. Their root forms resolve against a 16px root font set in the
+    /// generic `serif` family, and `lh`, `rlh`, the viewport units and the
+    /// container units read as zero, since a canvas here has no line box,
+    /// window or container to measure.
     ///
     /// # Errors
     ///
@@ -1403,8 +1415,7 @@ impl Context2D {
     /// # Ok::<(), meo_skia_canvas::error::Error>(())
     /// ```
     pub fn set_filter_css(&mut self, css: &str) -> Result<(), Error> {
-        let em = self.inner.state.char_style.font_size();
-        let ops = parse_filter(css, em)?;
+        let ops = parse_filter(css, &self.inner.state.filter_units())?;
         self.set_filter(&ops)?;
         // Echo the caller's own text, exactly -- case, spacing and spelling,
         // `"  NONE "` included -- as Chrome and the JavaScript `filter`
@@ -1816,9 +1827,8 @@ impl Context2D {
     /// # Ok::<(), meo_skia_canvas::error::Error>(())
     /// ```
     pub fn set_text_decoration_css(&mut self, css: &str) -> Result<(), Error> {
-        let em = self.inner.state.char_style.font_size();
-        let parsed =
-            parse_decoration(css, em).ok_or_else(|| Error::InvalidColor {
+        let parsed = parse_decoration(css, &self.inner.state.font_units())
+            .ok_or_else(|| Error::InvalidColor {
                 reason: format!("{css:?}"),
             })?;
         self.set_text_decoration(
@@ -3276,19 +3286,23 @@ impl Context2D {
     /// Sets the spacing between characters from a CSS length.
     ///
     /// The string form of [`set_letter_spacing`](Self::set_letter_spacing),
-    /// and the one that can say `em`. A relative length stays relative:
-    /// `"0.1em"` is a tenth of the font size *whenever the text is laid
-    /// out*, so changing the font afterwards changes the spacing. The pixel
-    /// form cannot express that, because by the time it is a number the
-    /// relationship to the font is gone.
+    /// and the one that can say `em`, `ex`, `ch`, `cap` or `ic`. A
+    /// font-relative length stays relative: `"0.1em"` is a tenth of the font
+    /// size *whenever the text is laid out*, so changing the font afterwards
+    /// changes the spacing. The pixel form cannot express that, because by
+    /// the time it is a number the relationship to the font is gone. The
+    /// root forms -- `rem`, `rex` and the rest -- resolve against the same
+    /// font, as Chrome resolves them here, and `lh`, `rlh`, the viewport
+    /// units and the container units lay out as zero.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidCssLength`] for a unit CSS does not define,
-    /// for a bare number other than zero, for a percentage --
+    /// for a bare number, zero included, for a percentage --
     /// `letter-spacing` is defined over a length, and a percentage is not
-    /// one -- and for whitespace around the length or before its unit, as
-    /// Chrome ignores `" 5px "` and `"5 px"`.
+    /// one -- for a math function such as `calc()`, and for whitespace
+    /// around the length or before its unit. Chrome ignores each of these:
+    /// `"0"`, `"calc(1px)"`, `" 5px "` and `"5 px"`.
     ///
     /// # Examples
     ///
@@ -3329,7 +3343,7 @@ impl Context2D {
         self.inner
             .state
             .letter_spacing
-            .in_px(self.inner.state.char_style.font_size())
+            .in_px(&self.inner.state.font_units())
     }
 
     /// Extra space added at word boundaries, in pixels.
@@ -3337,7 +3351,7 @@ impl Context2D {
         self.inner
             .state
             .word_spacing
-            .in_px(self.inner.state.char_style.font_size())
+            .in_px(&self.inner.state.font_units())
     }
 
     /// Where a text run sits horizontally relative to its origin.
@@ -3962,22 +3976,11 @@ pub(crate) fn check_radii(x_radius: f32, y_radius: f32) -> Result<(), Error> {
     Ok(())
 }
 
-/// A [`Spacing`] from a CSS length.
-///
-/// Carries the unit through rather than resolving it, so a relative length
-/// is still relative after it is set: `Spacing::in_px` takes the font size
-/// at the moment the text is laid out.
+/// A [`Spacing`] from a CSS length, by [`Spacing::from_css`].
 fn css_spacing(css: &str) -> Result<Spacing, Error> {
-    let invalid = || Error::InvalidCssLength {
+    Spacing::from_css(css).ok_or_else(|| Error::InvalidCssLength {
         reason: format!("{css:?}"),
-    };
-    // Whitespace around the length is refused too: Chrome ignores
-    // `ctx.letterSpacing = " 5px "`.
-    if css.trim() != css {
-        return Err(invalid());
-    }
-    let length = parse_length(css).ok_or_else(invalid)?;
-    Spacing::parse(length.value, length.unit, length.pixels).ok_or_else(invalid)
+    })
 }
 
 /// A CSS color string as a fill, keeping the space it was named in.

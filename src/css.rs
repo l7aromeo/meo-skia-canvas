@@ -8,21 +8,32 @@
 //! `set_fill_style` takes an [`RgbaLinear`] and `set_fill_style_css` takes
 //! `"red"`, and neither replaced the other.
 //!
-//! Written here rather than taken from a CSS crate: what is needed is four
+//! Written here rather than taken from a CSS crate: what is needed is a few
 //! grammars out of a specification that has hundreds, and a general parser
 //! would bring a cascade, a selector engine and a property database for
-//! them. The JavaScript side parses the same strings in
-//! `lib/classes/css.js`, and this follows it deliberately -- including its
-//! unit table -- so a string that works on one surface works on the other.
+//! them. The JavaScript `filter`, `letterSpacing` and `wordSpacing` are read
+//! by these same functions through the binding, so a string that works on
+//! one surface works on the other because it is one parser. The CSS math
+//! functions are in [`math`], one evaluator for every property that takes
+//! them.
 //!
 //! [`RgbaLinear`]: crate::color::RgbaLinear
 //! [`FilterOp`]: crate::filter::FilterOp
+
+mod math;
+
+use std::{borrow::Cow, cell::OnceCell};
+
+use skia_safe::{Font as SkFont, FontHinting, Typeface};
+
+pub(crate) use math::{Dimension, Expect, Quantity, evaluate, is_math};
 
 use crate::{
     color::{RgbaLinear, skia_color_to_rgba_linear},
     error::Error,
     filter::FilterOp,
     geometry::Affine,
+    image::{EX_PER_EM, x_height_ratio},
     node::utils::css_to_color,
     text::{TextDecoration, TextDecorationStyle},
 };
@@ -60,7 +71,7 @@ const GRADIANS_PER_TURN: f32 = 400.0;
 
 /// A length in CSS units, as pixels.
 ///
-/// `em_size` is what `em` and `rem` resolve against -- the font size in
+/// `units` is what the font-relative units resolve against -- the font in
 /// play, which is why the caller supplies it rather than this assuming one.
 ///
 /// Returns `None` for a unit CSS does not define, and for a number with no
@@ -71,11 +82,22 @@ const GRADIANS_PER_TURN: f32 = 400.0;
 /// `blur(50%)`. The properties where a percentage *is* legal are font sizes,
 /// and those are parsed by `Font::from_css`, not here. Nor may anything come
 /// between the number and its unit: Chrome refuses `blur(5 px)`.
-pub(crate) fn parse_size(text: &str, em_size: f32) -> Option<f32> {
+pub(crate) fn parse_size(text: &str, units: &FontUnits) -> Option<f32> {
     let text = text.trim();
     let (value, unit) = split_number(text)?;
+    let per_px = match unit {
+        // Zero is the one length CSS lets go unitless, because zero of
+        // anything is the same zero.
+        "" if value == 0.0 => 1.0,
+        _ => units.px_per(&unit.to_ascii_lowercase())?,
+    };
+    Some(value * per_px)
+}
 
-    let per_px = match unit.to_ascii_lowercase().as_str() {
+/// Pixels in one of an absolute length unit, in lower case, or `None` for
+/// anything that is not one.
+fn absolute_px(unit: &str) -> Option<f32> {
+    Some(match unit {
         "px" => 1.0,
         "pt" => PX_PER_INCH / PT_PER_INCH,
         "pc" => PX_PER_INCH / PC_PER_INCH,
@@ -83,13 +105,224 @@ pub(crate) fn parse_size(text: &str, em_size: f32) -> Option<f32> {
         "cm" => PX_PER_INCH / CM_PER_INCH,
         "mm" => PX_PER_INCH / (CM_PER_INCH * MM_PER_CM),
         "q" => PX_PER_INCH / (CM_PER_INCH * Q_PER_CM),
-        "em" | "rem" => em_size,
-        // Zero is the one length CSS lets go unitless, because zero of
-        // anything is the same zero.
-        "" if value == 0.0 => 1.0,
         _ => return None,
+    })
+}
+
+/// The size `rem` resolves against where there is a root to resolve it
+/// against: the root element's default, CSS's `medium`. Chrome reads `2rem`
+/// in a canvas font as 32px, and `blur(1rem)` as 16px.
+pub(crate) const ROOT_FONT_PX: f32 = 16.0;
+
+/// The font-relative length units, in lower case, each with its root form.
+///
+/// What the root forms resolve against depends on the property, as it does in
+/// Chrome: `letterSpacing` and `wordSpacing` resolve them against the
+/// context's own font, so at 40px Oswald `1rem` is 40px and `1rex` 23.12px,
+/// while `ctx.filter` resolves them against the document root -- see
+/// [`FontUnits::with_root`].
+const FONT_RELATIVE_UNITS: &[&str] = &[
+    "em", "rem", "ex", "rex", "ch", "rch", "cap", "rcap", "ic", "ric",
+];
+
+/// The length units that measure something a canvas outside a document does
+/// not have: a line box, a viewport, a container.
+///
+/// Each reads as zero, which is what Chrome 152 gives every one of them in a
+/// worker's `OffscreenCanvas` -- the context closest to this library, which
+/// has no window either -- and in `letterSpacing` everywhere. A canvas in a
+/// document is the exception: there Chrome resolves `blur(1vw)` against the
+/// window, 8px at 800 wide, and `blur(1lh)` to 12px. So `blur(1vw)` is
+/// taken here and draws no blur at all, and docs/browser-differences.md says
+/// so.
+const ZERO_LENGTH_UNITS: &[&str] = &[
+    "lh", "rlh", "vw", "vh", "vi", "vb", "vmin", "vmax", "svw", "svh", "svi",
+    "svb", "svmin", "svmax", "lvw", "lvh", "lvi", "lvb", "lvmin", "lvmax",
+    "dvw", "dvh", "dvi", "dvb", "dvmin", "dvmax", "cqw", "cqh", "cqi", "cqb",
+    "cqmin", "cqmax",
+];
+
+/// Whether `unit`, in lower case, resolves against a font and so has to be
+/// carried rather than resolved where it is read.
+pub(crate) fn is_font_relative(unit: &str) -> bool {
+    FONT_RELATIVE_UNITS.contains(&unit)
+}
+
+/// What the font-relative length units resolve against: a font size, and
+/// the typeface that size is set in.
+///
+/// The typeface is asked for only when a unit needs it, and once: finding
+/// it means searching the font collection, which `em` alone never needs.
+pub(crate) struct FontUnits<'a> {
+    em: f32,
+    face: Option<Box<dyn Fn() -> Option<Typeface> + 'a>>,
+    ratios: OnceCell<FaceRatios>,
+    /// What the root forms -- `rem`, `rex`, `rch`, `rcap`, `ric` -- resolve
+    /// against, or `None` for this font itself.
+    root: Option<Box<FontUnits<'a>>>,
+}
+
+/// The font-relative units as fractions of an em, for one typeface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FaceRatios {
+    ex: f32,
+    ch: f32,
+    cap: f32,
+    ic: f32,
+}
+
+/// One `ch` as a fraction of an `em` when the face has no `0`.
+///
+/// CSS Values 4, section 6.1.1: where the measure of the "0" glyph cannot
+/// be determined "it must be assumed to be 0.5em wide by 1em tall".
+const CH_PER_EM: f32 = 0.5;
+
+/// One `ic` as a fraction of an `em` when the face has no U+6C34.
+///
+/// CSS Values 4, section 6.1.1: "it must be assumed to be 1em". Chrome gives
+/// 40px for `1ic` at 40px Oswald, which has no such glyph.
+const IC_PER_EM: f32 = 1.0;
+
+/// The glyph `ic` measures: U+6C34, the CJK water ideograph, which CSS Values
+/// 4 names as the representative full-width character.
+const IC_GLYPH: char = '\u{6C34}';
+
+/// The size a face is measured at before its metrics are divided back out,
+/// so a ratio belongs to the face and not to one size of it.
+const MEASURE_SIZE: f32 = 100.0;
+
+impl FaceRatios {
+    /// What CSS Values 4 says to assume when there is no face to measure.
+    ///
+    /// `cap` has no fallback of its own in the standard beyond "the font's
+    /// ascent", and with no face there is no ascent, so it takes one em, the
+    /// box an ascent would sit in.
+    const ASSUMED: Self = Self {
+        ex: EX_PER_EM,
+        ch: CH_PER_EM,
+        cap: 1.0,
+        ic: IC_PER_EM,
     };
-    Some(value * per_px)
+
+    /// The units as `typeface` draws them.
+    ///
+    /// `ex` is the face's x-height, by [`x_height_ratio`]. `ch` and `ic` are
+    /// the advances of `0` and of U+6C34, and `cap` is the cap-height metric,
+    /// or the ascent where the face declares none, as CSS Values 4 says.
+    /// Measured in Chrome 152 on Oswald: `ex` is its sxHeight of 578/1000,
+    /// `ch` the 517/1000 advance of its `0`, and `cap` its 810/1000
+    /// capHeight, each exactly.
+    fn of(typeface: Typeface) -> Self {
+        let mut font = SkFont::from_typeface(typeface.clone(), MEASURE_SIZE);
+        // Unhinted, because a hinted advance is snapped to the pixel grid at
+        // the size it is measured at. FreeType does that and CoreText does
+        // not: with Skia's default hinting, Oswald's `0` measures 52 at
+        // 100px on Linux, `1ch` 0.52em, where its advance is 517/1000.
+        font.set_hinting(FontHinting::None);
+        let advance = |glyph: char| {
+            let id = font.unichar_to_glyph(glyph as i32);
+            (id != 0).then(|| {
+                font.measure_str(glyph.to_string(), None).0 / MEASURE_SIZE
+            })
+        };
+        let (_, metrics) = font.metrics();
+        let cap = match metrics.cap_height {
+            height if height.is_finite() && height > 0.0 => height,
+            _ => -metrics.ascent,
+        } / MEASURE_SIZE;
+        Self {
+            ex: x_height_ratio(typeface).unwrap_or(EX_PER_EM),
+            ch: advance('0').unwrap_or(CH_PER_EM),
+            cap: match cap.is_finite() && cap > 0.0 {
+                true => cap,
+                false => Self::ASSUMED.cap,
+            },
+            ic: advance(IC_GLYPH).unwrap_or(IC_PER_EM),
+        }
+    }
+}
+
+impl<'a> FontUnits<'a> {
+    /// Units for a font of `em` pixels, set in whatever `face` returns.
+    pub(crate) fn new(
+        em: f32,
+        face: impl Fn() -> Option<Typeface> + 'a,
+    ) -> Self {
+        Self {
+            em,
+            face: Some(Box::new(face)),
+            ratios: OnceCell::new(),
+            root: None,
+        }
+    }
+
+    /// These units with the root forms resolving against `root` rather than
+    /// against this font.
+    pub(crate) fn with_root(self, root: FontUnits<'a>) -> Self {
+        Self {
+            root: Some(Box::new(root)),
+            ..self
+        }
+    }
+
+    /// Units for a font of `em` pixels with no typeface to measure, so each
+    /// unit takes the value CSS Values 4 says to assume.
+    pub(crate) fn assumed(em: f32) -> Self {
+        Self {
+            em,
+            face: None,
+            ratios: OnceCell::new(),
+            root: None,
+        }
+    }
+
+    fn ratios(&self) -> FaceRatios {
+        *self.ratios.get_or_init(|| {
+            self.face
+                .as_ref()
+                .and_then(|face| face())
+                .map_or(FaceRatios::ASSUMED, FaceRatios::of)
+        })
+    }
+
+    /// Pixels in one of `unit`, in lower case: an absolute unit, a
+    /// font-relative one, or one that reads as zero here. `None` for
+    /// anything that is not a length unit.
+    pub(crate) fn px_per(&self, unit: &str) -> Option<f32> {
+        if let Some(px) = absolute_px(unit) {
+            return Some(px);
+        }
+        if ZERO_LENGTH_UNITS.contains(&unit) {
+            return Some(0.0);
+        }
+        if let Some(local) = unit.strip_prefix('r')
+            && is_font_relative(unit)
+        {
+            let root = self.root.as_deref().unwrap_or(self);
+            return root.px_per(local);
+        }
+        let ratio = match unit {
+            "em" => return Some(self.em),
+            "ex" => self.ratios().ex,
+            "ch" => self.ratios().ch,
+            "cap" => self.ratios().cap,
+            "ic" => self.ratios().ic,
+            _ => return None,
+        };
+        Some(self.em * ratio)
+    }
+}
+
+/// Degrees in one of an angle unit, in lower case, or `None` for anything
+/// that is not one.
+pub(crate) fn angle_degrees(unit: &str) -> Option<f32> {
+    Some(match unit {
+        "deg" => 1.0,
+        "rad" => 1.0_f32.to_degrees(),
+        "grad" => DEGREES_PER_TURN / GRADIANS_PER_TURN,
+        "turn" => DEGREES_PER_TURN,
+        _ => return None,
+    })
 }
 
 /// Splits a CSS dimension into its number and its unit.
@@ -102,6 +335,16 @@ pub(crate) fn parse_size(text: &str, em_size: f32) -> Option<f32> {
 /// `.` is the same: it belongs to the number only when a digit follows, so
 /// `5.px` is not five pixels, as Chrome agrees.
 pub(crate) fn split_number(text: &str) -> Option<(f32, &str)> {
+    let at = number_length(text);
+    let value: f32 = text.get(..at)?.parse().ok()?;
+    value
+        .is_finite()
+        .then(|| (value, text.get(at..).unwrap_or("")))
+}
+
+/// How many bytes at the front of `text` are a CSS number, by the rules
+/// [`split_number`] gives. Zero when there is none.
+pub(crate) fn number_length(text: &str) -> usize {
     let bytes = text.as_bytes();
     let mut at = 0;
 
@@ -132,54 +375,64 @@ pub(crate) fn split_number(text: &str) -> Option<(f32, &str)> {
             }
         }
     }
-
-    let value: f32 = text.get(..at)?.parse().ok()?;
-    value
-        .is_finite()
-        .then(|| (value, text.get(at..).unwrap_or("")))
+    at
 }
 
 /// A CSS length split into the number, its unit, and its value in pixels.
 ///
 /// The three a [`Spacing`](crate::node::typography::Spacing) is built from.
-/// Absolute units resolve here; `em` and `rem` cannot, because what they
-/// resolve against changes when the font does -- so their pixel value is
-/// left `NaN` and the unit is carried, which is how spacing stays relative
-/// after it is set rather than being frozen at the size it was set at.
+/// Absolute units resolve here, and so do the units that read as zero; the
+/// font-relative ones cannot, because what they resolve against changes
+/// when the font does -- so their pixel value is left `NaN` and the unit is
+/// carried, which is how spacing stays relative after it is set rather than
+/// being frozen at the font it was set with.
 pub(crate) struct Length {
     /// The number as written.
     pub value: f32,
-    /// The unit, lowercased. Empty only for a bare zero.
+    /// The unit, lowercased.
     pub unit: String,
-    /// The length in pixels, or `NaN` for a unit that needs a font size.
+    /// The length in pixels, or `NaN` for a unit that needs a font.
     pub pixels: f32,
 }
 
 /// A CSS length for a property that keeps its unit.
 ///
-/// Returns `None` for a unit CSS does not define, and for a bare number
-/// other than zero. A percentage is refused for the reason
-/// [`parse_size`] refuses it: `letter-spacing` is defined over `<length>`.
+/// Returns `None` for a unit CSS does not define and for a bare number other
+/// than zero. A percentage is refused for the reason [`parse_size`] refuses
+/// it: `letter-spacing` is defined over `<length>`. So is a math function:
+/// Chrome 152 ignores `calc()`, `min()` and the rest in `letterSpacing` and
+/// `wordSpacing`, while `ctx.filter` takes them.
 pub(crate) fn parse_length(text: &str) -> Option<Length> {
-    let text = text.trim();
-    let (value, unit) = split_number(text)?;
+    let (value, unit) = split_number(text.trim())?;
+    length_of(value, unit)
+}
+
+/// A [`Length`] from a number and its unit as written, by the rules
+/// [`parse_length`] reads them with.
+pub(crate) fn length_of(value: f32, unit: &str) -> Option<Length> {
     let unit = unit.to_ascii_lowercase();
-    match unit.as_str() {
+    if unit.is_empty() {
+        // Zero is the one length CSS lets go unitless.
+        return (value == 0.0).then_some(Length {
+            value,
+            unit,
+            pixels: 0.0,
+        });
+    }
+    if is_font_relative(&unit) {
         // Relative, so the pixel value is not knowable yet.
-        "em" | "rem" => Some(Length {
+        return Some(Length {
             value,
             unit,
             pixels: f32::NAN,
-        }),
-        _ => {
-            let pixels = parse_size(text, f32::NAN)?;
-            pixels.is_finite().then_some(Length {
-                value,
-                unit,
-                pixels,
-            })
-        }
+        });
     }
+    let pixels = value * FontUnits::assumed(f32::NAN).px_per(&unit)?;
+    pixels.is_finite().then_some(Length {
+        value,
+        unit,
+        pixels,
+    })
 }
 
 /// A percentage or bare number as a fraction.
@@ -219,16 +472,11 @@ pub(crate) fn parse_number(text: &str) -> Option<f32> {
 /// `rotate(0)` and `skewX(0)`.
 pub(crate) fn parse_angle(text: &str) -> Option<f32> {
     let (value, unit) = split_number(text.trim())?;
-    // Case-insensitive: CSS units are, and a browser takes `45DEG`.
-    let degrees = match unit.to_ascii_lowercase().as_str() {
-        "" if value == 0.0 => 0.0,
-        "deg" => value,
-        "rad" => value.to_degrees(),
-        "grad" => value * DEGREES_PER_TURN / GRADIANS_PER_TURN,
-        "turn" => value * DEGREES_PER_TURN,
-        _ => return None,
-    };
-    Some(degrees)
+    match unit {
+        "" if value == 0.0 => Some(0.0),
+        // Case-insensitive: CSS units are, and a browser takes `45DEG`.
+        _ => Some(value * angle_degrees(&unit.to_ascii_lowercase())?),
+    }
 }
 
 /// The four parts a CSS `text-decoration` shorthand can carry.
@@ -261,7 +509,10 @@ pub(crate) struct Decoration {
 /// Returns `None` for a token that is none of those things -- most often a
 /// colour that does not parse, which is the only way a caller can get this
 /// wrong without misspelling a keyword.
-pub(crate) fn parse_decoration(text: &str, em_size: f32) -> Option<Decoration> {
+pub(crate) fn parse_decoration(
+    text: &str,
+    units: &FontUnits,
+) -> Option<Decoration> {
     let mut parsed = Decoration {
         lines: TextDecoration::default(),
         style: TextDecorationStyle::Solid,
@@ -296,7 +547,7 @@ pub(crate) fn parse_decoration(text: &str, em_size: f32) -> Option<Decoration> {
             // reaches the colour arm otherwise and fails there, since no
             // colour parser resolves it without a fill to resolve against.
             "currentcolor" => parsed.color = None,
-            _ => match parse_size(token, em_size) {
+            _ => match parse_size(token, units) {
                 Some(thickness) => parsed.thickness = Some(thickness),
                 // Anything left has to be a colour, and a token that is not
                 // one is a token nobody can act on.
@@ -342,6 +593,29 @@ fn split_functions(text: &str) -> Vec<&str> {
     parts
 }
 
+/// `text` with every parenthesis still open at its end closed.
+///
+/// CSS Syntax 3 ends a block where the input ends, so Chrome draws
+/// `blur(2px` as `blur(2px)` and `drop-shadow(2px 2px rgb(255 0 0` with both
+/// closed. A `)` with nothing open is left for the parse to refuse.
+fn close_open_blocks(text: &str) -> Cow<'_, str> {
+    let mut depth = 0usize;
+    for character in text.chars() {
+        match character {
+            '(' => depth += 1,
+            ')' => match depth.checked_sub(1) {
+                Some(open) => depth = open,
+                None => return Cow::Borrowed(text),
+            },
+            _ => {}
+        }
+    }
+    match depth {
+        0 => Cow::Borrowed(text),
+        open => Cow::Owned(format!("{text}{}", ")".repeat(open))),
+    }
+}
+
 /// Splits one `name(args)` call into its two halves.
 fn call<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     text.strip_prefix(name)?
@@ -364,7 +638,7 @@ fn call<'a>(text: &'a str, name: &str) -> Option<&'a str> {
 /// the step nobody could read is how a typo becomes a rendering bug.
 pub(crate) fn parse_filter(
     text: &str,
-    em_size: f32,
+    units: &FontUnits,
 ) -> Result<Vec<FilterOp>, Error> {
     let trimmed = text.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
@@ -374,6 +648,8 @@ pub(crate) fn parse_filter(
     let refuse = |part: &str| Error::InvalidFilter {
         reason: format!("could not parse {part:?} in filter {text:?}"),
     };
+    let closed = close_open_blocks(trimmed);
+    let trimmed = closed.as_ref();
 
     let mut ops = Vec::new();
     for part in split_functions(trimmed) {
@@ -391,13 +667,22 @@ pub(crate) fn parse_filter(
         let omitted = argument.trim().is_empty();
 
         // A negative amount is outside every one of these functions'
-        // ranges, and Chrome refuses it rather than clamping.
+        // ranges, and Chrome refuses it when it is written out but clamps it
+        // when a math function computes it: `brightness(-1)` is refused and
+        // `brightness(calc(-1))` draws as `brightness(0)`.
         let percent = || {
             match omitted {
                 true => Some(OMITTED_FILTER_AMOUNT),
-                false => {
+                false => math(
+                    argument,
+                    true,
+                    units,
+                    &[Dimension::NUMBER, Dimension::PERCENT],
+                    0.0,
+                )
+                .unwrap_or_else(|| {
                     parse_percentage(argument).filter(|&amount| amount >= 0.0)
-                }
+                }),
             }
             .ok_or_else(|| refuse(part))
         };
@@ -405,20 +690,32 @@ pub(crate) fn parse_filter(
             // Its arguments are themselves space-separated, so it is the one
             // function that cannot share the shape below.
             "drop-shadow" => {
-                drop_shadow(argument, em_size).ok_or_else(|| refuse(part))?
+                drop_shadow(argument, units).ok_or_else(|| refuse(part))?
             }
             "blur" => FilterOp::Blur(
                 match omitted {
                     true => Some(0.0),
-                    false => parse_size(argument, em_size)
-                        .filter(|&radius| radius >= 0.0),
+                    false => {
+                        math(argument, false, units, &[Dimension::LENGTH], 0.0)
+                            .unwrap_or_else(|| {
+                                parse_size(argument, units)
+                                    .filter(|&radius| radius >= 0.0)
+                            })
+                    }
                 }
                 .ok_or_else(|| refuse(part))?,
             ),
             "hue-rotate" => FilterOp::HueRotate(
                 match omitted {
                     true => Some(0.0),
-                    false => parse_angle(argument),
+                    false => math(
+                        argument,
+                        false,
+                        units,
+                        &[Dimension::ANGLE],
+                        f32::MIN,
+                    )
+                    .unwrap_or_else(|| parse_angle(argument)),
                 }
                 .ok_or_else(|| refuse(part))?,
             ),
@@ -441,6 +738,44 @@ pub(crate) fn parse_filter(
 /// `opacity` and `saturate` changes nothing and for the other three is the
 /// full effect.
 const OMITTED_FILTER_AMOUNT: f32 = 1.0;
+
+/// `argument` as a math function of one of `dimensions`, held into
+/// `[low, f32::MAX]` by [`held`].
+///
+/// `None` when `argument` is not a math function at all, so the caller reads
+/// it as a written value instead. `Some(None)` when it is one and does not
+/// evaluate, or evaluates to another dimension -- a refusal, never a second
+/// reading.
+fn math(
+    argument: &str,
+    percent: bool,
+    units: &FontUnits,
+    dimensions: &[Dimension],
+    low: f32,
+) -> Option<Option<f32>> {
+    let argument = argument.trim();
+    is_math(argument).then(|| {
+        evaluate(argument, &Expect { percent, units })
+            .filter(|quantity| dimensions.contains(&quantity.dimension))
+            .map(|quantity| held(quantity, low))
+    })
+}
+
+/// A finished math value as the `f32` a filter carries, held to
+/// `[low, f32::MAX]`.
+///
+/// The top of the range is Chrome's: it clamps an infinity to the largest
+/// float, so `brightness(calc(infinity))` draws as
+/// `brightness(3.4028234e38)` and an infinite shadow offset as
+/// `3.4e38px`. The bottom is the function's own range, which a computed
+/// value is clamped into where a written one is refused.
+fn held(quantity: Quantity, low: f32) -> f32 {
+    // In `f64` first: `as f32` turns anything past the largest float into
+    // an infinity rather than saturating.
+    quantity
+        .finished()
+        .clamp(f64::from(low), f64::from(f32::MAX)) as f32
+}
 
 /// A CSS colour for a destination that holds eight bits a channel, as a
 /// filter shadow and a text decoration both do: quantised in sRGB first,
@@ -467,28 +802,35 @@ fn eight_bit_colour(css: &str) -> Option<RgbaLinear> {
 /// after them. `drop-shadow(red 2px 2px 4px)` and `drop-shadow(2px 4px red)`
 /// were both refused -- and refusing one step rejects the whole chain, so a
 /// filter Chrome draws became an error here.
-fn drop_shadow(args: &str, em_size: f32) -> Option<FilterOp> {
-    let words: Vec<&str> = args.split_whitespace().collect();
+fn drop_shadow(args: &str, units: &FontUnits) -> Option<FilterOp> {
+    // Split where `split_functions` splits, so a math function or a colour
+    // function stays one word whatever spaces it holds.
+    let words = split_functions(args.trim());
 
-    // Both orderings are tried rather than the lengths being located in one
-    // pass, because a colour can contain something that parses as a length:
-    // `rgb(0 0 0)` splits into three words of which the middle one is a
-    // valid CSS zero. Anchoring the run to one end or the other cannot be
-    // fooled by that.
+    // A length, and whether a math function computed it: a computed blur
+    // radius below zero is clamped, where a written one is refused.
+    let length = |word: &&str| match math(
+        word,
+        false,
+        units,
+        &[Dimension::LENGTH],
+        f32::MIN,
+    ) {
+        Some(computed) => computed.map(|px| (px, true)),
+        None => parse_size(word, units).map(|px| (px, false)),
+    };
+
+    // The colour may sit at either end, so the run of lengths is anchored to
+    // one end and then the other, and whatever is left is the colour.
     let leading = |words: &[&str]| {
-        let lengths: Vec<f32> = words
-            .iter()
-            .map_while(|word| parse_size(word, em_size))
-            .collect();
+        let lengths: Vec<(f32, bool)> =
+            words.iter().map_while(length).collect();
         let rest = words[lengths.len()..].join(" ");
         (lengths, rest)
     };
     let trailing = |words: &[&str]| {
-        let mut lengths: Vec<f32> = words
-            .iter()
-            .rev()
-            .map_while(|word| parse_size(word, em_size))
-            .collect();
+        let mut lengths: Vec<(f32, bool)> =
+            words.iter().rev().map_while(length).collect();
         lengths.reverse();
         let rest = words[..words.len() - lengths.len()].join(" ");
         (lengths, rest)
@@ -497,10 +839,15 @@ fn drop_shadow(args: &str, em_size: f32) -> Option<FilterOp> {
     // Colour after the lengths first, since that is the common spelling.
     for (lengths, rest) in [leading(&words), trailing(&words)] {
         // The offsets may be negative; the blur radius may not, and Chrome
-        // refuses `drop-shadow(2px 2px -3px)`.
-        if !(2..=3).contains(&lengths.len())
-            || lengths.get(2).is_some_and(|&radius| radius < 0.0)
-        {
+        // refuses `drop-shadow(2px 2px -3px)` -- but draws
+        // `drop-shadow(1px 2px calc(-3px) red)` with no blur.
+        let radius = match lengths.get(2) {
+            None => 0.0,
+            Some(&(radius, true)) => radius.max(0.0),
+            Some(&(radius, false)) if radius >= 0.0 => radius,
+            Some(_) => continue,
+        };
+        if !(2..=3).contains(&lengths.len()) {
             continue;
         }
         let color = match rest.is_empty() {
@@ -508,19 +855,17 @@ fn drop_shadow(args: &str, em_size: f32) -> Option<FilterOp> {
             // to the fill; black is what this crate has always used and what
             // the typed `FilterOp::DropShadow` carries when none is given.
             true => RgbaLinear::opaque(0.0, 0.0, 0.0),
-            // Through the same parser `set_fill_style_css` uses, so a colour
-            // that works in one place works in the other.
             false => match eight_bit_colour(&rest) {
                 Some(color) => color,
                 None => continue,
             },
         };
         return Some(FilterOp::DropShadow {
-            offset_x: lengths[0],
-            offset_y: lengths[1],
+            offset_x: lengths[0].0,
+            offset_y: lengths[1].0,
             // The blur radius is the optional one, and its initial value is
             // zero -- a hard-edged shadow.
-            blur: lengths.get(2).copied().unwrap_or(0.0),
+            blur: radius,
             color,
         });
     }
@@ -534,6 +879,12 @@ mod tests {
 
     /// The font size CSS relative units resolve against in these tests.
     const EM: f32 = 16.0;
+
+    /// Units for a 16px font with no face, so `ex`, `ch`, `cap` and `ic` take
+    /// what CSS Values 4 says to assume.
+    fn em() -> FontUnits<'static> {
+        FontUnits::assumed(EM)
+    }
 
     #[test]
     fn every_absolute_length_unit_converts_to_the_pixels_css_defines() {
@@ -559,7 +910,7 @@ mod tests {
             ("1PX", 1.0),
             ("1IN", 96.0),
         ] {
-            let got = parse_size(text, EM)
+            let got = parse_size(text, &em())
                 .unwrap_or_else(|| panic!("{text:?} did not parse"));
             assert!(
                 (got - pixels).abs() < 1e-3,
@@ -572,8 +923,8 @@ mod tests {
     fn a_percentage_is_not_a_length() {
         // It reads like one, and Chrome refuses `blur(50%)`: CSS defines
         // `blur()` over `<length>`, and a percentage is not one.
-        assert_eq!(parse_size("50%", EM), None);
-        assert!(parse_filter("blur(50%)", EM).is_err());
+        assert_eq!(parse_size("50%", &em()), None);
+        assert!(parse_filter("blur(50%)", &em()).is_err());
     }
 
     #[test]
@@ -582,26 +933,26 @@ mod tests {
         // rejects `blur(4)`. Accepting it here would take a filter that
         // does nothing in a browser and make it work in this crate, which
         // is worse than refusing both.
-        assert_eq!(parse_size("4", EM), None);
-        assert_eq!(parse_size("0", EM), Some(0.0));
-        assert_eq!(parse_size("4furlongs", EM), None);
-        assert_eq!(parse_size("", EM), None);
-        assert_eq!(parse_size("px", EM), None);
+        assert_eq!(parse_size("4", &em()), None);
+        assert_eq!(parse_size("0", &em()), Some(0.0));
+        assert_eq!(parse_size("4furlongs", &em()), None);
+        assert_eq!(parse_size("", &em()), None);
+        assert_eq!(parse_size("px", &em()), None);
     }
 
     #[test]
     fn a_point_needs_a_digit_after_it() {
         // CSS Syntax's number has digits after any `.`, and Chrome ignores
         // `ctx.font = "5.px Arial"`.
-        assert_eq!(parse_size("5.px", EM), None);
-        assert_eq!(parse_size("5.", EM), None);
-        assert_eq!(parse_size(".5px", EM), Some(0.5));
+        assert_eq!(parse_size("5.px", &em()), None);
+        assert_eq!(parse_size("5.", &em()), None);
+        assert_eq!(parse_size(".5px", &em()), Some(0.5));
         assert_eq!(parse_percentage("2."), None);
         assert_eq!(parse_percentage("50.%"), None);
         assert_eq!(parse_number("2."), None);
         assert_eq!(parse_number("nan"), None);
         assert_eq!(parse_number("-1.5e3"), Some(-1500.0));
-        assert_eq!(parse_size("5.0px", EM), Some(5.0));
+        assert_eq!(parse_size("5.0px", &em()), Some(5.0));
     }
 
     #[test]
@@ -643,7 +994,7 @@ mod tests {
     fn a_chain_parses_into_the_ops_it_names() {
         let ops = parse_filter(
             "blur(4px) saturate(150%) hue-rotate(-45deg) opacity(0.5)",
-            EM,
+            &em(),
         )
         .expect("a well formed chain");
         assert_eq!(ops.len(), 4);
@@ -668,7 +1019,7 @@ mod tests {
     fn none_and_nothing_are_an_empty_chain() {
         for text in ["none", "NONE", "", "   "] {
             assert!(
-                parse_filter(text, EM).expect("accepted").is_empty(),
+                parse_filter(text, &em()).expect("accepted").is_empty(),
                 "{text:?}"
             );
         }
@@ -682,7 +1033,7 @@ mod tests {
     /// pictures in Chrome.
     #[test]
     fn a_drop_shadow_takes_its_colour_from_either_end() {
-        let shadow = |css: &str| match parse_filter(css, EM) {
+        let shadow = |css: &str| match parse_filter(css, &em()) {
             Ok(ops) => match ops.first() {
                 Some(&FilterOp::DropShadow {
                     offset_x,
@@ -749,8 +1100,8 @@ mod tests {
     fn a_drop_shadow_keeps_its_arguments_together() {
         // The one function whose arguments are themselves space-separated,
         // so a plain split on whitespace would cut it into four pieces.
-        let ops =
-            parse_filter("drop-shadow(2px 4px 6px red)", EM).expect("a shadow");
+        let ops = parse_filter("drop-shadow(2px 4px 6px red)", &em())
+            .expect("a shadow");
         assert_eq!(ops.len(), 1);
         match ops[0] {
             FilterOp::DropShadow {
@@ -769,7 +1120,7 @@ mod tests {
         // And one beside other functions still finds its own boundaries.
         let chain = parse_filter(
             "blur(2px) drop-shadow(1px 1px 1px blue) invert(1)",
-            EM,
+            &em(),
         )
         .expect("a chain");
         assert_eq!(chain.len(), 3);
@@ -779,7 +1130,8 @@ mod tests {
     fn a_relative_length_follows_the_font_size_it_is_given() {
         // What the string form buys over the typed one: `em` cannot be
         // expressed as a fixed pixel count, because it is not one.
-        let at = |em| match parse_filter("blur(0.5em)", em) {
+        let at = |em| match parse_filter("blur(0.5em)", &FontUnits::assumed(em))
+        {
             Ok(ops) => match ops[0] {
                 FilterOp::Blur(px) => px,
                 ref other => panic!("{other:?}"),
@@ -801,7 +1153,7 @@ mod tests {
             "blur(4px)\ninvert(1)",
             "blur( 4px ) invert( 1 )",
         ] {
-            let ops = parse_filter(text, EM)
+            let ops = parse_filter(text, &em())
                 .unwrap_or_else(|e| panic!("{text:?}: {e}"));
             assert_eq!(ops.len(), 2, "{text:?}");
             assert!(
@@ -823,7 +1175,7 @@ mod tests {
             "drop-shadow(1px 2px 3px hsl(0 100% 50%))",
             "drop-shadow(1px 2px 3px #ff0000)",
         ] {
-            let ops = parse_filter(text, EM)
+            let ops = parse_filter(text, &em())
                 .unwrap_or_else(|e| panic!("{text:?}: {e}"));
             assert_eq!(ops.len(), 1, "{text:?}");
             assert!(
@@ -834,9 +1186,11 @@ mod tests {
         }
 
         // And one nested colour does not swallow a following function.
-        let chain =
-            parse_filter("drop-shadow(1px 2px 3px rgb(0 0 0)) blur(2px)", EM)
-                .expect("two steps");
+        let chain = parse_filter(
+            "drop-shadow(1px 2px 3px rgb(0 0 0)) blur(2px)",
+            &em(),
+        )
+        .expect("two steps");
         assert_eq!(chain.len(), 2);
     }
 
@@ -845,12 +1199,10 @@ mod tests {
         // A parser reachable from a string a caller did not write has to
         // survive anything. None of these may panic, and none may parse.
         for text in [
-            "blur(",
             "blur)",
             "()",
             "(((",
             ")))",
-            "blur(4px",
             "blur 4px)",
             "drop-shadow(",
             "drop-shadow()",
@@ -865,14 +1217,27 @@ mod tests {
             "blur(--4px)",
             "blur(+-4px)",
             "hue-rotate(4.5.6deg)",
-            "blur(4px",
+            "blur(4px) (",
             "\u{1f600}",
             "blur(\u{1f600})",
             "blur(4px) \u{0}",
         ] {
             assert!(
-                parse_filter(text, EM).is_err(),
+                parse_filter(text, &em()).is_err(),
                 "{text:?} should not parse"
+            );
+        }
+        // A function left open at the end is closed, as Chrome 152 closes
+        // it: it takes `blur(`, `blur(4px` and `hue-rotate(`.
+        for (text, closed) in [
+            ("blur(", "blur()"),
+            ("blur(4px", "blur(4px)"),
+            ("hue-rotate(", "hue-rotate()"),
+        ] {
+            assert_eq!(
+                parse_filter(text, &em()).expect("taken"),
+                parse_filter(closed, &em()).expect("taken"),
+                "{text:?}"
             );
         }
     }
@@ -906,18 +1271,18 @@ mod tests {
             "infpx",
         ] {
             // No assertion on the answer, only that there is one.
-            let _ = parse_size(text, EM);
+            let _ = parse_size(text, &em());
             let _ = parse_angle(text);
             let _ = parse_percentage(text);
         }
 
         // The ones with a defined answer.
-        assert_eq!(parse_size("1.2.3px", EM), None, "two decimal points");
-        assert_eq!(parse_size("--1px", EM), None, "two signs");
-        assert_eq!(parse_size("1px2", EM), None, "trailing rubbish");
-        assert_eq!(parse_size("1e", EM), None, "an exponent with no digits");
+        assert_eq!(parse_size("1.2.3px", &em()), None, "two decimal points");
+        assert_eq!(parse_size("--1px", &em()), None, "two signs");
+        assert_eq!(parse_size("1px2", &em()), None, "trailing rubbish");
+        assert_eq!(parse_size("1e", &em()), None, "an exponent with no digits");
         // An overflowing exponent parses to infinity, which is not a length.
-        assert_eq!(parse_size("1e400px", EM), None, "overflows to infinity");
+        assert_eq!(parse_size("1e400px", &em()), None, "overflows to infinity");
         assert_eq!(parse_percentage("NaN"), None);
         assert_eq!(parse_percentage("inf"), None);
     }
@@ -927,15 +1292,16 @@ mod tests {
         // The bug this parser had: `e` both continues an exponent and
         // begins `em`, so splitting on "characters a number may contain"
         // read `0.5em` as `0.5e` and `m`, and neither half is anything.
-        assert_eq!(parse_size("0.5em", 16.0), Some(8.0));
-        assert_eq!(parse_size("2em", 16.0), Some(32.0));
-        assert_eq!(parse_size("1rem", 16.0), Some(16.0));
+        assert_eq!(parse_size("0.5em", &FontUnits::assumed(16.0)), Some(8.0));
+        assert_eq!(parse_size("2em", &FontUnits::assumed(16.0)), Some(32.0));
+        assert_eq!(parse_size("1rem", &FontUnits::assumed(16.0)), Some(16.0));
         // A real exponent still works, including with a sign.
-        assert_eq!(parse_size("1e2px", EM), Some(100.0));
-        assert_eq!(parse_size("1e+2px", EM), Some(100.0));
-        assert_eq!(parse_size("1e-2px", EM), Some(0.01));
+        assert_eq!(parse_size("1e2px", &em()), Some(100.0));
+        assert_eq!(parse_size("1e+2px", &em()), Some(100.0));
+        assert_eq!(parse_size("1e-2px", &em()), Some(0.01));
         // And an `e` that begins a unit is a unit, not a broken exponent.
-        assert_eq!(parse_size("1ex", EM), None, "ex is not a unit here");
+        // With no face to measure, half an em, as CSS Values 4 assumes.
+        assert_eq!(parse_size("1ex", &em()), Some(8.0), "ex is a unit");
     }
 
     #[test]
@@ -951,12 +1317,12 @@ mod tests {
             "shadow(1px 2px 3px red)",
         ] {
             assert!(
-                parse_filter(text, EM).is_err(),
+                parse_filter(text, &em()).is_err(),
                 "{text:?} should not parse"
             );
         }
         for text in ["blur(4px)", "BLUR(4px)", "Drop-Shadow(1px 2px red)"] {
-            assert!(parse_filter(text, EM).is_ok(), "{text:?} should parse");
+            assert!(parse_filter(text, &em()).is_ok(), "{text:?} should parse");
         }
     }
 
@@ -965,11 +1331,11 @@ mod tests {
         // `blur` takes a length and `saturate` takes a percentage, and
         // neither accepts the other's form -- which is what stops
         // `blur(50%)` silently blurring by half the font size.
-        assert!(parse_filter("blur(50%)", EM).is_err());
-        assert!(parse_filter("saturate(4px)", EM).is_err());
-        assert!(parse_filter("hue-rotate(50%)", EM).is_err());
+        assert!(parse_filter("blur(50%)", &em()).is_err());
+        assert!(parse_filter("saturate(4px)", &em()).is_err());
+        assert!(parse_filter("hue-rotate(50%)", &em()).is_err());
         // Though a bare number is a percentage, which CSS allows.
-        assert!(parse_filter("saturate(1.5)", EM).is_ok());
+        assert!(parse_filter("saturate(1.5)", &em()).is_ok());
     }
 
     #[test]
@@ -986,6 +1352,13 @@ mod tests {
         assert_eq!(rem.unit, "rem");
         assert!(rem.pixels.is_nan());
 
+        // Every unit that needs the face, and its root form.
+        for unit in FONT_RELATIVE_UNITS {
+            let length = parse_length(&format!("1{unit}"))
+                .unwrap_or_else(|| panic!("{unit} is a length unit"));
+            assert!(length.pixels.is_nan(), "{unit} needs a font");
+        }
+
         for (text, unit, pixels) in [
             ("2px", "px", 2.0),
             ("1in", "in", 96.0),
@@ -995,7 +1368,11 @@ mod tests {
             ("1mm", "mm", 96.0 / 25.4),
             ("1q", "q", 96.0 / 25.4 / 4.0),
             ("-3px", "px", -3.0),
-            ("0", "", 0.0),
+            // Measured as zero in Chrome 152's `letterSpacing`: a canvas has
+            // no line box, viewport or container to measure.
+            ("2lh", "lh", 0.0),
+            ("2vw", "vw", 0.0),
+            ("2cqmin", "cqmin", 0.0),
         ] {
             let length = parse_length(text)
                 .unwrap_or_else(|| panic!("{text:?} did not parse"));
@@ -1030,10 +1407,14 @@ mod tests {
             "1e400px",
             "NaNpx",
             "\u{1f600}",
+            // Every math function, which Chrome refuses in spacing.
+            "calc(1px)",
+            "min(1px, 2px)",
         ] {
             assert!(parse_length(text).is_none(), "{text:?} should not parse");
         }
-        // Zero alone may go unitless.
+        // Zero alone may go unitless here; spacing refuses it on top, in
+        // `Spacing::from_css`.
         assert!(parse_length("0").is_some());
     }
 
@@ -1055,7 +1436,7 @@ mod tests {
             "wavy red underline",
             "underline red wavy",
         ] {
-            let d = parse_decoration(text, EM)
+            let d = parse_decoration(text, &em())
                 .unwrap_or_else(|| panic!("{text:?} did not parse"));
             assert!(d.lines.underline, "{text:?}");
             assert!(!d.lines.overline && !d.lines.line_through, "{text:?}");
@@ -1066,12 +1447,12 @@ mod tests {
 
     #[test]
     fn several_lines_combine_and_none_clears_them() {
-        let both =
-            parse_decoration("underline line-through", EM).expect("two lines");
+        let both = parse_decoration("underline line-through", &em())
+            .expect("two lines");
         assert!(both.lines.underline && both.lines.line_through);
         assert!(!both.lines.overline);
 
-        let all = parse_decoration("underline overline line-through", EM)
+        let all = parse_decoration("underline overline line-through", &em())
             .expect("three lines");
         assert!(
             all.lines.underline && all.lines.overline && all.lines.line_through
@@ -1089,7 +1470,7 @@ mod tests {
             "",
             "   ",
         ] {
-            let cleared = parse_decoration(text, EM)
+            let cleared = parse_decoration(text, &em())
                 .unwrap_or_else(|| panic!("{text:?} did not parse"));
             assert_eq!(
                 cleared.lines,
@@ -1101,7 +1482,7 @@ mod tests {
         // And a later `none` clears an earlier line, which is what makes
         // the tokens order-dependent in exactly this one way.
         let overridden =
-            parse_decoration("underline none", EM).expect("parsed");
+            parse_decoration("underline none", &em()).expect("parsed");
         assert_eq!(overridden.lines, TextDecoration::default());
     }
 
@@ -1114,36 +1495,57 @@ mod tests {
             ("underline dashed", TextDecorationStyle::Dashed),
             ("underline wavy", TextDecorationStyle::Wavy),
         ] {
-            let d = parse_decoration(text, EM).expect("parsed");
+            let d = parse_decoration(text, &em()).expect("parsed");
             assert_eq!(d.style, style, "{text:?}");
         }
         // Solid is the default when none is named.
         assert_eq!(
-            parse_decoration("underline", EM).expect("parsed").style,
+            parse_decoration("underline", &em()).expect("parsed").style,
             TextDecorationStyle::Solid
         );
     }
 
     #[test]
     fn a_thickness_is_a_length_and_auto_is_not_one() {
-        let thick = parse_decoration("underline 3px", EM).expect("parsed");
+        let thick = parse_decoration("underline 3px", &em()).expect("parsed");
         assert_eq!(thick.thickness, Some(3.0));
 
         // Relative to the font, resolved now: the decoration is stored as a
         // resolved style, so there is nowhere to keep the unit.
         let relative =
-            parse_decoration("underline 0.25em", 40.0).expect("parsed");
+            parse_decoration("underline 0.25em", &FontUnits::assumed(40.0))
+                .expect("parsed");
         assert_eq!(relative.thickness, Some(10.0));
 
         // `auto` and `from-font` both mean the font's own, which is what
         // `None` already says.
         for text in ["underline auto", "underline from-font", "underline"] {
             assert_eq!(
-                parse_decoration(text, EM).expect("parsed").thickness,
+                parse_decoration(text, &em()).expect("parsed").thickness,
                 None,
                 "{text:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_computed_value_is_clamped_into_its_function_s_range() {
+        // Chrome draws `blur(calc(-1px))` as `blur(0px)` and
+        // `brightness(calc(-1))` as `brightness(0)`. Skia happens to draw a
+        // negative blur as none, so the pixels cannot show this clamp; the
+        // operation the parse hands on can.
+        let parsed = |css: &str| parse_filter(css, &em()).expect("taken");
+        assert_eq!(parsed("blur(calc(-1px))"), [FilterOp::Blur(0.0)]);
+        assert_eq!(parsed("brightness(calc(-1))"), [FilterOp::Brightness(0.0)]);
+        match parsed("drop-shadow(1px 2px calc(-3px) red)")[..] {
+            [FilterOp::DropShadow { blur, .. }] => assert_eq!(blur, 0.0),
+            ref other => panic!("{other:?}"),
+        }
+        // And an infinity is the largest `f32`, as Chrome draws it.
+        assert_eq!(
+            parsed("blur(calc(1px * infinity))"),
+            [FilterOp::Blur(f32::MAX)]
+        );
     }
 
     #[test]
@@ -1157,7 +1559,7 @@ mod tests {
             // A half step rounds up at parse, as Chrome rounds it.
             ("rgb(10.5 20.4 30.6)", [11, 20, 31]),
         ] {
-            let parsed = parse_decoration(&format!("underline {css}"), EM)
+            let parsed = parse_decoration(&format!("underline {css}"), &em())
                 .expect("a decoration");
             let color =
                 rgba_linear_to_skia_color(parsed.color.expect("a colour"));
@@ -1175,7 +1577,7 @@ mod tests {
             "underline currentColor",
         ] {
             assert!(
-                parse_decoration(text, EM).is_some(),
+                parse_decoration(text, &em()).is_some(),
                 "{text:?} should parse"
             );
         }
@@ -1192,7 +1594,7 @@ mod tests {
             "underline \u{1f600}",
         ] {
             assert!(
-                parse_decoration(text, EM).is_none(),
+                parse_decoration(text, &em()).is_none(),
                 "{text:?} should not parse"
             );
         }
@@ -1200,11 +1602,11 @@ mod tests {
 
     #[test]
     fn keywords_are_case_insensitive_as_css_keywords_are() {
-        let d = parse_decoration("UNDERLINE WAVY", EM).expect("parsed");
+        let d = parse_decoration("UNDERLINE WAVY", &em()).expect("parsed");
         assert!(d.lines.underline);
         assert_eq!(d.style, TextDecorationStyle::Wavy);
         assert_eq!(
-            parse_decoration("NONE", EM).expect("parsed").lines,
+            parse_decoration("NONE", &em()).expect("parsed").lines,
             TextDecoration::default()
         );
     }
@@ -1213,12 +1615,12 @@ mod tests {
     fn a_long_chain_and_a_repeated_function_both_survive() {
         // CSS applies a repeated function twice rather than replacing the
         // first, and a chain has no length limit worth enforcing.
-        let ops = parse_filter("blur(1px) blur(2px) blur(3px)", EM)
+        let ops = parse_filter("blur(1px) blur(2px) blur(3px)", &em())
             .expect("three blurs");
         assert_eq!(ops.len(), 3, "repeats are kept, not collapsed");
 
         let long = "invert(1) ".repeat(64);
-        assert_eq!(parse_filter(&long, EM).expect("a long chain").len(), 64);
+        assert_eq!(parse_filter(&long, &em()).expect("a long chain").len(), 64);
     }
 
     #[test]
@@ -1233,7 +1635,7 @@ mod tests {
             "blur 4px",
             "drop-shadow(2px red)",
         ] {
-            let refused = parse_filter(text, EM)
+            let refused = parse_filter(text, &em())
                 .expect_err(&format!("{text:?} should not parse"));
             assert!(
                 format!("{refused}").contains("could not parse"),
@@ -1382,12 +1784,13 @@ fn transform_function(text: &str) -> Option<Matrix4> {
         "perspective",
     ] {
         let Some(args) = args(name) else { continue };
-        // `parse_length` gives NaN for `em` and `rem`, whose pixel value needs
-        // a font size this function does not have. Refused rather than
-        // silently placed at NaN, which would put the drawing nowhere.
+        // An absolute unit or a bare zero, and nothing else: Chrome's
+        // `DOMMatrix` refuses `em`, `ex` and the rest, which need a font this
+        // function does not have, and `vw` and `lh`, which need a document.
         let length = |at: usize| -> Option<f64> {
-            let pixels = parse_length(args.get(at)?)?.pixels;
-            pixels.is_finite().then_some(f64::from(pixels))
+            let length = parse_length(args.get(at)?)?;
+            (length.unit.is_empty() || absolute_px(&length.unit).is_some())
+                .then_some(f64::from(length.pixels))
         };
         let angle = |at: usize| parse_angle(args.get(at)?).map(f64::from);
         let number = |at: usize| parse_number(args.get(at)?).map(f64::from);

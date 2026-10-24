@@ -12,12 +12,14 @@ use std::cell::RefCell;
 use super::{BoxedContext2D, Context2D, Dye, page::ExportOptions};
 use crate::{
     color_filter::BoxedColorFilter,
+    css::parse_filter,
     export::VectorFeatures,
+    filter::FilterOp,
     image_filter::BoxedImageFilter,
     mask_filter::BoxedMaskFilter,
     node::{
         canvas::BoxedCanvas,
-        filter::Filter,
+        filter::{Filter, FilterSpec},
         font_library::FontLibrary,
         image::{Content, Source},
         path::{Path2D, conic_or_line},
@@ -1670,10 +1672,8 @@ pub fn set_letterSpacing(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let mut this = this.borrow_mut();
 
     if let Some(spacing) = opt_spacing_arg(&mut cx, 1)? {
-        let em_size = this.state.char_style.font_size();
-        this.state
-            .char_style
-            .set_letter_spacing(spacing.in_px(em_size));
+        let px = spacing.in_px(&this.state.font_units());
+        this.state.char_style.set_letter_spacing(px);
         this.state.letter_spacing = spacing;
     }
     Ok(cx.undefined())
@@ -1690,10 +1690,8 @@ pub fn set_wordSpacing(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let mut this = this.borrow_mut();
 
     if let Some(spacing) = opt_spacing_arg(&mut cx, 1)? {
-        let em_size = this.state.char_style.font_size();
-        this.state
-            .char_style
-            .set_word_spacing(spacing.in_px(em_size));
+        let px = spacing.in_px(&this.state.font_units());
+        this.state.char_style.set_word_spacing(px);
         this.state.word_spacing = spacing;
     }
     Ok(cx.undefined())
@@ -1828,18 +1826,28 @@ pub fn get_filter(mut cx: FunctionContext) -> JsResult<JsString> {
 
 pub fn set_filter(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
+    let css = cx.argument::<JsString>(1)?.value(&mut cx);
     let mut this = this.borrow_mut();
-    if !cx.argument::<JsValue>(1)?.is_a::<JsNull, _>(&mut cx) {
-        // `None` is a declaration that did not parse, and the Canvas API
-        // ignores one of those: the filter already in place stands.
-        // Compared by what it resolves to as well as by its text: the same
-        // `blur(1em)` set again after the font changed is a different blur,
-        // and Chrome redraws it at the new size.
-        if let Some((filter_text, specs)) = filter_arg(&mut cx, 1)?
-            && !this.state.filter.is(&filter_text, &specs)
-        {
-            this.state.filter = Filter::new(&filter_text, &specs);
-        }
+    // Read by the crate's own `parse_filter`, so the two surfaces take one
+    // grammar from one implementation. A declaration that does not parse is
+    // ignored, as the Canvas API says, and so is the empty string, which
+    // Chrome ignores where `Context2D::set_filter_css` clears the filter.
+    if css.trim().is_empty() {
+        return Ok(cx.undefined());
+    }
+    let Ok(ops) = parse_filter(&css, &this.state.filter_units()) else {
+        return Ok(cx.undefined());
+    };
+    if ops.iter().any(|op| op.validate().is_err()) {
+        return Ok(cx.undefined());
+    }
+    let specs: Vec<FilterSpec> =
+        ops.into_iter().map(FilterOp::to_spec).collect();
+    // Compared by what it resolves to as well as by its text: the same
+    // `blur(1em)` set again after the font changed is a different blur, and
+    // Chrome redraws it at the new size.
+    if !this.state.filter.is(&css, &specs) {
+        this.state.filter = Filter::new(&css, &specs);
     }
     Ok(cx.undefined())
 }

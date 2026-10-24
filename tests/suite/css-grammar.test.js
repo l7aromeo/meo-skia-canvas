@@ -7,12 +7,19 @@
 // Chrome rather than taken from either surface.
 
 const { assert, describe, test } = require("../runner"),
-  { Canvas, DOMMatrix } = require("../../lib"),
+  { Canvas, DOMMatrix, FontLibrary } = require("../../lib"),
   css = require("../../lib/classes/css"),
   filters = require("../assets/cases/css-filters.json"),
   fonts = require("../assets/cases/css-fonts.json"),
+  math = require("../assets/cases/css-math.json"),
   spacing = require("../assets/cases/css-spacing.json"),
   transforms = require("../assets/cases/css-transforms.json");
+
+// Oswald, the variable face the font-relative rows were measured on in
+// Chrome, under the family name the rows give.
+FontLibrary.use("Oswald", [
+  "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+]);
 
 // Chrome resolves a length in float32: `2cm` reads 75.59055328 where
 // 2 * 96 / 2.54 is 75.59055118. Wide enough for that, and far narrower than
@@ -250,6 +257,56 @@ describe("CSS filters and spacing", () => {
             `${property} ${JSON.stringify(css)}: ${got ?? "ignored"}, Chrome ${read ?? "ignores it"}`,
           );
       }
+    assert.deepEqual(wrong, []);
+  });
+
+  test("letterSpacing lays out the spacing table's pixels", () => {
+    // The rows with a `font` give the spacing Chrome laid out in pixels, and
+    // each is checked by laying the same text out with that many pixels
+    // written instead. Layout is the same code either way, so this isolates
+    // what the unit resolves to.
+    const wrong = [];
+    for (const { font, css, px } of spacing.cases.filter((c) => c.font)) {
+      const ctx = new Canvas(10, 10).getContext("2d");
+      ctx.font = font;
+      const width = (letterSpacing) => {
+        ctx.letterSpacing = letterSpacing;
+        return ctx.measureText("abcd").width;
+      };
+      const [got, want] = [width(css), width(`${px}px`)];
+      if (Math.abs(got - want) > 1e-3)
+        wrong.push(`${css} in ${font}: ${got}, as ${px}px ${want}`);
+    }
+    assert.deepEqual(wrong, []);
+  });
+
+  test("ctx.filter answers the math table", () => {
+    // Each taken row draws the same pixels as the plain filter Chrome drew
+    // it as, over the scene it was measured on; each refused row leaves the
+    // filter before it standing.
+    const filtered = (font, filter) => {
+      const ctx = new Canvas(200, 80).getContext("2d");
+      if (font) ctx.font = font;
+      ctx.filter = filter;
+      const taken = ctx.filter === filter;
+      ctx.fillStyle = "rgb(40,90,20)";
+      ctx.fillRect(60, 20, 60, 30);
+      ctx.fillStyle = "rgba(200,50,160,0.6)";
+      ctx.fillRect(90, 35, 50, 30);
+      return {
+        taken,
+        pixels: Buffer.from(ctx.getImageData(0, 0, 200, 80).data),
+      };
+    };
+    const wrong = [];
+    for (const { font, css, draws } of math.cases) {
+      const got = filtered(font, css);
+      if (!draws) {
+        if (got.taken) wrong.push(`${css}: taken, Chrome ignores it`);
+      } else if (!got.taken) wrong.push(`${css}: ignored`);
+      else if (!got.pixels.equals(filtered(font, draws).pixels))
+        wrong.push(`${css}: does not draw as ${draws}`);
+    }
     assert.deepEqual(wrong, []);
   });
 
