@@ -844,7 +844,7 @@ why  = """Both surfaces carry the value; only npm constrains it. Rust models the
        these five, so a caller matching on the input type matches string
        literals with nothing to catch a typo. A typing gap in the crate."""
 status = "gap"
-issue = "unfiled"
+issue = "https://github.com/l7aromeo/meo-skia-canvas/issues/273"
 
 [[capability]]
 name = "the CSS font-variant keyword set"
@@ -1733,14 +1733,17 @@ name = "the format a multi-page save chooses"
 rust = []
 npm = ["SaveOptions",
        "SaveOptions.format"]
-why = """npm's `toFile` takes a `format` naming the container to write when the
-      filename does not settle it, and a filename containing `{}` writes one
-      numbered file per page. `Canvas::to_file` takes the format from the
-      extension alone and writes one page, so a Rust caller wanting either
-      passes the format to `to_buffer` and writes the bytes itself, page by
-      page. A gap in the crate's file export."""
-status = "gap"
-issue = "unfiled"
+why = """npm's `toFile` takes the container to write as `format` in its options,
+      for a filename that does not settle it. The crate takes it as an
+      argument: `Canvas::to_file_as(path, format, options)` is
+      `toFile(path, { format })`, and `Canvas::to_file` reads the format from
+      the extension, as `toFile` does without one. `EncodeOptions` has no
+      format field because `Canvas::to_buffer` takes the format as an
+      argument too, as npm's `toBuffer` does, and one struct serves both. So
+      SaveOptions has nothing left to add: a filename with `{}` or `{N}`
+      writes one numbered file per page through either method, as it does
+      through `toFile`."""
+status = "deliberate"
 
 [[capability]]
 name = "releasing cached memory on request"
@@ -1800,11 +1803,13 @@ why = """`Canvas | Image | ImageData` twice over -- what `drawImage` accepts and
       inherits either, so they are not part of the mixin decomposition above
       despite the shared prefix. The crate has a method per source instead:
       `draw_image` and `create_pattern` take an `Image`, `draw_canvas` and
-      `create_pattern_from_canvas` a `Canvas`, and none takes an `ImageData`,
-      which a Rust caller converts through `Image::from_pixels` first. That
-      conversion is a gap in the crate."""
-status = "gap"
-issue = "unfiled"
+      `create_pattern_from_canvas` a `Canvas`. An `ImageData` reaches the
+      `Image` methods through the crate's `TryFrom<&ImageData>` for `Image`
+      in src/image.rs, a trait implementation rather than a method of its
+      own, which draws it as `drawImage` draws one. A union would need a
+      trait or an enum standing in for three types a Rust caller already
+      names, so the crate keeps a method per source."""
+status = "deliberate"
 
 [[capability]]
 name = "npm argument shapes that declare no members"
