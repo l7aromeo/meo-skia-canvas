@@ -493,7 +493,7 @@ why  = """The crate's colour primitive: premultiplied, linear-light, and the
 status = "deliberate"
 
 [[capability]]
-name = "the `prototype` property on declared classes"
+name = "the `prototype` property on declared constructor objects"
 rust = []
 npm  = ["CanvasGradient.prototype",
         "CanvasRenderingContext2D.prototype",
@@ -502,14 +502,17 @@ npm  = ["CanvasGradient.prototype",
         "DOMRect.prototype",
         "Path2D.prototype",
         "TextMetrics.prototype"]
-why  = """Not a capability on either side. These are `declare class` artefacts
-       in lib/index.d.ts -- every JavaScript constructor has a `prototype`,
-       and declaring it explicitly adds nothing a caller can use. One of the
-       same kind was deleted from `ImageData` for this reason. The entry is
-       here so the gate is quiet; the fix is to stop declaring them, which
-       would delete it -- a gap in the npm declaration."""
-status = "gap"
-issue = "unfiled"
+why  = """Not a capability on either side: the declaration shape of the DOM's own
+       types. lib/index.d.ts declares these seven as TypeScript's own DOM
+       library does, an interface for the instance and a `declare var` for
+       the constructor object, and TypeScript supplies a `prototype` only for
+       a class, never for a `declare var`. Without the declaration, `X.prototype` does not
+       compile on the three with no construct signature -- `CanvasGradient`,
+       `CanvasRenderingContext2D` and `TextMetrics`, whose constructors throw
+       -- and is `any` on the other four, from `Function.prototype`.
+       tests/types/constructors.ts checks each is exactly the instance type.
+       `ImageData` is declared as a class, so TypeScript gives it one."""
+status = "deliberate"
 
 [[capability]]
 name = "a shadow offset as one member or two"
