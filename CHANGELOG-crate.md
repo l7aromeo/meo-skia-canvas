@@ -317,6 +317,16 @@ window be changed after it opens.** No signature moves and nothing is removed.
   back as `None`, including `translate3d` with two arguments and a negative
   `perspective`.
 
+- **An `ImageData` draws as an image.** `Image::try_from(&image_data)` copies
+  it into an `Image`, so every `draw_image` form and `create_pattern` take
+  one, as JavaScript's `drawImage` and `createPattern` do. Unlike
+  `put_image_data`, which writes the bytes as they are, a drawn one takes
+  the transform, the global alpha and the compositing. The pixels keep the
+  layout the `ImageData` reports: a premultiplied buffer draws the colours
+  it holds rather than darker ones, and a Display P3 buffer is converted
+  into the canvas's space. Checked against the Node binding's
+  `drawImage(imageData)` and `createPattern(imageData)` on the same buffer.
+
 - **`color(xyz ...)`, `color(xyz-d50 ...)` and `color(xyz-d65 ...)` are
   accepted**, beside the `srgb`, `srgb-linear`, `display-p3` and `rec2020`
   forms already taken. `xyz` and `xyz-d65` name one space, as CSS Color 4

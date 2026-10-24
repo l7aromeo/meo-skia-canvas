@@ -16,7 +16,7 @@ use crate::{
     decode::bmp::space_of,
     error::Error,
     geometry::Size,
-    pixels::{PixelColorSpace, PixelExportOptions},
+    pixels::{ImageData, PixelColorSpace, PixelExportOptions},
 };
 
 /// The size an SVG with no declared size of its own is laid out against.
@@ -643,6 +643,56 @@ pub struct Svg {
     dom: svg::Dom,
     intrinsic: Size,
     autosized: bool,
+}
+
+/// An [`ImageData`] as an image to draw, which is how JavaScript's
+/// `drawImage` and `createPattern` take one.
+///
+/// Drawn rather than put: unlike
+/// [`Context2D::put_image_data`](crate::context2d::Context2D::put_image_data),
+/// which writes the bytes as they are, every
+/// [`Context2D::draw_image`](crate::context2d::Context2D::draw_image) form
+/// and [`Context2D::create_pattern`](crate::context2d::Context2D::create_pattern)
+/// apply the transform, the global alpha and the compositing to it. The
+/// pixels are copied, in the layout the `ImageData` reports -- its depth, its
+/// colour space and whether it is premultiplied -- through
+/// [`Image::from_pixels`].
+///
+/// ```
+/// use meo_skia_canvas::prelude::*;
+///
+/// let mut canvas = Canvas::new(4.0, 4.0);
+/// let ctx = canvas.context();
+/// let dot = ImageData::from_pixels(
+///     1,
+///     1,
+///     PixelExportOptions::default(),
+///     vec![255, 0, 0, 255],
+/// )?;
+/// ctx.set_global_alpha(0.5);
+/// ctx.draw_image(&Image::try_from(&dot)?, 1.0, 1.0);
+/// let read = ctx.get_image_data(1.0, 1.0, 1.0, 1.0)?;
+/// assert_eq!(read.pixels(), [255, 0, 0, 128]);
+/// # Ok::<(), meo_skia_canvas::error::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// What [`Image::from_pixels`] returns, which for an `ImageData` that exists
+/// is only [`Error::UnsupportedPixelColorSpace`] or [`Error::DecodeImage`]:
+/// its dimensions, row length and byte count are already consistent.
+impl TryFrom<&ImageData> for Image {
+    type Error = Error;
+
+    fn try_from(data: &ImageData) -> Result<Self, Error> {
+        Self::from_pixels(
+            data.pixels(),
+            data.width(),
+            data.height(),
+            data.stride(),
+            data.options(),
+        )
+    }
 }
 
 impl Svg {
