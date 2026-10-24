@@ -24,31 +24,6 @@ import { posix } from "node:path";
 // do not carry.
 const SKIP = /^vendor\//;
 
-// The npm changelog continues phyron-skia-canvas, and every section before
-// this package's first release (CHANGELOG.md's channel table) is upstream's
-// notes, written in upstream's tree. They link to `/docs/api/canvas.md` and
-// pages like it, which this tree has never carried, so they are history, not
-// links to fix -- as the changelog-count check leaves released sections alone.
-// Everything from the first such section down is not read.
-const UPSTREAM_HISTORY = { file: "CHANGELOG-npm.md", before: [3, 6, 0] };
-
-/** `text` with upstream's sections blanked, line numbers kept, or null if the
- * boundary is not where it should be. */
-export function withoutUpstreamHistory(text, before = UPSTREAM_HISTORY.before) {
-  const lines = text.split("\n"),
-    older = (v) => {
-      for (let i = 0; i < 3; i++)
-        if (v[i] !== before[i]) return v[i] < before[i];
-      return false;
-    };
-  const start = lines.findIndex((line) => {
-    const m = line.match(/^## .*\[v(\d+)\.(\d+)\.(\d+)[^\]]*\]/);
-    return m && older(m.slice(1, 4).map(Number));
-  });
-  if (start < 0) return null;
-  return lines.map((line, i) => (i < start ? line : "")).join("\n");
-}
-
 /** The text with fenced code blocks and code spans blanked out, lines kept. */
 function withoutCode(text) {
   let fence = null;
@@ -401,32 +376,7 @@ Under
       0,
     ],
   ];
-  // Upstream's history is cut at the first section older than the boundary.
-  const log = (link) =>
-    `## [v6.0.0]\n\n[x](${link})\n\n## [v3.6.0]\n\n## [v3.5.1]\n\n[y](gone.md)\n`;
-  const cut = withoutUpstreamHistory(log("ok.md"));
-  cases.push(
-    [
-      "upstream's history is not read",
-      [
-        ["c.md", cut],
-        ["ok.md", "# T"],
-      ],
-      0,
-    ],
-    [
-      "this package's own sections still are",
-      [["c.md", withoutUpstreamHistory(log("missing.md"))]],
-      1,
-      "missing.md",
-    ],
-  );
-  if (withoutUpstreamHistory("## [v6.0.0]\n") !== null) {
-    console.error(
-      "  self-test FAILED: a changelog with no upstream section should be refused",
-    );
-    process.exit(1);
-  }
+
   let bad = 0;
   for (const [label, entries, expected, mustSay] of cases) {
     const { files, tracked } = tree(entries);
@@ -460,18 +410,6 @@ function main() {
       .filter((p) => p.endsWith(".md") && !SKIP.test(p))
       .map((p) => [p, readFileSync(p, "utf8")]),
   );
-  if (files.has(UPSTREAM_HISTORY.file)) {
-    const own = withoutUpstreamHistory(files.get(UPSTREAM_HISTORY.file));
-    if (own === null) {
-      console.error(
-        `markdown-links: ${UPSTREAM_HISTORY.file} has no section older than ` +
-          `${UPSTREAM_HISTORY.before.join(".")} -- the boundary has moved; ` +
-          `update UPSTREAM_HISTORY rather than read upstream's notes.`,
-      );
-      process.exit(1);
-    }
-    files.set(UPSTREAM_HISTORY.file, own);
-  }
   // Asserted non-empty: a pattern that has stopped matching would otherwise
   // report a clean tree.
   const links = [...files.values()].reduce(
