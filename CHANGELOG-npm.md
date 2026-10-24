@@ -192,10 +192,11 @@ removed and no signature moves.
   narrowed, as `"a "` at -10px, 7.04 where Chrome measures 6.2. The width
   is now the advance of every glyph and space with its spacing, which is
   what Chrome reports and what the drawing already used: where the text is
-  drawn does not move. And the bounding box of a negative advance reaches
-  back on the left to where the advance ends, as Chrome's does: `a` at
-  -50px reports `actualBoundingBoxLeft` 32.96, its advance, though its ink
-  begins 1.68 right of the origin.
+  drawn does not move. The bounding box stays where the glyphs' ink is:
+  `a` at -50px reports `actualBoundingBoxLeft` -1.68, its ink beginning
+  1.68 right of the origin, where Chrome reports 32.96, the end of the
+  advance -- a box wider than the text. docs/browser-differences.md
+  records the difference.
 - **`getImageData` on the GPU unpremultiplies as the CPU does.** On the
   GPU engine, the default on macOS, a translucent pixel read back up to a
   level low wherever its unpremultiplied value fell on a half:

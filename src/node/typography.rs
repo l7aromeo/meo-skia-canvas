@@ -1067,17 +1067,6 @@ impl<'a> Typesetter<'a> {
             false => self.signed_advance(&paragraph) * condensation,
             true => width,
         };
-        // Where the advance is negative, what `Measured::ink` reaches back
-        // to on the left -- see `NegativeAdvance`.
-        let negative_advance =
-            (width < 0.0 && !self.text_wrap).then(|| NegativeAdvance {
-                width,
-                shift: match self.gravity() {
-                    TextAlign::Center => width / 2.0,
-                    TextAlign::Right => width,
-                    _ => 0.0,
-                },
-            });
 
         let extents = TextExtents {
             width,
@@ -1100,7 +1089,6 @@ impl<'a> Typesetter<'a> {
             norm,
             ideo,
             char_ranges,
-            negative_advance,
         };
         (extents, measured)
     }
@@ -1783,27 +1771,6 @@ pub struct Measured {
     ideo: f32,
     /// Each line's text, in UTF-16 code units.
     char_ranges: Vec<Range<usize>>,
-    /// Where an unwrapped run's advance is negative, how far left its ink
-    /// box reaches.
-    negative_advance: Option<NegativeAdvance>,
-}
-
-/// An unwrapped run whose advance is negative, as its ink box needs it.
-///
-/// Chrome's box for such a run reaches back on the left to where the advance
-/// ends: Blink's plain_text_node.cc moves the left edge of the run's ink out
-/// to the smaller of its width and its ink's width -- the width, the ink's
-/// being never negative -- to cover the glyphs a negative advance carries
-/// left without measuring each, and leaves the right edge as it is. So `a`
-/// at -50px of letter spacing reports `actualBoundingBoxLeft` 32.96, its
-/// advance, though its ink begins 1.68 right of the origin. Applied where
-/// Chrome applies it, before the alignment shifts the run by none, half or
-/// all of the width.
-struct NegativeAdvance {
-    /// The signed advance, condensed.
-    width: f32,
-    /// How far the alignment moves the run: none, half or all of `width`.
-    shift: f32,
 }
 
 impl Measured {
@@ -1820,7 +1787,6 @@ impl Measured {
             norm,
             ideo,
             char_ranges,
-            negative_advance,
         } = self;
         let (origin, condensation, half_leading) =
             (*origin, *condensation, *half_leading);
@@ -2002,15 +1968,6 @@ impl Measured {
                 }
             }
         }
-        let ink_bounds = match negative_advance {
-            Some(NegativeAdvance { width, shift }) => Rect::new(
-                (ink_bounds.left + *shift).min(*width) - *shift,
-                ink_bounds.top,
-                ink_bounds.right,
-                ink_bounds.bottom,
-            ),
-            None => ink_bounds,
-        };
         (ink_bounds, line_details)
     }
 }
