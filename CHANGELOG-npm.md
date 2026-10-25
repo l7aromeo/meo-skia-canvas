@@ -154,6 +154,20 @@ removed and no signature moves.
 
 ### Fixed
 
+- **`outlineText` and the ink box put every glyph where `fillText` draws
+  it.** A glyph the shaper moves off its advance -- a mark stacked over
+  another, a mark set over a base with no precomposed glyph, the half of a
+  kern from a font's legacy `kern` table that HarfBuzz carries as an offset
+  -- was read from SkParagraph's `extended_visit`, which reports positions
+  without those offsets. At 240px Raleway, `"p\u0301\u0308"` outlined both
+  marks at one height, its top 174.80 above the baseline where the drawn
+  diaeresis reaches 224.42, and `actualBoundingBoxAscent` and
+  `actualBoundingBoxRight` read 174.80 and 212.39 where the ink spans 224.42
+  and 200.38. The glyphs are now read from the text blobs `fillText` paints.
+  That replaces the reconstruction of halved kerns 6.0.0 added for
+  `outlineText`, which modelled that one offset and kept the reported
+  position for every other.
+
 - **A refused `App.launch()` leaves the app as it found it.** Where there is
   no GPU or no display, `launch()` throws at once -- "No display available:
   a window needs one, and this process has none" -- and no loop begins, but

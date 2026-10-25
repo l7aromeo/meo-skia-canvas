@@ -4361,11 +4361,21 @@ mod run_painter_tests {
             ("plain".into(), text("48px Oswald", line, |_| {})),
             ("plain Raleway".into(), text("40px Raleway", line, |_| {})),
             ("system serif".into(), text("40px serif", line, |_| {})),
-            // Kerned through `kern` alone, where SkParagraph's reported
-            // positions and the painted ones part -- see `glyph_runs`.
+            // Kerned through `kern` alone, where HarfBuzz carries half of
+            // each kern as an offset -- see `glyph_runs`.
             (
                 "legacy kern".into(),
                 text("48px Helvetica", "AV To Ta", |_| {}),
+            ),
+            // Marks the shaper stacks and sets over a base with no
+            // precomposed glyph, by offsets alone.
+            (
+                "stacked marks".into(),
+                text(
+                    "48px Raleway",
+                    "p\u{301}\u{308} x\u{323}\u{302} q\u{308}",
+                    |_| {},
+                ),
             ),
             (
                 "mixed fallback".into(),
