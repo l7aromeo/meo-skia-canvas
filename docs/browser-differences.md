@@ -104,7 +104,7 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   fallback match ... produced by geometric shearing to the specified oblique
   value" ahead of any italic. So here `oblique 10deg` leans an upright face
   by `tan(10deg)` and `oblique -14deg` leans it back by `tan(14deg)`, a
-  `slnt` axis leans as far as it goes, and an italic face is drawn only for
+  `slnt` axis is set as far as it goes, and an italic face is drawn only for
   a family with no upright face to shear. At 90deg either way a sheared
   glyph lies along its baseline and draws nothing, the limit it nears as
   the angle grows. `resolve_for_oblique` and `run_shear` in

@@ -671,7 +671,11 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
     });
     let base_oblique = match_oblique(&mut text_style, &mut collection);
     let mut para_style = para_style;
-    para_style.set_text_style(&text_style);
+    // Only an oblique changes the style, and copying it back costs a copy
+    // of every field it has.
+    if base_oblique {
+        para_style.set_text_style(&text_style);
+    }
 
     Ok(cx.boxed(RefCell::new(ParagraphBuilderWrap {
         recipe: Some(ParagraphRecipe::new(
