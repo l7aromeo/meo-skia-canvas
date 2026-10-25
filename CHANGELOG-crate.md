@@ -83,11 +83,20 @@ window be changed after it opens.** No signature moves and nothing is removed.
     space, so `"red\u{a0}"` was red and
     `"blur(2px)\u{a0}grayscale(1)"` a filter; each is now refused, as
     Chrome 152 refuses it.
-  - A comment inside a colour is dropped, as CSS Syntax drops one:
-    `rgb(255,/**/0,0)` and `/**/#f00` were refused and now read as red. A
-    comment still ends the token before it, so `rgb/**/(255 0 0)` stays
-    refused. A comment beside a keyword, `red/**/`, is dropped too, where
-    Chrome ignores the whole value; docs/browser-differences.md says why.
+  - A comment is dropped, as CSS Syntax drops one, in every CSS string the
+    crate reads -- `set_fill_style_css`, `Font::from_css`, `set_filter_css`,
+    `Affine::from_css` and the spacing setters: `rgb(255,/**/0,0)`,
+    `12px/**/serif` and `blur(/**/2px)` were refused and are read. A
+    comment in a quoted family name is part of the name. A comment still
+    ends the token before it, so `rgb/**/(255 0 0)` and `blur(2/**/px)`
+    stay refused, and a sign it parts from what follows stands alone, so
+    `rgb(255 -/**/10 0)` is refused rather than read as -10. A comment
+    beside a colour keyword, `red/**/`, is dropped too, where Chrome ignores
+    the whole value; docs/browser-differences.md says why.
+  - `set_letter_spacing_css` and `set_word_spacing_css` take whitespace and
+    comments around the length, `" 5px "` and `"/**/5px"`, which they
+    refused: CSS Syntax discards both there. Chrome 152 ignores them;
+    docs/browser-differences.md records it.
   - `currentcolor` is opaque black, `rgb(from currentcolor r g b)` too,
     where it was refused: CSS Color 4 resolves it from the `color`
     property's initial value when there is no element, and a canvas here

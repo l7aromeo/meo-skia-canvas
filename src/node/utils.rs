@@ -14,7 +14,7 @@ use crate::{
     color::{RgbaLinear, linear_to_srgb, linear_to_srgb_byte, srgb_to_linear},
     css::{
         DEGREES_PER_TURN, Dimension, Expect, FontUnits, Percent, Quantity,
-        evaluate, is_math, literal,
+        evaluate, is_math, literal, without_comments,
     },
 };
 
@@ -2362,57 +2362,6 @@ fn hex_or_named(css: &str) -> Option<Option<Color4f>> {
     Some(Some(Color4f::new(byte(r), byte(g), byte(b), 1.0)))
 }
 
-/// `css` with its comments dropped, as CSS Syntax 3's tokenizer drops them
-/// (section 4.3.2): `rgb(255/**/0 0)` is `rgb(255 0 0)`, and a comment left
-/// open runs to the end, so `rgb(255 0 0 /* x)` is `rgb(255 0 0 `.
-///
-/// A comment ends the token before it, so where one stands between two
-/// characters that would otherwise read as one token it becomes a space:
-/// `rgb/**/(` is a name and a bracket, refused as `rgb (` is, `120/**/deg` a
-/// number and a name, and `#f/**/00` no hex colour. A comment is no
-/// whitespace, though, and the one place that tells them apart is the `+` or
-/// `-` of a math function, which needs whitespace on both sides: beside a
-/// sign with no whitespace beyond it the comment leaves nothing, so
-/// `calc(100/**/+/**/155)` stays refused, as Chrome 152 refuses it.
-fn without_comments(css: &str) -> Cow<'_, str> {
-    if !css.contains("/*") {
-        return Cow::Borrowed(css);
-    }
-    let mut out = String::with_capacity(css.len());
-    let mut rest = css;
-    while let Some(at) = rest.find("/*") {
-        out.push_str(&rest[..at]);
-        let after = match rest[at + 2..].find("*/") {
-            Some(close) => &rest[at + 2 + close + 2..],
-            None => "",
-        };
-        let before = out.chars().next_back();
-        let next = after.chars().next();
-        let sign = |c: Option<char>| matches!(c, Some('+' | '-'));
-        let bare_sign_before = sign(before)
-            && out
-                .chars()
-                .rev()
-                .nth(1)
-                .is_none_or(|c| c.is_ascii_whitespace());
-        let bare_sign_after = sign(next)
-            && after
-                .chars()
-                .nth(1)
-                .is_none_or(|c| c.is_ascii_whitespace() || c == '/');
-        let separates = before.is_some_and(|c| !c.is_ascii_whitespace())
-            && next.is_some_and(|c| !c.is_ascii_whitespace())
-            && !bare_sign_before
-            && !bare_sign_after;
-        if separates {
-            out.push(' ');
-        }
-        rest = after;
-    }
-    out.push_str(rest);
-    Cow::Owned(out)
-}
-
 /// `css` with every bracket still open at its end closed, as CSS Syntax 3
 /// closes every open block when the input ends: `rgb(255 0 0` is
 /// `rgb(255 0 0)`, as Chrome 153's canvas reads it.
@@ -2439,7 +2388,7 @@ fn closed_at_end(css: &str) -> Cow<'_, str> {
 /// Skia converts at the paint, and converting via sRGB first would cost a
 /// level of the eight the readback quantises to.
 pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
-    let uncommented = without_comments(css);
+    let uncommented = without_comments(css)?;
     let css = closed_at_end(uncommented.as_ref());
     let css = css.as_ref();
     if let Some(color) = read_color_function(css) {

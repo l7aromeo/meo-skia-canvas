@@ -1,6 +1,6 @@
 {
   "about": "CSS transform lists and the 2D matrix each composes to, as a, b, c, d, e, f. Read by tests/css_grammar.rs for Affine::from_css and by tests/suite/css-grammar.test.js for DOMMatrix.setMatrixValue, so the two surfaces answer one table rather than two.",
-  "source": "Chrome 152.0.7977.149: new DOMMatrix().setMatrixValue(css), then a through f, measured 2026-10-22. A 3D list is composed in 4x4 and projected, which is why rotateX(30deg) before translate3d moves f. Chrome resolves a length in float32, so `2cm` reads 75.59055328 where 2 * 96 / 2.54 is 75.59055118; the tests compare within a tolerance that admits that. `is2D` and `matrix4`, the sixteen values as `toFloat64Array` lists them, are given for every list Chrome reports as 3D, which is any list holding a 3D function whatever its values: `translate3d(0, 0, 0)` is not 2D. The rows with a character CSS does not count as whitespace -- U+000B, U+00A0, U+2028, U+3000 and U+FEFF -- and those with a carriage return or a form feed were measured in Chrome 152.0.7977.167 on 2026-10-26 the same way.",
+  "source": "Chrome 152.0.7977.149: new DOMMatrix().setMatrixValue(css), then a through f, measured 2026-10-22. A 3D list is composed in 4x4 and projected, which is why rotateX(30deg) before translate3d moves f. Chrome resolves a length in float32, so `2cm` reads 75.59055328 where 2 * 96 / 2.54 is 75.59055118; the tests compare within a tolerance that admits that. `is2D` and `matrix4`, the sixteen values as `toFloat64Array` lists them, are given for every list Chrome reports as 3D, which is any list holding a 3D function whatever its values: `translate3d(0, 0, 0)` is not 2D. The rows with a character CSS does not count as whitespace -- U+000B, U+00A0, U+2028, U+3000 and U+FEFF -- and those with a carriage return or a form feed were measured in Chrome 152.0.7977.167 on 2026-10-26 the same way. The rows with a comment were measured in Chrome 152.0.7977.167 on 2026-10-26 the same way.",
   "knownDifferences": "An angle past the float range is not matched, and is left out of the table. Chrome reads `rotate(1e38deg)`, `rotate(1e300deg)` and `rotate(calc(infinity * 1deg))` as no rotation, and `skewX()` of any of them as a shear of 3.964681007867002e-6, while `rotate(3.4028234663852886e38deg)` reduced by whole turns is exactly no rotation and `1e38deg` is not, so no reading of the angle explains both functions; here an angle is held to the float range and used as it stands. Infinite numbers are matched where the table can hold them and otherwise left out, since JSON has no infinity: `scale(calc(infinity))` is an infinite scale and `matrix(calc(infinity), 0, 0, 1, 0, 0)` an `a` of the largest double, in Chrome and here.",
   "cases": [
     {
@@ -2310,6 +2310,62 @@
         1,
         2
       ]
+    },
+    {
+      "css": "translate(/**/1px, 2px)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        1,
+        2
+      ]
+    },
+    {
+      "css": "translate/**/(1px, 2px)",
+      "refused": true
+    },
+    {
+      "css": "translate(1px,/**/2px)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        1,
+        2
+      ]
+    },
+    {
+      "css": "/**/translate(1px, 2px)",
+      "matrix": [
+        1,
+        0,
+        0,
+        1,
+        1,
+        2
+      ]
+    },
+    {
+      "css": "translate(1px, 2px)/**/scale(2)",
+      "matrix": [
+        2,
+        0,
+        0,
+        2,
+        1,
+        2
+      ]
+    },
+    {
+      "css": "translate(1/**/px, 2px)",
+      "refused": true
+    },
+    {
+      "css": "translate(-/**/1px, 2px)",
+      "refused": true
     }
   ]
 }

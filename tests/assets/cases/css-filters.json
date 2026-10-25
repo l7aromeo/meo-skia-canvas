@@ -1,6 +1,6 @@
 {
   "about": "`ctx.filter` strings and whether Chrome takes them. Read by tests/css_grammar.rs for `Context2D::set_filter_css` and by tests/suite/css-grammar.test.js for `ctx.filter`, so the two surfaces answer one table. Whether a filter is taken, and what it reads back as: every filter Chrome takes reads back exactly as it was written, whitespace and letter case included, so a row's own `css` is its reading.",
-  "source": "Chrome 152.0.7977.149: ctx.filter set on a fresh 2D context after `blur(3px)`, then read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving `blur(3px)`. Each taken filter was read back from a fresh context too, and every one came back unchanged. The three blank rows -- the empty string, three spaces and a tab -- were measured in Chrome 152.0.7977.167 on 2026-10-25 the same way. The rows with a character CSS does not count as whitespace -- U+000B, U+00A0, U+2028, U+3000 and U+FEFF -- and those with a carriage return or a form feed were measured in Chrome 152.0.7977.167 on 2026-10-26 the same way.",
+  "source": "Chrome 152.0.7977.149: ctx.filter set on a fresh 2D context after `blur(3px)`, then read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving `blur(3px)`. Each taken filter was read back from a fresh context too, and every one came back unchanged. The three blank rows -- the empty string, three spaces and a tab -- were measured in Chrome 152.0.7977.167 on 2026-10-25 the same way. The rows with a character CSS does not count as whitespace -- U+000B, U+00A0, U+2028, U+3000 and U+FEFF -- and those with a carriage return or a form feed were measured in Chrome 152.0.7977.167 on 2026-10-26 the same way. The rows with a comment were measured in Chrome 152.0.7977.167 on 2026-10-26 the same way.",
   "knownDifferences": "Math functions and the font-relative units are in css-math.json.",
   "cases": [
     {
@@ -486,6 +486,32 @@
     },
     {
       "css": "blur(2px)\fgrayscale(1)"
+    },
+    {
+      "css": "blur(/**/2px)"
+    },
+    {
+      "css": "blur(2px)/**/grayscale(1)"
+    },
+    {
+      "css": "blur(2/**/px)",
+      "refused": true
+    },
+    {
+      "css": "/**/blur(2px)"
+    },
+    {
+      "css": "blur(2px)/**/"
+    },
+    {
+      "css": "blur/**/(2px)",
+      "refused": true
+    },
+    {
+      "css": "drop-shadow(1px/**/1px red)"
+    },
+    {
+      "css": "blur(2px) /*"
     }
   ]
 }
