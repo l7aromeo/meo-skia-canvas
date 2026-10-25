@@ -579,20 +579,24 @@ fn parse_paragraph_style(
     }
 
     // textHeightBehavior: 0 = All, 1 = DisableFirstAscent,
-    // 2 = DisableLastDescent, 3 = DisableAll. A non-integer is truncated by
-    // the cast and a non-finite one never arrives, so both pass; that is
-    // deprecated in lib/index.d.ts, and 7.0 refuses them by rule 4.
-    if let Some(thb) = opt_float_for_key(cx, obj, "textHeightBehavior") {
-        let behavior = match thb as i32 {
-            0 => CrateTextHeightBehavior::All,
-            1 => CrateTextHeightBehavior::DisableFirstAscent,
-            2 => CrateTextHeightBehavior::DisableLastDescent,
-            3 => CrateTextHeightBehavior::DisableAll,
+    // 2 = DisableLastDescent, 3 = DisableAll, and nothing else. Read before
+    // any conversion to an integer, so that `1.5`, `NaN` and the infinities
+    // are refused rather than truncated or dropped.
+    if let Some(thb) = opt_raw_double_for_key(cx, obj, "textHeightBehavior") {
+        let behavior = match thb {
+            0.0 => CrateTextHeightBehavior::All,
+            1.0 => CrateTextHeightBehavior::DisableFirstAscent,
+            2.0 => CrateTextHeightBehavior::DisableLastDescent,
+            3.0 => CrateTextHeightBehavior::DisableAll,
             // Rule 4, as for `decorationStyle`: a number outside the set
-            // the parser holds, not a misspelt name.
+            // the parser holds, not a misspelt name. Spelled by JavaScript's
+            // own `ToString`, so the message says `Infinity` and `1e+21`
+            // where Rust's `Display` says `inf` and twenty-two digits.
             other => {
+                let spelled = cx.number(other).to_string(cx)?.value(cx);
                 return cx.throw_range_error(format!(
-                    "Unknown textHeightBehavior {other} (expected 0 to 3)"
+                    "Unknown textHeightBehavior {spelled} (expected 0, 1, 2 \
+                     or 3)"
                 ));
             }
         };

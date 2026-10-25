@@ -687,6 +687,19 @@ pub fn opt_double_for_key(
     obj.get(cx, attr).ok().and_then(|val| _as_double(cx, &val))
 }
 
+/// The number at `attr` as it converts, `NaN` and the infinities included,
+/// or `None` when the key is absent or holds no number -- for an option
+/// that refuses a non-finite value rather than ignoring it.
+pub fn opt_raw_double_for_key(
+    cx: &mut FunctionContext,
+    obj: &Handle<JsObject>,
+    attr: &str,
+) -> Option<f64> {
+    obj.get(cx, attr)
+        .ok()
+        .and_then(|val| _as_double_raw(cx, &val))
+}
+
 pub fn opt_float_for_key(
     cx: &mut FunctionContext,
     obj: &Handle<JsObject>,

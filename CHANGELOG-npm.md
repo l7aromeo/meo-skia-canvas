@@ -19,6 +19,18 @@ spellings that resolved to the wrong colour, and raising the
 `follow-redirects` floor past three security advisories.** Nothing is
 removed and no signature moves.
 
+### Breaking
+
+- **`textHeightBehavior` takes `0`, `1`, `2` or `3` and refuses any other
+  number.** `ParagraphBuilder` truncated `1.5` toward zero, to `1`, and
+  ignored `NaN` and the infinities, leaving the default `0`; each is now a
+  `RangeError`, as an integer outside `0` to `3` already was. The option
+  is typed `TextHeightBehavior`, where `TextHeightBehavior | (number & {})`
+  let any `number` compile.
+
+  Migrate: pass one of the four codes, rounding or checking a computed
+  value first, and type it as `TextHeightBehavior`.
+
 ### Security
 
 - **`follow-redirects` is required at `^1.16.1`, up from `^1.15.11`.** It is
@@ -776,8 +788,7 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 - **`TextHeightBehavior` names the four codes `textHeightBehavior` takes**,
   `0` to `3`, with what each trims in its doc comment, so an editor offers
-  them. The option is typed `TextHeightBehavior | (number & {})`, so code
-  passing a `number` compiles as before.
+  them. The option is typed `TextHeightBehavior`; see Breaking.
 
 - **`ctx.filter` takes the CSS math functions**, as Chrome 152 does:
   `calc()` and `-webkit-calc()`, `min()`, `max()`, `clamp()`, `round()`,
@@ -944,12 +955,6 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   what they gave, the ink then worked out once.
 
 ### Deprecated
-
-- **A `textHeightBehavior` that is not an integer.** `ParagraphBuilder`
-  truncates `1.5` toward zero, to `1`, and ignores `NaN` and the
-  infinities, leaving the default `0`. In 7.0 each is a `RangeError`, as
-  an integer outside `0` to `3` is already, and the option is typed as
-  `TextHeightBehavior` alone.
 
 - **`TextMetrics` values as own properties.** In 7.0 they become getters on
   `TextMetrics.prototype` alone, as Chrome's are, and the object has no

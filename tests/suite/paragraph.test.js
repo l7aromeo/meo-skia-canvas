@@ -777,6 +777,54 @@ describe("the numeric style codes", () => {
   });
 });
 
+describe("textHeightBehavior", () => {
+  // A closed set of four integers, as `TextHeightBehavior` types it. A
+  // number that is not one of them is refused rather than truncated or
+  // dropped: rule 4 of AGENTS.md's refusals, a number outside its set.
+  test("refuses a number that is not one of the four codes", () => {
+    for (const code of [
+      1.5,
+      -0.5,
+      3.0000001,
+      NaN,
+      Infinity,
+      -Infinity,
+      4,
+      -1,
+    ]) {
+      assert.throws(
+        () => ParagraphBuilder.Make({ textHeightBehavior: code }),
+        (e) => e instanceof RangeError && /textHeightBehavior/.test(e.message),
+        `${code} is a RangeError`,
+      );
+    }
+  });
+
+  test("names the number refused as JavaScript spells it", () => {
+    for (const [code, spelled] of [
+      [Infinity, "Infinity"],
+      [-Infinity, "-Infinity"],
+      [NaN, "NaN"],
+      [1e21, "1e+21"],
+      [1.5, "1.5"],
+    ]) {
+      assert.throws(
+        () => ParagraphBuilder.Make({ textHeightBehavior: code }),
+        (e) =>
+          e instanceof RangeError &&
+          e.message.includes(`textHeightBehavior ${spelled} `),
+        `${spelled} in the message`,
+      );
+    }
+  });
+
+  test("takes each of the four codes", () => {
+    for (const code of [0, 1, 2, 3, -0]) {
+      assert.ok(ParagraphBuilder.Make({ textHeightBehavior: code }), `${code}`);
+    }
+  });
+});
+
 describe("ParagraphBuilder optical size", () => {
   // Chrome 152 widths of `Hamburgefonstiv` in Amstelvar, whose `opsz` axis
   // runs 10 to 72: measureText with `opsz` left to follow the font size,

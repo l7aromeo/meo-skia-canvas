@@ -5520,17 +5520,10 @@ export interface ParagraphStyleInput {
   strutStyle?: StrutStyleInput;
   /**
    * First/last-line leading trim, one of the four {@link TextHeightBehavior}
-   * values. Any other integer is a `RangeError`.
-   *
-   * Typed open, as `number`, so code passing a `number` keeps compiling; 7.0
-   * narrows it to {@link TextHeightBehavior}.
-   *
-   * Deprecated: a number that is not an integer. Today `1.5` is truncated
-   * toward zero, to `1`, and `NaN` or an infinity is ignored, leaving the
-   * default `0`. In 7.0 each is a `RangeError`. Not marked `@deprecated`,
-   * because the option itself is not.
+   * values. Any other number -- `1.5`, `NaN`, an infinity, `4` -- is a
+   * `RangeError`.
    */
-  textHeightBehavior?: TextHeightBehavior | (number & {});
+  textHeightBehavior?: TextHeightBehavior;
 }
 
 /**
