@@ -2355,7 +2355,10 @@ impl Page {
                 // zeros or stale bytes as success, and nothing here can tell.
                 // The draws before it are confirmed by `confirmed_surface`;
                 // this copy is not, and it is short-lived, which is the whole
-                // of the argument for living with it.
+                // of the argument for living with it. A readback seen
+                // transparent is told from this by running it again under
+                // `node scripts/gpu-events.mjs --run -- <command>`, which on
+                // a failure prints any GPU recovery while it ran.
                 //
                 // Checking that submit covers the copy only. The draws were
                 // committed earlier in a buffer of their own, by the
