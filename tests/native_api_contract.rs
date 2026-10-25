@@ -1415,28 +1415,52 @@ fn a_colour_missing_its_closing_brackets_is_read_closed() -> Result<()> {
     Ok(())
 }
 
-/// The colour forms no browser reads that `csscolorparser` always has --
-/// `hwba()`, `hsv()`, `hsva()`, hex without its `#`, and legacy comma syntax
-/// CSS Color 4 does not allow -- still paint, as they did, until npm 7.0 and
-/// crate 0.17 refuse them. Chrome 153 refuses
-/// every one. Their relative forms are read with the others, from the
-/// origin unclipped, so a relative `hsv()` names the colour its absolute
-/// spelling does.
+/// The colour forms no CSS defines -- `hwba()`, `hsv()`, `hsva()`, absolute
+/// or relative, and hex without its `#` -- are refused, and leave the fill
+/// as it was, as Chrome 153 ignores each. The CSS spellings beside them
+/// still parse.
+#[test]
+fn colour_forms_no_css_defines_are_refused() -> Result<()> {
+    let mut canvas = Canvas::new(4.0, 4.0);
+    let ctx = canvas.context();
+    ctx.set_fill_style_css("#123456")?;
+    let before = ctx.fill_style();
+    for css in [
+        "hwba(0 0% 0%)",
+        "HWBA(0 0% 0%)",
+        "hwba(0 0% 0% / 0.5)",
+        "hsv(0 100% 100%)",
+        "hsva(0 100% 100% / 0.5)",
+        "ff0000",
+        "f00",
+        "ff000080",
+        "add",
+        "hwba(from red h w b)",
+        "hsv(from red h s v)",
+        "hsva(from red h s v / 0.5)",
+        "hsv(from black h s v)",
+    ] {
+        assert!(ctx.set_fill_style_css(css).is_err(), "{css} is refused");
+        assert_eq!(ctx.fill_style(), before, "{css} leaves the fill");
+        assert_eq!(RgbaLinear::from_css(css), None, "{css} is no colour");
+    }
+    for css in [
+        "#f00",
+        "hwb(0 0% 0%)",
+        "hwb(from red h w b)",
+        "rgb(255 0 0)",
+    ] {
+        assert!(ctx.set_fill_style_css(css).is_ok(), "{css} still parses");
+    }
+    Ok(())
+}
+
+/// The legacy comma syntax no browser reads that `csscolorparser` always
+/// has, CSS Color 4 not allowing it, still paints, as it did, until npm 7.0
+/// and crate 0.17 refuse it. Chrome 153 refuses every one.
 #[test]
 fn the_deprecated_colour_forms_still_paint() -> Result<()> {
     for (css, painted) in [
-        ("hwba(0 0% 0%)", [234, 51, 35, 255]),
-        ("HWBA(0 0% 0%)", [234, 51, 35, 255]),
-        ("hwba(0 0% 0% / 0.5)", [233, 52, 36, 128]),
-        ("hsv(0 100% 100%)", [234, 51, 35, 255]),
-        ("hsva(0 100% 100% / 0.5)", [233, 52, 36, 128]),
-        ("ff0000", [234, 51, 35, 255]),
-        ("f00", [234, 51, 35, 255]),
-        ("ff000080", [233, 52, 36, 128]),
-        ("hwba(from red h w b)", [234, 51, 35, 255]),
-        ("hsv(from red h s v)", [234, 51, 35, 255]),
-        ("hsva(from red h s v / 0.5)", [233, 52, 36, 128]),
-        ("hsv(from black h s v)", [0, 0, 0, 255]),
         // Malformed legacy syntax: numbers and percentages mixed, separators
         // mixed, `hsl()` without its percentages, `none` in a channel, and
         // commas where a function has none.
@@ -1457,24 +1481,6 @@ fn the_deprecated_colour_forms_still_paint() -> Result<()> {
         ("color(srgb 1, 0, 0)", [234, 51, 35, 255]),
     ] {
         assert_eq!(painted_p3(css)?, painted, "{css}");
-    }
-    for (relative, absolute) in [
-        ("hsv(from red h 50% v)", "hsv(0 50% 100%)"),
-        (
-            "hsv(from red calc(h + 120) s calc(v / 2))",
-            "hsv(120 100% 50%)",
-        ),
-        ("hsv(from rgb(51 102 153) h s v)", "hsv(210 66.67% 60%)"),
-        (
-            "hwba(from color(srgb 1.2 0.2 0.1) h w b)",
-            "color(srgb 1.2 0.2 0.1)",
-        ),
-        (
-            "hsv(from color(srgb 1.2 0.2 0.1) h s v)",
-            "color(srgb 1.2 0.2 0.1)",
-        ),
-    ] {
-        assert_eq!(painted_p3(relative)?, painted_p3(absolute)?, "{relative}");
     }
     Ok(())
 }

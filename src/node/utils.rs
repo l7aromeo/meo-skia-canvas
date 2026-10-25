@@ -1592,10 +1592,6 @@ enum Relative {
     Rgb,
     Hsl,
     Hwb,
-    /// `csscolorparser`'s own `hsv()`, which no browser reads. Deprecated:
-    /// it paints until crate 0.17 and npm 7.0 refuse it with the other
-    /// non-CSS forms `css_to_color4f_in_space` lists.
-    Hsv,
     Lab,
     Lch,
     Oklab,
@@ -1611,7 +1607,6 @@ impl Relative {
             Self::Rgb => ["r", "g", "b", "alpha"],
             Self::Hsl => ["h", "s", "l", "alpha"],
             Self::Hwb => ["h", "w", "b", "alpha"],
-            Self::Hsv => ["h", "s", "v", "alpha"],
             Self::Lab | Self::Oklab => ["l", "a", "b", "alpha"],
             Self::Lch | Self::Oklch => ["l", "c", "h", "alpha"],
             Self::Color(space) if space.starts_with("xyz") => {
@@ -1628,9 +1623,7 @@ impl Relative {
         let percent = Channel::Scaled(PERCENT_CHANNEL_SCALE);
         match self {
             Self::Rgb => [Channel::Scaled(RGB_CHANNEL_SCALE); 3],
-            Self::Hsl | Self::Hwb | Self::Hsv => {
-                [Channel::Hue, percent, percent]
-            }
+            Self::Hsl | Self::Hwb => [Channel::Hue, percent, percent],
             Self::Lab => [percent, lab_ab, lab_ab],
             Self::Lch => [
                 percent,
@@ -1667,19 +1660,6 @@ impl Relative {
                     srgb_hue(wide),
                     r.min(g).min(b) * PERCENT_CHANNEL_SCALE,
                     (1.0 - r.max(g).max(b)) * PERCENT_CHANNEL_SCALE,
-                ]
-            }
-            Self::Hsv => {
-                let [r, g, b] = wide;
-                let (max, min) = (r.max(g).max(b), r.min(g).min(b));
-                let saturation = match max == 0.0 {
-                    true => 0.0,
-                    false => (max - min) / max,
-                };
-                [
-                    srgb_hue(wide),
-                    saturation * PERCENT_CHANNEL_SCALE,
-                    max * PERCENT_CHANNEL_SCALE,
                 ]
             }
             Self::Lab => scaled(lab()),
@@ -1733,12 +1713,6 @@ impl Relative {
                 y / PERCENT_CHANNEL_SCALE,
                 z / PERCENT_CHANNEL_SCALE,
             )),
-            // HSV is HWB with whiteness `(1 - s) v` and blackness `1 - v`.
-            Self::Hsv => {
-                let (s, v) =
-                    (y / PERCENT_CHANNEL_SCALE, z / PERCENT_CHANNEL_SCALE);
-                narrow(hwb_to_srgb(x, (1.0 - s) * v, 1.0 - v))
-            }
             Self::Lab => lab_to_srgb(narrow([lab_l, y, z])),
             Self::Lch => lab_to_srgb(from_polar(lab_l, y, z)),
             Self::Oklab => oklab_to_srgb(narrow([oklab_l, y, z])),
@@ -1865,9 +1839,12 @@ fn hwb_to_srgb(hue: f64, white: f64, black: f64) -> [f64; 3] {
 /// crate's own parser, its channels found in the function's own space from
 /// it as it is, and its channel keywords bound -- so nothing is clipped to
 /// sRGB between the origin and the result, which is what Chrome does and
-/// what CSS Color 5 describes. `hwba(from ...)`, `hsv(from ...)` and
-/// `hsva(from ...)` are read too, as `csscolorparser` always read them, and
-/// are deprecated.
+/// what CSS Color 5 describes.
+///
+/// `hwba()`, `hsv()` and `hsva()`, absolute or relative, are `Some(None)`:
+/// no CSS function has those names and no browser reads them -- Chrome 153
+/// ignores `hwba(0 0% 0%)` and `hsv(0 100% 100%)` -- so they are refused
+/// here rather than left to `csscolorparser`, which reads them.
 fn read_color_function(css: &str) -> Option<Option<(Color4f, &'static str)>> {
     // UPSTREAM: csscolorparser 0.9.0 -- unfiled -- worked around
     // Re-check: return `None` here, then cargo test
@@ -1888,10 +1865,8 @@ fn read_color_function(css: &str) -> Option<Option<(Color4f, &'static str)>> {
     let function = match name.to_ascii_lowercase().as_str() {
         "rgb" | "rgba" => Relative::Rgb,
         "hsl" | "hsla" => Relative::Hsl,
-        // `hwba()` is no CSS function, and `csscolorparser` reads it as
-        // `hwb()`; deprecated with `hsv()`, below.
-        "hwb" | "hwba" => Relative::Hwb,
-        "hsv" | "hsva" => Relative::Hsv,
+        "hwb" => Relative::Hwb,
+        "hwba" | "hsv" | "hsva" => return Some(None),
         "lab" => Relative::Lab,
         "lch" => Relative::Lch,
         "oklab" => Relative::Oklab,
@@ -1905,14 +1880,6 @@ fn read_color_function(css: &str) -> Option<Option<(Color4f, &'static str)>> {
         .is_some_and(|&(from, to)| args[from..to].eq_ignore_ascii_case("from"));
     match relative {
         true => Some(relative_channels(args, function)),
-        // The absolute deprecated forms stay with `csscolorparser`, which
-        // reads them as it always has.
-        false
-            if function == Relative::Hsv
-                || name.eq_ignore_ascii_case("hwba") =>
-        {
-            None
-        }
         false => absolute_channels(args, function),
     }
 }
@@ -2491,6 +2458,12 @@ pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
     if let Some(color) = hex_or_named(css) {
         return color.map(|color| (color, ColorSpace::new_srgb()));
     }
+    // Hex digits with no `#`, `"ff0000"`, are no CSS colour and no browser
+    // reads them; Chrome 153 ignores the `fillStyle`. The parser below reads
+    // them, so they stop here.
+    if css.trim().chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
     // UPSTREAM: csscolorparser 0.9.0 -- unfiled -- worked around
     // Re-check: return `c.r`, `c.g` and `c.b` unchanged, then fill
     // `oklch(0.8, 0.18, 165)` -- a comma form `legacy_channels` leaves to
@@ -2513,14 +2486,11 @@ pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
         true => linear_to_srgb(v / SRGB_SLOPE),
         false => v,
     };
-    // Only what is deprecated reaches `csscolorparser`, and from crate 0.17 and
-    // npm 7.0 it is refused and the dependency goes: `hwba()`, `hsv()`,
-    // `hsva()`, hex without its `#`, and the legacy comma forms
-    // `legacy_channels` leaves here. `csscolorparser` reads them and no
+    // Only what is deprecated reaches `csscolorparser`: the legacy comma
+    // forms `legacy_channels` leaves here. `csscolorparser` reads them and no
     // browser does -- Chrome 153 refuses each -- so they reach it here
-    // unchanged until then. `the_deprecated_colour_forms_still_paint` holds
-    // them, and the relative forms of the first three are read by
-    // `read_color_function`.
+    // unchanged until they are refused too.
+    // `the_deprecated_colour_forms_still_paint` holds them.
     csscolorparser::parse(css).ok().map(|c| {
         (
             Color4f::new(channel(c.r), channel(c.g), channel(c.b), c.a),

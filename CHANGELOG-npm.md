@@ -49,6 +49,20 @@ removed and no signature moves.
   Migrate: read the values by name, or copy them with `m.toJSON()` where
   you spread a measurement or listed its keys.
 
+- **`hwba()`, `hsv()`, `hsva()` and hex without its `#` are refused as
+  colours.** No CSS defines them, and Chrome 153 ignores
+  `fillStyle = 'hwba(0 0% 0%)'`, `'hsv(0 100% 100%)'`,
+  `'hsva(0 100% 100% / 0.5)'` and `'ff0000'`, each of which painted red
+  here. Each is now refused as any colour that does not parse is, relative
+  forms included -- `'hsv(from red h s v)'`: `fillStyle`, `strokeStyle`
+  and `shadowColor` ignore it and keep what they held, and `addColorStop`
+  throws its `SyntaxError`.
+
+  Migrate: write `#` before the hex digits, and `hwb()` for the rest:
+  `hsv(h s v)` with `s` and `v` out of 100 is
+  `hwb(h calc((100 - s) * v / 100) calc(100 - v))`, and `hwba()` is
+  `hwb()`.
+
 ### Security
 
 - **`follow-redirects` is required at `^1.16.1`, up from `^1.15.11`.** It is
@@ -980,21 +994,6 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   the values by name and nothing changes. `TextMetrics.prototype`, its
   `Symbol.toStringTag` and the constructor that refuses to be called are
   Chrome's already.
-
-- **A `textHeightBehavior` that is not an integer.** `ParagraphBuilder`
-  truncates `1.5` toward zero, to `1`, and ignores `NaN` and the
-  infinities, leaving the default `0`. In 7.0 each is a `RangeError`, as
-  an integer outside `0` to `3` is already, and the option is typed as
-  `TextHeightBehavior` alone.
-
-- **`hwba()`, `hsv()`, `hsva()` and hex without its `#` as colours.**
-  The CSS parser underneath has always read them and no browser does:
-  Chrome 153 ignores `fillStyle = 'hwba(0 0% 0%)'`, `'hsv(0 100% 100%)'`,
-  `'hsva(0 100% 100% / 0.5)'` and `'ff0000'`, each of which paints red
-  here. They keep painting as they did, relative forms included, until
-  7.0 ignores them as a browser does. Write `#` before the hex digits and
-  `hwb()` for the rest: `hsv(h s v)` with `s` and `v` out of 100 is
-  `hwb(h calc((100 - s) * v / 100) calc(100 - v))`.
 
 - **Legacy comma syntax CSS Color 4 does not allow.** Each of these paints
   here and is ignored by Chrome 153: numbers and percentages mixed,

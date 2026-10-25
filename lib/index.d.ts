@@ -3866,11 +3866,12 @@ export interface CanvasFillStrokeStyles {
    * Color inputs follow the [`Color4fInput`] convention:
    *
    * - A **CSS string** (`"#ff8800"`, `"rgb(...)"`, named colors) is parsed as
-   *   sRGB-gamma. `hwba()`, `hsv()`, `hsva()`, hex without its `#`
-   *   (`"ff8800"`) and legacy comma syntax CSS Color 4 does not allow
-   *   (`"rgb(255, 0%, 0)"`, `"hsl(120, 100, 50)"`, `"lab(50, 40, 30)"`) are
-   *   **deprecated**: no browser accepts them, and 7.0 ignores them as a
-   *   browser does. Until then they paint as they always have.
+   *   sRGB-gamma. `hwba()`, `hsv()`, `hsva()` and hex without its `#`
+   *   (`"ff8800"`), which no CSS defines, are ignored, as a browser ignores
+   *   them. Legacy comma syntax CSS Color 4 does not allow
+   *   (`"rgb(255, 0%, 0)"`, `"hsl(120, 100, 50)"`, `"lab(50, 40, 30)"`) is
+   *   **deprecated**: no browser accepts it, and 7.0 ignores it as a browser
+   *   does. Until then it paints as it always has.
    * - A **`[r, g, b, a]` array** carries premultiplied **linear-light** floats
    *   interpreted in the surface's working color space; pass these to avoid
    *   the lossy sRGB-encoding round-trip used by the CSS form (the shape
