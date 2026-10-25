@@ -22,6 +22,7 @@ use crate::{
     node::{
         oblique::{
             ParagraphRecipe, Sheared, add_slnt, match_oblique, set_coordinates,
+            without_paragraph_cache,
         },
         typography::with_oblique_slnt,
     },
@@ -59,6 +60,9 @@ pub struct ParagraphWrap {
     pub paragraph: SkParagraph,
     /// What draws the paragraph's oblique ranges, where it has any.
     pub sheared: Option<Sheared>,
+    /// The collection whose paragraph cache a layout goes without -- see
+    /// `oblique::without_paragraph_cache`.
+    pub uncached: Option<FontCollection>,
 }
 
 impl Finalize for ParagraphWrap {}
@@ -848,8 +852,13 @@ pub fn build(mut cx: FunctionContext) -> JsResult<BoxedParagraph> {
 
     match this.recipe.take() {
         Some(recipe) => {
+            let uncached = recipe.uncached();
             let (paragraph, sheared) = recipe.build();
-            Ok(cx.boxed(RefCell::new(ParagraphWrap { paragraph, sheared })))
+            Ok(cx.boxed(RefCell::new(ParagraphWrap {
+                paragraph,
+                sheared,
+                uncached,
+            })))
         }
         None => cx.throw_error(
             "ParagraphBuilder has already been consumed by build()",
@@ -866,11 +875,17 @@ pub fn layout(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let width = float_arg_or_bail(&mut cx, 1, "width")?;
 
     let mut this = this.borrow_mut();
-    let ParagraphWrap { paragraph, sheared } = &mut *this;
-    paragraph.layout(width);
-    if let Some(sheared) = sheared {
-        sheared.lay_out(paragraph, width);
-    }
+    let ParagraphWrap {
+        paragraph,
+        sheared,
+        uncached,
+    } = &mut *this;
+    without_paragraph_cache(uncached.as_ref(), || {
+        paragraph.layout(width);
+        if let Some(sheared) = sheared {
+            sheared.lay_out(paragraph, width);
+        }
+    });
     Ok(cx.undefined())
 }
 

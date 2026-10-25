@@ -170,6 +170,9 @@ pub(crate) struct ParagraphRecipe {
     base_oblique: bool,
     /// Whether any style does, the paragraph's own included.
     oblique: bool,
+    /// Whether any style splits its leading half above and half below,
+    /// the paragraph's own included -- see [`without_paragraph_cache`].
+    half_leading: bool,
 }
 
 impl ParagraphRecipe {
@@ -182,13 +185,14 @@ impl ParagraphRecipe {
     ) -> Self {
         Self {
             builder: ParagraphBuilder::new(&style, &collection),
-            style,
             collection,
             steps: Vec::with_capacity(8),
             styles: Vec::with_capacity(4),
             length: 0,
             base_oblique,
             oblique: base_oblique,
+            half_leading: style.text_style().half_leading(),
+            style,
         }
     }
 
@@ -196,6 +200,7 @@ impl ParagraphRecipe {
     pub(crate) fn push_style(&mut self, style: TextStyle, oblique: bool) {
         self.builder.push_style(&style);
         self.oblique |= oblique;
+        self.half_leading |= style.half_leading();
         self.steps.push(Step::Push(self.styles.len()));
         self.styles.push((style, oblique));
     }
@@ -220,6 +225,13 @@ impl ParagraphRecipe {
 
     /// The paragraph, not yet laid out, and what draws its oblique ranges
     /// where it has any.
+    /// The collection whose paragraph cache this paragraph's layouts have to
+    /// go without, where a style splits its leading -- see
+    /// [`without_paragraph_cache`].
+    pub(crate) fn uncached(&self) -> Option<FontCollection> {
+        self.half_leading.then(|| self.collection.clone())
+    }
+
     pub(crate) fn build(mut self) -> (Paragraph, Option<Sheared>) {
         if !self.oblique {
             return (self.builder.build(), None);
@@ -536,6 +548,41 @@ impl ObliqueRange {
             shadows: style.shadows().to_vec(),
         }
     }
+}
+
+/// Runs `lay_out` with `collection`'s paragraph cache off where one is
+/// given -- see [`ParagraphRecipe::uncached`] -- and on again after.
+///
+/// SkParagraph's cache matches two paragraphs whose styles differ only in
+/// `halfLeading` and hands the second the first's runs, whose ascent and
+/// descent the first's leading rule already set, so whichever was laid out
+/// first decides both. With the cache off for its layouts, a paragraph that
+/// splits its leading neither takes another's runs nor leaves its own for
+/// another to take, and every other paragraph keeps the cache. Nothing in
+/// this crate turns a collection's cache off otherwise, so on is what it
+/// goes back to.
+///
+/// The flag is the collection's, so no other layout may run on it between
+/// the two switches, and none can: skia-safe's `FontCollection` is neither
+/// `Send` nor `Sync`, and nothing here wraps one in skia-safe's `Sendable`,
+/// so a collection is used only on the thread that made it -- each thread
+/// has its own `FontLibrary`, and `TextEngine` cannot leave its thread.
+/// `Paragraph::layout` runs to the end without calling back into this
+/// crate, so nothing on that thread lays out between the switches either.
+// UPSTREAM: skia-safe 0.153.3 -- https://github.com/google/skia/commit/e0d79efbf171fdd78063f7673d517491154c9a7a -- worked around
+// Re-check: cargo test a_half_leading_paragraph_is_not_laid_out_as_another_was
+pub(crate) fn without_paragraph_cache<T>(
+    collection: Option<&FontCollection>,
+    lay_out: impl FnOnce() -> T,
+) -> T {
+    let Some(collection) = collection else {
+        return lay_out();
+    };
+    let mut collection = collection.clone();
+    collection.paragraph_cache_mut().turn_on(false);
+    let laid_out = lay_out();
+    collection.paragraph_cache_mut().turn_on(true);
+    laid_out
 }
 
 /// What draws a paragraph's oblique ranges: their glyph runs, found again at

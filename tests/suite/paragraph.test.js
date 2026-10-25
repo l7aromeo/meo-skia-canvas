@@ -1521,3 +1521,55 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
     assert.ok(Math.abs(standing) <= 0.005, `an upright one ${standing}`);
   });
 });
+
+// `halfLeading` splits a line's spare height half above the text and half
+// below, as CSS 2.1 section 10.8.1 does: 48px Oswald at a height of 2 has
+// 96px for its 57.264 of ascent and 13.872 of descent, so the baseline is
+// 57.264 + 24.864 / 2 = 69.696 down, where scaling both puts it at 77.279.
+// SkParagraph's paragraph cache matched two paragraphs that differ only in
+// `halfLeading`, so whichever was laid out first decided both.
+describe("halfLeading", () => {
+  // Registered once a test, not once a layout: registering a font drops
+  // the collection's caches, and with them the stale layout this guards
+  // against.
+  const register = () =>
+    FontLibrary.use("HalfLeadingOswald", [
+      "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    ]);
+  const baseline = (half, where) => {
+    const style = {
+        fontFamilies: ["HalfLeadingOswald"],
+        fontSize: 48,
+        heightMultiplier: 2,
+      },
+      pb = ParagraphBuilder.Make({
+        textStyle: where === "base" ? { ...style, halfLeading: half } : style,
+      });
+    // The paragraph's own style is the text's where nothing is pushed.
+    if (where === "pushed") pb.pushStyle({ ...style, halfLeading: half });
+    pb.addText("H x");
+    if (where === "pushed") pb.pop();
+    const p = pb.build();
+    p.layout(1000);
+    return p.getAlphabeticBaseline();
+  };
+
+  for (const where of ["base", "pushed"]) {
+    test(`on the ${where} style, whatever was laid out before`, () => {
+      register();
+      for (const order of [
+        [false, true, false],
+        [true, false, true],
+      ]) {
+        for (const half of order) {
+          const at = baseline(half, where),
+            expected = half ? 69.696 : 77.279;
+          assert.ok(
+            Math.abs(at - expected) < 0.01,
+            `halfLeading ${half} in ${order}: ${at}, expected ${expected}`,
+          );
+        }
+      }
+    });
+  }
+});

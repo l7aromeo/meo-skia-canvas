@@ -263,6 +263,16 @@ removed and no signature moves.
     families, are refused, and an escape in an unquoted name is decoded,
     `12px \61 bc` naming `abc` where it was refused, as in Chrome.
 
+- **`halfLeading` takes effect whatever paragraph was laid out before.**
+  SkParagraph's paragraph cache matched two paragraphs whose styles differ
+  only in `halfLeading` and handed the second the first's layout, so the
+  first one laid out decided every later one: in 48px Oswald at a line
+  height of 2, a baseline that splits the spare height half above and half
+  below sits 69.70 down and one that scales the line sits 77.28 down. A
+  paragraph with `halfLeading` on any style now lays out without the cache,
+  and every other paragraph keeps it. Fixed in Skia, not yet in the
+  skia-safe this release builds on.
+
 - **`letterSpacing` and `wordSpacing` take `"0"`.** CSS Values 4 lets a
   zero length be written without its unit, and `ctx.letterSpacing = "0"`
   was ignored; it and any other unitless zero, such as `0.0` or `0e5`, now

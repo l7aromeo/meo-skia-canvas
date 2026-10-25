@@ -110,6 +110,16 @@ window be changed after it opens.** No signature moves and nothing is removed.
     families, are refused, and an escape in an unquoted name is decoded,
     `12px \61 bc` naming `abc` where it was refused, as in Chrome.
 
+- **`TextStyle::half_leading` takes effect whatever paragraph was laid out
+  before.** SkParagraph's paragraph cache matched two paragraphs whose
+  styles differ only in `half_leading` and handed the second the first's
+  layout, so the first one laid out decided every later one: in 48px Oswald
+  at a line height of 2, a baseline that splits the spare height half above
+  and half below sits 69.70 down and one that scales the line sits 77.28
+  down. A paragraph with `half_leading` on any style now lays out without
+  the cache, and every other paragraph keeps it. Fixed in Skia, not yet in
+  the skia-safe this release builds on.
+
 - **`outline_text` and the ink box put every glyph where `fill_text` draws
   it.** A glyph the shaper moves off its advance -- a mark stacked over
   another, a mark set over a base with no precomposed glyph, the half of a

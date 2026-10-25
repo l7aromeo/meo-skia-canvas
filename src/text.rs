@@ -38,7 +38,10 @@ use crate::{
     },
     geometry::Rect,
     image::CSS_INITIAL_FONT_SIZE,
-    node::oblique::{ParagraphRecipe, Sheared, add_slnt, match_oblique},
+    node::oblique::{
+        ParagraphRecipe, Sheared, add_slnt, match_oblique,
+        without_paragraph_cache,
+    },
 };
 
 /// Horizontal alignment of text within its layout width.
@@ -1450,10 +1453,12 @@ impl ParagraphBuilder {
 
     /// Closes the paragraph and lays it out, wrapping at `max_width`.
     pub fn build(self, max_width: f32) -> Paragraph {
+        let uncached = self.recipe.uncached();
         let (paragraph, sheared) = self.recipe.build();
         let mut paragraph = Paragraph {
             paragraph,
             sheared,
+            uncached,
             max_width,
         };
         paragraph.layout(max_width);
@@ -1469,6 +1474,9 @@ pub struct Paragraph {
     pub(crate) paragraph: SkParagraph,
     /// What draws the paragraph's oblique ranges, where it has any.
     sheared: Option<Sheared>,
+    /// The collection whose paragraph cache a layout goes without -- see
+    /// `node::oblique::without_paragraph_cache`.
+    uncached: Option<FontCollection>,
     max_width: f32,
 }
 
@@ -1485,10 +1493,18 @@ impl Paragraph {
     ///
     /// Every metric on this type reports the new layout afterwards.
     pub fn layout(&mut self, max_width: f32) {
-        self.paragraph.layout(max_width);
-        if let Some(sheared) = &mut self.sheared {
-            sheared.lay_out(&mut self.paragraph, max_width);
-        }
+        let Self {
+            paragraph,
+            sheared,
+            uncached,
+            ..
+        } = self;
+        without_paragraph_cache(uncached.as_ref(), || {
+            paragraph.layout(max_width);
+            if let Some(sheared) = sheared {
+                sheared.lay_out(paragraph, max_width);
+            }
+        });
         self.max_width = max_width;
     }
 
