@@ -1987,9 +1987,9 @@ impl Dye {
             Dye::Color(color, cs) => {
                 let mut color = *color;
                 color.a *= alpha;
-                // Converted at the paint rather than at the parse, so what
-                // `fillStyle` reports back still echoes the space the colour
-                // was named in, as a browser's does.
+                // Kept in the space it was named in, so what `fillStyle`
+                // reports back echoes that space as a browser's does, and
+                // handed over by the path every tagged reader shares.
                 match cs {
                     Some(space) => {
                         let (color, space) = skia_paint_color(color, space);

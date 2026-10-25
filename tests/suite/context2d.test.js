@@ -2436,24 +2436,23 @@ describe("Context2D", () => {
       );
     });
 
-    test("color(rec2020 ...) converts through Rec. 2020's own curve", () => {
-      // Skia has no transfer function for Rec. 2020: `skia_safe`'s CICP
-      // transfer functions are reference EOTFs, and `REC2020_10BIT` and
-      // `REC2020_12BIT` are both aliases of `REC709`, which is a pure 2.4
-      // gamma. Tagging the paint therefore decoded the components with the
-      // wrong curve. 0,120,168 is what the CSS Color 4 conversion matrices
-      // give for these components, and what Chrome paints.
+    test("color(rec2020 ...) takes CSS Color 4's 2.4 gamma", () => {
+      // CSS Color 4 section 10.8 defines `rec2020`'s transfer function as
+      // "gamma 2.40, from [REC_BT.1886]". Through its sample code these
+      // components are 0, 97, 153 in sRGB, and a grey of 0.2 is 40. Chrome
+      // 152 paints 0, 120, 168 and 67, by BT.2020's inverse OETF, which the
+      // standard used until 2025 -- docs/browser-differences.md has it.
       let ctx2 = new Canvas(4, 4).getContext("2d");
       ctx2.fillStyle = "color(rec2020 0.2 0.4 0.6)";
       ctx2.fillRect(0, 0, 4, 4);
       assert.deepEqual(
         Array.from(ctx2.getImageData(1, 1, 1, 1).data).slice(0, 3),
-        [0, 120, 168],
+        [0, 97, 153],
       );
 
       // Every surface has to answer alike. A grey isolates the transfer
-      // function from the primaries: the wrong curve gave 40 where 67 is
-      // right, and each of these reached the paint by a different route.
+      // function from the primaries, and each of these reaches the paint by
+      // a different route.
       let grey = "color(rec2020 0.2 0.2 0.2)";
       let sample = (draw) => {
         let c = new Canvas(4, 4).getContext("2d");
@@ -2478,7 +2477,7 @@ describe("Context2D", () => {
         c.fillStyle = "#000";
         c.fillRect(-8, 0, 4, 4);
       });
-      assert.deepEqual(byFill, [67, 67, 67], "through a fill");
+      assert.deepEqual(byFill, [40, 40, 40], "through a fill");
       assert.deepEqual(byStop, byFill, "through a gradient stop");
       assert.deepEqual(byShadow, byFill, "through a shadow");
     });

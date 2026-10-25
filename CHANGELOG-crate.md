@@ -51,6 +51,21 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `set_fill_style_css`, where you passed `RgbaLinear::opaque(r, g, b)` or
   `from_srgb(r, g, b, a)` meaning the canvas's own primaries.
 
+- **`color(rec2020 ...)` decodes by a 2.4 gamma, as CSS Color 4 now
+  defines it.** Section 10.8 gives `rec2020`'s transfer function as "gamma
+  2.40, from [REC_BT.1886]", changed from BT.2020's inverse OETF since the
+  Candidate Recommendation Draft of 24 April 2025. This crate used the old
+  curve, as Chrome 152 still does. `color(rec2020 0.2 0.2 0.2)` paints 40 where it
+  painted 67, in every `set_*_css` setter and `RgbaLinear::from_css`, and
+  `color(rec2020 0.2 0.4 0.6)` paints 0, 97, 153 on an sRGB canvas where it
+  painted 0, 120, 168. A Rec. 2020 canvas stores by the same curve, so a
+  colour named in `rec2020` reads back from one as it was named.
+  docs/browser-differences.md records Chrome's values.
+
+  Migrate: a `rec2020` colour written for the old curve, with each
+  component `c` above 0.081, is the same colour at
+  `((c + 0.0993) / 1.0993) ^ (1 / 0.45 / 2.4)`.
+
 - **A colour function written with a space before its `(` is refused.**
   `rgb (255 0 0)`, `lab (50 40 30)`, `color (srgb 1 0 0)` and the rest
   painted as if the space were not there. CSS Syntax reads such a name and

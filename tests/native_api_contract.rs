@@ -1181,9 +1181,12 @@ fn every_relative_function_reads_its_channels_as_chrome_does() -> Result<()> {
             "color(from color(display-p3 1 0 0) display-p3 r g b)",
             [255, 0, 0, 255],
         ),
+        // Not Chrome's: Chrome 152 paints 126, 71, 34 by BT.2020's inverse
+        // OETF, and this is CSS Color 4's 2.4 gamma, worked from its sample
+        // code -- docs/browser-differences.md has the difference.
         (
             "color(from red rec2020 calc(r / 2) g b)",
-            [126, 71, 34, 255],
+            [104, 73, 34, 255],
         ),
         (
             "color(from red a98-rgb calc(r / 2) g b)",
