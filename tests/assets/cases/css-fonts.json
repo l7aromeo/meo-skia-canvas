@@ -1,12 +1,12 @@
 {
   "about": "Canvas `font` shorthands and what each sets. Read by tests/css_grammar.rs for the Rust font grammar and by tests/suite/css-grammar.test.js for `ctx.font`, so the two surfaces answer one table rather than two.",
-  "source": "Chrome 152.0.7977.149: ctx.font set on a fresh 2D context after a sentinel font, then ctx.font, ctx.fontVariantCaps and ctx.fontStretch read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving the sentinel. `parts` is Chrome's serialized font taken apart; `lineHeight`, which Chrome does not expose, is CSS Fonts 4's: a number or percentage multiplies the size, `normal` is none. Relative sizes resolve against the canvas's default 10px font and `rem` against 16px, as Chrome does. Sizes are clamped to 10000px, as Chrome reads `20000px Arial`, and a computed negative size to zero; computed weights are held to 1 to 1000. For `oblique` with an angle, `parts.style` is the slant a `Font` takes rather than what Chrome reads back, which keeps the keyword only for the default 14deg: any angle but zero is `italic`, the oblique slant, and zero is `normal`. An oblique draws by CSS Fonts 4's rule whatever the angle, and Chrome draws it otherwise; docs/browser-differences.md has both.",
+  "source": "Chrome 152.0.7977.149: ctx.font set on a fresh 2D context after a sentinel font, then ctx.font, ctx.fontVariantCaps and ctx.fontStretch read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving the sentinel. `font` is what ctx.font reads back by HTML, CSSOM section 6.7.2 and CSS Fonts 4 -- components in the grammar's order, a weight as its number, a width as its keyword, an `oblique` with its angle, numbers in their shortest form to six decimals, a family name as a quoted string and a generic as its keyword -- and `chrome`, where present, is what Chrome 152 read back instead; docs/browser-differences.md lists the differences. `parts` is the font Chrome's readback describes, taken apart; `lineHeight`, which Chrome does not expose, is CSS Fonts 4's: a number or percentage multiplies the size, `normal` is none. Relative sizes resolve against the canvas's default 10px font and `rem` against 16px, as Chrome does. Sizes are clamped to 10000px, as Chrome reads `20000px Arial`, and a computed negative size to zero; computed weights are held to 1 to 1000. For `oblique` with an angle, `parts.style` is the slant a `Font` takes rather than what Chrome reads back, which keeps the keyword only for the default 14deg: any angle but zero is `italic`, the oblique slant, and zero is `normal`. `font` keeps the angle written: `oblique 10deg`, and `oblique 0deg` too, a computed value of its own though it draws upright. An oblique draws by CSS Fonts 4's rule whatever the angle, and Chrome draws it otherwise; docs/browser-differences.md has both.",
   "notMeasured": "System-font keywords (caption, icon, menu, message-box, small-caption, status-bar) and `oblique 10deg 16px Arial` are left out: Chrome on macOS read every system font as 16px Arial, which is platform-specific, and serialized the oblique angle away.",
   "knownDifferences": "Measured and left out: a font size in `ex`, `ch` or `cap`, or in `rex`, `rch` or `rcap`, which Chrome resolves against 10px, or 16px for the root forms, of its standard family -- Times on macOS, so `1ex Oswald` is 4.4873px whatever family is named -- and which resolves here against the face `serif` resolves to, which differs by platform; `lh`, `rlh`, the viewport and container units, which Chrome resolves against the document and which read as zero here; and `16px \"serif\"` and `16px \"inherit\"`, which Chrome keeps quoted because a quoted generic or keyword names a family literally, and which a `Font` cannot tell from the unquoted name.",
   "cases": [
     {
       "css": "16px Arial",
-      "font": "16px Arial",
+      "font": "16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -18,11 +18,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px Arial"
     },
     {
       "css": "bold 12px/1.5 \"Helvetica Neue\", serif",
-      "font": "bold 12px \"Helvetica Neue\", serif",
+      "font": "700 12px \"Helvetica Neue\", serif",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -36,11 +37,12 @@
         "variantCaps": "normal",
         "stretch": "normal",
         "lineHeight": 18
-      }
+      },
+      "chrome": "bold 12px \"Helvetica Neue\", serif"
     },
     {
       "css": "italic small-caps 300 condensed 16px Arial",
-      "font": "italic 300 small-caps 16px Arial",
+      "font": "italic small-caps 300 condensed 16px \"Arial\"",
       "variantCaps": "small-caps",
       "stretch": "condensed",
       "parts": {
@@ -52,11 +54,12 @@
         ],
         "variantCaps": "small-caps",
         "stretch": "condensed"
-      }
+      },
+      "chrome": "italic 300 small-caps 16px Arial"
     },
     {
       "css": "12pt Times",
-      "font": "16px Times",
+      "font": "16px \"Times\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -68,7 +71,8 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px Times"
     },
     {
       "css": "1em sans-serif",
@@ -88,7 +92,7 @@
     },
     {
       "css": "x-large Arial",
-      "font": "24px Arial",
+      "font": "24px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -100,11 +104,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "24px Arial"
     },
     {
       "css": "larger Arial",
-      "font": "12px Arial",
+      "font": "12px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -116,11 +121,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "12px Arial"
     },
     {
       "css": "calc(10px + 2px) Arial",
-      "font": "12px Arial",
+      "font": "12px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -132,11 +138,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "12px Arial"
     },
     {
       "css": "12pc Arial",
-      "font": "192px Arial",
+      "font": "192px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -148,11 +155,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "192px Arial"
     },
     {
       "css": "1in Arial",
-      "font": "96px Arial",
+      "font": "96px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -164,11 +172,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "96px Arial"
     },
     {
       "css": "2cm Arial",
-      "font": "75.5906px Arial",
+      "font": "75.59055px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -180,11 +189,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "75.5906px Arial"
     },
     {
       "css": "10mm Arial",
-      "font": "37.7953px Arial",
+      "font": "37.795277px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -196,11 +206,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "37.7953px Arial"
     },
     {
       "css": "40q Arial",
-      "font": "37.7953px Arial",
+      "font": "37.795277px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -212,11 +223,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "37.7953px Arial"
     },
     {
       "css": "2rem Arial",
-      "font": "32px Arial",
+      "font": "32px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -228,11 +240,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "32px Arial"
     },
     {
       "css": "150% Arial",
-      "font": "15px Arial",
+      "font": "15px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -244,11 +257,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "15px Arial"
     },
     {
       "css": "xx-small Arial",
-      "font": "9px Arial",
+      "font": "9px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -260,11 +274,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "9px Arial"
     },
     {
       "css": "x-small Arial",
-      "font": "10px Arial",
+      "font": "10px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -276,11 +291,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "10px Arial"
     },
     {
       "css": "small Arial",
-      "font": "13px Arial",
+      "font": "13px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -292,11 +308,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "13px Arial"
     },
     {
       "css": "medium Arial",
-      "font": "16px Arial",
+      "font": "16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -308,11 +325,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px Arial"
     },
     {
       "css": "large Arial",
-      "font": "18px Arial",
+      "font": "18px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -324,11 +342,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "18px Arial"
     },
     {
       "css": "xx-large Arial",
-      "font": "32px Arial",
+      "font": "32px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -340,11 +359,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "32px Arial"
     },
     {
       "css": "xxx-large Arial",
-      "font": "48px Arial",
+      "font": "48px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -356,11 +376,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "48px Arial"
     },
     {
       "css": "smaller Arial",
-      "font": "8.33333px Arial",
+      "font": "8.333333px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -372,11 +393,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "8.33333px Arial"
     },
     {
       "css": "16px/2 Arial",
-      "font": "16px Arial",
+      "font": "16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -389,11 +411,12 @@
         "variantCaps": "normal",
         "stretch": "normal",
         "lineHeight": 32
-      }
+      },
+      "chrome": "16px Arial"
     },
     {
       "css": "16px/24px Arial",
-      "font": "16px Arial",
+      "font": "16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -406,11 +429,12 @@
         "variantCaps": "normal",
         "stretch": "normal",
         "lineHeight": 24
-      }
+      },
+      "chrome": "16px Arial"
     },
     {
       "css": "16px/150% Arial",
-      "font": "16px Arial",
+      "font": "16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -423,11 +447,12 @@
         "variantCaps": "normal",
         "stretch": "normal",
         "lineHeight": 24
-      }
+      },
+      "chrome": "16px Arial"
     },
     {
       "css": "16px/normal Arial",
-      "font": "16px Arial",
+      "font": "16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -440,11 +465,12 @@
         "variantCaps": "normal",
         "stretch": "normal",
         "lineHeight": null
-      }
+      },
+      "chrome": "16px Arial"
     },
     {
       "css": "oblique 16px Arial",
-      "font": "italic 16px Arial",
+      "font": "oblique 16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -456,11 +482,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "italic 16px Arial"
     },
     {
       "css": "italic 16px Arial",
-      "font": "italic 16px Arial",
+      "font": "italic 16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -472,11 +499,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "italic 16px Arial"
     },
     {
       "css": "normal 16px Arial",
-      "font": "16px Arial",
+      "font": "16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -488,11 +516,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px Arial"
     },
     {
       "css": "normal normal normal 16px Arial",
-      "font": "16px Arial",
+      "font": "16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -504,11 +533,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px Arial"
     },
     {
       "css": "100 16px Arial",
-      "font": "100 16px Arial",
+      "font": "100 16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -520,11 +550,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "100 16px Arial"
     },
     {
       "css": "1000 16px Arial",
-      "font": "1000 16px Arial",
+      "font": "1000 16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -536,11 +567,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "1000 16px Arial"
     },
     {
       "css": "1 16px Arial",
-      "font": "1 16px Arial",
+      "font": "1 16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -552,11 +584,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "1 16px Arial"
     },
     {
       "css": "bolder 16px Arial",
-      "font": "bold 16px Arial",
+      "font": "700 16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -568,11 +601,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "bold 16px Arial"
     },
     {
       "css": "lighter 16px Arial",
-      "font": "100 16px Arial",
+      "font": "100 16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -584,11 +618,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "100 16px Arial"
     },
     {
       "css": "550 16px Arial",
-      "font": "550 16px Arial",
+      "font": "550 16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -600,11 +635,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "550 16px Arial"
     },
     {
       "css": "ultra-condensed 16px Arial",
-      "font": "16px Arial",
+      "font": "ultra-condensed 16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "ultra-condensed",
       "parts": {
@@ -616,11 +652,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "ultra-condensed"
-      }
+      },
+      "chrome": "16px Arial"
     },
     {
       "css": "semi-expanded 16px Arial",
-      "font": "16px Arial",
+      "font": "semi-expanded 16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "semi-expanded",
       "parts": {
@@ -632,11 +669,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "semi-expanded"
-      }
+      },
+      "chrome": "16px Arial"
     },
     {
       "css": "ultra-expanded 16px Arial",
-      "font": "16px Arial",
+      "font": "ultra-expanded 16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "ultra-expanded",
       "parts": {
@@ -648,11 +686,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "ultra-expanded"
-      }
+      },
+      "chrome": "16px Arial"
     },
     {
       "css": "small-caps 16px Arial",
-      "font": "small-caps 16px Arial",
+      "font": "small-caps 16px \"Arial\"",
       "variantCaps": "small-caps",
       "stretch": "normal",
       "parts": {
@@ -664,11 +703,12 @@
         ],
         "variantCaps": "small-caps",
         "stretch": "normal"
-      }
+      },
+      "chrome": "small-caps 16px Arial"
     },
     {
       "css": "16px 'Times New Roman', Georgia, serif",
-      "font": "16px \"Times New Roman\", Georgia, serif",
+      "font": "16px \"Times New Roman\", \"Georgia\", serif",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -682,7 +722,8 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px \"Times New Roman\", Georgia, serif"
     },
     {
       "css": "16px Times New Roman",
@@ -751,7 +792,7 @@
     },
     {
       "css": "bold italic 16px Arial",
-      "font": "italic bold 16px Arial",
+      "font": "italic 700 16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -763,7 +804,8 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "italic bold 16px Arial"
     },
     {
       "css": "16px bold Arial",
@@ -783,7 +825,7 @@
     },
     {
       "css": "BOLD ITALIC 16PX ARIAL",
-      "font": "italic bold 16px ARIAL",
+      "font": "italic 700 16px \"ARIAL\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -795,11 +837,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "italic bold 16px ARIAL"
     },
     {
       "css": "  16px   Arial  ",
-      "font": "16px Arial",
+      "font": "16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -811,11 +854,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px Arial"
     },
     {
       "css": "0px Arial",
-      "font": "0px Arial",
+      "font": "0px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -827,11 +871,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "0px Arial"
     },
     {
       "css": "16.5px Arial",
-      "font": "16.5px Arial",
+      "font": "16.5px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -843,11 +888,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16.5px Arial"
     },
     {
       "css": "1e1px Arial",
-      "font": "10px Arial",
+      "font": "10px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -859,11 +905,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "10px Arial"
     },
     {
       "css": "550.7 16px Arial",
-      "font": "550 16px Arial",
+      "font": "550 16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -875,11 +922,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "550 16px Arial"
     },
     {
       "css": "+500 16px Arial",
-      "font": "500 16px Arial",
+      "font": "500 16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -891,11 +939,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "500 16px Arial"
     },
     {
       "css": "1e3 16px Arial",
-      "font": "1000 16px Arial",
+      "font": "1000 16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -907,11 +956,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "1000 16px Arial"
     },
     {
       "css": ".5em Arial",
-      "font": "5px Arial",
+      "font": "5px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -923,11 +973,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "5px Arial"
     },
     {
       "css": "calc((10px + 2px) * 2) Arial",
-      "font": "24px Arial",
+      "font": "24px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -939,11 +990,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "24px Arial"
     },
     {
       "css": "calc(10px*2) Arial",
-      "font": "20px Arial",
+      "font": "20px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -955,11 +1007,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "20px Arial"
     },
     {
       "css": "16px/calc(10px * 2) Arial",
-      "font": "16px Arial",
+      "font": "16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -972,11 +1025,12 @@
         "variantCaps": "normal",
         "stretch": "normal",
         "lineHeight": 20
-      }
+      },
+      "chrome": "16px Arial"
     },
     {
       "css": "calc((10px + 2px) * 2)/1.5 Arial",
-      "font": "24px Arial",
+      "font": "24px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -989,11 +1043,12 @@
         "variantCaps": "normal",
         "stretch": "normal",
         "lineHeight": 36
-      }
+      },
+      "chrome": "24px Arial"
     },
     {
       "css": "16PX/1.5 Arial",
-      "font": "16px Arial",
+      "font": "16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1006,11 +1061,12 @@
         "variantCaps": "normal",
         "stretch": "normal",
         "lineHeight": 24
-      }
+      },
+      "chrome": "16px Arial"
     },
     {
       "css": "16px Arial ,serif",
-      "font": "16px Arial, serif",
+      "font": "16px \"Arial\", serif",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1023,11 +1079,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px Arial, serif"
     },
     {
       "css": "16px\tArial\t,\tserif",
-      "font": "16px Arial, serif",
+      "font": "16px \"Arial\", serif",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1040,11 +1097,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px Arial, serif"
     },
     {
       "css": "16px -foo",
-      "font": "16px -foo",
+      "font": "16px \"-foo\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1056,7 +1114,8 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px -foo"
     },
     {
       "css": "16px 'A\"B'",
@@ -1092,7 +1151,7 @@
     },
     {
       "css": "16px Ünïcødé",
-      "font": "16px Ünïcødé",
+      "font": "16px \"Ünïcødé\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1104,7 +1163,8 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px Ünïcødé"
     },
     {
       "css": "16px Arial Black",
@@ -1124,7 +1184,7 @@
     },
     {
       "css": "normal normal normal normal 16px Arial",
-      "font": "16px Arial",
+      "font": "16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1136,11 +1196,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px Arial"
     },
     {
       "css": "0 Arial",
-      "font": "0px Arial",
+      "font": "0px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1152,11 +1213,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "0px Arial"
     },
     {
       "css": "16px/0 Arial",
-      "font": "16px Arial",
+      "font": "16px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1169,7 +1231,8 @@
         "variantCaps": "normal",
         "stretch": "normal",
         "lineHeight": 0
-      }
+      },
+      "chrome": "16px Arial"
     },
     {
       "css": "16px default Arial",
@@ -1301,7 +1364,7 @@
     },
     {
       "css": "min(10px, 20px) Oswald",
-      "font": "10px Oswald",
+      "font": "10px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1313,11 +1376,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "10px Oswald"
     },
     {
       "css": "max(10px, 20px) Oswald",
-      "font": "20px Oswald",
+      "font": "20px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1329,11 +1393,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "20px Oswald"
     },
     {
       "css": "clamp(1px, 12px, 20px) Oswald",
-      "font": "12px Oswald",
+      "font": "12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1345,11 +1410,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "12px Oswald"
     },
     {
       "css": "abs(-12px) Oswald",
-      "font": "12px Oswald",
+      "font": "12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1361,11 +1427,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "12px Oswald"
     },
     {
       "css": "round(12.4px, 1px) Oswald",
-      "font": "12px Oswald",
+      "font": "12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1377,11 +1444,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "12px Oswald"
     },
     {
       "css": "calc(1em + 1px) Oswald",
-      "font": "11px Oswald",
+      "font": "11px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1393,11 +1461,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "11px Oswald"
     },
     {
       "css": "calc(50% + 2px) Oswald",
-      "font": "7px Oswald",
+      "font": "7px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1409,11 +1478,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "7px Oswald"
     },
     {
       "css": "CALC(10px + 2px) Oswald",
-      "font": "12px Oswald",
+      "font": "12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1425,11 +1495,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "12px Oswald"
     },
     {
       "css": "-webkit-calc(12px) Oswald",
-      "font": "12px Oswald",
+      "font": "12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1441,11 +1512,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "12px Oswald"
     },
     {
       "css": "calc(-5px) Oswald",
-      "font": "0px Oswald",
+      "font": "0px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1457,11 +1529,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "0px Oswald"
     },
     {
       "css": "calc(1px * infinity) Oswald",
-      "font": "10000px Oswald",
+      "font": "10000px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1473,11 +1546,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "10000px Oswald"
     },
     {
       "css": "calc(1px * NaN) Oswald",
-      "font": "0px Oswald",
+      "font": "0px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1489,11 +1563,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "0px Oswald"
     },
     {
       "css": "calc(1px / 0) Oswald",
-      "font": "10000px Oswald",
+      "font": "10000px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1505,11 +1580,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "10000px Oswald"
     },
     {
       "css": "20000px Oswald",
-      "font": "10000px Oswald",
+      "font": "10000px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1521,11 +1597,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "10000px Oswald"
     },
     {
       "css": "10001px Oswald",
-      "font": "10000px Oswald",
+      "font": "10000px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1537,11 +1614,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "10000px Oswald"
     },
     {
       "css": "calc(20000px) Oswald",
-      "font": "10000px Oswald",
+      "font": "10000px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1553,11 +1631,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "10000px Oswald"
     },
     {
       "css": "1rem Oswald",
-      "font": "16px Oswald",
+      "font": "16px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1569,11 +1648,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px Oswald"
     },
     {
       "css": "calc(1rem + 1em) Oswald",
-      "font": "26px Oswald",
+      "font": "26px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1585,11 +1665,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "26px Oswald"
     },
     {
       "css": "1ic Oswald",
-      "font": "10px Oswald",
+      "font": "10px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1601,11 +1682,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "10px Oswald"
     },
     {
       "css": "calc(12px * progress(5, 0, 10)) Oswald",
-      "font": "6px Oswald",
+      "font": "6px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1617,11 +1699,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "6px Oswald"
     },
     {
       "css": "calc(sibling-index() * 12px) Oswald",
-      "font": "12px Oswald",
+      "font": "12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1633,11 +1716,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "12px Oswald"
     },
     {
       "css": "calc(2px * 6) Oswald",
-      "font": "12px Oswald",
+      "font": "12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1649,11 +1733,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "12px Oswald"
     },
     {
       "css": "calc(12px * sign(-1) * -1) Oswald",
-      "font": "12px Oswald",
+      "font": "12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1665,11 +1750,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "12px Oswald"
     },
     {
       "css": "calc(400 + 300) 12px Oswald",
-      "font": "bold 12px Oswald",
+      "font": "700 12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1681,11 +1767,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "bold 12px Oswald"
     },
     {
       "css": "calc(950 + 100) 12px Oswald",
-      "font": "1000 12px Oswald",
+      "font": "1000 12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1697,11 +1784,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "1000 12px Oswald"
     },
     {
       "css": "calc(-1) 12px Oswald",
-      "font": "1 12px Oswald",
+      "font": "1 12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1713,11 +1801,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "1 12px Oswald"
     },
     {
       "css": "min(800, 900) 12px Oswald",
-      "font": "800 12px Oswald",
+      "font": "800 12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1729,11 +1818,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "800 12px Oswald"
     },
     {
       "css": "clamp(1, 650, 1000) 12px Oswald",
-      "font": "650 12px Oswald",
+      "font": "650 12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1745,11 +1835,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "650 12px Oswald"
     },
     {
       "css": "sin(30deg) 12px Oswald",
-      "font": "1 12px Oswald",
+      "font": "1 12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1761,11 +1852,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "1 12px Oswald"
     },
     {
       "css": "calc(400) 12px Oswald",
-      "font": "12px Oswald",
+      "font": "12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1777,11 +1869,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "12px Oswald"
     },
     {
       "css": "bold calc(12px) Oswald",
-      "font": "bold 12px Oswald",
+      "font": "700 12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1793,11 +1886,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "bold 12px Oswald"
     },
     {
       "css": "italic calc(300 + 1) small-caps calc(10px + 2px) Oswald",
-      "font": "italic 301 small-caps 12px Oswald",
+      "font": "italic small-caps 301 12px \"Oswald\"",
       "variantCaps": "small-caps",
       "stretch": "normal",
       "parts": {
@@ -1809,11 +1903,12 @@
         ],
         "variantCaps": "small-caps",
         "stretch": "normal"
-      }
+      },
+      "chrome": "italic 301 small-caps 12px Oswald"
     },
     {
       "css": "12px/calc(1 + 1) Oswald",
-      "font": "12px Oswald",
+      "font": "12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1826,11 +1921,12 @@
         "variantCaps": "normal",
         "stretch": "normal",
         "lineHeight": 24
-      }
+      },
+      "chrome": "12px Oswald"
     },
     {
       "css": "12px/calc(10px + 2px) Oswald",
-      "font": "12px Oswald",
+      "font": "12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1843,11 +1939,12 @@
         "variantCaps": "normal",
         "stretch": "normal",
         "lineHeight": 12
-      }
+      },
+      "chrome": "12px Oswald"
     },
     {
       "css": "12px/min(2, 3) Oswald",
-      "font": "12px Oswald",
+      "font": "12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1860,11 +1957,12 @@
         "variantCaps": "normal",
         "stretch": "normal",
         "lineHeight": 24
-      }
+      },
+      "chrome": "12px Oswald"
     },
     {
       "css": "12px/calc(50% + 6px) Oswald",
-      "font": "12px Oswald",
+      "font": "12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1877,11 +1975,12 @@
         "variantCaps": "normal",
         "stretch": "normal",
         "lineHeight": 12
-      }
+      },
+      "chrome": "12px Oswald"
     },
     {
       "css": "calc(10px + 2px)/calc(1.5 * 2) Oswald",
-      "font": "12px Oswald",
+      "font": "12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1894,7 +1993,8 @@
         "variantCaps": "normal",
         "stretch": "normal",
         "lineHeight": 36
-      }
+      },
+      "chrome": "12px Oswald"
     },
     {
       "css": "calc() Oswald",
@@ -1938,7 +2038,7 @@
     },
     {
       "css": "20px Arial",
-      "font": "20px Arial",
+      "font": "20px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1950,11 +2050,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "20px Arial"
     },
     {
       "css": "33pt Arial",
-      "font": "44px Arial",
+      "font": "44px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1966,11 +2067,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "44px Arial"
     },
     {
       "css": "75pt Arial",
-      "font": "100px Arial",
+      "font": "100px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1982,11 +2084,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "100px Arial"
     },
     {
       "css": "20% Arial",
-      "font": "2px Arial",
+      "font": "2px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -1998,11 +2101,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "2px Arial"
     },
     {
       "css": "20mm Arial",
-      "font": "75.5906px Arial",
+      "font": "75.59055px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2014,7 +2118,8 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "75.5906px Arial"
     },
     {
       "css": "20px serif",
@@ -2066,7 +2171,7 @@
     },
     {
       "css": "50px Arial, sans-serif",
-      "font": "50px Arial, sans-serif",
+      "font": "50px \"Arial\", sans-serif",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2079,11 +2184,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "50px Arial, sans-serif"
     },
     {
       "css": "bold italic 50px Arial, sans-serif",
-      "font": "italic bold 50px Arial, sans-serif",
+      "font": "italic 700 50px \"Arial\", sans-serif",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2096,11 +2202,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "italic bold 50px Arial, sans-serif"
     },
     {
       "css": "50px Helvetica ,  Arial, sans-serif",
-      "font": "50px Helvetica, Arial, sans-serif",
+      "font": "50px \"Helvetica\", \"Arial\", sans-serif",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2114,7 +2221,8 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "50px Helvetica, Arial, sans-serif"
     },
     {
       "css": "50px 'Helvetica Neue'",
@@ -2134,7 +2242,7 @@
     },
     {
       "css": "italic 20px Arial",
-      "font": "italic 20px Arial",
+      "font": "italic 20px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2146,11 +2254,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "italic 20px Arial"
     },
     {
       "css": "oblique 20px Arial",
-      "font": "italic 20px Arial",
+      "font": "oblique 20px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2162,11 +2271,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "italic 20px Arial"
     },
     {
       "css": "normal 20px Arial",
-      "font": "20px Arial",
+      "font": "20px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2178,11 +2288,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "20px Arial"
     },
     {
       "css": "300 20px Arial",
-      "font": "300 20px Arial",
+      "font": "300 20px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2194,11 +2305,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "300 20px Arial"
     },
     {
       "css": "800 20px Arial",
-      "font": "800 20px Arial",
+      "font": "800 20px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2210,11 +2322,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "800 20px Arial"
     },
     {
       "css": "bolder 20px Arial",
-      "font": "bold 20px Arial",
+      "font": "700 20px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2226,11 +2339,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "bold 20px Arial"
     },
     {
       "css": "lighter 20px Arial",
-      "font": "100 20px Arial",
+      "font": "100 20px \"Arial\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2242,11 +2356,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "100 20px Arial"
     },
     {
       "css": "normal normal normal 16px Impact",
-      "font": "16px Impact",
+      "font": "16px \"Impact\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2258,11 +2373,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px Impact"
     },
     {
       "css": "italic small-caps bolder 16px cursive",
-      "font": "italic bold small-caps 16px cursive",
+      "font": "italic small-caps 700 16px cursive",
       "variantCaps": "small-caps",
       "stretch": "normal",
       "parts": {
@@ -2274,7 +2390,8 @@
         ],
         "variantCaps": "small-caps",
         "stretch": "normal"
-      }
+      },
+      "chrome": "italic bold small-caps 16px cursive"
     },
     {
       "css": "5PX serif",
@@ -2326,7 +2443,7 @@
     },
     {
       "css": "5PT serif",
-      "font": "6.66667px serif",
+      "font": "6.666667px serif",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2338,11 +2455,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "6.66667px serif"
     },
     {
       "css": "2Q serif",
-      "font": "1.88976px serif",
+      "font": "1.889764px serif",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2354,7 +2472,8 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "1.88976px serif"
     },
     {
       "css": "5REM serif",
@@ -2422,7 +2541,7 @@
     },
     {
       "css": "Oblique 20px serif",
-      "font": "italic 20px serif",
+      "font": "oblique 20px serif",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2434,7 +2553,8 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "italic 20px serif"
     },
     {
       "css": "SMALL-CAPS 20px serif",
@@ -2454,7 +2574,7 @@
     },
     {
       "css": "CONDENSED 20px serif",
-      "font": "20px serif",
+      "font": "condensed 20px serif",
       "variantCaps": "normal",
       "stretch": "condensed",
       "parts": {
@@ -2466,11 +2586,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "condensed"
-      }
+      },
+      "chrome": "20px serif"
     },
     {
       "css": "BOLD 20px serif",
-      "font": "bold 20px serif",
+      "font": "700 20px serif",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2482,11 +2603,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "bold 20px serif"
     },
     {
       "css": "Bolder 20px serif",
-      "font": "bold 20px serif",
+      "font": "700 20px serif",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2498,7 +2620,8 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "bold 20px serif"
     },
     {
       "css": "LIGHTER 20px serif",
@@ -2578,7 +2701,7 @@
     },
     {
       "css": "16px Baskerville, serif",
-      "font": "16px Baskerville, serif",
+      "font": "16px \"Baskerville\", serif",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2591,7 +2714,8 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px Baskerville, serif"
     },
     {
       "css": "12px/1.5 serif",
@@ -2679,7 +2803,7 @@
     },
     {
       "css": "oblique 14deg 16px Oswald",
-      "font": "italic 16px Oswald",
+      "font": "oblique 16px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2691,11 +2815,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "italic 16px Oswald"
     },
     {
       "css": "oblique 14DEG 16px Oswald",
-      "font": "italic 16px Oswald",
+      "font": "oblique 16px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2707,11 +2832,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "italic 16px Oswald"
     },
     {
       "css": "oblique calc(14deg) 16px Oswald",
-      "font": "italic 16px Oswald",
+      "font": "oblique 16px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2723,11 +2849,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "italic 16px Oswald"
     },
     {
       "css": "oblique calc(10deg + 4deg) 12px Oswald",
-      "font": "italic 12px Oswald",
+      "font": "oblique 12px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2739,11 +2866,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "italic 12px Oswald"
     },
     {
       "css": "oblique 10deg 16px Oswald",
-      "font": "16px Oswald",
+      "font": "oblique 10deg 16px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2755,11 +2883,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px Oswald"
     },
     {
       "css": "oblique -14deg 16px Oswald",
-      "font": "16px Oswald",
+      "font": "oblique -14deg 16px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2771,11 +2900,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px Oswald"
     },
     {
       "css": "oblique 90deg 16px Oswald",
-      "font": "16px Oswald",
+      "font": "oblique 90deg 16px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2787,11 +2917,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px Oswald"
     },
     {
       "css": "oblique 0.25turn 16px Oswald",
-      "font": "16px Oswald",
+      "font": "oblique 90deg 16px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2803,11 +2934,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px Oswald"
     },
     {
       "css": "oblique calc(100deg) 16px Oswald",
-      "font": "16px Oswald",
+      "font": "oblique 90deg 16px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2819,11 +2951,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px Oswald"
     },
     {
       "css": "oblique 0deg 16px Oswald",
-      "font": "16px Oswald",
+      "font": "oblique 0deg 16px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2835,11 +2968,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "16px Oswald"
     },
     {
       "css": "oblique 14 16px Oswald",
-      "font": "italic 14 16px Oswald",
+      "font": "oblique 14 16px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2851,11 +2985,12 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "italic 14 16px Oswald"
     },
     {
       "css": "oblique 10deg bold 16px Oswald",
-      "font": "bold 16px Oswald",
+      "font": "oblique 10deg 700 16px \"Oswald\"",
       "variantCaps": "normal",
       "stretch": "normal",
       "parts": {
@@ -2867,7 +3002,8 @@
         ],
         "variantCaps": "normal",
         "stretch": "normal"
-      }
+      },
+      "chrome": "bold 16px Oswald"
     },
     {
       "css": "oblique 91deg 16px Oswald",

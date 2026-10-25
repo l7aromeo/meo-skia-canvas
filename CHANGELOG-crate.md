@@ -149,11 +149,6 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `"underline hsl(120 50% 50%)"` was split at every space and refused; a
   function's parentheses now hold it together, as in `set_filter_css`.
 
-- **`set_letter_spacing_css` and `set_word_spacing_css` refuse a bare
-  `"0"`**, with `Error::InvalidCssLength`, as Chrome ignores
-  `ctx.letterSpacing = "0"`. They took it as no spacing. `"0px"` is
-  unchanged, and so is `blur(0)` in a filter, which Chrome takes.
-
 - **A filter left unclosed at the end is taken**, as in Chrome, which
   closes it: `set_filter_css("blur(2px")` is `blur(2px)`. It returned
   `Error::InvalidFilter`.
@@ -427,16 +422,17 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   on it keeps working; `Font::from_css` reads the same grammar and answers
   with an `Option`.
 
-- **`Context2D::font()` reports a font as Chrome's `ctx.font` does.** A
-  stretch is no longer in the string -- `font_stretch()` reports it, and
-  Chrome reports it through `fontStretch` alone -- `oblique` reads as
-  `italic` though the oblique face is still the one selected, the weight
-  comes before `small-caps`, a size has six significant digits (`2cm` is
-  `75.5906px`), and a family that is not one identifier is quoted, with a
-  `"` or `\` inside escaped. So `condensed 16px X` reads back as
-  `16px X` and `oblique 16px X` as `italic 16px X`, and re-reading the
-  string loses the stretch and the oblique, as it does in a browser; keep
-  the `Font` to keep them.
+- **`Context2D::font()` reports a font as CSSOM serializes it**, in the
+  form HTML and CSS Fonts 4 give it: style, `small-caps`, weight, width,
+  size and family, in that order, each left out at its initial value. A
+  stretch keyword is kept, `oblique` reads as `oblique` with its angle
+  where it is not the default 14deg, a weight is its number (`700`, not
+  `bold`), a size is the shortest number to six decimals (`2cm` is
+  `75.59055px`, the nearest `f32`), and a family name is a quoted string,
+  with a `"` or `\` inside escaped, where a generic family is its keyword.
+  So `condensed 16px X` reads back as `condensed 16px "X"` and
+  `oblique 10deg 16px X` as `oblique 10deg 16px "X"`. Chrome differs in
+  each, and docs/browser-differences.md lists how.
 
 - **`set_filter_css`, `set_letter_spacing_css` and `set_word_spacing_css`
   read a value as Chrome reads it.** Checked against 99 filters and 19
@@ -499,9 +495,9 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   in a size are those of 10px `serif`, and `rem` and the other root forms
   of 16px. An `oblique` angle from -90deg to 90deg is taken: any angle but
   zero is `FontSlant::Oblique`, and `set_font_css` draws it at the angle, as
-  the entry under Changed says. Only the default 14deg reads back as
-  `italic` from `font()`. A size written above 10000px is now 10000px,
-  as Chrome reads it.
+  the entry under Changed says, and `font()` reads it back with its angle,
+  the default 14deg as `oblique`. A size written above 10000px is now
+  10000px, as Chrome reads it.
 
 - **Every CSS length unit in `set_filter_css`, `set_letter_spacing_css`,
   `set_word_spacing_css` and a `set_text_decoration_css` thickness.** `ex`,
@@ -802,9 +798,9 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   italic face, is the upright face sheared by 14deg. Chrome 152 takes the
   family's italic, or a fixed quarter skew, from 14deg up and draws upright
   below; its measurements are in docs/browser-differences.md.
-  `measure_text` reports the sheared ink, and `font()` reads back as it
-  did. A paragraph's oblique range is sheared at 14deg and draws what
-  `set_font_css("oblique …")` text draws, its decorations level and its
+  `measure_text` reports the sheared ink, and `font()` reads back as
+  `oblique`, with its angle. A paragraph's oblique range is sheared at
+  14deg and draws what `set_font_css("oblique …")` text draws, its decorations level and its
   shadows leaning with its glyphs. Being a font of its own, it is shaped apart from the
   text beside it, so no ligature forms across its edge, and a combining
   mark the edge would split from its base is drawn with its base, in the

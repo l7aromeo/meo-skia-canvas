@@ -618,48 +618,63 @@ impl Font {
             },
             variant: variant.to_string(),
             canonical,
-            serialized: self.serialized(small_caps),
+            serialized: self.serialized(small_caps, None),
         }
     }
 
-    /// What `ctx.font` reads back for this font, in Chrome's form: "the
-    /// serialized form of the current font of the context (with no
-    /// 'line-height' component)", as HTML puts it, which Chrome writes as
-    /// style, weight, `small-caps`, size and family list, each left out at
-    /// its initial value. Weight 700 is `bold`; `oblique` reads as `italic`,
-    /// as Chrome reports it; the stretch is not in the string at all --
-    /// Chrome reports it through `fontStretch`, and so does
-    /// [`Context2D::font_stretch`]. The size has six significant digits, so
-    /// `2cm` reads `75.5906px`.
-    fn serialized(&self, small_caps: bool) -> String {
+    /// What `ctx.font` reads back for this font, with `angle` the `oblique`
+    /// angle the shorthand wrote, where it wrote one other than the default.
+    ///
+    /// HTML: "On getting, the font attribute must return the serialized form
+    /// of the current font of the context (with no 'line-height' component)",
+    /// and its example reads `italic 400 12px/2 Unknown Font, sans-serif`
+    /// back as `italic 12px "Unknown Font", sans-serif`. CSSOM 6.7.2 says
+    /// how: "reorder the component values to use the canonical order of
+    /// component values as given in the property definition table", which
+    /// CSS Fonts 4 section 2.7 gives for `font` as "per grammar" -- style,
+    /// `small-caps`, weight, width, then size and family -- and leave out
+    /// what "can be omitted or replaced with a shorter representation
+    /// without changing the meaning of the value", which is each component
+    /// at its initial value. So:
+    ///
+    /// - The style is CSS Fonts 4 section 2.4's computed value, "the keyword
+    ///   specified, plus angle in degrees if specified": `italic`, or `oblique`
+    ///   with its angle. "The lack of an <angle> represents 14deg", so `oblique
+    ///   14deg` shortens to `oblique`. `oblique 0deg` stays, judged: it draws
+    ///   upright, as `normal` does, but `normal` is another computed value.
+    /// - The weight is the computed number. `700` is shorter than `bold`.
+    /// - The width is its keyword, `condensed`, the only form the shorthand
+    ///   takes.
+    /// - The size and the angle are `<number>`s, "in the shortest form possible
+    ///   ... rounding the value if necessary to not produce more than 6
+    ///   decimals" -- see [`css_number`].
+    /// - A family name is "The string serialized as a string" and a generic
+    ///   family its keyword: CSSOM's own example serializes `a, 'b"', serif` as
+    ///   `"a", "b\"", serif` -- see [`css_family`].
+    ///
+    /// Chrome differs in each of these -- it reads `bold`, leaves the width
+    /// out, reads `oblique` as `italic`, writes `small-caps` after the
+    /// weight, keeps six significant digits and quotes a name only where it
+    /// has to -- and docs/browser-differences.md lists them.
+    fn serialized(&self, small_caps: bool, angle: Option<f32>) -> String {
+        let style = match angle {
+            Some(degrees) => {
+                Some(format!("oblique {}deg", css_number(degrees)))
+            }
+            None => self.slant.to_css().map(str::to_string),
+        };
         let families = self
             .families
             .iter()
-            .map(|family| {
-                let identifiers = family.split(' ').all(|word| {
-                    word.chars().next().is_some_and(|c| {
-                        c.is_alphabetic() || c == '_' || c == '-'
-                    }) && word
-                        .chars()
-                        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-                });
-                match identifiers && !family.contains(char::is_whitespace) {
-                    true => family.clone(),
-                    false => format!(
-                        "\"{}\"",
-                        family.replace('\\', "\\\\").replace('"', "\\\"")
-                    ),
-                }
-            })
+            .map(|family| css_family(family))
             .collect::<Vec<_>>()
             .join(", ");
         [
-            (self.slant != FontSlant::Normal).then(|| "italic".to_string()),
-            (self.weight != NORMAL_WEIGHT).then(|| match self.weight {
-                BOLD_WEIGHT => "bold".to_string(),
-                weight => weight.to_string(),
-            }),
+            style,
             small_caps.then(|| "small-caps".to_string()),
+            (self.weight != NORMAL_WEIGHT).then(|| self.weight.to_string()),
+            (self.stretch != FontStretch::Normal)
+                .then(|| self.stretch.to_css().to_string()),
             Some(format!("{}px", css_number(self.size))),
             Some(families),
         ]
@@ -670,19 +685,79 @@ impl Font {
     }
 }
 
-/// A number as CSS serializes it in a computed value: six significant digits,
-/// with trailing zeros dropped -- Chrome reads `2cm` back as `75.5906px` and
-/// `smaller` as `8.33333px`.
+/// The generic family keywords of CSS Fonts 4 section 2.1.3, which a font
+/// serializes as themselves where every other family name is a string.
+const GENERIC_FAMILIES: [&str; 13] = [
+    "serif",
+    "sans-serif",
+    "cursive",
+    "fantasy",
+    "monospace",
+    "system-ui",
+    "emoji",
+    "math",
+    "fangsong",
+    "ui-serif",
+    "ui-sans-serif",
+    "ui-monospace",
+    "ui-rounded",
+];
+
+/// A family as a serialized font names it: a generic family as its keyword,
+/// and any other name serialized as a string, by CSSOM section 2.1's
+/// "serialize a string" -- in double quotes, a NULL replaced by U+FFFD, a
+/// control character from U+0001 to U+001F or U+007F escaped as its code
+/// point, and `"` and `\` each after a backslash.
+///
+/// A family named `serif` in quotes is a family and not the generic, which
+/// a [`Font`] cannot tell apart from the keyword; both read as the keyword.
+fn css_family(family: &str) -> String {
+    if let Some(generic) = GENERIC_FAMILIES
+        .iter()
+        .find(|generic| generic.eq_ignore_ascii_case(family))
+    {
+        return generic.to_string();
+    }
+    let mut quoted = String::with_capacity(family.len() + 2);
+    quoted.push('"');
+    for c in family.chars() {
+        match c {
+            '\0' => quoted.push(char::REPLACEMENT_CHARACTER),
+            '\u{1}'..='\u{1f}' | '\u{7f}' => {
+                quoted.push_str(&format!("\\{:x} ", u32::from(c)));
+            }
+            '"' | '\\' => {
+                quoted.push('\\');
+                quoted.push(c);
+            }
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+/// A `<number>` as CSSOM section 6.7.2 serializes it: "in the shortest form
+/// possible ... rounding the value if necessary to not produce more than 6
+/// decimals". Shortest for the `f32` held, judged: `2cm` is 75.5905511...px
+/// exactly and held as the nearest `f32`, whose shortest form is `75.59055`,
+/// so it reads `75.59055px`, the same whether the font came from a string or
+/// a [`Font`]. `smaller` reads `8.333333px`.
 fn css_number(value: f32) -> String {
-    let value = f64::from(value);
-    if value == 0.0 || !value.is_finite() {
+    if !value.is_finite() {
         return format!("{value}");
     }
-    let decimals = (5 - value.abs().log10().floor() as i32).max(0) as usize;
-    let text = format!("{value:.decimals$}");
-    match text.contains('.') {
-        true => text.trim_end_matches('0').trim_end_matches('.').to_string(),
-        false => text,
+    let shortest = format!("{value}");
+    match shortest.split_once('.') {
+        Some((_, decimals)) if decimals.len() > 6 => {
+            let rounded = format!("{:.6}", f64::from(value));
+            let trimmed = rounded.trim_end_matches('0').trim_end_matches('.');
+            match trimmed {
+                "-0" => "0".to_string(),
+                trimmed => trimmed.to_string(),
+            }
+        }
+        _ => shortest,
     }
 }
 
@@ -727,9 +802,12 @@ struct FontShorthand {
     font: Font,
     small_caps: bool,
     /// An `oblique` angle other than zero and the default 14deg, which a
-    /// [`Font`] has no field for (#287): it is drawn at, and reads back with
-    /// no style, as Chrome reads it.
+    /// [`Font`] has no field for (#287): it is drawn at.
     oblique_degrees: Option<f32>,
+    /// The angle an `oblique` wrote, where it wrote one other than the
+    /// default 14deg -- zero included, which draws upright -- for the font
+    /// to read back with.
+    written_angle: Option<f32>,
 }
 
 /// The specification a Canvas `font` shorthand names, or `None` where Chrome
@@ -753,12 +831,9 @@ impl FontShorthand {
                 &format!("oblique {degrees}deg"),
                 1,
             );
-            spec.serialized = spec
-                .serialized
-                .strip_prefix("italic ")
-                .unwrap_or(&spec.serialized)
-                .to_string();
         }
+        spec.serialized =
+            self.font.serialized(self.small_caps, self.written_angle);
         spec
     }
 }
@@ -1076,6 +1151,7 @@ fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
     let mut font = Font::new(String::new(), 0.0);
     let mut small_caps = false;
     let mut oblique_degrees = None;
+    let mut written_angle = None;
     let (mut style, mut variant, mut weight, mut stretch) =
         (false, false, false, false);
     let mut prefix_tokens = 0;
@@ -1126,6 +1202,9 @@ fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
                         0.0 => font.slant = FontSlant::Normal,
                         DEFAULT_OBLIQUE_DEGREES => {}
                         degrees => oblique_degrees = Some(degrees),
+                    }
+                    if degrees != DEFAULT_OBLIQUE_DEGREES {
+                        written_angle = Some(degrees);
                     }
                     rest = after[next_end..].trim_start();
                     prefix_tokens += 1;
@@ -1189,6 +1268,7 @@ fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
         font,
         small_caps,
         oblique_degrees,
+        written_angle,
     })
 }
 
@@ -1621,12 +1701,18 @@ impl Context2D {
     /// let mut canvas = Canvas::new(10.0, 10.0);
     /// let ctx = canvas.context();
     /// assert!(ctx.set_font_css("italic small-caps 300 condensed 16px Arial"));
-    /// assert_eq!(ctx.font(), "italic 300 small-caps 16px Arial");
+    /// assert_eq!(
+    ///     ctx.font(),
+    ///     r#"italic small-caps 300 condensed 16px "Arial""#
+    /// );
     /// assert_eq!(ctx.font_variant_caps(), FontVariantCaps::SmallCaps);
     /// assert_eq!(ctx.font_stretch(), FontStretch::Condensed);
     ///
     /// assert!(!ctx.set_font_css("bold"), "no size or family");
-    /// assert_eq!(ctx.font(), "italic 300 small-caps 16px Arial");
+    /// assert_eq!(
+    ///     ctx.font(),
+    ///     r#"italic small-caps 300 condensed 16px "Arial""#
+    /// );
     /// ```
     pub fn set_font_css(&mut self, css: &str) -> bool {
         let Ok(shorthand) = parse_font_shorthand(css) else {
@@ -3358,15 +3444,17 @@ impl Context2D {
 
     /// The current font, as the Canvas API serializes it.
     ///
-    /// The CSS `font` shorthand with every component at its initial value
-    /// left out and no `line-height`, which is what a browser returns from
-    /// the same getter: a font set from `"16px/24px Helvetica"` reads back
-    /// as `"16px Helvetica"`, and one set from `"bold 16px Helvetica"` reads
-    /// back unchanged rather than as `"normal 700 16px Helvetica"`.
+    /// The CSS `font` shorthand as CSSOM serializes it, with no
+    /// `line-height`, as the HTML standard has the getter return: every
+    /// component at its initial value left out, the rest in the grammar's
+    /// order, the weight as its number and each family name quoted. A font
+    /// set from `"bold condensed 16px/24px Helvetica, sans-serif"` reads
+    /// back as `700 condensed 16px "Helvetica", sans-serif`, and an
+    /// `oblique` keeps its angle unless it is the default 14deg.
     ///
-    /// In Chrome's form beyond that: the stretch is left to
-    /// [`Context2D::font_stretch`], any slant reads as `italic`, the weight
-    /// comes before `small-caps`, and the size has six significant digits.
+    /// Chrome's `ctx.font` differs -- it reads `bold`, leaves the stretch
+    /// out, reads `oblique` as `italic` and quotes a name only where it has
+    /// to -- and docs/browser-differences.md lists each difference.
     pub fn font(&self) -> String {
         self.inner.state.font.clone()
     }
@@ -3406,11 +3494,12 @@ impl Context2D {
     /// # Errors
     ///
     /// Returns [`Error::InvalidCssLength`] for a unit CSS does not define,
-    /// for a bare number, zero included, for a percentage --
+    /// for a bare number other than zero, for a percentage --
     /// `letter-spacing` is defined over a length, and a percentage is not
     /// one -- for a math function such as `calc()`, and for whitespace
     /// around the length or before its unit. Chrome ignores each of these:
-    /// `"0"`, `"calc(1px)"`, `" 5px "` and `"5 px"`.
+    /// `"5"`, `"calc(1px)"`, `" 5px "` and `"5 px"`. A bare `"0"` is taken,
+    /// as CSS Values 4 makes a zero length, where Chrome ignores it.
     ///
     /// # Examples
     ///

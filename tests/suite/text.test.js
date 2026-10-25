@@ -451,39 +451,31 @@ describe("actualBoundingBox reports the ink, not the advance", () => {
 
 describe("ctx.font reports the serialized form, not the parsed one", () => {
   // HTML: "On getting, the font attribute must return the serialized form of
-  // the current font of the context (with no 'line-height' component)". CSS
-  // shorthand serialisation then omits every component sitting at its initial
-  // value. All three rules were being broken at once: a line height appeared
-  // that no browser returns, `normal 400` was emitted where nothing should
-  // be, and 700 was spelled as the number rather than as `bold`.
+  // the current font of the context (with no 'line-height' component)".
+  // CSSOM's shorthand serialisation then omits every component sitting at
+  // its initial value, writes the rest in the grammar's order, a weight as
+  // its computed number and a family name as a string.
   const ctx = () => new Canvas(10, 10).getContext("2d");
 
-  test("the four cases measured against Chrome 148", () => {
-    // The right-hand column is what Chrome 148 returns for the same
-    // assignment, read off `document.createElement("canvas").getContext("2d")`.
-    for (const [set, expected] of [
-      ["24px/2 Helvetica", "24px Helvetica"],
-      ["16px Helvetica", "16px Helvetica"],
-      ["bold 16px Helvetica", "bold 16px Helvetica"],
-      ["italic bold 24px Helvetica", "italic bold 24px Helvetica"],
-    ]) {
-      const c = ctx();
-      c.font = set;
-      assert.equal(c.font, expected, set);
-    }
+  test("the standard's own example", () => {
+    // From the HTML standard's note on the `font` getter.
+    const c = ctx();
+    c.font = "italic 400 12px/2 Unknown Font, sans-serif";
+    assert.equal(c.font, 'italic 12px "Unknown Font", sans-serif');
   });
 
-  test("every component drops at its initial value, and 700 is bold", () => {
+  test("every component drops at its initial value, and 700 is its number", () => {
     for (const [set, expected] of [
+      ["24px/2 Helvetica", '24px "Helvetica"'],
       ["normal normal 400 normal 16px serif", "16px serif"],
-      ["700 16px serif", "bold 16px serif"],
+      ["bold 16px Helvetica", '700 16px "Helvetica"'],
+      ["700 16px serif", "700 16px serif"],
       ["300 16px serif", "300 16px serif"],
       ["1000 16px serif", "1000 16px serif"],
       ["italic 16px serif", "italic 16px serif"],
       ["small-caps 16px serif", "small-caps 16px serif"],
       ["16px/1.5 serif", "16px serif"],
       ["16px/24px serif", "16px serif"],
-      // Quoting survives, and so does the fallback list.
       ["300 12px Comic Sans, serif", '300 12px "Comic Sans", serif'],
     ]) {
       const c = ctx();
@@ -492,32 +484,45 @@ describe("ctx.font reports the serialized form, not the parsed one", () => {
     }
   });
 
-  test("stretch, oblique and small-caps read back as Chrome reads them", () => {
-    // Chrome's canvas serialiser, not its CSS one: `div.style.font` keeps
-    // `oblique` and the stretch and orders small-caps before the weight,
-    // while `ctx.font` reads the slant as `italic`, puts the weight first,
-    // and reports the stretch through `fontStretch` alone. Measured on
-    // Chrome 152; tests/assets/cases/css-fonts.json holds the full table.
-    // Only the string loses them: the stretch still selects a face, and
-    // `oblique` still reaches the matcher as itself.
+  test("stretch, oblique and small-caps keep their place in the grammar", () => {
+    // CSS Fonts 4: canonical order "per grammar", style, variant, weight,
+    // stretch, size, family; the computed style is "the keyword specified,
+    // plus angle in degrees if specified", and 14deg is what the keyword
+    // alone means. Chrome's canvas reads these differently -- see
+    // docs/browser-differences.md and the `chrome` column of
+    // tests/assets/cases/css-fonts.json.
     const c = ctx();
     c.font = "condensed 16px serif";
-    assert.equal(c.font, "16px serif");
+    assert.equal(c.font, "condensed 16px serif");
     assert.equal(c.fontStretch, "condensed");
     c.font = "oblique 20px serif";
-    assert.equal(c.font, "italic 20px serif");
-    c.font = "italic small-caps bold 16px serif";
-    assert.equal(c.font, "italic bold small-caps 16px serif");
+    assert.equal(c.font, "oblique 20px serif");
+    c.font = "oblique 14deg 20px serif";
+    assert.equal(c.font, "oblique 20px serif");
+    c.font = "oblique 10deg 20px serif";
+    assert.equal(c.font, "oblique 10deg 20px serif");
+    c.font = "italic bold small-caps 16px serif";
+    assert.equal(c.font, "italic small-caps 700 16px serif");
+  });
+
+  test("fontStretch and fontVariantCaps leave the string alone", () => {
+    // The standard keeps them as values of their own beside the font.
+    const c = ctx();
+    c.font = "16px serif";
+    c.fontStretch = "condensed";
+    c.fontVariantCaps = "small-caps";
+    assert.equal(c.font, "16px serif");
   });
 
   test("assigning the getter back is a no-op", () => {
-    // The reason the three rules are worth following. In a browser
+    // The reason the serialisation rules are worth following. In a browser
     // `ctx.font = ctx.font` changes nothing; here it reparsed a different
     // string, so anything that stored, compared or restored the value drifted.
     for (const set of [
       "16px serif",
       "bold italic 20px serif",
       "condensed 300 12px serif",
+      "oblique 0deg 12px Comic Sans, serif",
       "16px/24px serif",
     ]) {
       const c = ctx();
@@ -1190,12 +1195,13 @@ describe("`oblique` is not a spelling of italic", () => {
     });
   }
 
-  test("the keyword reads back as italic, as in Chrome", () => {
+  test("the keyword reads back as itself", () => {
+    // CSS Fonts 4 makes the computed value "the keyword specified", so the
+    // string keeps `oblique`. Chrome reads it back as `italic`;
+    // docs/browser-differences.md records that.
     const ctx = new Canvas(10, 10).getContext("2d");
     ctx.font = "oblique 64px Times";
-    // Only the string merges them -- `oblique` and `italic` remain two
-    // values to the matcher, which the Rust suite asserts at the parse.
-    assert.match(ctx.font, /^italic /);
+    assert.match(ctx.font, /^oblique /);
   });
 });
 
@@ -1384,7 +1390,7 @@ describe("a claimed name is also registered under a private alias", () => {
     assert.ok(names.includes("AClaimedName"));
     let ctx = new Canvas(10, 10).getContext("2d");
     ctx.font = "36px AClaimedName";
-    assert.equal(ctx.font, "36px AClaimedName");
+    assert.equal(ctx.font, '36px "AClaimedName"');
   });
 });
 

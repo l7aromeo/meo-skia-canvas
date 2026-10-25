@@ -204,6 +204,29 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   every one as `16px Arial`, which no other platform has to agree with and no
   test here could pin. The crate's `Font::parse` refuses them for the same
   reason.
+- _`ctx.font` and `Context2D::font()` read back in the specification's form,
+  not Chrome's._ HTML says the getter returns "the serialized form of the
+  current font of the context (with no 'line-height' component)", CSSOM 6.7.2
+  puts a shorthand's components in "the canonical order of component values
+  as given in the property definition table" -- for `font`, CSS Fonts 4
+  section 2.7's grammar: style, `small-caps`, weight, width, size, family --
+  a `<number>` "in the shortest form possible ... rounding the value if
+  necessary to not produce more than 6 decimals", and a family name as "The
+  string serialized as a string". Chrome 152 differs in each: it writes a
+  weight of 700 as `bold`, leaves a width out (reporting it through
+  `fontStretch` alone), reads `oblique` as `italic` and an `oblique` angle
+  other than 14deg as no style at all, writes `small-caps` after the weight,
+  keeps six significant digits (`2cm` is `75.5906px`, here `75.59055px`), and
+  quotes a family only where it is not a single identifier. So
+  `italic small-caps 300 condensed 16px Arial` reads
+  `italic 300 small-caps 16px Arial` in Chrome and
+  `italic small-caps 300 condensed 16px "Arial"` here.
+  `tests/assets/cases/css-fonts.json` holds both, the specification's form as `font` and Chrome's as `chrome`.
+- _`letterSpacing` and `wordSpacing` take `"0"`_, and `0.0`, `-0` and `+0`,
+  as no spacing, reading back as `0px`, where Chrome 152 ignores each. CSS
+  Values 4 section 6: "For zero lengths the unit identifier is optional (i.e.
+  can be syntactically represented as the <number> 0)." The crate's
+  `set_letter_spacing_css` and `set_word_spacing_css` take them too.
 
 **Gradient stops interpolate in sRGB, and Chrome does not. Ours is the
 specification's answer.** The HTML Standard, section 4.12.5.1.10 "Fill and

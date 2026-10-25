@@ -1651,27 +1651,28 @@ fn font_parse_reads_the_stretch_and_the_line_height() {
 }
 
 #[test]
-fn the_font_string_is_what_chrome_reads_back() {
-    // The getter reports Chrome's serialized form, which keeps less than a
-    // `Font` holds: no line height, as the Canvas API says ("with no
-    // 'line-height' component"); no stretch, which Chrome reports through
-    // `fontStretch` instead; and `italic` for `oblique`. So re-reading the
-    // string gives the font with those three dropped, while the context
-    // still draws with all of them -- a caller who needs them back keeps the
-    // `Font`.
+fn the_font_string_reads_back_as_the_font_set() {
+    // The getter reports the font as CSSOM serializes it, which keeps all a
+    // `Font` holds but its line height, as the Canvas API says ("with no
+    // 'line-height' component"). So re-reading the string gives the font
+    // back with only that dropped: the stretch keyword, `oblique` and the
+    // weight's number all survive, where Chrome's form loses the first two.
     let cases = [
-        ("16px Helvetica", "16px Helvetica"),
-        ("italic 16px Helvetica", "italic 16px Helvetica"),
-        ("oblique 16px Helvetica", "italic 16px Helvetica"),
-        ("oblique 700 44px Helvetica", "italic bold 44px Helvetica"),
-        ("bold 16px Helvetica", "bold 16px Helvetica"),
-        ("italic 700 44px Helvetica", "italic bold 44px Helvetica"),
-        ("condensed 16px Helvetica", "16px Helvetica"),
+        ("16px Helvetica", "16px \"Helvetica\""),
+        ("italic 16px Helvetica", "italic 16px \"Helvetica\""),
+        ("oblique 16px Helvetica", "oblique 16px \"Helvetica\""),
+        (
+            "oblique 700 44px Helvetica",
+            "oblique 700 44px \"Helvetica\"",
+        ),
+        ("bold 16px Helvetica", "700 16px \"Helvetica\""),
+        ("italic 700 44px Helvetica", "italic 700 44px \"Helvetica\""),
+        ("condensed 16px Helvetica", "condensed 16px \"Helvetica\""),
         (
             "italic condensed 700 44px Helvetica",
-            "italic bold 44px Helvetica",
+            "italic 700 condensed 44px \"Helvetica\"",
         ),
-        ("16px/24px Helvetica", "16px Helvetica"),
+        ("16px/24px Helvetica", "16px \"Helvetica\""),
         (
             "300 12px Comic Sans, serif",
             "300 12px \"Comic Sans\", serif",
@@ -1689,16 +1690,10 @@ fn the_font_string_is_what_chrome_reads_back() {
             font.stretch,
             "stretch of {shorthand:?}"
         );
-        let slant = match font.slant {
-            FontSlant::Normal => FontSlant::Normal,
-            _ => FontSlant::Italic,
-        };
         assert_eq!(
             Font::parse(&ctx.font()).expect("re-parses"),
             Font {
                 line_height: None,
-                stretch: FontStretch::Normal,
-                slant,
                 ..font.clone()
             },
             "round trip of {shorthand:?}"
@@ -6682,8 +6677,8 @@ fn font_reports_the_serialization_the_standard_asks_for() {
     // spelled out, including the ones sitting at their CSS initial value and
     // a line height the standard excludes. HTML asks for "the serialized form
     // of the current font of the context (with no 'line-height' component)",
-    // which drops what is at its initial value and spells weight 700 as
-    // `bold`, the way a browser does.
+    // and CSSOM's serialization drops what is at its initial value, writes a
+    // weight as its computed number and a family name as a string.
     //
     // Read back through the public getter rather than the field, because the
     // getter is the whole surface a crate consumer has for this.
@@ -6695,21 +6690,21 @@ fn font_reports_the_serialization_the_standard_asks_for() {
     ctx.set_font(&plain);
     let reported = ctx.font();
     assert_eq!(
-        reported, "16px Times",
+        reported, "16px \"Times\"",
         "initial-value components and the line height are dropped"
     );
 
     let mut bold = Font::new("Times", 16.0);
     bold.weight = 700;
     ctx.set_font(&bold);
-    assert_eq!(ctx.font(), "bold 16px Times", "700 is spelled `bold`");
+    assert_eq!(ctx.font(), "700 16px \"Times\"", "700 is its number");
 
     let mut heavy = Font::new("Times", 16.0);
     heavy.weight = 800;
     ctx.set_font(&heavy);
     assert_eq!(
         ctx.font(),
-        "800 16px Times",
+        "800 16px \"Times\"",
         "a weight with no keyword keeps its number"
     );
 }

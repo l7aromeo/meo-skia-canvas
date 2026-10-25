@@ -1868,7 +1868,7 @@ impl Default for Spacing {
 
 impl Spacing {
     /// A spacing from a CSS length, as `letterSpacing` and `wordSpacing`
-    /// take one, or `None` for one Chrome ignores.
+    /// take one, or `None` for a string that is not one.
     ///
     /// Carries the unit through rather than resolving it, so a font-relative
     /// length is still relative after it is set: [`in_px`](Self::in_px)
@@ -1880,10 +1880,13 @@ impl Spacing {
             return None;
         }
         let length = parse_length(css)?;
-        // So is a bare zero, which CSS lets a length be and `blur(0)` takes:
-        // Chrome ignores `ctx.letterSpacing = "0"`.
+        // A number with no unit is a length only at zero. CSS Values 4
+        // section 6: "For zero lengths the unit identifier is optional (i.e.
+        // can be syntactically represented as the <number> 0)." Chrome
+        // ignores `ctx.letterSpacing = "0"`; docs/browser-differences.md
+        // records it.
         if length.unit.is_empty() {
-            return None;
+            return (length.value == 0.0).then(Self::default);
         }
         Self::parse(length.value, length.unit, length.pixels)
     }

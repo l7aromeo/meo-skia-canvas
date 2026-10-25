@@ -110,10 +110,11 @@ describe("CSS font shorthands", () => {
   test("ctx.font answers the font table", () => {
     // Set before each case, so a refusal shows as all of it surviving and a
     // font taken shows the caps and stretch reset, as Chrome's setter resets
-    // them. `font` reads it back in Chrome's form, with no stretch.
+    // them. `font` reads it back in the specification's form, which the
+    // table's `font` holds; `chrome` beside it is what Chrome 152 read.
     const SENTINEL = "small-caps ultra-expanded 7px Sentinel",
       ignored =
-        "small-caps 7px Sentinel, caps small-caps, stretch ultra-expanded";
+        'small-caps ultra-expanded 7px "Sentinel", caps small-caps, stretch ultra-expanded';
 
     const ctx = new Canvas(10, 10).getContext("2d"),
       wrong = [];
@@ -127,7 +128,7 @@ describe("CSS font shorthands", () => {
             : `${font}, caps ${variantCaps}, stretch ${stretch}`;
       if (got !== want)
         wrong.push(
-          `${JSON.stringify(css)}: ${got}; Chrome ${font === undefined ? "ignores it" : want}`,
+          `${JSON.stringify(css)}: ${got}; want ${font === undefined ? "it ignored" : want}`,
         );
     }
     assert.deepEqual(wrong, []);
@@ -250,7 +251,7 @@ describe("CSS filters and spacing", () => {
         const got = assign(ctx, property, "3px", css);
         if (got !== read)
           wrong.push(
-            `${property} ${JSON.stringify(css)}: ${got ?? "ignored"}, Chrome ${read ?? "ignores it"}`,
+            `${property} ${JSON.stringify(css)}: ${got ?? "ignored"}, want ${read ?? "it ignored"}`,
           );
       }
     assert.deepEqual(wrong, []);
