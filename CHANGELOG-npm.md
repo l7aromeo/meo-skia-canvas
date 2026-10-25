@@ -258,7 +258,10 @@ removed and no signature moves.
     name's. `12px a\u00b5b` was read as the family `aµb`, and `12px serif`
     followed by U+00A0 is now refused rather than trimmed; Chrome 152 takes
     both under the older rule, which docs/browser-differences.md records.
-    `12px a·b` was refused and is now read, as Chrome reads it.
+    `12px a·b` was refused and is now read, as Chrome reads it. A name
+    starts as CSS Syntax says, so `12px -1x` and `12px -`, which read as
+    families, are refused, and an escape in an unquoted name is decoded,
+    `12px \61 bc` naming `abc` where it was refused, as in Chrome.
 
 - **`letterSpacing` and `wordSpacing` take `"0"`.** CSS Values 4 lets a
   zero length be written without its unit, and `ctx.letterSpacing = "0"`
