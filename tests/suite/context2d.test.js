@@ -2718,6 +2718,82 @@ describe("Context2D", () => {
     });
   });
 
+  // CSS 2.1 section 10.8.1: a line box of one font is `line-height` tall,
+  // so wrapped lines' baselines lie that far apart. A number or a
+  // percentage is of the font size, `em` of the font's own size, and
+  // `normal` the face's own spacing. Chrome's canvas does not wrap, so the
+  // figures are CSS's arithmetic: at 48px, `30px` is 30, `1` 48, `150%` 72
+  // and `0.5em` 24. The shorthand's line height used to be taken as a
+  // multiple of the size a second time, putting the second line of
+  // "48px/30px" 1440px down.
+  describe("a font's line height spaces wrapped lines", () => {
+    FontLibrary.use("LineHeightOswald", [
+      "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    ]);
+    const TEXT = "HHH HHH HHH",
+      WIDTH = 110;
+    const baselines = (font) => {
+      const c = new Canvas(400, 400).getContext("2d");
+      c.font = font;
+      c.textWrap = true;
+      return c.measureText(TEXT, WIDTH).lines.map((line) => line.baseline);
+    };
+    const gaps = (font) => {
+      const at = baselines(font);
+      assert.equal(at.length, 3, `${font}: three lines`);
+      return at.slice(1).map((y, i) => y - at[i]);
+    };
+
+    for (const [height, pixels] of [
+      ["30px", 30],
+      ["1", 48],
+      ["150%", 72],
+      ["0.5em", 24],
+    ]) {
+      test(`48px/${height} puts the lines ${pixels}px apart`, () => {
+        const font = `48px/${height} LineHeightOswald`;
+        for (const gap of gaps(font))
+          assert.ok(Math.abs(gap - pixels) < 0.01, `${font}: ${gap}`);
+        assert.ok(
+          Math.abs(baselines(font)[0]) < 0.01,
+          "the first line's baseline is the y given",
+        );
+      });
+    }
+
+    test("48px/normal spaces them as no line height does", () => {
+      const normal = gaps("48px/normal LineHeightOswald");
+      assert.deepEqual(normal, gaps("48px LineHeightOswald"));
+      // Oswald's ascent and descent, 57.26 and 13.87, and no line gap.
+      for (const gap of normal)
+        assert.ok(Math.abs(gap - 71.14) < 0.5, `${gap}`);
+    });
+
+    // Spacings wider than the cap height, so the two stems do not meet.
+    test("the lines are drawn where they measure", () => {
+      for (const [height, pixels] of [
+        ["1", 48],
+        ["150%", 72],
+      ]) {
+        const c = new Canvas(400, 400).getContext("2d");
+        c.font = `48px/${height} LineHeightOswald`;
+        c.textWrap = true;
+        c.fillText("H H", 10, 100, 40);
+        // The foot of each `H`'s left stem, in the column through it.
+        const { data } = c.getImageData(14, 0, 1, 400),
+          feet = [];
+        for (let y = 1; y < 400; y++)
+          if (data[(y - 1) * 4 + 3] > 128 && data[y * 4 + 3] <= 128)
+            feet.push(y);
+        assert.deepEqual(
+          feet,
+          [100, 100 + pixels],
+          `48px/${height}: stems end at ${feet}`,
+        );
+      }
+    });
+  });
+
   describe("textDecoration", () => {
     // A bundled face, so where the line lands, and so the rows read below,
     // does not depend on which font the system hands over for a name such as

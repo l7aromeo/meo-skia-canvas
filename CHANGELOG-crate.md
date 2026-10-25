@@ -66,6 +66,15 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A font's line height spaces wrapped lines by its pixels.**
+  `Font::line_height` takes pixels, as does the line height in a shorthand
+  `Font::from_css` reads, and wrapped text took it as a multiple of the font
+  size: 30px at 48px put the second line 1440px below the first. Lines now
+  lie the line height apart, with the space beyond the face's ascent and
+  descent split half above and half below, CSS 2.1 section 10.8.1's line
+  box. In a shorthand at 48px, `30px` is 30, `1` 48, `150%` 72 and `0.5em`
+  24, and `normal` keeps the face's own spacing.
+
 - **`outline_text` and the ink box put every glyph where `fill_text` draws
   it.** A glyph the shaper moves off its advance -- a mark stacked over
   another, a mark set over a base with no precomposed glyph, the half of a
