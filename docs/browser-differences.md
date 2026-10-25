@@ -67,6 +67,10 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   included, in the order 6.x serialised them as own properties, so a
   measurement serialises as it always did. It is WebIDL's default `toJSON`,
   the one `DOMRect` has, and works the ink box out when it is called.
+  `structuredClone` of a measurement gives `{}`, a plain object with none of
+  the values, where Chrome refuses it with a `DataCloneError`: a class
+  instance in Node is cloned as an ordinary object, and nothing here marks
+  it as uncloneable.
 
 - _`imageSmoothingQuality = "high"` picks its sampler from the device-space
   scale._ The Chrome mapping this ports, and why one unconditional cubic is

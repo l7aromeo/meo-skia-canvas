@@ -4004,6 +4004,18 @@ describe("measureText's return shape", () => {
     );
     assert.equal(typeof toJSON.value, "function");
     assert.ok(toJSON.writable && toJSON.enumerable && toJSON.configurable);
+    // WebIDL's default `toJSON` checks its receiver as the getters do, rather
+    // than reading properties a plain object does not have.
+    assert.throws(
+      () => toJSON.value.call({}),
+      TypeError,
+      "toJSON on a non-measurement",
+    );
+    assert.throws(
+      () => toJSON.value.call(Object.create(TextMetrics.prototype)),
+      TypeError,
+      "toJSON on an object made from the prototype",
+    );
 
     const m = measured().measureText("Hamburgefonstiv");
     assert.deepEqual(Object.getOwnPropertyNames(m), []);
@@ -4026,6 +4038,19 @@ describe("measureText's return shape", () => {
     assert.deepEqual(Object.keys(parsed), SERIALISED);
     assert.deepEqual(Object.keys(parsed.lines[0]).at(-1), "runs");
     assert.equal(typeof parsed.lines[0].runs[0].family, "string");
+  });
+
+  // Node's `console.log` shows own properties, and a measurement has none,
+  // so it would print `TextMetrics {}`: it shows what `toJSON` gives, as a
+  // browser's console lists the values its getters read.
+  test("shows its values when inspected", () => {
+    const { inspect } = require("util");
+    const m = measured().measureText("Hamburgefonstiv");
+    const shown = inspect(m);
+    assert.match(shown, /^TextMetrics \{/);
+    for (const name of SERIALISED)
+      assert.ok(shown.includes(`${name}:`), `${name} in ${shown}`);
+    assert.ok(shown.includes(String(m.width)), "with its values");
   });
 
   test("has the prototype and constructor Chrome's TextMetrics has", () => {

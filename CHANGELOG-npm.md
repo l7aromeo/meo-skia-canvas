@@ -36,11 +36,13 @@ removed and no signature moves.
   property; each is now a getter on `TextMetrics.prototype`, enumerable as
   WebIDL makes an attribute, and the object has no properties of its own:
   `Object.keys` is empty and a spread copies nothing, as in Chrome 152, and
-  the object is no longer frozen. A getter called on anything but a
-  measurement throws a `TypeError`.
+  the object is no longer frozen. A getter or `toJSON` called on anything
+  but a measurement throws a `TypeError`. `structuredClone(m)` gives `{}`,
+  where it gave every value; Chrome throws a `DataCloneError`.
   `JSON.stringify` gives what it gave, the same values in the same order,
   through a `toJSON` this library adds -- docs/browser-differences.md has
-  why -- and works the ink box out once. A measurement is cheaper to make:
+  why -- and works the ink box out once. `console.log` and `util.inspect`
+  show the values `toJSON` gives, working the ink box out too. A measurement is cheaper to make:
   `measureText("Hello world")` with only `width` read takes 4.3 µs where
   it took 4.7, in a release build on macOS.
 
