@@ -1,5 +1,7 @@
 use std::fmt;
 
+#[cfg(feature = "fetch")]
+use crate::load::LoadError;
 use crate::{
     geometry::Rect,
     pixels::{PixelColorSpace, PixelDepth},
@@ -13,7 +15,13 @@ use crate::{
 /// the arguments, useful for logs and not worth matching on. Variants
 /// carrying typed values instead describe input the crate rejected, and hand
 /// back what was passed so a caller need not re-derive it.
+///
+/// Non-exhaustive, so a variant can be added in a minor release: a `match`
+/// outside this crate needs a `_` arm. An operation that fails in ways of its
+/// own has its own error type -- `LoadError`, under the `fetch` feature, for
+/// loading from a URL -- which converts into this one through `?`.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Error {
     /// Canvas or image dimensions were not finite and positive.
     InvalidDimensions {
@@ -178,11 +186,20 @@ pub enum Error {
     ///
     /// Distinct from a window that opens and then fails: this is the loop
     /// never starting, on a machine with no display or where the platform
-    /// refused it. Windows queued before the call are left unopened, and a
-    /// caller that ignored this would wait for windows that cannot appear.
+    /// refused it. Windows queued before the call are dropped unopened, and
+    /// a caller that ignored this would wait for windows that cannot appear.
     EventLoop {
         /// What prevented the loop from running.
         reason: String,
+    },
+    /// A window was given an id another window holds, by `Window::set_id`
+    /// under the `window` feature.
+    ///
+    /// A window holds its id from the moment it is built until it closes, or
+    /// is dropped without having opened.
+    WindowIdTaken {
+        /// The id that was asked for.
+        id: u32,
     },
     /// An export option held a value the crate will not act on.
     ///
@@ -228,6 +245,22 @@ pub enum Error {
         /// What the surface reported.
         reason: String,
     },
+    /// Loading from a URL failed, as the [`LoadError`] says.
+    ///
+    /// What `?` makes of a `LoadError` in a function returning this type;
+    /// the load functions themselves return `LoadError`. Boxed because a
+    /// `LoadError` can carry an `Error` in turn, as
+    /// [`LoadError::Decode`]. The
+    /// `LoadError` is also this error's
+    /// [`source`](std::error::Error::source), and its own source is the
+    /// integrity failure where there is one.
+    ///
+    /// Present only with the `fetch` feature. A variant that comes and goes
+    /// with a feature is safe because `Error` is non-exhaustive: every match
+    /// outside the crate already has a `_` arm, so turning the feature on
+    /// breaks none of them.
+    #[cfg(feature = "fetch")]
+    Load(Box<LoadError>),
 }
 
 impl fmt::Display for Error {
@@ -319,6 +352,9 @@ impl fmt::Display for Error {
             Self::EventLoop { reason } => {
                 write!(f, "the window event loop could not run: {reason}")
             }
+            Self::WindowIdTaken { id } => {
+                write!(f, "window id {id} is held by another window")
+            }
             Self::InvalidExportOption { option, reason } => {
                 write!(f, "invalid `{option}`: {reason}")
             }
@@ -329,8 +365,29 @@ impl fmt::Display for Error {
             Self::PixelWrite { reason } => {
                 write!(f, "pixel write failed: {reason}")
             }
+            // The load's own message, which names the URL and the step that
+            // failed. A reporter that also walks `source()` prints it twice;
+            // one that prints only this line, the commoner kind, loses
+            // nothing.
+            #[cfg(feature = "fetch")]
+            Self::Load(load) => write!(f, "{load}"),
         }
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            #[cfg(feature = "fetch")]
+            Self::Load(load) => Some(load.as_ref()),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "fetch")]
+impl From<LoadError> for Error {
+    fn from(load: LoadError) -> Self {
+        Self::Load(Box::new(load))
+    }
+}

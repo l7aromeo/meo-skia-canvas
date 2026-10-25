@@ -327,7 +327,7 @@ let image = Image::from_url("https://example.com/pentagon.png", &options)?;
 - **Redirects** are followed up to 20, Fetch's limit, on 301, 302, 303, 307 and 308. `Authorization`, `Cookie` and `Proxy-Authorization` are not sent past a redirect to another host, or from `https` to `http`. `Redirect::Error` and `Redirect::Manual` stop at the first redirect, never request where it leads, and say where that was in `LoadError::Redirect`.
 - **`integrity`** is checked against the whole body after redirects and before decoding, by `Integrity`, the same check npm runs. `Integrity::parse` and `verify` work on any bytes without the feature.
 - **`ImageData::from_url` reads the body as pixels**, not as an encoded image, as `loadImageData` does. With `height` as `None` it is the number of whole rows the body holds.
-- **A failure is a `LoadError`** naming the step: `Url`, `Header`, `Network`, `Timeout`, `Cancelled`, `Status`, `Redirect`, `TooManyRedirects`, `Integrity` or `Decode`, which wraps the `Error` decoding gave. Every variant naming a URL names the one passed in.
+- **A failure is a `LoadError`** naming the step: `Url`, `Header`, `Network`, `Timeout`, `Cancelled`, `Status`, `Redirect`, `TooManyRedirects`, `Integrity` or `Decode`, which wraps the `Error` decoding gave. Every variant naming a URL names the one passed in. In a function returning `Error`, `?` turns it into `Error::Load`.
 
 **Cancelling.** Clone a `Cancel` into each load's options and call `cancel()` from any thread; every load holding it returns `LoadError::Cancelled`. A load waiting on its server -- in a TLS handshake, for the response, or partway through the body -- returns at once, because its connection is closed under it. Resolving the host name and opening the TCP connection cannot be interrupted, so a load cancelled during either returns when that call does: give it a `timeout` if that matters.
 
@@ -338,7 +338,7 @@ let image = Image::from_url("https://example.com/pentagon.png", &options)?;
 - `FontLibrary::{register_font_from_data, register_font_from_path, has_font, families}` registers TTF / OTF / WOFF / WOFF2 typefaces under family aliases. Internal state is a `parking_lot::Mutex` -- no `RefCell` exposure.
 - `FontLibrary::use_paths(alias, paths)` and `use_data(alias, bytes)` are JavaScript's `FontLibrary.use()`: the alias is optional, each font otherwise filed under the family it declares, and each returns the `FontFace` it registered -- family, weight, slant, stretch and the file it came from. `use_data_all(alias, faces)` takes several buffers, and `use_families(groups)` several aliases with their files, as `use()` takes an object. A batch is all or nothing, across every group of `use_families` too.
 - `TextEngine::new(&font_manager)` wires the registry into a paragraph `FontCollection` (with system-font fallback). `with_system_fonts()` is the no-registry convenience.
-- `TextStyle` carries font selection, size, weight, slant, color, alignment, line height, letter / word spacing, decoration (`underline` / `overline` / `line_through` plus style, color, thickness), shadows, and baseline shift. `font_weight: i32` drives `SkFontStyle` face matching and, on a variable typeface, is the `wght` coordinate unless `font_variations` pins `wght` -- with or without other axes set, and per span in rich text. An instance is never given a synthetic bold over the weight it was instanced at. Construct with `..TextStyle::default()`: the struct is not `#[non_exhaustive]` (no crate-root type is), so listing every field compiles today and breaks the next time one is added.
+- `TextStyle` carries font selection, size, weight, slant, color, alignment, line height, letter / word spacing, decoration (`underline` / `overline` / `line_through` plus style, color, thickness), shadows, and baseline shift. `font_weight: i32` drives `SkFontStyle` face matching and, on a variable typeface, is the `wght` coordinate unless `font_variations` pins `wght` -- with or without other axes set, and per span in rich text. An instance is never given a synthetic bold over the weight it was instanced at. Construct with `..TextStyle::default()`: the struct is not `#[non_exhaustive]` (no crate-root struct is), so listing every field compiles today and breaks the next time one is added.
 - **`TextStyle::font_variations: Vec<FontVariation>`** pins variable-font axis positions before layout (CanvasKit's `fontVariations` shape). When the requested families resolve to a variable typeface, the axes go on the paragraph's text style as `FontArguments`, and Skia clones the typeface at them (clamped to its declared `[min, max]`, an axis it lacks ignored), caching the instance on the engine's one `FontCollection`. An explicit `wght` here wins over `font_weight`, as `font-variation-settings` does in CSS. Use `FontAxisTag::WGHT` / `WDTH` / `OPSZ` / `SLNT` / `ITAL` for the common axes, or `FontAxisTag::from_str("xxxx")` / `FontAxisTag::new(b"xxxx")` for arbitrary tags. In rich text a span's own `font_variations` replace the base style's, as a nested `font-variation-settings` replaces its parent's in CSS, and a span with none inherits the base's; its own weight supplies `wght` unless the axes in force name it. An empty list inherits rather than resets, so a span returns an axis to its default by naming the default.
 - `FontLibrary::installed_families()` lists every family a draw can match -- the platform's own plus anything registered here -- and `family_details(name)` reports the weights, widths and styles one offers, or `None` when nothing resolves under that name. The counterparts of the JavaScript `FontLibrary.families` and `FontLibrary.family()`. `families()` stays the narrower question: what this registry was given.
 - `Font::from_css` reads a CSS `font` shorthand as Chrome reads `ctx.font`, and `None` where Chrome ignores one; `Context2D::set_font_css` assigns one, setting the caps and stretch as the shorthand does and returning `false` without changing anything when it will not read. `Context2D::font()` reports Chrome's serialized form: no line height, no stretch (that is `font_stretch()`), `italic` for any slant, and the size to six significant digits. System font keywords such as `caption` are refused, since what they name is the platform's choice.
@@ -392,19 +392,21 @@ afterwards breaks every caller:
 
 ## Errors
 
-`Error` is the unified error type. Variants are exhaustive and carry typed reasons:
+`Error` is the unified error type. It is `#[non_exhaustive]`, so a `match` on it needs a `_` arm and a release can add a variant without breaking one. Variants carry typed reasons:
 
-- Dimension / rect / stride / byte-length errors for canvas, image and readback construction (`InvalidDimensions`, `InvalidRect`, `InvalidStride`, `InvalidByteLength`).
+- Dimension / rect / radius / stride / byte-length errors for canvas, image and readback construction (`InvalidDimensions`, `InvalidRect`, `InvalidRadius`, `InvalidStride`, `InvalidByteLength`).
 - Unsupported colour-space / pixel-depth combinations (`UnsupportedPixelColorSpace`, `UnsupportedPixelDepth`).
-- Filter / gradient / SVG-path / colour-string / image-decode failures (`FilterCreate`, `InvalidGradient`, `InvalidSvgPath`, `InvalidColor`, `DecodeImage`).
-- Canvas creation, rendering and encoding failures (`SurfaceCreate`, `Render`, `Encode`).
+- CSS strings the setters refuse (`InvalidCssLength`, `InvalidFilter`, `InvalidColor`).
+- Filter / gradient / SVG-path / image-decode failures (`FilterCreate`, `InvalidGradient`, `InvalidSvgPath`, `DecodeImage`, `FrameOutOfRange`).
+- Canvas creation, rendering and encoding failures (`SurfaceCreate`, `Render`, `Encode`), and an export option the encoder will not act on (`InvalidExportOption`).
 - Pixel readback / write failures (`PixelReadback`, `PixelWrite`).
 - Font register failures, invalid data or IO error, and a font shorthand `Font::parse` cannot read (`FontRegister`).
-- A GPU engine that was asked for and is not reachable (`EngineUnavailable`).
+- The window loop never starting, and a window id another window holds (`EventLoop`, `WindowIdTaken`).
+- With the `fetch` feature, a load from a URL that failed (`Load`).
 
 `Error` implements `std::error::Error` and `Display`, and works directly with `anyhow` / `thiserror` callers.
 
-Loading from a URL fails with `LoadError` rather than with new `Error` variants, since adding a variant to an exhaustive enum breaks every `match` on it. `LoadError` is `#[non_exhaustive]` from the start, so it can grow, and `LoadError::Decode` carries the `Error` when the bytes arrived and would not decode.
+An operation that fails in ways of its own returns its own error type, which converts into `Error` through `?`. Loading from a URL returns `LoadError`, `#[non_exhaustive]` too, naming the step that failed; in a function returning `Error` it becomes `Error::Load`, whose `source()` is the `LoadError` and, below that, the `IntegrityError` where the bytes did not match. `LoadError::Decode` carries the `Error` when the bytes arrived and would not decode.
 
 ## Verification commands
 

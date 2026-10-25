@@ -521,8 +521,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 - **`Window::set_id` gives a window an id of the caller's choosing**, as
   JavaScript's `new Window({ id })` does. The id has to be free, and one
-  another window holds is refused as a `WindowIdTaken` naming it -- a type of
-  its own, since `Error` cannot gain a variant until 0.17. A window holds its
+  another window holds is refused as an `Error::WindowIdTaken` naming it. A
+  window holds its
   id from when it is built until it closes, or is dropped unopened; a closed
   window's id is free at once, while the loop runs on, as JavaScript's is.
   The counter that numbers windows moves past a chosen id, so no window built
@@ -743,8 +743,10 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `Proxy-Authorization` are dropped at a redirect to another host or from
   `https` to `http`, by the rule npm's loaders apply. `Redirect::Error`
   and `Redirect::Manual` stop at the redirect and never request its
-  target. A failure is a `LoadError`, a new type rather than new `Error`
-  variants, that says which step failed and names the URL given.
+  target. A failure is a `LoadError` that says which step failed and names
+  the URL given. In a function returning `Error`, `?` turns it into
+  `Error::Load`, whose `source()` is the `LoadError` and, below it, the
+  `IntegrityError` where the bytes did not match.
 
 - **`Cancel` stops a load from another thread.** Clone it into any number
   of loads' `LoadOptions::cancel` and call `cancel()`: each returns
@@ -780,6 +782,12 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   is unchanged. In your code, match on the variants instead of the strings
   -- `UiEvent::Input(data, TextInputType::InsertText)` for
   `UiEvent::Input(data, t) if t == "insertText"` -- and add a `_` arm.
+
+- **`Error` is `#[non_exhaustive]`.** A release can now add a failure kind
+  to it without breaking anyone, which is what kept the URL loader's errors
+  and the window-id refusal in types of their own until now. A `match` on
+  `Error` outside this crate stops compiling until it has a `_` arm: add
+  one, or bind the rest as `other =>`.
 
 - **`FontSlant::Oblique` and `TextSlant::Oblique` draw as CSS Fonts 4
   matches them, superseding 0.16.0's "`TextSlant::Oblique` now renders the

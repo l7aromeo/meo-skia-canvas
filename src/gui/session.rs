@@ -29,7 +29,6 @@
 use std::{
     cell::RefCell,
     collections::HashSet,
-    fmt,
     num::NonZeroU32,
     sync::{
         LazyLock, Mutex, MutexGuard, PoisonError,
@@ -44,7 +43,7 @@ use super::{
     window::{Cursor, Fit, WindowSpec},
 };
 use crate::{
-    canvas::Canvas, context::page::Page, context2d::Context2D,
+    canvas::Canvas, context::page::Page, context2d::Context2D, error::Error,
     gui::window::DEFAULT_BACKGROUND,
 };
 
@@ -80,24 +79,6 @@ static HELD: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(Default::default);
 fn held() -> MutexGuard<'static, HashSet<u32>> {
     HELD.lock().unwrap_or_else(PoisonError::into_inner)
 }
-
-/// An id [`Window::set_id`] was asked for that another window holds.
-///
-/// A window holds its id from the moment it is built until it closes, or is
-/// dropped without having opened.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct WindowIdTaken {
-    /// The id that was asked for.
-    pub id: u32,
-}
-
-impl fmt::Display for WindowIdTaken {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "window id {} is held by another window", self.id)
-    }
-}
-
-impl std::error::Error for WindowIdTaken {}
 
 /// The index of a canvas's newest page, which a window shows until told
 /// otherwise -- JavaScript's `canvas.pages.length`, counted from zero.
@@ -228,21 +209,22 @@ impl Window {
     ///
     /// let mut other = Window::new(320.0, 240.0);
     /// let taken = other.set_id(NonZeroU32::new(5).expect("not zero"));
-    /// assert_eq!(taken.map_err(|e| e.id), Err(5));
-    /// # Ok::<(), WindowIdTaken>(())
+    /// assert_eq!(taken, Err(Error::WindowIdTaken { id: 5 }));
+    /// # Ok::<(), Error>(())
     /// ```
     ///
     /// # Errors
     ///
-    /// Returns [`WindowIdTaken`] naming the id when another window holds it.
-    pub fn set_id(&mut self, id: NonZeroU32) -> Result<(), WindowIdTaken> {
+    /// Returns [`Error::WindowIdTaken`] naming the id when another window
+    /// holds it.
+    pub fn set_id(&mut self, id: NonZeroU32) -> Result<(), Error> {
         let id = id.get();
         if id == self.spec.id {
             return Ok(());
         }
         let mut held = held();
         if held.contains(&id) {
-            return Err(WindowIdTaken { id });
+            return Err(Error::WindowIdTaken { id });
         }
         held.remove(&self.spec.id);
         held.insert(id);
@@ -808,7 +790,7 @@ mod chosen_ids {
         let mut other = Window::new(10.0, 10.0);
         let before = other.id();
         let taken = other.set_id(id(10));
-        assert_eq!(taken, Err(WindowIdTaken { id: id(10).get() }));
+        assert_eq!(taken, Err(Error::WindowIdTaken { id: id(10).get() }));
         assert_eq!(other.id(), before, "keeps the id it had");
         let message = taken.expect_err("refused").to_string();
         assert!(message.contains(&id(10).get().to_string()), "{message}");

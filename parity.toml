@@ -1933,6 +1933,8 @@ rust = ["LoadError",
         "Integrity.error",
         "LoadError::Decode",
         "Decode.0",
+        "Error::Load",
+        "Load.0",
         "DataUrlError",
         "DataUrlError::NotData",
         "DataUrlError::MissingComma",
@@ -1942,7 +1944,9 @@ why  = """A rejected promise carries an `Error` whose type and message say the
        same things: a `TypeError` for a refused redirect, an integrity mismatch
        or a bad header, an `Error` naming the HTTP status, an `AbortError` for
        an aborted signal. JavaScript has no typed error enumeration to pair
-       these with, and the npm package exports no error classes."""
+       these with, and the npm package exports no error classes. In Rust,
+       `?` carries a `LoadError` into `Error::Load`, which only a function
+       returning `Error` needs."""
 status = "deliberate"
 
 [[capability]]
@@ -2395,12 +2399,10 @@ status = "deliberate"
 
 [[capability]]
 name = "the refusal a chosen window id gets"
-rust = ["WindowIdTaken", "WindowIdTaken.id"]
+rust = ["Error::WindowIdTaken", "WindowIdTaken.id"]
 npm = []
-why = """`Window::set_id` refuses an id another window holds with a
-      `WindowIdTaken` naming it, where npm's `Window` constructor throws a
-      `RangeError` naming it. A type of its own because `Error` is not
-      `#[non_exhaustive]` and cannot gain a variant without breaking an
-      exhaustive match; JavaScript has no error type to add, so nothing
-      faces it there."""
+why = """`Window::set_id` refuses an id another window holds with an
+      `Error::WindowIdTaken` naming it, where npm's `Window` constructor throws
+      a `RangeError` naming it. JavaScript has no error type to add, so
+      nothing faces it there."""
 status = "deliberate"

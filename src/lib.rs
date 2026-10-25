@@ -326,7 +326,7 @@ pub mod prelude {
         event::{ModifierKeys, TextInputType, UiEvent},
         handle::WindowHandle,
         key::Key,
-        session::{Window, WindowIdTaken},
+        session::Window,
         window::Fit,
     };
 }
