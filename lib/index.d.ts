@@ -5347,7 +5347,13 @@ export interface TextStyleInput {
   fontStyle?: {
     /** Weight on the CSS scale, `100` to `900`. */
     weight?: number;
-    /** Width as a percentage of normal, where `100` is unstretched. */
+    /**
+     * Width as the CSS numeric code the `font-stretch` keywords stand for:
+     * `1` ultra-condensed, `5` normal, `9` ultra-expanded. It picks among the
+     * widths the family ships rather than stretching the glyphs. A fraction
+     * is truncated, and a value outside `1` to `9` is pinned to the nearer
+     * end, so `100` read as a percentage asks for ultra-expanded.
+     */
     width?: number;
     /**
      * `0` upright, `1` italic, `2` oblique: 14deg, drawn as `oblique` text on
