@@ -1573,3 +1573,35 @@ describe("halfLeading", () => {
     });
   }
 });
+
+describe("an empty fontFamilies list", () => {
+  // No family names the default list, as the option left out does. It
+  // aborted the process in a debug build: skia-safe 0.153.3 builds a slice
+  // from a null pointer for an empty list -- see the UPSTREAM marker in
+  // src/node/paragraph.rs.
+  test("lays out in the default families", () => {
+    const widthOf = (style) => {
+      const p = ParagraphBuilder.Make(style).addText("Hamburgefonstiv").build();
+      p.layout(10000);
+      return p.getMaxIntrinsicWidth();
+    };
+    const plain = widthOf({ textStyle: { fontSize: 24 } });
+    assert.equal(
+      widthOf({ textStyle: { fontSize: 24, fontFamilies: [] } }),
+      plain,
+    );
+    const pushed = ParagraphBuilder.Make({ textStyle: { fontSize: 24 } })
+      .pushStyle({ fontSize: 24, fontFamilies: [] })
+      .addText("Hamburgefonstiv")
+      .build();
+    pushed.layout(10000);
+    assert.equal(pushed.getMaxIntrinsicWidth(), plain);
+    assert.equal(
+      widthOf({
+        textStyle: { fontSize: 24 },
+        strutStyle: { fontFamilies: [] },
+      }),
+      plain,
+    );
+  });
+});

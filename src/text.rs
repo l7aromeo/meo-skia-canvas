@@ -2032,8 +2032,43 @@ fn build_paragraph_style(
 
 #[cfg(test)]
 mod tests {
-    use super::{TextEngine, TextStyle};
+    use super::{SkTextStyle, TextEngine, TextStyle};
     use crate::font::{FontLibrary, INSTANCED_POSITIONS};
+
+    /// Whether skia-safe still turns an empty family list into a slice
+    /// built from a null pointer, which a debug build aborts on: the defect
+    /// the npm binding's `families_in` and this module's `is_empty` tests
+    /// before `set_font_families` keep away from. Run in a child process,
+    /// since the abort does not unwind. Fails once skia-safe takes an empty
+    /// list, which is the cue to drop the guard.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn an_empty_family_list_is_a_null_slice_in_skia_safe() {
+        /// Set for the child, which makes the call the parent watches.
+        const CHILD: &str = "MEO_SKIA_CANVAS_EMPTY_FAMILY_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            SkTextStyle::new().set_font_families(&[] as &[&str]);
+            return;
+        }
+        let status = std::process::Command::new(
+            std::env::current_exe().expect("the test binary"),
+        )
+        .args([
+            "--exact",
+            "text::tests::an_empty_family_list_is_a_null_slice_in_skia_safe",
+            "--test-threads=1",
+        ])
+        .env(CHILD, "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("the test binary runs");
+        assert!(
+            !status.success(),
+            "skia-safe takes an empty family list now: drop `families_in`'s \
+             guard in src/node/paragraph.rs and its UPSTREAM marker"
+        );
+    }
 
     #[test]
     fn an_engine_drops_its_caches_past_the_bound_on_instanced_positions() {
