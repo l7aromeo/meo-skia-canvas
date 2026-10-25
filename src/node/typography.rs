@@ -920,11 +920,13 @@ pub(crate) fn with_oblique_slnt(
     }
 }
 
-/// The UTF-8 range of the text under each glyph of a visited run, read from
+/// The UTF-8 range of the text under glyph `at` of a visited run, read from
 /// the paragraph at the middle of the glyph's advance on its baseline.
 ///
 /// `origin`, `positions` and `advance` are a run's as `extended_visit`
 /// reports them. The text offsets it reports beside them are not used.
+/// Each lookup walks the line's runs, so callers ask it of as few glyphs as
+/// answer their question.
 ///
 /// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
 /// Re-check: cargo test skia_still_misreports_utf8_starts, and
@@ -935,22 +937,19 @@ pub(crate) fn with_oblique_slnt(
 /// first line's glyphs; and where the run does not start the text it
 /// copies `count` offsets into storage of that size and hands out
 /// `count + 1`, so the last, the end of the run, is read from past them.
-pub(crate) fn clusters_under(
+pub(crate) fn cluster_under(
     paragraph: &Paragraph,
     origin: Point,
     positions: &[Point],
     advance: f32,
-) -> Vec<Option<Range<usize>>> {
-    let end = positions.first().map_or(0.0, |first| first.x + advance);
-    (0..positions.len())
-        .map(|at| {
-            let next = positions.get(at + 1).map_or(end, |next| next.x);
-            let middle = origin.x + (positions[at].x + next) / 2.0;
-            paragraph
-                .get_closest_glyph_cluster_at((middle, origin.y))
-                .map(|cluster| cluster.text_range)
-        })
-        .collect()
+    at: usize,
+) -> Option<Range<usize>> {
+    let end = positions.first()?.x + advance;
+    let next = positions.get(at + 1).map_or(end, |next| next.x);
+    let middle = origin.x + (positions.get(at)?.x + next) / 2.0;
+    paragraph
+        .get_closest_glyph_cluster_at((middle, origin.y))
+        .map(|cluster| cluster.text_range)
 }
 
 /// The ranges of `paragraph` whose face wants a different style from
@@ -980,10 +979,13 @@ fn runs_to_restyle(
     visited
         .into_iter()
         .filter_map(|(origin, positions, advance, style)| {
-            let clusters =
-                clusters_under(paragraph, origin, &positions, advance);
-            let start = clusters.iter().flatten().map(|c| c.start).min()?;
-            let end = clusters.iter().flatten().map(|c| c.end).max()?;
+            // A run's text is contiguous, so its two end glyphs bound it --
+            // in either order, since a right-to-left run starts at its last.
+            let ends = [0, positions.len().saturating_sub(1)].map(|at| {
+                cluster_under(paragraph, origin, &positions, advance, at)
+            });
+            let start = ends.iter().flatten().map(|c| c.start).min()?;
+            let end = ends.iter().flatten().map(|c| c.end).max()?;
             Some((start..end, style))
         })
         .collect()

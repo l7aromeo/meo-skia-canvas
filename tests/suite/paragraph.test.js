@@ -1151,6 +1151,36 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
     }
   });
 
+  test("two oblique ranges in one run keep their own paints", () => {
+    // Adjacent oblique ranges in one font are one run; each glyph has to
+    // be matched to its own range for its colour. Each pixel is held to the
+    // whole text drawn in the colour it came out in: FreeType adjusts a
+    // glyph's edge coverage by its paint's luminance, so a blue edge is up
+    // to 13 levels from a red one, where the same colour matches exactly.
+    register();
+    const family = "ParagraphOswald",
+      oblique = slanted(OBLIQUE),
+      inRed = onWhite(family, 100, [["IHIH", { ...oblique, color: "red" }]]),
+      inBlue = onWhite(family, 100, [["IHIH", { ...oblique, color: "blue" }]]),
+      two = onWhite(family, 100, [
+        ["IH", { ...oblique, color: "red" }],
+        ["IH", { ...oblique, color: "blue" }],
+      ]);
+    let red = 0,
+      blue = 0,
+      off = 0;
+    for (let i = 0; i < two.length; i += 4) {
+      if (inRed[i + 1] > 250 && two[i + 1] > 250) continue;
+      const isRed = two[i] > two[i + 2],
+        expected = isRed ? inRed : inBlue;
+      if (isRed) red++;
+      else blue++;
+      if (two[i + 1] !== expected[i + 1]) off++;
+    }
+    assert.ok(red > 0 && blue > 0, `both paints: ${red} red, ${blue} blue`);
+    assert.equal(off, 0, "every pixel is its own colour's");
+  });
+
   test("a sheared range's shadow is drawn under every glyph", () => {
     register();
     // SkParagraph paints every shadow on a line before any glyph, and every
