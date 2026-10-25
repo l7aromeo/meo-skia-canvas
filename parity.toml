@@ -135,10 +135,8 @@ why = """Four states on each side, and the two `TextHeightBehavior` types pair b
       to 3 its `textHeightBehavior` option takes, the numbers CanvasKit's
       enum carries, so the variants have no member to pair with and the type's
       doc comment says which code is which. The option is typed
-      `TextHeightBehavior | (number & {})` so that code passing a `number`
-      keeps compiling, and a non-integer is truncated today; npm 7.0 narrows
-      the option to `TextHeightBehavior` and refuses a non-integer with a
-      `RangeError`, after which the two sides hold the same four values."""
+      `TextHeightBehavior` and refuses any other number with a `RangeError`,
+      so the two sides hold the same four values."""
 status = "deliberate"
 
 [[capability]]
