@@ -1,11 +1,11 @@
 //! Paragraphs whose `oblique` ranges are drawn as CSS Fonts 4 matches them.
 //!
 //! A range asking for oblique is laid out in the family's face that leans as
-//! asked where it has one, and otherwise upright and sheared by
-//! `tan(14deg)`, the default angle -- the rule a canvas `oblique` follows,
-//! `run_shear` in `node::typography`. It carries `slnt` among its font
-//! arguments either way, so that SkParagraph shapes it as the font of its
-//! own it is and no ligature forms across its edge -- see `add_slnt`.
+//! asked where it has one, and otherwise upright and sheared by the tangent
+//! of its angle -- the rule a canvas `oblique` follows, `run_shear` in
+//! `node::typography`. It carries `slnt` among its font arguments either
+//! way, so that SkParagraph shapes it as the font of its own it is and no
+//! ligature forms across its edge -- see `add_slnt`.
 //!
 //! SkParagraph cannot shear a range of its own, and a paragraph is painted
 //! by `Paragraph::paint`, which carries each range's colours, shadows and
@@ -32,7 +32,6 @@
 //! can therefore stack differently; ranges on one line paint as they would.
 
 use crate::{
-    context2d::DEFAULT_OBLIQUE_DEGREES,
     font::leans_as_asked,
     node::typography::{SLNT, Shear, run_shear, sheared_blob},
 };
@@ -54,8 +53,8 @@ use unicode_segmentation::UnicodeSegmentation;
 /// moves every later text offset.
 const PLACEHOLDER_CHARACTER: char = '\u{FFFC}';
 
-/// The slant a style asking for `font_style` is laid out in, or `None`
-/// where it does not ask for oblique.
+/// The slant a style asking for `font_style`, an oblique of `degrees`, is
+/// laid out in, or `None` where it does not ask for oblique.
 ///
 /// `Oblique` where the family's face for an oblique request leans as asked
 /// -- a face flagged oblique, or one whose `slnt` axis is already set --
@@ -67,6 +66,7 @@ pub(crate) fn oblique_layout_slant(
     collection: &mut FontCollection,
     families: &[&str],
     font_style: FontStyle,
+    degrees: f32,
 ) -> Option<Slant> {
     if font_style.slant() != Slant::Oblique {
         return None;
@@ -74,40 +74,39 @@ pub(crate) fn oblique_layout_slant(
     let leans = collection
         .find_typefaces(families, font_style)
         .first()
-        .is_some_and(|face| leans_as_asked(face, DEFAULT_OBLIQUE_DEGREES));
+        .is_some_and(|face| leans_as_asked(face, degrees));
     Some(match leans {
         true => Slant::Oblique,
         false => Slant::Upright,
     })
 }
 
-/// Sets `style` to the slant [`oblique_layout_slant`] lays it out in, and
-/// says whether it asks for oblique.
+/// Sets `style`, which asks for an oblique of `degrees` if any, to the slant
+/// [`oblique_layout_slant`] lays it out in, and gives the angle back where
+/// it does ask for oblique.
 pub(crate) fn match_oblique(
     style: &mut TextStyle,
     collection: &mut FontCollection,
-) -> bool {
+    degrees: f32,
+) -> Option<f32> {
     let font_style = style.font_style();
     if font_style.slant() != Slant::Oblique {
-        return false;
+        return None;
     }
     let families = style.font_families();
     let families: Vec<&str> = families.iter().collect();
-    let Some(slant) = oblique_layout_slant(collection, &families, font_style)
-    else {
-        return false;
-    };
+    let slant =
+        oblique_layout_slant(collection, &families, font_style, degrees)?;
     style.set_font_style(FontStyle::new(
         font_style.weight(),
         font_style.width(),
         slant,
     ));
-    true
+    Some(degrees)
 }
 
-/// Puts `slnt` among `coordinates`, at the default oblique angle, unless
-/// they set it already: the font arguments of a style that asks for
-/// oblique.
+/// Puts `slnt` among `coordinates`, at an oblique of `degrees`, unless they
+/// set it already: the font arguments of a style that asks for oblique.
 ///
 /// An oblique is a font of its own, and this is how SkParagraph is told so.
 /// It shapes adjacent styles as one run wherever their font style,
@@ -115,12 +114,14 @@ pub(crate) fn match_oblique(
 /// oblique range whose face is the upright one formed a ligature with the
 /// text beside it -- "fi" across the edge drawn half sheared, half not. With
 /// the coordinate, shaping breaks at the edge, as it does at any change of
-/// font. A face without the axis ignores it.
-pub(crate) fn add_slnt(coordinates: &mut Vec<Coordinate>) {
+/// font, and between two obliques of different angles. A face without the
+/// axis ignores it. OpenType counts `slnt` counter-clockwise, so the
+/// coordinate is the angle negated.
+pub(crate) fn add_slnt(coordinates: &mut Vec<Coordinate>, degrees: f32) {
     if !coordinates.iter().any(|coordinate| coordinate.axis == SLNT) {
         coordinates.push(Coordinate {
             axis: SLNT,
-            value: -DEFAULT_OBLIQUE_DEGREES,
+            value: -degrees,
         });
     }
 }
@@ -162,12 +163,13 @@ pub(crate) struct ParagraphRecipe {
     style: ParagraphStyle,
     collection: FontCollection,
     steps: Vec<Step>,
-    /// Each style pushed, and whether it asks for oblique.
-    styles: Vec<(TextStyle, bool)>,
+    /// Each style pushed, and the angle of the oblique it asks for, if any.
+    styles: Vec<(TextStyle, Option<f32>)>,
     /// The length of the builder's text, in UTF-8 bytes.
     length: usize,
-    /// Whether the paragraph style's own text style asks for oblique.
-    base_oblique: bool,
+    /// The angle of the oblique the paragraph style's own text style asks
+    /// for, if any.
+    base_oblique: Option<f32>,
     /// Whether any style does, the paragraph's own included.
     oblique: bool,
     /// Whether any style splits its leading half above and half below,
@@ -176,11 +178,12 @@ pub(crate) struct ParagraphRecipe {
 }
 
 impl ParagraphRecipe {
-    /// A paragraph in `style`, whose text style says by `base_oblique`
-    /// whether it asks for oblique -- [`match_oblique`]'s answer for it.
+    /// A paragraph in `style`, whose text style asks for the oblique
+    /// `base_oblique` gives the angle of, if any -- [`match_oblique`]'s
+    /// answer for it.
     pub(crate) fn new(
         style: ParagraphStyle,
-        base_oblique: bool,
+        base_oblique: Option<f32>,
         collection: FontCollection,
     ) -> Self {
         Self {
@@ -190,16 +193,21 @@ impl ParagraphRecipe {
             styles: Vec::with_capacity(4),
             length: 0,
             base_oblique,
-            oblique: base_oblique,
+            oblique: base_oblique.is_some(),
             half_leading: style.text_style().half_leading(),
             style,
         }
     }
 
-    /// Pushes `style`, which `oblique` says asks for oblique.
-    pub(crate) fn push_style(&mut self, style: TextStyle, oblique: bool) {
+    /// Pushes `style`, which asks for an oblique of the angle `oblique`
+    /// gives, if any.
+    pub(crate) fn push_style(
+        &mut self,
+        style: TextStyle,
+        oblique: Option<f32>,
+    ) {
         self.builder.push_style(&style);
-        self.oblique |= oblique;
+        self.oblique |= oblique.is_some();
         self.half_leading |= style.half_leading();
         self.steps.push(Step::Push(self.styles.len()));
         self.styles.push((style, oblique));
@@ -262,18 +270,18 @@ impl ParagraphRecipe {
                 style
                     .set_foreground_paint(&transparent())
                     .set_decoration_type(TextDecoration::NO_DECORATION);
-                if oblique {
+                if oblique.is_some() {
                     style.reset_shadows();
                 }
                 Some(style)
             })
         });
         let paragraph = self.replay(&text, |style, oblique| {
-            if !(oblique || shadowed || decorated) {
+            if !(oblique.is_some() || shadowed || decorated) {
                 return None;
             }
             let mut style = style.clone();
-            if oblique {
+            if oblique.is_some() {
                 style.set_foreground_paint(&transparent()).reset_shadows();
             }
             if shadowed {
@@ -307,11 +315,13 @@ impl ParagraphRecipe {
     /// grapheme cluster to the cluster's end -- see [`whole_graphemes`] --
     /// and says whether any did.
     fn keep_graphemes_whole(&mut self, text: &str) -> bool {
-        let mut stack = vec![self.base_oblique];
+        let mut stack = vec![self.base_oblique.is_some()];
         let mut pieces = Vec::new();
         for (at, step) in self.steps.iter().enumerate() {
             match step {
-                Step::Push(style) => stack.push(self.styles[*style].1),
+                Step::Push(style) => {
+                    stack.push(self.styles[*style].1.is_some());
+                }
                 Step::Pop if stack.len() > 1 => {
                     stack.pop();
                 }
@@ -390,8 +400,14 @@ impl ParagraphRecipe {
                     // SAFETY: `stack` starts with the base style and a pop
                     // never takes it, so it is never empty.
                     let (style, oblique) = stack.last().unwrap();
-                    if *oblique && !bytes.is_empty() {
-                        ranges.push(ObliqueRange::new(bytes.clone(), style));
+                    if let Some(degrees) = oblique
+                        && !bytes.is_empty()
+                    {
+                        ranges.push(ObliqueRange::new(
+                            bytes.clone(),
+                            style,
+                            *degrees,
+                        ));
                     }
                 }
             }
@@ -401,12 +417,12 @@ impl ParagraphRecipe {
 
     /// A paragraph from these steps and `text`, the builder's, with each
     /// style -- the paragraph style's own included -- replaced by what
-    /// `restyle` makes of it and of whether it asks for oblique, where that
-    /// is `Some`.
+    /// `restyle` makes of it and of the angle of the oblique it asks for,
+    /// where that is `Some`.
     fn replay(
         &self,
         text: &str,
-        restyle: impl Fn(&TextStyle, bool) -> Option<TextStyle>,
+        restyle: impl Fn(&TextStyle, Option<f32>) -> Option<TextStyle>,
     ) -> Paragraph {
         self.replay_builder(text, restyle).build()
     }
@@ -415,7 +431,7 @@ impl ParagraphRecipe {
     fn replay_builder(
         &self,
         text: &str,
-        restyle: impl Fn(&TextStyle, bool) -> Option<TextStyle>,
+        restyle: impl Fn(&TextStyle, Option<f32>) -> Option<TextStyle>,
     ) -> ParagraphBuilder {
         let style = match restyle(self.style.text_style(), self.base_oblique) {
             Some(base) => {
@@ -530,10 +546,12 @@ struct ObliqueRange {
     /// where it has one, and otherwise a default paint in its colour.
     foreground: Paint,
     shadows: Vec<TextShadow>,
+    /// The angle of the oblique, in CSS degrees.
+    degrees: f32,
 }
 
 impl ObliqueRange {
-    fn new(bytes: Range<usize>, style: &TextStyle) -> Self {
+    fn new(bytes: Range<usize>, style: &TextStyle, degrees: f32) -> Self {
         let foreground = match style.has_foreground() {
             true => style.foreground(),
             false => {
@@ -546,6 +564,7 @@ impl ObliqueRange {
             bytes,
             foreground,
             shadows: style.shadows().to_vec(),
+            degrees,
         }
     }
 }
@@ -661,8 +680,7 @@ impl Sheared {
                         Some(*last)
                     })
                     .collect();
-                let shear =
-                    run_shear(&font.typeface(), Some(DEFAULT_OBLIQUE_DEGREES));
+                let typeface = font.typeface();
                 ranges
                     .chunk_by(|a, b| a == b)
                     .scan(0, |start, chunk| {
@@ -676,7 +694,10 @@ impl Sheared {
                         positions: positions[at].to_vec(),
                         origin,
                         range,
-                        shear,
+                        shear: run_shear(
+                            &typeface,
+                            Some(self.ranges[range].degrees),
+                        ),
                     })
                     .collect::<Vec<_>>()
             })
@@ -751,6 +772,7 @@ mod tests {
         ParagraphRecipe, Piece, add_slnt, match_oblique, set_coordinates,
         whole_graphemes,
     };
+    use crate::font::ObliqueAngle;
     use skia_safe::{
         Color, Data, FontMgr, FontStyle, GlyphId, ImageInfo, Point,
         font_style::{Slant, Weight, Width},
@@ -983,7 +1005,7 @@ mod tests {
         collection: &mut FontCollection,
         oblique: bool,
         visible: bool,
-    ) -> (TextStyle, bool) {
+    ) -> (TextStyle, Option<f32>) {
         let mut style = TextStyle::new();
         style
             .set_font_families(&[RALEWAY])
@@ -999,10 +1021,11 @@ mod tests {
                 Slant::Oblique,
             ));
         }
-        let oblique = match_oblique(&mut style, collection);
-        if oblique {
+        let degrees = ObliqueAngle::DEFAULT.degrees();
+        let oblique = match_oblique(&mut style, collection, degrees);
+        if oblique.is_some() {
             let mut coordinates = Vec::new();
-            add_slnt(&mut coordinates);
+            add_slnt(&mut coordinates, degrees);
             set_coordinates(&mut style, &coordinates);
         }
         (style, oblique)
@@ -1289,7 +1312,7 @@ mod tests {
 
         let mut recipe = ParagraphRecipe::new(
             ParagraphStyle::new(),
-            generated.1,
+            generated.1.then_some(ObliqueAngle::DEFAULT.degrees()),
             collection.clone(),
         );
         for op in &generated.0 {

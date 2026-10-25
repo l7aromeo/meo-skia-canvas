@@ -963,6 +963,17 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Added
 
+- **`fontStyle.obliqueAngle` sets a `Paragraph` oblique's angle.** A range
+  with `slant: 2` leaned by 14deg, with no way to ask for another, where
+  `ctx.font = "oblique 10deg ..."` draws at ten. `{ slant: 2,
+obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
+  draws, pixel for pixel: from -90 to 90 degrees, a negative angle leaning
+  back and 0 upright, and 14 when left out. It converts as the other
+  number options do, so `"10"` is 10 and NaN or an infinity is a
+  `TypeError`; a finite angle outside that range is a `RangeError`, and one
+  given with any other `slant` a `TypeError`, since it would not be drawn.
+  CanvasKit has no counterpart.
+
 - **`fontVariations: "normal"` resets a `ParagraphBuilder` style's axes.**
   A style given to `pushStyle` took the paragraph's axes unless it named its
   own, so it could return an axis to the face's default only by naming the
@@ -1021,8 +1032,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   through 10000px, a weight to 1 through 1000. `ex`, `ch`, `cap` and `ic`
   in a size are those of 10px `serif`, Chrome's standard family, and `rem`
   and the other root forms of 16px. An `oblique` angle from -90deg to 90deg
-  is taken, and drawn as the entry under Changed says. Only the default
-  14deg reads back as `italic`. A size above 10000px, which was
+  is taken, and drawn as the entry under Changed says, and reads back with
+  its angle, the default 14deg as `oblique`. A size above 10000px, which was
   taken as written, is now 10000px. 113 shorthands measured in Chrome join
   `tests/assets/cases/css-fonts.json`, and the JavaScript tests that held
   the old parser to its own internals are rows there instead.
@@ -1105,8 +1116,9 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   quarter skew, from 14deg up and draws upright below; its measurements are
   in docs/browser-differences.md. `measureText` reports the sheared ink, and
   `ctx.font` reads back as `oblique`, with its angle. A `Paragraph` range
-  whose `fontStyle` asks for oblique is sheared at 14deg the same way and draws what
-  `oblique` text on a canvas draws, its decorations level and its shadows
+  whose `fontStyle` asks for oblique is sheared the same way, at 14deg or
+  its `obliqueAngle`, and draws what `oblique` text on a canvas draws, its
+  decorations level and its shadows
   leaning with its glyphs. Being a font of its own, it is shaped apart from the
   text beside it, so no ligature forms across its edge, and a combining
   mark the edge would split from its base is drawn with its base, in the

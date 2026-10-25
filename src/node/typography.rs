@@ -2,9 +2,8 @@
 #![allow(non_snake_case)]
 use crate::{
     context::State,
-    context2d::DEFAULT_OBLIQUE_DEGREES,
     css::{FontUnits, is_font_relative, parse_length, without_comments},
-    font::{leans_as_asked, variation_axes},
+    font::{ObliqueAngle, leans_as_asked, variation_axes},
     font_library::{FontEpoch, FontLibrary, base_face},
     text::{
         TextAlign as CrateTextAlign, TextBaseline as CrateTextBaseline,
@@ -1520,8 +1519,8 @@ pub struct FontSpec {
     pub weight: Weight,
     pub width: Width,
     pub slant: Slant,
-    /// The angle of an `oblique` other than the default 14deg, which a
-    /// `Font` has no field for (#287), or `None`.
+    /// The angle of an `oblique` other than the default 14deg, or `None`:
+    /// [`FontSpec::slant`] holds no angle.
     pub oblique_degrees: Option<f32>,
     pub features: Vec<(String, i32)>,
     pub variant: String,
@@ -1550,8 +1549,10 @@ impl FontSpec {
     /// The angle an `oblique` specification is drawn at, or `None` where it
     /// is not oblique.
     pub fn oblique_angle(&self) -> Option<f32> {
-        (self.slant == Slant::Oblique)
-            .then(|| self.oblique_degrees.unwrap_or(DEFAULT_OBLIQUE_DEGREES))
+        (self.slant == Slant::Oblique).then(|| {
+            self.oblique_degrees
+                .unwrap_or(ObliqueAngle::DEFAULT.degrees())
+        })
     }
 }
 

@@ -313,7 +313,7 @@ fn facade_draws_a_layout_at_the_axis_it_was_laid_out_with() -> Result<()> {
 
     let ink_at = |wght: f32| -> Result<usize> {
         let style = TextStyle {
-            font_families: vec!["Oswald".to_string()],
+            font_families: vec!["Oswald".into()],
             color: RgbaLinear::opaque(1.0, 1.0, 1.0),
             font_size: 36.0,
             font_variations: vec![FontVariation::new(FontAxisTag::WGHT, wght)]
@@ -373,7 +373,7 @@ fn a_static_family_first_does_not_hide_the_variable_one() -> Result<()> {
 
     let pixels = |families: &[&str], weight: i32| -> Result<Vec<u8>> {
         let style = TextStyle {
-            font_families: families.iter().map(|f| f.to_string()).collect(),
+            font_families: families.iter().map(|f| (*f).into()).collect(),
             color: RgbaLinear::opaque(1.0, 1.0, 1.0),
             font_size: 48.0,
             font_weight: weight,
@@ -419,7 +419,7 @@ fn a_shared_collection_keeps_each_axis_position_apart() -> Result<()> {
 
     let ink_at = |wght: f32| -> Result<usize> {
         let style = TextStyle {
-            font_families: vec!["Oswald".to_string()],
+            font_families: vec!["Oswald".into()],
             color: RgbaLinear::opaque(1.0, 1.0, 1.0),
             font_size: 36.0,
             font_variations: vec![FontVariation::new(FontAxisTag::WGHT, wght)]
@@ -3393,7 +3393,7 @@ fn a_condensed_face_is_selected_when_the_family_has_one() -> Result<()> {
     let engine = TextEngine::with_system_fonts();
     let measured = |stretch| {
         let style = TextStyle {
-            font_families: vec![family.clone()],
+            font_families: vec![family.clone().into()],
             font_size: 24.0,
             stretch,
             ..TextStyle::default()
@@ -3436,7 +3436,7 @@ fn a_variable_font_is_instanced_under_the_name_it_was_given() -> Result<()> {
 
     let width_at = |engine: &TextEngine, family: &str, wght: f32| {
         let style = TextStyle {
-            font_families: vec![family.to_string()],
+            font_families: vec![family.into()],
             font_size: 64.0,
             font_variations: vec![FontVariation::new(FontAxisTag::WGHT, wght)]
                 .into(),
@@ -3502,7 +3502,7 @@ fn a_variable_font_is_instanced_under_the_name_it_was_given() -> Result<()> {
             let style = TextStyle {
                 font_families: families
                     .iter()
-                    .map(|family| family.to_string())
+                    .map(|family| (*family).into())
                     .collect(),
                 font_size: 64.0,
                 font_variations: vec![FontVariation::new(

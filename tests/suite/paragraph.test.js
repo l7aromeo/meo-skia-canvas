@@ -1272,6 +1272,112 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
     }
   });
 
+  test("obliqueAngle draws at its angle, as oblique text at it does", () => {
+    register();
+    const angled = (obliqueAngle) => ({
+      fontStyle: { slant: OBLIQUE, obliqueAngle },
+    });
+    for (const family of FAMILIES) {
+      assert.ok(
+        same(
+          paragraph(family, [["IH", angled(14)]]),
+          paragraph(family, [["IH", slanted(OBLIQUE)]]),
+        ),
+        `${family}: 14 is the default`,
+      );
+      for (const degrees of [10, -10, 0]) {
+        assert.ok(
+          same(
+            paragraph(family, [["IH", angled(degrees)]]),
+            text(`oblique ${degrees}deg 200px ${family}`, "IH"),
+          ),
+          `${family}: obliqueAngle ${degrees} draws what oblique ${degrees}deg text draws`,
+        );
+      }
+      assert.ok(
+        same(
+          paragraph(family, [["IH", angled("10")]]),
+          paragraph(family, [["IH", angled(10)]]),
+        ),
+        `${family}: "10" converts to 10`,
+      );
+      assert.ok(
+        same(
+          paragraph(family, [["IH", angled(0)]]),
+          paragraph(family, [["IH", slanted(UPRIGHT)]]),
+        ),
+        `${family}: 0 draws upright`,
+      );
+      const measured = slope(paragraph(family, [["I", angled(10)]]));
+      assert.ok(
+        Math.abs(measured + Math.tan((10 * Math.PI) / 180)) <= 0.005,
+        `${family}: slope ${measured} at 10deg`,
+      );
+    }
+  });
+
+  test("obliqueAngle reaches the paragraph's own text style", () => {
+    register();
+    const [family] = FAMILIES;
+    const pb = ParagraphBuilder.Make({
+      textStyle: {
+        fontFamilies: [family],
+        fontSize: 200,
+        color: "black",
+        fontStyle: { slant: OBLIQUE, obliqueAngle: 10 },
+      },
+    });
+    pb.addText("IH");
+    const p = pb.build();
+    p.layout(1000);
+    const ctx = new Canvas(W, H * 2).getContext("2d");
+    ctx.drawParagraph(p, 60, 250 - p.getAlphabeticBaseline());
+    assert.ok(
+      same(
+        ctx.getImageData(0, 0, W, H * 2).data,
+        text(`oblique 10deg 200px ${family}`, "IH"),
+      ),
+    );
+  });
+
+  test("obliqueAngle is refused out of range, off an oblique, or not a number", () => {
+    const pushed = (fontStyle) => () => {
+      const pb = ParagraphBuilder.Make({ textStyle: { fontSize: 20 } });
+      pb.pushStyle({ fontStyle });
+    };
+    // A finite number outside the range CSS allows: rule 4.
+    for (const obliqueAngle of [90.0001, -91, 1e21]) {
+      assert.throws(
+        pushed({ slant: OBLIQUE, obliqueAngle }),
+        RangeError,
+        `${obliqueAngle}`,
+      );
+    }
+    // A value whose conversion to a `double` fails, as for every number
+    // option: a TypeError naming the option where it was written.
+    for (const obliqueAngle of [NaN, Infinity, -Infinity, "ten", {}]) {
+      assert.throws(
+        pushed({ slant: OBLIQUE, obliqueAngle }),
+        { name: "TypeError", message: /`fontStyle\.obliqueAngle`/ },
+        `${String(obliqueAngle)}`,
+      );
+    }
+    for (const fontStyle of [
+      { slant: UPRIGHT, obliqueAngle: 10 },
+      { slant: ITALIC, obliqueAngle: 10 },
+      { obliqueAngle: 10 },
+    ]) {
+      assert.throws(pushed(fontStyle), {
+        name: "TypeError",
+        message: /slant: 2/,
+      });
+    }
+    // A string of digits converts, as `fontSize: "12"` does.
+    for (const obliqueAngle of [90, -90, 0, undefined, "10", [10]]) {
+      assert.doesNotThrow(pushed({ slant: OBLIQUE, obliqueAngle }));
+    }
+  });
+
   test("a range is sheared on whichever line it lands", () => {
     register();
     // Two words in one font are one run, and the second wraps: its glyphs

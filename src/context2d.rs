@@ -53,7 +53,7 @@ use crate::{
     error::Error,
     export::VectorFeatures,
     filter::{ColorFilter, FilterOp, ImageFilter, MaskFilter},
-    font::FontVariation,
+    font::{FontFamily, FontVariation, ObliqueAngle},
     geometry::{Affine, Point, Projection, Rect},
     gpu::{RenderingEngine, completion::typed},
     image::Image,
@@ -136,43 +136,67 @@ pub enum FontSlant {
     Normal,
     /// The family's designed italic.
     Italic,
-    /// An oblique at CSS Fonts 4's default angle, 14deg: the family's
-    /// oblique face, its `slnt` axis set to the angle, or else its upright
-    /// face sheared by `tan(14deg)` -- and its italic only where it has no
-    /// upright face to shear.
+    /// An oblique at an angle: the family's oblique face that leans the
+    /// same way, its `slnt` axis set to the angle, or else its upright face
+    /// sheared by `tan(angle)` -- and its italic only where it has no upright
+    /// face to shear. At 0deg it draws upright, and is still an oblique.
     ///
-    /// A [`Font`] carries no angle of its own until a field for one lands in
-    /// crate 0.17, #287, so `oblique 10deg` reaches it as this 14deg -- and
-    /// so does `oblique -10deg`, which leans the other way.
-    /// [`Context2D::set_font_css`] draws the angle a shorthand names.
-    Oblique,
+    /// [`FontSlant::OBLIQUE`] is the default angle, 14deg, which is what
+    /// `oblique` with no angle means.
+    Oblique(ObliqueAngle),
 }
 
 impl FontSlant {
-    /// The slant Skia reports for a face, as one of the three keywords.
+    /// An oblique at CSS Fonts 4's default angle, 14deg: `oblique` with no
+    /// angle written.
+    pub const OBLIQUE: Self = Self::Oblique(ObliqueAngle::DEFAULT);
+
+    /// The slant Skia reports for a face, as one of the three keywords. A
+    /// face says it is oblique without an angle, so it is the default one.
     pub(crate) fn from_skia(slant: Slant) -> Self {
         match slant {
             Slant::Upright => Self::Normal,
             Slant::Italic => Self::Italic,
-            Slant::Oblique => Self::Oblique,
+            Slant::Oblique => Self::OBLIQUE,
         }
     }
 
-    /// The CSS `font-style` keyword, or `None` for the initial value --
-    /// which a serialized font string leaves out rather than spelling.
-    fn to_css(self) -> Option<&'static str> {
+    /// The CSS `font-style` computed value, or `None` for the initial value
+    /// -- which a serialized font string leaves out rather than spelling.
+    ///
+    /// CSS Fonts 4 section 2.4 gives it as "the keyword specified, plus
+    /// angle in degrees if specified": `italic`, or `oblique` with its angle.
+    /// "The lack of an `<angle>` represents 14deg", so the default reads as
+    /// `oblique` alone, the shorter form.
+    fn to_css(self) -> Option<String> {
         match self {
             Self::Normal => None,
-            Self::Italic => Some("italic"),
-            Self::Oblique => Some("oblique"),
+            Self::Italic => Some("italic".to_string()),
+            Self::Oblique(angle) if angle == ObliqueAngle::DEFAULT => {
+                Some("oblique".to_string())
+            }
+            Self::Oblique(angle) => {
+                Some(format!("oblique {}deg", css_number(angle.degrees())))
+            }
         }
     }
 
+    /// The slant the face matcher is asked for. An oblique of 0deg leans no
+    /// way, so it asks for the upright face that draws it.
     fn to_skia(self) -> Slant {
         match self {
             Self::Normal => Slant::Upright,
             Self::Italic => Slant::Italic,
-            Self::Oblique => Slant::Oblique,
+            Self::Oblique(angle) if angle.degrees() == 0.0 => Slant::Upright,
+            Self::Oblique(_) => Slant::Oblique,
+        }
+    }
+
+    /// The angle an oblique leans by, or `None` for another slant.
+    fn oblique_angle(self) -> Option<ObliqueAngle> {
+        match self {
+            Self::Oblique(angle) => Some(angle),
+            _ => None,
         }
     }
 }
@@ -409,7 +433,11 @@ impl DashFit {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Font {
     /// Families in preference order. The first that resolves is used.
-    pub families: Vec<String>,
+    ///
+    /// A string converts into a [`FontFamily`] as CSS reads an unquoted name,
+    /// so `vec!["Helvetica".into(), "serif".into()]` is a named family and
+    /// then the generic `serif`.
+    pub families: Vec<FontFamily>,
     /// Em size in pixels.
     pub size: f32,
     /// CSS numeric weight, `1` to `1000`. `400` is regular, `700` bold.
@@ -440,7 +468,10 @@ pub struct Font {
 
 impl Font {
     /// Creates a font of `size` pixels in `family` at regular weight.
-    pub fn new(family: impl Into<String>, size: f32) -> Self {
+    ///
+    /// A string names a family, or a generic family where it spells a
+    /// generic keyword -- see [`FontFamily`].
+    pub fn new(family: impl Into<FontFamily>, size: f32) -> Self {
         Self {
             families: vec![family.into()],
             size,
@@ -534,15 +565,12 @@ impl Font {
     /// where written out, a negative size or an angle past 90deg is refused.
     ///
     /// `small-caps` has no place on a [`Font`]; [`Context2D::set_font_css`]
-    /// applies it as [`FontVariantCaps::SmallCaps`]. Nor has an `oblique`
-    /// angle, until #287 gives it a field in crate 0.17: any angle but zero is
-    /// [`FontSlant::Oblique`], which draws at 14deg, so
-    /// `Font::from_css("oblique 10deg 16px Oswald")` set with
-    /// [`Context2D::set_font`] slants by 14deg where the same string through
-    /// [`Context2D::set_font_css`] slants by 10, and `oblique -10deg` leans
-    /// 14deg forwards rather than 10 back. Zero is [`FontSlant::Normal`].
-    /// A system font keyword such as `caption` is refused, deliberately: what
-    /// it means is the platform's choice.
+    /// applies it as [`FontVariantCaps::SmallCaps`]. An `oblique` angle is
+    /// [`FontSlant::Oblique`]'s, zero included. A family in quotes is a
+    /// [`FontFamily::Named`] even where it spells a generic keyword, and an
+    /// unquoted generic keyword is a [`FontFamily::Generic`]. A system font
+    /// keyword such as `caption` is refused, deliberately: what it means is
+    /// the platform's choice.
     ///
     /// ```
     /// use meo_skia_canvas::prelude::*;
@@ -553,7 +581,13 @@ impl Font {
     ///     (font.size, font.weight, font.line_height),
     ///     (16.0, 700, Some(24.0))
     /// );
-    /// assert_eq!(font.families, ["Helvetica Neue", "serif"]);
+    /// assert_eq!(
+    ///     font.families,
+    ///     [
+    ///         FontFamily::Named("Helvetica Neue".into()),
+    ///         FontFamily::Generic(GenericFamily::Serif)
+    ///     ]
+    /// );
     ///
     /// assert!(Font::from_css("16px").is_none(), "no family");
     /// ```
@@ -571,17 +605,12 @@ impl Font {
     /// As [`Font::to_spec`], with small caps on when `small_caps` is, as a
     /// font shorthand can ask and a [`Font`] cannot carry.
     fn to_spec_with(&self, small_caps: bool) -> FontSpec {
-        // Quoted in the canonical string whenever a name has a space, which
-        // is all the cache key needs to tell names apart.
+        // Every name quoted and every generic bare, as the getter writes
+        // them, so a family called serif and the generic are two keys.
         let families = self
             .families
             .iter()
-            .map(|family| {
-                match family.contains(|c: char| c.is_ascii_whitespace()) {
-                    true => format!("\"{family}\""),
-                    false => family.clone(),
-                }
-            })
+            .map(FontFamily::to_string)
             .collect::<Vec<_>>()
             .join(", ");
         let variant = match small_caps {
@@ -596,7 +625,7 @@ impl Font {
         // line height left out here would collapse two different fonts onto
         // one entry.
         let mut canonical =
-            vec![self.slant.to_css().unwrap_or("normal").to_string()];
+            vec![self.slant.to_css().unwrap_or_else(|| "normal".to_string())];
         if self.slant != FontSlant::Normal || small_caps {
             canonical.push(variant.to_string());
         }
@@ -612,25 +641,32 @@ impl Font {
         let canonical = canonical.join(" ");
 
         FontSpec {
-            families: self.families.clone(),
+            families: self
+                .families
+                .iter()
+                .map(|family| family.matcher_name().to_string())
+                .collect(),
             size: self.size,
             line_height: self.line_height,
             weight: Weight::from(i32::from(self.weight)),
             width: self.stretch.to_skia(),
             slant: self.slant.to_skia(),
-            oblique_degrees: None,
+            oblique_degrees: self
+                .slant
+                .oblique_angle()
+                .filter(|angle| *angle != ObliqueAngle::DEFAULT)
+                .map(ObliqueAngle::degrees),
             features: match small_caps {
                 true => FontVariantCaps::SmallCaps.to_features(),
                 false => vec![],
             },
             variant: variant.to_string(),
             canonical,
-            serialized: self.serialized(small_caps, None),
+            serialized: self.serialized(small_caps),
         }
     }
 
-    /// What `ctx.font` reads back for this font, with `angle` the `oblique`
-    /// angle the shorthand wrote, where it wrote one other than the default.
+    /// What `ctx.font` reads back for this font.
     ///
     /// HTML: "On getting, the font attribute must return the serialized form
     /// of the current font of the context (with no 'line-height' component)",
@@ -648,7 +684,8 @@ impl Font {
     ///   specified, plus angle in degrees if specified": `italic`, or `oblique`
     ///   with its angle. "The lack of an <angle> represents 14deg", so `oblique
     ///   14deg` shortens to `oblique`. `oblique 0deg` stays, judged: it draws
-    ///   upright, as `normal` does, but `normal` is another computed value.
+    ///   upright, as `normal` does, but `normal` is another computed value. See
+    ///   [`FontSlant::to_css`].
     /// - The weight is the computed number. `700` is shorter than `bold`.
     /// - The width is its keyword, `condensed`, the only form the shorthand
     ///   takes.
@@ -657,27 +694,22 @@ impl Font {
     ///   decimals" -- see [`css_number`].
     /// - A family name is "The string serialized as a string" and a generic
     ///   family its keyword: CSSOM's own example serializes `a, 'b"', serif` as
-    ///   `"a", "b\"", serif` -- see [`css_family`].
+    ///   `"a", "b\"", serif` -- see [`FontFamily`]'s `Display`. A generic
+    ///   keyword in quotes is a family name, and reads back quoted.
     ///
     /// Chrome differs in each of these -- it reads `bold`, leaves the width
     /// out, reads `oblique` as `italic`, writes `small-caps` after the
     /// weight, keeps six significant digits and quotes a name only where it
     /// has to -- and docs/browser-differences.md lists them.
-    fn serialized(&self, small_caps: bool, angle: Option<f32>) -> String {
-        let style = match angle {
-            Some(degrees) => {
-                Some(format!("oblique {}deg", css_number(degrees)))
-            }
-            None => self.slant.to_css().map(str::to_string),
-        };
+    fn serialized(&self, small_caps: bool) -> String {
         let families = self
             .families
             .iter()
-            .map(|family| css_family(family))
+            .map(FontFamily::to_string)
             .collect::<Vec<_>>()
             .join(", ");
         [
-            style,
+            self.slant.to_css(),
             small_caps.then(|| "small-caps".to_string()),
             (self.weight != NORMAL_WEIGHT).then(|| self.weight.to_string()),
             (self.stretch != FontStretch::Normal)
@@ -690,58 +722,6 @@ impl Font {
         .collect::<Vec<_>>()
         .join(" ")
     }
-}
-
-/// The generic family keywords of CSS Fonts 4 section 2.1.3, which a font
-/// serializes as themselves where every other family name is a string.
-const GENERIC_FAMILIES: [&str; 13] = [
-    "serif",
-    "sans-serif",
-    "cursive",
-    "fantasy",
-    "monospace",
-    "system-ui",
-    "emoji",
-    "math",
-    "fangsong",
-    "ui-serif",
-    "ui-sans-serif",
-    "ui-monospace",
-    "ui-rounded",
-];
-
-/// A family as a serialized font names it: a generic family as its keyword,
-/// and any other name serialized as a string, by CSSOM section 2.1's
-/// "serialize a string" -- in double quotes, a NULL replaced by U+FFFD, a
-/// control character from U+0001 to U+001F or U+007F escaped as its code
-/// point, and `"` and `\` each after a backslash.
-///
-/// A family named `serif` in quotes is a family and not the generic, which
-/// a [`Font`] cannot tell apart from the keyword; both read as the keyword.
-fn css_family(family: &str) -> String {
-    if let Some(generic) = GENERIC_FAMILIES
-        .iter()
-        .find(|generic| generic.eq_ignore_ascii_case(family))
-    {
-        return generic.to_string();
-    }
-    let mut quoted = String::with_capacity(family.len() + 2);
-    quoted.push('"');
-    for c in family.chars() {
-        match c {
-            '\0' => quoted.push(char::REPLACEMENT_CHARACTER),
-            '\u{1}'..='\u{1f}' | '\u{7f}' => {
-                quoted.push_str(&format!("\\{:x} ", u32::from(c)));
-            }
-            '"' | '\\' => {
-                quoted.push('\\');
-                quoted.push(c);
-            }
-            c => quoted.push(c),
-        }
-    }
-    quoted.push('"');
-    quoted
 }
 
 /// A `<number>` as CSSOM section 6.7.2 serializes it: "in the shortest form
@@ -811,13 +791,6 @@ const LIGHTER_FROM_NORMAL: u16 = 100;
 struct FontShorthand {
     font: Font,
     small_caps: bool,
-    /// An `oblique` angle other than zero and the default 14deg, which a
-    /// [`Font`] has no field for (#287): it is drawn at.
-    oblique_degrees: Option<f32>,
-    /// The angle an `oblique` wrote, where it wrote one other than the
-    /// default 14deg -- zero included, which draws upright -- for the font
-    /// to read back with.
-    written_angle: Option<f32>,
 }
 
 /// The specification a Canvas `font` shorthand names, or `None` where Chrome
@@ -830,21 +803,9 @@ pub(crate) fn font_spec_from_css(css: &str) -> Option<FontSpec> {
 }
 
 impl FontShorthand {
-    /// The specification the shorthand names, angle included.
+    /// The specification the shorthand names.
     fn to_spec(&self) -> FontSpec {
-        let mut spec = self.font.to_spec_with(self.small_caps);
-        if let Some(degrees) = self.oblique_degrees {
-            spec.oblique_degrees = Some(degrees);
-            // Another angle is another font, so the cache key says which.
-            spec.canonical = spec.canonical.replacen(
-                "oblique",
-                &format!("oblique {degrees}deg"),
-                1,
-            );
-        }
-        spec.serialized =
-            self.font.serialized(self.small_caps, self.written_angle);
-        spec
+        self.font.to_spec_with(self.small_caps)
     }
 }
 
@@ -968,13 +929,18 @@ fn font_line_height(text: &str, size: f32) -> Option<Option<f32>> {
 /// ignores `16px 12` -- and a CSS-wide keyword is not one either. An
 /// identifier is CSS Syntax 3's, its code points those
 /// [`is_ident_code_point`] takes, and whitespace is CSS's five characters:
-/// `serif\u{a0}` is no name, since U+00A0 is neither.
-fn font_families(text: &str) -> Option<Vec<String>> {
+/// `serif\u{a0}` is no name, since U+00A0 is neither. An unquoted generic
+/// keyword is the generic family; a quoted one is a family name, as CSS
+/// Fonts 4 section 2.1 has it.
+fn font_families(text: &str) -> Option<Vec<FontFamily>> {
     let mut families = Vec::new();
     let mut rest = text.trim_ascii();
     while !rest.is_empty() {
         let (name, after) = match rest.chars().next() {
-            Some(quote @ ('"' | '\'')) => css_string(rest, quote)?,
+            Some(quote @ ('"' | '\'')) => {
+                let (name, after) = css_string(rest, quote)?;
+                (FontFamily::Named(name), after)
+            }
             _ => {
                 let (words, end) = identifiers(rest)?;
                 let name = words.join(" ");
@@ -989,7 +955,7 @@ fn font_families(text: &str) -> Option<Vec<String>> {
                 if keyword.contains(&name.to_ascii_lowercase().as_str()) {
                     return None;
                 }
-                (name, &rest[end..])
+                (FontFamily::from(name), &rest[end..])
             }
         };
         families.push(name);
@@ -1164,16 +1130,6 @@ fn computed_weight(text: &str) -> Option<u16> {
     )
 }
 
-/// CSS Fonts 4's default oblique angle, what a bare `oblique` means: "The
-/// lack of an <angle> represents 14deg." So `oblique 14deg` reads back as
-/// `oblique`, the shorter form; Chrome 152 reads it back as `italic`, and
-/// every other angle with no style at all.
-pub(crate) const DEFAULT_OBLIQUE_DEGREES: f32 = 14.0;
-
-/// The largest oblique angle CSS Fonts 4 allows, either way. Chrome refuses
-/// `oblique 91deg` written out and clamps a computed one.
-const MAX_OBLIQUE_DEGREES: f32 = 90.0;
-
 /// An angle following `oblique`, in degrees: one with a unit, or a math
 /// function of one. `None` when `text` is neither, so it is read as the next
 /// token instead -- `oblique 14 16px Arial` is a weight of 14.
@@ -1187,8 +1143,11 @@ fn oblique_angle(text: &str) -> Option<f32> {
         };
         let quantity = evaluate(text, &expect)
             .filter(|quantity| quantity.dimension == Dimension::ANGLE)?;
-        let limit = f64::from(MAX_OBLIQUE_DEGREES);
-        return Some(quantity.finished().clamp(-limit, limit) as f32);
+        // Chrome holds a computed angle in range, where it refuses one
+        // written out of it.
+        return Some(
+            ObliqueAngle::clamped(quantity.finished() as f32).degrees(),
+        );
     }
     // A unit, which `parse_angle` lets a zero go without and this does not:
     // Chrome refuses `oblique 0 16px Arial`.
@@ -1206,10 +1165,8 @@ fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
     let uncommented = without_comments(shorthand)
         .ok_or_else(|| format!("a sign stands alone in {shorthand:?}"))?;
     let text = uncommented.trim_ascii();
-    let mut font = Font::new(String::new(), 0.0);
+    let mut font = Font::new(FontFamily::Named("".into()), 0.0);
     let mut small_caps = false;
-    let mut oblique_degrees = None;
-    let mut written_angle = None;
     let (mut style, mut variant, mut weight, mut stretch) =
         (false, false, false, false);
     let mut prefix_tokens = 0;
@@ -1241,30 +1198,20 @@ fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
             }
             "oblique" if !style => {
                 style = true;
-                font.slant = FontSlant::Oblique;
+                font.slant = FontSlant::OBLIQUE;
                 // An angle may follow. Written out it has to be within the
                 // range; computed it is clamped into it.
                 let next_end = font_token_end(after, |c| {
                     c.is_ascii_whitespace() || c == '/'
                 });
                 if let Some(degrees) = oblique_angle(&after[..next_end]) {
-                    if degrees.abs() > MAX_OBLIQUE_DEGREES {
-                        return Err(format!(
-                            "oblique angle out of range in {shorthand:?}"
-                        ));
-                    }
                     // Every angle draws as CSS Fonts 4 says, whatever Chrome
                     // does with it -- see `leans_as_asked` and
-                    // docs/browser-differences.md. Zero is upright: the
-                    // shear to it is none, and no face leans at it.
-                    match degrees {
-                        0.0 => font.slant = FontSlant::Normal,
-                        DEFAULT_OBLIQUE_DEGREES => {}
-                        degrees => oblique_degrees = Some(degrees),
-                    }
-                    if degrees != DEFAULT_OBLIQUE_DEGREES {
-                        written_angle = Some(degrees);
-                    }
+                    // docs/browser-differences.md.
+                    let angle = ObliqueAngle::new(degrees).map_err(|_| {
+                        format!("oblique angle out of range in {shorthand:?}")
+                    })?;
+                    font.slant = FontSlant::Oblique(angle);
                     rest = after[next_end..].trim_ascii_start();
                     prefix_tokens += 1;
                     continue;
@@ -1323,12 +1270,7 @@ fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
 
     font.families = font_families(rest)
         .ok_or_else(|| format!("no font family in {shorthand:?}"))?;
-    Ok(FontShorthand {
-        font,
-        small_caps,
-        oblique_degrees,
-        written_angle,
-    })
+    Ok(FontShorthand { font, small_caps })
 }
 
 /// The drawing surface of a [`Canvas`] page.

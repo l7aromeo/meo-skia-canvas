@@ -1,5 +1,7 @@
 use std::{
     collections::HashSet,
+    fmt::{self, Write as _},
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
 };
 
@@ -14,10 +16,255 @@ use skia_safe::{
 // Aliased because the public type below now carries the same name: this one
 // is the shared store, that one is the handle a caller holds.
 use crate::{
-    context2d::{DEFAULT_OBLIQUE_DEGREES, FontSlant, FontStretch},
+    context2d::{FontSlant, FontStretch},
     error::Error,
     node::font_library::FontLibrary as SharedFontRegistry,
 };
+
+/// One entry in a font's family list: a family by name, or a generic family.
+///
+/// CSS Fonts 4 section 2.1 keeps the two apart by spelling. A generic
+/// keyword such as `serif` names the generic only unquoted -- the keywords
+/// "must not be quoted" -- so `"serif"` in quotes is a family called serif,
+/// matched by name like any other, and never the generic.
+///
+/// A string converts as CSS reads an unquoted identifier: a generic keyword,
+/// in any ASCII case, is [`FontFamily::Generic`], and anything else
+/// [`FontFamily::Named`]. So `Font::new("serif", 16.0)` asks for the generic
+/// and `Font::new("Helvetica", 16.0)` for the family;
+/// `FontFamily::Named("serif".into())` names a family whose name spells a
+/// keyword.
+///
+/// ```
+/// use meo_skia_canvas::prelude::*;
+///
+/// assert_eq!(
+///     FontFamily::from("SERIF"),
+///     FontFamily::Generic(GenericFamily::Serif)
+/// );
+/// assert_eq!(FontFamily::from("Helvetica").to_string(), "\"Helvetica\"");
+/// assert_eq!(FontFamily::Named("serif".into()).to_string(), "\"serif\"");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum FontFamily {
+    /// A family by its name, as a font file declares it.
+    Named(String),
+    /// One of CSS's generic families, which stands for whichever installed
+    /// family the library takes for it.
+    Generic(GenericFamily),
+}
+
+impl FontFamily {
+    /// The name the font collection is asked for.
+    pub(crate) fn matcher_name(&self) -> &str {
+        match self {
+            Self::Named(name) => name,
+            Self::Generic(generic) => generic.to_css(),
+        }
+    }
+}
+
+impl From<&str> for FontFamily {
+    fn from(name: &str) -> Self {
+        GenericFamily::from_css(name)
+            .map_or_else(|| Self::Named(name.to_string()), Self::Generic)
+    }
+}
+
+impl From<String> for FontFamily {
+    fn from(name: String) -> Self {
+        GenericFamily::from_css(&name).map_or(Self::Named(name), Self::Generic)
+    }
+}
+
+impl From<&String> for FontFamily {
+    fn from(name: &String) -> Self {
+        Self::from(name.as_str())
+    }
+}
+
+impl From<GenericFamily> for FontFamily {
+    fn from(generic: GenericFamily) -> Self {
+        Self::Generic(generic)
+    }
+}
+
+/// The family as CSS writes it: a generic as its keyword, and a name
+/// serialized as a string by CSSOM section 2.1's "serialize a string" -- in
+/// double quotes, a NULL replaced by U+FFFD, a control character from U+0001
+/// to U+001F or U+007F escaped as its code point, and `"` and `\` each after
+/// a backslash.
+impl fmt::Display for FontFamily {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let name = match self {
+            Self::Generic(generic) => return f.write_str(generic.to_css()),
+            Self::Named(name) => name,
+        };
+        f.write_char('"')?;
+        for c in name.chars() {
+            match c {
+                '\0' => f.write_char(char::REPLACEMENT_CHARACTER)?,
+                '\u{1}'..='\u{1f}' | '\u{7f}' => {
+                    write!(f, "\\{:x} ", u32::from(c))?;
+                }
+                '"' | '\\' => {
+                    f.write_char('\\')?;
+                    f.write_char(c)?;
+                }
+                c => f.write_char(c)?,
+            }
+        }
+        f.write_char('"')
+    }
+}
+
+/// The generic font families of CSS Fonts 4 section 2.1.3.
+///
+/// Each stands for an installed family the library chooses, which a
+/// registration under the keyword as its alias redirects -- see
+/// [`FontLibrary::use_paths`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum GenericFamily {
+    /// `serif`.
+    Serif,
+    /// `sans-serif`.
+    SansSerif,
+    /// `cursive`.
+    Cursive,
+    /// `fantasy`.
+    Fantasy,
+    /// `monospace`.
+    Monospace,
+    /// `system-ui`, the platform's interface font.
+    SystemUi,
+    /// `emoji`.
+    Emoji,
+    /// `math`.
+    Math,
+    /// `fangsong`, a Chinese style between serif and cursive.
+    Fangsong,
+    /// `ui-serif`.
+    UiSerif,
+    /// `ui-sans-serif`.
+    UiSansSerif,
+    /// `ui-monospace`.
+    UiMonospace,
+    /// `ui-rounded`.
+    UiRounded,
+}
+
+impl GenericFamily {
+    /// Every generic family, in the order CSS Fonts 4 lists them.
+    pub const ALL: [Self; 13] = [
+        Self::Serif,
+        Self::SansSerif,
+        Self::Cursive,
+        Self::Fantasy,
+        Self::Monospace,
+        Self::SystemUi,
+        Self::Emoji,
+        Self::Math,
+        Self::Fangsong,
+        Self::UiSerif,
+        Self::UiSansSerif,
+        Self::UiMonospace,
+        Self::UiRounded,
+    ];
+
+    /// The generic a keyword names, in any ASCII case, as CSS reads one, or
+    /// `None` for anything else.
+    pub fn from_css(keyword: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|generic| generic.to_css().eq_ignore_ascii_case(keyword))
+    }
+
+    /// The CSS keyword, in lower case.
+    pub fn to_css(self) -> &'static str {
+        match self {
+            Self::Serif => "serif",
+            Self::SansSerif => "sans-serif",
+            Self::Cursive => "cursive",
+            Self::Fantasy => "fantasy",
+            Self::Monospace => "monospace",
+            Self::SystemUi => "system-ui",
+            Self::Emoji => "emoji",
+            Self::Math => "math",
+            Self::Fangsong => "fangsong",
+            Self::UiSerif => "ui-serif",
+            Self::UiSansSerif => "ui-sans-serif",
+            Self::UiMonospace => "ui-monospace",
+            Self::UiRounded => "ui-rounded",
+        }
+    }
+}
+
+/// The angle an oblique leans by, in degrees, clockwise from upright as CSS
+/// counts it: from -90 to 90, with a negative angle leaning backwards.
+///
+/// CSS Fonts 4 section 2.4: `oblique <angle>`, where "The lack of an `<angle>`
+/// represents 14deg" -- [`ObliqueAngle::DEFAULT`] -- and "Values outside
+/// that range are invalid". Zero is an angle like any other: it draws
+/// upright, and an `oblique 0deg` font still reads back as one.
+///
+/// Held finite and in range, with negative zero stored as zero, so equality
+/// and hashing are those of the angle.
+#[derive(Debug, Clone, Copy)]
+pub struct ObliqueAngle(f32);
+
+impl ObliqueAngle {
+    /// 14deg, what `oblique` means with no angle written.
+    pub const DEFAULT: Self = Self(14.0);
+    /// The largest angle either way, CSS Fonts 4's 90deg.
+    pub const MAX_DEGREES: f32 = 90.0;
+
+    /// An angle of `degrees`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidObliqueAngle`] for an angle that is not finite or
+    /// leans further than [`ObliqueAngle::MAX_DEGREES`] either way.
+    pub fn new(degrees: f32) -> Result<Self, Error> {
+        match degrees.is_finite() && degrees.abs() <= Self::MAX_DEGREES {
+            // Adding zero makes a negative zero positive.
+            true => Ok(Self(degrees + 0.0)),
+            false => Err(Error::InvalidObliqueAngle { degrees }),
+        }
+    }
+
+    /// The angle, clamped into range, for a computed value CSS clamps rather
+    /// than refuses: Chrome holds `oblique calc(100deg)` at 90deg.
+    pub(crate) fn clamped(degrees: f32) -> Self {
+        Self(degrees.clamp(-Self::MAX_DEGREES, Self::MAX_DEGREES) + 0.0)
+    }
+
+    /// The angle in degrees.
+    pub const fn degrees(self) -> f32 {
+        self.0
+    }
+}
+
+impl Default for ObliqueAngle {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl PartialEq for ObliqueAngle {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+
+impl Eq for ObliqueAngle {}
+
+impl Hash for ObliqueAngle {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.to_bits().hash(state);
+    }
+}
 
 /// Four-byte OpenType axis tag (e.g. `"wght"`, `"wdth"`, `"opsz"`).
 ///
@@ -81,7 +328,7 @@ pub(crate) fn designed_oblique_angle(face: &Typeface) -> Option<f32> {
     ]) as f32
         / FIXED_ONE;
     Some(match italic_angle {
-        0.0 => DEFAULT_OBLIQUE_DEGREES,
+        0.0 => ObliqueAngle::DEFAULT.degrees(),
         angle => -angle,
     })
 }
@@ -311,7 +558,7 @@ impl FontVariation {
 /// The lists are of what is actually installed or registered under the name,
 /// so a family with one file has one entry in each.
 #[derive(Debug, Clone, PartialEq)]
-pub struct FontFamily {
+pub struct FontFamilyDetails {
     /// The family name as the platform reports it.
     pub family: String,
     /// Weights on offer, in CSS numbering: 400 is regular, 700 bold.
@@ -722,14 +969,14 @@ impl FontLibrary {
     /// [`Context2D::set_font_stretch`](crate::context2d::Context2D::set_font_stretch)
     /// picks a narrower face only where the family ships one, and there is
     /// otherwise no way to find out except by measuring.
-    pub fn family_details(&self, family: &str) -> Option<FontFamily> {
+    pub fn family_details(&self, family: &str) -> Option<FontFamilyDetails> {
         let (weights, widths, styles) =
             SharedFontRegistry::with_shared(|library| {
                 library.family_details(family)
             });
         match weights.is_empty() {
             true => None,
-            false => Some(FontFamily {
+            false => Some(FontFamilyDetails {
                 family: family.to_string(),
                 weights,
                 widths,

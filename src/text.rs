@@ -31,10 +31,10 @@ use crate::{
         RgbaLinear, linear_srgb_color_space, rgba_linear_to_skia_color,
         rgba_linear_to_unpremul_color4f,
     },
-    context2d::{DEFAULT_OBLIQUE_DEGREES, FontStretch, TextDirection},
+    context2d::{FontStretch, TextDirection},
     font::{
-        FontAxisTag, FontLibrary, FontVariation, InstancedPositions,
-        optical_size, variation_axes,
+        FontAxisTag, FontFamily, FontLibrary, FontVariation,
+        InstancedPositions, ObliqueAngle, optical_size, variation_axes,
     },
     geometry::Rect,
     image::CSS_INITIAL_FONT_SIZE,
@@ -242,19 +242,36 @@ pub enum TextSlant {
     Upright,
     /// The font's designed italic, where it has one.
     Italic,
-    /// An oblique at CSS Fonts 4's default angle, 14deg, drawn as
-    /// [`FontSlant::Oblique`](crate::context2d::FontSlant::Oblique) is: the
-    /// family's face that leans as asked, or else its upright face sheared
-    /// by `tan(14deg)`, before any italic.
-    Oblique,
+    /// An oblique at an angle, drawn as
+    /// [`FontSlant::Oblique`](crate::context2d::FontSlant::Oblique) draws it:
+    /// the family's face that leans the same way, or else its upright face
+    /// sheared by `tan(angle)`, before any italic. At 0deg it draws upright.
+    ///
+    /// [`TextSlant::OBLIQUE`] is the default angle, 14deg.
+    Oblique(ObliqueAngle),
 }
 
 impl TextSlant {
+    /// An oblique at CSS Fonts 4's default angle, 14deg.
+    pub const OBLIQUE: Self = Self::Oblique(ObliqueAngle::DEFAULT);
+
+    /// The slant the face matcher is asked for. An oblique of 0deg leans no
+    /// way, so it asks for the upright face that draws it, as a canvas font
+    /// does.
     fn to_skia(self) -> Slant {
         match self {
             Self::Upright => Slant::Upright,
             Self::Italic => Slant::Italic,
-            Self::Oblique => Slant::Oblique,
+            Self::Oblique(angle) if angle.degrees() == 0.0 => Slant::Upright,
+            Self::Oblique(_) => Slant::Oblique,
+        }
+    }
+
+    /// The angle of an oblique, in degrees, or `None` for another slant.
+    fn oblique_degrees(self) -> Option<f32> {
+        match self {
+            Self::Oblique(angle) => Some(angle.degrees()),
+            _ => None,
         }
     }
 }
@@ -306,7 +323,10 @@ impl FontFeature {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StrutStyle {
     /// Strut font families. Empty falls back to the paragraph's fonts.
-    pub font_families: Vec<String>,
+    ///
+    /// A string converts as [`FontFamily`] says: a generic keyword is the
+    /// generic family, anything else a name.
+    pub font_families: Vec<FontFamily>,
     /// Strut font size in pixels. `None` uses the base text size.
     pub font_size: Option<f32>,
     /// Line-height multiplier for the strut line box. `None` leaves it
@@ -425,7 +445,11 @@ impl<const N: usize> From<[FontVariation; N]> for FontVariationSettings {
 pub struct TextStyle {
     /// Families tried in order; the first that has a glyph wins. Empty
     /// uses the system default.
-    pub font_families: Vec<String>,
+    ///
+    /// A string converts as [`FontFamily`] says, so `"serif".into()` is the
+    /// generic family and `"Helvetica".into()` a name;
+    /// [`FontFamily::Named`] names a family that spells a keyword.
+    pub font_families: Vec<FontFamily>,
     /// Em size in pixels.
     ///
     /// On a variable typeface with an `opsz` axis it is also the `opsz`
@@ -1332,11 +1356,14 @@ impl TextEngine {
             base_style,
             &oblique_variations(base_style, base_variations),
         );
-        if base_style.slant == TextSlant::Oblique {
-            add_slnt(&mut instance.coordinates);
+        if let TextSlant::Oblique(angle) = base_style.slant {
+            add_slnt(&mut instance.coordinates, angle.degrees());
         }
         let mut base_sk_style = build_text_style(base_style, &instance);
-        let base_oblique = match_oblique(&mut base_sk_style, &mut collection);
+        let base_oblique =
+            base_style.slant.oblique_degrees().and_then(|degrees| {
+                match_oblique(&mut base_sk_style, &mut collection, degrees)
+            });
         let paragraph_style =
             build_paragraph_style(base_style, &base_sk_style, &strut);
         ParagraphBuilder {
@@ -1420,11 +1447,13 @@ impl ParagraphBuilder {
             style,
             &oblique_variations(style, variations),
         );
-        if style.slant == TextSlant::Oblique {
-            add_slnt(&mut instance.coordinates);
+        if let TextSlant::Oblique(angle) = style.slant {
+            add_slnt(&mut instance.coordinates, angle.degrees());
         }
         let mut sk_style = build_text_style(style, &instance);
-        let oblique = match_oblique(&mut sk_style, &mut self.collection);
+        let oblique = style.slant.oblique_degrees().and_then(|degrees| {
+            match_oblique(&mut sk_style, &mut self.collection, degrees)
+        });
         self.recipe.push_style(sk_style, oblique);
         self
     }
@@ -1706,21 +1735,18 @@ fn font_style_for(style: &TextStyle) -> FontStyle {
     )
 }
 
-/// `variations`, with `slnt` set to the default oblique angle ahead of them
-/// where `style` asks for oblique -- negated, as OpenType counts the axis
+/// `variations`, with `slnt` set to the oblique's angle ahead of them where
+/// `style` asks for oblique -- negated, as OpenType counts the axis
 /// counter-clockwise -- so that a `slnt` they name wins.
 fn oblique_variations<'a>(
     style: &TextStyle,
     variations: &'a [FontVariation],
 ) -> Cow<'a, [FontVariation]> {
     match style.slant {
-        TextSlant::Oblique => Cow::Owned(
-            once(FontVariation::new(
-                FontAxisTag::SLNT,
-                -DEFAULT_OBLIQUE_DEGREES,
-            ))
-            .chain(variations.iter().copied())
-            .collect(),
+        TextSlant::Oblique(angle) => Cow::Owned(
+            once(FontVariation::new(FontAxisTag::SLNT, -angle.degrees()))
+                .chain(variations.iter().copied())
+                .collect(),
         ),
         _ => Cow::Borrowed(variations),
     }
@@ -1767,8 +1793,11 @@ fn instance_for(
     style: &TextStyle,
     variations: &[FontVariation],
 ) -> Instance {
-    let families: Vec<&str> =
-        style.font_families.iter().map(String::as_str).collect();
+    let families: Vec<&str> = style
+        .font_families
+        .iter()
+        .map(FontFamily::matcher_name)
+        .collect();
     if families.is_empty() {
         return Instance::default();
     }
@@ -1854,8 +1883,11 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
 
     sk_style.set_font_size(style.font_size);
     if !style.font_families.is_empty() {
-        let families: Vec<&str> =
-            style.font_families.iter().map(String::as_str).collect();
+        let families: Vec<&str> = style
+            .font_families
+            .iter()
+            .map(FontFamily::matcher_name)
+            .collect();
         sk_style.set_font_families(&families);
     }
     // Pinned to the weight the instance has. Skia fakes a bold wherever the
@@ -1969,11 +2001,17 @@ fn strut_families(
     let Some(strut) = &style.strut else {
         return Vec::new();
     };
+    let names = |families: &[FontFamily]| {
+        families
+            .iter()
+            .map(|family| family.matcher_name().to_string())
+            .collect()
+    };
     if !strut.font_families.is_empty() {
-        return strut.font_families.clone();
+        return names(&strut.font_families);
     }
     if !style.font_families.is_empty() {
-        return style.font_families.clone();
+        return names(&style.font_families);
     }
     collection
         .default_fallback()
@@ -2088,7 +2126,7 @@ mod tests {
         let engine = TextEngine::new(&fonts);
         let lay_out = |step: usize| {
             let style = TextStyle {
-                font_families: vec![FAMILY.to_string()],
+                font_families: vec![FAMILY.into()],
                 font_size: 10.0 + step as f32 * 0.25,
                 ..TextStyle::default()
             };

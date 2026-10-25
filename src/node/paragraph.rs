@@ -16,8 +16,7 @@ use skia_safe::{
 };
 
 use crate::{
-    context2d::DEFAULT_OBLIQUE_DEGREES,
-    font::variation_axes,
+    font::{ObliqueAngle, variation_axes},
     font_library::{FontLibrary, instance_coordinates},
     node::{
         oblique::{
@@ -644,13 +643,16 @@ fn font_families<'a>(
 }
 
 /// A text style from `obj`, which sits at `prefix` among the options --
-/// `textStyle.` for a paragraph's, nothing for a pushed style.
+/// `textStyle.` for a paragraph's, nothing for a pushed style -- and the
+/// angle of the oblique it asks for, if any: Skia's font style has no field
+/// for one.
 fn parse_text_style<'a>(
     cx: &mut FunctionContext<'a>,
     obj: &Handle<'a, JsObject>,
     prefix: &str,
-) -> NeonResult<TextStyle> {
+) -> NeonResult<(TextStyle, Option<f32>)> {
     let mut style = TextStyle::new();
+    let mut oblique = None;
 
     refuse_unknown_keys(cx, obj, TEXT_STYLE_KEYS, "text style")?;
 
@@ -718,6 +720,15 @@ fn parse_text_style<'a>(
         let slant = match number_option(cx, &fs_obj, &inner, "slant")? {
             None => Slant::Upright,
             Some(number) => code(cx, number, &SLANTS, "slant")?,
+        };
+        let angle = oblique_angle_for_key(cx, &fs_obj, &inner, slant)?;
+        oblique = (slant == Slant::Oblique)
+            .then(|| angle.unwrap_or(ObliqueAngle::DEFAULT).degrees());
+        // An oblique of 0deg leans no way, so it asks for the upright face
+        // that draws it, as `TextSlant::to_skia` does.
+        let slant = match oblique {
+            Some(0.0) => Slant::Upright,
+            _ => slant,
         };
         style.set_font_style(FontStyle::new(weight, width, slant));
     }
@@ -957,14 +968,54 @@ fn parse_text_style<'a>(
         style.set_half_leading(half);
     }
 
-    Ok(style)
+    Ok((style, oblique))
 }
 
+/// `fontStyle.obliqueAngle` in degrees, `None` where it is not given.
+///
+/// Converted as the other number options are, as an IDL `double`, so `"10"`
+/// is 10 and NaN or an infinity is a `TypeError`. Only an oblique has an
+/// angle, so one given with another `slant` is a `TypeError` naming the
+/// fix: the caller asked for an angle that would not be drawn, which is
+/// substitutive and refused in every mode. Outside -90deg to 90deg, the
+/// range CSS Fonts 4 allows, it is a `RangeError` -- rule 4, a number whose
+/// value is not one the range holds.
+fn oblique_angle_for_key<'a>(
+    cx: &mut FunctionContext<'a>,
+    font_style: &Handle<'a, JsObject>,
+    prefix: &str,
+    slant: Slant,
+) -> NeonResult<Option<ObliqueAngle>> {
+    let Some(degrees) = number_option(cx, font_style, prefix, "obliqueAngle")?
+    else {
+        return Ok(None);
+    };
+    if slant != Slant::Oblique {
+        return cx.throw_type_error(format!(
+            "`{prefix}obliqueAngle` needs `{prefix}slant: 2` (oblique)"
+        ));
+    }
+    // Checked at full width: a number just past 90 rounds to 90 as an `f32`.
+    if degrees.abs() > f64::from(ObliqueAngle::MAX_DEGREES) {
+        let spelled = cx.number(degrees).to_string(cx)?.value(cx);
+        return cx.throw_range_error(format!(
+            "`{prefix}obliqueAngle` {spelled} is outside -90 to 90"
+        ));
+    }
+    match ObliqueAngle::new(degrees as f32) {
+        Ok(angle) => Ok(Some(angle)),
+        Err(error) => cx.throw_range_error(error.to_string()),
+    }
+}
+
+/// A paragraph style, and the angle of the oblique its text style asks for,
+/// if any.
 fn parse_paragraph_style<'a>(
     cx: &mut FunctionContext<'a>,
     obj: &Handle<'a, JsObject>,
-) -> NeonResult<ParagraphStyle> {
+) -> NeonResult<(ParagraphStyle, Option<f32>)> {
     let mut style = ParagraphStyle::new();
+    let mut oblique = None;
 
     refuse_unknown_keys(cx, obj, PARAGRAPH_STYLE_KEYS, "paragraph style")?;
 
@@ -1024,8 +1075,9 @@ fn parse_paragraph_style<'a>(
 
     // textStyle (default text style for the paragraph)
     if let Some(ts_obj) = object_option(cx, obj, "", "textStyle")? {
-        let text_style = parse_text_style(cx, &ts_obj, "textStyle.")?;
+        let (text_style, asked) = parse_text_style(cx, &ts_obj, "textStyle.")?;
         style.set_text_style(&text_style);
+        oblique = asked;
     }
 
     // textHeightBehavior: 0 = All, 1 = DisableFirstAscent,
@@ -1073,7 +1125,7 @@ fn parse_paragraph_style<'a>(
         style.set_strut_style(strut);
     }
 
-    Ok(style)
+    Ok((style, oblique))
 }
 
 /// Parses the `textStyle.fontVariations` array from a
@@ -1101,7 +1153,7 @@ fn parse_paragraph_font_variations<'a>(
 
 pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
     let style_arg = cx.argument::<JsObject>(1)?;
-    let para_style = parse_paragraph_style(&mut cx, &style_arg)?;
+    let (para_style, asked) = parse_paragraph_style(&mut cx, &style_arg)?;
     let variations = parse_paragraph_font_variations(&mut cx, &style_arg)?;
 
     // Route through `fonts_for_style` so any variable typefaces in the
@@ -1115,23 +1167,21 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
     let mut text_style = para_style.text_style().clone();
     // An oblique paragraph is instanced at `slnt` where its faces have the
     // axis, as a pushed oblique style is.
-    let asks_oblique = text_style.font_style().slant() == Slant::Oblique;
-    let instanced = with_oblique_slnt(
-        &variations,
-        asks_oblique.then_some(DEFAULT_OBLIQUE_DEGREES),
-    );
+    let instanced = with_oblique_slnt(&variations, asked);
     // The matched face is for a caller deciding what Skia may synthesise;
     // a paragraph built here carries its own text style and does not.
     let (mut collection, _) = FontLibrary::with_shared(|lib| {
         lib.fonts_for_style(&text_style, &instanced)
     });
-    let base_oblique = match_oblique(&mut text_style, &mut collection);
+    let base_oblique = asked.and_then(|degrees| {
+        match_oblique(&mut text_style, &mut collection, degrees)
+    });
     let mut para_style = para_style;
     // Only an oblique changes the style, and copying it back costs a copy
     // of every field it has.
-    if base_oblique {
+    if let Some(degrees) = asked {
         let mut coordinates = Vec::new();
-        add_slnt(&mut coordinates);
+        add_slnt(&mut coordinates, degrees);
         set_coordinates(&mut text_style, &coordinates);
         para_style.set_text_style(&text_style);
     }
@@ -1150,7 +1200,7 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
 pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedParagraphBuilder>(0)?;
     let style_obj = cx.argument::<JsObject>(1)?;
-    let mut text_style = parse_text_style(&mut cx, &style_obj, "")?;
+    let (mut text_style, asked) = parse_text_style(&mut cx, &style_obj, "")?;
     let own = parse_font_variations(&mut cx, &style_obj, "")?;
 
     let mut this = this.borrow_mut();
@@ -1171,12 +1221,10 @@ pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // An oblique is set at `slnt` where the face has the axis, ahead of the
     // style's own variations so that a `slnt` they name wins, and is laid
     // out upright where no face leans as asked -- see `match_oblique`.
-    let asks_oblique = text_style.font_style().slant() == Slant::Oblique;
-    let variations = with_oblique_slnt(
-        variations,
-        asks_oblique.then_some(DEFAULT_OBLIQUE_DEGREES),
-    );
-    let oblique = match_oblique(&mut text_style, collection);
+    let variations = with_oblique_slnt(variations, asked);
+    let oblique = asked.and_then(|degrees| {
+        match_oblique(&mut text_style, collection, degrees)
+    });
     let families = text_style.font_families();
     let families: Vec<&str> = families.iter().collect();
     let axes = collection
@@ -1196,8 +1244,8 @@ pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         }
         None => Vec::new(),
     };
-    if oblique {
-        add_slnt(&mut coordinates);
+    if let Some(degrees) = asked {
+        add_slnt(&mut coordinates, degrees);
     }
     set_coordinates(&mut text_style, &coordinates);
     if let Some(recipe) = recipe.as_mut() {

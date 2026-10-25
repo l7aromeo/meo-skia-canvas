@@ -5377,12 +5377,26 @@ export interface TextStyleInput {
      */
     width?: number;
     /**
-     * `0` upright, `1` italic, `2` oblique: 14deg, drawn as `oblique` text on
-     * a canvas is -- the family's face that leans as asked, or else its
-     * upright face sheared, before any italic. Another number is a
-     * `RangeError`.
+     * `0` upright, `1` italic, `2` oblique: at `obliqueAngle`, 14deg
+     * unless given, drawn as `oblique` text on a canvas is -- the family's
+     * face that leans as asked, or else its upright face sheared, before any
+     * italic. Another number is a `RangeError`.
      */
     slant?: 0 | 1 | 2;
+    /**
+     * The angle of an oblique, in degrees clockwise from upright as CSS
+     * counts it: `oblique 10deg` on a canvas is `{ slant: 2, obliqueAngle:
+     * 10 }` here, and draws the same. From -90 to 90, a negative angle
+     * leaning backwards; 0 draws upright. Left out, an oblique leans by
+     * 14deg, the angle CSS Fonts 4 gives `oblique` alone.
+     *
+     * 🧪 Not in CanvasKit, whose obliques carry no angle.
+     *
+     * @throws {TypeError} An angle that converts to NaN or an infinity, or
+     * one given with a `slant` other than `2`.
+     * @throws {RangeError} A finite angle outside -90 to 90.
+     */
+    obliqueAngle?: number;
   };
   /** Extra space added after each glyph, in pixels. */
   letterSpacing?: number;
