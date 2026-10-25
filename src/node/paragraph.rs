@@ -972,10 +972,16 @@ fn parse_paragraph_style<'a>(
     //
     // Through the same parser `ctx.textAlign` uses rather than a second copy
     // of the six names: this file spelled them out again, so the two could
-    // drift and nothing would have said so.
-    if let Some(align) = string_option(cx, obj, "", "textAlign")?
-        .and_then(|name| to_text_align(&name))
-    {
+    // drift and nothing would have said so. Another name is a `TypeError` by
+    // rule 2, as for `textDirection`, where the context's attribute ignores
+    // one as HTML's setter does.
+    if let Some(name) = string_option(cx, obj, "", "textAlign")? {
+        let Some(align) = to_text_align(&name) else {
+            return cx.throw_type_error(format!(
+                "`textAlign` takes \"left\", \"right\", \"center\", \"justify\", \
+                 \"start\" or \"end\", not {name:?}"
+            ));
+        };
         style.set_text_align(align.to_skia());
     }
 

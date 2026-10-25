@@ -5528,19 +5528,8 @@ export type TextHeightBehavior = 0 | 1 | 2 | 3;
  * @category Paragraph Layout
  */
 export interface ParagraphStyleInput {
-  /**
-   * Matched case-insensitively. An unrecognised value is ignored and the
-   * default alignment stands, so a typo fails silently.
-   */
-  textAlign?:
-    | "left"
-    | "right"
-    | "center"
-    | "justify"
-    | "start"
-    | "end"
-    | (string & {})
-    | null;
+  /** Matched case-insensitively. Another value is a `TypeError`. */
+  textAlign?: "left" | "right" | "center" | "justify" | "start" | "end" | null;
 
   /**
    * Base direction for the paragraph, matched without ASCII case. Another

@@ -1748,6 +1748,7 @@ describe("a ParagraphBuilder option is converted as WebIDL converts it", () => {
     COUNT = "count",
     STRING = "DOMString",
     DIRECTION = "direction",
+    ALIGN = "align",
     BOOLEAN = "boolean",
     SEQUENCE = "sequence",
     DICTIONARY = "dictionary",
@@ -1758,8 +1759,8 @@ describe("a ParagraphBuilder option is converted as WebIDL converts it", () => {
   // 3.2.25. A number's values all convert into the range every number
   // option takes, so a refusal here is a conversion's and nothing else's.
   // `maxLines` counts from 1, so `null`, which converts to 0, is left to
-  // its own refusal; and a direction is an enumeration, so only its names
-  // convert.
+  // its own refusal; and a direction and an alignment are enumerations, so
+  // only their names convert.
   const CONVERTS = {
     [DOUBLE]: [
       "1",
@@ -1782,6 +1783,7 @@ describe("a ParagraphBuilder option is converted as WebIDL converts it", () => {
     ],
     [STRING]: [1, true, null, {}, { toString: () => "ltr" }, 1n],
     [DIRECTION]: ["ltr", "RTL", null, { toString: () => "rtl" }],
+    [ALIGN]: ["left", "CENTER", "start", null, { toString: () => "end" }],
     [BOOLEAN]: [1, 0, "", "x", null, {}, [], 0n, NaN, Symbol("s")],
     [SEQUENCE]: [[], new Set(), (function* () {})()],
     [DICTIONARY]: [null, {}, [], () => {}],
@@ -1812,6 +1814,7 @@ describe("a ParagraphBuilder option is converted as WebIDL converts it", () => {
     [COUNT]: ["abc", {}, NaN, Infinity, -Infinity, [1, 2], Symbol("s"), 1n],
     [STRING]: [Symbol("s")],
     [DIRECTION]: [Symbol("s"), "up", "", 1, {}],
+    [ALIGN]: [Symbol("s"), "middle", "", 1, {}],
     [BOOLEAN]: [],
     [SEQUENCE]: ["Arial", 1, true, null, {}, Symbol("s")],
     [DICTIONARY]: ["x", 1, true, Symbol("s"), 1n],
@@ -1847,7 +1850,7 @@ describe("a ParagraphBuilder option is converted as WebIDL converts it", () => {
     locale: STRING,
   };
   const PARAGRAPH = {
-    textAlign: STRING,
+    textAlign: ALIGN,
     textDirection: DIRECTION,
     maxLines: COUNT,
     ellipsis: STRING,

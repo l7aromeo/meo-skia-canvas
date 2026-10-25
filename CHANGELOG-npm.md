@@ -85,6 +85,15 @@ removed and no signature moves.
 
   Migrate: pass `"ltr"` or `"rtl"`, or leave the option out.
 
+- **A `textAlign` other than the six alignments is a `TypeError`.** It was
+  ignored, leaving the default alignment, so a typo failed silently. Case
+  still does not matter. The option is typed as the six names or `null`,
+  where any string compiled. `ctx.textAlign` still ignores an unknown
+  name, as HTML's setter does.
+
+  Migrate: pass one of `"left"`, `"right"`, `"center"`, `"justify"`,
+  `"start"` and `"end"`, or leave the option out.
+
 - **`TextMetrics` keeps its values on the prototype, as HTML's interface
   does.** A measurement was a frozen object holding every value as its own
   property; each is now a getter on `TextMetrics.prototype`, enumerable as
