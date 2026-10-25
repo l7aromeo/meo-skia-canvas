@@ -323,7 +323,7 @@ pub mod prelude {
     #[cfg(feature = "window")]
     pub use crate::gui::{
         app::App,
-        event::{ModifierKeys, UiEvent},
+        event::{ModifierKeys, TextInputType, UiEvent},
         handle::WindowHandle,
         key::Key,
         session::{Window, WindowIdTaken},

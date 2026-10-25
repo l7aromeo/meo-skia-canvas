@@ -770,6 +770,17 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   blank string is not a `<filter-value-list>`. To clear a filter, pass
   `"none"` or call `set_filter(&[])`.
 
+- **`UiEvent::Input` names its input type as a `TextInputType`.** The
+  second field was a `String` holding one of five DOM `inputType` values,
+  so a handler matched string literals with nothing to catch a typo. It is
+  now `TextInputType`: `InsertText`, `InsertLineBreak`,
+  `InsertCompositionText`, `DeleteContentBackward` and
+  `DeleteContentForward`, the five npm's `TextInputType` names, and
+  `#[non_exhaustive]` since the DOM defines more. What JavaScript receives
+  is unchanged. In your code, match on the variants instead of the strings
+  -- `UiEvent::Input(data, TextInputType::InsertText)` for
+  `UiEvent::Input(data, t) if t == "insertText"` -- and add a `_` arm.
+
 - **`FontSlant::Oblique` and `TextSlant::Oblique` draw as CSS Fonts 4
   matches them, superseding 0.16.0's "`TextSlant::Oblique` now renders the
   italic face".** A `Font` with `FontSlant::Oblique`, `set_font_css` with
