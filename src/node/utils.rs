@@ -983,50 +983,26 @@ pub fn float_args_or_bail_at(
 // Colors
 //
 
-/// Rec. 2020's power segment's scale, and the offset that follows from it.
+/// The exponent of `rec2020`'s transfer function.
 ///
-/// ITU-R BT.2020 writes the encode as
-///
-/// ```text
-/// V = 4.5 L                        for L < beta
-/// V = alpha L^0.45 - (alpha - 1)   otherwise
-/// ```
-///
-/// and these are the standard's own constants, to the precision it gives
-/// for ten-bit systems.
-const REC2020_ALPHA: f32 = 1.099_296_8;
-/// Rec. 2020's breakpoint, on the linear-light side.
-const REC2020_BETA: f32 = 0.018_053_97;
-/// Rec. 2020's slope near black. Steeper than sRGB's 12.92 because the
-/// breakpoint sits higher.
-const REC2020_SLOPE: f32 = 4.5;
-/// Rec. 2020's exponent. Unlike sRGB, the standard states this one on the
-/// encode side, so the decode raises to its reciprocal.
-const REC2020_EXPONENT: f32 = 0.45;
+/// CSS Color 4 section 10.8 gives the function as "gamma 2.40, from
+/// [REC_BT.1886]": BT.1886's reference EOTF with black lift `b = 0` and gain
+/// `a = 1`, which is a pure power. Its sample code applies it to the
+/// magnitude and keeps the sign, so a component below zero reaches a colour
+/// outside the gamut rather than being clipped. Fixed by the standard, not
+/// chosen; drafts before the Candidate Recommendation Draft of 24 April 2025
+/// used BT.2020's piecewise inverse OETF instead.
+const REC2020_GAMMA: f32 = 2.4;
 
-/// Rec. 2020's transfer function, extended through zero the way
-/// [`srgb_to_linear`] is: the inverse of the encode [`REC2020_ALPHA`] gives.
+/// `rec2020`'s transfer function, CSS Color 4's `lin_2020`.
 fn rec2020_decode(encoded: f32) -> f32 {
-    let magnitude = encoded.abs();
-    let linear = match magnitude < REC2020_BETA * REC2020_SLOPE {
-        true => magnitude / REC2020_SLOPE,
-        false => ((magnitude + REC2020_ALPHA - 1.0) / REC2020_ALPHA)
-            .powf(1.0 / REC2020_EXPONENT),
-    };
-    linear.copysign(encoded)
+    encoded.abs().powf(REC2020_GAMMA).copysign(encoded)
 }
 
-/// Rec. 2020's encode, the inverse of [`rec2020_decode`].
+/// `rec2020`'s encode, CSS Color 4's `gam_2020`: the inverse of
+/// [`rec2020_decode`].
 fn rec2020_encode(linear: f32) -> f32 {
-    let magnitude = linear.abs();
-    let encoded = match magnitude < REC2020_BETA {
-        true => magnitude * REC2020_SLOPE,
-        false => {
-            REC2020_ALPHA * magnitude.powf(REC2020_EXPONENT)
-                - (REC2020_ALPHA - 1.0)
-        }
-    };
-    encoded.copysign(linear)
+    linear.abs().powf(REC2020_GAMMA.recip()).copysign(linear)
 }
 
 /// Linear-light Display P3 into linear-light sRGB.
@@ -2487,33 +2463,21 @@ pub fn color4f_to_srgb(color: Color4f, space: Option<&ColorSpace>) -> Color4f {
     }
 }
 
-/// `color` in `space` as Skia is handed it: with its own tag, except for
-/// Rec. 2020, which is converted to sRGB here and tagged sRGB.
+/// `color` in `space` as Skia is handed it.
 ///
 /// Every reader that tags a colour with the space it was named in goes
 /// through this, so a colour decodes by one curve whichever reader paints
-/// it.
-///
-/// Rec. 2020 follows Chrome rather than the current standard. Chrome 152
-/// decodes `color(rec2020 ...)` with BT.2020's inverse OETF -- `rec2020
-/// 0.2 0.2 0.2` paints 67, 67, 67 on an sRGB canvas, fill and shadow alike
-/// -- which is what [`rec2020_decode`] implements and what CSS Color 4
-/// specified until its Candidate Recommendation Draft of 24 April 2025.
-/// The Editor's Draft since then defines it as "gamma 2.40, from
-/// [REC_BT.1886]", which paints 40. Skia's Rec. 2020 tag is that 2.4 gamma
-/// -- `skia_safe`'s `REC2020_10BIT` and `REC2020_12BIT` alias `REC709` --
-/// so it agrees with the revised standard and not with Chrome, and a
-/// colour handed over with its tag would paint 40.
+/// it. Each space this crate names decodes correctly from its Skia tag, so
+/// the colour passes through as it is; this is the one place to divert a
+/// space whose tag Skia would decode differently from the standard.
+/// `rec2020` is not one: CSS Color 4 section 10.8 defines it as "gamma
+/// 2.40, from [REC_BT.1886]", and `skia_safe`'s `REC2020_10BIT` and
+/// `REC2020_12BIT` alias `REC709`, a pure 2.4 gamma, which agrees.
 pub fn skia_paint_color(
     color: Color4f,
     space: &ColorSpace,
 ) -> (Color4f, ColorSpace) {
-    match color_space_name(space) {
-        Some("rec2020") => {
-            (color4f_to_srgb(color, Some(space)), ColorSpace::new_srgb())
-        }
-        _ => (color, space.clone()),
-    }
+    (color, space.clone())
 }
 
 /// Parses a CSS color into 8-bit sRGB, gamut-mapped.

@@ -10128,64 +10128,143 @@ fn shadow_color_reads_back_the_colour_it_was_given() {
     assert!((read.a - 1.0).abs() < 0.01);
 }
 
-/// A `rec2020` colour is converted before the paint is set, not clipped.
+/// `color(rec2020 ...)` decodes by the curve CSS Color 4 section 10.8 gives
+/// it, "gamma 2.40, from [REC_BT.1886]", on every canvas.
 ///
-/// Rec. 2020 cannot ride on its colour-space tag. `skia_safe`'s CICP
-/// transfer functions are reference EOTFs, and note 1 of ITU-T H.273 supplies
-/// BT.1886 for transfer characteristics 1, 6, 14 and 15 alike -- so
-/// `REC2020_10BIT` and `REC2020_12BIT` are both aliases of `REC709`, which is
-/// `g: 2.4` with every other coefficient zero. CSS Color 4 wants BT.2020's
-/// own inverse OETF instead, so the colour is converted to sRGB and Skia is
-/// handed an untagged one.
-///
-/// **Every figure here is computed from CSS Color 4's conversion code
-/// (section 12.1), not read back from the surface**, so a defect in the
-/// conversion cannot supply its own expectation. For
-/// `color(rec2020 0.2 0.2 0.2)`: BT.2020's inverse OETF, as ITU-R BT.2020
-/// Table 4 gives it, takes 0.2 to a linear 0.055516; a neutral survives the
-/// primaries matrix as a neutral, and the sRGB transfer function encodes that
-/// as 0.261295, which is byte 67. Tagging painted 40.
-///
-/// The two rows that assert are chosen where clipping and converting must
-/// differ. A primary cannot: `color(rec2020 1 0 0)` lies outside the sRGB
-/// gamut, so the old path's clip and the correct conversion both land on
-/// `[255, 0, 0]`. It is asserted last, and labelled, so a later reader adding
-/// primaries can see why they prove nothing about the conversion.
+/// **Every expected byte is computed here, in `f64`, from CSS Color 4's own
+/// sample code (section 19)** -- `lin_2020`, `lin_2020_to_XYZ`,
+/// `XYZ_to_lin_sRGB`, `XYZ_to_lin_P3` and sRGB's encode -- not read back from
+/// the surface, so the conversion under test cannot supply its own
+/// expectation. A grey isolates the curve from the primaries: BT.2020's
+/// inverse OETF, which the standard used before its Candidate Recommendation
+/// Draft of 24 April 2025 and Chrome 152 still uses, paints
+/// `color(rec2020 0.2 0.2 0.2)` as 67 where 2.4 gamma paints 40.
 #[test]
-fn a_rec2020_colour_is_converted_rather_than_clipped() {
-    let painted = |css: &str| -> [u8; 4] {
-        let mut canvas = Canvas::new(4.0, 4.0);
-        {
-            let ctx = canvas.context();
-            ctx.set_fill_style_css(css).expect("a css colour");
-            ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
-        }
-        at(&pixels(&mut canvas), 4, 1, 1)
+fn a_rec2020_colour_takes_css_color_4s_curve_on_every_canvas() {
+    type Matrix = [[f64; 3]; 3];
+    const LIN_2020_TO_XYZ: Matrix = [
+        [
+            63426534.0 / 99577255.0,
+            20160776.0 / 139408157.0,
+            47086771.0 / 278816314.0,
+        ],
+        [
+            26158966.0 / 99577255.0,
+            472592308.0 / 697040785.0,
+            8267143.0 / 139408157.0,
+        ],
+        [0.0, 19567812.0 / 697040785.0, 295819943.0 / 278816314.0],
+    ];
+    const XYZ_TO_LIN_SRGB: Matrix = [
+        [12831.0 / 3959.0, -329.0 / 214.0, -1974.0 / 3959.0],
+        [
+            -851781.0 / 878810.0,
+            1648619.0 / 878810.0,
+            36519.0 / 878810.0,
+        ],
+        [705.0 / 12673.0, -2585.0 / 12673.0, 705.0 / 667.0],
+    ];
+    const XYZ_TO_LIN_P3: Matrix = [
+        [
+            446124.0 / 178915.0,
+            -333277.0 / 357830.0,
+            -72051.0 / 178915.0,
+        ],
+        [-14852.0 / 17905.0, 63121.0 / 35810.0, 423.0 / 17905.0],
+        [11844.0 / 330415.0, -50337.0 / 660830.0, 316169.0 / 330415.0],
+    ];
+    let apply = |m: Matrix, v: [f64; 3]| {
+        m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
+    };
+    // sRGB's encode, which Display P3 shares.
+    let encode = |c: f64| {
+        let magnitude = c.abs();
+        let encoded = match magnitude > 0.0031308 {
+            true => 1.055 * magnitude.powf(1.0 / 2.4) - 0.055,
+            false => 12.92 * magnitude,
+        };
+        encoded.copysign(c)
+    };
+    // `rec2020` components as bytes in the space `to_linear` leads to,
+    // clipped there as an 8-bit readback clips.
+    let expected = |rgb: [f64; 3], to_linear: Matrix| -> [u8; 4] {
+        let linear = rgb.map(|c| c.abs().powf(2.4).copysign(c));
+        let [r, g, b] = apply(to_linear, apply(LIN_2020_TO_XYZ, linear))
+            .map(|c| (encode(c).clamp(0.0, 1.0) * 255.0).round() as u8);
+        [r, g, b, 255]
     };
 
-    // A neutral, where only the transfer function is in play: the primaries
-    // matrix maps equal components to equal components, so this isolates the
-    // curve from the gamut. Tagged rather than converted, this was 40.
-    assert_eq!(
-        painted("color(rec2020 0.2 0.2 0.2)"),
-        [67, 67, 67, 255],
-        "a neutral rec2020 grey takes BT.2020's curve, not BT.1886's",
-    );
-
-    // Saturated, and inside the sRGB gamut once converted -- so a correct
-    // conversion has somewhere to put it and clipping does not. This was
-    // `[248, 0, 0]`: the green and blue did not merely darken, they were
-    // clipped to zero, and a channel reading 0 where 56 is right carries
-    // nothing a later correction can recover.
-    assert_eq!(
-        painted("color(rec2020 0.8 0.3 0.1)"),
-        [255, 56, 10, 255],
-        "a saturated rec2020 colour converts into the sRGB gamut",
-    );
-
-    // Cannot discriminate, kept to say so: this one is outside the sRGB
-    // gamut, so both behaviours clip it to the same bytes.
-    assert_eq!(painted("color(rec2020 1 0 0)"), [255, 0, 0, 255]);
+    let cases = [
+        ("color(rec2020 0.2 0.2 0.2)", [0.2, 0.2, 0.2]),
+        ("color(rec2020 0.5 0.5 0.5)", [0.5, 0.5, 0.5]),
+        ("color(rec2020 0.2 0.4 0.6)", [0.2, 0.4, 0.6]),
+    ];
+    // Each canvas read where it holds the colour unclipped, or clips it as
+    // the expectation does: an sRGB canvas in sRGB, a P3 canvas in P3, and a
+    // Rec. 2020 canvas, which holds all three, in both.
+    let readings = [
+        (
+            PixelColorSpace::Srgb,
+            PixelColorSpace::Srgb,
+            XYZ_TO_LIN_SRGB,
+        ),
+        (
+            PixelColorSpace::DisplayP3,
+            PixelColorSpace::DisplayP3,
+            XYZ_TO_LIN_P3,
+        ),
+        (
+            PixelColorSpace::Rec2020,
+            PixelColorSpace::Srgb,
+            XYZ_TO_LIN_SRGB,
+        ),
+        (
+            PixelColorSpace::Rec2020,
+            PixelColorSpace::DisplayP3,
+            XYZ_TO_LIN_P3,
+        ),
+    ];
+    for (css, rgb) in cases {
+        for (space, read_in, to_linear) in readings {
+            let mut canvas = Canvas::with_options(
+                4.0,
+                4.0,
+                CanvasOptions {
+                    color_space: space,
+                    gpu: false,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a space this build can make");
+            {
+                let ctx = canvas.context();
+                ctx.set_fill_style_css(css).expect("a css colour");
+                ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+            }
+            let raw = canvas
+                .to_buffer(
+                    ImageFormat::Raw,
+                    &EncodeOptions {
+                        color_space: Some(read_in),
+                        ..EncodeOptions::default()
+                    },
+                )
+                .expect("raw export");
+            let got = [raw[0], raw[1], raw[2], raw[3]];
+            let want = expected(rgb, to_linear);
+            // An eight-bit Rec. 2020 canvas holds 0.5 as 128/255, a step
+            // that converting out of it can widen to two.
+            let levels = match space {
+                PixelColorSpace::Rec2020 => 2,
+                _ => 1,
+            };
+            assert!(
+                got.iter().zip(want).all(|(g, w)| g.abs_diff(w) <= levels),
+                "{css} on {space:?}, read in {read_in:?}: {got:?}, the \
+                 standard's arithmetic gives {want:?}"
+            );
+        }
+    }
 }
 
 #[test]

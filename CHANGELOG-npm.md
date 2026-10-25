@@ -86,6 +86,22 @@ removed and no signature moves.
   light becomes `color(srgb-linear r g b / a)`, its components divided by
   its alpha if they were premultiplied.
 
+- **`color(rec2020 ...)` decodes by a 2.4 gamma, as CSS Color 4 now
+  defines it.** Section 10.8 gives `rec2020`'s transfer function as "gamma
+  2.40, from [REC_BT.1886]", changed from BT.2020's inverse OETF since the
+  Candidate Recommendation Draft of 24 April 2025. This library used the old
+  curve, as Chrome 152 still does. `color(rec2020 0.2 0.2 0.2)` paints 40 where it
+  painted 67, as a `fillStyle`, `strokeStyle`, `shadowColor`, gradient stop
+  or anywhere else a colour string goes, and `color(rec2020 0.2 0.4 0.6)`
+  paints 0, 97, 153 on an sRGB canvas where it painted 0, 120, 168, as
+  Chrome still does; docs/browser-differences.md has its values. A
+  Rec. 2020 canvas stores by the same curve, so a colour named in `rec2020`
+  reads back from one as it was named.
+
+  Migrate: a `rec2020` colour written for the old curve, with each
+  component `c` above 0.081, is the same colour at
+  `((c + 0.0993) / 1.0993) ^ (1 / 0.45 / 2.4)`.
+
 - **`textHeightBehavior` takes `0`, `1`, `2` or `3` and refuses any other
   number.** `ParagraphBuilder` truncated `1.5` toward zero, to `1`, and
   ignored `NaN` and the infinities, leaving the default `0`. A finite
