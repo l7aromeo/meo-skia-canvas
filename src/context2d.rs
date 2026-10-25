@@ -42,9 +42,9 @@ use crate::{
         Context2D as Inner, Dye, initial_root_face, page::ExportOptions,
     },
     css::{
-        Dimension, Expect, FontUnits, Percent, ROOT_FONT_PX, evaluate, is_math,
-        parse_angle, parse_decoration, parse_filter, split_number,
-        written_zero,
+        Dimension, Expect, FontUnits, Percent, ROOT_FONT_PX, evaluate,
+        is_ident_code_point, is_ident_start_code_point, is_math, parse_angle,
+        parse_decoration, parse_filter, split_number, written_zero,
     },
     error::Error,
     export::VectorFeatures,
@@ -959,23 +959,25 @@ fn font_line_height(text: &str, size: f32) -> Option<Option<f32>> {
 /// unquoted runs of whitespace taken as one space.
 ///
 /// An unquoted name must be identifiers -- `12` is not a family, and Chrome
-/// ignores `16px 12` -- and a CSS-wide keyword is not one either.
+/// ignores `16px 12` -- and a CSS-wide keyword is not one either. An
+/// identifier is CSS Syntax 3's, its code points those
+/// [`is_ident_code_point`] takes, and whitespace is CSS's five characters:
+/// `serif\u{a0}` is no name, since U+00A0 is neither.
 fn font_families(text: &str) -> Option<Vec<String>> {
     let mut families = Vec::new();
-    let mut rest = text.trim();
+    let mut rest = text.trim_ascii();
     while !rest.is_empty() {
         let (name, after) = match rest.chars().next() {
             Some(quote @ ('"' | '\'')) => css_string(rest, quote)?,
             _ => {
                 let end = rest.find(',').unwrap_or(rest.len());
-                let words: Vec<&str> = rest[..end].split_whitespace().collect();
+                let words: Vec<&str> =
+                    rest[..end].split_ascii_whitespace().collect();
                 let identifier = |word: &&str| {
                     let mut chars = word.chars();
                     chars.next().is_some_and(|c| {
-                        c.is_alphabetic() || c == '_' || c == '-'
-                    }) && word
-                        .chars()
-                        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                        is_ident_start_code_point(c) || c == '-'
+                    }) && word.chars().all(is_ident_code_point)
                 };
                 if words.is_empty() || !words.iter().all(identifier) {
                     return None;
@@ -998,8 +1000,10 @@ fn font_families(text: &str) -> Option<Vec<String>> {
         families.push(name);
         rest = match after.strip_prefix(',') {
             // A comma promises another name: `16px Arial,` is refused.
-            Some(next) if !next.trim().is_empty() => next.trim_start(),
-            None if after.trim().is_empty() => "",
+            Some(next) if !next.trim_ascii().is_empty() => {
+                next.trim_ascii_start()
+            }
+            None if after.trim_ascii().is_empty() => "",
             _ => return None,
         };
     }
@@ -1018,7 +1022,7 @@ fn css_string(text: &str, quote: char) -> Option<(String, &str)> {
     while let Some((at, c)) = chars.next() {
         match c {
             c if c == quote => {
-                return Some((name, text[at + 1..].trim_start()));
+                return Some((name, text[at + 1..].trim_ascii_start()));
             }
             '\\' => {
                 let hex: String = iter::from_fn(|| {
@@ -1031,7 +1035,7 @@ fn css_string(text: &str, quote: char) -> Option<(String, &str)> {
                 if hex.is_empty() {
                     name.push(chars.next()?.1);
                 } else {
-                    chars.next_if(|(_, c)| c.is_whitespace());
+                    chars.next_if(|(_, c)| c.is_ascii_whitespace());
                     let code = u32::from_str_radix(&hex, 16).ok()?;
                     // Zero, a surrogate and anything past the last code
                     // point are all U+FFFD.
@@ -1152,7 +1156,7 @@ fn oblique_angle(text: &str) -> Option<f32> {
 /// for the grammar; the error names what could not be read, worded as
 /// [`Font::parse`] has always worded it.
 fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
-    let text = shorthand.trim();
+    let text = shorthand.trim_ascii();
     let mut font = Font::new(String::new(), 0.0);
     let mut small_caps = false;
     let mut oblique_degrees = None;
@@ -1165,12 +1169,12 @@ fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
     loop {
         // A token runs to the next space, or to the `/` that starts a line
         // height, or past the `(...)` of a `calc()`.
-        let end = font_token_end(rest, |c| c.is_whitespace() || c == '/');
+        let end = font_token_end(rest, |c| c.is_ascii_whitespace() || c == '/');
         let token = &rest[..end];
         if token.is_empty() {
             return Err(format!("no `<size>px` in {shorthand:?}"));
         }
-        let after = rest[end..].trim_start();
+        let after = rest[end..].trim_ascii_start();
 
         if let Some(size) = font_size(token) {
             font.size = size;
@@ -1191,8 +1195,9 @@ fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
                 font.slant = FontSlant::Oblique;
                 // An angle may follow. Written out it has to be within the
                 // range; computed it is clamped into it.
-                let next_end =
-                    font_token_end(after, |c| c.is_whitespace() || c == '/');
+                let next_end = font_token_end(after, |c| {
+                    c.is_ascii_whitespace() || c == '/'
+                });
                 if let Some(degrees) = oblique_angle(&after[..next_end]) {
                     if degrees.abs() > MAX_OBLIQUE_DEGREES {
                         return Err(format!(
@@ -1211,7 +1216,7 @@ fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
                     if degrees != DEFAULT_OBLIQUE_DEGREES {
                         written_angle = Some(degrees);
                     }
-                    rest = after[next_end..].trim_start();
+                    rest = after[next_end..].trim_ascii_start();
                     prefix_tokens += 1;
                     continue;
                 }
@@ -1260,11 +1265,11 @@ fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
     }
 
     if let Some(leading) = rest.strip_prefix('/') {
-        let leading = leading.trim_start();
-        let end = font_token_end(leading, char::is_whitespace);
+        let leading = leading.trim_ascii_start();
+        let end = font_token_end(leading, |c| c.is_ascii_whitespace());
         font.line_height = font_line_height(&leading[..end], font.size)
             .ok_or_else(|| format!("no line height in {shorthand:?}"))?;
-        rest = leading[end..].trim_start();
+        rest = leading[end..].trim_ascii_start();
     }
 
     font.families = font_families(rest)
@@ -1336,9 +1341,12 @@ impl Context2D {
     /// The same notations the JavaScript `fillStyle` takes, parsed by the same
     /// code: named colors, `#rgb`, `rgb()`, `hsl()`, `hwb()`, `lab()`,
     /// `lch()`, `oklab()`, `oklch()` and `color(<space> r g b / a)`, each in
-    /// its relative form too, and `rgb()` and `hsl()` in the legacy comma
-    /// syntax CSS Color 4 allows. Anything else is refused and the fill left
-    /// as it was: `hwba()`, `hsv()`, `hsva()` and hex without its `#`, which
+    /// its relative form too, `rgb()` and `hsl()` in the legacy comma syntax
+    /// CSS Color 4 allows, and `currentcolor`, opaque black on a canvas with
+    /// no element to take a colour from, as Chrome paints it. Comments are
+    /// dropped as CSS Syntax drops them, and whitespace is CSS's five
+    /// characters. Anything else is refused and the fill left as it was:
+    /// `hwba()`, `hsv()`, `hsva()` and hex without its `#`, which
     /// no CSS defines, and comma syntax CSS Color 4 does not allow, such as
     /// `rgb(255, 0%, 0)` or `lab(50, 40, 30)`.
     ///
@@ -4102,7 +4110,7 @@ pub(crate) fn decoration_from_css(css: &str) -> Option<DecorationStyle> {
         parsed.style,
         parsed.color,
         size,
-        css.trim().to_string(),
+        css.trim_ascii().to_string(),
     ))
 }
 

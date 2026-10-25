@@ -1,8 +1,8 @@
 {
   "about": "Canvas `font` shorthands and what each sets. Read by tests/css_grammar.rs for the Rust font grammar and by tests/suite/css-grammar.test.js for `ctx.font`, so the two surfaces answer one table rather than two.",
-  "source": "Chrome 152.0.7977.149: ctx.font set on a fresh 2D context after a sentinel font, then ctx.font, ctx.fontVariantCaps and ctx.fontStretch read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving the sentinel. `font` is what ctx.font reads back by HTML, CSSOM section 6.7.2 and CSS Fonts 4 -- components in the grammar's order, a weight as its number, a width as its keyword, an `oblique` with its angle, numbers in their shortest form to six decimals, a family name as a quoted string and a generic as its keyword -- and `chrome`, where present, is what Chrome 152 read back instead; docs/browser-differences.md lists the differences. `parts` is the font Chrome's readback describes, taken apart; `lineHeight`, which Chrome does not expose, is CSS Fonts 4's: a number or percentage multiplies the size, `normal` is none. Relative sizes resolve against the canvas's default 10px font and `rem` against 16px, as Chrome does. Sizes are clamped to 10000px, as Chrome reads `20000px Arial`, and a computed negative size to zero; computed weights are held to 1 to 1000. For `oblique` with an angle, `parts.style` is the slant a `Font` takes rather than what Chrome reads back, which keeps the keyword only for the default 14deg: any angle but zero is `italic`, the oblique slant, and zero is `normal`. `font` keeps the angle written: `oblique 10deg`, and `oblique 0deg` too, a computed value of its own though it draws upright. An oblique draws by CSS Fonts 4's rule whatever the angle, and Chrome draws it otherwise; docs/browser-differences.md has both.",
+  "source": "Chrome 152.0.7977.149: ctx.font set on a fresh 2D context after a sentinel font, then ctx.font, ctx.fontVariantCaps and ctx.fontStretch read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving the sentinel. `font` is what ctx.font reads back by HTML, CSSOM section 6.7.2 and CSS Fonts 4 -- components in the grammar's order, a weight as its number, a width as its keyword, an `oblique` with its angle, numbers in their shortest form to six decimals, a family name as a quoted string and a generic as its keyword -- and `chrome`, where present, is what Chrome 152 read back instead; docs/browser-differences.md lists the differences. `parts` is the font Chrome's readback describes, taken apart; `lineHeight`, which Chrome does not expose, is CSS Fonts 4's: a number or percentage multiplies the size, `normal` is none. Relative sizes resolve against the canvas's default 10px font and `rem` against 16px, as Chrome does. Sizes are clamped to 10000px, as Chrome reads `20000px Arial`, and a computed negative size to zero; computed weights are held to 1 to 1000. For `oblique` with an angle, `parts.style` is the slant a `Font` takes rather than what Chrome reads back, which keeps the keyword only for the default 14deg: any angle but zero is `italic`, the oblique slant, and zero is `normal`. `font` keeps the angle written: `oblique 10deg`, and `oblique 0deg` too, a computed value of its own though it draws upright. An oblique draws by CSS Fonts 4's rule whatever the angle, and Chrome draws it otherwise; docs/browser-differences.md has both. The rows with a character CSS does not count as whitespace -- U+000B, U+00A0, U+2028, U+3000 and U+FEFF -- and those with a carriage return or a form feed were measured in Chrome 152.0.7977.167 on 2026-10-26 the same way.",
   "notMeasured": "System-font keywords (caption, icon, menu, message-box, small-caption, status-bar) and `oblique 10deg 16px Arial` are left out: Chrome on macOS read every system font as 16px Arial, which is platform-specific, and serialized the oblique angle away.",
-  "knownDifferences": "Measured and left out: a font size in `ex`, `ch` or `cap`, or in `rex`, `rch` or `rcap`, which Chrome resolves against 10px, or 16px for the root forms, of its standard family -- Times on macOS, so `1ex Oswald` is 4.4873px whatever family is named -- and which resolves here against the face `serif` resolves to, which differs by platform; `lh`, `rlh`, the viewport and container units, which Chrome resolves against the document and which read as zero here; and `16px \"serif\"` and `16px \"inherit\"`, which Chrome keeps quoted because a quoted generic or keyword names a family literally, and which a `Font` cannot tell from the unquoted name.",
+  "knownDifferences": "Measured and left out: a font size in `ex`, `ch` or `cap`, or in `rex`, `rch` or `rcap`, which Chrome resolves against 10px, or 16px for the root forms, of its standard family -- Times on macOS, so `1ex Oswald` is 4.4873px whatever family is named -- and which resolves here against the face `serif` resolves to, which differs by platform; `lh`, `rlh`, the viewport and container units, which Chrome resolves against the document and which read as zero here; and `16px \"serif\"` and `16px \"inherit\"`, which Chrome keeps quoted because a quoted generic or keyword names a family literally, and which a `Font` cannot tell from the unquoted name. Also left out: a family name holding a code point at or above U+0080 that CSS Syntax 3 section 4.2 does not list as a non-ASCII ident code point -- `12px aµb`, `12px a×b`, `12px aªb`, `12px serif\u00a0`, `12px serif\u2028`, `12px serif\u3000`, `12px Times\u00a0New Roman`. Chrome 152 takes each, under the older rule that any such code point is a name's; here each is refused, as the current definition makes it no part of a name. docs/browser-differences.md says so.",
   "cases": [
     {
       "css": "16px Arial",
@@ -3016,6 +3016,271 @@
     {
       "css": "italic 14deg 16px Oswald",
       "refused": true
+    },
+    {
+      "css": "\u00a012px serif",
+      "refused": true
+    },
+    {
+      "css": "bold\u00a012px serif",
+      "refused": true
+    },
+    {
+      "css": "\u000b12px serif",
+      "refused": true
+    },
+    {
+      "css": "bold\u000b12px serif",
+      "refused": true
+    },
+    {
+      "css": "12px serif\u000b",
+      "refused": true
+    },
+    {
+      "css": "\u202812px serif",
+      "refused": true
+    },
+    {
+      "css": "bold\u202812px serif",
+      "refused": true
+    },
+    {
+      "css": "\u300012px serif",
+      "refused": true
+    },
+    {
+      "css": "bold\u300012px serif",
+      "refused": true
+    },
+    {
+      "css": "\ufeff12px serif",
+      "refused": true
+    },
+    {
+      "css": "bold\ufeff12px serif",
+      "refused": true
+    },
+    {
+      "css": "12px serif\ufeff",
+      "font": "12px \"serif\ufeff\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif\ufeff"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      },
+      "chrome": "12px serif\ufeff"
+    },
+    {
+      "css": "12px\u00a0serif",
+      "refused": true
+    },
+    {
+      "css": "\r12px serif",
+      "font": "12px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "12px serif\r",
+      "font": "12px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "bold\r12px serif",
+      "font": "700 12px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 700,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      },
+      "chrome": "bold 12px serif"
+    },
+    {
+      "css": "\f12px serif",
+      "font": "12px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "12px serif\f",
+      "font": "12px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "bold\f12px serif",
+      "font": "700 12px serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 700,
+        "style": "normal",
+        "families": [
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      },
+      "chrome": "bold 12px serif"
+    },
+    {
+      "css": "12px a·b",
+      "font": "12px \"a·b\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "a·b"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      },
+      "chrome": "12px a·b"
+    },
+    {
+      "css": "12px Café",
+      "font": "12px \"Café\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Café"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      },
+      "chrome": "12px Café"
+    },
+    {
+      "css": "12px 中文",
+      "font": "12px \"中文\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "中文"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      },
+      "chrome": "12px 中文"
+    },
+    {
+      "css": "12px ·a",
+      "font": "12px \"·a\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "·a"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      },
+      "chrome": "12px ·a"
+    },
+    {
+      "css": "12px a‿b",
+      "font": "12px \"a‿b\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "a‿b"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      },
+      "chrome": "12px a‿b"
+    },
+    {
+      "css": "12px \ufeffserif",
+      "font": "12px \"\ufeffserif\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "\ufeffserif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      },
+      "chrome": "12px \ufeffserif"
     }
   ]
 }

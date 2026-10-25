@@ -1495,7 +1495,7 @@ fn top_level_spans(args: &str) -> Vec<(usize, usize)> {
                 depth += 1;
                 start.get_or_insert(at);
             }
-            c if c.is_whitespace() && depth == 0 => {
+            c if c.is_ascii_whitespace() && depth == 0 => {
                 spans.extend(start.take().map(|from| (from, at)));
             }
             _ => {
@@ -1811,7 +1811,7 @@ fn hwb_to_srgb(hue: f64, white: f64, black: f64) -> [f64; 3] {
 /// no CSS function has those names and no browser reads them -- Chrome 153
 /// ignores `hwba(0 0% 0%)` and `hsv(0 100% 100%)`.
 fn read_color_function(css: &str) -> Option<Option<(Color4f, &'static str)>> {
-    let (name, args) = css.trim().split_once('(')?;
+    let (name, args) = css.trim_ascii().split_once('(')?;
     let function = match name.to_ascii_lowercase().as_str() {
         "rgb" | "rgba" => Relative::Rgb,
         "hsl" | "hsla" => Relative::Hsl,
@@ -1957,7 +1957,7 @@ fn relative_channels(
     fn token(text: &str, (from, to): (usize, usize)) -> &str {
         &text[from..to]
     }
-    let body = args.trim_end().strip_suffix(')')?.trim_end();
+    let body = args.trim_ascii_end().strip_suffix(')')?.trim_ascii_end();
     let spans = top_level_spans(body);
     // A `)` before the end stops the spans short of it: `hsl(from red h s
     // l))` is refused for the second.
@@ -2001,7 +2001,7 @@ fn absolute_channels(
     args: &str,
     function: Relative,
 ) -> Option<(Color4f, &'static str)> {
-    let body = args.trim_end().strip_suffix(')')?.trim();
+    let body = args.trim_ascii_end().strip_suffix(')')?.trim_ascii();
     match has_top_level_comma(body) {
         true => legacy_channels(body, function),
         false => modern_channels(body, function),
@@ -2082,13 +2082,13 @@ fn legacy_channels(
             '(' => depth += 1,
             ')' => depth = depth.saturating_sub(1),
             ',' if depth == 0 => {
-                parts.push(body[start..at].trim());
+                parts.push(body[start..at].trim_ascii());
                 start = at + 1;
             }
             _ => {}
         }
     }
-    parts.push(body[start..].trim());
+    parts.push(body[start..].trim_ascii());
     let (channels, alpha) = match parts[..] {
         [a, b, c] => ([a, b, c], None),
         [a, b, c, alpha] => ([a, b, c], Some(alpha)),
@@ -2315,7 +2315,7 @@ const NAMED_COLORS: [(&str, [u8; 3]); 148] = [
 /// every hex form to the `f32`s earlier releases gave. A `#` followed by
 /// anything else is `Some(None)`, a refusal: only hex follows one.
 fn hex_or_named(css: &str) -> Option<Option<Color4f>> {
-    let css = css.trim();
+    let css = css.trim_ascii();
     let byte = |b: u8| f32::from(b) / 255.0;
     if let Some(digits) = css.strip_prefix('#') {
         let nibbles: Option<Vec<u8>> = digits
@@ -2346,11 +2346,71 @@ fn hex_or_named(css: &str) -> Option<Option<Color4f>> {
     if name == "transparent" {
         return Some(Some(Color4f::new(0.0, 0.0, 0.0, 0.0)));
     }
+    // `currentcolor` is the `color` property of the element a colour is on.
+    // A canvas here is on none, and CSS Color 4's "parse a CSS <color>
+    // value", which HTML's `fillStyle` and `strokeStyle` setters run with no
+    // element when the canvas has none, resolves it with "the initial values
+    // of the properties": `color`'s, `CanvasText`, black. Chrome 152 paints
+    // it opaque black on a canvas outside a document.
+    if name == "currentcolor" {
+        return Some(Some(Color4f::new(0.0, 0.0, 0.0, 1.0)));
+    }
     let at = NAMED_COLORS
         .binary_search_by(|&(named, _)| named.cmp(name.as_str()))
         .ok()?;
     let [r, g, b] = NAMED_COLORS[at].1;
     Some(Some(Color4f::new(byte(r), byte(g), byte(b), 1.0)))
+}
+
+/// `css` with its comments dropped, as CSS Syntax 3's tokenizer drops them
+/// (section 4.3.2): `rgb(255/**/0 0)` is `rgb(255 0 0)`, and a comment left
+/// open runs to the end, so `rgb(255 0 0 /* x)` is `rgb(255 0 0 `.
+///
+/// A comment ends the token before it, so where one stands between two
+/// characters that would otherwise read as one token it becomes a space:
+/// `rgb/**/(` is a name and a bracket, refused as `rgb (` is, `120/**/deg` a
+/// number and a name, and `#f/**/00` no hex colour. A comment is no
+/// whitespace, though, and the one place that tells them apart is the `+` or
+/// `-` of a math function, which needs whitespace on both sides: beside a
+/// sign with no whitespace beyond it the comment leaves nothing, so
+/// `calc(100/**/+/**/155)` stays refused, as Chrome 152 refuses it.
+fn without_comments(css: &str) -> Cow<'_, str> {
+    if !css.contains("/*") {
+        return Cow::Borrowed(css);
+    }
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(at) = rest.find("/*") {
+        out.push_str(&rest[..at]);
+        let after = match rest[at + 2..].find("*/") {
+            Some(close) => &rest[at + 2 + close + 2..],
+            None => "",
+        };
+        let before = out.chars().next_back();
+        let next = after.chars().next();
+        let sign = |c: Option<char>| matches!(c, Some('+' | '-'));
+        let bare_sign_before = sign(before)
+            && out
+                .chars()
+                .rev()
+                .nth(1)
+                .is_none_or(|c| c.is_ascii_whitespace());
+        let bare_sign_after = sign(next)
+            && after
+                .chars()
+                .nth(1)
+                .is_none_or(|c| c.is_ascii_whitespace() || c == '/');
+        let separates = before.is_some_and(|c| !c.is_ascii_whitespace())
+            && next.is_some_and(|c| !c.is_ascii_whitespace())
+            && !bare_sign_before
+            && !bare_sign_after;
+        if separates {
+            out.push(' ');
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
 }
 
 /// `css` with every bracket still open at its end closed, as CSS Syntax 3
@@ -2379,7 +2439,8 @@ fn closed_at_end(css: &str) -> Cow<'_, str> {
 /// Skia converts at the paint, and converting via sRGB first would cost a
 /// level of the eight the readback quantises to.
 pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
-    let css = closed_at_end(css);
+    let uncommented = without_comments(css);
+    let css = closed_at_end(uncommented.as_ref());
     let css = css.as_ref();
     if let Some(color) = read_color_function(css) {
         // SAFETY: `read_color_function` only returns names this builds.

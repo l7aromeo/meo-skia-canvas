@@ -3870,6 +3870,9 @@ export interface CanvasFillStrokeStyles {
    *   (`"ff8800"`), which no CSS defines, and comma syntax CSS Color 4 does
    *   not allow (`"rgb(255, 0%, 0)"`, `"hsl(120, 100, 50)"`,
    *   `"lab(50, 40, 30)"`) are ignored, as a browser ignores them.
+   *   `"currentcolor"` is opaque black, as on a canvas outside a document,
+   *   comments are dropped, and whitespace is CSS's: space, tab, line feed,
+   *   carriage return and form feed, so a U+00A0 makes a string no colour.
    * - A **`[r, g, b, a]` array** carries premultiplied **linear-light** floats
    *   interpreted in the surface's working color space; pass these to avoid
    *   the lossy sRGB-encoding round-trip used by the CSS form (the shape

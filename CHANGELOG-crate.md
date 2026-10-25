@@ -75,6 +75,29 @@ window be changed after it opens.** No signature moves and nothing is removed.
   box. In a shorthand at 48px, `30px` is 30, `1` 48, `150%` 72 and `0.5em`
   24, and `normal` keeps the face's own spacing.
 
+- **CSS strings are read with CSS's whitespace, comments and names, and no
+  more.**
+  - Whitespace is space, tab, line feed, carriage return and form feed.
+    `set_fill_style_css`, `RgbaLinear::from_css`, `set_filter_css`,
+    `Font::from_css` and `Affine::from_css` trimmed or split at any Unicode
+    space, so `"red\u{a0}"` was red and
+    `"blur(2px)\u{a0}grayscale(1)"` a filter; each is now refused, as
+    Chrome 152 refuses it.
+  - A comment inside a colour is dropped, as CSS Syntax drops one:
+    `rgb(255,/**/0,0)` and `/**/#f00` were refused and now read as red. A
+    comment still ends the token before it, so `rgb/**/(255 0 0)` stays
+    refused. A comment beside a keyword, `red/**/`, is dropped too, where
+    Chrome ignores the whole value; docs/browser-differences.md says why.
+  - `currentcolor` is opaque black, `rgb(from currentcolor r g b)` too,
+    where it was refused: CSS Color 4 resolves it from the `color`
+    property's initial value when there is no element, and a canvas here
+    has none.
+  - A family name holds only the code points CSS Syntax 3 lists as a
+    name's, so `Font::from_css("12px a\u{b5}b")` is `None` where it read
+    the family `aµb`, and `12px a·b` is read where it was refused. Chrome
+    152 takes both, under the older rule that any code point at or above
+    U+0080 is a name's; docs/browser-differences.md records it.
+
 - **`outline_text` and the ink box put every glyph where `fill_text` draws
   it.** A glyph the shaper moves off its advance -- a mark stacked over
   another, a mark set over a base with no precomposed glyph, the half of a

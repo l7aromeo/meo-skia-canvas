@@ -223,6 +223,33 @@ removed and no signature moves.
 
 ### Fixed
 
+- **Colours, fonts, filters and transforms read CSS's whitespace,
+  comments and names, and no more.**
+  - Whitespace is space, tab, line feed, carriage return and form feed.
+    A U+00A0, U+000B, U+2028, U+3000 or U+FEFF was trimmed or taken as a
+    separator, so `fillStyle = "red\u00a0"`,
+    `filter = "blur(2px)\u00a0grayscale(1)"`,
+    `new DOMMatrix("\u00a0translate(1px, 2px)")` and
+    `font = "bold\u00a012px serif"` were each read. Chrome 152 ignores the
+    colour, the filter and the font and throws `SyntaxError` for the
+    transform, and so does this library now. `fontVariant` and `fontVariationSettings` split at the
+    same five characters.
+  - A comment inside a colour is dropped, as CSS Syntax drops one:
+    `rgb(255,/**/0,0)`, `rgb(/*x*/255 0 0)` and `/**/#f00` were refused and
+    now paint red, as in Chrome 152. A comment still ends the token before
+    it, so `rgb/**/(255 0 0)` and `calc(100/**/+/**/155)` stay refused. A
+    comment beside a keyword, `red/**/`, is dropped too, where Chrome
+    ignores the whole value; docs/browser-differences.md says why.
+  - `currentcolor` is opaque black, `rgb(from currentcolor r g b)` too,
+    where it was refused: CSS Color 4 resolves it from the `color`
+    property's initial value when a canvas has no element, and Chrome 152
+    paints it black.
+  - A family name holds only the code points CSS Syntax 3 lists as a
+    name's. `12px a\u00b5b` was read as the family `aµb`, and `12px serif`
+    followed by U+00A0 is now refused rather than trimmed; Chrome 152 takes
+    both under the older rule, which docs/browser-differences.md records.
+    `12px a·b` was refused and is now read, as Chrome reads it.
+
 - **`letterSpacing` and `wordSpacing` take `"0"`.** CSS Values 4 lets a
   zero length be written without its unit, and `ctx.letterSpacing = "0"`
   was ignored; it and any other unitless zero, such as `0.0` or `0e5`, now

@@ -313,7 +313,11 @@ impl RgbaLinear {
     /// `oklab()`, `oklch()` and `color()` in `srgb`, `srgb-linear`,
     /// `display-p3`, `rec2020`, `a98-rgb`, `prophoto-rgb`, `xyz`, `xyz-d50`
     /// or `xyz-d65`, each in its relative form too, and `rgb()` and `hsl()` in
-    /// the legacy comma syntax CSS Color 4 allows. Anything else is `None`:
+    /// the legacy comma syntax CSS Color 4 allows. `currentcolor` is opaque
+    /// black, the colour a canvas outside a document resolves it to, and a
+    /// comment is dropped as CSS Syntax drops one. Whitespace is CSS's: space,
+    /// tab, line feed, carriage return and form feed, and no other. Anything
+    /// else is `None`:
     /// `hwba()`, `hsv()`, `hsva()` and hex without its `#`, which no CSS
     /// defines, and comma syntax CSS Color 4 does not allow, such as
     /// `rgb(255, 0%, 0)` or `lab(50, 40, 30)`.
