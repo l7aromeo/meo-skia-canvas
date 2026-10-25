@@ -943,15 +943,16 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   it would upright.
 
   An oblique run is drawn a glyph run at a time so that each can be
-  sheared or not, which costs more than an upright one: in a release
-  build on macOS, filling `oblique 10deg 32px Oswald` takes about 8.1 µs
-  where it took 6.2, and 11.8 underlined where it took 6.8. Upright text
-  is unchanged, at 6.2 µs before and after.
+  sheared or not, which costs more than an upright one. In a release
+  build on macOS filling `"Hamburgefonstiv"` in
+  `oblique 10deg 32px Oswald` takes about 5.3 µs on the CPU engine where
+  6.0.2 took 3.1 drawing the italic face, and 5.7 underlined where it
+  took 3.9; on the GPU engine, 5.2 and 5.7 where it took 3.1 and 3.8.
+  Upright text is unchanged, at 3.3 µs before and after.
 
   A paragraph with an oblique range takes longer to lay out -- for 109
   characters at 24px with 66 of them oblique, in a release build on macOS,
-  about 39 µs where it took 28 -- and draws about as fast. A paragraph
-  with none costs what it did.
+  about 19 µs where 6.0.2 took 11 -- and draws about as fast.
 
 - **`measureText` works out the ink box only when it is read.** The four
   `actualBoundingBox` values and `lines` come from the outline of every
