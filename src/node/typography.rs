@@ -889,7 +889,8 @@ fn resolve_for_oblique(
 }
 
 /// The OpenType `slnt` axis tag.
-const SLNT: FourByteTag = FourByteTag::from_chars('s', 'l', 'n', 't');
+pub(crate) const SLNT: FourByteTag =
+    FourByteTag::from_chars('s', 'l', 'n', 't');
 
 /// `variations` with an `oblique` angle's `slnt` ahead of them, so that a
 /// face with that axis is instanced at it and an explicit `slnt` in

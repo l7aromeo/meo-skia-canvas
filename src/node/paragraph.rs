@@ -6,8 +6,7 @@ use neon::prelude::*;
 use std::{cell::RefCell, sync::OnceLock};
 
 use skia_safe::{
-    Color, ColorSpace, FontArguments, FourByteTag, Paint, PaintStyle, Point,
-    font_arguments::VariationPosition,
+    Color, ColorSpace, FourByteTag, Paint, PaintStyle, Point,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
         FontCollection, Paragraph as SkParagraph, ParagraphStyle,
@@ -21,7 +20,9 @@ use crate::{
     font::variation_axes,
     font_library::{FontLibrary, instance_coordinates},
     node::{
-        oblique::{ParagraphRecipe, Sheared, match_oblique},
+        oblique::{
+            ParagraphRecipe, Sheared, add_slnt, match_oblique, set_coordinates,
+        },
         typography::with_oblique_slnt,
     },
     text::{
@@ -674,6 +675,9 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
     // Only an oblique changes the style, and copying it back costs a copy
     // of every field it has.
     if base_oblique {
+        let mut coordinates = Vec::new();
+        add_slnt(&mut coordinates);
+        set_coordinates(&mut text_style, &coordinates);
         para_style.set_text_style(&text_style);
     }
 
@@ -726,21 +730,23 @@ pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         .find_typefaces(&families, text_style.font_style())
         .iter()
         .find_map(variation_axes);
-    if let Some(axes) = axes {
-        let coordinates = instance_coordinates(&axes, &text_style, &variations);
-        if FontLibrary::with_shared(|lib| {
-            lib.admit_position(&families, &coordinates)
-        }) {
-            collection.clear_caches();
+    let mut coordinates = match axes {
+        Some(axes) => {
+            let coordinates =
+                instance_coordinates(&axes, &text_style, &variations);
+            if FontLibrary::with_shared(|lib| {
+                lib.admit_position(&families, &coordinates)
+            }) {
+                collection.clear_caches();
+            }
+            coordinates
         }
-        text_style.set_font_arguments(
-            &FontArguments::new().set_variation_design_position(
-                VariationPosition {
-                    coordinates: &coordinates,
-                },
-            ),
-        );
+        None => Vec::new(),
+    };
+    if oblique {
+        add_slnt(&mut coordinates);
     }
+    set_coordinates(&mut text_style, &coordinates);
     if let Some(recipe) = recipe.as_mut() {
         recipe.push_style(text_style, oblique);
     }

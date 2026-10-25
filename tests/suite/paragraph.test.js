@@ -919,22 +919,31 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
   // before any italic. So a range asking for oblique on Raleway, which has
   // an italic, is sheared as one on Oswald, which has none, and draws
   // exactly what canvas text in `oblique` draws.
-  FontLibrary.use("ParagraphOswald", [
-    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
-  ]);
-  FontLibrary.use("ParagraphRaleway", [
-    "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
-    "tests/assets/fonts/Raleway/Raleway-Italic-VariableFont_wght.ttf",
-  ]);
-  // And the two Recursive fixtures: one with a `slnt` axis, set to -14,
-  // and one whose oblique face is drawn as it is -- see the README beside
-  // them.
+  // Registered by each test rather than once here: tests above call
+  // `FontLibrary.reset()`, and a family gone by the time a test runs would
+  // leave both sides of each comparison in the same fallback face.
   const R = "tests/assets/fonts/Recursive";
-  FontLibrary.use("ParagraphRecursiveSlnt", [`${R}/Recursive-slnt-subset.ttf`]);
-  FontLibrary.use("ParagraphRecursiveStatic", [
-    `${R}/Recursive-upright-subset.ttf`,
-    `${R}/Recursive-oblique12-subset.ttf`,
-  ]);
+  const register = () => {
+    FontLibrary.use("ParagraphOswald", [
+      "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    ]);
+    FontLibrary.use("ParagraphRaleway", [
+      "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+      "tests/assets/fonts/Raleway/Raleway-Italic-VariableFont_wght.ttf",
+    ]);
+    // And the two Recursive fixtures: one with a `slnt` axis, set to -14,
+    // and one whose oblique face is drawn as it is -- see the README beside
+    // them.
+    FontLibrary.use("ParagraphRecursiveSlnt", [
+      `${R}/Recursive-slnt-subset.ttf`,
+    ]);
+    FontLibrary.use("ParagraphRecursiveStatic", [
+      `${R}/Recursive-upright-subset.ttf`,
+      `${R}/Recursive-oblique12-subset.ttf`,
+    ]);
+    for (const family of [...FAMILIES, ...LEANING])
+      assert.ok(FontLibrary.has(family), `${family} is registered`);
+  };
   const FAMILIES = ["ParagraphOswald", "ParagraphRaleway"],
     LEANING = ["ParagraphRecursiveSlnt", "ParagraphRecursiveStatic"],
     W = 400,
@@ -1001,6 +1010,7 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
   };
 
   test("pixel for pixel, in a family with an italic and in one without", () => {
+    register();
     for (const family of FAMILIES) {
       // The control: without it a scene that is not like for like would
       // make the comparison below mean nothing.
@@ -1024,6 +1034,7 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
   });
 
   test("a face that leans as asked is drawn as canvas text draws it", () => {
+    register();
     for (const family of LEANING) {
       const oblique = paragraph(family, [["IH", slanted(OBLIQUE)]]);
       assert.ok(
@@ -1038,6 +1049,7 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
   });
 
   test("sheared by tan(14deg)", () => {
+    register();
     for (const family of FAMILIES) {
       const measured = slope(paragraph(family, [["I", slanted(OBLIQUE)]]));
       assert.ok(
@@ -1048,6 +1060,7 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
   });
 
   test("a range is sheared on whichever line it lands", () => {
+    register();
     // Two words in one font are one run, and the second wraps: its glyphs
     // are the run continued on a second line, the case SkParagraph reports
     // the wrong text offsets for. Each line has to be what the paragraph
@@ -1081,7 +1094,138 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
     );
   });
 
+  // A paragraph of `pieces`, each `[text, style]` over a shared base, laid
+  // out wide and drawn at (20, 10) on white; the RGBA it leaves.
+  const onWhite = (family, size, pieces, w = W, h = H) => {
+    const base = { fontFamilies: [family], fontSize: size, color: "black" },
+      pb = ParagraphBuilder.Make({ textStyle: base });
+    for (const [text, style] of pieces) {
+      pb.pushStyle({ ...base, ...style });
+      pb.addText(text);
+      pb.pop();
+    }
+    const p = pb.build();
+    p.layout(2000);
+    const ctx = new Canvas(w, h).getContext("2d");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawParagraph(p, 20, 10);
+    return ctx.getImageData(0, 0, w, h).data;
+  };
+  const ink = (data) => {
+    let sum = 0;
+    for (let i = 0; i < data.length; i += 4) sum += 255 - data[i + 1];
+    return sum;
+  };
+
+  test("an oblique range breaks a ligature at its edge", () => {
+    register();
+    // An oblique is a change of font, and shaping breaks there: no
+    // ligature forms across the edge, so the paragraph inks what its pieces
+    // ink shaped on their own. Across it, "ffi" was formed and then either
+    // clipped away by the transparent half or drawn twice.
+    const family = "ParagraphRaleway",
+      red = { color: "#c00" };
+    for (const pieces of [
+      [["ef"], ["fi", { ...slanted(OBLIQUE), ...red }], ["ffle"]],
+      [["ef", { ...slanted(OBLIQUE), ...red }], ["fi"]],
+    ]) {
+      const whole = ink(
+          onWhite(
+            family,
+            80,
+            pieces.map(([t, st]) => [t, st ?? {}]),
+            600,
+            140,
+          ),
+        ),
+        parts = pieces
+          .map(([t, st]) => ink(onWhite(family, 80, [[t, st ?? {}]], 600, 140)))
+          .reduce((a, b) => a + b, 0);
+      const name = pieces.map(([t]) => t).join("|");
+      assert.ok(parts > 0, "the control: the pieces ink");
+      assert.ok(
+        Math.abs(whole - parts) / parts < 0.03,
+        `${name}: the paragraph inks ${whole}, its pieces ${parts}`,
+      );
+    }
+  });
+
+  test("a sheared range's shadow is drawn under every glyph", () => {
+    register();
+    // SkParagraph paints every shadow on a line before any glyph, and every
+    // decoration after every glyph, whichever range each belongs to.
+    const family = "ParagraphOswald";
+    const uprightOnly = onWhite(family, 100, [
+        ["HH"],
+        ["HH", { ...slanted(OBLIQUE), color: "transparent" }],
+      ]),
+      shadowed = onWhite(family, 100, [
+        ["HH"],
+        [
+          "HH",
+          {
+            ...slanted(OBLIQUE),
+            color: "transparent",
+            shadows: [{ color: "blue", offset: [-90, 0], blurRadius: 0 }],
+          },
+        ],
+      ]);
+    let glyph = 0,
+      covered = 0;
+    for (let i = 0; i < uprightOnly.length; i += 4)
+      if (uprightOnly[i] < 10 && uprightOnly[i + 2] < 10) {
+        glyph++;
+        if (shadowed[i + 2] > 200 && shadowed[i] < 50) covered++;
+      }
+    assert.ok(glyph > 0, "the control: the upright glyphs are drawn");
+    assert.equal(
+      covered,
+      0,
+      "no upright glyph pixel is under the oblique shadow",
+    );
+  });
+
+  test("an upright decoration is drawn over a sheared glyph", () => {
+    register();
+    const family = "ParagraphOswald";
+    // An upright line-through beside an oblique glyph that leans into it.
+    // The struck range ends in a transparent glyph, since a line's trailing
+    // spaces are not struck.
+    const LINE_THROUGH = 4,
+      struck = [
+        [
+          "   I",
+          {
+            color: "transparent",
+            decoration: LINE_THROUGH,
+            decorationColor: "red",
+            decorationThickness: 4,
+          },
+        ],
+      ],
+      glyphOnly = onWhite(family, 160, [
+        ["I", slanted(OBLIQUE)],
+        ["   I", { color: "transparent" }],
+      ]),
+      lineOnly = onWhite(family, 160, [
+        ["I", { ...slanted(OBLIQUE), color: "transparent" }],
+        ...struck,
+      ]),
+      both = onWhite(family, 160, [["I", slanted(OBLIQUE)], ...struck]);
+    let crossing = 0,
+      red = 0;
+    for (let i = 0; i < both.length; i += 4)
+      if (glyphOnly[i] < 10 && lineOnly[i] > 200 && lineOnly[i + 1] < 50) {
+        crossing++;
+        if (both[i] > 200 && both[i + 1] < 50) red++;
+      }
+    assert.ok(crossing > 0, "the control: the glyph leans across the line");
+    assert.equal(red, crossing, "the line is drawn over the glyph");
+  });
+
   test("decorations stay level and shadows lean with their glyphs", () => {
+    register();
     const family = "ParagraphOswald",
       UNDERLINE = 1;
     // Below the baseline, where an `I` has no ink, only the underline is.
