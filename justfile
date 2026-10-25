@@ -269,6 +269,31 @@ check-release-tags:
 # pattern from `changelog_version_prefix`, so a change to the convention that
 # missed one of them fails here. A guard is only a guard if it can go red, so
 # the absent version is checked as well as the present one.
+# The pin `check-release-guards` compares: the first `meo-skia-canvas = {
+# version = "..."` in README.md. Major.minor of the version before any
+# prerelease suffix, so that `0.17.0-rc.1` pins `0.17` rather than `0.17.0-rc`.
+[doc("Move README's crate pin to Cargo.toml's major.minor, if it differs.")]
+sync-readme-pin:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    manifest=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+    base="${manifest%%-*}"
+    want="${base%.*}"
+    pin='meo-skia-canvas = { version = "'
+    readme=$(grep -o "${pin}[0-9.]*\"" README.md | head -1 | sed 's/.*"\(.*\)"/\1/' || true)
+    test -n "$readme" || {
+        echo "README.md has no '${pin}...\"' pin to move"
+        exit 1
+    }
+    if [[ "$readme" == "$want" ]]; then
+        echo "README pins ${readme}, matching Cargo.toml ${manifest}"
+        exit 0
+    fi
+    # `-i.bak` and a removal, which BSD and GNU sed both read the same way.
+    sed -i.bak "s/meo-skia-canvas = { version = \"${readme//./\\.}\"/${pin}${want}\"/" README.md
+    rm README.md.bak
+    echo "README pin moved from ${readme} to ${want}, for Cargo.toml ${manifest}"
+
 [doc("Check the release recipes can find a changelog entry, and refuse an absent one.")]
 check-release-guards:
     #!/usr/bin/env bash
@@ -315,9 +340,12 @@ check-release-guards:
     #
     # Compared on major.minor rather than the full version, because that is
     # what the pin carries and what Cargo acts on: a patch release does not
-    # move it, and requiring one would fail this on every 0.16.x.
+    # move it, and requiring one would fail this on every 0.16.x. Taken from
+    # the version before any prerelease suffix, as `sync-readme-pin` takes it,
+    # so that `0.17.0-rc.1` wants `0.17` rather than `0.17.0-rc`.
     manifest=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
-    want="${manifest%.*}"
+    base="${manifest%%-*}"
+    want="${base%.*}"
     readme=$(grep -o 'meo-skia-canvas = { version = "[0-9.]*"' README.md \
       | head -1 | sed 's/.*"\(.*\)"/\1/' || true)
     test -n "$readme" || {
@@ -1423,10 +1451,11 @@ release-crate bump="patch" wait="false":
     # `just precommit` runs inside `git commit` and a clippy or formatting failure
     # lands in exactly it.
     #
-    # Both files, because `cargo set-version` writes both. `release-npm` carries
-    # the same trap over `package.json` and `bun.lock`. Released once the commit
+    # Cargo.toml and Cargo.lock because `cargo set-version` writes both, and
+    # README.md because `sync-readme-pin` below may. `release-npm` carries the
+    # same trap over `package.json` and `bun.lock`. Released once the commit
     # lands.
-    trap 'git checkout HEAD -- Cargo.toml Cargo.lock 2>/dev/null || true' EXIT INT TERM
+    trap 'git checkout HEAD -- Cargo.toml Cargo.lock README.md 2>/dev/null || true' EXIT INT TERM
     cargo set-version --bump {{ bump }}
     VERSION=$(cargo metadata --no-deps --format-version 1 | node -e "
         let s=''; process.stdin.on('data', d => s += d)
@@ -1461,6 +1490,14 @@ release-crate bump="patch" wait="false":
     # accept the pathspec.
     cargo update -p meo-skia-canvas
 
+    # README's quick start pins the crate at major.minor, and
+    # `check-release-guards` holds the pin to Cargo.toml's. A bump that moves
+    # major.minor moves the pin too, in the same commit: committed apart, the
+    # bump commit fails the guard, and the pin cannot move first either, since
+    # the guard fails against the version before the bump. A patch bump leaves
+    # README as it is.
+    just sync-readme-pin
+
     echo ""
     echo "  crate version: ${VERSION} (cargo only; npm package untouched)"
     echo "  tag:           ${TAG}"
@@ -1473,7 +1510,7 @@ release-crate bump="patch" wait="false":
         exit 1
     fi
 
-    git add Cargo.toml Cargo.lock
+    git add Cargo.toml Cargo.lock README.md
     git commit -m "rust: ${VERSION}"
     # Committed: the bump is now the intended state, so stop undoing it.
     trap - EXIT INT TERM
