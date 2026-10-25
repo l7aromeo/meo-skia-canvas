@@ -514,6 +514,15 @@ describe("ctx.font reports the serialized form, not the parsed one", () => {
     assert.equal(c.font, "16px serif");
   });
 
+  test("a negative zero reads back as zero", () => {
+    // The shortest form of negative zero is `0`.
+    const c = ctx();
+    c.font = "-0px X";
+    assert.equal(c.font, '0px "X"');
+    c.font = "oblique -0deg 16px X";
+    assert.equal(c.font, 'oblique 0deg 16px "X"');
+  });
+
   test("a number too small for a float is still not a zero", () => {
     // CSS lets only zero go without a unit, and `1e-50` is not zero
     // though a 32-bit float holds it as one.

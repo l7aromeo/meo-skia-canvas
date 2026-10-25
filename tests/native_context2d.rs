@@ -1677,6 +1677,18 @@ fn a_number_too_small_for_an_f32_is_still_not_zero() {
 }
 
 #[test]
+fn a_negative_zero_reads_back_as_zero() {
+    // CSSOM serializes a number "in the shortest form possible", and the
+    // shortest form of negative zero is `0`.
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    assert!(ctx.set_font_css("-0px X"));
+    assert_eq!(ctx.font(), "0px \"X\"");
+    assert!(ctx.set_font_css("oblique -0deg 16px X"));
+    assert_eq!(ctx.font(), "oblique 0deg 16px \"X\"");
+}
+
+#[test]
 fn the_font_string_reads_back_as_the_font_set() {
     // The getter reports the font as CSSOM serializes it, which keeps all a
     // `Font` holds but its line height, as the Canvas API says ("with no
