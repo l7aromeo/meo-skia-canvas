@@ -16,7 +16,7 @@ use skia_safe::{
 };
 
 use crate::{
-    font::{ObliqueAngle, variation_axes},
+    font::{FontFamily, ObliqueAngle, variation_axes},
     font_library::{FontLibrary, instance_coordinates},
     node::{
         oblique::{
@@ -642,6 +642,16 @@ fn font_families<'a>(
     Ok((!families.is_empty()).then_some(families))
 }
 
+/// The names the shared font collection is asked for `families` by: each
+/// read as CSS reads an unquoted name, as `FontFamily`'s `From<&str>` does,
+/// and lowered by `FontLibrary::collection_names`. CanvasKit's
+/// `fontFamilies` has no quoting, so a generic keyword is the generic.
+fn collection_names(families: &[String]) -> Vec<String> {
+    let families: Vec<FontFamily> =
+        families.iter().map(FontFamily::from).collect();
+    FontLibrary::with_shared(|lib| lib.collection_names(&families))
+}
+
 /// A text style from `obj`, which sits at `prefix` among the options --
 /// `textStyle.` for a paragraph's, nothing for a pushed style -- and the
 /// angle of the oblique it asks for, if any: Skia's font style has no field
@@ -663,6 +673,7 @@ fn parse_text_style<'a>(
 
     // fontFamilies
     if let Some(families) = font_families(cx, obj, prefix)? {
+        let families = collection_names(&families);
         style.set_font_families(&families);
     }
 
@@ -1102,6 +1113,7 @@ fn parse_paragraph_style<'a>(
             bool_option(cx, &strut_obj, "enabled")?.unwrap_or(true),
         );
         if let Some(families) = font_families(cx, &strut_obj, STRUT)? {
+            let families = collection_names(&families);
             strut.set_font_families(&families);
         }
         if let Some(size) = float_option(cx, &strut_obj, STRUT, "fontSize")? {

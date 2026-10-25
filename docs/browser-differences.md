@@ -110,6 +110,15 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   of its standard font, 10px Times, whatever family is named, with `rem`
   and the other root forms of 16px Times. This library uses the face its
   `serif` resolves to, which is Times where the system's `serif` is Times.
+- _A family list nothing answers draws in this library's `sans-serif`,
+  where Chrome uses its standard font._ What a list naming no available
+  family falls back to is the user agent's choice, and the canvas's own
+  default font, `10px sans-serif`, names this one. Chrome 152 on macOS
+  measures `Hamburgefonstiv` in `16px NoSuchFamilyAnywhere` at 111.70, as in
+  `16px Times` and `16px serif`, in a canvas and in an `OffscreenCanvas`
+  alike; here it measures 126.16, as in `16px sans-serif`. A quoted
+  `"serif"` with no family of that name is such a list. `new_font_collection`
+  in `src/node/font_library.rs` sets the default.
 - _`oblique <angle>` draws as CSS Fonts 4 matches it, and Chrome does not._
   Section 5.2, "Matching font styles", takes an oblique face leaning the
   angle's way first, sets a `slnt` axis to the angle where the family has

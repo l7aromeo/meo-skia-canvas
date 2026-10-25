@@ -641,11 +641,8 @@ impl Font {
         let canonical = canonical.join(" ");
 
         FontSpec {
-            families: self
-                .families
-                .iter()
-                .map(|family| family.matcher_name().to_string())
-                .collect(),
+            families: self.families.clone(),
+            collection_names: Vec::new(),
             size: self.size,
             line_height: self.line_height,
             weight: Weight::from(i32::from(self.weight)),
