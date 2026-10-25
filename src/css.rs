@@ -90,7 +90,7 @@ pub(crate) fn parse_size(text: &str, units: &FontUnits) -> Option<f32> {
     let per_px = match unit {
         // Zero is the one length CSS lets go unitless, because zero of
         // anything is the same zero.
-        "" if value == 0.0 => 1.0,
+        "" if written_zero(text) => 1.0,
         _ => units.px_per(&unit.to_ascii_lowercase())?,
     };
     Some(value * per_px)
@@ -399,6 +399,20 @@ pub(crate) fn number_length(text: &str) -> usize {
     at
 }
 
+/// Whether the CSS number opening `text` is zero as written: it has a digit
+/// and every digit before any exponent is `0`.
+///
+/// Read from the text rather than from the `f32` [`split_number`] gives,
+/// because CSS lets only zero go without a unit and a number other than
+/// zero can round to an `f32` zero: `1e-50` is held as 0 and is still a
+/// number that needs one.
+pub(crate) fn written_zero(text: &str) -> bool {
+    let number = text.get(..number_length(text)).unwrap_or("");
+    let mantissa = number.split(['e', 'E']).next().unwrap_or("");
+    mantissa.bytes().any(|b| b.is_ascii_digit())
+        && mantissa.bytes().all(|b| !b.is_ascii_digit() || b == b'0')
+}
+
 /// A CSS length split into the number, its unit, and its value in pixels.
 ///
 /// The three a [`Spacing`](crate::node::typography::Spacing) is built from.
@@ -424,17 +438,18 @@ pub(crate) struct Length {
 /// Chrome 152 ignores `calc()`, `min()` and the rest in `letterSpacing` and
 /// `wordSpacing`, while `ctx.filter` takes them.
 pub(crate) fn parse_length(text: &str) -> Option<Length> {
-    let (value, unit) = split_number(text.trim())?;
-    length_of(value, unit)
+    let text = text.trim();
+    let (value, unit) = split_number(text)?;
+    length_of(value, unit, written_zero(text))
 }
 
-/// A [`Length`] from a number and its unit as written, by the rules
-/// [`parse_length`] reads them with.
-fn length_of(value: f32, unit: &str) -> Option<Length> {
+/// A [`Length`] from a number, its unit as written and whether the number
+/// was written as zero, by the rules [`parse_length`] reads them with.
+fn length_of(value: f32, unit: &str, zero: bool) -> Option<Length> {
     let unit = unit.to_ascii_lowercase();
     if unit.is_empty() {
         // Zero is the one length CSS lets go unitless.
-        return (value == 0.0).then_some(Length {
+        return zero.then_some(Length {
             value,
             unit,
             pixels: 0.0,
@@ -481,9 +496,10 @@ pub(crate) fn parse_percentage(text: &str) -> Option<f32> {
 /// an angle, and Chrome refuses `hue-rotate(45)` but reads `hue-rotate(0)`,
 /// `rotate(0)` and `skewX(0)`.
 pub(crate) fn parse_angle(text: &str) -> Option<f32> {
-    let (value, unit) = split_number(text.trim())?;
+    let text = text.trim();
+    let (value, unit) = split_number(text)?;
     match unit {
-        "" if value == 0.0 => Some(0.0),
+        "" if written_zero(text) => Some(0.0),
         // Case-insensitive: CSS units are, and a browser takes `45DEG`.
         _ => Some(
             (f64::from(value) * angle_degrees(&unit.to_ascii_lowercase())?)
@@ -962,6 +978,30 @@ mod tests {
         assert_eq!(parse_size("4furlongs", &em()), None);
         assert_eq!(parse_size("", &em()), None);
         assert_eq!(parse_size("px", &em()), None);
+    }
+
+    #[test]
+    fn a_zero_is_read_from_its_digits_not_from_the_float() {
+        // `1e-50` is a number other than zero, so it needs a unit, though
+        // it rounds to an `f32` zero. Every spelling of zero goes unitless.
+        for text in ["1e-50", "-1e-50", "+1e-50", "0.1e-50", "1E-60"] {
+            assert_eq!(parse_size(text, &em()), None, "{text:?} as a size");
+            assert_eq!(parse_angle(text), None, "{text:?} as an angle");
+            assert!(parse_length(text).is_none(), "{text:?} as a length");
+        }
+        for text in ["0", "-0", "+0", "00", ".0", "0.000", "0e5", "0E-50"] {
+            assert_eq!(parse_size(text, &em()), Some(0.0), "{text:?}");
+            assert_eq!(parse_angle(text), Some(0.0), "{text:?}");
+            assert!(parse_length(text).is_some(), "{text:?}");
+        }
+        // A transform reads its numbers as `f64`, which `1e-400` still
+        // underflows.
+        for text in ["rotate(1e-400)", "translate(1e-400)", "skewX(-1e-400)"] {
+            assert!(parse_transform(text).is_none(), "{text:?}");
+        }
+        for text in ["rotate(0e5)", "translate(00)", "skewX(-.0)"] {
+            assert!(parse_transform(text).is_some(), "{text:?}");
+        }
     }
 
     #[test]
@@ -1893,9 +1933,10 @@ impl TransformArguments<'_> {
         if let Some(math) = self.math(at, Dimension::LENGTH) {
             return math;
         }
-        let (value, unit) = split_wide_number(self.args.get(at)?)?;
+        let arg = self.args.get(at)?;
+        let (value, unit) = split_wide_number(arg)?;
         match unit.as_str() {
-            "" => (value == 0.0).then_some(0.0),
+            "" => written_zero(arg).then_some(0.0),
             unit => Some(value * f64::from(absolute_px(unit)?)),
         }
     }
@@ -1914,9 +1955,10 @@ impl TransformArguments<'_> {
         let degrees = match self.math(at, Dimension::ANGLE) {
             Some(math) => math?,
             None => {
-                let (value, unit) = split_wide_number(self.args.get(at)?)?;
+                let arg = self.args.get(at)?;
+                let (value, unit) = split_wide_number(arg)?;
                 match unit.as_str() {
-                    "" => (value == 0.0).then_some(0.0)?,
+                    "" => written_zero(arg).then_some(0.0)?,
                     unit => value * angle_degrees(unit)?,
                 }
             }

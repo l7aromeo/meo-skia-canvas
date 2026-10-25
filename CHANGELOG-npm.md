@@ -156,8 +156,9 @@ removed and no signature moves.
 
 - **`letterSpacing` and `wordSpacing` take `"0"`.** CSS Values 4 lets a
   zero length be written without its unit, and `ctx.letterSpacing = "0"`
-  was ignored; it now sets no spacing and reads back as `0px`. Chrome
-  ignores it, and docs/browser-differences.md records the difference.
+  was ignored; it and any other unitless zero, such as `0.0` or `0e5`, now
+  set no spacing and read back as `0px`. Chrome ignores them, and
+  docs/browser-differences.md records the difference.
 
 - **`outlineText` and the ink box put every glyph where `fillText` draws
   it.** A glyph the shaper moves off its advance -- a mark stacked over

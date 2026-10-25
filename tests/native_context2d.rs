@@ -1651,6 +1651,32 @@ fn font_parse_reads_the_stretch_and_the_line_height() {
 }
 
 #[test]
+fn a_number_too_small_for_an_f32_is_still_not_zero() {
+    // CSS lets only zero go without a unit, and `1e-50` is not zero though
+    // an `f32` holds it as one: whether a number is zero is read from its
+    // digits.
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    for css in ["1e-50", "-1e-50"] {
+        assert!(
+            ctx.set_letter_spacing_css(css).is_err(),
+            "letter spacing {css:?}"
+        );
+        assert!(
+            ctx.set_word_spacing_css(css).is_err(),
+            "word spacing {css:?}"
+        );
+        assert!(
+            Font::from_css(&format!("{css} Arial")).is_none(),
+            "font size {css:?}"
+        );
+    }
+    for css in ["0", "0e5", "00", ".0"] {
+        assert!(ctx.set_letter_spacing_css(css).is_ok(), "{css:?}");
+    }
+}
+
+#[test]
 fn the_font_string_reads_back_as_the_font_set() {
     // The getter reports the font as CSSOM serializes it, which keeps all a
     // `Font` holds but its line height, as the Canvas API says ("with no

@@ -44,6 +44,7 @@ use crate::{
     css::{
         Dimension, Expect, FontUnits, Percent, ROOT_FONT_PX, evaluate, is_math,
         parse_angle, parse_decoration, parse_filter, split_number,
+        written_zero,
     },
     error::Error,
     export::VectorFeatures,
@@ -903,7 +904,7 @@ fn font_length(text: &str) -> Option<f32> {
     let unit = unit.to_ascii_lowercase();
     match unit.as_str() {
         "%" => Some(value / 100.0 * CANVAS_DEFAULT_FONT_PX),
-        "" => (value == 0.0).then_some(0.0),
+        "" => written_zero(text).then_some(0.0),
         _ => Some(value * parent_units().px_per(&unit)?),
     }
     .filter(|px| px.is_finite())

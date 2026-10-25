@@ -1886,7 +1886,9 @@ impl Spacing {
         // ignores `ctx.letterSpacing = "0"`; docs/browser-differences.md
         // records it.
         if length.unit.is_empty() {
-            return (length.value == 0.0).then(Self::default);
+            // `parse_length` takes a bare number only where it is written
+            // as zero.
+            return Some(Self::default());
         }
         Self::parse(length.value, length.unit, length.pixels)
     }
