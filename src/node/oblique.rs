@@ -35,7 +35,7 @@ use crate::{
     context2d::DEFAULT_OBLIQUE_DEGREES,
     font::leans_as_asked,
     node::typography::{
-        SLNT, Shear, clusters_under, painted_positions, run_shear, sheared_blob,
+        SLNT, Shear, cluster_under, painted_positions, run_shear, sheared_blob,
     },
 };
 use skia_safe::{
@@ -430,7 +430,7 @@ impl Sheared {
     /// out at the same width, and finds the oblique ranges' glyphs again.
     ///
     /// A glyph's text is found by asking the paragraph for the cluster
-    /// under it -- see `clusters_under`.
+    /// under it -- see `cluster_under`.
     pub(crate) fn lay_out(&mut self, paragraph: &mut Paragraph, width: f32) {
         for pass in [&mut self.under, &mut self.decorations]
             .into_iter()
@@ -460,11 +460,22 @@ impl Sheared {
         self.runs = visited
             .into_iter()
             .flat_map(|(font, glyphs, positions, origin, advance)| {
-                let ranges: Vec<Option<usize>> =
-                    clusters_under(paragraph, origin, &positions, advance)
-                        .into_iter()
-                        .map(|cluster| self.range_of(cluster?.start))
-                        .collect();
+                let range = |at| {
+                    let cluster = cluster_under(
+                        paragraph, origin, &positions, advance, at,
+                    );
+                    self.range_of(cluster?.start)
+                };
+                // An oblique style is a font of its own, so a run is all
+                // oblique or none of it, and its text is contiguous: where
+                // its end glyphs share a range, every glyph between does.
+                // Only a run across two oblique ranges, painted apart, needs
+                // each glyph asked.
+                let ends = (range(0), range(glyphs.len().saturating_sub(1)));
+                let ranges: Vec<Option<usize>> = match ends {
+                    (first, last) if first == last => vec![first; glyphs.len()],
+                    _ => (0..glyphs.len()).map(range).collect(),
+                };
                 let shear =
                     run_shear(&font.typeface(), Some(DEFAULT_OBLIQUE_DEGREES));
                 ranges
@@ -588,7 +599,7 @@ mod tests {
         builder.build()
     }
 
-    /// The second defect `clusters_under` works around, measured directly:
+    /// The second defect `cluster_under` works around, measured directly:
     /// for a run that does not start the text, the offset after its last
     /// glyph -- the end of the run -- is not the end of the run.
     ///

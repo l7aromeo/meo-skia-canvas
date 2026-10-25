@@ -889,12 +889,12 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   where it took 6.2, and 11.8 underlined where it took 6.8. Upright text
   is unchanged, at 6.2 µs before and after.
 
-  A paragraph with an oblique range is laid out twice as slowly -- about
-  58 µs where it took 28, for 109 characters at 24px with 66 of them
-  oblique, in a release build on macOS -- because each of its glyphs is matched to its text
-  again, and draws about as fast, or about 40% slower where the range is
-  underlined, which takes a second paragraph. A paragraph with none costs
-  what it did.
+  A paragraph with an oblique range takes longer to lay out -- for 109
+  characters at 24px with 66 of them oblique, in a release build on macOS,
+  about 39 µs where it took 28, and 59 where it took 28 when the range is
+  underlined, which takes a paragraph of its own for the decorations --
+  and draws about as fast, or about 30% slower underlined. A paragraph with
+  none costs what it did.
 
 - **`measureText` works out the ink box only when it is read.** The four
   `actualBoundingBox` values and `lines` come from the outline of every
