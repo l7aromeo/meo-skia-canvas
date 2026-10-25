@@ -5318,7 +5318,9 @@ export interface TextFontFeatures {
   name: string | null;
   /**
    * Feature selector: `1` to enable, `0` to disable, or an index where the
-   * feature offers alternates.
+   * feature offers alternates. A whole number, as CSS's
+   * `font-feature-settings` takes, up to 2147483647; another is a
+   * `RangeError`.
    */
   value?: number;
 }
@@ -5377,9 +5379,10 @@ export interface TextStyleInput {
     /**
      * `0` upright, `1` italic, `2` oblique: 14deg, drawn as `oblique` text on
      * a canvas is -- the family's face that leans as asked, or else its
-     * upright face sheared, before any italic.
+     * upright face sheared, before any italic. Another number is a
+     * `RangeError`.
      */
-    slant?: number;
+    slant?: 0 | 1 | 2;
   };
   /** Extra space added after each glyph, in pixels. */
   letterSpacing?: number;
@@ -5404,9 +5407,13 @@ export interface TextStyleInput {
    * metrics. Setting it at all turns on the override.
    */
   heightMultiplier?: number;
-  /** Which lines to draw. Combine with `|`: `Underline | LineThrough`. */
+  /**
+   * Which lines to draw. Combine with `|`: `Underline | LineThrough`. A
+   * number that is not a whole mask of those flags, `0` to `7`, is a
+   * `RangeError`.
+   */
   decoration?: TextDecorationMask;
-  /** How those lines are drawn. A code outside the set is refused. */
+  /** How those lines are drawn. A code outside the set is a `RangeError`. */
   decorationStyle?: TextDecorationStyleValue;
   /** Color of the decoration lines. Defaults to the text color. */
   decorationColor?: TextColorInput;
@@ -5536,13 +5543,14 @@ export interface ParagraphStyleInput {
     | null;
 
   /**
-   * Base direction for the paragraph. Matched case-insensitively; an
-   * unrecognised value is ignored.
+   * Base direction for the paragraph, matched without ASCII case. Another
+   * value is a `TypeError`.
    */
-  textDirection?: "ltr" | "rtl" | (string & {}) | null;
+  textDirection?: "ltr" | "rtl" | null;
   /**
    * Cap on the number of lines. Anything past it is dropped, which
-   * {@link Paragraph.didExceedMaxLines} then reports.
+   * {@link Paragraph.didExceedMaxLines} then reports. A whole number from
+   * `1`; another is a `RangeError`.
    */
   maxLines?: number;
   /** String appended to the last line when `maxLines` truncated the text. */
@@ -5684,8 +5692,8 @@ export class ParagraphBuilder {
    * Reserve a rectangle in the text flow for something drawn separately.
    *
    * `align` and `baseline` were accepted and discarded until 4.2.0, so every
-   * placeholder laid out on the baseline whatever was passed. A value outside
-   * either set now throws rather than silently reverting to the default.
+   * placeholder laid out on the baseline whatever was passed. A number
+   * outside either set is a `RangeError` rather than the default.
    *
    * @param align - see {@link PlaceholderAlignment}
    * @param baseline - see {@link TextBaseline}; consulted by the three
@@ -5778,7 +5786,7 @@ export class Paragraph {
    * default), `1` the full line height, `2`, `3` and `4` distributing line
    * spacing to the middle, top and bottom, and `5` the strut's height.
    * `wStyle` is `0` for tight or `1` to stretch the last box of a line to
-   * the layout width.
+   * the layout width. A number outside either set is a `RangeError`.
    */
   getRectsForRange(
     start: number,

@@ -59,6 +59,32 @@ removed and no signature moves.
   Migrate: pass one of the four codes, rounding or checking a computed
   value first, and type it as `TextHeightBehavior`.
 
+- **A numeric code is read from the number given, and a number outside its
+  set is a `RangeError` naming it.** `fontStyle.slant`, `decorationStyle`,
+  `addPlaceholder`'s `align` and `baseline`, and `getRectsForRange`'s two
+  styles truncated a fraction toward zero, so `slant: 1.5` was italic, and
+  named `1e10` as `2147483647` in the refusal. `decoration` dropped a
+  fraction and any bit past the three flags, so `decoration: 8` drew no
+  line and `1.5` an underline; a feature's `value` was truncated and
+  saturated; and `maxLines` read `1.5` as 1, and `0` and `-1` as one line.
+  Each now takes a whole number in its set -- `decoration` a mask of `0`
+  to `7`, `maxLines` a count from `1`, a feature's `value` one from `0` to
+  `2147483647` -- and refuses another with a `RangeError` spelling the
+  number as JavaScript does. `addPlaceholder` raised a `TypeError` for a
+  code outside its set, and raises the `RangeError` the others do.
+  `fontStyle.slant` is typed `0 | 1 | 2`.
+
+  Migrate: pass a whole code from the set, rounding a computed one first,
+  and catch `RangeError` where `addPlaceholder` was caught for a
+  `TypeError`.
+
+- **A `textDirection` other than `"ltr"` or `"rtl"` is a `TypeError`.** It
+  was ignored, leaving the paragraph left to right. Case still does not
+  matter. The option is typed `"ltr" | "rtl" | null`, where any string
+  compiled.
+
+  Migrate: pass `"ltr"` or `"rtl"`, or leave the option out.
+
 - **`TextMetrics` keeps its values on the prototype, as HTML's interface
   does.** A measurement was a frozen object holding every value as its own
   property; each is now a getter on `TextMetrics.prototype`, enumerable as
