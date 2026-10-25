@@ -49,6 +49,18 @@ removed and no signature moves.
   Migrate: read the values by name, or copy them with `m.toJSON()` where
   you spread a measurement or listed its keys.
 
+- **A colour function written with a space before its `(` is refused.**
+  `'rgb (255 0 0)'`, `'lab (50 40 30)'`, `'color (srgb 1 0 0)'` and the
+  rest painted as if the space were not there. CSS Syntax reads such a
+  name and its brackets as a word and a block, not a function, and Chrome
+  153 ignores every one as a `fillStyle`. Each is now refused as any colour
+  that does not parse is: `fillStyle`, `strokeStyle` and `shadowColor`
+  ignore it and keep what they held, and `addColorStop` throws its
+  `SyntaxError`. Nothing deprecated this first; it went with the parser
+  that read it.
+
+  Migrate: write the name and its `(` together, `rgb(255 0 0)`.
+
 - **Legacy comma syntax CSS Color 4 does not allow is refused.** Each of
   these painted here and is ignored by Chrome 153: numbers and percentages
   mixed, `'rgb(255, 0%, 0)'`; separators mixed, `'rgb(255,0 0)'`; `hsl()`

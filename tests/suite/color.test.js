@@ -87,6 +87,9 @@ describe("colour forms no CSS defines", () => {
       "f00",
       "hwba(from red h w b)",
       "hsv(from red h s v)",
+      "rgb (255 0 0)",
+      "lab (50 40 30)",
+      "color (srgb 1 0 0)",
     ]) {
       ctx.fillStyle = "#123456";
       ctx.fillStyle = css;

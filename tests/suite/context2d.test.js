@@ -2281,10 +2281,8 @@ describe("Context2D", () => {
 
     test("color() names a space of its own", () => {
       // `color(display-p3 …)` is how CSS Color 4 names a colour outside sRGB.
-      // csscolorparser does not implement the function, so this is parsed
-      // here -- and the colour is kept in the space it was named in rather
-      // than converted, which is what makes it exact on a canvas of that
-      // space.
+      // The colour is kept in the space it was named in rather than
+      // converted, which is what makes it exact on a canvas of that space.
       for (let css of [
         "color(display-p3 0.4 0.8 0.3)",
         "color(rec2020 1 0 0)",
