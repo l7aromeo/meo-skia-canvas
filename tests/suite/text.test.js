@@ -1701,6 +1701,157 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
     );
   });
 
+  // A sheared glyph is drawn in a sheared font, not under a sheared canvas:
+  // the canvas transform carries the paint too, so a gradient, a pattern, a
+  // shadow's blur and a stroke's pen would lean with the glyphs. Each is
+  // held to the paint in user space, or to the same outline drawn as a path.
+  test("a gradient is not sheared with the glyphs", () => {
+    const W = 510,
+      H = 120;
+    const opaque = (ctx, check) => {
+      const d = ctx.getImageData(0, 0, W, H).data;
+      let n = 0,
+        off = 0;
+      for (let y = 0; y < H; y++)
+        for (let x = 0; x < W; x++) {
+          const i = (y * W + x) * 4;
+          if (d[i + 3] !== 255) continue;
+          n++;
+          off += check(d, i, x);
+        }
+      return { n, off: off / n };
+    };
+    for (const angle of [14, 20, 50]) {
+      const font = `bold oblique ${angle}deg 90px Oswald`;
+
+      // The gradient's red is the canvas x it was drawn at.
+      const g = new Canvas(W, H).getContext("2d"),
+        ramp = g.createLinearGradient(0, 0, W - 1, 0);
+      ramp.addColorStop(0, "rgb(0,0,0)");
+      ramp.addColorStop(1, "rgb(255,0,0)");
+      g.fillStyle = ramp;
+      g.font = font;
+      g.fillText("IIIIIIII", 150, 100);
+      const ramped = opaque(g, (d, i, x) => d[i] - (x / (W - 1)) * 255);
+      assert.ok(ramped.n > 0, "the control: the text is drawn");
+      assert.ok(
+        Math.abs(ramped.off) < 2,
+        `${font}: a gradient stays where it was set, red off by ${ramped.off}`,
+      );
+    }
+  });
+
+  test("a pattern is not sheared with the glyphs", () => {
+    const W = 510,
+      H = 120;
+    const opaque = (ctx, check) => {
+      const d = ctx.getImageData(0, 0, W, H).data;
+      let n = 0,
+        off = 0;
+      for (let y = 0; y < H; y++)
+        for (let x = 0; x < W; x++) {
+          const i = (y * W + x) * 4;
+          if (d[i + 3] !== 255) continue;
+          n++;
+          off += check(d, i, x);
+        }
+      return { n, off: off / n };
+    };
+    for (const angle of [14, 20, 50]) {
+      const font = `bold oblique ${angle}deg 90px Oswald`;
+
+      // Stripes five pixels wide, red then blue, from the canvas's x = 0.
+      const tile = new Canvas(10, 1).getContext("2d");
+      tile.fillStyle = "red";
+      tile.fillRect(0, 0, 5, 1);
+      tile.fillStyle = "blue";
+      tile.fillRect(5, 0, 5, 1);
+      const p = new Canvas(W, H).getContext("2d");
+      p.imageSmoothingEnabled = false;
+      p.fillStyle = p.createPattern(tile.canvas, "repeat");
+      p.font = font;
+      p.fillText("IIIIIIII", 150, 100);
+      const striped = opaque(p, (d, i, x) =>
+        Number(d[i] > d[i + 2] !== x % 10 < 5),
+      );
+      assert.ok(
+        striped.off < 0.01,
+        `${font}: a pattern stays where it was set, ${striped.off} of its pixels moved`,
+      );
+    }
+  });
+
+  test("a shadow's blur is not sheared with the glyphs", () => {
+    // The spread of a shadow across one row, against the same text drawn
+    // first and given its shadow as an image.
+    const W = 700,
+      H = 260,
+      ROW = 110,
+      AWAY = 300;
+    const spread = (ctx) => {
+      const d = ctx.getImageData(0, 0, W, H).data;
+      let m = 0,
+        s = 0,
+        s2 = 0;
+      for (let x = AWAY; x < W; x++) {
+        const a = d[(ROW * W + x) * 4 + 3];
+        m += a;
+        s += a * x;
+        s2 += a * x * x;
+      }
+      return Math.sqrt(s2 / m - (s / m) ** 2);
+    };
+    const shadowed = (ctx) => {
+      ctx.shadowColor = "blue";
+      ctx.shadowBlur = 40;
+      ctx.shadowOffsetX = AWAY;
+    };
+    for (const angle of [30, 60]) {
+      const font = `bold oblique ${angle}deg 100px Oswald`;
+      const direct = new Canvas(W, H).getContext("2d");
+      direct.font = font;
+      shadowed(direct);
+      direct.fillText("I", 100, 150);
+      const text = new Canvas(W, H).getContext("2d");
+      text.font = font;
+      text.fillText("I", 100, 150);
+      const reference = new Canvas(W, H).getContext("2d");
+      shadowed(reference);
+      reference.drawImage(text.canvas, 0, 0);
+      near(spread(direct), spread(reference), 0.5, `${font}: shadow spread`);
+    }
+  });
+
+  test("a stroke's pen is not sheared with the glyphs", () => {
+    // strokeText against stroking the outline outlineText returns, which
+    // is the sheared outline under an unsheared pen.
+    const W = 700,
+      H = 260;
+    for (const angle of [30, 60]) {
+      const font = `bold oblique ${angle}deg 100px Oswald`;
+      const stroked = new Canvas(W, H).getContext("2d"),
+        outlined = new Canvas(W, H).getContext("2d");
+      for (const ctx of [stroked, outlined]) {
+        ctx.font = font;
+        ctx.lineWidth = 12;
+      }
+      stroked.strokeText("IH", 150, 220);
+      const outline = outlined.outlineText("IH");
+      outlined.translate(150, 220);
+      outlined.stroke(outline);
+      const ink = (ctx) =>
+        ctx
+          .getImageData(0, 0, W, H)
+          .data.reduce((sum, v, i) => (i % 4 === 3 ? sum + v : sum), 0);
+      const a = ink(stroked),
+        b = ink(outlined);
+      assert.ok(
+        Math.abs(a - b) / b < 0.02,
+        `${font}: strokeText inks ${a / 255}, the stroked outline ${b / 255}`,
+      );
+    }
+  });
+
   test("a shear to a right angle draws nothing, and nearer one a sliver", () => {
     // As the angle nears 90deg a sheared glyph thins towards its baseline,
     // so its coverage of any finite region tends to nothing: 90deg is that
