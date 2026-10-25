@@ -1047,13 +1047,13 @@ fn parse_paragraph_style<'a>(
         style.set_text_align(align.to_skia());
     }
 
-    // textDirection, matched without ASCII case. Another name is a
-    // `TypeError` by rule 2, a value outside an enumeration, as WebIDL
-    // raises for a dictionary member of an enumeration type.
+    // textDirection, matched exactly as WebIDL matches an enumeration's
+    // values. Another name is a `TypeError` by rule 2, as WebIDL raises for
+    // a dictionary member of an enumeration type.
     if let Some(dir_str) = string_option(cx, obj, "", "textDirection")? {
-        let direction = match dir_str {
-            _ if dir_str.eq_ignore_ascii_case("rtl") => TextDirection::RTL,
-            _ if dir_str.eq_ignore_ascii_case("ltr") => TextDirection::LTR,
+        let direction = match dir_str.as_str() {
+            "rtl" => TextDirection::RTL,
+            "ltr" => TextDirection::LTR,
             _ => {
                 return cx.throw_type_error(format!(
                     "`textDirection` takes \"ltr\" or \"rtl\", not {dir_str:?}"

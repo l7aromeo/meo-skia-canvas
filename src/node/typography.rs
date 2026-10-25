@@ -1664,8 +1664,11 @@ pub fn from_slant(slant: Slant) -> String {
     .to_string()
 }
 
-pub fn to_width(width_name: &str) -> Width {
-    match width_name.to_lowercase().as_str() {
+/// The width a `fontStretch` name asks for, or `None` for a name the
+/// enumeration does not have. Matched exactly, as WebIDL matches an
+/// enumeration's values: Chrome ignores `"CONDENSED"`.
+pub fn to_width(width_name: &str) -> Option<Width> {
+    Some(match width_name {
         "ultra-condensed" => Width::ULTRA_CONDENSED,
         "extra-condensed" => Width::EXTRA_CONDENSED,
         "condensed" => Width::CONDENSED,
@@ -1674,8 +1677,9 @@ pub fn to_width(width_name: &str) -> Width {
         "expanded" => Width::EXPANDED,
         "extra-expanded" => Width::EXTRA_EXPANDED,
         "ultra-expanded" => Width::ULTRA_EXPANDED,
-        _ => Width::NORMAL,
-    }
+        "normal" => Width::NORMAL,
+        _ => return None,
+    })
 }
 
 pub fn from_width(width: Width) -> String {
@@ -1693,8 +1697,10 @@ pub fn from_width(width: Width) -> String {
     .to_string()
 }
 
+/// Matched exactly, as WebIDL matches an enumeration's values: Chrome
+/// ignores `"CENTER"` as it ignores any other name it does not have.
 pub fn to_text_align(mode_name: &str) -> Option<CrateTextAlign> {
-    let mode = match mode_name.to_lowercase().as_str() {
+    let mode = match mode_name {
         "left" => CrateTextAlign::Left,
         "right" => CrateTextAlign::Right,
         "center" => CrateTextAlign::Center,
@@ -1760,8 +1766,9 @@ pub enum Baseline {
     Bottom,
 }
 
+/// Matched exactly, as [`to_text_align`] is.
 pub fn to_text_baseline(mode_name: &str) -> Option<CrateTextBaseline> {
-    let mode = match mode_name.to_lowercase().as_str() {
+    let mode = match mode_name {
         "top" => CrateTextBaseline::Top,
         "hanging" => CrateTextBaseline::Hanging,
         "middle" => CrateTextBaseline::Middle,

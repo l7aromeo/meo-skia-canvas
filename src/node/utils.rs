@@ -3355,8 +3355,10 @@ pub fn path2d_arg<'a>(
 
 use crate::node::filter::SamplingQuality;
 
+/// The quality an `imageSmoothingQuality` name asks for, matched exactly as
+/// WebIDL matches an enumeration's values.
 pub fn to_filter_quality(mode_name: &str) -> Option<SamplingQuality> {
-    let mode = match mode_name.to_lowercase().as_str() {
+    let mode = match mode_name {
         "low" => SamplingQuality::Low,
         "medium" => SamplingQuality::Medium,
         "high" => SamplingQuality::High,
@@ -3411,8 +3413,10 @@ use skia_safe::{
     TileMode,
     TileMode::{Decal, Repeat},
 };
+/// The tiling a `createPattern` repetition asks for, matched exactly: the
+/// standard refuses one not "identical to" its four names.
 pub fn to_repeat_mode(repeat: &str) -> Option<(TileMode, TileMode)> {
-    let mode = match repeat.to_lowercase().as_str() {
+    let mode = match repeat {
         "repeat" | "" => (Repeat, Repeat),
         "repeat-x" => (Repeat, Decal),
         "repeat-y" => (Decal, Repeat),
@@ -3429,9 +3433,10 @@ use skia_safe::PaintCap;
 ///
 /// Returns the crate's type rather than Skia's, so the binding and a Rust
 /// caller name the same three caps -- and a name the crate has no word for
-/// cannot be reached from JavaScript. The three arms are the whole enum.
+/// cannot be reached from JavaScript. The three arms are the whole enum,
+/// matched exactly as WebIDL matches an enumeration's values.
 pub fn to_stroke_cap(mode_name: &str) -> Option<StrokeCap> {
-    let mode = match mode_name.to_lowercase().as_str() {
+    let mode = match mode_name {
         "butt" => StrokeCap::Butt,
         "round" => StrokeCap::Round,
         "square" => StrokeCap::Square,
@@ -3454,10 +3459,10 @@ use skia_safe::PaintJoin;
 
 /// The crate's [`StrokeJoin`] a `lineJoin` name asks for.
 ///
-/// As [`to_stroke_cap`]: the crate's type, and the three arms are the whole
-/// enum.
+/// As [`to_stroke_cap`]: the crate's type, the three arms are the whole
+/// enum, and they are matched exactly.
 pub fn to_stroke_join(mode_name: &str) -> Option<StrokeJoin> {
-    let mode = match mode_name.to_lowercase().as_str() {
+    let mode = match mode_name {
         "miter" => StrokeJoin::Miter,
         "round" => StrokeJoin::Round,
         "bevel" => StrokeJoin::Bevel,
@@ -3477,8 +3482,10 @@ pub fn from_stroke_join(mode: PaintJoin) -> String {
 
 use crate::paint::BlendMode as CrateBlend;
 use skia_safe::BlendMode as SkBlend;
+/// The blend a `globalCompositeOperation` name asks for, matched exactly:
+/// the standard ignores a value not "identical to" one it lists.
 pub fn to_blend_mode(mode_name: &str) -> Option<CrateBlend> {
-    let mode = match mode_name.to_lowercase().as_str() {
+    let mode = match mode_name {
         "source-over" => CrateBlend::SourceOver,
         "destination-over" => CrateBlend::DestinationOver,
         "copy" => CrateBlend::Copy,
@@ -3518,19 +3525,22 @@ pub fn to_blend_mode(mode_name: &str) -> Option<CrateBlend> {
 ///
 /// The standard names are tried first, so [`to_blend_mode`] stays the single
 /// definition of what the Canvas API accepts and this only adds to it: Skia's
-/// own `src`/`dst` shorthands and CanvasKit's camel case, matched after
-/// lowercasing so `srcOver` and `srcover` are one arm.
+/// own `src`/`dst` shorthands and CanvasKit's camel case. The name is
+/// lowercased before either is tried, so `srcOver` and `srcover` are one
+/// arm, and `Multiply` is `multiply` here where `globalCompositeOperation`
+/// ignores it.
 ///
 /// Kept separate rather than folded into [`to_blend_mode`] on purpose. These
 /// spellings belong to the CanvasKit-mirroring surface; letting
 /// `globalCompositeOperation` accept `"srcOver"` would put a name in the core
 /// API that no browser has.
 pub fn to_filter_blend_mode(mode_name: &str) -> Option<CrateBlend> {
-    if let Some(mode) = to_blend_mode(mode_name) {
+    let mode_name = mode_name.to_lowercase();
+    if let Some(mode) = to_blend_mode(&mode_name) {
         return Some(mode);
     }
 
-    Some(match mode_name.to_lowercase().as_str() {
+    Some(match mode_name.as_str() {
         "src" | "source" => CrateBlend::Copy,
         "dst" => CrateBlend::Destination,
         "srcover" | "src-over" => CrateBlend::SourceOver,
@@ -3666,8 +3676,10 @@ pub fn to_path_op(op_name: &str) -> Option<PathOp> {
 }
 
 use skia_safe::path_1d_path_effect;
+/// The style a `lineDashFit` name asks for, matched exactly as the standard
+/// attributes beside it are.
 pub fn to_1d_style(mode_name: &str) -> Option<path_1d_path_effect::Style> {
-    let mode = match mode_name.to_lowercase().as_str() {
+    let mode = match mode_name {
         "move" => path_1d_path_effect::Style::Translate,
         "turn" => path_1d_path_effect::Style::Rotate,
         "follow" => path_1d_path_effect::Style::Morph,
@@ -3886,15 +3898,15 @@ mod tests {
 
     /// Every arm of the two blend parsers is reachable.
     ///
-    /// Both match on `mode_name.to_lowercase()`, so an arm whose literal
-    /// carries a capital can never match. That is not hypothetical:
-    /// [`enum_arg_or`] carries a `debug_assert!` against exactly this for
-    /// table-driven paths, and its comment records that it is "how the camel
-    /// case blend names went unreachable for as long as they were
-    /// advertised". These two are `match` arms rather than tables, so that
-    /// assertion cannot reach them -- and a dead arm raises no warning,
-    /// fails no test, and reads as a supported spelling to anyone reading
-    /// the source.
+    /// `to_filter_blend_mode` lowercases a name before either `match` sees
+    /// it, so an arm whose literal carries a capital can never match. That is
+    /// not hypothetical: [`enum_arg_or`] carries a `debug_assert!` against
+    /// exactly this for table-driven paths, and its comment records that it
+    /// is "how the camel case blend names went unreachable for as long as
+    /// they were advertised". These two are `match` arms rather than
+    /// tables, so that assertion cannot reach them -- and a dead arm raises
+    /// no warning, fails no test, and reads as a supported spelling to
+    /// anyone reading the source.
     ///
     /// The arms are read out of this file rather than listed here, because a
     /// list would be a second copy to maintain and would go stale in the

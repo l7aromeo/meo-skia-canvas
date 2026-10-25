@@ -1864,21 +1864,83 @@ describe("Context2D", () => {
       ctx.filter = "none";
     });
 
-    // Units and keywords are ASCII case-insensitive wherever they appear, not
-    // only in the `font` shorthand. Each of these reaches a different parser.
-    describe("case-insensitivity outside the font shorthand", () => {
-      test("fontStretch", () => {
-        for (let [written, expected] of [
-          ["condensed", "condensed"],
-          ["CONDENSED", "condensed"],
-          ["Semi-Expanded", "semi-expanded"],
-          ["ULTRA-CONDENSED", "ultra-condensed"],
-        ]) {
-          ctx.fontStretch = written;
-          assert.equal(ctx.fontStretch, expected, written);
+    // An enumerated attribute takes its names exactly, as WebIDL matches an
+    // enumeration's values: a name in another case is not one of them, and
+    // the setter ignores it. Each row was measured in Chrome 152.0.7977.167,
+    // which left every attribute at its initial value for each spelling
+    // here and took each exact name.
+    describe("an enumerated attribute matches its names exactly", () => {
+      const ROWS = [
+        ["textAlign", "center", ["CENTER", "Center"]],
+        ["textBaseline", "top", ["TOP"]],
+        ["direction", "rtl", ["RTL", "Rtl"]],
+        ["lineCap", "round", ["ROUND"]],
+        ["lineJoin", "bevel", ["BEVEL"]],
+        ["imageSmoothingQuality", "high", ["HIGH"]],
+        // U+212A KELVIN SIGN lowercases to "k" under Unicode's rules.
+        [
+          "globalCompositeOperation",
+          "darken",
+          ["DARKEN", "Darken", "dar\u212Aen"],
+        ],
+        ["fontStretch", "condensed", ["CONDENSED", "Semi-Expanded"]],
+        ["fontVariantCaps", "small-caps", ["SMALL-CAPS"]],
+        // `lineDashFit` is this library's, and matches as its siblings do.
+        ["lineDashFit", "follow", ["FOLLOW"]],
+      ];
+
+      test("ignores a name in another case", () => {
+        const taken = [];
+        for (const [attr, , spellings] of ROWS)
+          for (const written of spellings) {
+            const fresh = new Canvas(4, 4).getContext("2d"),
+              before = fresh[attr];
+            fresh[attr] = written;
+            if (fresh[attr] !== before)
+              taken.push(
+                `${attr} = ${JSON.stringify(written)}: ${fresh[attr]}`,
+              );
+          }
+        assert.deepEqual(taken, []);
+      });
+
+      test("takes each exact name", () => {
+        for (const [attr, exact] of ROWS) {
+          const fresh = new Canvas(4, 4).getContext("2d");
+          fresh[attr] = exact;
+          assert.equal(fresh[attr], exact, attr);
         }
       });
 
+      // A name in another case leaves a value that is not the default in
+      // place, rather than resetting it.
+      test("keeps the value it held", () => {
+        const fresh = new Canvas(4, 4).getContext("2d");
+        fresh.fontStretch = "condensed";
+        fresh.fontStretch = "EXPANDED";
+        assert.equal(fresh.fontStretch, "condensed");
+      });
+
+      // The standard names the exception: "If repetition is not identical
+      // to one of ..., then throw a SyntaxError DOMException." Chrome 152
+      // throws it for both of these.
+      test("createPattern refuses a repetition in another case", () => {
+        const source = new Canvas(2, 2);
+        for (const written of ["REPEAT", "Repeat-X", "NO-REPEAT"])
+          assert.throws(
+            () => ctx.createPattern(source, written),
+            (e) => e.name === "SyntaxError",
+            written,
+          );
+        assert.ok(ctx.createPattern(source, "repeat-x"));
+      });
+    });
+
+    // Units and keywords in a CSS value are ASCII case-insensitive wherever
+    // they appear, not only in the `font` shorthand. Each of these reaches a
+    // different parser. `fontStretch` is not one: it is an enumeration, and
+    // matched exactly above.
+    describe("case-insensitivity outside the font shorthand", () => {
       test("letterSpacing and wordSpacing", () => {
         // Only the absolute units. `parseFlexibleSize` has no `em` arm, so a
         // font-relative spacing produces `NaN` and the addon refuses it out

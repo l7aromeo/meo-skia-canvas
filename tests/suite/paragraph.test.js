@@ -880,7 +880,7 @@ describe("a numeric code is matched on the number it converts to", () => {
 
 describe("a textDirection outside its names", () => {
   test("is a TypeError naming the option", () => {
-    for (const value of ["up", "", "ltr ", "rtl\u0000"])
+    for (const value of ["up", "", "ltr ", "rtl\u0000", "RTL", "Ltr"])
       assert.throws(
         () => ParagraphBuilder.Make({ textDirection: value }),
         (e) => e instanceof TypeError && /`textDirection`/.test(e.message),
@@ -888,7 +888,7 @@ describe("a textDirection outside its names", () => {
       );
   });
 
-  test("is matched without ASCII case", () => {
+  test("lays out each of its names", () => {
     const start = (textDirection) => {
       const p = ParagraphBuilder.Make({
         textDirection,
@@ -904,8 +904,6 @@ describe("a textDirection outside its names", () => {
       start("ltr"),
       "the direction must move the text",
     );
-    assert.deepEqual(start("RTL"), start("rtl"));
-    assert.deepEqual(start("Ltr"), start("ltr"));
   });
 });
 
@@ -1888,8 +1886,8 @@ describe("a ParagraphBuilder option is converted as WebIDL converts it", () => {
       { valueOf: () => 1 },
     ],
     [STRING]: [1, true, null, {}, { toString: () => "ltr" }, 1n],
-    [DIRECTION]: ["ltr", "RTL", null, { toString: () => "rtl" }],
-    [ALIGN]: ["left", "CENTER", "start", null, { toString: () => "end" }],
+    [DIRECTION]: ["ltr", "rtl", null, { toString: () => "rtl" }],
+    [ALIGN]: ["left", "center", "start", null, { toString: () => "end" }],
     [BOOLEAN]: [1, 0, "", "x", null, {}, [], 0n, NaN, Symbol("s")],
     [SEQUENCE]: [[], new Set(), (function* () {})()],
     [DICTIONARY]: [null, {}, [], () => {}],
@@ -1919,8 +1917,8 @@ describe("a ParagraphBuilder option is converted as WebIDL converts it", () => {
     [DOUBLE]: ["abc", {}, NaN, Infinity, -Infinity, [1, 2], Symbol("s"), 1n],
     [COUNT]: ["abc", {}, NaN, Infinity, -Infinity, [1, 2], Symbol("s"), 1n],
     [STRING]: [Symbol("s")],
-    [DIRECTION]: [Symbol("s"), "up", "", 1, {}],
-    [ALIGN]: [Symbol("s"), "middle", "", 1, {}],
+    [DIRECTION]: [Symbol("s"), "up", "", 1, {}, "RTL"],
+    [ALIGN]: [Symbol("s"), "middle", "", 1, {}, "CENTER"],
     [BOOLEAN]: [],
     [SEQUENCE]: ["Arial", 1, true, null, {}, Symbol("s")],
     [DICTIONARY]: ["x", 1, true, Symbol("s"), 1n],
