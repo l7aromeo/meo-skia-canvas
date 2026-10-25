@@ -995,27 +995,30 @@ describe("measureText's width is the run's advance", () => {
     }
   });
 
-  // Chrome's box for a negative advance reaches back on the left to where
-  // the advance ends -- Blink's plain_text_node.cc moves the left edge of
-  // such a run's ink out to its width -- and keeps the ink's right edge,
-  // before the alignment shifts it by none, half or all of the width. Chrome
-  // 152, 40px Oswald: `a` at -50px reports a left of 32.96 though its ink
-  // begins 1.68 right of the origin.
-  test("a negative advance's box reaches back to where it ends", () => {
+  // A negative advance does not move the ink box: it is where the glyphs'
+  // ink is. Chrome's is not -- Blink's plain_text_node.cc moves the left
+  // edge of such a run's box out to the end of the advance, so `a` at -50px
+  // reports a left of 32.96 though its ink begins 1.68 right of the origin,
+  // and a lone space, which has no ink, reports 0.84.
+  // docs/browser-differences.md records it. Each value below is the union of
+  // the glyphs' own ink, each placed at the sum of the advances before it and
+  // their spacing, then shifted by the alignment; the right edges are
+  // Chrome's too.
+  test("a negative advance's ink box is where the ink is", () => {
     const ctx = new Canvas(10, 10).getContext("2d");
     ctx.font = "40px Oswald";
     for (const [letter, word, text, align, direction, left, right] of [
-      ["-23.12px", "0px", "abcd", "start", "ltr", 23.44, 15.48],
-      ["-50px", "0px", "a", "start", "ltr", 32.96, 15.48],
-      ["-100px", "0px", "abcd", "start", "ltr", 330.96, 15.48],
-      ["-30px", "0px", "ab", "start", "ltr", 25.08, 15.48],
-      ["-23.12px", "0px", "abcd", "right", "ltr", 0, 38.92],
-      ["-50px", "0px", "a", "right", "ltr", 0, 48.44],
-      ["-23.12px", "0px", "abcd", "center", "ltr", 11.72, 27.2],
-      ["-50px", "0px", "a", "center", "ltr", 16.48, 31.96],
-      ["-23.12px", "0px", "abcd", "start", "rtl", 0, 38.92],
-      ["-10px", "0px", " ", "start", "ltr", 0.84, 0],
-      // The ink already reaches past the advance: unchanged.
+      ["-23.12px", "0px", "abcd", "start", "ltr", 16.28, 15.48],
+      ["-50px", "0px", "a", "start", "ltr", -1.68, 15.48],
+      ["-100px", "0px", "abcd", "start", "ltr", 246.92, 15.48],
+      ["-30px", "0px", "ab", "start", "ltr", 10.72, 15.48],
+      ["-23.12px", "0px", "abcd", "right", "ltr", -7.16, 38.92],
+      ["-50px", "0px", "a", "right", "ltr", -34.64, 48.44],
+      ["-23.12px", "0px", "abcd", "center", "ltr", 4.56, 27.2],
+      ["-50px", "0px", "a", "center", "ltr", -18.16, 31.96],
+      ["-23.12px", "0px", "abcd", "start", "rtl", -7.16, 38.92],
+      ["-10px", "0px", " ", "start", "ltr", 0, 0],
+      // The ink reaches past the advance here, so Chrome agrees.
       ["0px", "-100px", "a b", "start", "ltr", 71.56, 15.48],
     ]) {
       ctx.letterSpacing = letter;
@@ -1026,11 +1029,11 @@ describe("measureText's width is the run's advance", () => {
         what = `${letter} ${word} ${JSON.stringify(text)} ${align} ${direction}`;
       assert.ok(
         Math.abs(m.actualBoundingBoxLeft - left) <= 0.02,
-        `${what} left: ${m.actualBoundingBoxLeft}, Chrome ${left}`,
+        `${what} left: ${m.actualBoundingBoxLeft}, ink ${left}`,
       );
       assert.ok(
         Math.abs(m.actualBoundingBoxRight - right) <= 0.02,
-        `${what} right: ${m.actualBoundingBoxRight}, Chrome ${right}`,
+        `${what} right: ${m.actualBoundingBoxRight}, ink ${right}`,
       );
     }
   });

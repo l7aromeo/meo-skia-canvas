@@ -45,9 +45,11 @@ window be changed after it opens.** No signature moves and nothing is removed.
   advance negative, and counts a trailing space's spacing.** At 40px Oswald
   with a letter spacing of -23.12px, `"abcd"` measured 0 where Chrome
   measures -23.44, and `"a "` at -10px 7.04 where it measures 6.2. The
-  width is now the signed advance, as Chrome reports it, and the ink box
-  of a negative advance reaches back on the left to where the advance
-  ends, as Chrome's does. The drawing is unchanged.
+  width is now the signed advance, as Chrome reports it. The ink box stays
+  where the glyphs' ink is: Chrome's reaches back on the left to where a
+  negative advance ends, a box wider than the text, and
+  docs/browser-differences.md records the difference. The drawing is
+  unchanged.
 - **A read on the GPU unpremultiplies as the raster engine does.**
   `get_image_data` on the GPU engine read a translucent pixel up to a level
   low wherever the unpremultiplied value fell on a half: red 128 at half

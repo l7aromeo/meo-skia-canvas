@@ -47,6 +47,17 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
 
 **Deliberate, and worth keeping.**
 
+- _A negative advance's ink box is the ink._ With a letter or word spacing
+  that makes a run's advance negative, Chrome's `actualBoundingBoxLeft`
+  reaches back to where the advance ends: Blink's `plain_text_node.cc` moves
+  the left edge of the run's box out to the smaller of the advance and the
+  ink's width, to cover glyphs a negative advance carries left without
+  measuring each. Chrome 152 at 40px Oswald reports `a` at -50px with a left
+  of 32.96, and a lone space, which has no ink, with 0.84. That box is wider
+  than the text, so it is not the ink box the property names; this library
+  reports the glyphs' own ink, -1.68 for that `a`, its ink beginning 1.68
+  right of the origin, and 0 for the space. The right edge and the width
+  agree with Chrome's.
 - _`imageSmoothingQuality = "high"` picks its sampler from the device-space
   scale._ The Chrome mapping this ports, and why one unconditional cubic is
   wrong twice over, are documented on `ScalingOperation` and
