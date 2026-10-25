@@ -222,11 +222,14 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   `italic 300 small-caps 16px Arial` in Chrome and
   `italic small-caps 300 condensed 16px "Arial"` here.
   `tests/assets/cases/css-fonts.json` holds both, the specification's form as `font` and Chrome's as `chrome`.
-- _`letterSpacing` and `wordSpacing` take `"0"`_, and `0.0`, `-0` and `+0`,
-  as no spacing, reading back as `0px`, where Chrome 152 ignores each. CSS
-  Values 4 section 6: "For zero lengths the unit identifier is optional (i.e.
-  can be syntactically represented as the <number> 0)." The crate's
-  `set_letter_spacing_css` and `set_word_spacing_css` take them too.
+- _`letterSpacing` and `wordSpacing` take `"0"`_, and any other zero
+  written without a unit -- `0.0`, `-0`, `00`, `0e5` -- as no spacing,
+  reading back as `0px`, where Chrome 152 ignored each of `0`, `-0`, `+0`
+  and `0.0`. CSS Values 4 section 6: "For zero lengths the unit identifier
+  is optional (i.e. can be syntactically represented as the <number> 0)."
+  Whether a number is zero is read from its digits, so `1e-50`, which a
+  32-bit float holds as zero, is still refused. The crate's
+  `set_letter_spacing_css` and `set_word_spacing_css` take the same zeros.
 
 **Gradient stops interpolate in sRGB, and Chrome does not. Ours is the
 specification's answer.** The HTML Standard, section 4.12.5.1.10 "Fill and

@@ -514,6 +514,25 @@ describe("ctx.font reports the serialized form, not the parsed one", () => {
     assert.equal(c.font, "16px serif");
   });
 
+  test("a number too small for a float is still not a zero", () => {
+    // CSS lets only zero go without a unit, and `1e-50` is not zero
+    // though a 32-bit float holds it as one.
+    const c = ctx();
+    for (const css of ["1e-50", "-1e-50"]) {
+      c.letterSpacing = "3px";
+      c.letterSpacing = css;
+      assert.equal(c.letterSpacing, "3px", `letterSpacing ${css}`);
+      c.wordSpacing = "3px";
+      c.wordSpacing = css;
+      assert.equal(c.wordSpacing, "3px", `wordSpacing ${css}`);
+      c.font = "16px serif";
+      c.font = `${css} serif`;
+      assert.equal(c.font, "16px serif", `font size ${css}`);
+    }
+    c.letterSpacing = "0e5";
+    assert.equal(c.letterSpacing, "0px");
+  });
+
   test("assigning the getter back is a no-op", () => {
     // The reason the serialisation rules are worth following. In a browser
     // `ctx.font = ctx.font` changes nothing; here it reparsed a different
