@@ -2,7 +2,7 @@
 use crate::shader::{AlphaInterpolation, GradientColorSpace, HueMethod};
 use neon::prelude::*;
 use skia_safe::{
-    Color, Color4f, Matrix, Point, Shader, TileMode,
+    Color, Color4f, ColorSpace, Matrix, Point, Shader, TileMode,
     gradient::{
         Colors as GradientColors, Gradient as SkGradient, Interpolation,
         shaders as gradient_shaders,
@@ -188,7 +188,7 @@ impl CanvasGradient {
                     colors.as_slice(),
                     Some(stops.as_slice()),
                     TileMode::Clamp,
-                    None,
+                    Some(ColorSpace::new_srgb()),
                 );
                 let gradient = SkGradient::new(stop_colors, interp);
                 gradient_shaders::linear_gradient(
@@ -209,7 +209,7 @@ impl CanvasGradient {
                     colors.as_slice(),
                     Some(stops.as_slice()),
                     TileMode::Clamp,
-                    None,
+                    Some(ColorSpace::new_srgb()),
                 );
                 let gradient = SkGradient::new(stop_colors, interp);
                 gradient_shaders::two_point_conical_gradient(
@@ -237,7 +237,7 @@ impl CanvasGradient {
                     colors.as_slice(),
                     Some(stops.as_slice()),
                     TileMode::Clamp,
-                    None,
+                    Some(ColorSpace::new_srgb()),
                 );
                 let gradient = SkGradient::new(stop_colors, interp);
                 // The old `sweep_with_interpolation` defaulted the
@@ -380,18 +380,19 @@ pub fn addColorStop(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         ));
     }
 
-    // Accept either a CSS string or a `[r, g, b, a]` premultiplied
-    // linear-light float array (the `Color4fInput` shape mirroring
-    // `TextColorInput`). A string naming a `color()` space is converted to
-    // sRGB here rather than tagged: Skia interpolates the stop values it is
-    // given, so an unconverted stop is read as sRGB and the space is lost --
-    // `color(srgb-linear 0.2 0.4 0.6)` painted 51,102,153 as a stop where the
-    // same string fills 124,170,203. The stops then flow into Skia's
-    // interpolation as-is; callers that need a non-default interpolation
-    // color space set it via `gradient.interpolation`.
+    // Accept either a CSS string or a `[r, g, b, a]` array of sRGB
+    // components (the `Color4fInput` shape mirroring `TextColorInput`).
+    // Every stop is converted to extended sRGB here, and
+    // the stops go to Skia tagged sRGB, so a stop is the colour it names on
+    // every canvas: Skia reads an untagged stop as already in the canvas's
+    // space, which made sRGB red a P3 canvas's own red, and a stop named in
+    // another space loses that space unless converted -- `color(srgb-linear
+    // 0.2 0.4 0.6)` painted 51,102,153 as a stop where the same string fills
+    // 124,170,203. Callers that need a non-default interpolation color space
+    // set it via `gradient.interpolation`.
     let color_arg = cx.argument::<JsValue>(2)?;
     if let Some((color4f, cs)) = color4f_in(&mut cx, color_arg) {
-        this.add_color_stop(offset, color4f_to_srgb(color4f, cs.as_ref()));
+        this.add_color_stop(offset, color4f_to_srgb(color4f, Some(&cs)));
     } else {
         // "If color cannot be parsed as a CSS <color> value, then throw a
         // SyntaxError" -- the Canvas standard, and again what Chrome raises.

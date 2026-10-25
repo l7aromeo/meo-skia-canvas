@@ -1953,6 +1953,14 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
         // which resolves the fallback itself. Setting it explicitly is what
         // makes the documented behaviour true.
         let decoration_color = style.decoration_color.unwrap_or(style.color);
+        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+        // Re-check: grep -n "fn set_decoration_color\|fn new(color"
+        // ~/.cargo/registry/src/*/skia-safe-*/src/modules/paragraph/text_style.
+        // rs ~/.cargo/registry/src/*/skia-safe-*/src/modules/paragraph/
+        // text_shadow.rs SkParagraph takes a decoration's colour, and a
+        // text shadow's, as an eight-bit sRGB `SkColor` and nothing
+        // wider, so a wide colour is gamut-mapped into sRGB on the way
+        // in.
         sk_style
             .set_decoration_color(rgba_linear_to_skia_color(decoration_color));
         if (style.decoration_thickness - 1.0).abs() > f32::EPSILON {
@@ -1963,9 +1971,8 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
     }
 
     for shadow in &style.shadows {
-        // `TextShadow::new` takes a Skia `Color` (u32 ARGB, sRGB-encoded);
-        // gamma-encode the linear input the same way as
-        // `decoration_color`.
+        // `TextShadow::new` takes a Skia `Color` (u32 ARGB, sRGB-encoded),
+        // reached the way `decoration_color` is, above.
         sk_style.add_shadow(SkTextShadow::new(
             rgba_linear_to_skia_color(shadow.color),
             SkPoint::new(shadow.offset_x, shadow.offset_y),

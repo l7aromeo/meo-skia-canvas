@@ -1,29 +1,50 @@
 use skia_safe::{Color as SkColor, Color4f, ColorSpace as SkColorSpace};
 
-use crate::{error::Error, node::utils::css_to_color4f};
+use crate::{
+    error::Error,
+    node::utils::{css_to_color4f, gamut_map_srgb},
+};
 
-/// Linear-light sRGB color space tag for `Color4f` handoffs to Skia.
+/// The space every [`RgbaLinear`] is in: linear-light sRGB, the tag a
+/// `Color4f` made from one goes to Skia with.
 ///
 /// Skia's `Paint::set_color4f`, `image_filters::drop_shadow`, and the
 /// gradient pipeline all interpret a `Color4f` as **sRGB-encoded** when
-/// no color space is supplied. Our `RgbaLinear` carries linear-light
-/// values, so we must always pair the `Color4f` with this tag to
-/// suppress Skia's implicit gamma decode. (Wider-gamut working spaces
-/// would tag with the surface's working space; for the SDR / linear
-/// sRGB primaries used internally, this matches.)
+/// no color space is supplied. Tagged with this, the linear-light values are
+/// read as what they are and converted to whatever canvas they are drawn
+/// on, so one `RgbaLinear` is one colour on every canvas.
 pub(crate) fn linear_srgb_color_space() -> SkColorSpace {
     SkColorSpace::new_srgb_linear()
 }
 
 /// Converts an `RgbaLinear` to a Skia `Color` (`u32` ARGB, sRGB-encoded by Skia
-/// convention).
+/// convention), for the Skia calls that take nothing wider: the lighting
+/// image filters, SkParagraph's decoration and text-shadow colours, and an
+/// SVG document's current colour.
 ///
-/// Used for sites where Skia accepts only an untagged `Color` (e.g.
-/// `TextStyle::set_decoration_color`, `TextShadow::new`): we unpremultiply,
-/// gamma-encode linear → sRGB, and quantize to `u8` so Skia's implicit "decode
-/// as sRGB" round-trips back to the original linear value.
+/// Unpremultiplied, then brought inside sRGB by CSS Color 4's gamut mapping
+/// -- see [`gamut_map_srgb`] -- rather than clipped channel by channel,
+/// which would shift a wide colour's hue; then gamma-encoded and quantized,
+/// so Skia's implicit "decode as sRGB" round-trips to the colour for any
+/// colour inside sRGB. A colour inside sRGB is not touched by the mapping.
 pub(crate) fn rgba_linear_to_skia_color(color: RgbaLinear) -> SkColor {
-    let (r, g, b, a) = if color.a > 0.0 {
+    let (r, g, b, a) = unpremultiplied(color);
+    let [r, g, b] = gamut_map_srgb([r, g, b]);
+    eight_bit(r, g, b, a)
+}
+
+/// Converts an `RgbaLinear` to a Skia `Color` by clamping each channel to
+/// `0.0..=1.0` on its own, for a value that is per-channel coefficients
+/// rather than a colour -- `ColorFilter::lighting`'s multiply and add --
+/// where mapping in a perceptual space would change what each channel does.
+pub(crate) fn rgba_linear_to_clamped_skia_color(color: RgbaLinear) -> SkColor {
+    let (r, g, b, a) = unpremultiplied(color);
+    eight_bit(r, g, b, a)
+}
+
+/// The straight components of a premultiplied colour, zero where alpha is.
+fn unpremultiplied(color: RgbaLinear) -> (f32, f32, f32, f32) {
+    if color.a > 0.0 {
         (
             color.r / color.a,
             color.g / color.a,
@@ -32,7 +53,12 @@ pub(crate) fn rgba_linear_to_skia_color(color: RgbaLinear) -> SkColor {
         )
     } else {
         (0.0, 0.0, 0.0, 0.0)
-    };
+    }
+}
+
+/// Straight linear-light components encoded into an eight-bit sRGB `Color`,
+/// each clamped to the displayable range.
+fn eight_bit(r: f32, g: f32, b: f32, a: f32) -> SkColor {
     let alpha_byte = (a.clamp(0.0, 1.0) * 255.0).round() as u8;
     SkColor::from_argb(
         alpha_byte,
@@ -179,11 +205,22 @@ pub(crate) fn linear_to_srgb_byte(v: f32) -> u8 {
     (linear_to_srgb(v.clamp(0.0, 1.0)) * 255.0).round() as u8
 }
 
-/// A premultiplied color in linear light.
+/// A premultiplied color in linear-light sRGB: CSS's `srgb-linear`, D65,
+/// unbounded.
 ///
 /// Components are premultiplied by alpha and are **not** gamma-encoded, so
-/// these are not the 0-255 sRGB bytes a CSS color parses to. Values normally
-/// lie in `0.0..=1.0`; wider-gamut spaces may exceed that range.
+/// these are not the 0-255 sRGB bytes a CSS color parses to. A color inside
+/// sRGB lies in `0.0..=1.0`; one outside it keeps its hue as components
+/// below zero or above one, so `color(display-p3 1 0 0)` is red above one
+/// with green and blue below zero.
+///
+/// The frame is the same on every canvas and in every reader -- a fill, a
+/// stroke, a shadow, a filter, a gradient stop, a texture, a matte -- so one
+/// value paints one color whatever space the canvas was built in. A canvas
+/// narrower than the color shows the nearest it can hold. The few readers
+/// Skia gives only an 8-bit sRGB color -- the lighting filters' light, a
+/// text decoration and text shadow, an SVG's `currentColor` -- gamut-map a
+/// color outside sRGB into it per CSS Color 4, keeping its hue.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RgbaLinear {
     /// Red, premultiplied by `a`.
@@ -328,15 +365,11 @@ impl RgbaLinear {
     /// The result is **linear sRGB, unclamped**: a color named in a wider
     /// space keeps its hue as components outside `0.0..=1.0`, so
     /// `"color(display-p3 1 0 0)"` comes back with red above one and green
-    /// and blue below zero, rather than as sRGB red. That is the frame
-    /// [`RgbaLinear::from_srgb`] builds in and the one a drop shadow and a
-    /// text color are read in, so a P3 color reaches those as itself. The
-    /// lighting filters and [`ColorFilter::blend`] hand Skia an 8-bit sRGB
-    /// color and clip it whatever built it. A fill is different again:
-    /// [`Context2D::set_fill_style`] reads an `RgbaLinear` in the canvas's
-    /// own space, so on a Display P3 canvas pass the string to
-    /// [`Context2D::set_fill_style_css`] instead, which keeps the space it
-    /// was named in.
+    /// and blue below zero, rather than as sRGB red. That is the frame every
+    /// reader of an `RgbaLinear` reads, so
+    /// `set_fill_style(RgbaLinear::from_css(css))` paints what
+    /// [`Context2D::set_fill_style_css`] paints for the same string, on any
+    /// canvas.
     ///
     /// `None` for anything that is not a color, matching
     /// [`Affine::from_css`](crate::geometry::Affine::from_css): "that is not
@@ -358,8 +391,6 @@ impl RgbaLinear {
     /// assert_eq!(RgbaLinear::from_css("not a colour"), None);
     /// ```
     ///
-    /// [`Context2D::set_fill_style`]: crate::context2d::Context2D::set_fill_style
-    /// [`ColorFilter::blend`]: crate::filter::ColorFilter::blend
     /// [`Context2D::set_fill_style_css`]: crate::context2d::Context2D::set_fill_style_css
     pub fn from_css(css: &str) -> Option<Self> {
         css_to_color4f(css).map(|c| Self::from_srgb(c.r, c.g, c.b, c.a))

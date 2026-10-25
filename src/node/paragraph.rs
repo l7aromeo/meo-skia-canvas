@@ -429,15 +429,17 @@ fn to_doubles<'a, const N: usize>(
 
 /// A colour option -- `(DOMString or sequence<double>)`, converted as
 /// WebIDL section 3.2.25 converts a union: an iterable is the sequence,
-/// `[r, g, b, a]` linear floats, and anything else is `ToString`'d and read
-/// as CSS. `None` where it is absent or does not parse, which leaves the
-/// colour as it would have been.
+/// `[r, g, b, a]` sRGB components with straight alpha, `color(srgb r g b /
+/// a)`, and anything else is `ToString`'d and read as CSS. Either way the
+/// colour comes back with the space it is in: sRGB for the sequence, the
+/// space a CSS string named. `None` where it is absent or does not parse,
+/// which leaves the colour as it would have been.
 fn colour_option<'a>(
     cx: &mut FunctionContext<'a>,
     obj: &Handle<'a, JsObject>,
     prefix: &str,
     key: &str,
-) -> NeonResult<Option<(Color4f, Option<ColorSpace>)>> {
+) -> NeonResult<Option<(Color4f, ColorSpace)>> {
     const TAKES: &str = "a CSS colour string or an [r, g, b, a] array";
     let Some(value) = option_value(cx, obj, key)? else {
         return Ok(None);
@@ -445,16 +447,13 @@ fn colour_option<'a>(
     if let Some(elements) = iterated(cx, value)? {
         let [r, g, b, a] = to_doubles::<4>(cx, &elements, prefix, key, TAKES)?;
         let color = Color4f::new(r as f32, g as f32, b as f32, a as f32);
-        return Ok(Some((color, None)));
+        return Ok(Some((color, ColorSpace::new_srgb())));
     }
     if is_symbol(cx, value) {
         return wrong_kind(cx, prefix, key, TAKES, value);
     }
     let css = value.to_string(cx)?.value(cx);
-    Ok(
-        css_to_color4f_in_space(&css)
-            .map(|(color, space)| (color, Some(space))),
-    )
+    Ok(css_to_color4f_in_space(&css))
 }
 
 /// Parses `fontVariations` from a `TextStyleInput` JS object: `None` to
@@ -680,11 +679,10 @@ fn parse_text_style<'a>(
         style.set_font_families(&families);
     }
 
-    // color / foregroundColor / backgroundColor accept either:
-    //   * a CSS string -- tagged as sRGB by `color4f_in`,
-    //   * a `[r, g, b, a]` float array -- tagged here as `srgb_linear` so Skia
-    //     converts to the destination working color space at paint time instead
-    //     of treating the linear values as sRGB-encoded.
+    // color / foregroundColor / backgroundColor accept a CSS string or a
+    // `[r, g, b, a]` float array, which `colour_option` tags -- the string
+    // with the space it named, the array as sRGB -- so Skia converts either
+    // to the canvas's space at paint time.
     // Remembered so an unspecified decorationColor can fall back to it. The
     // text color goes in as a foreground *paint*, which leaves
     // TextStyle::color at its default, so the decoration cannot read it
@@ -692,19 +690,19 @@ fn parse_text_style<'a>(
     let mut text_color = None;
     if let Some((color4f, cs)) = colour_option(cx, obj, prefix, "color")? {
         let mut paint = Paint::default();
-        let cs = cs.unwrap_or_else(ColorSpace::new_srgb_linear);
-        paint.set_color4f(color4f, Some(&cs));
+        let (paint_color, paint_space) = skia_paint_color(color4f, &cs);
+        paint.set_color4f(paint_color, Some(&paint_space));
         style.set_foreground_paint(&paint);
-        text_color = Some(color4f.to_color());
+        text_color = Some(color4f_to_skia_color(color4f, &cs));
     }
     if let Some((color4f, cs)) =
         colour_option(cx, obj, prefix, "foregroundColor")?
     {
         let mut paint = Paint::default();
-        let cs = cs.unwrap_or_else(ColorSpace::new_srgb_linear);
-        paint.set_color4f(color4f, Some(&cs));
+        let (paint_color, paint_space) = skia_paint_color(color4f, &cs);
+        paint.set_color4f(paint_color, Some(&paint_space));
         style.set_foreground_paint(&paint);
-        text_color = Some(color4f.to_color());
+        text_color = Some(color4f_to_skia_color(color4f, &cs));
     }
 
     // backgroundColor
@@ -712,8 +710,8 @@ fn parse_text_style<'a>(
         colour_option(cx, obj, prefix, "backgroundColor")?
     {
         let mut paint = Paint::default();
-        let cs = cs.unwrap_or_else(ColorSpace::new_srgb_linear);
-        paint.set_color4f(color4f, Some(&cs));
+        let (paint_color, paint_space) = skia_paint_color(color4f, &cs);
+        paint.set_color4f(paint_color, Some(&paint_space));
         style.set_background_paint(&paint);
     }
 
@@ -819,20 +817,19 @@ fn parse_text_style<'a>(
         style.set_decoration_style(style_code.to_skia());
     }
 
-    // decorationColor accepts a CSS string or a `[r, g, b, a]` linear float
-    // array. Skia's `set_decoration_color` takes a u32 ARGB tag that it
-    // treats as sRGB-encoded, so the linear-array path must gamma-encode
-    // before quantizing -- otherwise Skia's implicit decode darkens the
-    // decoration and drops the alpha precision the caller asked for.
+    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+    // Re-check: grep -n "fn set_decoration_color\|fn new(color"
+    // ~/.cargo/registry/src/*/skia-safe-*/src/modules/paragraph/text_style.rs
+    // ~/.cargo/registry/src/*/skia-safe-*/src/modules/paragraph/text_shadow.rs
+    // SkParagraph takes a decoration's colour, and a text shadow's, as an
+    // eight-bit sRGB `SkColor` and nothing wider, so `color4f_to_skia_color`
+    // converts from the space `colour_option` tagged and gamut-maps a wide
+    // colour into sRGB on the way in.
     let mut decoration_color = None;
     if let Some((color4f, cs)) =
         colour_option(cx, obj, prefix, "decorationColor")?
     {
-        decoration_color = Some(if cs.is_some() {
-            color4f.to_color()
-        } else {
-            linear_color4f_to_srgb_color(&color4f)
-        });
+        decoration_color = Some(color4f_to_skia_color(color4f, &cs));
     }
     // Fall back to the text color, as CSS does and as the native TextStyle
     // documents. Skia defaults it to transparent, so leaving it unset drew an
@@ -868,16 +865,11 @@ fn parse_text_style<'a>(
             let mut offset = Point::new(0.0, 0.0);
             let mut blur = 0.0;
             if let Some(shadow_obj) = shadow_obj {
-                // Shadow color follows the same rule as decorationColor:
-                // CSS strings round-trip through u32 ARGB cleanly, linear
-                // float arrays must be gamma-encoded first.
+                // Eight-bit, as decorationColor is and for the same reason.
                 if let Some((c, cs)) =
                     colour_option(cx, &shadow_obj, &inner, "color")?
                 {
-                    color = match cs {
-                        Some(_) => c.to_color(),
-                        None => linear_color4f_to_srgb_color(&c),
-                    };
+                    color = color4f_to_skia_color(c, &cs);
                 }
 
                 if let Some(offset_val) =

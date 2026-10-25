@@ -64,6 +64,28 @@ removed and no signature moves.
   family in a list, and pass a CSS colour as a string primitive, `"red"`.
   Pass a boolean option a boolean.
 
+- **A `[r, g, b, a]` colour array is sRGB, with straight alpha, on every
+  canvas.** It is `color(srgb r g b / a)`: gamma-encoded components from
+  `0` to `1`, as CanvasKit's `Color4f` takes them. `fillStyle`,
+  `strokeStyle` and `addColorStop` read the four numbers in the canvas's
+  own space, so on a Display P3 canvas `[1, 0, 0, 1]` was P3 red; on an
+  sRGB canvas they paint as they did. A paragraph's `color`,
+  `backgroundColor`, `decorationColor` and `shadows` colour read them as
+  premultiplied linear light, so the same array painted another colour
+  there: `[0.2, 0.5, 0.8, 1]` filled `rgb(51 128 204)` and coloured
+  paragraph text `rgb(124 188 231)`. Both now paint `rgb(51 128 204)`, on
+  every canvas. A component below zero or above one reaches a colour
+  outside sRGB, as it does in `color(srgb ...)`, which a wide canvas shows
+  and an sRGB one clips. The declarations called every array
+  "premultiplied linear-light", which no reader did; they now say what
+  each does.
+
+  Migrate: on a wide canvas, an array meant in the canvas's own space
+  becomes a string, `color(display-p3 r g b / a)` or
+  `color(rec2020 r g b / a)`. In a paragraph, an array meant as linear
+  light becomes `color(srgb-linear r g b / a)`, its components divided by
+  its alpha if they were premultiplied.
+
 - **`textHeightBehavior` takes `0`, `1`, `2` or `3` and refuses any other
   number.** `ParagraphBuilder` truncated `1.5` toward zero, to `1`, and
   ignored `NaN` and the infinities, leaving the default `0`. A finite
@@ -428,6 +450,35 @@ false` now takes effect, and its default is on, at Slight, as Chrome draws
   as for any missing family, where fontconfig on Linux had answered
   `serif`, `sans-serif` and `monospace` with the generic's faces.
   `FontLibrary.use("serif", ...)` still claims the generic as well.
+
+- **`shadowColor`, a texture's `color` and an export's `matte` keep a
+  colour outside sRGB.** Each went through eight-bit sRGB, so
+  `color(display-p3 1 0 0)` cast a shadow of sRGB red on a P3 canvas beside
+  a fill of P3 red. Each is now kept in floating point in the space it was
+  named in, and `shadowColor` reads back as it was set,
+  `color(display-p3 1 0 0)`, as `fillStyle` does. They still take a string
+  only, as they did.
+
+- **`ColorFilter.MakeBlend` and `ImageFilter.MakeDropShadow` keep a CSS
+  colour outside sRGB**, which they clipped to eight-bit sRGB on the way
+  in. An array given to `MakeDropShadow` is still CanvasKit's
+  unpremultiplied sRGB `Color4f`.
+
+- **A paragraph's `decorationColor` and `shadows` colour draw a colour
+  named in another space as that colour.** The components were taken as
+  sRGB whatever the string named, so `color(display-p3 0.8 0.3 0.2)` drew
+  as `rgb(80% 30% 20%)`, and so did a decoration that took its colour from
+  the text's.
+
+- **A colour outside sRGB keeps its hue where Skia takes only eight-bit
+  sRGB.** A paragraph's `decorationColor` and `shadows` colour, the
+  lighting filters' light colour, an SVG's `currentColor` and a window's
+  `background` clipped each channel on its own, which turns P3 red more
+  orange. They now map it into sRGB as CSS Color 4 section 14.2.2 does,
+  reducing its chroma in Oklch at its own lightness and hue. A colour
+  inside sRGB gives the bytes it gave. `ColorFilter.MakeLighting`'s
+  multiply and add are per-channel coefficients rather than colours, and
+  are still clamped channel by channel.
 
 - **`letterSpacing` and `wordSpacing` take `"0"`.** CSS Values 4 lets a
   zero length be written without its unit, and `ctx.letterSpacing = "0"`

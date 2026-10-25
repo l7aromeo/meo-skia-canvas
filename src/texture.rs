@@ -14,7 +14,9 @@
 use std::fmt;
 
 use crate::{
-    color::{RgbaLinear, rgba_linear_to_skia_color},
+    color::{
+        RgbaLinear, linear_srgb_color_space, rgba_linear_to_unpremul_color4f,
+    },
     node::texture::CanvasTexture,
     paint::StrokeCap,
     path::Path2D,
@@ -119,7 +121,10 @@ impl Texture {
         Self {
             inner: CanvasTexture::from_parts(
                 options.path.as_ref().map(|path| path.inner.clone()),
-                rgba_linear_to_skia_color(options.color),
+                (
+                    rgba_linear_to_unpremul_color4f(options.color),
+                    linear_srgb_color_space(),
+                ),
                 options.line,
                 options.cap.to_skia(),
                 options.angle,

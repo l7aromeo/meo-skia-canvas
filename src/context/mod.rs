@@ -76,8 +76,8 @@ impl Finalize for Context2D {}
 
 pub struct Context2D {
     pub bounds: Rect,
-    /// The canvas's working color space. Used to tag untagged colors (float
-    /// arrays) so Skia can convert them during export to a different space.
+    /// The canvas's color space, fixed when the canvas is built. The page's
+    /// image is tagged with it -- see `Context2D::image`.
     pub canvas_color_space: ColorSpace,
     /// The canvas's pixel format.
     ///
@@ -182,7 +182,10 @@ pub struct State {
     pub fill_style: Dye,
     pub stroke_style: Dye,
     pub shadow_blur: f32,
-    pub shadow_color: Color,
+    /// The shadow colour, unpremultiplied, and the space it is in: the space
+    /// a CSS string named, or linear-light sRGB for an `RgbaLinear`. Never
+    /// quantised, so a wide colour reaches a wide canvas.
+    pub shadow_color: (Color4f, ColorSpace),
     pub shadow_offset: Point,
 
     pub line_dash_offset: f32,
@@ -284,7 +287,10 @@ impl Default for State {
             dither: false,
 
             shadow_blur: 0.0,
-            shadow_color: TRANSPARENT,
+            shadow_color: (
+                Color4f::new(0.0, 0.0, 0.0, 0.0),
+                ColorSpace::new_srgb(),
+            ),
             shadow_offset: (0.0, 0.0).into(),
 
             font: "10px sans-serif".to_string(),
@@ -1840,13 +1846,10 @@ impl Context2D {
     }
 
     pub fn paint_for_shadow(&self, base_paint: &Paint) -> Option<Paint> {
-        let State {
-            shadow_color,
-            mut shadow_blur,
-            shadow_offset,
-            ..
-        } = self.state;
-        if shadow_color.a() == 0
+        let (shadow_color, shadow_space) = &self.state.shadow_color;
+        let (mut shadow_blur, shadow_offset) =
+            (self.state.shadow_blur, self.state.shadow_offset);
+        if shadow_color.a == 0.0
             || (shadow_blur == 0.0 && shadow_offset.is_zero())
         {
             return None;
@@ -1877,11 +1880,13 @@ impl Context2D {
             }
         }
         let mut paint = base_paint.clone();
+        let (shadow_color, shadow_space) =
+            skia_paint_color(*shadow_color, shadow_space);
         paint.set_image_filter(image_filters::drop_shadow_only(
             (0.0, 0.0),
             (sigma.x, sigma.y),
             shadow_color,
-            ColorSpace::new_srgb(),
+            shadow_space,
             None,
             None,
         ));
@@ -1895,8 +1900,9 @@ impl Context2D {
 
 #[derive(Clone)]
 pub enum Dye {
-    /// A solid color with its source color space.
-    /// CSS colors carry `Some(sRGB)`, float arrays carry `None` (destination).
+    /// A solid color, unpremultiplied, with the space it is in: the one a CSS
+    /// string named, sRGB for a float array, linear-light sRGB for an
+    /// `RgbaLinear`. `None` is sRGB, as Skia reads an untagged colour.
     Color(Color4f, Option<ColorSpace>),
     Gradient(CanvasGradient),
     Pattern(CanvasPattern),
@@ -1912,7 +1918,6 @@ impl Dye {
     pub fn new<'a>(
         cx: &mut FunctionContext<'a>,
         value: Handle<'a, JsValue>,
-        canvas_color_space: &ColorSpace,
     ) -> Option<Self> {
         if let Ok(gradient) = value.downcast::<BoxedCanvasGradient, _>(cx) {
             Some(Dye::Gradient(gradient.borrow().clone()))
@@ -1928,13 +1933,9 @@ impl Dye {
                 shader.borrow().features,
             ))
         } else {
-            color4f_in(cx, value).map(|(c, cs)| {
-                // CSS colors are tagged as sRGB by color4f_in.
-                // Float arrays return None -- tag them with the canvas's
-                // working color space so Skia can convert during export.
-                let cs = cs.unwrap_or_else(|| canvas_color_space.clone());
-                Dye::Color(c, Some(cs))
-            })
+            // Tagged either way by `color4f_in`: a CSS colour with the space
+            // it named, a float array as sRGB.
+            color4f_in(cx, value).map(|(c, cs)| Dye::Color(c, Some(cs)))
         }
     }
 
@@ -1986,26 +1987,15 @@ impl Dye {
             Dye::Color(color, cs) => {
                 let mut color = *color;
                 color.a *= alpha;
-                // Rec. 2020 cannot ride on its tag, so it is converted here
-                // and Skia is handed sRGB. `skia_safe`'s CICP transfer
-                // functions are reference EOTFs -- note 1 of ITU-T H.273
-                // supplies BT.1886 for transfer characteristics 1, 6, 14 and
-                // 15 alike, so `REC2020_10BIT` and `REC2020_12BIT` are both
-                // aliases of `REC709`, which is `g: 2.4` with every other
-                // coefficient zero. CSS Color 4 wants BT.2020's inverse OETF,
-                // `ColorSpace` takes no explicit coefficients, and tagging
-                // painted `color(rec2020 0.2 0.2 0.2)` as 40 where 67 is
-                // right. Converting here rather than at the parse leaves what
-                // `fillStyle` reports back alone, which echoes the space it
-                // was named in as a browser does.
-                //
-                // Every other space decodes correctly from its tag and keeps
-                // the identity a wide surface is worth: sRGB and Display P3
-                // share the sRGB transfer function, and linear sRGB is linear.
-                match cs.as_ref().and_then(color_space_name) {
-                    Some("rec2020") => paint
-                        .set_color4f(color4f_to_srgb(color, cs.as_ref()), None),
-                    _ => paint.set_color4f(color, cs.as_ref()),
+                // Converted at the paint rather than at the parse, so what
+                // `fillStyle` reports back still echoes the space the colour
+                // was named in, as a browser's does.
+                match cs {
+                    Some(space) => {
+                        let (color, space) = skia_paint_color(color, space);
+                        paint.set_color4f(color, &space)
+                    }
+                    None => paint.set_color4f(color, None),
                 };
             }
             Dye::Gradient(gradient) => {

@@ -10,8 +10,8 @@
 use std::{ops::Range, path::Path};
 
 use crate::{
-    color::{RgbaLinear, rgba_linear_to_skia_color},
-    context::page::{ExportOptions, PageSequence},
+    color::RgbaLinear,
+    context::page::{ExportOptions, Matte, PageSequence},
     encode::avif,
     error::Error,
     gpu::{self, completion::typed},
@@ -1171,7 +1171,7 @@ impl EncodeOptions {
             lossless: self.lossless,
             density: self.density,
             outline: self.outline,
-            matte: self.matte.map(rgba_linear_to_skia_color),
+            matte: self.matte.map(Matte::from_rgba_linear),
             msaa: self.msaa,
             // The space to convert *into*. Unasked, that is the canvas's
             // own, so a wide-gamut canvas exports wide rather than being

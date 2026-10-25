@@ -1,5 +1,5 @@
 use skia_safe::{
-    BlurStyle as SkBlurStyle, ColorChannel as SkColorChannel,
+    BlurStyle as SkBlurStyle, Color as SkColor, ColorChannel as SkColorChannel,
     ColorFilter as SkColorFilter, ImageFilter as SkImageFilter,
     MaskFilter as SkMaskFilter, Point as SkPoint, Point3 as SkPoint3,
     Rect as SkRect, TileMode as SkTileMode, color_filters, image_filters,
@@ -9,7 +9,8 @@ use skia_safe::{
 use crate::{
     color::{
         RgbaLinear, linear_srgb_color_space, rgba_css,
-        rgba_linear_to_skia_color, rgba_linear_to_unpremul_color4f,
+        rgba_linear_to_clamped_skia_color, rgba_linear_to_skia_color,
+        rgba_linear_to_unpremul_color4f,
     },
     context2d::affine_to_matrix,
     error::Error,
@@ -385,6 +386,18 @@ impl MaskFilter {
     }
 }
 
+/// A lighting filter's light colour as Skia takes it: an eight-bit sRGB
+/// `Color`, gamut-mapped into sRGB rather than clipped -- see
+/// `rgba_linear_to_skia_color`.
+fn lit(color: RgbaLinear) -> SkColor {
+    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+    // Re-check: grep -n "light_color: impl Into"
+    // ~/.cargo/registry/src/*/skia-safe-*/src/effects/image_filters.rs
+    // Every lighting image filter takes its light colour as an `SkColor`, so
+    // a wide light is brought inside sRGB by gamut mapping on the way in.
+    rgba_linear_to_skia_color(color)
+}
+
 impl ImageFilter {
     /// A rectangle in Skia's terms.
     fn skia_rect(rect: Rect) -> SkRect {
@@ -593,7 +606,7 @@ impl ImageFilter {
         Self::built(
             image_filters::distant_lit_diffuse(
                 direction.to_skia(),
-                rgba_linear_to_skia_color(light_color),
+                lit(light_color),
                 surface_scale,
                 kd,
                 input.map(|f| f.inner),
@@ -625,7 +638,7 @@ impl ImageFilter {
         Self::built(
             image_filters::distant_lit_specular(
                 direction.to_skia(),
-                rgba_linear_to_skia_color(light_color),
+                lit(light_color),
                 surface_scale,
                 ks,
                 shininess,
@@ -656,7 +669,7 @@ impl ImageFilter {
         Self::built(
             image_filters::point_lit_diffuse(
                 location.to_skia(),
-                rgba_linear_to_skia_color(light_color),
+                lit(light_color),
                 surface_scale,
                 kd,
                 input.map(|f| f.inner),
@@ -685,7 +698,7 @@ impl ImageFilter {
         Self::built(
             image_filters::point_lit_specular(
                 location.to_skia(),
-                rgba_linear_to_skia_color(light_color),
+                lit(light_color),
                 surface_scale,
                 ks,
                 shininess,
@@ -722,7 +735,7 @@ impl ImageFilter {
                 target.to_skia(),
                 falloff_exponent,
                 cutoff_angle,
-                rgba_linear_to_skia_color(light_color),
+                lit(light_color),
                 surface_scale,
                 kd,
                 input.map(|f| f.inner),
@@ -757,7 +770,7 @@ impl ImageFilter {
                 target.to_skia(),
                 falloff_exponent,
                 cutoff_angle,
-                rgba_linear_to_skia_color(light_color),
+                lit(light_color),
                 surface_scale,
                 ks,
                 shininess,
@@ -1032,10 +1045,8 @@ impl ImageFilter {
 
     /// Builds a drop shadow at `(dx, dy)` with separable blur sigmas.
     ///
-    /// `color` is premultiplied linear and is tagged as linear-light sRGB,
-    /// not as the destination's working color space. On a wider-gamut
-    /// surface the shadow will therefore not match an equivalent
-    /// [`Paint`](crate::paint::Paint) fill of the same `RgbaLinear`.
+    /// `color` is read as every [`RgbaLinear`] is, so the shadow is the color
+    /// a fill of the same value paints, on any canvas.
     ///
     /// # Errors
     ///
@@ -1174,18 +1185,24 @@ impl ColorFilter {
     ///
     /// The colour-domain half of what a `globalCompositeOperation` does:
     /// the same blend, applied to a draw's own colours rather than between
-    /// a draw and the canvas under it.
+    /// a draw and the canvas under it. `color` is linear-light sRGB, as every
+    /// [`RgbaLinear`] is, and reaches Skia in floating point, so a wide
+    /// colour blends as itself on a wide canvas.
     ///
     /// # Errors
     ///
     /// Returns [`Error::FilterCreate`] when Skia declines the mode, which it
     /// does for the ones that need a destination it does not have here.
     pub fn blend(color: RgbaLinear, mode: BlendMode) -> Result<Self, Error> {
-        color_filters::blend(rgba_linear_to_skia_color(color), mode.to_skia())
-            .map(|inner| Self { inner })
-            .ok_or_else(|| Error::FilterCreate {
-                reason: format!("no color filter for blend mode {mode:?}"),
-            })
+        color_filters::blend_with_color_space(
+            rgba_linear_to_unpremul_color4f(color),
+            linear_srgb_color_space(),
+            mode.to_skia(),
+        )
+        .map(|inner| Self { inner })
+        .ok_or_else(|| Error::FilterCreate {
+            reason: format!("no color filter for blend mode {mode:?}"),
+        })
     }
 
     /// A filter that multiplies each colour by a 5x4 matrix.
@@ -1274,6 +1291,9 @@ impl ColorFilter {
     ///
     /// Per channel, which is what makes it a tint plus a lift rather than a
     /// blend: `multiply` scales what is there and `add` raises the floor.
+    /// Each is a set of coefficients rather than a colour, and Skia takes
+    /// them as an eight-bit sRGB `Color`, so each channel is clamped to
+    /// `0.0..=1.0` and quantized to eight bits.
     ///
     /// # Errors
     ///
@@ -1282,9 +1302,14 @@ impl ColorFilter {
         multiply: RgbaLinear,
         add: RgbaLinear,
     ) -> Result<Self, Error> {
+        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+        // Re-check: grep -n "pub fn lighting" -A4
+        // ~/.cargo/registry/src/*/skia-safe-*/src/core/color_filter.rs
+        // `SkColorFilters::Lighting` takes two `SkColor`s and nothing
+        // wider, so a coefficient above one cannot reach it.
         color_filters::lighting(
-            rgba_linear_to_skia_color(multiply),
-            rgba_linear_to_skia_color(add),
+            rgba_linear_to_clamped_skia_color(multiply),
+            rgba_linear_to_clamped_skia_color(add),
         )
         .map(|inner| Self { inner })
         .ok_or_else(|| Error::FilterCreate {
@@ -1544,7 +1569,10 @@ impl FilterOp {
             } => FilterSpec::Shadow {
                 offset: SkPoint::new(offset_x, offset_y),
                 blur,
-                color: rgba_linear_to_skia_color(color),
+                color: (
+                    rgba_linear_to_unpremul_color4f(color),
+                    linear_srgb_color_space(),
+                ),
             },
         }
     }
