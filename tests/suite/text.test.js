@@ -3,7 +3,7 @@
 "use strict";
 
 const { assert, describe, test } = require("../runner"),
-  { Canvas, FontLibrary } = require("../../lib");
+  { Canvas, FontLibrary, ParagraphBuilder } = require("../../lib");
 
 // The families the machine itself holds, captured before any test registers
 // one. Describe bodies run at collection, so a snapshot taken further down
@@ -2180,6 +2180,48 @@ describe("a quoted generic keyword is a family name", () => {
     FontLibrary.use("serif", [FACE]);
     assert.equal(painted('36px "serif"'), face, "quoted, after");
     assert.equal(painted("36px serif"), face, "bare, the claim");
+    // A family name matches without regard to case, so the quoted name in
+    // capitals is the same family.
+    assert.equal(painted('36px "SERIF"'), face, "quoted, in capitals");
+    FontLibrary.reset();
+  });
+
+  test("a registered family matches its name in any case", () => {
+    // CSS Fonts 4 section 5.1: "User agents must match these names case
+    // insensitively". The provider the library registers faces with matches
+    // a name exactly, so `oswaldx` missed a family registered as `OswaldX`
+    // and drew whatever came next.
+    FontLibrary.use("CaseRegistered", [FACE]);
+    const face = painted("36px CaseRegistered");
+    assert.notEqual(face, painted("36px NoSuchFamilyQuoted"), "the control");
+    for (const font of [
+      "36px caseregistered",
+      "36px CASEREGISTERED",
+      '36px "caseRegistered"',
+    ]) {
+      assert.equal(painted(font), face, font);
+    }
+    // And in a paragraph, whose `fontFamilies` go the same way.
+    const laidOut = (family) => {
+      const pb = ParagraphBuilder.Make({
+        textStyle: { fontSize: 36, fontFamilies: [family] },
+      });
+      pb.addText("Wgq AVA");
+      const paragraph = pb.build();
+      paragraph.layout(1000);
+      return paragraph.getMaxIntrinsicWidth();
+    };
+    const registered = laidOut("CaseRegistered");
+    assert.notEqual(
+      registered,
+      laidOut("NoSuchFamilyQuoted"),
+      "paragraph control",
+    );
+    assert.equal(
+      laidOut("caseregistered"),
+      registered,
+      "paragraph, lower case",
+    );
     FontLibrary.reset();
   });
 });

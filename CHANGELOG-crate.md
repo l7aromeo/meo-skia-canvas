@@ -66,6 +66,15 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A registered family matches its name in any case.** CSS Fonts 4
+  matches family names without regard to case, and the system's families
+  were found that way, but a family registered with `FontLibrary::use_paths`
+  or `use_data` was filed under its exact spelling: registered as
+  `"OswaldX"`, `set_font_css("16px oswaldx")` and a `TextEngine` style
+  naming `"oswaldx"` drew the fallback. Each now draws the registered
+  family. Letters outside ASCII still have to match exactly; CSS asks for
+  Unicode case folding there.
+
 - **A font's line height spaces wrapped lines by its pixels.**
   `Font::line_height` takes pixels, as does the line height in a shorthand
   `Font::from_css` reads, and wrapped text took it as a multiple of the font

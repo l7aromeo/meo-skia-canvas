@@ -1424,15 +1424,36 @@ impl FontLibrary {
             .iter()
             .map(|family| match family {
                 FontFamily::Generic(generic) => generic_name(*generic),
-                FontFamily::Named(name)
-                    if GenericFamily::from_css(name).is_some()
-                        && !self.has_family(name) =>
+                FontFamily::Named(name) => match self.registered_spelling(name)
                 {
-                    unmatched_name(name)
-                }
-                FontFamily::Named(name) => name.clone(),
+                    Some(registered) => registered,
+                    None if GenericFamily::from_css(name).is_some()
+                        && !self.has_family(name) =>
+                    {
+                        unmatched_name(name)
+                    }
+                    None => name.clone(),
+                },
             })
             .collect()
+    }
+
+    /// The name a registered family is filed under, where `name` is that
+    /// family in another case.
+    ///
+    /// CSS Fonts 4 section 5.1: "User agents must match these names case
+    /// insensitively". The system managers do, and the provider the
+    /// registered faces are filed with matches a name exactly, so a family
+    /// registered as `OswaldX` is asked for in that spelling whatever case
+    /// the font names it in. Compared ASCII case-insensitively, as
+    /// [`has_family`](Self::has_family) and a claim on a generic are; the
+    /// section names Unicode's Default Caseless Matching, which also folds
+    /// letters outside ASCII and is not done here.
+    pub(crate) fn registered_spelling(&self, name: &str) -> Option<String> {
+        self.fonts.iter().find_map(|(font, alias)| {
+            let filed = alias.clone().unwrap_or_else(|| font.family_name());
+            filed.eq_ignore_ascii_case(name).then_some(filed)
+        })
     }
 
     /// Matches `spec` against the library, and remembers the answer.
