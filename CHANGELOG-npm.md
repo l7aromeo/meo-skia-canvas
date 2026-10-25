@@ -1009,17 +1009,6 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   well about 7.4. `JSON.stringify` works the ink out once, through
   `toJSON` -- see Breaking.
 
-### Deprecated
-
-- **`TextMetrics` values as own properties.** In 7.0 they become getters on
-  `TextMetrics.prototype` alone, as Chrome's are, and the object has no
-  properties of its own: `Object.keys` is empty, `JSON.stringify` gives
-  `"{}"` and a spread copies nothing, for this library's `emHeightAscent`,
-  `emHeightDescent`, `height` and `lines` as for the standard values. Read
-  the values by name and nothing changes. `TextMetrics.prototype`, its
-  `Symbol.toStringTag` and the constructor that refuses to be called are
-  Chrome's already.
-
 ## 📦 ⟩ [v6.0.2] (npm) ⟩ September 16, 2026
 
 **A patch closing a gap 6.0.1 shipped knowingly.** Nothing is added and

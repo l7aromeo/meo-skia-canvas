@@ -373,5 +373,3 @@ spellings take its 8-bit path, case included, and a colour whose bytes
 depend on how its function name is cased is not one CSS describes. The
 difference is a level at most where Chrome rounds, and more where its 8-bit
 path clips an `hsl()` outside sRGB that this library keeps.
-
-**Kept until 7.0, and deprecated.**
