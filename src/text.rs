@@ -354,6 +354,64 @@ impl TextHeightBehavior {
     }
 }
 
+/// What a style says about variable-font axes: CSS `font-variation-settings`.
+///
+/// Three states rather than a list, because CSS has three: a style can take
+/// the axes in force, reset them to the face's own, or set its own. A list
+/// alone cannot tell the first two apart. The default is
+/// [`Inherit`](Self::Inherit), so `..TextStyle::default()` keeps the base
+/// style's axes.
+///
+/// Whatever the setting, `font_weight` supplies `wght` and `font_size` supplies
+/// `opsz` unless the axes in force name them, as `font-weight` and
+/// `font-optical-sizing` do under `font-variation-settings` in CSS.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
+pub enum FontVariationSettings {
+    /// The axes in force: a pushed style or a rich-text span is instanced at
+    /// the base style's. On a base style, which has nothing to inherit, it is
+    /// [`Normal`](Self::Normal).
+    #[default]
+    Inherit,
+    /// CSS `normal`: no axes of the style's own. A span under a base style
+    /// that set some is instanced at the face's defaults instead.
+    Normal,
+    /// These axes, replacing those in force, as a nested
+    /// `font-variation-settings` replaces its parent's rather than merging
+    /// with it. An axis the face lacks is ignored and a position outside its
+    /// range clamped. An empty list is [`Normal`](Self::Normal).
+    Axes(Vec<FontVariation>),
+}
+
+impl FontVariationSettings {
+    /// The axes a style with these settings is instanced at, given those in
+    /// force where it is used.
+    fn resolve<'a>(
+        &'a self,
+        inherited: &'a [FontVariation],
+    ) -> &'a [FontVariation] {
+        match self {
+            Self::Inherit => inherited,
+            Self::Normal => &[],
+            Self::Axes(axes) => axes,
+        }
+    }
+}
+
+impl From<Vec<FontVariation>> for FontVariationSettings {
+    /// The list as [`Axes`](Self::Axes).
+    fn from(axes: Vec<FontVariation>) -> Self {
+        Self::Axes(axes)
+    }
+}
+
+impl<const N: usize> From<[FontVariation; N]> for FontVariationSettings {
+    /// The array as [`Axes`](Self::Axes).
+    fn from(axes: [FontVariation; N]) -> Self {
+        Self::Axes(axes.into())
+    }
+}
+
 /// Paragraph style.
 ///
 /// The paragraph-level fields -- `align`, `line_height_multiplier`,
@@ -463,17 +521,18 @@ pub struct TextStyle {
     /// Positive shifts downward; negative shifts upward (use for
     /// superscripts).
     pub baseline_shift: f32,
-    /// Variable-font axis positions.
+    /// Variable-font axis positions, as CSS `font-variation-settings` sets
+    /// them: the base style's, the face's own, or a list -- see
+    /// [`FontVariationSettings`].
     ///
-    /// A variable typeface the families resolve to is instanced at these
-    /// axes before layout, matching CanvasKit's `fontVariations`; an axis
-    /// the face lacks is ignored and a position outside its range clamped.
-    /// `font_weight` drives face matching and supplies `wght` when this
-    /// does not name it, as `font_size` supplies `opsz`. A
-    /// `FontAxisTag::WGHT` entry here wins over `font_weight`, as
+    /// A variable typeface the families resolve to is instanced at the axes
+    /// in force before layout, matching CanvasKit's `fontVariations`.
+    /// `font_weight` drives face matching and supplies `wght` when those
+    /// axes do not name it, as `font_size` supplies `opsz`. A
+    /// `FontAxisTag::WGHT` entry wins over `font_weight`, as
     /// `font-variation-settings` wins over `font-weight` in CSS, and a
     /// `FontAxisTag::OPSZ` entry over `font_size` the same way.
-    pub font_variations: Vec<FontVariation>,
+    pub font_variations: FontVariationSettings,
     /// OpenType features applied to the run (small caps, ligatures,
     /// oldstyle/tabular figures, stylistic sets, ...).
     ///
@@ -576,7 +635,7 @@ impl Default for TextStyle {
             decoration_thickness: 1.0,
             shadows: Vec::new(),
             baseline_shift: 0.0,
-            font_variations: Vec::new(),
+            font_variations: FontVariationSettings::Inherit,
             font_features: Vec::new(),
             stroke_width: None,
             locale: None,
@@ -1195,12 +1254,13 @@ impl TextEngine {
     /// `base_style`; each `RichTextSpan` overlays its own per-span style for
     /// the span's text (font, color, decoration, baseline shift, etc.).
     ///
-    /// A span with `font_variations` of its own is instanced at those, which
-    /// replace `base_style`'s as a nested `font-variation-settings` replaces
-    /// its parent's in CSS; a span with none is instanced at `base_style`'s.
+    /// A span's [`font_variations`](TextStyle::font_variations) decide its
+    /// axes: [`Inherit`](FontVariationSettings::Inherit) takes
+    /// `base_style`'s, [`Normal`](FontVariationSettings::Normal) the face's
+    /// own, and [`Axes`](FontVariationSettings::Axes) replaces `base_style`'s
+    /// as a nested `font-variation-settings` replaces its parent's in CSS.
     /// Either way the span's own `font_weight` supplies `wght` unless the
-    /// axes in force name it. An empty list inherits rather than resets, so
-    /// a span returns an axis to its default by naming the default.
+    /// axes in force name it.
     ///
     /// Each span is pushed and popped in turn, so the styles do not nest.
     /// Use [`TextEngine::paragraph_builder`] for a paragraph that needs a
@@ -1231,7 +1291,7 @@ impl TextEngine {
     /// is fixed here from `base_style` and cannot be changed once the
     /// builder exists, because Skia settles the paragraph style before the
     /// first character is added. `base_style`'s font variations are the ones
-    /// a pushed style with none of its own is instanced at, as
+    /// a pushed style that inherits is instanced at, as
     /// [`layout_rich_text`] does for its spans.
     ///
     /// [`layout_rich_text`]: TextEngine::layout_rich_text
@@ -1261,11 +1321,13 @@ impl TextEngine {
     ) -> ParagraphBuilder {
         let mut collection = self.collection.clone();
         let strut = strut_families(base_style, &mut collection.clone());
+        // A base style has nothing to inherit, so `Inherit` is `Normal` here.
+        let base_variations = base_style.font_variations.resolve(&[]);
         let mut instance = instance_for(
             &mut collection.clone(),
             &self.positions,
             base_style,
-            &oblique_variations(base_style, &base_style.font_variations),
+            &oblique_variations(base_style, base_variations),
         );
         if base_style.slant == TextSlant::Oblique {
             add_slnt(&mut instance.coordinates);
@@ -1282,7 +1344,7 @@ impl TextEngine {
             ),
             collection,
             positions: self.positions.clone(),
-            variations: base_style.font_variations.clone(),
+            variations: base_variations.to_vec(),
         }
     }
 }
@@ -1332,7 +1394,7 @@ pub struct ParagraphBuilder {
     collection: FontCollection,
     /// The engine's record of the positions instanced through `collection`.
     positions: Rc<Mutex<InstancedPositions>>,
-    /// The base style's axes, which a pushed style with none of its own is
+    /// The base style's axes, which a pushed style that inherits is
     /// instanced at.
     variations: Vec<FontVariation>,
 }
@@ -1340,15 +1402,15 @@ pub struct ParagraphBuilder {
 impl ParagraphBuilder {
     /// Pushes `style` onto the stack. Text added from here on is drawn in it.
     ///
-    /// Its own `font_variations` replace the base style's, as a nested
-    /// `font-variation-settings` replaces its parent's in CSS; with none of
-    /// its own it is instanced at the base style's. Either way its own
-    /// `font_weight` supplies `wght` unless the axes in force name it.
+    /// Its [`font_variations`](TextStyle::font_variations) decide its axes:
+    /// [`Inherit`](FontVariationSettings::Inherit) takes the base style's,
+    /// [`Normal`](FontVariationSettings::Normal) the face's own, and
+    /// [`Axes`](FontVariationSettings::Axes) replaces the base style's, as a
+    /// nested `font-variation-settings` replaces its parent's in CSS. Either
+    /// way its own `font_weight` supplies `wght` unless the axes in force
+    /// name it.
     pub fn push_style(&mut self, style: &TextStyle) -> &mut Self {
-        let variations = match style.font_variations.is_empty() {
-            true => &self.variations,
-            false => &style.font_variations,
-        };
+        let variations = style.font_variations.resolve(&self.variations);
         let mut instance = instance_for(
             &mut self.collection.clone(),
             &self.positions,

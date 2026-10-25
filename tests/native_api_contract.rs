@@ -316,7 +316,8 @@ fn facade_draws_a_layout_at_the_axis_it_was_laid_out_with() -> Result<()> {
             font_families: vec!["Oswald".to_string()],
             color: RgbaLinear::opaque(1.0, 1.0, 1.0),
             font_size: 36.0,
-            font_variations: vec![FontVariation::new(FontAxisTag::WGHT, wght)],
+            font_variations: vec![FontVariation::new(FontAxisTag::WGHT, wght)]
+                .into(),
             ..TextStyle::default()
         };
         let layout = engine.layout_text("Studio", &style, 200.0);
@@ -421,7 +422,8 @@ fn a_shared_collection_keeps_each_axis_position_apart() -> Result<()> {
             font_families: vec!["Oswald".to_string()],
             color: RgbaLinear::opaque(1.0, 1.0, 1.0),
             font_size: 36.0,
-            font_variations: vec![FontVariation::new(FontAxisTag::WGHT, wght)],
+            font_variations: vec![FontVariation::new(FontAxisTag::WGHT, wght)]
+                .into(),
             ..TextStyle::default()
         };
         let layout = engine.layout_text("Studio", &style, 200.0);
@@ -3408,7 +3410,8 @@ fn a_variable_font_is_instanced_under_the_name_it_was_given() -> Result<()> {
         let style = TextStyle {
             font_families: vec![family.to_string()],
             font_size: 64.0,
-            font_variations: vec![FontVariation::new(FontAxisTag::WGHT, wght)],
+            font_variations: vec![FontVariation::new(FontAxisTag::WGHT, wght)]
+                .into(),
             ..TextStyle::default()
         };
         engine
@@ -3477,7 +3480,8 @@ fn a_variable_font_is_instanced_under_the_name_it_was_given() -> Result<()> {
                 font_variations: vec![FontVariation::new(
                     FontAxisTag::WGHT,
                     wght,
-                )],
+                )]
+                .into(),
                 ..TextStyle::default()
             };
             engine

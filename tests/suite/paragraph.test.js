@@ -844,8 +844,9 @@ describe("ParagraphBuilder span axes", () => {
   // A pushed style's `fontVariations` replace the paragraph's, as a nested
   // `font-variation-settings` replaces its parent's in CSS and as the
   // crate's `ParagraphBuilder::push_style` does; a style with none of its
-  // own takes the paragraph's. Its weight supplies `wght` unless the list in
-  // force names it. Measured against a paragraph built in the span's style
+  // own, or an empty list, takes the paragraph's, and one set to `"normal"`
+  // has none, as `font-variation-settings: normal` does. Its weight supplies
+  // `wght` unless the list in force names it. Measured against a paragraph built in the span's style
   // outright, which instances its face through the same library.
   const FAMILY = "AmstelvarSpanAxes",
     TEXT = "Hamburgefonstiv",
@@ -901,6 +902,30 @@ describe("ParagraphBuilder span axes", () => {
         style(400, undefined),
         style(400, wdth50),
       ],
+      [
+        "a span with an empty list under a paragraph's wdth 50",
+        style(400, wdth50),
+        style(400, []),
+        style(400, wdth50),
+      ],
+      [
+        "a span set to normal under a paragraph's wdth 50",
+        style(400, wdth50),
+        style(400, "normal"),
+        style(400, undefined),
+      ],
+      [
+        "a span set to NORMAL, in any case, under a paragraph's wdth 50",
+        style(400, wdth50),
+        style(400, "NORMAL"),
+        style(400, undefined),
+      ],
+      [
+        "a paragraph set to normal",
+        style(400, "normal"),
+        undefined,
+        style(400, undefined),
+      ],
     ];
     for (const [what, base, span, alone] of cases) {
       const pushed = widthOf(base, span),
@@ -910,6 +935,16 @@ describe("ParagraphBuilder span axes", () => {
         `${what} measured ${pushed} against ${expected}`,
       );
     }
+  });
+
+  test("refuses a keyword other than normal", () => {
+    assert.throws(
+      () => widthOf(style(400, wdth50), style(400, "none")),
+      (error) =>
+        error instanceof TypeError &&
+        /"normal" or a list/.test(error.message) &&
+        /"none"/.test(error.message),
+    );
   });
 });
 

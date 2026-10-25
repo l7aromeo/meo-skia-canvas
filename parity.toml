@@ -808,6 +808,22 @@ why  = """Not exported to JavaScript, and deliberately. A JavaScript caller gets
 status = "deliberate"
 
 [[capability]]
+name = "a style's font-variation settings: inherit, normal or axes"
+rust = ["FontVariationSettings",
+        "FontVariationSettings::Inherit",
+        "FontVariationSettings::Normal",
+        "FontVariationSettings::Axes",
+        "Axes.0"]
+npm  = ["TextStyleInput.fontVariations.normal"]
+why  = """The same three states on both surfaces, spelled as each language
+       spells a choice. npm writes them as values of `fontVariations` on a
+       `TextStyleInput`: absent or an empty list takes the paragraph's axes,
+       `"normal"` takes none, and a list sets its own. Only `"normal"` is an
+       id of its own there; the inheriting and listing forms are the
+       property itself, which pairs with `TextStyle.font_variations` by
+       name."""
+
+[[capability]]
 name = "the text engine that owns a font collection"
 rust = ["TextEngine",
         "TextEngine::layout_rich_text",

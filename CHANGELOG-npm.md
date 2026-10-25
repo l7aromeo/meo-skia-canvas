@@ -757,6 +757,15 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Added
 
+- **`fontVariations: "normal"` resets a `ParagraphBuilder` style's axes.**
+  A style given to `pushStyle` took the paragraph's axes unless it named its
+  own, so it could return an axis to the face's default only by naming the
+  default value. `"normal"`, in any case, now sets none, as CSS
+  `font-variation-settings: normal` does under a parent that set some; the
+  style's weight, stretch and font size still supply `wght`, `wdth` and
+  `opsz`. A style with no `fontVariations`, or an empty list, still takes
+  the paragraph's, and any other string throws a `TypeError`.
+
 - **`TextHeightBehavior` names the four codes `textHeightBehavior` takes**,
   `0` to `3`, with what each trims in its doc comment, so an editor offers
   them. The option is typed `TextHeightBehavior | (number & {})`, so code

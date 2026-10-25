@@ -4640,7 +4640,9 @@ fn a_spans_own_axes_replace_the_base_styles() {
     // not the 276.02 of both axes; and weight 700 with `"wdth" 50` inside a
     // `"wght" 300` parent measures 276.02, as weight 700 with `"wdth" 50`
     // alone does -- the span's list does not name `wght`, so its weight
-    // supplies it. A span with no list of its own inherits the base's.
+    // supplies it. A span with no list of its own inherits the base's, and
+    // one set to `normal` resets to the face's own axes, as
+    // `font-variation-settings: normal` does under a parent that set some.
     const AMSTELVAR: &str = "tests/assets/fonts/AmstelvarAlpha-VF.ttf";
     const TEXT: &str = "Hamburgefonstiv";
     const SIZE: f32 = 48.0;
@@ -4649,15 +4651,19 @@ fn a_spans_own_axes_replace_the_base_styles() {
         .register_font_from_path("AmstelvarSpans", AMSTELVAR)
         .expect("bundled Amstelvar registers");
     let engine = TextEngine::new(&fonts);
-    let style = |weight: i32, axes: &[(FontAxisTag, f32)]| TextStyle {
+    let style = |weight: i32, settings: FontVariationSettings| TextStyle {
         font_families: vec!["AmstelvarSpans".to_string()],
         font_size: SIZE,
         font_weight: weight,
-        font_variations: axes
-            .iter()
-            .map(|(tag, value)| FontVariation::new(*tag, *value))
-            .collect(),
+        font_variations: settings,
         ..TextStyle::default()
+    };
+    let axes = |axes: &[(FontAxisTag, f32)]| {
+        FontVariationSettings::from(
+            axes.iter()
+                .map(|(tag, value)| FontVariation::new(*tag, *value))
+                .collect::<Vec<_>>(),
+        )
     };
     let rich = |base: &TextStyle, span: TextStyle| {
         engine
@@ -4689,21 +4695,33 @@ fn a_spans_own_axes_replace_the_base_styles() {
     let cases = [
         (
             "a span's wght 700 under a base's wdth 50",
-            style(400, &[(wdth, 50.0)]),
-            style(400, &[(FontAxisTag::WGHT, 700.0)]),
+            style(400, axes(&[(wdth, 50.0)])),
+            style(400, axes(&[(FontAxisTag::WGHT, 700.0)])),
             bare(&[(*b"wght", 700.0)], 400),
         ),
         (
             "a span's weight 700 and wdth 50 under a base's wght 300",
-            style(400, &[(FontAxisTag::WGHT, 300.0)]),
-            style(700, &[(wdth, 50.0)]),
+            style(400, axes(&[(FontAxisTag::WGHT, 300.0)])),
+            style(700, axes(&[(wdth, 50.0)])),
             bare(&[(*b"wdth", 50.0), (*b"wght", 700.0)], 700),
         ),
         (
-            "a span with no axes under a base's wdth 50",
-            style(400, &[(wdth, 50.0)]),
-            style(400, &[]),
+            "a span that inherits under a base's wdth 50",
+            style(400, axes(&[(wdth, 50.0)])),
+            style(400, FontVariationSettings::Inherit),
             bare(&[(*b"wdth", 50.0), (*b"wght", 400.0)], 400),
+        ),
+        (
+            "a span set to normal under a base's wdth 50",
+            style(400, axes(&[(wdth, 50.0)])),
+            style(400, FontVariationSettings::Normal),
+            bare(&[(*b"wght", 400.0)], 400),
+        ),
+        (
+            "a span with an empty list under a base's wdth 50, as normal",
+            style(400, axes(&[(wdth, 50.0)])),
+            style(400, axes(&[])),
+            bare(&[(*b"wght", 400.0)], 400),
         ),
     ];
     // The first case separates replacing from merging only if the two
@@ -4826,13 +4844,18 @@ fn laid_out_text_takes_its_optical_size_from_each_styles_font_size() {
     const TEXT: &str = "Hamburgefonstiv";
     let fonts = amstelvar_optical(FAMILY);
     let engine = TextEngine::new(&fonts);
+    // No axes here means a span that inherits the paragraph's.
     let style = |size: f32, axes: &[(FontAxisTag, f32)]| TextStyle {
         font_families: vec![FAMILY.to_string()],
         font_size: size,
-        font_variations: axes
-            .iter()
-            .map(|(tag, value)| FontVariation::new(*tag, *value))
-            .collect(),
+        font_variations: match axes.is_empty() {
+            true => FontVariationSettings::Inherit,
+            false => axes
+                .iter()
+                .map(|(tag, value)| FontVariation::new(*tag, *value))
+                .collect::<Vec<_>>()
+                .into(),
+        },
         ..TextStyle::default()
     };
     let laid_out = |style: &TextStyle| {
@@ -4912,7 +4935,8 @@ fn an_explicit_wght_wins_over_a_paragraphs_font_weight() {
     const TEXT: &str = "Hamburgefonstiv";
     let engine = oswald_engine();
     let style = TextStyle {
-        font_variations: vec![FontVariation::new(FontAxisTag::WGHT, 300.0)],
+        font_variations: vec![FontVariation::new(FontAxisTag::WGHT, 300.0)]
+            .into(),
         ..oswald_paragraph(700)
     };
     let measured = engine_width(&engine, &style, TEXT);
@@ -4947,7 +4971,8 @@ fn an_instanced_paragraph_is_not_given_a_synthetic_bold() {
         pixels(&mut canvas)
     };
     let pinned_light = TextStyle {
-        font_variations: vec![FontVariation::new(FontAxisTag::WGHT, 300.0)],
+        font_variations: vec![FontVariation::new(FontAxisTag::WGHT, 300.0)]
+            .into(),
         ..oswald_paragraph(700)
     };
     assert!(
@@ -5042,7 +5067,8 @@ fn a_span_instances_a_variable_font_at_its_own_font_weight() {
     }
 
     let pinned = TextStyle {
-        font_variations: vec![FontVariation::new(FontAxisTag::WGHT, 300.0)],
+        font_variations: vec![FontVariation::new(FontAxisTag::WGHT, 300.0)]
+            .into(),
         ..oswald_paragraph(400)
     };
     let heavy_span = oswald_paragraph(700);
