@@ -1514,8 +1514,7 @@ impl Context2D {
     /// default (`brightness()` is `brightness(1)`), a function still open at
     /// the end of the string closed (`blur(2px` is `blur(2px)`), and a
     /// negative blur, shadow radius or amount refused where it is written
-    /// out. `"none"` clears the filter, and so does the empty string, which
-    /// Chrome ignores instead.
+    /// out. `"none"` clears the filter.
     ///
     /// Any argument may be a CSS math function -- `calc()`, `min()`,
     /// `max()`, `clamp()`, `round()`, `mod()`, `rem()`, `abs()`, `sign()`,
@@ -1539,7 +1538,9 @@ impl Context2D {
     /// Returns [`Error::InvalidFilter`] naming the piece that did not
     /// parse, and [`Error::FilterCreate`] for a value the typed form would
     /// also refuse. The whole string is rejected rather than the readable
-    /// parts kept.
+    /// parts kept. A blank string is refused as [`Error::InvalidFilter`] and
+    /// leaves the filter as it was, as HTML's `filter` setter and Chrome
+    /// leave it: a blank string is not a `<filter-value-list>`.
     ///
     /// # Examples
     ///
@@ -1562,12 +1563,8 @@ impl Context2D {
         // `"  NONE "` included -- as Chrome and the JavaScript `filter`
         // getter read it back, rather than what `set_filter` derived from
         // the parse: `saturate(150%)` and `saturate(1.5)` are one filter,
-        // and what draws is the parse. Only the empty string, which clears
-        // the filter here and which Chrome ignores, has no text to echo and
-        // reads back as `"none"`.
-        if !css.trim().is_empty() {
-            self.inner.state.filter.css = css.to_string();
-        }
+        // and what draws is the parse.
+        self.inner.state.filter.css = css.to_string();
         Ok(())
     }
 
@@ -1577,7 +1574,7 @@ impl Context2D {
     /// back exactly as it was written, whitespace and letter case included:
     /// `saturate(150%)` stays a percentage, `BLUR(5PX)` stays upper case,
     /// and `"NONE"` reads `"NONE"`. That is what Chrome and the JavaScript
-    /// `filter` getter do. The empty string reads back as `"none"`.
+    /// `filter` getter do.
     ///
     /// A chain set through the typed [`set_filter`](Self::set_filter) has no
     /// source text to echo, so it is serialized from the operations --

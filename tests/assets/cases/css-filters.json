@@ -1,7 +1,7 @@
 {
   "about": "`ctx.filter` strings and whether Chrome takes them. Read by tests/css_grammar.rs for `Context2D::set_filter_css` and by tests/suite/css-grammar.test.js for `ctx.filter`, so the two surfaces answer one table. Whether a filter is taken, and what it reads back as: every filter Chrome takes reads back exactly as it was written, whitespace and letter case included, so a row's own `css` is its reading.",
-  "source": "Chrome 152.0.7977.149: ctx.filter set on a fresh 2D context after `blur(3px)`, then read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving `blur(3px)`. Each taken filter was read back from a fresh context too, and every one came back unchanged.",
-  "knownDifferences": "Left out: the empty string, which Chrome ignores and the npm `filter` ignores too, but which `Context2D::set_filter_css` documents as clearing the filter, as `none` does; refusing it there is a change to a published signature's meaning and waits for the next breaking release of the crate. Math functions and the font-relative units are in css-math.json.",
+  "source": "Chrome 152.0.7977.149: ctx.filter set on a fresh 2D context after `blur(3px)`, then read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving `blur(3px)`. Each taken filter was read back from a fresh context too, and every one came back unchanged. The three blank rows -- the empty string, three spaces and a tab -- were measured in Chrome 152.0.7977.167 on 2026-10-25 the same way.",
+  "knownDifferences": "Math functions and the font-relative units are in css-math.json.",
   "cases": [
     {
       "css": "blur(+5px)"
@@ -209,6 +209,18 @@
     },
     {
       "css": " none "
+    },
+    {
+      "css": "",
+      "refused": true
+    },
+    {
+      "css": "   ",
+      "refused": true
+    },
+    {
+      "css": "\t",
+      "refused": true
     },
     {
       "css": "opacity(50%) sepia(1)"

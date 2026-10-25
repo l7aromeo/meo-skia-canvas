@@ -630,8 +630,8 @@ fn close_open_blocks(text: &str) -> Cow<'_, str> {
 
 /// A CSS `filter` value as the chain [`Context2D::set_filter`] takes.
 ///
-/// `"none"` and the empty string are an empty chain, which is how the
-/// property spells "no filter".
+/// `"none"` is an empty chain, which is how the property spells "no
+/// filter".
 ///
 /// [`Context2D::set_filter`]: crate::context2d::Context2D::set_filter
 ///
@@ -640,13 +640,21 @@ fn close_open_blocks(text: &str) -> Cow<'_, str> {
 /// Returns [`Error::InvalidFilter`] naming the piece that did not parse.
 /// The whole string is rejected rather than the recognised parts kept:
 /// a chain missing one step is a different picture, and quietly dropping
-/// the step nobody could read is how a typo becomes a rendering bug.
+/// the step nobody could read is how a typo becomes a rendering bug. A
+/// blank string is refused too: HTML's `filter` setter parses the value as
+/// a `<filter-value-list>`, which an empty one is not, and leaves the
+/// filter as it was, as Chrome does.
 pub(crate) fn parse_filter(
     text: &str,
     units: &FontUnits,
 ) -> Result<Vec<FilterOp>, Error> {
     let trimmed = text.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+    if trimmed.is_empty() {
+        return Err(Error::InvalidFilter {
+            reason: format!("the filter {text:?} is blank; \"none\" clears it"),
+        });
+    }
+    if trimmed.eq_ignore_ascii_case("none") {
         return Ok(Vec::new());
     }
 
@@ -1035,10 +1043,21 @@ mod tests {
     }
 
     #[test]
-    fn none_and_nothing_are_an_empty_chain() {
-        for text in ["none", "NONE", "", "   "] {
+    fn none_is_an_empty_chain_and_nothing_is_refused() {
+        for text in ["none", "NONE", " none "] {
             assert!(
                 parse_filter(text, &em()).expect("accepted").is_empty(),
+                "{text:?}"
+            );
+        }
+        // HTML's setter parses the value as a `<filter-value-list>`, which a
+        // blank string is not, and Chrome 152 leaves the filter as it was.
+        for text in ["", "   ", "\t"] {
+            assert!(
+                matches!(
+                    parse_filter(text, &em()),
+                    Err(Error::InvalidFilter { .. })
+                ),
                 "{text:?}"
             );
         }

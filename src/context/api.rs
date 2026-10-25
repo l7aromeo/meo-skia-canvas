@@ -1847,12 +1847,8 @@ pub fn set_filter(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let css = cx.argument::<JsString>(1)?.value(&mut cx);
     let mut this = this.borrow_mut();
     // Read by the crate's own `parse_filter`, so the two surfaces take one
-    // grammar from one implementation. A declaration that does not parse is
-    // ignored, as the Canvas API says, and so is the empty string, which
-    // Chrome ignores where `Context2D::set_filter_css` clears the filter.
-    if css.trim().is_empty() {
-        return Ok(cx.undefined());
-    }
+    // grammar from one implementation. A declaration that does not parse,
+    // a blank one included, is ignored, as the Canvas API says.
     let Ok(ops) = parse_filter(&css, &this.state.filter_units()) else {
         return Ok(cx.undefined());
     };
