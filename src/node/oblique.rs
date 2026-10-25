@@ -29,7 +29,9 @@
 use crate::{
     context2d::DEFAULT_OBLIQUE_DEGREES,
     font::leans_as_asked,
-    node::typography::{Shear, painted_positions, run_shear, sheared_blob},
+    node::typography::{
+        Shear, clusters_under, painted_positions, run_shear, sheared_blob,
+    },
 };
 use skia_safe::{
     BlurStyle, Canvas, Color, Font, FontStyle, GlyphId, MaskFilter, Paint,
@@ -352,14 +354,7 @@ impl Sheared {
     /// out at the same width, and finds the oblique ranges' glyphs again.
     ///
     /// A glyph's text is found by asking the paragraph for the cluster
-    /// under it rather than from the offsets `extended_visit` reports.
-    ///
-    /// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
-    /// Re-check: cargo test skia_still_restarts_utf8_starts_on_a_wrapped_line,
-    /// which goes red when the offsets of a run continued on a later line
-    /// start where its glyphs do. `ParagraphImpl::extendedVisit` hands out
-    /// the glyphs from where the line's part of the run begins and the
-    /// offsets from where the whole run does.
+    /// under it -- see `clusters_under`.
     pub(crate) fn lay_out(&mut self, paragraph: &mut Paragraph, width: f32) {
         if let Some(decorations) = &mut self.decorations {
             decorations.layout(width);
@@ -374,33 +369,23 @@ impl Sheared {
                     info.advance().width,
                 )
                 .unwrap_or_else(|| info.positions().to_vec());
-                let end = info.positions()[0].x + info.advance().width;
                 visited.push((
                     info.font().clone(),
                     info.glyphs().to_vec(),
                     positions,
                     info.origin(),
-                    end,
+                    info.advance().width,
                 ));
             }
         });
         self.runs = visited
             .into_iter()
-            .flat_map(|(font, glyphs, positions, origin, end)| {
-                // The range of each glyph, read at the middle of its
-                // advance on its baseline.
-                let ranges: Vec<Option<usize>> = (0..glyphs.len())
-                    .map(|at| {
-                        let next =
-                            positions.get(at + 1).map_or(end, |next| next.x);
-                        let middle = origin.x + (positions[at].x + next) / 2.0;
-                        paragraph
-                            .get_closest_glyph_cluster_at((middle, origin.y))
-                            .and_then(|cluster| {
-                                self.range_of(cluster.text_range.start)
-                            })
-                    })
-                    .collect();
+            .flat_map(|(font, glyphs, positions, origin, advance)| {
+                let ranges: Vec<Option<usize>> =
+                    clusters_under(paragraph, origin, &positions, advance)
+                        .into_iter()
+                        .map(|cluster| self.range_of(cluster?.start))
+                        .collect();
                 let shear =
                     run_shear(&font.typeface(), Some(DEFAULT_OBLIQUE_DEGREES));
                 ranges
@@ -489,18 +474,15 @@ mod tests {
     use skia_safe::{
         Data, FontMgr,
         textlayout::{
-            FontCollection, ParagraphBuilder, ParagraphStyle, TextStyle,
-            TypefaceFontProvider,
+            FontCollection, Paragraph, ParagraphBuilder, ParagraphStyle,
+            TextStyle, TypefaceFontProvider,
         },
     };
 
-    /// The defect `Sheared::lay_out` works around, measured directly: a run
-    /// continued on a second line reports text offsets from its first
-    /// glyph, not from the first glyph of that line's part of it.
-    ///
-    /// Red once Skia offsets them, which is when the cluster lookup can go.
-    #[test]
-    fn skia_still_restarts_utf8_starts_on_a_wrapped_line() {
+    /// A paragraph of bundled Oswald at 200px, filled in by `fill`.
+    fn oswald_paragraph(
+        fill: impl FnOnce(&mut ParagraphBuilder, &TextStyle),
+    ) -> Paragraph {
         const FAMILY: &str = "OswaldWrapped";
         let bytes = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -520,9 +502,54 @@ mod tests {
         let mut style = ParagraphStyle::new();
         style.set_text_style(&text_style);
         let mut builder = ParagraphBuilder::new(&style, collection);
-        // One run in one font, wrapped after the space.
-        builder.add_text("II II");
-        let mut paragraph = builder.build();
+        fill(&mut builder, &text_style);
+        builder.build()
+    }
+
+    /// The second defect `clusters_under` works around, measured directly:
+    /// for a run that does not start the text, the offset after its last
+    /// glyph -- the end of the run -- is not the end of the run.
+    ///
+    /// Skia copies the run's `count` offsets into storage of that size and
+    /// hands out `count + 1`, so the last is read from past what it wrote;
+    /// its value is whatever that storage held. Red once Skia writes it,
+    /// which is when the cluster lookup can go.
+    #[test]
+    fn skia_still_misreports_utf8_starts() {
+        let mut paragraph = oswald_paragraph(|builder, style| {
+            // A size of its own makes the second piece a run of its own,
+            // starting at the third byte.
+            builder.add_text("IH");
+            let mut larger = style.clone();
+            larger.set_font_size(120.0);
+            builder.push_style(&larger);
+            builder.add_text("IH");
+        });
+        paragraph.layout(1000.0);
+        let mut second = None;
+        paragraph.extended_visit(|_, visit| {
+            if let Some(info) = visit
+                && info.utf8_starts()[0] == 2
+            {
+                second = Some(info.utf8_starts().to_vec());
+            }
+        });
+        let starts = second.expect("the second piece is a run of its own");
+        assert_eq!(starts[..2], [2, 3], "the glyphs' own offsets are right");
+        assert_ne!(starts[2], 4, "and the run's end is not");
+    }
+
+    /// The defect `Sheared::lay_out` works around, measured directly: a run
+    /// continued on a second line reports text offsets from its first
+    /// glyph, not from the first glyph of that line's part of it.
+    ///
+    /// Red once Skia offsets them, which is when the cluster lookup can go.
+    #[test]
+    fn skia_still_restarts_utf8_starts_on_a_wrapped_line() {
+        let mut paragraph = oswald_paragraph(|builder, _| {
+            // One run in one font, wrapped after the space.
+            builder.add_text("II II");
+        });
         paragraph.layout(130.0);
         assert_eq!(paragraph.line_number(), 2, "the run wraps once");
 
