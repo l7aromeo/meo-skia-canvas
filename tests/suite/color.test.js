@@ -99,3 +99,28 @@ describe("colour forms no CSS defines", () => {
     assert.equal(ctx.fillStyle, "#ff0000", "hwb() itself still parses");
   });
 });
+
+describe("legacy colour syntax CSS Color 4 does not allow", () => {
+  // Chrome 153 ignores each as a `fillStyle`, and so does the setter here,
+  // as HTML says it ignores any value that does not parse.
+  test("is ignored, leaving the style as it was", () => {
+    const ctx = new Canvas(4, 4).getContext("2d");
+    for (const css of [
+      "rgb(255, 0%, 0)",
+      "rgb(255,0 0)",
+      "hsl(120, 100, 50)",
+      "rgb(none, 0, 0)",
+      "rgb(255, 0, 0, none)",
+      "hwb(120, 0%, 0%)",
+      "lab(50, 40, 30)",
+      "oklch(0.6, 0.2, 30)",
+      "color(srgb 1, 0, 0)",
+    ]) {
+      ctx.fillStyle = "#123456";
+      ctx.fillStyle = css;
+      assert.equal(ctx.fillStyle, "#123456", css);
+    }
+    ctx.fillStyle = "rgb(255, 0, 0)";
+    assert.equal(ctx.fillStyle, "#ff0000", "lawful legacy syntax parses");
+  });
+});
