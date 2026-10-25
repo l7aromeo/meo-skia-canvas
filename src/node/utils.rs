@@ -1380,13 +1380,12 @@ const LCH_CHROMA_FULL_SCALE: f32 = 150.0;
 /// Color 4 section 12.1, then [`BRADFORD_D50_TO_D65`] and the sRGB matrix,
 /// clipping nothing, a lightness outside `0..=100` included.
 ///
-/// `csscolorparser` reads Lab too, and the two are not the same reading.
 /// Over a grid of every form the `lab()` and `lch()` grammar takes, 17,712
 /// inputs, this lands within 8.5e-6 of the specification's own conversion
-/// done in `f64`, and `csscolorparser` 0.9 within 2.2e-3: a whole 8-bit level
-/// apart on 121 of them, one of which `the_rust_surface_takes_css_colors`
-/// pins against Chrome. `lab_and_lch_follow_css_color_4_across_their_grammar`
-/// fails if Lab is left to it.
+/// done in `f64`, which `lab_and_lch_follow_css_color_4_across_their_grammar`
+/// holds it to; a conversion within 2.2e-3 puts 121 of them a whole 8-bit
+/// level off, one of which `the_rust_surface_takes_css_colors` pins against
+/// Chrome.
 fn lab_to_srgb([l, a, b]: [f32; 3]) -> [f32; 3] {
     let fy = (l + 16.0) / 116.0;
     let fx = a / 500.0 + fy;
@@ -1795,8 +1794,8 @@ fn hwb_to_srgb(hue: f64, white: f64, black: f64) -> [f64; 3] {
 }
 
 /// A colour function -- `rgb(255 0 0)`, `lab(from red l a b)` and the rest --
-/// read by this crate rather than by `csscolorparser`, with the space the
-/// result is in, or `None` for what is no colour function this crate knows.
+/// with the space the result is in, or `None` for what is no colour function
+/// this crate knows.
 ///
 /// `Some(None)` when it is a colour function and does not parse, which is a
 /// refusal rather than a cue to read it some other way.
@@ -1810,24 +1809,8 @@ fn hwb_to_srgb(hue: f64, white: f64, black: f64) -> [f64; 3] {
 ///
 /// `hwba()`, `hsv()` and `hsva()`, absolute or relative, are `Some(None)`:
 /// no CSS function has those names and no browser reads them -- Chrome 153
-/// ignores `hwba(0 0% 0%)` and `hsv(0 100% 100%)` -- so they are refused
-/// here rather than left to `csscolorparser`, which reads them.
+/// ignores `hwba(0 0% 0%)` and `hsv(0 100% 100%)`.
 fn read_color_function(css: &str) -> Option<Option<(Color4f, &'static str)>> {
-    // UPSTREAM: csscolorparser 0.9.0 -- unfiled -- worked around
-    // Re-check: return `None` here, then cargo test
-    // the_rust_surface_takes_css_colors; its `rgb(from oklch(0.8 0.18 165) r g
-    // b)` row on a Display P3 canvas reads 4 rather than 91 if the defects are
-    // still there.
-    //
-    // `csscolorparser` reads a relative colour's channels out of the one
-    // encoded sRGB value it keeps per colour. The encode is the one
-    // `css_to_color4f_in_space` repairs, so an origin it built in linear light
-    // reaches an sRGB function with its negative channel on the wrong curve,
-    // and the mirror of that holds the other way. `Color::to_hsla` and
-    // `to_hwba` clamp the origin to 0..1 before finding its hue. It cannot
-    // read `display-p3`, `rec2020`, `a98-rgb` or `prophoto-rgb`, absolute or
-    // relative, and its channel grammar refuses math functions, percentages
-    // where CSS takes them, angle units, `calc(e)` and infinities.
     let (name, args) = css.trim().split_once('(')?;
     let function = match name.to_ascii_lowercase().as_str() {
         "rgb" | "rgba" => Relative::Rgb,
@@ -1847,7 +1830,7 @@ fn read_color_function(css: &str) -> Option<Option<(Color4f, &'static str)>> {
         .is_some_and(|&(from, to)| args[from..to].eq_ignore_ascii_case("from"));
     match relative {
         true => Some(relative_channels(args, function)),
-        false => absolute_channels(args, function),
+        false => Some(absolute_channels(args, function)),
     }
 }
 
@@ -2013,19 +1996,15 @@ fn relative_channels(
 }
 
 /// The colour an absolute colour function names, given what follows the
-/// `(`, on the terms [`read_color_function`] gives: `Some(None)` refuses it,
-/// `None` leaves it to `csscolorparser`.
+/// `(`, and the space it is in, or `None` where it does not parse.
 fn absolute_channels(
     args: &str,
     function: Relative,
-) -> Option<Option<(Color4f, &'static str)>> {
-    let Some(body) = args.trim_end().strip_suffix(')') else {
-        return Some(None);
-    };
-    let body = body.trim();
+) -> Option<(Color4f, &'static str)> {
+    let body = args.trim_end().strip_suffix(')')?.trim();
     match has_top_level_comma(body) {
-        true => Some(legacy_channels(body, function)),
-        false => Some(modern_channels(body, function)),
+        true => legacy_channels(body, function),
+        false => modern_channels(body, function),
     }
 }
 
@@ -2331,11 +2310,9 @@ const NAMED_COLORS: [(&str, [u8; 3]); 148] = [
 /// A hex colour -- `#rgb`, `#rgba`, `#rrggbb` or `#rrggbbaa` -- or a named one,
 /// in either case, or `None` for anything else.
 ///
-/// Read here rather than by `csscolorparser`, so that from npm 7.0 and crate
-/// 0.17 it is left only the forms deprecated until then. Each component is
-/// its byte over 255, as `csscolorparser` gives it, so the same string names
-/// the same `f32`s either way; `hex_and_named_colours_read_as_they_did`
-/// holds that for every named colour and every hex form. A `#` followed by
+/// Each component is its byte over 255, and
+/// `hex_and_named_colours_read_as_they_did` holds every named colour and
+/// every hex form to the `f32`s earlier releases gave. A `#` followed by
 /// anything else is `Some(None)`, a refusal: only hex follows one.
 fn hex_or_named(css: &str) -> Option<Option<Color4f>> {
     let css = css.trim();
@@ -2412,17 +2389,11 @@ pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
     if let Some(color) = hex_or_named(css) {
         return color.map(|color| (color, ColorSpace::new_srgb()));
     }
-    // Hex digits with no `#`, `"ff0000"`, are no CSS colour and no browser
-    // reads them; Chrome 153 ignores the `fillStyle`. The parser below reads
-    // them, so they stop here.
-    if css.trim().chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    // Every colour CSS defines is read above, and every colour function is
-    // read or refused there; what reaches `csscolorparser` is neither.
-    csscolorparser::parse(css)
-        .ok()
-        .map(|c| (Color4f::new(c.r, c.g, c.b, c.a), ColorSpace::new_srgb()))
+    // Neither a colour function nor a hex or named colour, which is all CSS
+    // has: hex digits with no `#`, a function name with a space before its
+    // `(` -- `rgb (255 0 0)`, which CSS Syntax reads as a word and a block --
+    // and the rest. Chrome 153 ignores each.
+    None
 }
 
 /// Converts a colour into sRGB when it was named in some other space.
@@ -3768,50 +3739,83 @@ pub fn from_engine(engine: RenderingEngine) -> String {
 mod tests {
     use super::*;
 
+    /// FNV-1a over every input [`hex_and_named_colours_read_as_they_did`]
+    /// reads, a byte saying whether it was read, and the `f32` bits it reads
+    /// as: `csscolorparser` 0.9's answers, which these matched bit for bit,
+    /// input by input, when the inputs were first recorded.
+    const HEX_AND_NAMED_DIGEST: u64 = 0x50bc_dc39_c4f3_3e1b;
+
+    /// FNV-1a's 64-bit offset basis and prime, as the FNV specification,
+    /// draft-eastlake-fnv, gives them.
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x100_0000_01b3;
+
+    /// Set to print each input and what it reads as, one per line, to
+    /// standard error.
+    const DUMP_VARIABLE: &str = "HEX_AND_NAMED_DUMP";
+
     #[test]
     fn hex_and_named_colours_read_as_they_did() {
-        // The same `f32`s `csscolorparser` gives, bit for bit, over every
-        // named colour in either case, every short hex form, and the long
-        // forms channel by channel with a spread of the rest.
-        let both = |css: &str| {
+        // Every named colour in either case, every short hex form, and the
+        // long forms channel by channel with a spread of the rest.
+        //
+        // A digest names no input when it fails. To find the ones that moved,
+        // run this with `HEX_AND_NAMED_DUMP=1` and `-- --nocapture`, here and
+        // at the last commit it passed, and diff the two outputs.
+        //
+        // A refusal folds a 0 byte and an answer a 1 before its bits. Without
+        // that byte a refusal and transparent black fold the same bytes, so a
+        // reader that refused `transparent` or `#0000` would pass.
+        let dump = std::env::var_os(DUMP_VARIABLE).is_some();
+        let mut digest = FNV_OFFSET_BASIS;
+        let mut fold = |bytes: &[u8]| {
+            for &byte in bytes {
+                digest = (digest ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
+            }
+        };
+        let mut read = |css: &str| {
             let ours = hex_or_named(css)
                 .flatten()
                 .map(|c| c.as_array().map(f32::to_bits));
-            let theirs = csscolorparser::parse(css)
-                .ok()
-                .map(|c| c.to_array().map(f32::to_bits));
-            assert_eq!(ours, theirs, "{css}");
+            if dump {
+                eprintln!("{css} {ours:08x?}");
+            }
+            fold(css.as_bytes());
+            fold(&[u8::from(ours.is_some())]);
+            for bits in ours.unwrap_or_default() {
+                fold(&bits.to_le_bytes());
+            }
         };
-        assert_eq!(NAMED_COLORS.len(), csscolorparser::NAMED_COLORS.len());
-        for (name, _) in csscolorparser::NAMED_COLORS.entries() {
-            both(name.as_str());
-            both(&name.as_str().to_ascii_uppercase());
+        for (name, _) in NAMED_COLORS {
+            read(name);
+            read(&name.to_ascii_uppercase());
         }
         for name in ["transparent", "Transparent", "TRANSPARENT"] {
-            both(name);
+            read(name);
         }
         for value in 0..16u32.pow(4) {
-            both(&format!("#{value:04x}"));
-            both(&format!("#{value:04X}"));
+            read(&format!("#{value:04x}"));
+            read(&format!("#{value:04X}"));
             if value < 16u32.pow(3) {
-                both(&format!("#{value:03x}"));
+                read(&format!("#{value:03x}"));
             }
         }
         for byte in 0..=255u32 {
             for shift in [0, 8, 16, 24] {
-                both(&format!(
+                read(&format!(
                     "#{:08x}",
                     byte << shift | 0x5a5a5a5a & !(0xff << shift)
                 ));
             }
-            both(&format!("#{:06x}", byte * 0x010101));
+            read(&format!("#{:06x}", byte * 0x010101));
         }
         let mut state = 0x2545_f491_u32;
         for _ in 0..50_000 {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            both(&format!("#{state:08x}"));
-            both(&format!("#{:06x}", state >> 8));
+            read(&format!("#{state:08x}"));
+            read(&format!("#{:06x}", state >> 8));
         }
+        assert_eq!(digest, HEX_AND_NAMED_DIGEST);
     }
 
     #[test]

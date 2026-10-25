@@ -961,7 +961,7 @@ fn the_rust_surface_takes_css_colors() -> Result<()> {
     //
     // The same colour in other notations: an `xyz` space and a relative
     // colour whose space follows an origin with spaces of its own, both
-    // converted in linear light by `csscolorparser`, and the same Lab colour
+    // converted in linear light, and the same Lab colour
     // in upper case, read by this crate's own Lab conversion. Lab rounds its
     // components to four places, which moves no byte here.
     for css in [
@@ -1416,9 +1416,10 @@ fn a_colour_missing_its_closing_brackets_is_read_closed() -> Result<()> {
 }
 
 /// The colour forms no CSS defines -- `hwba()`, `hsv()`, `hsva()`, absolute
-/// or relative, and hex without its `#` -- are refused, and leave the fill
-/// as it was, as Chrome 153 ignores each. The CSS spellings beside them
-/// still parse.
+/// or relative, hex without its `#`, and a function name with a space before
+/// its `(`, which CSS Syntax reads as a word and a block -- are refused, and
+/// leave the fill as it was, as Chrome 153 ignores each. The CSS spellings
+/// beside them still parse.
 #[test]
 fn colour_forms_no_css_defines_are_refused() -> Result<()> {
     let mut canvas = Canvas::new(4.0, 4.0);
@@ -1439,6 +1440,12 @@ fn colour_forms_no_css_defines_are_refused() -> Result<()> {
         "hsv(from red h s v)",
         "hsva(from red h s v / 0.5)",
         "hsv(from black h s v)",
+        "rgb (255 0 0)",
+        "RGB (255, 0, 0)",
+        "hsl (120 100% 50%)",
+        "lab (50 40 30)",
+        "oklch (0.6 0.2 30)",
+        "color (srgb 1 0 0)",
     ] {
         assert!(ctx.set_fill_style_css(css).is_err(), "{css} is refused");
         assert_eq!(ctx.fill_style(), before, "{css} leaves the fill");

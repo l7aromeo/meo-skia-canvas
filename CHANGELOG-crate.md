@@ -25,6 +25,17 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Breaking
 
+- **A colour function written with a space before its `(` is refused.**
+  `rgb (255 0 0)`, `lab (50 40 30)`, `color (srgb 1 0 0)` and the rest
+  painted as if the space were not there. CSS Syntax reads such a name and
+  its brackets as a word and a block, not a function, and Chrome 153
+  ignores every one. Each `set_*_css` setter now returns its colour error
+  for them and leaves the style as it was, and `RgbaLinear::from_css`
+  returns `None`. Nothing deprecated this first; it went with the parser
+  that read it, `csscolorparser`, which the crate no longer depends on.
+
+  Migrate: write the name and its `(` together, `rgb(255 0 0)`.
+
 - **Legacy comma syntax CSS Color 4 does not allow is refused.** Each of
   these painted here and is refused by Chrome 153: numbers and percentages
   mixed, `rgb(255, 0%, 0)`; separators mixed, `rgb(255,0 0)`; `hsl()` with
