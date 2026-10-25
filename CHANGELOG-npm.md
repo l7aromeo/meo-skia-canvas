@@ -273,6 +273,14 @@ removed and no signature moves.
   and every other paragraph keeps it. Fixed in Skia, not yet in the
   skia-safe this release builds on.
 
+- **An empty `fontFamilies` list lays out in the default families.**
+  `ParagraphBuilder` handed it to Skia as it stood, and skia-safe 0.153.3
+  builds a slice from a null pointer for an empty list: a debug build of
+  the addon aborted the process, `Make({ textStyle: { fontFamilies: [] } })`
+  included, and a release build passed the null slice on. An empty list in
+  a text style, a pushed style or a strut now names no family, as leaving
+  the option out does.
+
 - **`letterSpacing` and `wordSpacing` take `"0"`.** CSS Values 4 lets a
   zero length be written without its unit, and `ctx.letterSpacing = "0"`
   was ignored; it and any other unitless zero, such as `0.0` or `0e5`, now

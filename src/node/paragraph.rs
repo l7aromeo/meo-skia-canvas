@@ -220,6 +220,24 @@ fn refuse_unknown_keys(
     Ok(())
 }
 
+/// The family names in a `fontFamilies` list, or `None` where it holds none,
+/// which names the default families as the option left out does.
+fn families_in(
+    cx: &mut FunctionContext,
+    list: Handle<JsArray>,
+) -> NeonResult<Option<Vec<String>>> {
+    let values = list.to_vec(cx)?;
+    let families = strings_in(cx, &values);
+    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+    // Re-check: cargo test an_empty_family_list_is_a_null_slice_in_skia_safe
+    // `NativeSliceAccess::native` makes a slice from the first element's
+    // pointer, null for an empty list, and `set_font_families` hands it one:
+    // a debug build's precondition check aborts the process there, and a
+    // release build passes a null slice on. The crate's own styles never
+    // set an empty list, so only this binding reached it.
+    Ok((!families.is_empty()).then_some(families))
+}
+
 fn parse_text_style(
     cx: &mut FunctionContext,
     obj: &Handle<JsObject>,
@@ -233,12 +251,12 @@ fn parse_text_style(
         style.set_font_size(size);
     }
 
-    // fontFamilies
+    // fontFamilies -- an empty list names the default families, as the
+    // option left out does; see `families_in`.
     if let Ok(fam_val) = obj.get::<JsValue, _, _>(cx, "fontFamilies")
         && let Ok(fam_arr) = fam_val.downcast::<JsArray, _>(cx)
+        && let Some(families) = families_in(cx, fam_arr)?
     {
-        let fam_vec = fam_arr.to_vec(cx)?;
-        let families = strings_in(cx, &fam_vec);
         style.set_font_families(&families);
     }
 
@@ -618,9 +636,8 @@ fn parse_paragraph_style(
         );
         if let Ok(fam_val) = strut_obj.get::<JsValue, _, _>(cx, "fontFamilies")
             && let Ok(fam_arr) = fam_val.downcast::<JsArray, _>(cx)
+            && let Some(families) = families_in(cx, fam_arr)?
         {
-            let fam_vec = fam_arr.to_vec(cx)?;
-            let families = strings_in(cx, &fam_vec);
             strut.set_font_families(&families);
         }
         if let Some(size) = opt_float_for_key(cx, &strut_obj, "fontSize") {
