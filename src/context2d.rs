@@ -2812,7 +2812,7 @@ impl Context2D {
         // without this wrapper the context's alpha and blend mode would be
         // silently dropped.
         self.inner.with_composited_canvas(|canvas| {
-            layout.paragraph.paint(canvas, SkPoint::new(x, y));
+            layout.paint(canvas, SkPoint::new(x, y));
         });
     }
 

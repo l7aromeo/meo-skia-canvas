@@ -1,17 +1,18 @@
 use std::{
+    borrow::Cow,
+    iter::once,
     ops::Range,
     rc::Rc,
     sync::{Mutex, PoisonError},
 };
 
 use skia_safe::{
-    FontArguments, FontMgr, FontStyle, FourByteTag, Paint as SkPaint,
-    PaintStyle as SkPaintStyle, Point as SkPoint,
+    Canvas as SkCanvas, FontArguments, FontMgr, FontStyle, FourByteTag,
+    Paint as SkPaint, PaintStyle as SkPaintStyle, Point as SkPoint,
     font_arguments::{VariationPosition, variation_position::Coordinate},
     font_style::{Slant, Weight},
     textlayout::{
         Affinity as SkAffinity, FontCollection, Paragraph as SkParagraph,
-        ParagraphBuilder as SkParagraphBuilder,
         ParagraphStyle as SkParagraphStyle,
         PlaceholderAlignment as SkPlaceholderAlignment, PlaceholderStyle,
         RectHeightStyle as SkRectHeightStyle,
@@ -30,13 +31,14 @@ use crate::{
         RgbaLinear, linear_srgb_color_space, rgba_linear_to_skia_color,
         rgba_linear_to_unpremul_color4f,
     },
-    context2d::{FontStretch, TextDirection},
+    context2d::{DEFAULT_OBLIQUE_DEGREES, FontStretch, TextDirection},
     font::{
         FontAxisTag, FontLibrary, FontVariation, InstancedPositions,
-        optical_size, slant_for_matching, variation_axes,
+        optical_size, variation_axes,
     },
     geometry::Rect,
     image::CSS_INITIAL_FONT_SIZE,
+    node::oblique::{ParagraphRecipe, Sheared, match_oblique},
 };
 
 /// Horizontal alignment of text within its layout width.
@@ -237,7 +239,10 @@ pub enum TextSlant {
     Upright,
     /// The font's designed italic, where it has one.
     Italic,
-    /// A slanted upright, used where no true italic exists.
+    /// An oblique at CSS Fonts 4's default angle, 14deg, drawn as
+    /// [`FontSlant::Oblique`](crate::context2d::FontSlant::Oblique) is: the
+    /// family's face that leans as asked, or else its upright face sheared
+    /// by `tan(14deg)`, before any italic.
     Oblique,
 }
 
@@ -1179,26 +1184,9 @@ impl TextEngine {
         style: &TextStyle,
         max_width: f32,
     ) -> Paragraph {
-        let collection = self.collection.clone();
-        let strut = strut_families(style, &mut collection.clone());
-        let instance = instance_for(
-            &mut collection.clone(),
-            &self.positions,
-            style,
-            &style.font_variations,
-        );
-        let sk_text_style = build_text_style(style, &instance);
-        let paragraph_style =
-            build_paragraph_style(style, &sk_text_style, &strut);
-
-        let mut builder = SkParagraphBuilder::new(&paragraph_style, collection);
+        let mut builder = self.paragraph_builder(style);
         builder.add_text(text);
-        let mut paragraph = builder.build();
-        paragraph.layout(max_width);
-        Paragraph {
-            paragraph,
-            max_width,
-        }
+        builder.build(max_width)
     }
 
     /// Lays out a rich-text paragraph.
@@ -1271,20 +1259,22 @@ impl TextEngine {
         &self,
         base_style: &TextStyle,
     ) -> ParagraphBuilder {
-        let collection = self.collection.clone();
+        let mut collection = self.collection.clone();
         let strut = strut_families(base_style, &mut collection.clone());
         let instance = instance_for(
             &mut collection.clone(),
             &self.positions,
             base_style,
-            &base_style.font_variations,
+            &oblique_variations(base_style, &base_style.font_variations),
         );
-        let base_sk_style = build_text_style(base_style, &instance);
+        let mut base_sk_style = build_text_style(base_style, &instance);
+        let base_oblique = match_oblique(&mut base_sk_style, &mut collection);
         let paragraph_style =
             build_paragraph_style(base_style, &base_sk_style, &strut);
         ParagraphBuilder {
-            inner: SkParagraphBuilder::new(
-                &paragraph_style,
+            recipe: ParagraphRecipe::new(
+                paragraph_style,
+                base_oblique,
                 collection.clone(),
             ),
             collection,
@@ -1332,11 +1322,10 @@ pub struct TextPosition {
 /// Skia's builder does the same, and a mismatched pop is a bug in the
 /// caller's bookkeeping, not a reason to take the process down mid-layout.
 pub struct ParagraphBuilder {
-    inner: SkParagraphBuilder,
-    /// Skia's builder borrows the collection internally rather than owning a
-    /// reference the Rust side can see, so this keeps it alive for as long
-    /// as the builder can reach it -- and a pushed style resolves its faces
-    /// against it to decide whether they are variable.
+    /// The steps the paragraph is built from.
+    recipe: ParagraphRecipe,
+    /// What a pushed style resolves its faces against, to decide whether
+    /// they are variable and whether one leans for an oblique.
     collection: FontCollection,
     /// The engine's record of the positions instanced through `collection`.
     positions: Rc<Mutex<InstancedPositions>>,
@@ -1361,21 +1350,23 @@ impl ParagraphBuilder {
             &mut self.collection.clone(),
             &self.positions,
             style,
-            variations,
+            &oblique_variations(style, variations),
         );
-        self.inner.push_style(&build_text_style(style, &instance));
+        let mut sk_style = build_text_style(style, &instance);
+        let oblique = match_oblique(&mut sk_style, &mut self.collection);
+        self.recipe.push_style(sk_style, oblique);
         self
     }
 
     /// Pops the top style, returning to the one beneath.
     pub fn pop(&mut self) -> &mut Self {
-        self.inner.pop();
+        self.recipe.pop();
         self
     }
 
     /// Adds `text` in the style currently on top of the stack.
     pub fn add_text(&mut self, text: &str) -> &mut Self {
-        self.inner.add_text(text);
+        self.recipe.add_text(text);
         self
     }
 
@@ -1385,18 +1376,20 @@ impl ParagraphBuilder {
     /// reports where each one landed, in the order they were added, which is
     /// what the caller draws against.
     pub fn add_placeholder(&mut self, placeholder: Placeholder) -> &mut Self {
-        self.inner.add_placeholder(&placeholder.to_skia());
+        self.recipe.add_placeholder(&placeholder.to_skia());
         self
     }
 
     /// Closes the paragraph and lays it out, wrapping at `max_width`.
-    pub fn build(mut self, max_width: f32) -> Paragraph {
-        let mut paragraph = self.inner.build();
-        paragraph.layout(max_width);
-        Paragraph {
+    pub fn build(self, max_width: f32) -> Paragraph {
+        let (paragraph, sheared) = self.recipe.build();
+        let mut paragraph = Paragraph {
             paragraph,
+            sheared,
             max_width,
-        }
+        };
+        paragraph.layout(max_width);
+        paragraph
     }
 }
 
@@ -1406,6 +1399,8 @@ impl ParagraphBuilder {
 /// `draw_text_layout` paints the same paragraph onto a canvas.
 pub struct Paragraph {
     pub(crate) paragraph: SkParagraph,
+    /// What draws the paragraph's oblique ranges, where it has any.
+    sheared: Option<Sheared>,
     max_width: f32,
 }
 
@@ -1423,7 +1418,20 @@ impl Paragraph {
     /// Every metric on this type reports the new layout afterwards.
     pub fn layout(&mut self, max_width: f32) {
         self.paragraph.layout(max_width);
+        if let Some(sheared) = &mut self.sheared {
+            sheared.lay_out(&mut self.paragraph, max_width);
+        }
         self.max_width = max_width;
+    }
+
+    /// Paints the paragraph with its top-left corner at `origin`: through
+    /// `Paragraph::paint`, and with its oblique ranges sheared where it has
+    /// any -- see `node::oblique`.
+    pub(crate) fn paint(&self, canvas: &SkCanvas, origin: SkPoint) {
+        match &self.sheared {
+            Some(sheared) => sheared.paint(&self.paragraph, canvas, origin),
+            None => self.paragraph.paint(canvas, origin),
+        }
     }
 
     /// The distance from the top of the layout to the alphabetic baseline
@@ -1610,8 +1618,28 @@ fn font_style_for(style: &TextStyle) -> FontStyle {
     FontStyle::new(
         Weight::from(style.font_weight),
         style.stretch.to_skia(),
-        slant_for_matching(style.slant.to_skia()),
+        style.slant.to_skia(),
     )
+}
+
+/// `variations`, with `slnt` set to the default oblique angle ahead of them
+/// where `style` asks for oblique -- negated, as OpenType counts the axis
+/// counter-clockwise -- so that a `slnt` they name wins.
+fn oblique_variations<'a>(
+    style: &TextStyle,
+    variations: &'a [FontVariation],
+) -> Cow<'a, [FontVariation]> {
+    match style.slant {
+        TextSlant::Oblique => Cow::Owned(
+            once(FontVariation::new(
+                FontAxisTag::SLNT,
+                -DEFAULT_OBLIQUE_DEGREES,
+            ))
+            .chain(variations.iter().copied())
+            .collect(),
+        ),
+        _ => Cow::Borrowed(variations),
+    }
 }
 
 /// How a style's variable faces are instanced.

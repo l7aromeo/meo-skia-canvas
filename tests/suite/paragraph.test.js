@@ -912,3 +912,215 @@ describe("ParagraphBuilder span axes", () => {
     }
   });
 });
+
+describe("an oblique range in a Paragraph draws as canvas `oblique` text does", () => {
+  // CSS Fonts 4's rule, the one a canvas follows: a family's face that
+  // leans as asked, and otherwise its upright face sheared by tan(14deg),
+  // before any italic. So a range asking for oblique on Raleway, which has
+  // an italic, is sheared as one on Oswald, which has none, and draws
+  // exactly what canvas text in `oblique` draws.
+  FontLibrary.use("ParagraphOswald", [
+    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+  ]);
+  FontLibrary.use("ParagraphRaleway", [
+    "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+    "tests/assets/fonts/Raleway/Raleway-Italic-VariableFont_wght.ttf",
+  ]);
+  // And the two Recursive fixtures: one with a `slnt` axis, set to -14,
+  // and one whose oblique face is drawn as it is -- see the README beside
+  // them.
+  const R = "tests/assets/fonts/Recursive";
+  FontLibrary.use("ParagraphRecursiveSlnt", [`${R}/Recursive-slnt-subset.ttf`]);
+  FontLibrary.use("ParagraphRecursiveStatic", [
+    `${R}/Recursive-upright-subset.ttf`,
+    `${R}/Recursive-oblique12-subset.ttf`,
+  ]);
+  const FAMILIES = ["ParagraphOswald", "ParagraphRaleway"],
+    LEANING = ["ParagraphRecursiveSlnt", "ParagraphRecursiveStatic"],
+    W = 400,
+    H = 300,
+    UPRIGHT = 0,
+    ITALIC = 1,
+    OBLIQUE = 2,
+    TAN_14 = Math.tan((14 * Math.PI) / 180);
+
+  // A paragraph of `pieces`, each `[text, style]`, drawn with its first
+  // baseline at y = 250, the baseline the canvas text below is drawn on.
+  const paragraph = (family, pieces, width = 1000) => {
+    const base = { fontFamilies: [family], fontSize: 200, color: "black" },
+      pb = ParagraphBuilder.Make({ textStyle: base });
+    for (const [text, style] of pieces) {
+      pb.pushStyle({ ...base, ...style });
+      pb.addText(text);
+      pb.pop();
+    }
+    const p = pb.build();
+    p.layout(width);
+    const ctx = new Canvas(W, H * 2).getContext("2d");
+    ctx.drawParagraph(p, 60, 250 - p.getAlphabeticBaseline());
+    const data = ctx.getImageData(0, 0, W, H * 2).data;
+    data.lines = p.getNumberOfLines();
+    return data;
+  };
+  const slanted = (slant) => ({ fontStyle: { slant } });
+  const text = (font, words) => {
+    const ctx = new Canvas(W, H * 2).getContext("2d");
+    ctx.font = font;
+    ctx.fillText(words, 60, 250);
+    return ctx.getImageData(0, 0, W, H * 2).data;
+  };
+  const same = (a, b) => Buffer.from(a).equals(Buffer.from(b));
+  // Rows `from` to `to` of a picture, for comparing one line of a paragraph.
+  const rows = (data, from, to) =>
+    Buffer.from(data.subarray(from * W * 4, to * W * 4));
+
+  // The slope of the left edge of the first inked column of each row,
+  // fitted over the middle seventy percent of the rows.
+  const slope = (data) => {
+    const edge = [];
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++)
+        if (data[(y * W + x) * 4 + 3] >= 128) {
+          edge.push([y, x]);
+          break;
+        }
+    const inner = edge.slice(
+        Math.floor(edge.length * 0.15),
+        Math.floor(edge.length * 0.85),
+      ),
+      n = inner.length,
+      my = inner.reduce((s, [y]) => s + y, 0) / n,
+      mx = inner.reduce((s, [, x]) => s + x, 0) / n;
+    let num = 0,
+      den = 0;
+    for (const [y, x] of inner) {
+      num += (y - my) * (x - mx);
+      den += (y - my) ** 2;
+    }
+    return num / den;
+  };
+
+  test("pixel for pixel, in a family with an italic and in one without", () => {
+    for (const family of FAMILIES) {
+      // The control: without it a scene that is not like for like would
+      // make the comparison below mean nothing.
+      assert.ok(
+        same(
+          paragraph(family, [["IH", slanted(UPRIGHT)]]),
+          text(`200px ${family}`, "IH"),
+        ),
+        `${family}: an upright paragraph draws what upright text draws`,
+      );
+      const oblique = paragraph(family, [["IH", slanted(OBLIQUE)]]);
+      assert.ok(
+        same(oblique, text(`oblique 200px ${family}`, "IH")),
+        `${family}: an oblique range draws what oblique text draws`,
+      );
+      assert.ok(
+        !same(oblique, paragraph(family, [["IH", slanted(ITALIC)]])),
+        `${family}: oblique is not the italic`,
+      );
+    }
+  });
+
+  test("a face that leans as asked is drawn as canvas text draws it", () => {
+    for (const family of LEANING) {
+      const oblique = paragraph(family, [["IH", slanted(OBLIQUE)]]);
+      assert.ok(
+        same(oblique, text(`oblique 200px ${family}`, "IH")),
+        `${family}: an oblique range draws what oblique text draws`,
+      );
+      assert.ok(
+        !same(oblique, paragraph(family, [["IH", slanted(UPRIGHT)]])),
+        `${family}: and leans`,
+      );
+    }
+  });
+
+  test("sheared by tan(14deg)", () => {
+    for (const family of FAMILIES) {
+      const measured = slope(paragraph(family, [["I", slanted(OBLIQUE)]]));
+      assert.ok(
+        Math.abs(measured + TAN_14) <= 0.005,
+        `${family}: slope ${measured}, expected ${-TAN_14}`,
+      );
+    }
+  });
+
+  test("a range is sheared on whichever line it lands", () => {
+    // Two words in one font are one run, and the second wraps: its glyphs
+    // are the run continued on a second line, the case SkParagraph reports
+    // the wrong text offsets for. Each line has to be what the paragraph
+    // all in the one slant draws there.
+    const family = "ParagraphOswald",
+      width = 130,
+      mixed = paragraph(
+        family,
+        [
+          ["II ", slanted(UPRIGHT)],
+          ["II", slanted(OBLIQUE)],
+        ],
+        width,
+      ),
+      upright = paragraph(family, [["II II", slanted(UPRIGHT)]], width),
+      oblique = paragraph(family, [["II II", slanted(OBLIQUE)]], width),
+      second = H; // the second line's rows start below the first's
+    for (const [name, data] of Object.entries({ mixed, upright, oblique }))
+      assert.equal(data.lines, 2, `${name} wraps once`);
+    assert.ok(
+      !rows(upright, second, H * 2).equals(rows(oblique, second, H * 2)),
+      "the control: the two slants differ on the second line",
+    );
+    assert.ok(
+      rows(mixed, 0, second).equals(rows(upright, 0, second)),
+      "the first line is upright",
+    );
+    assert.ok(
+      rows(mixed, second, H * 2).equals(rows(oblique, second, H * 2)),
+      "the second line is sheared",
+    );
+  });
+
+  test("decorations stay level and shadows lean with their glyphs", () => {
+    const family = "ParagraphOswald",
+      UNDERLINE = 1;
+    // Below the baseline, where an `I` has no ink, only the underline is.
+    const under = (data) => rows(data, 252, H);
+    const underlined = (slant) =>
+      paragraph(family, [
+        [
+          "I",
+          { ...slanted(slant), decoration: UNDERLINE, decorationColor: "red" },
+        ],
+      ]);
+    assert.ok(
+      under(underlined(UPRIGHT)).some((v) => v > 0),
+      "the control: the underline is drawn",
+    );
+    assert.ok(
+      under(underlined(OBLIQUE)).equals(under(underlined(UPRIGHT))),
+      "an oblique range is underlined as an upright one is",
+    );
+
+    // The shadow alone, under a transparent glyph: it leans as its glyph
+    // does, and an upright range's does not.
+    const shadow = (slant) =>
+      paragraph(family, [
+        [
+          "I",
+          {
+            ...slanted(slant),
+            color: "transparent",
+            shadows: [{ color: "blue", offset: [40, 0], blurRadius: 0 }],
+          },
+        ],
+      ]);
+    const leaning = slope(shadow(OBLIQUE)),
+      standing = slope(shadow(UPRIGHT));
+    assert.ok(
+      Math.abs(leaning + TAN_14) <= 0.005,
+      `an oblique range's shadow slopes ${leaning}, expected ${-TAN_14}`,
+    );
+    assert.ok(Math.abs(standing) <= 0.005, `an upright one ${standing}`);
+  });
+});

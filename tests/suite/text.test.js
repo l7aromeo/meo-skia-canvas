@@ -1701,6 +1701,82 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
     );
   });
 
+  test("a shear to a right angle draws nothing, and nearer one a sliver", () => {
+    // As the angle nears 90deg a sheared glyph thins towards its baseline,
+    // so its coverage of any finite region tends to nothing: 90deg is that
+    // limit, and 89.9deg is still a faint sliver on the way to it.
+    const metrics = (font) => {
+      const ctx = new Canvas(300, 300).getContext("2d");
+      ctx.font = font;
+      ctx.fillText("IH", 60, 250);
+      const m = ctx.measureText("IH"),
+        inked = ctx
+          .getImageData(0, 0, 300, 300)
+          .data.filter((_, i) => i % 4 === 3 && _ > 0).length;
+      return {
+        inked,
+        m,
+        outline: ctx.outlineText("IH").bounds,
+        numbers: [
+          m.width,
+          m.actualBoundingBoxLeft,
+          m.actualBoundingBoxRight,
+          m.actualBoundingBoxAscent,
+          m.actualBoundingBoxDescent,
+          ...Object.values(ctx.outlineText("IH").bounds),
+        ],
+      };
+    };
+    const upright = metrics("200px Oswald"),
+      blank = (() => {
+        const ctx = new Canvas(10, 10).getContext("2d");
+        ctx.font = "200px Oswald";
+        return ctx.measureText("  ");
+      })(),
+      nothing = new Canvas(10, 10).getContext("2d").outlineText("").bounds;
+    assert.ok(upright.inked > 0, "the control paints");
+    for (const angle of [90, -90]) {
+      const flat = metrics(`oblique ${angle}deg 200px Oswald`);
+      assert.equal(flat.inked, 0, `${angle}deg paints nothing`);
+      assert.equal(
+        flat.m.width,
+        upright.m.width,
+        `${angle}deg advances as upright`,
+      );
+      for (const key of [
+        "actualBoundingBoxLeft",
+        "actualBoundingBoxRight",
+        "actualBoundingBoxAscent",
+        "actualBoundingBoxDescent",
+      ])
+        assert.equal(
+          flat.m[key],
+          blank[key],
+          `${angle}deg ${key} is a blank's`,
+        );
+      assert.deepEqual(
+        flat.outline,
+        nothing,
+        `${angle}deg has an empty outline`,
+      );
+      assert.ok(flat.numbers.every(Number.isFinite), `${angle}deg: no NaN`);
+    }
+    for (const angle of [89.9, -89.9]) {
+      const sliver = metrics(`oblique ${angle}deg 200px Oswald`);
+      assert.ok(sliver.inked > 0, `${angle}deg still paints`);
+      assert.ok(
+        sliver.inked < upright.inked,
+        `${angle}deg paints less than upright: ${sliver.inked} of ${upright.inked}`,
+      );
+      assert.equal(
+        sliver.m.width,
+        upright.m.width,
+        `${angle}deg advances as upright`,
+      );
+      assert.ok(sliver.numbers.every(Number.isFinite), `${angle}deg: no NaN`);
+    }
+  });
+
   test("a fallback face that leans already is not sheared again", () => {
     // The upright instance with no `I`, so an `I` falls back to the slnt
     // instance, which leans by itself: sheared on top, it would slope twice.

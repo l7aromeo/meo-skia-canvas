@@ -105,9 +105,13 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   value" ahead of any italic. So here `oblique 10deg` leans an upright face
   by `tan(10deg)` and `oblique -14deg` leans it back by `tan(14deg)`, a
   `slnt` axis leans as far as it goes, and an italic face is drawn only for
-  a family with no upright face to shear. `resolve_for_oblique` and
-  `run_shear` in `src/node/typography.rs` are the match, and quote the
-  section. Slope of an `I` stem at 200px, measured here on macOS:
+  a family with no upright face to shear. At 90deg either way a sheared
+  glyph lies along its baseline and draws nothing, the limit it nears as
+  the angle grows. `resolve_for_oblique` and `run_shear` in
+  `src/node/typography.rs` are the match, and quote the section. A range of
+  a `Paragraph` asking for oblique is matched and sheared the same way, at
+  14deg, and draws what canvas text in `oblique` draws -- `src/node/oblique.rs`.
+  Slope of an `I` stem at 200px, measured here on macOS:
 
   | This library               | `italic` | 0.5deg  | 10deg   | 13.9deg | 14deg   | 30deg   | -14deg | -30deg |
   | -------------------------- | -------- | ------- | ------- | ------- | ------- | ------- | ------ | ------ |
@@ -162,11 +166,6 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   None of these is the standard's answer, and each substitutes a face or a
   fixed skew for the angle asked for. Chrome's fixed skew is also not 14deg:
   a quarter is `atan(1/4)`, 14.036deg.
-
-  The Paragraph API takes Chrome's italic answer rather than this one: a
-  `TextStyle` or a node `Paragraph` asking for oblique draws the family's
-  italic face, and SkParagraph's quarter skew where it has none.
-  `slant_for_matching` in `src/font.rs` says so at the site.
 
 - _A transform angle past the `float` range is not matched._ Chrome 152's
   `DOMMatrix` reads `rotate(1e38deg)`, `rotate(1e300deg)` and

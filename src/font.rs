@@ -7,8 +7,7 @@ use parking_lot::Mutex;
 use skia_safe::{
     Data, FontMgr, FourByteTag, Typeface,
     font_arguments::variation_position::Coordinate,
-    font_parameters::variation::Axis, font_style::Slant,
-    textlayout::TypefaceFontProvider,
+    font_parameters::variation::Axis, textlayout::TypefaceFontProvider,
 };
 
 // The process-wide registry the JavaScript `FontLibrary.use()` writes to.
@@ -28,33 +27,6 @@ use crate::{
 /// ASCII string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FontAxisTag([u8; 4]);
-
-/// The slant the Paragraph API asks Skia for when matching a face.
-///
-/// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
-/// Re-check: make the match below pass `Oblique` through unchanged, then
-/// cargo test a_text_style_oblique_selects_the_italic_face. The test passes
-/// with the substitution in place whatever Skia's matcher does, so running it
-/// unchanged answers a different question.
-///
-/// `Oblique` is passed through as `Italic`, so a `TextStyle` or a node
-/// `Paragraph` asking for oblique draws the family's italic face, and
-/// SkParagraph's quarter skew where it has none -- Chrome's answer rather
-/// than CSS Fonts 4's, which shears the upright face before it takes an
-/// italic. A canvas draws CSS Fonts 4's answer and does not come through
-/// here; `resolve_for_oblique` in `node::typography` is its match. Without
-/// the substitution, Skia's matcher answers an oblique request on a system
-/// family with no oblique face, Times on macOS, with the upright face.
-///
-/// This substitution is for matching only. The slant a caller set is stored
-/// and reported unchanged, so [`FontSlant`](crate::context2d::FontSlant)
-/// keeps three distinct values.
-pub(crate) fn slant_for_matching(slant: Slant) -> Slant {
-    match slant {
-        Slant::Oblique => Slant::Italic,
-        other => other,
-    }
-}
 
 /// The `OS/2` table, where a face says whether it is oblique.
 const OS2: FourByteTag = FourByteTag::from_chars('O', 'S', '/', '2');
