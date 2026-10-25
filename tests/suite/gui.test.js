@@ -25,7 +25,8 @@
 
 const { assert, describe, test } = require("../runner"),
   { App, Canvas, Window } = require("../../lib"),
-  css = require("../../lib/classes/css");
+  css = require("../../lib/classes/css"),
+  { neon } = require("../../lib/classes/neon");
 
 // Whether a `Window` can be built here at all, and why not when it cannot.
 //
@@ -387,6 +388,40 @@ describe("the window and app refusals, without opening a window", () => {
     }
     assert.ok(reached, "a real Canvas passes the constructor's check");
   });
+});
+
+describe("a launch the native side refuses", () => {
+  // `App.launch` hands over to the native `activate`, which refuses at once
+  // where there is no GPU or no display. That refusal has to leave the app
+  // as it found it: not running, and with `eventLoop` still settable, since
+  // no loop began. Swapping in a refusing `activate` makes the case happen
+  // on every machine, display or not, rather than only on one without; the
+  // real refusal is the same throw from the same call.
+  //
+  // Before any test that launches, because a launch that runs fixes the
+  // event loop for the rest of the process, by design.
+  test(
+    "leaves the app not running, with its event loop still settable",
+    { skip: !neon.App && "built without window support" },
+    () => {
+      const activate = neon.App.activate,
+        before = App.eventLoop,
+        other = before == "node" ? "native" : "node";
+      neon.App.activate = () => {
+        throw new Error("No display available: refused for this test");
+      };
+      try {
+        assert.equal(App.running, false, "not running before the launch");
+        assert.throws(() => App.launch(), /No display available/);
+        assert.equal(App.running, false, "a refused launch is not running");
+        App.eventLoop = other;
+        assert.equal(App.eventLoop, other, "the event loop can still be set");
+        App.eventLoop = before;
+      } finally {
+        neon.App.activate = activate;
+      }
+    },
+  );
 });
 
 describe("the event loop, where a window can be opened", () => {

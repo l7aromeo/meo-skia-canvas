@@ -6212,9 +6212,10 @@ export interface App extends EventEmitter<{
   /** Every window that is currently open, in the order they opened. */
   readonly windows: Window[];
   /**
-   * Whether {@link App.launch} has been called. It stays `true` once the
-   * loop has started, including after the last window closes, since
-   * {@link App.eventLoop} can no longer be changed either way.
+   * Whether the event loop has started: {@link App.launch} was called and
+   * did not refuse. It stays `true` once the loop has started, including
+   * after the last window closes, since {@link App.eventLoop} can no longer
+   * be changed either way.
    */
   readonly running: boolean;
   /**
@@ -6234,6 +6235,10 @@ export interface App extends EventEmitter<{
    *
    * Opening a window schedules this on the next tick, so calling it is only
    * necessary to hold the promise -- calling it twice returns the same one.
+   *
+   * Throws at once where there is no GPU or no display to open a window on,
+   * and then no loop began: {@link App.running} stays `false` and
+   * {@link App.eventLoop} can still be set.
    */
   launch(): Promise<undefined>;
   /** Close every window and end the event loop. */

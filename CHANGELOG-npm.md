@@ -154,6 +154,14 @@ removed and no signature moves.
 
 ### Fixed
 
+- **A refused `App.launch()` leaves the app as it found it.** Where there is
+  no GPU or no display, `launch()` throws at once -- "No display available:
+  a window needs one, and this process has none" -- and no loop begins, but
+  the app was marked started before it asked: `App.running` reported `true`
+  with nothing running, and setting `App.eventLoop` threw "Cannot alter event
+  loop after it has begun" for the rest of the process. The app is now marked
+  started only once the native side has accepted the launch.
+
 - **A large `blur()` in `ctx.filter` draws as Chrome's.** A flat-colour
   shape or text was blurred on its coverage, which Skia holds to a sigma of
   128, so a larger blur drew as 128 did: on a 100 pixel canvas a square
