@@ -1605,6 +1605,34 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
     );
   });
 
+  // A run of marks alone has no advance, and is still a run of its face.
+  // Here the acute and diaeresis fall back from a face holding only "H" to
+  // Montserrat's 700 face, which Chrome does not embolden at 900 -- see
+  // "a static face is faked bold as Chrome fakes it". The run was found by
+  // the text under its middle, and a run with no width has nothing under
+  // it, so it kept the 900 Skia fakes a bold from: 27 per cent more ink.
+  test("marks alone in a fallback face are judged against that face", () => {
+    FontLibrary.use("RecursiveH", [
+      "tests/assets/fonts/Recursive/Recursive-upright-H-subset.ttf",
+    ]);
+    FontLibrary.use("Montserrat700", [
+      "tests/assets/fonts/montserrat-latin/montserrat-v30-latin-700.woff2",
+    ]);
+    const pixels = (font, text) => {
+      const ctx = new Canvas(400, 200).getContext("2d");
+      ctx.font = font;
+      ctx.fillText(text, 100, 150);
+      return Buffer.from(ctx.getImageData(0, 0, 400, 200).data);
+    };
+    for (const text of ["\u0301\u0308", "x\u0301\u0308"])
+      assert.ok(
+        pixels("900 80px RecursiveH, Montserrat700", text).equals(
+          pixels("900 80px Montserrat700", text),
+        ),
+        `${JSON.stringify(text)} draws as Montserrat 700 does on its own`,
+      );
+  });
+
   // A family with an italic face of its own: the italic is drawn as it
   // is, and skewed again it would lean by its own slope plus a quarter.
   // Raleway ships one, so the case runs wherever the suite does. Chrome

@@ -572,7 +572,7 @@ impl Sheared {
     /// not used: a glyph's position without the offset the shaper gave it,
     /// which is where a mark stacks or sits over its base, and the text
     /// offsets of a run continued onto a later line restarting at those
-    /// of its first -- see `cluster_under`.
+    /// of its first -- see `glyph_runs`.
     ///
     /// A run's first glyph says whether it is oblique: an oblique style is a
     /// font of its own, so no run holds oblique text and upright text both.
@@ -709,7 +709,7 @@ mod tests {
         font_style::{Slant, Weight, Width},
         surfaces,
         textlayout::{
-            FontCollection, Paragraph, ParagraphBuilder, ParagraphStyle,
+            FontCollection, ParagraphBuilder, ParagraphStyle,
             PlaceholderAlignment, PlaceholderStyle, TextBaseline, TextStyle,
             TypefaceFontProvider,
         },
@@ -815,101 +815,6 @@ mod tests {
     #[test]
     fn a_ligature_edge_stays_where_it_is() {
         assert_eq!(moved("effi", &[(0..2, false), (2..4, true)]), ["ef", "fi"]);
-    }
-
-    /// A paragraph of bundled Oswald at 200px, filled in by `fill`.
-    fn oswald_paragraph(
-        fill: impl FnOnce(&mut ParagraphBuilder, &TextStyle),
-    ) -> Paragraph {
-        const FAMILY: &str = "OswaldWrapped";
-        let bytes = std::fs::read(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"
-        ))
-        .expect("bundled Oswald reads");
-        let face = FontMgr::new()
-            .new_from_data(Data::new_copy(&bytes), None)
-            .expect("bundled Oswald loads");
-        let mut provider = TypefaceFontProvider::new();
-        provider.register_typeface(face, Some(FAMILY));
-        let mut collection = FontCollection::new();
-        collection.set_asset_font_manager(Some(provider.into()));
-
-        let mut text_style = TextStyle::new();
-        text_style.set_font_families(&[FAMILY]).set_font_size(200.0);
-        let mut style = ParagraphStyle::new();
-        style.set_text_style(&text_style);
-        let mut builder = ParagraphBuilder::new(&style, collection);
-        fill(&mut builder, &text_style);
-        builder.build()
-    }
-
-    /// The second defect `cluster_under` works around, measured directly:
-    /// for a run that does not start the text, the offset after its last
-    /// glyph -- the end of the run -- is not the end of the run.
-    ///
-    /// Skia copies the run's `count` offsets into storage of that size and
-    /// hands out `count + 1`, so the last is read from past what it wrote;
-    /// its value is whatever that storage held. Red once Skia writes it,
-    /// which is when the cluster lookup can go.
-    #[test]
-    fn skia_still_misreports_utf8_starts() {
-        let mut paragraph = oswald_paragraph(|builder, style| {
-            // A size of its own makes the second piece a run of its own,
-            // starting at the third byte.
-            builder.add_text("IH");
-            let mut larger = style.clone();
-            larger.set_font_size(120.0);
-            builder.push_style(&larger);
-            builder.add_text("IH");
-        });
-        paragraph.layout(1000.0);
-        let mut second = None;
-        paragraph.extended_visit(|_, visit| {
-            if let Some(info) = visit
-                && info.utf8_starts()[0] == 2
-            {
-                second = Some(info.utf8_starts().to_vec());
-            }
-        });
-        let starts = second.expect("the second piece is a run of its own");
-        assert_eq!(starts[..2], [2, 3], "the glyphs' own offsets are right");
-        assert_ne!(starts[2], 4, "and the run's end is not");
-    }
-
-    /// The defect `cluster_under` works around, measured directly: a run
-    /// continued on a second line reports text offsets from its first
-    /// glyph, not from the first glyph of that line's part of it.
-    ///
-    /// Red once Skia offsets them, which is when the cluster lookup can go.
-    #[test]
-    fn skia_still_restarts_utf8_starts_on_a_wrapped_line() {
-        let mut paragraph = oswald_paragraph(|builder, _| {
-            // One run in one font, wrapped after the space.
-            builder.add_text("II II");
-        });
-        paragraph.layout(130.0);
-        assert_eq!(paragraph.line_number(), 2, "the run wraps once");
-
-        let mut second = None;
-        paragraph.extended_visit(|line, visit| {
-            if let (1, Some(info)) = (line, visit) {
-                let first = info.origin() + info.positions()[0];
-                second = Some((info.utf8_starts()[0], first));
-            }
-        });
-        let (reported, first) = second.expect("the second line has a run");
-        let cluster = paragraph
-            .get_closest_glyph_cluster_at((first.x + 1.0, first.y))
-            .expect("a glyph is under the second line's start");
-        assert_eq!(
-            cluster.text_range.start, 3,
-            "the second line starts at the third byte"
-        );
-        assert_eq!(
-            reported, 0,
-            "and SkParagraph reports the first byte of the whole run"
-        );
     }
 
     /// SplitMix64, Steele, Lea and Flood's generator ("Fast splittable
