@@ -755,10 +755,11 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Changed
 
-- **`FontSlant::Oblique` draws as CSS Fonts 4 matches it, superseding
-  0.16.0's "`TextSlant::Oblique` now renders the italic face" for a
-  canvas.** A `Font` with `FontSlant::Oblique`, and `set_font_css` with
-  `oblique` or `oblique <angle>`, take the family's oblique face where it
+- **`FontSlant::Oblique` and `TextSlant::Oblique` draw as CSS Fonts 4
+  matches them, superseding 0.16.0's "`TextSlant::Oblique` now renders the
+  italic face".** A `Font` with `FontSlant::Oblique`, `set_font_css` with
+  `oblique` or `oblique <angle>`, and a `TextStyle` with
+  `TextSlant::Oblique`, take the family's oblique face where it
   has one leaning the angle's way, set a `slnt` axis to the angle where it
   has one -- as far as the axis goes, so `oblique 30deg` on an axis ending at
   -15 leans 15 -- and otherwise shear the upright face by the tangent of the
@@ -768,13 +769,23 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   family's italic, or a fixed quarter skew, from 14deg up and draws upright
   below; its measurements are in docs/browser-differences.md.
   `measure_text` reports the sheared ink, and `font()` reads back as it
-  did. A `TextStyle` with `TextSlant::Oblique` still draws the italic face.
+  did. A paragraph's oblique range is sheared at 14deg and draws what
+  `set_font_css("oblique …")` text draws, its decorations level and its
+  shadows leaning with its glyphs. At 90deg either way a sheared run draws
+  nothing and has no ink or outline, and advances as it would upright.
 
   An oblique run is drawn a glyph run at a time so that each can be
   sheared or not, which costs more than an upright one: in a release
   build on macOS, filling `oblique 10deg 32px Oswald` takes about 8.1 µs
   where it took 6.2, and 11.8 underlined where it took 6.8. Upright text
   is unchanged, at 6.2 µs before and after.
+
+  A paragraph with an oblique range is laid out twice as slowly -- about
+  58 µs where it took 28, for 109 characters at 24px with 66 of them
+  oblique, in a release build on macOS -- because each of its glyphs is matched to its text
+  again, and draws about as fast, or about 40% slower where the range is
+  underlined, which takes a second paragraph. A paragraph with none costs
+  what it did.
 
   A `Font` carries no angle, so `FontSlant::Oblique` there is 14deg, the
   default: `Font::from_css("oblique 10deg 16px Oswald")` set with

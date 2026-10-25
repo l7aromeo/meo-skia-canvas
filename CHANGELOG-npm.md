@@ -875,14 +875,25 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   Oswald, which has none. Chrome 152 takes the family's italic, or a fixed
   quarter skew, from 14deg up and draws upright below; its measurements are
   in docs/browser-differences.md. `measureText` reports the sheared ink, and
-  `ctx.font` reads back as it did. A `TextStyleInput` asking for oblique in
-  a `Paragraph` still draws the family's italic face.
+  `ctx.font` reads back as it did. A `Paragraph` range whose `fontStyle`
+  asks for oblique is sheared at 14deg the same way and draws what
+  `oblique` text on a canvas draws, its decorations level and its shadows
+  leaning with its glyphs. At 90deg either way a sheared run draws nothing,
+  with no ink in `measureText` and no `outlineText` path, and advances as
+  it would upright.
 
   An oblique run is drawn a glyph run at a time so that each can be
   sheared or not, which costs more than an upright one: in a release
   build on macOS, filling `oblique 10deg 32px Oswald` takes about 8.1 µs
   where it took 6.2, and 11.8 underlined where it took 6.8. Upright text
   is unchanged, at 6.2 µs before and after.
+
+  A paragraph with an oblique range is laid out twice as slowly -- about
+  58 µs where it took 28, for 109 characters at 24px with 66 of them
+  oblique, in a release build on macOS -- because each of its glyphs is matched to its text
+  again, and draws about as fast, or about 40% slower where the range is
+  underlined, which takes a second paragraph. A paragraph with none costs
+  what it did.
 
 - **`measureText` works out the ink box only when it is read.** The four
   `actualBoundingBox` values and `lines` come from the outline of every

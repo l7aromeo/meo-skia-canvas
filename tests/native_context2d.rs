@@ -6678,7 +6678,8 @@ fn oblique_shears_the_upright_face_before_taking_the_italic() {
     // geometric shearing to the specified oblique value" ahead of any italic
     // face, so a family with an italic and no oblique draws its upright face
     // sheared. Chrome draws the italic instead, which
-    // docs/browser-differences.md records.
+    // docs/browser-differences.md records. A paragraph's half is
+    // `a_text_style_oblique_shears_the_upright_face`.
     //
     // Ink signature rather than a golden: the three renderings differ in
     // coverage and in horizontal centre of mass, and comparing both catches
@@ -7319,16 +7320,14 @@ fn kerning_stops_at_a_word_boundary() {
     }
 }
 
-/// A `TextStyle` asking for oblique renders the italic face.
+/// A `TextStyle` asking for oblique shears the upright face, as a canvas
+/// does.
 ///
-/// Skia's matcher does not fall back from oblique to italic, so a family with
-/// an italic face and no oblique one rendered upright and `Oblique` painted
-/// what `Upright` paints. Chrome renders the italic, which is the order CSS
-/// Fonts 4 gives: oblique, then italic, then upright.
-///
-/// This is the text-layout route. A canvas shears the upright face instead,
-/// as CSS Fonts 4 orders it, which
-/// `oblique_shears_the_upright_face_before_taking_the_italic` covers.
+/// CSS Fonts 4 puts the sheared upright face before any italic, so a family
+/// with an italic face and no oblique one draws neither its italic nor its
+/// upright face as it stands.
+/// `oblique_shears_the_upright_face_before_taking_the_italic` is the canvas's
+/// half of this.
 ///
 /// A system family rather than a bundled one, because the case needs a real
 /// italic face and `TextEngine::with_system_fonts` does not see the
@@ -7336,7 +7335,7 @@ fn kerning_stops_at_a_word_boundary() {
 /// the same signature as the default face, so the whole comparison would be
 /// against a fallback.
 #[test]
-fn a_text_style_oblique_selects_the_italic_face() {
+fn a_text_style_oblique_shears_the_upright_face() {
     let signature = |slant: TextSlant| {
         let engine = TextEngine::with_system_fonts();
         let style = TextStyle {
@@ -7365,14 +7364,82 @@ fn a_text_style_oblique_selects_the_italic_face() {
     let italic = signature(TextSlant::Italic);
     let oblique = signature(TextSlant::Oblique);
 
-    // Without this the assertion below passes on a family whose faces render
+    // Without this the assertions below pass on a family whose faces render
     // alike, or on one that resolved to a single fallback for all three.
     assert_ne!(
         italic, upright,
         "italic must differ from upright to compare against"
     );
-    assert_eq!(oblique, italic, "oblique selects the italic face");
+    assert_ne!(oblique, italic, "oblique does not take the italic face");
     assert_ne!(oblique, upright, "oblique does not render upright");
+}
+
+/// A paragraph in oblique draws what canvas text in `oblique` draws, and
+/// slopes by `tan(14deg)`.
+#[test]
+fn a_paragraph_in_oblique_draws_what_oblique_text_draws() {
+    const SIZE: f32 = 200.0;
+    const BASELINE: f32 = 250.0;
+    let engine = oswald_engine();
+    let paragraph = |slant: TextSlant| {
+        let style = TextStyle {
+            font_families: vec![OSWALD_PARAGRAPH.to_string()],
+            font_size: SIZE,
+            slant,
+            ..TextStyle::default()
+        };
+        let laid_out = engine.layout_text("IH", &style, 1000.0);
+        let mut canvas = Canvas::new(300.0, 300.0);
+        canvas.context().draw_paragraph(
+            &laid_out,
+            60.0,
+            BASELINE - laid_out.alphabetic_baseline(),
+        );
+        pixels(&mut canvas)
+    };
+    let text = |font: &str| {
+        let mut canvas = Canvas::new(300.0, 300.0);
+        {
+            let ctx = canvas.context();
+            assert!(ctx.set_font_css(font));
+            ctx.fill_text("IH", 60.0, BASELINE, None);
+        }
+        pixels(&mut canvas)
+    };
+
+    assert!(
+        paragraph(TextSlant::Upright)
+            == text(&format!("{SIZE}px {OSWALD_PARAGRAPH}")),
+        "the control: an upright paragraph draws what upright text draws"
+    );
+    // To a step of alpha rather than exactly. The paragraph and the canvas
+    // draw the same glyphs at the same positions under the same shear and
+    // paint, from outlines that are the same, but each through its own
+    // instance of the face -- the engine's library instances its own -- and
+    // two edge pixels of the sheared glyphs come out one step apart. The npm
+    // paragraph and canvas share a face and match exactly.
+    let oblique = paragraph(TextSlant::Oblique);
+    let reference = text(&format!("oblique {SIZE}px {OSWALD_PARAGRAPH}"));
+    let ink = |buffer: &[u8]| buffer.chunks(4).filter(|px| px[3] > 0).count();
+    assert!(
+        oblique
+            .iter()
+            .zip(&reference)
+            .all(|(a, b)| a.abs_diff(*b) <= 1),
+        "an oblique paragraph draws what oblique text draws"
+    );
+    assert_eq!(ink(&oblique), ink(&reference), "on the same pixels");
+    assert!(oblique != paragraph(TextSlant::Upright), "and it leans");
+
+    let slope = stem_slope(|ctx| {
+        assert!(
+            ctx.set_font_css(&format!("oblique {SIZE}px {OSWALD_PARAGRAPH}"))
+        )
+    });
+    assert!(
+        (slope + 14f32.to_radians().tan()).abs() <= 0.005,
+        "the text it matches slopes by tan(14deg): {slope}"
+    );
 }
 
 /// `Affine::multiply` composes the way the drawing context does.

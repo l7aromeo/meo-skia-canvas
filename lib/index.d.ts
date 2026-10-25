@@ -5349,7 +5349,11 @@ export interface TextStyleInput {
     weight?: number;
     /** Width as a percentage of normal, where `100` is unstretched. */
     width?: number;
-    /** Slant in degrees, for a font with a variable slant axis. */
+    /**
+     * `0` upright, `1` italic, `2` oblique: 14deg, drawn as `oblique` text on
+     * a canvas is -- the family's face that leans as asked, or else its
+     * upright face sheared, before any italic.
+     */
     slant?: number;
   };
   /** Extra space added after each glyph, in pixels. */

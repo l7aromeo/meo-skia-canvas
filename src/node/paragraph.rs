@@ -10,16 +10,20 @@ use skia_safe::{
     font_arguments::VariationPosition,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
-        FontCollection, Paragraph as SkParagraph,
-        ParagraphBuilder as SkParagraphBuilder, ParagraphStyle,
+        FontCollection, Paragraph as SkParagraph, ParagraphStyle,
         PlaceholderStyle, StrutStyle, TextDecoration, TextDecorationMode,
         TextDirection, TextShadow, TextStyle,
     },
 };
 
 use crate::{
-    font::{slant_for_matching, variation_axes},
+    context2d::DEFAULT_OBLIQUE_DEGREES,
+    font::variation_axes,
     font_library::{FontLibrary, instance_coordinates},
+    node::{
+        oblique::{ParagraphRecipe, Sheared, match_oblique},
+        typography::with_oblique_slnt,
+    },
     text::{
         PlaceholderAlignment as CratePlaceholderAlignment, PlaceholderBaseline,
         RectHeightStyle as CrateRectHeightStyle,
@@ -37,7 +41,8 @@ use crate::{
 //
 
 pub struct ParagraphBuilderWrap {
-    builder: Option<SkParagraphBuilder>,
+    /// The steps the paragraph is built from, until `build()` takes them.
+    recipe: Option<ParagraphRecipe>,
     /// The collection the builder resolves against, kept alive for it, and
     /// searched by a pushed style for the axes its face has.
     collection: FontCollection,
@@ -51,6 +56,8 @@ pub type BoxedParagraphBuilder = JsBox<RefCell<ParagraphBuilderWrap>>;
 
 pub struct ParagraphWrap {
     pub paragraph: SkParagraph,
+    /// What draws the paragraph's oblique ranges, where it has any.
+    pub sheared: Option<Sheared>,
 }
 
 impl Finalize for ParagraphWrap {}
@@ -281,11 +288,7 @@ fn parse_text_style(
                 }
             },
         };
-        style.set_font_style(FontStyle::new(
-            weight,
-            width,
-            slant_for_matching(slant),
-        ));
+        style.set_font_style(FontStyle::new(weight, width, slant));
     }
 
     // letterSpacing
@@ -653,17 +656,29 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
     // weight and the rendered glyphs drift off the requested wght
     // axis -- a visible parity gap on variable fonts like Dosis vs
     // CanvasKit's render.
-    let text_style = para_style.text_style().clone();
+    let mut text_style = para_style.text_style().clone();
+    // An oblique paragraph is instanced at `slnt` where its faces have the
+    // axis, as a pushed oblique style is.
+    let asks_oblique = text_style.font_style().slant() == Slant::Oblique;
+    let instanced = with_oblique_slnt(
+        &variations,
+        asks_oblique.then_some(DEFAULT_OBLIQUE_DEGREES),
+    );
     // The matched face is for a caller deciding what Skia may synthesise;
     // a paragraph built here carries its own text style and does not.
-    let (collection, _) = FontLibrary::with_shared(|lib| {
-        lib.fonts_for_style(&text_style, &variations)
+    let (mut collection, _) = FontLibrary::with_shared(|lib| {
+        lib.fonts_for_style(&text_style, &instanced)
     });
-
-    let builder = SkParagraphBuilder::new(&para_style, &collection);
+    let base_oblique = match_oblique(&mut text_style, &mut collection);
+    let mut para_style = para_style;
+    para_style.set_text_style(&text_style);
 
     Ok(cx.boxed(RefCell::new(ParagraphBuilderWrap {
-        builder: Some(builder),
+        recipe: Some(ParagraphRecipe::new(
+            para_style,
+            base_oblique,
+            collection.clone(),
+        )),
         collection,
         variations,
     })))
@@ -677,7 +692,7 @@ pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
     let mut this = this.borrow_mut();
     let ParagraphBuilderWrap {
-        builder,
+        recipe,
         collection,
         variations: paragraph_variations,
     } = &mut *this;
@@ -692,6 +707,15 @@ pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         true => &*paragraph_variations,
         false => &own,
     };
+    // An oblique is set at `slnt` where the face has the axis, ahead of the
+    // style's own variations so that a `slnt` they name wins, and is laid
+    // out upright where no face leans as asked -- see `match_oblique`.
+    let asks_oblique = text_style.font_style().slant() == Slant::Oblique;
+    let variations = with_oblique_slnt(
+        variations,
+        asks_oblique.then_some(DEFAULT_OBLIQUE_DEGREES),
+    );
+    let oblique = match_oblique(&mut text_style, collection);
     let families = text_style.font_families();
     let families: Vec<&str> = families.iter().collect();
     let axes = collection
@@ -699,7 +723,7 @@ pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         .iter()
         .find_map(variation_axes);
     if let Some(axes) = axes {
-        let coordinates = instance_coordinates(&axes, &text_style, variations);
+        let coordinates = instance_coordinates(&axes, &text_style, &variations);
         if FontLibrary::with_shared(|lib| {
             lib.admit_position(&families, &coordinates)
         }) {
@@ -713,8 +737,8 @@ pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
             ),
         );
     }
-    if let Some(builder) = builder.as_mut() {
-        builder.push_style(&text_style);
+    if let Some(recipe) = recipe.as_mut() {
+        recipe.push_style(text_style, oblique);
     }
     Ok(cx.undefined())
 }
@@ -722,8 +746,8 @@ pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 pub fn pop(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedParagraphBuilder>(0)?;
     let mut this = this.borrow_mut();
-    if let Some(builder) = this.builder.as_mut() {
-        builder.pop();
+    if let Some(recipe) = this.recipe.as_mut() {
+        recipe.pop();
     }
     Ok(cx.undefined())
 }
@@ -733,8 +757,8 @@ pub fn addText(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let text = string_arg(&mut cx, 1, "text")?;
 
     let mut this = this.borrow_mut();
-    if let Some(builder) = this.builder.as_mut() {
-        builder.add_text(&text);
+    if let Some(recipe) = this.recipe.as_mut() {
+        recipe.add_text(&text);
     }
     Ok(cx.undefined())
 }
@@ -780,8 +804,8 @@ pub fn addPlaceholder(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     };
 
     let mut this = this.borrow_mut();
-    if let Some(builder) = this.builder.as_mut() {
-        builder.add_placeholder(&placeholder);
+    if let Some(recipe) = this.recipe.as_mut() {
+        recipe.add_placeholder(&placeholder);
     }
     Ok(cx.undefined())
 }
@@ -790,10 +814,10 @@ pub fn build(mut cx: FunctionContext) -> JsResult<BoxedParagraph> {
     let this = cx.argument::<BoxedParagraphBuilder>(0)?;
     let mut this = this.borrow_mut();
 
-    match this.builder.take() {
-        Some(mut builder) => {
-            let paragraph = builder.build();
-            Ok(cx.boxed(RefCell::new(ParagraphWrap { paragraph })))
+    match this.recipe.take() {
+        Some(recipe) => {
+            let (paragraph, sheared) = recipe.build();
+            Ok(cx.boxed(RefCell::new(ParagraphWrap { paragraph, sheared })))
         }
         None => cx.throw_error(
             "ParagraphBuilder has already been consumed by build()",
@@ -810,7 +834,11 @@ pub fn layout(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let width = float_arg_or_bail(&mut cx, 1, "width")?;
 
     let mut this = this.borrow_mut();
-    this.paragraph.layout(width);
+    let ParagraphWrap { paragraph, sheared } = &mut *this;
+    paragraph.layout(width);
+    if let Some(sheared) = sheared {
+        sheared.lay_out(paragraph, width);
+    }
     Ok(cx.undefined())
 }
 
@@ -1055,7 +1083,11 @@ pub fn drawParagraph(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // paints, so the context's globalAlpha and globalCompositeOperation have
     // to be applied around it or they are silently dropped.
     ctx.with_composited_canvas(|canvas| {
-        para.paragraph.paint(canvas, Point::new(x, y));
+        let at = Point::new(x, y);
+        match &para.sheared {
+            Some(sheared) => sheared.paint(&para.paragraph, canvas, at),
+            None => para.paragraph.paint(canvas, at),
+        }
     });
 
     Ok(cx.undefined())

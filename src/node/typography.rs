@@ -312,7 +312,7 @@ fn classify_face(font: &Font, typeface: Typeface) -> Option<bool> {
 /// zero), and it does not prove that no wrong reconstruction can still sum to
 /// the right total. Treat it as a guard that can be strengthened, not as a
 /// proof of correctness.
-fn painted_positions(
+pub(crate) fn painted_positions(
     font: &Font,
     glyphs: &[GlyphId],
     reported: &[Point],
@@ -635,16 +635,17 @@ impl TextLayout {
             match run_shear(&run.font.typeface(), self.oblique) {
                 // About the run's baseline, which is where its origin sits:
                 // the glyphs lean, and the line under them does not move.
-                Some(shear) => {
+                Shear::By(shear) => {
                     canvas.save();
                     canvas.translate(origin + run.origin);
-                    canvas.concat(&Matrix::skew((-shear, 0.0)));
+                    canvas.concat(&shear);
                     canvas.draw_text_blob(blob, Point::default(), paint);
                     canvas.restore();
                 }
-                None => {
+                Shear::None => {
                     canvas.draw_text_blob(blob, origin + run.origin, paint);
                 }
+                Shear::Flat => {}
             }
         }
         if let Some(decorations) = &self.decorations {
@@ -759,8 +760,38 @@ fn synthesis_style(
     FontStyle::new(Weight::from(weight), face.width(), slant)
 }
 
-/// The tangent of the shear a run in `face` is drawn under for an `oblique`
-/// request at `angle` degrees, or `None` where it is drawn as it is.
+/// How a run is drawn for an `oblique` request: as laid out, sheared, or not
+/// at all.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Shear {
+    /// Drawn as laid out.
+    None,
+    /// Drawn under this shear, about the run's baseline.
+    By(Matrix),
+    /// Sheared to a right angle, which lays every glyph along its own
+    /// baseline: drawn as nothing, with no ink and no outline, and advancing
+    /// as it would upright.
+    Flat,
+}
+
+/// The angle at which a shear lays a glyph along its baseline, where its
+/// tangent has no finite value.
+const FLAT_DEGREES: f32 = 90.0;
+
+/// The shear a run in `face` is drawn under for an `oblique` request at
+/// `angle` degrees -- [`shear_for`] of the face's reported slant and of
+/// whether it leans by design.
+pub(crate) fn run_shear(face: &Typeface, angle: Option<f32>) -> Shear {
+    shear_for(
+        face.font_style().slant(),
+        |angle| leans_as_asked(face, angle),
+        angle,
+    )
+}
+
+/// The shear a run is drawn under for an `oblique` request at `angle`
+/// degrees, in a face Skia reports as `slant` and that `leans` at an angle
+/// or not.
 ///
 /// A face upright by design that does not lean as asked is sheared, by
 /// CSS Fonts 4's "geometric shearing to the specified oblique value": a
@@ -770,17 +801,30 @@ fn synthesis_style(
 ///
 /// CoreText and FreeType report every face that leans -- one flagged
 /// oblique, and a variable instance at a nonzero `slnt` -- as slanted, so on
-/// both the slant test alone decides and `leans_as_asked` never changes the
-/// answer. It is asked anyway for a backend that reports an instance with
-/// its default instance's style, which nothing here has measured DirectWrite
-/// not to do.
-pub(crate) fn run_shear(face: &Typeface, angle: Option<f32>) -> Option<f32> {
-    angle
-        .filter(|angle| {
-            face.font_style().slant() == Slant::Upright
-                && !leans_as_asked(face, *angle)
-        })
-        .map(|angle| angle.to_radians().tan())
+/// both the slant test alone decides. `leans` is asked as well for a backend
+/// that reports an instance with its default instance's style, which nothing
+/// here has measured DirectWrite not to do.
+///
+/// At 90deg either way the shear is [`Shear::Flat`]. That is the limit of
+/// the shear rather than a case of its own: as the angle nears a right angle
+/// the glyph thins towards its baseline and covers less of any region of
+/// finite height, so `oblique 89.9deg` draws a faint sliver and 90deg the
+/// nothing it tends to.
+fn shear_for(
+    slant: Slant,
+    leans: impl FnOnce(f32) -> bool,
+    angle: Option<f32>,
+) -> Shear {
+    let Some(angle) = angle else {
+        return Shear::None;
+    };
+    if slant != Slant::Upright || leans(angle) {
+        return Shear::None;
+    }
+    match angle.abs() >= FLAT_DEGREES {
+        true => Shear::Flat,
+        false => Shear::By(Matrix::skew((-angle.to_radians().tan(), 0.0))),
+    }
 }
 
 /// The faces `style` is laid out with for an `oblique` at `angle`, found by
@@ -838,7 +882,7 @@ const SLNT: FourByteTag = FourByteTag::from_chars('s', 'l', 'n', 't');
 /// oblique values below the one asked for would find. An angle of the sign
 /// the axis does not reach clamps to upright, and that run is sheared
 /// instead -- see [`run_shear`].
-fn with_oblique_slnt(
+pub(crate) fn with_oblique_slnt(
     variations: &[(FourByteTag, f32)],
     angle: Option<f32>,
 ) -> Cow<'_, [(FourByteTag, f32)]> {
@@ -1441,13 +1485,15 @@ impl<'a> Typesetter<'a> {
         for run in glyph_runs(&mut paragraph) {
             // The shear the painter draws the run under, applied to each
             // outline in its own em box, where the baseline is y = 0.
-            let shear = run_shear(&run.font.typeface(), self.oblique)
-                .map(|shear| Matrix::skew((-shear, 0.0)));
+            let shear = run_shear(&run.font.typeface(), self.oblique);
+            if shear == Shear::Flat {
+                continue;
+            }
             for (glyph, at) in zip(run.glyphs, run.positions) {
                 if let Some(outline) = run.font.get_path(glyph) {
                     let outline = match &shear {
-                        Some(shear) => outline.with_transform(shear),
-                        None => outline,
+                        Shear::By(shear) => outline.with_transform(shear),
+                        Shear::None | Shear::Flat => outline,
                     };
                     builder.add_path(
                         &outline.with_offset(at + run.origin + origin),
@@ -2112,8 +2158,7 @@ impl Measured {
         let oblique = *oblique;
         paragraph.extended_visit(|line, visit| {
             if let Some(info) = visit {
-                let shear = run_shear(&info.font().typeface(), oblique)
-                    .map(|shear| Matrix::skew((-shear, 0.0)));
+                let shear = run_shear(&info.font().typeface(), oblique);
                 run_bounds.push(RunBound {
                     line,
                     // `painted_positions` rather than `info.positions()`:
@@ -2130,7 +2175,11 @@ impl Measured {
                         .unwrap_or_else(|| info.positions().to_vec()),
                         zip(info.glyphs(), info.bounds()),
                     )
-                    .filter(|(_, (_, rect))| !rect.is_empty())
+                    // A flat run has no ink at all, so its glyphs join
+                    // nothing, as a space's do.
+                    .filter(|(_, (_, rect))| {
+                        shear != Shear::Flat && !rect.is_empty()
+                    })
                     .map(|(pt, (glyph, rect))| {
                         // The glyph's outline, not the box `info.bounds()`
                         // reports. That one is the rasterisation box: the
@@ -2151,15 +2200,17 @@ impl Measured {
                         // which is not the box of the sheared box: a glyph's
                         // corners are rarely ink.
                         let ink = match &shear {
-                            None => {
+                            Shear::None | Shear::Flat => {
                                 glyph_ink(info.font(), *glyph).unwrap_or(*rect)
                             }
-                            Some(shear) => match info.font().get_path(*glyph) {
-                                Some(outline) => outline
-                                    .with_transform(shear)
-                                    .compute_tight_bounds(),
-                                None => shear.map_rect(*rect).0,
-                            },
+                            Shear::By(shear) => {
+                                match info.font().get_path(*glyph) {
+                                    Some(outline) => outline
+                                        .with_transform(shear)
+                                        .compute_tight_bounds(),
+                                    None => shear.map_rect(*rect).0,
+                                }
+                            }
                         };
                         // `info.origin()` as reported, rounding and all.
                         // Its `y` is the run's baseline snapped to a whole
@@ -2856,6 +2907,65 @@ mod tests {
         let flat = normalize_to_one_line(text);
         assert!(matches!(flat, Cow::Owned(_)), "a replacement allocates");
         assert_eq!(flat, "A B C D E F G H");
+    }
+}
+
+#[cfg(test)]
+mod shear {
+    use super::{Matrix, Shear, Slant, shear_for};
+
+    const UPRIGHT_BY_DESIGN: fn(f32) -> bool = |_| false;
+    const LEANS_BY_DESIGN: fn(f32) -> bool = |_| true;
+
+    #[test]
+    fn an_upright_face_is_sheared_by_the_tangent_of_the_angle() {
+        let tan = |degrees: f32| degrees.to_radians().tan();
+        for angle in [0.5f32, 10.0, 14.0, -14.0, 89.9] {
+            assert_eq!(
+                shear_for(Slant::Upright, UPRIGHT_BY_DESIGN, Some(angle)),
+                Shear::By(Matrix::skew((-tan(angle), 0.0))),
+                "{angle}deg"
+            );
+        }
+        assert_eq!(
+            shear_for(Slant::Upright, UPRIGHT_BY_DESIGN, None),
+            Shear::None,
+            "no oblique asked for"
+        );
+    }
+
+    /// A face reported upright that leans by design is not sheared. Neither
+    /// CoreText nor FreeType reports such a face -- both call it slanted --
+    /// so this is the only place the second test of the two is observed.
+    #[test]
+    fn a_face_reported_upright_that_leans_already_is_not_sheared() {
+        assert_eq!(
+            shear_for(Slant::Upright, LEANS_BY_DESIGN, Some(10.0)),
+            Shear::None
+        );
+        for slant in [Slant::Italic, Slant::Oblique] {
+            assert_eq!(
+                shear_for(slant, UPRIGHT_BY_DESIGN, Some(10.0)),
+                Shear::None,
+                "{slant:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_right_angle_lays_the_glyphs_flat() {
+        for angle in [90.0, -90.0] {
+            assert_eq!(
+                shear_for(Slant::Upright, UPRIGHT_BY_DESIGN, Some(angle)),
+                Shear::Flat,
+                "{angle}deg"
+            );
+            assert_eq!(
+                shear_for(Slant::Upright, LEANS_BY_DESIGN, Some(angle)),
+                Shear::None,
+                "a face that leans by design is drawn as it is at {angle}deg"
+            );
+        }
     }
 }
 
