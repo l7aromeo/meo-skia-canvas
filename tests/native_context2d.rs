@@ -12366,3 +12366,50 @@ fn max_width_condenses_the_run_it_cannot_fit() {
     );
     assert_eq!(thin.height(), wide.height(), "and keeps its height");
 }
+
+/// The baseline of "H x" in 48px Oswald at a line height of 2, laid out on
+/// `engine`, its leading split half and half where `half_leading` says.
+fn half_leading_baseline(engine: &TextEngine, half_leading: bool) -> f32 {
+    let style = TextStyle {
+        font_size: 48.0,
+        line_height_multiplier: 2.0,
+        half_leading,
+        ..oswald_paragraph(400)
+    };
+    engine
+        .layout_rich_text(
+            &[RichTextSpan {
+                text: "H x".to_string(),
+                style: style.clone(),
+            }],
+            &style,
+            1000.0,
+        )
+        .alphabetic_baseline()
+}
+
+#[test]
+fn a_half_leading_paragraph_is_not_laid_out_as_another_was() {
+    // A line twice the size, 96px, holds Oswald's 57.264 of ascent and
+    // 13.872 of descent: half-leading puts the 24.864 to spare half above,
+    // a baseline at 69.696, and scaling both by 96/71.136 puts it at
+    // 77.279. SkParagraph's paragraph cache matched two paragraphs that
+    // differ only in `half_leading` and handed the second the first's
+    // layout, so whichever came first decided both.
+    for first in [false, true] {
+        let engine = oswald_engine();
+        let order = [first, !first, first];
+        let baselines: Vec<f32> = order
+            .iter()
+            .map(|&half| half_leading_baseline(&engine, half))
+            .collect();
+        for (half, baseline) in order.iter().zip(&baselines) {
+            let expected = if *half { 69.696 } else { 77.279 };
+            assert!(
+                (baseline - expected).abs() < 0.01,
+                "half_leading {half} after {order:?}: baseline {baseline}, \
+                 expected {expected}"
+            );
+        }
+    }
+}
