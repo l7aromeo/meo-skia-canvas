@@ -417,8 +417,8 @@ pub struct Font {
     ///
     /// Three-valued rather than a `bool`, because `oblique` and `italic`
     /// are different faces on a family that ships both, and the matcher is
-    /// asked for the one named. Only [`Context2D::font`] reads both back as
-    /// `italic`, as Chrome does.
+    /// asked for the one named. [`Context2D::font`] reads each back as its
+    /// own keyword, where Chrome reads both as `italic`.
     pub slant: FontSlant,
     /// How wide a face to select.
     ///
@@ -1114,8 +1114,9 @@ fn computed_weight(text: &str) -> Option<u16> {
 }
 
 /// CSS Fonts 4's default oblique angle, what a bare `oblique` means: "The
-/// lack of an <angle> represents 14deg." Chrome 152 reads `oblique 14deg`
-/// back as `italic`, and every other angle back with no style at all.
+/// lack of an <angle> represents 14deg." So `oblique 14deg` reads back as
+/// `oblique`, the shorter form; Chrome 152 reads it back as `italic`, and
+/// every other angle with no style at all.
 pub(crate) const DEFAULT_OBLIQUE_DEGREES: f32 = 14.0;
 
 /// The largest oblique angle CSS Fonts 4 allows, either way. Chrome refuses
