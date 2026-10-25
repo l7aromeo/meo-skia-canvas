@@ -502,8 +502,8 @@ describe("addPlaceholder", () => {
   test("a value outside either set throws", () => {
     let builder = () => new ParagraphBuilder({});
 
-    assert.throws(() => builder().addPlaceholder(10, 10, 9), TypeError);
-    assert.throws(() => builder().addPlaceholder(10, 10, 0, 7), TypeError);
+    assert.throws(() => builder().addPlaceholder(10, 10, 9), RangeError);
+    assert.throws(() => builder().addPlaceholder(10, 10, 0, 7), RangeError);
   });
 
   test("omitting them still lays out on the baseline", () => {
@@ -774,6 +774,138 @@ describe("the numeric style codes", () => {
     assert.ok(ParagraphBuilder.Make({ textStyle: { decorationStyle: 0 } }));
     assert.ok(ParagraphBuilder.Make({ textHeightBehavior: 0 }));
     assert.ok(paragraph.getRectsForRange(0, 2, 0, 0));
+  });
+});
+
+describe("a numeric code is matched on the number it converts to", () => {
+  // Each code is read from the converted `double` rather than from an integer
+  // cast from it, which truncated `1.5` to a code and saturated `1e10` to
+  // 2147483647 in the refusal. A finite number outside the set is a
+  // `RangeError` naming the number as JavaScript spells it -- AGENTS.md's
+  // rule 4 -- and `-0` is 0.
+  const paragraph = () => {
+    const p = ParagraphBuilder.Make({ textStyle: { fontSize: 16 } })
+      .addText("hi")
+      .build();
+    p.layout(100);
+    return p;
+  };
+  const pushed = (style) => ParagraphBuilder.Make({}).pushStyle(style);
+  const CODES = [
+    [
+      "slant",
+      (v) => pushed({ fontStyle: { slant: v } }),
+      [0, 1, 2, -0],
+      [3, 1.5, -0.5, -1, 1e10, 1e21],
+    ],
+    [
+      "decorationStyle",
+      (v) => pushed({ decorationStyle: v }),
+      [0, 1, 2, 3, 4, -0],
+      [5, 1.5, -1, 1e10],
+    ],
+    [
+      "decoration",
+      (v) => pushed({ decoration: v }),
+      [0, 1, 2, 3, 4, 5, 6, 7, -0],
+      [8, 9, 0.5, 1.5, -1, 2 ** 32 + 1, 1e10],
+    ],
+    [
+      "fontFeatures[0].value",
+      (v) => pushed({ fontFeatures: [{ name: "smcp", value: v }] }),
+      [0, 1, 2, 2147483647, -0],
+      [1.5, -1, 2147483648, 1e10],
+    ],
+    [
+      "maxLines",
+      (v) => ParagraphBuilder.Make({ maxLines: v }),
+      [1, 2, 1e10, 1e30],
+      [0, -0, null, 1.5, -1],
+    ],
+    [
+      "placeholder align",
+      (v) => ParagraphBuilder.Make({}).addPlaceholder(10, 10, v),
+      [0, 1, 2, 3, 4, 5],
+      [6, 1.5, -1, 1e10],
+    ],
+    [
+      "placeholder baseline",
+      (v) => ParagraphBuilder.Make({}).addPlaceholder(10, 10, 0, v),
+      [0, 1],
+      [2, 0.5, -1, 1e10],
+    ],
+    [
+      "rect height style",
+      (v) => paragraph().getRectsForRange(0, 2, v, 0),
+      [0, 1, 2, 3, 4, 5],
+      [6, 1.5, -1, 1e10],
+    ],
+    [
+      "rect width style",
+      (v) => paragraph().getRectsForRange(0, 2, 0, v),
+      [0, 1],
+      [2, 0.5, -1, 1e10],
+    ],
+  ];
+
+  test("refuses a number outside the set, naming it as JavaScript does", () => {
+    const wrong = [];
+    for (const [name, make, , refused] of CODES)
+      for (const value of refused) {
+        // `null` converts to 0, and the refusal names the 0.
+        const spelled = String(Number(value));
+        try {
+          make(value);
+          wrong.push(`${name} = ${value}: taken`);
+        } catch (e) {
+          if (
+            !(e instanceof RangeError) ||
+            !e.message.includes(name) ||
+            !e.message.includes(spelled)
+          )
+            wrong.push(
+              `${name} = ${value}: ${e.constructor.name}: ${e.message}`,
+            );
+        }
+      }
+    assert.deepEqual(wrong, []);
+  });
+
+  test("takes each number in the set", () => {
+    for (const [name, make, taken] of CODES)
+      for (const value of taken)
+        assert.doesNotThrow(() => make(value), `${name} = ${value}`);
+  });
+});
+
+describe("a textDirection outside its names", () => {
+  test("is a TypeError naming the option", () => {
+    for (const value of ["up", "", "ltr ", "rtl\u0000"])
+      assert.throws(
+        () => ParagraphBuilder.Make({ textDirection: value }),
+        (e) => e instanceof TypeError && /`textDirection`/.test(e.message),
+        JSON.stringify(value),
+      );
+  });
+
+  test("is matched without ASCII case", () => {
+    const start = (textDirection) => {
+      const p = ParagraphBuilder.Make({
+        textDirection,
+        textStyle: { fontSize: 16 },
+      })
+        .addText("hi")
+        .build();
+      p.layout(200);
+      return p.getRectsForRange(0, 2, 0, 0)[0].rect;
+    };
+    assert.notDeepEqual(
+      start("rtl"),
+      start("ltr"),
+      "the direction must move the text",
+    );
+    assert.deepEqual(start("RTL"), start("rtl"));
+    assert.deepEqual(start("Ltr"), start("ltr"));
   });
 });
 
@@ -1613,7 +1745,9 @@ describe("a ParagraphBuilder option is converted as WebIDL converts it", () => {
   // whose conversion throws a `TypeError`, which here names the option. An
   // absent or `undefined` option takes its default.
   const DOUBLE = "double",
+    COUNT = "count",
     STRING = "DOMString",
+    DIRECTION = "direction",
     BOOLEAN = "boolean",
     SEQUENCE = "sequence",
     DICTIONARY = "dictionary",
@@ -1623,6 +1757,9 @@ describe("a ParagraphBuilder option is converted as WebIDL converts it", () => {
   // What converts, by WebIDL section 3.2.7, 3.2.10, 3.2.3, 3.2.17, 3.2.21 and
   // 3.2.25. A number's values all convert into the range every number
   // option takes, so a refusal here is a conversion's and nothing else's.
+  // `maxLines` counts from 1, so `null`, which converts to 0, is left to
+  // its own refusal; and a direction is an enumeration, so only its names
+  // convert.
   const CONVERTS = {
     [DOUBLE]: [
       "1",
@@ -1634,7 +1771,17 @@ describe("a ParagraphBuilder option is converted as WebIDL converts it", () => {
       new Number(1),
       { valueOf: () => 1 },
     ],
+    [COUNT]: [
+      "1",
+      " 1 ",
+      true,
+      [1],
+      "0x1",
+      new Number(1),
+      { valueOf: () => 1 },
+    ],
     [STRING]: [1, true, null, {}, { toString: () => "ltr" }, 1n],
+    [DIRECTION]: ["ltr", "RTL", null, { toString: () => "rtl" }],
     [BOOLEAN]: [1, 0, "", "x", null, {}, [], 0n, NaN, Symbol("s")],
     [SEQUENCE]: [[], new Set(), (function* () {})()],
     [DICTIONARY]: [null, {}, [], () => {}],
@@ -1658,11 +1805,13 @@ describe("a ParagraphBuilder option is converted as WebIDL converts it", () => {
   };
   // What throws: ToNumber's NaN and infinities and its refusal of a Symbol
   // and a BigInt; ToString's of a Symbol; a dictionary that is no Object; a
-  // sequence that is no Object or has no iterator; and, for the lists of
-  // fixed length, one of another length.
+  // sequence that is no Object or has no iterator; for the lists of fixed
+  // length, one of another length; and a name no enumeration holds.
   const THROWS = {
     [DOUBLE]: ["abc", {}, NaN, Infinity, -Infinity, [1, 2], Symbol("s"), 1n],
+    [COUNT]: ["abc", {}, NaN, Infinity, -Infinity, [1, 2], Symbol("s"), 1n],
     [STRING]: [Symbol("s")],
+    [DIRECTION]: [Symbol("s"), "up", "", 1, {}],
     [BOOLEAN]: [],
     [SEQUENCE]: ["Arial", 1, true, null, {}, Symbol("s")],
     [DICTIONARY]: ["x", 1, true, Symbol("s"), 1n],
@@ -1699,8 +1848,8 @@ describe("a ParagraphBuilder option is converted as WebIDL converts it", () => {
   };
   const PARAGRAPH = {
     textAlign: STRING,
-    textDirection: STRING,
-    maxLines: DOUBLE,
+    textDirection: DIRECTION,
+    maxLines: COUNT,
     ellipsis: STRING,
     textStyle: DICTIONARY,
     strutStyle: DICTIONARY,

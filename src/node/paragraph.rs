@@ -174,7 +174,7 @@ fn to_double(
     if number.is_finite() {
         return Ok(number);
     }
-    let spelled = cx.number(number).to_string(cx)?.value(cx);
+    let spelled = spelled(cx, number)?;
     let got = match value.is_a::<JsNumber, _>(cx) {
         true => spelled,
         false => format!("{} converting to {spelled}", kind_of(cx, value)),
@@ -203,6 +203,43 @@ fn float_option<'a>(
     key: &str,
 ) -> NeonResult<Option<f32>> {
     Ok(number_option(cx, obj, prefix, key)?.map(|number| number as f32))
+}
+
+/// `number` as JavaScript's `ToString` spells it, for a refusal to name:
+/// `1e+21` and `Infinity` where Rust's `Display` writes twenty-two digits
+/// and `inf`.
+fn spelled(cx: &mut FunctionContext, number: f64) -> NeonResult<String> {
+    Ok(cx.number(number).to_string(cx)?.value(cx))
+}
+
+/// The code `number` names in `codes`, which lists them in order from 0, or
+/// a `RangeError` naming `number` -- AGENTS.md's rule 4, a number outside
+/// the set it is read from, where a misspelt name would be rule 2's
+/// `TypeError`. Matched on the number itself rather than on an integer cast
+/// from it, which truncates `1.5` to a code and saturates `1e10` to
+/// `i32::MAX`, naming a number the caller never passed.
+fn code<T: Copy>(
+    cx: &mut FunctionContext,
+    number: f64,
+    codes: &[T],
+    name: &str,
+) -> NeonResult<T> {
+    // The cast truncates and saturates, so only a number it gives back
+    // unchanged is a whole one in range.
+    let at = number as usize;
+    if let Some(&code) = codes.get(at)
+        && at as f64 == number
+    {
+        return Ok(code);
+    }
+    let spelled = spelled(cx, number)?;
+    let expected = match codes.len() {
+        2 => "0 or 1".to_string(),
+        len => format!("0 to {}", len - 1),
+    };
+    cx.throw_range_error(format!(
+        "Unknown {name} {spelled} (expected {expected})"
+    ))
 }
 
 /// `value` as an IDL `DOMString`, WebIDL section 3.2.10: "Let x be ?
@@ -674,24 +711,13 @@ fn parse_text_style<'a>(
             .map(|w| Width::from(w as i32))
             .unwrap_or(Width::NORMAL);
         // Refused rather than defaulted, as the other numeric style codes in
-        // this parser are. `_ => Upright` swallowed anything outside the set:
-        // `slant: 9` painted upright, byte for byte identical to `slant: 0`,
-        // so a caller reading a constant off the wrong object got no slant
-        // and no reason. Rule 4 -- the argument is a number and its value is
-        // not one the set holds, which is a `RangeError` rather than the
-        // `TypeError` rule 2 gives a misspelt name.
-        let slant = match float_option(cx, &fs_obj, &inner, "slant")? {
+        // this parser are: a caller reading a constant off the wrong object
+        // gets a reason rather than an upright run.
+        const SLANTS: [Slant; 3] =
+            [Slant::Upright, Slant::Italic, Slant::Oblique];
+        let slant = match number_option(cx, &fs_obj, &inner, "slant")? {
             None => Slant::Upright,
-            Some(s) => match s as i32 {
-                0 => Slant::Upright,
-                1 => Slant::Italic,
-                2 => Slant::Oblique,
-                other => {
-                    return cx.throw_range_error(format!(
-                        "Unknown slant {other} (expected 0 to 2)"
-                    ));
-                }
-            },
+            Some(number) => code(cx, number, &SLANTS, "slant")?,
         };
         style.set_font_style(FontStyle::new(weight, width, slant));
     }
@@ -725,12 +751,25 @@ fn parse_text_style<'a>(
     //
     // The JavaScript side numbers these the way CanvasKit does, which is the
     // way Skia does -- underline 1, overline 2, line-through 4. So the mask
-    // arrives already in `TextDecoration`'s own representation and needs
-    // taking apart only to drop bits Skia does not define. Testing each bit
-    // against a literal and setting the matching flag did the same thing
-    // while stating the correspondence three times and asserting it none.
-    if let Some(deco) = float_option(cx, obj, prefix, "decoration")? {
+    // arrives already in `TextDecoration`'s own representation, and a whole
+    // number holding only those bits is taken apart into the three flags.
+    // Anything else is refused, by rule 4 as a code outside its set is: a
+    // fraction or a bit Skia does not define draws no line the caller asked
+    // for, and a cast to `u32` truncated the one and dropped the other.
+    if let Some(deco) = number_option(cx, obj, prefix, "decoration")? {
+        let defined = (TextDecoration::UNDERLINE
+            | TextDecoration::OVERLINE
+            | TextDecoration::LINE_THROUGH)
+            .bits();
+        // A fraction, a negative and a number past `u32::MAX` do not come
+        // back from the cast unchanged.
         let bits = deco as u32;
+        if f64::from(bits) != deco || bits & !defined != 0 {
+            let spelled = spelled(cx, deco)?;
+            return cx.throw_range_error(format!(
+                "Unknown decoration {spelled} (expected a mask of 0 to {defined})"
+            ));
+        }
         let decoration = CrateTextDecoration {
             underline: bits & TextDecoration::UNDERLINE.bits() != 0,
             overline: bits & TextDecoration::OVERLINE.bits() != 0,
@@ -740,25 +779,18 @@ fn parse_text_style<'a>(
     }
 
     // decorationStyle
-    if let Some(ds) = float_option(cx, obj, prefix, "decorationStyle")? {
-        let style_code = match ds as i32 {
-            0 => CrateTextDecorationStyle::Solid,
-            1 => CrateTextDecorationStyle::Double,
-            2 => CrateTextDecorationStyle::Dotted,
-            3 => CrateTextDecorationStyle::Dashed,
-            4 => CrateTextDecorationStyle::Wavy,
-            // Named rather than defaulted: `_ => Solid` turned a code outside
-            // the set into the default silently, so a caller reading a
-            // constant off the wrong object got no line style and no reason.
-            // Rule 4 rather than rule 2 -- the argument is a number, not a
-            // spelling, which is the distinction rule 4's own `bitDepth`
-            // example draws.
-            other => {
-                return cx.throw_range_error(format!(
-                    "Unknown decorationStyle {other} (expected 0 to 4)"
-                ));
-            }
-        };
+    //
+    // Refused rather than defaulted outside the set, so a caller reading a
+    // constant off the wrong object gets a reason rather than a solid line.
+    if let Some(ds) = number_option(cx, obj, prefix, "decorationStyle")? {
+        const STYLES: [CrateTextDecorationStyle; 5] = [
+            CrateTextDecorationStyle::Solid,
+            CrateTextDecorationStyle::Double,
+            CrateTextDecorationStyle::Dotted,
+            CrateTextDecorationStyle::Dashed,
+            CrateTextDecorationStyle::Wavy,
+        ];
+        let style_code = code(cx, ds, &STYLES, "decorationStyle")?;
         style.set_decoration_style(style_code.to_skia());
     }
 
@@ -876,8 +908,24 @@ fn parse_text_style<'a>(
             if name.is_empty() {
                 continue;
             }
-            let value = float_option(cx, &feat_obj, &inner, "value")?
-                .unwrap_or(1.0) as i32;
+            // A feature's value is a whole number, as CSS's
+            // `font-feature-settings` takes, up to the `i32` Skia carries.
+            // Rule 4 refuses another, which a cast truncated or saturated.
+            let value = match number_option(cx, &feat_obj, &inner, "value")? {
+                None => 1,
+                Some(number) => {
+                    let whole = number as i32;
+                    if whole < 0 || f64::from(whole) != number {
+                        let spelled = spelled(cx, number)?;
+                        return cx.throw_range_error(format!(
+                            "`{inner}value` takes a whole number from 0 to {}, not \
+                             {spelled}",
+                            i32::MAX
+                        ));
+                    }
+                    whole
+                }
+            };
             style.add_font_feature(name, value);
         }
     }
@@ -931,21 +979,33 @@ fn parse_paragraph_style<'a>(
         style.set_text_align(align.to_skia());
     }
 
-    // textDirection
+    // textDirection, matched without ASCII case. Another name is a
+    // `TypeError` by rule 2, a value outside an enumeration, as WebIDL
+    // raises for a dictionary member of an enumeration type.
     if let Some(dir_str) = string_option(cx, obj, "", "textDirection")? {
-        match dir_str.to_lowercase().as_str() {
-            "rtl" => {
-                style.set_text_direction(TextDirection::RTL);
+        let direction = match dir_str {
+            _ if dir_str.eq_ignore_ascii_case("rtl") => TextDirection::RTL,
+            _ if dir_str.eq_ignore_ascii_case("ltr") => TextDirection::LTR,
+            _ => {
+                return cx.throw_type_error(format!(
+                    "`textDirection` takes \"ltr\" or \"rtl\", not {dir_str:?}"
+                ));
             }
-            "ltr" => {
-                style.set_text_direction(TextDirection::LTR);
-            }
-            _ => {}
-        }
+        };
+        style.set_text_direction(direction);
     }
 
-    // maxLines
-    if let Some(max) = float_option(cx, obj, "", "maxLines")? {
+    // maxLines -- a whole number of lines from 1, and rule 4 refuses another:
+    // Skia lays out one line for 0, so neither 0 nor a fraction can be what
+    // the caller asked for. One past `usize::MAX` saturates to it, which is
+    // as unlimited as the number asked.
+    if let Some(max) = number_option(cx, obj, "", "maxLines")? {
+        if max.fract() != 0.0 || max < 1.0 {
+            let spelled = spelled(cx, max)?;
+            return cx.throw_range_error(format!(
+                "`maxLines` takes a whole number of lines from 1, not {spelled}"
+            ));
+        }
         style.set_max_lines(Some(max as usize));
     }
 
@@ -963,27 +1023,15 @@ fn parse_paragraph_style<'a>(
     }
 
     // textHeightBehavior: 0 = All, 1 = DisableFirstAscent,
-    // 2 = DisableLastDescent, 3 = DisableAll, and nothing else. Read before
-    // any conversion to an integer, so that `1.5`, `NaN` and the infinities
-    // are refused rather than truncated or dropped.
+    // 2 = DisableLastDescent, 3 = DisableAll, and nothing else.
     if let Some(thb) = number_option(cx, obj, "", "textHeightBehavior")? {
-        let behavior = match thb {
-            0.0 => CrateTextHeightBehavior::All,
-            1.0 => CrateTextHeightBehavior::DisableFirstAscent,
-            2.0 => CrateTextHeightBehavior::DisableLastDescent,
-            3.0 => CrateTextHeightBehavior::DisableAll,
-            // Rule 4, as for `decorationStyle`: a number outside the set
-            // the parser holds, not a misspelt name. Spelled by JavaScript's
-            // own `ToString`, so the message says `Infinity` and `1e+21`
-            // where Rust's `Display` says `inf` and twenty-two digits.
-            other => {
-                let spelled = cx.number(other).to_string(cx)?.value(cx);
-                return cx.throw_range_error(format!(
-                    "Unknown textHeightBehavior {spelled} (expected 0, 1, 2 \
-                     or 3)"
-                ));
-            }
-        };
+        const BEHAVIORS: [CrateTextHeightBehavior; 4] = [
+            CrateTextHeightBehavior::All,
+            CrateTextHeightBehavior::DisableFirstAscent,
+            CrateTextHeightBehavior::DisableLastDescent,
+            CrateTextHeightBehavior::DisableAll,
+        ];
+        let behavior = code(cx, thb, &BEHAVIORS, "textHeightBehavior")?;
         style.set_text_height_behavior(behavior.to_skia());
     }
 
@@ -1176,31 +1224,29 @@ pub fn addPlaceholder(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedParagraphBuilder>(0)?;
     let width = float_arg_or_bail(&mut cx, 1, "width")?;
     let height = float_arg_or_bail(&mut cx, 2, "height")?;
-    // Both were read and discarded, so every placeholder laid out on the
-    // baseline whatever the caller asked for. The numbering is CanvasKit's.
-    let alignment = match opt_float_arg(&mut cx, 3).unwrap_or(0.0) as i32 {
-        0 => CratePlaceholderAlignment::Baseline,
-        1 => CratePlaceholderAlignment::AboveBaseline,
-        2 => CratePlaceholderAlignment::BelowBaseline,
-        3 => CratePlaceholderAlignment::Top,
-        4 => CratePlaceholderAlignment::Bottom,
-        5 => CratePlaceholderAlignment::Middle,
-        other => {
-            return cx.throw_type_error(format!(
-                "Unknown placeholder align {other} (expected 0 to 5)"
-            ));
-        }
-    };
-
-    let baseline = match opt_float_arg(&mut cx, 4).unwrap_or(0.0) as i32 {
-        0 => PlaceholderBaseline::Alphabetic,
-        1 => PlaceholderBaseline::Ideographic,
-        other => {
-            return cx.throw_type_error(format!(
-                "Unknown placeholder baseline {other} (expected 0 or 1)"
-            ));
-        }
-    };
+    // The numbering is CanvasKit's.
+    const ALIGNMENTS: [CratePlaceholderAlignment; 6] = [
+        CratePlaceholderAlignment::Baseline,
+        CratePlaceholderAlignment::AboveBaseline,
+        CratePlaceholderAlignment::BelowBaseline,
+        CratePlaceholderAlignment::Top,
+        CratePlaceholderAlignment::Bottom,
+        CratePlaceholderAlignment::Middle,
+    ];
+    const BASELINES: [PlaceholderBaseline; 2] = [
+        PlaceholderBaseline::Alphabetic,
+        PlaceholderBaseline::Ideographic,
+    ];
+    let align = opt_float_arg(&mut cx, 3).unwrap_or(0.0);
+    let alignment =
+        code(&mut cx, f64::from(align), &ALIGNMENTS, "placeholder align")?;
+    let baseline = opt_float_arg(&mut cx, 4).unwrap_or(0.0);
+    let baseline = code(
+        &mut cx,
+        f64::from(baseline),
+        &BASELINES,
+        "placeholder baseline",
+    )?;
 
     let offset = opt_float_arg(&mut cx, 5).unwrap_or(0.0);
 
@@ -1373,31 +1419,30 @@ pub fn getRectsForRange(mut cx: FunctionContext) -> JsResult<JsArray> {
     let this = cx.argument::<BoxedParagraph>(0)?;
     let start = float_arg_or_bail(&mut cx, 1, "start")? as usize;
     let end = float_arg_or_bail(&mut cx, 2, "end")? as usize;
-    let h_style = opt_float_arg(&mut cx, 3).unwrap_or(0.0) as i32;
-    let w_style = opt_float_arg(&mut cx, 4).unwrap_or(0.0) as i32;
-
-    let rect_height_style = match h_style {
-        0 => CrateRectHeightStyle::Tight,
-        1 => CrateRectHeightStyle::Max,
-        2 => CrateRectHeightStyle::IncludeLineSpacingMiddle,
-        3 => CrateRectHeightStyle::IncludeLineSpacingTop,
-        4 => CrateRectHeightStyle::IncludeLineSpacingBottom,
-        5 => CrateRectHeightStyle::Strut,
-        other => {
-            return cx.throw_range_error(format!(
-                "Unknown rect height style {other} (expected 0 to 5)"
-            ));
-        }
-    };
-    let rect_width_style = match w_style {
-        0 => CrateRectWidthStyle::Tight,
-        1 => CrateRectWidthStyle::Max,
-        other => {
-            return cx.throw_range_error(format!(
-                "Unknown rect width style {other} (expected 0 or 1)"
-            ));
-        }
-    };
+    const HEIGHT_STYLES: [CrateRectHeightStyle; 6] = [
+        CrateRectHeightStyle::Tight,
+        CrateRectHeightStyle::Max,
+        CrateRectHeightStyle::IncludeLineSpacingMiddle,
+        CrateRectHeightStyle::IncludeLineSpacingTop,
+        CrateRectHeightStyle::IncludeLineSpacingBottom,
+        CrateRectHeightStyle::Strut,
+    ];
+    const WIDTH_STYLES: [CrateRectWidthStyle; 2] =
+        [CrateRectWidthStyle::Tight, CrateRectWidthStyle::Max];
+    let h_style = opt_float_arg(&mut cx, 3).unwrap_or(0.0);
+    let w_style = opt_float_arg(&mut cx, 4).unwrap_or(0.0);
+    let rect_height_style = code(
+        &mut cx,
+        f64::from(h_style),
+        &HEIGHT_STYLES,
+        "rect height style",
+    )?;
+    let rect_width_style = code(
+        &mut cx,
+        f64::from(w_style),
+        &WIDTH_STYLES,
+        "rect width style",
+    )?;
 
     let this = this.borrow();
     let boxes = this.paragraph.get_rects_for_range(
