@@ -15,8 +15,8 @@ use crate::{
 use neon::prelude::*;
 use skia_safe::{
     Canvas, Color, Font, FontMetrics, FourByteTag, GlyphId, Matrix, Paint,
-    Path as SkPath, PathBuilder as SkPathBuilder, Point, Rect, TextBlobBuilder,
-    Typeface,
+    Path as SkPath, PathBuilder as SkPathBuilder, Point, Rect, TextBlob,
+    TextBlobBuilder, Typeface,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
         Decoration, FontCollection, Paragraph, ParagraphBuilder,
@@ -610,7 +610,8 @@ impl TextLayout {
     /// decorated.
     ///
     /// A run at a time rather than through `Paragraph::paint`, so that a run
-    /// can be drawn under a transform of its own. The pixels are
+    /// can be drawn sheared or not on its own -- see [`sheared_blob`]. The
+    /// pixels of a run drawn as it stands are
     /// `Paragraph::paint`'s: each run's `Font` already carries what
     /// SkParagraph synthesised for it -- an embolden, a skew -- and the run's
     /// origin is the one `Paragraph::paint` draws from, its baseline snapped
@@ -626,26 +627,11 @@ impl TextLayout {
     /// so the decorations need a second layout of their own.
     pub fn paint(&mut self, canvas: &Canvas, origin: Point, paint: &Paint) {
         for run in glyph_runs(&mut self.paragraph) {
-            let mut builder = TextBlobBuilder::new();
-            let (glyphs, positions) =
-                builder.alloc_run_pos(&run.font, run.glyphs.len(), None);
-            glyphs.copy_from_slice(&run.glyphs);
-            positions.copy_from_slice(&run.positions);
-            let Some(blob) = builder.make() else { continue };
-            match run_shear(&run.font.typeface(), self.oblique) {
-                // About the run's baseline, which is where its origin sits:
-                // the glyphs lean, and the line under them does not move.
-                Shear::By(shear) => {
-                    canvas.save();
-                    canvas.translate(origin + run.origin);
-                    canvas.concat(&shear);
-                    canvas.draw_text_blob(blob, Point::default(), paint);
-                    canvas.restore();
-                }
-                Shear::None => {
-                    canvas.draw_text_blob(blob, origin + run.origin, paint);
-                }
-                Shear::Flat => {}
+            let shear = run_shear(&run.font.typeface(), self.oblique);
+            if let Some(blob) =
+                sheared_blob(&run.font, &run.glyphs, &run.positions, shear)
+            {
+                canvas.draw_text_blob(blob, origin + run.origin, paint);
             }
         }
         if let Some(decorations) = &self.decorations {
@@ -772,6 +758,41 @@ pub(crate) enum Shear {
     /// baseline: drawn as nothing, with no ink and no outline, and advancing
     /// as it would upright.
     Flat,
+}
+
+/// A blob of `glyphs` at `positions`, relative to a run's origin, sheared
+/// by `shear` about the run's baseline -- or `None` where there is nothing
+/// to draw.
+///
+/// The glyphs are sheared through the font's own x skew, and their
+/// positions with them, rather than by drawing under a sheared canvas: the
+/// canvas's transform also carries the paint, so a gradient, a pattern, a
+/// shadow's blur and a stroke's pen would all be sheared with the glyphs.
+/// Shears along x add, so a run SkParagraph skewed for a fake italic keeps
+/// that skew and takes this one on top, as the outline the path and the
+/// ink box shear does.
+pub(crate) fn sheared_blob(
+    font: &Font,
+    glyphs: &[GlyphId],
+    positions: &[Point],
+    shear: Shear,
+) -> Option<TextBlob> {
+    let (font, positions) = match shear {
+        Shear::None => (Cow::Borrowed(font), Cow::Borrowed(positions)),
+        Shear::By(shear) => {
+            let mut sheared = font.clone();
+            sheared.set_skew_x(font.skew_x() + shear.skew_x());
+            let moved = positions.iter().map(|at| shear.map_point(*at));
+            (Cow::Owned(sheared), Cow::Owned(moved.collect()))
+        }
+        Shear::Flat => return None,
+    };
+    let mut builder = TextBlobBuilder::new();
+    let (into_glyphs, into_positions) =
+        builder.alloc_run_pos(&font, glyphs.len(), None);
+    into_glyphs.copy_from_slice(glyphs);
+    into_positions.copy_from_slice(&positions);
+    builder.make()
 }
 
 /// The angle at which a shear lays a glyph along its baseline, where its
@@ -1483,17 +1504,20 @@ impl<'a> Typesetter<'a> {
         // `get_path_at`'s skipped-glyph count reported.
         let mut builder = SkPathBuilder::new();
         for run in glyph_runs(&mut paragraph) {
-            // The shear the painter draws the run under, applied to each
-            // outline in its own em box, where the baseline is y = 0.
+            // The shear the painter draws the run with, applied to each
+            // outline in its own em box, where the baseline is y = 0, and to
+            // its position, as `sheared_blob` applies it.
             let shear = run_shear(&run.font.typeface(), self.oblique);
             if shear == Shear::Flat {
                 continue;
             }
             for (glyph, at) in zip(run.glyphs, run.positions) {
                 if let Some(outline) = run.font.get_path(glyph) {
-                    let outline = match &shear {
-                        Shear::By(shear) => outline.with_transform(shear),
-                        Shear::None | Shear::Flat => outline,
+                    let (outline, at) = match &shear {
+                        Shear::By(shear) => {
+                            (outline.with_transform(shear), shear.map_point(at))
+                        }
+                        Shear::None | Shear::Flat => (outline, at),
                     };
                     builder.add_path(
                         &outline.with_offset(at + run.origin + origin),
@@ -2222,6 +2246,11 @@ impl Measured {
                         // and that is this one. Chrome does not round here
                         // and so reports 0.039 more ascent at 48px; the
                         // difference is in the drawing, not the measurement.
+                        // A sheared glyph's position is sheared with it.
+                        let pt = match &shear {
+                            Shear::By(shear) => shear.map_point(pt),
+                            Shear::None | Shear::Flat => pt,
+                        };
                         ink.with_offset(
                             pt + info.origin() + origin - Point::new(0.0, norm),
                         )

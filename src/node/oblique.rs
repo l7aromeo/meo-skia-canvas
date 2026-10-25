@@ -29,11 +29,11 @@
 use crate::{
     context2d::DEFAULT_OBLIQUE_DEGREES,
     font::leans_as_asked,
-    node::typography::{Shear, painted_positions, run_shear},
+    node::typography::{Shear, painted_positions, run_shear, sheared_blob},
 };
 use skia_safe::{
     BlurStyle, Canvas, Color, Font, FontStyle, GlyphId, MaskFilter, Paint,
-    Point, TextBlobBuilder,
+    Point,
     font_style::Slant,
     textlayout::{
         FontCollection, Paragraph, ParagraphBuilder, ParagraphStyle,
@@ -474,26 +474,12 @@ impl Sheared {
 
 impl ShearedRun {
     /// Draws the run with the paragraph's origin at `origin`, sheared about
-    /// its baseline.
+    /// its baseline -- see `sheared_blob`.
     fn draw(&self, canvas: &Canvas, origin: Point, paint: &Paint) {
-        let mut builder = TextBlobBuilder::new();
-        let (glyphs, positions) =
-            builder.alloc_run_pos(&self.font, self.glyphs.len(), None);
-        glyphs.copy_from_slice(&self.glyphs);
-        positions.copy_from_slice(&self.positions);
-        let Some(blob) = builder.make() else { return };
-        match self.shear {
-            Shear::None => {
-                canvas.draw_text_blob(blob, origin + self.origin, paint);
-            }
-            Shear::By(shear) => {
-                canvas.save();
-                canvas.translate(origin + self.origin);
-                canvas.concat(&shear);
-                canvas.draw_text_blob(blob, Point::default(), paint);
-                canvas.restore();
-            }
-            Shear::Flat => {}
+        if let Some(blob) =
+            sheared_blob(&self.font, &self.glyphs, &self.positions, self.shear)
+        {
+            canvas.draw_text_blob(blob, origin + self.origin, paint);
         }
     }
 }
