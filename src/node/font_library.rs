@@ -5,8 +5,8 @@
 use neon::{prelude::*, types::buffer::TypedArray};
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashMap},
-    fs,
+    collections::{BTreeMap, HashMap, HashSet},
+    fs, iter,
     path::Path,
     rc::Rc,
     sync::{Arc, OnceLock},
@@ -22,7 +22,10 @@ use skia_safe::{
 };
 
 use crate::{
-    font::{InstancedPositions, optical_size, variation_axes},
+    font::{
+        FontFamily, GenericFamily, InstancedPositions, optical_size,
+        variation_axes,
+    },
     image::x_height_ratio,
     typography::{
         FontSpec, from_slant, from_width, typeface_details, typeface_wght_range,
@@ -593,6 +596,10 @@ pub struct FontLibrary {
     /// The positions paragraph builders have instanced through font
     /// arguments on the collections this hands out.
     positions: InstancedPositions,
+    /// The system's family names, in lower case, read once for
+    /// [`has_family`](Self::has_family) and dropped with everything else on
+    /// [`invalidate`](Self::invalidate).
+    system_families: Option<HashSet<String>>,
 }
 
 /// The prefix every private alias carries.
@@ -601,8 +608,10 @@ pub struct FontLibrary {
 /// dump should be able to attribute the name to this library instead of taking
 /// it for corruption. What the name has to be is one no system font manager
 /// answers `match_family_style` for, and any ordinary string the system does
-/// not have satisfies that -- measured on macOS, the call is `None` for every
-/// name not installed, including all six generics.
+/// not have satisfies that: measured, CoreText answers `None` for every name
+/// not installed, including all six generics, and fontconfig for every one
+/// not installed except `serif`, `sans-serif` and `monospace`, which it
+/// aliases to faces of its choosing.
 const PRIVATE_ALIAS_PREFIX: &str = "meo-skia-canvas private family: ";
 
 /// The second name a claimed family is registered under.
@@ -618,6 +627,47 @@ const PRIVATE_ALIAS_PREFIX: &str = "meo-skia-canvas private family: ";
 /// cost every reader more than the case is worth.
 fn private_alias(claimed: &str) -> String {
     format!("{PRIVATE_ALIAS_PREFIX}{claimed}")
+}
+
+/// The name a generic family's faces are registered under in a collection,
+/// and asked for by: its keyword after [`PRIVATE_ALIAS_PREFIX`].
+///
+/// Not the keyword, so that a family named `serif` in quotes -- a family
+/// name, by CSS Fonts 4 -- never reaches the faces standing in for the
+/// generic. Not the keyword after U+0000 either, a prefix no CSS name can
+/// spell: SkParagraph hands each family name to the font managers as a C
+/// string -- `matchFamily(familyName.c_str())` and
+/// `matchFamilyStyle(familyName.c_str(), ...)` in
+/// skparagraph/src/FontCollection.cpp, lines 187 and 266 at skia-safe
+/// 0.153.3 -- so the name would arrive empty. The prefix's collision
+/// stance is [`private_alias`]'s.
+pub(crate) fn generic_name(generic: GenericFamily) -> String {
+    private_alias(generic.to_css())
+}
+
+/// Registers `face` in `provider` under `alias`, or its own family name
+/// without one -- and, where the alias is a generic keyword, under
+/// [`generic_name`] too: a claim on a generic sets the generic's faces,
+/// which are asked for by that name.
+fn register_under(
+    provider: &mut TypefaceFontProvider,
+    face: Typeface,
+    alias: Option<&str>,
+) {
+    if let Some(generic) = alias.and_then(GenericFamily::from_css) {
+        provider.register_typeface(
+            face.clone(),
+            Some(generic_name(generic).as_str()),
+        );
+    }
+    provider.register_typeface(face, alias);
+}
+
+/// The name a family that spells a generic keyword is asked for by where no
+/// family of that name exists: one nothing is registered under, so the list
+/// moves on to its next family, as CSS has a missing family do.
+pub(crate) fn unmatched_name(family: &str) -> String {
+    private_alias(&format!("unmatched {family}"))
 }
 
 /// Whether `alias` is one the caller has already claimed.
@@ -648,6 +698,7 @@ impl FontLibrary {
             collection_hinted: false,
             generics_cache: vec![],
             positions: InstancedPositions::default(),
+            system_families: None,
         }
     }
 
@@ -729,9 +780,21 @@ impl FontLibrary {
     fn new_font_collection(&mut self) -> FontCollection {
         let (assets, default_family) = self.collection_parts();
         let mut collection = FontCollection::new();
-        collection.set_default_font_manager(
+        // What a list naming no available family draws in: this library's
+        // `sans-serif`, then the face `collection_parts` chose. Named in
+        // full rather than appended to, because SkParagraph seeds the list
+        // with its own `DEFAULT_FONT_FAMILY`, the keyword `sans-serif`,
+        // which the curated faces are not registered under -- they sit
+        // under `generic_name` -- so that entry would go to the system
+        // manager, where CoreText answers nothing for it and fontconfig a
+        // face of its own choosing.
+        let defaults: Vec<String> =
+            iter::once(generic_name(GenericFamily::SansSerif))
+                .chain(default_family)
+                .collect();
+        collection.set_default_font_manager_and_family_names(
             self.mgr.clone(),
-            default_family.as_deref(),
+            &defaults,
         );
         collection.set_asset_font_manager(Some(assets));
         collection
@@ -750,18 +813,25 @@ impl FontLibrary {
         }
         let mut assets = TypefaceFontProvider::new();
         let claimed = self.claimed_aliases();
+        // Under `generic_name` rather than the keyword, so that a family
+        // named after the keyword is not taken for the generic.
         for (font, alias) in self.generics() {
             if claims(&claimed, alias.as_deref()) {
                 continue;
             }
-            assets.register_typeface(font.clone(), alias.as_deref());
+            let name = alias
+                .as_deref()
+                .and_then(GenericFamily::from_css)
+                .map(generic_name);
+            assets.register_typeface(font.clone(), name.as_deref());
         }
-        // No private alias here, deliberately, and this is the one place the
-        // two providers differ on purpose. `font_mgr` registers every aliased
-        // face a second time under `private_alias` so the SVG rewrite has a
-        // name the system font manager cannot answer for; canvas text has no
-        // rewrite and no such name to send, so the second registration would
-        // buy nothing.
+        // No private alias for a claimed name here, deliberately -- only the
+        // generic names above, which no caller types -- and this is the one
+        // place the two providers differ on purpose. `font_mgr` registers every
+        // aliased face a second time under `private_alias` so the SVG
+        // rewrite has a name the system font manager cannot answer for;
+        // canvas text has no rewrite and no such name to send, so the
+        // second registration would buy nothing.
         //
         // It would also cost something. The alias would become a family a
         // caller can type, and one that resolves to neither the registered
@@ -775,10 +845,11 @@ impl FontLibrary {
         // So making the two providers match here is not a tidy-up. It puts
         // back a typeable name with an unexplained rendering.
         for (font, alias) in &self.fonts {
-            assets.register_typeface(font.clone(), alias.as_deref());
+            register_under(&mut assets, font.clone(), alias.as_deref());
         }
 
-        let mut style_set = assets.match_family("system-ui");
+        let mut style_set =
+            assets.match_family(generic_name(GenericFamily::SystemUi));
         let default_fam = match style_set.count() > 1 {
             true => style_set.match_style(FontStyle::default()),
             false => self.mgr.legacy_make_typeface(None, FontStyle::default()),
@@ -1037,7 +1108,12 @@ impl FontLibrary {
         let candidates: Vec<Typeface> = self
             .font_collection()
             .find_typefaces(
-                &["system-ui", "sans-serif", "serif"],
+                &[
+                    GenericFamily::SystemUi,
+                    GenericFamily::SansSerif,
+                    GenericFamily::Serif,
+                ]
+                .map(generic_name),
                 FontStyle::normal(),
             )
             .into_iter()
@@ -1304,6 +1380,61 @@ impl FontLibrary {
         self.resolved_fonts.insert(name, font);
     }
 
+    /// Whether a family named `name` exists, compared without case: one
+    /// registered here, under its alias or its own name, or one the system
+    /// lists among its families.
+    ///
+    /// The system's list is read once and kept until
+    /// [`invalidate`](Self::invalidate); the registered fonts are read as
+    /// they stand.
+    pub(crate) fn has_family(&mut self, name: &str) -> bool {
+        let registered = self.fonts.iter().any(|(font, alias)| match alias {
+            Some(alias) => alias.eq_ignore_ascii_case(name),
+            None => font.family_name().eq_ignore_ascii_case(name),
+        });
+        registered
+            || self
+                .system_families
+                .get_or_insert_with(|| {
+                    self.mgr
+                        .family_names()
+                        .map(|family| family.to_ascii_lowercase())
+                        .collect()
+                })
+                .contains(&name.to_ascii_lowercase())
+    }
+
+    /// The names a font collection of this library is asked for `families`
+    /// by, in order.
+    ///
+    /// A generic is asked for by [`generic_name`], under which its faces are
+    /// registered. A name that spells a generic keyword -- quoted, so a
+    /// family name by CSS Fonts 4 -- is passed on only where a family of that
+    /// name exists, and otherwise by [`unmatched_name`]: fontconfig answers
+    /// `serif`, `sans-serif` and `monospace` with faces of its choosing,
+    /// which would draw a quoted "serif" as the generic it is not. Any other
+    /// name is passed as it is and left to the platform, whose own aliases
+    /// stand -- Chrome on Linux takes fontconfig's metric aliases too, such
+    /// as Helvetica drawn in Nimbus Sans.
+    pub(crate) fn collection_names(
+        &mut self,
+        families: &[FontFamily],
+    ) -> Vec<String> {
+        families
+            .iter()
+            .map(|family| match family {
+                FontFamily::Generic(generic) => generic_name(*generic),
+                FontFamily::Named(name)
+                    if GenericFamily::from_css(name).is_some()
+                        && !self.has_family(name) =>
+                {
+                    unmatched_name(name)
+                }
+                FontFamily::Named(name) => name.clone(),
+            })
+            .collect()
+    }
+
     /// Matches `spec` against the library, and remembers the answer.
     ///
     /// `None` where no family in the specification names a font this library
@@ -1311,10 +1442,11 @@ impl FontLibrary {
     /// remembered: a `FontLibrary::use` that registers the missing family
     /// clears this cache anyway, but a negative left in it would be a
     /// promise about fonts rather than a record of one.
-    pub fn resolve(&mut self, spec: FontSpec) -> Option<ResolvedFont> {
+    pub fn resolve(&mut self, mut spec: FontSpec) -> Option<ResolvedFont> {
+        spec.collection_names = self.collection_names(&spec.families);
         let typeface = self
             .font_collection()
-            .find_typefaces(&spec.families, spec.style())
+            .find_typefaces(&spec.collection_names, spec.style())
             .into_iter()
             .next()?;
         let font: ResolvedFont = Arc::new((spec, typeface));
@@ -1338,6 +1470,7 @@ impl FontLibrary {
     /// alternative is a cache whose correctness rests on which of two
     /// lookups happens to win.
     fn invalidate(&mut self) {
+        self.system_families = None;
         self.epoch = Rc::new(FontEpoch {
             fonts: self.fonts.clone(),
         });
@@ -1450,7 +1583,7 @@ impl FontLibrary {
                                     None
                                 }
                             });
-                        dynamic.register_typeface(face, alias.as_deref());
+                        register_under(&mut dynamic, face, alias.as_deref());
                     }
                 }
             }

@@ -55,16 +55,6 @@ pub enum FontFamily {
     Generic(GenericFamily),
 }
 
-impl FontFamily {
-    /// The name the font collection is asked for.
-    pub(crate) fn matcher_name(&self) -> &str {
-        match self {
-            Self::Named(name) => name,
-            Self::Generic(generic) => generic.to_css(),
-        }
-    }
-}
-
 impl From<&str> for FontFamily {
     fn from(name: &str) -> Self {
         GenericFamily::from_css(name)

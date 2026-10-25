@@ -33,14 +33,17 @@ use crate::{
     },
     context2d::{FontStretch, TextDirection},
     font::{
-        FontAxisTag, FontFamily, FontLibrary, FontVariation,
+        FontAxisTag, FontFamily, FontLibrary, FontVariation, GenericFamily,
         InstancedPositions, ObliqueAngle, optical_size, variation_axes,
     },
     geometry::Rect,
     image::CSS_INITIAL_FONT_SIZE,
-    node::oblique::{
-        ParagraphRecipe, Sheared, add_slnt, match_oblique,
-        without_paragraph_cache,
+    node::{
+        font_library::{FontLibrary as SharedFontRegistry, unmatched_name},
+        oblique::{
+            ParagraphRecipe, Sheared, add_slnt, match_oblique,
+            without_paragraph_cache,
+        },
     },
 };
 
@@ -1793,11 +1796,8 @@ fn instance_for(
     style: &TextStyle,
     variations: &[FontVariation],
 ) -> Instance {
-    let families: Vec<&str> = style
-        .font_families
-        .iter()
-        .map(FontFamily::matcher_name)
-        .collect();
+    let names = collection_names(&style.font_families);
+    let families: Vec<&str> = names.iter().map(String::as_str).collect();
     if families.is_empty() {
         return Instance::default();
     }
@@ -1883,12 +1883,7 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
 
     sk_style.set_font_size(style.font_size);
     if !style.font_families.is_empty() {
-        let families: Vec<&str> = style
-            .font_families
-            .iter()
-            .map(FontFamily::matcher_name)
-            .collect();
-        sk_style.set_font_families(&families);
+        sk_style.set_font_families(&collection_names(&style.font_families));
     }
     // Pinned to the weight the instance has. Skia fakes a bold wherever the
     // weight asked for is 200 or more above the face's, and an instance is
@@ -1981,6 +1976,33 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
     sk_style
 }
 
+/// The names an engine's font collection is asked for `families` by.
+///
+/// An engine's collection holds what its library registered and nothing
+/// standing in for the generics, so a generic is asked for by its keyword
+/// and answered by the platform -- fontconfig has faces for `serif`,
+/// `sans-serif` and `monospace`, CoreText none. A name that spells a generic
+/// keyword is a family name, and is passed on only where a family of that
+/// name exists, so that fontconfig's answer for the keyword is not taken
+/// for it -- see `FontLibrary::collection_names`, the canvas's counterpart.
+fn collection_names(families: &[FontFamily]) -> Vec<String> {
+    families
+        .iter()
+        .map(|family| match family {
+            FontFamily::Generic(generic) => generic.to_css().to_string(),
+            FontFamily::Named(name)
+                if GenericFamily::from_css(name).is_some()
+                    && !SharedFontRegistry::with_shared(|library| {
+                        library.has_family(name)
+                    }) =>
+            {
+                unmatched_name(name)
+            }
+            FontFamily::Named(name) => name.clone(),
+        })
+        .collect()
+}
+
 /// The families a strut should be measured in.
 ///
 /// A strut whose family cannot be resolved does not fall back the way a text
@@ -2001,17 +2023,11 @@ fn strut_families(
     let Some(strut) = &style.strut else {
         return Vec::new();
     };
-    let names = |families: &[FontFamily]| {
-        families
-            .iter()
-            .map(|family| family.matcher_name().to_string())
-            .collect()
-    };
     if !strut.font_families.is_empty() {
-        return names(&strut.font_families);
+        return collection_names(&strut.font_families);
     }
     if !style.font_families.is_empty() {
-        return names(&style.font_families);
+        return collection_names(&style.font_families);
     }
     collection
         .default_fallback()

@@ -876,7 +876,10 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   read back unquoted. `FontFamily` is `Named(String)` or
   `Generic(GenericFamily)`, the thirteen CSS generics. The shorthand keeps
   the quoting: `16px "serif"` reads back as itself, and `16px serif` as the
-  generic. A string converts as CSS reads an unquoted name, a generic
+  generic. It draws as itself too: a quoted keyword reaches a family by that
+  name, registered or installed, and with none the list moves on, where
+  fontconfig had answered `serif`, `sans-serif` and `monospace` with the
+  generic's faces. A string converts as CSS reads an unquoted name, a generic
   keyword in any case becoming the generic, so `Font::new("serif", 16.0)`
   is unchanged; `FontFamily::Named("serif".into())` names the family. In your code,
   write `vec!["Helvetica".into(), "serif".into()]` where you wrote

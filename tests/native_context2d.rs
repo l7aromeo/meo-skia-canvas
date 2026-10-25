@@ -1675,6 +1675,31 @@ fn a_quoted_generic_keyword_is_a_family_name() {
         ctx.set_font(&Font::from_css(css).expect("parses"));
         assert_eq!(ctx.font(), read, "set_font(Font::from_css({css:?}))");
     }
+
+    // And draws as one: with no family called serif, as a missing family,
+    // never as the generic.
+    let painted = |css: &str| {
+        let mut canvas = Canvas::new(320.0, 60.0);
+        {
+            let ctx = canvas.context();
+            assert!(ctx.set_font_css(css), "{css:?}");
+            ctx.fill_text("Wgq AVA", 5.0, 45.0, None);
+        }
+        pixels(&mut canvas)
+    };
+    let missing = painted("36px NoSuchFamilyQuoted");
+    assert!(painted("36px \"serif\"") == missing, "quoted serif");
+    assert!(painted("36px serif") != missing, "the control: bare serif");
+
+    // What a missing family draws is this library's `sans-serif`, the
+    // canvas default family -- pinned to that family rather than to
+    // another fallback, since the comparisons above move with whatever the
+    // fallback is. It drew the `system-ui` face once the curated faces
+    // left the keyword SkParagraph seeds its default list with.
+    assert!(
+        painted("36px sans-serif") == missing,
+        "a missing family draws the library's sans-serif"
+    );
 }
 
 #[test]
@@ -4121,6 +4146,35 @@ fn drawing_an_empty_canvas_paints_nothing() {
 }
 
 // -- Paragraphs --------------------------------------------------------------
+
+#[test]
+fn a_paragraph_family_spelling_a_generic_is_a_name() {
+    // `FontFamily::Named("serif")` is a family called serif, and with none
+    // registered or installed the list moves on -- where fontconfig would
+    // otherwise answer `serif` with a face of its choosing.
+    let engine = TextEngine::new(&FontLibrary::new());
+    let width = |families: Vec<FontFamily>| {
+        engine
+            .layout_text(
+                "Hamburgefonstiv",
+                &TextStyle {
+                    font_families: families,
+                    font_size: 32.0,
+                    ..TextStyle::default()
+                },
+                1000.0,
+            )
+            .max_intrinsic_width()
+    };
+    let missing = width(vec![FontFamily::Named("NoSuchFamilyQuoted".into())]);
+    for name in ["serif", "SERIF", "sans-serif", "monospace"] {
+        assert_eq!(
+            width(vec![FontFamily::Named(name.into())]),
+            missing,
+            "{name:?}"
+        );
+    }
+}
 
 #[test]
 fn draw_paragraph_paints_the_laid_out_text() {

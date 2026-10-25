@@ -352,6 +352,15 @@ removed and no signature moves.
   a text style, a pushed style or a strut now names no family, as leaving
   the option out does.
 
+- **A quoted generic keyword in `ctx.font` is a family name.** CSS Fonts 4
+  says the generic keywords "must not be quoted", so `16px "serif"` names a
+  family called serif, but it drew and read back as the generic `serif`. It
+  now reads back as itself, and draws a family of that name where one is
+  registered or installed; with none, the next family in the list draws,
+  as for any missing family, where fontconfig on Linux had answered
+  `serif`, `sans-serif` and `monospace` with the generic's faces.
+  `FontLibrary.use("serif", ...)` still claims the generic as well.
+
 - **`letterSpacing` and `wordSpacing` take `"0"`.** CSS Values 4 lets a
   zero length be written without its unit, and `ctx.letterSpacing = "0"`
   was ignored; it and any other unitless zero, such as `0.0` or `0e5`, now

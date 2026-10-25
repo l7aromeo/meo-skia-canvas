@@ -25,7 +25,8 @@ pub mod page;
 use crate::{
     css::{FontUnits, ROOT_FONT_PX},
     export::VectorFeatures,
-    font_library::{FontLibrary, ResolvedFont},
+    font::GenericFamily,
+    font_library::{FontLibrary, ResolvedFont, generic_name},
     gpu::RenderingEngine,
     gradient::{BoxedCanvasGradient, CanvasGradient},
     node::{
@@ -309,7 +310,10 @@ pub(crate) fn initial_root_face() -> Option<Typeface> {
     FontLibrary::with_shared(|library| {
         let mut collection = library.font_collection();
         collection
-            .find_typefaces(&[ROOT_FONT_FAMILY], FontStyle::normal())
+            .find_typefaces(
+                &[generic_name(ROOT_FONT_FAMILY)],
+                FontStyle::normal(),
+            )
             .into_iter()
             .next()
             .or_else(|| collection.default_fallback())
@@ -318,7 +322,7 @@ pub(crate) fn initial_root_face() -> Option<Typeface> {
 
 /// The family an initial root font is set in: the generic `serif`, which is
 /// CSS's usual initial value and Chrome's default standard font.
-const ROOT_FONT_FAMILY: &str = "serif";
+const ROOT_FONT_FAMILY: GenericFamily = GenericFamily::Serif;
 
 impl State {
     /// The typeface the context font resolves to first, as text is drawn
@@ -1527,7 +1531,7 @@ impl Context2D {
         let (spec, typeface) = &**font;
         let mut style = self.state.char_style.clone();
         style.set_typeface(typeface.clone());
-        style.set_font_families(&spec.families);
+        style.set_font_families(&spec.collection_names);
         style.set_font_style(spec.style());
         style.set_font_size(spec.size);
         style.reset_font_features();

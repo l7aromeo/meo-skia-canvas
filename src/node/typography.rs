@@ -3,7 +3,7 @@
 use crate::{
     context::State,
     css::{FontUnits, is_font_relative, parse_length, without_comments},
-    font::{ObliqueAngle, leans_as_asked, variation_axes},
+    font::{FontFamily, ObliqueAngle, leans_as_asked, variation_axes},
     font_library::{FontEpoch, FontLibrary, base_face},
     text::{
         TextAlign as CrateTextAlign, TextBaseline as CrateTextBaseline,
@@ -1511,7 +1511,11 @@ impl Utf16Index {
 //
 #[derive(Debug, Clone)]
 pub struct FontSpec {
-    pub families: Vec<String>,
+    pub families: Vec<FontFamily>,
+    /// The names a font collection is asked for `families` by, which only
+    /// the library resolving the specification can say -- see
+    /// `FontLibrary::collection_names`. Empty until it has.
+    pub collection_names: Vec<String>,
     pub size: f32,
     /// The shorthand's line height in pixels, a number or percentage
     /// already multiplied by `size`, or `None` for `normal`.
