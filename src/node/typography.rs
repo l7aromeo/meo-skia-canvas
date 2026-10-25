@@ -431,7 +431,11 @@ struct GlyphRun {
 /// shaper gave it: the offset that stacks a mark or sets it over its base,
 /// and the half of a kern from a font's legacy `kern` table that HarfBuzz
 /// carries as an offset. The run painter's differential test separates the
-/// two, on stacked marks and on 48px Helvetica `"AV To Ta"`.
+/// two, on stacked marks and on 48px Helvetica `"AV To Ta"`. Its text
+/// offsets are worse: on a line a run continues onto they repeat those of
+/// the run's first line, and for a run that does not start the text the
+/// one after its last glyph is read from past the storage holding them.
+/// `visit`'s are each glyph's own, on every line.
 fn glyph_runs(paragraph: &mut Paragraph) -> Vec<GlyphRun> {
     let mut runs = vec![];
     paragraph.visit(|_line, visit| {
@@ -703,73 +707,29 @@ pub(crate) fn with_oblique_slnt(
     }
 }
 
-/// The UTF-8 range of the text under glyph `at` of a visited run, read from
-/// the paragraph at the middle of the glyph's advance on its baseline.
-///
-/// `origin`, `positions` and `advance` are a run's as `extended_visit`
-/// reports them. The text offsets it reports beside them are not used.
-/// Each lookup walks the line's runs, so callers ask it of as few glyphs as
-/// answer their question.
-///
-/// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
-/// Re-check: cargo test skia_still_misreports_utf8_starts, and
-/// cargo test skia_still_restarts_utf8_starts_on_a_wrapped_line.
-/// `ParagraphImpl::extendedVisit` hands out a run's glyphs from where the
-/// line's part of it begins and its `utf8Starts` from where the whole run
-/// does, so a run continued on a later line reports the offsets of its
-/// first line's glyphs; and where the run does not start the text it
-/// copies `count` offsets into storage of that size and hands out
-/// `count + 1`, so the last, the end of the run, is read from past them.
-pub(crate) fn cluster_under(
-    paragraph: &Paragraph,
-    origin: Point,
-    positions: &[Point],
-    advance: f32,
-    at: usize,
-) -> Option<Range<usize>> {
-    let end = positions.first()?.x + advance;
-    let next = positions.get(at + 1).map_or(end, |next| next.x);
-    let middle = origin.x + (positions.get(at)?.x + next) / 2.0;
-    paragraph
-        .get_closest_glyph_cluster_at((middle, origin.y))
-        .map(|cluster| cluster.text_range)
-}
-
 /// The ranges of `paragraph` whose face wants a different style from
 /// `base`, each with the style `synthesis_style` gives it, or none where
 /// every run is in a face `base` already suits.
+///
+/// Read from `Paragraph::get_fonts`, which lists each shaped run's font and
+/// its text range: no glyph is looked at, and a run of marks alone, with no
+/// advance, is a run like any other. Finding a run's text from its glyphs
+/// cost more and missed that one -- the cluster under the middle of its end
+/// glyphs, where a run with no width has none.
 fn runs_to_restyle(
-    paragraph: &mut Paragraph,
+    paragraph: &Paragraph,
     requested: FontStyle,
     base: FontStyle,
     oblique: Option<f32>,
 ) -> Vec<(Range<usize>, FontStyle)> {
-    let mut visited = Vec::new();
-    paragraph.extended_visit(|_line, visit| {
-        let Some(info) = visit else { return };
-        let face = info.font().typeface();
-        let leans = oblique.map(|angle| leans_as_asked(&face, angle));
-        let style = synthesis_style(requested, face.font_style(), leans);
-        if style != base {
-            visited.push((
-                info.origin(),
-                info.positions().to_vec(),
-                info.advance().width,
-                style,
-            ));
-        }
-    });
-    visited
+    paragraph
+        .get_fonts()
         .into_iter()
-        .filter_map(|(origin, positions, advance, style)| {
-            // A run's text is contiguous, so its two end glyphs bound it --
-            // in either order, since a right-to-left run starts at its last.
-            let ends = [0, positions.len().saturating_sub(1)].map(|at| {
-                cluster_under(paragraph, origin, &positions, advance, at)
-            });
-            let start = ends.iter().flatten().map(|c| c.start).min()?;
-            let end = ends.iter().flatten().map(|c| c.end).max()?;
-            Some((start..end, style))
+        .filter_map(|run| {
+            let face = run.font.typeface();
+            let leans = oblique.map(|angle| leans_as_asked(&face, angle));
+            let style = synthesis_style(requested, face.font_style(), leans);
+            (style != base).then_some((run.text_range, style))
         })
         .collect()
 }
@@ -1074,9 +1034,9 @@ impl<'a> Typesetter<'a> {
         &self,
         char_style: &TextStyle,
     ) -> (Paragraph, Vec<(Range<usize>, FontStyle)>) {
-        let mut first = self.paragraph_with(char_style, &[]);
+        let first = self.paragraph_with(char_style, &[]);
         let restyled = runs_to_restyle(
-            &mut first,
+            &first,
             self.char_style.font_style(),
             char_style.font_style(),
             self.oblique,
