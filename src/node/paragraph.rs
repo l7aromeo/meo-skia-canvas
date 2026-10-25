@@ -75,8 +75,9 @@ pub type BoxedParagraph = JsBox<RefCell<ParagraphWrap>>;
 // Each option is converted as WebIDL converts a value to the type the
 // option's declaration names, as the Canvas API's own attributes are: a
 // number by `ToNumber`, so `fontSize: "12"` is 12 as `ctx.lineWidth = "5"`
-// is 5; a string by `ToString`; a boolean by `ToBoolean`; an object of
-// options as a dictionary; a list as a sequence. Where a conversion throws,
+// is 5; a string by `ToString`, `null` being the option left out; a
+// boolean by `ToBoolean`; an object of options as a dictionary; a list as a
+// sequence. Where a conversion throws,
 // the `TypeError` names the option and what it takes -- AGENTS.md's refusal
 // rule 5, the error WebIDL raises -- and an absent or `undefined` option
 // takes its default, as an omitted dictionary member does. A converted
@@ -219,7 +220,12 @@ fn to_dom_string(
     Ok(value.to_string(cx)?.value(cx))
 }
 
-/// A string option, as an IDL `DOMString` -- see [`to_dom_string`].
+/// A string option, as an IDL `DOMString?`, WebIDL section 3.2.20: "if V is
+/// null or undefined, then return the IDL nullable type T? value null",
+/// and otherwise the `DOMString` of [`to_dom_string`]. Every string option
+/// is nullable, null meaning the option is absent: `ellipsis: null` is no
+/// ellipsis rather than the four letters, and `locale: null` no locale
+/// rather than one named "null".
 fn string_option<'a>(
     cx: &mut FunctionContext<'a>,
     obj: &Handle<'a, JsObject>,
@@ -227,6 +233,7 @@ fn string_option<'a>(
     key: &str,
 ) -> NeonResult<Option<String>> {
     match option_value(cx, obj, key)? {
+        Some(value) if value.is_a::<JsNull, _>(cx) => Ok(None),
         Some(value) => to_dom_string(cx, value, prefix, key).map(Some),
         None => Ok(None),
     }
@@ -415,7 +422,7 @@ fn colour_option<'a>(
 }
 
 /// Parses `fontVariations` from a `TextStyleInput` JS object: `None` to
-/// take the axes in force -- the key absent, or an empty list -- and
+/// take the axes in force -- the key absent or `null`, or an empty list -- and
 /// otherwise the style's own, which `"normal"` makes none, resetting to the
 /// face's defaults as CSS `font-variation-settings: normal` does.
 ///
@@ -434,9 +441,13 @@ fn parse_font_variations<'a>(
     prefix: &str,
 ) -> NeonResult<Option<Vec<(FourByteTag, f32)>>> {
     let mut out: Vec<(FourByteTag, f32)> = Vec::new();
+    // Nullable, as the string options are: `null` is the option left out.
     let Some(vars_val) = option_value(cx, obj, "fontVariations")? else {
         return Ok(None);
     };
+    if vars_val.is_a::<JsNull, _>(cx) {
+        return Ok(None);
+    }
     let Some(entries) = iterated(cx, vars_val)? else {
         // A value outside an enumeration is a `TypeError` (AGENTS.md, rule
         // 2).

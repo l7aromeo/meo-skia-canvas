@@ -5297,7 +5297,7 @@ export interface TextShadowInput {
  */
 export interface FontVariationInput {
   /** Four-character OpenType axis tag, such as `"wght"` or `"opsz"`. */
-  axis: string;
+  axis: string | null;
   /** Position on that axis, clamped to the range the typeface declares. */
   value: number;
 }
@@ -5315,7 +5315,7 @@ export interface FontVariationInput {
  */
 export interface TextFontFeatures {
   /** Four-character OpenType feature tag, such as `"smcp"` or `"ss01"`. */
-  name: string;
+  name: string | null;
   /**
    * Feature selector: `1` to enable, `0` to disable, or an index where the
    * feature offers alternates.
@@ -5330,7 +5330,8 @@ export interface TextFontFeatures {
  * a list as a dictionary or a sequence. A value whose conversion fails --
  * a number that converts to NaN or an infinity, a list that is not
  * iterable, a Symbol -- is a `TypeError` naming the option, and an option
- * left out or `undefined` takes its default.
+ * left out or `undefined` takes its default, as a string option given
+ * `null` does.
  *
  * 🧪 Not in the HTML Canvas standard.
  *
@@ -5436,7 +5437,7 @@ export interface TextStyleInput {
    * and font size supply `wght`, `wdth` and `opsz` unless the list names
    * them. Any other string throws a `TypeError`.
    */
-  fontVariations?: FontVariationInput[] | "normal";
+  fontVariations?: FontVariationInput[] | "normal" | null;
   /**
    * OpenType features applied to the run: small caps (`smcp`/`c2sc`),
    * ligatures (`liga`/`dlig`), oldstyle/tabular/proportional figures
@@ -5457,7 +5458,7 @@ export interface TextStyleInput {
    * characters share codepoints across Japanese and Chinese and differ in
    * shape, and nothing in the text itself says which the reader should see.
    */
-  locale?: string;
+  locale?: string | null;
 }
 
 /**
@@ -5512,7 +5513,8 @@ export type TextHeightBehavior = 0 | 1 | 2 | 3;
  * a list as a dictionary or a sequence. A value whose conversion fails --
  * a number that converts to NaN or an infinity, a list that is not
  * iterable, a Symbol -- is a `TypeError` naming the option, and an option
- * left out or `undefined` takes its default.
+ * left out or `undefined` takes its default, as a string option given
+ * `null` does.
  *
  * 🧪 Not in the HTML Canvas standard.
  *
@@ -5524,20 +5526,27 @@ export interface ParagraphStyleInput {
    * default alignment stands, so a typo fails silently.
    */
   textAlign?:
-    "left" | "right" | "center" | "justify" | "start" | "end" | (string & {});
+    | "left"
+    | "right"
+    | "center"
+    | "justify"
+    | "start"
+    | "end"
+    | (string & {})
+    | null;
 
   /**
    * Base direction for the paragraph. Matched case-insensitively; an
    * unrecognised value is ignored.
    */
-  textDirection?: "ltr" | "rtl" | (string & {});
+  textDirection?: "ltr" | "rtl" | (string & {}) | null;
   /**
    * Cap on the number of lines. Anything past it is dropped, which
    * {@link Paragraph.didExceedMaxLines} then reports.
    */
   maxLines?: number;
   /** String appended to the last line when `maxLines` truncated the text. */
-  ellipsis?: string;
+  ellipsis?: string | null;
   /**
    * The style text starts in, before any {@link ParagraphBuilder.pushStyle}.
    * Font variations are read from here and nowhere else.
