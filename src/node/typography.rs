@@ -41,40 +41,53 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
-/// How many glyphs' outline bounds [`glyph_ink`] remembers.
-///
-/// Each entry is a key and a rectangle, about sixty bytes, so the bound is a
-/// quarter of a megabyte -- several faces' worth of the glyphs a page uses at
-/// a handful of sizes each.
-const GLYPH_INK_CACHE: usize = 4096;
+/// How many faces [`glyph_inks`] remembers outline bounds for, the most
+/// recently used kept: a face here is one instance at one size, so a page
+/// of text at a handful of sizes in two or three families fits.
+const INK_FACES: usize = 16;
 
-/// What a glyph's outline depends on: the face, the size, the horizontal
-/// scale and skew, whether it is emboldened, the hinting, and the glyph.
-type GlyphKey = (TypefaceId, u32, u32, u32, bool, i32, GlyphId);
+/// How many glyphs one face's table holds. A glyph lives in the slot the
+/// low bits of its id name, so finding it is an index rather than a hash,
+/// and a glyph that shares its slot replaces it. Latin text in most faces
+/// keeps its glyph ids under this, each in a slot of its own; at about
+/// twenty-four bytes a slot, sixteen faces hold about 100 KB.
+const INK_SLOTS: usize = 256;
 
-/// [`glyph_ink`]'s answers, each with the insertion it was made at, and the
-/// count of insertions.
-type GlyphInkCache = (HashMap<GlyphKey, (Option<Rect>, u64)>, u64);
+/// What a glyph's outline depends on besides the glyph: the face, the
+/// size, the horizontal scale and skew, whether it is emboldened, and the
+/// hinting.
+type FaceKey = (TypefaceId, u32, u32, u32, bool, i32);
 
-thread_local! {
-    static GLYPH_INK: RefCell<GlyphInkCache> =
-        RefCell::new((HashMap::with_capacity(GLYPH_INK_CACHE), 0));
+/// A slot of a face's table: the glyph held there and its outline's
+/// bounds, or `None` before any glyph has been.
+type InkSlot = Option<(GlyphId, Option<Rect>)>;
+
+/// One face's remembered outline bounds, by slot.
+struct FaceInk {
+    key: FaceKey,
+    slots: Box<[InkSlot]>,
 }
 
-/// The tight bounds of `glyph`'s outline in `font`, or `None` for a glyph
-/// with no outline -- a space, a bitmap or a colour emoji -- or an empty
-/// one. Remembered.
+thread_local! {
+    /// The faces [`glyph_inks`] remembers, the most recently used last.
+    static FACE_INK: RefCell<Vec<FaceInk>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The tight bounds of each of `glyphs`' outlines in `font`, each `None` for
+/// a glyph with no outline -- a space, a bitmap or a colour emoji -- or an
+/// empty one. Remembered.
 ///
 /// The outline is what an ink box is joined from, and making it was two
 /// thirds of working out a run's ink with every cache in Skia already warm:
 /// `SkFont::getPath` builds a strike description and copies the path at the
 /// font's size for every glyph, and `ComputeTightBounds` then walks it. A
-/// glyph's outline depends on nothing but what the key holds, so the
-/// second time a glyph is measured at a size it is a lookup.
+/// glyph's outline depends on nothing but its face key and its id, so the
+/// second time a glyph is measured in a face it is an index.
 ///
-/// When the map is full the older half goes, by insertion, so that finding
-/// what to drop is paid once per two thousand glyphs rather than on each.
-fn glyph_ink(font: &Font, glyph: GlyphId) -> Option<Rect> {
+/// The face is found once for the run, not once a glyph: building its key
+/// asks Skia six questions, and hashing it with the glyph cost more than
+/// the rest of a 270-glyph measurement's ink.
+fn glyph_inks(font: &Font, glyphs: &[GlyphId]) -> Vec<Option<Rect>> {
     let key = (
         font.typeface().unique_id(),
         font.size().to_bits(),
@@ -82,33 +95,53 @@ fn glyph_ink(font: &Font, glyph: GlyphId) -> Option<Rect> {
         font.skew_x().to_bits(),
         font.is_embolden(),
         font.hinting() as i32,
-        glyph,
     );
-    if let Some(found) = GLYPH_INK
-        .with(|cache| cache.borrow().0.get(&key).map(|(bounds, _)| *bounds))
-    {
-        return found;
-    }
-    let bounds = font
-        .get_path(glyph)
-        .map(|outline| outline.compute_tight_bounds())
-        .filter(|outline| !outline.is_empty());
-    GLYPH_INK.with(|cache| {
-        let (entries, made) = &mut *cache.borrow_mut();
-        if entries.len() >= GLYPH_INK_CACHE {
-            let cutoff = *made - (GLYPH_INK_CACHE / 2) as u64;
-            entries.retain(|_, (_, at)| *at > cutoff);
+    let outline = |glyph| {
+        font.get_path(glyph)
+            .map(|outline| outline.compute_tight_bounds())
+            .filter(|outline| !outline.is_empty())
+    };
+    FACE_INK.with(|faces| {
+        let mut faces = faces.borrow_mut();
+        match faces.iter().position(|face| face.key == key) {
+            Some(at) => {
+                let face = faces.remove(at);
+                faces.push(face);
+            }
+            None => {
+                if faces.len() == INK_FACES {
+                    faces.remove(0);
+                }
+                faces.push(FaceInk {
+                    key,
+                    slots: vec![None; INK_SLOTS].into_boxed_slice(),
+                });
+            }
         }
-        *made += 1;
-        entries.insert(key, (bounds, *made));
-    });
-    bounds
+        // SAFETY: a face was pushed on the line before, whichever arm ran.
+        let face = faces.last_mut().unwrap();
+        glyphs
+            .iter()
+            .map(|&glyph| {
+                let slot = &mut face.slots[usize::from(glyph) % INK_SLOTS];
+                match *slot {
+                    Some((held, ink)) if held == glyph => ink,
+                    _ => {
+                        let ink = outline(glyph);
+                        *slot = Some((glyph, ink));
+                        ink
+                    }
+                }
+            })
+            .collect()
+    })
 }
 
 /// The ink of `glyph` in `font`, drawn under `shear`, relative to its
 /// position, or `None` for a glyph that inks nothing: one whose `reported`
 /// box from `Font::get_bounds` is empty, as a space's is, or any glyph of a
-/// flat run.
+/// flat run. `upright` is its outline's bounds from [`glyph_inks`], which
+/// an upright run reads.
 ///
 /// The glyph's outline, not the box `Font::get_bounds` reports. That one is
 /// the rasterisation box: the outline rounded outwards to the pixel grid and
@@ -126,6 +159,7 @@ fn glyph_box(
     font: &Font,
     glyph: GlyphId,
     reported: Rect,
+    upright: Option<Rect>,
     shear: &Shear,
 ) -> Option<Rect> {
     if reported.is_empty() {
@@ -133,7 +167,7 @@ fn glyph_box(
     }
     match shear {
         Shear::Flat => None,
-        Shear::None => Some(glyph_ink(font, glyph).unwrap_or(reported)),
+        Shear::None => Some(upright.unwrap_or(reported)),
         Shear::By(shear) => Some(match font.get_path(glyph) {
             Some(outline) => {
                 outline.with_transform(shear).compute_tight_bounds()
@@ -469,6 +503,32 @@ fn synthesis_style(
     FontStyle::new(Weight::from(weight), face.width(), slant)
 }
 
+/// `point` under `matrix`, an affine one, as `Matrix::map_point` maps it --
+/// in Rust, so that mapping a run's glyphs one at a time crosses into Skia
+/// for none of them.
+pub(crate) fn map_affine(matrix: &Matrix, point: Point) -> Point {
+    Point::new(
+        matrix.scale_x() * point.x
+            + matrix.skew_x() * point.y
+            + matrix.translate_x(),
+        matrix.skew_y() * point.x
+            + matrix.scale_y() * point.y
+            + matrix.translate_y(),
+    )
+}
+
+/// The smallest rectangle holding `a` and `b`, two that are not empty, in
+/// Rust: a run's glyph boxes are joined one at a time, and `Rect::join`
+/// crosses into Skia for each.
+fn union(a: Rect, b: Rect) -> Rect {
+    Rect::new(
+        a.left.min(b.left),
+        a.top.min(b.top),
+        a.right.max(b.right),
+        a.bottom.max(b.bottom),
+    )
+}
+
 /// How a run is drawn for an `oblique` request: as laid out, sheared, or not
 /// at all.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -505,7 +565,7 @@ pub(crate) fn sheared_blob(
         Shear::By(shear) => {
             let mut sheared = font.clone();
             sheared.set_skew_x(font.skew_x() + shear.skew_x());
-            let moved = positions.iter().map(|at| shear.map_point(*at));
+            let moved = positions.iter().map(|&at| map_affine(&shear, at));
             (Cow::Owned(sheared), Cow::Owned(moved.collect()))
         }
         Shear::Flat => return None,
@@ -1285,16 +1345,33 @@ impl<'a> Typesetter<'a> {
             }
             for (glyph, at) in zip(run.glyphs, run.positions) {
                 if let Some(outline) = run.font.get_path(glyph) {
-                    let (outline, at) = match &shear {
+                    // Added where it goes, under its shear, in one call each:
+                    // a sheared copy and then a moved one were two paths
+                    // made and dropped for every glyph.
+                    match &shear {
                         Shear::By(shear) => {
-                            (outline.with_transform(shear), shear.map_point(at))
+                            let to =
+                                map_affine(shear, at) + run.origin + origin;
+                            let placed = Matrix::from_affine(&[
+                                shear.scale_x(),
+                                shear.skew_y(),
+                                shear.skew_x(),
+                                shear.scale_y(),
+                                to.x,
+                                to.y,
+                            ]);
+                            builder.add_path_with_transform(
+                                &outline, &placed, None,
+                            );
                         }
-                        Shear::None | Shear::Flat => (outline, at),
-                    };
-                    builder.add_path(
-                        &outline.with_offset(at + run.origin + origin),
-                        None,
-                    );
+                        Shear::None | Shear::Flat => {
+                            builder.add_path_with_offset(
+                                &outline,
+                                at + run.origin + origin,
+                                None,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1972,19 +2049,26 @@ impl Measured {
                 // again, so asking glyph by glyph costs more than every box.
                 let mut reported = vec![Rect::new_empty(); info.glyphs().len()];
                 font.get_bounds(info.glyphs(), &mut reported, None);
+                let upright = match shear {
+                    Shear::None => glyph_inks(font, info.glyphs()),
+                    Shear::By(_) | Shear::Flat => vec![None; reported.len()],
+                };
                 run_bounds.push(RunBound {
                     line,
                     bounds: zip(info.positions(), zip(info.glyphs(), reported))
-                        .filter_map(|(&pt, (&glyph, reported))| {
-                            let ink = glyph_box(font, glyph, reported, &shear)?;
+                        .zip(upright)
+                        .filter_map(|((&pt, (&glyph, reported)), upright)| {
+                            let ink = glyph_box(
+                                font, glyph, reported, upright, &shear,
+                            )?;
                             // A sheared glyph's position is sheared with it.
                             let pt = match &shear {
-                                Shear::By(shear) => shear.map_point(pt),
+                                Shear::By(shear) => map_affine(shear, pt),
                                 Shear::None | Shear::Flat => pt,
                             };
                             Some(ink.with_offset(pt + at))
                         })
-                        .reduce(Rect::join2)
+                        .reduce(union)
                         .unwrap_or(Rect::new_empty()),
                     family: family_of(&font.typeface()),
                     metrics: font.metrics().1,
@@ -2851,10 +2935,11 @@ mod measurement {
 
     #[test]
     fn a_glyphs_remembered_ink_is_its_outlines_at_that_size() {
-        // The bounds come back from the map the second time, and have to be
-        // what the outline gives -- at the size asked for, not at the size
-        // the glyph was first measured at.
-        use super::{GLYPH_INK, GLYPH_INK_CACHE, glyph_ink};
+        // The bounds come back from the table the second time, and have to
+        // be what the outline gives -- at the size asked for, not at the
+        // size the glyph was first measured at, and for the glyph asked
+        // for, not another sharing its slot.
+        use super::{FACE_INK, INK_FACES, INK_SLOTS, glyph_inks};
 
         let font = raleway();
         let ids: Vec<u16> = font.str_to_glyphs_vec("Hamburgefonstiv");
@@ -2863,36 +2948,43 @@ mod measurement {
                 .map(|path| path.compute_tight_bounds())
                 .filter(|bounds| !bounds.is_empty())
         };
+        let outlines = |font: &skia_safe::Font, glyphs: &[u16]| {
+            glyphs
+                .iter()
+                .map(|&glyph| outline(font, glyph))
+                .collect::<Vec<_>>()
+        };
         let mut half = font.clone();
         half.set_size(font.size() / 2.0);
         for _ in 0..2 {
-            for &glyph in &ids {
-                assert_eq!(glyph_ink(&font, glyph), outline(&font, glyph));
-                assert_eq!(glyph_ink(&half, glyph), outline(&half, glyph));
-            }
+            assert_eq!(glyph_inks(&font, &ids), outlines(&font, &ids));
+            assert_eq!(glyph_inks(&half, &ids), outlines(&half, &ids));
         }
-        let a = ids[0];
         assert_ne!(
-            glyph_ink(&font, a),
-            glyph_ink(&half, a),
-            "two sizes of a glyph are two entries"
+            glyph_inks(&font, &ids[..1]),
+            glyph_inks(&half, &ids[..1]),
+            "two sizes of a glyph are two faces"
         );
 
-        let spaces = font.str_to_glyphs_vec(" ");
-        assert_eq!(glyph_ink(&font, spaces[0]), None, "a space has no ink");
-
-        // Every glyph id of the face, at a run of sizes, is more than the
-        // map holds.
-        let mut sized = font.clone();
-        for step in 0..(GLYPH_INK_CACHE / 64 + 4) {
-            sized.set_size(10.0 + step as f32);
-            for glyph in 0..64 {
-                glyph_ink(&sized, glyph);
-            }
+        // Two glyphs in one slot, each asked for after the other.
+        let (a, b) = (ids[0], ids[0] + INK_SLOTS as u16);
+        for _ in 0..2 {
+            assert_eq!(glyph_inks(&font, &[a, b]), outlines(&font, &[a, b]));
         }
-        assert!(
-            GLYPH_INK.with(|cache| cache.borrow().0.len()) <= GLYPH_INK_CACHE,
-            "the map stays at its bound"
+
+        let spaces = font.str_to_glyphs_vec(" ");
+        assert_eq!(glyph_inks(&font, &spaces), [None], "a space has no ink");
+
+        // More sizes of the face than the faces held.
+        let mut sized = font.clone();
+        for step in 0..(INK_FACES + 4) {
+            sized.set_size(10.0 + step as f32);
+            glyph_inks(&sized, &ids);
+        }
+        assert_eq!(
+            FACE_INK.with(|faces| faces.borrow().len()),
+            INK_FACES,
+            "the faces stay at their bound"
         );
     }
 
