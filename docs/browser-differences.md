@@ -96,26 +96,43 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   of its standard font, 10px Times, whatever family is named, with `rem`
   and the other root forms of 16px Times. This library uses the face its
   `serif` resolves to, which is Times where the system's `serif` is Times.
-- _`oblique <angle>` draws as Chrome draws a `FontFace`, in every family._
-  An angle of 14deg or more slants -- the family's italic or oblique face,
-  or where it has neither a slant synthesised at one skew whatever the
-  angle, the quarter that slopes an `I` by -0.2504 -- and an angle below
-  14deg, or a negative one, draws upright. That is Chrome's rule for a font
-  loaded as a `FontFace`, in a canvas and in CSS text alike, on Oswald,
-  Raleway with its italic face, and Arial, Georgia, Impact, Liberation,
-  FreeSans and DejaVu loaded from their files: upright at 0.5, 10 and
-  13.9deg and at every negative angle measured, slanted at 14 and 30deg, and
-  on Oswald and Raleway also upright at 10.9, 11, 12, 13 and 13.75deg and
-  slanted at 14.1, 20 and 90deg, `0.25turn` and `calc(10deg + 4deg)`.
-  Measured by the slope of an `I` stem at 200px and by text widths, in
-  Chrome 152 on macOS and Chrome 156 on Linux. `OBLIQUE_SLANTS_FROM_DEGREES` in
-  `src/context2d.rs` is the threshold.
+- _`oblique <angle>` draws as CSS Fonts 4 matches it, and Chrome does not._
+  Section 5.2, "Matching font styles", takes an oblique face leaning the
+  angle's way first, sets a `slnt` axis to the angle where the family has
+  one -- "For variable fonts with a slnt axis, a match is created by setting
+  the slnt value with the specified oblique value" -- and otherwise puts "a
+  fallback match ... produced by geometric shearing to the specified oblique
+  value" ahead of any italic. So here `oblique 10deg` leans an upright face
+  by `tan(10deg)` and `oblique -14deg` leans it back by `tan(14deg)`, a
+  `slnt` axis leans as far as it goes, and an italic face is drawn only for
+  a family with no upright face to shear. `resolve_for_oblique` and
+  `run_shear` in `src/node/typography.rs` are the match, and quote the
+  section. Slope of an `I` stem at 200px, measured here on macOS:
 
-  Chrome draws a system family by other rules, and by different ones on each
-  platform -- they follow the platform's font matcher rather than the
-  `FontFace` matching. This library does not reproduce them: a system
-  family follows the same rule as a registered one, which was the
-  maintainer's choice. Slope of an `I` stem at 200px, 0 upright:
+  | This library               | `italic` | 0.5deg  | 10deg   | 13.9deg | 14deg   | 30deg   | -14deg | -30deg |
+  | -------------------------- | -------- | ------- | ------- | ------- | ------- | ------- | ------ | ------ |
+  | `-tan(angle)`              |          | -0.0087 | -0.1763 | -0.2475 | -0.2493 | -0.5774 | 0.2493 | 0.5774 |
+  | Oswald (no italic)         | -0.2498  | -0.0083 | -0.1766 | -0.2467 | -0.2501 | -0.5775 | 0.2501 | 0.5777 |
+  | Raleway with its italic    | -0.2137  | -0.0049 | -0.1767 | -0.2469 | -0.2502 | -0.5776 | 0.2502 | 0.5772 |
+  | Recursive, `slnt` -15 to 0 | -0.2501  | -0.0144 | -0.1796 | -0.2477 | -0.2499 | -0.2499 | 0.2466 | 0.5776 |
+  | Recursive, a 12deg oblique | -0.2141  | -0.2141 | -0.2141 | -0.2141 | -0.2141 | -0.2141 | 0.2466 | 0.5776 |
+
+  The last two rows are fixtures made from Recursive, in
+  tests/assets/fonts/Recursive: its `slnt` axis, and a static upright with
+  a static `slnt` -12 instance flagged oblique. A family with both an italic
+  and an oblique face would take the oblique; none was available to pin.
+
+  Chrome draws neither the shear nor the angle. For a font loaded as a
+  `FontFace` -- Oswald, Raleway with its italic face, and Arial, Georgia,
+  Impact, Liberation, FreeSans and DejaVu loaded from their files -- an angle
+  of 14deg or more takes the family's italic or oblique face, or where it has
+  neither a synthesised skew of a quarter whatever the angle, sloping an `I`
+  by -0.2504; an angle below 14deg, or a negative one, draws upright. On
+  Oswald and Raleway that held at 0.5, 10, 10.9, 11, 12, 13, 13.75 and 13.9deg
+  upright, at 14, 14.1, 20, 30 and 90deg, `0.25turn` and
+  `calc(10deg + 4deg)` slanted, and at every negative angle measured
+  upright, in a canvas and in CSS text alike. A system family follows the
+  platform's font matcher instead, by a different rule on each platform:
 
   | Chrome 152, macOS (CoreText)    | `italic` | 0.5deg  | 10deg   | 13.9deg | 14deg   | 30deg   | -14deg  | -30deg  |
   | ------------------------------- | -------- | ------- | ------- | ------- | ------- | ------- | ------- | ------- |
@@ -138,20 +155,18 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   an italic or oblique face takes it at every positive angle and draws
   upright at a negative one, and one with neither synthesises at 14deg
   alone: DejaVu Sans and Serif slant at 14, 14.01 and 14.1deg and draw
-  upright at 13.99, 15, 20, 25, 45, 60 and 90deg.
+  upright at 13.99, 15, 20, 25, 45, 60 and 90deg. All of Chrome's figures are
+  from Chrome 152 on macOS and Chrome 156 on Linux, by the slope of an `I`
+  stem at 200px and by text widths.
 
-  CSS Fonts 4 is different again. Its section 5.2, "Matching font styles",
-  changes at 11deg rather than 14, and where a family has no oblique face it
-  shears before it looks for an italic: "a fallback match is produced by
-  geometric shearing to the specified oblique value". `oblique 10deg` would
-  lean ten degrees and `oblique 20deg` twenty, in Raleway as in Oswald;
-  Chrome follows that on no origin.
+  None of these is the standard's answer, and each substitutes a face or a
+  fixed skew for the angle asked for. Chrome's fixed skew is also not 14deg:
+  a quarter is `atan(1/4)`, 14.036deg.
 
-  An earlier entry here said Chrome selects a family's italic for any angle
-  but zero and synthesises a slant only from 14deg up. That was two origins
-  read as one rule: the italic half was measured on Arial, a macOS system
-  font, and the synthesis half on Oswald, a `FontFace`. No family in Chrome
-  behaves that way.
+  The Paragraph API takes Chrome's italic answer rather than this one: a
+  `TextStyle` or a node `Paragraph` asking for oblique draws the family's
+  italic face, and SkParagraph's quarter skew where it has none.
+  `slant_for_matching` in `src/font.rs` says so at the site.
 
 - _A transform angle past the `float` range is not matched._ Chrome 152's
   `DOMMatrix` reads `rotate(1e38deg)`, `rotate(1e300deg)` and

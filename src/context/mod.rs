@@ -224,6 +224,9 @@ pub struct State {
     pub text_decoration: DecorationStyle,
     pub text_wrap: bool,
     pub line_height: Option<f32>,
+    /// The angle an `oblique` font is drawn at, in CSS degrees, or `None`
+    /// where the font is not oblique.
+    pub oblique_angle: Option<f32>,
     pub variations: Vec<(FourByteTag, f32)>,
     pub font_variation_settings: String,
 }
@@ -290,6 +293,7 @@ impl Default for State {
             text_decoration: DecorationStyle::default(),
             text_wrap: false,
             line_height: None,
+            oblique_angle: None,
             variations: vec![],
             font_variation_settings: "normal".to_string(),
         }
@@ -1534,6 +1538,7 @@ impl Context2D {
         self.state.font_width = spec.width;
         self.state.char_style = style;
         self.state.line_height = spec.line_height;
+        self.state.oblique_angle = spec.oblique_angle();
     }
 
     /// Matches a specification against the font library and applies it.

@@ -15,7 +15,7 @@ use skia_safe::{
 // Aliased because the public type below now carries the same name: this one
 // is the shared store, that one is the handle a caller holds.
 use crate::{
-    context2d::{FontSlant, FontStretch},
+    context2d::{DEFAULT_OBLIQUE_DEGREES, FontSlant, FontStretch},
     error::Error,
     node::font_library::FontLibrary as SharedFontRegistry,
 };
@@ -29,46 +29,119 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FontAxisTag([u8; 4]);
 
-/// The slant to ask Skia for when matching a face.
+/// The slant the Paragraph API asks Skia for when matching a face.
 ///
 /// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
 /// Re-check: make the match below pass `Oblique` through unchanged, then
-/// cargo test oblique_falls_back_to_the_italic_face. The test passes with the
-/// substitution in place whatever Skia's matcher does, so running it
+/// cargo test a_text_style_oblique_selects_the_italic_face. The test passes
+/// with the substitution in place whatever Skia's matcher does, so running it
 /// unchanged answers a different question.
 ///
-/// `Oblique` is passed through as `Italic`. Skia's matcher does not fall back
-/// from oblique to italic: asking for `Slant::Oblique` on a family with no
-/// oblique face returns the upright one, so an oblique run painted exactly
-/// what an upright one painted. Chrome 148 renders such a request as the
-/// italic face, which is what CSS Fonts 4 asks for: an oblique request
-/// prefers an oblique face and falls back to an italic one before an upright
-/// one.
-///
-/// The identity is the whole of the change and needs no pixel count to state:
-/// an oblique run was byte-identical to an upright one and is byte-identical
-/// to an italic one. That holds for whatever is drawn, where a count holds
-/// only for the scene it was taken on -- `CHANGELOG-crate.md` carries one
-/// such measurement with its canvas, string, origin and ink threshold named.
+/// `Oblique` is passed through as `Italic`, so a `TextStyle` or a node
+/// `Paragraph` asking for oblique draws the family's italic face, and
+/// SkParagraph's quarter skew where it has none -- Chrome's answer rather
+/// than CSS Fonts 4's, which shears the upright face before it takes an
+/// italic. A canvas draws CSS Fonts 4's answer and does not come through
+/// here; `resolve_for_oblique` in `node::typography` is its match. Without
+/// the substitution, Skia's matcher answers an oblique request on a system
+/// family with no oblique face, Times on macOS, with the upright face.
 ///
 /// This substitution is for matching only. The slant a caller set is stored
-/// and reported unchanged, so `ctx.font` still reads back `oblique` and
-/// [`FontSlant`](crate::context2d::FontSlant) keeps three distinct values.
-///
-/// Lives here because both surfaces resolve faces and both were wrong. The
-/// binding had its own copy first and the crate kept the old behaviour for a
-/// release-candidate's worth of time, which is the shape of defect two
-/// translations of one concept produce.
-///
-/// The cost is a family shipping a true oblique face *and* a separate italic,
-/// which now gets the italic. No face on any platform this project builds for
-/// is known to do that, and rendering upright was wrong for every family
-/// rather than one.
+/// and reported unchanged, so [`FontSlant`](crate::context2d::FontSlant)
+/// keeps three distinct values.
 pub(crate) fn slant_for_matching(slant: Slant) -> Slant {
     match slant {
         Slant::Oblique => Slant::Italic,
         other => other,
     }
+}
+
+/// The `OS/2` table, where a face says whether it is oblique.
+const OS2: FourByteTag = FourByteTag::from_chars('O', 'S', '/', '2');
+
+/// The `post` table, which holds a face's italic angle.
+const POST: FourByteTag = FourByteTag::from_chars('p', 'o', 's', 't');
+
+/// The byte offset of `fsSelection`, a `uint16`, in `OS/2`: the OpenType
+/// specification's "OS/2 -- OS/2 and Windows Metrics Table".
+const OS2_FS_SELECTION_AT: usize = 62;
+
+/// `fsSelection` bit 9, `OBLIQUE`: "Font contains oblique glyphs", by the
+/// same table. Set on a face slanted by design rather than drawn as a
+/// cursive italic.
+const FS_SELECTION_OBLIQUE: u16 = 1 << 9;
+
+/// The byte offset of `italicAngle`, a 16.16 `Fixed`, in `post`: the
+/// OpenType specification's "post -- PostScript Table". Counter-clockwise
+/// degrees from the vertical, so an oblique leaning right has a negative
+/// one.
+const POST_ITALIC_ANGLE_AT: usize = 4;
+
+/// One in a 16.16 `Fixed`.
+const FIXED_ONE: f32 = (1u32 << 16) as f32;
+
+/// The oblique angle `face` is drawn at by its own design, in CSS degrees --
+/// clockwise positive, as `oblique <angle>` counts them -- or `None` where
+/// the face is not an oblique one.
+///
+/// Read from the face's tables rather than its Skia slant: CoreText reports
+/// a face flagged oblique as italic, so the slant cannot tell the two apart
+/// on macOS, and CSS Fonts 4 matches an oblique request against oblique
+/// faces only. An oblique face whose `italicAngle` is zero leans by an angle
+/// it does not state, and is taken as the default 14deg.
+pub(crate) fn designed_oblique_angle(face: &Typeface) -> Option<f32> {
+    let mut os2 = [0u8; OS2_FS_SELECTION_AT + 2];
+    face.get_table_data(*OS2, &mut os2);
+    let fs_selection = u16::from_be_bytes([
+        os2[OS2_FS_SELECTION_AT],
+        os2[OS2_FS_SELECTION_AT + 1],
+    ]);
+    if fs_selection & FS_SELECTION_OBLIQUE == 0 {
+        return None;
+    }
+    let mut post = [0u8; POST_ITALIC_ANGLE_AT + 4];
+    face.get_table_data(*POST, &mut post);
+    let italic_angle = i32::from_be_bytes([
+        post[POST_ITALIC_ANGLE_AT],
+        post[POST_ITALIC_ANGLE_AT + 1],
+        post[POST_ITALIC_ANGLE_AT + 2],
+        post[POST_ITALIC_ANGLE_AT + 3],
+    ]) as f32
+        / FIXED_ONE;
+    Some(match italic_angle {
+        0.0 => DEFAULT_OBLIQUE_DEGREES,
+        angle => -angle,
+    })
+}
+
+/// The oblique angle `face` is instanced at on a `slnt` axis, in CSS
+/// degrees, or `None` where it has no such axis or sits upright on it.
+///
+/// OpenType's `slnt` counts counter-clockwise, the opposite way to CSS, so
+/// the angle is the coordinate negated.
+pub(crate) fn instanced_oblique_angle(face: &Typeface) -> Option<f32> {
+    let slnt = FourByteTag::from(u32::from_be_bytes(FontAxisTag::SLNT.0));
+    face.variation_design_position()?
+        .iter()
+        .find(|coordinate| coordinate.axis == slnt)
+        .map(|coordinate| -coordinate.value)
+        .filter(|angle| *angle != 0.0)
+}
+
+/// Whether `face` already leans the way `oblique <angle>` asks, so that the
+/// run it draws is not sheared on top: an oblique face, or a `slnt` instance,
+/// slanted with the same sign as `angle`.
+///
+/// CSS Fonts 4, section 5.2, matches an oblique request against faces whose
+/// oblique values have the requested sign -- "Only positive values of
+/// oblique values are checked in this stage", and for a negative angle the
+/// steps run "with the negated values and opposite directions" -- before it
+/// produces "a fallback match ... by geometric shearing to the specified
+/// oblique value". A face of the other sign, or none, is sheared.
+pub(crate) fn leans_as_asked(face: &Typeface, angle: f32) -> bool {
+    designed_oblique_angle(face)
+        .or_else(|| instanced_oblique_angle(face))
+        .is_some_and(|own| own.signum() == angle.signum())
 }
 
 /// The variation axes `face` has, or `None` for a face with none.

@@ -489,14 +489,10 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   parent, and a computed value held where Chrome holds it: a size to 0
   through 10000px, a weight to 1 through 1000. `ex`, `ch`, `cap` and `ic`
   in a size are those of 10px `serif`, and `rem` and the other root forms
-  of 16px. An `oblique` angle from -90deg to 90deg is taken: one of 14deg
-  or more is `FontSlant::Oblique`, which draws the family's italic or
-  oblique face, or a synthesised slant where it has neither, and one below
-  14deg or negative is `FontSlant::Normal` and draws upright, as Chrome
-  draws a font loaded as a `FontFace`. Every family follows that rule,
-  though Chrome draws a system family by its platform's own --
-  docs/browser-differences.md has them. Only the default 14deg reads back
-  as `italic` from `font()`. A size written above 10000px is now 10000px,
+  of 16px. An `oblique` angle from -90deg to 90deg is taken: any angle but
+  zero is `FontSlant::Oblique`, and `set_font_css` draws it at the angle, as
+  the entry under Changed says. Only the default 14deg reads back as
+  `italic` from `font()`. A size written above 10000px is now 10000px,
   as Chrome reads it.
 
 - **Every CSS length unit in `set_filter_css`, `set_letter_spacing_css`,
@@ -758,6 +754,32 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `Image::from_url` takes `data:` URLs through it.
 
 ### Changed
+
+- **`FontSlant::Oblique` draws as CSS Fonts 4 matches it, superseding
+  0.16.0's "`TextSlant::Oblique` now renders the italic face" for a
+  canvas.** A `Font` with `FontSlant::Oblique`, and `set_font_css` with
+  `oblique` or `oblique <angle>`, take the family's oblique face where it
+  has one leaning the angle's way, set a `slnt` axis to the angle where it
+  has one -- as far as the axis goes, so `oblique 30deg` on an axis ending at
+  -15 leans 15 -- and otherwise shear the upright face by the tangent of the
+  angle, a negative angle leaning back. The italic face is drawn only for a
+  family with no upright face. So `oblique 64px Times`, which drew the
+  italic face, is the upright face sheared by 14deg. Chrome 152 takes the
+  family's italic, or a fixed quarter skew, from 14deg up and draws upright
+  below; its measurements are in docs/browser-differences.md.
+  `measure_text` reports the sheared ink, and `font()` reads back as it
+  did. A `TextStyle` with `TextSlant::Oblique` still draws the italic face.
+
+  An oblique run is drawn a glyph run at a time so that each can be
+  sheared or not, which costs more than an upright one: in a release
+  build on macOS, filling `oblique 10deg 32px Oswald` takes about 8.1 µs
+  where it took 6.2, and 11.8 underlined where it took 6.8. Upright text
+  is unchanged, at 6.2 µs before and after.
+
+  A `Font` carries no angle, so `FontSlant::Oblique` there is 14deg, the
+  default: `Font::from_css("oblique 10deg 16px Oswald")` set with
+  `set_font` slants by 14deg, where the same string through `set_font_css`
+  slants by 10. #287 adds the angle to `Font` in 0.17.
 
 - **`measure_text` remembers each glyph's outline bounds.** The ink box is
   joined from the outline of every glyph, and building the outline was two

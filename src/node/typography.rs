@@ -2,8 +2,9 @@
 #![allow(non_snake_case)]
 use crate::{
     context::State,
+    context2d::DEFAULT_OBLIQUE_DEGREES,
     css::{FontUnits, is_font_relative, parse_length},
-    font::{slant_for_matching, variation_axes},
+    font::{leans_as_asked, variation_axes},
     font_library::{FontEpoch, FontLibrary, base_face},
     text::{
         TextAlign as CrateTextAlign, TextBaseline as CrateTextBaseline,
@@ -29,7 +30,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, VecDeque},
     fmt,
-    iter::zip,
+    iter::{once, zip},
     ops::Range,
     rc::Rc,
 };
@@ -464,6 +465,12 @@ pub struct Typesetter<'a> {
     /// that face. A run another face draws is restyled for its own face in
     /// `layout`.
     matched_style: Option<FontStyle>,
+    /// The angle an `oblique` font is drawn at, or `None` -- see
+    /// [`run_shear`].
+    oblique: Option<f32>,
+    /// Whether the face the style matched first already leans as the
+    /// `oblique` asks, where there is an `oblique` to ask about.
+    matched_leans: Option<bool>,
     /// Borrowed from a [`TypesetInputs`] laying a run out again, which keeps
     /// its own; owned otherwise.
     char_style: Cow<'a, TextStyle>,
@@ -558,6 +565,9 @@ pub struct TextLayout {
     /// paragraph is laid out with too, so that its lines fall under the
     /// same glyphs.
     restyled: Vec<(Range<usize>, FontStyle)>,
+    /// The angle an `oblique` font is drawn at, which decides which runs
+    /// are sheared -- see [`run_shear`].
+    oblique: Option<f32>,
 }
 
 /// Which painter draws a laid-out run.
@@ -583,10 +593,15 @@ impl TextLayout {
     /// one painter for everything becomes the right shape once that second
     /// layout is gone.
     ///
-    /// No run is yet drawn under a transform of its own, so this is always
-    /// `Paragraph`.
+    /// The run painter is needed where the font is `oblique`: a run that
+    /// does not lean as asked is sheared, and a run that does is not, which
+    /// `Paragraph::paint` cannot tell apart. Asked of one field, so that
+    /// deciding costs plain text nothing.
     pub fn painter(&self) -> Painter {
-        Painter::Paragraph
+        match self.oblique {
+            Some(_) => Painter::Runs,
+            None => Painter::Paragraph,
+        }
     }
 
     /// Paints the run with its anchor at `origin`: each glyph run as a text
@@ -616,8 +631,20 @@ impl TextLayout {
                 builder.alloc_run_pos(&run.font, run.glyphs.len(), None);
             glyphs.copy_from_slice(&run.glyphs);
             positions.copy_from_slice(&run.positions);
-            if let Some(blob) = builder.make() {
-                canvas.draw_text_blob(blob, origin + run.origin, paint);
+            let Some(blob) = builder.make() else { continue };
+            match run_shear(&run.font.typeface(), self.oblique) {
+                // About the run's baseline, which is where its origin sits:
+                // the glyphs lean, and the line under them does not move.
+                Some(shear) => {
+                    canvas.save();
+                    canvas.translate(origin + run.origin);
+                    canvas.concat(&Matrix::skew((-shear, 0.0)));
+                    canvas.draw_text_blob(blob, Point::default(), paint);
+                    canvas.restore();
+                }
+                None => {
+                    canvas.draw_text_blob(blob, origin + run.origin, paint);
+                }
             }
         }
         if let Some(decorations) = &self.decorations {
@@ -706,19 +733,123 @@ const SKIA_FAKE_BOLD_GAP: i32 = 200;
 /// - **The slant is italic where the request is slanted and the face is
 ///   upright**, so the run is skewed; a face that is itself italic or oblique
 ///   keeps its own slant and is not skewed a second time.
-fn synthesis_style(requested: FontStyle, face: FontStyle) -> FontStyle {
+/// - **An `oblique` request is never synthesised here.** `leans` says whether
+///   the face already leans as asked -- see [`leans_as_asked`]: such a face
+///   keeps its slant, and any other is laid out upright, an italic face
+///   included, and sheared by the painter to the angle asked for -- see
+///   [`run_shear`].
+fn synthesis_style(
+    requested: FontStyle,
+    face: FontStyle,
+    leans: Option<bool>,
+) -> FontStyle {
     let (asked, has) = (*requested.weight(), *face.weight());
     let bold = *Weight::SEMI_BOLD;
     let weight = match asked >= bold && has < bold {
         true => asked.max(has + SKIA_FAKE_BOLD_GAP),
         false => has,
     };
-    let slant = match (requested.slant(), face.slant()) {
-        (Slant::Upright, face) => face,
-        (_, Slant::Upright) => Slant::Italic,
-        (_, face) => face,
+    let slant = match (requested.slant(), face.slant(), leans) {
+        (Slant::Oblique, face, Some(true)) => face,
+        (Slant::Oblique, _, Some(false)) => Slant::Upright,
+        (Slant::Upright, face, _) => face,
+        (_, Slant::Upright, _) => Slant::Italic,
+        (_, face, _) => face,
     };
     FontStyle::new(Weight::from(weight), face.width(), slant)
+}
+
+/// The tangent of the shear a run in `face` is drawn under for an `oblique`
+/// request at `angle` degrees, or `None` where it is drawn as it is.
+///
+/// A face upright by design that does not lean as asked is sheared, by
+/// CSS Fonts 4's "geometric shearing to the specified oblique value": a
+/// positive angle leans clockwise, the top of each glyph to the right, and a
+/// negative one backwards. One that leans as asked, or is slanted by design
+/// either way, is not sheared on top of its own slant.
+///
+/// CoreText and FreeType report every face that leans -- one flagged
+/// oblique, and a variable instance at a nonzero `slnt` -- as slanted, so on
+/// both the slant test alone decides and `leans_as_asked` never changes the
+/// answer. It is asked anyway for a backend that reports an instance with
+/// its default instance's style, which nothing here has measured DirectWrite
+/// not to do.
+pub(crate) fn run_shear(face: &Typeface, angle: Option<f32>) -> Option<f32> {
+    angle
+        .filter(|angle| {
+            face.font_style().slant() == Slant::Upright
+                && !leans_as_asked(face, *angle)
+        })
+        .map(|angle| angle.to_radians().tan())
+}
+
+/// The faces `style` is laid out with for an `oblique` at `angle`, found by
+/// `resolve`, with `style` set upright where the request is drawn by
+/// shearing.
+///
+/// CSS Fonts 4, section 5.2, puts "a fallback match ... produced by
+/// geometric shearing to the specified oblique value" before any italic
+/// face: "If no match is found, italic values ... are checked" comes after
+/// it, and with synthesis allowed a shear always matches. So where the face
+/// an oblique request finds first does not lean as asked -- Skia's matcher
+/// answers `Oblique` with a family's italic -- the run is laid out in the
+/// upright face, and sheared. The faces are resolved again for that,
+/// because a variable family is instanced only for the faces its request
+/// matched.
+fn resolve_for_oblique(
+    style: &mut TextStyle,
+    angle: Option<f32>,
+    resolve: impl Fn(&TextStyle) -> (FontCollection, Option<FontStyle>),
+) -> (FontCollection, Option<FontStyle>) {
+    let faces = resolve(style);
+    let Some(angle) = angle else { return faces };
+    let families = style.font_families();
+    let families: Vec<&str> = families.iter().collect();
+    let leans = faces
+        .0
+        .clone()
+        .find_typefaces(&families, style.font_style())
+        .first()
+        .is_some_and(|face| leans_as_asked(face, angle));
+    if leans {
+        return faces;
+    }
+    let asked = style.font_style();
+    style.set_font_style(FontStyle::new(
+        asked.weight(),
+        asked.width(),
+        Slant::Upright,
+    ));
+    resolve(style)
+}
+
+/// The OpenType `slnt` axis tag.
+const SLNT: FourByteTag = FourByteTag::from_chars('s', 'l', 'n', 't');
+
+/// `variations` with an `oblique` angle's `slnt` ahead of them, so that a
+/// face with that axis is instanced at it and an explicit `slnt` in
+/// `variations` still wins.
+///
+/// CSS Fonts 4, section 5.2: "For variable fonts with a slnt axis, a match is
+/// created by setting the slnt value with the specified oblique value."
+/// OpenType counts `slnt` counter-clockwise, so it is the angle negated, and
+/// the axis clamps it: `oblique 30deg` on an axis that stops at -15 leans
+/// 15deg, the nearest oblique value the face has, as the search through
+/// oblique values below the one asked for would find. An angle of the sign
+/// the axis does not reach clamps to upright, and that run is sheared
+/// instead -- see [`run_shear`].
+fn with_oblique_slnt(
+    variations: &[(FourByteTag, f32)],
+    angle: Option<f32>,
+) -> Cow<'_, [(FourByteTag, f32)]> {
+    match angle {
+        None => Cow::Borrowed(variations),
+        Some(angle) => Cow::Owned(
+            once((SLNT, -angle))
+                .chain(variations.iter().copied())
+                .collect(),
+        ),
+    }
 }
 
 /// The ranges of `paragraph` whose face wants a different style from
@@ -728,12 +859,14 @@ fn runs_to_restyle(
     paragraph: &mut Paragraph,
     requested: FontStyle,
     base: FontStyle,
+    oblique: Option<f32>,
 ) -> Vec<(Range<usize>, FontStyle)> {
     let mut restyled = Vec::new();
     paragraph.extended_visit(|_line, visit| {
         let Some(info) = visit else { return };
         let face = info.font().typeface();
-        let style = synthesis_style(requested, face.font_style());
+        let leans = oblique.map(|angle| leans_as_asked(&face, angle));
+        let style = synthesis_style(requested, face.font_style(), leans);
         let starts = info.utf8_starts();
         if style != base
             && let (Some(first), Some(last)) = (starts.first(), starts.last())
@@ -784,6 +917,7 @@ impl<'a> Typesetter<'a> {
             state.typography(),
             &state.variations,
             decoration_thickness(state),
+            state.oblique_angle,
             text,
             width,
         )
@@ -796,15 +930,20 @@ impl<'a> Typesetter<'a> {
         typography: Typography,
         variations: &[(FourByteTag, f32)],
         decoration_thickness: Option<f32>,
+        oblique: Option<f32>,
         text: &'a str,
         width: Option<f32>,
     ) -> Self {
         // The matched style comes back with the collection, from the one
         // search that found it. `layout` used to search again for it, on
         // every call, and it is the same search.
-        let faces = FontLibrary::with_shared(|lib| {
-            lib.set_hinting(typography.1.hinting_is_on())
-                .fonts_for_style(&typography.0, variations)
+        let mut typography = typography;
+        let hinting = typography.1.hinting_is_on();
+        let variations = with_oblique_slnt(variations, oblique);
+        let faces = resolve_for_oblique(&mut typography.0, oblique, |style| {
+            FontLibrary::with_shared(|lib| {
+                lib.set_hinting(hinting).fonts_for_style(style, &variations)
+            })
         });
         let (char_style, graf_style, text_decoration, baseline, text_wrap) =
             typography;
@@ -817,6 +956,7 @@ impl<'a> Typesetter<'a> {
                 text_wrap,
             ),
             decoration_thickness,
+            oblique,
             faces,
             text,
             width,
@@ -828,6 +968,7 @@ impl<'a> Typesetter<'a> {
     fn from_resolved(
         typography: TypographyRef<'a>,
         decoration_thickness: Option<f32>,
+        oblique: Option<f32>,
         (typefaces, matched_style): (FontCollection, Option<FontStyle>),
         text: &'a str,
         width: Option<f32>,
@@ -866,6 +1007,19 @@ impl<'a> Typesetter<'a> {
         // reported that as its width.
         let condense_to = condense_to.filter(|max| *max > 0.0);
 
+        // Asked of the face itself, which only an `oblique` needs: the style
+        // alone cannot say whether a face leans by design, since CoreText
+        // reports an oblique face as italic -- see `leans_as_asked`.
+        let matched_leans = oblique.map(|angle| {
+            let families = char_style.font_families();
+            let families: Vec<&str> = families.iter().collect();
+            typefaces
+                .clone()
+                .find_typefaces(&families, char_style.font_style())
+                .first()
+                .is_some_and(|face| leans_as_asked(face, angle))
+        });
+
         Typesetter {
             text,
             width,
@@ -873,6 +1027,8 @@ impl<'a> Typesetter<'a> {
             baseline,
             typefaces,
             matched_style,
+            oblique,
+            matched_leans,
             char_style,
             graf_style,
             text_decoration,
@@ -912,6 +1068,7 @@ impl<'a> Typesetter<'a> {
             condensation,
             decorations: None,
             restyled,
+            oblique: self.oblique,
         }
     }
 
@@ -997,6 +1154,7 @@ impl<'a> Typesetter<'a> {
             char_style.set_font_style(synthesis_style(
                 self.char_style.font_style(),
                 matched,
+                self.matched_leans,
             ));
         }
         char_style
@@ -1024,6 +1182,7 @@ impl<'a> Typesetter<'a> {
             &mut first,
             self.char_style.font_style(),
             char_style.font_style(),
+            self.oblique,
         );
         match restyled.is_empty() {
             true => (first, restyled),
@@ -1245,6 +1404,7 @@ impl<'a> Typesetter<'a> {
             norm,
             ideo,
             char_ranges,
+            oblique: self.oblique,
         };
         (extents, measured)
     }
@@ -1279,8 +1439,16 @@ impl<'a> Typesetter<'a> {
         // `get_path_at`'s skipped-glyph count reported.
         let mut builder = SkPathBuilder::new();
         for run in glyph_runs(&mut paragraph) {
+            // The shear the painter draws the run under, applied to each
+            // outline in its own em box, where the baseline is y = 0.
+            let shear = run_shear(&run.font.typeface(), self.oblique)
+                .map(|shear| Matrix::skew((-shear, 0.0)));
             for (glyph, at) in zip(run.glyphs, run.positions) {
                 if let Some(outline) = run.font.get_path(glyph) {
+                    let outline = match &shear {
+                        Some(shear) => outline.with_transform(shear),
+                        None => outline,
+                    };
                     builder.add_path(
                         &outline.with_offset(at + run.origin + origin),
                         None,
@@ -1475,6 +1643,9 @@ pub struct FontSpec {
     pub weight: Weight,
     pub width: Width,
     pub slant: Slant,
+    /// The angle of an `oblique` other than the default 14deg, which a
+    /// `Font` has no field for (#287), or `None`.
+    pub oblique_degrees: Option<f32>,
     pub features: Vec<(String, i32)>,
     pub variant: String,
     /// The string that names this specification uniquely, and the key the
@@ -1496,7 +1667,14 @@ impl FontSpec {
     }
 
     pub fn style(&self) -> FontStyle {
-        FontStyle::new(self.weight, self.width, slant_for_matching(self.slant))
+        FontStyle::new(self.weight, self.width, self.slant)
+    }
+
+    /// The angle an `oblique` specification is drawn at, or `None` where it
+    /// is not oblique.
+    pub fn oblique_angle(&self) -> Option<f32> {
+        (self.slant == Slant::Oblique)
+            .then(|| self.oblique_degrees.unwrap_or(DEFAULT_OBLIQUE_DEGREES))
     }
 }
 
@@ -1898,6 +2076,9 @@ pub struct Measured {
     ideo: f32,
     /// Each line's text, in UTF-16 code units.
     char_ranges: Vec<Range<usize>>,
+    /// The angle an `oblique` font is drawn at, which shears the ink of the
+    /// runs it shears -- see [`run_shear`].
+    oblique: Option<f32>,
 }
 
 impl Measured {
@@ -1914,6 +2095,7 @@ impl Measured {
             norm,
             ideo,
             char_ranges,
+            oblique,
         } = self;
         let (origin, condensation, half_leading) =
             (*origin, *condensation, *half_leading);
@@ -1927,8 +2109,11 @@ impl Measured {
         // has, so the common case allocates once and never grows.
         let mut run_bounds: Vec<RunBound> =
             Vec::with_capacity(paragraph.line_number());
+        let oblique = *oblique;
         paragraph.extended_visit(|line, visit| {
             if let Some(info) = visit {
+                let shear = run_shear(&info.font().typeface(), oblique)
+                    .map(|shear| Matrix::skew((-shear, 0.0)));
                 run_bounds.push(RunBound {
                     line,
                     // `painted_positions` rather than `info.positions()`:
@@ -1961,8 +2146,21 @@ impl Measured {
                         // A glyph with no outline, a bitmap or colour emoji,
                         // keeps the reported box: it is the only one there is
                         // for a glyph that is not a path.
-                        let ink =
-                            glyph_ink(info.font(), *glyph).unwrap_or(*rect);
+                        //
+                        // A sheared run's ink is its sheared outline's box,
+                        // which is not the box of the sheared box: a glyph's
+                        // corners are rarely ink.
+                        let ink = match &shear {
+                            None => {
+                                glyph_ink(info.font(), *glyph).unwrap_or(*rect)
+                            }
+                            Some(shear) => match info.font().get_path(*glyph) {
+                                Some(outline) => outline
+                                    .with_transform(shear)
+                                    .compute_tight_bounds(),
+                                None => shear.map_rect(*rect).0,
+                            },
+                        };
                         // `info.origin()` as reported, rounding and all.
                         // Its `y` is the run's baseline snapped to a whole
                         // pixel -- 37 against 36.960938 at 48px -- and
@@ -2374,6 +2572,8 @@ pub struct TypesetInputs {
     variations: Vec<(FourByteTag, f32)>,
     /// Resolved when the run was measured -- see [`decoration_thickness`].
     decoration_thickness: Option<f32>,
+    /// The angle an `oblique` font is drawn at -- see [`run_shear`].
+    oblique: Option<f32>,
     text: String,
     width: Option<f32>,
     /// The fonts registered when the run was measured, so that laying it
@@ -2383,10 +2583,23 @@ pub struct TypesetInputs {
 
 impl TypesetInputs {
     pub fn new(state: &State, text: &str, width: Option<f32>) -> Self {
+        // The upright choice an `oblique` makes is made here, once, with the
+        // fonts registered now, so that laying the run out again lays out
+        // what was measured -- see `resolve_for_oblique`.
+        let mut typography = state.typography();
+        let hinting = typography.1.hinting_is_on();
+        let variations =
+            with_oblique_slnt(&state.variations, state.oblique_angle);
+        resolve_for_oblique(&mut typography.0, state.oblique_angle, |style| {
+            FontLibrary::with_shared(|lib| {
+                lib.set_hinting(hinting).fonts_for_style(style, &variations)
+            })
+        });
         Self {
-            typography: state.typography(),
+            typography,
             variations: state.variations.clone(),
             decoration_thickness: decoration_thickness(state),
+            oblique: state.oblique_angle,
             text: text.to_string(),
             width,
             fonts: FontLibrary::with_shared(|lib| lib.epoch()),
@@ -2400,7 +2613,7 @@ impl TypesetInputs {
             &self.fonts,
             self.typography.1.hinting_is_on(),
             &self.typography.0,
-            &self.variations,
+            &with_oblique_slnt(&self.variations, self.oblique),
         );
         let (char_style, graf_style, text_decoration, baseline, text_wrap) =
             &self.typography;
@@ -2413,6 +2626,7 @@ impl TypesetInputs {
                 *text_wrap,
             ),
             self.decoration_thickness,
+            self.oblique,
             faces,
             &self.text,
             self.width,
@@ -3364,12 +3578,12 @@ mod synthesis {
             (Slant::Oblique, Slant::Oblique),
             (Slant::Italic, Slant::Italic),
         ] {
-            let got = synthesis_style(asked, style(400, face));
+            let got = synthesis_style(asked, style(400, face), None);
             assert_eq!(got.slant(), slant, "{face:?}");
         }
         // An upright request takes the face as it is.
         let upright = style(400, Slant::Upright);
-        let got = synthesis_style(upright, style(400, Slant::Oblique));
+        let got = synthesis_style(upright, style(400, Slant::Oblique), None);
         assert_eq!(got.slant(), Slant::Oblique);
     }
 
@@ -3389,6 +3603,7 @@ mod synthesis {
                 let handed = *synthesis_style(
                     style(asked, Slant::Upright),
                     style(face, Slant::Upright),
+                    None,
                 )
                 .weight();
                 assert_eq!(
@@ -3417,6 +3632,7 @@ mod synthesis {
             let got = synthesis_style(
                 style(asked, Slant::Upright),
                 style(face, Slant::Upright),
+                None,
             );
             assert_eq!(*got.weight(), handed, "asked {asked}, face {face}");
         }

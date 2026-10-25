@@ -1098,7 +1098,7 @@ describe("measureText reports the laid-out height", () => {
   });
 });
 
-describe("oblique falls back to the italic face", () => {
+describe("`oblique` is not a spelling of italic", () => {
   // Skia's matcher does not fall back from oblique to italic: asking for
   // `Slant::Oblique` on a family with no oblique face returned the upright
   // one, so `oblique 64px Times` painted exactly what `64px Times` paints.
@@ -1130,22 +1130,25 @@ describe("oblique falls back to the italic face", () => {
   };
 
   for (const family of ["Times", "Helvetica"]) {
-    test(`\`oblique\` renders as italic in ${family}`, () => {
+    test(`\`oblique\` shears the upright face in ${family}`, () => {
       const upright = ink(`64px ${family}`),
         italic = ink(`italic 64px ${family}`),
         oblique = ink(`oblique 64px ${family}`);
 
       // The control: without it, a family whose italic and upright happen to
-      // ink alike would make the assertion below pass for no reason.
+      // ink alike would make the assertions below pass for no reason.
       assert.notEqual(
         italic,
         upright,
         `${family} italic must differ from upright`,
       );
-      assert.equal(
+      // CSS Fonts 4 shears a face before it takes an italic for an oblique
+      // request, and these families have no oblique face; Chrome draws the
+      // italic instead, which docs/browser-differences.md records.
+      assert.notEqual(
         oblique,
         italic,
-        `${family} oblique should use the italic face`,
+        `${family} oblique must not use the italic face`,
       );
       assert.notEqual(
         oblique,
@@ -1596,47 +1599,126 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
     near(stem("200px RalewayWithItalic").slope, 0, 0.001, "the control");
   });
 
-  // An `oblique` angle slants from 14deg up and draws upright below it,
-  // whether the family has a slanted face or not. Chrome 152 on these
-  // families loaded as FontFace, by the same stem: Oswald, which has no
-  // italic, is skewed by a quarter at 14, 14.1, 20, 30 and 90deg, 0.25turn
-  // and `calc(10deg + 4deg)` alike, and Raleway takes its italic face over
-  // the same angles; at 0.5, 10 and 13.9deg and at every negative angle
-  // both draw upright. A system family does not always do this in Chrome --
-  // docs/browser-differences.md has the measurements -- and this library
-  // draws every family by the rule a FontFace follows.
-  test("an oblique angle slants from 14deg up and not below", () => {
-    const slanted = [
-      "14deg",
-      "14.1deg",
-      "20deg",
-      "30deg",
-      "90deg",
-      "0.25turn",
-      "calc(10deg + 4deg)",
-    ];
-    const upright = [
-      "0.5deg",
-      "10deg",
-      "13.9deg",
-      "-1deg",
-      "-14deg",
-      "-20deg",
-      "-90deg",
-    ];
-    for (const [family, slope] of [
-      ["Oswald", -0.25],
-      ["RalewayWithItalic", -0.2139],
-    ]) {
-      for (const angle of slanted) {
-        const font = `oblique ${angle} 200px ${family}`;
-        near(stem(font).slope, slope, 0.005, font);
+  // An `oblique` angle is drawn as CSS Fonts 4 section 5.2 matches it: an
+  // oblique face of the angle's sign where the family has one, a `slnt`
+  // axis set to the angle where it has that, and otherwise the upright face
+  // sheared to the angle -- before, and so instead of, any italic face. The
+  // slope of a shear is tan(angle), negative for a clockwise lean in these
+  // pixel rows. Chrome draws none of this; docs/browser-differences.md has
+  // its numbers.
+  const tan = (degrees) => Math.tan((degrees * Math.PI) / 180);
+  const R = "tests/assets/fonts/Recursive";
+  FontLibrary.use("RecursiveSlnt", [`${R}/Recursive-slnt-subset.ttf`]);
+  FontLibrary.use("RecursiveStatic", [
+    `${R}/Recursive-upright-subset.ttf`,
+    `${R}/Recursive-oblique12-subset.ttf`,
+  ]);
+  FontLibrary.use("RecursiveOblique12", [
+    `${R}/Recursive-oblique12-subset.ttf`,
+  ]);
+
+  test("an oblique angle shears an upright face to the angle", () => {
+    for (const family of ["Oswald", "RalewayWithItalic"]) {
+      for (const angle of [0.5, 10, 13.9, 14, 30, -14]) {
+        const font = `oblique ${angle}deg 200px ${family}`;
+        near(stem(font).slope, -tan(angle), 0.005, font);
       }
-      for (const angle of upright) {
-        const font = `oblique ${angle} 200px ${family}`;
-        near(stem(font).slope, 0, 0.001, font);
-      }
+      near(
+        stem(`oblique 0deg 200px ${family}`).slope,
+        0,
+        0.001,
+        `${family} 0deg`,
+      );
     }
+  });
+
+  const pixels = (font, setup = () => {}) => {
+    const ctx = new Canvas(300, 300).getContext("2d");
+    ctx.font = font;
+    setup(ctx);
+    ctx.fillText("IH", 60, 250);
+    return Buffer.from(ctx.getImageData(0, 0, 300, 300).data);
+  };
+
+  test("a slnt axis is set to the angle, as far as the axis goes", () => {
+    // The same face at the same `slnt`, asked for directly: OpenType counts
+    // the axis counter-clockwise, so it is the angle negated, and an angle
+    // past its end leans as far as the axis goes.
+    for (const [angle, slnt] of [
+      [10, -10],
+      [14, -14],
+      [30, -15],
+      [90, -15],
+    ]) {
+      assert.ok(
+        pixels(`oblique ${angle}deg 200px RecursiveSlnt`).equals(
+          pixels("200px RecursiveSlnt", (ctx) => {
+            ctx.fontVariationSettings = `"slnt" ${slnt}`;
+          }),
+        ),
+        `${angle}deg is slnt ${slnt}`,
+      );
+    }
+    // The axis reaches no negative angle, so that one is sheared.
+    near(
+      stem("oblique -14deg 200px RecursiveSlnt").slope,
+      -tan(-14),
+      0.005,
+      "-14deg",
+    );
+    assert.ok(
+      pixels("oblique 0deg 200px RecursiveSlnt").equals(
+        pixels("200px RecursiveSlnt"),
+      ),
+      "0deg is upright and unsheared",
+    );
+  });
+
+  test("an oblique face of the angle's sign is drawn as it is", () => {
+    // RecursiveStatic is two static instances of Recursive: the upright one
+    // and slnt -12 flagged oblique, with an italicAngle of -12. Every
+    // positive angle takes the oblique face unsheared, the only oblique
+    // value of that sign the family has; a negative one finds none, and the
+    // upright face is sheared.
+    const oblique = pixels("200px RecursiveOblique12");
+    for (const angle of [0.5, 10, 14, 30, 90]) {
+      assert.ok(
+        pixels(`oblique ${angle}deg 200px RecursiveStatic`).equals(oblique),
+        `${angle}deg draws the oblique face`,
+      );
+    }
+    near(
+      stem("oblique -14deg 200px RecursiveStatic").slope,
+      -tan(-14),
+      0.005,
+      "-14deg",
+    );
+    assert.ok(
+      pixels("oblique 0deg 200px RecursiveStatic").equals(
+        pixels("200px RecursiveStatic"),
+      ),
+      "0deg is upright and unsheared",
+    );
+  });
+
+  test("a fallback face that leans already is not sheared again", () => {
+    // The upright instance with no `I`, so an `I` falls back to the slnt
+    // instance, which leans by itself: sheared on top, it would slope twice.
+    FontLibrary.use("RecursiveWithoutI", [
+      `${R}/Recursive-upright-H-subset.ttf`,
+    ]);
+    near(
+      stem("oblique 10deg 200px RecursiveWithoutI, RecursiveSlnt").slope,
+      stem("oblique 10deg 200px RecursiveSlnt").slope,
+      0.005,
+      "the fallback leans as the slnt instance does alone",
+    );
+    near(
+      stem("oblique 10deg 200px RecursiveWithoutI, RecursiveSlnt").slope,
+      -tan(10),
+      0.005,
+      "and that is the angle asked for",
+    );
   });
 
   test("a static face lighter than asked is faked bold from 600", () => {
