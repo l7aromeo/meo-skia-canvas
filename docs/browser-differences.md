@@ -379,9 +379,6 @@ path clips an `hsl()` outside sRGB that this library keeps.
 - _Colour forms no browser reads still paint._ The CSS parser underneath,
   `csscolorparser`, has always accepted them here, and Chrome 153 refuses
   each, keeping the previous fill:
-  - `hwba()`, `hsv()` and `hsva()`, `"hwba(0 0% 0%)"` and
-    `"hsv(0 100% 100%)"` among them, and their relative forms;
-  - hex without its `#`, `"ff0000"`;
   - legacy comma syntax CSS Color 4 does not allow: numbers and percentages
     mixed, `"rgb(255, 0%, 0)"`; separators mixed, `"rgb(255,0 0)"`;
     `hsl()` with bare numbers, `"hsl(120, 100, 50)"`; `none` in a channel,
@@ -391,8 +388,8 @@ path clips an `hsl()` outside sRGB that this library keeps.
 
   npm 7.0 and crate 0.17 refuse them; until then
   `the_deprecated_colour_forms_still_paint` in
-  `tests/native_api_contract.rs` holds what each paints. Write `#` before
-  hex digits, spaces between channels, and `hwb()` for `hsv()`. A `none`
+  `tests/native_api_contract.rs` holds what each paints. Write spaces
+  between channels. A `none`
   alpha in legacy syntax, `rgb(255, 0, 0, none)`, painted transparent and
   is refused already.
 

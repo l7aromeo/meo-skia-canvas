@@ -23,6 +23,23 @@ independently of the npm package.
 CSS colour spellings that resolved to the wrong colour, and letting a Rust
 window be changed after it opens.** No signature moves and nothing is removed.
 
+### Breaking
+
+- **`hwba()`, `hsv()`, `hsva()` and hex without its `#` are refused as
+  colours.** No CSS defines them, and Chrome 153 refuses
+  `hwba(0 0% 0%)`, `hsv(0 100% 100%)`, `hsva(0 100% 100% / 0.5)` and
+  `"ff0000"`, each of which every `set_*_css` setter and
+  `RgbaLinear::from_css` read as red. Each `set_*_css` setter now returns
+  the error it returns for any colour that does not parse and leaves the
+  style as it was, and `RgbaLinear::from_css` returns `None`, relative
+  forms included -- `hsv(from red h s v)`. `RgbaLinear::from_hex`, which
+  takes hex without a `#` by design, is unchanged.
+
+  Migrate: write `#` before the hex digits, and `hwb()` for the rest:
+  `hsv(h s v)` with `s` and `v` out of 100 is
+  `hwb(h calc((100 - s) * v / 100) calc(100 - v))`, and `hwba()` is
+  `hwb()`.
+
 ### Fixed
 
 - **`outline_text` and the ink box put every glyph where `fill_text` draws
@@ -849,15 +866,6 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   it took 5.6, and a seventy-character line about 15 where it took 25.
 
 ### Deprecated
-
-- **`hwba()`, `hsv()`, `hsva()` and hex without its `#`.** The CSS parser
-  underneath has always read them and no browser does: Chrome 153 refuses
-  `hwba(0 0% 0%)`, `hsv(0 100% 100%)`, `hsva(0 100% 100% / 0.5)` and
-  `"ff0000"`, each of which every `set_*_css` setter and
-  `RgbaLinear::from_css` paint as red. They keep painting as they did,
-  relative forms included, and 0.17 refuses them. Write `#` before the
-  hex digits and `hwb()` for the rest: `hsv(h s v)` with `s` and `v` out
-  of 100 is `hwb(h calc((100 - s) * v / 100) calc(100 - v))`.
 
 - **Legacy comma syntax CSS Color 4 does not allow.** Each of these paints
   here and is refused by Chrome 153: numbers and percentages mixed,

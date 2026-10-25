@@ -71,3 +71,31 @@ describe("createImageData", () => {
     );
   });
 });
+
+describe("colour forms no CSS defines", () => {
+  // `hwba()`, `hsv()` and `hsva()`, absolute or relative, and hex without its
+  // `#` are no CSS colours, and Chrome 153 ignores each as a `fillStyle`. The
+  // setter ignores them as HTML says it ignores any value that does not
+  // parse, leaving the style as it was.
+  test("are ignored, leaving the style as it was", () => {
+    const ctx = new Canvas(4, 4).getContext("2d");
+    for (const css of [
+      "hwba(0 0% 0%)",
+      "hsv(0 100% 100%)",
+      "hsva(0 100% 100% / 0.5)",
+      "ff0000",
+      "f00",
+      "hwba(from red h w b)",
+      "hsv(from red h s v)",
+    ]) {
+      ctx.fillStyle = "#123456";
+      ctx.fillStyle = css;
+      assert.equal(ctx.fillStyle, "#123456", css);
+      ctx.strokeStyle = "#123456";
+      ctx.strokeStyle = css;
+      assert.equal(ctx.strokeStyle, "#123456", css);
+    }
+    ctx.fillStyle = "hwb(0 0% 0%)";
+    assert.equal(ctx.fillStyle, "#ff0000", "hwb() itself still parses");
+  });
+});
