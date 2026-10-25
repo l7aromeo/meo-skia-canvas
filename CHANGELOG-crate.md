@@ -25,6 +25,19 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Breaking
 
+- **Legacy comma syntax CSS Color 4 does not allow is refused.** Each of
+  these painted here and is refused by Chrome 153: numbers and percentages
+  mixed, `rgb(255, 0%, 0)`; separators mixed, `rgb(255,0 0)`; `hsl()` with
+  bare numbers, `hsl(120, 100, 50)`; `none` in a channel,
+  `rgb(none, 0, 0)`; and commas in a function with no legacy syntax,
+  `hwb(120, 0%, 0%)`, `lab(50, 40, 30)`, `oklch(0.6, 0.2, 30)` and
+  `color(srgb 1, 0, 0)`. Each `set_*_css` setter now returns its colour
+  error for them and leaves the style as it was, and `RgbaLinear::from_css`
+  returns `None`.
+
+  Migrate: write the channels space-separated, `rgb(255 0 0)`, or in the
+  legacy form the function allows, `rgb(255, 0, 0)`.
+
 - **`hwba()`, `hsv()`, `hsva()` and hex without its `#` are refused as
   colours.** No CSS defines them, and Chrome 153 refuses
   `hwba(0 0% 0%)`, `hsv(0 100% 100%)`, `hsva(0 100% 100% / 0.5)` and
@@ -864,18 +877,6 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   bounds are now remembered by face, size and glyph, up to 4,096 of them:
   `measure_text("Hello world")` takes about 4.3 µs in release on macOS where
   it took 5.6, and a seventy-character line about 15 where it took 25.
-
-### Deprecated
-
-- **Legacy comma syntax CSS Color 4 does not allow.** Each of these paints
-  here and is refused by Chrome 153: numbers and percentages mixed,
-  `rgb(255, 0%, 0)`; separators mixed, `rgb(255,0 0)`; `hsl()` with bare
-  numbers, `hsl(120, 100, 50)`; `none` in a channel, `rgb(none, 0, 0)`;
-  and commas in a function with no legacy syntax, `hwb(120, 0%, 0%)`,
-  `lab(50, 40, 30)`, `oklch(0.6, 0.2, 30)` and `color(srgb 1, 0, 0)`.
-  They keep painting as they did, and 0.17 refuses them. Write the
-  channels space-separated, `rgb(255 0 0)`, or in the legacy form the
-  function allows, `rgb(255, 0, 0)`.
 
 ## 📦 ⟩ [v0.16.3] (crate) ⟩ September 16, 2026
 

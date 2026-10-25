@@ -375,23 +375,3 @@ difference is a level at most where Chrome rounds, and more where its 8-bit
 path clips an `hsl()` outside sRGB that this library keeps.
 
 **Kept until 7.0, and deprecated.**
-
-- _Colour forms no browser reads still paint._ The CSS parser underneath,
-  `csscolorparser`, has always accepted them here, and Chrome 153 refuses
-  each, keeping the previous fill:
-  - legacy comma syntax CSS Color 4 does not allow: numbers and percentages
-    mixed, `"rgb(255, 0%, 0)"`; separators mixed, `"rgb(255,0 0)"`;
-    `hsl()` with bare numbers, `"hsl(120, 100, 50)"`; `none` in a channel,
-    `"rgb(none, 0, 0)"`; and commas in a function that has no legacy
-    syntax, `"hwb(120, 0%, 0%)"`, `"lab(50, 40, 30)"`,
-    `"oklch(0.6, 0.2, 30)"`, `"color(srgb 1, 0, 0)"`.
-
-  npm 7.0 and crate 0.17 refuse them; until then
-  `the_deprecated_colour_forms_still_paint` in
-  `tests/native_api_contract.rs` holds what each paints. Write spaces
-  between channels. A `none`
-  alpha in legacy syntax, `rgb(255, 0, 0, none)`, painted transparent and
-  is refused already.
-
-  Hex and named colours are read by the library itself, so in 7.0
-  `csscolorparser` goes with the forms above.

@@ -11,10 +11,7 @@ use std::{borrow::Cow, cmp};
 // while the one in `color` was not, so the same negative component came
 // back as two different numbers.
 use crate::{
-    color::{
-        RgbaLinear, SRGB_SLOPE, linear_to_srgb, linear_to_srgb_byte,
-        srgb_to_linear,
-    },
+    color::{RgbaLinear, linear_to_srgb, linear_to_srgb_byte, srgb_to_linear},
     css::{
         DEGREES_PER_TURN, Dimension, Expect, FontUnits, Percent, Quantity,
         evaluate, is_math, literal,
@@ -1479,34 +1476,6 @@ fn oklab_to_srgb(oklab: [f32; 3]) -> [f32; 3] {
     .map(linear_to_srgb)
 }
 
-/// Whether `csscolorparser` builds `css` through `Color::from_linear_rgba`.
-///
-/// It does for the notations whose conversion runs in linear light --
-/// `oklab()`, `oklch()`, `lab()`, `lch()` and `color()` in `srgb-linear` or
-/// an `xyz` space -- and for nothing else: hex, names, `rgb()`, `hsl()`,
-/// `hwb()` and `color(srgb ...)` are stored as written. The distinction
-/// matters because only the first group can carry the encode defect
-/// `css_to_color4f_in_space` repairs, and a negative in the second, such as
-/// `color(srgb -0.1 0 0)`, already means what it says. Every colour function
-/// is read by [`read_color_function`] before this is asked; what reaches
-/// `csscolorparser` from the first group is a legacy comma form
-/// [`legacy_channels`] leaves to it, `oklch(0.8, 0.18, 165)` among them.
-fn built_from_linear_light(css: &str) -> bool {
-    let Some((name, rest)) = css.trim_start().split_once('(') else {
-        return false;
-    };
-    match name.to_ascii_lowercase().as_str() {
-        "oklab" | "oklch" | "lab" | "lch" => true,
-        "color" => color_function_space(rest).is_some_and(|space| {
-            matches!(
-                space.to_ascii_lowercase().as_str(),
-                "srgb-linear" | "xyz" | "xyz-d50" | "xyz-d65"
-            )
-        }),
-        _ => false,
-    }
-}
-
 /// The arguments of a call, given what follows its `(`, as spans of `args`:
 /// split at whitespace outside parentheses, and ending at the `)` that closes
 /// the call. An argument that is itself a call -- a relative colour's origin
@@ -1827,9 +1796,7 @@ fn hwb_to_srgb(hue: f64, white: f64, black: f64) -> [f64; 3] {
 
 /// A colour function -- `rgb(255 0 0)`, `lab(from red l a b)` and the rest --
 /// read by this crate rather than by `csscolorparser`, with the space the
-/// result is in, or `None` for what is left to `csscolorparser`: hex and
-/// named colours, the deprecated forms `css_to_color4f_in_space` lists, and
-/// the legacy comma forms [`legacy_channels`] does not read.
+/// result is in, or `None` for what is no colour function this crate knows.
 ///
 /// `Some(None)` when it is a colour function and does not parse, which is a
 /// refusal rather than a cue to read it some other way.
@@ -2057,7 +2024,7 @@ fn absolute_channels(
     };
     let body = body.trim();
     match has_top_level_comma(body) {
-        true => legacy_channels(body, function),
+        true => Some(legacy_channels(body, function)),
         false => Some(modern_channels(body, function)),
     }
 }
@@ -2110,7 +2077,7 @@ fn modern_channels(
 }
 
 /// An absolute `rgb()` or `hsl()` in the comma-separated legacy syntax, given
-/// what follows its `(` without the `)`.
+/// what follows its `(` without the `)`, or `None` for any other comma form.
 ///
 /// CSS Color 4 section 5.1 and 7.1 give that syntax three channels and an
 /// optional alpha, no `none`, and for `rgb()` channels all numbers or all
@@ -2118,16 +2085,13 @@ fn modern_channels(
 /// read here, a math function in any channel included -- Chrome 153 reads
 /// `rgba(calc(255), 0, 0)` -- with `hsl()` saturation and lightness held
 /// to `0%..=100%`, which keeps a legacy colour inside sRGB. What does not is
-/// `None` and left to `csscolorparser`, which has always read it and still
-/// does, though Chrome refuses each: `rgb(255, 0%, 0)`, `hsl(120, 100, 50)`,
-/// `lab(50, 40, 30)`, `rgb(none, 0, 0)`. Those are deprecated, and refused
-/// from crate 0.17 and npm 7.0; `the_deprecated_colour_forms_still_paint`
-/// holds what they paint. A `none` alpha is refused now, since
-/// `rgb(255, 0, 0, none)` painted transparent.
+/// refused, as Chrome 153 refuses each: `rgb(255, 0%, 0)`, `rgb(255,0 0)`,
+/// `hsl(120, 100, 50)`, `rgb(none, 0, 0)`, `rgb(255, 0, 0, none)`, and commas
+/// in a function with no legacy syntax, `lab(50, 40, 30)`.
 fn legacy_channels(
     body: &str,
     function: Relative,
-) -> Option<Option<(Color4f, &'static str)>> {
+) -> Option<(Color4f, &'static str)> {
     if !matches!(function, Relative::Rgb | Relative::Hsl) {
         return None;
     }
@@ -2151,13 +2115,6 @@ fn legacy_channels(
         [a, b, c, alpha] => ([a, b, c], Some(alpha)),
         _ => return None,
     };
-    // A `none` alpha painted transparent, where Chrome 153 refuses the
-    // colour: legacy syntax has no `none`, and an alpha of zero is not what
-    // was asked for. Every other malformed legacy form keeps painting as it
-    // always has, deprecated.
-    if alpha.is_some_and(|alpha| alpha.eq_ignore_ascii_case("none")) {
-        return Some(None);
-    }
     if parts.iter().any(|part| {
         part.eq_ignore_ascii_case("none") || top_level_spans(part).len() != 1
     }) {
@@ -2208,10 +2165,7 @@ fn legacy_channels(
         _ => [x, y, z],
     };
     let ([r, g, b], space) = function.color(values);
-    Some(Some((
-        Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32),
-        space,
-    )))
+    Some((Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32), space))
 }
 
 /// CSS Color 4's named colours ([section 6.1]), in the order its table lists
@@ -2464,39 +2418,11 @@ pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
     if css.trim().chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
-    // UPSTREAM: csscolorparser 0.9.0 -- unfiled -- worked around
-    // Re-check: return `c.r`, `c.g` and `c.b` unchanged, then fill
-    // `oklch(0.8, 0.18, 165)` -- a comma form `legacy_channels` leaves to
-    // `csscolorparser` -- on a Display P3 canvas and read it back in P3; red
-    // reads 4 rather than 91 if the defect is still there.
-    //
-    // `Color::from_linear_rgba` encodes every value below the sRGB breakpoint
-    // as `12.92 * x`, negatives included, where CSS Color 4 mirrors the curve
-    // through zero. A colour outside sRGB arrives with its negative channel
-    // on the linear segment's slope rather than the curve's -- invisible on
-    // an sRGB canvas, where both clip to zero, and a different colour on a
-    // wider one. Below the breakpoint that encode is linear, so the light it
-    // meant is exactly the value over the slope, and re-encoding it through
-    // the mirrored curve gives the CSS answer. Only a negative channel of a
-    // colour built that way is touched; see `built_from_linear_light`. A
-    // colour function reaches it only in the legacy forms `legacy_channels`
-    // leaves here.
-    let from_linear = built_from_linear_light(css);
-    let channel = |v: f32| match from_linear && v < 0.0 {
-        true => linear_to_srgb(v / SRGB_SLOPE),
-        false => v,
-    };
-    // Only what is deprecated reaches `csscolorparser`: the legacy comma
-    // forms `legacy_channels` leaves here. `csscolorparser` reads them and no
-    // browser does -- Chrome 153 refuses each -- so they reach it here
-    // unchanged until they are refused too.
-    // `the_deprecated_colour_forms_still_paint` holds them.
-    csscolorparser::parse(css).ok().map(|c| {
-        (
-            Color4f::new(channel(c.r), channel(c.g), channel(c.b), c.a),
-            ColorSpace::new_srgb(),
-        )
-    })
+    // Every colour CSS defines is read above, and every colour function is
+    // read or refused there; what reaches `csscolorparser` is neither.
+    csscolorparser::parse(css)
+        .ok()
+        .map(|c| (Color4f::new(c.r, c.g, c.b, c.a), ColorSpace::new_srgb()))
 }
 
 /// Converts a colour into sRGB when it was named in some other space.

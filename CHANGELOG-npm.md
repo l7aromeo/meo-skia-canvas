@@ -49,6 +49,19 @@ removed and no signature moves.
   Migrate: read the values by name, or copy them with `m.toJSON()` where
   you spread a measurement or listed its keys.
 
+- **Legacy comma syntax CSS Color 4 does not allow is refused.** Each of
+  these painted here and is ignored by Chrome 153: numbers and percentages
+  mixed, `'rgb(255, 0%, 0)'`; separators mixed, `'rgb(255,0 0)'`; `hsl()`
+  with bare numbers, `'hsl(120, 100, 50)'`; `none` in a channel,
+  `'rgb(none, 0, 0)'`; and commas in a function with no legacy syntax,
+  `'hwb(120, 0%, 0%)'`, `'lab(50, 40, 30)'`, `'oklch(0.6, 0.2, 30)'` and
+  `'color(srgb 1, 0, 0)'`. Each is now refused as any colour that does not
+  parse is: `fillStyle`, `strokeStyle` and `shadowColor` ignore it and keep
+  what they held, and `addColorStop` throws its `SyntaxError`.
+
+  Migrate: write the channels space-separated, `rgb(255 0 0)`, or in the
+  legacy form the function allows, `rgb(255, 0, 0)`.
+
 - **`hwba()`, `hsv()`, `hsva()` and hex without its `#` are refused as
   colours.** No CSS defines them, and Chrome 153 ignores
   `fillStyle = 'hwba(0 0% 0%)'`, `'hsv(0 100% 100%)'`,
@@ -994,17 +1007,6 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   the values by name and nothing changes. `TextMetrics.prototype`, its
   `Symbol.toStringTag` and the constructor that refuses to be called are
   Chrome's already.
-
-- **Legacy comma syntax CSS Color 4 does not allow.** Each of these paints
-  here and is ignored by Chrome 153: numbers and percentages mixed,
-  `'rgb(255, 0%, 0)'`; separators mixed, `'rgb(255,0 0)'`; `hsl()` with
-  bare numbers, `'hsl(120, 100, 50)'`; `none` in a channel,
-  `'rgb(none, 0, 0)'`; and commas in a function with no legacy syntax,
-  `'hwb(120, 0%, 0%)'`, `'lab(50, 40, 30)'`, `'oklch(0.6, 0.2, 30)'` and
-  `'color(srgb 1, 0, 0)'`. They keep painting as they did until 7.0
-  ignores them as a browser does. Write the channels space-separated,
-  `rgb(255 0 0)`, or in the legacy form the function allows,
-  `rgb(255, 0, 0)`.
 
 ## 📦 ⟩ [v6.0.2] (npm) ⟩ September 16, 2026
 

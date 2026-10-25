@@ -1336,11 +1336,11 @@ impl Context2D {
     /// The same notations the JavaScript `fillStyle` takes, parsed by the same
     /// code: named colors, `#rgb`, `rgb()`, `hsl()`, `hwb()`, `lab()`,
     /// `lch()`, `oklab()`, `oklch()` and `color(<space> r g b / a)`, each in
-    /// its relative form too. Legacy comma syntax CSS Color 4 does not
-    /// allow, such as `rgb(255, 0%, 0)` or `lab(50, 40, 30)`, is read as well
-    /// and is deprecated: no browser reads it, and 0.17 refuses it.
-    /// `hwba()`, `hsv()`, `hsva()` and hex without its `#`, which no CSS
-    /// defines, are refused, and the fill is left as it was.
+    /// its relative form too, and `rgb()` and `hsl()` in the legacy comma
+    /// syntax CSS Color 4 allows. Anything else is refused and the fill left
+    /// as it was: `hwba()`, `hsv()`, `hsva()` and hex without its `#`, which
+    /// no CSS defines, and comma syntax CSS Color 4 does not allow, such as
+    /// `rgb(255, 0%, 0)` or `lab(50, 40, 30)`.
     ///
     /// Unlike [`Context2D::set_fill_style`], which takes a value already in
     /// the canvas's space, this keeps the space the string named: on a Display

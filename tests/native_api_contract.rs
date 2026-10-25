@@ -1455,32 +1455,47 @@ fn colour_forms_no_css_defines_are_refused() -> Result<()> {
     Ok(())
 }
 
-/// The legacy comma syntax no browser reads that `csscolorparser` always
-/// has, CSS Color 4 not allowing it, still paints, as it did, until npm 7.0
-/// and crate 0.17 refuse it. Chrome 153 refuses every one.
+/// Legacy comma syntax CSS Color 4 does not allow is refused, and leaves the
+/// fill as it was, as Chrome 153 ignores each: numbers and percentages
+/// mixed, separators mixed, `hsl()` without its percentages, `none` in a
+/// channel or the alpha, and commas where a function has none. The legacy
+/// forms CSS Color 4 does allow still parse.
 #[test]
-fn the_deprecated_colour_forms_still_paint() -> Result<()> {
-    for (css, painted) in [
-        // Malformed legacy syntax: numbers and percentages mixed, separators
-        // mixed, `hsl()` without its percentages, `none` in a channel, and
-        // commas where a function has none.
-        ("rgb(255, 0%, 0)", [234, 51, 35, 255]),
-        ("rgb(100%, 0, 0)", [234, 51, 35, 255]),
-        ("rgb(255,0 0)", [234, 51, 35, 255]),
-        ("rgb(255 0,0)", [234, 51, 35, 255]),
-        ("rgb(255, 0, 0 / 0.5)", [233, 52, 36, 128]),
-        ("hsl(120, 100, 50)", [117, 251, 76, 255]),
-        ("hsl(120, 100%, 50)", [117, 251, 76, 255]),
-        ("rgb(none, 0, 0)", [0, 0, 0, 255]),
-        ("hsl(none, 100%, 50%)", [234, 51, 35, 255]),
-        ("hwb(120, 0%, 0%)", [117, 251, 76, 255]),
-        ("lab(50, 40, 30)", [175, 93, 76, 255]),
-        ("lch(50, 40, 30)", [167, 98, 90, 255]),
-        ("oklab(0.6, 0.1, 0.1)", [182, 101, 58, 255]),
-        ("oklch(0.6, 0.2, 30)", [205, 75, 56, 255]),
-        ("color(srgb 1, 0, 0)", [234, 51, 35, 255]),
+fn malformed_legacy_colour_syntax_is_refused() -> Result<()> {
+    let mut canvas = Canvas::new(4.0, 4.0);
+    let ctx = canvas.context();
+    ctx.set_fill_style_css("#123456")?;
+    let before = ctx.fill_style();
+    for css in [
+        "rgb(255, 0%, 0)",
+        "rgb(100%, 0, 0)",
+        "rgb(255,0 0)",
+        "rgb(255 0,0)",
+        "rgb(255, 0, 0 / 0.5)",
+        "hsl(120, 100, 50)",
+        "hsl(120, 100%, 50)",
+        "rgb(none, 0, 0)",
+        "hsl(none, 100%, 50%)",
+        "hwb(120, 0%, 0%)",
+        "lab(50, 40, 30)",
+        "lch(50, 40, 30)",
+        "oklab(0.6, 0.1, 0.1)",
+        "oklch(0.6, 0.2, 30)",
+        "color(srgb 1, 0, 0)",
+        "rgb(255, 0, 0, none)",
     ] {
-        assert_eq!(painted_p3(css)?, painted, "{css}");
+        assert!(ctx.set_fill_style_css(css).is_err(), "{css} is refused");
+        assert_eq!(ctx.fill_style(), before, "{css} leaves the fill");
+        assert_eq!(RgbaLinear::from_css(css), None, "{css} is no colour");
+    }
+    for css in [
+        "rgb(255, 0, 0)",
+        "rgba(100%, 0%, 0%, 0.5)",
+        "hsl(120, 100%, 50%)",
+        "hsla(120deg, 100%, 50%, 0.5)",
+        "rgba(calc(255), 0, 0)",
+    ] {
+        assert!(ctx.set_fill_style_css(css).is_ok(), "{css} still parses");
     }
     Ok(())
 }
