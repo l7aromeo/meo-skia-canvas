@@ -41,11 +41,19 @@ removed and no signature moves.
   iterator, and an `offset` or a float colour of the wrong length. An
   option left out or `undefined` still takes its default.
 
+  Two conversions change a value that was taken. A boolean option given
+  a string is `true` unless the string is empty, so `halfLeading: "false"`
+  and `halfLeading: "0"` are `true`, where a string was ignored and the
+  option left `false`. And a colour that is iterable is read as a list of
+  numbers: `["red"]` and `new String("red")`, which a `String` object's
+  iterator makes a list of three letters, are each a `TypeError`, where
+  both were read as the CSS `"red"`.
+
   Migrate: a number option given a value that converts to NaN or an
   infinity, a list option given a single value, and a colour array of
-  other than four numbers -- `["red"]` among them, which read as `"red"`
-  -- each throw; pass a finite number, wrap a single family in a list, and
-  pass a CSS colour as the string itself, `"red"`.
+  other than four numbers each throw; pass a finite number, wrap a single
+  family in a list, and pass a CSS colour as a string primitive, `"red"`.
+  Pass a boolean option a boolean.
 
 - **`textHeightBehavior` takes `0`, `1`, `2` or `3` and refuses any other
   number.** `ParagraphBuilder` truncated `1.5` toward zero, to `1`, and
