@@ -58,6 +58,16 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   reports the glyphs' own ink, -1.68 for that `a`, its ink beginning 1.68
   right of the origin, and 0 for the space. The right edge and the width
   agree with Chrome's.
+- _`TextMetrics` has a `toJSON`._ HTML's interface defines none, and Chrome
+  152 puts its values on `TextMetrics.prototype` as getters with nothing of
+  the object's own, so there `JSON.stringify` of a measurement gives `"{}"`.
+  The values are on the prototype here too, and `Object.keys` is empty and a
+  spread copies nothing, as in Chrome; but `toJSON` returns every value,
+  this library's `emHeightAscent`, `emHeightDescent`, `height` and `lines`
+  included, in the order 6.x serialised them as own properties, so a
+  measurement serialises as it always did. It is WebIDL's default `toJSON`,
+  the one `DOMRect` has, and works the ink box out when it is called.
+
 - _`imageSmoothingQuality = "high"` picks its sampler from the device-space
   scale._ The Chrome mapping this ports, and why one unconditional cubic is
   wrong twice over, are documented on `ScalingOperation` and
@@ -384,14 +394,3 @@ path clips an `hsl()` outside sRGB that this library keeps.
 
   Hex and named colours are read by the library itself, so in 7.0
   `csscolorparser` goes with the forms above.
-
-- _`TextMetrics` carries its values as its own properties._ Chrome 152 puts
-  the ten it defines on `TextMetrics.prototype` as enumerable getters and
-  gives the object none of its own, so there `Object.keys` is empty,
-  `JSON.stringify` gives `"{}"` and a spread copies nothing. Here every
-  value, this library's `emHeightAscent`, `emHeightDescent`, `height` and
-  `lines` included, is an own property of a frozen object, in the order
-  6.0.2 wrote them, so serialising or spreading a measurement still sees
-  them all. The prototype, its `Symbol.toStringTag` and the constructor
-  that refuses to be called are Chrome's already. In 7.0 the values move to
-  the prototype; read them by name and nothing changes.

@@ -4728,13 +4728,12 @@ declare var Path2D: {
 /**
  * The dimensions of a piece of text in the canvas, as created by the CanvasRenderingContext2D.measureText() method.
  *
- * The values are the object's own properties, and the object is frozen. The
- * four `actualBoundingBox` values and `lines` come from the outline of every
- * glyph, worked out when the first of them is read and kept for the rest.
- *
- * **Deprecated:** in 7.0 the values become getters on `TextMetrics.prototype`
- * alone, as a browser's are, so `Object.keys`, a spread and `JSON.stringify`
- * will see none of them. Read them by name.
+ * The values are getters on `TextMetrics.prototype`, as HTML's interface
+ * defines them, and the object has no properties of its own: `Object.keys`
+ * is empty and a spread copies nothing. `JSON.stringify` gives every value,
+ * through {@link TextMetrics.toJSON}. The four `actualBoundingBox` values and
+ * `lines` come from the outline of every glyph, worked out when the first of
+ * them is read and kept for the rest.
  *
  * [MDN Reference](https://developer.mozilla.org/docs/Web/API/TextMetrics)
  *
@@ -4782,6 +4781,15 @@ export interface TextMetrics {
    * 🧪 Not in the HTML Canvas standard.
    */
   readonly height: number;
+
+  /**
+   * Every value as a plain object, `lines` included -- what
+   * `JSON.stringify` serialises. Calling it works out the ink box.
+   *
+   * 🧪 Not in the HTML Canvas standard, whose `TextMetrics` has no
+   * `toJSON`; WebIDL's default one, as `DOMRect` has.
+   */
+  toJSON(): Omit<TextMetrics, "toJSON">;
 }
 
 // No construct signature: measurements come from

@@ -31,6 +31,20 @@ removed and no signature moves.
   Migrate: pass one of the four codes, rounding or checking a computed
   value first, and type it as `TextHeightBehavior`.
 
+- **`TextMetrics` keeps its values on the prototype, as HTML's interface
+  does.** A measurement was a frozen object holding every value as its own
+  property; each is now a getter on `TextMetrics.prototype`, enumerable as
+  WebIDL makes an attribute, and the object has no properties of its own:
+  `Object.keys` is empty and a spread copies nothing, as in Chrome 152, and
+  the object is no longer frozen. A getter called on anything but a
+  measurement throws a `TypeError`.
+  `JSON.stringify` gives what it gave, the same values in the same order,
+  through a `toJSON` this library adds -- docs/browser-differences.md has
+  why -- and works the ink box out once.
+
+  Migrate: read the values by name, or copy them with `m.toJSON()` where
+  you spread a measurement or listed its keys.
+
 ### Security
 
 - **`follow-redirects` is required at `^1.16.1`, up from `^1.15.11`.** It is
@@ -949,10 +963,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   rest, and each glyph's outline bounds are remembered by face, size and
   glyph rather than outlined again: `measureText("Hello world")` with only
   `width` read takes about 5.5 µs where it took 7.7, and reading the ink as
-  well about 7.4. Nothing a
-  caller sees moves: the values are still the frozen object's own
-  properties, in the same order, and `JSON.stringify` and a spread give
-  what they gave, the ink then worked out once.
+  well about 7.4. `JSON.stringify` works the ink out once, through
+  `toJSON` -- see Breaking.
 
 ### Deprecated
 
@@ -964,6 +976,12 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   the values by name and nothing changes. `TextMetrics.prototype`, its
   `Symbol.toStringTag` and the constructor that refuses to be called are
   Chrome's already.
+
+- **A `textHeightBehavior` that is not an integer.** `ParagraphBuilder`
+  truncates `1.5` toward zero, to `1`, and ignores `NaN` and the
+  infinities, leaving the default `0`. In 7.0 each is a `RangeError`, as
+  an integer outside `0` to `3` is already, and the option is typed as
+  `TextHeightBehavior` alone.
 
 - **`hwba()`, `hsv()`, `hsva()` and hex without its `#` as colours.**
   The CSS parser underneath has always read them and no browser does:
