@@ -771,7 +771,11 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `measure_text` reports the sheared ink, and `font()` reads back as it
   did. A paragraph's oblique range is sheared at 14deg and draws what
   `set_font_css("oblique …")` text draws, its decorations level and its
-  shadows leaning with its glyphs. At 90deg either way a sheared run draws
+  shadows leaning with its glyphs. Being a font of its own, it is shaped apart from the
+  text beside it, so no ligature forms across its edge, and a combining
+  mark the edge would split from its base is drawn with its base, in the
+  base's style. A mark straight after a placeholder has no base, and is
+  shaped alone in its own style. At 90deg either way a sheared run draws
   nothing and has no ink or outline, and advances as it would upright.
 
   An oblique run is drawn a glyph run at a time so that each can be

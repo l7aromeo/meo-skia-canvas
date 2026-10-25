@@ -1096,10 +1096,17 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
 
   // A paragraph of `pieces`, each `[text, style]` over a shared base, laid
   // out wide and drawn at (20, 10) on white; the RGBA it leaves.
+  const PLACEHOLDER = Symbol("placeholder");
   const onWhite = (family, size, pieces, w = W, h = H) => {
     const base = { fontFamilies: [family], fontSize: size, color: "black" },
       pb = ParagraphBuilder.Make({ textStyle: base });
-    for (const [text, style] of pieces) {
+    for (const piece of pieces) {
+      // A placeholder box, 40 pixels square, where a piece says so.
+      if (piece === PLACEHOLDER) {
+        pb.addPlaceholder(40, 40);
+        continue;
+      }
+      const [text, style] = piece;
       pb.pushStyle({ ...base, ...style });
       pb.addText(text);
       pb.pop();
@@ -1149,6 +1156,139 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
         `${name}: the paragraph inks ${whole}, its pieces ${parts}`,
       );
     }
+  });
+
+  test("a mark split from its base by an oblique edge stays on its base", () => {
+    // A combining mark belongs to the grapheme of the base before it, and
+    // the base's style takes the whole cluster: the mark is drawn with its
+    // base, whichever side of the edge each was given.
+    register();
+    const family = "ParagraphRaleway",
+      oblique = { ...slanted(OBLIQUE), color: "#c00" },
+      ACUTE = "\u0301";
+    for (const [split, joined] of [
+      // The base upright, the mark given to the oblique range after it.
+      [
+        [["cafe"], [`${ACUTE} x`, oblique]],
+        [[`cafe${ACUTE}`], [" x", oblique]],
+      ],
+      // The base oblique, the mark given to the upright range after it.
+      [
+        [["caf"], ["e", oblique], [`${ACUTE} x`]],
+        [["caf"], [`e${ACUTE}`, oblique], [" x"]],
+      ],
+    ]) {
+      const drawn = (pieces) =>
+        Buffer.from(
+          onWhite(
+            family,
+            80,
+            pieces.map(([t, st]) => [t, st ?? {}]),
+            600,
+            140,
+          ),
+        );
+      assert.ok(
+        drawn(split).equals(drawn(joined)),
+        `${split.map(([t]) => t).join("|")} draws as ${joined.map(([t]) => t).join("|")}`,
+      );
+    }
+  });
+
+  // Pixels by colour: red, blue and black ink, on white.
+  const colours = (data) => {
+    let red = 0,
+      blue = 0,
+      black = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      const [r, g, b] = [data[i], data[i + 1], data[i + 2]];
+      if (r > 150 && g < 80 && b < 80) red++;
+      else if (b > 150 && r < 80 && g < 80) blue++;
+      else if (r < 80 && g < 80 && b < 80) black++;
+    }
+    return { red, blue, black };
+  };
+
+  test("a mark after a placeholder is shaped alone, and moves nothing else", () => {
+    // A placeholder stands in the text as U+FFFC, which a following mark
+    // joins in one grapheme. There is no base to keep the mark with, so
+    // it stays with its own text, shaped alone as SkParagraph shapes it --
+    // and no text after it is lost or moved.
+    register();
+    const family = "ParagraphRaleway",
+      ACUTE = "\u0301",
+      red = { ...slanted(OBLIQUE), color: "red" },
+      blue = { ...slanted(OBLIQUE), color: "blue" };
+    const oblique = ink(
+        onWhite(family, 60, [PLACEHOLDER, [`${ACUTE}x`, red]], 600, 140),
+      ),
+      upright = ink(
+        onWhite(family, 60, [PLACEHOLDER, [`${ACUTE}x`, {}]], 600, 140),
+      );
+    assert.ok(upright > 0, "the control: the upright mark and x ink");
+    assert.ok(
+      Math.abs(oblique - upright) / upright < 0.15,
+      `an oblique mark and x ink ${oblique}, upright ${upright}`,
+    );
+    // And with text before the placeholder, whose edge with the mark is
+    // not an edge: the U+FFFC lies between them.
+    const after = ink(
+        onWhite(family, 60, [["a"], PLACEHOLDER, [`${ACUTE}x`, red]], 600, 140),
+      ),
+      afterUpright = ink(
+        onWhite(family, 60, [["a"], PLACEHOLDER, [`${ACUTE}x`, {}]], 600, 140),
+      );
+    assert.ok(
+      Math.abs(after - afterUpright) / afterUpright < 0.15,
+      `after "a" and a placeholder: ${after}, upright ${afterUpright}`,
+    );
+
+    const withMark = colours(
+        onWhite(
+          family,
+          60,
+          [PLACEHOLDER, [`${ACUTE}HH`, red], [" HH ", {}], ["HHHH", blue]],
+          600,
+          140,
+        ),
+      ),
+      without = colours(
+        onWhite(
+          family,
+          60,
+          [PLACEHOLDER, ["HH", red], [" HH ", {}], ["HHHH", blue]],
+          600,
+          140,
+        ),
+      );
+    for (const colour of ["black", "blue"])
+      assert.equal(
+        withMark[colour],
+        without[colour],
+        `${colour} is what the same text inks without the mark`,
+      );
+    assert.ok(
+      Math.abs(withMark.red - without.red) / without.red < 0.15,
+      `red ${withMark.red} against ${without.red} without the mark`,
+    );
+  });
+
+  test("an oblique range elsewhere does not restyle an upright mark", () => {
+    // Edges move only where one side is oblique; a black "e" with a red
+    // accent keeps its red accent whether or not text after it is oblique.
+    register();
+    const family = "ParagraphRaleway",
+      ACUTE = "\u0301",
+      pieces = (after) => [
+        ["caf"],
+        ["e"],
+        [ACUTE, { color: "red" }],
+        [" x", after],
+      ];
+    const plain = colours(onWhite(family, 80, pieces({}), 600, 140)),
+      later = colours(onWhite(family, 80, pieces(slanted(OBLIQUE)), 600, 140));
+    assert.ok(plain.red > 0, "the control: the accent is red");
+    assert.equal(later.red, plain.red, "and stays red");
   });
 
   test("two oblique ranges in one run keep their own paints", () => {
