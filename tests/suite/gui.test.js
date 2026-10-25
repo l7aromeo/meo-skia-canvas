@@ -9,10 +9,11 @@
 // canvas are all checked on the real object, everywhere the suite runs, and
 // the process still exits on its own afterwards.
 //
-// The rest needs a display, and now has one somewhere: the Linux job
-// installs a software Vulkan device and a virtual screen, so `App.launch()`,
-// the event loop and the `geom` payload it delivers are exercised there.
-// Those tests skip where no window can be built, and that leg sets
+// The rest needs a GPU, and the event loop a display as well, and both now
+// exist somewhere: the Linux job installs a software Vulkan device and a
+// virtual screen, so `App.launch()`, the event loop and the `geom` payload it
+// delivers are exercised there. Those tests skip where no window can be
+// built, the event loop's also where there is no display, and that leg sets
 // `MEO_SKIA_CANVAS_REQUIRE_WINDOWING` so a skip is a failure rather than a
 // quiet pass.
 //
@@ -398,10 +399,15 @@ describe("the event loop, where a window can be opened", () => {
   // Skipped where no window can be built. On CI that is every leg except the
   // one that installs a software Vulkan device and a virtual display, which
   // is why that leg exists.
+  //
+  // Skipped too where a window can be built and there is no display to open
+  // it on, which `noWindowing` cannot see: building one needs only the GPU,
+  // and `App.launch` is what asks for a display, refusing at once and before
+  // any loop starts. A container with lavapipe and no X server is that case.
   test(
     "delivers frames and a geometry the setters accept",
     { skip: noWindowing },
-    async () => {
+    async (t) => {
       let win = new Window(120, 80, { visible: false }),
         frames = [];
 
@@ -425,8 +431,23 @@ describe("the event loop, where a window can be opened", () => {
 
       App.eventLoop = "node";
       App.fps = 10;
+      let session;
       try {
-        await App.launch();
+        session = App.launch();
+      } catch (e) {
+        clearTimeout(guard);
+        win.close();
+        if (
+          /^No display available/.test(e.message) &&
+          !process.env.MEO_SKIA_CANVAS_REQUIRE_WINDOWING
+        ) {
+          t.skip(`no display here: ${e.message}`);
+          return;
+        }
+        throw e;
+      }
+      try {
+        await session;
       } finally {
         clearTimeout(guard);
       }
