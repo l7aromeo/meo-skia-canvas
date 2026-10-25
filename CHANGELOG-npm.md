@@ -793,12 +793,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   through 10000px, a weight to 1 through 1000. `ex`, `ch`, `cap` and `ic`
   in a size are those of 10px `serif`, Chrome's standard family, and `rem`
   and the other root forms of 16px. An `oblique` angle from -90deg to 90deg
-  is taken: one of 14deg or more draws the family's italic or oblique face,
-  or a synthesised slant where it has neither, and one below 14deg or
-  negative draws upright, as Chrome draws a font loaded as a `FontFace`.
-  Every family follows that rule, though Chrome draws a system family by
-  its platform's own -- docs/browser-differences.md has them. Only the
-  default 14deg reads back as `italic`. A size above 10000px, which was
+  is taken, and drawn as the entry under Changed says. Only the default
+  14deg reads back as `italic`. A size above 10000px, which was
   taken as written, is now 10000px. 113 shorthands measured in Chrome join
   `tests/assets/cases/css-fonts.json`, and the JavaScript tests that held
   the old parser to its own internals are rows there instead.
@@ -865,6 +861,28 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   channel with zero, and is therefore black.
 
 ### Changed
+
+- **`oblique` draws as CSS Fonts 4 matches it, superseding 6.0.0's
+  "`oblique` renders as the italic face".** `oblique` and
+  `oblique <angle>` take the family's oblique face where it has one leaning
+  the angle's way, set a `slnt` axis to the angle where it has one -- as far
+  as the axis goes, so `oblique 30deg` on an axis ending at -15 leans 15 --
+  and otherwise shear the upright face by the tangent of the angle, a
+  negative angle leaning back. The italic face is drawn only for a family
+  with no upright face. So `oblique 64px Times`, which 6.0.0 moved from the
+  upright face to the italic, is the upright face sheared by 14deg, and
+  `oblique 10deg` leans ten degrees in Raleway, which has an italic, as in
+  Oswald, which has none. Chrome 152 takes the family's italic, or a fixed
+  quarter skew, from 14deg up and draws upright below; its measurements are
+  in docs/browser-differences.md. `measureText` reports the sheared ink, and
+  `ctx.font` reads back as it did. A `TextStyleInput` asking for oblique in
+  a `Paragraph` still draws the family's italic face.
+
+  An oblique run is drawn a glyph run at a time so that each can be
+  sheared or not, which costs more than an upright one: in a release
+  build on macOS, filling `oblique 10deg 32px Oswald` takes about 8.1 µs
+  where it took 6.2, and 11.8 underlined where it took 6.8. Upright text
+  is unchanged, at 6.2 µs before and after.
 
 - **`measureText` works out the ink box only when it is read.** The four
   `actualBoundingBox` values and `lines` come from the outline of every

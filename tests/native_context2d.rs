@@ -6639,21 +6639,50 @@ fn font_reports_the_serialization_the_standard_asks_for() {
     );
 }
 
+/// The slope of the left edge of an `I` drawn in `font`, fitted over the
+/// middle seventy percent of its rows: `-tan(angle)` for a glyph leaning
+/// `angle` clockwise, since `x` falls as `y` grows.
+fn stem_slope(set_font: impl Fn(&mut Context2D)) -> f32 {
+    let mut canvas = Canvas::new(300.0, 300.0);
+    {
+        let ctx = canvas.context();
+        set_font(ctx);
+        ctx.set_fill_style(red());
+        ctx.fill_text("I", 100.0, 250.0, None);
+    }
+    let buffer = pixels(&mut canvas);
+    let rows: Vec<(f32, f32)> = (0..300)
+        .filter_map(|y| {
+            (0..300)
+                .find(|&x| at(&buffer, 300, x, y)[3] >= 128)
+                .map(|x| (y as f32, x as f32))
+        })
+        .collect();
+    let inner = &rows[rows.len() * 15 / 100..rows.len() * 85 / 100];
+    let n = inner.len() as f32;
+    let (mean_y, mean_x) = inner
+        .iter()
+        .fold((0.0, 0.0), |(sy, sx), (y, x)| (sy + y / n, sx + x / n));
+    let (num, den) = inner.iter().fold((0.0, 0.0), |(num, den), (y, x)| {
+        (
+            num + (y - mean_y) * (x - mean_x),
+            den + (y - mean_y).powi(2),
+        )
+    });
+    num / den
+}
+
 #[test]
-fn oblique_falls_back_to_the_italic_face() {
-    // Skia's matcher does not fall back from oblique to italic, so asking for
-    // `Slant::Oblique` on a family with no oblique face returned the upright
-    // one and `oblique` painted what upright paints. Chrome renders it as the
-    // italic face, which is the order CSS Fonts 4 gives: oblique, then italic,
-    // then upright.
+fn oblique_shears_the_upright_face_before_taking_the_italic() {
+    // CSS Fonts 4, section 5.2, puts "a fallback match ... produced by
+    // geometric shearing to the specified oblique value" ahead of any italic
+    // face, so a family with an italic and no oblique draws its upright face
+    // sheared. Chrome draws the italic instead, which
+    // docs/browser-differences.md records.
     //
-    // The crate had this after the binding was fixed, because each surface
-    // translated the slant separately. The rule is one function now and this
-    // asserts the crate reaches it.
-    //
-    // Ink signature rather than a golden: the three faces differ in coverage
-    // and in horizontal centre of mass, and comparing both catches a face
-    // swap that coverage alone would miss.
+    // Ink signature rather than a golden: the three renderings differ in
+    // coverage and in horizontal centre of mass, and comparing both catches
+    // a face swap that coverage alone would miss.
     let signature = |slant: FontSlant| {
         let mut canvas = Canvas::new(240.0, 120.0);
         {
@@ -6677,14 +6706,66 @@ fn oblique_falls_back_to_the_italic_face() {
     let italic = signature(FontSlant::Italic);
     let oblique = signature(FontSlant::Oblique);
 
-    // Without this the assertion below passes on any family whose faces
-    // happen to render alike, which proves nothing about the fallback.
+    // Without this the first assertion below passes on any family whose
+    // faces happen to render alike, which proves nothing about the order.
     assert_ne!(
         italic, upright,
         "italic must differ from upright to compare against"
     );
-    assert_eq!(oblique, italic, "oblique should select the italic face");
+    assert_ne!(oblique, italic, "oblique must not take the italic face");
     assert_ne!(oblique, upright, "oblique must not render upright");
+}
+
+#[test]
+fn a_font_obliques_by_fourteen_degrees_and_a_shorthand_by_its_angle() {
+    // `FontSlant::Oblique` carries no angle, so a `Font` set with it is the
+    // shorthand's bare `oblique`: 14deg, the angle CSS Fonts 4 gives it.
+    // `set_font_css` keeps the angle the shorthand names, and `Font::from_css`
+    // cannot, which is the difference its documentation states.
+    let tan = |degrees: f32| degrees.to_radians().tan();
+    let near = |slope: f32, expected: f32, what: &str| {
+        assert!(
+            (slope - expected).abs() <= 0.005,
+            "{what}: slope {slope}, expected {expected}"
+        );
+    };
+    let family = oswald();
+
+    near(
+        stem_slope(|ctx| {
+            ctx.set_font(&Font::new(family, 200.0).slant(FontSlant::Oblique))
+        }),
+        -tan(14.0),
+        "a Font with FontSlant::Oblique",
+    );
+    near(
+        stem_slope(|ctx| {
+            assert!(ctx.set_font_css(&format!("oblique 10deg 200px {family}")))
+        }),
+        -tan(10.0),
+        "set_font_css at 10deg",
+    );
+    near(
+        stem_slope(|ctx| {
+            assert!(ctx.set_font_css(&format!("oblique -14deg 200px {family}")))
+        }),
+        tan(14.0),
+        "set_font_css at -14deg leans back",
+    );
+    near(
+        stem_slope(|ctx| {
+            let font = Font::from_css(&format!("oblique 10deg 200px {family}"))
+                .expect("parses");
+            ctx.set_font(&font);
+        }),
+        -tan(14.0),
+        "Font::from_css keeps the slant and not the angle",
+    );
+    near(
+        stem_slope(|ctx| ctx.set_font(&Font::new(family, 200.0))),
+        0.0,
+        "the control: upright",
+    );
 }
 
 #[test]
@@ -7048,13 +7129,10 @@ fn font_builder_selects_an_italic_face() {
 /// `font` reads `oblique` back as `italic`, as Chrome does, which
 /// `the_font_string_is_what_chrome_reads_back` pins.
 ///
-/// **What this can and cannot show with the bundled fonts.** Raleway ships
-/// upright and italic and no oblique, which the first assertion states
-/// rather than assumes -- so the matcher resolves both slants to the italic
-/// face here and a measurement cannot separate them. What it does show is
-/// that the slant reaches Skia at all: an oblique request selects a
-/// different face from the upright one. The separation between the two
-/// keywords is asserted where it is observable, on the value.
+/// Raleway ships upright and italic and no oblique, which the first
+/// assertion states rather than assumes. An oblique request there draws the
+/// upright face sheared, so it advances as the upright face does and not as
+/// the italic one, and a measurement separates the two keywords.
 #[test]
 fn oblique_is_a_slant_of_its_own_not_a_spelling_of_italic() {
     assert_ne!(
@@ -7079,17 +7157,23 @@ fn oblique_is_a_slant_of_its_own_not_a_spelling_of_italic() {
         .styles;
     assert!(
         !styles.iter().any(|style| style == "oblique"),
-        "the fixture has no oblique face, which is why the measurement \
-         below cannot separate the two keywords: {styles:?}"
+        "the fixture has no oblique face, so an oblique is a sheared \
+         upright: {styles:?}"
     );
 
     let mut canvas = Canvas::new(10.0, 10.0);
     let ctx = canvas.context();
-    ctx.set_font(&Font::new(raleway(), 32.0));
-    let upright = ctx.measure_text("oblique", None).width;
-    ctx.set_font(&Font::new(raleway(), 32.0).slant(FontSlant::Oblique));
-    let slanted = ctx.measure_text("oblique", None).width;
-    assert_ne!(upright, slanted, "the slant reached the matcher");
+    let mut width = |slant: FontSlant| {
+        ctx.set_font(&Font::new(raleway(), 32.0).slant(slant));
+        ctx.measure_text("oblique", None).width
+    };
+    let (upright, italic, oblique) = (
+        width(FontSlant::Normal),
+        width(FontSlant::Italic),
+        width(FontSlant::Oblique),
+    );
+    assert_ne!(upright, italic, "the italic is a face of its own");
+    assert_eq!(oblique, upright, "oblique advances as the upright face");
 }
 
 /// Letter spacing adds one space for every character, the last included.
@@ -7242,10 +7326,9 @@ fn kerning_stops_at_a_word_boundary() {
 /// what `Upright` paints. Chrome renders the italic, which is the order CSS
 /// Fonts 4 gives: oblique, then italic, then upright.
 ///
-/// This is the text-layout route, which is the half that was left.
-/// `oblique_falls_back_to_the_italic_face` covers `Font`/`FontSlant`, where
-/// `italic: bool` meant `"oblique"` already selected the italic face and
-/// nothing changed.
+/// This is the text-layout route. A canvas shears the upright face instead,
+/// as CSS Fonts 4 orders it, which
+/// `oblique_shears_the_upright_face_before_taking_the_italic` covers.
 ///
 /// A system family rather than a bundled one, because the case needs a real
 /// italic face and `TextEngine::with_system_fonts` does not see the
