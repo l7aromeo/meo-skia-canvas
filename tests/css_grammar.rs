@@ -245,8 +245,8 @@ fn set_font_css_answers_the_font_table() {
     /// font taken shows the caps and stretch reset, as Chrome's setter
     /// resets them.
     const SENTINEL: &str = "small-caps ultra-expanded 7px Sentinel";
-    /// The sentinel as `font` reads it back: Chrome's form, with no stretch.
-    const SENTINEL_READ: &str = "small-caps 7px Sentinel";
+    /// The sentinel as `font` reads it back, in the specification's form.
+    const SENTINEL_READ: &str = "small-caps ultra-expanded 7px \"Sentinel\"";
 
     let cases = cases("css-fonts");
     let ignored =
@@ -277,18 +277,18 @@ fn set_font_css_answers_the_font_table() {
                         case["variantCaps"].as_str().expect("a caps keyword")
                     );
                     (!taken || got != want).then(|| {
-                        format!("{css:?}: taken {taken}, {got}; Chrome {want}")
+                        format!("{css:?}: taken {taken}, {got}; want {want}")
                     })
                 }
                 None => (taken || got != ignored).then(|| {
-                    format!("{css:?}: taken {taken}, {got}; Chrome ignores it")
+                    format!("{css:?}: taken {taken}, {got}; want it ignored")
                 }),
             }
         })
         .collect();
     assert!(
         wrong.is_empty(),
-        "{} of {} cases disagree with Chrome:\n{}",
+        "{} of {} cases disagree with the table:\n{}",
         wrong.len(),
         cases.len(),
         wrong.join("\n")
@@ -377,7 +377,7 @@ fn the_spacing_setters_answer_the_spacing_table() {
             };
             if !agrees {
                 wrong.push(format!(
-                    "{property} spacing {css:?} in {:?}: {got:?}, Chrome {want:?}",
+                    "{property} spacing {css:?} in {:?}: {got:?}, want {want:?}",
                     case.get("font")
                 ));
             }
@@ -385,7 +385,7 @@ fn the_spacing_setters_answer_the_spacing_table() {
     }
     assert!(
         wrong.is_empty(),
-        "{} disagreements with Chrome over {} cases:\n{}",
+        "{} disagreements with the table over {} cases:\n{}",
         wrong.len(),
         cases.len(),
         wrong.join("\n")

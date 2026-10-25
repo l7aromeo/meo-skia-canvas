@@ -1451,8 +1451,8 @@ mod tests {
         ] {
             assert!(parse_length(text).is_none(), "{text:?} should not parse");
         }
-        // Zero alone may go unitless here; spacing refuses it on top, in
-        // `Spacing::from_css`.
+        // Zero alone may go unitless, as CSS Values 4 lets a zero length;
+        // spacing takes it as `0px`, in `Spacing::from_css`.
         assert!(parse_length("0").is_some());
     }
 

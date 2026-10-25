@@ -67,8 +67,8 @@ describe("Context2D", () => {
 
     test("font", () => {
       assert.equal(ctx.font, "10px sans-serif");
-      let font = "16px Baskerville, serif";
-      ctx.font = font;
+      ctx.font = "16px Baskerville, serif";
+      let font = '16px "Baskerville", serif';
       assert.equal(ctx.font, font);
       ctx.font = "invalid";
       assert.equal(ctx.font, font);
@@ -1844,10 +1844,10 @@ describe("Context2D", () => {
   describe("parses", () => {
     test("a mixed-case font reaches ctx.font", () => {
       ctx.font = "ITALIC BOLD 20PX serif";
-      // The getter reports the serialized form, so `bold` rather than 700
-      // and no `normal` variant; the table above is the canonical string,
-      // which is the addon's cache key and keeps both.
-      assert.equal(ctx.font, "italic bold 20px serif");
+      // The getter reports the serialized form, so 700 and no `normal`
+      // variant; the table above is the canonical string, which is the
+      // addon's cache key and keeps both.
+      assert.equal(ctx.font, "italic 700 20px serif");
     });
 
     test("a negative size leaves ctx.font alone", () => {
@@ -4183,7 +4183,7 @@ describe("bolder and lighter resolve against the inherited weight", () => {
   test("both keywords land on the row the specification gives for 400", () => {
     const ctx = new Canvas(10, 10).getContext("2d");
     ctx.font = "bolder 16px serif";
-    assert.equal(ctx.font, "bold 16px serif");
+    assert.equal(ctx.font, "700 16px serif");
     ctx.font = "lighter 16px serif";
     assert.equal(ctx.font, "100 16px serif");
   });

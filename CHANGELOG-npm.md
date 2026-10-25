@@ -154,6 +154,11 @@ removed and no signature moves.
 
 ### Fixed
 
+- **`letterSpacing` and `wordSpacing` take `"0"`.** CSS Values 4 lets a
+  zero length be written without its unit, and `ctx.letterSpacing = "0"`
+  was ignored; it now sets no spacing and reads back as `0px`. Chrome
+  ignores it, and docs/browser-differences.md records the difference.
+
 - **`outlineText` and the ink box put every glyph where `fillText` draws
   it.** A glyph the shaper moves off its advance -- a mark stacked over
   another, a mark set over a base with no precomposed glyph, the half of a
@@ -569,20 +574,22 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   unpremultiplied, as the standard defines, so nothing changes for code
   that never asks for premultiplied data.
 
-- **`ctx.font` reads and reports a font as Chrome does.** Checked against
-  101 shorthands measured in Chrome 152, which `Font::from_css` on the crate
-  side is tested against too.
+- **`ctx.font` reads a font as Chrome does, and reports it as CSSOM
+  serializes it.** Checked against 101 shorthands measured in Chrome 152,
+  which `Font::from_css` on the crate side is tested against too.
 
-  **What `ctx.font` reads back has changed.** A stretch keyword is still
-  applied but no longer appears in the string, which Chrome reports through
-  `ctx.fontStretch` alone: `condensed 16px Arial` reads back as
-  `16px Arial`, so `ctx.font = ctx.font` resets the stretch, as it does in
-  a browser. `oblique` reads back as `italic`, though the oblique face is
-  still the one selected. The weight comes before `small-caps`, as in
-  `italic 300 small-caps 16px Arial`. A size has six significant digits:
-  `2cm` reads `75.5906px` rather than `75.59055118110236px`. A family that
-  is not one identifier is quoted, with a `"` or `\` inside it escaped, so
-  `16px "12"` reads back as itself rather than as `16px 12`.
+  **What `ctx.font` reads back has changed**, to the form HTML, CSSOM and
+  CSS Fonts 4 give it: style, `small-caps`, weight, width, size and family,
+  in that order, each left out at its initial value. A stretch keyword is
+  kept, so `condensed 16px Arial` reads back as `condensed 16px "Arial"`
+  and `ctx.font = ctx.font` keeps it. `oblique` reads back as `oblique`,
+  with its angle where it is not the default 14deg, as `oblique 10deg`. A
+  weight is its number, so `bold` reads back as `700`. A size is the
+  shortest number to six decimals: `2cm` reads `75.59055px`, the nearest
+  32-bit value to 75.5905511... A family name is a quoted string, with a
+  `"` or `\` inside it escaped, and a generic family its keyword:
+  `16px Arial, sans-serif` reads back as `16px "Arial", sans-serif`. Chrome
+  differs in each of these, and docs/browser-differences.md lists how.
 
   **Sizes resolve as in Chrome.** `em` and `%` are of the canvas default,
   10px, not 16px: `1em` is 10px and `150%` is 15px. The keywords follow
@@ -899,8 +906,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   Oswald, which has none. Chrome 152 takes the family's italic, or a fixed
   quarter skew, from 14deg up and draws upright below; its measurements are
   in docs/browser-differences.md. `measureText` reports the sheared ink, and
-  `ctx.font` reads back as it did. A `Paragraph` range whose `fontStyle`
-  asks for oblique is sheared at 14deg the same way and draws what
+  `ctx.font` reads back as `oblique`, with its angle. A `Paragraph` range
+  whose `fontStyle` asks for oblique is sheared at 14deg the same way and draws what
   `oblique` text on a canvas draws, its decorations level and its shadows
   leaning with its glyphs. Being a font of its own, it is shaped apart from the
   text beside it, so no ligature forms across its edge, and a combining

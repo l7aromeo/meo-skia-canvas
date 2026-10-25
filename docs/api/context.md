@@ -36,7 +36,7 @@ ctx.font = "24px Avenir"; // uses the default leading in the font metrics
 ctx.font = "24px/1.5 Avenir"; // sets the line height to 1.5 ems
 ```
 
-Reading `.font` back gives the form Chrome gives: no line height, the weight before `small-caps`, `italic` for an `oblique` font, and sizes to six significant digits (`"2cm Arial"` reads back as `"75.5906px Arial"`). A stretch keyword in the shorthand is applied but reported by [`.fontStretch`][fontStretch] instead. Relative sizes resolve as they do in a browser canvas: `em` and `%` against the default 10px, `rem` against 16px. System font keywords such as `caption` and `menu` are ignored, since what they name differs by platform.
+Reading `.font` back gives the font as CSSOM serializes it, with no line height: components at their initial value left out, the rest in the shorthand's order, the weight as a number, an `oblique` with its angle unless that is the default 14deg, sizes to at most six decimals, and family names quoted (`"bold condensed 2cm Arial, sans-serif"` reads back as `'700 condensed 75.59055px "Arial", sans-serif'`). Chrome reads `bold`, drops the stretch, reads `oblique` as `italic` and leaves names unquoted; [browser differences](../browser-differences.md) lists each one. Setting [`.fontStretch`][fontStretch] or `.fontVariantCaps` afterwards changes the text drawn but not what `.font` reads, as the HTML standard keeps them separate. Relative sizes resolve as they do in a browser canvas: `em` and `%` against the default 10px, `rem` against 16px. System font keywords such as `caption` and `menu` are ignored, since what they name differs by platform.
 
 ### `.fontHinting`
 
