@@ -116,8 +116,7 @@ window be changed after it opens.** No signature moves and nothing is removed.
 - **`Context2D::filter()` reports a chain set through `set_filter_css`
   exactly as it was written**, as Chrome and the JavaScript `filter` getter
   do. Surrounding whitespace was trimmed and `"NONE"` or `" none "` read back
-  as `"none"`; now only the empty string, which clears the filter here and
-  which Chrome ignores, reads back as `"none"`. The parse still trims, so
+  as `"none"`; now each reads back as written. The parse still trims, so
   nothing draws differently.
 
 - **A `drop-shadow` colour in `set_filter_css`, and a decoration colour in
@@ -162,8 +161,7 @@ window be changed after it opens.** No signature moves and nothing is removed.
 - **`Context2D::filter()` reports a chain set through `set_filter_css`
   exactly as it was written**, as Chrome and the JavaScript `filter` getter
   do. Surrounding whitespace was trimmed and `"NONE"` or `" none "` read back
-  as `"none"`; now only the empty string, which clears the filter here and
-  which Chrome ignores, reads back as `"none"`. The parse still trims, so
+  as `"none"`; now each reads back as written. The parse still trims, so
   nothing draws differently.
 
 - **A family with no italic face is slanted, and a static family with no
@@ -452,8 +450,7 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `blur(2px)brightness(2)`; an argument left out, which takes its
   default -- `blur()` and `hue-rotate()` are zero, `brightness()` and the
   other amounts 1; and a bare `0` as an angle, as `hue-rotate(0)`, which
-  transforms already took. `set_filter_css("")` still clears the filter,
-  though Chrome ignores the empty string.
+  transforms already took.
 
 - **A number ending in a point is refused.** CSS Syntax needs a digit after
   a `.`, and Chrome refuses `translate(5.px)`, `scale(2.)` and
@@ -765,6 +762,13 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `Image::from_url` takes `data:` URLs through it.
 
 ### Changed
+
+- **`set_filter_css` leaves the filter as it was for a blank string.**
+  `set_filter_css("")`, and a string of only whitespace, cleared the
+  filter. It now returns `Error::InvalidFilter` and changes nothing, as
+  HTML's `filter` setter, Chrome 152 and the JavaScript `ctx.filter` do: a
+  blank string is not a `<filter-value-list>`. To clear a filter, pass
+  `"none"` or call `set_filter(&[])`.
 
 - **`FontSlant::Oblique` and `TextSlant::Oblique` draw as CSS Fonts 4
   matches them, superseding 0.16.0's "`TextSlant::Oblique` now renders the

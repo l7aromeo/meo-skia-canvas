@@ -3296,6 +3296,46 @@ fn an_empty_filter_chain_clears_a_previous_one() {
 }
 
 #[test]
+fn a_blank_filter_string_leaves_the_filter_as_it_was() {
+    // HTML's `filter` setter returns without a change for a value that is
+    // not a `<filter-value-list>`, and a blank one is not; only `none`
+    // clears. Measured on what draws as well as on `filter()`, since a
+    // setter could refuse and still have cleared the chain first.
+    let sample = |apply: &dyn Fn(&mut Context2D)| {
+        let mut canvas = Canvas::new(20.0, 20.0);
+        {
+            let ctx = canvas.context();
+            ctx.set_filter_css("blur(4px)").expect("a filter");
+            apply(ctx);
+            ctx.set_fill_style(red());
+            ctx.fill_rect(5.0, 5.0, 10.0, 10.0);
+        }
+        pixels(&mut canvas)
+    };
+
+    let blurred = sample(&|_| {});
+    for blank in ["", "   ", "\t"] {
+        let kept = sample(&|ctx| {
+            assert!(
+                matches!(
+                    ctx.set_filter_css(blank),
+                    Err(Error::InvalidFilter { .. })
+                ),
+                "{blank:?} is refused"
+            );
+            assert_eq!(ctx.filter(), "blur(4px)", "{blank:?} keeps it");
+        });
+        assert_eq!(kept, blurred, "{blank:?} leaves the blur drawing");
+    }
+
+    let cleared = sample(&|ctx| {
+        ctx.set_filter_css("none").expect("none clears");
+        assert_eq!(ctx.filter(), "none");
+    });
+    assert_ne!(cleared, blurred, "none takes the blur off");
+}
+
+#[test]
 fn filter_state_is_saved_and_restored() {
     // Asserts on the rendered pixels, not only on `filter()`. The string and
     // the Skia filter chain are two halves of one value, and a restore that
