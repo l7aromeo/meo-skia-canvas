@@ -3449,6 +3449,167 @@
         "variantCaps": "normal",
         "stretch": "normal"
       }
+    },
+    {
+      "css": "12px -1x",
+      "refused": true
+    },
+    {
+      "css": "12px -",
+      "refused": true
+    },
+    {
+      "css": "12px --a",
+      "font": "12px \"--a\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "--a"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      },
+      "chrome": "12px \"--a\""
+    },
+    {
+      "css": "12px -a",
+      "font": "12px \"-a\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "-a"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      },
+      "chrome": "12px -a"
+    },
+    {
+      "css": "12px \\61 bc",
+      "font": "12px \"abc\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "abc"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      },
+      "chrome": "12px abc"
+    },
+    {
+      "css": "12px \\61bc",
+      "font": "12px \"憼\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "憼"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      },
+      "chrome": "12px 憼"
+    },
+    {
+      "css": "12px a\\ b",
+      "font": "12px \"a b\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "a b"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      },
+      "chrome": "12px \"a b\""
+    },
+    {
+      "css": "12px \\-1x",
+      "font": "12px \"-1x\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "-1x"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      },
+      "chrome": "12px \"-1x\""
+    },
+    {
+      "css": "12px -\\31 x",
+      "font": "12px \"-1x\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "-1x"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      },
+      "chrome": "12px \"-1x\""
+    },
+    {
+      "css": "12px \\",
+      "font": "12px \"\ufffd\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "\ufffd"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      },
+      "chrome": "12px \ufffd"
+    },
+    {
+      "css": "12px a\\",
+      "font": "12px \"a\ufffd\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "a\ufffd"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      },
+      "chrome": "12px a\ufffd"
     }
   ]
 }

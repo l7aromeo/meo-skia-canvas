@@ -14,7 +14,10 @@
 //! so it is used in a scope rather than held for the canvas's lifetime as it
 //! would be in JavaScript.
 
-use std::iter;
+use std::{
+    iter::{self, Peekable},
+    str::CharIndices,
+};
 
 use skia_safe::{
     ColorSpace as SkColorSpace, Data, FourByteTag, IRect,
@@ -43,8 +46,8 @@ use crate::{
     },
     css::{
         Dimension, Expect, FontUnits, Percent, ROOT_FONT_PX, evaluate,
-        is_ident_code_point, is_ident_start_code_point, is_math, parse_angle,
-        parse_decoration, parse_filter, split_number, without_comments,
+        is_ident_code_point, is_math, parse_angle, parse_decoration,
+        parse_filter, split_number, without_comments, would_start_ident,
         written_zero,
     },
     error::Error,
@@ -573,9 +576,11 @@ impl Font {
         let families = self
             .families
             .iter()
-            .map(|family| match family.contains(char::is_whitespace) {
-                true => format!("\"{family}\""),
-                false => family.clone(),
+            .map(|family| {
+                match family.contains(|c: char| c.is_ascii_whitespace()) {
+                    true => format!("\"{family}\""),
+                    false => family.clone(),
+                }
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -971,18 +976,7 @@ fn font_families(text: &str) -> Option<Vec<String>> {
         let (name, after) = match rest.chars().next() {
             Some(quote @ ('"' | '\'')) => css_string(rest, quote)?,
             _ => {
-                let end = rest.find(',').unwrap_or(rest.len());
-                let words: Vec<&str> =
-                    rest[..end].split_ascii_whitespace().collect();
-                let identifier = |word: &&str| {
-                    let mut chars = word.chars();
-                    chars.next().is_some_and(|c| {
-                        is_ident_start_code_point(c) || c == '-'
-                    }) && word.chars().all(is_ident_code_point)
-                };
-                if words.is_empty() || !words.iter().all(identifier) {
-                    return None;
-                }
+                let (words, end) = identifiers(rest)?;
                 let name = words.join(" ");
                 let keyword = [
                     "inherit",
@@ -1011,6 +1005,74 @@ fn font_families(text: &str) -> Option<Vec<String>> {
     (!families.is_empty()).then_some(families)
 }
 
+/// The identifiers an unquoted family name is written as, decoded, and the
+/// byte offset of what follows them: the end, or the comma before the next
+/// family. `None` where something other than an identifier stands there --
+/// `12` is not a family, and Chrome ignores `16px 12`.
+///
+/// Each identifier starts as [`would_start_ident`] says, so `-1x` and `-`
+/// alone are none, and runs over [`is_ident_code_point`]s and escapes,
+/// which CSS Syntax 3 section 4.3.11 decodes as it consumes one: `\61 bc`
+/// is `abc` and `a\ b` the one word `a b`. Identifiers apart are joined by a
+/// single space.
+fn identifiers(text: &str) -> Option<(Vec<String>, usize)> {
+    let mut words = Vec::new();
+    let mut chars = text.char_indices().peekable();
+    loop {
+        while chars.next_if(|(_, c)| c.is_ascii_whitespace()).is_some() {}
+        let Some(&(at, c)) = chars.peek() else {
+            break;
+        };
+        if c == ',' {
+            return (!words.is_empty()).then_some((words, at));
+        }
+        if !would_start_ident(&text[at..]) {
+            return None;
+        }
+        let mut word = String::new();
+        while let Some(&(at, c)) = chars.peek() {
+            match c {
+                '\\' if would_start_ident(&text[at..]) => {
+                    chars.next();
+                    word.push(consume_escape(&mut chars));
+                }
+                c if is_ident_code_point(c) => {
+                    chars.next();
+                    word.push(c);
+                }
+                c if c.is_ascii_whitespace() || c == ',' => break,
+                _ => return None,
+            }
+        }
+        words.push(word);
+    }
+    (!words.is_empty()).then_some((words, text.len()))
+}
+
+/// The code point a CSS escape names, its backslash already read, as CSS
+/// Syntax 3 section 4.3.7 consumes one: up to six hex digits and one
+/// whitespace after them, or else the next code point as itself. Zero, a
+/// surrogate, anything past the last code point and the end of the input
+/// are U+FFFD.
+fn consume_escape(chars: &mut Peekable<CharIndices>) -> char {
+    let hex: String = iter::from_fn(|| {
+        chars
+            .next_if(|(_, c)| c.is_ascii_hexdigit())
+            .map(|(_, c)| c)
+    })
+    .take(MAX_CSS_ESCAPE_HEX_DIGITS)
+    .collect();
+    if hex.is_empty() {
+        return chars.next().map_or(char::REPLACEMENT_CHARACTER, |(_, c)| c);
+    }
+    chars.next_if(|(_, c)| c.is_ascii_whitespace());
+    u32::from_str_radix(&hex, 16)
+        .ok()
+        .and_then(char::from_u32)
+        .filter(|&c| c != '\0')
+        .unwrap_or(char::REPLACEMENT_CHARACTER)
+}
+
 /// A CSS string opening `text` with `quote`, unescaped, and what follows it.
 ///
 /// A backslash escapes the next character, or names one in up to six hex
@@ -1019,33 +1081,17 @@ fn font_families(text: &str) -> Option<Vec<String>> {
 /// closing quote is `None`.
 fn css_string(text: &str, quote: char) -> Option<(String, &str)> {
     let mut name = String::new();
-    let mut chars = text.char_indices().skip(1).peekable();
+    let mut chars = text.char_indices().peekable();
+    chars.next();
     while let Some((at, c)) = chars.next() {
         match c {
             c if c == quote => {
                 return Some((name, text[at + 1..].trim_ascii_start()));
             }
-            '\\' => {
-                let hex: String = iter::from_fn(|| {
-                    chars
-                        .next_if(|(_, c)| c.is_ascii_hexdigit())
-                        .map(|(_, c)| c)
-                })
-                .take(MAX_CSS_ESCAPE_HEX_DIGITS)
-                .collect();
-                if hex.is_empty() {
-                    name.push(chars.next()?.1);
-                } else {
-                    chars.next_if(|(_, c)| c.is_ascii_whitespace());
-                    let code = u32::from_str_radix(&hex, 16).ok()?;
-                    // Zero, a surrogate and anything past the last code
-                    // point are all U+FFFD.
-                    name.push(
-                        char::from_u32(code)
-                            .filter(|&c| c != '\0')
-                            .unwrap_or(char::REPLACEMENT_CHARACTER),
-                    );
-                }
+            // A backslash with nothing after it ends the string unclosed,
+            // which is refused below.
+            '\\' if chars.peek().is_some() => {
+                name.push(consume_escape(&mut chars));
             }
             c => name.push(c),
         }

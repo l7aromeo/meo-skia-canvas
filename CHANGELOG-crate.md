@@ -105,7 +105,10 @@ window be changed after it opens.** No signature moves and nothing is removed.
     name's, so `Font::from_css("12px a\u{b5}b")` is `None` where it read
     the family `aµb`, and `12px a·b` is read where it was refused. Chrome
     152 takes both, under the older rule that any code point at or above
-    U+0080 is a name's; docs/browser-differences.md records it.
+    U+0080 is a name's; docs/browser-differences.md records it. A name
+    starts as CSS Syntax says, so `12px -1x` and `12px -`, which read as
+    families, are refused, and an escape in an unquoted name is decoded,
+    `12px \61 bc` naming `abc` where it was refused, as in Chrome.
 
 - **`outline_text` and the ink box put every glyph where `fill_text` draws
   it.** A glyph the shaper moves off its advance -- a mark stacked over

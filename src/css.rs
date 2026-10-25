@@ -159,6 +159,29 @@ pub(crate) fn is_ident_start_code_point(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_' || is_non_ascii_ident_code_point(c)
 }
 
+/// Whether `text` starts an identifier, CSS Syntax 3 section 4.3.9's "check
+/// if three code points would start an ident sequence": an ident-start code
+/// point; a `-` before one, before another `-`, or before a valid escape; or
+/// a valid escape -- a `\` that is not before a newline, CSS's line feed,
+/// carriage return or form feed. So `-1x` and `-` alone start none, where
+/// `-a`, `--a`, `\-1x` and `-\31 x` each start one.
+pub(crate) fn would_start_ident(text: &str) -> bool {
+    let valid_escape = |first: Option<char>, second: Option<char>| {
+        first == Some('\\') && !matches!(second, Some('\n' | '\r' | '\x0C'))
+    };
+    let mut chars = text.chars();
+    match chars.next() {
+        Some('-') => {
+            let (second, third) = (chars.next(), chars.next());
+            second.is_some_and(|c| is_ident_start_code_point(c) || c == '-')
+                || valid_escape(second, third)
+        }
+        first @ Some('\\') => valid_escape(first, chars.next()),
+        Some(c) => is_ident_start_code_point(c),
+        None => false,
+    }
+}
+
 /// Whether `c` may appear in a CSS identifier: CSS Syntax 3, section 4.2,
 /// "ident code point" -- "An ident-start code point, a digit, or U+002D
 /// HYPHEN-MINUS (-)".
