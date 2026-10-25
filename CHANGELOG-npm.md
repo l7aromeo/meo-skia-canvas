@@ -30,7 +30,8 @@ removed and no signature moves.
   `offset: [1, 2, 3]` took its first two numbers, and `halfLeading: 1` was
   ignored where `fontSize: "12"` was 12. Each option now converts as a
   Canvas attribute does: a number by `ToNumber`, so `"12"`, `[12]` and
-  `true` convert; a string by `ToString`; a boolean by `ToBoolean`, so
+  `true` convert; a string by `ToString`, `null` meaning the option left
+  out, as it did; a boolean by `ToBoolean`, so
   `halfLeading: 1` is `true`; an object of options as a dictionary, `null`
   taking every default; a list as a sequence, any iterable included; a
   colour as a CSS string or a sequence of four numbers. A conversion WebIDL

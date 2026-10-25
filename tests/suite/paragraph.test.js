@@ -1653,6 +1653,7 @@ describe("a ParagraphBuilder option is converted as WebIDL converts it", () => {
       { toString: () => "normal" },
       [],
       new Set(),
+      null,
     ],
   };
   // What throws: ToNumber's NaN and infinities and its refusal of a Symbol
@@ -1666,7 +1667,7 @@ describe("a ParagraphBuilder option is converted as WebIDL converts it", () => {
     [SEQUENCE]: ["Arial", 1, true, null, {}, Symbol("s")],
     [DICTIONARY]: ["x", 1, true, Symbol("s"), 1n],
     [COLOUR]: [Symbol("s"), [1, 0, 0], ["red"], [1, 0, 0, "x"]],
-    [VARIATIONS]: [1, true, null, {}, "none", Symbol("s")],
+    [VARIATIONS]: [1, true, {}, "none", Symbol("s")],
   };
 
   const pushed = (style) => ParagraphBuilder.Make({}).pushStyle(style),
@@ -1836,6 +1837,28 @@ describe("a ParagraphBuilder option is converted as WebIDL converts it", () => {
       0,
       `${wrong.length} of ${all.length}:\n${wrong.join("\n")}`,
     );
+  });
+
+  // A string option is a `DOMString?`, so `null` is the option left out
+  // rather than the string "null".
+  test("is left out when a string option is null", () => {
+    const lastLine = (ellipsis) => {
+      const p = ParagraphBuilder.Make({
+        maxLines: 1,
+        ...(ellipsis === undefined ? {} : { ellipsis }),
+        textStyle: { fontSize: 16 },
+      })
+        .addText("Hamburgefonstiv ".repeat(20))
+        .build();
+      p.layout(200);
+      return p.getLineMetrics()[0].width;
+    };
+    assert.notEqual(
+      lastLine("null"),
+      lastLine(undefined),
+      "the ellipsis must show for this to mean anything",
+    );
+    assert.equal(lastLine(null), lastLine(undefined));
   });
 
   test("is its default when it is undefined", () => {
