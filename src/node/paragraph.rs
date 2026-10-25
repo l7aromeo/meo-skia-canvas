@@ -2,11 +2,11 @@
 // ParagraphBuilder & Paragraph wrappers for CanvasKit parity
 //
 #![allow(non_snake_case)]
-use neon::prelude::*;
+use neon::{prelude::*, types::JsBigInt};
 use std::{cell::RefCell, sync::OnceLock};
 
 use skia_safe::{
-    Color, ColorSpace, FourByteTag, Paint, PaintStyle, Point,
+    Color, Color4f, ColorSpace, FourByteTag, Paint, PaintStyle, Point,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
         FontCollection, Paragraph as SkParagraph, ParagraphStyle,
@@ -72,48 +72,393 @@ pub type BoxedParagraph = JsBox<RefCell<ParagraphWrap>>;
 // Style parsing helpers
 //
 
+// Each option is converted as WebIDL converts a value to the type the
+// option's declaration names, as the Canvas API's own attributes are: a
+// number by `ToNumber`, so `fontSize: "12"` is 12 as `ctx.lineWidth = "5"`
+// is 5; a string by `ToString`; a boolean by `ToBoolean`; an object of
+// options as a dictionary; a list as a sequence. Where a conversion throws,
+// the `TypeError` names the option and what it takes -- AGENTS.md's refusal
+// rule 5, the error WebIDL raises -- and an absent or `undefined` option
+// takes its default, as an omitted dictionary member does. A converted
+// value outside what an option allows is another rule's: a number out of
+// range, a colour that does not parse.
+//
+// `prefix` and `key` are where the option is -- `textStyle.` and
+// `fontSize`, or no prefix and `shadows[0].offset` -- so that the refusal
+// names the option the way the caller wrote it.
+
+/// What a JavaScript value is, as a refusal names it.
+fn kind_of(cx: &mut FunctionContext, value: Handle<JsValue>) -> &'static str {
+    if value.is_a::<JsNull, _>(cx) {
+        "null"
+    } else if value.is_a::<JsUndefined, _>(cx) {
+        "undefined"
+    } else if value.is_a::<JsString, _>(cx) {
+        "a string"
+    } else if value.is_a::<JsNumber, _>(cx) {
+        "a number"
+    } else if value.is_a::<JsBoolean, _>(cx) {
+        "a boolean"
+    } else if value.is_a::<JsArray, _>(cx) {
+        "an array"
+    } else if value.is_a::<JsFunction, _>(cx) {
+        "a function"
+    } else if value.is_a::<JsObject, _>(cx) {
+        "an object"
+    } else if value.is_a::<JsBigInt, _>(cx) {
+        "a bigint"
+    } else {
+        "a symbol"
+    }
+}
+
+/// Whether `value` is a Symbol, the one primitive `kind_of` names by
+/// elimination: `ToString` and `ToNumber` both throw for one.
+fn is_symbol(cx: &mut FunctionContext, value: Handle<JsValue>) -> bool {
+    kind_of(cx, value) == "a symbol"
+}
+
+/// Refuses `value`, given for the option at `prefix` and `key`, which
+/// takes `takes`.
+fn wrong_kind<T>(
+    cx: &mut FunctionContext,
+    prefix: &str,
+    key: &str,
+    takes: &str,
+    value: Handle<JsValue>,
+) -> NeonResult<T> {
+    let got = kind_of(cx, value);
+    cx.throw_type_error(format!("`{prefix}{key}` takes {takes}, not {got}"))
+}
+
+/// The value of `key` in `obj`, or `None` where it is absent or `undefined`.
+fn option_value<'a>(
+    cx: &mut FunctionContext<'a>,
+    obj: &Handle<'a, JsObject>,
+    key: &str,
+) -> NeonResult<Option<Handle<'a, JsValue>>> {
+    let value: Handle<JsValue> = obj.get_value(cx, key)?;
+    Ok((!value.is_a::<JsUndefined, _>(cx)).then_some(value))
+}
+
+/// `value` as an IDL `double`, WebIDL section 3.2.7: "Let x be ?
+/// ToNumber(V). If x is NaN, +∞, or −∞, then throw a TypeError."
+///
+/// `ToNumber` is the global `Number`, which is it for every value but a
+/// BigInt, for which `Number` converts and `ToNumber` throws. Every number
+/// option here is a `double` rather than an `unrestricted double`: none of
+/// them has a use for NaN or an infinity, and lib/index.d.ts declares none
+/// as taking one.
+fn to_double(
+    cx: &mut FunctionContext,
+    value: Handle<JsValue>,
+    prefix: &str,
+    key: &str,
+) -> NeonResult<f64> {
+    const TAKES: &str = "a finite number";
+    let number = match value.downcast::<JsNumber, _>(cx) {
+        Ok(number) => number.value(cx),
+        Err(_) if value.is_a::<JsBigInt, _>(cx) || is_symbol(cx, value) => {
+            return wrong_kind(cx, prefix, key, TAKES, value);
+        }
+        Err(_) => {
+            let to_number: Handle<JsFunction> = cx.global("Number")?;
+            to_number
+                .call_with(cx)
+                .arg(value)
+                .apply::<JsNumber, _>(cx)?
+                .value(cx)
+        }
+    };
+    if number.is_finite() {
+        return Ok(number);
+    }
+    let spelled = cx.number(number).to_string(cx)?.value(cx);
+    let got = match value.is_a::<JsNumber, _>(cx) {
+        true => spelled,
+        false => format!("{} converting to {spelled}", kind_of(cx, value)),
+    };
+    cx.throw_type_error(format!("`{prefix}{key}` takes {TAKES}, not {got}"))
+}
+
+/// A number option, as an IDL `double` -- see [`to_double`].
+fn number_option<'a>(
+    cx: &mut FunctionContext<'a>,
+    obj: &Handle<'a, JsObject>,
+    prefix: &str,
+    key: &str,
+) -> NeonResult<Option<f64>> {
+    match option_value(cx, obj, key)? {
+        Some(value) => to_double(cx, value, prefix, key).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// A number option as an `f32`.
+fn float_option<'a>(
+    cx: &mut FunctionContext<'a>,
+    obj: &Handle<'a, JsObject>,
+    prefix: &str,
+    key: &str,
+) -> NeonResult<Option<f32>> {
+    Ok(number_option(cx, obj, prefix, key)?.map(|number| number as f32))
+}
+
+/// `value` as an IDL `DOMString`, WebIDL section 3.2.10: "Let x be ?
+/// ToString(V)." Only a Symbol throws, and is refused here so the error
+/// names the option.
+fn to_dom_string(
+    cx: &mut FunctionContext,
+    value: Handle<JsValue>,
+    prefix: &str,
+    key: &str,
+) -> NeonResult<String> {
+    if is_symbol(cx, value) {
+        return wrong_kind(cx, prefix, key, "a string", value);
+    }
+    Ok(value.to_string(cx)?.value(cx))
+}
+
+/// A string option, as an IDL `DOMString` -- see [`to_dom_string`].
+fn string_option<'a>(
+    cx: &mut FunctionContext<'a>,
+    obj: &Handle<'a, JsObject>,
+    prefix: &str,
+    key: &str,
+) -> NeonResult<Option<String>> {
+    match option_value(cx, obj, key)? {
+        Some(value) => to_dom_string(cx, value, prefix, key).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// A boolean option, as an IDL `boolean`, WebIDL section 3.2.3: "Let x be
+/// the result of computing ToBoolean(V)." Nothing is refused: every value
+/// is truthy or not.
+fn bool_option<'a>(
+    cx: &mut FunctionContext<'a>,
+    obj: &Handle<'a, JsObject>,
+    key: &str,
+) -> NeonResult<Option<bool>> {
+    let Some(value) = option_value(cx, obj, key)? else {
+        return Ok(None);
+    };
+    let to_boolean: Handle<JsFunction> = cx.global("Boolean")?;
+    let truth = to_boolean
+        .call_with(cx)
+        .arg(value)
+        .apply::<JsBoolean, _>(cx)?
+        .value(cx);
+    Ok(Some(truth))
+}
+
+/// `value` as an IDL dictionary, WebIDL section 3.2.17: "If jsDict is not an
+/// Object and jsDict is neither undefined nor null, then throw a TypeError."
+/// `None` for `null`, whose members are all left out, as `undefined`'s are;
+/// an array is an Object, and its members are read from it.
+///
+/// So is a function, which Neon's `JsObject` is not: its members are read
+/// from a copy, `Object.assign({}, value)`, which takes the own enumerable
+/// ones where WebIDL's `Get` would reach its prototype too -- the same
+/// answer for any function anyone passes as options.
+fn to_dictionary<'a>(
+    cx: &mut FunctionContext<'a>,
+    value: Handle<'a, JsValue>,
+    prefix: &str,
+    key: &str,
+) -> NeonResult<Option<Handle<'a, JsObject>>> {
+    if value.is_a::<JsNull, _>(cx) || value.is_a::<JsUndefined, _>(cx) {
+        return Ok(None);
+    }
+    if let Ok(object) = value.downcast::<JsObject, _>(cx) {
+        return Ok(Some(object));
+    }
+    if value.is_a::<JsFunction, _>(cx) {
+        let object: Handle<JsFunction> = cx.global("Object")?;
+        let assign: Handle<JsFunction> = object.get(cx, "assign")?;
+        let copy = cx.empty_object();
+        let members = assign
+            .call_with(cx)
+            .arg(copy)
+            .arg(value)
+            .apply::<JsObject, _>(cx)?;
+        return Ok(Some(members));
+    }
+    wrong_kind(cx, prefix, key, "an object", value)
+}
+
+/// An option holding an object of options, as an IDL dictionary -- see
+/// [`to_dictionary`].
+fn object_option<'a>(
+    cx: &mut FunctionContext<'a>,
+    obj: &Handle<'a, JsObject>,
+    prefix: &str,
+    key: &str,
+) -> NeonResult<Option<Handle<'a, JsObject>>> {
+    match option_value(cx, obj, key)? {
+        Some(value) => to_dictionary(cx, value, prefix, key),
+        None => Ok(None),
+    }
+}
+
+/// `value`'s elements where it is iterable, or `None` where it is not: the
+/// test both WebIDL's sequence conversion and its union conversion make,
+/// "Let method be ? GetMethod(V, %Symbol.iterator%)". An array is read as it
+/// is; any other iterable through `Array.from`, which runs its iterator.
+fn iterated<'a>(
+    cx: &mut FunctionContext<'a>,
+    value: Handle<'a, JsValue>,
+) -> NeonResult<Option<Vec<Handle<'a, JsValue>>>> {
+    if let Ok(array) = value.downcast::<JsArray, _>(cx) {
+        return array.to_vec(cx).map(Some);
+    }
+    let Ok(object) = value.downcast::<JsObject, _>(cx) else {
+        return Ok(None);
+    };
+    // A function is an Object to WebIDL and not to Neon's `JsObject`; one
+    // holding an iterator is not a list anyone writes, so it is not read
+    // as one.
+    let symbol: Handle<JsFunction> = cx.global("Symbol")?;
+    let iterator: Handle<JsValue> = symbol.get(cx, "iterator")?;
+    let method: Handle<JsValue> = object.get_value(cx, iterator)?;
+    if !method.is_a::<JsFunction, _>(cx) {
+        return Ok(None);
+    }
+    let array: Handle<JsFunction> = cx.global("Array")?;
+    let from: Handle<JsFunction> = array.get(cx, "from")?;
+    let elements = from.call_with(cx).arg(value).apply::<JsArray, _>(cx)?;
+    elements.to_vec(cx).map(Some)
+}
+
+/// `value` as an IDL `sequence`, WebIDL section 3.2.21: "If V is not an
+/// Object, throw a TypeError. Let method be ? GetMethod(V,
+/// %Symbol.iterator%). If method is undefined, throw a TypeError." The
+/// elements, each still to be converted to the sequence's type.
+fn to_sequence<'a>(
+    cx: &mut FunctionContext<'a>,
+    value: Handle<'a, JsValue>,
+    prefix: &str,
+    key: &str,
+    takes: &str,
+) -> NeonResult<Vec<Handle<'a, JsValue>>> {
+    match iterated(cx, value)? {
+        Some(elements) => Ok(elements),
+        None => wrong_kind(cx, prefix, key, takes, value),
+    }
+}
+
+/// A list option, as an IDL `sequence` -- see [`to_sequence`].
+fn array_option<'a>(
+    cx: &mut FunctionContext<'a>,
+    obj: &Handle<'a, JsObject>,
+    prefix: &str,
+    key: &str,
+    takes: &str,
+) -> NeonResult<Option<Vec<Handle<'a, JsValue>>>> {
+    match option_value(cx, obj, key)? {
+        Some(value) => to_sequence(cx, value, prefix, key, takes).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// `value` as a sequence of exactly `N` doubles, or the refusal naming the
+/// option: a sequence of another length is a `TypeError` too, by rule 3, as
+/// `new DOMMatrix([1, 2, 3])` is in Chrome.
+fn to_doubles<'a, const N: usize>(
+    cx: &mut FunctionContext<'a>,
+    elements: &[Handle<'a, JsValue>],
+    prefix: &str,
+    key: &str,
+    takes: &str,
+) -> NeonResult<[f64; N]> {
+    if elements.len() != N {
+        let got = format!("a list of {}", elements.len());
+        return cx.throw_type_error(format!(
+            "`{prefix}{key}` takes {takes}, not {got}"
+        ));
+    }
+    let mut out = [0.0; N];
+    for (at, element) in elements.iter().enumerate() {
+        out[at] = to_double(cx, *element, prefix, &format!("{key}[{at}]"))?;
+    }
+    Ok(out)
+}
+
+/// A colour option -- `(DOMString or sequence<double>)`, converted as
+/// WebIDL section 3.2.25 converts a union: an iterable is the sequence,
+/// `[r, g, b, a]` linear floats, and anything else is `ToString`'d and read
+/// as CSS. `None` where it is absent or does not parse, which leaves the
+/// colour as it would have been.
+fn colour_option<'a>(
+    cx: &mut FunctionContext<'a>,
+    obj: &Handle<'a, JsObject>,
+    prefix: &str,
+    key: &str,
+) -> NeonResult<Option<(Color4f, Option<ColorSpace>)>> {
+    const TAKES: &str = "a CSS colour string or an [r, g, b, a] array";
+    let Some(value) = option_value(cx, obj, key)? else {
+        return Ok(None);
+    };
+    if let Some(elements) = iterated(cx, value)? {
+        let [r, g, b, a] = to_doubles::<4>(cx, &elements, prefix, key, TAKES)?;
+        let color = Color4f::new(r as f32, g as f32, b as f32, a as f32);
+        return Ok(Some((color, None)));
+    }
+    if is_symbol(cx, value) {
+        return wrong_kind(cx, prefix, key, TAKES, value);
+    }
+    let css = value.to_string(cx)?.value(cx);
+    Ok(
+        css_to_color4f_in_space(&css)
+            .map(|(color, space)| (color, Some(space))),
+    )
+}
+
 /// Parses `fontVariations` from a `TextStyleInput` JS object: `None` to
 /// take the axes in force -- the key absent, or an empty list -- and
 /// otherwise the style's own, which `"normal"` makes none, resetting to the
 /// face's defaults as CSS `font-variation-settings: normal` does.
 ///
 /// A list holds `{axis, value}` entries. Axis tags must be exactly 4 ASCII
-/// characters (Skia convention, e.g. "wght", "wdth", "ital"). Malformed
-/// entries are silently skipped -- the field is optional and missing
-/// variations fall back to the typeface's default axis positions. A string
-/// other than `"normal"`, in any case, is a `TypeError`: it names a keyword
-/// the property does not have, so what the caller asked for would not
-/// happen.
-fn parse_font_variations(
-    cx: &mut FunctionContext,
-    obj: &Handle<JsObject>,
+/// characters (Skia convention, e.g. "wght", "wdth", "ital"). An entry
+/// missing either, or with a tag of another length, is skipped -- the field
+/// is optional and missing variations fall back to the typeface's default
+/// axis positions. The option is `(DOMString or sequence<dictionary>)`,
+/// converted as WebIDL converts a union: an iterable is the list, and
+/// anything else is `ToString`'d. A string other than `"normal"`, in any
+/// case, is a `TypeError`: it names a keyword the property does not have, so
+/// what the caller asked for would not happen.
+fn parse_font_variations<'a>(
+    cx: &mut FunctionContext<'a>,
+    obj: &Handle<'a, JsObject>,
+    prefix: &str,
 ) -> NeonResult<Option<Vec<(FourByteTag, f32)>>> {
     let mut out: Vec<(FourByteTag, f32)> = Vec::new();
-    let Ok(vars_val) = obj.get::<JsValue, _, _>(cx, "fontVariations") else {
+    let Some(vars_val) = option_value(cx, obj, "fontVariations")? else {
         return Ok(None);
     };
-    // A value outside an enumeration is a `TypeError` (AGENTS.md, rule 2).
-    if let Ok(keyword) = vars_val.downcast::<JsString, _>(cx) {
-        let keyword = keyword.value(cx);
+    let Some(entries) = iterated(cx, vars_val)? else {
+        // A value outside an enumeration is a `TypeError` (AGENTS.md, rule
+        // 2).
+        let keyword = to_dom_string(cx, vars_val, prefix, "fontVariations")?;
         return match keyword.eq_ignore_ascii_case("normal") {
             true => Ok(Some(Vec::new())),
             false => cx.throw_type_error(format!(
                 "Expected \"normal\" or a list of {{axis, value}} for \
-                 `fontVariations` (got {keyword:?})"
+                 `{prefix}fontVariations` (got {keyword:?})"
             )),
         };
-    }
-    let Ok(vars_arr) = vars_val.downcast::<JsArray, _>(cx) else {
-        return Ok(None);
     };
-    for v in vars_arr.to_vec(cx)? {
-        let Ok(v_obj) = v.downcast::<JsObject, _>(cx) else {
+    for (at, v) in entries.into_iter().enumerate() {
+        let key = format!("fontVariations[{at}]");
+        // `null` is an entry with no axis and no value, and is skipped.
+        let Some(v_obj) = to_dictionary(cx, v, prefix, &key)? else {
             continue;
         };
-        let Some(axis) = opt_string_for_key(cx, &v_obj, "axis") else {
-            continue;
-        };
-        let Some(value) = opt_float_for_key(cx, &v_obj, "value") else {
+        let inner = format!("{prefix}{key}.");
+        let axis = string_option(cx, &v_obj, &inner, "axis")?;
+        let value = float_option(cx, &v_obj, &inner, "value")?;
+        let (Some(axis), Some(value)) = (axis, value) else {
             continue;
         };
         let bytes = axis.as_bytes();
@@ -220,43 +565,54 @@ fn refuse_unknown_keys(
     Ok(())
 }
 
-/// The family names in a `fontFamilies` list, or `None` where it holds none,
-/// which names the default families as the option left out does.
-fn families_in(
-    cx: &mut FunctionContext,
-    list: Handle<JsArray>,
+/// The strings of a `fontFamilies` list, each converted as a `DOMString`, or
+/// `None` where the list is absent or empty: no family names the default
+/// list, as the option left out does.
+fn font_families<'a>(
+    cx: &mut FunctionContext<'a>,
+    obj: &Handle<'a, JsObject>,
+    prefix: &str,
 ) -> NeonResult<Option<Vec<String>>> {
-    let values = list.to_vec(cx)?;
-    let families = strings_in(cx, &values);
+    let Some(names) =
+        array_option(cx, obj, prefix, "fontFamilies", "a list of strings")?
+    else {
+        return Ok(None);
+    };
     // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
     // Re-check: cargo test an_empty_family_list_is_a_null_slice_in_skia_safe
     // `NativeSliceAccess::native` makes a slice from the first element's
     // pointer, null for an empty list, and `set_font_families` hands it one:
     // a debug build's precondition check aborts the process there, and a
-    // release build passes a null slice on. The crate's own styles never
-    // set an empty list, so only this binding reached it.
+    // release build passes a null slice on. The crate's own styles never set
+    // an empty list, so only this binding reached it.
+    let families = names
+        .into_iter()
+        .enumerate()
+        .map(|(at, name)| {
+            to_dom_string(cx, name, prefix, &format!("fontFamilies[{at}]"))
+        })
+        .collect::<NeonResult<Vec<String>>>()?;
     Ok((!families.is_empty()).then_some(families))
 }
 
-fn parse_text_style(
-    cx: &mut FunctionContext,
-    obj: &Handle<JsObject>,
+/// A text style from `obj`, which sits at `prefix` among the options --
+/// `textStyle.` for a paragraph's, nothing for a pushed style.
+fn parse_text_style<'a>(
+    cx: &mut FunctionContext<'a>,
+    obj: &Handle<'a, JsObject>,
+    prefix: &str,
 ) -> NeonResult<TextStyle> {
     let mut style = TextStyle::new();
 
     refuse_unknown_keys(cx, obj, TEXT_STYLE_KEYS, "text style")?;
 
     // fontSize
-    if let Some(size) = opt_float_for_key(cx, obj, "fontSize") {
+    if let Some(size) = float_option(cx, obj, prefix, "fontSize")? {
         style.set_font_size(size);
     }
 
-    // fontFamilies -- an empty list names the default families, as the
-    // option left out does; see `families_in`.
-    if let Ok(fam_val) = obj.get::<JsValue, _, _>(cx, "fontFamilies")
-        && let Ok(fam_arr) = fam_val.downcast::<JsArray, _>(cx)
-        && let Some(families) = families_in(cx, fam_arr)?
-    {
+    // fontFamilies
+    if let Some(families) = font_families(cx, obj, prefix)? {
         style.set_font_families(&families);
     }
 
@@ -270,17 +626,15 @@ fn parse_text_style(
     // TextStyle::color at its default, so the decoration cannot read it
     // back from the style.
     let mut text_color = None;
-    if let Ok(color_val) = obj.get::<JsValue, _, _>(cx, "color")
-        && let Some((color4f, cs)) = color4f_in(cx, color_val)
-    {
+    if let Some((color4f, cs)) = colour_option(cx, obj, prefix, "color")? {
         let mut paint = Paint::default();
         let cs = cs.unwrap_or_else(ColorSpace::new_srgb_linear);
         paint.set_color4f(color4f, Some(&cs));
         style.set_foreground_paint(&paint);
         text_color = Some(color4f.to_color());
     }
-    if let Ok(color_val) = obj.get::<JsValue, _, _>(cx, "foregroundColor")
-        && let Some((color4f, cs)) = color4f_in(cx, color_val)
+    if let Some((color4f, cs)) =
+        colour_option(cx, obj, prefix, "foregroundColor")?
     {
         let mut paint = Paint::default();
         let cs = cs.unwrap_or_else(ColorSpace::new_srgb_linear);
@@ -290,8 +644,8 @@ fn parse_text_style(
     }
 
     // backgroundColor
-    if let Ok(color_val) = obj.get::<JsValue, _, _>(cx, "backgroundColor")
-        && let Some((color4f, cs)) = color4f_in(cx, color_val)
+    if let Some((color4f, cs)) =
+        colour_option(cx, obj, prefix, "backgroundColor")?
     {
         let mut paint = Paint::default();
         let cs = cs.unwrap_or_else(ColorSpace::new_srgb_linear);
@@ -300,13 +654,12 @@ fn parse_text_style(
     }
 
     // fontStyle: { weight, width, slant }
-    if let Ok(fs_val) = obj.get::<JsValue, _, _>(cx, "fontStyle")
-        && let Ok(fs_obj) = fs_val.downcast::<JsObject, _>(cx)
-    {
-        let weight = opt_float_for_key(cx, &fs_obj, "weight")
+    if let Some(fs_obj) = object_option(cx, obj, prefix, "fontStyle")? {
+        let inner = format!("{prefix}fontStyle.");
+        let weight = float_option(cx, &fs_obj, &inner, "weight")?
             .map(|w| Weight::from(w as i32))
             .unwrap_or(Weight::NORMAL);
-        let width = opt_float_for_key(cx, &fs_obj, "width")
+        let width = float_option(cx, &fs_obj, &inner, "width")?
             .map(|w| Width::from(w as i32))
             .unwrap_or(Width::NORMAL);
         // Refused rather than defaulted, as the other numeric style codes in
@@ -316,7 +669,7 @@ fn parse_text_style(
         // and no reason. Rule 4 -- the argument is a number and its value is
         // not one the set holds, which is a `RangeError` rather than the
         // `TypeError` rule 2 gives a misspelt name.
-        let slant = match opt_float_for_key(cx, &fs_obj, "slant") {
+        let slant = match float_option(cx, &fs_obj, &inner, "slant")? {
             None => Slant::Upright,
             Some(s) => match s as i32 {
                 0 => Slant::Upright,
@@ -333,12 +686,12 @@ fn parse_text_style(
     }
 
     // letterSpacing
-    if let Some(ls) = opt_float_for_key(cx, obj, "letterSpacing") {
+    if let Some(ls) = float_option(cx, obj, prefix, "letterSpacing")? {
         style.set_letter_spacing(ls);
     }
 
     // wordSpacing
-    if let Some(ws) = opt_float_for_key(cx, obj, "wordSpacing") {
+    if let Some(ws) = float_option(cx, obj, prefix, "wordSpacing")? {
         style.set_word_spacing(ws);
     }
 
@@ -347,12 +700,12 @@ fn parse_text_style(
     // default, so the value is taken as given rather than filtered the way
     // `strokeWidth` is. The paragraph grows to contain the moved run: the
     // line box is not preserved, whatever the sign.
-    if let Some(shift) = opt_float_for_key(cx, obj, "baselineShift") {
+    if let Some(shift) = float_option(cx, obj, prefix, "baselineShift")? {
         style.set_baseline_shift(shift);
     }
 
     // heightMultiplier
-    if let Some(hm) = opt_float_for_key(cx, obj, "heightMultiplier") {
+    if let Some(hm) = float_option(cx, obj, prefix, "heightMultiplier")? {
         style.set_height(hm);
         style.set_height_override(true);
     }
@@ -365,7 +718,7 @@ fn parse_text_style(
     // taking apart only to drop bits Skia does not define. Testing each bit
     // against a literal and setting the matching flag did the same thing
     // while stating the correspondence three times and asserting it none.
-    if let Some(deco) = opt_float_for_key(cx, obj, "decoration") {
+    if let Some(deco) = float_option(cx, obj, prefix, "decoration")? {
         let bits = deco as u32;
         let decoration = CrateTextDecoration {
             underline: bits & TextDecoration::UNDERLINE.bits() != 0,
@@ -376,7 +729,7 @@ fn parse_text_style(
     }
 
     // decorationStyle
-    if let Some(ds) = opt_float_for_key(cx, obj, "decorationStyle") {
+    if let Some(ds) = float_option(cx, obj, prefix, "decorationStyle")? {
         let style_code = match ds as i32 {
             0 => CrateTextDecorationStyle::Solid,
             1 => CrateTextDecorationStyle::Double,
@@ -404,8 +757,8 @@ fn parse_text_style(
     // before quantizing -- otherwise Skia's implicit decode darkens the
     // decoration and drops the alpha precision the caller asked for.
     let mut decoration_color = None;
-    if let Ok(color_val) = obj.get::<JsValue, _, _>(cx, "decorationColor")
-        && let Some((color4f, cs)) = color4f_in(cx, color_val)
+    if let Some((color4f, cs)) =
+        colour_option(cx, obj, prefix, "decorationColor")?
     {
         decoration_color = Some(if cs.is_some() {
             color4f.to_color()
@@ -421,7 +774,7 @@ fn parse_text_style(
     }
 
     // decorationThickness
-    if let Some(dt) = opt_float_for_key(cx, obj, "decorationThickness") {
+    if let Some(dt) = float_option(cx, obj, prefix, "decorationThickness")? {
         style.set_decoration_thickness_multiplier(dt);
     }
 
@@ -434,63 +787,58 @@ fn parse_text_style(
     // the position as the style's font arguments.
 
     // shadows: [{ color, offset: [dx, dy], blurRadius }]
-    if let Ok(shadows_val) = obj.get::<JsValue, _, _>(cx, "shadows")
-        && let Ok(shadows_arr) = shadows_val.downcast::<JsArray, _>(cx)
+    if let Some(shadows) =
+        array_option(cx, obj, prefix, "shadows", "a list of shadows")?
     {
-        for shadow_val in shadows_arr.to_vec(cx)? {
-            if let Ok(shadow_obj) = shadow_val.downcast::<JsObject, _>(cx) {
+        for (at, shadow_val) in shadows.into_iter().enumerate() {
+            let key = format!("shadows[{at}]");
+            // `null` is a shadow with every member left out, as `{}` is:
+            // black, unmoved and unblurred.
+            let shadow_obj = to_dictionary(cx, shadow_val, prefix, &key)?;
+            let inner = format!("{prefix}{key}.");
+            let mut color = Color::BLACK;
+            let mut offset = Point::new(0.0, 0.0);
+            let mut blur = 0.0;
+            if let Some(shadow_obj) = shadow_obj {
                 // Shadow color follows the same rule as decorationColor:
                 // CSS strings round-trip through u32 ARGB cleanly, linear
                 // float arrays must be gamma-encoded first.
-                let color = shadow_obj
-                    .get::<JsValue, _, _>(cx, "color")
-                    .ok()
-                    .and_then(|v| color4f_in(cx, v))
-                    .map(|(c, cs)| {
-                        if cs.is_some() {
-                            c.to_color()
-                        } else {
-                            linear_color4f_to_srgb_color(&c)
-                        }
-                    })
-                    .unwrap_or(Color::BLACK);
-
-                let mut offset = Point::new(0.0, 0.0);
-                if let Ok(offset_val) =
-                    shadow_obj.get::<JsValue, _, _>(cx, "offset")
-                    && let Ok(offset_arr) =
-                        offset_val.downcast::<JsArray, _>(cx)
+                if let Some((c, cs)) =
+                    colour_option(cx, &shadow_obj, &inner, "color")?
                 {
-                    let vals = offset_arr.to_vec(cx)?;
-                    if vals.len() >= 2
-                        && let (Ok(dx), Ok(dy)) = (
-                            vals[0].downcast::<JsNumber, _>(cx),
-                            vals[1].downcast::<JsNumber, _>(cx),
-                        )
-                    {
-                        offset = Point::new(
-                            dx.value(cx) as f32,
-                            dy.value(cx) as f32,
-                        );
-                    }
+                    color = match cs {
+                        Some(_) => c.to_color(),
+                        None => linear_color4f_to_srgb_color(&c),
+                    };
                 }
 
-                // Halved for the same reason `shadowBlur` is, and against the
-                // same sentence: sigma is exactly half the blur radius.
+                if let Some(offset_val) =
+                    option_value(cx, &shadow_obj, "offset")?
+                {
+                    const TAKES: &str = "an [x, y] array of two numbers";
+                    let pair =
+                        to_sequence(cx, offset_val, &inner, "offset", TAKES)?;
+                    let [dx, dy] =
+                        to_doubles::<2>(cx, &pair, &inner, "offset", TAKES)?;
+                    offset = Point::new(dx as f32, dy as f32);
+                }
+
+                // Halved for the same reason `shadowBlur` is, and against
+                // the same sentence: sigma is exactly half the blur radius.
                 // https://www.w3.org/TR/css-backgrounds-3/#shadow-blur
                 //
                 // `TextShadow`'s third argument is Skia's sigma -- which is
-                // what the Rust side calls it, `TextStyle::blur_sigma` -- and
-                // this key is a radius, so handing it over unscaled made one
-                // library answer a single number two ways: `shadowBlur = 8` on
-                // a context blurred half as far as `blurRadius: 8` on a
-                // paragraph.
-                let blur = opt_float_for_key(cx, &shadow_obj, "blurRadius")
+                // what the Rust side calls it, `TextStyle::blur_sigma` --
+                // and this key is a radius, so handing it over unscaled made
+                // one library answer a single number two ways:
+                // `shadowBlur = 8` on a context blurred half as far as
+                // `blurRadius: 8` on a paragraph.
+                blur = float_option(cx, &shadow_obj, &inner, "blurRadius")?
                     .unwrap_or(0.0)
                     * 0.5;
-
-                style.add_shadow(TextShadow::new(color, offset, blur as f64));
             }
+
+            style.add_shadow(TextShadow::new(color, offset, blur as f64));
         }
     }
 
@@ -499,29 +847,34 @@ fn parse_text_style(
     // Canvas2D path reaches features via `fontVariant`; the paragraph
     // path needs them here so multi-style server text can drive small
     // caps and friends. `value` defaults to `1` (enable) when omitted.
-    if let Ok(feats_val) = obj.get::<JsValue, _, _>(cx, "fontFeatures")
-        && let Ok(feats_arr) = feats_val.downcast::<JsArray, _>(cx)
+    if let Some(features) =
+        array_option(cx, obj, prefix, "fontFeatures", "a list of features")?
     {
-        for feat_val in feats_arr.to_vec(cx)? {
-            if let Ok(feat_obj) = feat_val.downcast::<JsObject, _>(cx) {
-                let Some(name) = opt_string_for_key(cx, &feat_obj, "name")
-                else {
-                    continue;
-                };
-                if name.is_empty() {
-                    continue;
-                }
-                let value = opt_float_for_key(cx, &feat_obj, "value")
-                    .unwrap_or(1.0) as i32;
-                style.add_font_feature(name, value);
+        for (at, feat_val) in features.into_iter().enumerate() {
+            let key = format!("fontFeatures[{at}]");
+            // `null` is a feature with no name, and is skipped.
+            let Some(feat_obj) = to_dictionary(cx, feat_val, prefix, &key)?
+            else {
+                continue;
+            };
+            let inner = format!("{prefix}{key}.");
+            let Some(name) = string_option(cx, &feat_obj, &inner, "name")?
+            else {
+                continue;
+            };
+            if name.is_empty() {
+                continue;
             }
+            let value = float_option(cx, &feat_obj, &inner, "value")?
+                .unwrap_or(1.0) as i32;
+            style.add_font_feature(name, value);
         }
     }
 
     // strokeWidth -- outline the glyphs rather than filling them, as CSS
     // `-webkit-text-stroke` does. Not positive is ignored, matching
     // `lineWidth`; Skia would take zero as a hairline instead.
-    if let Some(width) = opt_float_for_key(cx, obj, "strokeWidth")
+    if let Some(width) = float_option(cx, obj, prefix, "strokeWidth")?
         && width > 0.0
     {
         let mut paint = Paint::default();
@@ -536,21 +889,21 @@ fn parse_text_style(
     // language's letterform a unified codepoint is drawn with. Han
     // characters share codepoints across Japanese and Chinese and differ in
     // shape, and nothing in the text says which the reader should see.
-    if let Some(locale) = opt_string_for_key(cx, obj, "locale") {
+    if let Some(locale) = string_option(cx, obj, prefix, "locale")? {
         style.set_locale(&locale);
     }
 
     // halfLeading -- distribute leading half above / half below the text.
-    if let Some(half) = opt_bool_for_key(cx, obj, "halfLeading") {
+    if let Some(half) = bool_option(cx, obj, "halfLeading")? {
         style.set_half_leading(half);
     }
 
     Ok(style)
 }
 
-fn parse_paragraph_style(
-    cx: &mut FunctionContext,
-    obj: &Handle<JsObject>,
+fn parse_paragraph_style<'a>(
+    cx: &mut FunctionContext<'a>,
+    obj: &Handle<'a, JsObject>,
 ) -> NeonResult<ParagraphStyle> {
     let mut style = ParagraphStyle::new();
 
@@ -561,14 +914,14 @@ fn parse_paragraph_style(
     // Through the same parser `ctx.textAlign` uses rather than a second copy
     // of the six names: this file spelled them out again, so the two could
     // drift and nothing would have said so.
-    if let Some(align) = opt_string_for_key(cx, obj, "textAlign")
+    if let Some(align) = string_option(cx, obj, "", "textAlign")?
         .and_then(|name| to_text_align(&name))
     {
         style.set_text_align(align.to_skia());
     }
 
     // textDirection
-    if let Some(dir_str) = opt_string_for_key(cx, obj, "textDirection") {
+    if let Some(dir_str) = string_option(cx, obj, "", "textDirection")? {
         match dir_str.to_lowercase().as_str() {
             "rtl" => {
                 style.set_text_direction(TextDirection::RTL);
@@ -581,22 +934,20 @@ fn parse_paragraph_style(
     }
 
     // maxLines
-    if let Some(max) = opt_float_for_key(cx, obj, "maxLines") {
+    if let Some(max) = float_option(cx, obj, "", "maxLines")? {
         style.set_max_lines(Some(max as usize));
     }
 
     // ellipsis
-    if let Some(ell) = opt_string_for_key(cx, obj, "ellipsis")
+    if let Some(ell) = string_option(cx, obj, "", "ellipsis")?
         && !ell.is_empty()
     {
         style.set_ellipsis(ell);
     }
 
     // textStyle (default text style for the paragraph)
-    if let Ok(ts_val) = obj.get::<JsValue, _, _>(cx, "textStyle")
-        && let Ok(ts_obj) = ts_val.downcast::<JsObject, _>(cx)
-    {
-        let text_style = parse_text_style(cx, &ts_obj)?;
+    if let Some(ts_obj) = object_option(cx, obj, "", "textStyle")? {
+        let text_style = parse_text_style(cx, &ts_obj, "textStyle.")?;
         style.set_text_style(&text_style);
     }
 
@@ -604,7 +955,7 @@ fn parse_paragraph_style(
     // 2 = DisableLastDescent, 3 = DisableAll, and nothing else. Read before
     // any conversion to an integer, so that `1.5`, `NaN` and the infinities
     // are refused rather than truncated or dropped.
-    if let Some(thb) = opt_raw_double_for_key(cx, obj, "textHeightBehavior") {
+    if let Some(thb) = number_option(cx, obj, "", "textHeightBehavior")? {
         let behavior = match thb {
             0.0 => CrateTextHeightBehavior::All,
             1.0 => CrateTextHeightBehavior::DisableFirstAscent,
@@ -627,35 +978,32 @@ fn parse_paragraph_style(
 
     // strutStyle: a fixed line box for deterministic leading. Presence of
     // the object enables the strut unless `enabled: false` is set.
-    if let Ok(strut_val) = obj.get::<JsValue, _, _>(cx, "strutStyle")
-        && let Ok(strut_obj) = strut_val.downcast::<JsObject, _>(cx)
-    {
+    if let Some(strut_obj) = object_option(cx, obj, "", "strutStyle")? {
+        const STRUT: &str = "strutStyle.";
         let mut strut = StrutStyle::new();
         strut.set_strut_enabled(
-            opt_bool_for_key(cx, &strut_obj, "enabled").unwrap_or(true),
+            bool_option(cx, &strut_obj, "enabled")?.unwrap_or(true),
         );
-        if let Ok(fam_val) = strut_obj.get::<JsValue, _, _>(cx, "fontFamilies")
-            && let Ok(fam_arr) = fam_val.downcast::<JsArray, _>(cx)
-            && let Some(families) = families_in(cx, fam_arr)?
-        {
+        if let Some(families) = font_families(cx, &strut_obj, STRUT)? {
             strut.set_font_families(&families);
         }
-        if let Some(size) = opt_float_for_key(cx, &strut_obj, "fontSize") {
+        if let Some(size) = float_option(cx, &strut_obj, STRUT, "fontSize")? {
             strut.set_font_size(size);
         }
-        if let Some(h) = opt_float_for_key(cx, &strut_obj, "heightMultiplier") {
+        if let Some(h) =
+            float_option(cx, &strut_obj, STRUT, "heightMultiplier")?
+        {
             strut.set_height(h);
             strut.set_height_override(true);
         }
-        if let Some(l) = opt_float_for_key(cx, &strut_obj, "leading") {
+        if let Some(l) = float_option(cx, &strut_obj, STRUT, "leading")? {
             strut.set_leading(l);
         }
         strut.set_force_strut_height(
-            opt_bool_for_key(cx, &strut_obj, "forceStrutHeight")
-                .unwrap_or(false),
+            bool_option(cx, &strut_obj, "forceStrutHeight")?.unwrap_or(false),
         );
         strut.set_half_leading(
-            opt_bool_for_key(cx, &strut_obj, "halfLeading").unwrap_or(false),
+            bool_option(cx, &strut_obj, "halfLeading")?.unwrap_or(false),
         );
         style.set_strut_style(strut);
     }
@@ -670,19 +1018,16 @@ fn parse_paragraph_style(
 /// can be the variable-instantiated one (otherwise the paragraph
 /// engine renders at the typeface master regardless of explicit weight,
 /// breaking parity with CanvasKit's behaviour on variable fonts).
-fn parse_paragraph_font_variations(
-    cx: &mut FunctionContext,
-    obj: &Handle<JsObject>,
+fn parse_paragraph_font_variations<'a>(
+    cx: &mut FunctionContext<'a>,
+    obj: &Handle<'a, JsObject>,
 ) -> NeonResult<Vec<(FourByteTag, f32)>> {
-    let Ok(ts_val) = obj.get::<JsValue, _, _>(cx, "textStyle") else {
-        return Ok(Vec::new());
-    };
-    let Ok(ts_obj) = ts_val.downcast::<JsObject, _>(cx) else {
+    let Some(ts_obj) = object_option(cx, obj, "", "textStyle")? else {
         return Ok(Vec::new());
     };
     // A paragraph has nothing to inherit, so taking the axes in force and
     // `"normal"` are both no axes of its own.
-    Ok(parse_font_variations(cx, &ts_obj)?.unwrap_or_default())
+    Ok(parse_font_variations(cx, &ts_obj, "textStyle.")?.unwrap_or_default())
 }
 
 //
@@ -740,8 +1085,8 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
 pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedParagraphBuilder>(0)?;
     let style_obj = cx.argument::<JsObject>(1)?;
-    let mut text_style = parse_text_style(&mut cx, &style_obj)?;
-    let own = parse_font_variations(&mut cx, &style_obj)?;
+    let mut text_style = parse_text_style(&mut cx, &style_obj, "")?;
+    let own = parse_font_variations(&mut cx, &style_obj, "")?;
 
     let mut this = this.borrow_mut();
     let ParagraphBuilderWrap {

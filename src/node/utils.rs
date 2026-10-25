@@ -684,19 +684,6 @@ pub fn opt_double_for_key(
     obj.get(cx, attr).ok().and_then(|val| _as_double(cx, &val))
 }
 
-/// The number at `attr` as it converts, `NaN` and the infinities included,
-/// or `None` when the key is absent or holds no number -- for an option
-/// that refuses a non-finite value rather than ignoring it.
-pub fn opt_raw_double_for_key(
-    cx: &mut FunctionContext,
-    obj: &Handle<JsObject>,
-    attr: &str,
-) -> Option<f64> {
-    obj.get(cx, attr)
-        .ok()
-        .and_then(|val| _as_double_raw(cx, &val))
-}
-
 pub fn opt_float_for_key(
     cx: &mut FunctionContext,
     obj: &Handle<JsObject>,
@@ -2493,9 +2480,13 @@ pub fn color4f_in<'a>(
     // An array of four numbers is the float-color form. Anything else that
     // happens to be an array falls through to the string path rather than
     // being rejected: an Array then reaches the JsObject arm and is parsed
-    // as CSS via its `toString()`, so `['red']` sets red. Callers rely on
-    // that, so it is a compatibility guarantee rather than a quirk to be
-    // tidied away -- do not start rejecting malformed arrays here.
+    // as CSS via its `toString()`, so `['red']` sets red. That holds for the
+    // callers here -- the context's colour styles and `addColorStop` -- and
+    // is what their setters have always done, so do not start rejecting
+    // malformed arrays here. A Paragraph colour option is not read here: it
+    // is converted as WebIDL converts a union, where an array is a sequence
+    // of four numbers and `['red']` a `TypeError` -- see `colour_option` in
+    // src/node/paragraph.rs.
     if let Some(rgba) = opt_color4f_from_array(cx, val) {
         return Some((rgba, None));
     }

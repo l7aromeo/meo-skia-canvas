@@ -778,41 +778,39 @@ describe("the numeric style codes", () => {
 });
 
 describe("textHeightBehavior", () => {
-  // A closed set of four integers, as `TextHeightBehavior` types it. A
-  // number that is not one of them is refused rather than truncated or
-  // dropped: rule 4 of AGENTS.md's refusals, a number outside its set.
+  // A closed set of four integers, as `TextHeightBehavior` types it. A finite
+  // number that is not one of them is refused rather than truncated: rule 4
+  // of AGENTS.md's refusals, a number outside its set. NaN and the
+  // infinities fail the option's WebIDL `double` conversion first, and are a
+  // `TypeError`.
   test("refuses a number that is not one of the four codes", () => {
-    for (const code of [
-      1.5,
-      -0.5,
-      3.0000001,
-      NaN,
-      Infinity,
-      -Infinity,
-      4,
-      -1,
-    ]) {
+    for (const code of [1.5, -0.5, 3.0000001, 4, -1, 1e21]) {
       assert.throws(
         () => ParagraphBuilder.Make({ textHeightBehavior: code }),
         (e) => e instanceof RangeError && /textHeightBehavior/.test(e.message),
         `${code} is a RangeError`,
       );
     }
+    for (const code of [NaN, Infinity, -Infinity]) {
+      assert.throws(
+        () => ParagraphBuilder.Make({ textHeightBehavior: code }),
+        (e) => e instanceof TypeError && /textHeightBehavior/.test(e.message),
+        `${code} is a TypeError`,
+      );
+    }
   });
 
   test("names the number refused as JavaScript spells it", () => {
-    for (const [code, spelled] of [
-      [Infinity, "Infinity"],
-      [-Infinity, "-Infinity"],
-      [NaN, "NaN"],
-      [1e21, "1e+21"],
-      [1.5, "1.5"],
+    for (const [code, spelled, kind] of [
+      [Infinity, "Infinity", TypeError],
+      [-Infinity, "-Infinity", TypeError],
+      [NaN, "NaN", TypeError],
+      [1e21, "1e+21", RangeError],
+      [1.5, "1.5", RangeError],
     ]) {
       assert.throws(
         () => ParagraphBuilder.Make({ textHeightBehavior: code }),
-        (e) =>
-          e instanceof RangeError &&
-          e.message.includes(`textHeightBehavior ${spelled} `),
+        (e) => e instanceof kind && e.message.includes(spelled),
         `${spelled} in the message`,
       );
     }
@@ -1603,5 +1601,286 @@ describe("an empty fontFamilies list", () => {
       }),
       plain,
     );
+  });
+});
+
+describe("a ParagraphBuilder option is converted as WebIDL converts it", () => {
+  // Every option the builder reads, where it is read and the WebIDL type it
+  // converts to, as the Canvas API's own attributes convert: a number by
+  // `ToNumber` to a `double`, a string by `ToString`, a boolean by
+  // `ToBoolean`, an object of options as a dictionary and a list as a
+  // sequence. Two tables follow from WebIDL: values that convert, and values
+  // whose conversion throws a `TypeError`, which here names the option. An
+  // absent or `undefined` option takes its default.
+  const DOUBLE = "double",
+    STRING = "DOMString",
+    BOOLEAN = "boolean",
+    SEQUENCE = "sequence",
+    DICTIONARY = "dictionary",
+    COLOUR = "colour",
+    VARIATIONS = "variations";
+
+  // What converts, by WebIDL section 3.2.7, 3.2.10, 3.2.3, 3.2.17, 3.2.21 and
+  // 3.2.25. A number's values all convert into the range every number
+  // option takes, so a refusal here is a conversion's and nothing else's.
+  const CONVERTS = {
+    [DOUBLE]: [
+      "1",
+      " 1 ",
+      true,
+      null,
+      [1],
+      "0x1",
+      new Number(1),
+      { valueOf: () => 1 },
+    ],
+    [STRING]: [1, true, null, {}, { toString: () => "ltr" }, 1n],
+    [BOOLEAN]: [1, 0, "", "x", null, {}, [], 0n, NaN, Symbol("s")],
+    [SEQUENCE]: [[], new Set(), (function* () {})()],
+    [DICTIONARY]: [null, {}, [], () => {}],
+    [COLOUR]: [
+      { toString: () => "red" },
+      1,
+      true,
+      null,
+      {},
+      [0, 0, 0, 1],
+      new Set([1, 0.5, 0, 0.25]),
+    ],
+    [VARIATIONS]: [
+      "normal",
+      "NORMAL",
+      { toString: () => "normal" },
+      [],
+      new Set(),
+    ],
+  };
+  // What throws: ToNumber's NaN and infinities and its refusal of a Symbol
+  // and a BigInt; ToString's of a Symbol; a dictionary that is no Object; a
+  // sequence that is no Object or has no iterator; and, for the lists of
+  // fixed length, one of another length.
+  const THROWS = {
+    [DOUBLE]: ["abc", {}, NaN, Infinity, -Infinity, [1, 2], Symbol("s"), 1n],
+    [STRING]: [Symbol("s")],
+    [BOOLEAN]: [],
+    [SEQUENCE]: ["Arial", 1, true, null, {}, Symbol("s")],
+    [DICTIONARY]: ["x", 1, true, Symbol("s"), 1n],
+    [COLOUR]: [Symbol("s"), [1, 0, 0], ["red"], [1, 0, 0, "x"]],
+    [VARIATIONS]: [1, true, null, {}, "none", Symbol("s")],
+  };
+
+  const pushed = (style) => ParagraphBuilder.Make({}).pushStyle(style),
+    paragraphText = (style) => ParagraphBuilder.Make({ textStyle: style }),
+    paragraph = (style) => ParagraphBuilder.Make(style),
+    strut = (style) => ParagraphBuilder.Make({ strutStyle: style });
+
+  const TEXT = {
+    fontSize: DOUBLE,
+    fontFamilies: SEQUENCE,
+    color: COLOUR,
+    foregroundColor: COLOUR,
+    backgroundColor: COLOUR,
+    strokeWidth: DOUBLE,
+    fontStyle: DICTIONARY,
+    letterSpacing: DOUBLE,
+    wordSpacing: DOUBLE,
+    baselineShift: DOUBLE,
+    heightMultiplier: DOUBLE,
+    decoration: DOUBLE,
+    decorationStyle: DOUBLE,
+    decorationColor: COLOUR,
+    decorationThickness: DOUBLE,
+    shadows: SEQUENCE,
+    fontVariations: VARIATIONS,
+    fontFeatures: SEQUENCE,
+    halfLeading: BOOLEAN,
+    locale: STRING,
+  };
+  const PARAGRAPH = {
+    textAlign: STRING,
+    textDirection: STRING,
+    maxLines: DOUBLE,
+    ellipsis: STRING,
+    textStyle: DICTIONARY,
+    strutStyle: DICTIONARY,
+    textHeightBehavior: DOUBLE,
+  };
+  const STRUT = {
+    enabled: BOOLEAN,
+    fontFamilies: SEQUENCE,
+    fontSize: DOUBLE,
+    heightMultiplier: DOUBLE,
+    leading: DOUBLE,
+    forceStrutHeight: BOOLEAN,
+    halfLeading: BOOLEAN,
+  };
+  // Inside a list or an object an option holds, named by its path. A list's
+  // element has no default, so `undefined` there is converted like any
+  // other value: a dictionary takes it as `{}`, a string as "undefined".
+  const NESTED = [
+    ["fontStyle.weight", (v) => ({ fontStyle: { weight: v } }), DOUBLE],
+    ["fontStyle.width", (v) => ({ fontStyle: { width: v } }), DOUBLE],
+    ["fontStyle.slant", (v) => ({ fontStyle: { slant: v } }), DOUBLE],
+    ["fontFamilies[1]", (v) => ({ fontFamilies: ["Arial", v] }), STRING],
+    ["shadows[0]", (v) => ({ shadows: [v] }), DICTIONARY],
+    ["shadows[0].color", (v) => ({ shadows: [{ color: v }] }), COLOUR],
+    [
+      "shadows[0].blurRadius",
+      (v) => ({ shadows: [{ blurRadius: v }] }),
+      DOUBLE,
+    ],
+    ["fontFeatures[0]", (v) => ({ fontFeatures: [v] }), DICTIONARY],
+    ["fontFeatures[0].name", (v) => ({ fontFeatures: [{ name: v }] }), STRING],
+    [
+      "fontFeatures[0].value",
+      (v) => ({ fontFeatures: [{ name: "smcp", value: v }] }),
+      DOUBLE,
+    ],
+    ["fontVariations[0]", (v) => ({ fontVariations: [v] }), DICTIONARY],
+    [
+      "fontVariations[0].axis",
+      (v) => ({ fontVariations: [{ axis: v, value: 1 }] }),
+      STRING,
+    ],
+    [
+      "fontVariations[0].value",
+      (v) => ({ fontVariations: [{ axis: "wght", value: v }] }),
+      DOUBLE,
+    ],
+  ];
+  // A shadow's offset is a sequence of exactly two doubles.
+  const OFFSET = {
+    converts: [[1, 2], ["1", "2"], new Set([1, 2])],
+    throws: ["1,2", 1, null, {}, [1], [1, 2, 3], [1, "a"], [1, Symbol("s")]],
+  };
+
+  const shown = (value) =>
+    typeof value === "symbol" || typeof value === "bigint"
+      ? String(value)
+      : typeof value === "function"
+        ? "a function"
+        : (JSON.stringify(value) ?? String(value));
+
+  // Every case in `table` reached every way, as `[how, name, style, value]`.
+  const cases = (table) => {
+    const out = [];
+    for (const [key, type] of Object.entries(TEXT))
+      for (const value of table[type]) {
+        out.push([pushed, key, { [key]: value }, value]);
+        out.push([paragraphText, `textStyle.${key}`, { [key]: value }, value]);
+      }
+    for (const [key, type] of Object.entries(PARAGRAPH))
+      for (const value of table[type])
+        out.push([paragraph, key, { [key]: value }, value]);
+    for (const [key, type] of Object.entries(STRUT))
+      for (const value of table[type])
+        out.push([strut, `strutStyle.${key}`, { [key]: value }, value]);
+    for (const [path, style, type] of NESTED)
+      for (const value of table[type])
+        out.push([pushed, path, style(value), value]);
+    return out;
+  };
+
+  test("converts what WebIDL converts", () => {
+    const wrong = [];
+    const all = [
+      ...cases(CONVERTS),
+      ...OFFSET.converts.map((v) => [
+        pushed,
+        "shadows[0].offset",
+        { shadows: [{ offset: v }] },
+        v,
+      ]),
+    ];
+    for (const [make, name, style, value] of all) {
+      try {
+        make(style);
+      } catch (error) {
+        wrong.push(
+          `${name} = ${shown(value)}: ${error.constructor.name}: ${error.message}`,
+        );
+      }
+    }
+    assert.equal(
+      wrong.length,
+      0,
+      `${wrong.length} of ${all.length}:\n${wrong.join("\n")}`,
+    );
+  });
+
+  test("throws a TypeError naming the option where WebIDL throws", () => {
+    const wrong = [];
+    const all = [
+      ...cases(THROWS),
+      ...OFFSET.throws.map((v) => [
+        pushed,
+        "shadows[0].offset",
+        { shadows: [{ offset: v }] },
+        v,
+      ]),
+    ];
+    for (const [make, name, style, value] of all) {
+      let thrown;
+      try {
+        make(style);
+      } catch (error) {
+        thrown = error;
+      }
+      if (!(thrown instanceof TypeError) || !thrown.message.includes(name))
+        wrong.push(
+          `${name} = ${shown(value)}: ${thrown ? `${thrown.constructor.name}: ${thrown.message}` : "taken"}`,
+        );
+    }
+    assert.equal(
+      wrong.length,
+      0,
+      `${wrong.length} of ${all.length}:\n${wrong.join("\n")}`,
+    );
+  });
+
+  test("is its default when it is undefined", () => {
+    for (const key of Object.keys(TEXT)) {
+      pushed({ [key]: undefined });
+      paragraphText({ [key]: undefined });
+    }
+    for (const key of Object.keys(PARAGRAPH)) paragraph({ [key]: undefined });
+    for (const key of Object.keys(STRUT)) strut({ [key]: undefined });
+    for (const [path, style] of NESTED)
+      if (!path.endsWith("]")) pushed(style(undefined));
+  });
+
+  // A converted value is the value: a numeric string lays out as its number,
+  // an object's `toString` names the colour, any iterable is the list.
+  test("reads the converted value", () => {
+    const widthOf = (style) => {
+      const p = ParagraphBuilder.Make({ textStyle: style })
+        .addText("Hamburgefonstiv")
+        .build();
+      p.layout(10000);
+      return p.getMaxIntrinsicWidth();
+    };
+    assert.equal(widthOf({ fontSize: "24" }), widthOf({ fontSize: 24 }));
+    assert.equal(widthOf({ fontSize: [24] }), widthOf({ fontSize: 24 }));
+    assert.equal(
+      widthOf({ fontSize: 24, fontFamilies: new Set(["serif"]) }),
+      widthOf({ fontSize: 24, fontFamilies: ["serif"] }),
+    );
+    assert.equal(
+      widthOf({ fontSize: 24, letterSpacing: true }),
+      widthOf({ fontSize: 24, letterSpacing: 1 }),
+    );
+
+    const pixel = (color) => {
+      const p = ParagraphBuilder.Make({
+        textStyle: { fontSize: 80, color },
+      })
+        .addText("█")
+        .build();
+      p.layout(1000);
+      const ctx = new Canvas(100, 100).getContext("2d");
+      ctx.drawParagraph(p, 0, 0);
+      return [...ctx.getImageData(20, 50, 1, 1).data];
+    };
+    assert.deepEqual(pixel({ toString: () => "red" }), pixel("red"));
   });
 });
