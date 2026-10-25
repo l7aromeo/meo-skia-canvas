@@ -580,3 +580,39 @@ fn base64_of(bytes: &[u8]) -> String {
         })
         .collect()
 }
+
+/// A load's error converts into the crate's `Error` through `?`, and keeps
+/// its detail behind `source()`: the `LoadError`, and below it the
+/// `IntegrityError` naming the digest the bytes actually have.
+#[test]
+fn a_load_error_reaches_a_function_returning_error_with_its_detail() {
+    use std::error::Error as _;
+
+    use meo_skia_canvas::{Error, IntegrityError};
+
+    fn load(url: &str, options: &LoadOptions) -> Result<Image, Error> {
+        Ok(Image::from_url(url, options)?)
+    }
+
+    let url = format!("data:image/png;base64,{}", base64_of(PNG));
+    let pinned = LoadOptions::new().integrity("sha256-AAAA");
+    let error = load(&url, &pinned).expect_err("the digest does not match");
+    assert!(matches!(&error, Error::Load(load) if matches!(
+        **load,
+        LoadError::Integrity { .. }
+    )));
+
+    let load = error
+        .source()
+        .and_then(|source| source.downcast_ref::<LoadError>())
+        .expect("the load error is the source");
+    assert!(matches!(load, LoadError::Integrity { .. }), "{load:?}");
+    let integrity = load
+        .source()
+        .and_then(|source| source.downcast_ref::<IntegrityError>())
+        .expect("and the integrity error below it");
+    assert!(
+        integrity.to_string().contains(PNG_SHA256),
+        "names the digest the bytes have: {integrity}"
+    );
+}
