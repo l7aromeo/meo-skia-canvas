@@ -3,7 +3,7 @@
 #![allow(unused_variables)]
 #![allow(dead_code)]
 use skia_safe::{
-    BlurStyle, Color, ColorSpace, CubicResampler, FilterMode,
+    BlurStyle, Color, Color4f, ColorSpace, CubicResampler, FilterMode,
     ImageFilter as SkImageFilter, MaskFilter, Matrix, MipmapMode, Paint, Point,
     SamplingOptions, TileMode, color_filters, image_filters,
     table_color_filter,
@@ -206,7 +206,8 @@ pub enum FilterSpec {
     Shadow {
         offset: Point,
         blur: f32,
-        color: Color,
+        /// Unpremultiplied, in the space it is tagged with.
+        color: (Color4f, ColorSpace),
     },
 }
 
@@ -351,13 +352,10 @@ impl Filter {
                                 let point =
                                     (offset.x / scale.x, offset.y / scale.y);
                                 let sigma = (blur / scale.x, blur / scale.y);
+                                let (color, space) =
+                                    skia_paint_color(color.0, &color.1);
                                 image_filters::drop_shadow(
-                                    point,
-                                    sigma,
-                                    *color,
-                                    ColorSpace::new_srgb(),
-                                    chain,
-                                    None,
+                                    point, sigma, color, space, chain, None,
                                 )
                             }
                             FilterSpec::Plain { name, value } => match name

@@ -81,10 +81,20 @@ pub fn makeLinearToSRGBGamma(mut cx: FunctionContext) -> JsResult<JsValue> {
 
 /// `ColorFilter.MakeBlend(color, mode)` -- blend with a solid color.
 pub fn makeBlend(mut cx: FunctionContext) -> JsResult<JsValue> {
-    let color = color_arg(&mut cx, 1, "color")?;
+    let (color, space) = color4f_arg(&mut cx, 1, "color")?;
+    let (color, space) = skia_paint_color(color, &space);
     let mode = filter_blend_mode_arg(&mut cx, 2, "mode")?;
 
-    wrap_color_filter!(cx, color_filters::blend(color, mode.to_skia()))
+    // Tagged with the space it was named in, so a colour outside sRGB
+    // reaches a wide canvas rather than being clipped on the way in.
+    wrap_color_filter!(
+        cx,
+        color_filters::blend_with_color_space(
+            color,
+            Some(space),
+            mode.to_skia()
+        )
+    )
 }
 
 /// `ColorFilter.MakeCompose(outer, inner)` -- compose two color filters.
@@ -134,8 +144,10 @@ pub fn makeHSLAMatrix(mut cx: FunctionContext) -> JsResult<JsValue> {
 
 /// `ColorFilter.MakeLighting(multiply, add)` -- lighting effect.
 pub fn makeLighting(mut cx: FunctionContext) -> JsResult<JsValue> {
-    let mul = color_arg(&mut cx, 1, "multiply")?;
-    let add = color_arg(&mut cx, 2, "add")?;
+    // Per-channel coefficients rather than colours, and Skia takes them as
+    // 8-bit sRGB, so each channel is clamped on its own.
+    let mul = clamped_color_arg(&mut cx, 1, "multiply")?;
+    let add = clamped_color_arg(&mut cx, 2, "add")?;
 
     wrap_color_filter!(cx, color_filters::lighting(mul, add))
 }

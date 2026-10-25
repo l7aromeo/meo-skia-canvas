@@ -36,7 +36,7 @@ use crate::{
     filter::FilterOp,
     geometry::Affine,
     image::{EX_PER_EM, x_height_ratio},
-    node::utils::css_to_color,
+    node::utils::{css_to_color, css_to_color4f},
     text::{TextDecoration, TextDecorationStyle},
 };
 
@@ -969,18 +969,26 @@ fn held(quantity: Quantity, low: f32) -> f32 {
         .clamp(f64::from(low), f64::from(f32::MAX)) as f32
 }
 
-/// A CSS colour for a destination that holds eight bits a channel, as a
-/// filter shadow and a text decoration both do: quantised in sRGB first,
-/// where Chrome quantises it, and then carried as an [`RgbaLinear`] that
-/// converts back to the same bytes exactly.
+/// A CSS colour for a filter shadow or a text decoration: quantised to
+/// eight bits in sRGB, where Chrome quantises it, when it lies inside sRGB,
+/// and carried as an [`RgbaLinear`] that converts back to the same bytes
+/// exactly. A colour outside sRGB is kept as it is, unquantised, so a wide
+/// canvas draws it -- eight bits of sRGB cannot hold it at all.
 ///
-/// Through [`RgbaLinear::from_css`] instead, `rgb(10.5 20.4 30.6)` lost its
+/// Through [`RgbaLinear::from_css`] alone, `rgb(10.5 20.4 30.6)` lost its
 /// half step in the `f32` round trip through linear light and drew red 10,
 /// where Chrome draws 11 for the shadow and the fill alike. The parser is
 /// the one `set_fill_style_css` uses, so a colour that works in one place
 /// works in the other.
 fn eight_bit_colour(css: &str) -> Option<RgbaLinear> {
-    css_to_color(css).map(skia_color_to_rgba_linear)
+    let srgb = css_to_color4f(css)?;
+    let inside = [srgb.r, srgb.g, srgb.b]
+        .iter()
+        .all(|channel| (0.0..=1.0).contains(channel));
+    match inside {
+        true => css_to_color(css).map(skia_color_to_rgba_linear),
+        false => Some(RgbaLinear::from_srgb(srgb.r, srgb.g, srgb.b, srgb.a)),
+    }
 }
 
 /// The lengths and optional colour a `drop-shadow` carries.

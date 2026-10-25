@@ -8,7 +8,7 @@ use skia_safe::{
 };
 
 use crate::{
-    color::{RgbaLinear, linear_to_srgb},
+    color::{RgbaLinear, linear_srgb_color_space},
     error::Error,
     export::VectorFeatures,
     geometry::Point,
@@ -323,8 +323,9 @@ impl From<GradientColorSpace> for GradientInterpolation {
 
 /// One color stop in a gradient.
 ///
-/// `position` is in `0.0..=1.0` along the gradient axis; `color` is
-/// `RgbaLinear` premultiplied in the active surface's working color space.
+/// `position` is in `0.0..=1.0` along the gradient axis; `color` is an
+/// [`RgbaLinear`], premultiplied linear-light sRGB, the same colour on every
+/// canvas.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GradientStop {
     /// Position along the gradient axis, `0.0` at the start and `1.0` at
@@ -395,33 +396,15 @@ impl Shader {
         let colors: Vec<Color4f> = stops
             .iter()
             .map(|stop| {
-                // Two conversions, both required, for different reasons.
-                //
-                // Unpremultiply, because Skia's gradient pipeline takes
+                // Unpremultiplied, because Skia's gradient pipeline takes
                 // unpremultiplied `Color4f` and `InPremul::No` below leaves
-                // it that way through the interpolation.
-                //
-                // Then gamma-encode, because the colours are handed over
-                // untagged -- `GradientColors::new(.., None)` -- which Skia
-                // reads as "already in the destination's working colour
-                // space", and that space is gamma-encoded sRGB while
-                // `RgbaLinear` is linear light. Skipping this step is what
-                // made every gradient far too dark: `#0f1b2d` filled as
-                // `[15, 27, 45]` through `set_fill_style` and drew
-                // `[1, 3, 7]` as a gradient stop of the same colour. Every
-                // gradient test on this crate ramped black to white, and
-                // those are the transfer function's two fixed points, so
-                // none of them could see it.
-                //
-                // Encoding here rather than tagging the colours with a
-                // linear space and letting Skia convert: tagging engages the
-                // primaries-conversion path, which crashes on the OKLCH
-                // interpolation variant in this Skia build.
-                //
-                // Alpha is not gamma-encoded and passes through untouched.
-                //
-                // A fully transparent stop keeps whatever hue it was built
-                // with -- see the zero-alpha arm below.
+                // it that way through the interpolation. The colours stay
+                // linear light and go to Skia tagged linear sRGB, the frame
+                // every `RgbaLinear` is in, so a stop is the same colour on
+                // every canvas -- untagged, Skia read them as already in the
+                // destination's space, so a P3 canvas painted sRGB red as P3
+                // red. A fully transparent stop keeps whatever hue it was
+                // built with -- see the zero-alpha arm below.
                 let (r, g, b) = match stop.color.a > 0.0 {
                     true => (
                         stop.color.r / stop.color.a,
@@ -437,9 +420,9 @@ impl Shader {
                     false => (stop.color.r, stop.color.g, stop.color.b),
                 };
                 Color4f {
-                    r: linear_to_srgb(r),
-                    g: linear_to_srgb(g),
-                    b: linear_to_srgb(b),
+                    r,
+                    g,
+                    b,
                     a: stop.color.a,
                 }
             })
@@ -462,12 +445,8 @@ impl Shader {
     /// Builds a linear gradient between `start` and `end` from a sorted list of
     /// stops.
     ///
-    /// Colors are interpreted in the destination surface's working color space
-    /// (no extra primaries conversion).
-    ///
-    /// Colors are interpreted in the destination surface's working color
-    /// space. Outside the stop range the endpoint colors extend
-    /// indefinitely: the tile mode is fixed at clamp and is not selectable.
+    /// Outside the stop range the endpoint colors extend indefinitely: the
+    /// tile mode is fixed at clamp and is not selectable.
     ///
     /// # Errors
     ///
@@ -482,17 +461,18 @@ impl Shader {
     ) -> Result<Self, Error> {
         let (colors, positions, interp) =
             Self::prepare_stops(stops, interpolation.into())?;
-        // `Colors::new` carries the stops + positions + tile mode +
-        // (optional) color space; `None` keeps the pipeline's "treat
-        // `Color4f` as already in the destination's working color space"
-        // semantic that matches our `RgbaLinear` convention. Tagging a
-        // color space would engage Skia's primaries-conversion path,
-        // which crashes on the OKLCH variant in this Skia build.
+        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+        // Re-check: cargo test
+        // a_gradient_stop_is_one_colour_in_every_interpolation_space
+        // Tagged stops are said to have crashed Skia's OKLCH interpolation
+        // in an earlier build, which kept them untagged and so read in the
+        // destination's space. Tagging no longer crashes in any of the
+        // sixteen interpolation spaces, on the CPU or the GPU engine.
         let stop_colors = GradientColors::new(
             &colors,
             Some(positions.as_slice()),
             TileMode::Clamp,
-            None,
+            Some(linear_srgb_color_space()),
         );
         let gradient = SkGradient::new(stop_colors, interp);
         let shader = gradient_shaders::linear_gradient(
@@ -511,9 +491,8 @@ impl Shader {
 
     /// Radial gradient centered at `center` with the given `radius`.
     ///
-    /// Colors are interpreted in the destination surface's working color
-    /// space. Outside the stop range the endpoint colors extend
-    /// indefinitely: the tile mode is fixed at clamp and is not selectable.
+    /// Outside the stop range the endpoint colors extend indefinitely: the
+    /// tile mode is fixed at clamp and is not selectable.
     ///
     /// # Errors
     ///
@@ -532,7 +511,7 @@ impl Shader {
             &colors,
             Some(positions.as_slice()),
             TileMode::Clamp,
-            None,
+            Some(linear_srgb_color_space()),
         );
         let gradient = SkGradient::new(stop_colors, interp);
         let shader = gradient_shaders::radial_gradient(
@@ -552,9 +531,8 @@ impl Shader {
     /// Sweep (angular / conic) gradient around `center`, sweeping from
     /// `start_angle` to `end_angle` in degrees (clockwise from +x).
     ///
-    /// Colors are interpreted in the destination surface's working color
-    /// space. Outside the stop range the endpoint colors extend
-    /// indefinitely: the tile mode is fixed at clamp and is not selectable.
+    /// Outside the stop range the endpoint colors extend indefinitely: the
+    /// tile mode is fixed at clamp and is not selectable.
     ///
     /// # Errors
     ///
@@ -574,7 +552,7 @@ impl Shader {
             &colors,
             Some(positions.as_slice()),
             TileMode::Clamp,
-            None,
+            Some(linear_srgb_color_space()),
         );
         let gradient = SkGradient::new(stop_colors, interp);
         let shader = gradient_shaders::sweep_gradient(
@@ -598,9 +576,8 @@ impl Shader {
     /// The two-circle form CanvasKit exposes that the Canvas2D radial gradient
     /// does not.
     ///
-    /// Colors are interpreted in the destination surface's working color
-    /// space. Outside the stop range the endpoint colors extend
-    /// indefinitely: the tile mode is fixed at clamp and is not selectable.
+    /// Outside the stop range the endpoint colors extend indefinitely: the
+    /// tile mode is fixed at clamp and is not selectable.
     ///
     /// # Errors
     ///
@@ -621,7 +598,7 @@ impl Shader {
             &colors,
             Some(positions.as_slice()),
             TileMode::Clamp,
-            None,
+            Some(linear_srgb_color_space()),
         );
         let gradient = SkGradient::new(stop_colors, interp);
         let shader = gradient_shaders::two_point_conical_gradient(

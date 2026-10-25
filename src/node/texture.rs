@@ -1,8 +1,8 @@
 #![allow(non_snake_case)]
 use neon::prelude::*;
 use skia_safe::{
-    Color, Color4f, ColorSpace, Matrix, Paint, PaintCap, PaintStyle, Path,
-    Point, line_2d_path_effect, path_2d_path_effect,
+    Color4f, ColorSpace, Matrix, Paint, PaintCap, PaintStyle, Path, Point,
+    line_2d_path_effect, path_2d_path_effect,
 };
 use std::{cell::RefCell, rc::Rc};
 
@@ -10,7 +10,9 @@ use crate::utils::*;
 
 struct Texture {
     path: Option<Path>,
-    color: Color,
+    /// Unpremultiplied, in the space it is tagged with: the one a CSS string
+    /// named, or linear-light sRGB for an `RgbaLinear`.
+    color: (Color4f, ColorSpace),
     line: f32,
     cap: PaintCap,
     angle: f32,
@@ -25,7 +27,7 @@ impl Default for Texture {
     fn default() -> Self {
         Texture {
             path: None,
-            color: Color::BLACK,
+            color: (Color4f::new(0.0, 0.0, 0.0, 1.0), ColorSpace::new_srgb()),
             line: 1.0,
             cap: PaintCap::Butt,
             angle: 0.0,
@@ -50,7 +52,7 @@ impl CanvasTexture {
     #[allow(clippy::too_many_arguments)]
     pub fn from_parts(
         path: Option<Path>,
-        color: Color,
+        color: (Color4f, ColorSpace),
         line: f32,
         cap: PaintCap,
         angle: f32,
@@ -159,9 +161,9 @@ impl CanvasTexture {
             paint.set_style(PaintStyle::Fill);
         }
 
-        let mut color: Color4f = tile.color.into();
+        let (mut color, space) = skia_paint_color(tile.color.0, &tile.color.1);
         color.a *= alpha;
-        paint.set_color4f(color, &ColorSpace::new_srgb());
+        paint.set_color4f(color, &space);
 
         thinned
     }
@@ -203,10 +205,9 @@ impl CanvasTexture {
 
     pub fn to_color4f(&self, alpha: f32) -> (Color4f, Option<ColorSpace>) {
         let tile = self.texture.borrow();
-        let mut color: Color4f = tile.color.into();
+        let (mut color, space) = skia_paint_color(tile.color.0, &tile.color.1);
         color.a *= alpha;
-        // Texture colors come from CSS parsing -- they're sRGB.
-        (color, Some(ColorSpace::new_srgb()))
+        (color, Some(space))
     }
 }
 
@@ -217,7 +218,12 @@ impl CanvasTexture {
 
 pub fn new(mut cx: FunctionContext) -> JsResult<BoxedCanvasTexture> {
     let path = opt_skpath_arg(&mut cx, 1);
-    let color = opt_color_arg(&mut cx, 2).unwrap_or(Color::BLACK);
+    let color = cx
+        .argument_opt(2)
+        .and_then(|value| color4f_string_in(&mut cx, value))
+        .unwrap_or_else(|| {
+            (Color4f::new(0.0, 0.0, 0.0, 1.0), ColorSpace::new_srgb())
+        });
 
     let line = match opt_float_arg(&mut cx, 3) {
         Some(weight) => weight,

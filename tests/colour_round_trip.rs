@@ -174,8 +174,8 @@ fn candidates(space: PixelColorSpace) -> ([u8; 4], [u8; 4]) {
 #[test]
 fn a_second_export_is_not_served_the_first_ones_conversion() {
     for (name, space) in SPACES {
-        // Saturated in the canvas's own space, so it lies outside sRGB and
-        // the conversion has something to destroy. A colour inside both
+        // Saturated and outside sRGB, inside both wide gamuts, so the
+        // conversion has something to destroy. A colour inside both
         // gamuts survives a clip and cannot tell the two answers apart.
         let alone = first_pixel(&mut painted_red(*space), *space);
 
@@ -190,7 +190,8 @@ fn a_second_export_is_not_served_the_first_ones_conversion() {
     }
 }
 
-/// A canvas filled with its own space's red, which is outside sRGB.
+/// A canvas filled with Display P3 red, which is outside sRGB and inside
+/// both wide gamuts.
 fn painted_red(space: PixelColorSpace) -> Canvas {
     let mut canvas = Canvas::with_options(
         8.0,
@@ -202,7 +203,9 @@ fn painted_red(space: PixelColorSpace) -> Canvas {
     )
     .expect("a canvas in every documented space");
     let ctx = canvas.context();
-    ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.0, 0.0));
+    ctx.set_fill_style(
+        RgbaLinear::from_css("color(display-p3 1 0 0)").expect("P3 red"),
+    );
     ctx.fill_rect(0.0, 0.0, 8.0, 8.0);
     canvas
 }

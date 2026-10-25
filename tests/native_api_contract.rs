@@ -3864,12 +3864,14 @@ fn a_wide_gamut_canvas_survives_being_drawn_into_another() -> Result<()> {
         Ok([pixels[0], pixels[1], pixels[2], pixels[3]])
     };
 
-    // Red named in the canvas's own space, so it is P3 red rather than sRGB
-    // red converted into P3 -- the difference the round trip destroys.
+    // P3 red rather than sRGB red converted into P3 -- the difference the
+    // round trip destroys.
     let mut inner = p3()?;
     {
         let ctx = inner.context();
-        ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.0, 0.0));
+        ctx.set_fill_style(
+            RgbaLinear::from_css("color(display-p3 1 0 0)").expect("P3 red"),
+        );
         ctx.fill_rect(0.0, 0.0, 2.0, 2.0);
     }
     assert_eq!(read(&mut inner)?, [255, 0, 0, 255], "the source is P3 red");
