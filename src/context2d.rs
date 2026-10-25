@@ -4269,3 +4269,330 @@ mod compounding_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod run_painter_tests {
+    use super::*;
+    use std::iter::zip;
+
+    use crate::{
+        context::PAINTER_OVERRIDE,
+        font::{FontAxisTag, FontLibrary},
+        node::typography::Painter,
+    };
+
+    /// A scene drawn on a fresh context.
+    type Scene = Box<dyn Fn(&mut Context2D)>;
+
+    const W: f32 = 420.0;
+    const H: f32 = 160.0;
+
+    /// The bundled faces the scenes use, registered once.
+    fn register() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let fonts = FontLibrary::new();
+            let m = "tests/assets/fonts/montserrat-latin/montserrat-v30-latin";
+            for (family, files) in [
+                (
+                    "Oswald",
+                    vec!["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
+                ),
+                (
+                    "Raleway",
+                    vec![
+                        "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+                        "tests/assets/fonts/Raleway/Raleway-Italic-VariableFont_wght.ttf",
+                    ],
+                ),
+                (
+                    "Montserrat",
+                    vec![
+                        &*format!("{m}-200.woff2").leak(),
+                        &*format!("{m}-regular.woff2").leak(),
+                        &*format!("{m}-700.woff2").leak(),
+                    ],
+                ),
+                ("Monoton", vec!["tests/assets/fonts/Monoton-Regular.woff"]),
+                ("Amstelvar", vec!["tests/assets/fonts/AmstelvarAlpha-VF.ttf"]),
+            ] {
+                for file in files {
+                    fonts
+                        .register_font_from_path(family, file)
+                        .expect("a bundled face registers");
+                }
+            }
+        });
+    }
+
+    /// The canvas's bytes after `scene`, painted through `Paragraph::paint`
+    /// or through the run painter.
+    fn painted(
+        gpu: bool,
+        painter: Painter,
+        scene: &dyn Fn(&mut Context2D),
+    ) -> Vec<u8> {
+        PAINTER_OVERRIDE.set(Some(painter));
+        let mut canvas = Canvas::new(W, H);
+        canvas.set_gpu(gpu);
+        let ctx = canvas.context();
+        scene(ctx);
+        let bytes = ctx
+            .get_image_data(0.0, 0.0, W, H)
+            .expect("the canvas reads back")
+            .pixels()
+            .to_vec();
+        PAINTER_OVERRIDE.set(None);
+        bytes
+    }
+
+    /// Text drawn in `font`, after `setup`, at a fixed point.
+    fn text(
+        font: &'static str,
+        words: &'static str,
+        setup: impl Fn(&mut Context2D) + 'static,
+    ) -> Scene {
+        Box::new(move |ctx: &mut Context2D| {
+            ctx.set_fill_style_css("#203040").expect("a colour");
+            assert!(ctx.set_font_css(font), "{font} parses");
+            setup(ctx);
+            ctx.fill_text(words, 12.0, 96.0, None);
+        })
+    }
+
+    fn corpus() -> Vec<(String, Scene)> {
+        let line = "Hamburgefonstiv AV To";
+        let mut cases: Vec<(String, Scene)> = vec![
+            ("plain".into(), text("48px Oswald", line, |_| {})),
+            ("plain Raleway".into(), text("40px Raleway", line, |_| {})),
+            ("system serif".into(), text("40px serif", line, |_| {})),
+            // Kerned through `kern` alone, where SkParagraph's reported
+            // positions and the painted ones part -- see `glyph_runs`.
+            (
+                "legacy kern".into(),
+                text("48px Helvetica", "AV To Ta", |_| {}),
+            ),
+            (
+                "mixed fallback".into(),
+                text("900 48px Montserrat, Raleway", "ABЖЖ AV", |_| {}),
+            ),
+            (
+                "right to left".into(),
+                text("32px Raleway", "שלום עולם مرحبا", |ctx| {
+                    ctx.set_direction(TextDirection::RightToLeft)
+                }),
+            ),
+            (
+                "emoji fallback".into(),
+                text("40px Oswald", "Hi 😀 there 🎉", |_| {}),
+            ),
+            (
+                "letter and word spacing".into(),
+                text("36px Oswald", line, |ctx| {
+                    ctx.set_letter_spacing_css("6px").expect("spacing");
+                    ctx.set_word_spacing_css("18px").expect("spacing");
+                }),
+            ),
+            (
+                "negative spacing".into(),
+                text("36px Oswald", line, |ctx| {
+                    ctx.set_letter_spacing_css("-3px").expect("spacing");
+                    ctx.set_word_spacing_css("-8px").expect("spacing");
+                }),
+            ),
+            (
+                "small caps".into(),
+                text("36px Raleway", line, |ctx| {
+                    ctx.set_font_variant_caps(FontVariantCaps::SmallCaps)
+                }),
+            ),
+            (
+                "stretch".into(),
+                text("36px Amstelvar", line, |ctx| {
+                    ctx.set_font_stretch(FontStretch::Condensed)
+                }),
+            ),
+            (
+                "wght instance".into(),
+                text("300 44px Oswald", line, |_| {}),
+            ),
+            (
+                "opsz instance small".into(),
+                text("12px Amstelvar", line, |_| {}),
+            ),
+            (
+                "opsz instance large".into(),
+                text("72px Amstelvar", "Hamb", |_| {}),
+            ),
+            (
+                "explicit variation".into(),
+                text("40px Oswald", line, |ctx| {
+                    ctx.set_font_variation_settings(&[FontVariation::new(
+                        FontAxisTag::WGHT,
+                        650.0,
+                    )])
+                }),
+            ),
+            ("fake bold".into(), text("900 48px Monoton", "Hamb", |_| {})),
+            (
+                "fake italic".into(),
+                text("italic 48px Oswald", line, |_| {}),
+            ),
+            (
+                "real italic".into(),
+                text("italic 40px Raleway", line, |_| {}),
+            ),
+            (
+                "unhinted".into(),
+                text("40px Oswald", line, |ctx| ctx.set_font_hinting(false)),
+            ),
+            (
+                "shadow".into(),
+                text("40px Oswald", line, |ctx| {
+                    ctx.set_shadow_color_css("rgba(0, 0, 255, 0.6)")
+                        .expect("a colour");
+                    ctx.set_shadow_blur(4.0);
+                    ctx.set_shadow_offset(3.0, 4.0);
+                }),
+            ),
+            (
+                "clip".into(),
+                text("48px Oswald", line, |ctx| {
+                    ctx.begin_path();
+                    ctx.rect(40.0, 50.0, 200.0, 40.0);
+                    ctx.clip(FillRule::NonZero);
+                }),
+            ),
+            (
+                "global alpha".into(),
+                text("48px Oswald", line, |ctx| ctx.set_global_alpha(0.45)),
+            ),
+            (
+                "translucent fill".into(),
+                text("48px Oswald", line, |ctx| {
+                    ctx.set_fill_style_css("rgba(200, 30, 90, 0.5)")
+                        .expect("a colour");
+                }),
+            ),
+            (
+                "condensed by maxWidth".into(),
+                Box::new(|ctx: &mut Context2D| {
+                    assert!(ctx.set_font_css("48px Oswald"));
+                    ctx.fill_text(
+                        "Hamburgefonstiv AV To",
+                        12.0,
+                        96.0,
+                        Some(180.0),
+                    );
+                }),
+            ),
+            (
+                "wrapped".into(),
+                Box::new(|ctx: &mut Context2D| {
+                    assert!(ctx.set_font_css("20px Raleway"));
+                    ctx.set_text_wrap(true);
+                    ctx.fill_text(
+                        "A paragraph long enough to wrap onto several lines here",
+                        12.0,
+                        30.0,
+                        Some(220.0),
+                    );
+                }),
+            ),
+            (
+                "stroke".into(),
+                Box::new(|ctx: &mut Context2D| {
+                    assert!(ctx.set_font_css("bold 56px Oswald"));
+                    ctx.set_stroke_style_css("#a03").expect("a colour");
+                    ctx.set_line_width(2.5);
+                    ctx.stroke_text("Hamburg AV", 12.0, 100.0, None);
+                }),
+            ),
+        ];
+        for mode in [
+            BlendMode::Xor,
+            BlendMode::Multiply,
+            BlendMode::DestinationOver,
+        ] {
+            cases.push((
+                format!("composite {mode:?}"),
+                Box::new(move |ctx: &mut Context2D| {
+                    ctx.set_fill_style_css("#7ac").expect("a colour");
+                    ctx.fill_rect(30.0, 40.0, 240.0, 70.0);
+                    ctx.set_global_composite_operation(mode);
+                    ctx.set_fill_style_css("rgba(220, 40, 20, 0.8)")
+                        .expect("a colour");
+                    assert!(ctx.set_font_css("48px Oswald"));
+                    ctx.fill_text("Hamburgefonstiv AV", 12.0, 96.0, None);
+                }),
+            ));
+        }
+        for decoration in [
+            "underline",
+            "overline",
+            "line-through",
+            "underline overline line-through",
+            "underline double",
+            "underline dotted",
+            "underline dashed",
+            "underline wavy red 3px",
+        ] {
+            cases.push((
+                format!("decoration {decoration}"),
+                text("40px Oswald", line, move |ctx| {
+                    ctx.set_text_decoration_css(decoration)
+                        .expect("a decoration");
+                }),
+            ));
+        }
+        cases.push((
+            "decoration on mixed fallback".into(),
+            text("900 40px Montserrat, Raleway", "ABЖЖ AV", |ctx| {
+                ctx.set_text_decoration_css("underline")
+                    .expect("a decoration");
+            }),
+        ));
+        cases.push((
+            "decoration with shadow".into(),
+            text("40px Oswald", line, |ctx| {
+                ctx.set_text_decoration_css("underline 2px")
+                    .expect("a decoration");
+                ctx.set_shadow_color_css("rgba(0, 0, 0, 0.5)")
+                    .expect("a colour");
+                ctx.set_shadow_blur(3.0);
+                ctx.set_shadow_offset(2.0, 2.0);
+            }),
+        ));
+        cases
+    }
+
+    /// The run painter draws what `Paragraph::paint` draws, to the byte, on
+    /// both engines, for text with nothing a run would need painted on its
+    /// own. Any oblique a run is drawn under rests on this.
+    #[test]
+    fn the_run_painter_draws_what_paragraph_paint_draws() {
+        register();
+        let mut differing = vec![];
+        for gpu in [false, true] {
+            for (name, scene) in corpus() {
+                let through_paragraph =
+                    painted(gpu, Painter::Paragraph, scene.as_ref());
+                let by_runs = painted(gpu, Painter::Runs, scene.as_ref());
+                assert!(
+                    through_paragraph.iter().any(|&b| b != 0),
+                    "{name}: the scene draws something"
+                );
+                let bytes = zip(&through_paragraph, &by_runs)
+                    .filter(|(a, b)| a != b)
+                    .count();
+                if bytes != 0 {
+                    differing.push(format!(
+                        "{name} ({}): {bytes} bytes differ",
+                        if gpu { "GPU" } else { "CPU" }
+                    ));
+                }
+            }
+        }
+        assert!(differing.is_empty(), "{}", differing.join("\n"));
+    }
+}
