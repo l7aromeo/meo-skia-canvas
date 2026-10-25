@@ -2037,7 +2037,7 @@ mod tests {
 
     /// Whether skia-safe still turns an empty family list into a slice
     /// built from a null pointer, which a debug build aborts on: the defect
-    /// the npm binding's `families_in` and this module's `is_empty` tests
+    /// the npm binding's `font_families` and this module's `is_empty` tests
     /// before `set_font_families` keep away from. Run in a child process,
     /// since the abort does not unwind. Fails once skia-safe takes an empty
     /// list, which is the cue to drop the guard.
@@ -2065,7 +2065,7 @@ mod tests {
         .expect("the test binary runs");
         assert!(
             !status.success(),
-            "skia-safe takes an empty family list now: drop `families_in`'s \
+            "skia-safe takes an empty family list now: drop `font_families`' \
              guard in src/node/paragraph.rs and its UPSTREAM marker"
         );
     }

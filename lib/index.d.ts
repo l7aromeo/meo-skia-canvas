@@ -5324,6 +5324,14 @@ export interface TextFontFeatures {
 }
 
 /**
+ * Each option is converted as WebIDL converts a value to its type, as the
+ * Canvas API's own attributes are: a number by `ToNumber`, so `"12"` is 12;
+ * a string by `ToString`; a boolean by `ToBoolean`; an object of options or
+ * a list as a dictionary or a sequence. A value whose conversion fails --
+ * a number that converts to NaN or an infinity, a list that is not
+ * iterable, a Symbol -- is a `TypeError` naming the option, and an option
+ * left out or `undefined` takes its default.
+ *
  * 🧪 Not in the HTML Canvas standard.
  *
  * @category Paragraph Layout
@@ -5456,7 +5464,8 @@ export interface TextStyleInput {
  * A fixed line box independent of the per-run fonts, for deterministic
  * leading (captions, subtitles, vertically-aligned blocks). Mirrors
  * CanvasKit's `StrutStyle`. Presence on a paragraph style enables the
- * strut unless `enabled` is explicitly `false`.
+ * strut unless `enabled` is explicitly `false`. Each option is converted as
+ * in {@link TextStyleInput}.
  *
  * 🧪 Not in the HTML Canvas standard.
  *
@@ -5497,6 +5506,14 @@ export interface StrutStyleInput {
 export type TextHeightBehavior = 0 | 1 | 2 | 3;
 
 /**
+ * Each option is converted as WebIDL converts a value to its type, as the
+ * Canvas API's own attributes are: a number by `ToNumber`, so `"12"` is 12;
+ * a string by `ToString`; a boolean by `ToBoolean`; an object of options or
+ * a list as a dictionary or a sequence. A value whose conversion fails --
+ * a number that converts to NaN or an infinity, a list that is not
+ * iterable, a Symbol -- is a `TypeError` naming the option, and an option
+ * left out or `undefined` takes its default.
+ *
  * 🧪 Not in the HTML Canvas standard.
  *
  * @category Paragraph Layout

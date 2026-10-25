@@ -21,12 +21,39 @@ removed and no signature moves.
 
 ### Breaking
 
+- **A `ParagraphBuilder` option is converted as WebIDL converts it, and
+  one that cannot be is a `TypeError` naming it.** Every option of a
+  paragraph style, a text style, a strut, and the objects and lists inside
+  them was read by whatever reader came to hand and ignored when that
+  failed: `fontSize: "abc"` and `fontSize: NaN` left the default,
+  `fontFamilies: "Arial"` and `shadows: {}` were dropped,
+  `offset: [1, 2, 3]` took its first two numbers, and `halfLeading: 1` was
+  ignored where `fontSize: "12"` was 12. Each option now converts as a
+  Canvas attribute does: a number by `ToNumber`, so `"12"`, `[12]` and
+  `true` convert; a string by `ToString`; a boolean by `ToBoolean`, so
+  `halfLeading: 1` is `true`; an object of options as a dictionary, `null`
+  taking every default; a list as a sequence, any iterable included; a
+  colour as a CSS string or a sequence of four numbers. A conversion WebIDL
+  fails is a `TypeError` naming the option and what it takes: a number
+  that converts to NaN or an infinity, a BigInt or Symbol where a number
+  goes, a dictionary given a primitive, a list given something with no
+  iterator, and an `offset` or a float colour of the wrong length. An
+  option left out or `undefined` still takes its default.
+
+  Migrate: a number option given a value that converts to NaN or an
+  infinity, a list option given a single value, and a colour array of
+  other than four numbers -- `["red"]` among them, which read as `"red"`
+  -- each throw; pass a finite number, wrap a single family in a list, and
+  pass a CSS colour as the string itself, `"red"`.
+
 - **`textHeightBehavior` takes `0`, `1`, `2` or `3` and refuses any other
   number.** `ParagraphBuilder` truncated `1.5` toward zero, to `1`, and
-  ignored `NaN` and the infinities, leaving the default `0`; each is now a
-  `RangeError`, as an integer outside `0` to `3` already was. The option
-  is typed `TextHeightBehavior`, where `TextHeightBehavior | (number & {})`
-  let any `number` compile.
+  ignored `NaN` and the infinities, leaving the default `0`. A finite
+  number outside the four is now a `RangeError`, as an integer outside `0`
+  to `3` already was, and `NaN` and the infinities a `TypeError`, as every
+  number option's are -- see the entry above. The option is typed
+  `TextHeightBehavior`, where `TextHeightBehavior | (number & {})` let any
+  `number` compile.
 
   Migrate: pass one of the four codes, rounding or checking a computed
   value first, and type it as `TextHeightBehavior`.
