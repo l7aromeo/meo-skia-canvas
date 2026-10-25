@@ -800,6 +800,24 @@ describe("textHeightBehavior", () => {
     }
   });
 
+  test("names the number refused as JavaScript spells it", () => {
+    for (const [code, spelled] of [
+      [Infinity, "Infinity"],
+      [-Infinity, "-Infinity"],
+      [NaN, "NaN"],
+      [1e21, "1e+21"],
+      [1.5, "1.5"],
+    ]) {
+      assert.throws(
+        () => ParagraphBuilder.Make({ textHeightBehavior: code }),
+        (e) =>
+          e instanceof RangeError &&
+          e.message.includes(`textHeightBehavior ${spelled} `),
+        `${spelled} in the message`,
+      );
+    }
+  });
+
   test("takes each of the four codes", () => {
     for (const code of [0, 1, 2, 3, -0]) {
       assert.ok(ParagraphBuilder.Make({ textHeightBehavior: code }), `${code}`);
