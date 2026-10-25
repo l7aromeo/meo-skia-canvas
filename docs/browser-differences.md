@@ -130,7 +130,8 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   `slnt` axis is set as far as it goes, and an italic face is drawn only for
   a family with no upright face to shear. At 90deg either way a sheared
   glyph lies along its baseline and draws nothing, the limit it nears as
-  the angle grows. `resolve_for_oblique` and `run_shear` in
+  the angle grows; Chrome draws 90deg as it draws 14deg and -90deg as any
+  other negative angle, by the rules below. `resolve_for_oblique` and `run_shear` in
   `src/node/typography.rs` are the match, and quote the section. A range of
   a `Paragraph` asking for oblique is matched and sheared the same way, at
   14deg, and draws what canvas text in `oblique` draws -- `src/node/oblique.rs`.
