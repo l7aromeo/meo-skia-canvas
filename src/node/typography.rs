@@ -13,13 +13,14 @@ use crate::{
 };
 use neon::prelude::*;
 use skia_safe::{
-    Color, Font, FontMetrics, FourByteTag, GlyphId, Matrix, Paint,
-    Path as SkPath, PathBuilder as SkPathBuilder, Point, Rect, Typeface,
+    Canvas, Color, Font, FontMetrics, FourByteTag, GlyphId, Matrix, Paint,
+    Path as SkPath, PathBuilder as SkPathBuilder, Point, Rect, TextBlobBuilder,
+    Typeface,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
         Decoration, FontCollection, Paragraph, ParagraphBuilder,
         ParagraphStyle, RectHeightStyle, RectWidthStyle, TextAlign,
-        TextDirection, TextStyle, TypefaceFontProvider,
+        TextDecoration, TextDirection, TextStyle, TypefaceFontProvider,
     },
     typeface::TypefaceId,
 };
@@ -549,6 +550,130 @@ pub struct TextLayout {
     /// draws stems 6 pixels wide and a crossbar still 12, and the inked
     /// height does not move at any factor.
     pub condensation: f32,
+    /// The same run laid out with its glyphs transparent, painted for its
+    /// decoration lines alone, or `None` where it has none or nobody asked
+    /// for it -- see [`Typesetter::decorate`] and [`TextLayout::paint`].
+    pub decorations: Option<Paragraph>,
+    /// The ranges laid out in a style of their own, which the decoration
+    /// paragraph is laid out with too, so that its lines fall under the
+    /// same glyphs.
+    restyled: Vec<(Range<usize>, FontStyle)>,
+}
+
+/// Which painter draws a laid-out run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Painter {
+    /// `Paragraph::paint`, the whole paragraph at once.
+    Paragraph,
+    /// [`TextLayout::paint`], a glyph run at a time.
+    Runs,
+}
+
+impl TextLayout {
+    /// The painter this run needs.
+    ///
+    /// Two painters rather than one, and `Paragraph::paint` the default,
+    /// because the run painter costs more where it is not needed: in a
+    /// release build, `fillText` of plain text took about 1.5% longer
+    /// through it and decorated text about 50% longer -- 7.2 microseconds a
+    /// call against 10.8 -- the price of the second layout its decoration
+    /// lines need (see the `UPSTREAM:` marker on [`TextLayout::paint`]).
+    /// The two paint the same pixels, which
+    /// `the_run_painter_draws_what_paragraph_paint_draws` holds them to, so
+    /// one painter for everything becomes the right shape once that second
+    /// layout is gone.
+    ///
+    /// No run is yet drawn under a transform of its own, so this is always
+    /// `Paragraph`.
+    pub fn painter(&self) -> Painter {
+        Painter::Paragraph
+    }
+
+    /// Paints the run with its anchor at `origin`: each glyph run as a text
+    /// blob in its own font, then the decoration lines -- from the paragraph
+    /// [`Typesetter::decorate`] added, which this needs where the run is
+    /// decorated.
+    ///
+    /// A run at a time rather than through `Paragraph::paint`, so that a run
+    /// can be drawn under a transform of its own. The pixels are
+    /// `Paragraph::paint`'s: each run's `Font` already carries what
+    /// SkParagraph synthesised for it -- an embolden, a skew -- and the run's
+    /// origin is the one `Paragraph::paint` draws from, its baseline snapped
+    /// to a whole pixel (#142). The decoration lines are SkParagraph's own,
+    /// from a second paragraph whose glyphs are transparent, so they land
+    /// where `Paragraph::paint` puts them.
+    ///
+    /// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+    /// Re-check: cargo test the_run_painter_draws_what_paragraph_paint_draws
+    /// with the decoration paragraph replaced by one call to
+    /// `Paragraph::updateForegroundPaint` making the glyphs transparent, if
+    /// the binding offers it; SkParagraph has it, skia-safe does not bind it,
+    /// so the decorations need a second layout of their own.
+    pub fn paint(&mut self, canvas: &Canvas, origin: Point, paint: &Paint) {
+        for run in glyph_runs(&mut self.paragraph) {
+            let mut builder = TextBlobBuilder::new();
+            let (glyphs, positions) =
+                builder.alloc_run_pos(&run.font, run.glyphs.len(), None);
+            glyphs.copy_from_slice(&run.glyphs);
+            positions.copy_from_slice(&run.positions);
+            if let Some(blob) = builder.make() {
+                canvas.draw_text_blob(blob, origin + run.origin, paint);
+            }
+        }
+        if let Some(decorations) = &self.decorations {
+            decorations.paint(canvas, origin);
+        }
+    }
+}
+
+/// One glyph run of a laid-out paragraph: the glyphs one font draws, where
+/// each goes relative to the run's origin, and that origin relative to the
+/// paragraph's.
+struct GlyphRun {
+    font: Font,
+    glyphs: Vec<GlyphId>,
+    positions: Vec<Point>,
+    origin: Point,
+}
+
+/// The glyph runs `paragraph` paints, in the positions `Paragraph::paint`
+/// draws them at.
+///
+/// `painted_positions` rather than the positions SkParagraph reports, which
+/// place a glyph half its own preceding kern to the right of where
+/// `Paragraph::paint` draws it on a face that kerns through `kern` alone.
+/// The run painter's differential test is what separates the two: with the
+/// reported positions, 48px Helvetica `"AV To Ta"` paints 4,004 bytes
+/// differently from `Paragraph::paint` and 40px `serif` (Times) 2,492,
+/// where every face that kerns through GPOS paints the same either way; with
+/// `painted_positions`, all of them paint identically.
+///
+/// UPSTREAM: skia-safe 0.153.3 -- #131 -- worked around
+/// Re-check: cargo test skia_still_halves_a_legacy_kern, which draws a
+/// kerned run and compares what Skia reports against where it paints. It
+/// goes red when the defect is fixed: `painted_positions` refuses positions
+/// that are already painted positions, so a corrected Skia makes the test's
+/// own `expect` fail.
+fn glyph_runs(paragraph: &mut Paragraph) -> Vec<GlyphRun> {
+    let mut runs = vec![];
+    paragraph.extended_visit(|_line, visit| {
+        if let Some(info) = visit {
+            let positions = painted_positions(
+                info.font(),
+                info.glyphs(),
+                info.positions(),
+                info.advance().width,
+            )
+            .unwrap_or_else(|| info.positions().to_vec());
+            runs.push(GlyphRun {
+                font: info.font().clone(),
+                glyphs: info.glyphs().to_vec(),
+                positions,
+                origin: info.origin(),
+            });
+        }
+    });
+    runs
 }
 
 /// How far below the weight a style asks for SkParagraph needs a face to be
@@ -758,7 +883,7 @@ impl<'a> Typesetter<'a> {
 
     /// Lays the run out, and works out how far it has to be squeezed.
     pub fn layout(&self, paint: &Paint) -> TextLayout {
-        let paragraph = self.restyled_paragraph(&self.layout_style(paint));
+        let (paragraph, restyled) = self.restyled(&self.layout_style(paint));
 
         let offset = Point::new(
             self.alignment_offset(),
@@ -785,7 +910,26 @@ impl<'a> Typesetter<'a> {
             paragraph,
             offset,
             condensation,
+            decorations: None,
+            restyled,
         }
+    }
+
+    /// Adds to `layout`, laid out with `paint`, the decoration paragraph
+    /// [`TextLayout::paint`] draws its lines from, where the run has any.
+    ///
+    /// Apart from [`Typesetter::layout`] because it is a second layout, and
+    /// only the run painter needs it: `Paragraph::paint` draws the lines
+    /// itself, and a measurement or an outline has no use for them.
+    pub fn decorate(&self, layout: &mut TextLayout, paint: &Paint) {
+        let style = self.layout_style(paint);
+        if style.decoration().ty == TextDecoration::NO_DECORATION {
+            return;
+        }
+        let mut glyphless = style;
+        glyphless.set_foreground_paint(Paint::default().set_alpha(0));
+        layout.decorations =
+            Some(self.paragraph_with(&glyphless, &layout.restyled));
     }
 
     /// The run's advance -- every glyph and space, with the letter spacing
@@ -867,6 +1011,14 @@ impl<'a> Typesetter<'a> {
     /// plain Montserrat 700 and the Cyrillic, which Montserrat lacks, as
     /// Raleway's 900 instance.
     fn restyled_paragraph(&self, char_style: &TextStyle) -> Paragraph {
+        self.restyled(char_style).0
+    }
+
+    /// [`Typesetter::restyled_paragraph`], with the ranges it restyled.
+    fn restyled(
+        &self,
+        char_style: &TextStyle,
+    ) -> (Paragraph, Vec<(Range<usize>, FontStyle)>) {
         let mut first = self.paragraph_with(char_style, &[]);
         let restyled = runs_to_restyle(
             &mut first,
@@ -874,8 +1026,11 @@ impl<'a> Typesetter<'a> {
             char_style.font_style(),
         );
         match restyled.is_empty() {
-            true => first,
-            false => self.paragraph_with(char_style, &restyled),
+            true => (first, restyled),
+            false => {
+                let paragraph = self.paragraph_with(char_style, &restyled);
+                (paragraph, restyled)
+            }
         }
     }
 
@@ -981,6 +1136,7 @@ impl<'a> Typesetter<'a> {
             paragraph,
             offset: origin,
             condensation,
+            ..
         } = self.layout(&Paint::default());
 
         // Baseline offsets, relative to whatever `textBaseline` selected.
@@ -1098,6 +1254,7 @@ impl<'a> Typesetter<'a> {
             mut paragraph,
             offset: mut origin,
             condensation,
+            ..
         } = self.layout(&Paint::default());
         let headroom = self.char_style.font_metrics().ascent
             + paragraph.alphabetic_baseline();
@@ -1106,42 +1263,12 @@ impl<'a> Typesetter<'a> {
         origin += anchor;
         origin.y -= headroom - offset;
 
-        // Built a run at a time from `painted_positions` rather than taken
-        // from `Paragraph::get_path_at`, which places each glyph half its own
+        // Built a run at a time from `glyph_runs` rather than taken from
+        // `Paragraph::get_path_at`, which places each glyph half its own
         // preceding kern to the right of where `Paragraph::paint` draws it --
         // so the path this returns used to fill differently from the text it
-        // was taken from.
+        // was taken from. `glyph_runs` holds the positions and their marker.
         //
-        // UPSTREAM: skia-safe 0.153.3 -- #131 -- worked around
-        // Re-check: cargo test skia_still_halves_a_legacy_kern, which draws
-        // a kerned run and compares what Skia reports against where it
-        // paints. It goes red when the defect is fixed rather than needing a
-        // workaround removed first: `painted_positions` refuses positions
-        // that are already painted positions, so a corrected Skia makes the
-        // test's own `expect` fail. Nothing is filed with rust-skia or Skia:
-        // #131 records the attribution to Skia as not yet established, so
-        // this may turn out to be ours.
-        //
-        // `painted_positions` documents the recovery and the guard on it.
-        let mut runs: Vec<(Font, Vec<GlyphId>, Vec<Point>, Point)> = vec![];
-        paragraph.extended_visit(|_line, visit| {
-            if let Some(info) = visit {
-                let positions = painted_positions(
-                    info.font(),
-                    info.glyphs(),
-                    info.positions(),
-                    info.advance().width,
-                )
-                .unwrap_or_else(|| info.positions().to_vec());
-                runs.push((
-                    info.font().clone(),
-                    info.glyphs().to_vec(),
-                    positions,
-                    info.origin(),
-                ));
-            }
-        });
-
         // One glyph outline at a time rather than through
         // `Paragraph::GetPath`, which applies a translation of its own: for
         // `"To"` it returned a path starting at x = 46.4 from a blob whose
@@ -1151,11 +1278,11 @@ impl<'a> Typesetter<'a> {
         // yields `None` and contributes nothing, which is what
         // `get_path_at`'s skipped-glyph count reported.
         let mut builder = SkPathBuilder::new();
-        for (font, glyphs, positions, run_origin) in runs {
-            for (glyph, at) in zip(glyphs, positions) {
-                if let Some(outline) = font.get_path(glyph) {
+        for run in glyph_runs(&mut paragraph) {
+            for (glyph, at) in zip(run.glyphs, run.positions) {
+                if let Some(outline) = run.font.get_path(glyph) {
                     builder.add_path(
-                        &outline.with_offset(at + run_origin + origin),
+                        &outline.with_offset(at + run.origin + origin),
                         None,
                     );
                 }

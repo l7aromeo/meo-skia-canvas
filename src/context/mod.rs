@@ -38,8 +38,8 @@ use crate::{
         texture::{BoxedCanvasTexture, CanvasTexture},
     },
     typography::{
-        Baseline, DecorationStyle, FontSpec, PendingInk, Spacing, TextExtents,
-        TextLayout, TypesetInputs, Typesetter,
+        Baseline, DecorationStyle, FontSpec, Painter, PendingInk, Spacing,
+        TextExtents, TypesetInputs, Typesetter,
     },
     utils::*,
 };
@@ -427,6 +427,14 @@ impl State {
             _ => None,
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Set by a test to paint text with one painter whatever the run needs,
+    /// so the two can be compared on the same scene.
+    pub(crate) static PAINTER_OVERRIDE: std::cell::Cell<Option<Painter>> =
+        const { std::cell::Cell::new(None) };
 }
 
 impl Context2D {
@@ -1578,11 +1586,19 @@ impl Context2D {
         } else {
             let features = self.vector_features(&paint, Some(style));
             self.render_to_canvas(&paint, features, |canvas, paint| {
-                let TextLayout {
-                    paragraph,
-                    offset,
-                    condensation,
-                } = typesetter.layout(paint);
+                let mut layout = typesetter.layout(paint);
+                let (offset, condensation) =
+                    (layout.offset, layout.condensation);
+                let painter = layout.painter();
+                #[cfg(test)]
+                let painter = PAINTER_OVERRIDE.get().unwrap_or(painter);
+                if painter == Painter::Runs {
+                    typesetter.decorate(&mut layout, paint);
+                }
+                let mut draw = |canvas: &SkCanvas, at: Point| match painter {
+                    Painter::Paragraph => layout.paragraph.paint(canvas, at),
+                    Painter::Runs => layout.paint(canvas, at, paint),
+                };
                 match condensation {
                     // Chrome condenses with a plain anisotropic transform
                     // rather than a narrower face, and the pen goes with it:
@@ -1590,11 +1606,11 @@ impl Context2D {
                     // `strokeText("H")` draws its stems 6 pixels wide and
                     // its crossbar still 12. A canvas scale is that, so the
                     // stroke needs no separate handling.
-                    1.0 => paragraph.paint(canvas, origin + offset),
+                    1.0 => draw(canvas, origin + offset),
                     scale => {
                         canvas.save();
                         canvas.translate(origin).scale((scale, 1.0));
-                        paragraph.paint(canvas, offset);
+                        draw(canvas, offset);
                         canvas.restore();
                     }
                 }
