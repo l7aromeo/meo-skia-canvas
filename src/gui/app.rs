@@ -132,6 +132,13 @@ enum LoopEvent {
     Edits,
 }
 
+/// What [`App::run`] returns on a thread with no event loop.
+fn no_display() -> Error {
+    Error::EventLoop {
+        reason: "no display is available".to_string(),
+    }
+}
+
 fn add_event(event: AppEvent) {
     PROXY.with_borrow_mut(|proxy| {
         proxy.as_mut().and_then(|proxy| {
@@ -285,7 +292,8 @@ impl App {
     ///
     /// # Panics
     ///
-    /// Panics if the platform will not provide an event loop.
+    /// On macOS, when the first `run` on a thread is not on the main thread:
+    /// winit refuses to build an event loop anywhere else.
     ///
     /// # Examples
     ///
@@ -305,9 +313,12 @@ impl App {
     /// # Errors
     ///
     /// Returns [`Error::EventLoop`] when the loop never ran: no display to
-    /// open on, or the platform refused it. Windows queued before the call
-    /// are left unopened, so a caller that discards this waits for windows
-    /// that cannot appear.
+    /// open on, or the platform refused it. A refused `run` drops the windows
+    /// queued before it: none of them opens, their ids are free for another
+    /// window to choose, and their [`WindowHandle`]s report `is_open() ==
+    /// false`. Whether a thread has an event loop is decided once, the first
+    /// time it asks, so a thread that found no display refuses every later
+    /// `run` too.
     pub fn run() -> Result<(), Error> {
         let outcome = Self::run_windows();
         // Whichever way the loop ended, no window it held is open any more,
@@ -330,6 +341,15 @@ impl App {
         // opens.
         handle::apply_queued(&mut windows);
 
+        // A test stands in for a thread with no display here, before anything
+        // asks for the event loop: test threads are not the main thread, and
+        // on macOS building one anywhere else panics. The windows taken above
+        // are dropped on the way out, as on the real path.
+        #[cfg(test)]
+        if tests::WITHOUT_DISPLAY.get() {
+            return Err(no_display());
+        }
+
         // Queued before the loop starts, which is the only way in: winit
         // creates windows inside a running loop, so these are picked up as
         // `AppEvent::Open` on the first pass rather than opened here.
@@ -344,9 +364,7 @@ impl App {
                 // it, and a caller told nothing would wait for windows that
                 // can never draw.
                 let Some(event_loop) = event_loop.as_mut() else {
-                    return Err(Error::EventLoop {
-                        reason: "no display is available".to_string(),
-                    });
+                    return Err(no_display());
                 };
                 // Woken from another thread by a handle's change: one, or a
                 // dozen queued since the last pass, cost the same single
@@ -866,7 +884,60 @@ impl Cadence {
 
 #[cfg(test)]
 mod tests {
-    use super::Pass;
+    use std::{cell::Cell, num::NonZeroU32};
+
+    use super::{App, Pass};
+    use crate::{
+        error::Error,
+        gui::session::{self, Window},
+    };
+
+    thread_local!(
+        /// Set by a test to make [`App::run`] refuse on this thread as one
+        /// with no display does.
+        pub(super) static WITHOUT_DISPLAY: Cell<bool> =
+            const { Cell::new(false) };
+    );
+
+    /// An id no other test chooses. Ids are held process-wide, so two tests
+    /// choosing one would refuse each other.
+    const REFUSED_ID: u32 = 4_190_001;
+
+    // A thread with no display can never open a window: its event loop is
+    // decided once, so keeping the queued windows would reserve ids and keep
+    // handles answering "open" for windows that cannot appear.
+    #[test]
+    fn a_refused_run_drops_the_windows_queued_before_it() {
+        WITHOUT_DISPLAY.set(true);
+        let id = NonZeroU32::new(REFUSED_ID).expect("a nonzero id");
+
+        let mut window = Window::new(8.0, 8.0);
+        window.set_id(id).expect("the id is free");
+        let handle = window.handle();
+        window.open();
+        assert!(handle.is_open(), "a queued window counts as open");
+
+        let refused = App::run();
+        assert!(
+            matches!(refused, Err(Error::EventLoop { .. })),
+            "{refused:?}"
+        );
+        assert!(
+            session::take_pending().is_empty(),
+            "nothing is still queued"
+        );
+        assert!(!handle.is_open(), "the handle reports the window closed");
+        assert!(!App::running(), "no loop is running");
+
+        let mut again = Window::new(8.0, 8.0);
+        again.set_id(id).expect("the dropped window's id is free");
+        again.open();
+        assert!(
+            matches!(App::run(), Err(Error::EventLoop { .. })),
+            "a later run on the same thread refuses too"
+        );
+        assert!(session::take_pending().is_empty());
+    }
 
     // The half of #190 that needs no display. Whether `run_on_demand` fails
     // under a given condition is `winit`'s to answer and needs a window

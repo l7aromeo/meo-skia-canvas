@@ -25,6 +25,14 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **`App::run`'s documentation says what a refusal leaves.** It said windows
+  queued before a refused `run` are "left unopened", which read as still
+  queued; they are dropped -- their ids freed and their `WindowHandle`s
+  reporting `is_open() == false` -- and a thread that found no display
+  refuses every later `run` too, since its event loop is decided once. Its
+  `# Panics` section now names the one case that panics: a first `run` off
+  the main thread on macOS.
+
 - **A large blur in `set_filter_css` draws as Chrome's.** A flat-colour
   shape or text was blurred on its coverage, which Skia holds to a sigma of
   128, so `blur(200px)`, `blur(500px)` and `blur(1000px)` drew alike. A
