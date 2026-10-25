@@ -587,8 +587,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   style's, as a nested `font-variation-settings` replaces its parent's in
   CSS -- Chrome 153 measures `"wght" 700` inside a `"wdth" 50` parent as
   `"wght" 700` alone -- and a span with none still inherits the base's.
-  An empty list cannot reset to no axes; a span returns an axis to its
-  default by naming the default.
+  A span resets to the face's own axes with `FontVariationSettings::Normal`,
+  under Changed.
 
 - **`RgbaLinear::from_css` reads any CSS colour `set_fill_style_css`
   takes**, through the same parser, and returns `None` for anything else,
@@ -788,6 +788,20 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   and the window-id refusal in types of their own until now. A `match` on
   `Error` outside this crate stops compiling until it has a `_` arm: add
   one, or bind the rest as `other =>`.
+
+- **`TextStyle::font_variations` is a `FontVariationSettings`, so a span
+  can reset its axes.** It was a `Vec<FontVariation>` in which empty meant
+  "inherit the base style's", so a rich-text span or a pushed style could
+  return an axis to the face's default only by naming the default value.
+  `FontVariationSettings` has CSS `font-variation-settings`' three states:
+  `Inherit`, the default, takes the base style's axes; `Normal` takes none,
+  so the face's own defaults apply, with `font_weight` and `font_size` still
+  supplying `wght` and `opsz`; and `Axes(..)` replaces the base style's. On
+  a base style `Inherit` is `Normal`, and an empty `Axes` list is `Normal`.
+  In your code, write `font_variations: vec![..].into()` where you wrote
+  `vec![..]`; `..TextStyle::default()` and `Vec::new()`, which inherited,
+  are now `FontVariationSettings::Inherit`; and a span that named an axis's
+  default to reset it can use `FontVariationSettings::Normal`.
 
 - **`FontSlant::Oblique` and `TextSlant::Oblique` draw as CSS Fonts 4
   matches them, superseding 0.16.0's "`TextSlant::Oblique` now renders the

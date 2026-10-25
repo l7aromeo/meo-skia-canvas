@@ -5405,11 +5405,14 @@ export interface TextStyleInput {
    *
    * A style given to `pushStyle` with a list of its own is instanced at
    * that list in place of the paragraph's, as a nested
-   * `font-variation-settings` replaces its parent's in CSS; one without
-   * takes the paragraph's. Either way the style's weight, stretch and
-   * font size supply `wght`, `wdth` and `opsz` unless the list names them.
+   * `font-variation-settings` replaces its parent's in CSS; one without, or
+   * with an empty list, takes the paragraph's. `"normal"` sets none, so the
+   * face's own defaults apply, as `font-variation-settings: normal` does
+   * under a parent that set some. Either way the style's weight, stretch
+   * and font size supply `wght`, `wdth` and `opsz` unless the list names
+   * them. Any other string throws a `TypeError`.
    */
-  fontVariations?: FontVariationInput[];
+  fontVariations?: FontVariationInput[] | "normal";
   /**
    * OpenType features applied to the run: small caps (`smcp`/`c2sc`),
    * ligatures (`liga`/`dlig`), oldstyle/tabular/proportional figures

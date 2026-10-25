@@ -68,21 +68,39 @@ pub type BoxedParagraph = JsBox<RefCell<ParagraphWrap>>;
 // Style parsing helpers
 //
 
-/// Parses `fontVariations: [{axis, value}]` from a `TextStyleInput` JS
-/// object. Axis tags must be exactly 4 ASCII characters (Skia
-/// convention, e.g. "wght", "wdth", "ital"). Malformed entries are
-/// silently skipped -- the field is optional and missing variations
-/// fall back to the typeface's default axis positions.
+/// Parses `fontVariations` from a `TextStyleInput` JS object: `None` to
+/// take the axes in force -- the key absent, or an empty list -- and
+/// otherwise the style's own, which `"normal"` makes none, resetting to the
+/// face's defaults as CSS `font-variation-settings: normal` does.
+///
+/// A list holds `{axis, value}` entries. Axis tags must be exactly 4 ASCII
+/// characters (Skia convention, e.g. "wght", "wdth", "ital"). Malformed
+/// entries are silently skipped -- the field is optional and missing
+/// variations fall back to the typeface's default axis positions. A string
+/// other than `"normal"`, in any case, is a `TypeError`: it names a keyword
+/// the property does not have, so what the caller asked for would not
+/// happen.
 fn parse_font_variations(
     cx: &mut FunctionContext,
     obj: &Handle<JsObject>,
-) -> NeonResult<Vec<(FourByteTag, f32)>> {
+) -> NeonResult<Option<Vec<(FourByteTag, f32)>>> {
     let mut out: Vec<(FourByteTag, f32)> = Vec::new();
     let Ok(vars_val) = obj.get::<JsValue, _, _>(cx, "fontVariations") else {
-        return Ok(out);
+        return Ok(None);
     };
+    // A value outside an enumeration is a `TypeError` (AGENTS.md, rule 2).
+    if let Ok(keyword) = vars_val.downcast::<JsString, _>(cx) {
+        let keyword = keyword.value(cx);
+        return match keyword.eq_ignore_ascii_case("normal") {
+            true => Ok(Some(Vec::new())),
+            false => cx.throw_type_error(format!(
+                "Expected \"normal\" or a list of {{axis, value}} for \
+                 `fontVariations` (got {keyword:?})"
+            )),
+        };
+    }
     let Ok(vars_arr) = vars_val.downcast::<JsArray, _>(cx) else {
-        return Ok(out);
+        return Ok(None);
     };
     for v in vars_arr.to_vec(cx)? {
         let Ok(v_obj) = v.downcast::<JsObject, _>(cx) else {
@@ -106,7 +124,7 @@ fn parse_font_variations(
         );
         out.push((tag, value));
     }
-    Ok(out)
+    Ok((!out.is_empty()).then_some(out))
 }
 
 /// The keys [`parse_text_style`] reads. Anything else in the object is a
@@ -637,7 +655,9 @@ fn parse_paragraph_font_variations(
     let Ok(ts_obj) = ts_val.downcast::<JsObject, _>(cx) else {
         return Ok(Vec::new());
     };
-    parse_font_variations(cx, &ts_obj)
+    // A paragraph has nothing to inherit, so taking the axes in force and
+    // `"normal"` are both no axes of its own.
+    Ok(parse_font_variations(cx, &ts_obj)?.unwrap_or_default())
 }
 
 //
@@ -705,16 +725,14 @@ pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         variations: paragraph_variations,
     } = &mut *this;
     // A style's own `fontVariations` replace the paragraph's, as a nested
-    // `font-variation-settings` replaces its parent's in CSS; with none of its
-    // own it takes the paragraph's. Its weight, stretch and font size supply
+    // `font-variation-settings` replaces its parent's in CSS, and `"normal"`
+    // replaces them with none; with none of its own it takes the
+    // paragraph's. Its weight, stretch and font size supply
     // `wght`, `wdth` and `opsz` unless the list in force names them. The
     // collection holds the paragraph's faces instanced at its own style, and
     // the position set here names every axis, so nothing of the paragraph's
     // carries over.
-    let variations = match own.is_empty() {
-        true => &*paragraph_variations,
-        false => &own,
-    };
+    let variations = own.as_deref().unwrap_or(paragraph_variations);
     // An oblique is set at `slnt` where the face has the axis, ahead of the
     // style's own variations so that a `slnt` they name wins, and is laid
     // out upright where no face leans as asked -- see `match_oblique`.
