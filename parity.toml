@@ -1108,6 +1108,18 @@ why  = """Each is the non-`Self` operation applied to the receiver rather than
 status = "deliberate"
 
 [[capability]]
+name = "serialising a text measurement"
+rust = []
+npm  = ["TextMetrics.toJSON"]
+why  = """How JavaScript copies out a measurement whose values are getters on
+       its prototype, as HTML's `TextMetrics` keeps them: `JSON.stringify`
+       and a spread see nothing of the object's own, so `toJSON` hands every
+       value back as a plain object. Rust's `TextMetrics` is a struct with
+       public fields, which a caller reads, clones or destructures directly,
+       so there is nothing to add there."""
+status = "deliberate"
+
+[[capability]]
 name = "JavaScript construction and serialisation of a matrix"
 rust = []
 npm  = ["DOMMatrix.clone",

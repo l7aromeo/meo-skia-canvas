@@ -3941,42 +3941,120 @@ describe("measureText's return shape", () => {
     assert.equal(m.width, before);
   });
 
-  test("keeps 6.0.2's own properties, frozen, in their order", () => {
-    // Deprecated, and kept until 7.0: the values are own properties, as they
-    // were, so `Object.keys`, a spread and `JSON.stringify` see every one,
-    // `lines` included, and the object is frozen.
-    const OWN = [
+  // The order 6.x serialised a measurement in, its values then being own
+  // properties, and the order `toJSON` keeps.
+  const SERIALISED = [
+    "width",
+    "actualBoundingBoxLeft",
+    "actualBoundingBoxRight",
+    "actualBoundingBoxAscent",
+    "actualBoundingBoxDescent",
+    "fontBoundingBoxAscent",
+    "fontBoundingBoxDescent",
+    "emHeightAscent",
+    "emHeightDescent",
+    "hangingBaseline",
+    "alphabeticBaseline",
+    "ideographicBaseline",
+    "height",
+    "lines",
+  ];
+
+  test("puts its values on the prototype, as HTML's interface does", () => {
+    // HTML's attributes in the order its IDL declares them, then this
+    // library's two and `toJSON`. WebIDL makes each attribute an
+    // enumerable, configurable getter with no setter, and an operation an
+    // enumerable, writable, configurable method.
+    const { TextMetrics } = require("../../lib");
+    const HTML = [
       "width",
       "actualBoundingBoxLeft",
       "actualBoundingBoxRight",
-      "actualBoundingBoxAscent",
-      "actualBoundingBoxDescent",
       "fontBoundingBoxAscent",
       "fontBoundingBoxDescent",
+      "actualBoundingBoxAscent",
+      "actualBoundingBoxDescent",
       "emHeightAscent",
       "emHeightDescent",
       "hangingBaseline",
       "alphabeticBaseline",
       "ideographicBaseline",
+    ];
+    assert.deepEqual(Object.getOwnPropertyNames(TextMetrics.prototype), [
+      "constructor",
+      ...HTML,
       "height",
       "lines",
-    ];
-    const m = measured().measureText("Hamburgefonstiv");
-    assert.deepEqual(Object.keys(m), OWN);
-    assert.deepEqual(Object.getOwnPropertyNames(m), OWN);
-    assert.deepEqual(Object.keys({ ...m }), OWN);
-    assert.ok(Object.isFrozen(m));
+      "toJSON",
+    ]);
+    for (const name of [...HTML, "height", "lines"]) {
+      const d = Object.getOwnPropertyDescriptor(TextMetrics.prototype, name);
+      assert.equal(typeof d.get, "function", name);
+      assert.equal(d.set, undefined, name);
+      assert.ok(d.enumerable && d.configurable, name);
+      assert.throws(
+        () => d.get.call({}),
+        TypeError,
+        `${name} on a non-measurement`,
+      );
+    }
+    const toJSON = Object.getOwnPropertyDescriptor(
+      TextMetrics.prototype,
+      "toJSON",
+    );
+    assert.equal(typeof toJSON.value, "function");
+    assert.ok(toJSON.writable && toJSON.enumerable && toJSON.configurable);
+    // WebIDL's default `toJSON` checks its receiver as the getters do, rather
+    // than reading properties a plain object does not have.
+    assert.throws(
+      () => toJSON.value.call({}),
+      TypeError,
+      "toJSON on a non-measurement",
+    );
+    assert.throws(
+      () => toJSON.value.call(Object.create(TextMetrics.prototype)),
+      TypeError,
+      "toJSON on an object made from the prototype",
+    );
 
-    const json = JSON.parse(JSON.stringify(m));
-    assert.deepEqual(Object.keys(json), OWN);
-    for (const name of OWN) assert.deepEqual(json[name], m[name], name);
-    assert.deepEqual(Object.keys(json.lines[0]).at(-1), "runs");
-    assert.equal(typeof json.lines[0].runs[0].family, "string");
+    const m = measured().measureText("Hamburgefonstiv");
+    assert.deepEqual(Object.getOwnPropertyNames(m), []);
+    assert.deepEqual(Object.keys(m), []);
+    assert.deepEqual({ ...m }, {});
+    assert.ok(Object.isExtensible(m));
+    for (const name of HTML) assert.equal(typeof m[name], "number", name);
+  });
+
+  test("serialises as 6.x did, through toJSON", () => {
+    // 6.x serialised its own properties, which were these values in this
+    // order, so the same string is the same values in the same order.
+    const m = measured().measureText("Hamburgefonstiv");
+    const json = JSON.stringify(m);
+    assert.equal(
+      json,
+      JSON.stringify(Object.fromEntries(SERIALISED.map((k) => [k, m[k]]))),
+    );
+    const parsed = JSON.parse(json);
+    assert.deepEqual(Object.keys(parsed), SERIALISED);
+    assert.deepEqual(Object.keys(parsed.lines[0]).at(-1), "runs");
+    assert.equal(typeof parsed.lines[0].runs[0].family, "string");
+  });
+
+  // Node's `console.log` shows own properties, and a measurement has none,
+  // so it would print `TextMetrics {}`: it shows what `toJSON` gives, as a
+  // browser's console lists the values its getters read.
+  test("shows its values when inspected", () => {
+    const { inspect } = require("util");
+    const m = measured().measureText("Hamburgefonstiv");
+    const shown = inspect(m);
+    assert.match(shown, /^TextMetrics \{/);
+    for (const name of SERIALISED)
+      assert.ok(shown.includes(`${name}:`), `${name} in ${shown}`);
+    assert.ok(shown.includes(String(m.width)), "with its values");
   });
 
   test("has the prototype and constructor Chrome's TextMetrics has", () => {
-    // What of Chrome 152's shape costs nothing to keep alongside the own
-    // properties: the prototype, its tag, and a constructor that refuses.
+    // The prototype, its tag, and a constructor that refuses.
     const { TextMetrics } = require("../../lib");
     const m = measured().measureText("Hamburgefonstiv");
     assert.equal(Object.getPrototypeOf(m), TextMetrics.prototype);
@@ -4015,8 +4093,11 @@ describe("measureText's return shape", () => {
       m.actualBoundingBoxDescent;
       assert.ok(m.lines[0].runs.length > 0);
       JSON.stringify(m);
-      ({ ...m });
       assert.equal(calls, 1, "and the ink is computed once per measurement");
+
+      const spread = measured().measureText("Hamburgefonstiv");
+      ({ ...spread });
+      assert.equal(calls, 1, "a spread copies nothing, so reads nothing");
 
       JSON.stringify(measured().measureText("Hamburgefonstiv"));
       assert.equal(calls, 2, "a serialisation reads it, once");
