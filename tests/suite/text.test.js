@@ -654,16 +654,20 @@ describe("kerning stops at a word boundary", () => {
 });
 
 describe("outlineText draws what fillText draws", () => {
-  // `Paragraph::get_path_at` and `extended_visit` place a glyph half of its
-  // own preceding kern to the right of where `Paragraph::paint` draws it, so
-  // the path `outlineText` returned did not fill as the text it came from and
-  // `actualBoundingBoxRight` was wide by the same half. Reported upstream; the
-  // recovery and its guard are documented on `painted_positions`.
+  // `Paragraph::get_path_at` and `extended_visit` place each glyph where its
+  // advances put it, without the offset the shaper gave it, where
+  // `Paragraph::paint` adds it. So the path `outlineText` was built from did
+  // not fill as the text it came from wherever the shaper moved a glyph off
+  // its advance: half of each kern from a legacy `kern` table, which HarfBuzz
+  // carries as an offset, and every mark it stacks or sets over a base. The
+  // glyphs are now read from what `Paragraph::paint` draws -- see
+  // `glyph_runs`.
   //
-  // The fault needs a face that kerns through the legacy `kern` table. On
-  // macOS `Helvetica` is one; where it resolves to a GPOS-kerned substitute
-  // these assertions hold without the fix doing anything, so this is real
-  // coverage on some platforms and a consistency check on the rest. It is
+  // The kerning half needs a face that kerns through the legacy `kern`
+  // table. On macOS `Helvetica` is one; where it resolves to a GPOS-kerned
+  // substitute those assertions hold whatever is done, so they are real
+  // coverage on some platforms and a consistency check on the rest. The
+  // marks are bundled Raleway's, and real coverage everywhere. Both are
   // written against rasterised ink on purpose: the reported positions are
   // exactly what was broken, so a test asserting them would have encoded the
   // defect as expected behaviour.
@@ -703,6 +707,53 @@ describe("outlineText draws what fillText draws", () => {
       });
       assert.deepEqual(filled, drawn, `${text} fills as it draws`);
     }
+  });
+
+  test("stacked marks fill and measure where they are drawn", () => {
+    // A base with no precomposed accented glyph, so its marks are placed by
+    // the shaper's offsets alone: the acute and the diaeresis over the "p"
+    // stack one above the other.
+    FontLibrary.use("RalewayMarks", [
+      "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+    ]);
+    const ctx = new Canvas(W, H).getContext("2d");
+    ctx.font = "240px RalewayMarks";
+    const box = (draw) => {
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = "black";
+      draw();
+      const d = ctx.getImageData(0, 0, W, H).data;
+      let [left, right, top, bottom] = [W, -1, H, -1];
+      for (let i = 3; i < d.length; i += 4)
+        if (d[i] > 0) {
+          const x = ((i - 3) / 4) % W,
+            y = Math.floor((i - 3) / 4 / W);
+          [left, right] = [Math.min(left, x), Math.max(right, x)];
+          [top, bottom] = [Math.min(top, y), Math.max(bottom, y)];
+        }
+      return { left, right, top, bottom };
+    };
+    const text = "p\u0301\u0308";
+    const drawn = box(() => ctx.fillText(text, 100, 600));
+    const filled = box(() => {
+      ctx.save();
+      ctx.translate(100, 600);
+      ctx.fill(ctx.outlineText(text));
+      ctx.restore();
+    });
+    // Within a pixel, which is how far a filled outline's antialiased edge
+    // and a glyph mask's part; a mark out of place is tens of pixels off.
+    for (const edge of ["left", "right", "top", "bottom"])
+      assert.ok(
+        Math.abs(filled[edge] - drawn[edge]) <= 1,
+        `the outline fills as the text draws at its ${edge}: ${filled[edge]} against ${drawn[edge]}`,
+      );
+    // And the ink box is the outline's, which the fill above ties to the
+    // drawing.
+    const m = ctx.measureText(text),
+      bounds = ctx.outlineText(text).bounds;
+    assert.nearEqual(-m.actualBoundingBoxAscent, bounds.top, "ink top");
+    assert.nearEqual(m.actualBoundingBoxRight, bounds.right, "ink right");
   });
 
   test("and the ink box no longer carries the half kern", () => {
@@ -796,40 +847,21 @@ describe("actualBoundingBox reports the outline, not the pixel grid", () => {
   });
 });
 
-describe("a face that misreports its kerning is still corrected", () => {
-  // Skia reports half-kerned glyph positions for faces whose kerning comes
-  // from the legacy `kern` table, and `painted_positions` undoes that -- but
-  // only for runs its two run-level checks accept. One of those compares a
-  // reconstructed sum against the run's advance with a threshold of a
-  // thousandth, and how far that threshold sits above the noise depends on
-  // the rasteriser: the difference between the advances `get_widths` reports
-  // and the ones Skia laid out with. Measured at zero on FreeType and at most
-  // 1.038e-6 of the advance on Core Text; DirectWrite has never been measured,
-  // which is what this test exists to cover on the Windows CI leg.
+describe("a face kerned through its legacy kern table outlines as it draws", () => {
+  // HarfBuzz carries half of each kern from a font's legacy `kern` table as
+  // an offset on the glyph after it, and `outlineText` reads its glyphs from
+  // the text blobs `fillText` paints, offsets included -- see `glyph_runs`.
+  // Verdana kerns through that table too, despite its GPOS, because its GPOS
+  // has no kern feature; Arial kerns through GPOS and is the control.
   //
-  // If that floor ever exceeds the threshold, the check refuses runs it should
-  // take, they stay half-kerned, and `outlineText` stops describing the text
-  // `fillText` draws.
-  //
-  // The scale of a real failure, measured by forcing the refusal at 192px --
+  // The scale of the failure where the offsets are dropped, at 192px --
   // longest differing stretch on "To", "AV" and "Wave To":
   //
   //     Helvetica   11, 7, 11        Verdana   9, 4, 10        Arial   1, 0, 1
   //
-  // so the assertion below has teeth: a genuine failure is an order of
-  // magnitude clear of it.
-  //
-  // Arial is the control and is the reason a clean run is readable. It kerns
-  // through GPOS, so nothing is reconstructed for it and forcing the refusal
-  // changes nothing -- it stays at 1 in the table above. A probe that could
-  // see nothing would put every face at 1 too, and there would be no row that
-  // ever moves; this run has one that does.
-  //
-  // What a clean result does *not* say: it means nothing is broken here, not
-  // that the floor is safe. On a platform where none of these three faces
-  // misreports, nothing is reconstructed and the two routes agree for that
-  // reason instead. The two cases are indistinguishable from outside, because
-  // making that difference invisible is exactly what the correction is for.
+  // so the assertion below has teeth on a platform carrying these faces. On
+  // one where they resolve to GPOS-kerned substitutes it is a consistency
+  // check, and a clean run says nothing about the legacy table there.
   const SIZE = 192;
   const W = 2400,
     H = 400;

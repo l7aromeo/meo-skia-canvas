@@ -5807,6 +5807,41 @@ fn outline_text_produces_a_path_the_context_can_draw() {
     assert!(ink > 0, "the outlined glyphs were painted");
 }
 
+#[test]
+fn outline_text_and_the_ink_box_put_stacked_marks_where_they_are_drawn() {
+    // Raleway has no precomposed glyph for an accented "p", so its acute and
+    // diaeresis are placed by the shaper's offsets alone, one above the
+    // other.
+    const TEXT: &str = "p\u{301}\u{308}";
+    const SIZE: u32 = 400;
+    const BASELINE: f32 = 320.0;
+    let mut canvas = Canvas::new(SIZE as f32, SIZE as f32);
+    let (outline, ascent) = {
+        let ctx = canvas.context();
+        ctx.set_font(&Font::new(raleway(), 240.0));
+        let ascent = ctx.measure_text(TEXT, None).actual_bounding_box_ascent;
+        let outline = ctx.outline_text(TEXT, None).bounds();
+        ctx.fill_text(TEXT, 40.0, BASELINE, None);
+        (outline, ascent)
+    };
+    let drawn = pixels(&mut canvas);
+    let top = (0..SIZE)
+        .find(|&y| (0..SIZE).any(|x| at(&drawn, SIZE, x, y)[3] > 0))
+        .expect("the text draws");
+    // Within two pixels, which is how far an outline's edge and the first
+    // row a glyph mask touches part; a mark set at its base's height is fifty
+    // off.
+    assert!(
+        (BASELINE - ascent - top as f32).abs() <= 2.0,
+        "the ink box reaches the top mark: ascent {ascent}, drawn from row {top}"
+    );
+    assert!(
+        (outline.top + ascent).abs() < 0.01,
+        "the outline reaches it too: {} against {ascent}",
+        -outline.top
+    );
+}
+
 // -- Canvas sizing -----------------------------------------------------------
 
 #[test]

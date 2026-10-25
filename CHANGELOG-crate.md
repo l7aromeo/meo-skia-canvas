@@ -25,6 +25,17 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **`outline_text` and the ink box put every glyph where `fill_text` draws
+  it.** A glyph the shaper moves off its advance -- a mark stacked over
+  another, a mark set over a base with no precomposed glyph, the half of a
+  kern from a font's legacy `kern` table that HarfBuzz carries as an offset
+  -- was read without that offset. At 240px Raleway, `"p\u{301}\u{308}"`
+  outlined both marks at one height, its top 174.80 above the baseline where
+  the drawn diaeresis reaches 224.42, and the ink box's ascent and right
+  edge read 174.80 and 212.39 where the ink spans 224.42 and 200.38. The
+  glyphs are now read from the text blobs `fill_text` paints, which replaces
+  the reconstruction of halved kerns 0.16.0 added for `outline_text`.
+
 - **`App::run`'s documentation says what a refusal leaves.** It said windows
   queued before a refused `run` are "left unopened", which read as still
   queued; they are dropped -- their ids freed and their `WindowHandle`s

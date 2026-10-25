@@ -34,9 +34,7 @@
 use crate::{
     context2d::DEFAULT_OBLIQUE_DEGREES,
     font::leans_as_asked,
-    node::typography::{
-        SLNT, Shear, cluster_under, painted_positions, run_shear, sheared_blob,
-    },
+    node::typography::{SLNT, Shear, run_shear, sheared_blob},
 };
 use skia_safe::{
     BlurStyle, Canvas, Color, Font, FontArguments, FontStyle, GlyphId,
@@ -535,8 +533,21 @@ impl Sheared {
     /// Follows `paragraph`, just laid out at `width`: lays the decorations
     /// out at the same width, and finds the oblique ranges' glyphs again.
     ///
-    /// A glyph's text is found by asking the paragraph for the cluster
-    /// under it -- see `cluster_under`.
+    /// The glyphs are read with `Paragraph::visit`, which reports the text
+    /// blobs `Paragraph::paint` draws: each glyph where it is painted and
+    /// the text it comes from, on every line, and nothing for a
+    /// placeholder. `extended_visit` reports less than it paints, so it is
+    /// not used: a glyph's position without the offset the shaper gave it,
+    /// which is where a mark stacks or sits over its base, and the text
+    /// offsets of a run continued onto a later line restarting at those
+    /// of its first -- see `cluster_under`.
+    ///
+    /// A run's first glyph says whether it is oblique: an oblique style is a
+    /// font of its own, so no run holds oblique text and upright text both.
+    /// Each glyph then takes the range its text is in, or the one before
+    /// it where its text is in none: the glyphs of an ellipsis or a hyphen
+    /// report offsets counted from the text they stand after, which can run
+    /// past it.
     pub(crate) fn lay_out(&mut self, paragraph: &mut Paragraph, width: f32) {
         for pass in [&mut self.under, &mut self.decorations]
             .into_iter()
@@ -545,43 +556,32 @@ impl Sheared {
             pass.layout(width);
         }
         let mut visited = Vec::new();
-        paragraph.extended_visit(|_, visit| {
+        paragraph.visit(|_, visit| {
             if let Some(info) = visit {
-                let positions = painted_positions(
-                    info.font(),
-                    info.glyphs(),
-                    info.positions(),
-                    info.advance().width,
-                )
-                .unwrap_or_else(|| info.positions().to_vec());
+                let count = info.glyphs().len();
                 visited.push((
                     info.font().clone(),
                     info.glyphs().to_vec(),
-                    positions,
+                    info.positions().to_vec(),
                     info.origin(),
-                    info.advance().width,
+                    info.utf8_starts()[..count].to_vec(),
                 ));
             }
         });
         self.runs = visited
             .into_iter()
-            .flat_map(|(font, glyphs, positions, origin, advance)| {
-                let range = |at| {
-                    let cluster = cluster_under(
-                        paragraph, origin, &positions, advance, at,
-                    );
-                    self.range_of(cluster?.start)
+            .flat_map(|(font, glyphs, positions, origin, starts)| {
+                let range = |start: &u32| self.range_of(*start as usize);
+                let Some(first) = starts.first().and_then(range) else {
+                    return Vec::new();
                 };
-                // An oblique style is a font of its own, so a run is all
-                // oblique or none of it, and its text is contiguous: where
-                // its end glyphs share a range, every glyph between does.
-                // Only a run across two oblique ranges, painted apart, needs
-                // each glyph asked.
-                let ends = (range(0), range(glyphs.len().saturating_sub(1)));
-                let ranges: Vec<Option<usize>> = match ends {
-                    (first, last) if first == last => vec![first; glyphs.len()],
-                    _ => (0..glyphs.len()).map(range).collect(),
-                };
+                let ranges: Vec<usize> = starts
+                    .iter()
+                    .scan(first, |last, start| {
+                        *last = range(start).unwrap_or(*last);
+                        Some(*last)
+                    })
+                    .collect();
                 let shear =
                     run_shear(&font.typeface(), Some(DEFAULT_OBLIQUE_DEGREES));
                 ranges
@@ -591,15 +591,13 @@ impl Sheared {
                         *start = at.end;
                         Some((at, chunk[0]))
                     })
-                    .filter_map(|(at, range)| {
-                        Some(ShearedRun {
-                            font: font.clone(),
-                            glyphs: glyphs[at.clone()].to_vec(),
-                            positions: positions[at].to_vec(),
-                            origin,
-                            range: range?,
-                            shear,
-                        })
+                    .map(|(at, range)| ShearedRun {
+                        font: font.clone(),
+                        glyphs: glyphs[at.clone()].to_vec(),
+                        positions: positions[at].to_vec(),
+                        origin,
+                        range,
+                        shear,
                     })
                     .collect::<Vec<_>>()
             })
@@ -835,7 +833,7 @@ mod tests {
         assert_ne!(starts[2], 4, "and the run's end is not");
     }
 
-    /// The defect `Sheared::lay_out` works around, measured directly: a run
+    /// The defect `cluster_under` works around, measured directly: a run
     /// continued on a second line reports text offsets from its first
     /// glyph, not from the first glyph of that line's part of it.
     ///
