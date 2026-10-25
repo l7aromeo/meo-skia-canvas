@@ -879,7 +879,11 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `ctx.font` reads back as it did. A `Paragraph` range whose `fontStyle`
   asks for oblique is sheared at 14deg the same way and draws what
   `oblique` text on a canvas draws, its decorations level and its shadows
-  leaning with its glyphs. At 90deg either way a sheared run draws nothing,
+  leaning with its glyphs. Being a font of its own, it is shaped apart from the
+  text beside it, so no ligature forms across its edge, and a combining
+  mark the edge would split from its base is drawn with its base, in the
+  base's style. A mark straight after a placeholder has no base, and is
+  shaped alone in its own style. At 90deg either way a sheared run draws nothing,
   with no ink in `measureText` and no `outlineText` path, and advances as
   it would upright.
 

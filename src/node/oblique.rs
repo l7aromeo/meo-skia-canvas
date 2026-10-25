@@ -49,6 +49,7 @@ use skia_safe::{
     },
 };
 use std::{borrow::Cow, iter::once, ops::Range};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// The character SkParagraph adds to a paragraph's text for each
 /// placeholder, U+FFFC OBJECT REPLACEMENT CHARACTER, whose UTF-8 length
@@ -222,14 +223,15 @@ impl ParagraphRecipe {
     /// The paragraph, not yet laid out, and what draws its oblique ranges
     /// where it has any.
     pub(crate) fn build(mut self) -> (Paragraph, Option<Sheared>) {
-        let ranges = match self.oblique {
-            true => self.oblique_ranges(),
-            false => Vec::new(),
-        };
-        if ranges.is_empty() {
+        if !self.oblique {
             return (self.builder.build(), None);
         }
         let text = self.builder.get_text().to_owned();
+        self.keep_graphemes_whole(&text);
+        let ranges = self.oblique_ranges();
+        if ranges.is_empty() {
+            return (self.builder.build(), None);
+        }
         // SkParagraph paints a line in passes -- backgrounds, shadows,
         // glyphs, decorations -- so the sheared shadows go between the
         // upright ones and the upright glyphs, and every decoration after
@@ -282,6 +284,55 @@ impl ParagraphRecipe {
             runs: Vec::new(),
         };
         (paragraph, Some(sheared))
+    }
+
+    /// Moves each edge between an oblique and an upright piece of text that
+    /// falls inside a grapheme cluster to the cluster's end -- see
+    /// [`whole_graphemes`].
+    fn keep_graphemes_whole(&mut self, text: &str) {
+        let mut stack = vec![self.base_oblique];
+        let mut pieces = Vec::new();
+        for (at, step) in self.steps.iter().enumerate() {
+            match step {
+                Step::Push(style) => stack.push(self.styles[*style].1),
+                Step::Pop if stack.len() > 1 => {
+                    stack.pop();
+                }
+                Step::Pop | Step::Placeholder(_) => {}
+                Step::Text(bytes) => {
+                    pieces.push(Piece {
+                        step: at,
+                        bytes: bytes.clone(),
+                        // SAFETY: `stack` starts with the base style's flag
+                        // and a pop never takes it, so it is never empty.
+                        oblique: *stack.last().unwrap(),
+                    });
+                }
+            }
+        }
+        whole_graphemes(text, &mut pieces);
+        for piece in pieces {
+            self.steps[piece.step] = Step::Text(piece.bytes);
+        }
+        debug_assert!(
+            self.covers(text),
+            "the pieces of text cover the builder's, byte for byte"
+        );
+    }
+
+    /// Whether the text steps and placeholders, in order, are exactly
+    /// `text`: each piece starting where the one before it ended.
+    fn covers(&self, text: &str) -> bool {
+        let mut at = 0;
+        for step in &self.steps {
+            match step {
+                Step::Text(bytes) if bytes.start == at => at = bytes.end,
+                Step::Text(_) => return false,
+                Step::Placeholder(_) => at += PLACEHOLDER_CHARACTER.len_utf8(),
+                Step::Push(_) | Step::Pop => {}
+            }
+        }
+        at == text.len()
     }
 
     /// Whether any style decorates its text, the paragraph's own included.
@@ -363,6 +414,61 @@ impl ParagraphRecipe {
             }
         }
         builder.build()
+    }
+}
+
+/// One piece of a paragraph's text: the step that adds it, its bytes, and
+/// whether its style asks for oblique.
+struct Piece {
+    step: usize,
+    bytes: Range<usize>,
+    oblique: bool,
+}
+
+/// Moves each edge between two adjacent pieces of `text`, one oblique and
+/// one not, that falls inside a grapheme cluster to the cluster's end, so
+/// that the style of the cluster's base takes the whole of it.
+///
+/// Grapheme clusters rather than SkParagraph's glyph clusters, which cannot
+/// tell the two cases at an oblique edge apart: a ligature across the edge
+/// is one glyph cluster and should break, since an oblique is a font of its
+/// own, and a base and its combining marks are one too and should not,
+/// since a mark shaped apart from its base loses the glyph it attaches to;
+/// the base decides which glyph that is, so its style is the cluster's.
+///
+/// Only where one side is oblique: elsewhere SkParagraph shapes the two
+/// pieces as one and paints each its own way, as it always has. And only
+/// between two pieces that meet: a placeholder stands in the text as
+/// U+FFFC, which no piece holds, so the pieces either side of one do not
+/// meet and its edges never move. A mark right after one is a grapheme
+/// with it and has no base to go with, so it stays in its own piece and is
+/// shaped alone, as SkParagraph shapes it. Edges only move later and never
+/// past the next, so the pieces still hold the same bytes.
+fn whole_graphemes(text: &str, pieces: &mut [Piece]) {
+    let starts: Vec<usize> =
+        text.grapheme_indices(true).map(|(at, _)| at).collect();
+    let cluster_end = |at: usize| match starts.binary_search(&at) {
+        Ok(_) => at,
+        Err(next) => starts.get(next).copied().unwrap_or(text.len()),
+    };
+    // The piece holding the base of the cluster at the edge being looked
+    // at: the last one with any text, since a piece the edges before have
+    // emptied holds none of it.
+    let mut owner = 0;
+    for at in 1..pieces.len() {
+        let right = &pieces[at];
+        let joined = pieces[owner].bytes.end == right.bytes.start;
+        if joined && pieces[owner].oblique != right.oblique {
+            let edge = cluster_end(right.bytes.start).min(right.bytes.end);
+            pieces[owner].bytes.end = edge;
+            for emptied in &mut pieces[owner + 1..at] {
+                emptied.bytes = edge..edge;
+            }
+            pieces[at].bytes.start = edge;
+        }
+        if !joined || !pieces[at].bytes.is_empty() {
+            owner = at;
+        }
     }
 }
 
@@ -564,6 +670,7 @@ impl ShearedRun {
 
 #[cfg(test)]
 mod tests {
+    use super::{Piece, whole_graphemes};
     use skia_safe::{
         Data, FontMgr,
         textlayout::{
@@ -571,6 +678,102 @@ mod tests {
             TextStyle, TypefaceFontProvider,
         },
     };
+    use std::ops::Range;
+
+    /// The pieces of `text` at `ranges`, each oblique or not, and the text
+    /// each holds once its edges have moved. Between two ranges that do not
+    /// meet lies text no piece holds, as a placeholder's U+FFFC is.
+    fn moved(text: &str, ranges: &[(Range<usize>, bool)]) -> Vec<String> {
+        let mut pieces: Vec<Piece> = ranges
+            .iter()
+            .enumerate()
+            .map(|(at, (bytes, oblique))| Piece {
+                step: at,
+                bytes: bytes.clone(),
+                oblique: *oblique,
+            })
+            .collect();
+        let held = |pieces: &[Piece]| -> Vec<usize> {
+            pieces.iter().flat_map(|p| p.bytes.clone()).collect()
+        };
+        let before = held(&pieces);
+        whole_graphemes(text, &mut pieces);
+        assert_eq!(held(&pieces), before, "the same bytes, each held once");
+        pieces
+            .iter()
+            .map(|p| text[p.bytes.clone()].to_owned())
+            .collect()
+    }
+
+    const ACUTE: &str = "\u{301}";
+    const DIAERESIS: &str = "\u{308}";
+
+    #[test]
+    fn a_mark_given_to_the_other_side_of_an_oblique_edge_goes_with_its_base() {
+        let text = format!("cafe{ACUTE} x");
+        let n = text.len();
+        assert_eq!(
+            moved(&text, &[(0..4, false), (4..n, true)]),
+            [format!("cafe{ACUTE}"), " x".to_owned()]
+        );
+        assert_eq!(
+            moved(&text, &[(0..4, true), (4..n, false)]),
+            [format!("cafe{ACUTE}"), " x".to_owned()],
+            "the other way round"
+        );
+    }
+
+    #[test]
+    fn marks_split_over_several_pieces_go_with_their_base_where_needed() {
+        // An upright "e", an oblique acute and an upright diaeresis: the
+        // acute goes to the "e", emptying the oblique piece, and the
+        // diaeresis is then upright beside an upright base, an edge that
+        // does not move -- SkParagraph shapes the two as one.
+        let text = format!("e{ACUTE}{DIAERESIS}x");
+        let (acute, n) = (1 + ACUTE.len(), text.len());
+        assert_eq!(
+            moved(&text, &[(0..1, false), (1..acute, true), (acute..n, false)]),
+            [format!("e{ACUTE}"), String::new(), format!("{DIAERESIS}x")]
+        );
+        // An oblique diaeresis instead: it goes to the "e" too, past the
+        // emptied piece.
+        assert_eq!(
+            moved(&text, &[(0..1, false), (1..acute, true), (acute..n, true)]),
+            [
+                format!("e{ACUTE}{DIAERESIS}"),
+                String::new(),
+                "x".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn only_an_edge_with_an_oblique_side_moves() {
+        let text = format!("cafe{ACUTE} x");
+        let n = text.len();
+        assert_eq!(
+            moved(&text, &[(0..4, false), (4..n, false)]),
+            ["cafe".to_owned(), format!("{ACUTE} x")]
+        );
+    }
+
+    #[test]
+    fn nothing_moves_across_a_placeholder() {
+        // "a", a placeholder's U+FFFC, which no piece holds, and an oblique
+        // acute and "x": the acute joins the U+FFFC in one grapheme and
+        // has no base to go with.
+        let text = format!("a\u{FFFC}{ACUTE}x");
+        let (mark, n) = (1 + '\u{FFFC}'.len_utf8(), text.len());
+        assert_eq!(
+            moved(&text, &[(0..1, false), (mark..n, true)]),
+            ["a".to_owned(), format!("{ACUTE}x")]
+        );
+    }
+
+    #[test]
+    fn a_ligature_edge_stays_where_it_is() {
+        assert_eq!(moved("effi", &[(0..2, false), (2..4, true)]), ["ef", "fi"]);
+    }
 
     /// A paragraph of bundled Oswald at 200px, filled in by `fill`.
     fn oswald_paragraph(

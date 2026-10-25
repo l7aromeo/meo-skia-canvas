@@ -205,6 +205,10 @@ quick-xml = "0.42"
 # probe whether PNG row filtering pays for a given drawing -- see
 # `png_filter_flags`.
 flate2 = "1.1"
+# Grapheme boundaries, so that a paragraph's oblique range edge never splits
+# a base from its combining marks -- see `ParagraphRecipe::keep_graphemes_whole`.
+# Already in the tree by way of `winit`, at the version locked there.
+unicode-segmentation = "1.13.3"
 # Palette reduction for GIF, which is an indexed format and needs one.
 # k-means in Oklab, against `color_quant`'s NeuQuant; `default-features` off
 # because the defaults pull in the `image` umbrella this crate does without.
