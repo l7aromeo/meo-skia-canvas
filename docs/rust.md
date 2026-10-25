@@ -308,7 +308,7 @@ An animated GIF, WebP or APNG decodes to a still first frame plus the rest on re
 `Image::from_url(url, &options)` and `ImageData::from_url(url, width, height, settings, &options)` are npm's `loadImage` and `loadImageData` for Rust. They need the `fetch` feature, which is off by default and is not built into the npm addon:
 
 ```toml
-meo-skia-canvas = { version = "0.16.4", features = ["fetch"] }
+meo-skia-canvas = { version = "0.16", features = ["fetch"] }
 ```
 
 ```rust

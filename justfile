@@ -24,6 +24,12 @@ fmt_toolchain := "nightly-2026-09-04"
 # lookup below builds its pattern from the version and this prefix, never
 # from a tag.
 changelog_version_prefix := "v"
+# The files whose `meo-skia-canvas = { version = "..."` lines pin the crate:
+# README's quick start and the Rust guide's `fetch` example. Every such line
+# in them is held to Cargo.toml's major.minor by `check-release-guards` and
+# moved by `sync-crate-pins`, so a pin added to either file is covered, and a
+# file added here is covered by both.
+crate_pin_files := "README.md docs/rust.md"
 
 # Default: show available recipes.
 default:
@@ -258,6 +264,34 @@ check-fetch-deps:
 check-release-tags:
     node scripts/check-release-tags.mjs
 
+# The pins `check-release-guards` compares: every `meo-skia-canvas = {
+# version = "..."` line in `crate_pin_files`. Major.minor of the version
+# before any prerelease suffix, so that `0.17.0-rc.1` pins `0.17` rather than
+# `0.17.0-rc`.
+[doc("Move the crate pins in README and the Rust guide to Cargo.toml's major.minor.")]
+sync-crate-pins:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    manifest=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+    base="${manifest%%-*}"
+    want="${base%.*}"
+    pin='meo-skia-canvas = { version = "'
+    for file in {{ crate_pin_files }}; do
+        pins=$(grep -o "${pin}[0-9.]*\"" "$file" | sed 's/.*"\(.*\)"/\1/' | sort -u || true)
+        test -n "$pins" || {
+            echo "${file} has no '${pin}...\"' pin to move"
+            exit 1
+        }
+        if [[ "$pins" == "$want" ]]; then
+            echo "${file} pins ${want}, matching Cargo.toml ${manifest}"
+            continue
+        fi
+        # `-i.bak` and a removal, which BSD and GNU sed both read the same way.
+        sed -i.bak "s/meo-skia-canvas = { version = \"[0-9.]*\"/${pin}${want}\"/g" "$file"
+        rm "${file}.bak"
+        echo "${file} pins moved from $(echo $pins) to ${want}, for Cargo.toml ${manifest}"
+    done
+
 # The release recipes look their notes up in a changelog by heading, and a
 # lookup that matches nothing is indistinguishable from a version that is
 # genuinely absent -- both give no output. `release-crate` grepped the bare
@@ -307,31 +341,40 @@ check-release-guards:
         exit 1
     fi
     echo "release guards: found crate ${crate} and npm ${npm}, refused 99.99.99 in both"
-    # The README's Rust quick start pins a version, and nothing moved it when
-    # the crate did: it still said 0.15 with Cargo.toml at 0.16.0. That pin is
+    # README's Rust quick start and the Rust guide's `fetch` example pin a
+    # version -- every file in `crate_pin_files` -- and nothing moved them when
+    # the crate did: README still said 0.15 with Cargo.toml at 0.16.0. A pin is
     # not decoration -- Cargo reads `version = "0.15"` as `>=0.15.0, <0.16.0`,
     # so a reader copying the block gets the previous minor and none of what
     # the release was cut for, with no error to tell them.
     #
     # Compared on major.minor rather than the full version, because that is
     # what the pin carries and what Cargo acts on: a patch release does not
-    # move it, and requiring one would fail this on every 0.16.x.
+    # move it, and requiring one would fail this on every 0.16.x. Taken from
+    # the version before any prerelease suffix, as `sync-crate-pins` takes it,
+    # so that `0.17.0-rc.1` wants `0.17` rather than `0.17.0-rc`.
     manifest=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
-    want="${manifest%.*}"
-    readme=$(grep -o 'meo-skia-canvas = { version = "[0-9.]*"' README.md \
-      | head -1 | sed 's/.*"\(.*\)"/\1/' || true)
-    test -n "$readme" || {
-        echo "  README.md has no 'meo-skia-canvas = { version = \"...\"' pin to check;"
-        echo "  the quick start moved, so this guard is looking in the wrong place."
-        exit 1
-    }
-    if [[ "$readme" != "$want" ]]; then
-        echo "release guards: README.md pins the crate at ${readme}, Cargo.toml is ${manifest}"
-        echo "  Cargo reads that pin as >=${readme}.0, <$(( ${readme%%.*} )).$(( ${readme#*.} + 1 )).0,"
-        echo "  so the quick start installs a version this release supersedes."
-        exit 1
-    fi
-    echo "release guards: README pins ${readme}, matching Cargo.toml ${manifest}"
+    base="${manifest%%-*}"
+    want="${base%.*}"
+    for file in {{ crate_pin_files }}; do
+        pins=$(grep -o 'meo-skia-canvas = { version = "[0-9.]*"' "$file" \
+          | sed 's/.*"\(.*\)"/\1/' || true)
+        test -n "$pins" || {
+            echo "  ${file} has no 'meo-skia-canvas = { version = \"...\"' pin to check;"
+            echo "  the example moved, so this guard is looking in the wrong place."
+            exit 1
+        }
+        for pin in $pins; do
+            if [[ "$pin" != "$want" ]]; then
+                echo "release guards: ${file} pins the crate at ${pin}, Cargo.toml is ${manifest}"
+                minor="${pin#*.}"
+                echo "  Cargo reads that pin as below ${pin%%.*}.$(( ${minor%%.*} + 1 )).0,"
+                echo "  so the example installs a version this release supersedes."
+                exit 1
+            fi
+        done
+    done
+    echo "release guards: every crate pin in {{ crate_pin_files }} is ${want}, matching Cargo.toml ${manifest}"
     # Both release recipes run `check-parity --require-filed` before bumping,
     # so neither ships a gap recorded with no issue. Read from the recipes
     # themselves; the self-test feeds it the justfile with the step deleted,
@@ -1423,10 +1466,11 @@ release-crate bump="patch" wait="false":
     # `just precommit` runs inside `git commit` and a clippy or formatting failure
     # lands in exactly it.
     #
-    # Both files, because `cargo set-version` writes both. `release-npm` carries
-    # the same trap over `package.json` and `bun.lock`. Released once the commit
-    # lands.
-    trap 'git checkout HEAD -- Cargo.toml Cargo.lock 2>/dev/null || true' EXIT INT TERM
+    # Cargo.toml and Cargo.lock because `cargo set-version` writes both, and
+    # `crate_pin_files` because `sync-crate-pins` below may. `release-npm`
+    # carries the same trap over `package.json` and `bun.lock`. Released once
+    # the commit lands.
+    trap 'git checkout HEAD -- Cargo.toml Cargo.lock {{ crate_pin_files }} 2>/dev/null || true' EXIT INT TERM
     cargo set-version --bump {{ bump }}
     VERSION=$(cargo metadata --no-deps --format-version 1 | node -e "
         let s=''; process.stdin.on('data', d => s += d)
@@ -1461,6 +1505,14 @@ release-crate bump="patch" wait="false":
     # accept the pathspec.
     cargo update -p meo-skia-canvas
 
+    # `crate_pin_files` pin the crate at major.minor, and
+    # `check-release-guards` holds each pin to Cargo.toml's. A bump that moves
+    # major.minor moves the pins too, in the same commit: committed apart, the
+    # bump commit fails the guard, and the pins cannot move first either, since
+    # the guard fails against the version before the bump. A patch bump leaves
+    # the files as they are.
+    just sync-crate-pins
+
     echo ""
     echo "  crate version: ${VERSION} (cargo only; npm package untouched)"
     echo "  tag:           ${TAG}"
@@ -1473,7 +1525,7 @@ release-crate bump="patch" wait="false":
         exit 1
     fi
 
-    git add Cargo.toml Cargo.lock
+    git add Cargo.toml Cargo.lock {{ crate_pin_files }}
     git commit -m "rust: ${VERSION}"
     # Committed: the bump is now the intended state, so stop undoing it.
     trap - EXIT INT TERM
