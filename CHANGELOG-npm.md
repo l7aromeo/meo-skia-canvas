@@ -866,7 +866,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   "`oblique` renders as the italic face".** `oblique` and
   `oblique <angle>` take the family's oblique face where it has one leaning
   the angle's way, set a `slnt` axis to the angle where it has one -- as far
-  as the axis goes, so `oblique 30deg` on an axis ending at -15 leans 15 --
+  as the axis goes, so `oblique 30deg` on an axis ending at -15 sets it to
+  -15 and draws whatever the face draws there --
   and otherwise shear the upright face by the tangent of the angle, a
   negative angle leaning back. The italic face is drawn only for a family
   with no upright face. So `oblique 64px Times`, which 6.0.0 moved from the

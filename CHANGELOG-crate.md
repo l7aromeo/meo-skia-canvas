@@ -762,7 +762,7 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `TextSlant::Oblique`, take the family's oblique face where it
   has one leaning the angle's way, set a `slnt` axis to the angle where it
   has one -- as far as the axis goes, so `oblique 30deg` on an axis ending at
-  -15 leans 15 -- and otherwise shear the upright face by the tangent of the
+  -15 sets it to -15 and draws whatever the face draws there -- and otherwise shear the upright face by the tangent of the
   angle, a negative angle leaning back. The italic face is drawn only for a
   family with no upright face. So `oblique 64px Times`, which drew the
   italic face, is the upright face sheared by 14deg. Chrome 152 takes the
@@ -790,7 +790,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   A `Font` carries no angle, so `FontSlant::Oblique` there is 14deg, the
   default: `Font::from_css("oblique 10deg 16px Oswald")` set with
   `set_font` slants by 14deg, where the same string through `set_font_css`
-  slants by 10. #287 adds the angle to `Font` in 0.17.
+  slants by 10, and `oblique -10deg` leans 14deg forwards rather than 10
+  back. #287 adds the angle to `Font` in 0.17.
 
 - **`measure_text` remembers each glyph's outline bounds.** The ink box is
   joined from the outline of every glyph, and building the outline was two

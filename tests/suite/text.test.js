@@ -1643,7 +1643,7 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
   test("a slnt axis is set to the angle, as far as the axis goes", () => {
     // The same face at the same `slnt`, asked for directly: OpenType counts
     // the axis counter-clockwise, so it is the angle negated, and an angle
-    // past its end leans as far as the axis goes.
+    // past its end sets it as far as the axis goes.
     for (const [angle, slnt] of [
       [10, -10],
       [14, -14],

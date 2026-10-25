@@ -898,9 +898,11 @@ const SLNT: FourByteTag = FourByteTag::from_chars('s', 'l', 'n', 't');
 /// CSS Fonts 4, section 5.2: "For variable fonts with a slnt axis, a match is
 /// created by setting the slnt value with the specified oblique value."
 /// OpenType counts `slnt` counter-clockwise, so it is the angle negated, and
-/// the axis clamps it: `oblique 30deg` on an axis that stops at -15 leans
-/// 15deg, the nearest oblique value the face has, as the search through
-/// oblique values below the one asked for would find. An angle of the sign
+/// the axis clamps it: `oblique 30deg` on an axis that stops at -15 sets it
+/// to -15, the nearest oblique value the face has, as the search through
+/// oblique values below the one asked for would find. What the face draws
+/// there is its own design: the Recursive fixture's `avar` gives one slope,
+/// -0.2499, from -14 to -15. An angle of the sign
 /// the axis does not reach clamps to upright, and that run is sheared
 /// instead -- see [`run_shear`].
 pub(crate) fn with_oblique_slnt(
@@ -2710,15 +2712,18 @@ impl TypesetInputs {
         // The upright choice an `oblique` makes is made here, once, with the
         // fonts registered now, so that laying the run out again lays out
         // what was measured -- see `resolve_for_oblique`.
+        // Only for an oblique: the faces it resolves are not kept, so for
+        // any other font the search would be work for nothing.
         let mut typography = state.typography();
-        let hinting = typography.1.hinting_is_on();
-        let variations =
-            with_oblique_slnt(&state.variations, state.oblique_angle);
-        resolve_for_oblique(&mut typography.0, state.oblique_angle, |style| {
-            FontLibrary::with_shared(|lib| {
-                lib.set_hinting(hinting).fonts_for_style(style, &variations)
-            })
-        });
+        if let Some(angle) = state.oblique_angle {
+            let hinting = typography.1.hinting_is_on();
+            let variations = with_oblique_slnt(&state.variations, Some(angle));
+            resolve_for_oblique(&mut typography.0, Some(angle), |style| {
+                FontLibrary::with_shared(|lib| {
+                    lib.set_hinting(hinting).fonts_for_style(style, &variations)
+                })
+            });
+        }
         Self {
             typography,
             variations: state.variations.clone(),

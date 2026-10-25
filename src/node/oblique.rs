@@ -82,9 +82,12 @@ pub(crate) fn match_oblique(
     style: &mut TextStyle,
     collection: &mut FontCollection,
 ) -> bool {
+    let font_style = style.font_style();
+    if font_style.slant() != Slant::Oblique {
+        return false;
+    }
     let families = style.font_families();
     let families: Vec<&str> = families.iter().collect();
-    let font_style = style.font_style();
     let Some(slant) = oblique_layout_slant(collection, &families, font_style)
     else {
         return false;
@@ -141,8 +144,8 @@ impl ParagraphRecipe {
             builder: ParagraphBuilder::new(&style, &collection),
             style,
             collection,
-            steps: Vec::new(),
-            styles: Vec::new(),
+            steps: Vec::with_capacity(8),
+            styles: Vec::with_capacity(4),
             length: 0,
             base_oblique,
             oblique: base_oblique,

@@ -137,7 +137,8 @@ pub enum FontSlant {
     /// upright face to shear.
     ///
     /// A [`Font`] carries no angle of its own until a field for one lands in
-    /// crate 0.17, #287, so `oblique 10deg` reaches it as this 14deg.
+    /// crate 0.17, #287, so `oblique 10deg` reaches it as this 14deg -- and
+    /// so does `oblique -10deg`, which leans the other way.
     /// [`Context2D::set_font_css`] draws the angle a shorthand names.
     Oblique,
 }
@@ -533,7 +534,8 @@ impl Font {
     /// [`FontSlant::Oblique`], which draws at 14deg, so
     /// `Font::from_css("oblique 10deg 16px Oswald")` set with
     /// [`Context2D::set_font`] slants by 14deg where the same string through
-    /// [`Context2D::set_font_css`] slants by 10. Zero is [`FontSlant::Normal`].
+    /// [`Context2D::set_font_css`] slants by 10, and `oblique -10deg` leans
+    /// 14deg forwards rather than 10 back. Zero is [`FontSlant::Normal`].
     /// A system font keyword such as `caption` is refused, deliberately: what
     /// it means is the platform's choice.
     ///
