@@ -38,7 +38,7 @@ use crate::{
     },
     geometry::Rect,
     image::CSS_INITIAL_FONT_SIZE,
-    node::oblique::{ParagraphRecipe, Sheared, match_oblique},
+    node::oblique::{ParagraphRecipe, Sheared, add_slnt, match_oblique},
 };
 
 /// Horizontal alignment of text within its layout width.
@@ -1261,12 +1261,15 @@ impl TextEngine {
     ) -> ParagraphBuilder {
         let mut collection = self.collection.clone();
         let strut = strut_families(base_style, &mut collection.clone());
-        let instance = instance_for(
+        let mut instance = instance_for(
             &mut collection.clone(),
             &self.positions,
             base_style,
             &oblique_variations(base_style, &base_style.font_variations),
         );
+        if base_style.slant == TextSlant::Oblique {
+            add_slnt(&mut instance.coordinates);
+        }
         let mut base_sk_style = build_text_style(base_style, &instance);
         let base_oblique = match_oblique(&mut base_sk_style, &mut collection);
         let paragraph_style =
@@ -1346,12 +1349,15 @@ impl ParagraphBuilder {
             true => &self.variations,
             false => &style.font_variations,
         };
-        let instance = instance_for(
+        let mut instance = instance_for(
             &mut self.collection.clone(),
             &self.positions,
             style,
             &oblique_variations(style, variations),
         );
+        if style.slant == TextSlant::Oblique {
+            add_slnt(&mut instance.coordinates);
+        }
         let mut sk_style = build_text_style(style, &instance);
         let oblique = match_oblique(&mut sk_style, &mut self.collection);
         self.recipe.push_style(sk_style, oblique);

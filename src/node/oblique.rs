@@ -3,46 +3,52 @@
 //! A range asking for oblique is laid out in the family's face that leans as
 //! asked where it has one, and otherwise upright and sheared by
 //! `tan(14deg)`, the default angle -- the rule a canvas `oblique` follows,
-//! `run_shear` in `node::typography`. SkParagraph cannot shear a range of
-//! its own, and a paragraph is painted by `Paragraph::paint`, which carries
-//! each range's colours, shadows and decorations, so a paragraph with an
-//! oblique range is built twice from the steps that made it:
+//! `run_shear` in `node::typography`. It carries `slnt` among its font
+//! arguments either way, so that SkParagraph shapes it as the font of its
+//! own it is and no ligature forms across its edge -- see `add_slnt`.
 //!
-//! - once with the oblique ranges' glyphs and shadows transparent and their
-//!   decorations off, which paints everything else, backgrounds included, as it
-//!   always did;
-//! - and, where an oblique range is decorated, once more with every glyph
-//!   transparent and only the oblique ranges' decorations on, which paints
-//!   those lines after the glyphs they cross.
+//! SkParagraph cannot shear a range of its own, and a paragraph is painted
+//! by `Paragraph::paint`, which carries each range's colours, shadows and
+//! decorations. It paints a line in passes -- backgrounds, shadows, glyphs,
+//! decorations -- and the oblique ranges' shadows and glyphs, drawn a run
+//! at a time with the paints SkParagraph would have used, have to go in
+//! the same order. So a paragraph with an oblique range is built again from
+//! the steps that made it, as passes:
 //!
-//! Between the two the oblique ranges' shadows and glyphs are drawn a run
-//! at a time, each under its own shear, with the paints SkParagraph would
-//! have used. A paragraph with no oblique range is built once, as it is
-//! filled in, and painted by `Paragraph::paint` alone.
+//! - where an oblique range casts a shadow, one with every glyph transparent
+//!   and no decorations, which paints the backgrounds and the upright shadows,
+//!   before the sheared shadows;
+//! - one with the oblique ranges' glyphs transparent, which paints the upright
+//!   glyphs -- and the backgrounds and upright shadows too where the first pass
+//!   is not needed -- before the sheared glyphs;
+//! - and, where any range is decorated, one with every glyph transparent and
+//!   only the decorations, which paints every line after every glyph.
 //!
-//! SkParagraph paints a line in passes -- backgrounds, shadows, glyphs,
-//! decorations -- and the oblique ranges' shadows and glyphs come after the
-//! rest of the paragraph's glyphs and decorations rather than with them. Two
-//! ranges that overlap one another can therefore stack in a different
-//! order; ranges side by side paint as they would.
+//! A paragraph with no oblique range is built once, as it is filled in, and
+//! painted by `Paragraph::paint` alone. The passes are the paragraph's, not
+//! each line's: a pass for the whole paragraph comes before the next, where
+//! SkParagraph finishes one line before it starts the following one. Lines
+//! that overlap -- a descender reaching a background on the line below --
+//! can therefore stack differently; ranges on one line paint as they would.
 
 use crate::{
     context2d::DEFAULT_OBLIQUE_DEGREES,
     font::leans_as_asked,
     node::typography::{
-        Shear, clusters_under, painted_positions, run_shear, sheared_blob,
+        SLNT, Shear, clusters_under, painted_positions, run_shear, sheared_blob,
     },
 };
 use skia_safe::{
-    BlurStyle, Canvas, Color, Font, FontStyle, GlyphId, MaskFilter, Paint,
-    Point,
+    BlurStyle, Canvas, Color, Font, FontArguments, FontStyle, GlyphId,
+    MaskFilter, Paint, Point,
+    font_arguments::{VariationPosition, variation_position::Coordinate},
     font_style::Slant,
     textlayout::{
         FontCollection, Paragraph, ParagraphBuilder, ParagraphStyle,
         PlaceholderStyle, TextDecoration, TextShadow, TextStyle,
     },
 };
-use std::{borrow::Cow, ops::Range};
+use std::{borrow::Cow, iter::once, ops::Range};
 
 /// The character SkParagraph adds to a paragraph's text for each
 /// placeholder, U+FFFC OBJECT REPLACEMENT CHARACTER, whose UTF-8 length
@@ -98,6 +104,41 @@ pub(crate) fn match_oblique(
         slant,
     ));
     true
+}
+
+/// Puts `slnt` among `coordinates`, at the default oblique angle, unless
+/// they set it already: the font arguments of a style that asks for
+/// oblique.
+///
+/// An oblique is a font of its own, and this is how SkParagraph is told so.
+/// It shapes adjacent styles as one run wherever their font style,
+/// families, size and font arguments agree, whatever else differs, so an
+/// oblique range whose face is the upright one formed a ligature with the
+/// text beside it -- "fi" across the edge drawn half sheared, half not. With
+/// the coordinate, shaping breaks at the edge, as it does at any change of
+/// font. A face without the axis ignores it.
+pub(crate) fn add_slnt(coordinates: &mut Vec<Coordinate>) {
+    if !coordinates.iter().any(|coordinate| coordinate.axis == SLNT) {
+        coordinates.push(Coordinate {
+            axis: SLNT,
+            value: -DEFAULT_OBLIQUE_DEGREES,
+        });
+    }
+}
+
+/// Sets `style`'s font arguments to `coordinates`, or leaves it without any
+/// where there are none.
+pub(crate) fn set_coordinates(
+    style: &mut TextStyle,
+    coordinates: &[Coordinate],
+) {
+    if !coordinates.is_empty() {
+        style.set_font_arguments(
+            &FontArguments::new().set_variation_design_position(
+                VariationPosition { coordinates },
+            ),
+        );
+    }
 }
 
 /// One step of a paragraph's construction, as [`ParagraphRecipe`] keeps it.
@@ -189,37 +230,67 @@ impl ParagraphRecipe {
             return (self.builder.build(), None);
         }
         let text = self.builder.get_text().to_owned();
-        let paragraph = self.replay(&text, |style, oblique| {
-            oblique.then(|| {
+        // SkParagraph paints a line in passes -- backgrounds, shadows,
+        // glyphs, decorations -- so the sheared shadows go between the
+        // upright ones and the upright glyphs, and every decoration after
+        // every glyph. Each pass is a paragraph of its own only where
+        // something needs to come between it and the next.
+        let shadowed = ranges.iter().any(|range| !range.shadows.is_empty());
+        let decorated = self.decorated();
+        let under = shadowed.then(|| {
+            self.replay(&text, |style, oblique| {
                 let mut style = style.clone();
                 style
                     .set_foreground_paint(&transparent())
-                    .reset_shadows()
                     .set_decoration_type(TextDecoration::NO_DECORATION);
-                style
+                if oblique {
+                    style.reset_shadows();
+                }
+                Some(style)
             })
         });
-        let decorations =
-            ranges.iter().any(|range| range.decorated).then(|| {
-                self.replay(&text, |style, oblique| {
-                    let mut style = style.clone();
-                    style
-                        .set_foreground_paint(&transparent())
-                        .clear_background_color()
-                        .reset_shadows();
-                    if !oblique {
-                        style
-                            .set_decoration_type(TextDecoration::NO_DECORATION);
-                    }
-                    Some(style)
-                })
-            });
+        let paragraph = self.replay(&text, |style, oblique| {
+            if !(oblique || shadowed || decorated) {
+                return None;
+            }
+            let mut style = style.clone();
+            if oblique {
+                style.set_foreground_paint(&transparent()).reset_shadows();
+            }
+            if shadowed {
+                style.clear_background_color().reset_shadows();
+            }
+            if decorated {
+                style.set_decoration_type(TextDecoration::NO_DECORATION);
+            }
+            Some(style)
+        });
+        let decorations = decorated.then(|| {
+            self.replay(&text, |style, _| {
+                let mut style = style.clone();
+                style
+                    .set_foreground_paint(&transparent())
+                    .clear_background_color()
+                    .reset_shadows();
+                Some(style)
+            })
+        });
         let sheared = Sheared {
             ranges,
+            under,
             decorations,
             runs: Vec::new(),
         };
         (paragraph, Some(sheared))
+    }
+
+    /// Whether any style decorates its text, the paragraph's own included.
+    fn decorated(&self) -> bool {
+        once(self.style.text_style())
+            .chain(self.styles.iter().map(|(style, _)| style))
+            .any(|style| {
+                style.decoration_type() != TextDecoration::NO_DECORATION
+            })
     }
 
     /// The text of every oblique range, in UTF-8 offsets into the
@@ -311,7 +382,6 @@ struct ObliqueRange {
     /// where it has one, and otherwise a default paint in its colour.
     foreground: Paint,
     shadows: Vec<TextShadow>,
-    decorated: bool,
 }
 
 impl ObliqueRange {
@@ -328,7 +398,6 @@ impl ObliqueRange {
             bytes,
             foreground,
             shadows: style.shadows().to_vec(),
-            decorated: style.decoration_type() != TextDecoration::NO_DECORATION,
         }
     }
 }
@@ -337,6 +406,10 @@ impl ObliqueRange {
 /// each layout, and the paragraph their decorations come from.
 pub(crate) struct Sheared {
     ranges: Vec<ObliqueRange>,
+    /// The backgrounds and the upright shadows, where an oblique range
+    /// casts a shadow to go between them and the upright glyphs.
+    under: Option<Paragraph>,
+    /// Every decoration, where any style has one, to go over every glyph.
     decorations: Option<Paragraph>,
     runs: Vec<ShearedRun>,
 }
@@ -359,8 +432,11 @@ impl Sheared {
     /// A glyph's text is found by asking the paragraph for the cluster
     /// under it -- see `clusters_under`.
     pub(crate) fn lay_out(&mut self, paragraph: &mut Paragraph, width: f32) {
-        if let Some(decorations) = &mut self.decorations {
-            decorations.layout(width);
+        for pass in [&mut self.under, &mut self.decorations]
+            .into_iter()
+            .flatten()
+        {
+            pass.layout(width);
         }
         let mut visited = Vec::new();
         paragraph.extended_visit(|_, visit| {
@@ -432,7 +508,9 @@ impl Sheared {
         canvas: &Canvas,
         origin: Point,
     ) {
-        paragraph.paint(canvas, origin);
+        if let Some(under) = &self.under {
+            under.paint(canvas, origin);
+        }
         for run in &self.runs {
             for shadow in &self.ranges[run.range].shadows {
                 if !shadow.has_shadow() {
@@ -451,6 +529,7 @@ impl Sheared {
                 run.draw(canvas, origin + shadow.offset, &paint);
             }
         }
+        paragraph.paint(canvas, origin);
         for run in &self.runs {
             run.draw(canvas, origin, &self.ranges[run.range].foreground);
         }
