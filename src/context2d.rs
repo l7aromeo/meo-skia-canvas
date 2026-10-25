@@ -743,11 +743,14 @@ fn css_family(family: &str) -> String {
 /// decimals". Shortest for the `f32` held, judged: `2cm` is 75.5905511...px
 /// exactly and held as the nearest `f32`, whose shortest form is `75.59055`,
 /// so it reads `75.59055px`, the same whether the font came from a string or
-/// a [`Font`]. `smaller` reads `8.333333px`.
+/// a [`Font`]. `smaller` reads `8.333333px`. Zero is `0` whatever its sign,
+/// as is anything that rounds to it, since `0` is the shorter form.
 fn css_number(value: f32) -> String {
     if !value.is_finite() {
         return format!("{value}");
     }
+    // Negative zero displays as `-0`.
+    let value = if value == 0.0 { 0.0 } else { value };
     let shortest = format!("{value}");
     match shortest.split_once('.') {
         Some((_, decimals)) if decimals.len() > 6 => {
