@@ -917,6 +917,39 @@ pub(crate) fn with_oblique_slnt(
     }
 }
 
+/// The UTF-8 range of the text under each glyph of a visited run, read from
+/// the paragraph at the middle of the glyph's advance on its baseline.
+///
+/// `origin`, `positions` and `advance` are a run's as `extended_visit`
+/// reports them. The text offsets it reports beside them are not used.
+///
+/// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+/// Re-check: cargo test skia_still_misreports_utf8_starts, and
+/// cargo test skia_still_restarts_utf8_starts_on_a_wrapped_line.
+/// `ParagraphImpl::extendedVisit` hands out a run's glyphs from where the
+/// line's part of it begins and its `utf8Starts` from where the whole run
+/// does, so a run continued on a later line reports the offsets of its
+/// first line's glyphs; and where the run does not start the text it
+/// copies `count` offsets into storage of that size and hands out
+/// `count + 1`, so the last, the end of the run, is read from past them.
+pub(crate) fn clusters_under(
+    paragraph: &Paragraph,
+    origin: Point,
+    positions: &[Point],
+    advance: f32,
+) -> Vec<Option<Range<usize>>> {
+    let end = positions.first().map_or(0.0, |first| first.x + advance);
+    (0..positions.len())
+        .map(|at| {
+            let next = positions.get(at + 1).map_or(end, |next| next.x);
+            let middle = origin.x + (positions[at].x + next) / 2.0;
+            paragraph
+                .get_closest_glyph_cluster_at((middle, origin.y))
+                .map(|cluster| cluster.text_range)
+        })
+        .collect()
+}
+
 /// The ranges of `paragraph` whose face wants a different style from
 /// `base`, each with the style `synthesis_style` gives it, or none where
 /// every run is in a face `base` already suits.
@@ -926,20 +959,31 @@ fn runs_to_restyle(
     base: FontStyle,
     oblique: Option<f32>,
 ) -> Vec<(Range<usize>, FontStyle)> {
-    let mut restyled = Vec::new();
+    let mut visited = Vec::new();
     paragraph.extended_visit(|_line, visit| {
         let Some(info) = visit else { return };
         let face = info.font().typeface();
         let leans = oblique.map(|angle| leans_as_asked(&face, angle));
         let style = synthesis_style(requested, face.font_style(), leans);
-        let starts = info.utf8_starts();
-        if style != base
-            && let (Some(first), Some(last)) = (starts.first(), starts.last())
-        {
-            restyled.push((*first as usize..*last as usize, style));
+        if style != base {
+            visited.push((
+                info.origin(),
+                info.positions().to_vec(),
+                info.advance().width,
+                style,
+            ));
         }
     });
-    restyled
+    visited
+        .into_iter()
+        .filter_map(|(origin, positions, advance, style)| {
+            let clusters =
+                clusters_under(paragraph, origin, &positions, advance);
+            let start = clusters.iter().flatten().map(|c| c.start).min()?;
+            let end = clusters.iter().flatten().map(|c| c.end).max()?;
+            Some((start..end, style))
+        })
+        .collect()
 }
 
 /// Scales a measured box horizontally about the anchor.

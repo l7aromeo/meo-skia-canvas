@@ -1928,6 +1928,58 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
     }
   });
 
+  // The slope of the `index`th stem, from the left, over the rows of
+  // `ctx` that cross exactly `count` stems.
+  const nthStemSlope = (ctx, count, index) => {
+    const { width, height } = ctx.canvas,
+      data = ctx.getImageData(0, 0, width, height).data,
+      edges = [];
+    for (let y = 0; y < height; y++) {
+      const starts = [];
+      for (let x = 0, on = false; x < width; x++) {
+        const now = data[(y * width + x) * 4 + 3] >= 128;
+        if (now && !on) starts.push(x);
+        on = now;
+      }
+      if (starts.length === count) edges.push([y, starts[index]]);
+    }
+    const inner = edges.slice(
+        Math.floor(edges.length * 0.15),
+        Math.floor(edges.length * 0.85),
+      ),
+      n = inner.length,
+      my = inner.reduce((sum, [y]) => sum + y, 0) / n,
+      mx = inner.reduce((sum, [, x]) => sum + x, 0) / n;
+    let num = 0,
+      den = 0;
+    for (const [y, x] of inner) {
+      num += (y - my) * (x - mx);
+      den += (y - my) ** 2;
+    }
+    return num / den;
+  };
+
+  test("a fallback run between two of another face is sheared once", () => {
+    // Recursive's oblique face draws the `I`s and has no `l`, which falls
+    // back to Oswald, upright, and is sheared: by tan(14deg) and not by
+    // that and a fake italic on top, on one line and on the second line of
+    // a wrapped one.
+    const one = new Canvas(500, 220).getContext("2d");
+    one.font = "oblique 150px RecursiveStatic, Oswald";
+    one.fillText("IlI", 40, 180);
+    near(nthStemSlope(one, 3, 1), -tan(14), 0.01, "the fallback l");
+  });
+
+  test("a wrapped fallback run is sheared once on the line it lands on", () => {
+    // As above, with the run on the second line of a wrapped one, where
+    // SkParagraph reports the run's text offsets from its first line.
+    const two = new Canvas(500, 480).getContext("2d");
+    two.font = "oblique 150px RecursiveStatic, Oswald";
+    two.textWrap = true;
+    two.fillText("II IlI", 40, 180, 300);
+    near(nthStemSlope(two, 3, 1), -tan(14), 0.01, "the fallback l, wrapped");
+  });
+
   test("a fallback face that leans already is not sheared again", () => {
     // The upright instance with no `I`, so an `I` falls back to the slnt
     // instance, which leans by itself: sheared on top, it would slope twice.
