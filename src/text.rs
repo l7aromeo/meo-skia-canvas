@@ -1985,20 +1985,29 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
 /// keyword is a family name, and is passed on only where a family of that
 /// name exists, so that fontconfig's answer for the keyword is not taken
 /// for it -- see `FontLibrary::collection_names`, the canvas's counterpart.
+///
+/// A registered family named in another case is asked for in the spelling
+/// it was registered under, as the canvas's counterpart does: the provider
+/// matches a name exactly, and CSS Fonts 4 matches family names without
+/// regard to case.
 fn collection_names(families: &[FontFamily]) -> Vec<String> {
     families
         .iter()
         .map(|family| match family {
             FontFamily::Generic(generic) => generic.to_css().to_string(),
-            FontFamily::Named(name)
-                if GenericFamily::from_css(name).is_some()
-                    && !SharedFontRegistry::with_shared(|library| {
-                        library.has_family(name)
-                    }) =>
-            {
-                unmatched_name(name)
+            FontFamily::Named(name) => {
+                SharedFontRegistry::with_shared(|library| {
+                    match library.registered_spelling(name) {
+                        Some(registered) => registered,
+                        None if GenericFamily::from_css(name).is_some()
+                            && !library.has_family(name) =>
+                        {
+                            unmatched_name(name)
+                        }
+                        None => name.clone(),
+                    }
+                })
             }
-            FontFamily::Named(name) => name.clone(),
         })
         .collect()
 }

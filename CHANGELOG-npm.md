@@ -294,6 +294,15 @@ removed and no signature moves.
 
 ### Fixed
 
+- **A registered family matches its name in any case.** CSS Fonts 4
+  matches family names without regard to case, and the system's families
+  were found that way, but a family registered with `FontLibrary.use` was
+  filed under its exact spelling: after `FontLibrary.use("OswaldX", ...)`,
+  `ctx.font = "16px oswaldx"` drew the fallback, and so did a paragraph's
+  `fontFamilies: ["oswaldx"]`. Each now draws the registered family.
+  Letters outside ASCII still have to match exactly; CSS asks for Unicode
+  case folding there.
+
 - **Colours, fonts, filters and transforms read CSS's whitespace,
   comments and names, and no more.**
   - Whitespace is space, tab, line feed, carriage return and form feed.
