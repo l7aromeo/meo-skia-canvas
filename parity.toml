@@ -835,27 +835,6 @@ why  = """JavaScript needs a way to release the Skia object early because nothin
 status = "deliberate"
 
 [[capability]]
-name = "the five input-event types"
-rust = []
-npm  = ["TextInputType",
-        "TextInputType.deleteContentBackward",
-        "TextInputType.deleteContentForward",
-        "TextInputType.insertCompositionText",
-        "TextInputType.insertLineBreak",
-        "TextInputType.insertText"]
-why  = """Both surfaces carry the value; only npm constrains it. Rust models the
-       event as `UiEvent::Input(Option<String>, String)` and puts the same five
-       strings in the second field -- the event translation in src/gui/event.rs
-       writes 'insertText' and 'deleteContentBackward' by hand. So this is the
-       Key entry mirrored: there JavaScript types a key as `string` and Rust
-       enumerates 195, here npm enumerates five and Rust leaves a String. The
-       crate is the inconsistent side: it names every key as a variant but not
-       these five, so a caller matching on the input type matches string
-       literals with nothing to catch a typo. A typing gap in the crate."""
-status = "gap"
-issue = "https://github.com/l7aromeo/meo-skia-canvas/issues/273"
-
-[[capability]]
 name = "the CSS font-variant keyword set"
 rust = []
 npm  = ["FontVariantSetting",

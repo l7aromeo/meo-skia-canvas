@@ -100,19 +100,45 @@ pub enum UiEvent {
         /// Modifier keys held at the time.
         modifiers: ModifierKeys,
     },
-    /// Text input: the inserted data if any, and the DOM `inputType` that
-    /// produced it (`"insertText"`, `"deleteContentBackward"`,
-    /// `"deleteContentForward"`, `"insertLineBreak"`,
-    /// `"insertCompositionText"`).
+    /// Text input: the inserted data if any, and the kind of edit that
+    /// produced it, the DOM `InputEvent.inputType`.
     ///
     /// Emitted for ordinary keystrokes as well as for input-method commits.
-    Input(Option<String>, String),
+    Input(Option<String>, TextInputType),
     /// The window gained (`true`) or lost (`false`) keyboard focus.
     Focus(bool),
     /// The window was resized, in logical pixels.
     Resize(Size),
     /// The window entered (`true`) or left (`false`) fullscreen.
     Fullscreen(bool),
+}
+
+/// The kind of edit a [`UiEvent::Input`] makes: the values of the DOM's
+/// `InputEvent.inputType` that a window produces, and npm's `TextInputType`.
+///
+/// Serialized as the DOM spells each one -- `insertText`, `insertLineBreak`
+/// and so on -- which is what the JavaScript side hands to an `input`
+/// handler as `inputType`. That makes the spelling a wire format: the name
+/// is the variant's own, camel-cased, so renaming a variant or dropping the
+/// `rename_all` changes what JavaScript receives.
+///
+/// Non-exhaustive, unlike [`Key`]: the Input Events specification defines
+/// dozens of input types -- pastes, drops, formatting, history -- and a
+/// window that comes to produce one more adds a variant here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub enum TextInputType {
+    /// Typed text, a tab or a space: `insertText`.
+    InsertText,
+    /// Enter: `insertLineBreak`.
+    InsertLineBreak,
+    /// Text an input method committed: `insertCompositionText`.
+    InsertCompositionText,
+    /// Backspace, deleting before the caret: `deleteContentBackward`.
+    DeleteContentBackward,
+    /// Delete, deleting after the caret: `deleteContentForward`.
+    DeleteContentForward,
 }
 
 /// Which modifier keys were held when an event fired.
@@ -386,12 +412,17 @@ impl Sieve {
                     };
 
                     let input_type = match &logical_key {
-                        Named(NamedKey::Backspace) => "deleteContentBackward",
-                        Named(NamedKey::Delete) => "deleteContentForward",
-                        Named(NamedKey::Enter) => "insertLineBreak",
-                        _ => "insertText",
-                    }
-                    .to_string();
+                        Named(NamedKey::Backspace) => {
+                            TextInputType::DeleteContentBackward
+                        }
+                        Named(NamedKey::Delete) => {
+                            TextInputType::DeleteContentForward
+                        }
+                        Named(NamedKey::Enter) => {
+                            TextInputType::InsertLineBreak
+                        }
+                        _ => TextInputType::InsertText,
+                    };
 
                     if let Some(string) = key_char {
                         let data = if !string.is_empty() {
@@ -430,7 +461,7 @@ impl Sieve {
                         });
                         self.queue.push(UiEvent::Input(
                             Some(string.clone()),
-                            "insertCompositionText".to_string(),
+                            TextInputType::InsertCompositionText,
                         )); // emit the composed character
                         self.compose_begun = false;
                     }
@@ -473,10 +504,9 @@ mod tests {
     // else covers that: the window suite needs a display, so it does not run
     // in CI or on most machines.
     //
-    // The reason they exist now is that `UiEvent` is about to stop carrying
-    // winit's types. A rename or a reshaped variant would compile, pass every
-    // other test, and break the JS window API silently. Any diff here that is
-    // not deliberate is that bug.
+    // A rename or a reshaped variant compiles, passes every other test, and
+    // breaks the JS window API silently. Any diff here that is not
+    // deliberate is that bug.
 
     fn modifiers() -> ModifierKeys {
         ModifierKeys {
@@ -601,7 +631,7 @@ mod tests {
     #[test]
     fn input_is_a_pair_of_data_and_input_type() {
         let event =
-            UiEvent::Input(Some("x".to_string()), "insertText".to_string());
+            UiEvent::Input(Some("x".to_string()), TextInputType::InsertText);
         assert_eq!(
             to_value(&event).unwrap(),
             json!({ "input": ["x", "insertText"] })
@@ -610,11 +640,32 @@ mod tests {
 
     #[test]
     fn input_carries_null_data_for_a_deletion() {
-        let event = UiEvent::Input(None, "deleteContentBackward".to_string());
+        let event = UiEvent::Input(None, TextInputType::DeleteContentBackward);
         assert_eq!(
             to_value(&event).unwrap(),
             json!({ "input": [null, "deleteContentBackward"] })
         );
+    }
+
+    // npm's `TextInputType` names these five strings, and `gui.js` hands
+    // them to `input` handlers as `inputType`.
+    #[test]
+    fn every_input_type_crosses_as_its_dom_name() {
+        for (input_type, name) in [
+            (TextInputType::InsertText, "insertText"),
+            (TextInputType::InsertLineBreak, "insertLineBreak"),
+            (
+                TextInputType::InsertCompositionText,
+                "insertCompositionText",
+            ),
+            (
+                TextInputType::DeleteContentBackward,
+                "deleteContentBackward",
+            ),
+            (TextInputType::DeleteContentForward, "deleteContentForward"),
+        ] {
+            assert_eq!(to_value(input_type).unwrap(), json!(name));
+        }
     }
 
     #[test]
