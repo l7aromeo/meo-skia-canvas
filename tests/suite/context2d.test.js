@@ -2721,6 +2721,13 @@ describe("Context2D", () => {
   });
 
   describe("textDecoration", () => {
+    // A bundled face, so where the line lands, and so the rows read below,
+    // does not depend on which font the system hands over for a name such as
+    // Helvetica.
+    FontLibrary.use("DecorationOswald", [
+      "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    ]);
+
     // Every form but `underline <color>` used to be discarded in silence:
     // the parser treated `currentColor` -- the value the shorthand yields
     // when no color is named -- as an unparseable color and dropped the
@@ -2732,9 +2739,9 @@ describe("Context2D", () => {
       return n;
     };
 
-    // The underline for 24px text on a baseline at y=40 lands on rows 41-42
-    // and peaks at alpha 191, so both the band and the threshold matter --
-    // measured rather than assumed.
+    // The underline for 24px Oswald on a baseline at y=40 lands on rows 42-43
+    // and peaks at alpha 191 on macOS and Linux alike, so both the band and
+    // the threshold matter -- measured rather than assumed.
     let underlineColor = () => {
       let { data } = ctx.getImageData(0, 41, WIDTH, 6);
       for (let i = 0; i < data.length; i += 4) {
@@ -2745,7 +2752,7 @@ describe("Context2D", () => {
 
     let drawText = (decoration) => {
       ctx.fillStyle = "red";
-      ctx.font = "24px Helvetica";
+      ctx.font = "24px DecorationOswald";
       if (decoration) ctx.textDecoration = decoration;
       ctx.fillText("nnn", 10, 40);
       return inked();
@@ -2768,7 +2775,7 @@ describe("Context2D", () => {
 
     test("inherits the fill color", () => {
       ctx.fillStyle = "red";
-      ctx.font = "24px Helvetica";
+      ctx.font = "24px DecorationOswald";
       ctx.textDecoration = "underline";
       ctx.fillText("nnn", 10, 40);
 
@@ -2778,7 +2785,7 @@ describe("Context2D", () => {
 
     test("honours an explicit color over the fill", () => {
       ctx.fillStyle = "red";
-      ctx.font = "24px Helvetica";
+      ctx.font = "24px DecorationOswald";
       ctx.textDecoration = "underline blue";
       ctx.fillText("nnn", 10, 40);
 
@@ -2835,7 +2842,7 @@ describe("Context2D", () => {
     // `rgb(0 0 255)` is three tokens that are none of them a colour.
     test("takes a colour function that holds spaces", () => {
       ctx.fillStyle = "red";
-      ctx.font = "24px Helvetica";
+      ctx.font = "24px DecorationOswald";
       ctx.textDecoration = "underline rgb(0 0 255)";
       assert.equal(ctx.textDecoration, "underline rgb(0 0 255)");
       ctx.fillText("nnn", 10, 40);
@@ -2860,16 +2867,16 @@ describe("Context2D", () => {
         return Buffer.from(ctx.getImageData(0, 0, WIDTH, HEIGHT).data);
       };
       const relative = underline(() => {
-        ctx.font = "12px Helvetica";
+        ctx.font = "12px DecorationOswald";
         ctx.textDecoration = "underline 0.25em";
-        ctx.font = "24px Helvetica";
+        ctx.font = "24px DecorationOswald";
       });
       const absolute = underline(() => {
-        ctx.font = "24px Helvetica";
+        ctx.font = "24px DecorationOswald";
         ctx.textDecoration = "underline 6px";
       });
       const frozen = underline(() => {
-        ctx.font = "24px Helvetica";
+        ctx.font = "24px DecorationOswald";
         ctx.textDecoration = "underline 3px";
       });
       assert.ok(relative.equals(absolute), "0.25em of 24px is 6px");
