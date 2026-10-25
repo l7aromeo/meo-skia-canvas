@@ -1,6 +1,6 @@
 {
   "about": "`letterSpacing` and `wordSpacing` strings, what Chrome reads back for each, or that it ignores it. Both properties gave the same answer for every row. Read by tests/css_grammar.rs for `set_letter_spacing_css` and `set_word_spacing_css` and by tests/suite/css-grammar.test.js for the two properties. A row with a `font` sets it first, with Oswald registered from tests/assets/fonts/Oswald, and gives the spacing Chrome laid out in pixels as `px`, measured as the width it added to each of four characters.",
-  "source": "Chrome 152.0.7977.149: the property set on a fresh 2D context after `3px`, then read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving `3px`. Chrome resolves every font-relative unit when the text is laid out, against the font then in force, and the root forms -- `rem`, `rex`, `rch`, `rcap`, `ric` -- the same way, against the context's own font rather than a root. The units with nothing to measure on a canvas -- `lh`, `rlh`, the viewport and container units -- lay out as zero. Oswald was loaded as a FontFace declared with its weight range, `200 700`, so `bold` instances the variable face. A row's `read` is what this library reads back. Chrome ignored a bare zero -- `0`, `-0`, `+0`, `0.0` -- where CSS Values 4 says \"For zero lengths the unit identifier is optional (i.e. can be syntactically represented as the <number> 0)\", so those rows read `0px` and carry `chrome`, what Chrome did instead; docs/browser-differences.md has it.",
+  "source": "Chrome 152.0.7977.149: the property set on a fresh 2D context after `3px`, then read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving `3px`. Chrome resolves every font-relative unit when the text is laid out, against the font then in force, and the root forms -- `rem`, `rex`, `rch`, `rcap`, `ric` -- the same way, against the context's own font rather than a root. The units with nothing to measure on a canvas -- `lh`, `rlh`, the viewport and container units -- lay out as zero. Oswald was loaded as a FontFace declared with its weight range, `200 700`, so `bold` instances the variable face. A row's `read` is what this library reads back. Chrome ignored a bare zero -- `0`, `-0`, `+0`, `0.0` -- where CSS Values 4 says \"For zero lengths the unit identifier is optional (i.e. can be syntactically represented as the <number> 0)\", so those rows read `0px` and carry `chrome`, what Chrome did instead; docs/browser-differences.md has it. The rows with a character CSS does not count as whitespace -- U+000B, U+00A0, U+2028, U+3000 and U+FEFF -- and those with a carriage return or a form feed were measured in Chrome 152.0.7977.167 on 2026-10-26 the same way.",
   "cases": [
     {
       "css": "+5px",
@@ -276,6 +276,62 @@
     },
     {
       "css": "1deg",
+      "refused": true
+    },
+    {
+      "css": "\u00a03px",
+      "refused": true
+    },
+    {
+      "css": "3px\u00a0",
+      "refused": true
+    },
+    {
+      "css": "\u000b3px",
+      "refused": true
+    },
+    {
+      "css": "3px\u000b",
+      "refused": true
+    },
+    {
+      "css": "\u20283px",
+      "refused": true
+    },
+    {
+      "css": "3px\u2028",
+      "refused": true
+    },
+    {
+      "css": "\u30003px",
+      "refused": true
+    },
+    {
+      "css": "3px\u3000",
+      "refused": true
+    },
+    {
+      "css": "\ufeff3px",
+      "refused": true
+    },
+    {
+      "css": "3px\ufeff",
+      "refused": true
+    },
+    {
+      "css": "\r3px",
+      "refused": true
+    },
+    {
+      "css": "3px\r",
+      "refused": true
+    },
+    {
+      "css": "\f3px",
+      "refused": true
+    },
+    {
+      "css": "3px\f",
       "refused": true
     }
   ]

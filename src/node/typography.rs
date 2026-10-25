@@ -1874,7 +1874,7 @@ impl Spacing {
     pub fn from_css(css: &str) -> Option<Self> {
         // Whitespace around the length is refused too: Chrome ignores
         // `ctx.letterSpacing = " 5px "`.
-        if css.trim() != css {
+        if css.trim_ascii() != css {
             return None;
         }
         let length = parse_length(css)?;

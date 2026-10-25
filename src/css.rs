@@ -71,6 +71,50 @@ pub(crate) const DEGREES_PER_TURN: f64 = 360.0;
 /// Gradians in a full turn.
 const GRADIANS_PER_TURN: f64 = 400.0;
 
+/// Whether `c` may start a CSS identifier: CSS Syntax 3, section 4.2,
+/// "ident-start code point" -- "A letter, a non-ASCII ident code point, or
+/// U+005F LOW LINE (_)". A hyphen may start one too when an ident-start code
+/// point or another hyphen follows it, which the caller checks.
+pub(crate) fn is_ident_start_code_point(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == '_' || is_non_ascii_ident_code_point(c)
+}
+
+/// Whether `c` may appear in a CSS identifier: CSS Syntax 3, section 4.2,
+/// "ident code point" -- "An ident-start code point, a digit, or U+002D
+/// HYPHEN-MINUS (-)".
+pub(crate) fn is_ident_code_point(c: char) -> bool {
+    is_ident_start_code_point(c) || c.is_ascii_digit() || c == '-'
+}
+
+/// CSS Syntax 3, section 4.2, "non-ASCII ident code point", as
+/// <https://drafts.csswg.org/css-syntax-3/#non-ascii-ident-code-point> lists
+/// it, read 2026-10-26: the definition's ranges, inclusive, in its order.
+///
+/// Not every code point at or above U+0080, the rule this definition replaced
+/// and the one Chrome 152 still reads by: U+00A0, U+00D7, U+2028 and U+3000
+/// are outside it, so `12px serif\u{a0}` names no family where Chrome takes
+/// the family `serif\u{a0}` -- docs/browser-differences.md has the rest.
+fn is_non_ascii_ident_code_point(c: char) -> bool {
+    matches!(
+        c,
+        '\u{B7}'
+            | '\u{C0}'..='\u{D6}'
+            | '\u{D8}'..='\u{F6}'
+            | '\u{F8}'..='\u{37D}'
+            | '\u{37F}'..='\u{1FFF}'
+            | '\u{200C}'
+            | '\u{200D}'
+            | '\u{203F}'
+            | '\u{2040}'
+            | '\u{2070}'..='\u{218F}'
+            | '\u{2C00}'..='\u{2FEF}'
+            | '\u{3001}'..='\u{D7FF}'
+            | '\u{F900}'..='\u{FDCF}'
+            | '\u{FDF0}'..='\u{FFFD}'
+            | '\u{10000}'..
+    )
+}
+
 /// A length in CSS units, as pixels.
 ///
 /// `units` is what the font-relative units resolve against -- the font in
@@ -85,7 +129,7 @@ const GRADIANS_PER_TURN: f64 = 400.0;
 /// and those are parsed by `Font::from_css`, not here. Nor may anything come
 /// between the number and its unit: Chrome refuses `blur(5 px)`.
 pub(crate) fn parse_size(text: &str, units: &FontUnits) -> Option<f32> {
-    let text = text.trim();
+    let text = text.trim_ascii();
     let (value, unit) = split_number(text)?;
     let per_px = match unit {
         // Zero is the one length CSS lets go unitless, because zero of
@@ -438,7 +482,7 @@ pub(crate) struct Length {
 /// Chrome 152 ignores `calc()`, `min()` and the rest in `letterSpacing` and
 /// `wordSpacing`, while `ctx.filter` takes them.
 pub(crate) fn parse_length(text: &str) -> Option<Length> {
-    let text = text.trim();
+    let text = text.trim_ascii();
     let (value, unit) = split_number(text)?;
     length_of(value, unit, written_zero(text))
 }
@@ -482,7 +526,7 @@ pub(crate) fn parse_percentage(text: &str) -> Option<f32> {
         (value, "") => Some(value),
         _ => None,
     };
-    let text = text.trim();
+    let text = text.trim_ascii();
     let value = match text.strip_suffix('%') {
         Some(number) => plain(number)? / 100.0,
         None => plain(text)?,
@@ -496,7 +540,7 @@ pub(crate) fn parse_percentage(text: &str) -> Option<f32> {
 /// an angle, and Chrome refuses `hue-rotate(45)` but reads `hue-rotate(0)`,
 /// `rotate(0)` and `skewX(0)`.
 pub(crate) fn parse_angle(text: &str) -> Option<f32> {
-    let text = text.trim();
+    let text = text.trim_ascii();
     let (value, unit) = split_number(text)?;
     match unit {
         "" if written_zero(text) => Some(0.0),
@@ -550,7 +594,7 @@ pub(crate) fn parse_decoration(text: &str) -> Option<Decoration> {
 
     // Split where a filter is split, so a colour function keeps its own
     // spaces: `underline hsl(120 50% 50%)` is two tokens, not four.
-    for token in split_functions(text.trim()) {
+    for token in split_functions(text.trim_ascii()) {
         let lowered = token.to_ascii_lowercase();
         match lowered.as_str() {
             // The global keywords, and `none` itself. Each clears the lines
@@ -606,7 +650,7 @@ fn split_functions(text: &str) -> Vec<&str> {
                     start = at + 1;
                 }
             }
-            c if c.is_whitespace() && depth == 0 => {
+            c if c.is_ascii_whitespace() && depth == 0 => {
                 if at > start {
                     parts.push(&text[start..at]);
                 }
@@ -664,7 +708,7 @@ pub(crate) fn parse_filter(
     text: &str,
     units: &FontUnits,
 ) -> Result<Vec<FilterOp>, Error> {
-    let trimmed = text.trim();
+    let trimmed = text.trim_ascii();
     if trimmed.is_empty() {
         return Err(Error::InvalidFilter {
             reason: format!("the filter {text:?} is blank; \"none\" clears it"),
@@ -693,7 +737,7 @@ pub(crate) fn parse_filter(
         let name = name.to_ascii_lowercase();
         // Every function but `drop-shadow` may leave its argument out, and
         // then takes the value that changes nothing.
-        let omitted = argument.trim().is_empty();
+        let omitted = argument.trim_ascii().is_empty();
 
         // A negative amount is outside every one of these functions'
         // ranges, and Chrome refuses it when it is written out but clamps it
@@ -786,7 +830,7 @@ fn math(
     dimensions: &[Dimension],
     low: f32,
 ) -> Option<Option<f32>> {
-    let argument = argument.trim();
+    let argument = argument.trim_ascii();
     is_math(argument).then(|| {
         evaluate(
             argument,
@@ -845,7 +889,7 @@ fn eight_bit_colour(css: &str) -> Option<RgbaLinear> {
 fn drop_shadow(args: &str, units: &FontUnits) -> Option<FilterOp> {
     // Split where `split_functions` splits, so a math function or a colour
     // function stays one word whatever spaces it holds.
-    let words = split_functions(args.trim());
+    let words = split_functions(args.trim_ascii());
 
     // A length, and whether a math function computed it: a computed blur
     // radius below zero is clamped, where a written one is refused.
@@ -916,6 +960,60 @@ fn drop_shadow(args: &str, units: &FontUnits) -> Option<FilterOp> {
 mod tests {
     use super::*;
     use crate::color::rgba_linear_to_skia_color;
+
+    #[test]
+    fn an_identifier_holds_the_code_points_css_syntax_lists() {
+        // Each end of each range CSS Syntax 3 section 4.2 lists, and the code
+        // point beside it that the list leaves out, with the ASCII the
+        // definition names in words.
+        let inside = [
+            'a',
+            'Z',
+            '_',
+            '\u{B7}',
+            '\u{C0}',
+            '\u{D6}',
+            '\u{D8}',
+            '\u{F6}',
+            '\u{F8}',
+            '\u{37D}',
+            '\u{37F}',
+            '\u{1FFF}',
+            '\u{200C}',
+            '\u{200D}',
+            '\u{203F}',
+            '\u{2040}',
+            '\u{2070}',
+            '\u{218F}',
+            '\u{2C00}',
+            '\u{2FEF}',
+            '\u{3001}',
+            '\u{D7FF}',
+            '\u{F900}',
+            '\u{FDCF}',
+            '\u{FDF0}',
+            '\u{FFFD}',
+            '\u{10000}',
+            '\u{10FFFF}',
+        ];
+        let outside = [
+            '0', '-', ' ', '\u{7F}', '\u{80}', '\u{A0}', '\u{B5}', '\u{B6}',
+            '\u{B8}', '\u{D7}', '\u{F7}', '\u{37E}', '\u{2000}', '\u{200B}',
+            '\u{200E}', '\u{2028}', '\u{2041}', '\u{2190}', '\u{2BFF}',
+            '\u{2FF0}', '\u{3000}', '\u{FDD0}', '\u{FDEF}', '\u{FFFE}',
+        ];
+        for c in inside {
+            assert!(is_ident_start_code_point(c), "{c:?} starts a name");
+        }
+        for c in outside {
+            assert!(!is_ident_start_code_point(c), "{c:?} starts no name");
+        }
+        // A digit and a hyphen continue a name and do not start one.
+        for c in ['0', '9', '-'] {
+            assert!(is_ident_code_point(c), "{c:?} continues a name");
+        }
+        assert!(!is_ident_code_point('\u{A0}'));
+    }
 
     /// The font size CSS relative units resolve against in these tests.
     const EM: f32 = 16.0;
@@ -1880,13 +1978,13 @@ fn split_arguments(text: &str) -> Vec<&str> {
             '(' => depth += 1,
             ')' => depth = depth.saturating_sub(1),
             ',' if depth == 0 => {
-                parts.push(text[start..at].trim());
+                parts.push(text[start..at].trim_ascii());
                 start = at + 1;
             }
             _ => {}
         }
     }
-    parts.push(text[start..].trim());
+    parts.push(text[start..].trim_ascii());
     parts
 }
 
@@ -2131,7 +2229,7 @@ pub(crate) struct TransformList {
 /// different place on the canvas, and dropping the step nobody could read is
 /// how a typo becomes a rendering bug.
 pub(crate) fn parse_transform_list(text: &str) -> Option<TransformList> {
-    let text = text.trim().to_ascii_lowercase();
+    let text = text.trim_ascii().to_ascii_lowercase();
     if text.is_empty() || text == "none" {
         return Some(TransformList {
             matrix: Matrix4::IDENTITY.flat(),

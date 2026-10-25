@@ -236,6 +236,26 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   `italic 300 small-caps 16px Arial` in Chrome and
   `italic small-caps 300 condensed 16px "Arial"` here.
   `tests/assets/cases/css-fonts.json` holds both, the specification's form as `font` and Chrome's as `chrome`.
+- _A family name, and every other CSS identifier, holds only the code points
+  CSS Syntax 3 lists._ Section 4.2 makes a name of ASCII letters, digits,
+  `_`, `-` and the "non-ASCII ident code points", a list that leaves out
+  U+00A0, U+00AA, U+00B5, U+00D7, U+2028 and U+3000 among others. Chrome 152
+  still reads by the rule the list replaced, that every code point at or
+  above U+0080 is a name's, so it takes `12px aµb`, `12px a×b`, `12px aªb`,
+  `12px serif` followed by U+00A0, read as the family `serif` with that
+  space in it, which matches no face and falls back without a word, and
+  `12px Times New Roman` with U+00A0 between the words. Here each is refused,
+  as the current definition makes it no part of a name; a name of code points
+  on the list, `12px a·b` or `12px Café`, is read as Chrome reads it.
+  `is_ident_code_point` in `src/css.rs` is the one definition, which the font
+  family and math function readers both use.
+- _A comment beside a colour keyword is dropped._ CSS Syntax 3 drops a
+  comment when it tokenizes, so `red/**/` and `/**/red` are the keyword
+  `red`, and here each paints red. Chrome 152 ignores a comment beside a
+  keyword -- `red/**/`, `/**/red`, `red /**/`, `transparent/**/`,
+  `currentcolor/**/` and `red/*` all leave the fill as it was -- while it
+  takes one beside a hex colour or a function, `#f00/**/` and
+  `/**/ rgb(255 0 0)`, and anywhere inside a function.
 - _`letterSpacing` and `wordSpacing` take `"0"`_, and any other zero
   written without a unit -- `0.0`, `-0`, `00`, `0e5` -- as no spacing,
   reading back as `0px`, where Chrome 152 ignored each of `0`, `-0`, `+0`
