@@ -1,6 +1,6 @@
 {
   "about": "`letterSpacing` and `wordSpacing` strings, what Chrome reads back for each, or that it ignores it. Both properties gave the same answer for every row. Read by tests/css_grammar.rs for `set_letter_spacing_css` and `set_word_spacing_css` and by tests/suite/css-grammar.test.js for the two properties. A row with a `font` sets it first, with Oswald registered from tests/assets/fonts/Oswald, and gives the spacing Chrome laid out in pixels as `px`, measured as the width it added to each of four characters.",
-  "source": "Chrome 152.0.7977.149: the property set on a fresh 2D context after `3px`, then read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving `3px`. Chrome resolves every font-relative unit when the text is laid out, against the font then in force, and the root forms -- `rem`, `rex`, `rch`, `rcap`, `ric` -- the same way, against the context's own font rather than a root. The units with nothing to measure on a canvas -- `lh`, `rlh`, the viewport and container units -- lay out as zero. Oswald was loaded as a FontFace declared with its weight range, `200 700`, so `bold` instances the variable face. A row's `read` is what this library reads back. Chrome ignored a bare zero -- `0`, `-0`, `+0`, `0.0` -- where CSS Values 4 says \"For zero lengths the unit identifier is optional (i.e. can be syntactically represented as the <number> 0)\", so those rows read `0px` and carry `chrome`, what Chrome did instead; docs/browser-differences.md has it. The rows with a character CSS does not count as whitespace -- U+000B, U+00A0, U+2028, U+3000 and U+FEFF -- and those with a carriage return or a form feed were measured in Chrome 152.0.7977.167 on 2026-10-26 the same way.",
+  "source": "Chrome 152.0.7977.149: the property set on a fresh 2D context after `3px`, then read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving `3px`. Chrome resolves every font-relative unit when the text is laid out, against the font then in force, and the root forms -- `rem`, `rex`, `rch`, `rcap`, `ric` -- the same way, against the context's own font rather than a root. The units with nothing to measure on a canvas -- `lh`, `rlh`, the viewport and container units -- lay out as zero. Oswald was loaded as a FontFace declared with its weight range, `200 700`, so `bold` instances the variable face. A row's `read` is what this library reads back. Chrome ignored a bare zero -- `0`, `-0`, `+0`, `0.0` -- where CSS Values 4 says \"For zero lengths the unit identifier is optional (i.e. can be syntactically represented as the <number> 0)\", so those rows read `0px` and carry `chrome`, what Chrome did instead; docs/browser-differences.md has it. The rows with a character CSS does not count as whitespace -- U+000B, U+00A0, U+2028, U+3000 and U+FEFF -- and those with a carriage return or a form feed were measured in Chrome 152.0.7977.167 on 2026-10-26 the same way. The rows with a comment were measured in Chrome 152.0.7977.167 on 2026-10-26 the same way.",
   "cases": [
     {
       "css": "+5px",
@@ -48,10 +48,6 @@
     },
     {
       "css": "5pxx",
-      "refused": true
-    },
-    {
-      "css": " 5px ",
       "refused": true
     },
     {
@@ -319,20 +315,17 @@
       "refused": true
     },
     {
-      "css": "\r3px",
+      "css": "3/**/px",
       "refused": true
     },
     {
-      "css": "3px\r",
+      "css": "-/**/3px",
       "refused": true
     },
     {
-      "css": "\f3px",
-      "refused": true
-    },
-    {
-      "css": "3px\f",
-      "refused": true
+      "css": "/**/-3px",
+      "read": "-3px"
     }
-  ]
+  ],
+  "knownDifferences": "Left out: CSS whitespace or a comment around the length -- ` 5px `, a carriage return or a form feed before or after `3px`, `/**/3px`, `3px/**/`. HTML parses the value \"as a CSS <length>\", and CSS Syntax 3's \"parse a component value\" discards the whitespace on either side and its tokenizer the comments, so each is read here as the length alone. Chrome 152 ignores each, while taking `/**/-3px`; docs/browser-differences.md records it."
 }

@@ -71,6 +71,86 @@ pub(crate) const DEGREES_PER_TURN: f64 = 360.0;
 /// Gradians in a full turn.
 const GRADIANS_PER_TURN: f64 = 400.0;
 
+/// `text` with its comments dropped, as CSS Syntax 3's tokenizer drops them
+/// (section 4.3.2), for every CSS value this crate reads: `rgb(255/**/0 0)`
+/// is `rgb(255 0 0)` and `12px/**/serif` is `12px serif`. A comment left
+/// open runs to the end, so `rgb(255 0 0 /* x)` is `rgb(255 0 0 `, and one
+/// inside a string is part of the string: `12px "a/*b*/c"` names `a/*b*/c`.
+///
+/// A comment ends the token before it, so where one stands between two
+/// characters that would otherwise read as one token it becomes a space:
+/// `rgb/**/(` is a name and a bracket, refused as `rgb (` is, `120/**/deg` a
+/// number and a name, and `#f/**/00` no hex colour. A comment is no
+/// whitespace, though, and the place that tells them apart is a `+` or a
+/// `-`:
+///
+/// - before a sign whose own next character is whitespace -- a math function's
+///   operator -- the comment leaves nothing, so `calc(100/**/+/**/155)` stays
+///   without the whitespace its `+` needs;
+/// - after a sign standing on its own, with whitespace, a bracket, a comma or a
+///   slash before it, and something other than whitespace after the comment,
+///   the sign is a token of its own that no value here takes, and the whole
+///   value is `None`: `rgb(255 -/**/10 0)` and `calc(255 -/**/10)` are refused,
+///   as Chrome 152 refuses them. Glued to the number they would read as -10.
+pub(crate) fn without_comments(text: &str) -> Option<Cow<'_, str>> {
+    if !text.contains("/*") {
+        return Some(Cow::Borrowed(text));
+    }
+    let sign = |c: Option<char>| matches!(c, Some('+' | '-'));
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            '"' | '\'' => {
+                out.push(c);
+                // A string runs to its closing quote or the end, a backslash
+                // taking the character after it with it.
+                while let Some((_, inner)) = chars.next() {
+                    out.push(inner);
+                    match inner {
+                        '\\' => out.extend(chars.next().map(|(_, e)| e)),
+                        _ if inner == c => break,
+                        _ => {}
+                    }
+                }
+            }
+            '/' if chars.peek().is_some_and(|&(_, next)| next == '*') => {
+                let after = match text[at + 2..].find("*/") {
+                    Some(close) => at + 2 + close + 2,
+                    None => text.len(),
+                };
+                while chars.peek().is_some_and(|&(next_at, _)| next_at < after)
+                {
+                    chars.next();
+                }
+                let before = out.chars().next_back();
+                let next = text[after..].chars().next();
+                let lone_sign = sign(before)
+                    && out.chars().rev().nth(1).is_none_or(|c| {
+                        c.is_ascii_whitespace() || matches!(c, '(' | ',' | '/')
+                    });
+                if lone_sign && next.is_some_and(|c| !c.is_ascii_whitespace()) {
+                    return None;
+                }
+                let operator_after = sign(next)
+                    && text[after..]
+                        .chars()
+                        .nth(1)
+                        .is_none_or(|c| c.is_ascii_whitespace() || c == '/');
+                let separates = before
+                    .is_some_and(|c| !c.is_ascii_whitespace())
+                    && next.is_some_and(|c| !c.is_ascii_whitespace())
+                    && !operator_after;
+                if separates {
+                    out.push(' ');
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    Some(Cow::Owned(out))
+}
+
 /// Whether `c` may start a CSS identifier: CSS Syntax 3, section 4.2,
 /// "ident-start code point" -- "A letter, a non-ASCII ident code point, or
 /// U+005F LOW LINE (_)". A hyphen may start one too when an ident-start code
@@ -594,7 +674,8 @@ pub(crate) fn parse_decoration(text: &str) -> Option<Decoration> {
 
     // Split where a filter is split, so a colour function keeps its own
     // spaces: `underline hsl(120 50% 50%)` is two tokens, not four.
-    for token in split_functions(text.trim_ascii()) {
+    let uncommented = without_comments(text)?;
+    for token in split_functions(uncommented.trim_ascii()) {
         let lowered = token.to_ascii_lowercase();
         match lowered.as_str() {
             // The global keywords, and `none` itself. Each clears the lines
@@ -708,7 +789,11 @@ pub(crate) fn parse_filter(
     text: &str,
     units: &FontUnits,
 ) -> Result<Vec<FilterOp>, Error> {
-    let trimmed = text.trim_ascii();
+    let uncommented =
+        without_comments(text).ok_or_else(|| Error::InvalidFilter {
+            reason: format!("a sign stands alone in the filter {text:?}"),
+        })?;
+    let trimmed = uncommented.trim_ascii();
     if trimmed.is_empty() {
         return Err(Error::InvalidFilter {
             reason: format!("the filter {text:?} is blank; \"none\" clears it"),
@@ -2229,7 +2314,7 @@ pub(crate) struct TransformList {
 /// different place on the canvas, and dropping the step nobody could read is
 /// how a typo becomes a rendering bug.
 pub(crate) fn parse_transform_list(text: &str) -> Option<TransformList> {
-    let text = text.trim_ascii().to_ascii_lowercase();
+    let text = without_comments(text)?.trim_ascii().to_ascii_lowercase();
     if text.is_empty() || text == "none" {
         return Some(TransformList {
             matrix: Matrix4::IDENTITY.flat(),

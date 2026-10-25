@@ -495,6 +495,39 @@ fn the_spacing_setters_answer_the_spacing_table() {
     );
 }
 
+/// HTML parses a spacing "as a CSS <length>", and CSS Syntax 3's "parse a
+/// component value" discards the whitespace on either side and its
+/// tokenizer the comments. Chrome 152 ignores each; the spacing table leaves
+/// them out and docs/browser-differences.md records the difference.
+#[test]
+fn a_spacing_takes_whitespace_and_comments_around_the_length() {
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    ctx.set_letter_spacing_css("5px").expect("5px is a spacing");
+    let five = ctx.letter_spacing();
+    for css in [
+        " 5px ",
+        "\r5px",
+        "5px\x0c",
+        "\t5px\n",
+        "/**/5px",
+        "5px/**/",
+        " /**/5px ",
+    ] {
+        ctx.set_letter_spacing_css("3px").expect("3px is a spacing");
+        assert!(
+            ctx.set_letter_spacing_css(css).is_ok(),
+            "{css:?} is a spacing"
+        );
+        assert_eq!(ctx.letter_spacing(), five, "{css:?}");
+        ctx.set_word_spacing_css("3px").expect("3px is a spacing");
+        assert!(
+            ctx.set_word_spacing_css(css).is_ok(),
+            "{css:?} is a spacing"
+        );
+    }
+}
+
 #[test]
 fn a_filter_resolves_its_root_units_against_a_16px_serif_root() {
     // Chrome resolves them against the document root, 16px Times by

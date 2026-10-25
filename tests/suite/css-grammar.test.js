@@ -368,6 +368,29 @@ describe("CSS filters and spacing", () => {
     assert.deepEqual(wrong, []);
   });
 
+  // HTML parses the value "as a CSS <length>", and CSS Syntax 3's "parse a
+  // component value" discards the whitespace on either side and its
+  // tokenizer the comments. Chrome 152 ignores each; the spacing table
+  // leaves them out and docs/browser-differences.md records the difference.
+  test("letterSpacing and wordSpacing take whitespace and comments around the length", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    for (const css of [
+      " 5px ",
+      "\r5px",
+      "5px\f",
+      "\t5px\n",
+      "/**/5px",
+      "5px/**/",
+      " /**/5px ",
+    ])
+      for (const property of ["letterSpacing", "wordSpacing"])
+        assert.equal(
+          assign(ctx, property, "3px", css),
+          "5px",
+          `${property} ${JSON.stringify(css)}`,
+        );
+  });
+
   test("letterSpacing lays out the spacing table's pixels", () => {
     // The rows with a `font` give the spacing Chrome laid out in pixels, and
     // each is checked by laying the same text out with that many pixels

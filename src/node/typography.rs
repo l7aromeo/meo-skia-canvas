@@ -3,7 +3,7 @@
 use crate::{
     context::State,
     context2d::DEFAULT_OBLIQUE_DEGREES,
-    css::{FontUnits, is_font_relative, parse_length},
+    css::{FontUnits, is_font_relative, parse_length, without_comments},
     font::{leans_as_asked, variation_axes},
     font_library::{FontEpoch, FontLibrary, base_face},
     text::{
@@ -1872,12 +1872,16 @@ impl Spacing {
     /// length is still relative after it is set: [`in_px`](Self::in_px)
     /// resolves it at the moment the text is laid out.
     pub fn from_css(css: &str) -> Option<Self> {
-        // Whitespace around the length is refused too: Chrome ignores
-        // `ctx.letterSpacing = " 5px "`.
-        if css.trim_ascii() != css {
-            return None;
-        }
-        let length = parse_length(css)?;
+        // HTML's `letterSpacing` and `wordSpacing` setters parse "the given
+        // value as a CSS <length>", and CSS Syntax 3's "parse a component
+        // value" discards the whitespace on either side -- "Discard
+        // whitespace from input", before the value and after it -- and its
+        // tokenizer the comments, so `" 5px "` and `/**/5px` are 5px. Chrome
+        // 152 ignores both; docs/browser-differences.md records it. Inside
+        // the length nothing may come between the number and its unit, so
+        // `5 px` and `5/**/px` stay refused.
+        let uncommented = without_comments(css)?;
+        let length = parse_length(uncommented.trim_ascii())?;
         // A number with no unit is a length only at zero. CSS Values 4
         // section 6: "For zero lengths the unit identifier is optional (i.e.
         // can be syntactically represented as the <number> 0)." Chrome

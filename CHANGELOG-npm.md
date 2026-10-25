@@ -234,12 +234,22 @@ removed and no signature moves.
     colour, the filter and the font and throws `SyntaxError` for the
     transform, and so does this library now. `fontVariant` and `fontVariationSettings` split at the
     same five characters.
-  - A comment inside a colour is dropped, as CSS Syntax drops one:
-    `rgb(255,/**/0,0)`, `rgb(/*x*/255 0 0)` and `/**/#f00` were refused and
-    now paint red, as in Chrome 152. A comment still ends the token before
-    it, so `rgb/**/(255 0 0)` and `calc(100/**/+/**/155)` stay refused. A
-    comment beside a keyword, `red/**/`, is dropped too, where Chrome
-    ignores the whole value; docs/browser-differences.md says why.
+  - A comment is dropped, as CSS Syntax drops one, in a colour, a font, a
+    filter, a transform and a spacing: `rgb(255,/**/0,0)` and `/**/#f00`
+    were refused and now paint red, and `12px/**/serif`,
+    `bold/**/12px serif`, `blur(/**/2px)` and
+    `translate(/**/1px, 2px)` are read, as in Chrome 152. A comment in a
+    quoted family name is part of the name. A comment still ends the
+    token before it, so `rgb/**/(255 0 0)`, `blur(2/**/px)` and
+    `calc(100/**/+/**/155)` stay refused, and a sign it parts from what
+    follows stands alone, so `rgb(255 -/**/10 0)` is refused rather than
+    read as -10. A comment beside a colour keyword, `red/**/`, is dropped
+    too, where Chrome ignores the whole value; docs/browser-differences.md
+    says why.
+  - `letterSpacing` and `wordSpacing` take whitespace and comments around
+    the length, `" 5px "` and `"/**/5px"`, which were ignored: HTML parses
+    the value as a CSS `<length>`, and CSS Syntax discards both there.
+    Chrome 152 ignores them; docs/browser-differences.md records it.
   - `currentcolor` is opaque black, `rgb(from currentcolor r g b)` too,
     where it was refused: CSS Color 4 resolves it from the `color`
     property's initial value when a canvas has no element, and Chrome 152

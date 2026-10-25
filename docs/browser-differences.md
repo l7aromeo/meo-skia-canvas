@@ -256,6 +256,15 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   `currentcolor/**/` and `red/*` all leave the fill as it was -- while it
   takes one beside a hex colour or a function, `#f00/**/` and
   `/**/ rgb(255 0 0)`, and anywhere inside a function.
+- _`letterSpacing` and `wordSpacing` take whitespace and comments around the
+  length._ HTML's setters parse the value "as a CSS <length>", and CSS
+  Syntax 3's "parse a component value" says "Discard whitespace from input"
+  before the value and after it, its tokenizer having dropped the comments,
+  so `" 5px "`, a carriage return or form feed before or after the length,
+  `/**/5px` and `5px/**/` are each 5px here. Chrome 152 ignores each of
+  them, while it takes `/**/-3px`. Inside the length nothing may come
+  between the number and its unit, here as in Chrome: `5 px`, `5/**/px` and
+  `-/**/3px` are refused.
 - _`letterSpacing` and `wordSpacing` take `"0"`_, and any other zero
   written without a unit -- `0.0`, `-0`, `00`, `0e5` -- as no spacing,
   reading back as `0px`, where Chrome 152 ignored each of `0`, `-0`, `+0`

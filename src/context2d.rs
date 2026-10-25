@@ -44,7 +44,8 @@ use crate::{
     css::{
         Dimension, Expect, FontUnits, Percent, ROOT_FONT_PX, evaluate,
         is_ident_code_point, is_ident_start_code_point, is_math, parse_angle,
-        parse_decoration, parse_filter, split_number, written_zero,
+        parse_decoration, parse_filter, split_number, without_comments,
+        written_zero,
     },
     error::Error,
     export::VectorFeatures,
@@ -1156,7 +1157,9 @@ fn oblique_angle(text: &str) -> Option<f32> {
 /// for the grammar; the error names what could not be read, worded as
 /// [`Font::parse`] has always worded it.
 fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
-    let text = shorthand.trim_ascii();
+    let uncommented = without_comments(shorthand)
+        .ok_or_else(|| format!("a sign stands alone in {shorthand:?}"))?;
+    let text = uncommented.trim_ascii();
     let mut font = Font::new(String::new(), 0.0);
     let mut small_caps = false;
     let mut oblique_degrees = None;
@@ -3510,10 +3513,12 @@ impl Context2D {
     /// Returns [`Error::InvalidCssLength`] for a unit CSS does not define,
     /// for a bare number other than zero, for a percentage --
     /// `letter-spacing` is defined over a length, and a percentage is not
-    /// one -- for a math function such as `calc()`, and for whitespace
-    /// around the length or before its unit. Chrome ignores each of these:
-    /// `"5"`, `"calc(1px)"`, `" 5px "` and `"5 px"`. A bare `"0"` is taken,
-    /// as CSS Values 4 makes a zero length, where Chrome ignores it.
+    /// one -- for a math function such as `calc()`, and for anything
+    /// between the number and its unit. Chrome ignores each of these:
+    /// `"5"`, `"calc(1px)"` and `"5 px"`. A bare `"0"` is taken, as CSS
+    /// Values 4 makes a zero length, where Chrome ignores it, and so are
+    /// whitespace and comments around the length, `" 5px "` and
+    /// `"/**/5px"`, which CSS Syntax discards and Chrome refuses.
     ///
     /// # Examples
     ///
