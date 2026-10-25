@@ -160,6 +160,30 @@ removed and no signature moves.
   set no spacing and read back as `0px`. Chrome ignores them, and
   docs/browser-differences.md records the difference.
 
+- **Text decorations sit where the font puts them, beneath the glyphs.**
+  Every line was centred on the position the font gives for its top, so
+  each sat half its thickness too high: 96px Oswald drew its underline
+  from 6.94px below the baseline where its `post` table says 9.60, its
+  line-through from 36.00 above where `OS/2` says 33.31, and its overline
+  with its foot at 112.38 where the ascent is 114.53. An underline now
+  hangs from the `post` top and grows down, as CSS Text Decoration 4
+  section 2.8.1 says, an overline stands on the ascent, and a
+  line-through is the `OS/2` stroke, a `textDecoration` thickness growing
+  it about the stroke's centre -- where it grew by the face's own ratio
+  of strikeout to underline, so that `"line-through 2px"` drew 2.27px in a
+  face whose ratio is 2. Each box takes one position and thickness from
+  its first available font, as section 2.9 asks, rather than one per run,
+  which moved the line under a glyph a fallback face supplied. A double
+  line is two lines a thickness apart, where the second overlapped the
+  first at 3px, and a wavy line a wave of the same proportions at every
+  thickness. Underlines and overlines are drawn beneath the glyphs and
+  line-through over them, section 5.1's order, where every line was drawn
+  over: a descender now crosses its underline. In a `Paragraph`, a text
+  shadow shadows the style's decorations as well as its glyphs, and a
+  background stays beneath them. Where this differs from Chrome -- the
+  line-through, the double line's gap, the wave's constants -- is in
+  docs/browser-differences.md, with the measurements.
+
 - **`outlineText` and the ink box put every glyph where `fillText` draws
   it.** A glyph the shaper moves off its advance -- a mark stacked over
   another, a mark set over a base with no precomposed glyph, the half of a
@@ -926,10 +950,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
   A paragraph with an oblique range takes longer to lay out -- for 109
   characters at 24px with 66 of them oblique, in a release build on macOS,
-  about 39 µs where it took 28, and 59 where it took 28 when the range is
-  underlined, which takes a paragraph of its own for the decorations --
-  and draws about as fast, or about 30% slower underlined. A paragraph with
-  none costs what it did.
+  about 39 µs where it took 28 -- and draws about as fast. A paragraph
+  with none costs what it did.
 
 - **`measureText` works out the ink box only when it is read.** The four
   `actualBoundingBox` values and `lines` come from the outline of every

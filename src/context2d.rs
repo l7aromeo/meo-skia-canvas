@@ -4692,3 +4692,258 @@ mod run_painter_tests {
         assert!(differing.is_empty(), "{}", differing.join("\n"));
     }
 }
+
+#[cfg(test)]
+mod paragraph_shadow_tests {
+    use super::*;
+    use std::iter::zip;
+
+    use crate::{
+        canvas::EngineKind,
+        font::FontLibrary,
+        text::{PAINT_AS_ASKED, Paragraph, TextEngine, TextShadow, TextStyle},
+    };
+
+    const W: f32 = 520.0;
+    const H: f32 = 200.0;
+
+    /// A paragraph as a list of spans, each its text and what its style
+    /// adds to the base.
+    type Spans = Vec<(&'static str, fn(&mut TextStyle))>;
+
+    fn engine() -> TextEngine {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let fonts = FontLibrary::new();
+            for (family, file) in [
+                ("ShadowOswald", "Oswald/Oswald-VariableFont_wght.ttf"),
+                ("ShadowRaleway", "Raleway/Raleway-VariableFont_wght.ttf"),
+            ] {
+                fonts
+                    .register_font_from_path(
+                        family,
+                        format!("tests/assets/fonts/{file}"),
+                    )
+                    .expect("a bundled face registers");
+            }
+        });
+        TextEngine::new(&FontLibrary::new())
+    }
+
+    fn shadow(
+        (r, g, b, a): (u8, u8, u8, f32),
+        (x, y): (f32, f32),
+        blur: f32,
+    ) -> TextShadow {
+        TextShadow {
+            color: RgbaLinear::from_srgb8(r, g, b, a),
+            offset_x: x,
+            offset_y: y,
+            blur_sigma: blur,
+        }
+    }
+
+    fn base() -> TextStyle {
+        TextStyle {
+            font_families: vec!["ShadowOswald".into()],
+            font_size: 36.0,
+            color: RgbaLinear::from_srgb8(0x20, 0x30, 0x40, 1.0),
+            ..TextStyle::default()
+        }
+    }
+
+    fn laid_out(base: &TextStyle, spans: &Spans, width: f32) -> Paragraph {
+        let engine = engine();
+        let mut builder = engine.paragraph_builder(base);
+        for (text, style) in spans {
+            let mut pushed = base.clone();
+            style(&mut pushed);
+            builder.push_style(&pushed);
+            builder.add_text(text);
+            builder.pop();
+        }
+        builder.build(width)
+    }
+
+    /// Whether this machine has a GPU engine to run the GPU leg on.
+    fn gpu_reachable() -> bool {
+        let mut probe = Canvas::new(4.0, 4.0);
+        probe.set_gpu(true);
+        probe.engine_kind() == EngineKind::Gpu
+    }
+
+    fn painted(gpu: bool, paragraph: &Paragraph, as_asked: bool) -> Vec<u8> {
+        PAINT_AS_ASKED.set(as_asked);
+        let mut canvas = Canvas::new(W, H);
+        canvas.set_gpu(gpu);
+        // What the canvas reports drawing with, not what it was asked for:
+        // `set_gpu(true)` falls back to the raster engine silently.
+        assert_eq!(
+            canvas.engine_kind(),
+            match gpu {
+                true => EngineKind::Gpu,
+                false => EngineKind::Cpu,
+            },
+            "the leg runs on the engine it is named for"
+        );
+        let ctx = canvas.context();
+        ctx.draw_paragraph(paragraph, 10.0, 20.0);
+        let bytes = ctx
+            .get_image_data(0.0, 0.0, W, H)
+            .expect("the canvas reads back")
+            .pixels()
+            .to_vec();
+        PAINT_AS_ASKED.set(false);
+        bytes
+    }
+
+    fn corpus() -> Vec<(&'static str, TextStyle, Spans, f32)> {
+        let line = "Hamburgefonstiv AV To";
+        vec![
+            (
+                "one hard shadow",
+                base(),
+                vec![(line, |s| {
+                    s.shadows = vec![shadow((200, 0, 0, 1.0), (3.0, 4.0), 0.0)]
+                })],
+                W,
+            ),
+            (
+                "one blurred shadow",
+                base(),
+                vec![(line, |s| {
+                    s.shadows = vec![shadow((0, 0, 200, 1.0), (2.0, 3.0), 2.5)]
+                })],
+                W,
+            ),
+            (
+                "several translucent shadows",
+                base(),
+                vec![(line, |s| {
+                    s.shadows = vec![
+                        shadow((200, 0, 0, 0.5), (-3.0, 2.0), 0.0),
+                        shadow((0, 120, 0, 0.4), (4.0, 5.0), 1.5),
+                        shadow((0, 0, 0, 0.3), (0.0, 0.0), 4.0),
+                    ]
+                })],
+                W,
+            ),
+            (
+                "the base style's shadow",
+                TextStyle {
+                    shadows: vec![shadow((90, 0, 90, 0.7), (2.0, 2.0), 1.0)],
+                    ..base()
+                },
+                vec![(line, |_| {})],
+                W,
+            ),
+            (
+                "shadowed beside plain, one font",
+                base(),
+                vec![
+                    ("Hambur", |_| {}),
+                    ("gefons", |s| {
+                        s.shadows =
+                            vec![shadow((200, 0, 0, 0.8), (3.0, 3.0), 1.0)]
+                    }),
+                    ("tiv AV", |_| {}),
+                ],
+                W,
+            ),
+            (
+                "one shadow over two colours",
+                base(),
+                vec![
+                    ("Hambur", |s| {
+                        s.shadows =
+                            vec![shadow((0, 0, 0, 0.6), (3.0, 3.0), 2.0)]
+                    }),
+                    ("gefons", |s| {
+                        s.color = RgbaLinear::from_srgb8(200, 30, 30, 1.0);
+                        s.shadows =
+                            vec![shadow((0, 0, 0, 0.6), (3.0, 3.0), 2.0)]
+                    }),
+                ],
+                W,
+            ),
+            (
+                "fallback and right to left",
+                base(),
+                vec![("Ham \u{5e9}\u{5dc}\u{5d5}\u{5dd} Ж AV", |s| {
+                    s.shadows = vec![shadow((0, 0, 200, 0.7), (2.0, 3.0), 1.5)]
+                })],
+                W,
+            ),
+            (
+                "two faces",
+                base(),
+                vec![
+                    ("Hambur", |s| {
+                        s.shadows =
+                            vec![shadow((200, 0, 0, 0.8), (2.0, 2.0), 0.0)]
+                    }),
+                    ("gefons", |s| {
+                        s.font_families = vec!["ShadowRaleway".into()];
+                        s.shadows =
+                            vec![shadow((0, 0, 200, 0.8), (2.0, 2.0), 0.0)]
+                    }),
+                ],
+                W,
+            ),
+            (
+                "wrapped, the shadow short of the next line",
+                base(),
+                vec![("A paragraph long enough to wrap twice here", |s| {
+                    s.shadows = vec![shadow((200, 0, 0, 0.8), (2.0, 2.0), 1.0)]
+                })],
+                220.0,
+            ),
+            (
+                "ellipsis",
+                TextStyle {
+                    max_lines: Some(1),
+                    ellipsis: Some("\u{2026}".into()),
+                    ..base()
+                },
+                vec![("A line far too long to fit in the width", |s| {
+                    s.shadows = vec![shadow((200, 0, 0, 0.8), (2.0, 3.0), 1.0)]
+                })],
+                200.0,
+            ),
+        ]
+    }
+
+    /// The paragraph's shadows, drawn by `Passes` from the glyph runs
+    /// `Paragraph::visit` reports, are SkParagraph's own to the byte, on
+    /// both engines, wherever no line's shadow reaches another's glyphs.
+    #[test]
+    fn a_paragraphs_shadows_are_drawn_as_skparagraph_draws_them() {
+        let mut differing = vec![];
+        let legs: &[bool] = match gpu_reachable() {
+            true => &[false, true],
+            false => {
+                eprintln!("the GPU leg skipped: no GPU engine here");
+                &[false]
+            }
+        };
+        for &gpu in legs {
+            for (name, base, spans, width) in corpus() {
+                let paragraph = laid_out(&base, &spans, width);
+                let ours = painted(gpu, &paragraph, false);
+                let theirs = painted(gpu, &paragraph, true);
+                assert!(
+                    theirs.iter().any(|&b| b != 0),
+                    "{name}: the scene draws something"
+                );
+                let bytes = zip(&ours, &theirs).filter(|(a, b)| a != b).count();
+                if bytes != 0 {
+                    differing.push(format!(
+                        "{name} ({}): {bytes} bytes differ",
+                        if gpu { "GPU" } else { "CPU" }
+                    ));
+                }
+            }
+        }
+        assert!(differing.is_empty(), "{}", differing.join("\n"));
+    }
+}

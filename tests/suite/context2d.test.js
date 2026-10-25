@@ -14,7 +14,8 @@ const { assert, describe, test, beforeEach, afterEach } = require("../runner"),
     loadImage,
   } = require("../../lib"),
   fs = require("fs"),
-  { loadSkiaNode } = require("../../lib/binary.js");
+  { loadSkiaNode } = require("../../lib/binary.js"),
+  { fontTables } = require("../support/font-tables.js");
 
 const native = loadSkiaNode();
 
@@ -2739,9 +2740,9 @@ describe("Context2D", () => {
       return n;
     };
 
-    // The underline for 24px Oswald on a baseline at y=40 lands on rows 42-43
-    // and peaks at alpha 191 on macOS and Linux alike, so both the band and
-    // the threshold matter -- measured rather than assumed.
+    // The underline for 24px Oswald on a baseline at y=40 covers row 43 and
+    // part of row 42, at alpha 64 there, so both the band and the threshold
+    // matter -- measured rather than assumed.
     let underlineColor = () => {
       let { data } = ctx.getImageData(0, 41, WIDTH, 6);
       for (let i = 0; i < data.length; i += 4) {
@@ -2881,6 +2882,374 @@ describe("Context2D", () => {
       });
       assert.ok(relative.equals(absolute), "0.25em of 24px is 6px");
       assert.ok(!relative.equals(frozen), "not 0.25em of 12px");
+    });
+  });
+
+  describe("a decoration sits where its font says", () => {
+    // Each line is held to the font's own tables, read from the file:
+    // `post` for the underline's top and thickness, `OS/2` for the
+    // strikeout's, and `hhea` for the ascent an overline sits on. An
+    // underline grows down from its top and an overline up from the
+    // ascent, CSS Text Decoration 4 section 2.8.1's "extending its thickness
+    // in the positive direction only". A line-through is the font's stroke,
+    // and an explicit thickness grows it equally about the stroke's centre,
+    // so it still crosses the glyphs where the font meant.
+    //
+    // Measured in one column, in the gap of a run of spaces, so no glyph's
+    // ink is read: the line's edges are where its coverage starts and ends,
+    // a partly covered row counting for the part it covers.
+    const OSWALD = "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+      RALEWAY = "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+      FACES = { DecorGeomOswald: OSWALD, DecorGeomRaleway: RALEWAY },
+      BASELINE = 200,
+      // Drawn at four times the size and read in quarter pixels: Skia's
+      // antialiasing resolves an edge to a quarter of a device pixel, about
+      // 0.2px of error at 1x, which hides a 24px line's misplacement. At 4x
+      // a hand-drawn rectangle reads back within 0.03px, and the baseline,
+      // read from a glyph drawn on a whole device pixel, within 0.125px.
+      // The misplacement guarded against is half a line's thickness, 0.6px
+      // at 24px.
+      SCALE = 4,
+      EDGE = 0.2;
+    for (const [family, file] of Object.entries(FACES))
+      FontLibrary.use(family, [file]);
+
+    // The vertical ink spans in the column at `x`, as [top, bottom] in
+    // user pixels down the canvas, edges fractional.
+    const inkSpans = (c, x) => {
+      const height = c.canvas.height,
+        { data } = c.getImageData(Math.floor(x * SCALE), 0, 1, height),
+        out = [];
+      let start = null;
+      for (let y = 0; y <= height; y++) {
+        const cover = y < height ? data[y * 4 + 3] / 255 : 0;
+        if (cover > 0 && start === null) start = y;
+        if (cover === 0 && start !== null) {
+          const first = data[start * 4 + 3] / 255,
+            last = data[(y - 1) * 4 + 3] / 255;
+          out.push([(start + 1 - first) / SCALE, (y - 1 + last) / SCALE]);
+          start = null;
+        }
+      }
+      return out;
+    };
+
+    // Where the glyphs stand: the foot of the tallest span of ink under the
+    // first glyph, a stem standing on the baseline. Read rather than taken
+    // from the `y` given, because the baseline is drawn on a whole pixel
+    // of the paragraph's own, half a pixel from it at most.
+    const baselineOf = (c, from, to) => {
+      let stem = [0, 0];
+      for (let x = from; x < to; x += 1 / SCALE) {
+        for (const span of inkSpans(c, x))
+          if (span[1] - span[0] > stem[1] - stem[0]) stem = span;
+      }
+      return stem[1];
+    };
+
+    // The spans in the column at `x`, as [top, bottom] in pixels up from
+    // the baseline `c` was drawn on.
+    const spans = (c, x) =>
+      inkSpans(c, x).map(([top, bottom]) => [
+        c.baseline - top,
+        c.baseline - bottom,
+      ]);
+
+    // `text` drawn decorated, and the column in the middle of its gap.
+    const decorated = (font, decoration, text = "n      n") => {
+      const c = new Canvas(900 * SCALE, 400 * SCALE).getContext("2d");
+      c.scale(SCALE, SCALE);
+      c.fillStyle = "black";
+      c.font = font;
+      c.textDecoration = decoration;
+      c.fillText(text, 10, BASELINE);
+      c.baseline = baselineOf(c, 10, 10 + c.measureText(text[0]).width);
+      return { c, x: Math.floor(10 + c.measureText(text).width / 2) };
+    };
+
+    const near = (actual, expected, what) =>
+      assert.ok(
+        Math.abs(actual - expected) <= EDGE,
+        `${what}: ${actual.toFixed(3)} where the font says ${expected.toFixed(3)}`,
+      );
+
+    for (const [family, file] of Object.entries(FACES))
+      for (const size of [24, 96]) {
+        const font = `${size}px ${family}`,
+          m = fontTables(file).at(size);
+
+        test(`an underline in ${font} hangs from the post table's top`, () => {
+          const { c, x } = decorated(font, "underline");
+          const [[top, bottom]] = spans(c, x);
+          near(top, m.underlineTop, "top");
+          near(top - bottom, m.underlineThickness, "thickness");
+        });
+
+        test(`a line-through in ${font} is the OS/2 strikeout stroke`, () => {
+          const { c, x } = decorated(font, "line-through");
+          const [[top, bottom]] = spans(c, x);
+          near(top, m.strikeoutTop, "top");
+          near(top - bottom, m.strikeoutThickness, "thickness");
+        });
+
+        test(`an overline in ${font} stands on the ascent`, () => {
+          const { c, x } = decorated(font, "overline");
+          const [[top, bottom]] = spans(c, x);
+          near(bottom, m.ascent, "bottom");
+          near(top - bottom, m.underlineThickness, "thickness");
+        });
+      }
+
+    // The thickness was handed to Skia as a multiple of the underline's,
+    // which Skia applied to the strikeout's: where the two differ, a 2px
+    // line-through was drawn at 2px times their ratio.
+    test("a line-through given a thickness is that thick, about the stroke's centre", () => {
+      for (const t of [2, 8]) {
+        const m = fontTables(RALEWAY).at(96),
+          centre = m.strikeoutTop - m.strikeoutThickness / 2;
+        const { c, x } = decorated(
+          "96px DecorGeomRaleway",
+          `line-through ${t}px`,
+        );
+        const [[top, bottom]] = spans(c, x);
+        near(top - bottom, t, `${t}px thickness`);
+        near((top + bottom) / 2, centre, `${t}px centre`);
+      }
+    });
+
+    // No specification draws these; each is Chrome 153's measured
+    // pattern scaled by the line's thickness t, with Chrome's fixed pixel
+    // terms dropped so the figure is the same at every size
+    // (docs/browser-differences.md has the measurements). Every line
+    // starts at the font's position and grows in CSS's positive direction:
+    // a double's second line is 2t further out, a gap of t.
+    describe("a styled line keeps its pattern in proportion", () => {
+      const m = fontTables(OSWALD).at(96),
+        font = "96px DecorGeomOswald";
+
+      test("a double underline is two lines of t, a gap of t apart", () => {
+        for (const t of [4, 8]) {
+          const { c, x } = decorated(font, `underline double ${t}px`);
+          const below = spans(c, x);
+          assert.equal(below.length, 2, JSON.stringify(below));
+          near(below[0][0], m.underlineTop, `${t}px first top`);
+          near(below[0][0] - below[0][1], t, `${t}px first thickness`);
+          near(below[1][0], m.underlineTop - 2 * t, `${t}px second top`);
+          near(below[1][0] - below[1][1], t, `${t}px second thickness`);
+        }
+      });
+
+      test("a double overline rises from the ascent", () => {
+        const t = 8,
+          { c, x } = decorated(font, `overline double ${t}px`);
+        const above = spans(c, x);
+        assert.equal(above.length, 2, JSON.stringify(above));
+        const [upper, lower] = above;
+        near(lower[1], m.ascent, "first bottom");
+        near(upper[1], m.ascent + 2 * t, "second bottom");
+        near(upper[0] - upper[1], t, "second thickness");
+      });
+
+      // The first line is the single one, about the stroke's centre; the
+      // second is 2t below it, as Chrome draws it.
+      test("a double line-through adds its second line below the first", () => {
+        const t = 8,
+          centre = m.strikeoutTop - m.strikeoutThickness / 2,
+          { c, x } = decorated(font, `line-through double ${t}px`);
+        const lines = spans(c, x);
+        assert.equal(lines.length, 2, JSON.stringify(lines));
+        const [first, second] = lines;
+        near((first[0] + first[1]) / 2, centre, "first centre");
+        near(first[1] - second[0], t, "gap");
+        near(second[0] - second[1], t, "second thickness");
+      });
+
+      // Along the line's middle row, from the run's left edge: Chrome's
+      // dotted is on t, off t, and its dashed on 2t, off t. Columns within
+      // a pixel of a change are skipped, where the edge is antialiased.
+      for (const [style, on, period] of [
+        ["dotted", 1, 2],
+        ["dashed", 2, 3],
+      ])
+        test(`a ${style} underline repeats ${on}t on in every ${period}t`, () => {
+          for (const t of [4, 8]) {
+            const { c } = decorated(font, `underline ${style} ${t}px`),
+              row = Math.floor((BASELINE - m.underlineTop + t / 2) * SCALE),
+              { data } = c.getImageData(0, row, c.canvas.width, 1),
+              start = 10,
+              end = start + c.measureText("n      n").width;
+            // In user pixels, each read at the middle of its device column.
+            for (let x = start + 1; x < end - 1; x += 1 / SCALE) {
+              const phase = (x + 0.5 / SCALE - start) % (period * t);
+              if (
+                Math.abs(phase - on * t) < 1 ||
+                phase < 1 ||
+                phase > period * t - 1
+              )
+                continue;
+              const inked = data[Math.round(x * SCALE) * 4 + 3] > 127;
+              if (inked !== phase < on * t)
+                assert.fail(
+                  `${t}px ${style}: x ${x} is ${inked ? "on" : "off"} at phase ${phase.toFixed(2)}`,
+                );
+            }
+          }
+        });
+
+      // A wave of stroke t, period 4t and centreline swing 1.75t, in a band
+      // 2.75t tall whose top is the font's underline top.
+      test("a wavy underline keeps period 4t in a band 2.75t from the font's top", () => {
+        for (const t of [4, 8]) {
+          const { c } = decorated(font, `underline wavy ${t}px`),
+            start = 10 + c.measureText("n").width + 2,
+            end = 10 + c.measureText("n      ").width - 2;
+          let top = Infinity,
+            bottom = -Infinity;
+          const centres = [];
+          for (let x = Math.ceil(start); x < end; x++) {
+            const [[a, b]] = spans(c, x).filter(([y]) => y < 0);
+            top = Math.min(top, -a);
+            bottom = Math.max(bottom, -b);
+            centres.push(-(a + b) / 2);
+          }
+          near(top, -m.underlineTop, `${t}px band top`);
+          near(bottom - top, 2.75 * t, `${t}px band height`);
+          // The period: the lag at which the centreline best repeats.
+          const mean = centres.reduce((a, b) => a + b, 0) / centres.length,
+            v = centres.map((y) => y - mean);
+          let best = 0,
+            lagAt = 0;
+          for (let lag = 2 * t; lag < 6 * t && lag < v.length / 2; lag++) {
+            let sum = 0;
+            for (let i = 0; i + lag < v.length; i++) sum += v[i] * v[i + lag];
+            if (sum / (v.length - lag) > best) {
+              best = sum / (v.length - lag);
+              lagAt = lag;
+            }
+          }
+          assert.ok(
+            Math.abs(lagAt - 4 * t) <= 1,
+            `${t}px period ${lagAt}, not ${4 * t}`,
+          );
+        }
+      });
+    });
+
+    // CSS Text Decoration 4 section 5.1, after CSS 2 Appendix E: shadows,
+    // then underlines and overlines, beneath the text; line-through over
+    // it. Chrome 153 draws them so.
+    test("an underline is beneath the glyph and a line-through over it", () => {
+      const c = new Canvas(300, 300).getContext("2d");
+      c.font = "96px DecorGeomOswald";
+      c.fillStyle = "black";
+      c.textDecoration = "underline red 10px";
+      c.fillText("p", 10, BASELINE);
+      // Where the descender's stem crosses the underline, the glyph wins.
+      const m = fontTables(OSWALD).at(96),
+        row = Math.floor(BASELINE - m.underlineTop + 5),
+        { data } = c.getImageData(0, row, 300, 1);
+      const black = [...Array(300).keys()].filter(
+          (x) => data[x * 4 + 3] === 255 && data[x * 4] < 40,
+        ),
+        red = [...Array(300).keys()].filter(
+          (x) =>
+            data[x * 4 + 3] === 255 &&
+            data[x * 4] > 215 &&
+            data[x * 4 + 1] < 40,
+        );
+      assert.ok(black.length > 0, "the descender shows over the underline");
+      assert.ok(red.length > 0, "the underline is drawn");
+
+      const d = new Canvas(300, 300).getContext("2d");
+      d.font = "96px DecorGeomOswald";
+      d.fillStyle = "black";
+      d.textDecoration = "line-through red 10px";
+      d.fillText("H", 10, BASELINE);
+      const strike = Math.floor(
+          BASELINE - (m.strikeoutTop - m.strikeoutThickness / 2),
+        ),
+        { data: across } = d.getImageData(0, strike, 300, 1);
+      const blackAcross = [...Array(300).keys()].filter(
+        (x) => across[x * 4 + 3] === 255 && across[x * 4] < 40,
+      );
+      assert.equal(blackAcross.length, 0, "the line-through covers the stems");
+    });
+
+    // CSS Fonts 4, section 5.2: "The first available font ... is defined to
+    // be the first font for which the character U+0020 (space) is not
+    // excluded by a unicode-range, given the font families in the
+    // font-family list". Nothing here has a unicode-range, so it is the
+    // first family that is there, whatever its character map holds. This
+    // subset has `H` alone, so the spaces come from Oswald, and the line
+    // under them is still the subset's -- Chrome 153 draws it so, rows 19-24
+    // below the baseline under the spaces, where Oswald alone gives 10-13.
+    test("the first family decides the line, even without a space of its own", () => {
+      const file =
+        "tests/assets/fonts/Recursive/Recursive-upright-H-subset.ttf";
+      FontLibrary.use("DecorGeomRecH", [file]);
+      const m = fontTables(file).at(96),
+        { c, x } = decorated(
+          "96px DecorGeomRecH, DecorGeomOswald",
+          "underline",
+          "H      H",
+        );
+      const [[top, bottom]] = spans(c, x);
+      near(top, m.underlineTop, "top");
+      near(top - bottom, m.underlineThickness, "thickness");
+    });
+
+    // A face whose strikeout is twice its underline: the thickness given
+    // is the one drawn, about the strikeout stroke's centre. Skia scaled
+    // the strikeout by thickness over the underline's, drawing 2px as 4.
+    test("a line-through's given thickness is not scaled by the face's", () => {
+      const file =
+        "tests/assets/fonts/Recursive/Recursive-upright-strikeout-subset.ttf";
+      FontLibrary.use("DecorGeomRecStrike", [file]);
+      const m = fontTables(file).at(96),
+        centre = m.strikeoutTop - m.strikeoutThickness / 2;
+      assert.equal(m.strikeoutThickness, 2 * m.underlineThickness);
+      for (const t of [2, 8]) {
+        const { c, x } = decorated(
+          "96px DecorGeomRecStrike",
+          `line-through ${t}px`,
+          "H      H",
+        );
+        const [[top, bottom]] = spans(c, x);
+        near(top - bottom, t, `${t}px thickness`);
+        near((top + bottom) / 2, centre, `${t}px centre`);
+      }
+    });
+
+    // CSS Text Decoration 4 section 2.9: "the UA must use a single
+    // thickness and position on each line for the decorations deriving
+    // from a single decorating box", taken from the first available font.
+    // Oswald has no Ω, so Raleway draws it, and the line under it is
+    // still Oswald's -- as Chrome 153 draws it, rows 10-13 under both.
+    test("one underline runs under a glyph from a fallback face", () => {
+      const font = "96px DecorGeomOswald, DecorGeomRaleway",
+        m = fontTables(OSWALD).at(96),
+        c = new Canvas(900 * SCALE, 400 * SCALE).getContext("2d");
+      c.scale(SCALE, SCALE);
+      c.fillStyle = "black";
+      c.font = font;
+      c.textDecoration = "underline";
+      const before = c.measureText("n   ").width,
+        omega = c.measureText("Ω").width;
+      c.fillText("n   Ω   n", 10, BASELINE);
+      c.baseline = baselineOf(c, 10, 10 + c.measureText("n").width);
+      for (const [what, x] of [
+        ["under a space", Math.floor(10 + before / 2)],
+        ["under the fallback Ω", Math.floor(10 + before + omega / 2)],
+      ]) {
+        const below = spans(c, x).filter(([top]) => top < 0);
+        assert.equal(below.length, 1, `${what}: ${JSON.stringify(below)}`);
+        near(below[0][0], m.underlineTop, `${what}, top`);
+        near(
+          below[0][0] - below[0][1],
+          m.underlineThickness,
+          `${what}, thickness`,
+        );
+      }
     });
   });
 

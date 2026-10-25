@@ -38,7 +38,7 @@ use crate::{
     },
     geometry::Rect,
     image::CSS_INITIAL_FONT_SIZE,
-    node::oblique::{ParagraphRecipe, Sheared, add_slnt, match_oblique},
+    node::oblique::{ParagraphRecipe, Passes, add_slnt, match_oblique},
 };
 
 /// Horizontal alignment of text within its layout width.
@@ -1450,15 +1450,24 @@ impl ParagraphBuilder {
 
     /// Closes the paragraph and lays it out, wrapping at `max_width`.
     pub fn build(self, max_width: f32) -> Paragraph {
-        let (paragraph, sheared) = self.recipe.build();
+        let (paragraph, passes) = self.recipe.build();
         let mut paragraph = Paragraph {
             paragraph,
-            sheared,
+            passes,
             max_width,
         };
         paragraph.layout(max_width);
         paragraph
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Set by a test to paint each paragraph as its caller asked for it,
+    /// its shadows SkParagraph's to draw: the control for what
+    /// `node::oblique::Passes` draws in their place.
+    pub(crate) static PAINT_AS_ASKED: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 /// Result of `TextEngine::layout_text`.
@@ -1467,8 +1476,9 @@ impl ParagraphBuilder {
 /// `draw_text_layout` paints the same paragraph onto a canvas.
 pub struct Paragraph {
     pub(crate) paragraph: SkParagraph,
-    /// What draws the paragraph's oblique ranges, where it has any.
-    sheared: Option<Sheared>,
+    /// What draws the paragraph's oblique ranges and its decorations,
+    /// where it has any.
+    passes: Option<Passes>,
     max_width: f32,
 }
 
@@ -1486,18 +1496,26 @@ impl Paragraph {
     /// Every metric on this type reports the new layout afterwards.
     pub fn layout(&mut self, max_width: f32) {
         self.paragraph.layout(max_width);
-        if let Some(sheared) = &mut self.sheared {
-            sheared.lay_out(&mut self.paragraph, max_width);
+        if let Some(passes) = &mut self.passes {
+            passes.lay_out(&mut self.paragraph, max_width);
         }
         self.max_width = max_width;
     }
 
     /// Paints the paragraph with its top-left corner at `origin`: through
-    /// `Paragraph::paint`, and with its oblique ranges sheared where it has
-    /// any -- see `node::oblique`.
+    /// `Paragraph::paint`, with its oblique ranges sheared, its shadows and
+    /// its decorations drawn where it has any -- see `node::oblique`.
     pub(crate) fn paint(&self, canvas: &SkCanvas, origin: SkPoint) {
-        match &self.sheared {
-            Some(sheared) => sheared.paint(&self.paragraph, canvas, origin),
+        #[cfg(test)]
+        if PAINT_AS_ASKED.get()
+            && let Some(as_asked) =
+                self.passes.as_ref().and_then(|p| p.as_asked.as_ref())
+        {
+            as_asked.paint(canvas, origin);
+            return;
+        }
+        match &self.passes {
+            Some(passes) => passes.paint(&self.paragraph, canvas, origin),
             None => self.paragraph.paint(canvas, origin),
         }
     }

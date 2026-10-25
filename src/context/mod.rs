@@ -29,6 +29,7 @@ use crate::{
     gpu::RenderingEngine,
     gradient::{BoxedCanvasGradient, CanvasGradient},
     node::{
+        decorate::{self, Layer},
         filter::{
             Coverage, Filter, SamplingFilter, SamplingQuality, ScalingOperation,
         },
@@ -39,7 +40,7 @@ use crate::{
     },
     typography::{
         Baseline, DecorationStyle, FontSpec, Painter, PendingInk, Spacing,
-        TextExtents, TypesetInputs, Typesetter,
+        TextExtents, TypesetInputs, Typesetter, glyph_runs,
     },
     utils::*,
 };
@@ -1597,12 +1598,42 @@ impl Context2D {
                 let painter = layout.painter();
                 #[cfg(test)]
                 let painter = PAINTER_OVERRIDE.get().unwrap_or(painter);
-                if painter == Painter::Runs {
-                    typesetter.decorate(&mut layout, paint);
-                }
-                let mut draw = |canvas: &SkCanvas, at: Point| match painter {
-                    Painter::Paragraph => layout.paragraph.paint(canvas, at),
-                    Painter::Runs => layout.paint(canvas, at, paint),
+                // The run is one decorating box: every run of it is the
+                // box's, whatever face draws it.
+                let decoration = typesetter.decoration(paint);
+                let spans = match &decoration {
+                    Some(_) => decorate::spans(
+                        &glyph_runs(&mut layout.paragraph),
+                        |_| Some(0),
+                    ),
+                    None => Vec::new(),
+                };
+                let boxes = decoration.as_slice();
+                // Underlines and overlines beneath the glyphs, line-through
+                // over them: CSS Text Decoration 4, section 5.1.
+                let mut draw = |canvas: &SkCanvas, at: Point| {
+                    decorate::paint(
+                        canvas,
+                        &spans,
+                        boxes,
+                        at,
+                        Layer::Beneath,
+                        paint,
+                    );
+                    match painter {
+                        Painter::Paragraph => {
+                            layout.paragraph.paint(canvas, at)
+                        }
+                        Painter::Runs => layout.paint(canvas, at, paint),
+                    }
+                    decorate::paint(
+                        canvas,
+                        &spans,
+                        boxes,
+                        at,
+                        Layer::Over,
+                        paint,
+                    );
                 };
                 match condensation {
                     // Chrome condenses with a plain anisotropic transform

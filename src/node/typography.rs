@@ -6,6 +6,7 @@ use crate::{
     css::{FontUnits, is_font_relative, parse_length},
     font::{leans_as_asked, variation_axes},
     font_library::{FontEpoch, FontLibrary, base_face},
+    node::decorate::{self, FaceLines, Thickness},
     text::{
         TextAlign as CrateTextAlign, TextBaseline as CrateTextBaseline,
         TextMetricsLine, TextMetricsRun,
@@ -329,13 +330,7 @@ pub struct TextLayout {
     /// draws stems 6 pixels wide and a crossbar still 12, and the inked
     /// height does not move at any factor.
     pub condensation: f32,
-    /// The same run laid out with its glyphs transparent, painted for its
-    /// decoration lines alone, or `None` where it has none or nobody asked
-    /// for it -- see [`Typesetter::decorate`] and [`TextLayout::paint`].
-    pub decorations: Option<Paragraph>,
-    /// The ranges laid out in a style of their own, which the decoration
-    /// paragraph is laid out with too, so that its lines fall under the
-    /// same glyphs.
+    /// The ranges laid out in a style of their own.
     restyled: Vec<(Range<usize>, FontStyle)>,
     /// The angle an `oblique` font is drawn at, which decides which runs
     /// are sheared -- see [`run_shear`].
@@ -357,13 +352,10 @@ impl TextLayout {
     /// Two painters rather than one, and `Paragraph::paint` the default,
     /// because the run painter costs more where it is not needed: in a
     /// release build, `fillText` of plain text took about 1.5% longer
-    /// through it and decorated text about 50% longer -- 7.2 microseconds a
-    /// call against 10.8 -- the price of the second layout its decoration
-    /// lines need (see the `UPSTREAM:` marker on [`TextLayout::paint`]).
-    /// The two paint the same pixels, which
-    /// `the_run_painter_draws_what_paragraph_paint_draws` holds them to, so
-    /// one painter for everything becomes the right shape once that second
-    /// layout is gone.
+    /// through it. Neither draws decoration lines, which
+    /// [`crate::node::decorate`] draws around either. The two paint the
+    /// same pixels, which `the_run_painter_draws_what_paragraph_paint_draws`
+    /// holds them to.
     ///
     /// The run painter is needed where the font is `oblique`: a run that
     /// does not lean as asked is sheared, and a run that does is not, which
@@ -376,10 +368,9 @@ impl TextLayout {
         }
     }
 
-    /// Paints the run with its anchor at `origin`: each glyph run as a text
-    /// blob in its own font, then the decoration lines -- from the paragraph
-    /// [`Typesetter::decorate`] added, which this needs where the run is
-    /// decorated.
+    /// Paints the run's glyphs with its anchor at `origin`: each glyph run
+    /// as a text blob in its own font. Decoration lines are drawn around
+    /// this, by [`crate::node::decorate`].
     ///
     /// A run at a time rather than through `Paragraph::paint`, so that a run
     /// can be drawn sheared or not on its own -- see [`sheared_blob`]. The
@@ -387,16 +378,7 @@ impl TextLayout {
     /// `Paragraph::paint`'s: each run's `Font` already carries what
     /// SkParagraph synthesised for it -- an embolden, a skew -- and the run's
     /// origin is the one `Paragraph::paint` draws from, its baseline snapped
-    /// to a whole pixel (#142). The decoration lines are SkParagraph's own,
-    /// from a second paragraph whose glyphs are transparent, so they land
-    /// where `Paragraph::paint` puts them.
-    ///
-    /// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
-    /// Re-check: cargo test the_run_painter_draws_what_paragraph_paint_draws
-    /// with the decoration paragraph replaced by one call to
-    /// `Paragraph::updateForegroundPaint` making the glyphs transparent, if
-    /// the binding offers it; SkParagraph has it, skia-safe does not bind it,
-    /// so the decorations need a second layout of their own.
+    /// to a whole pixel (#142).
     pub fn paint(&mut self, canvas: &Canvas, origin: Point, paint: &Paint) {
         for run in glyph_runs(&mut self.paragraph) {
             let shear = run_shear(&run.font.typeface(), self.oblique);
@@ -406,20 +388,23 @@ impl TextLayout {
                 canvas.draw_text_blob(blob, origin + run.origin, paint);
             }
         }
-        if let Some(decorations) = &self.decorations {
-            decorations.paint(canvas, origin);
-        }
     }
 }
 
 /// One glyph run of a laid-out paragraph: the glyphs one font draws, where
 /// each goes relative to the run's origin, and that origin relative to the
 /// paragraph's.
-struct GlyphRun {
-    font: Font,
-    glyphs: Vec<GlyphId>,
-    positions: Vec<Point>,
-    origin: Point,
+pub(crate) struct GlyphRun {
+    /// The line the run is on, from 0.
+    pub(crate) line: usize,
+    pub(crate) font: Font,
+    pub(crate) glyphs: Vec<GlyphId>,
+    pub(crate) positions: Vec<Point>,
+    /// The UTF-8 offset of the text each glyph comes from.
+    pub(crate) starts: Vec<u32>,
+    pub(crate) origin: Point,
+    /// The right edge of the run's clip, in the paragraph's coordinates.
+    pub(crate) advance_x: f32,
 }
 
 /// The glyph runs `paragraph` paints, in the positions `Paragraph::paint`
@@ -436,15 +421,19 @@ struct GlyphRun {
 /// the run's first line, and for a run that does not start the text the
 /// one after its last glyph is read from past the storage holding them.
 /// `visit`'s are each glyph's own, on every line.
-fn glyph_runs(paragraph: &mut Paragraph) -> Vec<GlyphRun> {
+pub(crate) fn glyph_runs(paragraph: &mut Paragraph) -> Vec<GlyphRun> {
     let mut runs = vec![];
-    paragraph.visit(|_line, visit| {
+    paragraph.visit(|line, visit| {
         if let Some(info) = visit {
+            let count = info.glyphs().len();
             runs.push(GlyphRun {
+                line,
                 font: info.font().clone(),
                 glyphs: info.glyphs().to_vec(),
                 positions: info.positions().to_vec(),
+                starts: info.utf8_starts()[..count].to_vec(),
                 origin: info.origin(),
+                advance_x: info.advance_x(),
             });
         }
     });
@@ -923,27 +912,41 @@ impl<'a> Typesetter<'a> {
             paragraph,
             offset,
             condensation,
-            decorations: None,
             restyled,
             oblique: self.oblique,
         }
     }
 
-    /// Adds to `layout`, laid out with `paint`, the decoration paragraph
-    /// [`TextLayout::paint`] draws its lines from, where the run has any.
+    /// The run's decoration, painted in `paint`'s colour unless it names
+    /// its own, or `None` where it has no lines.
     ///
-    /// Apart from [`Typesetter::layout`] because it is a second layout, and
-    /// only the run painter needs it: `Paragraph::paint` draws the lines
-    /// itself, and a measurement or an outline has no use for them.
-    pub fn decorate(&self, layout: &mut TextLayout, paint: &Paint) {
-        let style = self.layout_style(paint);
-        if style.decoration().ty == TextDecoration::NO_DECORATION {
-            return;
+    /// The whole run is one decorating box, so its lines are placed by its
+    /// first available font -- see [`FaceLines::first_available`] -- at the
+    /// run's size and axes, and a run another face draws for want of a
+    /// glyph is underlined at the same height.
+    pub fn decoration(&self, paint: &Paint) -> Option<decorate::Decoration> {
+        let decoration = &self.text_decoration.decoration;
+        if decoration.ty == TextDecoration::NO_DECORATION {
+            return None;
         }
-        let mut glyphless = style;
-        glyphless.set_foreground_paint(Paint::default().set_alpha(0));
-        layout.decorations =
-            Some(self.paragraph_with(&glyphless, &layout.restyled));
+        let families = self.char_style.font_families();
+        let families: Vec<&str> = families.iter().collect();
+        let face = FaceLines::first_available(
+            &mut self.typefaces.clone(),
+            &families,
+            self.char_style.font_style(),
+            self.char_style.font_size(),
+            self.char_style.font_arguments(),
+        )?;
+        Some(decorate::Decoration {
+            lines: decoration.ty,
+            style: decoration.style,
+            thickness: self
+                .decoration_thickness
+                .map_or(Thickness::Font, Thickness::Pixels),
+            color: self.text_decoration.color.unwrap_or(paint.color()),
+            face,
+        })
     }
 
     /// The run's advance -- every glyph and space, with the letter spacing
@@ -994,11 +997,6 @@ impl<'a> Typesetter<'a> {
     fn layout_style(&self, paint: &Paint) -> TextStyle {
         let mut char_style = TextStyle::clone(&self.char_style);
         char_style.set_foreground_paint(paint);
-        char_style.set_decoration(&self.text_decoration.for_layout(
-            &char_style,
-            paint.color(),
-            self.decoration_thickness,
-        ));
 
         // Let SkParagraph synthesise what Chrome synthesises and nothing
         // else -- see `synthesis_style`. The match was found once, when the
@@ -1819,29 +1817,6 @@ impl Default for DecorationStyle {
             size: None,
             color: None,
             css: "none".to_string(),
-        }
-    }
-}
-
-impl DecorationStyle {
-    /// The decoration as Skia takes it, for text in `style`, with
-    /// `thickness` the resolved [`size`](Self::size) in pixels.
-    pub fn for_layout(
-        &self,
-        style: &TextStyle,
-        text_color: Color,
-        thickness: Option<f32>,
-    ) -> Decoration {
-        // Skia takes a multiple of the font's own underline thickness.
-        let font_thickness =
-            style.font_metrics().underline_thickness().unwrap_or(1.0);
-        let thickness_multiplier =
-            thickness.map_or(1.0, |px| px / font_thickness);
-        let color = self.color.unwrap_or(text_color);
-        Decoration {
-            thickness_multiplier,
-            color,
-            ..self.decoration
         }
     }
 }

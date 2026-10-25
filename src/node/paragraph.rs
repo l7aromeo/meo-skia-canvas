@@ -21,7 +21,7 @@ use crate::{
     font_library::{FontLibrary, instance_coordinates},
     node::{
         oblique::{
-            ParagraphRecipe, Sheared, add_slnt, match_oblique, set_coordinates,
+            ParagraphRecipe, Passes, add_slnt, match_oblique, set_coordinates,
         },
         typography::with_oblique_slnt,
     },
@@ -57,8 +57,9 @@ pub type BoxedParagraphBuilder = JsBox<RefCell<ParagraphBuilderWrap>>;
 
 pub struct ParagraphWrap {
     pub paragraph: SkParagraph,
-    /// What draws the paragraph's oblique ranges, where it has any.
-    pub sheared: Option<Sheared>,
+    /// What draws the paragraph's oblique ranges and its decorations,
+    /// where it has any.
+    pub passes: Option<Passes>,
 }
 
 impl Finalize for ParagraphWrap {}
@@ -844,8 +845,8 @@ pub fn build(mut cx: FunctionContext) -> JsResult<BoxedParagraph> {
 
     match this.recipe.take() {
         Some(recipe) => {
-            let (paragraph, sheared) = recipe.build();
-            Ok(cx.boxed(RefCell::new(ParagraphWrap { paragraph, sheared })))
+            let (paragraph, passes) = recipe.build();
+            Ok(cx.boxed(RefCell::new(ParagraphWrap { paragraph, passes })))
         }
         None => cx.throw_error(
             "ParagraphBuilder has already been consumed by build()",
@@ -862,10 +863,10 @@ pub fn layout(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let width = float_arg_or_bail(&mut cx, 1, "width")?;
 
     let mut this = this.borrow_mut();
-    let ParagraphWrap { paragraph, sheared } = &mut *this;
+    let ParagraphWrap { paragraph, passes } = &mut *this;
     paragraph.layout(width);
-    if let Some(sheared) = sheared {
-        sheared.lay_out(paragraph, width);
+    if let Some(passes) = passes {
+        passes.lay_out(paragraph, width);
     }
     Ok(cx.undefined())
 }
@@ -1112,8 +1113,8 @@ pub fn drawParagraph(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // to be applied around it or they are silently dropped.
     ctx.with_composited_canvas(|canvas| {
         let at = Point::new(x, y);
-        match &para.sheared {
-            Some(sheared) => sheared.paint(&para.paragraph, canvas, at),
+        match &para.passes {
+            Some(passes) => passes.paint(&para.paragraph, canvas, at),
             None => para.paragraph.paint(canvas, at),
         }
     });
