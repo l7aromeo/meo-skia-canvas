@@ -213,7 +213,8 @@ verbs! {
         // context is in. What it *resolves* to is another matter -- it means
         // the canvas element's computed direction, and a canvas with no
         // document around it has none, so `ltr` is what gets laid out.
-        let resolved = match direction.to_lowercase().as_str() {
+        // Matched exactly, as WebIDL matches an enumeration's values.
+        let resolved = match direction {
             "ltr" => Some((TextDirection::LTR, false)),
             "rtl" => Some((TextDirection::RTL, false)),
             "inherit" => Some((TextDirection::LTR, true)),
@@ -551,7 +552,9 @@ verbs! {
     // is recorded; anything else crosses to the hand-written setter, which
     // ignores it as it always has.
     set_fontStretchText as SetFontStretchText (fontStretch @ text) => |ctx| {
-        ctx.set_font_width(to_width(fontStretch));
+        if let Some(width) = to_width(fontStretch) {
+            ctx.set_font_width(width);
+        }
     },
 
     // The flags. Each arrives as a real boolean -- the JavaScript setter
@@ -1642,7 +1645,9 @@ pub fn set_fontStretch(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     if let Some(stretch) = opt_string_arg(&mut cx, 1) {
         let mut this = this.borrow_mut();
-        this.set_font_width(to_width(&stretch));
+        if let Some(width) = to_width(&stretch) {
+            this.set_font_width(width);
+        }
     }
     Ok(cx.undefined())
 }

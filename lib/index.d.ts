@@ -5542,12 +5542,12 @@ export type TextHeightBehavior = 0 | 1 | 2 | 3;
  * @category Paragraph Layout
  */
 export interface ParagraphStyleInput {
-  /** Matched case-insensitively. Another value is a `TypeError`. */
+  /** Matched exactly, as `ctx.textAlign` is. Another value is a `TypeError`. */
   textAlign?: "left" | "right" | "center" | "justify" | "start" | "end" | null;
 
   /**
-   * Base direction for the paragraph, matched without ASCII case. Another
-   * value is a `TypeError`.
+   * Base direction for the paragraph, matched exactly. Another value is a
+   * `TypeError`.
    */
   textDirection?: "ltr" | "rtl" | null;
   /**

@@ -87,20 +87,22 @@ removed and no signature moves.
   `TypeError`.
 
 - **A `textDirection` other than `"ltr"` or `"rtl"` is a `TypeError`.** It
-  was ignored, leaving the paragraph left to right. Case still does not
-  matter. The option is typed `"ltr" | "rtl" | null`, where any string
-  compiled.
+  was ignored, leaving the paragraph left to right. The names match
+  exactly, as `ctx.direction`'s do, so `"RTL"` is refused too. The option
+  is typed `"ltr" | "rtl" | null`, where any string compiled.
 
-  Migrate: pass `"ltr"` or `"rtl"`, or leave the option out.
+  Migrate: pass `"ltr"` or `"rtl"`, in lower case, or leave the option
+  out.
 
 - **A `textAlign` other than the six alignments is a `TypeError`.** It was
-  ignored, leaving the default alignment, so a typo failed silently. Case
-  still does not matter. The option is typed as the six names or `null`,
+  ignored, leaving the default alignment, so a typo failed silently. The
+  names match exactly, as `ctx.textAlign`'s do, so `"CENTER"` is refused
+  too. The option is typed as the six names or `null`,
   where any string compiled. `ctx.textAlign` still ignores an unknown
   name, as HTML's setter does.
 
   Migrate: pass one of `"left"`, `"right"`, `"center"`, `"justify"`,
-  `"start"` and `"end"`, or leave the option out.
+  `"start"` and `"end"`, in lower case, or leave the option out.
 
 - **`TextMetrics` keeps its values on the prototype, as HTML's interface
   does.** A measurement was a frozen object holding every value as its own
@@ -302,6 +304,19 @@ removed and no signature moves.
   `fontFamilies: ["oswaldx"]`. Each now draws the registered family.
   Letters outside ASCII still have to match exactly; CSS asks for Unicode
   case folding there.
+
+- **An enumerated attribute takes its names exactly, as Chrome does.**
+  `textAlign`, `textBaseline`, `direction`, `lineCap`, `lineJoin`,
+  `imageSmoothingQuality`, `globalCompositeOperation` and `fontStretch`
+  folded case, so `ctx.textAlign = "CENTER"` centred the text where Chrome
+  152 ignores it, and `"dar\u212Aen"`, whose Kelvin sign lowercases to
+  `k`, was taken as `darken`. WebIDL matches an enumeration's values
+  exactly, and each setter now ignores another spelling, leaving the value
+  it held. `createPattern` throws its `SyntaxError` for `"REPEAT"`, as the
+  standard asks of a repetition not identical to one of its four names.
+  `lineDashFit` and a `CanvasTexture`'s `cap` match exactly too, as their
+  siblings do. The filter
+  factories' blend names still match in any case, as CanvasKit's do.
 
 - **Colours, fonts, filters and transforms read CSS's whitespace,
   comments and names, and no more.**
