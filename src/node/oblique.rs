@@ -1,5 +1,6 @@
 //! Paragraphs whose `oblique` ranges are drawn as CSS Fonts 4 matches them,
-//! and whose decorations are drawn where their fonts put them.
+//! and whose decorations, shadows and backgrounds are drawn as CSS paints
+//! them.
 //!
 //! A range asking for oblique is laid out in the family's face that leans as
 //! asked where it has one, and otherwise upright and sheared by
@@ -8,61 +9,47 @@
 //! arguments either way, so that SkParagraph shapes it as the font of its
 //! own it is and no ligature forms across its edge -- see `add_slnt`.
 //!
-//! Decorations and text shadows are taken off every style as it is pushed.
-//! The lines are drawn by `node::decorate`, which places each by its style's
-//! first available font -- see the `UPSTREAM:` note there for why not
-//! SkParagraph's -- and the shadows from the glyph runs `Paragraph::paint`
-//! draws, with the paint SkParagraph uses, so that the lines go beneath them
-//! and a shadow shadows the lines too.
+//! Decorations, text shadows and backgrounds are taken off every style as
+//! it is pushed, so SkParagraph lays the paragraph out and draws none of
+//! them. A paragraph that had any, or an oblique range, is drawn by
+//! [`Passes`], from the glyph runs `Paragraph::visit` reports, a line at a
+//! time in CSS 2.1 Appendix E's order; the lines are placed by
+//! `node::decorate` from each box's first available font -- see the
+//! `UPSTREAM:` note there for why not SkParagraph's -- and a background
+//! covers its font's content area.
 //!
-//! SkParagraph cannot shear a range of its own, and a paragraph is painted
-//! by `Paragraph::paint`, which carries each range's colours and
-//! backgrounds. It paints a line's backgrounds before its glyphs, and the
-//! shadows, the lines beneath the glyphs, the sheared glyphs and the
-//! lines-through have to go in CSS's order around them -- see
-//! [`Passes::paint`]. So a paragraph with an oblique range, a decoration or
-//! a shadow is painted in passes, built again from the steps that made it
-//! where a pass needs styles of its own:
-//!
-//! - where a paragraph with a background has a shadow or a decoration to go
-//!   over it, one with every glyph transparent, which paints the backgrounds;
-//! - one with the oblique ranges' glyphs transparent, which paints the upright
-//!   glyphs, and the backgrounds where the first pass is not needed.
-//!
-//! A paragraph with none of the three is built once, as it is filled in, and
-//! painted by `Paragraph::paint` alone; so is one whose passes need no styles
-//! of their own. The passes are the paragraph's, not each line's: a pass for
-//! the whole paragraph comes before the next, where SkParagraph finishes one
-//! line before it starts the following one. Lines that overlap -- a
-//! descender reaching a background on the line below -- can therefore stack
-//! differently; ranges on one line paint as they would.
+//! An edge between two styles that falls inside a grapheme cluster moves to
+//! the cluster's end where a side is oblique or the two are shaped as one
+//! font -- see [`whole_graphemes`] -- and the paragraph is built again from
+//! its steps. A colour change left inside a ligature has [`Passes`] draw
+//! the paragraph too, the ligature whole. Any other paragraph is built once,
+//! as it is filled in, and painted by `Paragraph::paint` alone.
 
 use crate::{
     context2d::DEFAULT_OBLIQUE_DEGREES,
     font::leans_as_asked,
     node::{
-        decorate::{self, Decoration, FaceLines, Layer, Span, Thickness},
+        decorate::{
+            self, Decoration, FaceLines, Layer, Span, Spans, Thickness,
+        },
         typography::{
-            GlyphRun, SLNT, Shear, glyph_runs, run_shear, sheared_blob,
+            GlyphRun, GlyphRunRef, SLNT, Shear, glyph_runs, run_shear,
+            sheared_blob,
         },
     },
 };
 use skia_safe::{
-    BlurStyle, Canvas, Color, FontArguments, FontStyle, MaskFilter, Paint,
-    Point, TextBlob,
+    BlurStyle, Canvas, FontArguments, FontStyle, MaskFilter, Paint, Point,
+    Rect, TextBlob,
     font_arguments::{VariationPosition, variation_position::Coordinate},
     font_style::Slant,
     textlayout::{
         FontCollection, Paragraph, ParagraphBuilder, ParagraphStyle,
-        PlaceholderStyle, TextDecoration, TextShadow, TextStyle,
+        PlaceholderStyle, StyleType, TextDecoration, TextShadow, TextStyle,
     },
 };
-use std::{
-    borrow::Cow,
-    iter::{once, zip},
-    ops::Range,
-};
-use unicode_segmentation::UnicodeSegmentation;
+use std::{borrow::Cow, iter::once, ops::Range};
+use unicode_segmentation::GraphemeCursor;
 
 /// The character SkParagraph adds to a paragraph's text for each
 /// placeholder, U+FFFC OBJECT REPLACEMENT CHARACTER, whose UTF-8 length
@@ -166,12 +153,12 @@ enum Step {
 }
 
 /// A paragraph under construction, built as it is filled in and kept so
-/// that one with oblique ranges can be built again from the same steps --
-/// see the module documentation.
+/// that one whose edges move can be built again from the same steps -- see
+/// the module documentation.
 ///
 /// The steps hold no text of their own, only where it lies in the
-/// builder's, so a paragraph with no oblique range costs what building it
-/// did before.
+/// builder's. A paragraph in one style is built as it was filled in; one in
+/// several copies its text once, to look at each edge.
 pub(crate) struct ParagraphRecipe {
     builder: ParagraphBuilder,
     style: ParagraphStyle,
@@ -186,6 +173,8 @@ pub(crate) struct ParagraphRecipe {
     /// see [`Passes`].
     decorations: Vec<Option<StyleDecoration>>,
     shadows: Vec<Vec<TextShadow>>,
+    /// Each style's background, by slot, likewise taken off it.
+    backgrounds: Vec<Option<StyleBackground>>,
     /// The length of the builder's text, in UTF-8 bytes.
     length: usize,
     /// Whether the paragraph style's own text style asks for oblique.
@@ -205,13 +194,16 @@ impl ParagraphRecipe {
         let mut base = style.text_style().clone();
         let decoration = StyleDecoration::take(&mut base, &mut collection);
         let shadows = take_shadows(&mut base);
-        if decoration.is_some() || !shadows.is_empty() {
+        let background = StyleBackground::take(&mut base, &mut collection);
+        if decoration.is_some() || !shadows.is_empty() || background.is_some() {
             style.set_text_style(&base);
         }
         let mut decorations = Vec::with_capacity(4);
         decorations.push(decoration);
         let mut shadow_slots = Vec::with_capacity(4);
         shadow_slots.push(shadows);
+        let mut backgrounds = Vec::with_capacity(4);
+        backgrounds.push(background);
         Self {
             builder: ParagraphBuilder::new(&style, &collection),
             style,
@@ -220,6 +212,7 @@ impl ParagraphRecipe {
             styles: Vec::with_capacity(4),
             decorations,
             shadows: shadow_slots,
+            backgrounds,
             length: 0,
             base_oblique,
             oblique: base_oblique,
@@ -231,12 +224,15 @@ impl ParagraphRecipe {
         let decoration =
             StyleDecoration::take(&mut style, &mut self.collection);
         let shadows = take_shadows(&mut style);
+        let background =
+            StyleBackground::take(&mut style, &mut self.collection);
         self.builder.push_style(&style);
         self.oblique |= oblique;
         self.steps.push(Step::Push(self.styles.len()));
         self.styles.push((style, oblique));
         self.decorations.push(decoration);
         self.shadows.push(shadows);
+        self.backgrounds.push(background);
     }
 
     pub(crate) fn pop(&mut self) {
@@ -257,85 +253,46 @@ impl ParagraphRecipe {
         self.steps.push(Step::Placeholder(placeholder.clone()));
     }
 
-    /// The paragraph, not yet laid out, and what draws its oblique ranges,
-    /// its shadows and its decorations where it has any.
+    /// The paragraph, not yet laid out, and what paints it where it has an
+    /// oblique range, a decoration, a shadow or a background, or a colour
+    /// change that a layout may find inside a ligature -- see [`Passes`]. A
+    /// paragraph with none of these is painted by `Paragraph::paint` alone.
     pub(crate) fn build(mut self) -> (Paragraph, Option<Passes>) {
         let (boxes, box_slots) = self.boxes();
         let shadowed = self.shadows.iter().any(|shadows| !shadows.is_empty());
-        if !self.oblique && boxes.is_empty() && !shadowed {
+        let backed = self.backgrounds.iter().any(Option::is_some);
+        let drawn = self.oblique || !boxes.is_empty() || shadowed || backed;
+        // With one style there is no edge to fall inside a cluster.
+        if !drawn && self.styles.is_empty() {
             return (self.builder.build(), None);
         }
         let text = self.builder.get_text().to_owned();
         // The builder holds the text where it was added, so once an edge
         // has moved, only the steps say where it went.
-        let moved = self.oblique && self.keep_graphemes_whole(&text);
-        let ranges = match self.oblique {
-            true => self.oblique_ranges(),
-            false => Vec::new(),
-        };
-        if ranges.is_empty() && boxes.is_empty() && !shadowed {
-            let paragraph = match moved {
-                true => self.replay(&text, |_, _, _| None),
-                false => self.builder.build(),
-            };
-            return (paragraph, None);
-        }
-        let backed = self.text_styles().any(TextStyle::has_background);
-        if backed && ranges.is_empty() && boxes.is_empty() {
-            // Shadows alone, which go between the backgrounds and the
-            // glyphs, where SkParagraph draws them itself: given back, so
-            // that the paragraph is laid out once.
-            let paragraph = self.replay(&text, |style, _, slot| {
-                restore_shadows(style, &self.shadows[slot])
-            });
-            return (paragraph, None);
-        }
-        // SkParagraph paints a line's backgrounds before its glyphs, and
-        // the shadows and the lines beneath the glyphs go between the two.
-        // Where there are backgrounds to go under them, they come from a
-        // paragraph of their own, laid out a second time: a decorated
-        // paragraph with a background cost 12.7 microseconds a draw before
-        // decorations were drawn here and 17.3 with it, in a release build
-        // at 24px.
-        //
-        // Not drawn here instead, because they cannot be drawn exactly as
-        // `TextLine::paintBackground` draws them: its rectangle spans a run's
-        // `runTop` and `calculateHeight`, from the line's rounded sizes and
-        // each run's ascent corrected for its height multiplier, half
-        // leading and baseline shift, across the run's advances before the
-        // shaper's offsets, with cluster edges apportioned. `Paragraph::visit`
-        // reports glyph positions with the offsets already in them and none
-        // of the line's sizes.
-        let under = (backed && (shadowed || !boxes.is_empty())).then(|| {
-            self.replay(&text, |style, _, _| {
-                let mut style = style.clone();
-                style.set_foreground_paint(&transparent());
-                Some(style)
-            })
-        });
-        let split = under.is_some();
-        let paragraph = match moved || !ranges.is_empty() || split {
-            true => self.replay(&text, |style, oblique, _| {
-                if !(oblique || split) {
-                    return None;
-                }
-                let mut style = style.clone();
-                if oblique {
-                    style.set_foreground_paint(&transparent());
-                }
-                if split {
-                    style.clear_background_color();
-                }
-                Some(style)
-            }),
+        let (moved, edges) = self.keep_graphemes_whole(&text);
+        let paragraph = match moved {
+            true => self.replay(&text, |_, _, _| None),
             false => self.builder.build(),
         };
-        let shadow_slots: Vec<Option<usize>> = self
-            .shadows
-            .iter()
-            .enumerate()
-            .map(|(slot, shadows)| (!shadows.is_empty()).then_some(slot))
-            .collect();
+        if !drawn && edges.is_empty() {
+            return (paragraph, None);
+        }
+        let slots = self.slot_ranges(
+            &(0..=self.styles.len()).map(Some).collect::<Vec<_>>(),
+        );
+        let (paints, sheared): (Vec<Paint>, Vec<bool>) = self
+            .text_styles()
+            .zip(once(self.base_oblique).chain(self.styles.iter().map(|s| s.1)))
+            .map(|(style, oblique)| (foreground(style), oblique))
+            .unzip();
+        let mut background_slots = Vec::with_capacity(self.backgrounds.len());
+        let mut backgrounds = Vec::new();
+        for background in &self.backgrounds {
+            background_slots.push(background.as_ref().map(|background| {
+                backgrounds.push(background.clone());
+                backgrounds.len() - 1
+            }));
+        }
         let (boxes, box_shadows) = boxes
             .into_iter()
             .map(|decorated| (decorated.decoration, decorated.shadows))
@@ -344,16 +301,34 @@ impl ParagraphRecipe {
             #[cfg(test)]
             as_asked: self.as_asked(&text),
             box_ranges: self.slot_ranges(&box_slots),
-            shadow_ranges: self.slot_ranges(&shadow_slots),
+            background_ranges: self.slot_ranges(&background_slots),
+            slots,
+            paints,
+            sheared,
             shadows: self.shadows,
-            ranges,
-            under,
             boxes,
             box_shadows,
+            backgrounds,
             runs: Vec::new(),
             spans: Vec::new(),
+            background_spans: Vec::new(),
+            lines: 0,
+            ligature_edges: match drawn {
+                true => None,
+                false => Some(edges),
+            },
+            drawn,
         };
         (paragraph, Some(passes))
+    }
+
+    /// The style in `slot`: the paragraph's own at 0, and each pushed one at
+    /// its index in `styles` plus 1.
+    fn text_style(&self, slot: usize) -> &TextStyle {
+        match slot {
+            0 => self.style.text_style(),
+            _ => &self.styles[slot - 1].0,
+        }
     }
 
     /// Every style, the paragraph's own first.
@@ -416,40 +391,71 @@ impl ParagraphRecipe {
         ranges
     }
 
-    /// The paragraph as its caller asked for it, its shadows SkParagraph's
-    /// to draw: the control for what [`Passes`] draws in their place.
+    /// The paragraph as its caller asked for it, its shadows and
+    /// backgrounds SkParagraph's to draw: the control for what [`Passes`]
+    /// draws in their place.
     #[cfg(test)]
     fn as_asked(&self, text: &str) -> Option<Paragraph> {
         Some(self.replay(text, |style, _, slot| {
-            restore_shadows(style, &self.shadows[slot])
+            let mut style = restore_shadows(style, &self.shadows[slot])
+                .unwrap_or_else(|| style.clone());
+            if let Some(background) = &self.backgrounds[slot] {
+                style.set_background_paint(&background.paint);
+            }
+            Some(style)
         }))
     }
 
-    /// Moves each edge beside an oblique piece of text that falls inside a
-    /// grapheme cluster to the cluster's end -- see [`whole_graphemes`] --
-    /// and says whether any did.
-    fn keep_graphemes_whole(&mut self, text: &str) -> bool {
-        let mut stack = vec![self.base_oblique];
+    /// Moves each edge that falls inside a grapheme cluster, beside an
+    /// oblique piece of text or between two that SkParagraph shapes as one,
+    /// to the cluster's end -- see [`whole_graphemes`]. Says whether any
+    /// did, and where the edges that remain between two pieces shaped as
+    /// one with different glyph paints lie: those can still fall inside a
+    /// glyph cluster, a ligature's, which only the layout tells -- see
+    /// [`Passes::lay_out`].
+    fn keep_graphemes_whole(&mut self, text: &str) -> (bool, Vec<usize>) {
+        let mut stack = vec![(self.base_oblique, 0)];
         let mut pieces = Vec::new();
         for (at, step) in self.steps.iter().enumerate() {
             match step {
-                Step::Push(style) => stack.push(self.styles[*style].1),
+                Step::Push(style) => {
+                    stack.push((self.styles[*style].1, style + 1));
+                }
                 Step::Pop if stack.len() > 1 => {
                     stack.pop();
                 }
                 Step::Pop | Step::Placeholder(_) => {}
                 Step::Text(bytes) => {
+                    // SAFETY: `stack` starts with the base style's entry and
+                    // a pop never takes it, so it is never empty.
+                    let (oblique, slot) = *stack.last().unwrap();
                     pieces.push(Piece {
                         step: at,
                         bytes: bytes.clone(),
-                        // SAFETY: `stack` starts with the base style's flag
-                        // and a pop never takes it, so it is never empty.
-                        oblique: *stack.last().unwrap(),
+                        oblique,
+                        slot,
                     });
                 }
             }
         }
-        whole_graphemes(text, &mut pieces);
+        let shaped_as_one = |left: usize, right: usize| {
+            self.text_style(left)
+                .match_one_attribute(StyleType::Font, self.text_style(right))
+        };
+        whole_graphemes(text, &mut pieces, shaped_as_one);
+        let mut edges = Vec::new();
+        let mut owner: Option<&Piece> = None;
+        for piece in pieces.iter().filter(|piece| !piece.bytes.is_empty()) {
+            if let Some(left) = owner
+                && left.bytes.end == piece.bytes.start
+                && shaped_as_one(left.slot, piece.slot)
+                && foreground(self.text_style(left.slot))
+                    != foreground(self.text_style(piece.slot))
+            {
+                edges.push(piece.bytes.start);
+            }
+            owner = Some(piece);
+        }
         let mut moved = false;
         for piece in pieces {
             let step = Step::Text(piece.bytes);
@@ -463,7 +469,7 @@ impl ParagraphRecipe {
             self.covers(text),
             "the pieces of text cover the builder's, byte for byte"
         );
-        moved
+        (moved, edges)
     }
 
     /// Whether the text steps and placeholders, in order, are exactly
@@ -479,37 +485,6 @@ impl ParagraphRecipe {
             }
         }
         at == text.len()
-    }
-
-    /// The text of every oblique range, in UTF-8 offsets into the
-    /// paragraph's text, in order, with what painting it needs.
-    ///
-    /// A pop with nothing pushed is ignored, as SkParagraph's builder
-    /// ignores it.
-    fn oblique_ranges(&self) -> Vec<ObliqueRange> {
-        let mut stack = vec![(self.style.text_style(), self.base_oblique)];
-        let mut ranges = Vec::new();
-        for step in &self.steps {
-            match step {
-                Step::Push(at) => {
-                    let (style, oblique) = &self.styles[*at];
-                    stack.push((style, *oblique));
-                }
-                Step::Pop if stack.len() > 1 => {
-                    stack.pop();
-                }
-                Step::Pop | Step::Placeholder(_) => {}
-                Step::Text(bytes) => {
-                    // SAFETY: `stack` starts with the base style and a pop
-                    // never takes it, so it is never empty.
-                    let (style, oblique) = stack.last().unwrap();
-                    if *oblique && !bytes.is_empty() {
-                        ranges.push(ObliqueRange::new(bytes.clone(), style));
-                    }
-                }
-            }
-        }
-        ranges
     }
 
     /// A paragraph from these steps and `text`, the builder's, with each
@@ -564,17 +539,20 @@ impl ParagraphRecipe {
     }
 }
 
-/// One piece of a paragraph's text: the step that adds it, its bytes, and
-/// whether its style asks for oblique.
+/// One piece of a paragraph's text: the step that adds it, its bytes,
+/// whether its style asks for oblique, and its style's slot.
 struct Piece {
     step: usize,
     bytes: Range<usize>,
     oblique: bool,
+    slot: usize,
 }
 
-/// Moves each edge between two adjacent pieces of `text`, either of them
-/// oblique, that falls inside a grapheme cluster to the cluster's end, so
-/// that the style of the cluster's base takes the whole of it.
+/// Moves each edge between two adjacent pieces of `text` that falls inside
+/// a grapheme cluster to the cluster's end, so that the style of the
+/// cluster's base takes the whole of it, where either piece is oblique or
+/// `shaped_as_one` says SkParagraph shapes the two pieces' styles, by slot,
+/// as one font.
 ///
 /// Grapheme clusters rather than SkParagraph's glyph clusters, which cannot
 /// tell the two cases at an oblique edge apart: a ligature across the edge
@@ -583,24 +561,39 @@ struct Piece {
 /// since a mark shaped apart from its base loses the glyph it attaches to;
 /// the base decides which glyph that is, so its style is the cluster's.
 ///
-/// Only where a side is oblique: elsewhere SkParagraph shapes the two pieces
-/// as one and paints each its own way, as it always has. Between two
-/// oblique pieces it shapes them as one too, but the sheared pass draws a
-/// glyph whole, in one range's paint, so the cluster goes to its base's
-/// piece there as well. And only between two pieces with text that meet: an
-/// empty piece holds no base, and a placeholder stands in the text as
-/// U+FFFC, which no piece holds, so the pieces either side of one never
-/// meet, whatever empty pieces lie between, and its edges never move. A
-/// mark right after one is a grapheme with it and has no base to go with,
-/// so it stays in its own piece and is shaped alone, as SkParagraph shapes
-/// it. Edges only move later and never past the next, so the pieces still
-/// hold the same bytes.
-fn whole_graphemes(text: &str, pieces: &mut [Piece]) {
-    let starts: Vec<usize> =
-        text.grapheme_indices(true).map(|(at, _)| at).collect();
-    let cluster_end = |at: usize| match starts.binary_search(&at) {
-        Ok(_) => at,
-        Err(next) => starts.get(next).copied().unwrap_or(text.len()),
+/// Between two pieces shaped as one, the glyphs are shared and only their
+/// paint can differ. Chrome 156 paints a grapheme split that way whole, in
+/// its base's style, a mark that is a glyph of its own included, where
+/// SkParagraph cuts a glyph by the share of its UTF-8 bytes each side
+/// holds, and loses a mark beside a base it has cut. CSS Text 3, section
+/// 1.4, leaves the case undefined and allows either side. Where the fonts
+/// differ, the two are shaped apart and each side keeps its own style, as in
+/// Chrome, unless one is oblique.
+///
+/// Only between two pieces with text that meet: an empty piece holds no
+/// base, and a placeholder stands in the text as U+FFFC, which no piece
+/// holds, so the pieces either side of one never meet, whatever empty
+/// pieces lie between, and its edges never move. A mark right after one is
+/// a grapheme with it and has no base to go with, so it stays in its own
+/// piece and is shaped alone, as SkParagraph shapes it. Edges only move
+/// later and never past the next, so the pieces still hold the same bytes.
+fn whole_graphemes(
+    text: &str,
+    pieces: &mut [Piece],
+    shaped_as_one: impl Fn(usize, usize) -> bool,
+) {
+    // The end of the grapheme cluster `at` falls in, or `at` where it falls
+    // between two.
+    let cluster_end = |at: usize| {
+        let mut cursor = GraphemeCursor::new(at, text.len(), true);
+        match cursor.is_boundary(text, 0) {
+            Ok(true) => at,
+            _ => cursor
+                .next_boundary(text, 0)
+                .ok()
+                .flatten()
+                .unwrap_or(text.len()),
+        }
     };
     // The last piece with any text: the one holding the base of the
     // cluster at the next edge.
@@ -611,7 +604,9 @@ fn whole_graphemes(text: &str, pieces: &mut [Piece]) {
         }
         if let Some(left) = owner
             && pieces[left].bytes.end == pieces[at].bytes.start
-            && (pieces[left].oblique || pieces[at].oblique)
+            && (pieces[left].oblique
+                || pieces[at].oblique
+                || shaped_as_one(pieces[left].slot, pieces[at].slot))
         {
             let edge =
                 cluster_end(pieces[at].bytes.start).min(pieces[at].bytes.end);
@@ -626,14 +621,6 @@ fn whole_graphemes(text: &str, pieces: &mut [Piece]) {
             owner = Some(at);
         }
     }
-}
-
-/// A paint that draws nothing, for a glyph or a decoration painted
-/// elsewhere.
-fn transparent() -> Paint {
-    let mut paint = Paint::default();
-    paint.set_color(Color::TRANSPARENT);
-    paint
 }
 
 /// Takes `style`'s text shadows off it, for [`Passes`] to draw.
@@ -660,26 +647,53 @@ fn restore_shadows(
     Some(style)
 }
 
-/// The text of one oblique range and what painting it takes.
-struct ObliqueRange {
-    /// UTF-8 offsets into the paragraph's text.
-    bytes: Range<usize>,
-    /// The paint SkParagraph draws the range's glyphs with: its foreground
-    /// where it has one, and otherwise a default paint in its colour.
-    foreground: Paint,
+/// The paint SkParagraph draws `style`'s glyphs with: its foreground where it
+/// has one, and otherwise a default paint in its colour --
+/// `TextLine::buildTextBlob`'s.
+fn foreground(style: &TextStyle) -> Paint {
+    match style.has_foreground() {
+        true => style.foreground(),
+        false => {
+            let mut paint = Paint::default();
+            paint.set_color(style.color());
+            paint
+        }
+    }
 }
 
-impl ObliqueRange {
-    fn new(bytes: Range<usize>, style: &TextStyle) -> Self {
-        let foreground = match style.has_foreground() {
-            true => style.foreground(),
-            false => {
-                let mut paint = Paint::default();
-                paint.set_color(style.color());
-                paint
-            }
-        };
-        Self { bytes, foreground }
+/// A style's background, taken off it so that SkParagraph draws none, and
+/// the face whose content area it covers.
+#[derive(Clone)]
+struct StyleBackground {
+    paint: Paint,
+    face: FaceLines,
+}
+
+impl StyleBackground {
+    /// Takes `style`'s background off it. CSS paints an inline box's
+    /// background over its content area -- CSS 2.1 section 10.6.1, CSS
+    /// Inline 3 -- which is the first available font's ascent and descent
+    /// and nothing of the line height, so the face is that font, at the
+    /// style's size and axes -- see [`FaceLines::first_available`].
+    fn take(
+        style: &mut TextStyle,
+        collection: &mut FontCollection,
+    ) -> Option<Self> {
+        if !style.has_background() {
+            return None;
+        }
+        let paint = style.background();
+        style.clear_background_color();
+        let families = style.font_families();
+        let families: Vec<&str> = families.iter().collect();
+        let face = FaceLines::first_available(
+            collection,
+            &families,
+            style.font_style(),
+            style.font_size(),
+            style.font_arguments(),
+        )?;
+        Some(Self { paint, face })
     }
 }
 
@@ -725,7 +739,10 @@ impl StyleDecoration {
                 thickness: Thickness::Times(
                     style.decoration_thickness_multiplier(),
                 ),
-                color: style.decoration_color(),
+                color: Some(style.decoration_color()),
+                // `drawParagraph` applies a canvas's global alpha to the
+                // whole paragraph through a layer.
+                opacity: 1.0,
                 face,
             },
             shadows: style.shadows().to_vec(),
@@ -733,43 +750,62 @@ impl StyleDecoration {
     }
 }
 
-/// What a paragraph is painted with beyond `Paragraph::paint`: its glyph
-/// runs that are sheared or cast a shadow and its decorations' spans, each
-/// found again at every layout, and the paragraph its backgrounds come from
-/// where something has to go between them and the glyphs.
+/// What paints a paragraph that has an oblique range, a decoration, a shadow
+/// or a background, or a ligature in two colours -- see
+/// [`Self::ligature_edges`]: SkParagraph lays it out, and this draws every
+/// line of it
+/// from the glyph runs `Paragraph::visit` reports, in the order CSS 2.1
+/// Appendix E paints a line box's inline content -- for each line, its boxes'
+/// backgrounds, then their text shadows, underlines and overlines, glyphs,
+/// and lines-through. SkParagraph paints a pass over every line before the
+/// next pass; one line's shadow reaching the line above lies over that
+/// line's glyphs, as in Chrome, only when the lines are painted one by one.
 pub(crate) struct Passes {
-    ranges: Vec<ObliqueRange>,
-    /// The backgrounds, where a shadow or a line beneath the glyphs goes
-    /// between them and the glyphs.
-    under: Option<Paragraph>,
-    /// Each decorated style's decoration, by box, and its text shadows.
+    /// The text each style covers, in UTF-8 offsets into the paragraph's
+    /// text, in order, with its slot -- see [`ParagraphRecipe::shadows`].
+    slots: Vec<(Range<usize>, usize)>,
+    /// Each slot's glyph paint, whether it asks for oblique, and its text
+    /// shadows.
+    paints: Vec<Paint>,
+    sheared: Vec<bool>,
+    shadows: Vec<Vec<TextShadow>>,
+    /// Each decorated style's decoration, by box, its text shadows, and the
+    /// text each box decorates -- see `decorate::box_at`.
     boxes: Vec<Decoration>,
     box_shadows: Vec<Vec<TextShadow>>,
-    /// The text each box decorates, in order -- see `decorate::box_at`.
     box_ranges: Vec<(Range<usize>, usize)>,
-    /// Each style's text shadows, by slot -- see
-    /// [`ParagraphRecipe::shadows`] -- and the text each slot with any
-    /// covers.
-    shadows: Vec<Vec<TextShadow>>,
-    shadow_ranges: Vec<(Range<usize>, usize)>,
+    /// Each style's background, by box, and the text each covers.
+    backgrounds: Vec<StyleBackground>,
+    background_ranges: Vec<(Range<usize>, usize)>,
+    /// What this layout draws, in line order.
     runs: Vec<PaintedRun>,
     spans: Vec<Span>,
-    /// The paragraph with its shadows SkParagraph's to draw -- see
-    /// [`ParagraphRecipe::as_asked`].
+    background_spans: Vec<Span>,
+    lines: usize,
+    /// For a paragraph with nothing else to draw here, the edges between
+    /// two styles shaped as one with different glyph paints -- see
+    /// [`ParagraphRecipe::keep_graphemes_whole`]. Each layout asks whether
+    /// one falls inside a glyph cluster, and only then draws the paragraph
+    /// here.
+    ligature_edges: Option<Vec<usize>>,
+    /// Whether this layout is drawn here rather than by `Paragraph::paint`.
+    drawn: bool,
+    /// The paragraph with its shadows and backgrounds SkParagraph's to draw
+    /// -- see [`ParagraphRecipe::as_asked`].
     #[cfg(test)]
     pub(crate) as_asked: Option<Paragraph>,
 }
 
-/// The glyphs of one style in one font on one line that this draws: sheared
-/// where they are oblique, with their style's shadows where it casts any.
+/// The glyphs of one style in one font on one line, sheared where the style
+/// asks for oblique.
 struct PaintedRun {
     blob: TextBlob,
     origin: Point,
-    /// The index in [`Passes::ranges`] of the oblique range the glyphs are
-    /// in, whose foreground draws them here.
-    range: Option<usize>,
-    /// The slot whose shadows they cast.
-    shadows: Option<usize>,
+    line: usize,
+    /// The style the glyphs' text is in.
+    slot: usize,
+    /// Whether the glyphs are in an oblique style.
+    sheared: bool,
     /// The glyphs and their positions before any shear, for the tests to
     /// hold against SkParagraph's runs.
     #[cfg(test)]
@@ -778,188 +814,265 @@ struct PaintedRun {
     positions: Vec<Point>,
 }
 
+/// How near two reports of a glyph's place are the same place, in pixels: a
+/// cluster SkParagraph draws for two styles comes in two blobs whose
+/// origins are worked out from different clips, so their sums can part in
+/// the last bits.
+const SAME_PLACE: f32 = 1.0 / 64.0;
+
+/// The glyph runs `Paragraph::visit` reports, each glyph once.
+///
+/// SkParagraph makes a text blob for each run of one foreground in a
+/// style, and where a style's edge falls inside a cluster it makes one for
+/// each side, both holding the whole cluster and clipped to their share:
+/// `visit` then reports the cluster's glyphs twice, at the end of one run
+/// and the start of the next. They are kept the first time here, and
+/// [`Passes::painted`] draws them whole.
+fn records(paragraph: &mut Paragraph) -> Vec<GlyphRun> {
+    let mut runs: Vec<GlyphRun> = Vec::new();
+    for mut run in glyph_runs(paragraph) {
+        if let Some(last) = runs.last()
+            && last.line == run.line
+        {
+            let seen = |at: usize| {
+                let place = run.origin + run.positions[at];
+                last.glyphs.iter().enumerate().any(|(index, &glyph)| {
+                    glyph == run.glyphs[at]
+                        && last.starts[index] == run.starts[at]
+                        && (last.origin + last.positions[index] - place)
+                            .length()
+                            <= SAME_PLACE
+                })
+            };
+            let repeated =
+                (0..run.glyphs.len()).take_while(|&at| seen(at)).count();
+            if repeated == run.glyphs.len() {
+                continue;
+            }
+            run.glyphs.drain(..repeated);
+            run.positions.drain(..repeated);
+            run.starts.drain(..repeated);
+        }
+        runs.push(run);
+    }
+    runs
+}
+
 impl Passes {
-    /// Follows `paragraph`, just laid out at `width`: lays the pass beneath
-    /// it out at the same width, and finds the decorations' spans and the
-    /// glyphs drawn here again.
+    /// Follows `paragraph`, just laid out at `width`: finds again the glyph
+    /// runs, the decorations' spans and the backgrounds' spans.
     ///
-    /// The glyphs are read with `Paragraph::visit`, through `glyph_runs`,
+    /// The glyphs are read with `Paragraph::visit`, through [`records`],
     /// which reports the text blobs `Paragraph::paint` draws: each glyph
     /// where it is painted and the text it comes from, on every line, and
     /// nothing for a placeholder.
     ///
-    /// A run's first glyph says whether it is oblique: an oblique style is a
-    /// font of its own, so no run holds oblique text and upright text both.
-    /// Each glyph then takes the range its text is in, or the one before
-    /// it where its text is in none: the glyphs of an ellipsis or a hyphen
+    /// A glyph takes the style its text is in, or the one before it on the
+    /// line where its text is in none: the glyphs of an ellipsis or a hyphen
     /// report offsets counted from the text they stand after, which can run
-    /// past it. A glyph casts the shadows of the style its text is in, which
-    /// for a cluster of several characters is its first's.
-    pub(crate) fn lay_out(&mut self, paragraph: &mut Paragraph, width: f32) {
-        if let Some(under) = &mut self.under {
-            under.layout(width);
-        }
+    /// past it. A glyph standing for a cluster of several characters takes
+    /// its first's -- see [`Self::painted`].
+    ///
+    /// A paragraph here only for [`Self::ligature_edges`] is followed only
+    /// where one of them falls inside a glyph cluster: a lookup for each
+    /// edge, and otherwise `Paragraph::paint` draws it.
+    pub(crate) fn lay_out(&mut self, paragraph: &mut Paragraph, _width: f32) {
         #[cfg(test)]
         if let Some(as_asked) = &mut self.as_asked {
-            as_asked.layout(width);
+            as_asked.layout(_width);
         }
-        let runs = glyph_runs(paragraph);
-        self.spans = match self.boxes.is_empty() {
-            true => Vec::new(),
-            false => decorate::spans(&runs, |at| {
-                decorate::box_at(&self.box_ranges, at)
-            }),
-        };
-        self.runs = match self.ranges.is_empty()
-            && self.shadow_ranges.is_empty()
-        {
-            true => Vec::new(),
-            false => runs.iter().flat_map(|run| self.painted(run)).collect(),
-        };
+        if let Some(edges) = &self.ligature_edges {
+            self.drawn = edges.iter().any(|&edge| {
+                paragraph
+                    .get_glyph_cluster_at(edge)
+                    .is_some_and(|cluster| cluster.text_range.start < edge)
+            });
+            if !self.drawn {
+                self.runs.clear();
+                self.lines = 0;
+                return;
+            }
+        }
+        let mut spans = Spans::default();
+        let mut background_spans = Spans::default();
+        let mut runs = Vec::new();
+        let mut lines = 0;
+        // The style the last glyph took, and the line it is on.
+        let mut last = (usize::MAX, 0);
+        for run in &records(paragraph) {
+            let run = run.borrowed();
+            lines = lines.max(run.line + 1);
+            if !self.boxes.is_empty() {
+                spans.add(&run, |at| decorate::box_at(&self.box_ranges, at));
+            }
+            if !self.backgrounds.is_empty() {
+                background_spans.add(&run, |at| {
+                    decorate::box_at(&self.background_ranges, at)
+                });
+            }
+            if last.0 != run.line {
+                last = (run.line, 0);
+            }
+            self.painted(&run, &mut last.1, &mut runs);
+        }
+        self.spans = spans.finish();
+        self.background_spans = background_spans.finish();
+        self.runs = runs;
+        self.lines = lines;
     }
 
-    /// The pieces of `run` drawn here.
-    fn painted(&self, run: &GlyphRun) -> Vec<PaintedRun> {
-        let oblique = |start: &u32| self.range_of(*start as usize);
-        let ranges: Vec<Option<usize>> =
-            match run.starts.first().and_then(oblique) {
-                Some(first) => run
-                    .starts
-                    .iter()
-                    .scan(first, |last, start| {
-                        *last = oblique(start).unwrap_or(*last);
-                        Some(Some(*last))
-                    })
-                    .collect(),
-                None => vec![None; run.starts.len()],
-            };
-        let keys: Vec<(Option<usize>, Option<usize>)> = zip(
-            ranges,
-            run.starts.iter().map(|start| {
-                decorate::box_at(&self.shadow_ranges, *start as usize)
-            }),
-        )
-        .collect();
-        let shear = |range: Option<usize>| match range {
-            Some(_) => {
+    /// Adds to `out` the pieces of `run`, a stretch of glyphs in one style
+    /// each, `slot` carrying the style of the glyph before.
+    ///
+    /// A glyph is drawn whole in the style of the first character of its
+    /// cluster. A cluster whose text crosses into a style with another glyph
+    /// paint is a ligature across the edge, since an edge inside a grapheme
+    /// cluster has moved to its end -- see [`whole_graphemes`] -- and Chrome
+    /// 156 paints `f` and `i` in two colours as one `fi` in the first's.
+    fn painted(
+        &self,
+        run: &GlyphRunRef<'_>,
+        slot: &mut usize,
+        out: &mut Vec<PaintedRun>,
+    ) {
+        let mut piece: Option<(Range<usize>, usize)> = None;
+        for (at, &start) in run.starts.iter().enumerate() {
+            let style =
+                decorate::box_at(&self.slots, start as usize).unwrap_or(*slot);
+            *slot = style;
+            match &mut piece {
+                Some((glyphs, last)) if *last == style => glyphs.end = at + 1,
+                _ => {
+                    if let Some((glyphs, last)) = piece.take() {
+                        self.push_piece(run, glyphs, last, out);
+                    }
+                    piece = Some((at..at + 1, style));
+                }
+            }
+        }
+        if let Some((glyphs, last)) = piece {
+            self.push_piece(run, glyphs, last, out);
+        }
+    }
+
+    /// Adds `run`'s glyphs `at`, in style `slot`, to `out`.
+    fn push_piece(
+        &self,
+        run: &GlyphRunRef<'_>,
+        at: Range<usize>,
+        slot: usize,
+        out: &mut Vec<PaintedRun>,
+    ) {
+        let sheared = self.sheared[slot];
+        let shear = match sheared {
+            true => {
                 run_shear(&run.font.typeface(), Some(DEFAULT_OBLIQUE_DEGREES))
             }
-            None => Shear::None,
+            false => Shear::None,
         };
-        keys.chunk_by(|a, b| a == b)
-            .scan(0, |start, chunk| {
-                let at = *start..*start + chunk.len();
-                *start = at.end;
-                Some((at, chunk[0]))
-            })
-            .filter(|(_, (range, shadows))| {
-                range.is_some() || shadows.is_some()
-            })
-            .filter_map(|(at, (range, shadows))| {
-                let blob = sheared_blob(
-                    &run.font,
-                    &run.glyphs[at.clone()],
-                    &run.positions[at.clone()],
-                    shear(range),
-                )?;
-                Some(PaintedRun {
-                    blob,
-                    origin: run.origin,
-                    range,
-                    shadows,
-                    #[cfg(test)]
-                    glyphs: run.glyphs[at.clone()].to_vec(),
-                    #[cfg(test)]
-                    positions: run.positions[at].to_vec(),
-                })
-            })
-            .collect()
+        let Some(blob) = sheared_blob(
+            run.font,
+            &run.glyphs[at.clone()],
+            &run.positions[at.clone()],
+            shear,
+        ) else {
+            return;
+        };
+        out.push(PaintedRun {
+            blob,
+            origin: run.origin,
+            line: run.line,
+            slot,
+            sheared,
+            #[cfg(test)]
+            glyphs: run.glyphs[at.clone()].to_vec(),
+            #[cfg(test)]
+            positions: run.positions[at].to_vec(),
+        });
     }
 
-    /// The index of the oblique range holding the text at `byte`.
-    fn range_of(&self, byte: usize) -> Option<usize> {
-        let after =
-            self.ranges.partition_point(|range| range.bytes.end <= byte);
-        self.ranges
-            .get(after)
-            .filter(|range| range.bytes.contains(&byte))
-            .map(|_| after)
-    }
-
-    /// Paints `paragraph`, which this was laid out with, at `origin`, in
-    /// CSS's order -- section 5.1 of CSS Text Decoration 4, after CSS 2
-    /// Appendix E: the backgrounds, the shadows, the glyphs' and then the
-    /// decorations', the underlines and overlines, the glyphs, upright and
-    /// then sheared, and the lines-through over them all.
-    ///
-    /// The shadows are drawn here rather than by `Paragraph::paint` so that
-    /// they go beneath the lines, with the paint
-    /// `CanvasParagraphPainter::drawTextShadow` uses and from the same
-    /// glyphs. Every line's shadows go before any line's glyphs, where
-    /// SkParagraph draws one line's shadows and glyphs before the next
-    /// line's: a shadow reaching the line above lies beneath its glyphs here.
+    /// Paints `_paragraph`, which this was laid out with, at `origin`, a line
+    /// at a time -- see [`Passes`]. `Paragraph::paint` is not called: every
+    /// glyph is drawn here, with the paint SkParagraph would have used.
     pub(crate) fn paint(
         &self,
         paragraph: &Paragraph,
         canvas: &Canvas,
         origin: Point,
     ) {
-        if let Some(under) = &self.under {
-            under.paint(canvas, origin);
-        }
-        for run in &self.runs {
-            let Some(slot) = run.shadows else { continue };
-            for shadow in &self.shadows[slot] {
-                if let Some(paint) = shadow_paint(shadow) {
-                    canvas.draw_text_blob(
-                        &run.blob,
-                        origin + run.origin + shadow.offset,
-                        &paint,
-                    );
-                }
-            }
-        }
-        for (index, shadows) in self.box_shadows.iter().enumerate() {
-            for shadow in shadows {
-                if let Some(paint) = shadow_paint(shadow) {
-                    decorate::paint_shadow(
-                        canvas,
-                        &self.spans,
-                        &self.boxes,
-                        index,
-                        origin + shadow.offset,
-                        &paint,
-                    );
-                }
-            }
+        if !self.drawn {
+            paragraph.paint(canvas, origin);
+            return;
         }
         let base = Paint::default();
-        decorate::paint(
-            canvas,
-            &self.spans,
-            &self.boxes,
-            origin,
-            Layer::Beneath,
-            &base,
-        );
-        paragraph.paint(canvas, origin);
-        for run in &self.runs {
-            if let Some(range) = run.range {
-                canvas.draw_text_blob(
-                    &run.blob,
-                    origin + run.origin,
-                    &self.ranges[range].foreground,
+        for line in 0..self.lines {
+            let runs = {
+                let start = self.runs.partition_point(|run| run.line < line);
+                let end = self.runs.partition_point(|run| run.line <= line);
+                &self.runs[start..end]
+            };
+            let spans = decorate::on_line(&self.spans, line);
+            for span in decorate::on_line(&self.background_spans, line) {
+                let background = &self.backgrounds[span.box_index];
+                let baseline = origin.y + span.y;
+                canvas.draw_rect(
+                    Rect::new(
+                        origin.x + span.left,
+                        baseline + background.face.ascent,
+                        origin.x + span.right,
+                        baseline + background.face.descent,
+                    ),
+                    &background.paint,
                 );
             }
+            for run in runs {
+                for shadow in &self.shadows[run.slot] {
+                    if let Some(paint) = shadow_paint(shadow) {
+                        run.draw(canvas, origin + shadow.offset, &paint);
+                    }
+                }
+            }
+            for (index, shadows) in self.box_shadows.iter().enumerate() {
+                for shadow in shadows {
+                    if let Some(paint) = shadow_paint(shadow) {
+                        decorate::paint_shadow(
+                            canvas,
+                            spans,
+                            &self.boxes,
+                            index,
+                            origin + shadow.offset,
+                            &paint,
+                        );
+                    }
+                }
+            }
+            decorate::paint(
+                canvas,
+                spans,
+                &self.boxes,
+                origin,
+                Layer::Beneath,
+                &base,
+            );
+            for run in runs {
+                run.draw(canvas, origin, &self.paints[run.slot]);
+            }
+            decorate::paint(
+                canvas,
+                spans,
+                &self.boxes,
+                origin,
+                Layer::Over,
+                &base,
+            );
         }
-        decorate::paint(
-            canvas,
-            &self.spans,
-            &self.boxes,
-            origin,
-            Layer::Over,
-            &base,
-        );
+    }
+}
+
+impl PaintedRun {
+    /// Draws the run with the paragraph's origin at `origin`.
+    fn draw(&self, canvas: &Canvas, origin: Point, paint: &Paint) {
+        canvas.draw_text_blob(&self.blob, origin + self.origin, paint);
     }
 }
 
@@ -1001,10 +1114,21 @@ mod tests {
     use std::ops::Range;
     use unicode_segmentation::UnicodeSegmentation;
 
-    /// The pieces of `text` at `ranges`, each oblique or not, and the text
-    /// each holds once its edges have moved. Between two ranges that do not
-    /// meet lies text no piece holds, as a placeholder's U+FFFC is.
+    /// The pieces of `text` at `ranges`, each oblique or not and each in a
+    /// style of its own, and the text each holds once its edges have moved.
+    /// Between two ranges that do not meet lies text no piece holds, as a
+    /// placeholder's U+FFFC is.
     fn moved(text: &str, ranges: &[(Range<usize>, bool)]) -> Vec<String> {
+        moved_where(text, ranges, |_, _| false)
+    }
+
+    /// [`moved`], with `shaped_as_one` saying which styles, by piece, are
+    /// shaped as one font.
+    fn moved_where(
+        text: &str,
+        ranges: &[(Range<usize>, bool)],
+        shaped_as_one: impl Fn(usize, usize) -> bool,
+    ) -> Vec<String> {
         let mut pieces: Vec<Piece> = ranges
             .iter()
             .enumerate()
@@ -1012,13 +1136,14 @@ mod tests {
                 step: at,
                 bytes: bytes.clone(),
                 oblique: *oblique,
+                slot: at,
             })
             .collect();
         let held = |pieces: &[Piece]| -> Vec<usize> {
             pieces.iter().flat_map(|p| p.bytes.clone()).collect()
         };
         let before = held(&pieces);
-        whole_graphemes(text, &mut pieces);
+        whole_graphemes(text, &mut pieces, shaped_as_one);
         assert_eq!(held(&pieces), before, "the same bytes, each held once");
         pieces
             .iter()
@@ -1048,8 +1173,8 @@ mod tests {
     fn marks_split_over_several_pieces_go_with_their_base_where_needed() {
         // An upright "e", an oblique acute and an upright diaeresis: the
         // acute goes to the "e", emptying the oblique piece, and the
-        // diaeresis is then upright beside an upright base, an edge that
-        // does not move -- SkParagraph shapes the two as one.
+        // diaeresis is then upright beside an upright base in a font of
+        // its own, an edge that does not move.
         let text = format!("e{ACUTE}{DIAERESIS}x");
         let (acute, n) = (1 + ACUTE.len(), text.len());
         assert_eq!(
@@ -1069,12 +1194,18 @@ mod tests {
     }
 
     #[test]
-    fn only_an_edge_with_an_oblique_side_moves() {
+    fn an_upright_edge_moves_only_between_styles_shaped_as_one() {
         let text = format!("cafe{ACUTE} x");
         let n = text.len();
         assert_eq!(
             moved(&text, &[(0..4, false), (4..n, false)]),
-            ["cafe".to_owned(), format!("{ACUTE} x")]
+            ["cafe".to_owned(), format!("{ACUTE} x")],
+            "two fonts: each side keeps its own style"
+        );
+        assert_eq!(
+            moved_where(&text, &[(0..4, false), (4..n, false)], |_, _| true),
+            [format!("cafe{ACUTE}"), " x".to_owned()],
+            "one font, two paints: the grapheme is its base's"
         );
         // Two oblique pieces, which the sheared pass draws a glyph of whole.
         assert_eq!(
@@ -1099,6 +1230,61 @@ mod tests {
     #[test]
     fn a_ligature_edge_stays_where_it_is() {
         assert_eq!(moved("effi", &[(0..2, false), (2..4, true)]), ["ef", "fi"]);
+        assert_eq!(
+            moved_where("effi", &[(0..3, false), (3..4, false)], |_, _| true),
+            ["eff", "i"],
+            "a grapheme edge, whatever glyph the font makes across it"
+        );
+    }
+
+    /// A paragraph of `pieces`, each in Raleway in its own colour, laid out:
+    /// whether it has [`super::Passes`], and whether they draw it.
+    fn colours_drawn(pieces: &[(&str, Color)]) -> Option<bool> {
+        let collection = raleway();
+        let style = |color| {
+            let mut style = TextStyle::new();
+            style
+                .set_font_families(&[RALEWAY])
+                .set_font_size(SIZE)
+                .set_color(color);
+            style
+        };
+        let mut paragraph_style = ParagraphStyle::new();
+        paragraph_style.set_text_style(&style(Color::BLACK));
+        let mut recipe =
+            ParagraphRecipe::new(paragraph_style, false, collection);
+        for (text, color) in pieces {
+            recipe.push_style(style(*color), false);
+            recipe.add_text(text);
+            recipe.pop();
+        }
+        let (mut paragraph, passes) = recipe.build();
+        paragraph.layout(WIDTH);
+        passes.map(|mut passes| {
+            passes.lay_out(&mut paragraph, WIDTH);
+            passes.drawn
+        })
+    }
+
+    #[test]
+    fn only_a_colour_change_inside_a_ligature_is_drawn_here() {
+        assert_eq!(colours_drawn(&[("fi", Color::BLACK)]), None, "one colour");
+        assert_eq!(
+            colours_drawn(&[("ab", Color::BLACK), ("cd", Color::RED)]),
+            Some(false),
+            "two colours, no cluster between them: Paragraph::paint draws it"
+        );
+        assert_eq!(
+            colours_drawn(&[("f", Color::BLACK), ("i", Color::RED)]),
+            Some(true),
+            "an fi ligature in two colours"
+        );
+        assert_eq!(
+            colours_drawn(&[("e", Color::BLACK), ("\u{301}", Color::RED)]),
+            None,
+            "a mark goes to its base's style as the paragraph is built, \
+             leaving no edge to look up"
+        );
     }
 
     /// SplitMix64, Steele, Lea and Flood's generator ("Fast splittable
@@ -1140,7 +1326,8 @@ mod tests {
     /// every arrangement an edge can split, empty text, a space to wrap
     /// at, and a literal U+FFFC that is text rather than a placeholder.
     /// No "f", whose ligatures form across an edge upright and not across
-    /// an oblique one.
+    /// an oblique one, and which in two colours the recipe draws whole where
+    /// SkParagraph cuts it -- see [`super::Passes::painted`].
     const PIECES: &[&str] = &[
         "ab",
         "cd",
@@ -1252,7 +1439,10 @@ mod tests {
         Recipe,
         /// Every style upright, its text where the recipe puts it once its
         /// edges have moved, drawn by `Paragraph::paint` alone: the control
-        /// for what the sheared passes paint.
+        /// for what the sheared passes paint. It moves an edge inside a
+        /// grapheme as the recipe does, so a mark in another colour from its
+        /// base is held to Chrome's picture rather than SkParagraph's, which
+        /// cuts the glyph -- see [`whole_graphemes`].
         Assigned,
         /// Every style upright, its text where it was added, built by a
         /// plain `ParagraphBuilder`.
@@ -1392,7 +1582,7 @@ mod tests {
             sheared: sheared
                 .iter()
                 .flat_map(|sheared| &sheared.runs)
-                .filter(|run| run.range.is_some())
+                .filter(|run| run.sheared)
                 .map(|run| {
                     (run.origin, run.positions.clone(), run.glyphs.clone())
                 })
@@ -1429,6 +1619,7 @@ mod tests {
                         step,
                         bytes: text.len()..text.len() + added.len(),
                         oblique: stack[stack.len() - 1],
+                        slot: pieces.len(),
                     });
                     text.push_str(added);
                 }
@@ -1440,13 +1631,14 @@ mod tests {
 
     /// What is wrong with where [`whole_graphemes`] put `text`'s bytes,
     /// `before` to `after`, or `None`: every byte held once; one that moved
-    /// moved back, across an edge with an oblique side inside its grapheme,
+    /// moved back, across an edge `moves` says moves, inside its grapheme,
     /// into the piece that now holds the byte before that edge; and no such
     /// edge between two pieces with text that meet falls inside a grapheme.
     fn misplaced(
         text: &str,
         before: &[Piece],
         after: &[Piece],
+        moves: impl Fn(&Piece, &Piece) -> bool,
     ) -> Option<String> {
         let owner = |pieces: &[Piece], byte: usize| {
             let mut owners = pieces
@@ -1477,7 +1669,7 @@ mod tests {
                     let left = edge
                         .checked_sub(1)
                         .and_then(|left| owner(after, left).ok().flatten());
-                    if !(before[was].oblique || after[is].oblique)
+                    if !moves(&after[is], &before[was])
                         || grapheme(byte) >= edge
                         || left != Some(is)
                     {
@@ -1502,27 +1694,33 @@ mod tests {
         with_text.windows(2).find_map(|pair| {
             let edge = pair[1].bytes.start;
             (pair[0].bytes.end == edge
-                && (pair[0].oblique || pair[1].oblique)
+                && moves(pair[0], pair[1])
                 && starts.binary_search(&edge).is_err())
-            .then(|| {
-                format!("an oblique edge at byte {edge} splits a grapheme")
-            })
+            .then(|| format!("an edge at byte {edge} splits a grapheme"))
         })
     }
 
     /// What is wrong with where a generated paragraph's bytes end up, or
     /// `None`: each byte stays in its piece or goes to its grapheme's base
-    /// across an oblique edge -- see [`misplaced`] -- and the text the
+    /// across an edge that moves -- see [`misplaced`] -- and the text the
     /// recipe replays is the builder's, byte for byte.
+    ///
+    /// Twice: with only an oblique side moving an edge, and with every
+    /// edge moving, which is what a generated paragraph does, since its
+    /// upright styles are all one font.
     fn misplaced_bytes(
         collection: &mut FontCollection,
         generated: &(Vec<Op>, bool),
     ) -> Option<String> {
         let (text, before) = pieces(generated);
-        let (_, mut after) = pieces(generated);
-        whole_graphemes(&text, &mut after);
-        if let Some(why) = misplaced(&text, &before, &after) {
-            return Some(why);
+        for one_font in [false, true] {
+            let (_, mut after) = pieces(generated);
+            whole_graphemes(&text, &mut after, |_, _| one_font);
+            let moves =
+                |a: &Piece, b: &Piece| one_font || a.oblique || b.oblique;
+            if let Some(why) = misplaced(&text, &before, &after, moves) {
+                return Some(why);
+            }
         }
 
         let mut recipe = ParagraphRecipe::new(

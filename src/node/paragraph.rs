@@ -392,12 +392,14 @@ fn parse_text_style(
             linear_color4f_to_srgb_color(&color4f)
         });
     }
-    // Fall back to the text color, as CSS does and as the native TextStyle
-    // documents. Skia defaults it to transparent, so leaving it unset drew an
-    // invisible decoration unless the caller also passed a decorationColor.
-    if let Some(color) = decoration_color.or(text_color) {
-        style.set_decoration_color(color);
-    }
+    // Fall back to the text color, as CSS's `currentcolor` does and as the
+    // native TextStyle documents, and to the style's own colour where none
+    // was named at all, which is the black the text is drawn in. Skia
+    // defaults the decoration's colour to transparent, so a line left at
+    // that default is invisible.
+    style.set_decoration_color(
+        decoration_color.or(text_color).unwrap_or(style.color()),
+    );
 
     // decorationThickness
     if let Some(dt) = opt_float_for_key(cx, obj, "decorationThickness") {

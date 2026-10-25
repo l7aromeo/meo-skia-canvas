@@ -625,6 +625,125 @@ describe("TextDecoration", () => {
     }
   });
 
+  // Red underline pixels in device row `row` between user x `from` and `to`.
+  const redBetween = ({ data, width }, row, from, to) => {
+    let red = 0;
+    for (let x = Math.ceil(from * SCALE); x < Math.floor(to * SCALE); x++) {
+      const i = (row * width + x) * 4;
+      if (data[i] > 215 && data[i + 1] < 40 && data[i + 2] < 40) red++;
+    }
+    return red;
+  };
+
+  // A paragraph in an underlined style, `fill` adding what goes in it, drawn
+  // as `drawn` draws, with the paragraph's own rectangles for `fill` to read.
+  const underlinedParagraph = (fill) => {
+    FontLibrary.use("DecorParagraphOswald", [OSWALD]);
+    const base = {
+        fontFamilies: ["DecorParagraphOswald"],
+        fontSize: 96,
+        color: "black",
+      },
+      lined = {
+        ...base,
+        decoration: TextDecoration.Underline,
+        decorationColor: "red",
+      },
+      pb = ParagraphBuilder.Make({ textStyle: lined });
+    fill(pb, base);
+    const p = pb.build();
+    p.layout(10000);
+    const w = 900,
+      h = 260,
+      ctx = new Canvas(w * SCALE, h * SCALE).getContext("2d");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, w * SCALE, h * SCALE);
+    ctx.scale(SCALE, SCALE);
+    ctx.drawParagraph(p, 20, 20);
+    return {
+      p,
+      data: ctx.getImageData(0, 0, w * SCALE, h * SCALE).data,
+      width: w * SCALE,
+      height: h * SCALE,
+    };
+  };
+
+  // A box's line covers its own text: text in a pushed style without the
+  // decoration, between two runs of the underlined one, is not underlined,
+  // though the two runs are on one line in one font.
+  test("an undecorated span between underlined text is not underlined", () => {
+    const { p, ...image } = underlinedParagraph((pb, base) => {
+      pb.addText("ab ");
+      pb.pushStyle(base);
+      pb.addText("XY");
+      pb.pop();
+      pb.addText(" cd");
+    });
+    const [rect] = p.getRectsForRange(3, 5, 0, 0),
+      [l, , r] = rect.rect || rect,
+      row = underlineRow(p);
+    assert.equal(redBetween(image, row, 20 + l + 1, 20 + r - 1), 0, "under XY");
+    assert.ok(redBetween(image, row, 20, 20 + l - 1) > 0, "under ab");
+    assert.ok(redBetween(image, row, 20 + r + 1, 900) > 0, "under cd");
+  });
+
+  // An inline-block inside an underlined span is not underlined in Chrome
+  // 153, and a placeholder is that box here.
+  test("a placeholder inside underlined text is not underlined", () => {
+    const { PlaceholderAlignment, TextBaseline } = require("../../lib");
+    const { p, ...image } = underlinedParagraph((pb) => {
+      pb.addText("ab ");
+      pb.addPlaceholder(
+        120,
+        40,
+        PlaceholderAlignment.Baseline,
+        TextBaseline.Alphabetic,
+        0,
+      );
+      pb.addText(" cd");
+    });
+    const placed = p.getRectsForPlaceholders()[0],
+      [l, , r] = placed.rect || placed,
+      row = underlineRow(p);
+    assert.equal(
+      redBetween(image, row, 20 + l + 1, 20 + r - 1),
+      0,
+      "under the placeholder",
+    );
+    assert.ok(redBetween(image, row, 20, 20 + l - 1) > 0, "under ab");
+  });
+
+  // CSS's `text-decoration-color` defaults to `currentcolor`: a style that
+  // names no colour at all draws its line in the colour its text is drawn
+  // in, whatever that default is. On grey, so that either shows.
+  test("a paragraph's underline with no colour named is the text's", () => {
+    FontLibrary.use("DecorParagraphOswald", [OSWALD]);
+    const base = { fontFamilies: ["DecorParagraphOswald"], fontSize: 96 },
+      pb = ParagraphBuilder.Make({ textStyle: base });
+    pb.pushStyle({ ...base, decoration: TextDecoration.Underline });
+    pb.addText("H      H");
+    pb.pop();
+    const p = pb.build();
+    p.layout(10000);
+    const ctx = new Canvas(800 * SCALE, 260 * SCALE).getContext("2d");
+    ctx.fillStyle = "#808080";
+    ctx.fillRect(0, 0, 800 * SCALE, 260 * SCALE);
+    ctx.scale(SCALE, SCALE);
+    ctx.drawParagraph(p, 20, 20);
+    const pixel = (x, y) => [...ctx.getImageData(x, y, 1, 1).data],
+      line = pixel(
+        Math.floor((20 + p.getMaxIntrinsicWidth() / 2) * SCALE),
+        underlineRow(p),
+      ),
+      // The middle of the first `H`'s left stem, half way up.
+      stem = pixel(
+        Math.floor((20 + 10) * SCALE),
+        Math.floor((20 + p.getAlphabeticBaseline() - 30) * SCALE),
+      );
+    assert.notDeepEqual(stem, [128, 128, 128, 255], "the stem is inked");
+    assert.deepEqual(line, stem);
+  });
+
   test("exposes frozen constants with the expected bit values", () => {
     assert.deepEqual(
       { ...TextDecoration },
@@ -1565,20 +1684,24 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
   });
 
   test("an oblique range elsewhere does not restyle an upright mark", () => {
-    // Edges move only where one side is oblique; a black "e" with a red
-    // accent keeps its red accent whether or not text after it is oblique.
+    // A red "e" with a black accent is drawn whole in red, its accent going
+    // with its base -- see "a colour change inside a cluster" -- whether or
+    // not text after it is oblique.
     register();
     const family = "ParagraphRaleway",
       ACUTE = "\u0301",
       pieces = (after) => [
         ["caf"],
-        ["e"],
-        [ACUTE, { color: "red" }],
+        ["e", { color: "red" }],
+        [ACUTE],
         [" x", after],
       ];
     const plain = colours(onWhite(family, 80, pieces({}), 600, 140)),
-      later = colours(onWhite(family, 80, pieces(slanted(OBLIQUE)), 600, 140));
-    assert.ok(plain.red > 0, "the control: the accent is red");
+      later = colours(onWhite(family, 80, pieces(slanted(OBLIQUE)), 600, 140)),
+      bare = colours(
+        onWhite(family, 80, [["caf"], ["e", { color: "red" }]], 600, 140),
+      );
+    assert.ok(plain.red > bare.red, "the control: the accent is red too");
     assert.equal(later.red, plain.red, "and stays red");
   });
 
@@ -1758,5 +1881,248 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
       `an oblique range's shadow slopes ${leaning}, expected ${-TAN_14}`,
     );
     assert.ok(Math.abs(standing) <= 0.005, `an upright one ${standing}`);
+  });
+});
+
+// A change of colour inside a cluster. CSS Text 3, section 1.4, leaves a
+// typographic character unit divided by an element boundary undefined, to
+// be rendered as either side or an approximation of both; Chrome 156 paints
+// each of these whole, in its first character's colour, with no red at all,
+// where SkParagraph cut the glyph by the share of its UTF-8 bytes each colour
+// held and dropped the diaeresis beside an `e` it had cut. A change of font
+// is not that case: Chrome shapes the two apart, and each side keeps its own
+// colour.
+describe("a colour change inside a cluster", () => {
+  const { TextDecoration } = require("../../lib");
+  const RALEWAY = "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf";
+
+  // `pieces`, each [text, colour, extra style], drawn at 160px in Raleway;
+  // `drawnHere` adds a transparent underline to every piece, so that the
+  // paragraph is drawn by the library rather than by `Paragraph::paint`.
+  const drawn = (pieces, drawnHere = false) => {
+    FontLibrary.use("SplitRaleway", [RALEWAY]);
+    const base = { fontFamilies: ["SplitRaleway"], fontSize: 160 },
+      extra = drawnHere
+        ? {
+            decoration: TextDecoration.Underline,
+            decorationColor: "transparent",
+          }
+        : {},
+      pb = ParagraphBuilder.Make({ textStyle: base });
+    for (const [text, color, style] of pieces) {
+      pb.pushStyle({ ...base, ...extra, ...style, color });
+      pb.addText(text);
+      pb.pop();
+    }
+    const p = pb.build();
+    p.layout(2000);
+    const ctx = new Canvas(400, 240).getContext("2d");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, 400, 240);
+    ctx.drawParagraph(p, 20, 10);
+    return Buffer.from(ctx.getImageData(0, 0, 400, 240).data);
+  };
+  const red = (data) => {
+    let count = 0;
+    for (let i = 0; i < data.length; i += 4)
+      if (data[i] > 160 && data[i + 1] < 100 && data[i + 2] < 100) count++;
+    return count;
+  };
+
+  for (const [first, second, what] of [
+    ["e", "́̈", "a base and its marks"],
+    ["f", "i", "a ligature"],
+    ["é", "̈", "a mark that is a glyph of its own"],
+    ["e", "́", "a base and its mark"],
+  ]) {
+    test(`${what} is drawn whole in its first character's colour`, () => {
+      const whole = drawn([[first + second, "black"]]);
+      for (const drawnHere of [false, true]) {
+        const split = drawn(
+          [
+            [first, "black"],
+            [second, "red"],
+          ],
+          drawnHere,
+        );
+        assert.equal(red(split), 0, `no red, drawnHere ${drawnHere}`);
+        assert.ok(
+          split.equals(whole),
+          `drawn as one black run, drawnHere ${drawnHere}`,
+        );
+      }
+    });
+  }
+
+  test("each side keeps its colour where the font changes", () => {
+    for (const style of [{ fontSize: 240 }, { fontStyle: { weight: 900 } }]) {
+      for (const drawnHere of [false, true]) {
+        const split = drawn(
+          [
+            ["e", "black"],
+            ["́", "red", style],
+          ],
+          drawnHere,
+        );
+        assert.ok(red(split) > 0, `${JSON.stringify(style)}: the mark is red`);
+      }
+    }
+    assert.ok(
+      red(
+        drawn([
+          ["x", "black"],
+          ["x", "red"],
+        ]),
+      ) > 0,
+      "and two clusters keep theirs",
+    );
+  });
+});
+
+// A background covers its box's content area: the first available font's
+// ascent above the baseline and its descent below, whatever the line
+// height, and whatever face draws a glyph (CSS 2.1 section 10.6.1, CSS
+// Inline 3). Chrome 156 paints 48px Oswald's 71 rows, 57 and 14 rounded
+// from 57.264 and 13.872, at a line height of normal and of 2 alike, and
+// over a CJK glyph from a fallback face; and 48px Raleway's 56, from 45.12
+// and 11.232. SkParagraph's grew with the height multiplier: 77.28 above
+// and 18.72 below for Oswald at 2. Both faces set USE_TYPO_METRICS, with
+// `hhea` equal to `OS/2`'s typo metrics, so every platform's ascent is the
+// one read here.
+describe("a paragraph's background", () => {
+  const { fontTables } = require("../support/font-tables.js");
+  const FONTS = {
+    BackgroundOswald: "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    BackgroundRaleway:
+      "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+  };
+  // Device pixels to each of the paragraph's, so an edge reads to a
+  // quarter of one.
+  const SCALE = 4,
+    SIZE = 48;
+
+  // The black box behind `text` in `family`, transparent, at `height`: its
+  // top and bottom, from the coverage of the column at user x 12, and the
+  // baseline it was drawn at.
+  const box = (family, text, height) => {
+    FontLibrary.use(family, [FONTS[family]]);
+    const style = {
+        fontFamilies: [family],
+        fontSize: SIZE,
+        color: "transparent",
+        backgroundColor: "black",
+        ...(height ? { heightMultiplier: height } : {}),
+      },
+      pb = ParagraphBuilder.Make({
+        textStyle: { ...style, backgroundColor: undefined },
+      });
+    pb.pushStyle(style);
+    pb.addText(text);
+    pb.pop();
+    const p = pb.build();
+    p.layout(1000);
+    const [w, h] = [200, 160],
+      ctx = new Canvas(w * SCALE, h * SCALE).getContext("2d");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, w * SCALE, h * SCALE);
+    ctx.scale(SCALE, SCALE);
+    ctx.drawParagraph(p, 10, 10);
+    const { data } = ctx.getImageData(0, 0, w * SCALE, h * SCALE),
+      cover = (y) => (255 - data[(y * w * SCALE + 12 * SCALE) * 4]) / 255;
+    let top = null,
+      bottom = null;
+    for (let y = 0; y < h * SCALE; y++) {
+      if (cover(y) === 0) continue;
+      if (top === null) top = y + 1 - cover(y);
+      bottom = y + cover(y);
+    }
+    return {
+      top: top / SCALE - 10,
+      bottom: bottom / SCALE - 10,
+      baseline: p.getAlphabeticBaseline(),
+    };
+  };
+
+  for (const [family, rows] of [
+    ["BackgroundOswald", 71],
+    ["BackgroundRaleway", 56],
+  ]) {
+    test(`${family} at 48px covers its content area at any line height`, () => {
+      const { ascent, descent } = fontTables(FONTS[family]).at(SIZE);
+      for (const height of [undefined, 2]) {
+        const { top, bottom, baseline } = box(family, "H x", height),
+          what = `line height ${height ?? "normal"}`;
+        assert.ok(
+          Math.abs(bottom - top - (ascent + descent)) <= 0.25,
+          `${what}: ${bottom - top} tall, expected ${ascent + descent}`,
+        );
+        assert.ok(
+          Math.abs(bottom - top - rows) < 0.5,
+          `${what}: Chrome's ${rows} rows, rounded`,
+        );
+        // The box's top is its ascent above the baseline as drawn, which
+        // SkParagraph rounds to a whole pixel.
+        assert.ok(
+          Math.abs(Math.round(baseline) - top - ascent) <= 0.25,
+          `${what}: top ${top} for an ascent of ${ascent} over ${baseline}`,
+        );
+      }
+    });
+  }
+
+  test("a glyph from a fallback face does not move it", () => {
+    const { ascent, descent } = fontTables(FONTS.BackgroundOswald).at(SIZE);
+    for (const height of [undefined, 2]) {
+      const { top, bottom } = box("BackgroundOswald", "字字", height);
+      assert.ok(
+        Math.abs(bottom - top - (ascent + descent)) <= 0.25,
+        `line height ${height ?? "normal"}: ${bottom - top} tall, expected ` +
+          `${ascent + descent}`,
+      );
+    }
+  });
+});
+
+// CSS 2.1 Appendix E paints a line box at a time: a wrapped line's text
+// shadow goes over the line above's glyphs, painted before it. Chrome 156
+// draws "HHH HHH" in 48px Oswald wrapped onto two lines 60px apart, with a
+// red shadow 60px up, as two lines of red: every black pixel of the first
+// line is under the second line's shadow. SkParagraph drew every line's
+// shadows before any line's glyphs, leaving the first line black. Here the
+// shadow goes up as far as the lines are apart.
+describe("a wrapped line's shadow", () => {
+  test("lies over the line above's glyphs", () => {
+    FontLibrary.use("ShadowOrderOswald", [
+      "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    ]);
+    const style = { fontFamilies: ["ShadowOrderOswald"], fontSize: 48 },
+      laidOut = (shadows) => {
+        const pb = ParagraphBuilder.Make({ textStyle: style });
+        pb.pushStyle({ ...style, color: "black", shadows });
+        pb.addText("HHH HHH");
+        pb.pop();
+        const p = pb.build();
+        p.layout(110);
+        return p;
+      },
+      [first, second] = laidOut([]).getLineMetrics(),
+      apart = Math.round(second.baseline) - Math.round(first.baseline),
+      p = laidOut([{ color: "red", offset: [0, -apart], blurRadius: 0 }]),
+      ctx = new Canvas(300, 200).getContext("2d");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, 300, 200);
+    ctx.drawParagraph(p, 10, 10);
+    const { data } = ctx.getImageData(0, 0, 300, 200),
+      // Down to the first line's baseline: the second line's glyphs start
+      // below it.
+      bottom = 10 + Math.round(first.baseline);
+    let black = 0,
+      red = 0;
+    for (let i = 0; i < bottom * 300 * 4; i += 4) {
+      if (data[i] < 100 && data[i + 1] < 100) black++;
+      if (data[i] > 160 && data[i + 1] < 100) red++;
+    }
+    assert.equal(black, 0, "the second line's shadow covers the first");
+    assert.ok(red > 0, "and is drawn there");
   });
 });

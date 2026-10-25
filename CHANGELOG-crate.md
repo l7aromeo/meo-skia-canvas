@@ -26,29 +26,58 @@ window be changed after it opens.** No signature moves and nothing is removed.
 ### Fixed
 
 - **Text decorations sit where the font puts them, beneath the glyphs.**
-  Every line `set_text_decoration` or a `TextStyle`'s `decoration` asked
-  for was centred on the position the font gives for its top, so each sat
-  half its thickness too high: 96px Oswald drew its underline from 6.94px
-  below the baseline where its `post` table says 9.60, its line-through
-  from 36.00 above where `OS/2` says 33.31, and its overline with its foot
-  at 112.38 where the ascent is 114.53. An underline now hangs from the
-  `post` top and grows down, as CSS Text Decoration 4 section 2.8.1 says,
-  an overline stands on the ascent, and a line-through is the `OS/2`
-  stroke, a given thickness growing it about the stroke's centre -- where
-  it grew by the face's own ratio of strikeout to underline, so that a
-  2px line-through drew 2.27px in a face whose ratio is 2. Each box takes
-  one position and thickness from its first available font, as section
-  2.9 asks, rather than one per run, which moved the line under a glyph a
-  fallback face supplied. A double line is two lines a thickness apart,
+  Every line `set_text_decoration` or a `TextStyle`'s `decoration` asked for
+  was centred on the position the font gives for its top, so each sat half
+  its thickness too high: 96px Oswald drew its underline from 6.94px below
+  the baseline where its `post` table says 9.60, its line-through from 36.00
+  above where `OS/2` says 33.31, and its overline with its foot at 112.38
+  where the ascent is 114.53. An underline now hangs from the `post` top and
+  grows down, as CSS Text Decoration 4 section 2.8.1 says, an overline
+  stands on the ascent, and a line-through is the `OS/2` stroke, a given
+  thickness growing it about the stroke's centre -- where it grew by the
+  face's own ratio of strikeout to underline, so that in a 96px face whose
+  ratio is 2, 2px drew 4px and 8px 16. Each box takes one position and
+  thickness from its first available font, as section 2.9 asks, where each
+  run took its own: in a face with no space glyph, the line through the
+  spaces between two words was the fallback face's, 4.75px where the first
+  face's stroke is 13.82. A double line is two lines a thickness apart,
   where the second overlapped the first at 3px, and a wavy line a wave of
   the same proportions at every thickness. Underlines and overlines are
-  drawn beneath the glyphs and line-through over them, section 5.1's
-  order, where every line was drawn over: a descender now crosses its
-  underline. In a `Paragraph`, a `TextStyle`'s `shadows` shadow its
-  decorations as well as its glyphs, and a background stays beneath them.
-  Where this differs from Chrome -- the line-through, the double line's
-  gap, the wave's constants -- is in docs/browser-differences.md, with
-  the measurements.
+  drawn beneath the glyphs and line-through over them, section 5.1's order,
+  where every line was drawn over: a descender now crosses its underline.
+  Wrapped text is painted a line at a time, as CSS 2.1 Appendix E paints
+  line boxes, so a line's overline lies over the descenders of the line
+  above. A named decoration colour takes `set_global_alpha`'s alpha, where
+  at 0.5 a red underline was drawn opaque. In a `Paragraph`, a `TextStyle`'s
+  `shadows` shadow its decorations as well as its glyphs, and a background
+  stays beneath them; a line's shadows go over the line above. Where this
+  differs from Chrome -- the line-through, the double line's gap, the wave's
+  constants -- is in docs/browser-differences.md, with the measurements.
+
+- **A `Paragraph` background covers its font's content area, at any line
+  height.** A style's background was painted over the line's height: with a
+  height multiplier of 2, 48px Oswald's reached 77px above the baseline and
+  19 below where the font's ascent and descent are 57.26 and 13.87, and over
+  a CJK glyph from a fallback face it took that face's 51 above and 16
+  below. It now covers the first available font's ascent and descent,
+  whatever the line height and whichever face draws the glyph: the content
+  area CSS 2.1 section 10.6.1 gives an inline box's background, and what
+  Chrome 156 paints, 71 rows at line heights of normal and 2 and over the
+  fallback glyph alike. Paragraphs with a height multiplier or a glyph from
+  a fallback face show the change; others move by under a pixel.
+
+- **A colour change inside a ligature, or between a letter and its marks,
+  no longer cuts the glyph or drops a mark.** A paragraph from
+  `TextEngine::layout_rich_text` or a `ParagraphBuilder` whose colour
+  changed inside a cluster -- the `f` and `i` of an `fi` ligature, an `e`
+  and its acute -- drew the glyph cut in two, each colour taking the share
+  of it that its share of the text's UTF-8 bytes gave, and an `e` cut that
+  way lost a diaeresis drawn beside it. The cluster is now drawn whole in
+  its first character's colour, as Chrome 156 draws all four such cases;
+  CSS Text 3 leaves a cluster split by an element boundary open. Where the
+  font changes inside a cluster, the two sides are shaped apart and each
+  keeps its own colour, as in Chrome. A paragraph in several colours with
+  no change inside a cluster is drawn as it was.
 
 - **`outline_text` and the ink box put every glyph where `fill_text` draws
   it.** A glyph the shaper moves off its advance -- a mark stacked over

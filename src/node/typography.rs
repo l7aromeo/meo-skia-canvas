@@ -380,7 +380,21 @@ impl TextLayout {
     /// origin is the one `Paragraph::paint` draws from, its baseline snapped
     /// to a whole pixel (#142).
     pub fn paint(&mut self, canvas: &Canvas, origin: Point, paint: &Paint) {
-        for run in glyph_runs(&mut self.paragraph) {
+        let runs = glyph_runs(&mut self.paragraph);
+        self.paint_runs(canvas, origin, paint, &runs);
+    }
+
+    /// Paints `runs`, glyph runs of this layout, as [`TextLayout::paint`]
+    /// paints them all: for a caller drawing something between one line's
+    /// glyphs and the next's.
+    pub(crate) fn paint_runs(
+        &self,
+        canvas: &Canvas,
+        origin: Point,
+        paint: &Paint,
+        runs: &[GlyphRun],
+    ) {
+        for run in runs {
             let shear = run_shear(&run.font.typeface(), self.oblique);
             if let Some(blob) =
                 sheared_blob(&run.font, &run.glyphs, &run.positions, shear)
@@ -402,6 +416,8 @@ pub(crate) struct GlyphRun {
     pub(crate) positions: Vec<Point>,
     /// The UTF-8 offset of the text each glyph comes from.
     pub(crate) starts: Vec<u32>,
+    /// The UTF-8 offset after the last glyph's -- see [`GlyphRunRef::end`].
+    pub(crate) end: u32,
     pub(crate) origin: Point,
     /// The right edge of the run's clip, in the paragraph's coordinates.
     pub(crate) advance_x: f32,
@@ -423,21 +439,72 @@ pub(crate) struct GlyphRun {
 /// `visit`'s are each glyph's own, on every line.
 pub(crate) fn glyph_runs(paragraph: &mut Paragraph) -> Vec<GlyphRun> {
     let mut runs = vec![];
+    visit_glyph_runs(paragraph, |run| {
+        runs.push(GlyphRun {
+            line: run.line,
+            font: run.font.clone(),
+            glyphs: run.glyphs.to_vec(),
+            positions: run.positions.to_vec(),
+            starts: run.starts.to_vec(),
+            end: run.end,
+            origin: run.origin,
+            advance_x: run.advance_x,
+        });
+    });
+    runs
+}
+
+/// A [`GlyphRun`] borrowed from `Paragraph::visit` for the length of the
+/// visit, for a caller that needs nothing of it afterwards.
+pub(crate) struct GlyphRunRef<'a> {
+    pub(crate) line: usize,
+    pub(crate) font: &'a Font,
+    pub(crate) glyphs: &'a [GlyphId],
+    pub(crate) positions: &'a [Point],
+    pub(crate) starts: &'a [u32],
+    /// The UTF-8 offset `Paragraph::visit` reports after the last glyph's:
+    /// the start of the cluster that follows the run in its text.
+    pub(crate) end: u32,
+    pub(crate) origin: Point,
+    pub(crate) advance_x: f32,
+}
+
+impl GlyphRun {
+    pub(crate) fn borrowed(&self) -> GlyphRunRef<'_> {
+        GlyphRunRef {
+            line: self.line,
+            font: &self.font,
+            glyphs: &self.glyphs,
+            positions: &self.positions,
+            starts: &self.starts,
+            end: self.end,
+            origin: self.origin,
+            advance_x: self.advance_x,
+        }
+    }
+}
+
+/// Calls `each` with every glyph run [`glyph_runs`] would return, borrowed
+/// rather than copied.
+pub(crate) fn visit_glyph_runs(
+    paragraph: &mut Paragraph,
+    mut each: impl FnMut(GlyphRunRef<'_>),
+) {
     paragraph.visit(|line, visit| {
         if let Some(info) = visit {
             let count = info.glyphs().len();
-            runs.push(GlyphRun {
+            each(GlyphRunRef {
                 line,
-                font: info.font().clone(),
-                glyphs: info.glyphs().to_vec(),
-                positions: info.positions().to_vec(),
-                starts: info.utf8_starts()[..count].to_vec(),
+                font: info.font(),
+                glyphs: info.glyphs(),
+                positions: info.positions(),
+                starts: &info.utf8_starts()[..count],
+                end: info.utf8_starts()[count],
                 origin: info.origin(),
                 advance_x: info.advance_x(),
             });
         }
     });
-    runs
 }
 
 /// How far below the weight a style asks for SkParagraph needs a face to be
@@ -917,14 +984,18 @@ impl<'a> Typesetter<'a> {
         }
     }
 
-    /// The run's decoration, painted in `paint`'s colour unless it names
-    /// its own, or `None` where it has no lines.
+    /// The run's decoration, or `None` where it has no lines: in its own
+    /// colour where it names one, its alpha times `global_alpha` as the
+    /// text's paint has it, and otherwise in the text's paint's colour.
     ///
     /// The whole run is one decorating box, so its lines are placed by its
     /// first available font -- see [`FaceLines::first_available`] -- at the
     /// run's size and axes, and a run another face draws for want of a
     /// glyph is underlined at the same height.
-    pub fn decoration(&self, paint: &Paint) -> Option<decorate::Decoration> {
+    pub fn decoration(
+        &self,
+        global_alpha: f32,
+    ) -> Option<decorate::Decoration> {
         let decoration = &self.text_decoration.decoration;
         if decoration.ty == TextDecoration::NO_DECORATION {
             return None;
@@ -944,7 +1015,8 @@ impl<'a> Typesetter<'a> {
             thickness: self
                 .decoration_thickness
                 .map_or(Thickness::Font, Thickness::Pixels),
-            color: self.text_decoration.color.unwrap_or(paint.color()),
+            color: self.text_decoration.color,
+            opacity: global_alpha,
             face,
         })
     }

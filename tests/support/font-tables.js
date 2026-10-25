@@ -7,7 +7,9 @@
 // - `OS/2.yStrikeoutPosition`: "The position of the top of the strikeout
 //   stroke relative to the baseline", positive above, and
 //   `OS/2.yStrikeoutSize`: "Thickness of the strikeout stroke" (OS/2).
-// - `hhea.ascender`, the ascent an overline sits on.
+// - `hhea.ascender`, the ascent an overline sits on, and `hhea.descender`,
+//   negative below the baseline: with them, the content area a background
+//   covers.
 //
 // Values are in font units; `at(size)` scales them to pixels.
 
@@ -38,6 +40,7 @@ const fontTables = (path) => {
     strikeoutSize: data.readInt16BE(t["OS/2"] + 26),
     strikeoutPosition: data.readInt16BE(t["OS/2"] + 28),
     ascender: data.readInt16BE(t.hhea + 4),
+    descender: data.readInt16BE(t.hhea + 6),
   };
   return {
     ...units,
@@ -51,6 +54,7 @@ const fontTables = (path) => {
         strikeoutTop: units.strikeoutPosition * k,
         strikeoutThickness: units.strikeoutSize * k,
         ascent: units.ascender * k,
+        descent: -units.descender * k,
       };
     },
   };

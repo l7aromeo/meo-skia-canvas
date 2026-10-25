@@ -173,7 +173,12 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   and skip-ink `none`. An underline's top is `post.underlinePosition`, "the
   top of the underline", growing down, which is CSS Text Decoration 4
   section 2.8.1's "extending its thickness in the positive direction only";
-  an overline stands on the `hhea` ascent and grows up. Chrome agrees on
+  an overline stands on the ascent and grows up. The ascent is the one Skia
+  reports for the face: on FreeType the `OS/2` typographic ascender where
+  the face sets `USE_TYPO_METRICS` and `hhea`'s otherwise, on macOS
+  `CTFontGetAscent`, and on Windows DirectWrite's `DWRITE_FONT_METRICS`.
+  Oswald, measured here, sets the flag and gives both tables the same
+  ascender, so every platform agrees on it. Chrome agrees on
   both, to its whole-pixel snapping: 96px Oswald underlines rows 10 to 14
   below the baseline against a table top of 9.6 and a thickness of 4.8. A
   line-through is the `OS/2` strikeout stroke, `yStrikeoutPosition` being

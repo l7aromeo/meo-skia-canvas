@@ -2751,6 +2751,37 @@ describe("Context2D", () => {
       return null;
     };
 
+    // CSS 2.1 Appendix E paints a line box at a time, and a wrapped line's
+    // overline goes beneath its own glyphs but over the line above's, which
+    // were painted before it. Chrome 156 paints the second line's
+    // text-shadow over the first line's glyphs the same way, red over every
+    // black pixel of them. 48px Oswald's wrapped lines are 71px apart and
+    // its ascent 57.26, so the second line's 6px overline lies about 8 to
+    // 14px below the first line's baseline, across its descenders.
+    test("a wrapped line's overline lies over the line above's glyphs", () => {
+      const draw = (decoration) => {
+        const c = new Canvas(300, 200).getContext("2d");
+        c.fillStyle = "white";
+        c.fillRect(0, 0, 300, 200);
+        c.fillStyle = "black";
+        c.font = "48px DecorationOswald";
+        c.textWrap = true;
+        c.textDecoration = decoration;
+        c.fillText("ggg ggg", 10, 60, 110);
+        return c.getImageData(0, 0, 300, 200).data;
+      };
+      const plain = draw("none"),
+        lined = draw("overline red 6px");
+      let over = 0,
+        rows = new Set();
+      for (let i = 0; i < plain.length; i += 4) {
+        if (plain[i] < 100) rows.add(Math.floor(i / 4 / 300));
+        if (plain[i] < 100 && lined[i] > 160 && lined[i + 1] < 100) over++;
+      }
+      assert.ok(Math.max(...rows) - Math.min(...rows) > 71, "two lines");
+      assert.ok(over > 0, "the second overline crosses the first's descenders");
+    });
+
     let drawText = (decoration) => {
       ctx.fillStyle = "red";
       ctx.font = "24px DecorationOswald";
@@ -3190,6 +3221,87 @@ describe("Context2D", () => {
       const m = fontTables(file).at(96),
         { c, x } = decorated(
           "96px DecorGeomRecH, DecorGeomOswald",
+          "underline",
+          "H      H",
+        );
+      const [[top, bottom]] = spans(c, x);
+      near(top, m.underlineTop, "top");
+      near(top - bottom, m.underlineThickness, "thickness");
+    });
+
+    // A wavy line's shadow and a filter's blur spread past the wave's band,
+    // as they spread past a glyph: nothing clips the line after its paint's
+    // filter has run.
+    test("a wavy line's blur is not cropped to its band", () => {
+      for (const [what, setup] of [
+        [
+          "shadowBlur",
+          (c) => {
+            c.shadowColor = "black";
+            c.shadowBlur = 24;
+          },
+        ],
+        [
+          "filter",
+          (c) => {
+            c.filter = "blur(6px)";
+          },
+        ],
+      ]) {
+        const c = new Canvas(900, 400).getContext("2d");
+        setup(c);
+        c.font = "96px DecorGeomOswald";
+        c.textDecoration = "underline wavy 8px";
+        c.fillText("n      n", 10, BASELINE);
+        const x = Math.floor(10 + c.measureText("n      n").width / 2),
+          // Well below the band, which ends 2.75 thicknesses below the
+          // underline's top, 9.6 + 22 px below the baseline.
+          { data } = c.getImageData(x, BASELINE + 40, 1, 1);
+        assert.ok(data[3] > 0, `${what}: blur reaches below the band`);
+      }
+    });
+
+    // A line named in a colour of its own still takes the canvas's global
+    // alpha, as the glyphs do; one in the text's colour is that colour as
+    // the fill holds it, wide gamut included.
+    test("a decoration's colour takes globalAlpha and keeps the fill's gamut", () => {
+      const at = (c, y) => {
+        const x = Math.floor(10 + c.measureText("n      n").width / 2);
+        return [
+          ...c.getImageData(x, y, 1, 1, {
+            colorSpace: c.canvas.colorSpace ?? "srgb",
+          }).data,
+        ];
+      };
+      const m = fontTables(OSWALD).at(96),
+        row = Math.floor(BASELINE - m.underlineTop + 3);
+
+      const faded = new Canvas(900, 400).getContext("2d");
+      faded.globalAlpha = 0.5;
+      faded.font = "96px DecorGeomOswald";
+      faded.textDecoration = "underline 8px red";
+      faded.fillText("n      n", 10, BASELINE);
+      const [r, g, b, a] = at(faded, row);
+      assert.deepEqual([r, g, b], [255, 0, 0], "red");
+      assert.ok(Math.abs(a - 128) <= 1, `alpha ${a} at globalAlpha 0.5`);
+
+      const wide = new Canvas(900, 400, {
+        colorSpace: "display-p3",
+      }).getContext("2d");
+      wide.fillStyle = "color(display-p3 1 0 0)";
+      wide.font = "96px DecorGeomOswald";
+      wide.textDecoration = "underline 8px";
+      wide.fillText("n      n", 10, BASELINE);
+      assert.deepEqual(at(wide, row), [255, 0, 0, 255], "the fill's P3 red");
+    });
+
+    // A family that is not there is no font at all, so the first available
+    // font is the next one in the list -- not the collection's default face,
+    // which SkParagraph substitutes for a list matched in vain.
+    test("a missing first family leaves the line to the next one", () => {
+      const m = fontTables(OSWALD).at(96),
+        { c, x } = decorated(
+          "96px NoSuchFamilyZZ, DecorGeomOswald",
           "underline",
           "H      H",
         );
