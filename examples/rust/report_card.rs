@@ -363,7 +363,7 @@ fn draw_card(
 
     // Footnote, laid out as a wrapping paragraph with a styled run.
     let base = TextStyle {
-        font_families: vec!["Helvetica".to_string()],
+        font_families: vec!["Helvetica".into()],
         font_size: FOOTNOTE_SIZE,
         color: hex("#8fa8c8"),
         align: TextAlign::Left,

@@ -588,11 +588,11 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   parent, and a computed value held where Chrome holds it: a size to 0
   through 10000px, a weight to 1 through 1000. `ex`, `ch`, `cap` and `ic`
   in a size are those of 10px `serif`, and `rem` and the other root forms
-  of 16px. An `oblique` angle from -90deg to 90deg is taken: any angle but
-  zero is `FontSlant::Oblique`, and `set_font_css` draws it at the angle, as
-  the entry under Changed says, and `font()` reads it back with its angle,
-  the default 14deg as `oblique`. A size written above 10000px is now
-  10000px, as Chrome reads it.
+  of 16px. An `oblique` angle from -90deg to 90deg is taken, zero
+  included, as `FontSlant::Oblique` carrying it: `set_font_css` and
+  `set_font` draw it at the angle, as the entry under Changed says, and
+  `font()` reads it back with its angle, the default 14deg as `oblique`. A
+  size written above 10000px is now 10000px, as Chrome reads it.
 
 - **Every CSS length unit in `set_filter_css`, `set_letter_spacing_css`,
   `set_word_spacing_css` and a `set_text_decoration_css` thickness.** `ex`,
@@ -856,6 +856,38 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Changed
 
+- **`FontSlant::Oblique` and `TextSlant::Oblique` carry their angle, an
+  `ObliqueAngle`.** A `Font` and a paragraph `TextStyle` could ask for
+  oblique only at 14deg, so `Font::from_css("oblique 10deg 16px X")` set
+  with `set_font` drew at 14deg where `set_font_css` drew at 10, and read
+  back as `oblique 16px "X"`. The variant now holds the angle: from -90deg
+  to 90deg, `ObliqueAngle::new` returning `Error::InvalidObliqueAngle`
+  outside it, and `ObliqueAngle::DEFAULT` the 14deg `oblique` means alone.
+  A font or a paragraph range draws at its angle, 0deg upright, and
+  `font()` reads it back. In your code, match `FontSlant::Oblique(_)` and
+  `TextSlant::Oblique(_)` where you matched the bare variant, and write
+  `FontSlant::OBLIQUE` or `TextSlant::OBLIQUE` where you constructed it.
+
+- **`Font::families`, `TextStyle::font_families` and
+  `StrutStyle::font_families` are `Vec<FontFamily>`, so a quoted generic
+  keyword is a family name.** A family list was strings, so `"serif"` in
+  quotes -- a family named serif, by CSS Fonts 4, which says a generic
+  keyword "must not be quoted" -- was the generic `serif` once parsed, and
+  read back unquoted. `FontFamily` is `Named(String)` or
+  `Generic(GenericFamily)`, the thirteen CSS generics. The shorthand keeps
+  the quoting: `16px "serif"` reads back as itself, and `16px serif` as the
+  generic. A string converts as CSS reads an unquoted name, a generic
+  keyword in any case becoming the generic, so `Font::new("serif", 16.0)`
+  is unchanged; `FontFamily::Named("serif".into())` names the family. In your code,
+  write `vec!["Helvetica".into(), "serif".into()]` where you wrote
+  `vec!["Helvetica".to_string(), "serif".to_string()]`, and compare against
+  `FontFamily` values rather than strings.
+
+- **`FontFamily`, the details `FontLibrary::family_details` returns, is
+  `FontFamilyDetails`.** The name is `FontFamily`'s above, the entry in a
+  family list, and the two cannot share it. The fields are unchanged. In
+  your code, rename the type where you name it.
+
 - **`set_filter_css` leaves the filter as it was for a blank string.**
   `set_filter_css("")`, and a string of only whitespace, cleared the
   filter. It now returns `Error::InvalidFilter` and changes nothing, as
@@ -909,8 +941,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   below; its measurements are in docs/browser-differences.md.
   `measure_text` reports the sheared ink, and `font()` reads back as
   `oblique`, with its angle. A paragraph's oblique range is sheared at
-  14deg and draws what `set_font_css("oblique …")` text draws, its decorations level and its
-  shadows leaning with its glyphs. Being a font of its own, it is shaped apart from the
+  its angle and draws what `set_font_css("oblique …")` text draws, its
+  decorations level and its shadows leaning with its glyphs. Being a font of its own, it is shaped apart from the
   text beside it, so no ligature forms across its edge, and a combining
   mark the edge would split from its base is drawn with its base, in the
   base's style. A mark straight after a placeholder has no base, and is
@@ -929,12 +961,6 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   underlined, which takes a paragraph of its own for the decorations --
   and draws about as fast, or about 30% slower underlined. A paragraph with
   none costs what it did.
-
-  A `Font` carries no angle, so `FontSlant::Oblique` there is 14deg, the
-  default: `Font::from_css("oblique 10deg 16px Oswald")` set with
-  `set_font` slants by 14deg, where the same string through `set_font_css`
-  slants by 10, and `oblique -10deg` leans 14deg forwards rather than 10
-  back. #287 adds the angle to `Font` in 0.17.
 
 - **`measure_text` remembers each glyph's outline bounds.** The ink box is
   joined from the outline of every glyph, and building the outline was two

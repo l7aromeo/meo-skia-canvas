@@ -152,6 +152,26 @@ const STRETCHES: [(&str, FontStretch); 9] = [
 /// `192` are held to the same number of digits.
 const FONT_SIZE_TOLERANCE: f32 = 1e-5;
 
+/// A family as Chrome's answer names it: the name, or the generic keyword.
+fn family_name(family: &FontFamily) -> &str {
+    match family {
+        FontFamily::Named(name) => name,
+        FontFamily::Generic(generic) => generic.to_css(),
+        _ => unreachable!("a family is a name or a generic"),
+    }
+}
+
+/// Whether `slant` leans, which is what Chrome's taken-apart `style` says by
+/// `italic`: it gives an oblique at any angle but 0deg as `italic`, and
+/// `oblique 0deg`, which draws upright, as `normal`.
+fn leans(slant: FontSlant) -> bool {
+    match slant {
+        FontSlant::Normal => false,
+        FontSlant::Italic => true,
+        FontSlant::Oblique(angle) => angle.degrees() != 0.0,
+    }
+}
+
 /// What `Font::from_css` read, set against Chrome's answer taken apart, or
 /// `None` when every part agrees.
 fn font_parts_disagree(font: &Font, parts: &Value) -> Option<String> {
@@ -177,8 +197,12 @@ fn font_parts_disagree(font: &Font, parts: &Value) -> Option<String> {
     let agrees = (font.size - size).abs()
         <= FONT_SIZE_TOLERANCE * size.max(1.0)
         && u64::from(font.weight) == weight
-        && (font.slant != FontSlant::Normal) == italic
-        && font.families == families
+        && leans(font.slant) == italic
+        && font
+            .families
+            .iter()
+            .map(family_name)
+            .eq(families.iter().copied())
         && font.stretch == stretch
         && line_height.is_none_or(|want| font.line_height == want);
     (!agrees).then(|| {

@@ -506,7 +506,7 @@ fn an_undecorated_colour_follows_the_text_colour() {
     let ink = |decoration_color: Option<RgbaLinear>| {
         let engine = TextEngine::with_system_fonts();
         let style = TextStyle {
-            font_families: vec!["Helvetica".to_string()],
+            font_families: vec!["Helvetica".into()],
             font_size: 32.0,
             color: RgbaLinear::from_hex("#facc15").expect("a literal"),
             decoration: TextDecoration::underline(),
@@ -1594,7 +1594,13 @@ fn font_parse_reads_the_shorthand_and_rejects_junk() {
     assert_eq!(font.size, 44.0);
     assert_eq!(font.weight, 700);
     assert_eq!(font.slant, FontSlant::Italic);
-    assert_eq!(font.families, vec!["Helvetica", "Arial"]);
+    assert_eq!(
+        font.families,
+        [
+            FontFamily::Named("Helvetica".into()),
+            FontFamily::Named("Arial".into())
+        ]
+    );
 
     assert!(Font::parse("Helvetica").is_err(), "no size");
     assert!(Font::parse("20px").is_err(), "no family");
@@ -1648,6 +1654,74 @@ fn font_parse_reads_the_stretch_and_the_line_height() {
         Font::parse("16px/wide Helvetica").is_err(),
         "an unparseable line height is rejected, not dropped"
     );
+}
+
+#[test]
+fn a_quoted_generic_keyword_is_a_family_name() {
+    // CSS Fonts 4 section 2.1: generic family keywords "must not be quoted",
+    // so `"serif"` in quotes names a family called serif, and reads back as
+    // one -- through `set_font_css` and through a `Font` alike.
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    for (css, read) in [
+        ("16px \"serif\"", "16px \"serif\""),
+        ("16px 'SERIF'", "16px \"SERIF\""),
+        ("16px \"system-ui\", serif", "16px \"system-ui\", serif"),
+        ("16px serif", "16px serif"),
+        ("16px SANS-SERIF", "16px sans-serif"),
+    ] {
+        assert!(ctx.set_font_css(css), "{css:?}");
+        assert_eq!(ctx.font(), read, "set_font_css({css:?})");
+        ctx.set_font(&Font::from_css(css).expect("parses"));
+        assert_eq!(ctx.font(), read, "set_font(Font::from_css({css:?}))");
+    }
+}
+
+#[test]
+fn an_oblique_angle_is_finite_and_within_ninety_degrees() {
+    // CSS Fonts 4 section 2.4: an oblique angle runs from -90deg to 90deg,
+    // "Values outside that range are invalid".
+    for degrees in [90.0, -90.0, 0.0, 14.0, -45.5] {
+        assert_eq!(
+            ObliqueAngle::new(degrees).expect("in range").degrees(),
+            degrees,
+            "{degrees}"
+        );
+    }
+    for degrees in [90.001, -91.0, f32::NAN, f32::INFINITY] {
+        assert!(
+            matches!(
+                ObliqueAngle::new(degrees),
+                Err(Error::InvalidObliqueAngle { .. })
+            ),
+            "{degrees}"
+        );
+    }
+    // Negative zero is zero, so the two are one angle and one key.
+    let zero = ObliqueAngle::new(0.0).expect("zero");
+    let negative = ObliqueAngle::new(-0.0).expect("negative zero");
+    assert_eq!(zero, negative);
+    assert!(negative.degrees().is_sign_positive());
+    assert_eq!(ObliqueAngle::default(), ObliqueAngle::DEFAULT);
+    assert_eq!(ObliqueAngle::DEFAULT.degrees(), 14.0);
+}
+
+#[test]
+fn a_font_keeps_its_oblique_angle() {
+    // A `Font` read from `oblique 10deg` is that font, so setting it draws
+    // and reads back the angle, as setting the string does.
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    for (css, read) in [
+        ("oblique 10deg 16px X", "oblique 10deg 16px \"X\""),
+        ("oblique -10deg 16px X", "oblique -10deg 16px \"X\""),
+        ("oblique 0deg 16px X", "oblique 0deg 16px \"X\""),
+        ("oblique 14deg 16px X", "oblique 16px \"X\""),
+        ("oblique 16px X", "oblique 16px \"X\""),
+    ] {
+        ctx.set_font(&Font::from_css(css).expect("parses"));
+        assert_eq!(ctx.font(), read, "{css:?}");
+    }
 }
 
 #[test]
@@ -4054,7 +4128,7 @@ fn draw_paragraph_paints_the_laid_out_text() {
     let layout = engine.layout_text(
         "Studio",
         &TextStyle {
-            font_families: vec!["Helvetica".to_string()],
+            font_families: vec!["Helvetica".into()],
             font_size: 24.0,
             color: RgbaLinear::opaque(1.0, 0.0, 0.0),
             ..TextStyle::default()
@@ -4084,7 +4158,7 @@ fn draw_paragraph_takes_its_color_from_the_layout() {
     let layout = engine.layout_text(
         "Studio",
         &TextStyle {
-            font_families: vec!["Helvetica".to_string()],
+            font_families: vec!["Helvetica".into()],
             font_size: 24.0,
             color: RgbaLinear::opaque(0.0, 0.0, 1.0),
             ..TextStyle::default()
@@ -4118,7 +4192,7 @@ fn draw_paragraph_is_composited_through_the_context() {
         let layout = engine.layout_text(
             "Studio",
             &TextStyle {
-                font_families: vec!["Helvetica".to_string()],
+                font_families: vec!["Helvetica".into()],
                 font_size: 24.0,
                 color: RgbaLinear::opaque(1.0, 0.0, 0.0),
                 ..TextStyle::default()
@@ -4593,7 +4667,7 @@ fn oswald_engine() -> TextEngine {
 /// A paragraph style in Oswald at `weight`, 64px.
 fn oswald_paragraph(weight: i32) -> TextStyle {
     TextStyle {
-        font_families: vec![OSWALD_PARAGRAPH.to_string()],
+        font_families: vec![OSWALD_PARAGRAPH.into()],
         font_size: 64.0,
         font_weight: weight,
         ..TextStyle::default()
@@ -4685,7 +4759,7 @@ fn a_spans_own_axes_replace_the_base_styles() {
         .expect("bundled Amstelvar registers");
     let engine = TextEngine::new(&fonts);
     let style = |weight: i32, settings: FontVariationSettings| TextStyle {
-        font_families: vec!["AmstelvarSpans".to_string()],
+        font_families: vec!["AmstelvarSpans".into()],
         font_size: SIZE,
         font_weight: weight,
         font_variations: settings,
@@ -4879,7 +4953,7 @@ fn laid_out_text_takes_its_optical_size_from_each_styles_font_size() {
     let engine = TextEngine::new(&fonts);
     // No axes here means a span that inherits the paragraph's.
     let style = |size: f32, axes: &[(FontAxisTag, f32)]| TextStyle {
-        font_families: vec![FAMILY.to_string()],
+        font_families: vec![FAMILY.into()],
         font_size: size,
         font_variations: match axes.is_empty() {
             true => FontVariationSettings::Inherit,
@@ -5039,7 +5113,7 @@ fn a_paragraph_in_a_static_font_is_not_instanced() {
     let engine = TextEngine::new(&fonts);
     for weight in [200, 400, 700] {
         let style = TextStyle {
-            font_families: vec!["MonotonStatic".to_string()],
+            font_families: vec!["MonotonStatic".into()],
             font_size: 64.0,
             font_weight: weight,
             ..TextStyle::default()
@@ -6839,7 +6913,7 @@ fn oblique_shears_the_upright_face_before_taking_the_italic() {
 
     let upright = signature(FontSlant::Normal);
     let italic = signature(FontSlant::Italic);
-    let oblique = signature(FontSlant::Oblique);
+    let oblique = signature(FontSlant::OBLIQUE);
 
     // Without this the first assertion below passes on any family whose
     // faces happen to render alike, which proves nothing about the order.
@@ -6852,11 +6926,10 @@ fn oblique_shears_the_upright_face_before_taking_the_italic() {
 }
 
 #[test]
-fn a_font_obliques_by_fourteen_degrees_and_a_shorthand_by_its_angle() {
-    // `FontSlant::Oblique` carries no angle, so a `Font` set with it is the
-    // shorthand's bare `oblique`: 14deg, the angle CSS Fonts 4 gives it.
-    // `set_font_css` keeps the angle the shorthand names, and `Font::from_css`
-    // cannot, which is the difference its documentation states.
+fn a_font_obliques_by_its_angle_as_a_shorthand_does() {
+    // `FontSlant::OBLIQUE` is the shorthand's bare `oblique`: 14deg, the
+    // angle CSS Fonts 4 gives it. Any other angle is drawn at, whether the
+    // font came from `set_font_css`, from `Font::from_css` or was built.
     let tan = |degrees: f32| degrees.to_radians().tan();
     let near = |slope: f32, expected: f32, what: &str| {
         assert!(
@@ -6868,10 +6941,20 @@ fn a_font_obliques_by_fourteen_degrees_and_a_shorthand_by_its_angle() {
 
     near(
         stem_slope(|ctx| {
-            ctx.set_font(&Font::new(family, 200.0).slant(FontSlant::Oblique))
+            ctx.set_font(&Font::new(family, 200.0).slant(FontSlant::OBLIQUE))
         }),
         -tan(14.0),
-        "a Font with FontSlant::Oblique",
+        "a Font with FontSlant::OBLIQUE",
+    );
+    near(
+        stem_slope(|ctx| {
+            let angle = ObliqueAngle::new(10.0).expect("in range");
+            ctx.set_font(
+                &Font::new(family, 200.0).slant(FontSlant::Oblique(angle)),
+            )
+        }),
+        -tan(10.0),
+        "a Font with an oblique of 10deg",
     );
     near(
         stem_slope(|ctx| {
@@ -6893,8 +6976,8 @@ fn a_font_obliques_by_fourteen_degrees_and_a_shorthand_by_its_angle() {
                 .expect("parses");
             ctx.set_font(&font);
         }),
-        -tan(14.0),
-        "Font::from_css keeps the slant and not the angle",
+        -tan(10.0),
+        "Font::from_css keeps the angle",
     );
     near(
         stem_slope(|ctx| ctx.set_font(&Font::new(family, 200.0))),
@@ -7277,11 +7360,11 @@ fn oblique_is_a_slant_of_its_own_not_a_spelling_of_italic() {
     );
     assert_eq!(
         Font::parse("oblique 16px X").expect("parses").slant,
-        FontSlant::Oblique
+        FontSlant::OBLIQUE
     );
     assert_eq!(
-        Font::new("X", 16.0).slant(FontSlant::Oblique).slant,
-        FontSlant::Oblique,
+        Font::new("X", 16.0).slant(FontSlant::OBLIQUE).slant,
+        FontSlant::OBLIQUE,
         "and the builder reaches it"
     );
 
@@ -7305,7 +7388,7 @@ fn oblique_is_a_slant_of_its_own_not_a_spelling_of_italic() {
     let (upright, italic, oblique) = (
         width(FontSlant::Normal),
         width(FontSlant::Italic),
-        width(FontSlant::Oblique),
+        width(FontSlant::OBLIQUE),
     );
     assert_ne!(upright, italic, "the italic is a face of its own");
     assert_eq!(oblique, upright, "oblique advances as the upright face");
@@ -7473,7 +7556,7 @@ fn a_text_style_oblique_shears_the_upright_face() {
     let signature = |slant: TextSlant| {
         let engine = TextEngine::with_system_fonts();
         let style = TextStyle {
-            font_families: vec!["Times".to_string()],
+            font_families: vec!["Times".into()],
             font_size: 64.0,
             slant,
             color: red(),
@@ -7496,7 +7579,7 @@ fn a_text_style_oblique_shears_the_upright_face() {
 
     let upright = signature(TextSlant::Upright);
     let italic = signature(TextSlant::Italic);
-    let oblique = signature(TextSlant::Oblique);
+    let oblique = signature(TextSlant::OBLIQUE);
 
     // Without this the assertions below pass on a family whose faces render
     // alike, or on one that resolved to a single fallback for all three.
@@ -7517,7 +7600,7 @@ fn a_paragraph_in_oblique_draws_what_oblique_text_draws() {
     let engine = oswald_engine();
     let paragraph = |slant: TextSlant| {
         let style = TextStyle {
-            font_families: vec![OSWALD_PARAGRAPH.to_string()],
+            font_families: vec![OSWALD_PARAGRAPH.into()],
             font_size: SIZE,
             slant,
             ..TextStyle::default()
@@ -7552,7 +7635,7 @@ fn a_paragraph_in_oblique_draws_what_oblique_text_draws() {
     // instance of the face -- the engine's library instances its own -- and
     // two edge pixels of the sheared glyphs come out one step apart. The npm
     // paragraph and canvas share a face and match exactly.
-    let oblique = paragraph(TextSlant::Oblique);
+    let oblique = paragraph(TextSlant::OBLIQUE);
     let reference = text(&format!("oblique {SIZE}px {OSWALD_PARAGRAPH}"));
     let ink = |buffer: &[u8]| buffer.chunks(4).filter(|px| px[3] > 0).count();
     assert!(
@@ -7573,6 +7656,32 @@ fn a_paragraph_in_oblique_draws_what_oblique_text_draws() {
     assert!(
         (slope + 14f32.to_radians().tan()).abs() <= 0.005,
         "the text it matches slopes by tan(14deg): {slope}"
+    );
+
+    // Any other angle the same way, in both directions, and 0deg upright.
+    for degrees in [10.0f32, -10.0, 0.0] {
+        let angle = ObliqueAngle::new(degrees).expect("in range");
+        let leaning = paragraph(TextSlant::Oblique(angle));
+        let reference =
+            text(&format!("oblique {degrees}deg {SIZE}px {OSWALD_PARAGRAPH}"));
+        assert!(
+            leaning
+                .iter()
+                .zip(&reference)
+                .all(|(a, b)| a.abs_diff(*b) <= 1),
+            "an oblique paragraph at {degrees}deg draws what text at it draws"
+        );
+        assert_eq!(ink(&leaning), ink(&reference), "{degrees}deg");
+    }
+    assert!(
+        paragraph(TextSlant::Oblique(ObliqueAngle::new(10.0).expect("10")))
+            != oblique,
+        "10deg is not 14deg"
+    );
+    assert!(
+        paragraph(TextSlant::Oblique(ObliqueAngle::new(0.0).expect("0")))
+            == paragraph(TextSlant::Upright),
+        "0deg draws upright"
     );
 }
 
@@ -8643,7 +8752,13 @@ fn font_parse_reports_what_it_could_not_read() {
     assert_eq!(font.size, 44.0);
     assert_eq!(font.weight, 700);
     assert_eq!(font.slant, FontSlant::Italic);
-    assert_eq!(font.families, vec!["Helvetica", "Arial"]);
+    assert_eq!(
+        font.families,
+        [
+            FontFamily::Named("Helvetica".into()),
+            FontFamily::Named("Arial".into())
+        ]
+    );
 }
 
 // -- Documented behaviour ----------------------------------------------------
@@ -9470,11 +9585,17 @@ fn font_parse_strips_quotes_from_family_names() {
     // constructor is meant to surface.
     let font = Font::parse("bold 16px \"Helvetica Neue\", sans-serif")
         .expect("parses");
-    assert_eq!(font.families, vec!["Helvetica Neue", "sans-serif"]);
+    assert_eq!(
+        font.families,
+        [
+            FontFamily::Named("Helvetica Neue".into()),
+            FontFamily::Generic(GenericFamily::SansSerif)
+        ]
+    );
     assert_eq!(font.weight, 700);
 
     let single = Font::parse("16px 'Comic Sans MS'").expect("parses");
-    assert_eq!(single.families, vec!["Comic Sans MS"]);
+    assert_eq!(single.families, [FontFamily::Named("Comic Sans MS".into())]);
 }
 
 #[test]

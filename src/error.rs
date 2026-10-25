@@ -119,6 +119,14 @@ pub enum Error {
         /// How many frames the image has. A still image has one.
         count: usize,
     },
+    /// An oblique angle was not finite, or leaned further than 90deg either
+    /// way, the range CSS Fonts 4 allows.
+    ///
+    /// Returned by [`ObliqueAngle::new`](crate::font::ObliqueAngle::new).
+    InvalidObliqueAngle {
+        /// The rejected angle, in degrees.
+        degrees: f32,
+    },
     /// A CSS length could not be parsed.
     ///
     /// A unit CSS does not define, a bare number other than zero -- CSS
@@ -279,6 +287,12 @@ impl fmt::Display for Error {
             // who passed a negative radius needs to see the radius.
             Self::InvalidRadius { radius } => {
                 write!(f, "invalid radius: {radius}")
+            }
+            Self::InvalidObliqueAngle { degrees } => {
+                write!(
+                    f,
+                    "oblique angle {degrees}deg is outside -90deg to 90deg"
+                )
             }
             Self::InvalidRect { rect } => write!(
                 f,
