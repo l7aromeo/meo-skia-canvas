@@ -223,6 +223,8 @@ pub struct State {
     pub word_spacing: Spacing,
     pub text_decoration: DecorationStyle,
     pub text_wrap: bool,
+    /// The font's line height in pixels, or `None` for the face's own
+    /// spacing. Only wrapped text has lines to space.
     pub line_height: Option<f32>,
     /// The angle an `oblique` font is drawn at, in CSS degrees, or `None`
     /// where the font is not oblique.
@@ -388,14 +390,19 @@ impl State {
                 .set_force_strut_height(true)
                 .set_strut_enabled(true);
 
-            // if lineHeight is unspecified leave letterspacing at -1 to use
-            // font's default spacing, otherwise adjust strut's
-            // height & leading appropriately
-            if let Some(height) = self.line_height {
+            // With no line height the face's own spacing stands. A line
+            // height is in pixels, and the strut takes a multiple of the
+            // font size, every line box that tall with the space beyond the
+            // ascent and descent split half above and half below -- the
+            // half-leading of CSS 2.1 section 10.8.1.
+            let size = char_style.font_size();
+            if let Some(pixels) = self.line_height
+                && size > 0.0
+            {
                 strut_style
-                    .set_leading((height - 1.0).max(0.0))
-                    .set_height(height.min(1.0))
-                    .set_height_override(true);
+                    .set_height(pixels / size)
+                    .set_height_override(true)
+                    .set_half_leading(true);
             }
 
             graf_style.set_strut_style(strut_style);

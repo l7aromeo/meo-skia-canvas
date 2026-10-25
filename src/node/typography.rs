@@ -1160,9 +1160,6 @@ impl<'a> Typesetter<'a> {
         let hang = Baseline::Hanging.get_offset(&self.char_style) - shift;
         let norm = Baseline::Alphabetic.get_offset(&self.char_style) - shift;
         let ideo = Baseline::Ideographic.get_offset(&self.char_style) - shift;
-        let half_leading = self.graf_style.strut_style().leading().max(0.0)
-            * self.char_style.font_size()
-            / 2.0;
 
         // The laid-out box of each line horizontally, which is what the
         // Canvas API's `width` measures, so trailing whitespace counts.
@@ -1256,7 +1253,6 @@ impl<'a> Typesetter<'a> {
             paragraph,
             origin,
             condensation,
-            half_leading,
             hang,
             norm,
             ideo,
@@ -1518,6 +1514,8 @@ impl Utf16Index {
 pub struct FontSpec {
     pub families: Vec<String>,
     pub size: f32,
+    /// The shorthand's line height in pixels, a number or percentage
+    /// already multiplied by `size`, or `None` for `normal`.
     pub line_height: Option<f32>,
     pub weight: Weight,
     pub width: Width,
@@ -1951,8 +1949,6 @@ pub struct Measured {
     origin: Point,
     /// The horizontal factor the run is squeezed by. See [`TextLayout`].
     condensation: f32,
-    /// Half the strut's leading, which the line baselines are moved by.
-    half_leading: f32,
     /// The hanging, alphabetic and ideographic baselines' offsets from the
     /// selected one.
     hang: f32,
@@ -1974,15 +1970,13 @@ impl Measured {
             paragraph,
             origin,
             condensation,
-            half_leading,
             hang,
             norm,
             ideo,
             char_ranges,
             oblique,
         } = self;
-        let (origin, condensation, half_leading) =
-            (*origin, *condensation, *half_leading);
+        let (origin, condensation) = (*origin, *condensation);
         let (hang, norm, ideo) = (*hang, *norm, *ideo);
 
         // Each run's glyph bounds, with the family and font metrics
@@ -2085,8 +2079,7 @@ impl Measured {
             let char_range = char_range.clone();
 
             if let Some(line_metrics) = paragraph.get_line_metrics_at(line) {
-                let baseline =
-                    line_metrics.baseline as f32 + origin.y - half_leading;
+                let baseline = line_metrics.baseline as f32 + origin.y;
                 line_details.push(TextMetricsLine {
                     x: text_bounds.left,
                     y: text_bounds.top,

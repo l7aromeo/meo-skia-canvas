@@ -4173,3 +4173,52 @@ fn every_depth_crosses_with_either_alpha_mode() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn a_fonts_line_height_spaces_wrapped_lines_in_pixels() -> Result<()> {
+    // A line height is a length: the lines of a wrapped run lie that far
+    // apart, CSS 2.1 section 10.8.1's line box of one font. It was taken as
+    // a multiple of the size a second time, so 30px at 48px put the second
+    // line 1440px down.
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"
+    ))?;
+    FontLibrary::new().register_font_from_data("LineHeightOswald", &bytes)?;
+    let gaps = |set: &dyn Fn(&mut Context2D)| {
+        let mut canvas = Canvas::new(400.0, 400.0);
+        let ctx = canvas.context();
+        set(ctx);
+        ctx.set_text_wrap(true);
+        let lines = ctx.measure_text("HHH HHH HHH", Some(110.0)).lines;
+        assert_eq!(lines.len(), 3, "three lines");
+        lines
+            .windows(2)
+            .map(|pair| pair[1].baseline - pair[0].baseline)
+            .collect::<Vec<f32>>()
+    };
+    let near = |gaps: Vec<f32>, pixels: f32, what: &str| {
+        for gap in gaps {
+            assert!((gap - pixels).abs() < 0.01, "{what}: {gap}");
+        }
+    };
+    near(
+        gaps(&|ctx| {
+            ctx.set_font(&Font::new("LineHeightOswald", 48.0).line_height(30.0))
+        }),
+        30.0,
+        "Font::line_height(30.0)",
+    );
+    for (css, pixels) in [
+        ("48px/30px LineHeightOswald", 30.0),
+        ("48px/1 LineHeightOswald", 48.0),
+        ("48px/150% LineHeightOswald", 72.0),
+    ] {
+        near(
+            gaps(&|ctx| assert!(ctx.set_font_css(css), "{css} parses")),
+            pixels,
+            css,
+        );
+    }
+    Ok(())
+}
