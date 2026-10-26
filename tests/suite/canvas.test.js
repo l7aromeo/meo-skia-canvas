@@ -2929,16 +2929,22 @@ describe("a GPU read", () => {
 });
 
 // Skia takes a text gamma from 0 up to, not including, 4 and a contrast from
-// 0 to 1, and a canvas refuses anything outside them with a `RangeError`
-// naming the range. A gamma above it was checked against the contrast's
-// variable and accepted.
+// 0 to 1, and a canvas refuses anything outside them, NaN included, with a
+// `RangeError` naming the range. A gamma of exactly 4 is refused too, where
+// it was quietly made a hair smaller.
 describe("a canvas's text gamma and contrast", () => {
   test("are refused outside Skia's range", () => {
     for (const options of [
       { textGamma: 5 },
+      { textGamma: 4 },
+      // Under 4 as a double, 4 once it is the single-precision value Skia
+      // is handed.
+      { textGamma: 3.99999999 },
       { textGamma: -1 },
+      { textGamma: NaN },
       { textContrast: 2 },
       { textContrast: -0.5 },
+      { textContrast: NaN },
     ])
       assert.throws(
         () => new Canvas(1, 1, options),
@@ -2951,6 +2957,8 @@ describe("a canvas's text gamma and contrast", () => {
     for (const options of [
       { textGamma: 0 },
       { textGamma: 3.9 },
+      // The largest single-precision value below 4.
+      { textGamma: 3.9999997615814209 },
       { textContrast: 0 },
       { textContrast: 1 },
     ])

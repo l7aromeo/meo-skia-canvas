@@ -21,6 +21,18 @@ removed and no signature moves.
 
 ### Breaking
 
+- **`textGamma: 4`, and a text contrast or gamma that is NaN or infinite,
+  are refused.** Skia takes a text gamma from 0 up to, not including, 4. A
+  gamma of exactly 4 was quietly made a hair smaller and taken, and NaN or
+  an infinity in either option quietly became the default; each is now a
+  `RangeError` naming the option. The check is made on the single-precision
+  value Skia is handed, so a number just under 4 that rounds to 4 there is
+  refused with it.
+
+  Migrate: pass a gamma below 4 -- 3.9999997615814209 is the largest a
+  canvas takes -- and a finite contrast and gamma, or leave either out for
+  the platform's default.
+
 - **`ctx.fontHinting` reads `true` until it is set.** It read `false`,
   though text was drawn hinted either way, since the setting did nothing; it
   now takes effect, and on is what text was always drawn at. Code that read

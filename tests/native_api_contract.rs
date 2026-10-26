@@ -4277,3 +4277,42 @@ fn a_canvas_rasterizes_text_with_chromiums_contrast_and_gamma() {
         (contrast, gamma)
     );
 }
+
+#[test]
+fn canvas_options_refuse_text_contrast_and_gamma_outside_skias_range() {
+    // Skia's `SkSurfaceProps` takes a text contrast from 0 to 1 and a gamma
+    // from 0 up to, not including, 4; a canvas refuses anything else rather
+    // than handing it on.
+    let make = |text_contrast: f32, text_gamma: f32| {
+        Canvas::with_options(
+            10.0,
+            10.0,
+            CanvasOptions {
+                text_contrast,
+                text_gamma,
+                ..CanvasOptions::default()
+            },
+        )
+    };
+    // The largest gamma an `f32` holds below 4.
+    let below_four = f32::from_bits(4.0f32.to_bits() - 1);
+    for (contrast, gamma, field) in [
+        (0.0, 4.0, "text_gamma"),
+        (0.0, -0.1, "text_gamma"),
+        (0.0, f32::NAN, "text_gamma"),
+        (1.1, 1.0, "text_contrast"),
+        (-0.1, 1.0, "text_contrast"),
+        (f32::NAN, 1.0, "text_contrast"),
+    ] {
+        match make(contrast, gamma) {
+            Err(Error::InvalidCanvasOption { option, .. }) => {
+                assert_eq!(option, field, "{contrast}, {gamma}")
+            }
+            Err(other) => panic!("{contrast}, {gamma}: {other}"),
+            Ok(_) => panic!("{contrast}, {gamma} was taken"),
+        }
+    }
+    for (contrast, gamma) in [(0.0, 0.0), (1.0, below_four), (0.5, 1.2)] {
+        assert!(make(contrast, gamma).is_ok(), "{contrast}, {gamma}");
+    }
+}

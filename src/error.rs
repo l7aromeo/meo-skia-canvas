@@ -224,6 +224,19 @@ pub enum Error {
         /// What was wrong with it.
         reason: String,
     },
+    /// A canvas option held a value the crate will not act on -- see
+    /// [`Canvas::with_options`](crate::Canvas::with_options).
+    ///
+    /// The counterpart for a canvas of [`Error::InvalidExportOption`]:
+    /// nothing was made, the call was refused on the way in, where the
+    /// value would otherwise have been handed to Skia out of its range.
+    InvalidCanvasOption {
+        /// The field, named as it appears on
+        /// [`CanvasOptions`](crate::CanvasOptions).
+        option: &'static str,
+        /// What was wrong with it.
+        reason: String,
+    },
     /// Encoding a drawing to an image or document format failed.
     ///
     /// Distinct from [`Error::Render`]: the drawing itself succeeded and the
@@ -370,6 +383,9 @@ impl fmt::Display for Error {
                 write!(f, "window id {id} is held by another window")
             }
             Self::InvalidExportOption { option, reason } => {
+                write!(f, "invalid `{option}`: {reason}")
+            }
+            Self::InvalidCanvasOption { option, reason } => {
                 write!(f, "invalid `{option}`: {reason}")
             }
             Self::Encode { reason } => write!(f, "encode failed: {reason}"),

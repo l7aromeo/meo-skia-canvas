@@ -2,7 +2,7 @@
 use crate::{
     canvas::{
         DEFAULT_HEIGHT, DEFAULT_TEXT_CONTRAST, DEFAULT_TEXT_GAMMA,
-        DEFAULT_WIDTH,
+        DEFAULT_WIDTH, text_contrast_in_range, text_gamma_in_range,
     },
     context::page::{ExportOptions, pages_arg},
     gpu,
@@ -144,32 +144,29 @@ impl Canvas {
 
 pub fn new(mut cx: FunctionContext) -> JsResult<BoxedCanvas> {
     let opts = cx.argument::<JsObject>(1)?;
-    let text_contrast = opt_double_for_key(&mut cx, &opts, "textContrast")
+    // A number outside the range Skia takes is a `RangeError` -- the
+    // argument is the right kind and its value is not -- checked on the
+    // single-precision value Skia is handed, so a double just under 4 that
+    // rounds to 4 is refused with it. A gamma of exactly 4 is refused too,
+    // where it was quietly made a hair smaller, and so is NaN or an
+    // infinity, where either quietly became the default.
+    let text_contrast = opt_raw_double_for_key(&mut cx, &opts, "textContrast")
         .unwrap_or(DEFAULT_TEXT_CONTRAST.into());
-    let (min_c, max_c) = (
-        SurfaceProps::MIN_CONTRAST_INCLUSIVE as _,
-        SurfaceProps::MAX_CONTRAST_INCLUSIVE as _,
-    );
-    if text_contrast < min_c || text_contrast > max_c {
+    if !text_contrast_in_range(text_contrast as f32) {
         return cx.throw_range_error(format!(
-            "Expected a number between {} and {} for `textContrast`",
-            min_c, max_c
+            "Expected a number from {} to {} for `textContrast`",
+            SurfaceProps::MIN_CONTRAST_INCLUSIVE,
+            SurfaceProps::MAX_CONTRAST_INCLUSIVE
         ));
     }
-
-    let mut text_gamma = opt_double_for_key(&mut cx, &opts, "textGamma")
+    let text_gamma = opt_raw_double_for_key(&mut cx, &opts, "textGamma")
         .unwrap_or(DEFAULT_TEXT_GAMMA.into());
-    let (min_g, max_g) = (
-        SurfaceProps::MIN_GAMMA_INCLUSIVE as _,
-        SurfaceProps::MAX_GAMMA_EXCLUSIVE as _,
-    );
-    if text_gamma == max_g {
-        text_gamma -= f32::EPSILON as f64
-    }; // nudge down values right at the max
-    if text_gamma < min_g || text_gamma > max_g {
+    if !text_gamma_in_range(text_gamma as f32) {
         return cx.throw_range_error(format!(
-            "Expected a number between {} and {} for `textGamma`",
-            min_g, max_g
+            "Expected a number from {} up to, not including, {} for \
+             `textGamma`",
+            SurfaceProps::MIN_GAMMA_INCLUSIVE,
+            SurfaceProps::MAX_GAMMA_EXCLUSIVE
         ));
     }
 

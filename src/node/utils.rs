@@ -682,6 +682,19 @@ pub fn opt_double_for_key(
     obj.get(cx, attr).ok().and_then(|val| _as_double(cx, &val))
 }
 
+/// As [`opt_double_for_key`], keeping a value that converts to a
+/// non-finite number, for a caller that refuses one by its range rather than
+/// leaving it to fall back to a default.
+pub fn opt_raw_double_for_key(
+    cx: &mut FunctionContext,
+    obj: &Handle<JsObject>,
+    attr: &str,
+) -> Option<f64> {
+    obj.get(cx, attr)
+        .ok()
+        .and_then(|val| _as_double_raw(cx, &val))
+}
+
 pub fn opt_float_for_key(
     cx: &mut FunctionContext,
     obj: &Handle<JsObject>,
