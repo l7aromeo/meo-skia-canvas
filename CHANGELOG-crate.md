@@ -25,6 +25,15 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Breaking
 
+- **`Context2D::font_hinting` is `true` until it is set.** It was `false`,
+  though text was drawn hinted either way, since the setting did nothing; it
+  now takes effect, and on is what text was always drawn at. Code that read
+  it to decide something gets the other answer.
+
+  Migrate: where the old `false` was taken to mean unhinted text, read it as
+  hinted, which is what was drawn; call `set_font_hinting(false)` to have
+  the outlines as designed.
+
 - **A colour function written with a space before its `(` is refused.**
   `rgb (255 0 0)`, `lab (50 40 30)`, `color (srgb 1 0 0)` and the rest
   painted as if the space were not there. CSS Syntax reads such a name and
@@ -75,8 +84,7 @@ window be changed after it opens.** No signature moves and nothing is removed.
   Turned off, a glyph is its outline as designed -- undilated on macOS,
   where 13px text draws more than a third lighter, and unhinted under
   FreeType on Linux. No text moves either way, and what is drawn by default
-  does not change; `Context2D::font_hinting` is `true` until it is set,
-  where it was `false`. A paragraph from `TextEngine`, which has no hinting
+  does not change. A paragraph from `TextEngine`, which has no hinting
   setting, is drawn hinted, as it was.
 
 - **Text is drawn with Chrome's text contrast and gamma for the platform.**

@@ -21,6 +21,15 @@ removed and no signature moves.
 
 ### Breaking
 
+- **`ctx.fontHinting` reads `true` until it is set.** It read `false`,
+  though text was drawn hinted either way, since the setting did nothing; it
+  now takes effect, and on is what text was always drawn at. Code that read
+  the property to decide something gets the other answer.
+
+  Migrate: where the old `false` was taken to mean unhinted text, read it as
+  hinted, which is what was drawn; set `ctx.fontHinting = false` to have the
+  outlines as designed.
+
 - **A `ParagraphBuilder` option is converted as WebIDL converts it, and
   one that cannot be is a `TypeError` naming it.** Every option of a
   paragraph style, a text style, a strut, and the objects and lists inside
@@ -309,9 +318,8 @@ false` now takes effect, and its default is on, at Slight, as Chrome draws
   level but none, Chrome 156 draws the same pixels. Turned off, a glyph is
   its outline as designed -- undilated on macOS, where 13px text draws more
   than a third lighter, and unhinted under FreeType on Linux. No text moves
-  either way, and what is drawn by default does not change;
-  `ctx.fontHinting` reads `true` until it is set, where it read `false`. A
-  `Paragraph`, which has no hinting setting, is drawn hinted, as it was.
+  either way, and what is drawn by default does not change. A `Paragraph`,
+  which has no hinting setting, is drawn hinted, as it was.
 
 - **Text is drawn with Chrome's text contrast and gamma for the platform.**
   Glyph coverage was corrected with a gamma of 1.4 and no contrast by
