@@ -30,6 +30,7 @@ use std::{
 const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
 use crate::{
+    canvas::{DEFAULT_TEXT_CONTRAST, DEFAULT_TEXT_GAMMA},
     context::BoxedContext2D,
     encode::{
         self, Frame, FrameDepth, Pixels, SequenceSpec, Sink,
@@ -3861,8 +3862,8 @@ impl Default for ExportOptions {
             density: 1.0,
             matte: None,
             jpeg_downsample: false,
-            text_contrast: 0.0,
-            text_gamma: 1.4,
+            text_contrast: DEFAULT_TEXT_CONTRAST,
+            text_gamma: DEFAULT_TEXT_GAMMA,
             msaa: None,
             color_type: ColorType::RGBA8888,
             bit_depth: None,

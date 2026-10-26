@@ -43,7 +43,10 @@ use super::{
     window::{Cursor, Fit, WindowSpec},
 };
 use crate::{
-    canvas::Canvas, context::page::Page, context2d::Context2D, error::Error,
+    canvas::{Canvas, DEFAULT_TEXT_CONTRAST, DEFAULT_TEXT_GAMMA},
+    context::page::Page,
+    context2d::Context2D,
+    error::Error,
     gui::window::DEFAULT_BACKGROUND,
 };
 
@@ -173,8 +176,8 @@ impl Window {
                 height: canvas.height(),
                 cursor: "default".to_string(),
                 fit: Fit::ContainX,
-                text_contrast: 0.0,
-                text_gamma: 1.4,
+                text_contrast: DEFAULT_TEXT_CONTRAST,
+                text_gamma: DEFAULT_TEXT_GAMMA,
             },
             canvas,
             on_draw: None,

@@ -1918,13 +1918,17 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
 
   test("a stroke's pen is not sheared with the glyphs", () => {
     // strokeText against stroking the outline outlineText returns, which
-    // is the sheared outline under an unsheared pen.
+    // is the sheared outline under an unsheared pen. Text coverage goes
+    // through the text gamma and a path's does not, so both canvases take
+    // a gamma of 1 and no contrast, which leaves coverage as it is, and the
+    // two compare by shape alone.
     const W = 700,
-      H = 260;
+      H = 260,
+      linear = { textGamma: 1, textContrast: 0 };
     for (const angle of [30, 60]) {
       const font = `bold oblique ${angle}deg 100px Oswald`;
-      const stroked = new Canvas(W, H).getContext("2d"),
-        outlined = new Canvas(W, H).getContext("2d");
+      const stroked = new Canvas(W, H, linear).getContext("2d"),
+        outlined = new Canvas(W, H, linear).getContext("2d");
       for (const ctx of [stroked, outlined]) {
         ctx.font = font;
         ctx.lineWidth = 12;

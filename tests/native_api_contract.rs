@@ -4222,3 +4222,21 @@ fn a_fonts_line_height_spaces_wrapped_lines_in_pixels() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn a_canvas_rasterizes_text_with_chromiums_contrast_and_gamma() {
+    // Chromium's per-platform `SK_GAMMA_CONTRAST` and `SK_GAMMA_EXPONENT`,
+    // from its `skia/BUILD.gn`: what Chrome's text is drawn with.
+    let (contrast, gamma) = if cfg!(target_os = "macos") {
+        (0.0, 0.0)
+    } else if cfg!(target_os = "windows") {
+        (1.0, 0.0)
+    } else {
+        (0.2, 1.2)
+    };
+    let options = CanvasOptions::default();
+    assert_eq!(
+        (options.text_contrast, options.text_gamma),
+        (contrast, gamma)
+    );
+}
