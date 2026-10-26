@@ -4873,7 +4873,8 @@ describe("gradient interpolation", () => {
     // than trust them.
     "a98-rgb": [125, 0, 129, 255],
     "prophoto-rgb": [183, 4, 156, 255],
-    rec2020: [159, 19, 147, 255],
+    // CSS Color 4's 2.4 gamma; BT.2020's piecewise curve gives 159,19,147.
+    rec2020: [157, 18, 143, 255],
     lab: [190, 0, 135, 255],
     oklab: [138, 82, 161, 255],
     xyz: [184, 1, 187, 255],

@@ -62,6 +62,14 @@ window be changed after it opens.** No signature moves and nothing is removed.
   colour named in `rec2020` reads back from one as it was named.
   docs/browser-differences.md records Chrome's values.
 
+  `GradientColorSpace::Rec2020` mixes by the same curve. Skia's own
+  Rec. 2020 interpolation space uses BT.2020's piecewise curve, so the
+  gradient is now computed in a working space carrying the 2.4 gamma: a
+  `rgb(250 2 0)` to `rgb(0 0 254)` ramp reads 157, 18, 143 at its midpoint
+  where it read 159, 19, 147, in every geometry and on both engines. An SVG
+  export embeds such a gradient as an image, as it does a sweep, because
+  the SVG backend does not recognise the wrapped shader as a gradient.
+
   Migrate: a `rec2020` colour written for the old curve, with each
   component `c` above 0.081, is the same colour at
   `((c + 0.0993) / 1.0993) ^ (1 / 0.45 / 2.4)`.

@@ -141,12 +141,14 @@ impl CanvasGradient {
     ///
     /// SVG writes `linearGradient` and `radialGradient` and has nothing to
     /// say for a sweep, so a conic gradient's draws are rasterized into the
-    /// document rather than emitted with no fill at all.
+    /// document rather than emitted with no fill at all -- and so are a
+    /// linear or radial one's in a space with a working space of its own,
+    /// which the backend no longer recognises as a gradient.
     pub fn vector_features(&self) -> VectorFeatures {
         match &*self.gradient.borrow() {
             Gradient::Conic { .. } => VectorFeatures::EXOTIC_SHADER,
             Gradient::Linear { .. } | Gradient::Radial { .. } => {
-                VectorFeatures::PLAIN
+                self.color_space.vector_features()
             }
         }
     }
@@ -173,10 +175,10 @@ impl CanvasGradient {
             hue_method: self.hue_method.to_skia(),
         };
 
-        match &*self.gradient.borrow() {
+        let shader = match &*self.gradient.borrow() {
             // The clauses are on [`Gradient::paints_nothing`], which
             // `is_opaque` reads too.
-            ramp if ramp.paints_nothing() => Self::transparent(),
+            ramp if ramp.paints_nothing() => return Self::transparent(),
 
             Gradient::Linear {
                 start,
@@ -250,7 +252,9 @@ impl CanvasGradient {
                     Some(&rotated),
                 )
             }
-        }
+        }?;
+        // `None` for a space Skia cannot build, as for a shader it declines.
+        self.color_space.in_working_space(shader).ok()
     }
 
     pub fn add_color_stop(&mut self, offset: f32, color: Color4f) {
