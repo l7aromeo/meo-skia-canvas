@@ -277,9 +277,7 @@ impl ParagraphRecipe {
         if !drawn && edges.is_empty() {
             return (paragraph, None);
         }
-        let slots = self.slot_ranges(
-            &(0..=self.styles.len()).map(Some).collect::<Vec<_>>(),
-        );
+        let slots = self.slot_ranges();
         let (paints, sheared): (Vec<Paint>, Vec<bool>) = self
             .text_styles()
             .zip(once(self.base_oblique).chain(self.styles.iter().map(|s| s.1)))
@@ -300,8 +298,8 @@ impl ParagraphRecipe {
         let passes = Passes {
             #[cfg(test)]
             as_asked: self.as_asked(&text),
-            box_ranges: self.slot_ranges(&box_slots),
-            background_ranges: self.slot_ranges(&background_slots),
+            box_ranges: remap(&slots, &box_slots),
+            background_ranges: remap(&slots, &background_slots),
             slots,
             paints,
             sheared,
@@ -355,17 +353,15 @@ impl ParagraphRecipe {
     }
 
     /// The text each slot's style covers, in UTF-8 offsets into the
-    /// paragraph's text, in order, with what `slots` maps the slot to,
-    /// leaving out a slot it maps to `None`.
-    fn slot_ranges(
-        &self,
-        slots: &[Option<usize>],
-    ) -> Vec<(Range<usize>, usize)> {
-        let mut stack = vec![slots[0]];
-        let mut ranges: Vec<(Range<usize>, usize)> = Vec::new();
+    /// paragraph's text, in order, with the slot.
+    fn slot_ranges(&self) -> Vec<(Range<usize>, usize)> {
+        let mut stack = Vec::with_capacity(self.styles.len() + 1);
+        stack.push(0);
+        let mut ranges: Vec<(Range<usize>, usize)> =
+            Vec::with_capacity(self.steps.len());
         for step in &self.steps {
             match step {
-                Step::Push(at) => stack.push(slots[at + 1]),
+                Step::Push(at) => stack.push(at + 1),
                 Step::Pop if stack.len() > 1 => {
                     stack.pop();
                 }
@@ -373,18 +369,8 @@ impl ParagraphRecipe {
                 Step::Text(bytes) => {
                     // SAFETY: `stack` starts with the base style's slot and a
                     // pop never takes it, so it is never empty.
-                    let Some(index) = *stack.last().unwrap() else {
-                        continue;
-                    };
-                    match ranges.last_mut() {
-                        Some((last, at))
-                            if *at == index && last.end == bytes.start =>
-                        {
-                            last.end = bytes.end;
-                        }
-                        _ if bytes.is_empty() => {}
-                        _ => ranges.push((bytes.clone(), index)),
-                    }
+                    let index = *stack.last().unwrap();
+                    push_range(&mut ranges, bytes.clone(), index);
                 }
             }
         }
@@ -820,6 +806,38 @@ struct PaintedRun {
 /// origins are worked out from different clips, so their sums can part in
 /// the last bits.
 const SAME_PLACE: f32 = 1.0 / 64.0;
+
+/// `slots`, the text each slot covers, with each slot mapped through
+/// `map` and a slot it maps to `None` left out, neighbours mapped alike
+/// joined.
+fn remap(
+    slots: &[(Range<usize>, usize)],
+    map: &[Option<usize>],
+) -> Vec<(Range<usize>, usize)> {
+    let mut ranges = Vec::with_capacity(slots.len());
+    for (bytes, slot) in slots {
+        if let Some(index) = map[*slot] {
+            push_range(&mut ranges, bytes.clone(), index);
+        }
+    }
+    ranges
+}
+
+/// Adds `bytes` in `index` to `ranges`, joined to the last where it
+/// carries on from it in the same index, and nothing where it is empty.
+fn push_range(
+    ranges: &mut Vec<(Range<usize>, usize)>,
+    bytes: Range<usize>,
+    index: usize,
+) {
+    match ranges.last_mut() {
+        Some((last, at)) if *at == index && last.end == bytes.start => {
+            last.end = bytes.end;
+        }
+        _ if bytes.is_empty() => {}
+        _ => ranges.push((bytes, index)),
+    }
+}
 
 /// The glyph runs `Paragraph::visit` reports, each glyph once.
 ///
