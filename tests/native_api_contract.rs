@@ -3897,85 +3897,117 @@ fn a_wide_gamut_canvas_survives_being_drawn_into_another() -> Result<()> {
 /// region-sized surface, and Skia answers that by materializing the whole
 /// page and copying the sliver out -- so every op in the source ran however
 /// little of it showed. Replaying the picture into that surface lets Skia
-/// cull against its bounds instead.
+/// cull against its bounds instead. The crate reaches this by its own door,
+/// `capture`/`place_capture`, which handed over pixels without the picture
+/// beside them and so could not replay anything.
 ///
-/// A ratio, so the machine cancels out: a hundredfold heavier source cost 66
-/// times more before and does not now. The crate reaches this by its own
-/// door, `capture`/`place_capture`, which handed over pixels without the
-/// picture beside them and so could not replay anything.
+/// So the claim is a comparison with the page itself: drawing a 180x24
+/// region of a 5000-op source costs a small fraction of drawing that source
+/// whole, which it cannot if it rasterizes every op. Each trial times the two
+/// back to back, alternating which goes first, and the assertion takes the
+/// median of the trials' ratios. Load stretches both members of a pair alike
+/// and a stretched trial falls outside the median; a ratio of the fastest
+/// passes of two separate legs, which this replaced, reads high whenever
+/// contention lands on the short one -- it failed once on CI at 5.1 against a
+/// bound of 5.0 with nothing wrong.
+///
+/// The bound is a tenth. That allowance is the clipped draw's own cost: a
+/// fresh page, recording, the 4x4 readback, and replay culling each op
+/// against the region, which is per op but no pixels. Measured in a debug
+/// build with the machine at a load average near 94, eight runs: the region
+/// 0.03ms, the page 12 to 14ms, a median ratio of 0.0025 to 0.0028. With the
+/// region rasterized from the whole page instead, three runs gave medians of
+/// 0.95 to 0.98: the clipped draw then costs what the page does.
 #[test]
 fn a_clipped_nested_draw_does_not_cost_the_whole_page() {
     use std::time::Instant;
 
-    fn elapsed(ops: usize) -> f64 {
-        let mut inner = Canvas::new(1400.0, 1400.0);
-        inner.set_gpu(false);
-        {
-            let ctx = inner.context();
-            ctx.set_fill_style_css("#742").expect("a css colour");
-            ctx.fill_rect(0.0, 0.0, 1400.0, 1400.0);
-            for i in 0..ops {
-                let shade = (i % 12) as f32 / 12.0;
-                ctx.set_fill_style(RgbaLinear::opaque(shade, 0.4, 1.0 - shade));
-                ctx.fill_rect(
-                    ((i * 31) % 1400) as f32,
-                    ((i * 17) % 1400) as f32,
-                    260.0,
-                    140.0,
-                );
-            }
-        }
-        let mut source = Canvas::new(1400.0, 1400.0);
-        source.set_gpu(false);
-        source.context().draw_canvas(&mut inner, 0.0, 0.0);
+    /// Ops on the source page: enough that rasterizing them dominates the
+    /// page's fixed costs, so a whole-page draw is measurably the page.
+    const OPS: usize = 5000;
+    /// A clipped draw may cost this fraction of the whole page -- see above.
+    const ALLOWANCE: f64 = 0.1;
+    /// Paired trials whose median ratio is asserted; odd, so the median is
+    /// one of them.
+    const TRIALS: usize = 7;
 
-        let mut draw = || {
-            let mut dest = Canvas::new(1400.0, 1400.0);
-            dest.set_gpu(false);
-            {
-                let ctx = dest.context();
-                ctx.save();
+    let mut inner = Canvas::new(1400.0, 1400.0);
+    inner.set_gpu(false);
+    {
+        let ctx = inner.context();
+        ctx.set_fill_style_css("#742").expect("a css colour");
+        ctx.fill_rect(0.0, 0.0, 1400.0, 1400.0);
+        for i in 0..OPS {
+            let shade = (i % 12) as f32 / 12.0;
+            ctx.set_fill_style(RgbaLinear::opaque(shade, 0.4, 1.0 - shade));
+            ctx.fill_rect(
+                ((i * 31) % 1400) as f32,
+                ((i * 17) % 1400) as f32,
+                260.0,
+                140.0,
+            );
+        }
+    }
+    let mut source = Canvas::new(1400.0, 1400.0);
+    source.set_gpu(false);
+    source.context().draw_canvas(&mut inner, 0.0, 0.0);
+
+    let mut draw = |clipped: bool| {
+        let mut dest = Canvas::new(1400.0, 1400.0);
+        dest.set_gpu(false);
+        {
+            let ctx = dest.context();
+            ctx.save();
+            if clipped {
                 ctx.begin_path();
                 ctx.rect(0.0, 0.0, 180.0, 24.0);
                 ctx.clip(FillRule::NonZero);
-                ctx.draw_canvas(&mut source, 0.0, 0.0);
-                ctx.restore();
             }
-            let data = dest
-                .context()
-                .get_image_data(0.0, 0.0, 4.0, 4.0)
-                .expect("the page rasterizes");
-            data.pixels()[3]
-        };
-
-        draw(); // warm, so the first page's setup is not in the number
-
-        // The fastest of several passes rather than one. `cargo test` runs
-        // these in parallel, so any single pass can be stretched by whatever
-        // else holds a core -- and it stretches the cheap leg proportionally
-        // more than the expensive one, which is exactly the ratio being
-        // asserted. Load only ever adds time, so the minimum is the reading
-        // least contaminated by it.
-        let mut best = f64::INFINITY;
-        for _ in 0..5 {
-            let started = Instant::now();
-            let mut seen = 0u32;
-            for _ in 0..20 {
-                seen += draw() as u32;
-            }
-            assert_eq!(seen, 20 * 255, "every round actually drew");
-            best = best.min(started.elapsed().as_secs_f64() * 1e3);
+            ctx.draw_canvas(&mut source, 0.0, 0.0);
+            ctx.restore();
         }
-        eprintln!("ops={ops} -> {best:.1}ms");
-        best
-    }
+        let data = dest
+            .context()
+            .get_image_data(0.0, 0.0, 4.0, 4.0)
+            .expect("the page rasterizes");
+        assert_eq!(data.pixels()[3], 255, "the draw actually drew");
+    };
+    // Milliseconds per draw, over `rounds` draws.
+    let mut timed = |clipped: bool, rounds: usize| {
+        let started = Instant::now();
+        for _ in 0..rounds {
+            draw(clipped);
+        }
+        started.elapsed().as_secs_f64() * 1e3 / rounds as f64
+    };
 
-    let light = elapsed(200);
-    let heavy = elapsed(20000);
+    // Warm both paths, so neither first page's setup is in a number.
+    timed(true, 1);
+    timed(false, 1);
+
+    let mut ratios: Vec<(f64, f64, f64)> = (0..TRIALS)
+        .map(|trial| {
+            let (region, page) = match trial % 2 {
+                0 => {
+                    let region = timed(true, 20);
+                    (region, timed(false, 3))
+                }
+                _ => {
+                    let page = timed(false, 3);
+                    (timed(true, 20), page)
+                }
+            };
+            (region / page, region, page)
+        })
+        .collect();
+    ratios.sort_by(|a, b| a.0.total_cmp(&b.0));
+    eprintln!("region/page per trial, sorted: {ratios:.4?}");
+    let (median, region, page) = ratios[TRIALS / 2];
     assert!(
-        heavy < light * 5.0,
-        "a hundredfold heavier source must not cost proportionally more: \
-         {light:.1}ms against {heavy:.1}ms"
+        median < ALLOWANCE,
+        "a clipped draw must cost a fraction of the page: the median trial \
+         drew the region in {region:.2}ms and the page in {page:.2}ms, a \
+         ratio of {median:.3} against {ALLOWANCE}"
     );
 }
 
