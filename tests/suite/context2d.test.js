@@ -5576,3 +5576,206 @@ describe("text is drawn as Chrome draws it", () => {
     },
   );
 });
+
+// `fontKerning` and `textRendering`, as HTML's text preparation algorithm
+// hands them to CSS `font-kerning` and SVG `text-rendering`, and as Chrome
+// 152.0.7977.167 draws them on macOS.
+describe("fontKerning and textRendering", () => {
+  FontLibrary.use("KerningOswald", [
+    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+  ]);
+  const fresh = () => new Canvas(400, 160).getContext("2d");
+  const width = (font, text, set = {}) => {
+    const ctx = fresh();
+    ctx.font = font;
+    Object.assign(ctx, set);
+    return ctx.measureText(text).width;
+  };
+
+  test("start at auto, and are ignored for a name they do not have", () => {
+    const ctx = fresh();
+    assert.equal(ctx.fontKerning, "auto");
+    assert.equal(ctx.textRendering, "auto");
+    for (const [attr, written] of [
+      ["fontKerning", "NONE"],
+      ["fontKerning", "off"],
+      ["textRendering", "optimizespeed"],
+      ["textRendering", "GeometricPrecision"],
+      ["textRendering", "crisp-edges"],
+    ]) {
+      ctx[attr] = written;
+      assert.equal(ctx[attr], "auto", `${attr} = ${written}`);
+    }
+    for (const value of ["normal", "none", "auto"]) {
+      ctx.fontKerning = value;
+      assert.equal(ctx.fontKerning, value);
+    }
+    for (const value of [
+      "optimizeSpeed",
+      "optimizeLegibility",
+      "geometricPrecision",
+      "auto",
+    ]) {
+      ctx.textRendering = value;
+      assert.equal(ctx.textRendering, value);
+    }
+  });
+
+  // Chrome 152 keeps both through save and restore, returns both to auto
+  // on reset(), and leaves both alone when the font is set.
+  test("are saved, restored and reset, and survive a new font", () => {
+    const ctx = fresh();
+    ctx.fontKerning = "none";
+    ctx.textRendering = "optimizeSpeed";
+    ctx.save();
+    ctx.fontKerning = "normal";
+    ctx.textRendering = "geometricPrecision";
+    ctx.restore();
+    assert.deepEqual(
+      [ctx.fontKerning, ctx.textRendering],
+      ["none", "optimizeSpeed"],
+    );
+    ctx.font = "20px serif";
+    assert.deepEqual(
+      [ctx.fontKerning, ctx.textRendering],
+      ["none", "optimizeSpeed"],
+    );
+    ctx.reset();
+    assert.deepEqual([ctx.fontKerning, ctx.textRendering], ["auto", "auto"]);
+  });
+
+  test("none turns kerning off, whatever textRendering says", () => {
+    const font = "100px KerningOswald";
+    const kerned = width(font, "AVAVAV");
+    assert.equal(width(font, "AVAVAV", { fontKerning: "normal" }), kerned);
+    const unkerned = width(font, "AVAVAV", { fontKerning: "none" });
+    assert.ok(unkerned > kerned, `${unkerned} > ${kerned}`);
+    for (const textRendering of ["optimizeLegibility", "geometricPrecision"])
+      assert.equal(
+        width(font, "AVAVAV", { fontKerning: "none", textRendering }),
+        unkerned,
+        textRendering,
+      );
+    assert.equal(
+      width(font, "AVAVAV", { textRendering: "optimizeSpeed" }),
+      kerned,
+      "optimizeSpeed leaves kerning on",
+    );
+  });
+
+  test("optimizeSpeed turns the common ligatures off", () => {
+    const font = "100px KerningOswald";
+    const joined = width(font, "office fluffy");
+    assert.equal(
+      width(font, "office fluffy", { textRendering: "optimizeLegibility" }),
+      joined,
+    );
+    const apart = width(font, "office fluffy", {
+      textRendering: "optimizeSpeed",
+    });
+    assert.ok(apart > joined, `${apart} > ${joined}`);
+    // A ligature setting of the caller's own stands instead.
+    assert.equal(
+      width(font, "office fluffy", {
+        textRendering: "optimizeSpeed",
+        fontVariant: "common-ligatures",
+      }),
+      joined,
+    );
+  });
+
+  // Unhinted, as SVG says geometricPrecision usually is: the pixels
+  // `fontHinting = false` draws, at the same advances.
+  test("geometricPrecision draws outlines unhinted", () => {
+    const drawn = (set) => {
+      const ctx = fresh();
+      ctx.font = "13px KerningOswald";
+      Object.assign(ctx, set);
+      ctx.fillText("Hamburgefonstiv quick brown", 4, 40);
+      return [
+        Buffer.from(ctx.getImageData(0, 0, 400, 160).data).toString("base64"),
+        ctx.measureText("Hamburgefonstiv quick brown").width,
+      ];
+    };
+    const hinted = drawn({ fontHinting: true }),
+      unhinted = drawn({ fontHinting: false }),
+      precise = drawn({
+        fontHinting: true,
+        textRendering: "geometricPrecision",
+      });
+    assert.notEqual(
+      hinted[0],
+      unhinted[0],
+      "hinting must show for this to mean anything",
+    );
+    assert.equal(precise[0], unhinted[0]);
+    assert.equal(precise[1], hinted[1]);
+  });
+
+  // Chrome 152's own widths for macOS's Helvetica and Times, which both
+  // libraries draw through CoreText. Elsewhere the faces differ.
+  test(
+    "measures as Chrome does",
+    { skip: process.platform !== "darwin" },
+    () => {
+      const CHROME = [
+        [
+          "100px Helvetica",
+          "AVAVAV",
+          { auto: 363.33, none: 400.195, optimizeSpeed: 363.33 },
+        ],
+        [
+          "100px Helvetica",
+          "office fluffy",
+          { auto: 476.221, none: 477.979, optimizeSpeed: 474.463 },
+        ],
+        [
+          "100px Times",
+          "AVAVAV",
+          { auto: 368.848, none: 433.301, optimizeSpeed: 368.848 },
+        ],
+        [
+          "100px Times",
+          "To Wa Ty",
+          { auto: 389.014, none: 410.938, optimizeSpeed: 389.014 },
+        ],
+        [
+          "100px Times",
+          "office fluffy",
+          {
+            auto: 473.145,
+            none: 474.902,
+            optimizeSpeed: 482.324,
+            noneAndOptimizeSpeed: 485.84,
+          },
+        ],
+        [
+          "13px Times",
+          "office fluffy",
+          {
+            auto: 61.509,
+            none: 61.737,
+            optimizeSpeed: 62.702,
+            noneAndOptimizeSpeed: 63.159,
+          },
+        ],
+      ];
+      const wrong = [];
+      for (const [font, text, expected] of CHROME)
+        for (const [setting, chrome] of Object.entries(expected)) {
+          // Both together: kerning off and the common ligatures off.
+          const set = {
+            none: { fontKerning: "none" },
+            noneAndOptimizeSpeed: {
+              fontKerning: "none",
+              textRendering: "optimizeSpeed",
+            },
+          }[setting] ?? { textRendering: setting };
+          const here = width(font, text, set);
+          if (Math.abs(here - chrome) > 0.01)
+            wrong.push(`${font} ${text} ${setting}: ${here}, Chrome ${chrome}`);
+        }
+      assert.deepEqual(wrong, []);
+    },
+  );
+});

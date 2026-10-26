@@ -1040,6 +1040,22 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Added
 
+- **`ctx.fontKerning` and `ctx.textRendering`, the Canvas standard's two
+  remaining text attributes.** Setting either was a plain property that did
+  nothing. `fontKerning` takes `"auto"`, `"normal"` or `"none"`, and
+  `"none"` lays text out without the font's kerning; `textRendering` takes
+  `"auto"`, `"optimizeSpeed"`, `"optimizeLegibility"` or
+  `"geometricPrecision"`, with the meanings Chrome 152 gives SVG's
+  keywords: `"optimizeSpeed"` turns the common ligatures off,
+  `"optimizeLegibility"` draws as `"auto"`, and `"geometricPrecision"`
+  draws unhinted whatever `fontHinting` says. On macOS the widths match
+  Chrome's to a hundredth of a pixel: "AVAVAV" in 100px Times measures
+  433.30 unkerned and "office fluffy" 482.32 under `"optimizeSpeed"`. Both
+  match their names exactly, ignore any other value, are kept by `save()`
+  and `restore()`, return to `"auto"` on `reset()`, and are left alone by
+  `font`. A ligature set through `fontVariant` stands instead of
+  `"optimizeSpeed"`'s.
+
 - **`fontStyle.obliqueAngle` sets a `Paragraph` oblique's angle.** A range
   with `slant: 2` leaned by 14deg, with no way to ask for another, where
   `ctx.font = "oblique 10deg ..."` draws at ten. `{ slant: 2,

@@ -44,6 +44,8 @@ const TEXT_VALUES = {
   set_direction: ["rtl"],
   set_lineDashFit: ["move"],
   set_fontStretchText: ["condensed"],
+  set_fontKerning: ["none"],
+  set_textRendering: ["optimizeSpeed"],
   fillTextAt: ["Wg"],
   fillTextIn: ["Wg"],
   strokeTextAt: ["Wg"],

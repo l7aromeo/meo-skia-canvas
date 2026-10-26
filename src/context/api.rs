@@ -12,7 +12,9 @@ use std::cell::RefCell;
 use super::{BoxedContext2D, Context2D, Dye, page::ExportOptions};
 use crate::{
     color_filter::BoxedColorFilter,
-    context2d::{decoration_from_css, font_spec_from_css},
+    context2d::{
+        FontKerning, TextRendering, decoration_from_css, font_spec_from_css,
+    },
     css::parse_filter,
     export::VectorFeatures,
     filter::FilterOp,
@@ -257,6 +259,20 @@ verbs! {
         // written as a string, and crossing when it is anything else.
         if let Some(color) = css_to_color(shadowColor) {
             ctx.state.shadow_color = color;
+        }
+    },
+
+    // Enumerations, matched exactly and ignored when they name no value, as
+    // HTML's setters are; the types say what each value does.
+    set_fontKerning as SetFontKerning (fontKerning @ text) => |ctx| {
+        if let Some(kerning) = FontKerning::from_keyword(fontKerning) {
+            ctx.state.font_kerning = kerning;
+        }
+    },
+
+    set_textRendering as SetTextRendering (textRendering @ text) => |ctx| {
+        if let Some(rendering) = TextRendering::from_keyword(textRendering) {
+            ctx.state.text_rendering = rendering;
         }
     },
 
@@ -1719,6 +1735,18 @@ pub fn set_wordSpacing(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
 // -- non-standard typography extensions
 // --------------------------------------------
+
+pub fn get_fontKerning(mut cx: FunctionContext) -> JsResult<JsString> {
+    let this = cx.argument::<BoxedContext2D>(0)?;
+    let kerning = this.borrow().state.font_kerning;
+    Ok(cx.string(kerning.keyword()))
+}
+
+pub fn get_textRendering(mut cx: FunctionContext) -> JsResult<JsString> {
+    let this = cx.argument::<BoxedContext2D>(0)?;
+    let rendering = this.borrow().state.text_rendering;
+    Ok(cx.string(rendering.keyword()))
+}
 
 pub fn get_fontHinting(mut cx: FunctionContext) -> JsResult<JsBoolean> {
     let this = cx.argument::<BoxedContext2D>(0)?;

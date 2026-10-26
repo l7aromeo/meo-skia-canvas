@@ -3072,7 +3072,8 @@ mod hinting {
     };
     use crate::{
         Canvas, Font as CanvasFont, FontLibrary as Library, RichTextSpan,
-        TextEngine, TextStyle as SpanStyle, node::oblique::ParagraphRecipe,
+        TextEngine, TextRendering, TextStyle as SpanStyle,
+        node::oblique::ParagraphRecipe,
     };
     use skia_safe::{FontHinting, Paint};
 
@@ -3139,6 +3140,27 @@ mod hinting {
             hinting.iter().all(|h| *h == expected),
             "{what}: {hinting:?}, expected {expected:?}"
         );
+    }
+
+    /// `geometricPrecision` lays every run out unhinted, whatever
+    /// `fontHinting` says: one hinting level for the whole layout. Asking the
+    /// collection for unhinted faces while the run style still carries Slight
+    /// would draw unhinted metrics with hinted glyphs.
+    #[test]
+    fn geometric_precision_lays_every_run_out_unhinted() {
+        register();
+        let mut canvas = Canvas::new(200.0, 50.0);
+        let ctx = canvas.context();
+        ctx.set_font(&CanvasFont::new(FAMILY, SIZE));
+        ctx.set_font_hinting(true);
+        ctx.set_text_rendering(TextRendering::GeometricPrecision);
+        let mut layout = Typesetter::new(&ctx.inner.state, TEXT, None)
+            .layout(&Paint::default());
+        let hinting: Vec<FontHinting> = glyph_runs(&mut layout.paragraph)
+            .iter()
+            .map(|run| run.font.hinting())
+            .collect();
+        all(&hinting, FontHinting::None, "geometricPrecision");
     }
 
     #[test]
