@@ -2753,9 +2753,7 @@ describe("Context2D", () => {
 
     // CSS 2.1 Appendix E paints a line box at a time, and a wrapped line's
     // overline goes beneath its own glyphs but over the line above's, which
-    // were painted before it. Chrome 156 paints the second line's
-    // text-shadow over the first line's glyphs the same way, red over every
-    // black pixel of them. 48px Oswald's wrapped lines are 71px apart and
+    // were painted before it, as in Chrome 156. 48px Oswald's wrapped lines are 71px apart and
     // its ascent 57.26, so the second line's 6px overline lies about 8 to
     // 14px below the first line's baseline, across its descenders.
     test("a wrapped line's overline lies over the line above's glyphs", () => {

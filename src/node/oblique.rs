@@ -753,13 +753,14 @@ impl StyleDecoration {
 /// What paints a paragraph that has an oblique range, a decoration, a shadow
 /// or a background, or a ligature in two colours -- see
 /// [`Self::ligature_edges`]: SkParagraph lays it out, and this draws every
-/// line of it
-/// from the glyph runs `Paragraph::visit` reports, in the order CSS 2.1
-/// Appendix E paints a line box's inline content -- for each line, its boxes'
-/// backgrounds, then their text shadows, underlines and overlines, glyphs,
-/// and lines-through. SkParagraph paints a pass over every line before the
-/// next pass; one line's shadow reaching the line above lies over that
-/// line's glyphs, as in Chrome, only when the lines are painted one by one.
+/// line of it from the glyph runs `Paragraph::visit` reports, in three
+/// passes: every line's backgrounds, then every line's text shadows, then
+/// each line's underlines and overlines, glyphs and lines-through before the
+/// next line's. The last pass is CSS 2.1 Appendix E's order for a line box,
+/// so a wrapped line's overline lies over the descenders of the line above,
+/// as in Chrome. The shadows come out of it because CSS Text Decoration 3
+/// section 4 keeps a shadow beneath text -- its own, and its neighbours' --
+/// where Chrome paints a later span's or line's shadow over earlier glyphs.
 pub(crate) struct Passes {
     /// The text each style covers, in UTF-8 offsets into the paragraph's
     /// text, in order, with its slot -- see [`ParagraphRecipe::shadows`].
@@ -1005,13 +1006,12 @@ impl Passes {
             return;
         }
         let base = Paint::default();
+        let runs_on = |line: usize| {
+            let start = self.runs.partition_point(|run| run.line < line);
+            let end = self.runs.partition_point(|run| run.line <= line);
+            &self.runs[start..end]
+        };
         for line in 0..self.lines {
-            let runs = {
-                let start = self.runs.partition_point(|run| run.line < line);
-                let end = self.runs.partition_point(|run| run.line <= line);
-                &self.runs[start..end]
-            };
-            let spans = decorate::on_line(&self.spans, line);
             for span in decorate::on_line(&self.background_spans, line) {
                 let background = &self.backgrounds[span.box_index];
                 let baseline = origin.y + span.y;
@@ -1025,7 +1025,17 @@ impl Passes {
                     &background.paint,
                 );
             }
-            for run in runs {
+        }
+        // Every line's shadows before any line's glyphs: CSS Text Decoration
+        // 3 section 4 says shadows "never overlay the text itself" and that
+        // UAs "should avoid painting text shadows over text in adjacent
+        // elements", so a shadow stays beneath the glyphs of its own span,
+        // of the spans before it on its line, and of the lines above.
+        // Chrome paints each span's shadow with its text instead, which puts
+        // a later shadow over earlier glyphs -- docs/browser-differences.md.
+        for line in 0..self.lines {
+            let spans = decorate::on_line(&self.spans, line);
+            for run in runs_on(line) {
                 for shadow in &self.shadows[run.slot] {
                     if let Some(paint) = shadow_paint(shadow) {
                         run.draw(canvas, origin + shadow.offset, &paint);
@@ -1046,6 +1056,9 @@ impl Passes {
                     }
                 }
             }
+        }
+        for line in 0..self.lines {
+            let spans = decorate::on_line(&self.spans, line);
             decorate::paint(
                 canvas,
                 spans,
@@ -1054,7 +1067,7 @@ impl Passes {
                 Layer::Beneath,
                 &base,
             );
-            for run in runs {
+            for run in runs_on(line) {
                 run.draw(canvas, origin, &self.paints[run.slot]);
             }
             decorate::paint(

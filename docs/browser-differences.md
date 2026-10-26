@@ -213,6 +213,33 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   pattern: a dot `t` long and a gap of `t`, a dash `2t` and a gap of `t`,
   from the box's left edge.
 
+- _A text shadow stays beneath every glyph it reaches -- its own span's,
+  the spans before it on its line, and the lines above -- where Chrome paints
+  a later span's or line's shadow over them._ CSS Text Decoration 3 section 4
+  puts an element's shadow "at a stack level between the element's border
+  and/or background (if present) and the elements text and text
+  decoration", says shadows "may thus overlay each other, but they never
+  overlay the text itself", and adds "UAs should avoid painting text shadows
+  over text in adjacent elements belonging to the same stack level and
+  stacking context." It calls the exact stacking UA-defined, but its
+  preference is plain, so a `Paragraph` paints every line's shadows before
+  any line's glyphs. Chrome does not, on a line or across lines:
+  - Chrome 152, `H<span style="text-shadow:-200px 0 red">H</span>` at 400px
+    Helvetica: the second H's shadow covers the first H's right stem, its
+    crossbar red across the black.
+  - Chrome 156, "HHH HHH" in 48px Oswald wrapped onto two lines with a red
+    shadow cast up as far as the lines are apart: every black pixel of the
+    first line is under the second line's shadow.
+
+  Here the solid pixels of those glyphs are drawn as they are with no shadow
+  at all. Within one span the order is section 5.1's, bottommost first:
+  shadows, underlines and overlines, glyphs, line-through. The lines and
+  glyphs are still painted a line box at a time, as CSS 2.1 Appendix E
+  paints them, so a wrapped line's overline lies over the descenders of the
+  line above, as in Chrome; only the shadows are taken out of that order.
+  Pinned in tests/suite/paragraph.test.js, "a text shadow's stack level" and
+  "a wrapped line's shadow".
+
 - _A wavy line keeps Chrome's proportions without its pixel constants, and
   hangs from the font's top._ Chrome 153's wave on a 96px Oswald underline,
   read at four times the size in quarter pixels -- the period from the

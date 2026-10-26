@@ -2083,15 +2083,15 @@ describe("a paragraph's background", () => {
   });
 });
 
-// CSS 2.1 Appendix E paints a line box at a time: a wrapped line's text
-// shadow goes over the line above's glyphs, painted before it. Chrome 156
-// draws "HHH HHH" in 48px Oswald wrapped onto two lines 60px apart, with a
-// red shadow 60px up, as two lines of red: every black pixel of the first
-// line is under the second line's shadow. SkParagraph drew every line's
-// shadows before any line's glyphs, leaving the first line black. Here the
-// shadow goes up as far as the lines are apart.
+// A wrapped line's text shadow stays beneath the line above's glyphs: CSS
+// Text Decoration 3 section 4 says shadows "never overlay the text itself".
+// Chrome 156 differs -- it draws "HHH HHH" in 48px Oswald wrapped onto two
+// lines, with a red shadow cast straight up as far as the lines are apart, as two
+// lines of red, every black pixel of the first line under the second line's
+// shadow -- and docs/browser-differences.md says so. Here the first line's
+// solid glyph pixels are drawn as they are without the shadow.
 describe("a wrapped line's shadow", () => {
-  test("lies over the line above's glyphs", () => {
+  test("stays beneath the line above's glyphs", () => {
     FontLibrary.use("ShadowOrderOswald", [
       "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
     ]);
@@ -2107,22 +2107,151 @@ describe("a wrapped line's shadow", () => {
       },
       [first, second] = laidOut([]).getLineMetrics(),
       apart = Math.round(second.baseline) - Math.round(first.baseline),
-      p = laidOut([{ color: "red", offset: [0, -apart], blurRadius: 0 }]),
-      ctx = new Canvas(300, 200).getContext("2d");
-    ctx.fillStyle = "white";
-    ctx.fillRect(0, 0, 300, 200);
-    ctx.drawParagraph(p, 10, 10);
-    const { data } = ctx.getImageData(0, 0, 300, 200),
       // Down to the first line's baseline: the second line's glyphs start
       // below it.
-      bottom = 10 + Math.round(first.baseline);
-    let black = 0,
+      bottom = 10 + Math.round(first.baseline),
+      drawn = (p) => {
+        const canvas = new Canvas(300, 200);
+        canvas.gpu = false;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "white";
+        ctx.fillRect(0, 0, 300, 200);
+        ctx.drawParagraph(p, 10, 10);
+        return ctx.getImageData(0, 0, 300, bottom).data;
+      },
+      control = drawn(laidOut([])),
+      shadowed = drawn(
+        // Shifted sideways too, so the part beside each glyph shows.
+        laidOut([{ color: "red", offset: [6, -apart], blurRadius: 0 }]),
+      );
+    let solid = 0,
+      changed = 0,
       red = 0;
-    for (let i = 0; i < bottom * 300 * 4; i += 4) {
-      if (data[i] < 100 && data[i + 1] < 100) black++;
-      if (data[i] > 160 && data[i + 1] < 100) red++;
+    for (let i = 0; i < control.length; i += 4) {
+      if (shadowed[i] > 160 && shadowed[i + 1] < 100) red++;
+      // Fully covered pixels only: an antialiased edge blends with whatever
+      // lies beneath it, red as much as white.
+      if (control[i] || control[i + 1] || control[i + 2]) continue;
+      solid++;
+      if (shadowed[i] !== control[i] || shadowed[i + 1] !== control[i + 1])
+        changed++;
     }
-    assert.equal(black, 0, "the second line's shadow covers the first");
-    assert.ok(red > 0, "and is drawn there");
+    assert.ok(red > 0, "the second line's shadow must reach the first");
+    assert.ok(solid > 0);
+    assert.equal(changed, 0, "the first line's solid glyph pixels");
+  });
+});
+
+// Where a shadow sits among the glyphs and lines it is drawn with. CSS Text
+// Decoration 3 section 4 puts an element's shadow "at a stack level between
+// the element's border and/or background (if present) and the elements text
+// and text decoration", and adds "UAs should avoid painting text shadows over
+// text in adjacent elements belonging to the same stack level and stacking
+// context". A later span's shadow therefore stays beneath an earlier span's
+// glyphs on the same line, where Chrome 152 paints it over them --
+// docs/browser-differences.md says so, and "a wrapped line's shadow" above
+// holds the same across lines. Section 5.1 orders one span's own
+// layers, bottommost first: shadows, underlines, overlines, line-through.
+describe("a text shadow's stack level", () => {
+  const { Canvas, TextDecoration } = require("../../lib");
+  FontLibrary.use("ShadowOrderOswald", [
+    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+  ]);
+  const W = 400,
+    H = 200,
+    base = {
+      fontFamilies: ["ShadowOrderOswald"],
+      fontSize: 120,
+      color: "black",
+    };
+  const draw = (spans) => {
+    const pb = ParagraphBuilder.Make({ textStyle: base });
+    for (const style of spans) {
+      pb.pushStyle({ ...base, ...style });
+      pb.addText("H");
+      pb.pop();
+    }
+    const p = pb.build();
+    p.layout(10000);
+    const canvas = new Canvas(W, H);
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, W, H);
+    ctx.drawParagraph(p, 20, 20);
+    return ctx.getImageData(0, 0, W, H).data;
+  };
+  const inkOf = (data, test) => {
+    let n = 0;
+    for (let i = 0; i < data.length; i += 4)
+      if (test(data[i], data[i + 1], data[i + 2])) n++;
+    return n;
+  };
+  // The pixels a layer covers entirely in `control`, and how many of them
+  // `shadowed` drew differently: none, where the shadow lies beneath. An
+  // antialiased edge blends with whatever is under it, so only solid pixels
+  // say which layer is on top.
+  const covered = (control, shadowed, solid) => {
+    let solidPixels = 0,
+      changed = 0;
+    for (let i = 0; i < control.length; i += 4) {
+      if (!solid(control[i], control[i + 1], control[i + 2])) continue;
+      solidPixels++;
+      if (
+        control[i] !== shadowed[i] ||
+        control[i + 1] !== shadowed[i + 1] ||
+        control[i + 2] !== shadowed[i + 2]
+      )
+        changed++;
+    }
+    return { solidPixels, changed };
+  };
+  const black = (r, g, b) => r === 0 && g === 0 && b === 0,
+    red = (r, g, b) => r > 200 && g < 60 && b < 60,
+    blue = (r, g, b) => b === 255 && r === 0 && g === 0;
+  const advance = (() => {
+    const p = ParagraphBuilder.Make({ textStyle: base }).addText("H").build();
+    p.layout(10000);
+    return p.getMaxIntrinsicWidth();
+  })();
+
+  test("a later span's shadow stays beneath an earlier span's glyphs", () => {
+    // The second H's shadow is cast half an advance back, across the first
+    // H's right stem.
+    const control = draw([{}, {}]),
+      shadowed = draw([
+        {},
+        { shadows: [{ color: "red", offset: [-advance / 2, 0] }] },
+      ]);
+    assert.ok(
+      inkOf(shadowed, red) > 0,
+      "the shadow must show for this to mean anything",
+    );
+    const glyphs = covered(control, shadowed, black);
+    assert.ok(glyphs.solidPixels > 0);
+    assert.equal(glyphs.changed, 0, "an earlier glyph's solid pixels");
+  });
+
+  test("a span's shadow stays beneath its own glyphs and lines", () => {
+    const lines = {
+      decoration: TextDecoration.Underline | TextDecoration.LineThrough,
+      decorationColor: "blue",
+    };
+    const control = draw([lines]),
+      shadowed = draw([
+        { ...lines, shadows: [{ color: "red", offset: [4, 4] }] },
+      ]);
+    assert.ok(
+      inkOf(shadowed, red) > 0,
+      "the shadow must show for this to mean anything",
+    );
+    for (const [what, solid] of [
+      ["glyphs", black],
+      ["lines", blue],
+    ]) {
+      const layer = covered(control, shadowed, solid);
+      assert.ok(layer.solidPixels > 0, what);
+      assert.equal(layer.changed, 0, what);
+    }
   });
 });

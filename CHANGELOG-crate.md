@@ -49,10 +49,7 @@ window be changed after it opens.** No signature moves and nothing is removed.
   line boxes, so a line's overline lies over the descenders of the line
   above. A named decoration colour takes `set_global_alpha`'s alpha, where
   at 0.5 a red underline was drawn opaque. In a `Paragraph`, a `TextStyle`'s
-  `shadows` shadow its decorations as well as its glyphs, and a background
-  stays beneath them; a line's shadows go over the line above. Where this
-  differs from Chrome -- the line-through, the double line's gap, the wave's
-  constants -- is in docs/browser-differences.md, with the measurements.
+  `shadows` shadow its decorations as well as its glyphs, and a background stays beneath them; a shadow stays beneath every glyph, its own span's, the spans before it and the lines above, as CSS Text Decoration 3 section 4 asks. Where this differs from Chrome -- the line-through, the double line's gap, the wave's constants, a shadow over earlier glyphs -- is in docs/browser-differences.md, with the measurements.
 
 - **A `Paragraph` background covers its font's content area, at any line
   height.** A style's background was painted over the line's height: with a
