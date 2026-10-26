@@ -399,9 +399,12 @@ gamma." Drafts before that used BT.2020's piecewise inverse OETF, and Chrome
 Every figure in the right-hand column is the standard's arithmetic, worked
 in `f64` from its sample code. A Rec. 2020 canvas stores by the same curve,
 so a colour named in `rec2020` reads back from one as the components it was
-named with. Skia's own Rec. 2020 tag is a pure 2.4 gamma -- its CICP
-`REC2020_10BIT` and `REC2020_12BIT` alias `REC709` -- so the colour is handed
-to Skia with its tag and nothing converts it on the way. Pinned in
+named with. The colour space this library builds for `rec2020` is a CICP
+one, BT.2020 primaries with transfer characteristic 1, which Skia's
+`named_transfer_fn::REC709` makes a pure 2.4 gamma, so the colour is handed
+to Skia with that tag and nothing converts it on the way. Skia's own
+`SkNamedTransferFn::kRec2020` is BT.2020's piecewise curve, and is not
+used for it. Pinned in
 `a_rec2020_colour_takes_css_color_4s_curve_on_every_canvas` on sRGB,
 Display P3 and Rec. 2020 canvases.
 
