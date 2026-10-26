@@ -1268,6 +1268,22 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
         ctx::set_wordSpacing,
     )?;
     cx.export_function(
+        "CanvasRenderingContext2D_get_fontKerning",
+        ctx::get_fontKerning,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_set_fontKerning",
+        ctx::set_fontKerning,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_get_textRendering",
+        ctx::get_textRendering,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_set_textRendering",
+        ctx::set_textRendering,
+    )?;
+    cx.export_function(
         "CanvasRenderingContext2D_get_fontHinting",
         ctx::get_fontHinting,
     )?;

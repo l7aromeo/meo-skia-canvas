@@ -3475,7 +3475,13 @@ export type CanvasLineCap = "butt" | "round" | "square";
  * @category Drawing Styles
  */
 export type CanvasLineJoin = "bevel" | "miter" | "round";
-// type CanvasFontKerning = "auto" | "none" | "normal";
+/**
+ * Whether kerning is applied: `"auto"` and `"normal"` apply the font's
+ * kerning, as Chrome does, and `"none"` does not.
+ *
+ * @category Text and Fonts
+ */
+export type CanvasFontKerning = "auto" | "none" | "normal";
 /**
  * The small-caps and related capitalisation features, where the font provides them.
  *
@@ -3489,7 +3495,16 @@ export type CanvasFontVariantCaps =
   | "small-caps"
   | "titling-caps"
   | "unicase";
-// type CanvasTextRendering = "auto" | "geometricPrecision" | "optimizeLegibility" | "optimizeSpeed";
+/**
+ * What text is drawn for, with the meanings Chrome gives the SVG keywords:
+ * `"auto"` and `"optimizeLegibility"` alike, `"optimizeSpeed"` without the
+ * font's common ligatures, and `"geometricPrecision"` with the outlines
+ * unhinted.
+ *
+ * @category Text and Fonts
+ */
+export type CanvasTextRendering =
+  "auto" | "geometricPrecision" | "optimizeLegibility" | "optimizeSpeed";
 
 /**
  * A displacement, as an `[x, y]` pair or one number used for both axes.
@@ -4217,11 +4232,25 @@ export interface CanvasTextDrawingStyles {
    */
   fontVariantCaps: CanvasFontVariantCaps;
 
-  // UNIMPLEMENTED
-  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/textRendering) */
-  // textRendering: CanvasTextRendering;
-  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/fontKerning) */
-  // fontKerning: CanvasFontKerning;
+  /**
+   * What text is drawn for -- see {@link CanvasTextRendering}.
+   * `"geometricPrecision"` draws unhinted whatever `fontHinting` says, as
+   * SVG 2 asks of it; the other three leave hinting to `fontHinting`, and
+   * `"optimizeSpeed"` changes no hinting. A ligature set through
+   * {@link CanvasRenderingContext2D.fontVariant} stands instead of
+   * `"optimizeSpeed"`'s. An unrecognised value, `"optimizespeed"` among
+   * them, is ignored.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/textRendering)
+   */
+  textRendering: CanvasTextRendering;
+  /**
+   * Whether kerning is applied -- see {@link CanvasFontKerning}. Setting
+   * `font` leaves it as it was. An unrecognised value is ignored.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/fontKerning)
+   */
+  fontKerning: CanvasFontKerning;
 }
 
 /**
@@ -4318,7 +4347,10 @@ export interface CanvasRenderingContext2D
    * outlines fitted to the pixel grid vertically, with every advance as
    * designed. Off draws each glyph as its outline is designed -- undilated
    * on macOS, unhinted under FreeType -- and no text moves either way. A
-   * `Paragraph` is always drawn hinted.
+   * `Paragraph` is always drawn hinted. It governs text whose
+   * `textRendering` is `"auto"`, `"optimizeLegibility"` or
+   * `"optimizeSpeed"`; `"geometricPrecision"` draws unhinted whatever this
+   * says.
    *
    * 🧪 Not in the HTML Canvas standard.
    */

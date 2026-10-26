@@ -12604,3 +12604,120 @@ fn a_half_leading_paragraph_is_not_laid_out_as_another_was() {
         }
     }
 }
+
+/// The width of `text` in 100px Oswald with `settings` applied.
+fn oswald_width(text: &str, settings: impl Fn(&mut Context2D)) -> f32 {
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::new(oswald(), 100.0));
+    settings(ctx);
+    ctx.measure_text(text, None).width
+}
+
+#[test]
+fn font_kerning_and_text_rendering_are_state_like_the_canvas_attributes() {
+    // Chrome 152: both start at auto, are kept by save and restore, return
+    // to auto on reset(), and survive a new font.
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    assert_eq!(ctx.font_kerning(), FontKerning::Auto);
+    assert_eq!(ctx.text_rendering(), TextRendering::Auto);
+    ctx.set_font_kerning(FontKerning::None);
+    ctx.set_text_rendering(TextRendering::OptimizeSpeed);
+    ctx.save();
+    ctx.set_font_kerning(FontKerning::Normal);
+    ctx.set_text_rendering(TextRendering::GeometricPrecision);
+    ctx.restore();
+    assert_eq!(ctx.font_kerning(), FontKerning::None);
+    assert_eq!(ctx.text_rendering(), TextRendering::OptimizeSpeed);
+    ctx.set_font(&Font::new("serif", 20.0));
+    assert_eq!(ctx.font_kerning(), FontKerning::None);
+    assert_eq!(ctx.text_rendering(), TextRendering::OptimizeSpeed);
+    ctx.reset();
+    assert_eq!(ctx.font_kerning(), FontKerning::Auto);
+    assert_eq!(ctx.text_rendering(), TextRendering::Auto);
+}
+
+#[test]
+fn font_kerning_none_lays_text_out_unkerned_whatever_text_rendering_says() {
+    let kerned = oswald_width("AVAVAV", |_| {});
+    assert_eq!(
+        oswald_width("AVAVAV", |ctx| ctx.set_font_kerning(FontKerning::Normal)),
+        kerned
+    );
+    let unkerned =
+        oswald_width("AVAVAV", |ctx| ctx.set_font_kerning(FontKerning::None));
+    assert!(unkerned > kerned, "{unkerned} > {kerned}");
+    for rendering in [
+        TextRendering::OptimizeLegibility,
+        TextRendering::GeometricPrecision,
+    ] {
+        let width = oswald_width("AVAVAV", |ctx| {
+            ctx.set_font_kerning(FontKerning::None);
+            ctx.set_text_rendering(rendering);
+        });
+        assert_eq!(width, unkerned, "{rendering:?}");
+    }
+    // `optimizeSpeed` leaves kerning to `fontKerning`, as in Chrome.
+    assert_eq!(
+        oswald_width("AVAVAV", |ctx| {
+            ctx.set_text_rendering(TextRendering::OptimizeSpeed)
+        }),
+        kerned
+    );
+}
+
+#[test]
+fn optimize_speed_turns_the_common_ligatures_off_unless_the_caller_set_them() {
+    let joined = oswald_width("office fluffy", |_| {});
+    assert_eq!(
+        oswald_width("office fluffy", |ctx| {
+            ctx.set_text_rendering(TextRendering::OptimizeLegibility)
+        }),
+        joined
+    );
+    let apart = oswald_width("office fluffy", |ctx| {
+        ctx.set_text_rendering(TextRendering::OptimizeSpeed)
+    });
+    assert!(apart > joined, "{apart} > {joined}");
+    // A `liga` of the caller's own stands, as `font-variant-ligatures`
+    // outranks `text-rendering` in CSS.
+    assert_eq!(
+        oswald_width("office fluffy", |ctx| {
+            ctx.set_font_variant(
+                FontVariantCaps::Normal,
+                &[FontFeature::on("liga"), FontFeature::on("clig")],
+            );
+            ctx.set_text_rendering(TextRendering::OptimizeSpeed);
+        }),
+        joined
+    );
+}
+
+#[test]
+fn geometric_precision_draws_outlines_unhinted_whatever_font_hinting_says() {
+    // SVG 2 section 13.10.2: it "will usually cause the user agent to suspend
+    // the use of hinting". So the pixels `set_font_hinting(false)` draws, at
+    // the same advances.
+    let drawn = |settings: &dyn Fn(&mut Context2D)| {
+        let mut canvas = Canvas::new(400.0, 60.0);
+        let ctx = canvas.context();
+        ctx.set_font(&Font::new(oswald(), 13.0));
+        settings(ctx);
+        ctx.fill_text("Hamburgefonstiv quick brown", 4.0, 40.0, None);
+        let width = ctx.measure_text("Hamburgefonstiv quick brown", None).width;
+        (pixels(&mut canvas), width)
+    };
+    let hinted = drawn(&|ctx| ctx.set_font_hinting(true));
+    let unhinted = drawn(&|ctx| ctx.set_font_hinting(false));
+    let precise = drawn(&|ctx| {
+        ctx.set_font_hinting(true);
+        ctx.set_text_rendering(TextRendering::GeometricPrecision);
+    });
+    assert_ne!(
+        hinted.0, unhinted.0,
+        "hinting must show for this to mean anything"
+    );
+    assert_eq!(precise.0, unhinted.0);
+    assert_eq!(precise.1, hinted.1);
+}

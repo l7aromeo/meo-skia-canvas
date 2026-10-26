@@ -23,6 +23,7 @@ pub mod api;
 pub mod page;
 
 use crate::{
+    context2d::{FontKerning, TextRendering},
     css::{FontUnits, ROOT_FONT_PX},
     export::VectorFeatures,
     font::GenericFamily,
@@ -207,6 +208,8 @@ pub struct State {
     pub font_variant: String,
     pub font_width: Width,
     pub font_hinting: bool,
+    pub font_kerning: FontKerning,
+    pub text_rendering: TextRendering,
     pub char_style: TextStyle,
     pub graf_style: ParagraphStyle,
     /// Whether `direction` is the initial `inherit` rather than an explicit
@@ -288,6 +291,8 @@ impl Default for State {
             font_variant: "normal".to_string(),
             font_width: Width::NORMAL,
             font_hinting: true,
+            font_kerning: FontKerning::default(),
+            text_rendering: TextRendering::default(),
             char_style,
             graf_style,
             text_baseline: Baseline::Alphabetic,
@@ -325,6 +330,17 @@ pub(crate) fn initial_root_face() -> Option<Typeface> {
 const ROOT_FONT_FAMILY: GenericFamily = GenericFamily::Serif;
 
 impl State {
+    /// Whether text is drawn hinted: as `fontHinting` says, except under
+    /// `textRendering = "geometricPrecision"`, which is the standard's
+    /// request for unhinted outlines and outranks it -- see
+    /// [`TextRendering`]. The one value every hinting decision reads, so
+    /// that the collection a layout picks and the runs it lays out never
+    /// disagree.
+    pub fn hinted(&self) -> bool {
+        self.font_hinting
+            && self.text_rendering != TextRendering::GeometricPrecision
+    }
+
     /// The typeface the context font resolves to first, as text is drawn
     /// with it.
     ///
@@ -337,7 +353,7 @@ impl State {
     pub fn primary_face(&self) -> Option<Typeface> {
         FontLibrary::with_shared(|library| {
             let (mut collection, _) = library
-                .set_hinting(self.font_hinting)
+                .set_hinting(self.hinted())
                 .fonts_for_style(&self.char_style, &self.variations);
             let families = self.char_style.font_families();
             let families: Vec<&str> = families.iter().collect();
@@ -372,10 +388,37 @@ impl State {
             .with_root(FontUnits::new(ROOT_FONT_PX, initial_root_face))
     }
 
+    /// The OpenType features `fontKerning` and `textRendering` ask of
+    /// `style`, added where the style's own features do not name the tag
+    /// already: a `kern`, `liga` or `clig` set through `fontVariant` or the
+    /// font's features is the caller's, as `font-feature-settings` and
+    /// `font-variant-ligatures` outrank these in CSS. See [`FontKerning`] and
+    /// [`TextRendering`] for what each value does and where that is from.
+    fn add_rendering_features(&self, style: &mut TextStyle) {
+        let mut off = Vec::new();
+        if self.font_kerning == FontKerning::None {
+            off.push("kern");
+        }
+        if self.text_rendering == TextRendering::OptimizeSpeed {
+            off.extend(["liga", "clig"]);
+        }
+        let named: Vec<String> = style
+            .font_features()
+            .iter()
+            .map(|feature| feature.name().to_string())
+            .collect();
+        for tag in off {
+            if !named.iter().any(|name| name == tag) {
+                style.add_font_feature(tag, 0);
+            }
+        }
+    }
+
     pub fn typography(
         &self,
     ) -> (TextStyle, ParagraphStyle, DecorationStyle, Baseline, bool) {
         let mut char_style = self.char_style.clone(); // use font size & style to calculate spacing
+        self.add_rendering_features(&mut char_style);
         let units = self.font_units();
         char_style.set_word_spacing(self.word_spacing.in_px(&units));
         char_style.set_letter_spacing(self.letter_spacing.in_px(&units));
@@ -419,8 +462,8 @@ impl State {
         // The run fonts take the hinting; the paragraph style's flag is
         // what the layout code reads to choose the collections it lays out
         // with -- see `FontLibrary::set_hinting`.
-        char_style.set_font_hinting(text_hinting(self.font_hinting));
-        if !self.font_hinting {
+        char_style.set_font_hinting(text_hinting(self.hinted()));
+        if !self.hinted() {
             graf_style.turn_hinting_off();
         }
 

@@ -597,6 +597,18 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Added
 
+- **`Context2D::set_font_kerning` and `set_text_rendering`, with the
+  `FontKerning` and `TextRendering` enums**, the Canvas standard's
+  `fontKerning` and `textRendering`. `FontKerning::None` lays text out
+  without the font's kerning; `TextRendering::OptimizeSpeed` turns the
+  common ligatures off, `OptimizeLegibility` draws as `Auto`, and
+  `GeometricPrecision` draws unhinted whatever `set_font_hinting` says, as
+  Chrome 152 draws each and SVG 2 section 13.10.2 describes the last. Both
+  are kept by `save` and `restore`, reset by `reset`, and left alone by
+  `set_font`; `font_kerning()` and `text_rendering()` read them back. A
+  `liga` or `clig` the caller sets through `set_font_variant` stands
+  instead of `OptimizeSpeed`'s.
+
 - **`set_filter_css` takes the CSS math functions**, as Chrome 152's
   `ctx.filter` does: `calc()` and `-webkit-calc()`, `min()`, `max()`,
   `clamp()`, `round()`, `mod()`, `rem()`, `abs()`, `sign()`, `sin()`

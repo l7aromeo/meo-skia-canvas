@@ -291,6 +291,115 @@ impl FontStretch {
     }
 }
 
+/// Whether kerning is applied, as the Canvas `fontKerning` attribute and the
+/// CSS `font-kerning` property it sets.
+///
+/// HTML's text preparation algorithm lays text out with `font-kerning` set
+/// to the context's `fontKerning`, and CSS Fonts 4 section 6.3 defines the
+/// three keywords. Kerning is the font's `kern` feature: `None` turns it off
+/// and the other two leave it on, as Chrome 152 does -- `"auto"` and
+/// `"normal"` lay out "AVAVAV" in 100px Times at 368.85 and `"none"` at
+/// 433.30. A `kern` the caller sets among the font's features stands
+/// instead, as CSS lets `font-feature-settings` override `font-kerning`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FontKerning {
+    /// Kerning as the user agent decides: on, as Chrome has it. The initial
+    /// value.
+    #[default]
+    Auto,
+    /// Kerning on.
+    Normal,
+    /// Kerning off.
+    None,
+}
+
+impl FontKerning {
+    /// The keyword the Canvas attribute reads back.
+    pub(crate) fn keyword(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Normal => "normal",
+            Self::None => "none",
+        }
+    }
+
+    /// The value a keyword names, matched exactly, as WebIDL matches an
+    /// enumeration's values.
+    pub(crate) fn from_keyword(keyword: &str) -> Option<Self> {
+        Some(match keyword {
+            "auto" => Self::Auto,
+            "normal" => Self::Normal,
+            "none" => Self::None,
+            _ => return None,
+        })
+    }
+}
+
+/// What text is laid out and drawn for, as the Canvas `textRendering`
+/// attribute and the SVG `text-rendering` property it sets.
+///
+/// HTML gives each keyword SVG's meaning, and SVG 2 section 13.10.2 makes
+/// each one a hint, so what a value does is what Chrome does with it,
+/// measured in Chrome 152's canvas:
+///
+/// - `Auto` and `OptimizeLegibility` draw alike: kerning as [`FontKerning`]
+///   says, and the font's common ligatures on.
+/// - `OptimizeSpeed` turns the common ligatures (`liga`, `clig`) off: "office"
+///   in 100px Times measures 473.15 at `"auto"` and 482.32 here. It leaves
+///   kerning to [`FontKerning`].
+/// - `GeometricPrecision` draws outlines unhinted, at unchanged advances --
+///   SVG: it "will usually cause the user agent to suspend the use of hinting"
+///   -- so on macOS CoreText does not dilate the glyphs, and Chrome's text is
+///   lighter for it.
+///
+/// Hinting: `GeometricPrecision` draws unhinted whatever
+/// [`Context2D::set_font_hinting`] says, because it is the standard's own
+/// request -- SVG 2 section 13.10.2: it "will usually cause the user agent
+/// to suspend the use of hinting so that glyph outlines are drawn with
+/// comparable geometric precision to the rendering of path data". The other
+/// three leave hinting to `set_font_hinting`, this library's extension;
+/// `OptimizeSpeed` changes no hinting, and Chrome's glyphs under it draw as
+/// under `Auto`.
+///
+/// A ligature feature the caller sets -- through `font-variant-ligatures`
+/// or the font's features -- stands instead of `OptimizeSpeed`'s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TextRendering {
+    /// The initial value.
+    #[default]
+    Auto,
+    /// Common ligatures off.
+    OptimizeSpeed,
+    /// As [`TextRendering::Auto`].
+    OptimizeLegibility,
+    /// Outlines drawn unhinted.
+    GeometricPrecision,
+}
+
+impl TextRendering {
+    /// The keyword the Canvas attribute reads back.
+    pub(crate) fn keyword(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::OptimizeSpeed => "optimizeSpeed",
+            Self::OptimizeLegibility => "optimizeLegibility",
+            Self::GeometricPrecision => "geometricPrecision",
+        }
+    }
+
+    /// The value a keyword names, matched exactly, as WebIDL matches an
+    /// enumeration's values: `"optimizespeed"` is none of them.
+    pub(crate) fn from_keyword(keyword: &str) -> Option<Self> {
+        Some(match keyword {
+            "auto" => Self::Auto,
+            "optimizeSpeed" => Self::OptimizeSpeed,
+            "optimizeLegibility" => Self::OptimizeLegibility,
+            "geometricPrecision" => Self::GeometricPrecision,
+            _ => return None,
+        })
+    }
+}
+
 /// A capitals variant, as CSS `font-variant-caps`.
 ///
 /// Each maps to the OpenType feature the browser would enable. A font
@@ -1872,8 +1981,28 @@ impl Context2D {
     /// under FreeType, and visibly lighter on macOS. No text moves either
     /// way. The Canvas API has no hinting control, and a [`Paragraph`] has
     /// none either and is drawn hinted.
+    ///
+    /// It governs text under [`TextRendering::Auto`], `OptimizeLegibility`
+    /// and `OptimizeSpeed`; [`TextRendering::GeometricPrecision`] draws
+    /// unhinted whatever this says, as the standard asks of it.
     pub fn set_font_hinting(&mut self, enabled: bool) {
         self.inner.state.font_hinting = enabled;
+    }
+
+    /// Sets whether kerning is applied, as `ctx.fontKerning` does -- see
+    /// [`FontKerning`]. Kept by [`save`](Self::save) and
+    /// [`restore`](Self::restore), and left alone by
+    /// [`set_font`](Self::set_font).
+    pub fn set_font_kerning(&mut self, kerning: FontKerning) {
+        self.inner.state.font_kerning = kerning;
+    }
+
+    /// Sets what text is drawn for, as `ctx.textRendering` does -- see
+    /// [`TextRendering`]. Kept by [`save`](Self::save) and
+    /// [`restore`](Self::restore), and left alone by
+    /// [`set_font`](Self::set_font).
+    pub fn set_text_rendering(&mut self, rendering: TextRendering) {
+        self.inner.state.text_rendering = rendering;
     }
 
     /// Selects how wide a face to use, where the family offers a choice.
@@ -3487,6 +3616,16 @@ impl Context2D {
     /// [`Context2D::set_font_hinting`].
     pub fn font_hinting(&self) -> bool {
         self.inner.state.font_hinting
+    }
+
+    /// Whether kerning is applied: [`FontKerning::Auto`] on a new context.
+    pub fn font_kerning(&self) -> FontKerning {
+        self.inner.state.font_kerning
+    }
+
+    /// What text is drawn for: [`TextRendering::Auto`] on a new context.
+    pub fn text_rendering(&self) -> TextRendering {
+        self.inner.state.text_rendering
     }
 
     /// Sets the spacing between characters from a CSS length.
