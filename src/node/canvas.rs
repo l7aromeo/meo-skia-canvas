@@ -166,7 +166,7 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedCanvas> {
     if text_gamma == max_g {
         text_gamma -= f32::EPSILON as f64
     }; // nudge down values right at the max
-    if text_gamma < min_g || text_contrast > max_g {
+    if text_gamma < min_g || text_gamma > max_g {
         return cx.throw_range_error(format!(
             "Expected a number between {} and {} for `textGamma`",
             min_g, max_g

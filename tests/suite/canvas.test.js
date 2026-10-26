@@ -2915,3 +2915,36 @@ describe("a GPU read", () => {
     assert.deepEqual(swapped, cpu, "BGRA8888");
   });
 });
+
+// Skia takes a text gamma from 0 up to, not including, 4 and a contrast from
+// 0 to 1, and a canvas refuses anything outside them with a `RangeError`
+// naming the range. A gamma above it was checked against the contrast's
+// variable and accepted.
+describe("a canvas's text gamma and contrast", () => {
+  test("are refused outside Skia's range", () => {
+    for (const options of [
+      { textGamma: 5 },
+      { textGamma: -1 },
+      { textContrast: 2 },
+      { textContrast: -0.5 },
+    ])
+      assert.throws(
+        () => new Canvas(1, 1, options),
+        RangeError,
+        JSON.stringify(options),
+      );
+  });
+
+  test("are taken inside it", () => {
+    for (const options of [
+      { textGamma: 0 },
+      { textGamma: 3.9 },
+      { textContrast: 0 },
+      { textContrast: 1 },
+    ])
+      assert.doesNotThrow(
+        () => new Canvas(1, 1, options),
+        JSON.stringify(options),
+      );
+  });
+});
