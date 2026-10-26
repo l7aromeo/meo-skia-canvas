@@ -98,6 +98,13 @@ export function findings(text, path, knownTests = null) {
       out.push(`${where}: no "Re-check:" line follows the marker`);
     else if (!next.slice("Re-check:".length).trim())
       out.push(`${where}: the "Re-check:" line says nothing`);
+    // `cargo test` with no name on the line runs every test, which re-checks
+    // nothing in particular -- and is what a name wrapped onto the next line
+    // looks like, which would otherwise pass however that name drifted.
+    else if (/\bcargo test\b/.test(next) && !/\bcargo test\s+[a-z_]/.test(next))
+      out.push(
+        `${where}: "Re-check:" runs \`cargo test\` without naming a test on the same line`,
+      );
     else if (knownTests) {
       // Only names it actually cites. A `Re-check:` that describes an experiment
       // instead of naming a test is a legitimate form and is left alone.
@@ -151,6 +158,19 @@ function selfTest() {
     [good.replace("worked around", "mitigated"), 1, "unknown disposition"],
     [good.split("\n")[0], 1, "no Re-check line"],
     [good.replace("cargo test the_thing", ""), 1, "empty Re-check"],
+    // A name wrapped onto the next line leaves a bare `cargo test`, which
+    // runs everything and checks no name at all.
+    [
+      good.replace("cargo test the_thing", "cargo test\n// the_thing"),
+      1,
+      "Re-check of a bare cargo test, its name wrapped away",
+      new Set(["the_thing"]),
+    ],
+    [
+      good.replace("cargo test the_thing", "cargo test -- --nocapture"),
+      1,
+      "Re-check of cargo test with flags and no name",
+    ],
     [
       "// UPSTREAM: skia-safe 0.153.3 -- unfiled\n// Re-check: x",
       1,
