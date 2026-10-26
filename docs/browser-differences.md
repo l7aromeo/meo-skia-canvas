@@ -222,6 +222,12 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   Skia's FreeType port reports that face's ascent, 1.193em, where Chrome on
   Linux was not measured. `declares_x_height` in `src/image.rs` is the check.
 
+- _`ctx.direction` reads `"inherit"` on a fresh context._ The Canvas
+  standard makes `inherit` the attribute's initial value, and a getter that
+  answered `ltr` could not report the state a fresh context is in. Chrome
+  152 reads `"ltr"` from a detached canvas's fresh context. Text is laid out
+  left to right either way: with no element to inherit a direction from,
+  `inherit` resolves to `ltr`.
 - _A system font keyword in `ctx.font` is ignored_ -- `caption`, `icon`,
   `menu`, `message-box`, `small-caption` and `status-bar`, which Chrome takes.
   What each names is the platform's interface font: Chrome 152 on macOS read
