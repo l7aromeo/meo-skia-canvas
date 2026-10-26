@@ -2163,3 +2163,30 @@ describe("a ParagraphBuilder option is converted as WebIDL converts it", () => {
     assert.deepEqual(pixel({ toString: () => "red" }), pixel("red"));
   });
 });
+
+// A style that names no colour is black, as the type declarations say and
+// as CSS's initial `color` is. SkParagraph's own default is white, which
+// drew unstyled text invisibly on a white canvas.
+describe("a paragraph's text colour", () => {
+  test("is black where no style names one", () => {
+    FontLibrary.use("ColourOswald", [
+      "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    ]);
+    const style = { fontFamilies: ["ColourOswald"], fontSize: 48 };
+    for (const pushed of [false, true]) {
+      const pb = ParagraphBuilder.Make({ textStyle: style });
+      if (pushed) pb.pushStyle(style);
+      pb.addText("H");
+      if (pushed) pb.pop();
+      const p = pb.build();
+      p.layout(1000);
+      const ctx = new Canvas(100, 100).getContext("2d");
+      ctx.drawParagraph(p, 0, 0);
+      const { data } = ctx.getImageData(0, 0, 100, 100);
+      let darkest = [255, 255, 255, 0];
+      for (let i = 0; i < data.length; i += 4)
+        if (data[i + 3] > darkest[3]) darkest = [...data.slice(i, i + 4)];
+      assert.deepEqual(darkest, [0, 0, 0, 255], `pushed ${pushed}`);
+    }
+  });
+});
