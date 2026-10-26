@@ -2471,8 +2471,10 @@ pub fn color4f_to_srgb(color: Color4f, space: Option<&ColorSpace>) -> Color4f {
 /// the colour passes through as it is; this is the one place to divert a
 /// space whose tag Skia would decode differently from the standard.
 /// `rec2020` is not one: CSS Color 4 section 10.8 defines it as "gamma
-/// 2.40, from [REC_BT.1886]", and `skia_safe`'s `REC2020_10BIT` and
-/// `REC2020_12BIT` alias `REC709`, a pure 2.4 gamma, which agrees.
+/// 2.40, from [REC_BT.1886]", and the space [`opt_color_space`] builds for
+/// it is the CICP pair of BT.2020 primaries and transfer characteristic 1,
+/// whose `named_transfer_fn::REC709` is a pure 2.4 gamma, which agrees.
+/// Skia's own `kRec2020` transfer function is BT.2020's piecewise curve.
 pub fn skia_paint_color(
     color: Color4f,
     space: &ColorSpace,
