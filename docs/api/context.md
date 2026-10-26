@@ -40,7 +40,7 @@ Reading `.font` back gives the font as CSSOM serializes it, with no line height:
 
 ### `.fontHinting`
 
-By default the canvas disables Skia’s [font hinting](https://en.wikipedia.org/wiki/Font_hinting) when rendering text in order to better match the text rendering produced by browsers. To enable hinting, set the context's `.fontHinting` property to `true`. When enabled the results will likely look heavier than the default, but may appear more smoothly antialiased.
+Text is drawn with slight [font hinting](https://en.wikipedia.org/wiki/Font_hinting) by default, as Chrome draws it: on macOS that is the outline CoreGraphics dilates, and under FreeType on Linux outlines fitted to the pixel grid vertically, with every advance where the font puts it. Setting `.fontHinting` to `false` draws each glyph as its outline is designed instead -- undilated on macOS, which looks lighter, and unhinted under FreeType. No text moves either way. A `Paragraph` has no hinting setting and is always drawn hinted.
 
 ### `.fontVariant`
 

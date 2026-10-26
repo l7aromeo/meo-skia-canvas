@@ -33,6 +33,7 @@
 
 use crate::{
     font::leans_as_asked,
+    font_library::text_hinting,
     node::typography::{SLNT, Shear, run_shear, sheared_blob},
 };
 use skia_safe::{
@@ -181,11 +182,19 @@ impl ParagraphRecipe {
     /// A paragraph in `style`, whose text style asks for the oblique
     /// `base_oblique` gives the angle of, if any -- [`match_oblique`]'s
     /// answer for it.
+    ///
+    /// A paragraph's glyphs are drawn hinted, every style's, as canvas text
+    /// is by default -- see `font_library::text_hinting` -- so the paragraph
+    /// style's own text style is set so here, and each pushed style in
+    /// [`Self::push_style`].
     pub(crate) fn new(
-        style: ParagraphStyle,
+        mut style: ParagraphStyle,
         base_oblique: Option<f32>,
         collection: FontCollection,
     ) -> Self {
+        let mut text_style = style.text_style().clone();
+        text_style.set_font_hinting(text_hinting(true));
+        style.set_text_style(&text_style);
         Self {
             builder: ParagraphBuilder::new(&style, &collection),
             collection,
@@ -200,12 +209,13 @@ impl ParagraphRecipe {
     }
 
     /// Pushes `style`, which asks for an oblique of the angle `oblique`
-    /// gives, if any.
+    /// gives, if any, hinted -- see [`Self::new`].
     pub(crate) fn push_style(
         &mut self,
-        style: TextStyle,
+        mut style: TextStyle,
         oblique: Option<f32>,
     ) {
+        style.set_font_hinting(text_hinting(true));
         self.builder.push_style(&style);
         self.oblique |= oblique.is_some();
         self.half_leading |= style.half_leading();

@@ -2190,3 +2190,86 @@ describe("a paragraph's text colour", () => {
     }
   });
 });
+
+// Text is drawn at Slight hinting, as Chrome draws it, unless a context's
+// `fontHinting` is turned off; a paragraph has no knob and is always hinted.
+// It was all drawn at Slight whatever `fontHinting` said. Hinting shows on
+// macOS, where Skia's CoreText port dilates the outline at every level but
+// None, and under FreeType on Linux; elsewhere it is not measured. That a
+// paragraph's runs are hinted is pinned on every platform by `hinting` in
+// src/node/typography.rs, which reads the runs' fonts.
+describe("hinting", () => {
+  const OSWALD = "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    TEXT = "Hamburgefonstiv",
+    hints = process.platform === "darwin" || process.platform === "linux";
+  // Registering a font drops every collection, and with them their
+  // paragraph caches: what is drawn next is drawn from nothing cached.
+  const register = () => FontLibrary.use("HintingOswald", [OSWALD]);
+
+  // `text` in 13px Oswald, drawn on canvas.
+  const canvasText = (hinting, text = TEXT) => {
+    const ctx = new Canvas(200, 50).getContext("2d");
+    if (hinting !== undefined) ctx.fontHinting = hinting;
+    ctx.font = "13px HintingOswald";
+    ctx.fillText(text, 10, 30);
+    return Buffer.from(ctx.getImageData(0, 0, 200, 50).data);
+  };
+
+  // The same, as a paragraph.
+  const paragraphText = (text = TEXT) => {
+    const style = { fontFamilies: ["HintingOswald"], fontSize: 13 },
+      pb = ParagraphBuilder.Make({ textStyle: style });
+    pb.addText(text);
+    const p = pb.build();
+    p.layout(1000);
+    const ctx = new Canvas(200, 50).getContext("2d");
+    ctx.drawParagraph(p, 10, 10);
+    return Buffer.from(ctx.getImageData(0, 0, 200, 50).data);
+  };
+
+  test("fontHinting is on by default", () => {
+    register();
+    assert.equal(new Canvas(1, 1).getContext("2d").fontHinting, true);
+    assert.ok(canvasText().equals(canvasText(true)), "default is on");
+  });
+
+  test(
+    "fontHinting off draws the outlines as designed",
+    { skip: !hints && "measured on macOS and Linux" },
+    () => {
+      register();
+      assert.ok(!canvasText(false).equals(canvasText(true)));
+    },
+  );
+
+  // SkParagraph's paragraph cache matches the two without comparing their
+  // hinting, so laid out against one collection the second drawn would
+  // take the first's runs.
+  test(
+    "unhinted canvas text and a paragraph each keep their own, in either order",
+    { skip: !hints && "measured on macOS and Linux" },
+    () => {
+      for (const [index, order] of [
+        ["paragraph", "canvas"],
+        ["canvas", "paragraph"],
+      ].entries()) {
+        const text = `${TEXT} ${index}`,
+          drawn = {};
+        register();
+        for (const what of order)
+          drawn[what] =
+            what === "canvas" ? canvasText(false, text) : paragraphText(text);
+        register();
+        assert.ok(
+          drawn.canvas.equals(canvasText(false, text)),
+          `${order}: canvas`,
+        );
+        register();
+        assert.ok(
+          drawn.paragraph.equals(paragraphText(text)),
+          `${order}: paragraph`,
+        );
+      }
+    },
+  );
+});
