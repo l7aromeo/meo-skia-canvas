@@ -4944,7 +4944,7 @@ export interface Font {
   /** CSS numeric weight. */
   weight: number;
   /**
-   * Slant, as `to_slant` reports it. Three values and not an open set: the
+   * Slant, as the binding reports it. Three values and not an open set: the
    * binding maps Skia's slant onto exactly these, so a face is never
    * described by anything else.
    */
