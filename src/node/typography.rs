@@ -414,8 +414,8 @@ impl TextLayout {
 /// One glyph run of a laid-out paragraph: the glyphs one font draws, where
 /// each goes relative to the run's origin, and that origin relative to the
 /// paragraph's.
-struct GlyphRun {
-    font: Font,
+pub(crate) struct GlyphRun {
+    pub(crate) font: Font,
     glyphs: Vec<GlyphId>,
     positions: Vec<Point>,
     origin: Point,
@@ -435,7 +435,7 @@ struct GlyphRun {
 /// the run's first line, and for a run that does not start the text the
 /// one after its last glyph is read from past the storage holding them.
 /// `visit`'s are each glyph's own, on every line.
-fn glyph_runs(paragraph: &mut Paragraph) -> Vec<GlyphRun> {
+pub(crate) fn glyph_runs(paragraph: &mut Paragraph) -> Vec<GlyphRun> {
     let mut runs = vec![];
     paragraph.visit(|_line, visit| {
         if let Some(info) = visit {
@@ -3062,5 +3062,163 @@ mod synthesis {
             );
             assert_eq!(*got.weight(), handed, "asked {asked}, face {face}");
         }
+    }
+}
+
+#[cfg(test)]
+mod hinting {
+    use super::{
+        FontLibrary, ParagraphStyle, TextStyle, Typesetter, glyph_runs,
+    };
+    use crate::{
+        Canvas, Font as CanvasFont, FontLibrary as Library, RichTextSpan,
+        TextEngine, TextStyle as SpanStyle, node::oblique::ParagraphRecipe,
+    };
+    use skia_safe::{FontHinting, Paint};
+
+    /// The bundled Oswald, under a name of these tests' own.
+    const FAMILY: &str = "HintingOswald";
+    const SIZE: f32 = 13.0;
+    const TEXT: &str = "Hamburgefonstiv";
+
+    fn register() -> Library {
+        let library = Library::new();
+        library
+            .register_font_from_path(
+                FAMILY,
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"
+                ),
+            )
+            .expect("bundled Oswald registers");
+        library
+    }
+
+    /// The hinting of every glyph run canvas text is drawn with, its
+    /// `fontHinting` set where `hinted` is given.
+    fn canvas_hinting(hinted: Option<bool>) -> Vec<FontHinting> {
+        let mut canvas = Canvas::new(200.0, 50.0);
+        let ctx = canvas.context();
+        ctx.set_font(&CanvasFont::new(FAMILY, SIZE));
+        if let Some(hinted) = hinted {
+            ctx.set_font_hinting(hinted);
+        }
+        let mut layout = Typesetter::new(&ctx.inner.state, TEXT, None)
+            .layout(&Paint::default());
+        glyph_runs(&mut layout.paragraph)
+            .iter()
+            .map(|run| run.font.hinting())
+            .collect()
+    }
+
+    /// The hinting of every glyph run a paragraph is drawn with.
+    fn paragraph_hinting(engine: &TextEngine) -> Vec<FontHinting> {
+        let style = SpanStyle {
+            font_families: vec![FAMILY.into()],
+            font_size: SIZE,
+            ..SpanStyle::default()
+        };
+        let mut paragraph = engine.layout_rich_text(
+            &[RichTextSpan {
+                text: TEXT.to_string(),
+                style: style.clone(),
+            }],
+            &style,
+            1000.0,
+        );
+        glyph_runs(&mut paragraph.paragraph)
+            .iter()
+            .map(|run| run.font.hinting())
+            .collect()
+    }
+
+    fn all(hinting: &[FontHinting], expected: FontHinting, what: &str) {
+        assert!(!hinting.is_empty(), "{what}: no runs");
+        assert!(
+            hinting.iter().all(|h| *h == expected),
+            "{what}: {hinting:?}, expected {expected:?}"
+        );
+    }
+
+    #[test]
+    fn canvas_text_is_hinted_unless_turned_off() {
+        register();
+        all(&canvas_hinting(None), FontHinting::Slight, "by default");
+        all(
+            &canvas_hinting(Some(false)),
+            FontHinting::None,
+            "turned off",
+        );
+        all(
+            &canvas_hinting(Some(true)),
+            FontHinting::Slight,
+            "turned on",
+        );
+    }
+
+    /// The hinting of every glyph run a paragraph from the Node binding's
+    /// path is drawn with: its collection from the shared library, as
+    /// `node::paragraph::new` takes it.
+    fn shared_paragraph_hinting() -> Vec<FontHinting> {
+        let mut style = TextStyle::new();
+        style.set_font_families(&[FAMILY]).set_font_size(SIZE);
+        let (collection, _) = FontLibrary::with_shared(|lib| {
+            lib.set_hinting(true).fonts_for_style(&style, &[])
+        });
+        let mut paragraph_style = ParagraphStyle::new();
+        paragraph_style.set_text_style(&style);
+        let mut recipe =
+            ParagraphRecipe::new(paragraph_style, None, collection);
+        recipe.push_style(style, None);
+        recipe.add_text(TEXT);
+        recipe.pop();
+        let (mut paragraph, _) = recipe.build();
+        paragraph.layout(1000.0);
+        glyph_runs(&mut paragraph)
+            .iter()
+            .map(|run| run.font.hinting())
+            .collect()
+    }
+
+    /// Canvas text drawn unhinted and a paragraph of the same text, hinted,
+    /// share a library: each keeps its own hinting in either order. The
+    /// paragraph cache matches the two without comparing hinting, so laid
+    /// out against one collection the second takes the first's runs.
+    #[test]
+    fn hinted_and_unhinted_text_keep_their_own_hinting() {
+        register();
+        for canvas_first in [true, false] {
+            let mut seen = Vec::new();
+            for step in 0..4 {
+                let canvas = (step % 2 == 0) == canvas_first;
+                let hinting = match canvas {
+                    true => canvas_hinting(Some(false)),
+                    false => shared_paragraph_hinting(),
+                };
+                let expected = match canvas {
+                    true => FontHinting::None,
+                    false => FontHinting::Slight,
+                };
+                seen.push(hinting.clone());
+                all(
+                    &hinting,
+                    expected,
+                    &format!(
+                        "step {step}, canvas first {canvas_first}: {seen:?}"
+                    ),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_paragraph_is_hinted() {
+        let engine = TextEngine::new(&register());
+        all(
+            &paragraph_hinting(&engine),
+            FontHinting::Slight,
+            "a paragraph",
+        );
     }
 }

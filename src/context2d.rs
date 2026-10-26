@@ -1863,8 +1863,15 @@ impl Context2D {
         }
     }
 
-    /// Whether glyph hinting is applied. Off by default, matching the Canvas
-    /// API, which has no hinting control at all.
+    /// Whether glyph hinting is applied.
+    ///
+    /// On by default, at Slight, as Chrome draws text: on macOS that is
+    /// CoreGraphics' dilated outline, and under FreeType outlines fitted to
+    /// the pixel grid vertically, with every advance as designed. Off draws
+    /// each glyph as its outline is designed: undilated on macOS, unhinted
+    /// under FreeType, and visibly lighter on macOS. No text moves either
+    /// way. The Canvas API has no hinting control, and a [`Paragraph`] has
+    /// none either and is drawn hinted.
     pub fn set_font_hinting(&mut self, enabled: bool) {
         self.inner.state.font_hinting = enabled;
     }
@@ -3476,7 +3483,8 @@ impl Context2D {
         self.inner.state.font_variation_settings.clone()
     }
 
-    /// Whether glyph hinting is applied.
+    /// Whether glyph hinting is applied -- see
+    /// [`Context2D::set_font_hinting`].
     pub fn font_hinting(&self) -> bool {
         self.inner.state.font_hinting
     }

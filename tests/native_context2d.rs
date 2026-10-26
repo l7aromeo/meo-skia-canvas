@@ -1984,34 +1984,49 @@ fn dither_changes_a_shallow_gradient() {
 }
 
 #[test]
-fn font_hinting_is_carried_even_where_the_rasterizer_ignores_it() {
-    // Hinting is a request the platform's font engine may decline -- macOS
-    // CoreText does, and the same glyphs come out to the pixel either way.
-    // What can be asserted is that the flag is stored, read back, and
-    // saved and restored with the rest of the state.
+fn font_hinting_is_carried_with_the_state_and_reaches_the_glyphs() {
+    // On by default, as Chrome draws text, and saved and restored with the
+    // rest of the state. Turned off it draws each glyph as its outline is
+    // designed, which shows where the font engine hints: macOS, whose
+    // CoreGraphics dilates the outline at every level but none, and
+    // FreeType. Elsewhere it is not measured, and the drawing is only
+    // required to happen.
     let mut canvas = Canvas::new(60.0, 30.0);
     let ctx = canvas.context();
-    assert!(!ctx.font_hinting(), "off by default");
+    assert!(ctx.font_hinting(), "on by default");
 
-    ctx.set_font_hinting(true);
-    assert!(ctx.font_hinting());
-
-    ctx.save();
     ctx.set_font_hinting(false);
     assert!(!ctx.font_hinting());
-    ctx.restore();
-    assert!(ctx.font_hinting(), "restored with the state");
 
-    ctx.set_fill_style(red());
-    ctx.set_font(&Font::new("Helvetica", 16.0));
-    ctx.fill_text("Hinted", 4.0, 20.0, None);
-    let painted = pixels(&mut canvas)
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .filter(|px| px[3] > 0)
-        .count();
-    assert!(painted > 0, "and text still renders with it set");
+    ctx.save();
+    ctx.set_font_hinting(true);
+    assert!(ctx.font_hinting());
+    ctx.restore();
+    assert!(!ctx.font_hinting(), "restored with the state");
+
+    let drawn = |hinted: bool| {
+        let mut canvas = Canvas::new(60.0, 30.0);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        ctx.set_font_hinting(hinted);
+        ctx.set_fill_style(red());
+        ctx.set_font(&Font::new("Helvetica", 16.0));
+        ctx.fill_text("Hinted", 4.0, 20.0, None);
+        pixels(&mut canvas)
+    };
+    let (hinted, unhinted) = (drawn(true), drawn(false));
+    for (pixels, what) in [(&hinted, "hinted"), (&unhinted, "unhinted")] {
+        let painted = pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|px| px[3] > 0)
+            .count();
+        assert!(painted > 0, "{what} text renders");
+    }
+    if cfg!(any(target_os = "macos", target_os = "linux")) {
+        assert_ne!(hinted, unhinted, "the setting reaches the glyphs");
+    }
 }
 
 #[test]
@@ -9783,8 +9798,9 @@ fn every_scalar_setter_has_a_reader_that_agrees_with_it() {
     ctx.set_dither(true);
     assert!(ctx.dither());
 
-    ctx.set_font_hinting(true);
-    assert!(ctx.font_hinting());
+    // Off, since on is the default and setting it would prove nothing.
+    ctx.set_font_hinting(false);
+    assert!(!ctx.font_hinting());
 
     ctx.set_text_wrap(true);
     assert!(ctx.text_wrap());

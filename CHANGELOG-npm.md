@@ -296,6 +296,18 @@ removed and no signature moves.
 
 ### Fixed
 
+- **`ctx.fontHinting = false` draws the outlines as designed.** It turned
+  hinting off on the paragraph style, which SkParagraph never reads, so
+  every glyph was drawn at Slight hinting whatever it said. `fontHinting =
+false` now takes effect, and its default is on, at Slight, as Chrome draws
+  text: on macOS, where Skia's CoreText port dilates the outline at every
+  level but none, Chrome 156 draws the same pixels. Turned off, a glyph is
+  its outline as designed -- undilated on macOS, where 13px text draws more
+  than a third lighter, and unhinted under FreeType on Linux. No text moves
+  either way, and what is drawn by default does not change;
+  `ctx.fontHinting` reads `true` until it is set, where it read `false`. A
+  `Paragraph`, which has no hinting setting, is drawn hinted, as it was.
+
 - **Text is drawn with Chrome's text contrast and gamma for the platform.**
   Glyph coverage was corrected with a gamma of 1.4 and no contrast by
   default, Skia's Android setting, which matches no browser: on macOS, 13px

@@ -1185,8 +1185,10 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
     let instanced = with_oblique_slnt(&variations, asked);
     // The matched face is for a caller deciding what Skia may synthesise;
     // a paragraph built here carries its own text style and does not.
+    // Hinted, as every paragraph is drawn -- see `ParagraphRecipe::new`.
     let (mut collection, _) = FontLibrary::with_shared(|lib| {
-        lib.fonts_for_style(&text_style, &instanced)
+        lib.set_hinting(true)
+            .fonts_for_style(&text_style, &instanced)
     });
     let base_oblique = asked.and_then(|degrees| {
         match_oblique(&mut text_style, &mut collection, degrees)

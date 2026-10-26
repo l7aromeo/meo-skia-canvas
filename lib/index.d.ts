@@ -4312,7 +4312,16 @@ export interface CanvasRenderingContext2D
   fontVariant: FontVariantSetting;
   /** 🧪 Not in the HTML Canvas standard. */
   fontVariationSettings: string;
-  /** 🧪 Not in the HTML Canvas standard. */
+  /**
+   * Whether glyphs are hinted. On by default, at slight hinting, as Chrome
+   * draws text: on macOS CoreGraphics' dilated outline, under FreeType
+   * outlines fitted to the pixel grid vertically, with every advance as
+   * designed. Off draws each glyph as its outline is designed -- undilated
+   * on macOS, unhinted under FreeType -- and no text moves either way. A
+   * `Paragraph` is always drawn hinted.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   fontHinting: boolean;
   /** 🧪 Not in the HTML Canvas standard. */
   textWrap: boolean;

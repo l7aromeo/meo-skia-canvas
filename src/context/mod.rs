@@ -26,7 +26,7 @@ use crate::{
     css::{FontUnits, ROOT_FONT_PX},
     export::VectorFeatures,
     font::GenericFamily,
-    font_library::{FontLibrary, ResolvedFont, generic_name},
+    font_library::{FontLibrary, ResolvedFont, generic_name, text_hinting},
     gpu::RenderingEngine,
     gradient::{BoxedCanvasGradient, CanvasGradient},
     node::{
@@ -287,7 +287,7 @@ impl Default for State {
             font: "10px sans-serif".to_string(),
             font_variant: "normal".to_string(),
             font_width: Width::NORMAL,
-            font_hinting: false,
+            font_hinting: true,
             char_style,
             graf_style,
             text_baseline: Baseline::Alphabetic,
@@ -336,8 +336,9 @@ impl State {
     /// `None` only when nothing at all resolves.
     pub fn primary_face(&self) -> Option<Typeface> {
         FontLibrary::with_shared(|library| {
-            let (mut collection, _) =
-                library.fonts_for_style(&self.char_style, &self.variations);
+            let (mut collection, _) = library
+                .set_hinting(self.font_hinting)
+                .fonts_for_style(&self.char_style, &self.variations);
             let families = self.char_style.font_families();
             let families: Vec<&str> = families.iter().collect();
             collection
@@ -415,6 +416,10 @@ impl State {
             graf_style.set_max_lines(Some(1));
         }
 
+        // The run fonts take the hinting; the paragraph style's flag is
+        // what the layout code reads to choose the collections it lays out
+        // with -- see `FontLibrary::set_hinting`.
+        char_style.set_font_hinting(text_hinting(self.font_hinting));
         if !self.font_hinting {
             graf_style.turn_hinting_off();
         }

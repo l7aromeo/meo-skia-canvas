@@ -13,7 +13,7 @@ use std::{
 };
 
 use skia_safe::{
-    Data, FontArguments, FontMgr, FourByteTag, Typeface,
+    Data, FontArguments, FontHinting, FontMgr, FourByteTag, Typeface,
     font_arguments::{VariationPosition, variation_position::Coordinate},
     font_parameters::variation::Axis,
     font_style::{FontStyle, Slant},
@@ -137,6 +137,33 @@ thread_local!(
     static LIBRARY: OnceLock<RefCell<FontLibrary>> = const { OnceLock::new() };
 );
 
+/// The hinting a context draws text with when its `fontHinting` is turned
+/// off: none, so a glyph is its outline as designed. FreeType draws it
+/// unhinted, and on macOS it is drawn without the outline dilation
+/// CoreGraphics applies at every other level -- Skia's CoreText port maps
+/// None to undilated and anything else to Normal, dilated
+/// (`SkTypeface_Mac::onFilterRec`).
+const UNHINTED: FontHinting = FontHinting::None;
+
+/// The hinting text is drawn with otherwise, a paragraph's always: Slight,
+/// SkParagraph's own default and what Chrome draws with. On macOS it is the
+/// dilated outline, and with the text gamma in `canvas::DEFAULT_TEXT_GAMMA`
+/// Chrome 156's canvas matches it pixel for pixel. Under FreeType it fits
+/// outlines to the pixel grid vertically only, so every advance stays as
+/// designed and turning hinting off moves no text; Normal and Full fit
+/// advances too: 13px Oswald's "Hamburgefonstiv quick brown" is 140.50 wide
+/// unhinted and at Slight, and 144 at Normal and Full.
+const HINTED: FontHinting = FontHinting::Slight;
+
+/// The hinting to draw text with, where `hinted` says whether hinting was
+/// asked for -- see [`UNHINTED`] and [`HINTED`].
+pub(crate) fn text_hinting(hinted: bool) -> FontHinting {
+    match hinted {
+        true => HINTED,
+        false => UNHINTED,
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct CollectionKey {
     families: String,
@@ -159,6 +186,9 @@ pub struct CollectionKey {
     /// nothing, and keying on it would cache one collection per size for
     /// fonts that draw every size from the same one.
     optical_size: Option<i32>,
+    /// Whether the collection is for text drawn hinted -- see
+    /// [`FontLibrary::set_hinting`].
+    hinted: bool,
 }
 
 /// Steps per axis unit in a [`CollectionKey`].
@@ -174,6 +204,7 @@ impl CollectionKey {
         style: &TextStyle,
         variations: &[(FourByteTag, f32)],
         optical_size: Option<f32>,
+        hinted: bool,
     ) -> Self {
         let families = style.font_families();
         let families = families.iter().collect::<Vec<&str>>().join(", ");
@@ -196,6 +227,7 @@ impl CollectionKey {
             slant,
             variations,
             optical_size,
+            hinted,
         }
     }
 }
@@ -582,7 +614,10 @@ pub struct FontLibrary {
     /// The registered fonts as they stand, shared with what is laid out
     /// against them. Replaced by [`invalidate`](Self::invalidate).
     epoch: Rc<FontEpoch>,
-    collection: Option<FontCollection>,
+    /// The collection over every registered and generic face, one for text
+    /// drawn unhinted and one for text drawn hinted -- see
+    /// [`set_hinting`](Self::set_hinting).
+    collections: [Option<FontCollection>; 2],
     /// What every collection is built over, from
     /// [`collection_parts`](Self::collection_parts).
     collection_parts: Option<(FontMgr, Option<String>)>,
@@ -592,6 +627,8 @@ pub struct FontLibrary {
     /// The instances the cached collections were built from, kept longer.
     instances: InstanceCache,
     resolved_fonts: ResolvedFontCache,
+    /// Which of the two kinds of collection this hands out now -- see
+    /// [`set_hinting`](Self::set_hinting).
     collection_hinted: bool,
     /// The positions paragraph builders have instanced through font
     /// arguments on the collections this hands out.
@@ -690,7 +727,7 @@ impl FontLibrary {
                 fonts: fonts.clone(),
             }),
             fonts,
-            collection: None,
+            collections: [None, None],
             collection_parts: None,
             collection_cache: CollectionCache::default(),
             instances: InstanceCache::default(),
@@ -753,15 +790,18 @@ impl FontLibrary {
         })
     }
 
+    /// The collection over every registered and generic face for the
+    /// hinting [`set_hinting`](Self::set_hinting) last chose, made on first
+    /// use.
     pub fn font_collection(&mut self) -> FontCollection {
-        // lazily initialize font collection on first actual use
-        if self.collection.is_none() {
-            self.collection = Some(self.new_font_collection());
+        let slot = usize::from(self.collection_hinted);
+        if self.collections[slot].is_none() {
+            self.collections[slot] = Some(self.new_font_collection());
         };
 
-        // SAFETY: the `if` above assigns `Some` when `collection` is
-        // `None`, so it is `Some` on every path to here.
-        self.collection.as_ref().unwrap().clone()
+        // SAFETY: the `if` above assigns `Some` when the slot is `None`, so
+        // it is `Some` on every path to here.
+        self.collections[slot].as_ref().unwrap().clone()
     }
 
     /// A collection over the registered and generic faces, falling back to
@@ -1495,7 +1535,7 @@ impl FontLibrary {
         self.epoch = Rc::new(FontEpoch {
             fonts: self.fonts.clone(),
         });
-        self.collection = None;
+        self.collections = [None, None];
         self.collection_parts = None;
         self.collection_cache.clear();
         self.instances.clear();
@@ -1519,21 +1559,27 @@ impl FontLibrary {
         let full = self.positions.admit(families, coordinates);
         if full {
             self.collection_cache.clear_caches();
-            if let Some(collection) = self.collection.as_mut() {
+            for collection in self.collections.iter_mut().flatten() {
                 collection.clear_caches();
             }
         }
         full
     }
 
+    /// Chooses the collections handed out from here on: those for text
+    /// drawn hinted, or unhinted -- see [`text_hinting`]. Every caller
+    /// states which before [`fonts_for_style`](Self::fonts_for_style).
+    ///
+    /// Two sets rather than one, because a collection's paragraph cache
+    /// would hand a paragraph the runs of another that differs from it only
+    /// in hinting, shaped and drawn with the other's: the cache matches
+    /// styles without comparing their hinting. Kept apart, text of each
+    /// hinting keeps every cache of its own, and choosing between them
+    /// drops nothing.
+    // UPSTREAM: skia-safe 0.153.3 -- https://github.com/google/skia/commit/e0d79efbf171fdd78063f7673d517491154c9a7a -- worked around
+    // Re-check: cargo test hinted_and_unhinted_text_keep_their_own_hinting
     pub fn set_hinting(&mut self, hinting: bool) -> &mut Self {
-        // skia's rasterizer cache doesn't take hinting into account, so
-        // manually invalidate if changed
-        if hinting != self.collection_hinted {
-            self.collection_hinted = hinting;
-            self.collection_cache.clear_caches();
-            self.font_collection().clear_caches();
-        }
+        self.collection_hinted = hinting;
         self
     }
 
@@ -1577,7 +1623,12 @@ impl FontLibrary {
             let explicit_opsz =
                 variations.iter().any(|(tag, _)| *tag == opsz_tag);
             let optical = (sized && !explicit_opsz).then(|| style.font_size());
-            let key = CollectionKey::new(style, variations, optical);
+            let key = CollectionKey::new(
+                style,
+                variations,
+                optical,
+                self.collection_hinted,
+            );
             if let Some(cached) = self.collection_cache.get(&key) {
                 return cached;
             }
@@ -1903,6 +1954,7 @@ mod tests {
             slant: Slant::Upright,
             variations: vec![],
             optical_size: None,
+            hinted: false,
         }
     }
 
@@ -2180,7 +2232,7 @@ mod tests {
         FontLibrary::with_shared(|lib| {
             lib.register_typeface(face, Some(FAMILY.to_string()));
             lib.fonts_for_style(&first, &[]);
-            let first_key = CollectionKey::new(&first, &[], Some(10.0));
+            let first_key = CollectionKey::new(&first, &[], Some(10.0), false);
             assert!(
                 lib.collection_cache.entries.contains_key(&first_key),
                 "the first size is cached under the key it was built for"
