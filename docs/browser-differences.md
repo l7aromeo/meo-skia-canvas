@@ -408,6 +408,16 @@ used for it. Pinned in
 `a_rec2020_colour_takes_css_color_4s_curve_on_every_canvas` on sRGB,
 Display P3 and Rec. 2020 canvases.
 
+A gradient interpolated in `rec2020` mixes by the same 2.4 gamma. Skia's
+gradient interpolation space of that name is built from
+`SkNamedTransferFn::kRec2020` too, so the gradient is computed in the
+CICP space instead. On a `rgb(250 2 0)` to `rgb(0 0 254)` ramp the midpoint
+reads 157,18,143 here; Chrome 156 (156.0.8078.48) paints
+`color-mix(in rec2020, ...)` of the same pair as 159,19,147, which is what
+Skia's own space gives. Pinned in
+`a_rec2020_gradient_mixes_by_the_css_gamma` in four geometries, on both
+engines, with translucent and out-of-gamut stops.
+
 **A colour is painted at the precision it names, whatever its spelling,
 and Chrome rounds some spellings to 8 bits. Ours is the specification's
 answer.** CSS Color 4 rounds `rgb()` channels to integers only when it

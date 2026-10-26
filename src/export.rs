@@ -45,8 +45,9 @@ pub(crate) struct VectorFeatures(u8);
 impl VectorFeatures {
     /// A blend mode past source-over.
     pub(crate) const BLEND_MODE: Self = Self(1 << 3);
-    /// A sweep gradient or a procedural shader. SVG names four paint
-    /// servers and neither of these is among them.
+    /// A sweep gradient, a gradient mixed in a working space of its own, or a
+    /// procedural shader. SVG names four paint servers and none of these is
+    /// among them.
     pub(crate) const EXOTIC_SHADER: Self = Self(1 << 0);
     /// An image filter, which is also how a shadow is drawn here.
     pub(crate) const IMAGE_FILTER: Self = Self(1 << 1);

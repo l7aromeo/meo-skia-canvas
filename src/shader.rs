@@ -12,6 +12,7 @@ use crate::{
     error::Error,
     export::VectorFeatures,
     geometry::Point,
+    pixels::PixelColorSpace,
 };
 
 /// Color space a gradient's stops are interpolated in.
@@ -92,7 +93,9 @@ pub enum GradientColorSpace {
     Hwb,
     /// Interpolates in Display P3's primaries.
     DisplayP3,
-    /// Interpolates in Rec. 2020's primaries.
+    /// Interpolates in Rec. 2020's primaries, gamma-encoded with CSS Color
+    /// 4's pure 2.4 gamma -- the same space as a `rec2020` canvas -- rather
+    /// than BT.2020's piecewise camera curve.
     Rec2020,
     /// Interpolates in ProPhoto RGB's primaries.
     ProphotoRgb,
@@ -156,7 +159,10 @@ impl GradientColorSpace {
             Self::Hsl => interpolation::ColorSpace::HSL,
             Self::Hwb => interpolation::ColorSpace::HWB,
             Self::DisplayP3 => interpolation::ColorSpace::DisplayP3,
-            Self::Rec2020 => interpolation::ColorSpace::Rec2020,
+            // Mixed in the destination, which `in_working_space` makes CSS
+            // Color 4's 2.4-gamma Rec. 2020 -- see the note there on why
+            // Skia's own `Rec2020` is not that space.
+            Self::Rec2020 => interpolation::ColorSpace::Destination,
             Self::ProphotoRgb => interpolation::ColorSpace::ProphotoRGB,
             Self::A98Rgb => interpolation::ColorSpace::A98RGB,
             // The three XYZ spaces are linear re-coordinatisations of linear
@@ -165,6 +171,66 @@ impl GradientColorSpace {
             Self::Xyz | Self::XyzD65 | Self::XyzD50 => {
                 interpolation::ColorSpace::SRGBLinear
             }
+        }
+    }
+
+    /// The canvas space a gradient in this space is computed in, where it
+    /// is not the canvas's own.
+    ///
+    /// Only [`Rec2020`](Self::Rec2020) has one: its gradient is mixed in
+    /// the destination, and this makes the destination CSS Color 4's
+    /// `rec2020`.
+    pub(crate) fn working_space(self) -> Option<PixelColorSpace> {
+        match self {
+            Self::Rec2020 => Some(PixelColorSpace::Rec2020),
+            _ => None,
+        }
+    }
+
+    /// Wraps a gradient built from [`to_skia`](Self::to_skia) so it is
+    /// computed in [`working_space`](Self::working_space), where there is
+    /// one: the stops are converted into that space, mixed there, and the
+    /// result converted to the canvas.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidGradient`] if Skia cannot build the working
+    /// space.
+    pub(crate) fn in_working_space(
+        self,
+        shader: SkShader,
+    ) -> Result<SkShader, Error> {
+        // UPSTREAM: skia-bindings 0.153.3 -- unfiled -- worked around
+        // Re-check: cargo test a_rec2020_gradient_mixes_by_the_css_gamma
+        //
+        // Skia m153 lists its interpolation spaces under CSS Color 4's
+        // interpolation-space section (`SkGradient.h`), but builds `Rec2020`
+        // with `SkNamedTransferFn::kRec2020`, BT.2020's piecewise curve
+        // (`SkGradientBaseShader.cpp`). CSS Color 4 defines `rec2020` with a
+        // pure 2.4 gamma, the transfer `PixelColorSpace::Rec2020` is built
+        // with, so the gradient is mixed in the destination and the
+        // destination is made that space.
+        let Some(space) = self.working_space() else {
+            return Ok(shader);
+        };
+        let working = space.to_skia_color_space().map_err(|_| {
+            Error::InvalidGradient {
+                reason: format!("skia could not build the {space:?} space"),
+            }
+        })?;
+        Ok(shader.with_working_color_space(working, None))
+    }
+
+    /// What a vector backend has to reckon with to name a gradient mixed
+    /// in this space, on top of its geometry.
+    ///
+    /// A gradient wrapped in a [`working_space`](Self::working_space) is no
+    /// longer a gradient to the SVG backend, which then writes the shape with
+    /// no fill at all, so it is rasterized into the document like a sweep.
+    pub(crate) fn vector_features(self) -> VectorFeatures {
+        match self.working_space() {
+            Some(_) => VectorFeatures::EXOTIC_SHADER,
+            None => VectorFeatures::PLAIN,
         }
     }
 
@@ -459,8 +525,9 @@ impl Shader {
         stops: &[GradientStop],
         interpolation: impl Into<GradientInterpolation>,
     ) -> Result<Self, Error> {
+        let interpolation = interpolation.into();
         let (colors, positions, interp) =
-            Self::prepare_stops(stops, interpolation.into())?;
+            Self::prepare_stops(stops, interpolation)?;
         // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
         // Re-check: cargo test a_tagged_stop_is_one_colour_in_every_space
         //
@@ -483,9 +550,10 @@ impl Shader {
         .ok_or_else(|| Error::InvalidGradient {
             reason: "skia could not build linear gradient".to_string(),
         })?;
+        let shader = interpolation.space.in_working_space(shader)?;
         Ok(Self {
             inner: shader,
-            features: VectorFeatures::PLAIN,
+            features: interpolation.space.vector_features(),
         })
     }
 
@@ -505,8 +573,9 @@ impl Shader {
         stops: &[GradientStop],
         interpolation: impl Into<GradientInterpolation>,
     ) -> Result<Self, Error> {
+        let interpolation = interpolation.into();
         let (colors, positions, interp) =
-            Self::prepare_stops(stops, interpolation.into())?;
+            Self::prepare_stops(stops, interpolation)?;
         let stop_colors = GradientColors::new(
             &colors,
             Some(positions.as_slice()),
@@ -522,9 +591,10 @@ impl Shader {
         .ok_or_else(|| Error::InvalidGradient {
             reason: "skia could not build radial gradient".to_string(),
         })?;
+        let shader = interpolation.space.in_working_space(shader)?;
         Ok(Self {
             inner: shader,
-            features: VectorFeatures::PLAIN,
+            features: interpolation.space.vector_features(),
         })
     }
 
@@ -546,8 +616,9 @@ impl Shader {
         stops: &[GradientStop],
         interpolation: impl Into<GradientInterpolation>,
     ) -> Result<Self, Error> {
+        let interpolation = interpolation.into();
         let (colors, positions, interp) =
-            Self::prepare_stops(stops, interpolation.into())?;
+            Self::prepare_stops(stops, interpolation)?;
         let stop_colors = GradientColors::new(
             &colors,
             Some(positions.as_slice()),
@@ -564,6 +635,7 @@ impl Shader {
         .ok_or_else(|| Error::InvalidGradient {
             reason: "skia could not build sweep gradient".to_string(),
         })?;
+        let shader = interpolation.space.in_working_space(shader)?;
         Ok(Self {
             inner: shader,
             features: VectorFeatures::EXOTIC_SHADER,
@@ -592,8 +664,9 @@ impl Shader {
         stops: &[GradientStop],
         interpolation: impl Into<GradientInterpolation>,
     ) -> Result<Self, Error> {
+        let interpolation = interpolation.into();
         let (colors, positions, interp) =
-            Self::prepare_stops(stops, interpolation.into())?;
+            Self::prepare_stops(stops, interpolation)?;
         let stop_colors = GradientColors::new(
             &colors,
             Some(positions.as_slice()),
@@ -611,9 +684,10 @@ impl Shader {
             reason: "skia could not build two-point conical gradient"
                 .to_string(),
         })?;
+        let shader = interpolation.space.in_working_space(shader)?;
         Ok(Self {
             inner: shader,
-            features: VectorFeatures::PLAIN,
+            features: interpolation.space.vector_features(),
         })
     }
 
@@ -895,15 +969,20 @@ pub(crate) mod interpolation_space_tests {
     /// The four names that legitimately share `SRGBLinear` are the exception
     /// and are named here, so adding a fifth is a decision rather than a
     /// silent widening.
+    ///
+    /// A space is the pair of Skia's interpolation space and the working
+    /// space the shader is wrapped in: `Rec2020` interpolates in
+    /// `Destination` like `Destination` itself, and only the working space
+    /// tells them apart.
     #[test]
     fn each_space_maps_to_a_skia_space_of_its_own() {
         use GradientColorSpace as S;
         let expected_collapse = [S::SrgbLinear, S::Xyz, S::XyzD65, S::XyzD50];
 
-        let mut seen: Vec<(interpolation::ColorSpace, GradientColorSpace)> =
-            vec![];
+        type Mapping = (interpolation::ColorSpace, Option<PixelColorSpace>);
+        let mut seen: Vec<(Mapping, GradientColorSpace)> = vec![];
         for space in every_color_space() {
-            let skia = space.to_skia();
+            let skia = (space.to_skia(), space.working_space());
             if let Some((_, first)) =
                 seen.iter().find(|(other, _)| *other == skia)
             {

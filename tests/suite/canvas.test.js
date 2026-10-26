@@ -1142,6 +1142,18 @@ describe("Canvas", () => {
       let mixed = conic.toBufferSync("svg").toString("utf-8");
       assert.match(mixed, /<image/);
       assert.match(mixed, /<path/);
+
+      // A linear gradient mixed in `rec2020` is computed in a working space
+      // of its own, and the backend no longer sees a gradient in it.
+      let wide = new Canvas(60, 60);
+      ctx = wide.getContext("2d");
+      gradient = ctx.createLinearGradient(0, 0, 60, 0);
+      gradient.interpolation = "rec2020";
+      gradient.addColorStop(0, "red");
+      gradient.addColorStop(1, "blue");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(10, 10, 40, 40);
+      assert.match(wide.toBufferSync("svg").toString("utf-8"), /<image/);
     });
 
     test("PDFs", () => {
