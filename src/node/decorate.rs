@@ -30,8 +30,8 @@
 
 use crate::node::typography::{GlyphRun, GlyphRunRef};
 use skia_safe::{
-    Canvas, Color, Color4f, Font, FontStyle, Paint, Path, PathBuilder, PathOp,
-    Point, Rect,
+    Canvas, Color, Color4f, Font, FontStyle, Paint, Path, PathBuilder,
+    PathVerb, Point, Rect,
     paint::{Cap, Style},
     path_utils::fill_path_with_paint,
     textlayout::{
@@ -490,7 +490,7 @@ fn draw_line(
                 _ => top,
             };
             let middle = band_top + band / 2.0;
-            match wave(left, right, middle, band_top, t, device) {
+            match wave(left, right, middle, t, device) {
                 Some(wave) => canvas.draw_path(&wave, &paint),
                 // Shorter than a device pixel, a wave swings less than its
                 // period, so its ink averages to the stroke along its middle.
@@ -505,14 +505,22 @@ fn draw_line(
 }
 
 /// A wavy line's ink from `left` to `right`, `t` thick, swinging about
-/// `middle` within the band from `band_top` -- or `None` where its period is
-/// shorter than [`MIN_DEVICE_PERIOD`] at `device` pixels a unit, which bounds
-/// the half-waves to one per device pixel along it.
+/// `middle` -- or `None` where its period is shorter than
+/// [`MIN_DEVICE_PERIOD`] at `device` pixels a unit, which bounds the
+/// half-waves to one per device pixel along it.
+///
+/// The stroke's outline, cut to its band: square at `left` and `right`,
+/// where the butt caps meet the centreline at a slant and would otherwise
+/// poke past the box, and along the top and bottom, which the stroke only
+/// touches -- the crests swing `WAVE_SWING / 2` thicknesses off the middle
+/// and the stroke adds half a thickness more, `WAVE_BAND / 2` -- but which
+/// the stroker's curves overshoot by a fraction of a pixel. The cut is made
+/// on the outline rather than by a clip, so that a filter or a shadow on the
+/// paint spreads past the line as it spreads past a glyph.
 fn wave(
     left: f32,
     right: f32,
     middle: f32,
-    band_top: f32,
     t: f32,
     device: f32,
 ) -> Option<Path> {
@@ -520,6 +528,14 @@ fn wave(
         return None;
     }
     let band = WAVE_BAND * t;
+    let bounds =
+        Rect::new(left, middle - band / 2.0, right, middle + band / 2.0);
+    Some(cut_to(&wave_stroke(left, right, middle, t), bounds))
+}
+
+/// The outline of a wave's stroke from `left` to `right` about `middle`,
+/// `t` thick and butt-capped, before [`wave`] cuts it to its band.
+fn wave_stroke(left: f32, right: f32, middle: f32, t: f32) -> Path {
     // A quadratic peaks at half its control point's offset, so a control
     // 2 * (swing / 2) off the centreline swings it by `swing` from crest to
     // trough.
@@ -550,10 +566,6 @@ fn wave(
         x += half;
         side = -side;
     }
-    // The stroke's outline, cut to the band, filled: the caps at the ends
-    // square off at the band's edges rather than poking past `left` and
-    // `right`, and no clip comes between the line and its paint's filter or
-    // shadow, which spread past the band as they spread past a glyph.
     let mut stroke = Paint::default();
     stroke
         .set_style(Style::Stroke)
@@ -561,9 +573,246 @@ fn wave(
         .set_stroke_cap(Cap::Butt);
     let mut outline = PathBuilder::new();
     fill_path_with_paint(&path.detach(), &stroke, &mut outline, None, None);
-    let band =
-        Path::rect(Rect::new(left, band_top, right, band_top + band), None);
-    outline.detach().op(&band, PathOp::Intersect)
+    outline.detach()
+}
+
+/// One piece of an outline: a line or a quadratic, each from its first
+/// point to its last.
+#[derive(Clone, Copy, Debug)]
+enum Piece {
+    Line(Point, Point),
+    Quad(Point, Point, Point),
+}
+
+impl Piece {
+    fn start(self) -> Point {
+        match self {
+            Piece::Line(a, _) | Piece::Quad(a, _, _) => a,
+        }
+    }
+
+    fn end(self) -> Point {
+        match self {
+            Piece::Line(_, b) | Piece::Quad(_, _, b) => b,
+        }
+    }
+
+    fn at(self, u: f32) -> Point {
+        match self {
+            Piece::Line(a, b) => a + (b - a) * u,
+            Piece::Quad(a, c, b) => {
+                let v = 1.0 - u;
+                a * (v * v) + c * (2.0 * u * v) + b * (u * u)
+            }
+        }
+    }
+
+    /// The piece split at `u`, by de Casteljau, into the part before and
+    /// the part after.
+    fn split(self, u: f32) -> (Piece, Piece) {
+        let lerp = |a: Point, b: Point| a + (b - a) * u;
+        match self {
+            Piece::Line(a, b) => {
+                let m = lerp(a, b);
+                (Piece::Line(a, m), Piece::Line(m, b))
+            }
+            Piece::Quad(a, c, b) => {
+                let (ac, cb) = (lerp(a, c), lerp(c, b));
+                let m = lerp(ac, cb);
+                (Piece::Quad(a, ac, m), Piece::Quad(m, cb, b))
+            }
+        }
+    }
+
+    /// Where along a quadratic `along` -- its x or its y -- turns back,
+    /// if it does within it.
+    fn turn(self, along: impl Fn(Point) -> f32) -> Option<f32> {
+        match self {
+            Piece::Line(..) => None,
+            Piece::Quad(a, c, b) => {
+                let (a, c, b) = (along(a), along(c), along(b));
+                let denominator = a - 2.0 * c + b;
+                let u = (a - c) / denominator;
+                (denominator != 0.0 && u > 0.0 && u < 1.0).then_some(u)
+            }
+        }
+    }
+
+    /// The piece in parts that each move one way along `along`, so that
+    /// each crosses a line across that axis at most once.
+    fn monotone(
+        self,
+        along: impl Fn(Point) -> f32,
+    ) -> impl Iterator<Item = Piece> {
+        let (first, second) = match self.turn(along) {
+            Some(u) => {
+                let (before, after) = self.split(u);
+                (before, Some(after))
+            }
+            None => (self, None),
+        };
+        std::iter::once(first).chain(second)
+    }
+
+    fn add_to(self, path: &mut PathBuilder) {
+        match self {
+            Piece::Line(_, b) => path.line_to(b),
+            Piece::Quad(_, c, b) => path.quad_to(c, b),
+        };
+    }
+}
+
+/// Bisection steps for where a piece crosses a cut: past the precision of
+/// an `f32` parameter, so the crossing is as exact as the type holds.
+const CROSSING_STEPS: usize = 32;
+
+/// `outline` cut to `bounds`, each cut a straight edge along the side it
+/// is made on.
+///
+/// Each closed contour is clipped against one side at a time, as
+/// Sutherland and Hodgman clip a polygon by a half-plane: a piece inside is
+/// kept, a piece crossing is split where it crosses, and the stretch
+/// outside is replaced by the straight edge along the side from where the
+/// contour left to where it came back. Every point inside keeps the winding
+/// number it had, so the outline fills as it did wherever it is kept, even
+/// where a stroke's inner side folds over itself. Linear in the outline's
+/// size, where a boolean operation rebuilds all of it.
+///
+/// The outline is the stroke of a quadratic centreline with butt caps and
+/// the default join, which Skia's stroker draws in lines and quadratics
+/// only; `a_wave_is_lines_and_quadratics` pins that.
+fn cut_to(outline: &Path, bounds: Rect) -> Path {
+    let x = |p: Point| p.x;
+    let y = |p: Point| p.y;
+    let contours = contours(outline)
+        .into_iter()
+        .map(|pieces| cut(&pieces, x, |v| v - bounds.left))
+        .map(|pieces| cut(&pieces, x, |v| bounds.right - v))
+        .map(|pieces| cut(&pieces, y, |v| v - bounds.top))
+        .map(|pieces| cut(&pieces, y, |v| bounds.bottom - v));
+    let mut path = PathBuilder::new();
+    path.set_fill_type(outline.fill_type());
+    for pieces in contours {
+        let Some(first) = pieces.first() else {
+            continue;
+        };
+        path.move_to(first.start());
+        pieces.iter().for_each(|piece| piece.add_to(&mut path));
+        path.close();
+    }
+    path.detach()
+}
+
+/// The closed contours of `outline` as pieces, each closed explicitly.
+fn contours(outline: &Path) -> Vec<Vec<Piece>> {
+    let points = outline.points();
+    let mut contours: Vec<Vec<Piece>> = Vec::new();
+    let mut at = 0;
+    let mut pen = Point::default();
+    let mut open = Point::default();
+    let close = |pieces: &mut Vec<Piece>, pen: Point, open: Point| {
+        if pen != open {
+            pieces.push(Piece::Line(pen, open));
+        }
+    };
+    for verb in outline.verbs() {
+        match verb {
+            PathVerb::Move => {
+                if let Some(pieces) = contours.last_mut() {
+                    close(pieces, pen, open);
+                }
+                contours.push(Vec::new());
+                (pen, open) = (points[at], points[at]);
+                at += 1;
+            }
+            PathVerb::Line => {
+                if let Some(pieces) = contours.last_mut() {
+                    pieces.push(Piece::Line(pen, points[at]));
+                }
+                pen = points[at];
+                at += 1;
+            }
+            PathVerb::Quad => {
+                if let Some(pieces) = contours.last_mut() {
+                    pieces.push(Piece::Quad(pen, points[at], points[at + 1]));
+                }
+                pen = points[at + 1];
+                at += 2;
+            }
+            PathVerb::Close => {
+                if let Some(pieces) = contours.last_mut() {
+                    close(pieces, pen, open);
+                }
+                pen = open;
+            }
+            // Broken invariant, not input: the stroker draws a quadratic
+            // centreline's butt-capped stroke in lines and quadratics, and
+            // `a_wave_is_lines_and_quadratics` fails before this can be
+            // reached by a change to it.
+            PathVerb::Conic | PathVerb::Cubic => {
+                unreachable!("a wave's outline has a {verb:?}")
+            }
+        }
+    }
+    if let Some(pieces) = contours.last_mut() {
+        close(pieces, pen, open);
+    }
+    contours
+}
+
+/// The closed contour `pieces` cut to where `inside` of its coordinate
+/// `along` is not negative, the cut a straight edge -- one side of
+/// [`cut_to`].
+fn cut(
+    pieces: &[Piece],
+    along: impl Fn(Point) -> f32 + Copy,
+    inside: impl Fn(f32) -> f32,
+) -> Vec<Piece> {
+    let mut kept: Vec<Piece> = Vec::with_capacity(pieces.len() + 2);
+    // Where the contour last left the kept side, to join to where it
+    // comes back.
+    let mut left_at: Option<Point> = None;
+    let rejoin = |kept: &mut Vec<Piece>, from: Option<Point>, to: Point| {
+        if let Some(from) = from.filter(|from| *from != to) {
+            kept.push(Piece::Line(from, to));
+        }
+    };
+    for piece in pieces.iter().flat_map(|piece| piece.monotone(along)) {
+        let (a, b) = (
+            inside(along(piece.start())) >= 0.0,
+            inside(along(piece.end())) >= 0.0,
+        );
+        match (a, b) {
+            (true, true) => kept.push(piece),
+            (false, false) => {}
+            (_, _) => {
+                // Monotone along the axis, so the side changes once.
+                let (mut low, mut high) = (0.0f32, 1.0f32);
+                for _ in 0..CROSSING_STEPS {
+                    let mid = (low + high) / 2.0;
+                    if (inside(along(piece.at(mid))) >= 0.0) == a {
+                        low = mid;
+                    } else {
+                        high = mid;
+                    }
+                }
+                let (before, after) = piece.split((low + high) / 2.0);
+                if a {
+                    kept.push(before);
+                    left_at = Some(before.end());
+                } else {
+                    rejoin(&mut kept, left_at.take(), after.start());
+                    kept.push(after);
+                }
+            }
+        }
+    }
+    // A contour that begins outside is joined round from where it last
+    // left to where it first came back.
+    if let (Some(from), Some(first)) = (left_at, kept.first().copied()) {
+        rejoin(&mut kept, Some(from), first.start());
+    }
+    kept
 }
 
 /// The box a UTF-8 offset falls in, among boxes given as the text each
@@ -647,15 +896,10 @@ mod tests {
         }
         // A wave is one path, so its bound is the path's: no wave below a
         // device pixel's period, and above it a size linear in the length.
-        let band_top = |t: f32| -super::WAVE_BAND * t / 2.0;
         for t in [0.0001, 0.1] {
-            assert!(
-                wave(0.0, 500.0, 0.0, band_top(t), t, 1.0).is_none(),
-                "{t}px"
-            );
+            assert!(wave(0.0, 500.0, 0.0, t, 1.0).is_none(), "{t}px");
         }
-        let coarse =
-            wave(0.0, 500.0, 0.0, band_top(0.5), 0.5, 1.0).expect("a wave");
+        let coarse = wave(0.0, 500.0, 0.0, 0.5, 1.0).expect("a wave");
         // Its outline takes about eight points a half-wave, and there are no
         // more half-waves than device pixels: 500 here.
         assert!(
@@ -663,5 +907,212 @@ mod tests {
             "{}",
             coarse.count_points()
         );
+    }
+
+    /// A wave's uncut stroke and its band: the reference the cut one is
+    /// held to, drawn under a clip to the band.
+    fn stroke_and_band(
+        left: f32,
+        right: f32,
+        middle: f32,
+        t: f32,
+    ) -> (skia_safe::Path, Rect) {
+        let band = super::WAVE_BAND * t;
+        (
+            super::wave_stroke(left, right, middle, t),
+            Rect::new(left, middle - band / 2.0, right, middle + band / 2.0),
+        )
+    }
+
+    /// The wave this module draws, from `left` to `right` about `middle`.
+    fn drawn_wave(
+        left: f32,
+        right: f32,
+        middle: f32,
+        t: f32,
+    ) -> skia_safe::Path {
+        wave(left, right, middle, t, 1.0).expect("a wave")
+    }
+
+    /// Each pixel's alpha with `path` filled black, at `scale`.
+    fn coverage(path: &skia_safe::Path, scale: f32) -> Vec<u8> {
+        let (w, h) = (200, 80);
+        let mut surface =
+            skia_safe::surfaces::raster_n32_premul((w, h)).expect("a surface");
+        let canvas = surface.canvas();
+        canvas.scale((scale, scale));
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true).set_color(Color::BLACK);
+        canvas.draw_path(path, &paint);
+        let info = skia_safe::ImageInfo::new(
+            (w, h),
+            skia_safe::ColorType::Alpha8,
+            skia_safe::AlphaType::Premul,
+            None,
+        );
+        let mut alpha = vec![0u8; (w * h) as usize];
+        assert!(surface.read_pixels(&info, &mut alpha, w as usize, (0, 0)));
+        alpha
+    }
+
+    /// A wave is its stroke cut to its band -- square at the ends of its
+    /// box, where the cut goes through a butt cap, and along the band's
+    /// edges, which the stroker's curves overshoot -- at lengths down to
+    /// less than one half-wave and at fractional ends: what a clip to the
+    /// band leaves of the stroke, sampled as `a_cut_leaves_what_a_clip_leaves`
+    /// samples it. They part by up to 8 of 255, allowed 10, because the
+    /// rasterizer flattens a curve split in two differently from the whole
+    /// one -- splitting every curve of these strokes exactly, and cutting
+    /// nothing, moves them by up to 8. Leaving the ends uncut parts them by
+    /// 255, and leaving the bottom uncut by 60: the stroker overshoots the
+    /// band below its troughs. Above its crests it does not on these
+    /// strokes, so leaving the top uncut passes here, and the cut is kept
+    /// for the stroke that does.
+    #[test]
+    fn a_wave_is_its_stroke_cut_to_its_band() {
+        for t in [0.5, 1.0, 2.0, 4.0, 8.0, 16.0] {
+            for (left, right) in [
+                (10.25, 150.6),
+                (10.0, 10.0 + t * 0.3),
+                (10.4, 10.4 + t * 1.3),
+                (10.0, 10.0 + t * 2.0),
+                (10.7, 10.7 + t * 5.1),
+            ] {
+                let mine = averaged(&drawn_wave(left, right, 30.0, t), None);
+                let (stroke, band) = stroke_and_band(left, right, 30.0, t);
+                let clipped = averaged(&stroke, Some(band));
+                let worst = mine
+                    .iter()
+                    .zip(&clipped)
+                    .map(|(a, b)| a.abs_diff(*b))
+                    .max()
+                    .unwrap_or(0);
+                assert!(
+                    worst <= 10,
+                    "{t}px from {left} to {right}: {worst} off"
+                );
+            }
+        }
+    }
+
+    /// The stroker draws a wave's outline in lines and quadratics only,
+    /// which is all `cut_to` takes: at every thickness, at lengths
+    /// that end inside a half-wave, and scaled.
+    #[test]
+    fn a_wave_is_lines_and_quadratics() {
+        use skia_safe::PathVerb;
+        for t in [0.3, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 40.0] {
+            for length in [t * 0.3, t * 1.7, 97.3, 500.0] {
+                for device in [1.0, 4.0] {
+                    let Some(path) = wave(3.1, 3.1 + length, 20.0, t, device)
+                    else {
+                        continue;
+                    };
+                    assert!(
+                        path.verbs().iter().all(|verb| matches!(
+                            verb,
+                            PathVerb::Move
+                                | PathVerb::Line
+                                | PathVerb::Quad
+                                | PathVerb::Close
+                        )),
+                        "{t}px, {length} long"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `cut_to` cuts a contour that begins outside its bounds, on each
+    /// side in turn, crossing more than one side and folding over itself,
+    /// to what an antialiased clip to the bounds leaves of it: the stretch
+    /// outside is replaced by the edge along the side, the contour closed
+    /// round from where it last left, and every point inside keeps its
+    /// winding, twice round where it goes round twice. Compared at eight
+    /// samples a pixel each way and averaged: at one, an antialiased clip
+    /// multiplies its coverage into the shape's and is itself off by up to
+    /// 14 of 255 where both edges cross a pixel, at two by 4, at eight by 1,
+    /// which is rounding. A boolean intersection parts from the clip by 38
+    /// on the figure eight, whose lobes it unwinds.
+    #[test]
+    fn a_cut_leaves_what_a_clip_leaves() {
+        let bounds = Rect::new(40.0, 20.0, 160.0, 60.0);
+        let shapes: [&[(f32, f32)]; 6] = [
+            &[(20.0, 40.0), (100.0, 0.0), (180.0, 45.0), (100.0, 75.0)],
+            &[(100.0, 5.0), (175.0, 40.0), (100.0, 70.0), (30.0, 35.0)],
+            &[(170.0, 30.0), (60.0, 75.0), (25.0, 10.0), (130.0, 15.0)],
+            &[(90.0, 72.0), (30.0, 25.0), (150.0, 2.0), (175.0, 66.0)],
+            // A figure eight, crossing itself inside, so its lobes wind
+            // opposite ways.
+            &[(20.0, 10.0), (180.0, 70.0), (180.0, 10.0), (20.0, 70.0)],
+            // Round twice the same way, so its middle winds twice.
+            &[
+                (100.0, 2.0),
+                (178.0, 40.0),
+                (100.0, 78.0),
+                (22.0, 40.0),
+                (100.0, 8.0),
+                (170.0, 40.0),
+                (100.0, 72.0),
+                (30.0, 40.0),
+            ],
+        ];
+        for points in shapes {
+            let mut shape = skia_safe::PathBuilder::new();
+            shape.move_to(points[0]);
+            points[1..].iter().for_each(|p| {
+                shape.quad_to((p.0 - 10.0, p.1 + 7.0), *p);
+            });
+            shape.close();
+            let shape = shape.detach();
+            let mine = averaged(&super::cut_to(&shape, bounds), None);
+            let clipped = averaged(&shape, Some(bounds));
+            let worst = mine
+                .iter()
+                .zip(&clipped)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap_or(0);
+            assert!(worst <= 1, "{points:?}: {worst} off");
+        }
+    }
+
+    /// Each pixel's alpha with `path` filled black, inside an antialiased
+    /// clip to `clip` where there is one, drawn at eight samples a pixel
+    /// each way and averaged down.
+    fn averaged(path: &skia_safe::Path, clip: Option<Rect>) -> Vec<u8> {
+        const SAMPLES: usize = 8;
+        let (w, h) = (200, 80);
+        let (sw, sh) = (w * SAMPLES, h * SAMPLES);
+        let mut surface =
+            skia_safe::surfaces::raster_n32_premul((sw as i32, sh as i32))
+                .expect("a surface");
+        let canvas = surface.canvas();
+        canvas.scale((SAMPLES as f32, SAMPLES as f32));
+        if let Some(clip) = clip {
+            canvas.clip_rect(clip, None, true);
+        }
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true).set_color(Color::BLACK);
+        canvas.draw_path(path, &paint);
+        let info = skia_safe::ImageInfo::new(
+            (sw as i32, sh as i32),
+            skia_safe::ColorType::Alpha8,
+            skia_safe::AlphaType::Premul,
+            None,
+        );
+        let mut alpha = vec![0u8; sw * sh];
+        assert!(surface.read_pixels(&info, &mut alpha, sw, (0, 0)));
+        (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w * SAMPLES, i / w * SAMPLES);
+                let sum: usize = (0..SAMPLES * SAMPLES)
+                    .map(|k| {
+                        alpha[(y + k / SAMPLES) * sw + x + k % SAMPLES] as usize
+                    })
+                    .sum();
+                (sum / (SAMPLES * SAMPLES)) as u8
+            })
+            .collect()
     }
 }
