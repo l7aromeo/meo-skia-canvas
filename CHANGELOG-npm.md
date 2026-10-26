@@ -296,6 +296,11 @@ removed and no signature moves.
 
 ### Fixed
 
+- **`new Canvas(w, h, { textGamma })` refuses a gamma above 4.** Skia takes
+  a text gamma from 0 up to 4, and the `RangeError` said so, but the upper
+  bound was checked against `textContrast`, so `textGamma: 5` was taken. It
+  is now refused like `-1`.
+
 - **`ctx.fontHinting = false` draws the outlines as designed.** It turned
   hinting off on the paragraph style, which SkParagraph never reads, so
   every glyph was drawn at Slight hinting whatever it said. `fontHinting =
