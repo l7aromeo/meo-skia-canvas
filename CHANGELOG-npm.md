@@ -296,6 +296,12 @@ removed and no signature moves.
 
 ### Fixed
 
+- **A `Paragraph` style that names no colour draws black.** The declarations
+  say a style's `color` defaults to black, and it was white, SkParagraph's
+  own default: text built without a colour was invisible on a white canvas.
+  It is now black, CSS's initial `color`, on the paragraph's own style and
+  on a pushed one.
+
 - **A registered family matches its name in any case.** CSS Fonts 4
   matches family names without regard to case, and the system's families
   were found that way, but a family registered with `FontLibrary.use` was

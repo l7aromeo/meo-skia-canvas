@@ -661,7 +661,10 @@ fn parse_text_style<'a>(
     obj: &Handle<'a, JsObject>,
     prefix: &str,
 ) -> NeonResult<(TextStyle, Option<f32>)> {
+    // Black where no colour is named, as CSS's initial `color` is and as
+    // the declarations promise; SkParagraph's own default is white.
     let mut style = TextStyle::new();
+    style.set_color(Color::BLACK);
     let mut oblique = None;
 
     refuse_unknown_keys(cx, obj, TEXT_STYLE_KEYS, "text style")?;
