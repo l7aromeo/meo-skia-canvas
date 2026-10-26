@@ -8516,7 +8516,8 @@ fn a_line_texture_draws_its_wider_period_on_both_axes() {
 
 #[test]
 fn to_file_writes_the_format_the_extension_names() {
-    let dir = std::env::temp_dir().join("meo-skia-canvas-to-file");
+    let dir = std::env::temp_dir()
+        .join(format!("meo-skia-canvas-to-file-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
 
     for (name, magic) in [
@@ -10850,7 +10851,8 @@ fn writing_an_animation_to_a_file_writes_the_format_that_was_asked_for() {
     // other test of it goes through `to_buffer`. With only PDF covered here,
     // routing an animation into the PDF writer would have written a PDF
     // under a `.gif` name and passed.
-    let directory = std::env::temp_dir().join("meo-skia-canvas-animated");
+    let directory = std::env::temp_dir()
+        .join(format!("meo-skia-canvas-animated-{}", std::process::id()));
     std::fs::create_dir_all(&directory).expect("a place to write");
 
     let mut canvas = Canvas::new(2.0, 1.0);
@@ -10879,6 +10881,7 @@ fn writing_an_animation_to_a_file_writes_the_format_that_was_asked_for() {
             format.extension()
         );
     }
+    std::fs::remove_dir_all(&directory).ok();
 }
 
 #[test]

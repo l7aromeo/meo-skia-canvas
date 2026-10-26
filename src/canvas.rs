@@ -1178,7 +1178,8 @@ mod pages_tests {
         // they must agree byte for byte.
         let options = EncodeOptions::default();
         let mut canvas = drawn(48.0, 32.0);
-        let dir = std::env::temp_dir().join("meo-pages-write");
+        let dir = std::env::temp_dir()
+            .join(format!("meo-pages-write-png-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("one.png");
 
@@ -1194,7 +1195,7 @@ mod pages_tests {
             .unwrap()
             .encode()
             .unwrap();
-        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir_all(&dir).ok();
         assert_same_export(&canvas, "the written PNG", &written, &encoded);
     }
 
@@ -1209,7 +1210,8 @@ mod pages_tests {
             let ctx = canvas.context();
             ctx.fill_rect(0.0, 0.0, 16.0, 16.0);
         }
-        let dir = std::env::temp_dir().join("meo-pages-write");
+        let dir = std::env::temp_dir()
+            .join(format!("meo-pages-write-gif-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("spanning.gif");
 
@@ -1218,7 +1220,7 @@ mod pages_tests {
         pages.write(&path).unwrap();
 
         let written = std::fs::metadata(&path).unwrap().len();
-        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir_all(&dir).ok();
         assert!(written > 0, "a spanning write produced an empty file");
     }
 
