@@ -462,8 +462,8 @@ impl Shader {
         let (colors, positions, interp) =
             Self::prepare_stops(stops, interpolation.into())?;
         // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
-        // Re-check: cargo test
-        // a_gradient_stop_is_one_colour_in_every_interpolation_space
+        // Re-check: cargo test a_tagged_stop_is_one_colour_in_every_space
+        //
         // Tagged stops are said to have crashed Skia's OKLCH interpolation
         // in an earlier build, which kept them untagged and so read in the
         // destination's space. Tagging no longer crashes in any of the

@@ -1954,13 +1954,12 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
         // makes the documented behaviour true.
         let decoration_color = style.decoration_color.unwrap_or(style.color);
         // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
-        // Re-check: grep -n "fn set_decoration_color\|fn new(color"
-        // ~/.cargo/registry/src/*/skia-safe-*/src/modules/paragraph/text_style.
-        // rs ~/.cargo/registry/src/*/skia-safe-*/src/modules/paragraph/
-        // text_shadow.rs SkParagraph takes a decoration's colour, and a
-        // text shadow's, as an eight-bit sRGB `SkColor` and nothing
-        // wider, so a wide colour is gamut-mapped into sRGB on the way
-        // in.
+        // Re-check: grep -n "fn set_decoration_color\|fn new(color" in
+        // skia-safe's src/modules/paragraph/text_style.rs and text_shadow.rs
+        //
+        // SkParagraph takes a decoration's colour, and a text shadow's, as
+        // an eight-bit sRGB `SkColor` and nothing wider, so a wide colour is
+        // gamut-mapped into sRGB on the way in.
         sk_style
             .set_decoration_color(rgba_linear_to_skia_color(decoration_color));
         if (style.decoration_thickness - 1.0).abs() > f32::EPSILON {

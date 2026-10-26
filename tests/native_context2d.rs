@@ -8357,7 +8357,7 @@ fn an_rgba_linear_is_one_colour_in_every_reader_on_every_canvas() {
 /// as already in the canvas's space -- the UPSTREAM note on
 /// `Shader::linear_gradient` re-checks the first by this test.
 #[test]
-fn a_gradient_stop_is_one_colour_in_every_interpolation_space() {
+fn a_tagged_stop_is_one_colour_in_every_space() {
     let colour = RgbaLinear::from_css("color(display-p3 0.8 0.3 0.2)")
         .expect("a colour");
     let stops = [

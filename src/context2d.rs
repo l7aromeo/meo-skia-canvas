@@ -4274,11 +4274,11 @@ fn decoration_style(
         },
         size,
         // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
-        // Re-check: grep -n "pub color"
-        // ~/.cargo/registry/src/*/skia-safe-*/src/modules/paragraph/text_style.
-        // rs SkParagraph's `Decoration` holds an eight-bit sRGB
-        // `SkColor`, so a wide decoration colour is gamut-mapped into
-        // sRGB.
+        // Re-check: grep -n "pub color" in skia-safe's
+        // src/modules/paragraph/text_style.rs
+        //
+        // SkParagraph's `Decoration` holds an eight-bit sRGB `SkColor`, so
+        // a wide decoration colour is gamut-mapped into sRGB.
         color: color.map(rgba_linear_to_skia_color),
     }
 }
