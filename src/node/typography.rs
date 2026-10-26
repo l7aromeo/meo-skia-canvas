@@ -1647,14 +1647,6 @@ pub fn typeface_wght_range(font: &Typeface) -> Vec<i32> {
     wghts
 }
 
-pub fn to_slant(slant_name: &str) -> Slant {
-    match slant_name.to_lowercase().as_str() {
-        "italic" => Slant::Italic,
-        "oblique" => Slant::Oblique,
-        _ => Slant::Upright,
-    }
-}
-
 pub fn from_slant(slant: Slant) -> String {
     match slant {
         Slant::Upright => "normal",
