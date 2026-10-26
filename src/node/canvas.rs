@@ -1,6 +1,9 @@
 #![allow(non_snake_case)]
 use crate::{
-    canvas::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
+    canvas::{
+        DEFAULT_HEIGHT, DEFAULT_TEXT_CONTRAST, DEFAULT_TEXT_GAMMA,
+        DEFAULT_WIDTH,
+    },
     context::page::{ExportOptions, pages_arg},
     gpu,
     utils::*,
@@ -141,8 +144,8 @@ impl Canvas {
 
 pub fn new(mut cx: FunctionContext) -> JsResult<BoxedCanvas> {
     let opts = cx.argument::<JsObject>(1)?;
-    let text_contrast =
-        opt_double_for_key(&mut cx, &opts, "textContrast").unwrap_or(0.0);
+    let text_contrast = opt_double_for_key(&mut cx, &opts, "textContrast")
+        .unwrap_or(DEFAULT_TEXT_CONTRAST.into());
     let (min_c, max_c) = (
         SurfaceProps::MIN_CONTRAST_INCLUSIVE as _,
         SurfaceProps::MAX_CONTRAST_INCLUSIVE as _,
@@ -154,8 +157,8 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedCanvas> {
         ));
     }
 
-    let mut text_gamma =
-        opt_double_for_key(&mut cx, &opts, "textGamma").unwrap_or(1.4);
+    let mut text_gamma = opt_double_for_key(&mut cx, &opts, "textGamma")
+        .unwrap_or(DEFAULT_TEXT_GAMMA.into());
     let (min_g, max_g) = (
         SurfaceProps::MIN_GAMMA_INCLUSIVE as _,
         SurfaceProps::MAX_GAMMA_EXCLUSIVE as _,

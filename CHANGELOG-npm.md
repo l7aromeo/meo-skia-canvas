@@ -296,6 +296,19 @@ removed and no signature moves.
 
 ### Fixed
 
+- **Text is drawn with Chrome's text contrast and gamma for the platform.**
+  Glyph coverage was corrected with a gamma of 1.4 and no contrast by
+  default, Skia's Android setting, which matches no browser: on macOS, 13px
+  Helvetica drew 160,167 of alpha where Chrome 156 draws 136,770. A canvas
+  now takes the text contrast and gamma Chromium builds Skia with on the
+  platform -- on macOS a contrast of 0 and the sRGB curve, on Windows a
+  contrast of 1 and the sRGB curve, elsewhere 0.2 and 1.2 -- and on macOS
+  draws Helvetica at 13px and 48px and 48px Oswald pixel for pixel as Chrome
+  does, and 13px Oswald but for one glyph a hair's width from a subpixel
+  boundary. Text changes on every platform; the Linux and Windows values are
+  Chromium's and have not been compared with a Chrome there. `textContrast`
+  and `textGamma` still take any value.
+
 - **A `Paragraph` style that names no colour draws black.** The declarations
   say a style's `color` defaults to black, and it was white, SkParagraph's
   own default: text built without a colour was invisible on a white canvas.

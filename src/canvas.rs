@@ -103,6 +103,35 @@ impl BackendInfo {
 ///
 /// Not the URL-safe variant: a `data:` URL carries base64 in its body,
 /// where `+` and `/` are legal.
+/// The text contrast a canvas rasterizes glyph coverage with unless asked
+/// for another: the value Chromium compiles into its Skia build for the
+/// platform, `SK_GAMMA_CONTRAST` in `skia/BUILD.gn`'s `config("skia_config")`
+/// on the chromium/chromium main branch, which that file says is chosen to
+/// approximate the system browser. With [`DEFAULT_TEXT_GAMMA`] and hinting
+/// on, Chrome 156 on macOS draws 13px Helvetica and 48px Helvetica and Oswald
+/// pixel for pixel as a canvas does. The Linux value, Chromium's for Linux
+/// and ChromeOS, has not been measured against a Linux Chrome; it stands for
+/// every platform that is neither macOS nor Windows.
+#[cfg(target_os = "macos")]
+pub(crate) const DEFAULT_TEXT_CONTRAST: f32 = 0.0;
+/// See the macOS value.
+#[cfg(target_os = "windows")]
+pub(crate) const DEFAULT_TEXT_CONTRAST: f32 = 1.0;
+/// See the macOS value.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub(crate) const DEFAULT_TEXT_CONTRAST: f32 = 0.2;
+
+/// The gamma glyph coverage is corrected against unless asked for another,
+/// Chromium's `SK_GAMMA_EXPONENT` for the platform -- see
+/// [`DEFAULT_TEXT_CONTRAST`]. Chromium sets `SK_GAMMA_SRGB` instead on macOS
+/// and Windows, which this Skia no longer reads: an exponent of 0 is its sRGB
+/// curve either way.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) const DEFAULT_TEXT_GAMMA: f32 = 0.0;
+/// See the macOS value.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub(crate) const DEFAULT_TEXT_GAMMA: f32 = 1.2;
+
 const BASE64_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -197,15 +226,18 @@ pub struct CanvasOptions {
     ///
     /// Glyph stems below a pixel wide antialias to something lighter than
     /// the same shape at a larger size, and this compensates. Defaults to
-    /// `0.0`, which is no compensation; the value the Node binding takes
-    /// under the name `textContrast`.
+    /// the value Chrome's text is drawn with on the platform: `0.0` on
+    /// macOS, `1.0` on Windows and `0.2` elsewhere. The value the Node
+    /// binding takes under the name `textContrast`.
     pub text_contrast: f32,
-    /// The gamma the rasterizer corrects glyph coverage against.
+    /// The gamma the rasterizer corrects glyph coverage against, `0.0`
+    /// meaning the sRGB curve.
     ///
     /// Works with [`text_contrast`](Self::text_contrast): coverage is a
     /// linear quantity and the display is not, so blending glyph edges
     /// without accounting for that renders light text on dark thinner than
-    /// dark on light. Defaults to `1.4`, which is Skia's own tuned value.
+    /// dark on light. Defaults to the value Chrome's text is drawn with on
+    /// the platform: `0.0` on macOS and Windows and `1.2` elsewhere.
     pub text_gamma: f32,
 }
 
@@ -215,9 +247,8 @@ impl Default for CanvasOptions {
             color_space: PixelColorSpace::Srgb,
             color_type: PixelDepth::Uint8,
             gpu: true,
-            // Skia's own defaults, and what `ExportOptions` starts from.
-            text_contrast: 0.0,
-            text_gamma: 1.4,
+            text_contrast: DEFAULT_TEXT_CONTRAST,
+            text_gamma: DEFAULT_TEXT_GAMMA,
         }
     }
 }

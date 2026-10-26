@@ -1639,23 +1639,24 @@ export function backend(): BackendInfo;
  */
 export interface CanvasOptions {
   /**
-   * How much the rasterizer thickens small text, from `0` to `1` (defaults
-   * to `0`).
+   * How much the rasterizer thickens small text, from `0` to `1`.
    *
    * Glyph stems below a pixel wide antialias to something lighter than the
-   * same shape at a larger size, and this compensates. The default is no
-   * compensation.
+   * same shape at a larger size, and this compensates. Defaults to the value
+   * Chrome's text is drawn with on the platform: `0` on macOS, `1` on
+   * Windows and `0.2` elsewhere.
    */
   textContrast?: number;
 
   /**
-   * The gamma the rasterizer corrects glyph coverage against (defaults to
-   * `1.4`).
+   * The gamma the rasterizer corrects glyph coverage against, `0` meaning
+   * the sRGB curve.
    *
    * Works with {@link CanvasOptions.textContrast}: coverage is a linear
    * quantity and the display is not, so blending glyph edges without
    * accounting for that renders light text on dark thinner than dark on
-   * light. The default is Skia's own tuned value.
+   * light. Defaults to the value Chrome's text is drawn with on the
+   * platform: `0` on macOS and Windows and `1.2` elsewhere.
    */
   textGamma?: number;
 

@@ -66,6 +66,19 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **Text is drawn with Chrome's text contrast and gamma for the platform.**
+  Glyph coverage was corrected with a gamma of 1.4 and no contrast by
+  default, Skia's Android setting, which matches no browser: on macOS, 13px
+  Helvetica drew 160,167 of alpha where Chrome 156 draws 136,770. A canvas
+  now takes the text contrast and gamma Chromium builds Skia with on the
+  platform -- on macOS a contrast of 0 and the sRGB curve, on Windows a
+  contrast of 1 and the sRGB curve, elsewhere 0.2 and 1.2 -- and on macOS
+  draws Helvetica at 13px and 48px and 48px Oswald pixel for pixel as Chrome
+  does, and 13px Oswald but for one glyph a hair's width from a subpixel
+  boundary. Text changes on every platform; the Linux and Windows values are
+  Chromium's and have not been compared with a Chrome there.
+  `CanvasOptions::text_contrast` and `text_gamma` still take any value.
+
 - **A registered family matches its name in any case.** CSS Fonts 4
   matches family names without regard to case, and the system's families
   were found that way, but a family registered with `FontLibrary::use_paths`

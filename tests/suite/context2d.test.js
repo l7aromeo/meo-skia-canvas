@@ -5513,3 +5513,66 @@ describe("a context and its canvas", () => {
     assert.equal(freed, COUNT);
   });
 });
+
+// A canvas rasterizes text with Chrome's text contrast and gamma for the
+// platform, Chromium's `SK_GAMMA_CONTRAST` and `SK_GAMMA_EXPONENT` in its
+// `skia/BUILD.gn`. Chrome 156 on macOS, CPU canvas, black on transparent,
+// drew "Hamburgefonstiv quick brown" at (5, 90) on 1400 by 120 in 48px
+// Oswald to the buffer whose FNV-1a is below, and in 13px Oswald to 155,310
+// of alpha. Ours at 13px differs in one glyph: the `g` sits at 42.375, where
+// Chrome sums the same advances to 42.37495, and Skia's quarter-pixel
+// subpixel buckets part at .375, so the two draw it from neighbouring
+// buckets -- 58 pixels, 15 of alpha. Helvetica at 13px and 48px matched
+// pixel for pixel as well, but is a system font and is not pinned.
+describe("text is drawn as Chrome draws it", () => {
+  const OSWALD = "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    TEXT = "Hamburgefonstiv quick brown",
+    mac = process.platform === "darwin";
+  const [contrast, gamma] =
+    process.platform === "darwin"
+      ? [0, 0]
+      : process.platform === "win32"
+        ? [1, 0]
+        : [0.2, 1.2];
+
+  // FNV-1a of a buffer, as the Chrome measurement computed it.
+  const fnv = (data) => {
+    let h = 0x811c9dc5;
+    for (const byte of data) h = Math.imul(h ^ byte, 0x01000193) >>> 0;
+    return h.toString(16);
+  };
+  const drawn = (size) => {
+    FontLibrary.use("ChromeOswald", [OSWALD]);
+    const canvas = new Canvas(1400, 120);
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    ctx.font = `${size}px ChromeOswald`;
+    ctx.fillText(TEXT, 5, 90);
+    return ctx.getImageData(0, 0, 1400, 120).data;
+  };
+
+  test("a canvas takes Chromium's text contrast and gamma by default", () => {
+    const { textContrast, textGamma } = new Canvas(1, 1).engine;
+    assert.ok(Math.abs(textContrast - contrast) < 1e-6, `${textContrast}`);
+    assert.ok(Math.abs(textGamma - gamma) < 1e-6, `${textGamma}`);
+  });
+
+  test(
+    "48px Oswald is Chrome's, pixel for pixel",
+    { skip: !mac && "measured on macOS" },
+    () => {
+      assert.equal(fnv(drawn(48)), "3c2114f5");
+    },
+  );
+
+  test(
+    "13px Oswald is Chrome's but for one glyph's subpixel bucket",
+    { skip: !mac && "measured on macOS" },
+    () => {
+      const data = drawn(13);
+      let ink = 0;
+      for (let i = 3; i < data.length; i += 4) ink += data[i];
+      assert.ok(Math.abs(ink - 155310) <= 15, `${ink}`);
+    },
+  );
+});
