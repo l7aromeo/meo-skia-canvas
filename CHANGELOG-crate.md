@@ -25,6 +25,17 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Breaking
 
+- **`Canvas::with_options` refuses a text contrast or gamma outside Skia's
+  range.** `CanvasOptions::text_contrast` and `text_gamma` were handed to
+  Skia as they came, whatever they were. A contrast outside 0 to 1, a gamma
+  outside 0 up to, not including, 4, or NaN in either now returns
+  `Error::InvalidCanvasOption`, a new variant naming the field, as the Node
+  binding refuses them.
+
+  Migrate: pass a contrast from 0 to 1 and a gamma below 4 --
+  `f32::from_bits(4.0f32.to_bits() - 1)` is the largest taken -- or leave
+  both at `CanvasOptions::default()`'s.
+
 - **`Context2D::font_hinting` is `true` until it is set.** It was `false`,
   though text was drawn hinted either way, since the setting did nothing; it
   now takes effect, and on is what text was always drawn at. Code that read

@@ -22,7 +22,7 @@
 
 use std::path::Path;
 
-use skia_safe::{ColorSpace, ColorType};
+use skia_safe::{ColorSpace, ColorType, SurfaceProps};
 
 use crate::{
     context::{
@@ -132,6 +132,22 @@ pub(crate) const DEFAULT_TEXT_GAMMA: f32 = 0.0;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub(crate) const DEFAULT_TEXT_GAMMA: f32 = 1.2;
 
+/// Whether `contrast` is a text contrast Skia's `SkSurfaceProps` takes:
+/// `MIN_CONTRAST_INCLUSIVE` to `MAX_CONTRAST_INCLUSIVE`, 0 to 1. NaN is not.
+pub(crate) fn text_contrast_in_range(contrast: f32) -> bool {
+    (SurfaceProps::MIN_CONTRAST_INCLUSIVE
+        ..=SurfaceProps::MAX_CONTRAST_INCLUSIVE)
+        .contains(&contrast)
+}
+
+/// Whether `gamma` is a text gamma Skia's `SkSurfaceProps` takes:
+/// `MIN_GAMMA_INCLUSIVE` up to, not including, `MAX_GAMMA_EXCLUSIVE` -- 0 up
+/// to 4. NaN is not.
+pub(crate) fn text_gamma_in_range(gamma: f32) -> bool {
+    (SurfaceProps::MIN_GAMMA_INCLUSIVE..SurfaceProps::MAX_GAMMA_EXCLUSIVE)
+        .contains(&gamma)
+}
+
 const BASE64_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -228,7 +244,8 @@ pub struct CanvasOptions {
     /// the same shape at a larger size, and this compensates. Defaults to
     /// the value Chrome's text is drawn with on the platform: `0.0` on
     /// macOS, `1.0` on Windows and `0.2` elsewhere. The value the Node
-    /// binding takes under the name `textContrast`.
+    /// binding takes under the name `textContrast`. Outside `0.0` to `1.0`,
+    /// Skia's range, [`Canvas::with_options`] refuses it.
     pub text_contrast: f32,
     /// The gamma the rasterizer corrects glyph coverage against, `0.0`
     /// meaning the sRGB curve.
@@ -237,7 +254,9 @@ pub struct CanvasOptions {
     /// linear quantity and the display is not, so blending glyph edges
     /// without accounting for that renders light text on dark thinner than
     /// dark on light. Defaults to the value Chrome's text is drawn with on
-    /// the platform: `0.0` on macOS and Windows and `1.2` elsewhere.
+    /// the platform: `0.0` on macOS and Windows and `1.2` elsewhere. From
+    /// `0.0` up to, not including, `4.0`, Skia's range; outside it
+    /// [`Canvas::with_options`] refuses it.
     pub text_gamma: f32,
 }
 
@@ -268,9 +287,10 @@ impl Canvas {
     ///
     /// Composites in sRGB. Use [`Canvas::with_options`] for a wider space.
     pub fn new(width: f32, height: f32) -> Self {
-        // SAFETY: sRGB is the one space every Skia build can construct.
+        // SAFETY: sRGB is the one space every Skia build can construct, and
+        // the default text contrast and gamma are within Skia's range.
         Self::with_options(width, height, CanvasOptions::default())
-            .expect("sRGB is always available")
+            .expect("the default options are always available")
     }
 
     /// Creates a canvas with an explicit color space and pixel format.
@@ -278,7 +298,10 @@ impl Canvas {
     /// # Errors
     ///
     /// Returns [`Error::UnsupportedPixelColorSpace`] when the requested space
-    /// cannot be built by this Skia build.
+    /// cannot be built by this Skia build, and [`Error::InvalidCanvasOption`]
+    /// for a [`text_contrast`](CanvasOptions::text_contrast) or
+    /// [`text_gamma`](CanvasOptions::text_gamma) outside the range Skia
+    /// takes.
     ///
     /// # Examples
     ///
@@ -303,6 +326,28 @@ impl Canvas {
         height: f32,
         options: CanvasOptions,
     ) -> Result<Self, Error> {
+        if !text_contrast_in_range(options.text_contrast) {
+            return Err(Error::InvalidCanvasOption {
+                option: "text_contrast",
+                reason: format!(
+                    "{} is not from {} to {}",
+                    options.text_contrast,
+                    SurfaceProps::MIN_CONTRAST_INCLUSIVE,
+                    SurfaceProps::MAX_CONTRAST_INCLUSIVE
+                ),
+            });
+        }
+        if !text_gamma_in_range(options.text_gamma) {
+            return Err(Error::InvalidCanvasOption {
+                option: "text_gamma",
+                reason: format!(
+                    "{} is not from {} up to, not including, {}",
+                    options.text_gamma,
+                    SurfaceProps::MIN_GAMMA_INCLUSIVE,
+                    SurfaceProps::MAX_GAMMA_EXCLUSIVE
+                ),
+            });
+        }
         let space = options.color_space.to_skia_color_space()?;
         Ok(Self {
             width,
