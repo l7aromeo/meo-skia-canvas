@@ -364,6 +364,17 @@ removed and no signature moves.
 
 ### Fixed
 
+- **On macOS, a GPU draw is no longer dropped when the system's shader
+  compiler is slow.** Skia's Metal backend, as rust-skia builds it, waited one
+  second for each shader and pipeline it needed compiled and then drew
+  nothing, reporting only a line on stderr. On a loaded machine a process's
+  first image draw, blend mode or gradient could come back missing -- a
+  transparent PNG, an export with a shape gone. The darwin binary is now
+  built from Skia source with the version check upstream Skia makes, so the
+  draw waits for the compiler. Seen in the test suites as one-off empty
+  pixels; reproduced by pausing the compiler for three seconds, which a timed
+  build reads as `[0, 0, 0, 0]` and this one as the colour drawn.
+
 - **`new Canvas(w, h, { textGamma })` refuses a gamma above 4.** Skia takes
   a text gamma from 0 up to 4, and the `RangeError` said so, but the upper
   bound was checked against `textContrast`, so `textGamma: 5` was taken. It

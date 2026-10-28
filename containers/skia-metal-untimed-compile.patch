@@ -1,0 +1,60 @@
+--- a/skia-bindings/skia/src/gpu/ganesh/mtl/GrMtlUtil.h
++++ b/skia-bindings/skia/src/gpu/ganesh/mtl/GrMtlUtil.h
+@@ -87,6 +87,12 @@
+ void GrPrecompileMtlShaderLibrary(const GrMtlGpu* gpu, const SkSL::NativeShader& msl);
+ 
+ /**
++ * Whether the untimed Metal compile calls are safe: macOS 10.15 or later, or any
++ * other Apple OS. Before 10.15 the timed replacements below are used instead.
++ */
++bool GrMtlCompilesWithoutTimeout();
++
++/**
+  * Replacement for newLibraryWithSource:options:error that has a timeout.
+  */
+ id<MTLLibrary> GrMtlNewLibraryWithSource(id<MTLDevice>, NSString* mslCode,
+--- a/skia-bindings/skia/src/gpu/ganesh/mtl/GrMtlUtil.mm
++++ b/skia-bindings/skia/src/gpu/ganesh/mtl/GrMtlUtil.mm
+@@ -73,8 +73,7 @@
+ 
+     NSError* error = nil;
+     id<MTLLibrary> compiledLibrary;
+-    // rust-skia: `___isPlatformVersionAtLeast` linker error.
+-    if (false /* @available(macOS 10.15, *) */) {
++    if (GrMtlCompilesWithoutTimeout()) {
+         compiledLibrary = [gpu->device() newLibraryWithSource:(NSString* _Nonnull)nsSource
+                                                       options:options
+                                                         error:&error];
+@@ -91,6 +90,20 @@
+     return compiledLibrary;
+ }
+ 
++// rust-skia: `@available` needs `___isPlatformVersionAtLeast` from compiler-rt,
++// which the final link of a Rust binary does not provide, so the version is
++// asked for at run time. Hard-coding `false` instead sent every compile through
++// the one-second timeouts below, and a timed-out compile drops its draw.
++bool GrMtlCompilesWithoutTimeout() {
++#if TARGET_OS_OSX
++    static const bool kUntimed = [[NSProcessInfo processInfo]
++            isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){10, 15, 0}];
++    return kUntimed;
++#else
++    return true;
++#endif
++}
++
+ void GrPrecompileMtlShaderLibrary(const GrMtlGpu* gpu, const SkSL::NativeShader& msl) {
+     NSString* nsSource = [[NSString alloc] initWithBytesNoCopy:const_cast<char*>(msl.fText.c_str())
+                                                         length:msl.fText.size()
+--- a/skia-bindings/skia/src/gpu/ganesh/mtl/GrMtlPipelineStateBuilder.mm
++++ b/skia-bindings/skia/src/gpu/ganesh/mtl/GrMtlPipelineStateBuilder.mm
+@@ -681,8 +681,7 @@
+     id<MTLRenderPipelineState> pipelineState;
+     {
+         TRACE_EVENT0("skia.shaders", "newRenderPipelineStateWithDescriptor");
+-        // rust-skia: `___isPlatformVersionAtLeast` linker error.
+-        if (false /* @available(macOS 10.15, *) */ ) {
++        if (GrMtlCompilesWithoutTimeout()) {
+             pipelineState = [fGpu->device() newRenderPipelineStateWithDescriptor: pipelineDescriptor
+                                                                            error: &error];
+         } else {

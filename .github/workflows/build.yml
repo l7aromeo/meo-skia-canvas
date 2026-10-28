@@ -75,14 +75,40 @@ jobs:
       - name: Install just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
 
+      # The patched Skia tree the macOS build compiles from -- rust-skia at the
+      # Cargo.lock tag, Skia's DEPS and gn, and
+      # containers/skia-metal-untimed-compile.patch. `just build-release`
+      # prepares it when the cache misses; scripts/skia-source.mjs names it by
+      # version and patch digest, so the key below follows the same two files.
+      - name: Cache the Skia source
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/meo-skia-canvas
+          key: skia-source-${{ hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch') }}
+
       - name: Build module
         env:
           MACOSX_DEPLOYMENT_TARGET: 10.14
         run: just build-release
 
+      # A binary built against rust-skia's prebuilt Skia, or from an unpatched
+      # tree, carries the one-second Metal compile timeout and passes every test
+      # that does not stall the compiler. skia-bindings' build output says
+      # whether it built offline and names each file ninja compiled, so this
+      # refuses a build that downloaded, or whose `GrMtlUtil.mm` is not the
+      # patched one -- scripts/check-patched-skia.mjs says how.
+      - name: Check Skia was built from the patched source
+        run: node scripts/check-patched-skia.mjs target/release/build
+
       - name: Add to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # tests/suite/metal-compile.test.js fails rather than skips here for
+          # a missing GPU engine or sandbox. It still skips on this runner's
+          # Apple Paravirtual device, whose compiler service is shared and
+          # cannot be stopped for one process; the step above is the proof
+          # that holds there.
+          MEO_SKIA_CANVAS_REQUIRE_METAL: "1"
         run: |
           bun run test:suite && bun run upload
 

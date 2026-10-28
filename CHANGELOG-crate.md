@@ -1113,6 +1113,17 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   at idle by the npm addon alone, which can post the release to the
   JavaScript thread that owns them; a Rust program's are kept as before.
 
+### Known, and not fixed here
+
+- **On macOS a GPU draw can be dropped when the shader compiler is slow, in
+  a crate build.** The Skia skia-bindings 0.153.3 downloads waits one second
+  for each Metal shader and pipeline it compiles and then draws nothing, so
+  on a loaded machine a process's first image draw, blend mode or gradient
+  can come back missing. The npm package's macOS binary is built without
+  that limit; a crate build gets whatever Skia skia-bindings provides.
+  docs/rust.md, "Metal and skia-bindings' prebuilt Skia", says how to build
+  Skia from source with the patch that removes it.
+
 ## 📦 ⟩ [v0.16.3] (crate) ⟩ September 16, 2026
 
 **A patch closing a gap 0.16.2 shipped knowingly.** No signature moves and

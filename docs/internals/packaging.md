@@ -32,3 +32,34 @@ baseline symbols dynamic, which is what keeps the number low -- that behaviour
 is load-bearing, not incidental. `build.yml` asserts both after every Linux
 build, and a separate job loads the published Lambda layer and renders through
 it.
+
+## Skia on macOS is built from a patched source
+
+The darwin binary does not use rust-skia's prebuilt Skia. skia-bindings
+replaces Skia's `@available(macOS 10.15, *)` checks in `GrMtlUtil.mm` and
+`GrMtlPipelineStateBuilder.mm` with `false`, and so sends every Metal shader
+compile and pipeline creation through a wrapper that waits one second and then
+drops the draw. Under load, a process's first draw of a new pipeline comes back
+missing -- a transparent export, a dropped blend -- with nothing reported but a
+line on stderr. `containers/skia-metal-untimed-compile.patch` asks the OS
+version at run time instead, which is what upstream Skia's check does.
+
+**Build through `just` on macOS.** The justfile's `dotenv-command`,
+`scripts/skia-source.mjs env`, sets `SKIA_SOURCE_DIR` for every recipe on macOS
+and on no other platform, and `ensure-deps` prepares the tree it names: rust-skia
+at the Cargo.lock tag, Skia's DEPS and gn, the patch applied with `-F0`. It is
+fetched once, about 1 GB, into `$XDG_CACHE_HOME/meo-skia-canvas`, under a name
+that carries the version and the patch's digest. A bare `cargo build` or
+`bun run build` outside `just` sets nothing, downloads the prebuilt, and builds
+a binary with the timeout in it.
+
+**The release cannot ship that binary.** `build.yml`'s mac job refuses a build
+whose skia-bindings output does not say it built offline from that tree, and
+`tests/suite/metal-compile.test.js`, required there by
+`MEO_SKIA_CANVAS_REQUIRE_METAL`, stops the process's own compiler service for
+three seconds under a sandbox that hides the Metal shader cache, and reads a
+transparent pixel from a timed build. The structural check is the one that
+holds on the hosted runner: a macOS virtual machine shares one compiler service
+between processes, so the test has none of its own to stop there, and it skips
+on the Apple Paravirtual device alone. An Apple Silicon Mac on macOS 27 starts
+a service per process and runs it, and any other machine without one fails it.
