@@ -693,6 +693,13 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Added
 
+- **`color-mix()` in the CSS colours the crate reads** --
+  `set_fill_style_css`, `set_stroke_style_css`, `set_shadow_color_css` and
+  `RgbaLinear::from_css` -- by CSS Color 5 section 3: any CSS Color 4 space,
+  the four hue methods, Oklab by default, percentages normalised as CSS
+  Values 5 has a mix normalise them, missing channels carried to their
+  analogues, and one colour or more where Chrome 156 takes two.
+
 - **`Context2D::set_font_kerning` and `set_text_rendering`, with the
   `FontKerning` and `TextRendering` enums**, the Canvas standard's
   `fontKerning` and `textRendering`. `FontKerning::None` lays text out

@@ -1,0 +1,1149 @@
+{
+  "about": "color-mix() as CSS Color 5 section 3 defines it, each row as set on fillStyle: `expected` is what this library reads back, `null` where it refuses the string; `chrome`, `chromePixel` and `chromeStop` are what Chrome reads back, paints on an 8-bit canvas and whether its addColorStop takes it. Read by src/node/utils.rs and tests/suite/color-mix.test.js. A row without `why` agrees with Chrome to its six figures and its pixel to one level.",
+  "source": "Chrome 156.0.8078.49 headless, a 1x1 canvas outside a document, measured 2026-10-28.",
+  "why": {
+    "draft": "CSS Color 5's grammar takes one or more colours, `[ <color> && <percentage [0,100]>? ]#`; Chrome 156 takes exactly two. docs/browser-differences.md.",
+    "reference": "Chrome's figures stray from CSS Color 4's sample code worked in f64 from the fifth figure; this library's are that arithmetic at f32 precision. docs/browser-differences.md.",
+    "rec2020": "rec2020 decodes by CSS Color 4's 2.4 gamma here and by BT.2020's curve in Chrome 156. docs/browser-differences.md.",
+    "junk": "Chrome 156's addColorStop takes a colour followed by other text, which its fillStyle refuses; this library refuses both."
+  },
+  "cases": [
+    {
+      "css": "color-mix(in srgb, red, blue)",
+      "chrome": "color(srgb 0.5 0 0.5)",
+      "chromePixel": [
+        128,
+        0,
+        128,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.5 0 0.5)"
+    },
+    {
+      "css": "color-mix(in srgb, red 25%, blue)",
+      "chrome": "color(srgb 0.25 0 0.75)",
+      "chromePixel": [
+        64,
+        0,
+        191,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.25 0 0.75)"
+    },
+    {
+      "css": "color-mix(in srgb, red, blue 25%)",
+      "chrome": "color(srgb 0.75 0 0.25)",
+      "chromePixel": [
+        191,
+        0,
+        64,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.75 0 0.25)"
+    },
+    {
+      "css": "color-mix(in srgb, red 30%, blue 30%)",
+      "chrome": "color(srgb 0.5 0 0.5 / 0.6)",
+      "chromePixel": [
+        128,
+        0,
+        128,
+        153
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.5 0 0.5 / 0.6)"
+    },
+    {
+      "css": "color-mix(in srgb, red 80%, blue 80%)",
+      "chrome": "color(srgb 0.5 0 0.5)",
+      "chromePixel": [
+        128,
+        0,
+        128,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.5 0 0.5)"
+    },
+    {
+      "css": "color-mix(in srgb, red 0%, blue 0%)",
+      "chrome": "color(srgb 0.5 0 0.5 / 0)",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.5 0 0.5 / 0)"
+    },
+    {
+      "css": "color-mix(in srgb, red 100%, blue)",
+      "chrome": "color(srgb 1 0 0)",
+      "chromePixel": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 1 0 0)"
+    },
+    {
+      "css": "color-mix(in srgb, red)",
+      "chrome": "#123456",
+      "chromePixel": [
+        18,
+        52,
+        86,
+        255
+      ],
+      "chromeStop": false,
+      "expected": "color(srgb 1 0 0)",
+      "why": "draft"
+    },
+    {
+      "css": "color-mix(in srgb, red 50%)",
+      "chrome": "#123456",
+      "chromePixel": [
+        18,
+        52,
+        86,
+        255
+      ],
+      "chromeStop": false,
+      "expected": "color(srgb 1 0 0 / 0.5)",
+      "why": "draft"
+    },
+    {
+      "css": "color-mix(in srgb, red, blue, lime)",
+      "chrome": "#123456",
+      "chromePixel": [
+        18,
+        52,
+        86,
+        255
+      ],
+      "chromeStop": false,
+      "expected": "color(srgb 0.33333333 0.33333333 0.33333333)",
+      "why": "draft"
+    },
+    {
+      "css": "color-mix(in srgb, red 20%, blue 30%, lime 10%)",
+      "chrome": "#123456",
+      "chromePixel": [
+        18,
+        52,
+        86,
+        255
+      ],
+      "chromeStop": false,
+      "expected": "color(srgb 0.33333333 0.16666667 0.5 / 0.6)",
+      "why": "draft"
+    },
+    {
+      "css": "color-mix(red, blue)",
+      "chrome": "oklab(0.539974 0.0962086 -0.0928316)",
+      "chromePixel": [
+        140,
+        83,
+        162,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "oklab(0.5399845 0.09620305 -0.09284095)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in oklab, red, blue)",
+      "chrome": "oklab(0.539974 0.0962086 -0.0928316)",
+      "chromePixel": [
+        140,
+        83,
+        162,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "oklab(0.5399845 0.09620305 -0.09284095)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in srgb-linear, red, blue)",
+      "chrome": "color(srgb-linear 0.5 -6.85395e-9 0.5)",
+      "chromePixel": [
+        188,
+        0,
+        188,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb-linear 0.5 0 0.5)"
+    },
+    {
+      "css": "color-mix(in display-p3, red, blue)",
+      "chrome": "color(display-p3 0.458734 0.100055 0.549017)",
+      "chromePixel": [
+        128,
+        10,
+        145,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(display-p3 0.45874378 0.1001434 0.5490743)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in a98-rgb, red, blue)",
+      "chrome": "color(a98-rgb 0.426364 -0.00755272 0.487894)",
+      "chromePixel": [
+        128,
+        0,
+        128,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(a98-rgb 0.4292958 0 0.49053438)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in prophoto-rgb, red, blue)",
+      "chrome": "color(prophoto-rgb 0.519249 0.206658 0.513153)",
+      "chromePixel": [
+        186,
+        3,
+        157,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(prophoto-rgb 0.5192267 0.20667544 0.5132069)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in rec2020, red, blue)",
+      "chrome": "color(rec2020 0.480177 0.141018 0.510213)",
+      "chromePixel": [
+        162,
+        19,
+        147,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(rec2020 0.5469065 0.24161595 0.5677172)",
+      "why": "rec2020"
+    },
+    {
+      "css": "color-mix(in lab, red, blue)",
+      "chrome": "lab(41.9277 74.5607 -21.0676)",
+      "chromePixel": [
+        193,
+        0,
+        136,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "lab(41.92942 74.54614 -21.06937)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in xyz, red, blue)",
+      "chrome": "color(xyz-d65 0.296439 0.142411 0.484861)",
+      "chromePixel": [
+        188,
+        0,
+        188,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(xyz-d65 0.2964358 0.14241566 0.4849315)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in xyz-d50, red, blue)",
+      "chrome": "color(xyz-d50 0.289566 0.141548 0.364006)",
+      "chromePixel": [
+        188,
+        0,
+        188,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(xyz-d50 0.2895721 0.14155649 0.36401164)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in xyz-d65, red, blue)",
+      "chrome": "color(xyz-d65 0.296439 0.142411 0.484861)",
+      "chromePixel": [
+        188,
+        0,
+        188,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(xyz-d65 0.2964358 0.14241566 0.4849315)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in hsl, red, blue)",
+      "chrome": "color(srgb 1 0 1)",
+      "chromePixel": [
+        255,
+        0,
+        255,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 1 0 1)"
+    },
+    {
+      "css": "color-mix(in hwb, red, blue)",
+      "chrome": "color(srgb 1 0 1)",
+      "chromePixel": [
+        255,
+        0,
+        255,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 1 0 1)"
+    },
+    {
+      "css": "color-mix(in lch, red, blue)",
+      "chrome": "lch(41.9277 119.034 351.112)",
+      "chromePixel": [
+        245,
+        0,
+        134,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "lch(41.92942 119.01932 351.11096)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in oklch, red, blue)",
+      "chrome": "oklch(0.539974 0.285457 326.643)",
+      "chromePixel": [
+        186,
+        0,
+        194,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "oklch(0.5399845 0.28544885 326.64295)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in oklch shorter hue, red, blue)",
+      "chrome": "oklch(0.539974 0.285457 326.643)",
+      "chromePixel": [
+        186,
+        0,
+        194,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "oklch(0.5399845 0.28544885 326.64295)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in oklch longer hue, red, blue)",
+      "chrome": "oklch(0.539974 0.285457 146.643)",
+      "chromePixel": [
+        0,
+        147,
+        0,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "oklch(0.5399845 0.28544885 146.64295)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in oklch increasing hue, red, blue)",
+      "chrome": "oklch(0.539974 0.285457 146.643)",
+      "chromePixel": [
+        0,
+        147,
+        0,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "oklch(0.5399845 0.28544885 146.64295)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in oklch decreasing hue, red, blue)",
+      "chrome": "oklch(0.539974 0.285457 326.643)",
+      "chromePixel": [
+        186,
+        0,
+        194,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "oklch(0.5399845 0.28544885 326.64295)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in hsl longer hue, red, blue)",
+      "chrome": "color(srgb 0 1 0)",
+      "chromePixel": [
+        0,
+        255,
+        0,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0 1 0)"
+    },
+    {
+      "css": "color-mix(in lch, white, blue)",
+      "chrome": "lch(64.7821 65.6161 301.368)",
+      "chromePixel": [
+        175,
+        137,
+        255,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "lch(64.78415 65.60072 301.36427)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in oklch, white, red)",
+      "chrome": "oklch(0.81398 0.128877 29.2346)",
+      "chromePixel": [
+        255,
+        161,
+        145,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "oklch(0.81397768 0.12884165 29.23388)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in oklch, oklch(0.5 0.1 none), oklch(0.7 0.2 120))",
+      "chrome": "oklch(0.6 0.15 120)",
+      "chromePixel": [
+        117,
+        140,
+        0,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "oklch(0.6 0.15 120)"
+    },
+    {
+      "css": "color-mix(in oklch, oklch(none 0.1 30), oklch(0.7 0.2 120))",
+      "chrome": "oklch(0.7 0.15 75)",
+      "chromePixel": [
+        212,
+        142,
+        0,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "oklch(0.7 0.15 75)"
+    },
+    {
+      "css": "color-mix(in srgb, rgb(255 0 0 / 0.5), blue)",
+      "chrome": "color(srgb 0.333333 0 0.666667 / 0.75)",
+      "chromePixel": [
+        85,
+        0,
+        170,
+        191
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.33333333 0 0.6666667 / 0.75)"
+    },
+    {
+      "css": "color-mix(in oklab, rgb(255 0 0 / 0.5), rgb(0 0 255 / 0.25))",
+      "chrome": "oklab(0.569304 0.139099 -0.0199346 / 0.375)",
+      "chromePixel": [
+        178,
+        80,
+        128,
+        96
+      ],
+      "chromeStop": true,
+      "expected": "oklab(0.56930815 0.13908972 -0.0199452 / 0.375)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in srgb, transparent, blue)",
+      "chrome": "color(srgb 0 0 1 / 0.5)",
+      "chromePixel": [
+        0,
+        0,
+        255,
+        128
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0 0 1 / 0.5)"
+    },
+    {
+      "css": "color-mix(in srgb, color-mix(in srgb, red, blue), lime)",
+      "chrome": "color(srgb 0.25 0.5 0.25)",
+      "chromePixel": [
+        64,
+        128,
+        64,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.25 0.5 0.25)"
+    },
+    {
+      "css": "color-mix(in srgb, currentcolor, blue)",
+      "chrome": "color(srgb 0 0 0.5)",
+      "chromePixel": [
+        0,
+        0,
+        128,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0 0 0.5)"
+    },
+    {
+      "css": "color-mix(in srgb, red -10%, blue)",
+      "chrome": "#123456",
+      "chromePixel": [
+        18,
+        52,
+        86,
+        255
+      ],
+      "chromeStop": false,
+      "expected": null
+    },
+    {
+      "css": "color-mix(in srgb, red 110%, blue)",
+      "chrome": "#123456",
+      "chromePixel": [
+        18,
+        52,
+        86,
+        255
+      ],
+      "chromeStop": false,
+      "expected": null
+    },
+    {
+      "css": "color-mix(in srgb red, blue)",
+      "chrome": "#123456",
+      "chromePixel": [
+        18,
+        52,
+        86,
+        255
+      ],
+      "chromeStop": false,
+      "expected": null
+    },
+    {
+      "css": "color-mix(in srgb, red blue)",
+      "chrome": "#123456",
+      "chromePixel": [
+        18,
+        52,
+        86,
+        255
+      ],
+      "chromeStop": false,
+      "expected": null
+    },
+    {
+      "css": "color-mix(in hsl shorter hue, red, blue)",
+      "chrome": "color(srgb 1 0 1)",
+      "chromePixel": [
+        255,
+        0,
+        255,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 1 0 1)"
+    },
+    {
+      "css": "color-mix(in srgb shorter hue, red, blue)",
+      "chrome": "#123456",
+      "chromePixel": [
+        18,
+        52,
+        86,
+        255
+      ],
+      "chromeStop": false,
+      "expected": null
+    },
+    {
+      "css": "color-mix(in nonsense, red, blue)",
+      "chrome": "#123456",
+      "chromePixel": [
+        18,
+        52,
+        86,
+        255
+      ],
+      "chromeStop": false,
+      "expected": null
+    },
+    {
+      "css": "color-mix(in srgb,)",
+      "chrome": "#123456",
+      "chromePixel": [
+        18,
+        52,
+        86,
+        255
+      ],
+      "chromeStop": false,
+      "expected": null
+    },
+    {
+      "css": "color-mix(in srgb, red, blue)foo",
+      "chrome": "#123456",
+      "chromePixel": [
+        18,
+        52,
+        86,
+        255
+      ],
+      "chromeStop": true,
+      "expected": null,
+      "why": "junk"
+    },
+    {
+      "css": "COLOR-MIX(IN SRGB, RED, BLUE)",
+      "chrome": "color(srgb 0.5 0 0.5)",
+      "chromePixel": [
+        128,
+        0,
+        128,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.5 0 0.5)"
+    },
+    {
+      "css": "color-mix(in srgb, red calc(25%), blue)",
+      "chrome": "color(srgb 0.25 0 0.75)",
+      "chromePixel": [
+        64,
+        0,
+        191,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.25 0 0.75)"
+    },
+    {
+      "css": "color-mix(in srgb, red, blue",
+      "chrome": "color(srgb 0.5 0 0.5)",
+      "chromePixel": [
+        128,
+        0,
+        128,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.5 0 0.5)"
+    },
+    {
+      "css": "color-mix(in oklab, lab(50 20 30), oklch(0.6 0.1 200) 75%)",
+      "chrome": "oklab(0.59315 -0.0574202 -0.00798744)",
+      "chromePixel": [
+        84,
+        138,
+        132,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "oklab(0.593149 -0.05741783 -0.0079898)"
+    },
+    {
+      "css": "color-mix(in display-p3, color(display-p3 1 0 0), color(rec2020 0 1 0))",
+      "chrome": "color(display-p3 0.216131 0.516303 -0.0749823)",
+      "chromePixel": [
+        0,
+        134,
+        0,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(display-p3 0.21613138 0.51630338 -0.07498223)",
+      "why": "rec2020"
+    },
+    {
+      "css": "color-mix(in lch, lch(50 0 30), lch(60 40 90))",
+      "chrome": "lch(55 20 60)",
+      "chromePixel": [
+        156,
+        125,
+        102,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "lch(55 20 60)"
+    },
+    {
+      "css": "color-mix(in hsl, hsl(120 0% 50%), hsl(240 100% 50%))",
+      "chrome": "color(srgb 0.25 0.75 0.75)",
+      "chromePixel": [
+        64,
+        191,
+        191,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.25 0.75 0.75)"
+    },
+    {
+      "css": "color-mix(in srgb, red 33.3333%, blue)",
+      "chrome": "color(srgb 0.333333 0 0.666667)",
+      "chromePixel": [
+        85,
+        0,
+        170,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.333333 0 0.666667)"
+    },
+    {
+      "css": "color-mix(in oklch, red 10%, lime 20%, blue 70%)",
+      "chrome": "#123456",
+      "chromePixel": [
+        18,
+        52,
+        86,
+        255
+      ],
+      "chromeStop": false,
+      "expected": "oklch(0.55249306 0.30398385 216.25887)",
+      "why": "draft"
+    },
+    {
+      "css": "color-mix(in lch, hsl(120 50% none), lch(60 40 90))",
+      "chrome": "lch(60 20 90)",
+      "chromePixel": [
+        155,
+        144,
+        109,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "lch(60 20 90)"
+    },
+    {
+      "css": "color-mix(in hsl, hsl(120 50% none), hsl(240 50% 60%))",
+      "chrome": "color(srgb 0.4 0.8 0.8)",
+      "chromePixel": [
+        102,
+        204,
+        204,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.4 0.8 0.8)"
+    },
+    {
+      "css": "color-mix(in hsl, white, blue)",
+      "chrome": "color(srgb 0.625 0.625 0.875)",
+      "chromePixel": [
+        159,
+        159,
+        223,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.625 0.625 0.875)"
+    },
+    {
+      "css": "color-mix(in hwb, white, blue)",
+      "chrome": "color(srgb 0.5 0.5 1)",
+      "chromePixel": [
+        128,
+        128,
+        255,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.5 0.5 1)"
+    },
+    {
+      "css": "color-mix(in hsl, hsl(none 50% 50%), hsl(240 50% 50%))",
+      "chrome": "color(srgb 0.25 0.25 0.75)",
+      "chromePixel": [
+        64,
+        64,
+        191,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.25 0.25 0.75)"
+    },
+    {
+      "css": "color-mix(in hwb, hwb(none 10% 20%), hwb(240 30% 40%))",
+      "chrome": "color(srgb 0.2 0.2 0.7)",
+      "chromePixel": [
+        51,
+        51,
+        179,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.2 0.2 0.7)"
+    },
+    {
+      "css": "color-mix(in oklch, oklch(0.5 0.1 none), oklch(0.6 0.1 none))",
+      "chrome": "oklch(0.55 0.1 none)",
+      "chromePixel": [
+        160,
+        87,
+        111,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "oklch(0.55 0.1 none)"
+    },
+    {
+      "css": "color-mix(in srgb, rgb(none 0 0), blue)",
+      "chrome": "color(srgb 0 0 0.5)",
+      "chromePixel": [
+        0,
+        0,
+        128,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0 0 0.5)"
+    },
+    {
+      "css": "color-mix(in srgb, color(srgb none 0 0), color(srgb 0.6 0.2 1))",
+      "chrome": "color(srgb 0.6 0.1 0.5)",
+      "chromePixel": [
+        153,
+        26,
+        128,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.6 0.1 0.5)"
+    },
+    {
+      "css": "color-mix(in oklab, color(srgb none 0 0), blue)",
+      "chrome": "oklab(0.225991 -0.0162312 -0.155761)",
+      "chromePixel": [
+        0,
+        0,
+        99,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "oklab(0.22600686 -0.016228488 -0.15576409)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in oklab, color(srgb none none none), blue)",
+      "chrome": "oklab(0.451981 -0.0324624 -0.311523)",
+      "chromePixel": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "oklab(0.45201372 -0.032456975 -0.31152817)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in lab, lch(none 20 30), oklch(0.6 0.1 200))",
+      "chrome": "lab(54.5669 -6.98634 -1.4265)",
+      "chromePixel": [
+        116,
+        134,
+        133,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "lab(54.56644 -6.986812 -1.42391)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in srgb, rgb(255 0 0 / none), rgb(0 0 255 / 0.5))",
+      "chrome": "color(srgb 0.5 0 0.5 / 0.5)",
+      "chromePixel": [
+        128,
+        0,
+        128,
+        128
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.5 0 0.5 / 0.5)"
+    },
+    {
+      "css": "color-mix(in srgb, rgb(255 0 0 / none), rgb(0 0 255 / none))",
+      "chrome": "color(srgb 0.5 0 0.5 / none)",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.5 0 0.5 / none)"
+    },
+    {
+      "css": "color-mix(in srgb, red 0%, blue)",
+      "chrome": "color(srgb 0 0 1)",
+      "chromePixel": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0 0 1)"
+    },
+    {
+      "css": "color-mix(in srgb, red 60%, blue 60%)",
+      "chrome": "color(srgb 0.5 0 0.5)",
+      "chromePixel": [
+        128,
+        0,
+        128,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.5 0 0.5)"
+    },
+    {
+      "css": "color-mix(in srgb, transparent, transparent)",
+      "chrome": "color(srgb 0 0 0 / 0)",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0 0 0 / 0)"
+    },
+    {
+      "css": "color-mix(in hsl, hsl(30 100% 50%), hsl(330 100% 50%))",
+      "chrome": "color(srgb 1 0 0)",
+      "chromePixel": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 1 0 0)"
+    },
+    {
+      "css": "color-mix(in hsl increasing hue, hsl(30 100% 50%), hsl(330 100% 50%))",
+      "chrome": "color(srgb 0 1 1)",
+      "chromePixel": [
+        0,
+        255,
+        255,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0 1 1)"
+    },
+    {
+      "css": "color-mix(in hsl decreasing hue, hsl(30 100% 50%), hsl(330 100% 50%))",
+      "chrome": "color(srgb 1 0 0)",
+      "chromePixel": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 1 0 0)"
+    },
+    {
+      "css": "color-mix(in oklch, oklch(0.6 0.1 350), oklch(0.6 0.1 10))",
+      "chrome": "oklch(0.6 0.1 0)",
+      "chromePixel": [
+        177,
+        102,
+        126,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "oklch(0.6 0.1 0)"
+    },
+    {
+      "css": "color-mix(in oklch longer hue, oklch(0.6 0.1 350), oklch(0.6 0.1 10))",
+      "chrome": "oklch(0.6 0.1 180)",
+      "chromePixel": [
+        35,
+        147,
+        130,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "oklch(0.6 0.1 180)"
+    },
+    {
+      "css": "color-mix(in lch, lch(50 30 0), lch(50 30 180))",
+      "chrome": "lch(50 30 90)",
+      "chromePixel": [
+        132,
+        118,
+        67,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "lch(50 30 90)"
+    },
+    {
+      "css": "color-mix(in lch longer hue, lch(50 30 0), lch(50 30 180))",
+      "chrome": "lch(50 30 90)",
+      "chromePixel": [
+        132,
+        118,
+        67,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "lch(50 30 90)"
+    },
+    {
+      "css": "color-mix(in xyz, color(xyz none 0.2 0.3), color(srgb 1 0 0))",
+      "chrome": "color(xyz-d65 0.412426 0.206324 0.159659)",
+      "chromePixel": [
+        248,
+        0,
+        108,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(xyz-d65 0.4123908 0.2063195 0.1596654)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in srgb, color(xyz none 0.2 0.3), red)",
+      "chrome": "color(srgb 1 0.327933 0.281163)",
+      "chromePixel": [
+        255,
+        84,
+        72,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 1 0.3279215 0.2811469)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in hsl, hsl(120, 50%, 50%), hsl(240, 50%, 50%))",
+      "chrome": "color(srgb 0.25 0.75 0.75)",
+      "chromePixel": [
+        64,
+        191,
+        191,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.25 0.75 0.75)"
+    },
+    {
+      "css": "color-mix(in hsl, rgb(128 128 128), hsl(240 50% 50%))",
+      "chrome": "color(srgb 0.376225 0.376225 0.625735)",
+      "chromePixel": [
+        96,
+        96,
+        160,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.3762255 0.3762255 0.6257353)"
+    },
+    {
+      "css": "color-mix(in oklch, rgb(128 128 128), oklch(0.6 0.1 200))",
+      "chrome": "oklch(0.599934 0.0500149 200)",
+      "chromePixel": [
+        92,
+        138,
+        140,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "oklch(0.5999354 0.05 200)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in srgb, red 50%, blue 50%)",
+      "chrome": "color(srgb 0.5 0 0.5)",
+      "chromePixel": [
+        128,
+        0,
+        128,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.5 0 0.5)"
+    },
+    {
+      "css": "color-mix(25% red, blue)",
+      "chrome": "oklab(0.495977 0.0318731 -0.202177)",
+      "chromePixel": [
+        81,
+        71,
+        210,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "oklab(0.49599913 0.03187304 -0.20218456)",
+      "why": "reference"
+    },
+    {
+      "css": "color-mix(in srgb, 25% red, blue)",
+      "chrome": "color(srgb 0.25 0 0.75)",
+      "chromePixel": [
+        64,
+        0,
+        191,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.25 0 0.75)"
+    },
+    {
+      "css": "color-mix(in srgb, red 25% , blue)",
+      "chrome": "color(srgb 0.25 0 0.75)",
+      "chromePixel": [
+        64,
+        0,
+        191,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.25 0 0.75)"
+    },
+    {
+      "css": "color-mix( in srgb , red , blue )",
+      "chrome": "color(srgb 0.5 0 0.5)",
+      "chromePixel": [
+        128,
+        0,
+        128,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.5 0 0.5)"
+    }
+  ]
+}

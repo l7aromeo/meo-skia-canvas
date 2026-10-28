@@ -504,3 +504,36 @@ relative colour exactly.
 `Image.currentColor` reads back through the same code, so it reports the
 string `fillStyle` would for the same colour, although the SVG is recorded
 with its eight-bit equivalent.
+
+**`color-mix()` takes one colour or more, as CSS Color 5's grammar does, and
+mixes by CSS Color 4's sample code; Chrome takes exactly two and strays from
+the fifth figure.** The draft writes the function as `color-mix(
+<color-interpolation-method>? , [ <color> && <percentage [0,100]>? ]#)`, a
+list of one or more mix items. Chrome 156 refuses `color-mix(in srgb, red)`
+and `color-mix(in srgb, red, blue, lime)`; here the first is red and the
+second the colours mixed in order, a third of each. Two colours read and
+paint as they do in Chrome wherever the arithmetic agrees, measured on 92
+rows in `tests/assets/cases/css-color-mix.json`.
+
+Where it does not, the figures here are CSS Color 4's sample code worked in
+`f64`, held at `f32`, and Chrome's are not:
+
+        color-mix(in oklab, red, blue)
+            Chrome  oklab(0.539974 0.0962086 -0.0928316)
+            here    oklab(0.5399845 0.09620305 -0.09284095)
+            f64     0.53998454 0.09620305 -0.09284094
+        color-mix(in display-p3, red, blue)
+            Chrome  color(display-p3 0.458734 0.100055 0.549017)
+            here    color(display-p3 0.45874378 0.1001434 0.5490743)
+            f64     0.45874378 0.10014340 0.54907431
+        color-mix(in a98-rgb, red, blue)
+            Chrome  color(a98-rgb 0.426364 -0.00755272 0.487894)   paints 128,0,128
+            here    color(a98-rgb 0.4292958 0 0.49053438)           paints 129,0,129
+            f64     0.42929582 -3.05e-8 0.49053437, 128.52 as sRGB
+
+A98 RGB shares sRGB's red and blue primaries, so the mix has no green; the
+sample code's own arithmetic leaves 1e-17 there before A98's pure-power
+encode makes it -3e-8, and a matrix product within its own rounding of zero
+is zero here. A mix in `rec2020` differs from Chrome by the 2.4 gamma above.
+Chrome's `addColorStop` also takes `color-mix(in srgb, red, blue)foo`, which
+its `fillStyle` refuses; both refuse it here.
