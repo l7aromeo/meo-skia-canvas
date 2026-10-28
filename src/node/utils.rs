@@ -5288,6 +5288,21 @@ mod tests {
     }
 
     #[test]
+    fn a_trial_is_tested_as_its_text_reads() {
+        // `hsl(200 130% 60%)` keeps its saturation in the space-separated
+        // syntax, so its blue is 1.12 times 255: a legacy channel outside
+        // `0..=255`, written as `color(srgb ...)` with the channel divided by
+        // 255. Tested as the number in 0..=255 rather than as its text, the
+        // green's 0.7733 looks as if it repaints, and does not.
+        let css = "hsl(200 130% 60% / 0.5)";
+        let (held, space, declared) = css_to_declared(css).expect("a colour");
+        let read = declared_to_css(&declared);
+        assert_eq!(read, "color(srgb 0.08 0.7733333 1.12 / 0.5)");
+        let again = css_to_declared(&read).map(|(c, s, _)| (c, s));
+        assert_eq!(again, Some((held, space)), "{read} repaints {css}");
+    }
+
+    #[test]
     fn every_row_serialises_as_the_table_says() {
         let table: serde_json::Value = serde_json::from_str(include_str!(
             "../../tests/assets/cases/css-color-serialisation.json"
