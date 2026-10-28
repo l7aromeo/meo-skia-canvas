@@ -34,7 +34,10 @@ use crate::{
     color::{
         RgbaLinear, linear_srgb_color_space, rgba_linear_to_unpremul_color4f,
     },
-    context::BoxedContext2D,
+    context::{
+        BoxedContext2D,
+        layer::{BlurOp, Layer},
+    },
     encode::{
         self, Frame, FrameDepth, Pixels, SequenceSpec, Sink,
         color::ColorProfile,
@@ -326,7 +329,7 @@ impl Drop for PageId {
 /// measured 50.
 pub struct PageRecorder {
     current: PictureRecorder,
-    layers: Vec<Picture>,
+    layers: Vec<Layer>,
     /// Index-aligned with `layers`: what each layer's draws asked of a
     /// vector backend. Empty for the ordinary ones. See
     /// [`PageRecorder::append_isolated`].
@@ -759,7 +762,7 @@ impl PageRecorder {
                 wrapper.finish_recording_as_picture(None)
             })
         {
-            self.layers.push(pict);
+            self.layers.push(Layer::Picture(pict));
             self.features
                 .push(self.isolated.unwrap_or(VectorFeatures::PLAIN));
         }
@@ -822,6 +825,29 @@ impl PageRecorder {
             f(canvas);
             self.changed = true;
         }
+    }
+
+    /// Records `op` as a layer of its own, so that its blur is made where
+    /// the page is played back -- see [`BlurOp`].
+    ///
+    /// Inside an open `saveLayer` the draw cannot be split out, for the
+    /// reason [`Self::append_isolated`] gives; there it is played into the
+    /// recording at once, which makes its blur at the recording's scale.
+    pub fn append_blur(&mut self, op: BlurOp, features: VectorFeatures) {
+        if !self.layer_floors.is_empty() {
+            self.page_features = self.page_features.with(features);
+            // The op carries its own frame; the layer's floor is identity.
+            self.append(|canvas| {
+                canvas.save();
+                canvas.reset_matrix();
+                op.playback(canvas);
+                canvas.restore();
+            });
+            return;
+        }
+        self.flush();
+        self.layers.push(Layer::Blur(op));
+        self.features.push(features);
     }
 
     /// What one replay of this page costs; see the field.
@@ -1982,7 +2008,9 @@ pub struct Page {
     /// [`PageId`].
     pub(crate) owner: Weak<PageId>,
     pub bounds: Rect,
-    pub layers: Vec<Picture>,
+    /// The recording in order: Skia pictures, and the blurred draws kept as
+    /// ours so that their blur is made at playback -- see [`Layer`].
+    pub layers: Vec<Layer>,
     /// Index-aligned with `layers`; see [`PageRecorder::append_isolated`].
     pub(crate) features: Vec<VectorFeatures>,
     /// What a draw inside an open `saveLayer` asked for, which cannot be
@@ -2177,7 +2205,7 @@ impl Page {
     fn embed_raster(
         &self,
         canvas: &SkCanvas,
-        layers: &[Picture],
+        layers: &[Layer],
         density: f32,
     ) -> Result<(), String> {
         let dims = self.scaled_dimensions(density);

@@ -142,7 +142,7 @@ const ROUNDED_COVERAGE_BLUR_MAX_SIGMA: f32 = 10.0;
 /// computeXformedSigma` holds it to `kMaxBlurSigma`, 128, so a larger one
 /// draws exactly as 128 -- `blur(1000px)` on a 100 pixel square kept an
 /// alpha of 9 where Chrome's is gone.
-const MASK_BLUR_MAX_SIGMA: f32 = 128.0;
+pub(crate) const MASK_BLUR_MAX_SIGMA: f32 = 128.0;
 
 // Every coverage blur stays under Skia's cap, so none draws as a smaller
 // blur than it names.
@@ -184,7 +184,7 @@ impl Coverage {
     /// closely and costs less. Other paths are blurred as a result at
     /// every sigma: a circle took 145 microseconds a draw through its
     /// coverage at a sigma of 2 against 82, and a star no less.
-    fn blurs_alike(self, sigma: f32) -> bool {
+    pub(crate) fn blurs_alike(self, sigma: f32) -> bool {
         match self {
             Coverage::Rect => sigma <= RECT_COVERAGE_BLUR_MAX_SIGMA,
             Coverage::Rounded => sigma <= ROUNDED_COVERAGE_BLUR_MAX_SIGMA,
@@ -266,6 +266,17 @@ impl Filter {
     /// Whether this filter would leave a draw untouched.
     pub fn is_none(&self) -> bool {
         self.specs.is_empty()
+    }
+
+    /// The standard deviation, in canvas pixels, of a filter that is one
+    /// `blur()` and nothing else; `None` for any other filter.
+    pub fn sole_blur(&self) -> Option<f32> {
+        match self.specs.as_slice() {
+            [FilterSpec::Plain { name, value }] if name == "blur" => {
+                Some(*value)
+            }
+            _ => None,
+        }
     }
 
     pub fn new(css: &str, specs: &[FilterSpec]) -> Self {

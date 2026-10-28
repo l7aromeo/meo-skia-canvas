@@ -19,6 +19,7 @@ use skia_safe::{
 use std::{cell::RefCell, rc::Rc};
 
 pub mod api;
+pub mod layer;
 pub mod page;
 pub mod typesetting;
 
@@ -47,6 +48,7 @@ use crate::{
     },
     utils::*,
 };
+use layer::BlurOp;
 use page::{ExportOptions, Page, PageRecorder};
 use typesetting::{TextSettings, Typesetting, Typography};
 
@@ -1040,6 +1042,12 @@ impl Context2D {
         let coverage = coverage_of(&path, &self.state.matrix);
         let paint = self.paint_for_drawing(style, coverage);
         let features = self.vector_features(&paint, Some(style));
+        if let Some(op) = self.blur_op(&path, style, &paint) {
+            self.with_recorder(|mut recorder| {
+                recorder.append_blur(op, features);
+            });
+            return;
+        }
         self.render_to_canvas(&paint, features, |canvas, paint| {
             if let Some(tile) = self.state.texture(style) {
                 // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
@@ -1874,6 +1882,46 @@ impl Context2D {
         paint
     }
 
+    /// The draw of `path` with `paint` as a [`BlurOp`], whose blur is made
+    /// at playback, where it is a flat-colour fill or stroke blurred by a
+    /// `blur()` filter alone. `None` for any other draw, which records its
+    /// blur as it always has.
+    ///
+    /// Left out: a draw with a shadow, which is drawn beside it in one
+    /// recorded frame; a blend mode other than source-over, which
+    /// `render_to_canvas` composites through a layer of its own; and
+    /// anything carrying a CanvasKit filter, a texture or a dash, whose
+    /// paint this does not keep.
+    fn blur_op(
+        &self,
+        path: &Path,
+        style: PaintStyle,
+        paint: &Paint,
+    ) -> Option<BlurOp> {
+        let sigma = self.state.filter.sole_blur()?;
+        let plain = self.state.global_composite_operation == BlendMode::SrcOver
+            && matches!(self.state.dye(style), Dye::Color(..))
+            && self.state.texture(style).is_none()
+            && self.state.skia_image_filter.is_none()
+            && self.state.skia_mask_filter.is_none()
+            && self.state.skia_color_filter.is_none()
+            && paint.shader().is_none()
+            && paint.path_effect().is_none()
+            && self.paint_for_shadow(paint).is_none();
+        plain.then(|| {
+            // `Paint::set_color4f` converts to sRGB, so the colour read
+            // back is sRGB whatever space it was set in.
+            BlurOp::new(
+                path,
+                self.state.matrix,
+                self.state.clip.as_ref(),
+                paint,
+                ColorSpace::new_srgb(),
+                sigma,
+            )
+        })
+    }
+
     pub fn paint_for_shadow(&self, base_paint: &Paint) -> Option<Paint> {
         let (shadow_color, shadow_space) = &self.state.shadow_color;
         let (mut shadow_blur, shadow_offset) =
@@ -2061,7 +2109,7 @@ impl Dye {
 /// to blur it: a rectangle or a rounded rectangle only while the matrix
 /// keeps it one, since Skia's cheap coverage blur for those shapes works on
 /// axis-aligned device rectangles.
-fn coverage_of(path: &Path, matrix: &Matrix) -> Coverage {
+pub(crate) fn coverage_of(path: &Path, matrix: &Matrix) -> Coverage {
     if !matrix.rect_stays_rect() {
         return Coverage::Path;
     }

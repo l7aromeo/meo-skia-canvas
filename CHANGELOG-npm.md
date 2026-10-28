@@ -397,6 +397,15 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A large blur exported at a high density keeps its width.** A
+  `blur()` on a flat-colour shape is drawn by Skia's coverage blur up to a
+  sigma it chose at density 1, and that blur stops at 128 output pixels: a
+  `blur(40px)` rectangle exported at `density: 4`, 160 pixels, came out at
+  128 and read 49 levels off on the CPU, 41 on the GPU. Which blur a draw
+  gets is now decided where the page is drawn, at the size it is drawn at,
+  and past that limit it takes the blur that reaches it -- within the 7 and
+  5 levels that blur is off at any density.
+
 - **A blur set with `ctx.filter` keeps its width at every export density.**
   The blur of a flat-colour rectangle, rounded rectangle or line of text was
   sized in output pixels, so it stayed as wide in pixels as it was at
