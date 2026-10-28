@@ -1103,6 +1103,16 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `measure_text("Hello world")` takes about 4.3 µs in release on macOS where
   it took 5.6, and a seventy-character line about 15 where it took 25.
 
+- **Laying text out holds the idle watcher off, as drawing does.** The
+  watcher that drops cached page bitmaps and trims the allocator once
+  rendering stops counted only rasterization, so a program that measured
+  text without drawing it never started it, and one that drew and then only
+  measured had its pages dropped a few seconds into the measuring. A
+  canvas's text reaching its fonts now counts too; a `TextEngine`, which
+  keeps fonts of its own, does not. The font caches themselves are emptied
+  at idle by the npm addon alone, which can post the release to the
+  JavaScript thread that owns them; a Rust program's are kept as before.
+
 ## 📦 ⟩ [v0.16.3] (crate) ⟩ September 16, 2026
 
 **A patch closing a gap 0.16.2 shipped knowingly.** No signature moves and

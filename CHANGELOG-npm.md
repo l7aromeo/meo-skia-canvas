@@ -1331,6 +1331,23 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
   well about 7.4. `JSON.stringify` works the ink out once, through
   `toJSON` -- see Breaking.
 
+- **A process that has stopped drawing lets its font caches go.** Each font
+  collection keeps the paragraphs it has laid out and the faces and
+  variable-font instances it made for them, and nothing emptied them short
+  of `FontLibrary.reset()` or a registration: after sixty text-heavy pages
+  in two variable fonts, an idle process held 40.4 MB in them of the 78.1 MB
+  its allocator had in use, in a debug build on macOS. The idle watcher that
+  drops cached page bitmaps a few seconds after the last draw now empties
+  these too, on each thread that loaded the addon, between two of its tasks
+  and so never during a layout, and lets go of the paragraphs kept for
+  `measureText` results whose ink has not been read: one read later lays
+  its text out again and reports the same ink. Measuring text and looking
+  fonts up count as use, as drawing does, so a server answering with widths
+  alone keeps its caches while it works. The collections and their
+  instances stay: the next text drawn lays out again from faces already
+  loaded, and draws the same. Nothing the watcher leaves on a thread keeps
+  its event loop alive.
+
 ## 📦 ⟩ [v6.0.2] (npm) ⟩ September 16, 2026
 
 **A patch closing a gap 6.0.1 shipped knowingly.** Nothing is added and

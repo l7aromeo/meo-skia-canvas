@@ -27,6 +27,7 @@ use crate::{
         variation_axes,
     },
     image::x_height_ratio,
+    memory::note_font_use,
     typography::{
         FontSpec, forget_families, forget_kept_paragraphs, from_slant,
         from_width, typeface_details, typeface_wght_range,
@@ -773,10 +774,17 @@ impl FontLibrary {
         })
     }
 
+    /// Runs `f` on this thread's library, made on first use.
+    ///
+    /// Counts as use of the fonts for the idle watcher -- see
+    /// [`note_font_use`] -- so that text laid out without being drawn, a
+    /// server measuring and nothing else, holds a release off as drawing
+    /// does.
     pub fn with_shared<T, F>(f: F) -> T
     where
         F: FnOnce(&mut FontLibrary) -> T,
     {
+        note_font_use();
         LIBRARY.with(|lib_lock| {
             let shared_lib = lib_lock.get_or_init(|| {
                 // Covers the crate channel, which has no entry point to run
@@ -1595,12 +1603,87 @@ impl FontLibrary {
     ) -> bool {
         let full = self.positions.admit(families, coordinates);
         if full {
-            self.collection_cache.clear_caches();
-            for collection in self.collections.iter_mut().flatten() {
-                collection.clear_caches();
-            }
+            self.clear_collection_caches();
         }
         full
+    }
+
+    /// Empties the paragraph, face and variation caches of every collection
+    /// held, keeping the collections themselves and the instances they were
+    /// built over: what the idle watcher asks of a thread's library once
+    /// rendering stops -- see `node::idle`.
+    ///
+    /// The record of positions starts again, since the typefaces it counts
+    /// went with the caches. The instances stay: after sixty text-heavy pages
+    /// in two variable fonts, measured in a debug build on macOS, emptying
+    /// the collections' caches hands back 40.4 MB of the 78.1 MB the
+    /// allocator had in use, and halving the instances as well only 0.8 MB
+    /// more, for a rebuild of each on the next layout that needs it.
+    ///
+    /// The paragraphs kept for measurements whose ink is still to be read go
+    /// too, through [`forget_kept_paragraphs`]: each pins the typeface
+    /// instance it was laid out in, and a measurement whose paragraph has
+    /// gone lays out again when its ink is read, as one pushed out by their
+    /// bound does. The ink remembered per face and the family per face stay,
+    /// since they hold ids and bounds rather than faces, and come to about
+    /// 100 KB at most.
+    #[cfg(any(test, feature = "node-addon"))]
+    pub(crate) fn release_caches(&mut self) {
+        self.clear_collection_caches();
+        self.positions = InstancedPositions::default();
+        forget_kept_paragraphs();
+    }
+
+    /// [`release_caches`](Self::release_caches) on this thread's library,
+    /// if it has one.
+    ///
+    /// Not through [`with_shared`](Self::with_shared), which makes a library
+    /// on a thread that has none and counts as use of the fonts: a release
+    /// would hold off the next, and so be the cause of it. It runs between
+    /// two JavaScript tasks, when no borrow of the library can be
+    /// outstanding; one that is is left alone rather than panicked over.
+    #[cfg(any(test, feature = "node-addon"))]
+    pub(crate) fn release_shared_caches() {
+        Self::with_existing(Self::release_caches);
+    }
+
+    /// Runs `f` on this thread's library if it has one that nothing is
+    /// borrowing, without counting as use of the fonts.
+    #[cfg(any(test, feature = "node-addon"))]
+    fn with_existing<T>(f: impl FnOnce(&mut FontLibrary) -> T) -> Option<T> {
+        LIBRARY.with(|lib| {
+            let mut lib = lib.get()?.try_borrow_mut().ok()?;
+            Some(f(&mut lib))
+        })
+    }
+
+    /// How many paragraphs the caches of every collection held keep, for
+    /// the tests here and the debug addon's `__cachedParagraphs`.
+    #[cfg(any(test, all(debug_assertions, feature = "node-addon")))]
+    pub(crate) fn cached_paragraphs(&mut self) -> usize {
+        self.collections
+            .iter_mut()
+            .flatten()
+            .chain(
+                self.collection_cache
+                    .entries
+                    .values_mut()
+                    .map(|(collection, ..)| collection),
+            )
+            .map(|collection| {
+                usize::try_from(collection.paragraph_cache_mut().count())
+                    .unwrap_or_default()
+            })
+            .sum()
+    }
+
+    /// Empties the caches of every collection held, the base sets and the
+    /// cached instanced ones alike.
+    fn clear_collection_caches(&mut self) {
+        self.collection_cache.clear_caches();
+        for collection in self.collections.iter_mut().flatten() {
+            collection.clear_caches();
+        }
     }
 
     /// Chooses the collections handed out from here on: those for text
@@ -1876,6 +1959,19 @@ pub fn addFamilyFromData(mut cx: FunctionContext) -> JsResult<JsValue> {
     }
     let results = register_all(&mut cx, vec![(alias, faces)])?;
     results.get_value(&mut cx, 0)
+}
+
+/// Test-only: how many paragraphs the collections this thread's library
+/// holds keep in their caches, so that a test can watch the idle watcher
+/// empty them and the next layout fill them again. Reads without counting as
+/// use of the fonts, which would hold the release off.
+///
+/// Exported by debug builds only, as `__discardGpuDraws` is.
+#[cfg(all(feature = "node-addon", debug_assertions))]
+pub fn cachedParagraphs(mut cx: FunctionContext) -> JsResult<JsNumber> {
+    let held = FontLibrary::with_existing(FontLibrary::cached_paragraphs)
+        .unwrap_or_default();
+    Ok(cx.number(held as f64))
 }
 
 pub fn reset(mut cx: FunctionContext) -> JsResult<JsUndefined> {
@@ -2235,6 +2331,70 @@ mod tests {
                 "and the cached and the main collection are dropped here"
             );
         });
+    }
+
+    #[test]
+    fn a_release_empties_every_held_collection_and_keeps_them() {
+        // What the idle watcher posts to a thread: a paragraph laid out
+        // through the base set and one through a cached instanced collection
+        // are both let go, the collections and their instances stay, and the
+        // next layout through either caches again.
+        const FAMILY: &str = "AmstelvarRelease";
+        let bytes = std::fs::read("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+            .expect("bundled Amstelvar is readable");
+        let face = FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("Amstelvar parses");
+        let cache_paragraph = |collection: &FontCollection| {
+            let mut builder =
+                SkParagraphBuilder::new(&ParagraphStyle::new(), collection);
+            builder.add_text("Hamburgefonstiv");
+            builder.build().layout(f32::MAX);
+        };
+        let axis = FourByteTag::from_chars('w', 'g', 'h', 't');
+        let wght = [Coordinate { axis, value: 300.0 }];
+
+        FontLibrary::with_shared(|lib| {
+            lib.register_typeface(face, Some(FAMILY.to_string()));
+            let mut style = TextStyle::new();
+            style.set_font_families(&[FAMILY]);
+            let (instanced, _) = lib.fonts_for_style(&style, &[(axis, 300.0)]);
+            let main = lib.font_collection();
+            cache_paragraph(&instanced);
+            cache_paragraph(&main);
+            assert!(!lib.admit_position(&[FAMILY], &wght));
+            let collections = lib.collection_cache.entries.len();
+            let instances = lib.instances.entries.len();
+            assert_eq!(lib.cached_paragraphs(), 2, "one through each");
+
+            lib.release_caches();
+            assert_eq!(lib.cached_paragraphs(), 0, "both are let go");
+            assert_eq!(lib.positions.len(), 0, "with the positions they used");
+            assert_eq!(
+                (
+                    lib.collection_cache.entries.len(),
+                    lib.instances.entries.len()
+                ),
+                (collections, instances),
+                "the collections and instances stay"
+            );
+
+            cache_paragraph(&instanced);
+            cache_paragraph(&main);
+            assert_eq!(lib.cached_paragraphs(), 2, "and fill again");
+        });
+    }
+
+    #[test]
+    fn a_release_on_a_thread_without_a_library_makes_none() {
+        // The watcher posts to every thread that loaded the addon, and one
+        // that never reached a font has no library for a release to empty.
+        std::thread::spawn(|| {
+            FontLibrary::release_shared_caches();
+            LIBRARY.with(|lib| assert!(lib.get().is_none()));
+        })
+        .join()
+        .expect("the thread runs to the end");
     }
 
     #[test]

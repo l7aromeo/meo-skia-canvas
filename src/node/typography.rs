@@ -2979,6 +2979,47 @@ mod measurement {
     }
 
     #[test]
+    fn an_idle_release_lets_every_kept_paragraph_go() {
+        // What the idle watcher posts to a thread empties the kept paragraphs
+        // with the collections' caches, and each measurement lays out again
+        // for its ink, in the faces it was measured in.
+        use super::RECENT_LAYOUTS;
+
+        const FAMILY: &str = "KeptParagraphsReleased";
+        const TEXT: &str = "Hamburgefonstiv";
+        let fonts = Fonts::new();
+        fonts
+            .register_font_from_path(
+                FAMILY,
+                format!(
+                    "{}/tests/assets/fonts/AmstelvarAlpha-VF.ttf",
+                    env!("CARGO_MANIFEST_DIR")
+                ),
+            )
+            .expect("bundled Amstelvar registers");
+        let mut canvas = Canvas::new(10.0, 10.0);
+        let ctx = canvas.context();
+        ctx.set_font(&Font::new(FAMILY, 24.0));
+        let measured = ctx.inner.measure_text_extents(TEXT, None);
+        let pending: Vec<_> = (0..8)
+            .map(|_| ctx.inner.measure_text_lazily(TEXT, None).1)
+            .collect();
+        assert_eq!(RECENT_LAYOUTS.with(|recent| recent.borrow().len()), 8);
+
+        FontLibrary::with_shared(FontLibrary::release_caches);
+        assert_eq!(
+            RECENT_LAYOUTS.with(|recent| recent.borrow().len()),
+            0,
+            "no paragraph is kept past a release"
+        );
+        for each in &pending {
+            let (ink, lines) = each.ink().expect("not yet read");
+            assert_eq!(ink, measured.ink);
+            assert_eq!(lines, measured.line_details);
+        }
+    }
+
+    #[test]
     fn an_evicted_measurement_lays_out_again_in_the_faces_it_was_measured_in() {
         // A font registered between `measureText` and the first ink read
         // must not reach a measurement that has to be laid out again: its
