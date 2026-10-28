@@ -1223,6 +1223,38 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Changed
 
+- **Text costs less to lay out, draw and measure.** Each figure below is
+  from one release-prep window [RE-TIME: the window and its load].
+  - A line of text a `Context2D` draws a second time in the same settings
+    is kept as laid out, and every later draw of it, in any paint and
+    oblique included, is drawn from what was kept rather than laid out
+    afresh: a kept line draws about 14 times faster [RE-TIME vs 0.16.3].
+    Text drawn once is not kept and not slowed [RE-TIME vs 0.16.3]; a line
+    drawn exactly twice, kept on its second draw, costs about 9% more over
+    its two draws [RE-TIME vs 0.16.3].
+  - Setting a font, spacing, alignment or another text setting on a
+    `Context2D` to the value it already holds no longer throws that layout
+    away, so a loop that sets its font before every draw keeps the benefit
+    [RE-TIME vs 0.16.3].
+  - The faces and collection a font resolves to are remembered for each
+    family list and style while the registered fonts stand, a `TextEngine`
+    remembers the faces each family list matched and spells a list's names
+    once, and the caches holding these hash their keys with foldhash
+    rather than SipHash: a lookup that finds its answer takes [RE-TIME vs
+    0.16.3] of what it did.
+  - A paragraph from `TextEngine` in several styles reads its text for a
+    grapheme cluster crossing an edge between them only where the bytes
+    either side of the edge do not rule one out, and its base style is no
+    longer copied to set its hinting [RE-TIME vs 0.16.3].
+
+  What is kept costs memory, and each part of it is bounded. Each thread
+  keeps up to 512 lines of text or an estimated 8 MiB of them, the least
+  recently drawn let go first, 256 first-available faces for decorations
+  and 256 KiB of wave chunks; the font library and each `TextEngine`
+  remember 256 family lists and styles. Past its bound each of the last
+  three is dropped whole. All of it is let go when the registered fonts
+  change. Nothing drawn changes.
+
 - **`FontSlant::Oblique` and `TextSlant::Oblique` draw as CSS Fonts 4
   matches them, superseding 0.16.0's "`TextSlant::Oblique` now renders the
   italic face".** A `Font` with `FontSlant::Oblique`, `set_font_css` with

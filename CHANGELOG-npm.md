@@ -1487,6 +1487,36 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
 
 ### Changed
 
+- **Text costs less to lay out, draw and measure.** Each figure below is
+  from one release-prep window [RE-TIME: the window and its load].
+  - A line of text drawn a second time in the same settings is kept as
+    laid out, and every later draw of it, in any paint and `oblique`
+    included, is drawn from what was kept rather than laid out afresh: a
+    kept line draws about 14 times faster [RE-TIME vs 6.0.2]. Text drawn
+    once is not kept and not slowed [RE-TIME vs 6.0.2]; a line drawn
+    exactly twice, kept on its second draw, costs about 9% more over its
+    two draws [RE-TIME vs 6.0.2].
+  - Setting `ctx.font`, spacing, alignment or another text setting to the
+    value it already holds no longer throws that layout away, so a loop
+    that sets its font before every draw keeps the benefit: 200 labels
+    redrawn every frame draw 8 to 16 times faster [RE-TIME vs 6.0.2].
+  - The faces and collection a font resolves to are remembered for each
+    family list and style while the registered fonts stand, and the caches
+    holding them hash their keys with foldhash rather than SipHash: a
+    lookup that finds its answer takes [RE-TIME vs 6.0.2] of what it did.
+  - A `Paragraph` in several styles reads its text for a grapheme cluster
+    crossing an edge between them only where the bytes either side of the
+    edge do not rule one out, and a style in the paragraph's own text
+    style is no longer copied to set its hinting [RE-TIME vs 6.0.2].
+
+  What is kept costs memory, and each part of it is bounded. Each thread
+  keeps up to 512 lines of text or an estimated 8 MiB of them, the least
+  recently drawn let go first, 256 first-available faces for decorations
+  and 256 KiB of wave chunks; the font library remembers 256 family lists
+  and styles. Past its bound each of the last three is dropped whole. All
+  of it is let go when the registered fonts change and by the idle
+  release. Nothing drawn changes.
+
 - **`oblique` draws as CSS Fonts 4 matches it, superseding 6.0.0's
   "`oblique` renders as the italic face".** `oblique` and
   `oblique <angle>` take the family's oblique face where it has one leaning
