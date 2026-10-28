@@ -790,6 +790,32 @@ impl FontLibrary {
         })
     }
 
+    /// A collection to find faces in, for a caller that lays nothing out:
+    /// whichever of the two sets exists, the hinted one first, and the
+    /// hinted one made where neither does, since text is drawn hinted by
+    /// default.
+    ///
+    /// The two sets hold the same faces and differ only in the paragraphs
+    /// they cache, so a face search answers the same in either.
+    /// [`font_collection`](Self::font_collection) instead makes the set
+    /// [`set_hinting`](Self::set_hinting) last chose, which is right for a
+    /// layout and wrong here: on a fresh library that is the unhinted set,
+    /// so setting a font built a set of collections that text drawn hinted
+    /// never uses.
+    pub fn face_collection(&mut self) -> FontCollection {
+        let hinted = usize::from(true);
+        let slot = match self.collections {
+            [Some(_), None] => usize::from(false),
+            _ => hinted,
+        };
+        if self.collections[slot].is_none() {
+            self.collections[slot] = Some(self.new_font_collection());
+        }
+        // SAFETY: the `if` above assigns `Some` when the slot is `None`, so
+        // it is `Some` on every path to here.
+        self.collections[slot].as_ref().unwrap().clone()
+    }
+
     /// The collection over every registered and generic face for the
     /// hinting [`set_hinting`](Self::set_hinting) last chose, made on first
     /// use.
@@ -1146,7 +1172,7 @@ impl FontLibrary {
         // caches for cost. That is why it has not been done here rather than
         // an oversight; it puts a fresh collection on a per-document path.
         let candidates: Vec<Typeface> = self
-            .font_collection()
+            .face_collection()
             .find_typefaces(
                 &[
                     GenericFamily::SystemUi,
@@ -1506,7 +1532,7 @@ impl FontLibrary {
     pub fn resolve(&mut self, mut spec: FontSpec) -> Option<ResolvedFont> {
         spec.collection_names = self.collection_names(&spec.families);
         let typeface = self
-            .font_collection()
+            .face_collection()
             .find_typefaces(&spec.collection_names, spec.style())
             .into_iter()
             .next()?;
@@ -1859,6 +1885,43 @@ mod tests {
 
     use super::*;
     use crate::font::INSTANCED_POSITIONS;
+
+    /// Which of the two sets of collections exist: `[unhinted, hinted]`.
+    fn sets_built() -> [bool; 2] {
+        FontLibrary::with_shared(|lib| {
+            lib.collections.each_ref().map(Option::is_some)
+        })
+    }
+
+    #[test]
+    fn finding_a_face_builds_no_collection_of_another_hinting() {
+        // Setting a font and finding the root font look faces up and lay
+        // nothing out, so they need whichever set is there -- the hinted
+        // one, which text draws with by default, where there is none.
+        use crate::{
+            canvas::Canvas, context::initial_root_face, context2d::Font,
+        };
+        let mut canvas = Canvas::new(10.0, 10.0);
+        canvas.context().set_font(&Font::new("serif", 20.0));
+        initial_root_face();
+        assert_eq!(sets_built(), [false, true], "only the hinted set");
+    }
+
+    #[test]
+    fn finding_a_face_takes_the_set_already_built() {
+        // Text drawn unhinted only: its set is the one built, and a face
+        // search takes it rather than building the other.
+        use crate::{
+            canvas::Canvas, context::initial_root_face, context2d::Font,
+        };
+        FontLibrary::with_shared(|lib| {
+            lib.set_hinting(false).font_collection();
+        });
+        let mut canvas = Canvas::new(10.0, 10.0);
+        canvas.context().set_font(&Font::new("serif", 20.0));
+        initial_root_face();
+        assert_eq!(sets_built(), [true, false], "only the unhinted set");
+    }
 
     /// The manager handed to `SkSVGDOM` answers a null family.
     ///
