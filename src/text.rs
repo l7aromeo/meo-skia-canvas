@@ -1,6 +1,5 @@
 use std::{
     borrow::Cow,
-    collections::HashMap,
     hash::{Hash, Hasher},
     iter::once,
     ops::Range,
@@ -30,6 +29,7 @@ use skia_safe::{
 };
 
 use crate::{
+    cache_map::CacheMap,
     color::{
         RgbaLinear, linear_srgb_color_space, rgba_linear_to_skia_color,
         rgba_linear_to_unpremul_color4f,
@@ -1843,7 +1843,7 @@ const MATCHES_KEPT: usize = 256;
 /// on a style met before.
 #[derive(Default)]
 pub(crate) struct FaceMatches {
-    matches: HashMap<FaceMatchKey, Rc<[Typeface]>>,
+    matches: CacheMap<FaceMatchKey, Rc<[Typeface]>>,
 }
 
 /// What a search of an engine's collection is asked: a family list, as the
