@@ -58,6 +58,18 @@
 //! It is also why this is not hung off the GPU idle watcher, which would have
 //! been the obvious home: that thread only exists once a GPU engine
 //! initialises, and a CPU-only machine holds the same pages.
+//!
+//! The font release has a price of its own, paid once, by the frame after
+//! it, which lays its text out again. Forty labels in two variable faces,
+//! redrawn on a CPU canvas in a release build on macOS, take about 0.16
+//! milliseconds longer in the frame after a release than after the same
+//! call releasing nothing, a frame of about 0.28; the frames after that cost
+//! nothing extra. Most of it is the paragraphs Skia lays out again, the rest
+//! the faces and shaping data it builds again. That is the layout alone,
+//! timed with the release made between two frames: where the release has
+//! handed pages back to the system, as the trim does on glibc, the next work
+//! faults them in again, and that cost is not measured. Against the 26 to
+//! 40 MB above, it is the trade.
 
 use std::{
     sync::{
