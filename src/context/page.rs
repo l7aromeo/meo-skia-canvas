@@ -329,11 +329,15 @@ impl Drop for PageId {
 /// measured 50.
 pub struct PageRecorder {
     current: PictureRecorder,
-    layers: Vec<Layer>,
+    /// The recording so far, shared with every [`Page`] taken of it since
+    /// it last grew, so that taking a page copies a pointer whatever its
+    /// length. Growing it copies the list only while a page taken before
+    /// still holds it -- see [`PageRecorder::page`].
+    layers: Arc<Vec<Layer>>,
     /// Index-aligned with `layers`: what each layer's draws asked of a
     /// vector backend. Empty for the ordinary ones. See
-    /// [`PageRecorder::append_isolated`].
-    features: Vec<VectorFeatures>,
+    /// [`PageRecorder::append_isolated`]. Shared as `layers` is.
+    features: Arc<Vec<VectorFeatures>>,
     /// What appeared inside an open `saveLayer`, where a draw cannot be
     /// split into a layer of its own. A backend that refuses any of it
     /// rasterizes the whole page.
@@ -429,8 +433,8 @@ impl PageRecorder {
 
         PageRecorder {
             current: rec,
-            layers: vec![],
-            features: vec![],
+            layers: Arc::default(),
+            features: Arc::default(),
             page_features: VectorFeatures::PLAIN,
             changed: false,
             isolated: None,
@@ -503,8 +507,10 @@ impl PageRecorder {
 
         self.bounds = bounds;
         self.current.begin_recording(bounds, true).save(); // start at depth 2
-        self.layers.clear();
-        self.features.clear();
+        // Replaced rather than cleared, so that a page taken before keeps
+        // what it was given.
+        self.layers = Arc::default();
+        self.features = Arc::default();
         self.page_features = VectorFeatures::PLAIN;
         self.changed = false;
         self.isolated = None;
@@ -775,8 +781,8 @@ impl PageRecorder {
                 wrapper.finish_recording_as_picture(None)
             })
         {
-            self.layers.push(Layer::Picture(pict));
-            self.features
+            Arc::make_mut(&mut self.layers).push(Layer::Picture(pict));
+            Arc::make_mut(&mut self.features)
                 .push(self.isolated.unwrap_or(VectorFeatures::PLAIN));
         }
         self.isolated = None;
@@ -878,8 +884,10 @@ impl PageRecorder {
         // instead. `flush` seals a run before any page is taken, so this is
         // a guard rather than a path a run takes.
         if open
-            && let (Some(Layer::Blur(op)), Some(last)) =
-                (self.layers.last_mut(), self.features.last())
+            && let (Some(Layer::Blur(op)), Some(last)) = (
+                Arc::make_mut(&mut self.layers).last_mut(),
+                self.features.last(),
+            )
             && *last == features
             && let Some(op) = Arc::get_mut(op)
         {
@@ -889,9 +897,9 @@ impl PageRecorder {
             }
         }
         self.flush();
-        self.layers
+        Arc::make_mut(&mut self.layers)
             .push(Layer::Blur(Arc::new(BlurOp::start(draw, matrix, clip))));
-        self.features.push(features);
+        Arc::make_mut(&mut self.features).push(features);
         self.blur_run = Some(self.frame);
     }
 
@@ -908,13 +916,21 @@ impl PageRecorder {
         self.replay_cost = self.replay_cost.saturating_add(cost.max(1));
     }
 
+    /// The page as recorded so far: a snapshot that a later draw does not
+    /// change.
+    ///
+    /// It shares the recorder's lists rather than copying them, so taking
+    /// one costs the same at ten layers as at ten thousand -- every read of
+    /// the canvas takes one. The next draw copies the lists only if a page
+    /// taken before is still held then, as a window's renderer holds the
+    /// frame it is drawing; a read that has finished holds nothing.
     pub fn page(&mut self) -> Page {
         self.settle();
         self.flush();
 
         Page {
-            layers: self.layers.clone(),
-            features: self.features.clone(),
+            layers: Arc::clone(&self.layers),
+            features: Arc::clone(&self.features),
             page_features: self.page_features,
             bounds: self.bounds,
             id: self.id.0,
@@ -2054,10 +2070,11 @@ pub struct Page {
     pub(crate) owner: Weak<PageId>,
     pub bounds: Rect,
     /// The recording in order: Skia pictures, and the blurred draws kept as
-    /// ours so that their blur is made at playback -- see [`Layer`].
-    pub layers: Vec<Layer>,
+    /// ours so that their blur is made at playback -- see [`Layer`]. Shared
+    /// with the recorder it was taken from -- see [`PageRecorder::page`].
+    pub layers: Arc<Vec<Layer>>,
     /// Index-aligned with `layers`; see [`PageRecorder::append_isolated`].
-    pub(crate) features: Vec<VectorFeatures>,
+    pub(crate) features: Arc<Vec<VectorFeatures>>,
     /// What a draw inside an open `saveLayer` asked for, which cannot be
     /// isolated and so speaks for the whole page.
     pub(crate) page_features: VectorFeatures,
@@ -2075,8 +2092,8 @@ impl Default for Page {
             id: 0,
             owner: Weak::new(),
             bounds: skia_safe::Rect::new_empty(),
-            layers: vec![],
-            features: vec![],
+            layers: Arc::default(),
+            features: Arc::default(),
             page_features: VectorFeatures::PLAIN,
         }
     }
@@ -4359,6 +4376,7 @@ mod unpremultiply_tests {
 mod tests {
     use super::*;
     use parking_lot::Mutex;
+    use std::ptr;
 
     /// Serialises the tests that assert on the process-wide page cache.
     ///
@@ -5573,5 +5591,107 @@ mod tests {
     fn a_blur_op_held_elsewhere_is_not_grown() {
         assert_eq!(layers_after_two_squares(false), 1, "the run is joined");
         assert_eq!(layers_after_two_squares(true), 2, "a new op is opened");
+    }
+
+    /// A recorder that has drawn and been read `reads` times, as a canvas
+    /// read every frame and never cleared is: one layer a read.
+    fn read_every_draw(reads: usize) -> PageRecorder {
+        let mut recorder = PageRecorder::new(Rect::from_wh(100.0, 100.0));
+        for at in 0..reads {
+            recorder.append(|canvas| {
+                canvas.draw_rect(
+                    Rect::from_xywh((at % 90) as f32, 0.0, 10.0, 10.0),
+                    &Paint::default(),
+                );
+            });
+            recorder.page();
+        }
+        recorder
+    }
+
+    /// Taking a page copies no layer, however many the page has: two pages
+    /// taken in a row, and the recorder itself, hold one list. A copy per
+    /// read made a canvas read every frame slower with every frame.
+    #[test]
+    fn taking_a_page_copies_no_layer() {
+        for reads in [10, 10_000] {
+            let mut recorder = read_every_draw(reads);
+            let (first, second) = (recorder.page(), recorder.page());
+            assert_eq!(first.layers.len(), reads, "{reads}: a layer a read");
+            assert!(
+                ptr::eq(first.layers.as_ptr(), second.layers.as_ptr())
+                    && ptr::eq(first.layers.as_ptr(), recorder.layers.as_ptr()),
+                "{reads} layers: copied"
+            );
+        }
+    }
+
+    /// A page keeps what it was given while the recorder draws on, and a
+    /// page taken after sees the new draw.
+    #[test]
+    fn a_page_keeps_what_it_was_given() {
+        let mut recorder = read_every_draw(3);
+        let before = recorder.page();
+        recorder.append(|canvas| {
+            canvas.draw_rect(Rect::from_wh(5.0, 5.0), &Paint::default());
+        });
+        let after = recorder.page();
+        assert_eq!(before.layers.len(), 3, "the page taken before");
+        assert_eq!(after.layers.len(), 4, "the page taken after");
+        assert_eq!(before.features.len(), 3, "its features, before");
+        assert_eq!(after.features.len(), 4, "its features, after");
+    }
+
+    /// Draws a square at `at` into `recorder` and closes the layer it is
+    /// in, as the next read would.
+    fn draw_and_close(recorder: &mut PageRecorder, at: usize) {
+        recorder.append(|canvas| {
+            canvas.draw_rect(
+                Rect::from_xywh((at % 90) as f32, 10.0, 10.0, 10.0),
+                &Paint::default(),
+            );
+        });
+        recorder.flush();
+    }
+
+    /// While a page is held, the first draw after it copies the recorder's
+    /// list once, and the draws after that grow the copy in place: the
+    /// list is copied once per page held, never once per draw.
+    #[test]
+    fn a_held_page_costs_one_copy() {
+        let mut recorder = read_every_draw(5);
+        let held = recorder.page();
+        assert!(Arc::ptr_eq(&held.layers, &recorder.layers), "shared");
+        draw_and_close(&mut recorder, 0);
+        let copy = Arc::as_ptr(&recorder.layers);
+        assert!(!Arc::ptr_eq(&held.layers, &recorder.layers), "copied");
+        for at in 1..4 {
+            draw_and_close(&mut recorder, at);
+            assert!(
+                ptr::eq(copy, Arc::as_ptr(&recorder.layers)),
+                "draw {at} after the first copied again"
+            );
+        }
+        assert_eq!(held.layers.len(), 5, "the held page");
+        assert_eq!(recorder.layers.len(), 9, "the recorder");
+    }
+
+    /// A window's renderer holds frame N while frame N + 1 is drawn: the
+    /// lists alive are frame N's and the recorder's, two however many
+    /// draws frame N + 1 takes, and once frame N is let go and N + 1 taken
+    /// the recorder shares its list with N + 1 alone.
+    #[test]
+    fn a_frame_held_while_the_next_is_drawn_keeps_two_lists() {
+        let mut recorder = read_every_draw(3);
+        let frame = recorder.page();
+        for at in 0..20 {
+            draw_and_close(&mut recorder, at);
+        }
+        assert_eq!(Arc::strong_count(&frame.layers), 1, "frame N alone");
+        assert_eq!(Arc::strong_count(&recorder.layers), 1, "the recorder");
+        drop(frame);
+        let next = recorder.page();
+        assert!(Arc::ptr_eq(&next.layers, &recorder.layers), "N + 1 shares");
+        assert_eq!(Arc::strong_count(&recorder.layers), 2, "and no other");
     }
 }
