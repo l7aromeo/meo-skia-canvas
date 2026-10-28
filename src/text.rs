@@ -1208,14 +1208,11 @@ pub struct TextEngine {
     /// engine is neither `Send` nor `Sync`, and a `RefCell` would take away
     /// `UnwindSafe` and `RefUnwindSafe`, which it has.
     positions: Rc<Mutex<InstancedPositions>>,
-    /// The axes of the faces `collection` has resolved a style to, so that
-    /// each is asked of the platform once -- see [`KnownAxes`]. Shared with
-    /// every builder this engine opens, and held, like `positions`, in a
-    /// `Mutex` for the unwind safety it keeps.
-    axes: Rc<Mutex<KnownAxes>>,
-    /// The faces `collection` has matched each family list and style to --
-    /// see [`FaceMatches`]. Shared with every builder this engine opens.
-    matches: Rc<Mutex<FaceMatches>>,
+    /// What the engine has learned of the faces `collection` resolves
+    /// styles to -- see [`FaceRecord`]. Shared with every builder this
+    /// engine opens, and held, like `positions`, in a `Mutex` for the
+    /// unwind safety it keeps.
+    faces: Rc<Mutex<FaceRecord>>,
 }
 
 impl TextEngine {
@@ -1246,8 +1243,7 @@ impl TextEngine {
         Self {
             collection,
             positions: Rc::default(),
-            axes: Rc::default(),
-            matches: Rc::default(),
+            faces: Rc::default(),
         }
     }
 
@@ -1274,8 +1270,7 @@ impl TextEngine {
         Self {
             collection,
             positions: Rc::default(),
-            axes: Rc::default(),
-            matches: Rc::default(),
+            faces: Rc::default(),
         }
     }
 
@@ -1372,8 +1367,7 @@ impl TextEngine {
         let mut instance = instance_for(
             &mut collection.clone(),
             &self.positions,
-            &self.axes,
-            &self.matches,
+            &self.faces,
             base_style,
             &oblique_variations(base_style, base_variations),
         );
@@ -1398,8 +1392,7 @@ impl TextEngine {
             ),
             collection,
             positions: self.positions.clone(),
-            axes: self.axes.clone(),
-            matches: self.matches.clone(),
+            faces: self.faces.clone(),
             variations: base_variations.to_vec(),
         }
     }
@@ -1450,10 +1443,8 @@ pub struct ParagraphBuilder {
     collection: FontCollection,
     /// The engine's record of the positions instanced through `collection`.
     positions: Rc<Mutex<InstancedPositions>>,
-    /// The engine's record of its faces' axes.
-    axes: Rc<Mutex<KnownAxes>>,
-    /// The engine's record of what each family list and style matched.
-    matches: Rc<Mutex<FaceMatches>>,
+    /// The engine's record of its faces -- see [`FaceRecord`].
+    faces: Rc<Mutex<FaceRecord>>,
     /// The base style's axes, which a pushed style that inherits is
     /// instanced at.
     variations: Vec<FontVariation>,
@@ -1474,8 +1465,7 @@ impl ParagraphBuilder {
         let mut instance = instance_for(
             &mut self.collection.clone(),
             &self.positions,
-            &self.axes,
-            &self.matches,
+            &self.faces,
             style,
             &oblique_variations(style, variations),
         );
@@ -1855,6 +1845,21 @@ thread_local! {
     /// thread, for the tests that hold it to remembering.
     pub(crate) static SEARCHES: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    /// How many lists of coordinates [`instance_for`] has made on this
+    /// thread, for the test that holds it to making none for a style at
+    /// its faces' own position.
+    pub(crate) static COORDINATE_LISTS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// What an engine has learned of its faces: what each family list and
+/// style matched, and each face's axes. One record behind one lock, taken
+/// once a style rather than once for the match and again for each face's
+/// axes.
+#[derive(Default)]
+pub(crate) struct FaceRecord {
+    matches: FaceMatches,
+    axes: KnownAxes,
 }
 
 /// How many family lists and styles an engine remembers the matches of.
@@ -1973,8 +1978,7 @@ impl FaceMatches {
 fn instance_for(
     collection: &mut FontCollection,
     positions: &Mutex<InstancedPositions>,
-    known: &Mutex<KnownAxes>,
-    matches: &Mutex<FaceMatches>,
+    record: &Mutex<FaceRecord>,
     style: &TextStyle,
     variations: &[FontVariation],
 ) -> Instance {
@@ -1982,17 +1986,13 @@ fn instance_for(
         return Instance::default();
     }
     let names = collection_names(&style.font_families);
-    let faces = matches.lock().unwrap_or_else(PoisonError::into_inner).of(
-        collection,
-        &names,
-        font_style_for(style),
-    );
-    let Some(axes) = faces.iter().find_map(|face| {
-        known
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .of(face)
-    }) else {
+    let mut record = record.lock().unwrap_or_else(PoisonError::into_inner);
+    let FaceRecord {
+        matches,
+        axes: known,
+    } = &mut *record;
+    let faces = matches.of(collection, &names, font_style_for(style));
+    let Some(axes) = faces.iter().find_map(|face| known.of(face)) else {
         return Instance {
             names: Some(names),
             ..Instance::default()
@@ -2012,21 +2012,24 @@ fn instance_for(
         true => None,
         false => optical_size(&axes, style.font_size),
     };
-    let coordinates = variations
-        .iter()
-        .filter(|variation| variation.axis != FontAxisTag::WGHT)
-        .map(|variation| Coordinate {
-            axis: FourByteTag::from(u32::from_be_bytes(
-                *variation.axis.as_bytes(),
-            )),
-            value: variation.value,
-        })
-        .chain([Coordinate {
-            axis: FourByteTag::from(wght_tag),
-            value: wght,
-        }])
-        .chain(opsz)
-        .collect::<Vec<_>>();
+    // Walked rather than collected until an instance is made: a style at
+    // its faces' own position, the common case, makes none.
+    let coordinates = || {
+        variations
+            .iter()
+            .filter(|variation| variation.axis != FontAxisTag::WGHT)
+            .map(|variation| Coordinate {
+                axis: FourByteTag::from(u32::from_be_bytes(
+                    *variation.axis.as_bytes(),
+                )),
+                value: variation.value,
+            })
+            .chain([Coordinate {
+                axis: FourByteTag::from(wght_tag),
+                value: wght,
+            }])
+            .chain(opsz)
+    };
     let weight = axes
         .iter()
         .find(|axis| *axis.tag == wght_tag)
@@ -2039,11 +2042,10 @@ fn instance_for(
     // first, and its own defaults may differ.
     let at_default = faces.iter().all(|face| {
         known
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .of(face)
-            .is_none_or(|axes| at_default_position(&axes, &coordinates))
+            .is_none_or(|axes| at_default_position(&axes, coordinates()))
     });
+    drop(record);
     if at_default {
         return Instance {
             coordinates: Vec::new(),
@@ -2051,6 +2053,9 @@ fn instance_for(
             names: Some(names),
         };
     }
+    let coordinates: Vec<Coordinate> = coordinates().collect();
+    #[cfg(test)]
+    COORDINATE_LISTS.set(COORDINATE_LISTS.get() + 1);
     // A poisoned record is still a record: the panic that poisoned it was
     // elsewhere, and the worst a stale entry can do is drop the caches early.
     let families: Vec<&str> = names.iter().map(String::as_str).collect();
@@ -2075,11 +2080,14 @@ fn instance_for(
 /// it at the axis's default whatever the size, and CoreText at an optical
 /// size it picks for itself, which differs from the instance even at that
 /// default.
-fn at_default_position(axes: &[Axis], coordinates: &[Coordinate]) -> bool {
+fn at_default_position(
+    axes: &[Axis],
+    mut coordinates: impl Iterator<Item = Coordinate>,
+) -> bool {
     let opsz =
         FourByteTag::from(u32::from_be_bytes(*FontAxisTag::OPSZ.as_bytes()));
     !axes.iter().any(|axis| axis.tag == opsz)
-        && coordinates.iter().all(|coordinate| {
+        && coordinates.all(|coordinate| {
             axes.iter()
                 .find(|axis| axis.tag == coordinate.axis)
                 .is_none_or(|axis| axis.def == coordinate.value)
@@ -2459,8 +2467,7 @@ mod tests {
         instance_for(
             &mut engine.collection.clone(),
             &engine.positions,
-            &engine.axes,
-            &engine.matches,
+            &engine.faces,
             &style,
             &[],
         )
@@ -2496,6 +2503,20 @@ mod tests {
         let mut pixels = vec![0u8; 900 * 120 * 4];
         assert!(surface.read_pixels(&info, &mut pixels, 900 * 4, (0, 0)));
         (pixels, font.measure_str(text, None).0)
+    }
+
+    /// A style at its faces' own position makes no list of coordinates; one
+    /// off it makes one, for the instance.
+    #[test]
+    fn a_style_at_its_faces_own_position_makes_no_coordinates() {
+        let engine = variable_engine();
+        let made = |weight| {
+            let before = super::COORDINATE_LISTS.get();
+            let instance = instanced(&engine, &["OswaldDefault"], weight, 24.0);
+            (super::COORDINATE_LISTS.get() - before, instance.is_empty())
+        };
+        assert_eq!(made(400), (0, true), "at Oswald's own 400");
+        assert_eq!(made(401), (1, false), "at 401");
     }
 
     /// A style at its faces' own position is not instanced, and drawn so it
