@@ -35,7 +35,7 @@ use crate::{
         font_library::FontEpoch,
         typography::{
             GlyphRun, GlyphRunRef, SLNT, Shear, glyph_runs, run_shear,
-            sheared_blob,
+            sheared_blob, visit_glyph_runs,
         },
     },
 };
@@ -295,6 +295,11 @@ impl ParagraphRecipe {
             return (paragraph, None);
         }
         let slots = self.slot_ranges();
+        let style_edges = slots
+            .windows(2)
+            .filter(|pair| pair[0].0.end == pair[1].0.start)
+            .map(|pair| pair[1].0.start)
+            .collect();
         let (paints, sheared): (Vec<Paint>, Vec<bool>) = self
             .text_styles()
             .zip(once(self.base_oblique).chain(self.styles.iter().map(|s| s.1)))
@@ -333,6 +338,10 @@ impl ParagraphRecipe {
                 false => Some(edges),
             },
             drawn,
+            style_edges,
+            skia_glyphs: false,
+            #[cfg(test)]
+            per_line_only: false,
         };
         (paragraph, Some(passes))
     }
@@ -768,6 +777,10 @@ impl StyleDecoration {
 /// as in Chrome. The shadows come out of it because CSS Text Decoration 3
 /// section 4 keeps a shadow beneath text -- its own, and its neighbours' --
 /// where Chrome paints a later span's or line's shadow over earlier glyphs.
+///
+/// Where that order changes nothing, the glyphs are `Paragraph::paint`'s,
+/// between the lines beneath them and the lines over them -- see
+/// [`Self::skia_glyphs`].
 pub(crate) struct Passes {
     /// The text each style covers, in UTF-8 offsets into the paragraph's
     /// text, in order, with its slot -- see [`ParagraphRecipe::shadows`].
@@ -798,6 +811,18 @@ pub(crate) struct Passes {
     ligature_edges: Option<Vec<usize>>,
     /// Whether this layout is drawn here rather than by `Paragraph::paint`.
     drawn: bool,
+    /// The edges between two styles, in UTF-8 offsets: where `Paragraph::
+    /// paint` cuts a glyph cluster that one falls inside, which is drawn
+    /// here whole -- see [`Self::painted`].
+    style_edges: Vec<usize>,
+    /// Whether this layout's glyphs are left to `Paragraph::paint`, drawn
+    /// between the lines beneath them and the lines over them, rather than
+    /// rebuilt here run by run -- see [`Self::skia_glyphs`].
+    skia_glyphs: bool,
+    /// Whether every layout is drawn run by run here, for the tests to hold
+    /// the two ways of drawing against each other.
+    #[cfg(test)]
+    per_line_only: bool,
     /// The paragraph with its shadows and backgrounds SkParagraph's to draw
     /// -- see [`ParagraphRecipe::as_asked`].
     #[cfg(test)]
@@ -933,6 +958,29 @@ impl Passes {
                 return;
             }
         }
+        self.skia_glyphs = self.skia_glyphs(paragraph);
+        if self.skia_glyphs {
+            let mut spans = Spans::default();
+            let mut background_spans = Spans::default();
+            let mut lines = 0;
+            visit_glyph_runs(paragraph, |run| {
+                lines = lines.max(run.line + 1);
+                if !self.boxes.is_empty() {
+                    spans
+                        .add(&run, |at| decorate::box_at(&self.box_ranges, at));
+                }
+                if !self.backgrounds.is_empty() {
+                    background_spans.add(&run, |at| {
+                        decorate::box_at(&self.background_ranges, at)
+                    });
+                }
+            });
+            self.spans = spans.finish();
+            self.background_spans = background_spans.finish();
+            self.runs.clear();
+            self.lines = lines;
+            return;
+        }
         let mut spans = Spans::default();
         let mut background_spans = Spans::default();
         let mut runs = Vec::new();
@@ -959,6 +1007,41 @@ impl Passes {
         self.background_spans = background_spans.finish();
         self.runs = runs;
         self.lines = lines;
+    }
+
+    /// Whether `paragraph`, just laid out, can have its glyphs drawn by
+    /// `Paragraph::paint` with every line's underlines and overlines before
+    /// them and every line's lines-through after, and look as it does drawn
+    /// a line at a time.
+    ///
+    /// It can where nothing of it is drawn here for a reason of its own:
+    /// no style asks for oblique, which SkParagraph would draw upright; no
+    /// text shadow, which goes beneath every glyph; and no edge between two
+    /// styles inside a glyph cluster, which SkParagraph cuts where this draws
+    /// the cluster whole in its first style. And where the order of the
+    /// lines changes nothing: with one line, or with no decoration at all --
+    /// backgrounds are beneath every line's glyphs either way -- since on a
+    /// second line an overline lies over the descenders above, and a line
+    /// at a tight line height can reach the glyphs of the next.
+    ///
+    /// The spans are found as they are otherwise, from `Paragraph::visit`,
+    /// which also fills the blob cache `Paragraph::paint` then draws from;
+    /// what is saved is copying the runs and building their blobs here.
+    fn skia_glyphs(&self, paragraph: &mut Paragraph) -> bool {
+        #[cfg(test)]
+        if self.per_line_only {
+            return false;
+        }
+        !self.sheared.contains(&true)
+            // A decorated style's shadows are its slot's too, so this
+            // covers a decoration's shadow as well as the glyphs'.
+            && self.shadows.iter().all(Vec::is_empty)
+            && (self.boxes.is_empty() || paragraph.line_number() <= 1)
+            && self.style_edges.iter().all(|&edge| {
+                paragraph
+                    .get_glyph_cluster_at(edge)
+                    .is_none_or(|cluster| cluster.text_range.start >= edge)
+            })
     }
 
     /// Adds to `out` the pieces of `run`, a stretch of glyphs in one style
@@ -1031,9 +1114,12 @@ impl Passes {
         });
     }
 
-    /// Paints `_paragraph`, which this was laid out with, at `origin`, a line
-    /// at a time -- see [`Passes`]. `Paragraph::paint` is not called: every
-    /// glyph is drawn here, with the paint SkParagraph would have used.
+    /// Paints `paragraph`, which this was laid out with, at `origin`, a line
+    /// at a time -- see [`Passes`] -- each glyph drawn here with the paint
+    /// SkParagraph would have used. Where the layout found that the order of
+    /// lines changes nothing, the glyphs are `Paragraph::paint`'s instead,
+    /// between every line's lines beneath and over them -- see
+    /// [`Self::skia_glyphs`].
     pub(crate) fn paint(
         &self,
         paragraph: &Paragraph,
@@ -1045,26 +1131,39 @@ impl Passes {
             return;
         }
         let base = Paint::default();
+        if self.skia_glyphs {
+            self.paint_backgrounds(canvas, origin);
+            for line in 0..self.lines {
+                let spans = decorate::on_line(&self.spans, line);
+                decorate::paint(
+                    canvas,
+                    spans,
+                    &self.boxes,
+                    origin,
+                    Layer::Beneath,
+                    &base,
+                );
+            }
+            paragraph.paint(canvas, origin);
+            for line in 0..self.lines {
+                let spans = decorate::on_line(&self.spans, line);
+                decorate::paint(
+                    canvas,
+                    spans,
+                    &self.boxes,
+                    origin,
+                    Layer::Over,
+                    &base,
+                );
+            }
+            return;
+        }
         let runs_on = |line: usize| {
             let start = self.runs.partition_point(|run| run.line < line);
             let end = self.runs.partition_point(|run| run.line <= line);
             &self.runs[start..end]
         };
-        for line in 0..self.lines {
-            for span in decorate::on_line(&self.background_spans, line) {
-                let background = &self.backgrounds[span.box_index];
-                let baseline = origin.y + span.y;
-                canvas.draw_rect(
-                    Rect::new(
-                        origin.x + span.left,
-                        baseline + background.face.ascent,
-                        origin.x + span.right,
-                        baseline + background.face.descent,
-                    ),
-                    &background.paint,
-                );
-            }
-        }
+        self.paint_backgrounds(canvas, origin);
         // Every line's shadows before any line's glyphs: CSS Text Decoration
         // 3 section 4 says shadows "never overlay the text itself" and that
         // UAs "should avoid painting text shadows over text in adjacent
@@ -1117,6 +1216,28 @@ impl Passes {
                 Layer::Over,
                 &base,
             );
+        }
+    }
+}
+
+impl Passes {
+    /// Every line's backgrounds, over the content area of the face each
+    /// one's style first has -- see [`StyleBackground`].
+    fn paint_backgrounds(&self, canvas: &Canvas, origin: Point) {
+        for line in 0..self.lines {
+            for span in decorate::on_line(&self.background_spans, line) {
+                let background = &self.backgrounds[span.box_index];
+                let baseline = origin.y + span.y;
+                canvas.draw_rect(
+                    Rect::new(
+                        origin.x + span.left,
+                        baseline + background.face.ascent,
+                        origin.x + span.right,
+                        baseline + background.face.descent,
+                    ),
+                    &background.paint,
+                );
+            }
         }
     }
 }
@@ -1946,4 +2067,201 @@ mod tests {
     /// or more. A control of 0 allows nothing, so a style that should draw
     /// nothing is held to exactly that.
     const INK_SPREAD: f64 = 0.10;
+
+    /// A paragraph of `pieces`, each in its own style, drawn through its
+    /// passes -- run by run where `per_line_only`, and otherwise however the
+    /// layout chooses -- with whether its glyphs were `Paragraph::paint`'s.
+    /// `None` for one with nothing for passes to draw.
+    fn drawn_with(
+        pieces: &[(&str, TextStyle)],
+        width: f32,
+        per_line_only: bool,
+    ) -> Option<(Vec<u8>, bool)> {
+        let collection = raleway();
+        let mut base = TextStyle::new();
+        base.set_font_families(&[RALEWAY]).set_font_size(SIZE);
+        let mut paragraph_style = ParagraphStyle::new();
+        paragraph_style.set_text_style(&base);
+        let mut recipe =
+            ParagraphRecipe::new(paragraph_style, false, collection, None);
+        for (text, style) in pieces {
+            recipe.push_style(style.clone(), false);
+            recipe.add_text(text);
+            recipe.pop();
+        }
+        let (mut paragraph, passes) = recipe.build();
+        let mut passes = passes?;
+        passes.per_line_only = per_line_only;
+        paragraph.layout(width);
+        passes.lay_out(&mut paragraph, width);
+        let (w, h) = (
+            (width + 2.0 * MARGIN) as i32,
+            (paragraph.height() + 2.0 * MARGIN) as i32,
+        );
+        let mut surface =
+            surfaces::raster_n32_premul((w, h)).expect("a surface");
+        surface.canvas().clear(Color::WHITE);
+        passes.paint(&paragraph, surface.canvas(), Point::new(MARGIN, MARGIN));
+        let info = ImageInfo::new_n32_premul((w, h), None);
+        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        assert!(surface.read_pixels(
+            &info,
+            &mut pixels,
+            (w * 4) as usize,
+            (0, 0)
+        ));
+        Some((pixels, passes.skia_glyphs))
+    }
+
+    /// A style in Raleway at the generated size, in `color`, decorated with
+    /// `lines` in `style`, and over `background` where there is one.
+    fn decorated_style(
+        color: Color,
+        lines: skia_safe::textlayout::TextDecoration,
+        style: skia_safe::textlayout::TextDecorationStyle,
+        background: Option<Color>,
+    ) -> TextStyle {
+        let mut text_style = TextStyle::new();
+        text_style
+            .set_font_families(&[RALEWAY])
+            .set_font_size(SIZE)
+            .set_color(color);
+        text_style.set_decoration_type(lines);
+        text_style.set_decoration_style(style);
+        text_style.set_decoration_color(color);
+        if let Some(background) = background {
+            let mut paint = skia_safe::Paint::default();
+            paint.set_color(background);
+            text_style.set_background_paint(&paint);
+        }
+        text_style
+    }
+
+    /// Where a paragraph's glyphs are left to `Paragraph::paint`, it draws
+    /// byte for byte what it draws run by run: over generated paragraphs of
+    /// coloured, decorated and backgrounded pieces, on one line and on
+    /// several. Some of them are left to it and some are not, so neither
+    /// side of the comparison is empty.
+    #[test]
+    fn glyphs_left_to_skia_draw_what_the_runs_draw() {
+        use skia_safe::textlayout::{TextDecoration, TextDecorationStyle};
+        const COLORS: [Color; 3] = [Color::BLACK, Color::RED, Color::BLUE];
+        const LINES: [TextDecoration; 5] = [
+            TextDecoration::NO_DECORATION,
+            TextDecoration::UNDERLINE,
+            TextDecoration::LINE_THROUGH,
+            TextDecoration::OVERLINE,
+            TextDecoration::UNDERLINE.union(TextDecoration::LINE_THROUGH),
+        ];
+        const STYLES: [TextDecorationStyle; 5] = [
+            TextDecorationStyle::Solid,
+            TextDecorationStyle::Double,
+            TextDecorationStyle::Dotted,
+            TextDecorationStyle::Dashed,
+            TextDecorationStyle::Wavy,
+        ];
+        let mut random = SplitMix(SEED);
+        let (mut left, mut kept) = (0, 0);
+        for case in 0..CASES / 4 {
+            let pieces: Vec<(&str, TextStyle)> = (0..1 + random.below(5))
+                .map(|_| {
+                    let text = PIECES[random.below(PIECES.len())];
+                    let background = (random.below(3) == 0)
+                        .then(|| Color::from_argb(255, 255, 230, 120));
+                    let style = decorated_style(
+                        COLORS[random.below(COLORS.len())],
+                        LINES[random.below(LINES.len())],
+                        STYLES[random.below(STYLES.len())],
+                        background,
+                    );
+                    (text, style)
+                })
+                .collect();
+            // Narrow enough to wrap the longer ones.
+            let width = [WIDTH, 60.0][random.below(2)];
+            let Some((skia, by_skia)) = drawn_with(&pieces, width, false)
+            else {
+                continue;
+            };
+            let (runs, _) =
+                drawn_with(&pieces, width, true).expect("the same passes");
+            match by_skia {
+                true => left += 1,
+                false => kept += 1,
+            }
+            let texts: Vec<&str> =
+                pieces.iter().map(|(text, _)| *text).collect();
+            assert!(skia == runs, "case {case}: {texts:?} at {width}");
+        }
+        assert!(left > 0 && kept > 0, "{left} left to Skia, {kept} not");
+    }
+
+    /// A second line's overline lies over the descenders of the line above
+    /// it, which only drawing a line at a time puts there: such a paragraph
+    /// keeps its glyphs here, as one with only backgrounds over several
+    /// lines, or a decoration on one, does not.
+    #[test]
+    fn an_overline_on_a_second_line_keeps_its_glyphs_here() {
+        use skia_safe::textlayout::{TextDecoration, TextDecorationStyle};
+        let lines = |decoration, background| {
+            decorated_style(
+                Color::BLACK,
+                decoration,
+                TextDecorationStyle::Solid,
+                background,
+            )
+        };
+        let wrapped = "gyp jqy pqg";
+        let overlined = [(wrapped, lines(TextDecoration::OVERLINE, None))];
+        let by_skia = |pieces: &[(&str, TextStyle)], width| {
+            drawn_with(pieces, width, false).expect("passes").1
+        };
+        assert!(!by_skia(&overlined, 60.0), "an overline over two lines");
+        assert!(by_skia(&overlined, WIDTH * 4.0), "an overline on one line");
+        let backed = [(
+            wrapped,
+            lines(TextDecoration::NO_DECORATION, Some(Color::YELLOW)),
+        )];
+        assert!(by_skia(&backed, 60.0), "a background over two lines");
+
+        // And those it keeps here for a reason of their own: an fi ligature
+        // in two colours, which SkParagraph cuts and this draws whole, and a
+        // text shadow, which goes beneath every glyph. Each draws as it
+        // does run by run.
+        let underlined = |color| {
+            decorated_style(
+                color,
+                TextDecoration::UNDERLINE,
+                TextDecorationStyle::Solid,
+                None,
+            )
+        };
+        let mut shadowed = decorated_style(
+            Color::BLACK,
+            TextDecoration::NO_DECORATION,
+            TextDecorationStyle::Solid,
+            None,
+        );
+        shadowed.add_shadow(skia_safe::textlayout::TextShadow::new(
+            Color::RED,
+            (3.0, 3.0),
+            0.0,
+        ));
+        for (what, pieces) in [
+            (
+                "an fi ligature in two colours",
+                vec![
+                    ("f", underlined(Color::RED)),
+                    ("i", underlined(Color::BLUE)),
+                ],
+            ),
+            ("a text shadow", vec![("ab", shadowed)]),
+        ] {
+            let (skia, by_skia) =
+                drawn_with(&pieces, WIDTH, false).expect("passes");
+            let (runs, _) = drawn_with(&pieces, WIDTH, true).expect("passes");
+            assert!(!by_skia, "{what}");
+            assert!(skia == runs, "{what}");
+        }
+    }
 }
