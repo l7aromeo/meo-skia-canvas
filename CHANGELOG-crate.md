@@ -382,15 +382,20 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `# Panics` section now names the one case that panics: a first `run` off
   the main thread on macOS.
 
-- **A large blur in `set_filter_css` draws as Chrome's.** A flat-colour
-  shape or text was blurred on its coverage, which Skia holds to a sigma of
-  128, so `blur(200px)`, `blur(500px)` and `blur(1000px)` drew alike. A
-  draw is now blurred on its result wherever that is nearer Chrome or
-  cheaper. Chrome's own canvas blurs a large radius differently on its GPU
-  and on its CPU, and each engine here now matches Chrome's same engine:
-  a square sums to within half a percent of Chrome's GPU canvas from 50 to
-  1000px on the GPU engine, and to Chrome's CPU canvas exactly on the CPU
-  engine at every radius measured but 200px, which is 0.9% off.
+- **A large blur in `set_filter_css` draws as Chrome's.** A flat-colour shape
+  or text was blurred on its coverage, which Skia holds to a sigma of 128, so
+  `blur(200px)`, `blur(500px)` and `blur(1000px)` drew alike. A draw is now
+  blurred on its result wherever that is nearer Chrome or cheaper, and text
+  always: Skia's coverage blur of text blurs each glyph on its own and draws
+  the glyphs over one another, so where their blurs overlapped the text lost
+  ink -- 16px Oswald blurred by 20px kept 58% of it and 48px blurred by 40px
+  75% -- and at every size measured it was two to seven times further from
+  the exact Gaussian than the blurred text now is. Blurred text costs what
+  any blurred path does. Chrome's own canvas blurs a large radius differently
+  on its GPU and on its CPU, and each engine here now matches Chrome's same
+  engine: a square sums to within half a percent of Chrome's GPU canvas from
+  50 to 1000px on the GPU engine, and to Chrome's CPU canvas exactly on the
+  CPU engine at every radius measured but 200px, which is 0.9% off.
 
 - **`measure_text`'s width is the same whatever the text alignment, and
   keeps a letter spacing whole.** It was read from the laid-out boxes, whose
