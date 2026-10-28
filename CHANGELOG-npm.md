@@ -397,6 +397,14 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A paragraph's text shadow keeps its blur at every export density.** A
+  shadow's `blurRadius` in a `ParagraphBuilder` style was sized in output
+  pixels, so exported at `density: 2` the text doubled and its shadow's
+  blur did not, leaving the shadow edge up to about 100 levels from where
+  a blur of twice the width puts it. The blur now scales with the export
+  and with a canvas drawn into another at a size, as `ctx.filter`'s does;
+  at density 1 it is unchanged.
+
 - **A blur set with `ctx.filter` keeps its width at every export density.**
   The blur of a flat-colour rectangle, rounded rectangle or line of text was
   sized in output pixels, so it stayed as wide in pixels as it was at

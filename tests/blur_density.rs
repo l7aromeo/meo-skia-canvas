@@ -289,3 +289,126 @@ fn a_rounded_rect_or_text_blurs_at_density_two_as_drawn_twice_as_large() {
         }
     }
 }
+
+/// `image`, `width` pixels wide, blurred by `sigma` with the Gaussian's
+/// weight over each pixel, one axis and then the other.
+fn gaussian(image: &[f64], width: usize, sigma: f64) -> Vec<f64> {
+    let height = image.len() / width;
+    let reach = (6.0 * sigma).ceil() as i64 + 1;
+    let k = sigma * std::f64::consts::SQRT_2;
+    let weights: Vec<f64> = (-reach..=reach)
+        .map(|d| (erf((d as f64 + 0.5) / k) - erf((d as f64 - 0.5) / k)) / 2.0)
+        .collect();
+    let pass = |source: &[f64], across: bool| -> Vec<f64> {
+        (0..image.len())
+            .map(|i| {
+                let (x, y) = ((i % width) as i64, (i / width) as i64);
+                weights
+                    .iter()
+                    .zip(-reach..)
+                    .map(|(weight, d)| {
+                        let (sx, sy) = match across {
+                            true => (x + d, y),
+                            false => (x, y + d),
+                        };
+                        match (0..width as i64).contains(&sx)
+                            && (0..height as i64).contains(&sy)
+                        {
+                            true => {
+                                weight
+                                    * source[(sy * width as i64 + sx) as usize]
+                            }
+                            false => 0.0,
+                        }
+                    })
+                    .sum()
+            })
+            .collect()
+    };
+    pass(&pass(image, true), false)
+}
+
+/// How much closer a paragraph's blurred shadow exported at density 2 must
+/// be to its unblurred shadow blurred by twice the sigma than by the sigma
+/// itself. The first is 20 to 24 levels away -- the coverage blur's own
+/// approximation of a Gaussian -- and the second 92 to 105; with the sigma
+/// fixed in device pixels the two were the other way round, 94 to 100 and
+/// 23 to 41.
+const PARAGRAPH_SCALED_RATIO: f64 = 3.0;
+
+#[test]
+fn a_paragraph_shadow_blurs_at_density_two_by_twice_its_sigma() {
+    // Wide enough that no font family the text falls back to reaches
+    // the edge, where the blur would spread ink the canvas does not keep.
+    let width = 240.0;
+    let shadowed = |blur: f32, oblique: bool| {
+        let library = FontLibrary::new();
+        let engine = TextEngine::new(&library);
+        let style = TextStyle {
+            font_families: vec!["sans-serif".into()],
+            font_size: 24.0,
+            // The text itself transparent, so only its shadow is drawn.
+            color: RgbaLinear::from_srgb8(0, 0, 0, 0.0),
+            slant: match oblique {
+                true => TextSlant::OBLIQUE,
+                false => TextSlant::Upright,
+            },
+            shadows: vec![TextShadow {
+                color: RgbaLinear::from_srgb8(0, 0, 0, 1.0),
+                offset_x: 1.0,
+                offset_y: 0.0,
+                blur_sigma: blur,
+            }],
+            ..TextStyle::default()
+        };
+        let mut builder = engine.paragraph_builder(&style);
+        builder.add_text("Hamburg");
+        builder.build(1000.0)
+    };
+    for gpu in [false, true] {
+        for oblique in [false, true] {
+            let exported = |blur: f32| -> Option<Vec<f64>> {
+                let mut canvas = Canvas::new(width, 50.0);
+                canvas.set_gpu(gpu);
+                if gpu && canvas.engine_kind() != EngineKind::Gpu {
+                    return None;
+                }
+                canvas.context().draw_paragraph(
+                    &shadowed(blur, oblique),
+                    10.0,
+                    10.0,
+                );
+                let data = canvas
+                    .to_image_data(
+                        None,
+                        &ImageDataExport {
+                            density: 2,
+                            ..ImageDataExport::default()
+                        },
+                    )
+                    .expect("pixels");
+                Some(alpha(&data).into_iter().map(f64::from).collect())
+            };
+            let Some(sharp) = exported(0.0) else {
+                continue;
+            };
+            for sigma in [1.0f32, 2.0] {
+                let got = exported(sigma).expect("pixels");
+                let off = |by: f64| {
+                    gaussian(&sharp, (width * 2.0) as usize, by)
+                        .iter()
+                        .zip(&got)
+                        .map(|(e, g)| (e - g).abs())
+                        .fold(0.0, f64::max)
+                };
+                let (scaled, unscaled) =
+                    (off(f64::from(sigma) * 2.0), off(f64::from(sigma)));
+                assert!(
+                    scaled * PARAGRAPH_SCALED_RATIO <= unscaled,
+                    "gpu {gpu} oblique {oblique} sigma {sigma}: {scaled:.1} levels \
+                     from twice the sigma, {unscaled:.1} from the sigma itself"
+                );
+            }
+        }
+    }
+}
