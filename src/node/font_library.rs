@@ -28,7 +28,8 @@ use crate::{
     },
     image::x_height_ratio,
     typography::{
-        FontSpec, from_slant, from_width, typeface_details, typeface_wght_range,
+        FontSpec, forget_families, from_slant, from_width, typeface_details,
+        typeface_wght_range,
     },
     utils::*,
 };
@@ -1530,6 +1531,10 @@ impl FontLibrary {
     /// call on a path taken when a program registers a font, and the
     /// alternative is a cache whose correctness rests on which of two
     /// lookups happens to win.
+    ///
+    /// The families remembered per face and the positions recorded against
+    /// the collections go too: the faces and collections they describe are
+    /// the ones replaced here.
     fn invalidate(&mut self) {
         self.system_families = None;
         self.epoch = Rc::new(FontEpoch {
@@ -1540,6 +1545,8 @@ impl FontLibrary {
         self.collection_cache.clear();
         self.instances.clear();
         self.resolved_fonts.clear();
+        self.positions = InstancedPositions::default();
+        forget_families();
     }
 
     /// Records that a paragraph builder is about to instance `families` at
@@ -2064,6 +2071,35 @@ mod tests {
             Some(other.max),
             "a named value past its axis is pinned to it"
         );
+    }
+
+    #[test]
+    fn a_change_to_the_fonts_forgets_the_positions_recorded_before_it() {
+        // The positions count toward dropping the caches of the collections
+        // they were instanced through; a change to the fonts replaces those
+        // collections, so the count starts again with them.
+        const FAMILY: &str = "AmstelvarPositionsForgotten";
+        let bytes = std::fs::read("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+            .expect("bundled Amstelvar is readable");
+        let face = || {
+            FontMgr::new()
+                .new_from_data(Data::new_copy(&bytes), None)
+                .expect("Amstelvar parses")
+        };
+        let opsz = FourByteTag::from_chars('o', 'p', 's', 'z');
+        FontLibrary::with_shared(|lib| {
+            lib.register_typeface(face(), Some(FAMILY.to_string()));
+            for n in 0..10 {
+                let at = [Coordinate {
+                    axis: opsz,
+                    value: 10.0 + n as f32,
+                }];
+                assert!(!lib.admit_position(&[FAMILY], &at));
+            }
+            assert_eq!(lib.positions.len(), 10);
+            lib.register_typeface(face(), Some(FAMILY.to_string()));
+            assert_eq!(lib.positions.len(), 0);
+        });
     }
 
     #[test]

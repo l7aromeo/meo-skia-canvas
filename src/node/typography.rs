@@ -192,6 +192,18 @@ fn family_of(typeface: &Typeface) -> String {
     })
 }
 
+/// Forgets every family [`family_of`] remembered, called by
+/// `FontLibrary::invalidate` whenever the registered fonts change.
+///
+/// Skia never gives two typefaces the same id, so an entry for a face the
+/// library has let go of could only ever be asked for again by a
+/// measurement still holding that face, and the next one asks for it once
+/// more. Without this every registration of a font left one entry behind
+/// for good -- two hundred registrations kept two hundred.
+pub(crate) fn forget_families() {
+    FAMILIES.with(|families| families.borrow_mut().clear());
+}
+
 /// The next multiple of a hundred strictly above `weight`.
 ///
 /// The step the `wght` axis is enumerated in. A hundred because that is
@@ -2783,8 +2795,41 @@ mod shear {
 #[cfg(test)]
 mod measurement {
     use super::FAMILIES;
-    use crate::{canvas::Canvas, context2d::Font, font::FontLibrary as Fonts};
+    use crate::{
+        canvas::Canvas, context2d::Font, font::FontLibrary as Fonts,
+        font_library::FontLibrary,
+    };
     use skia_safe::{Data, FontMgr};
+
+    #[test]
+    fn a_change_to_the_fonts_forgets_the_families_of_the_faces_it_replaced() {
+        // Each registration makes a typeface with an id of its own, and Skia
+        // never hands an id out twice, so a family remembered for a face the
+        // library has let go of can never be asked for again.
+        const FAMILY: &str = "OswaldRegisteredAgain";
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"
+        ))
+        .expect("bundled Oswald is readable");
+        let mut canvas = Canvas::new(10.0, 10.0);
+        for _ in 0..20 {
+            let face = FontMgr::new()
+                .new_from_data(Data::new_copy(&bytes), None)
+                .expect("Oswald parses");
+            FontLibrary::with_shared(|lib| {
+                lib.register_typeface(face, Some(FAMILY.to_string()))
+            });
+            let ctx = canvas.context();
+            ctx.set_font(&Font::new(FAMILY, 20.0));
+            ctx.measure_text("Hamburgefonstiv", None);
+        }
+        assert_eq!(
+            FAMILIES.with(|families| families.borrow().len()),
+            1,
+            "only the face registered now is remembered"
+        );
+    }
 
     #[test]
     fn a_measurement_whose_paragraph_was_let_go_lays_its_ink_out_again() {
