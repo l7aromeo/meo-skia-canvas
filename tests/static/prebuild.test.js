@@ -272,3 +272,70 @@ describe("prebuild download", () => {
     });
   });
 });
+
+// `compile` hands the copy to cargo-cp-artifact, which copies only when the
+// artifact is newer than the file already at the destination. A binary put in
+// lib/ after the artifact was built -- a release build, then a dev one that
+// cargo finds up to date -- is newer, so the dev build used to leave the
+// release binary in place, and a suite run after it tested the wrong build.
+// The stand-in below copies by the same rule, so this fails unless `compile`
+// clears the destination first.
+describe("prebuild compile", () => {
+  const sandbox = join(
+    __dirname,
+    "../../.test-sandbox",
+    `compile-${process.pid}`,
+  );
+  const bin = join(sandbox, "bin");
+  const artifact = join(sandbox, "artifact.node");
+  let path;
+
+  before(() => {
+    mkdirSync(bin, { recursive: true });
+    cpSync(join(__dirname, "../../lib"), join(sandbox, "lib"), {
+      recursive: true,
+    });
+    cpSync(
+      join(__dirname, "../../package.json"),
+      join(sandbox, "package.json"),
+    );
+    writeFileSync(join(sandbox, "Cargo.toml"), "");
+    // Called as `cargo-cp-artifact -a cdylib <name> <destination> -- cargo ...`.
+    writeFileSync(
+      join(bin, "cargo-cp-artifact"),
+      `#!/bin/sh\nif [ ! -e "$4" ] || [ "${artifact}" -nt "$4" ]; then cp "${artifact}" "$4"; fi\n`,
+      { mode: 0o755 },
+    );
+    path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+  });
+
+  after(() => {
+    process.env.PATH = path;
+    rmSync(sandbox, { recursive: true, force: true });
+  });
+
+  test(
+    "replaces a binary newer than the artifact it builds",
+    {
+      skip:
+        process.platform === "win32" ? "the stand-in is a shell script" : false,
+    },
+    async () => {
+      const destination = join(sandbox, "lib/skia.node");
+      writeFileSync(artifact, "the build cargo just made");
+      writeFileSync(destination, "a release binary copied in later");
+      const later = new Date(Date.now() + 60_000);
+      require("fs").utimesSync(destination, later, later);
+
+      const { compile } = await import(
+        `file://${join(sandbox, "lib/prebuild.mjs")}`
+      );
+      assert.strictEqual(compile("dev"), 0);
+      assert.strictEqual(
+        readFileSync(destination, "utf8"),
+        "the build cargo just made",
+      );
+    },
+  );
+});
