@@ -1229,14 +1229,16 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   - A line of text a `Context2D` draws a second time in the same settings
     is kept as laid out, and every later draw of it, in any paint and
     oblique included, is drawn from what was kept rather than laid out
-    afresh: a kept line draws about 14 times faster [RE-TIME vs 0.16.3].
-    Text drawn once is not kept and not slowed [RE-TIME vs 0.16.3]; a line
-    drawn exactly twice, kept on its second draw, costs about 9% more over
-    its two draws [RE-TIME vs 0.16.3].
+    afresh: a kept line is laid out and recorded about 14 times faster
+    [RE-TIME vs 0.16.3]. Text drawn once is not kept and not slowed
+    [RE-TIME vs 0.16.3]; a line drawn exactly twice, kept on its second
+    draw, costs about 9% more over its two draws [RE-TIME vs 0.16.3].
   - Setting a font, spacing, alignment or another text setting on a
     `Context2D` to the value it already holds no longer throws that layout
-    away, so a loop that sets its font before every draw keeps the benefit
-    [RE-TIME vs 0.16.3].
+    away, so a loop that sets its font before every draw keeps the
+    benefit: 200 labels redrawn every frame with the font set before each
+    are laid out and recorded about 10 times faster, and laid out,
+    recorded and drawn to pixels about 4 times faster [RE-TIME vs 0.16.3].
   - The faces and collection a font resolves to are remembered for each
     family list and style while the registered fonts stand, a `TextEngine`
     remembers the faces each family list matched and spells a list's names
@@ -1288,13 +1290,14 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   nothing and has no ink or outline, and advances as it would upright.
 
   An oblique run is drawn a glyph run at a time so that each can be
-  sheared or not, which costs more than an upright one. In a release
-  build on macOS, measured through the Node addon, filling
-  `"Hamburgefonstiv"` in `oblique 10deg 32px Oswald` takes about 5.3 µs on
-  the CPU engine where the previous release took 3.1 drawing the italic
-  face, and 5.7 underlined where it took 3.9; on the GPU engine, 5.2 and
-  5.7 where it took 3.1 and 3.8. Upright text is unchanged, at 3.3 µs
-  before and after.
+  sheared or not, which costs more than an upright one. In a release build
+  on macOS, measured through the Node addon, filling `"Hamburgefonstiv"`
+  in `oblique 10deg 32px Oswald` into a 256 by 96 canvas read back every
+  50 draws takes about 3.9 µs a draw on the CPU engine where the previous
+  release took 3.6 drawing the italic face, and 4.4 underlined where it
+  took 4.3; on the GPU engine, 10.6 and 12.2 where it took 9.4 and 11.7.
+  Upright text takes 3.2 µs on the CPU engine where it took 5.1, and 9.3
+  on the GPU where it took 8.7 [RE-TIME vs 0.16.3].
 
   A paragraph with an oblique range reads its runs back for drawing at its
   first draw after a layout, so one only laid out or measured pays for no
