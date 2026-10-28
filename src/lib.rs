@@ -991,6 +991,8 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
         paragraph::paragraphStyleCopies,
     )?;
     #[cfg(debug_assertions)]
+    cx.export_function("__paragraphFollows", paragraph::paragraphFollows)?;
+    #[cfg(debug_assertions)]
     cx.export_function("__laidOut", typography::laidOut)?;
     #[cfg(debug_assertions)]
     cx.export_function("__typographyBuilds", typography::typographyBuilds)?;

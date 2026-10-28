@@ -1,5 +1,6 @@
 use std::{
     borrow::Cow,
+    cell::RefCell,
     hash::{Hash, Hasher},
     iter::once,
     ops::Range,
@@ -1516,8 +1517,8 @@ impl ParagraphBuilder {
         let uncached = self.recipe.uncached();
         let (paragraph, passes) = self.recipe.build();
         let mut paragraph = Paragraph {
-            paragraph,
-            passes,
+            paragraph: RefCell::new(paragraph),
+            passes: RefCell::new(passes),
             uncached,
             max_width,
         };
@@ -1540,10 +1541,19 @@ thread_local! {
 /// Owns the laid-out paragraph; metrics queries are cheap and
 /// `draw_text_layout` paints the same paragraph onto a canvas.
 pub struct Paragraph {
-    pub(crate) paragraph: SkParagraph,
-    /// What draws the paragraph's oblique ranges and its decorations,
-    /// where it has any.
-    passes: Option<Passes>,
+    /// The laid-out paragraph, and what draws its oblique ranges and its
+    /// decorations where it has any.
+    ///
+    /// Each in a `RefCell` because the first paint after a layout follows
+    /// it, reading its glyph runs back with `Paragraph::visit`, which takes
+    /// the paragraph mutably, through the `&Paragraph` that
+    /// `Context2D::draw_paragraph` is given -- see
+    /// `node::oblique::Passes::follow`. Each borrow lasts one call of this
+    /// type's, and none of them calls back into it, so no borrow meets
+    /// another. A `RefCell` takes away no auto trait the type had: it was
+    /// neither `Send`, `Sync` nor unwind-safe before.
+    pub(crate) paragraph: RefCell<SkParagraph>,
+    passes: RefCell<Option<Passes>>,
     /// The collection whose paragraph cache a layout goes without -- see
     /// `node::oblique::without_paragraph_cache`.
     uncached: Option<FontCollection>,
@@ -1570,9 +1580,9 @@ impl Paragraph {
             ..
         } = self;
         without_paragraph_cache(uncached.as_ref(), || {
-            paragraph.layout(max_width);
-            if let Some(passes) = passes {
-                passes.lay_out(paragraph, max_width);
+            paragraph.get_mut().layout(max_width);
+            if let Some(passes) = passes.get_mut() {
+                passes.lay_out(max_width);
             }
         });
         self.max_width = max_width;
@@ -1582,18 +1592,28 @@ impl Paragraph {
     /// `Paragraph::paint`, with its oblique ranges sheared, its shadows and
     /// its decorations drawn where it has any -- see `node::oblique`.
     pub(crate) fn paint(&self, canvas: &SkCanvas, origin: SkPoint) {
+        let mut passes = self.passes.borrow_mut();
         #[cfg(test)]
         if PAINT_AS_ASKED.get()
             && let Some(as_asked) =
-                self.passes.as_ref().and_then(|p| p.as_asked.as_ref())
+                passes.as_ref().and_then(|p| p.as_asked.as_ref())
         {
             as_asked.paint(canvas, origin);
             return;
         }
-        match &self.passes {
-            Some(passes) => passes.paint(&self.paragraph, canvas, origin),
-            None => self.paragraph.paint(canvas, origin),
+        let mut paragraph = self.paragraph.borrow_mut();
+        match passes.as_mut() {
+            Some(passes) => passes.paint(&mut paragraph, canvas, origin),
+            None => paragraph.paint(canvas, origin),
         }
+    }
+
+    /// How many times this paragraph's layouts have been followed for
+    /// drawing -- see `node::oblique::Passes::follow` -- or `None` where it
+    /// has nothing drawn by passes.
+    #[cfg(test)]
+    pub(crate) fn follows(&self) -> Option<usize> {
+        self.passes.borrow().as_ref().map(|passes| passes.follows)
     }
 
     /// The distance from the top of the layout to the alphabetic baseline
@@ -1603,7 +1623,7 @@ impl Paragraph {
     /// text by its baseline rather than by its top edge, which is what the
     /// Canvas `textBaseline` of `"alphabetic"` means.
     pub fn alphabetic_baseline(&self) -> f32 {
-        self.paragraph.alphabetic_baseline()
+        self.paragraph.borrow().alphabetic_baseline()
     }
 
     /// The distance from the top of the layout to the ideographic baseline
@@ -1611,7 +1631,7 @@ impl Paragraph {
     ///
     /// Lower than the alphabetic one, and where CJK glyphs sit.
     pub fn ideographic_baseline(&self) -> f32 {
-        self.paragraph.ideographic_baseline()
+        self.paragraph.borrow().ideographic_baseline()
     }
 
     /// The narrowest width the text could be laid out in without a word
@@ -1620,7 +1640,7 @@ impl Paragraph {
     /// The longest single word, in effect. Laying out narrower than this
     /// overflows or breaks mid-word depending on the style.
     pub fn min_intrinsic_width(&self) -> f32 {
-        self.paragraph.min_intrinsic_width()
+        self.paragraph.borrow().min_intrinsic_width()
     }
 
     /// The width the text would take with no wrapping at all.
@@ -1630,7 +1650,7 @@ impl Paragraph {
     /// every width worth laying out at -- wider than this changes nothing,
     /// and narrower than that cannot be honoured.
     pub fn max_intrinsic_width(&self) -> f32 {
-        self.paragraph.max_intrinsic_width()
+        self.paragraph.borrow().max_intrinsic_width()
     }
 
     /// The character index nearest `(x, y)`, and which side of it the point
@@ -1642,7 +1662,10 @@ impl Paragraph {
     /// distinguishes the end of one line from the start of the next at a
     /// wrap, since both are the same index.
     pub fn glyph_position_at_coordinate(&self, x: f32, y: f32) -> TextPosition {
-        let found = self.paragraph.get_glyph_position_at_coordinate((x, y));
+        let found = self
+            .paragraph
+            .borrow()
+            .get_glyph_position_at_coordinate((x, y));
         TextPosition {
             index: found.position.max(0) as usize,
             affinity: match found.affinity {
@@ -1658,7 +1681,7 @@ impl Paragraph {
     /// budget. Use [`Paragraph::max_width`] to recover the layout budget the
     /// caller asked for.
     pub fn width(&self) -> f32 {
-        self.paragraph.longest_line()
+        self.paragraph.borrow().longest_line()
     }
 
     /// The `max_width` (wrapping budget) requested at layout time.
@@ -1668,12 +1691,12 @@ impl Paragraph {
 
     /// Total height of the laid-out paragraph after wrapping.
     pub fn height(&self) -> f32 {
-        self.paragraph.height()
+        self.paragraph.borrow().height()
     }
 
     /// Number of laid-out lines (0 if the input was empty).
     pub fn line_count(&self) -> usize {
-        self.paragraph.line_number()
+        self.paragraph.borrow().line_number()
     }
 
     /// Distance from the paragraph's top edge to the first line's baseline
@@ -1688,14 +1711,19 @@ impl Paragraph {
     /// but it is stated because nothing else says which of the two a `0.0`
     /// means.
     pub fn first_line_ascent(&self) -> f32 {
-        let metrics = self.paragraph.get_line_metrics();
-        metrics.first().map(|m| m.ascent as f32).unwrap_or_default()
+        self.paragraph
+            .borrow()
+            .get_line_metrics()
+            .first()
+            .map(|m| m.ascent as f32)
+            .unwrap_or_default()
     }
 
     /// Per-line metrics for the laid-out paragraph. The vector is
     /// indexed by line number and ordered top-to-bottom.
     pub fn line_metrics(&self) -> Vec<LineMetrics> {
         self.paragraph
+            .borrow()
             .get_line_metrics()
             .iter()
             .enumerate()
@@ -1728,6 +1756,7 @@ impl Paragraph {
         width_style: RectWidthStyle,
     ) -> Vec<TextBox> {
         self.paragraph
+            .borrow()
             .get_rects_for_range(
                 range,
                 skia_height_style(height_style),
@@ -1744,7 +1773,7 @@ impl Paragraph {
     /// Drives auto-fit / "text overflows" logic. Mirrors CanvasKit's
     /// `Paragraph.didExceedMaxLines`.
     pub fn did_exceed_max_lines(&self) -> bool {
-        self.paragraph.did_exceed_max_lines()
+        self.paragraph.borrow().did_exceed_max_lines()
     }
 
     /// Bounding boxes of the inline placeholders added during layout, in
@@ -1755,6 +1784,7 @@ impl Paragraph {
     /// icons/images.
     pub fn rects_for_placeholders(&self) -> Vec<TextBox> {
         self.paragraph
+            .borrow()
             .get_rects_for_placeholders()
             .into_iter()
             .map(text_box)
@@ -1768,6 +1798,7 @@ impl Paragraph {
     /// self`: Skia computes this lazily on the laid-out paragraph.
     pub fn unresolved_codepoints(&mut self) -> Vec<u32> {
         self.paragraph
+            .get_mut()
             .unresolved_codepoints()
             .into_iter()
             .map(|cp| cp as u32)

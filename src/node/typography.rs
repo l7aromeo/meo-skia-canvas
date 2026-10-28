@@ -3973,7 +3973,7 @@ mod hinting {
             &style,
             1000.0,
         );
-        glyph_runs(&mut paragraph.paragraph)
+        glyph_runs(paragraph.paragraph.get_mut())
             .iter()
             .map(|run| run.font.hinting())
             .collect()

@@ -1497,9 +1497,12 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
   took 3.9; on the GPU engine, 5.2 and 5.7 where it took 3.1 and 3.8.
   Upright text is unchanged, at 3.3 µs before and after.
 
-  A paragraph with an oblique range takes longer to lay out -- for 109
-  characters at 24px with 66 of them oblique, in a release build on macOS,
-  about 19 µs where 6.0.2 took 11 -- and draws about as fast.
+  A paragraph with an oblique range reads its runs back for drawing at its
+  first draw after a layout, so one only laid out or measured pays for no
+  drawing: for 109 characters at 24px with 66 of them oblique, in a
+  release build on macOS, laying it out takes about 13 µs where 6.0.2 took
+  11, and building, laying out and drawing it about 24 where it took 19
+  [RE-TIME vs 6.0.2].
 
 - **`measureText` works out the ink box only when it is read.** The four
   `actualBoundingBox` values and `lines` come from the outline of every
