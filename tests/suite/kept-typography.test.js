@@ -135,21 +135,53 @@ describe("A context's kept typography follows every setting it is built from", (
     const width = (/** @type {{measured: string}} */ shot) =>
       JSON.parse(shot.measured).width;
 
-    // The width and the pixels, not every measurement: the hanging and
-    // ideographic baselines are read off the face the font resolved to
-    // when it was set, which a registration does not resolve again, with
-    // or without a kept typography.
     assert.notEqual(
       width(after),
       width(before),
       "the registration moves the spacing",
     );
     assert.equal(
-      width(after),
-      width(wanted),
+      after.measured,
+      wanted.measured,
       "measured as a fresh context does",
     );
     assert.ok(after.pixels === wanted.pixels, "drawn as a fresh context draws");
+  });
+
+  test("a font registered under the family moves the baselines", () => {
+    // Oswald hangs at 22.91 and sits its ideographic baseline at -6.94 at
+    // 24px; Amstelvar at 18.24 and -6.00. A context whose font was set before
+    // the registration has to read the new face's, and to draw at the
+    // baseline the new face puts `top` at.
+    const family = "KeptBaselines";
+    FontLibrary.use(family, [OSWALD]);
+    const setup = (/** @type {CanvasRenderingContext2D} */ ctx) => {
+      ctx.font = `24px ${family}`;
+      ctx.textBaseline = "top";
+    };
+    const kept = context(setup);
+    const before = typeset(kept);
+    FontLibrary.use(family, [AMSTELVAR]);
+    const after = typeset(kept);
+    const wanted = typeset(context(setup));
+    const read = (/** @type {{measured: string}} */ shot) => {
+      const { hangingBaseline, ideographicBaseline, alphabeticBaseline } =
+        JSON.parse(shot.measured);
+      return { hangingBaseline, ideographicBaseline, alphabeticBaseline };
+    };
+
+    assert.notDeepEqual(
+      read(wanted),
+      read(before),
+      "the faces' baselines differ",
+    );
+    assert.deepEqual(read(after), read(wanted), "the new face's baselines");
+    assert.equal(
+      after.measured,
+      wanted.measured,
+      "measured as a fresh context does",
+    );
+    assert.ok(after.pixels === wanted.pixels, "drawn at the new face's top");
   });
 
   test("restore brings back the typography that was saved", () => {
