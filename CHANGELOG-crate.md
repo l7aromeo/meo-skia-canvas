@@ -234,8 +234,13 @@ window be changed after it opens.** No signature moves and nothing is removed.
   or `use_data` was filed under its exact spelling: registered as
   `"OswaldX"`, `set_font_css("16px oswaldx")` and a `TextEngine` style
   naming `"oswaldx"` drew the fallback. Each now draws the registered
-  family. Letters outside ASCII still have to match exactly; CSS asks for
-  Unicode case folding there.
+  family. Letters outside ASCII match too, by the Default Caseless
+  Matching CSS Fonts 4 names, Unicode's full case folding:
+  `"STRASSE ΣΊΣΥΦΟΣ"` draws a family registered as `"Straße Σίσυφος"`.
+  Chrome 156 folds only one character to one, so it does not match `ß` to
+  `SS`. A generic keyword is still matched in ASCII case alone, so
+  registering `"ſerif"`, with a long s, does not take over the generic
+  `serif`.
 
 - **A font's line height spaces wrapped lines by its pixels.**
   `Font::line_height` takes pixels, as does the line height in a shorthand

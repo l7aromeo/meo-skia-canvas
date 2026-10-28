@@ -1297,6 +1297,86 @@ describe("a registration claims the generic family it names", () => {
   });
 });
 
+describe("a family name matches by its full case folding", () => {
+  // CSS Fonts 4 section 5.1 names Unicode's Default Caseless Matching: the
+  // full folding, so `ß` matches `SS` and a final `ς` matches `Σ`, without
+  // the Turkic `ı` and without normalising.
+  // Oswald, not Raleway: an earlier test registers Raleway as `sans-serif`,
+  // which is what a name nothing answers draws in, and the control below
+  // must tell the two apart.
+  const { createHash } = require("crypto"),
+    FACE = "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    FAMILY = "Straße Σίσυφος Iris Café";
+  FontLibrary.use(FAMILY, [FACE]);
+
+  /** @param {string} family quoted, so it is a family name, never a generic */
+  const painted = (family) => paintedIn(`"${family}"`);
+  /** @param {string} list a family list as `ctx.font` reads it */
+  const paintedIn = (list) => {
+    let canvas = new Canvas(320, 60),
+      ctx = canvas.getContext("2d");
+    ctx.font = `36px ${list}`;
+    ctx.fillText("Wgq AVA", 5, 45);
+    return createHash("sha256")
+      .update(Buffer.from(ctx.getImageData(0, 0, 320, 60).data))
+      .digest("hex");
+  };
+
+  test("in any case, and with ß as SS", () => {
+    const face = painted(FAMILY),
+      fallback = painted("NoSuchFamilyAnywhere");
+    assert.notEqual(face, fallback, "the control");
+    for (const family of [
+      "STRASSE ΣΊΣΥΦΟΣ IRIS CAFÉ",
+      "strasse σίσυφοσ iris café",
+      "sTRAßE σΊσυφος iRIS cafÉ",
+    ])
+      assert.equal(painted(family), face, family);
+  });
+
+  test("asked for in another case before it is registered", () => {
+    // A spelling resolved while nothing answered it must not be kept as a
+    // miss once a registration under another case does.
+    const late = "Spät Registriert Σ",
+      canvas = new Canvas(320, 60),
+      ctx = canvas.getContext("2d");
+    /** The pixels `ctx` paints in `family`, on the same context each time. */
+    const paint = (/** @type {string} */ family) => {
+      ctx.clearRect(0, 0, 320, 60);
+      ctx.font = `36px "${family}"`;
+      ctx.fillText("Wgq AVA", 5, 45);
+      return createHash("sha256")
+        .update(Buffer.from(ctx.getImageData(0, 0, 320, 60).data))
+        .digest("hex");
+    };
+    const before = paint("SPÄT REGISTRIERT σ");
+    assert.equal(before, painted("NoSuchFamilyAnywhere"), "a miss at first");
+    FontLibrary.use(late, [FACE]);
+    assert.equal(paint("SPÄT REGISTRIERT σ"), painted(FAMILY), "then a hit");
+  });
+
+  test("but a generic keyword only in ASCII case", () => {
+    // Whether a name is the generic is a question about a CSS keyword, which
+    // matches in ASCII case alone. A long s folds to s, so `ſerif` matches a
+    // family `serif` but registering it must not claim the generic `serif`.
+    const generic = paintedIn("serif");
+    assert.notEqual(generic, painted(FAMILY), "the control");
+    FontLibrary.use("ſerif", [FACE]);
+    assert.equal(paintedIn("serif"), generic, "the generic keeps its stack");
+    assert.equal(painted("ſERIF"), painted(FAMILY), "the family answers");
+  });
+
+  test("but not with a Turkic i or a decomposed letter", () => {
+    const fallback = painted("NoSuchFamilyAnywhere");
+    for (const family of [
+      "Straße Σίσυφος ırıs Café",
+      "Straße Σίσυφος Iris Café",
+      "Strase Σίσυφος Iris Café",
+    ])
+      assert.equal(painted(family), fallback, family);
+  });
+});
+
 describe("a claimed name is also registered under a private alias", () => {
   const { createHash } = require("crypto"),
     { loadImage } = require("../../lib"),

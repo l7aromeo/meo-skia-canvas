@@ -22,6 +22,8 @@ use crate::{
     node::font_library::FontLibrary as SharedFontRegistry,
 };
 
+pub(crate) mod caseless;
+
 /// One entry in a font's family list: a family by name, or a generic family.
 ///
 /// CSS Fonts 4 section 2.1 keeps the two apart by spelling. A generic
