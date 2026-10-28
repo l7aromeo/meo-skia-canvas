@@ -171,17 +171,12 @@ pub(crate) struct ParagraphRecipe {
     /// found once a epoch -- see [`FaceLines::first_available`].
     epoch: Option<Rc<FontEpoch>>,
     steps: Vec<Step>,
-    /// Each style pushed, without its decoration or its shadows, and the
-    /// angle of the oblique it asks for, if any.
-    styles: Vec<(TextStyle, Option<f32>)>,
-    /// Each style's decoration and shadows, by slot: the paragraph style's
-    /// own text style's at 0 and each pushed style's after it, at its index
-    /// in `styles` plus 1. Both are drawn here rather than by SkParagraph --
-    /// see [`Passes`].
-    decorations: Vec<Option<StyleDecoration>>,
-    shadows: Vec<Vec<TextShadow>>,
-    /// Each style's background, by slot, likewise taken off it.
-    backgrounds: Vec<Option<StyleBackground>>,
+    /// What was taken off the paragraph style's own text style, its slot 0.
+    base_taken: Taken,
+    /// Each style pushed, in slot 1 and on, at its index plus 1: one list
+    /// rather than one for each thing kept of it, and none at all until a
+    /// style is pushed, since every paragraph is built through here.
+    pushed: Vec<Pushed>,
     /// The length of the builder's text, in UTF-8 bytes.
     length: usize,
     /// The angle of the oblique the paragraph style's own text style asks
@@ -241,22 +236,18 @@ impl ParagraphRecipe {
                     (decoration, shadows, background)
                 }
             };
-        let mut decorations = Vec::with_capacity(4);
-        decorations.push(decoration);
-        let mut shadow_slots = Vec::with_capacity(4);
-        shadow_slots.push(shadows);
-        let mut backgrounds = Vec::with_capacity(4);
-        backgrounds.push(background);
         Self {
             builder: ParagraphBuilder::new(&style, &collection),
             style,
             collection,
             epoch,
             steps: Vec::with_capacity(8),
-            styles: Vec::with_capacity(4),
-            decorations,
-            shadows: shadow_slots,
-            backgrounds,
+            base_taken: Taken {
+                decoration,
+                shadows,
+                background,
+            },
+            pushed: Vec::new(),
             length: 0,
             base_oblique,
             oblique: base_oblique.is_some(),
@@ -286,11 +277,16 @@ impl ParagraphRecipe {
         self.builder.push_style(&style);
         self.oblique |= oblique.is_some();
         self.half_leading |= style.half_leading();
-        self.steps.push(Step::Push(self.styles.len()));
-        self.styles.push((style, oblique));
-        self.decorations.push(decoration);
-        self.shadows.push(shadows);
-        self.backgrounds.push(background);
+        self.steps.push(Step::Push(self.pushed.len()));
+        self.pushed.push(Pushed {
+            style,
+            oblique,
+            taken: Taken {
+                decoration,
+                shadows,
+                background,
+            },
+        });
     }
 
     pub(crate) fn pop(&mut self) {
@@ -324,11 +320,11 @@ impl ParagraphRecipe {
     /// paragraph with none of these is painted by `Paragraph::paint` alone.
     pub(crate) fn build(mut self) -> (Paragraph, Option<Passes>) {
         let (boxes, box_slots) = self.boxes();
-        let shadowed = self.shadows.iter().any(|shadows| !shadows.is_empty());
-        let backed = self.backgrounds.iter().any(Option::is_some);
+        let shadowed = self.taken().any(|taken| !taken.shadows.is_empty());
+        let backed = self.taken().any(|taken| taken.background.is_some());
         let drawn = self.oblique || !boxes.is_empty() || shadowed || backed;
         // With one style there is no edge to fall inside a cluster.
-        if !drawn && self.styles.is_empty() {
+        if !drawn && self.pushed.is_empty() {
             return (self.builder.build(), None);
         }
         // Copied only where an edge may fall inside a grapheme cluster, the
@@ -364,16 +360,21 @@ impl ParagraphRecipe {
             .collect();
         let (paints, sheared): (Vec<Paint>, Vec<Option<f32>>) = self
             .text_styles()
-            .zip(once(self.base_oblique).chain(self.styles.iter().map(|s| s.1)))
+            .zip(
+                once(self.base_oblique)
+                    .chain(self.pushed.iter().map(|pushed| pushed.oblique)),
+            )
             .map(|(style, oblique)| (foreground(style), oblique))
             .unzip();
-        let mut background_slots = Vec::with_capacity(self.backgrounds.len());
+        let mut background_slots = Vec::with_capacity(self.pushed.len() + 1);
         let mut backgrounds = Vec::new();
-        for background in &self.backgrounds {
-            background_slots.push(background.as_ref().map(|background| {
-                backgrounds.push(background.clone());
-                backgrounds.len() - 1
-            }));
+        for taken in self.taken() {
+            background_slots.push(taken.background.as_ref().map(
+                |background| {
+                    backgrounds.push(background.clone());
+                    backgrounds.len() - 1
+                },
+            ));
         }
         let (boxes, box_shadows) = boxes
             .into_iter()
@@ -387,7 +388,11 @@ impl ParagraphRecipe {
             slots,
             paints,
             sheared,
-            shadows: self.shadows,
+            shadows: once(self.base_taken.shadows)
+                .chain(
+                    self.pushed.into_iter().map(|pushed| pushed.taken.shadows),
+                )
+                .collect(),
             boxes,
             box_shadows,
             backgrounds,
@@ -416,14 +421,29 @@ impl ParagraphRecipe {
     fn text_style(&self, slot: usize) -> &TextStyle {
         match slot {
             0 => self.style.text_style(),
-            _ => &self.styles[slot - 1].0,
+            _ => &self.pushed[slot - 1].style,
+        }
+    }
+
+    /// What was taken off each style, by slot, the paragraph's own first.
+    fn taken(&self) -> impl Iterator<Item = &Taken> {
+        once(&self.base_taken)
+            .chain(self.pushed.iter().map(|pushed| &pushed.taken))
+    }
+
+    /// What was taken off the style in `slot` -- see [`Self::text_style`].
+    #[cfg(test)]
+    fn taken_at(&self, slot: usize) -> &Taken {
+        match slot {
+            0 => &self.base_taken,
+            _ => &self.pushed[slot - 1].taken,
         }
     }
 
     /// Every style, the paragraph's own first.
     fn text_styles(&self) -> impl Iterator<Item = &TextStyle> {
         once(self.style.text_style())
-            .chain(self.styles.iter().map(|(style, _)| style))
+            .chain(self.pushed.iter().map(|pushed| &pushed.style))
     }
 
     /// Each decorated style's decoration, by slot, and which box each slot
@@ -431,10 +451,9 @@ impl ParagraphRecipe {
     fn boxes(&self) -> (Vec<StyleDecoration>, Vec<Option<usize>>) {
         let mut boxes = Vec::new();
         let slots = self
-            .decorations
-            .iter()
-            .map(|decoration| {
-                decoration.as_ref().map(|decoration| {
+            .taken()
+            .map(|taken| {
+                taken.decoration.as_ref().map(|decoration| {
                     boxes.push(decoration.clone());
                     boxes.len() - 1
                 })
@@ -446,7 +465,7 @@ impl ParagraphRecipe {
     /// The text each slot's style covers, in UTF-8 offsets into the
     /// paragraph's text, in order, with the slot.
     fn slot_ranges(&self) -> Vec<(Range<usize>, usize)> {
-        let mut stack = Vec::with_capacity(self.styles.len() + 1);
+        let mut stack = Vec::with_capacity(self.pushed.len() + 1);
         stack.push(0);
         let mut ranges: Vec<(Range<usize>, usize)> =
             Vec::with_capacity(self.steps.len());
@@ -474,9 +493,10 @@ impl ParagraphRecipe {
     #[cfg(test)]
     fn as_asked(&self, text: &str) -> Option<Paragraph> {
         Some(self.replay(text, |style, _, slot| {
-            let mut style = restore_shadows(style, &self.shadows[slot])
+            let taken = self.taken_at(slot);
+            let mut style = restore_shadows(style, &taken.shadows)
                 .unwrap_or_else(|| style.clone());
-            if let Some(background) = &self.backgrounds[slot] {
+            if let Some(background) = &taken.background {
                 style.set_background_paint(&background.paint);
             }
             Some(style)
@@ -495,13 +515,16 @@ impl ParagraphRecipe {
         &mut self,
         text: Option<&str>,
     ) -> (bool, Vec<usize>) {
-        let mut stack = Vec::with_capacity(self.styles.len() + 1);
+        let mut stack = Vec::with_capacity(self.pushed.len() + 1);
         stack.push((self.base_oblique.is_some(), 0));
         let mut pieces = Vec::with_capacity(self.steps.len());
         for (at, step) in self.steps.iter().enumerate() {
             match step {
                 Step::Push(style) => {
-                    stack.push((self.styles[*style].1.is_some(), style + 1));
+                    stack.push((
+                        self.pushed[*style].oblique.is_some(),
+                        style + 1,
+                    ));
                 }
                 Step::Pop if stack.len() > 1 => {
                     stack.pop();
@@ -602,7 +625,7 @@ impl ParagraphRecipe {
         for step in &self.steps {
             match step {
                 Step::Push(at) => {
-                    let (style, oblique) = &self.styles[*at];
+                    let Pushed { style, oblique, .. } = &self.pushed[*at];
                     match restyle(style, *oblique, at + 1) {
                         Some(style) => builder.push_style(&style),
                         None => builder.push_style(style),
@@ -621,6 +644,22 @@ impl ParagraphRecipe {
         }
         builder
     }
+}
+
+/// A style pushed onto a [`ParagraphRecipe`]: the style, without what
+/// was taken off it, and the angle of the oblique it asks for, if any.
+struct Pushed {
+    style: TextStyle,
+    oblique: Option<f32>,
+    taken: Taken,
+}
+
+/// What was taken off a style to be drawn here rather than by SkParagraph
+/// -- see [`Passes`]: its decoration, its shadows and its background.
+struct Taken {
+    decoration: Option<StyleDecoration>,
+    shadows: Vec<TextShadow>,
+    background: Option<StyleBackground>,
 }
 
 /// One piece of a paragraph's text: the step that adds it, its bytes,
@@ -2864,5 +2903,24 @@ mod tests {
             assert!(rewrapped == fresh, "{what}");
         }
         assert!(drawn >= 4, "{drawn} kinds drawn by passes");
+    }
+
+    /// Every paragraph is built through a recipe, so one with no style
+    /// pushed holds no list for pushed styles, and one style pushed is one
+    /// entry in one list -- not one in each of a list per thing kept of it.
+    #[test]
+    fn a_recipe_holds_no_list_for_styles_until_one_is_pushed() {
+        let mut style = TextStyle::new();
+        style.set_font_families(&[RALEWAY]).set_font_size(SIZE);
+        let mut paragraph_style = ParagraphStyle::new();
+        paragraph_style.set_text_style(&style);
+        let mut recipe =
+            ParagraphRecipe::new(paragraph_style, None, raleway(), None);
+        recipe.add_text("Hamburgefonstiv ");
+        assert_eq!(recipe.pushed.capacity(), 0, "nothing pushed");
+        recipe.push_style(style, None);
+        recipe.add_text("quick");
+        recipe.pop();
+        assert_eq!(recipe.pushed.len(), 1, "one style pushed");
     }
 }
