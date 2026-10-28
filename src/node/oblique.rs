@@ -32,6 +32,7 @@ use crate::{
         decorate::{
             self, Decoration, FaceLines, Layer, Span, Spans, Thickness,
         },
+        font_library::FontEpoch,
         typography::{
             GlyphRun, GlyphRunRef, SLNT, Shear, glyph_runs, run_shear,
             sheared_blob,
@@ -48,7 +49,7 @@ use skia_safe::{
         PlaceholderStyle, StyleType, TextDecoration, TextShadow, TextStyle,
     },
 };
-use std::{borrow::Cow, iter::once, ops::Range};
+use std::{borrow::Cow, iter::once, ops::Range, rc::Rc};
 use unicode_segmentation::GraphemeCursor;
 
 /// The character SkParagraph adds to a paragraph's text for each
@@ -163,6 +164,10 @@ pub(crate) struct ParagraphRecipe {
     builder: ParagraphBuilder,
     style: ParagraphStyle,
     collection: FontCollection,
+    /// The fonts `collection` was built over, where it was built over the
+    /// shared library's, so that a decoration's or background's face is
+    /// found once a epoch -- see [`FaceLines::first_available`].
+    epoch: Option<Rc<FontEpoch>>,
     steps: Vec<Step>,
     /// Each style pushed, without its decoration or its shadows, and
     /// whether it asks for oblique.
@@ -185,16 +190,21 @@ pub(crate) struct ParagraphRecipe {
 
 impl ParagraphRecipe {
     /// A paragraph in `style`, whose text style says by `base_oblique`
-    /// whether it asks for oblique -- [`match_oblique`]'s answer for it.
+    /// whether it asks for oblique -- [`match_oblique`]'s answer for it --
+    /// laid out in `collection`, built over the fonts of `epoch` where it
+    /// came from the shared library.
     pub(crate) fn new(
         mut style: ParagraphStyle,
         base_oblique: bool,
         mut collection: FontCollection,
+        epoch: Option<Rc<FontEpoch>>,
     ) -> Self {
         let mut base = style.text_style().clone();
-        let decoration = StyleDecoration::take(&mut base, &mut collection);
+        let decoration =
+            StyleDecoration::take(&mut base, &mut collection, epoch.as_ref());
         let shadows = take_shadows(&mut base);
-        let background = StyleBackground::take(&mut base, &mut collection);
+        let background =
+            StyleBackground::take(&mut base, &mut collection, epoch.as_ref());
         if decoration.is_some() || !shadows.is_empty() || background.is_some() {
             style.set_text_style(&base);
         }
@@ -208,6 +218,7 @@ impl ParagraphRecipe {
             builder: ParagraphBuilder::new(&style, &collection),
             style,
             collection,
+            epoch,
             steps: Vec::with_capacity(8),
             styles: Vec::with_capacity(4),
             decorations,
@@ -221,11 +232,17 @@ impl ParagraphRecipe {
 
     /// Pushes `style`, which `oblique` says asks for oblique.
     pub(crate) fn push_style(&mut self, mut style: TextStyle, oblique: bool) {
-        let decoration =
-            StyleDecoration::take(&mut style, &mut self.collection);
+        let decoration = StyleDecoration::take(
+            &mut style,
+            &mut self.collection,
+            self.epoch.as_ref(),
+        );
         let shadows = take_shadows(&mut style);
-        let background =
-            StyleBackground::take(&mut style, &mut self.collection);
+        let background = StyleBackground::take(
+            &mut style,
+            &mut self.collection,
+            self.epoch.as_ref(),
+        );
         self.builder.push_style(&style);
         self.oblique |= oblique;
         self.steps.push(Step::Push(self.styles.len()));
@@ -664,6 +681,7 @@ impl StyleBackground {
     fn take(
         style: &mut TextStyle,
         collection: &mut FontCollection,
+        epoch: Option<&Rc<FontEpoch>>,
     ) -> Option<Self> {
         if !style.has_background() {
             return None;
@@ -674,6 +692,7 @@ impl StyleBackground {
         let families: Vec<&str> = families.iter().collect();
         let face = FaceLines::first_available(
             collection,
+            epoch,
             &families,
             style.font_style(),
             style.font_size(),
@@ -703,6 +722,7 @@ impl StyleDecoration {
     fn take(
         style: &mut TextStyle,
         collection: &mut FontCollection,
+        epoch: Option<&Rc<FontEpoch>>,
     ) -> Option<Self> {
         let lines = style.decoration_type();
         if lines == TextDecoration::NO_DECORATION {
@@ -713,6 +733,7 @@ impl StyleDecoration {
         let families: Vec<&str> = families.iter().collect();
         let face = FaceLines::first_available(
             collection,
+            epoch,
             &families,
             style.font_style(),
             style.font_size(),
@@ -1283,7 +1304,7 @@ mod tests {
         let mut paragraph_style = ParagraphStyle::new();
         paragraph_style.set_text_style(&style(Color::BLACK));
         let mut recipe =
-            ParagraphRecipe::new(paragraph_style, false, collection);
+            ParagraphRecipe::new(paragraph_style, false, collection, None);
         for (text, color) in pieces {
             recipe.push_style(style(*color), false);
             recipe.add_text(text);
@@ -1522,6 +1543,7 @@ mod tests {
             paragraph_style.clone(),
             base_flag,
             collection.clone(),
+            None,
         );
         let mut builder =
             ParagraphBuilder::new(&paragraph_style, collection.clone());
@@ -1758,6 +1780,7 @@ mod tests {
             ParagraphStyle::new(),
             generated.1,
             collection.clone(),
+            None,
         );
         for op in &generated.0 {
             match *op {

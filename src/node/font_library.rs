@@ -24,6 +24,7 @@ use skia_safe::{
 use crate::{
     font::{InstancedPositions, optical_size, variation_axes},
     image::x_height_ratio,
+    node::decorate::FaceLines,
     typography::{
         FontSpec, from_slant, from_width, typeface_details, typeface_wght_range,
     },
@@ -1341,6 +1342,7 @@ impl FontLibrary {
         self.epoch = Rc::new(FontEpoch {
             fonts: self.fonts.clone(),
         });
+        FaceLines::forget();
         self.collection = None;
         self.collection_parts = None;
         self.collection_cache.clear();

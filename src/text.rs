@@ -1337,10 +1337,13 @@ impl TextEngine {
         let paragraph_style =
             build_paragraph_style(base_style, &base_sk_style, &strut);
         ParagraphBuilder {
+            // The engine's collection is built over a library of its own,
+            // which has no epoch to key a face by.
             recipe: ParagraphRecipe::new(
                 paragraph_style,
                 base_oblique,
                 collection.clone(),
+                None,
             ),
             collection,
             positions: self.positions.clone(),

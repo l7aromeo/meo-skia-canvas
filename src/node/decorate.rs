@@ -28,7 +28,10 @@
 //! stroke", so every line sat half its thickness high, and it takes each
 //! run's own font rather than the box's.
 
-use crate::node::typography::{GlyphRun, GlyphRunRef};
+use crate::node::{
+    font_library::FontEpoch,
+    typography::{GlyphRun, GlyphRunRef},
+};
 use skia_safe::{
     Canvas, Color, Color4f, Font, FontStyle, Paint, Path, PathBuilder,
     PathVerb, Point, Rect,
@@ -38,7 +41,14 @@ use skia_safe::{
         FontArguments, FontCollection, TextDecoration, TextDecorationStyle,
     },
 };
-use std::ops::Range;
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    hash::{Hash, Hasher},
+    ops::Range,
+    ptr,
+    rc::{Rc, Weak},
+};
 
 /// The thickness Skia gives a line where the font states none: a
 /// fourteenth of the font size, SkParagraph's `calculateThickness` ("This is
@@ -141,7 +151,68 @@ impl FaceLines {
     /// the families that match, in order, and the collection's default face
     /// only where none does. Asked a family at a time, a missing one would
     /// answer with that default and stop the search there.
+    ///
+    /// With the `epoch` of fonts `collection` was built over, the answer is
+    /// kept for the next ask in that epoch -- see [`FACE_LINES`]. Every
+    /// collection built over one epoch resolves a family list to the same
+    /// face, whichever hinting or instances it holds, so the epoch is what
+    /// the answer depends on. Without one, as for a collection the crate's
+    /// `TextEngine` builds over a library of its own, nothing is kept.
     pub(crate) fn first_available(
+        collection: &mut FontCollection,
+        epoch: Option<&Rc<FontEpoch>>,
+        families: &[&str],
+        style: FontStyle,
+        size: f32,
+        arguments: Option<&FontArguments>,
+    ) -> Option<Self> {
+        let Some(epoch) = epoch else {
+            return Self::look_up(collection, families, style, size, arguments);
+        };
+        FACE_LINES.with_borrow_mut(|cache| {
+            if !ptr::eq(cache.epoch.as_ptr(), Rc::as_ptr(epoch)) {
+                cache.lines.clear();
+                cache.epoch = Rc::downgrade(epoch);
+            }
+            let key = FaceKey {
+                families: families
+                    .iter()
+                    .map(|name| name.to_string())
+                    .collect(),
+                weight: *style.weight(),
+                width: *style.width(),
+                slant: style.slant() as i32,
+                size: size.to_bits(),
+                arguments: arguments.cloned().map(Arguments),
+            };
+            if let Some(lines) = cache.lines.get(&key) {
+                return *lines;
+            }
+            let lines =
+                Self::look_up(collection, families, style, size, arguments);
+            if cache.lines.len() >= FACE_LINES_KEPT {
+                cache.lines.clear();
+            }
+            cache.lines.insert(key, lines);
+            lines
+        })
+    }
+
+    /// Drops every kept answer -- for the font library to call when the
+    /// fonts it holds change, so that nothing is kept for an epoch that has
+    /// passed.
+    pub(crate) fn forget() {
+        FACE_LINES.with_borrow_mut(|cache| *cache = FaceLinesCache::default());
+    }
+
+    /// How many answers this thread keeps.
+    #[cfg(test)]
+    fn kept() -> usize {
+        FACE_LINES.with_borrow(|cache| cache.lines.len())
+    }
+
+    /// [`first_available`](Self::first_available), asked of the collection.
+    fn look_up(
         collection: &mut FontCollection,
         families: &[&str],
         style: FontStyle,
@@ -157,6 +228,66 @@ impl FaceLines {
             .into_iter()
             .next()?;
         Some(Self::of(&Font::from_typeface(typeface, size)))
+    }
+}
+
+/// How many first-available answers a thread keeps for one epoch of fonts.
+///
+/// A bound rather than a working set: an answer is a few numbers, but its
+/// key holds a size, which can be any number, so text whose size animates
+/// would add one a frame. Past it, every kept answer is dropped and asked
+/// again.
+const FACE_LINES_KEPT: usize = 256;
+
+thread_local! {
+    /// The answers [`FaceLines::first_available`] has given for the fonts
+    /// of one epoch, dropped when a different epoch is asked about, when
+    /// the library's fonts change -- [`FaceLines::forget`] -- and at
+    /// [`FACE_LINES_KEPT`].
+    static FACE_LINES: RefCell<FaceLinesCache> = RefCell::default();
+}
+
+#[derive(Default)]
+struct FaceLinesCache {
+    /// The epoch the answers are for, held weakly: the cache keeps no
+    /// passed epoch's fonts alive, and while the weak reference is held the
+    /// allocation it points at is not reused, so a later epoch cannot take
+    /// its address.
+    epoch: Weak<FontEpoch>,
+    lines: HashMap<FaceKey, Option<FaceLines>>,
+}
+
+/// What a first-available answer depends on within one epoch.
+#[derive(PartialEq, Eq, Hash)]
+struct FaceKey {
+    families: Vec<String>,
+    weight: i32,
+    width: i32,
+    slant: i32,
+    /// The size's bits, so that the key is hashable; sizes that are equal
+    /// as numbers but differ in bits, 0 and -0, are kept apart, which costs
+    /// a second lookup and nothing else.
+    size: u32,
+    arguments: Option<Arguments>,
+}
+
+/// A text style's font arguments as part of a key, compared and hashed as
+/// Skia compares and hashes them, coordinate by coordinate. A coordinate
+/// that is NaN never equals itself, so such a key is never found again and
+/// is asked afresh each time, within [`FACE_LINES_KEPT`].
+struct Arguments(FontArguments);
+
+impl PartialEq for Arguments {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for Arguments {}
+
+impl Hash for Arguments {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
     }
 }
 
@@ -1182,5 +1313,164 @@ mod tests {
                 (sum / (SAMPLES * SAMPLES)) as u8
             })
             .collect()
+    }
+
+    /// The collection and epoch the shared library hands out for
+    /// `families` at 24px.
+    fn shared_fonts(
+        families: &[&str],
+    ) -> (
+        skia_safe::textlayout::FontCollection,
+        std::rc::Rc<crate::node::font_library::FontEpoch>,
+    ) {
+        use crate::node::font_library::FontLibrary;
+        let mut style = skia_safe::textlayout::TextStyle::new();
+        style.set_font_families(families).set_font_size(24.0);
+        FontLibrary::with_shared(|lib| {
+            (lib.fonts_for_style(&style, &[]).0, lib.epoch())
+        })
+    }
+
+    /// A first-available answer is kept for the fonts of one epoch and no
+    /// longer: once a family is registered under a name that found nothing
+    /// before, the name finds it, and the library's change leaves nothing
+    /// kept for the epoch that passed.
+    #[test]
+    fn a_kept_face_goes_when_the_fonts_change() {
+        use super::FaceLines;
+        use crate::node::font_library::FontLibrary;
+        use skia_safe::{Data, FontMgr, FontStyle};
+        let family = ["DecorKeptProbe"];
+        let ask = |collection: &mut skia_safe::textlayout::FontCollection,
+                   epoch| {
+            FaceLines::first_available(
+                collection,
+                Some(epoch),
+                &family,
+                FontStyle::normal(),
+                24.0,
+                None,
+            )
+        };
+        let (mut before_fonts, before_epoch) = shared_fonts(&family);
+        let before = ask(&mut before_fonts, &before_epoch);
+        assert!(FaceLines::kept() > 0, "the answer is kept");
+
+        let file = "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf";
+        let data = Data::new_copy(&std::fs::read(file).expect("Oswald"));
+        let face = FontMgr::new().new_from_data(data, None).expect("a face");
+        FontLibrary::with_shared(|lib| {
+            lib.register_typeface(face, Some(family[0].to_string()))
+        });
+        assert_eq!(FaceLines::kept(), 0, "the change drops what was kept");
+
+        let (mut after_fonts, after_epoch) = shared_fonts(&family);
+        let after = ask(&mut after_fonts, &after_epoch);
+        let fresh = FaceLines::first_available(
+            &mut after_fonts,
+            None,
+            &family,
+            FontStyle::normal(),
+            24.0,
+            None,
+        );
+        assert_eq!(after, fresh, "the registered family's lines");
+        assert_ne!(after, before, "and not the ones kept before");
+        // Asked again about the epoch that passed, it answers for that
+        // epoch's fonts, not the new one's.
+        assert_eq!(ask(&mut before_fonts, &before_epoch), before);
+    }
+
+    /// The answers a thread keeps are bounded, however many sizes are
+    /// asked for, and each is the one the collection gives uncached.
+    #[test]
+    fn kept_faces_are_bounded_and_answer_as_the_collection_does() {
+        use super::{FACE_LINES_KEPT, FaceLines};
+        use skia_safe::FontStyle;
+        let family = ["serif"];
+        let (mut fonts, epoch) = shared_fonts(&family);
+        for step in 0..=FACE_LINES_KEPT {
+            let size = 8.0 + step as f32 / 4.0;
+            let kept = FaceLines::first_available(
+                &mut fonts,
+                Some(&epoch),
+                &family,
+                FontStyle::bold(),
+                size,
+                None,
+            );
+            let again = FaceLines::first_available(
+                &mut fonts,
+                Some(&epoch),
+                &family,
+                FontStyle::bold(),
+                size,
+                None,
+            );
+            let fresh = FaceLines::first_available(
+                &mut fonts,
+                None,
+                &family,
+                FontStyle::bold(),
+                size,
+                None,
+            );
+            assert_eq!(kept, fresh, "at {size}px");
+            assert_eq!(again, fresh, "kept at {size}px");
+            assert!(FaceLines::kept() <= FACE_LINES_KEPT, "at {size}px");
+        }
+    }
+
+    /// A kept answer is the one for its style: three static faces of
+    /// different families under one name, told apart by weight and by slant,
+    /// each asked at one size, answer as the collection does uncached.
+    #[test]
+    fn a_kept_face_is_the_one_for_its_style() {
+        use super::FaceLines;
+        use crate::node::font_library::FontLibrary;
+        use skia_safe::{
+            Data, FontMgr, FontStyle,
+            font_style::{Slant, Weight, Width},
+        };
+        let family = ["DecorStyleProbe"];
+        for file in [
+            "tests/assets/fonts/Monoton-Regular.woff2",
+            "tests/assets/fonts/montserrat-latin/montserrat-v30-latin-700.woff2",
+            "tests/assets/fonts/montserrat-latin/montserrat-v30-latin-italic.woff2",
+        ] {
+            let data = Data::new_copy(&std::fs::read(file).expect("a font"));
+            let face =
+                FontMgr::new().new_from_data(data, None).expect("a face");
+            FontLibrary::with_shared(|lib| {
+                lib.register_typeface(face, Some(family[0].to_string()))
+            });
+        }
+        let (mut fonts, epoch) = shared_fonts(&family);
+        let styles = [
+            FontStyle::new(Weight::NORMAL, Width::NORMAL, Slant::Upright),
+            FontStyle::new(Weight::BOLD, Width::NORMAL, Slant::Upright),
+            FontStyle::new(Weight::NORMAL, Width::NORMAL, Slant::Italic),
+        ];
+        let answers: Vec<_> = styles
+            .iter()
+            .map(|style| {
+                let kept = FaceLines::first_available(
+                    &mut fonts,
+                    Some(&epoch),
+                    &family,
+                    *style,
+                    24.0,
+                    None,
+                );
+                let fresh = FaceLines::first_available(
+                    &mut fonts, None, &family, *style, 24.0, None,
+                );
+                assert_eq!(kept, fresh, "{style:?}");
+                kept
+            })
+            .collect();
+        // Not vacuous: the three faces' lines differ.
+        assert_ne!(answers[0], answers[1], "by weight");
+        assert_ne!(answers[0], answers[2], "by slant");
     }
 }

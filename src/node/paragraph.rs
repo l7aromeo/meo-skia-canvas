@@ -690,8 +690,8 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
     );
     // The matched face is for a caller deciding what Skia may synthesise;
     // a paragraph built here carries its own text style and does not.
-    let (mut collection, _) = FontLibrary::with_shared(|lib| {
-        lib.fonts_for_style(&text_style, &instanced)
+    let ((mut collection, _), epoch) = FontLibrary::with_shared(|lib| {
+        (lib.fonts_for_style(&text_style, &instanced), lib.epoch())
     });
     let base_oblique = match_oblique(&mut text_style, &mut collection);
     let mut para_style = para_style;
@@ -709,6 +709,7 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
             para_style,
             base_oblique,
             collection.clone(),
+            Some(epoch),
         )),
         collection,
         variations,

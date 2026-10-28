@@ -231,6 +231,9 @@ pub struct Typesetter<'a> {
     condense_to: Option<f32>,
     baseline: Baseline,
     typefaces: FontCollection,
+    /// The fonts `typefaces` was built over, so that the run's decoration
+    /// finds its face once an epoch -- see [`FaceLines::first_available`].
+    fonts: Rc<FontEpoch>,
     /// The style of the face the style matched first, where one was.
     ///
     /// Decides the style the paragraph is first built with, by
@@ -614,6 +617,15 @@ pub(crate) enum Shear {
 /// Shears along x add, so a run SkParagraph skewed for a fake italic keeps
 /// that skew and takes this one on top, as the outline the path and the
 /// ink box shear does.
+///
+/// The run is allocated without bounds, so Skia works them out: from the
+/// face's bounds where it has them, and glyph by glyph where it has none,
+/// which is every variable face -- Oswald's on CoreText reports
+/// `FontMetrics::has_bounds` false and empty typeface bounds, since its
+/// head table's box need not hold an instance's ink. Handing a rectangle
+/// from those metrics instead would be cheaper and is not done: blob bounds
+/// cull the draw and size a filter's layer, and nothing guarantees such a
+/// rectangle holds the glyphs.
 pub(crate) fn sheared_blob(
     font: &Font,
     glyphs: &[GlyphId],
@@ -858,6 +870,7 @@ impl<'a> Typesetter<'a> {
                 lib.set_hinting(hinting).fonts_for_style(style, &variations)
             })
         });
+        let fonts = FontLibrary::with_shared(|lib| lib.epoch());
         let (char_style, graf_style, text_decoration, baseline, text_wrap) =
             typography;
         Self::from_resolved(
@@ -871,18 +884,21 @@ impl<'a> Typesetter<'a> {
             decoration_thickness,
             oblique,
             faces,
+            fonts,
             text,
             width,
         )
     }
 
     /// A typesetter laying `text` out in `faces`, the collection a search
-    /// for `typography`'s style found and the style it matched first.
+    /// for `typography`'s style found and the style it matched first, built
+    /// over the fonts of `fonts`.
     fn from_resolved(
         typography: TypographyRef<'a>,
         decoration_thickness: Option<f32>,
         oblique: Option<f32>,
         (typefaces, matched_style): (FontCollection, Option<FontStyle>),
+        fonts: Rc<FontEpoch>,
         text: &'a str,
         width: Option<f32>,
     ) -> Self {
@@ -939,6 +955,7 @@ impl<'a> Typesetter<'a> {
             condense_to,
             baseline,
             typefaces,
+            fonts,
             matched_style,
             oblique,
             matched_leans,
@@ -1004,6 +1021,7 @@ impl<'a> Typesetter<'a> {
         let families: Vec<&str> = families.iter().collect();
         let face = FaceLines::first_available(
             &mut self.typefaces.clone(),
+            Some(&self.fonts),
             &families,
             self.char_style.font_style(),
             self.char_style.font_size(),
@@ -2536,6 +2554,7 @@ impl TypesetInputs {
             self.decoration_thickness,
             self.oblique,
             faces,
+            self.fonts.clone(),
             &self.text,
             self.width,
         )
