@@ -21,6 +21,20 @@ removed and no signature moves.
 
 ### Breaking
 
+- **`textGamma: 4`, and a text contrast or gamma that is NaN or infinite,
+  are refused.** Skia takes a text gamma from 0 up to, not including, 4. A
+  gamma of exactly 4 was quietly made a hair smaller and taken, and NaN or
+  an infinity in either option quietly became the default; each is now a
+  `RangeError` naming the option and the value it got. The check is made
+  on the single-precision value Skia is handed, so a number just under 4
+  that rounds to 4 there is refused with it, and `canvas.engine` reports
+  that value rather than the number passed: `textContrast: 1.00000001`
+  reads back as 1, and `textGamma: -1e-50` as 0.
+
+  Migrate: pass a gamma below 4 -- 3.9999997615814209 is the largest a
+  canvas takes -- and a finite contrast and gamma, or leave either out for
+  the platform's default.
+
 - **`ctx.fontHinting` reads `true` until it is set.** It read `false`,
   though text was drawn hinted either way, since the setting did nothing; it
   now takes effect, and on is what text was always drawn at. Code that read
@@ -63,6 +77,51 @@ removed and no signature moves.
   other than four numbers each throw; pass a finite number, wrap a single
   family in a list, and pass a CSS colour as a string primitive, `"red"`.
   Pass a boolean option a boolean.
+
+- **A `[r, g, b, a]` colour array is sRGB, with straight alpha, on every
+  canvas.** It is `color(srgb r g b / a)`: gamma-encoded components from
+  `0` to `1`, as CanvasKit's `Color4f` takes them. `fillStyle`,
+  `strokeStyle` and `addColorStop` read the four numbers in the canvas's
+  own space, so on a Display P3 canvas `[1, 0, 0, 1]` was P3 red; on an
+  sRGB canvas they paint as they did. A paragraph's `color`,
+  `backgroundColor`, `decorationColor` and `shadows` colour read them as
+  premultiplied linear light, so the same array painted another colour
+  there: `[0.2, 0.5, 0.8, 1]` filled `rgb(51 128 204)` and coloured
+  paragraph text `rgb(124 188 231)`. Both now paint `rgb(51 128 204)`, on
+  every canvas. A component below zero or above one reaches a colour
+  outside sRGB, as it does in `color(srgb ...)`, which a wide canvas shows
+  and an sRGB one clips. The declarations called every array
+  "premultiplied linear-light", which no reader did; they now say what
+  each does.
+
+  Migrate: on a wide canvas, an array meant in the canvas's own space
+  becomes a string, `color(display-p3 r g b / a)` or
+  `color(rec2020 r g b / a)`. In a paragraph, an array meant as linear
+  light becomes `color(srgb-linear r g b / a)`, its components divided by
+  its alpha if they were premultiplied.
+
+- **`color(rec2020 ...)` decodes by a 2.4 gamma, as CSS Color 4 now
+  defines it.** Section 10.8 gives `rec2020`'s transfer function as "gamma
+  2.40, from [REC_BT.1886]", changed from BT.2020's inverse OETF since the
+  Candidate Recommendation Draft of 24 April 2025. This library used the old
+  curve, as Chrome 152 still does. `color(rec2020 0.2 0.2 0.2)` paints 40 where it
+  painted 67, as a `fillStyle`, `strokeStyle`, `shadowColor`, gradient stop
+  or anywhere else a colour string goes, and `color(rec2020 0.2 0.4 0.6)`
+  paints 0, 97, 153 on an sRGB canvas where it painted 0, 120, 168, as
+  Chrome still does; docs/browser-differences.md has its values. A
+  Rec. 2020 canvas stores by the same curve, so a colour named in `rec2020`
+  reads back from one as it was named.
+
+  A gradient with `interpolation = "rec2020"` mixes by the same curve.
+  Skia's own Rec. 2020 interpolation space uses BT.2020's piecewise curve,
+  so the gradient is now computed in a working space carrying the 2.4
+  gamma: `rgb(250 2 0)` to `rgb(0 0 254)` reads 157, 18, 143 at its midpoint
+  where it read 159, 19, 147. An SVG export embeds such a gradient as an
+  image, as it does a conic one.
+
+  Migrate: a `rec2020` colour written for the old curve, with each
+  component `c` above 0.081, is the same colour at
+  `((c + 0.0993) / 1.0993) ^ (1 / 0.45 / 2.4)`.
 
 - **`textHeightBehavior` takes `0`, `1`, `2` or `3` and refuses any other
   number.** `ParagraphBuilder` truncated `1.5` toward zero, to `1`, and
@@ -439,6 +498,35 @@ false` now takes effect, and its default is on, at Slight, as Chrome draws
   as for any missing family, where fontconfig on Linux had answered
   `serif`, `sans-serif` and `monospace` with the generic's faces.
   `FontLibrary.use("serif", ...)` still claims the generic as well.
+
+- **`shadowColor`, a texture's `color` and an export's `matte` keep a
+  colour outside sRGB.** Each went through eight-bit sRGB, so
+  `color(display-p3 1 0 0)` cast a shadow of sRGB red on a P3 canvas beside
+  a fill of P3 red. Each is now kept in floating point in the space it was
+  named in, and `shadowColor` reads back as it was set,
+  `color(display-p3 1 0 0)`, as `fillStyle` does. They still take a string
+  only, as they did.
+
+- **`ColorFilter.MakeBlend` and `ImageFilter.MakeDropShadow` keep a CSS
+  colour outside sRGB**, which they clipped to eight-bit sRGB on the way
+  in. An array given to `MakeDropShadow` is still CanvasKit's
+  unpremultiplied sRGB `Color4f`.
+
+- **A paragraph's `decorationColor` and `shadows` colour draw a colour
+  named in another space as that colour.** The components were taken as
+  sRGB whatever the string named, so `color(display-p3 0.8 0.3 0.2)` drew
+  as `rgb(80% 30% 20%)`, and so did a decoration that took its colour from
+  the text's.
+
+- **A colour outside sRGB keeps its hue where Skia takes only eight-bit
+  sRGB.** A paragraph's `decorationColor` and `shadows` colour, the
+  lighting filters' light colour, an SVG's `currentColor` and a window's
+  `background` clipped each channel on its own, which turns P3 red more
+  orange. They now map it into sRGB as CSS Color 4 section 14.2.2 does,
+  reducing its chroma in Oklch at its own lightness and hue. A colour
+  inside sRGB gives the bytes it gave. `ColorFilter.MakeLighting`'s
+  multiply and add are per-channel coefficients rather than colours, and
+  are still clamped channel by channel.
 
 - **`letterSpacing` and `wordSpacing` take `"0"`.** CSS Values 4 lets a
   zero length be written without its unit, and `ctx.letterSpacing = "0"`

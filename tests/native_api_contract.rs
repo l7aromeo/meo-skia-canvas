@@ -1181,9 +1181,12 @@ fn every_relative_function_reads_its_channels_as_chrome_does() -> Result<()> {
             "color(from color(display-p3 1 0 0) display-p3 r g b)",
             [255, 0, 0, 255],
         ),
+        // Not Chrome's: Chrome 152 paints 126, 71, 34 by BT.2020's inverse
+        // OETF, and this is CSS Color 4's 2.4 gamma, worked from its sample
+        // code -- docs/browser-differences.md has the difference.
         (
             "color(from red rec2020 calc(r / 2) g b)",
-            [126, 71, 34, 255],
+            [104, 73, 34, 255],
         ),
         (
             "color(from red a98-rgb calc(r / 2) g b)",
@@ -3864,12 +3867,14 @@ fn a_wide_gamut_canvas_survives_being_drawn_into_another() -> Result<()> {
         Ok([pixels[0], pixels[1], pixels[2], pixels[3]])
     };
 
-    // Red named in the canvas's own space, so it is P3 red rather than sRGB
-    // red converted into P3 -- the difference the round trip destroys.
+    // P3 red rather than sRGB red converted into P3 -- the difference the
+    // round trip destroys.
     let mut inner = p3()?;
     {
         let ctx = inner.context();
-        ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.0, 0.0));
+        ctx.set_fill_style(
+            RgbaLinear::from_css("color(display-p3 1 0 0)").expect("P3 red"),
+        );
         ctx.fill_rect(0.0, 0.0, 2.0, 2.0);
     }
     assert_eq!(read(&mut inner)?, [255, 0, 0, 255], "the source is P3 red");
@@ -4271,4 +4276,43 @@ fn a_canvas_rasterizes_text_with_chromiums_contrast_and_gamma() {
         (options.text_contrast, options.text_gamma),
         (contrast, gamma)
     );
+}
+
+#[test]
+fn canvas_options_refuse_text_contrast_and_gamma_outside_skias_range() {
+    // Skia's `SkSurfaceProps` takes a text contrast from 0 to 1 and a gamma
+    // from 0 up to, not including, 4; a canvas refuses anything else rather
+    // than handing it on.
+    let make = |text_contrast: f32, text_gamma: f32| {
+        Canvas::with_options(
+            10.0,
+            10.0,
+            CanvasOptions {
+                text_contrast,
+                text_gamma,
+                ..CanvasOptions::default()
+            },
+        )
+    };
+    // The largest gamma an `f32` holds below 4.
+    let below_four = f32::from_bits(4.0f32.to_bits() - 1);
+    for (contrast, gamma, field) in [
+        (0.0, 4.0, "text_gamma"),
+        (0.0, -0.1, "text_gamma"),
+        (0.0, f32::NAN, "text_gamma"),
+        (1.1, 1.0, "text_contrast"),
+        (-0.1, 1.0, "text_contrast"),
+        (f32::NAN, 1.0, "text_contrast"),
+    ] {
+        match make(contrast, gamma) {
+            Err(Error::InvalidCanvasOption { option, .. }) => {
+                assert_eq!(option, field, "{contrast}, {gamma}")
+            }
+            Err(other) => panic!("{contrast}, {gamma}: {other}"),
+            Ok(_) => panic!("{contrast}, {gamma} was taken"),
+        }
+    }
+    for (contrast, gamma) in [(0.0, 0.0), (1.0, below_four), (0.5, 1.2)] {
+        assert!(make(contrast, gamma).is_ok(), "{contrast}, {gamma}");
+    }
 }

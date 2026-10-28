@@ -102,7 +102,9 @@ ensure-deps: ensure-skia-source
 # Always builds, never just checks the file exists. A stale `lib/skia.node`
 # kept `just test` green for a day after `node-addon` stopped compiling: the
 # suite was exercising a binary from before the code was deleted. Cargo is
-# incremental, so an unchanged tree costs a second or two.
+# incremental, so an unchanged tree costs a second or two, and the dev binary
+# replaces whatever `lib/skia.node` held even then -- a release build there
+# included, which `lib/prebuild.mjs` clears before it copies.
 [private]
 ensure-binary: ensure-deps
     bun run build -- dev

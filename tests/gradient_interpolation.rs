@@ -196,7 +196,12 @@ fn each_interpolation_space_mixes_the_pair_its_own_way() {
         ),
         (
             GradientColorSpace::Rec2020,
-            [159, 19, 147],
+            // CSS Color 4's 2.4 gamma, from the script alone. Chrome 156's
+            // `color-mix()` and Skia's own `Rec2020` space both give 159,
+            // 19, 147, by BT.2020's piecewise curve -- see
+            // `GradientColorSpace::in_working_space` and
+            // docs/browser-differences.md.
+            [157, 18, 143],
             "between A98Rgb and ProphotoRgb, as its gamut is",
         ),
         (
@@ -439,7 +444,7 @@ fn each_row_can_tell_its_space_from_another() {
         ),
         (
             GradientColorSpace::ProphotoRgb,
-            [159, 19, 147],
+            [157, 18, 143],
             "ProphotoRgb against Rec2020",
         ),
         (
@@ -888,4 +893,257 @@ fn destination_and_srgb_part_company_off_an_srgb_canvas() {
         on_srgb_destination, on_srgb_literal,
         "on an sRGB canvas the two name one space, which is why this was missed",
     );
+}
+
+/// The four geometries, each built so that one sample sits at exactly
+/// `t = 0.5`: the linear, radial and two-point ramps run from the left edge
+/// across `WIDTH` on row 2, so the midpoint pixel is half way, and the sweep
+/// is centred on row 2 so a pixel left of its centre is at 180 degrees.
+fn rec2020_geometries(
+    stops: &[GradientStop],
+    interp: GradientInterpolation,
+) -> [(&'static str, Shader, (f32, f32)); 4] {
+    let centre_row = Point { x: 0.0, y: 2.5 };
+    let built = |what: &str, shader: Result<Shader, Error>| {
+        shader.unwrap_or_else(|error| panic!("{what}: {error}"))
+    };
+    [
+        (
+            "linear",
+            built(
+                "linear",
+                Shader::linear_gradient(
+                    Point { x: 0.0, y: 0.0 },
+                    Point { x: WIDTH, y: 0.0 },
+                    stops,
+                    interp,
+                ),
+            ),
+            (50.0, 2.0),
+        ),
+        (
+            "radial",
+            built(
+                "radial",
+                Shader::radial_gradient(centre_row, WIDTH, stops, interp),
+            ),
+            (50.0, 2.0),
+        ),
+        (
+            "two-point conical",
+            built(
+                "two-point conical",
+                Shader::two_point_conical_gradient(
+                    centre_row, 0.0, centre_row, WIDTH, stops, interp,
+                ),
+            ),
+            (50.0, 2.0),
+        ),
+        (
+            "sweep",
+            built(
+                "sweep",
+                Shader::sweep_gradient(
+                    Point { x: 50.5, y: 2.5 },
+                    0.0,
+                    360.0,
+                    stops,
+                    interp,
+                ),
+            ),
+            (20.0, 2.0),
+        ),
+    ]
+}
+
+/// One pixel of `shader` drawn over a whole canvas, as unpremultiplied
+/// floats in the canvas's encoding.
+fn rec2020_sample(
+    shader: &Shader,
+    (x, y): (f32, f32),
+    depth: PixelDepth,
+    gpu: bool,
+) -> Option<[f32; 4]> {
+    let mut canvas = Canvas::with_options(
+        WIDTH,
+        4.0,
+        CanvasOptions {
+            color_type: depth,
+            gpu,
+            ..Default::default()
+        },
+    )
+    .expect("canvas");
+    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+        return None;
+    }
+    let ctx = canvas.context();
+    ctx.set_fill_shader(shader);
+    ctx.fill_rect(0.0, 0.0, WIDTH, 4.0);
+    let data = ctx
+        .get_image_data_as(
+            x,
+            y,
+            1.0,
+            1.0,
+            PixelExportOptions {
+                depth: PixelDepth::F32,
+                ..PixelExportOptions::default()
+            },
+        )
+        .expect("read back");
+    let b = data.pixels();
+    let channel =
+        |i: usize| f32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+    Some([channel(0), channel(4), channel(8), channel(12)])
+}
+
+/// `Rec2020` mixes by CSS Color 4's 2.4 gamma, in every geometry, on both
+/// engines, with translucent stops either way and with a stop sRGB cannot
+/// hold.
+///
+/// Every expected value is CSS Color 4's arithmetic worked in `f64` from its
+/// sample code -- `lin_2020` and `gam_2020` as a sign-preserving 2.4 power,
+/// and the sRGB and Rec. 2020 matrices -- by a script that reads nothing from
+/// this library, and given here as the sRGB encoding the canvas stores.
+/// Skia's own `Rec2020` space mixes by BT.2020's piecewise curve instead,
+/// which the same script puts at 159.06, 18.82, 146.65 on the first pair --
+/// two levels of red and four of blue from the 157, 18, 143 asserted below,
+/// so every geometry would fail against it.
+#[test]
+fn a_rec2020_gradient_mixes_by_the_css_gamma() {
+    let stop = |position, color| GradientStop { position, color };
+    let rec2020 = GradientInterpolation::new(GradientColorSpace::Rec2020);
+    let pair = [stop(0.0, from_stop()), stop(1.0, to_stop())];
+    // 157.40, 18.10, 143.35 unrounded: the nearest tie is 0.1 away.
+    let pair_mid = [0.617_255, 0.070_996, 0.562_137];
+    let near = |got: [f32; 4], want: [f32; 3], alpha: f32, what: &str| {
+        let off = (0..3)
+            .map(|i| (got[i] - want[i]).abs())
+            .chain([(got[3] - alpha).abs()])
+            .fold(0.0f32, f32::max);
+        assert!(
+            off < 5e-4,
+            "{what}: got {got:?}, CSS Color 4 says {want:?} at alpha {alpha}"
+        );
+    };
+
+    for (what, shader, at) in rec2020_geometries(&pair, rec2020) {
+        let float = rec2020_sample(&shader, at, PixelDepth::F32, false)
+            .expect("the raster engine is always there");
+        near(float, pair_mid, 1.0, what);
+
+        let bytes = rec2020_sample(&shader, at, PixelDepth::Uint8, false)
+            .expect("the raster engine is always there")
+            .map(|c| (c * 255.0).round() as u8);
+        assert_eq!(&bytes[..3], &[157, 18, 143], "{what}, eight-bit raster");
+
+        // The GPU computes in its own floats, so within a level -- which
+        // still leaves the piecewise curve's 159 and 147 out of reach.
+        if let Some(gpu) = rec2020_sample(&shader, at, PixelDepth::Uint8, true)
+        {
+            let gpu = gpu.map(|c| (c * 255.0).round() as i32);
+            let off = (0..3)
+                .map(|i| (gpu[i] - [157, 18, 143][i]).abs())
+                .max()
+                .unwrap_or(0);
+            assert!(off <= 1, "{what} on the GPU: {gpu:?}");
+        }
+    }
+
+    // A stop at a quarter alpha, mixed with alpha multiplied in and without:
+    // the two disagree, and each agrees with the specification's own.
+    let red = RgbaLinear::from_srgb8(255, 0, 0, 1.0);
+    let faint_blue = RgbaLinear::from_srgb8(0, 0, 255, 0.25);
+    let fading = [stop(0.0, red), stop(1.0, faint_blue)];
+    for (alpha, want) in [
+        (
+            AlphaInterpolation::Unpremultiplied,
+            [0.627_820, 0.070_692, 0.565_647],
+        ),
+        (
+            AlphaInterpolation::Premultiplied,
+            [0.854_617, 0.050_534, 0.288_902],
+        ),
+    ] {
+        let interp = rec2020.with_alpha(alpha);
+        let (_, shader, at) = rec2020_geometries(&fading, interp)
+            .into_iter()
+            .next()
+            .expect("the linear ramp");
+        let got = rec2020_sample(&shader, at, PixelDepth::F32, false)
+            .expect("the raster engine is always there");
+        near(got, want, 0.625, &format!("{alpha:?} at a quarter alpha"));
+    }
+
+    // Display P3's green is outside sRGB and inside Rec. 2020, so it mixes
+    // without clipping and the midpoint keeps a negative blue that only a
+    // float canvas can show.
+    let p3_green =
+        RgbaLinear::from_css("color(display-p3 0 1 0)").expect("a CSS colour");
+    let wide = [stop(0.0, p3_green), stop(1.0, red)];
+    let (_, shader, at) = rec2020_geometries(&wide, rec2020)
+        .into_iter()
+        .next()
+        .expect("the linear ramp");
+    let got = rec2020_sample(&shader, at, PixelDepth::F32, false)
+        .expect("the raster engine is always there");
+    near(
+        got,
+        [0.676_963, 0.633_027, -0.167_507],
+        1.0,
+        "P3 green to red",
+    );
+}
+
+/// An SVG of a `Rec2020` gradient carries it, and in its colours.
+///
+/// The working space that gives `Rec2020` its curve wraps the gradient in a
+/// shader the SVG backend does not recognise as one, and it then wrote the
+/// shape with no fill at all. So the draw is rasterized into the document,
+/// as a sweep is, and the midpoint read back from the SVG is the
+/// specification's.
+#[test]
+fn a_rec2020_gradient_survives_an_svg_export() {
+    let mut canvas = Canvas::new(WIDTH, 4.0);
+    canvas.set_gpu(false);
+    {
+        let ctx = canvas.context();
+        let shader = Shader::linear_gradient(
+            Point { x: 0.0, y: 0.0 },
+            Point { x: WIDTH, y: 0.0 },
+            &[
+                GradientStop {
+                    position: 0.0,
+                    color: from_stop(),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: to_stop(),
+                },
+            ],
+            GradientColorSpace::Rec2020,
+        )
+        .expect("gradient");
+        ctx.set_fill_shader(&shader);
+        ctx.fill_rect(0.0, 0.0, WIDTH, 4.0);
+    }
+    let svg = String::from_utf8(
+        canvas
+            .to_buffer(ImageFormat::Svg, &EncodeOptions::default())
+            .expect("encodes"),
+    )
+    .expect("utf-8");
+    assert!(svg.contains("<image"), "the gradient is rasterized: {svg}");
+
+    let image = Svg::parse(&svg)
+        .expect("parses")
+        .rasterize(WIDTH as u32, 4)
+        .expect("rasterizes");
+    let mut back = Canvas::new(WIDTH, 4.0);
+    back.set_gpu(false);
+    let ctx = back.context();
+    ctx.draw_image(&image, 0.0, 0.0);
+    let data = ctx.get_image_data(50.0, 2.0, 1.0, 1.0).expect("read back");
+    assert_eq!(&data.pixels()[..3], &[157, 18, 143], "the SVG's midpoint");
 }

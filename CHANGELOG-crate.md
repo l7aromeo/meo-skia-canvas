@@ -25,6 +25,17 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Breaking
 
+- **`Canvas::with_options` refuses a text contrast or gamma outside Skia's
+  range.** `CanvasOptions::text_contrast` and `text_gamma` were handed to
+  Skia as they came, whatever they were. A contrast outside 0 to 1, a gamma
+  outside 0 up to, not including, 4, or NaN in either now returns
+  `Error::InvalidCanvasOption`, a new variant naming the field, as the Node
+  binding refuses them.
+
+  Migrate: pass a contrast from 0 to 1 and a gamma below 4 --
+  `f32::from_bits(4.0f32.to_bits() - 1)` is the largest taken -- or leave
+  both at `CanvasOptions::default()`'s.
+
 - **`Context2D::font_hinting` is `true` until it is set.** It was `false`,
   though text was drawn hinted either way, since the setting did nothing; it
   now takes effect, and on is what text was always drawn at. Code that read
@@ -33,6 +44,46 @@ window be changed after it opens.** No signature moves and nothing is removed.
   Migrate: where the old `false` was taken to mean unhinted text, read it as
   hinted, which is what was drawn; call `set_font_hinting(false)` to have
   the outlines as designed.
+
+- **An `RgbaLinear` is linear-light sRGB on every canvas.** It meant
+  linear light in the canvas's own primaries for a fill, a stroke and a
+  gradient stop, and sRGB for a shadow, a drop-shadow filter, a texture, a
+  matte and a text colour, so one value painted two colours on a Display
+  P3 or Rec. 2020 canvas: `RgbaLinear::opaque(1.0, 0.0, 0.0)`
+  filled P3 red and cast an sRGB-red shadow. Every reader now takes CSS's
+  `srgb-linear`, unbounded, and a colour outside sRGB is reached with
+  components below zero or above one, which is what `RgbaLinear::from_css`
+  returns: `from_css("color(display-p3 1 0 0)")` fills, strokes, shadows
+  and stops in P3 red on a P3 canvas, and on an sRGB canvas in the sRGB
+  red it clips to. On an sRGB canvas nothing paints differently.
+
+  Migrate: on a wide canvas, build a colour named in its space with
+  `RgbaLinear::from_css("color(display-p3 r g b)")`, or pass the string to
+  `set_fill_style_css`, where you passed `RgbaLinear::opaque(r, g, b)` or
+  `from_srgb(r, g, b, a)` meaning the canvas's own primaries.
+
+- **`color(rec2020 ...)` decodes by a 2.4 gamma, as CSS Color 4 now
+  defines it.** Section 10.8 gives `rec2020`'s transfer function as "gamma
+  2.40, from [REC_BT.1886]", changed from BT.2020's inverse OETF since the
+  Candidate Recommendation Draft of 24 April 2025. This crate used the old
+  curve, as Chrome 152 still does. `color(rec2020 0.2 0.2 0.2)` paints 40 where it
+  painted 67, in every `set_*_css` setter and `RgbaLinear::from_css`, and
+  `color(rec2020 0.2 0.4 0.6)` paints 0, 97, 153 on an sRGB canvas where it
+  painted 0, 120, 168. A Rec. 2020 canvas stores by the same curve, so a
+  colour named in `rec2020` reads back from one as it was named.
+  docs/browser-differences.md records Chrome's values.
+
+  `GradientColorSpace::Rec2020` mixes by the same curve. Skia's own
+  Rec. 2020 interpolation space uses BT.2020's piecewise curve, so the
+  gradient is now computed in a working space carrying the 2.4 gamma: a
+  `rgb(250 2 0)` to `rgb(0 0 254)` ramp reads 157, 18, 143 at its midpoint
+  where it read 159, 19, 147, in every geometry and on both engines. An SVG
+  export embeds such a gradient as an image, as it does a sweep, because
+  the SVG backend does not recognise the wrapped shader as a gradient.
+
+  Migrate: a `rec2020` colour written for the old curve, with each
+  component `c` above 0.081, is the same colour at
+  `((c + 0.0993) / 1.0993) ^ (1 / 0.45 / 2.4)`.
 
 - **A colour function written with a space before its `(` is refused.**
   `rgb (255 0 0)`, `lab (50 40 30)`, `color (srgb 1 0 0)` and the rest
@@ -74,6 +125,13 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `hwb()`.
 
 ### Fixed
+
+- **A `Window` shows text at its canvas's contrast and gamma.**
+  `Window::with_canvas` took the platform's default `text_contrast` and
+  `text_gamma` whatever the canvas was made with, so a canvas made with a
+  `text_gamma` of 2.0 exported its text at 2.0 and showed it in a window at
+  the default; the Node `Window` already read its canvas's. It now takes the
+  canvas's, and `Window::text_contrast` and `text_gamma` report them.
 
 - **`Context2D::set_font_hinting(false)` draws the outlines as designed.**
   It turned hinting off on the paragraph style, which SkParagraph never
@@ -162,6 +220,26 @@ window be changed after it opens.** No signature moves and nothing is removed.
   down. A paragraph with `half_leading` on any style now lays out without
   the cache, and every other paragraph keeps it. Fixed in Skia, not yet in
   the skia-safe this release builds on.
+
+- **A shadow, a drop-shadow filter, `ColorFilter::blend`, a texture and an
+  export's matte keep a colour outside sRGB.** `set_shadow_color` and
+  `set_shadow_color_css`, `ColorFilter::blend`, `TextureOptions::color`
+  and the matte of `to_buffer` and `get_image_data_with` held eight-bit
+  sRGB, so `color(display-p3 1 0 0)` cast a shadow of sRGB red on a P3
+  canvas, beside a fill of P3 red, and a shadow colour read back rounded to
+  a 255th. Each is now kept in floating point and reaches the canvas as
+  itself; `shadow_color()` returns the `RgbaLinear` that was set.
+
+- **A colour outside sRGB keeps its hue where Skia takes only eight-bit
+  sRGB.** A text decoration, a text shadow, the lighting filters' light
+  colour, an SVG's `currentColor` and a window's background clipped each
+  channel to `0..1` on its own, which turns P3 red more orange. They now
+  map it into sRGB as CSS Color 4 section 14.2.2 does, reducing its chroma
+  in Oklch at its own lightness and hue until clipping costs less than a
+  just-noticeable difference. A colour inside sRGB gives the bytes it gave.
+  `ColorFilter::lighting`'s multiply and add are per-channel coefficients
+  rather than colours, and are still clamped channel by channel, as its
+  documentation now says.
 
 - **`outline_text` and the ink box put every glyph where `fill_text` draws
   it.** A glyph the shaper moves off its advance -- a mark stacked over
@@ -272,13 +350,12 @@ window be changed after it opens.** No signature moves and nothing is removed.
 - **`Context2D::fill_style()` and `stroke_style()` report a colour set
   from CSS as the colour it paints.** They handed back the components
   `set_fill_style_css` held, sRGB-encoded in the space the colour was named
-  in, as if they were linear light in the canvas's working space, which is
-  what an `RgbaLinear` is. So `"rebeccapurple"` read back as 0.4, 0.2, 0.6,
+  in, as if they were linear light, which is what an `RgbaLinear` is. So `"rebeccapurple"` read back as 0.4, 0.2, 0.6,
   and passing that to `set_fill_style` painted 170, 124, 203 where the CSS
   had painted 102, 51, 153; on a Display P3 canvas even `rgb(255 0 0 / 50%)`
-  came back off. The report is now converted the way a paint converts the
-  colour, into linear light in the working primaries: on an sRGB canvas it
-  is `RgbaLinear::from_css`, and on both an sRGB and a Display P3 canvas,
+  came back off. The report is now converted into linear-light sRGB, the
+  frame an `RgbaLinear` is in: it is `RgbaLinear::from_css`, and on both an
+  sRGB and a Display P3 canvas,
   seven colours named in sRGB, linear sRGB, P3 and Rec. 2020 repaint
   byte-identical from their report. A colour set through `set_fill_style`
   reads back unchanged, as before.
@@ -745,11 +822,10 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `TextStyle`, which take the value. An sRGB colour comes back exactly as
   `from_srgb8` builds it. The result is linear sRGB, unclamped: a colour
   named in a wider space keeps its hue as components outside `0..1` rather
-  than being clipped to the nearest sRGB colour, which is the frame a drop
-  shadow and a text colour are read in. The lighting filters and
-  `ColorFilter::blend` hand Skia an 8-bit sRGB colour and clip it whatever
-  built it. A fill on a canvas built in another space reads an `RgbaLinear` in
-  that space, so there the string belongs in `set_fill_style_css`.
+  than being clipped to the nearest sRGB colour, which is the frame every
+  reader of an `RgbaLinear` takes -- see `RgbaLinear` under Breaking -- so
+  `set_fill_style(RgbaLinear::from_css(css))` paints what
+  `set_fill_style_css(css)` paints, on any canvas.
 
   Its tests compute every expected value from CSS Color 4's published
   matrices rather than reading it off the parser, and found the parser's

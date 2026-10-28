@@ -2,7 +2,7 @@
 use crate::{
     canvas::{
         DEFAULT_HEIGHT, DEFAULT_TEXT_CONTRAST, DEFAULT_TEXT_GAMMA,
-        DEFAULT_WIDTH,
+        DEFAULT_WIDTH, text_contrast_in_range, text_gamma_in_range,
     },
     context::page::{ExportOptions, pages_arg},
     gpu,
@@ -144,34 +144,41 @@ impl Canvas {
 
 pub fn new(mut cx: FunctionContext) -> JsResult<BoxedCanvas> {
     let opts = cx.argument::<JsObject>(1)?;
-    let text_contrast = opt_double_for_key(&mut cx, &opts, "textContrast")
-        .unwrap_or(DEFAULT_TEXT_CONTRAST.into());
-    let (min_c, max_c) = (
-        SurfaceProps::MIN_CONTRAST_INCLUSIVE as _,
-        SurfaceProps::MAX_CONTRAST_INCLUSIVE as _,
-    );
-    if text_contrast < min_c || text_contrast > max_c {
+    // A number outside the range Skia takes is a `RangeError` -- the
+    // argument is the right kind and its value is not -- checked on the
+    // single-precision value Skia is handed, so a double just under 4 that
+    // rounds to 4 is refused with it. A gamma of exactly 4 is refused too,
+    // where it was quietly made a hair smaller, and so is NaN or an
+    // infinity, where either quietly became the default. What is kept is
+    // that single-precision value, so that `engine` reports what draws.
+    let asked = opt_raw_double_for_key(&mut cx, &opts, "textContrast");
+    let text_contrast = asked.map_or(DEFAULT_TEXT_CONTRAST, |v| v as f32);
+    if !text_contrast_in_range(text_contrast) {
+        let got = spelled(&mut cx, asked.unwrap_or_default())?;
         return cx.throw_range_error(format!(
-            "Expected a number between {} and {} for `textContrast`",
-            min_c, max_c
+            "Expected a number from {} to {} for `textContrast` (got {got})",
+            SurfaceProps::MIN_CONTRAST_INCLUSIVE,
+            SurfaceProps::MAX_CONTRAST_INCLUSIVE
         ));
     }
-
-    let mut text_gamma = opt_double_for_key(&mut cx, &opts, "textGamma")
-        .unwrap_or(DEFAULT_TEXT_GAMMA.into());
-    let (min_g, max_g) = (
-        SurfaceProps::MIN_GAMMA_INCLUSIVE as _,
-        SurfaceProps::MAX_GAMMA_EXCLUSIVE as _,
-    );
-    if text_gamma == max_g {
-        text_gamma -= f32::EPSILON as f64
-    }; // nudge down values right at the max
-    if text_gamma < min_g || text_gamma > max_g {
+    let asked = opt_raw_double_for_key(&mut cx, &opts, "textGamma");
+    let text_gamma = asked.map_or(DEFAULT_TEXT_GAMMA, |v| v as f32);
+    if !text_gamma_in_range(text_gamma) {
+        let got = spelled(&mut cx, asked.unwrap_or_default())?;
         return cx.throw_range_error(format!(
-            "Expected a number between {} and {} for `textGamma`",
-            min_g, max_g
+            "Expected a number from {} up to, not including, {} for \
+             `textGamma` (got {got})",
+            SurfaceProps::MIN_GAMMA_INCLUSIVE,
+            SurfaceProps::MAX_GAMMA_EXCLUSIVE
         ));
     }
+    // A double too small for a single is a zero of its sign; the range
+    // takes it, and Skia reads either zero alike, so it is kept as 0.
+    let unsigned_zero = |v: f32| if v == 0.0 { 0.0 } else { v };
+    let (text_contrast, text_gamma) = (
+        f64::from(unsigned_zero(text_contrast)),
+        f64::from(unsigned_zero(text_gamma)),
+    );
 
     let gpu_enabled = bool_for_key(&mut cx, &opts, "gpu")?;
     // Thrown on rather than substituted, as `colorSpace` below already was.

@@ -20,11 +20,10 @@ use std::{
 };
 
 use skia_safe::{
-    ColorSpace as SkColorSpace, Data, FourByteTag, IRect,
-    ImageInfo as SkImageInfo, Matrix as SkMatrix, Paint as SkPaint,
-    PaintStyle as SkPaintStyle, Path as SkPath, PathBuilder as SkPathBuilder,
-    PathDirection, Picture as SkPicture, Point as SkPoint, RRect,
-    Rect as SkRect, Size as SkSize,
+    Data, FourByteTag, IRect, ImageInfo as SkImageInfo, Matrix as SkMatrix,
+    Paint as SkPaint, PaintStyle as SkPaintStyle, Path as SkPath,
+    PathBuilder as SkPathBuilder, PathDirection, Picture as SkPicture,
+    Point as SkPoint, RRect, Rect as SkRect, Size as SkSize,
     font_style::{Slant, Weight, Width},
     path::AddPathMode,
     path_1d_path_effect,
@@ -37,12 +36,13 @@ use skia_safe::{
 use crate::{
     canvas::Canvas,
     color::{
-        RgbaLinear, rgba_css, rgba_linear_to_skia_color,
-        rgba_linear_to_unpremul_color4f, skia_color_to_rgba_linear,
+        RgbaLinear, linear_srgb_color_space, rgba_css,
+        rgba_linear_to_skia_color, rgba_linear_to_unpremul_color4f,
         unpremul_color4f_to_rgba_linear,
     },
     context::{
-        Context2D as Inner, Dye, initial_root_face, page::ExportOptions,
+        Context2D as Inner, Dye, initial_root_face,
+        page::{ExportOptions, Matte},
     },
     css::{
         Dimension, Expect, FontUnits, Percent, ROOT_FONT_PX, evaluate,
@@ -63,9 +63,7 @@ use crate::{
         path::{Path2D as NodePath2D, conic_or_line},
         pattern::CanvasPattern,
         typography::{Baseline, DecorationStyle, FontSpec, Spacing},
-        utils::{
-            color4f_to_working_linear, css_to_color, css_to_color4f_in_space,
-        },
+        utils::{color4f_to_rgba_linear, css_to_color4f_in_space},
     },
     paint::{BlendMode, StrokeCap, StrokeJoin},
     path::{FillRule, Path2D},
@@ -1428,9 +1426,13 @@ impl Context2D {
     /// The Canvas API's `fillStyle` also accepts gradients, patterns and
     /// textures; those arrive through their own setters rather than one
     /// union-typed property.
+    ///
+    /// `color` is linear-light sRGB, as every [`RgbaLinear`] is, so it is
+    /// the same colour on every canvas: a Display P3 colour is one with
+    /// components outside `0.0..=1.0`, such as
+    /// `RgbaLinear::from_css("color(display-p3 1 0 0)")`.
     pub fn set_fill_style(&mut self, color: RgbaLinear) {
-        let working = self.inner.canvas_color_space.clone();
-        self.inner.state.fill_style = to_dye(color, &working);
+        self.inner.state.fill_style = to_dye(color);
     }
 
     /// Sets the fill color from a CSS color string.
@@ -1447,10 +1449,11 @@ impl Context2D {
     /// no CSS defines, and comma syntax CSS Color 4 does not allow, such as
     /// `rgb(255, 0%, 0)` or `lab(50, 40, 30)`.
     ///
-    /// Unlike [`Context2D::set_fill_style`], which takes a value already in
-    /// the canvas's space, this keeps the space the string named: on a Display
-    /// P3 canvas, `"color(display-p3 1 0 0)"` is that canvas's red exactly,
-    /// while `"red"` is sRGB red converted into it.
+    /// The colour keeps the space the string named, so a Display P3 canvas
+    /// paints `"color(display-p3 1 0 0)"` as its own red with no conversion
+    /// at all, and `"red"` as sRGB red converted into it -- the colours
+    /// [`Context2D::set_fill_style`] paints for the same CSS read by
+    /// [`RgbaLinear::from_css`](crate::color::RgbaLinear::from_css).
     ///
     /// # Errors
     ///
@@ -1470,8 +1473,7 @@ impl Context2D {
     /// porting one. Replaces any shader, pattern or texture previously set
     /// as the stroke style.
     pub fn set_stroke_style(&mut self, color: RgbaLinear) {
-        let working = self.inner.canvas_color_space.clone();
-        self.inner.state.stroke_style = to_dye(color, &working);
+        self.inner.state.stroke_style = to_dye(color);
     }
 
     /// Sets the stroke color from a CSS color string.
@@ -3327,22 +3329,27 @@ impl Context2D {
     }
 
     /// Sets the shadow color. A fully transparent color disables shadows.
+    ///
+    /// Linear-light sRGB, as every [`RgbaLinear`] is, and kept in floating
+    /// point, so a wide colour reaches a wide canvas.
     pub fn set_shadow_color(&mut self, color: RgbaLinear) {
-        self.inner.state.shadow_color = rgba_linear_to_skia_color(color);
+        self.inner.state.shadow_color = (
+            rgba_linear_to_unpremul_color4f(color),
+            linear_srgb_color_space(),
+        );
     }
 
     /// Sets the shadow color from a CSS color string.
     ///
-    /// Takes the same notations as
-    /// [`Context2D::set_fill_style_css`]. Shadows are drawn through an
-    /// eight-bit color, so a wide-gamut string is converted rather than kept.
+    /// Takes the same notations as [`Context2D::set_fill_style_css`], and
+    /// keeps the space the string named, as it does.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidColor`] when the string is not a CSS color.
     pub fn set_shadow_color_css(&mut self, css: &str) -> Result<(), Error> {
-        self.inner.state.shadow_color =
-            css_to_color(css).ok_or_else(|| Error::InvalidColor {
+        self.inner.state.shadow_color = css_to_color4f_in_space(css)
+            .ok_or_else(|| Error::InvalidColor {
                 reason: format!("{css:?}"),
             })?;
         Ok(())
@@ -3446,27 +3453,20 @@ impl Context2D {
 
     /// What fills are painted with.
     ///
-    /// A colour reads back as linear light in the canvas's working space,
-    /// whichever setter it came through, so handing it to
-    /// [`set_fill_style`](Self::set_fill_style) paints what was painted
-    /// before -- `"rebeccapurple"` set through
+    /// A colour reads back as an [`RgbaLinear`], linear-light sRGB,
+    /// whichever setter it came through and whichever canvas holds it, so
+    /// handing it to [`set_fill_style`](Self::set_fill_style) paints what was
+    /// painted before -- `"rebeccapurple"` set through
     /// [`set_fill_style_css`](Self::set_fill_style_css) reads back as
-    /// `RgbaLinear::from_css("rebeccapurple")` on an sRGB canvas, and in
-    /// P3's primaries on a Display P3 one.
+    /// `RgbaLinear::from_css("rebeccapurple")`.
     pub fn fill_style(&self) -> PaintSource {
-        to_paint_source(
-            &self.inner.state.fill_style,
-            &self.inner.canvas_color_space,
-        )
+        to_paint_source(&self.inner.state.fill_style)
     }
 
     /// What strokes are painted with, on the terms of
     /// [`fill_style`](Self::fill_style).
     pub fn stroke_style(&self) -> PaintSource {
-        to_paint_source(
-            &self.inner.state.stroke_style,
-            &self.inner.canvas_color_space,
-        )
+        to_paint_source(&self.inner.state.stroke_style)
     }
 
     /// The reading direction text is laid out in.
@@ -3541,14 +3541,13 @@ impl Context2D {
         self.inner.state.shadow_blur
     }
 
-    /// The shadow color.
+    /// The shadow color, as linear-light sRGB.
     ///
-    /// Stored as 8-bit sRGB with 8-bit alpha, so a colour set from
-    /// [`RgbaLinear::from_srgb8`] with an alpha on a whole 255th reads back
-    /// exactly and anything else is quantised: `0.5` returns as `0.5019608`,
-    /// and the premultiplied components shift with it.
+    /// Held in floating point, so a colour set through
+    /// [`Context2D::set_shadow_color`] reads back as it was set.
     pub fn shadow_color(&self) -> RgbaLinear {
-        skia_color_to_rgba_linear(self.inner.state.shadow_color)
+        let (color, space) = &self.inner.state.shadow_color;
+        color4f_to_rgba_linear(*color, Some(space))
     }
 
     /// The shadow offset, as `(x, y)` pixels.
@@ -4004,7 +4003,7 @@ impl Context2D {
             surface_color_space: self.canvas_space.to_skia_color_space()?,
             surface_color_type: self.canvas_depth.to_skia_color_type(),
             density: export.density as f32,
-            matte: export.matte.map(rgba_linear_to_skia_color),
+            matte: export.matte.map(Matte::from_rgba_linear),
             msaa: export.msaa,
             ..ExportOptions::default()
         };
@@ -4274,6 +4273,12 @@ fn decoration_style(
             ..Decoration::default()
         },
         size,
+        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+        // Re-check: grep -n "pub color" in skia-safe's
+        // src/modules/paragraph/text_style.rs
+        //
+        // SkParagraph's `Decoration` holds an eight-bit sRGB `SkColor`, so
+        // a wide decoration colour is gamut-mapped into sRGB.
         color: color.map(rgba_linear_to_skia_color),
     }
 }
@@ -4327,15 +4332,14 @@ fn decoration_css(
 }
 
 /// Reports which kind of source a [`Dye`] is, recovering the colour when it
-/// holds one -- as an [`RgbaLinear`] in `working`, the canvas's working
-/// space, which is what [`set_fill_style`](Context2D::set_fill_style) takes
-/// back.
-fn to_paint_source(dye: &Dye, working: &SkColorSpace) -> PaintSource {
+/// holds one -- as an [`RgbaLinear`], linear-light sRGB, which is what
+/// [`set_fill_style`](Context2D::set_fill_style) takes back.
+fn to_paint_source(dye: &Dye) -> PaintSource {
     match dye {
-        // Set from an `RgbaLinear`, so already linear in the working space:
-        // `to_dye` tagged it so.
+        // Set from an `RgbaLinear`, so already linear sRGB: `to_dye` tagged
+        // it so.
         Dye::Color(color, Some(space))
-            if *space == working.with_linear_gamma() =>
+            if *space == linear_srgb_color_space() =>
         {
             PaintSource::Color(unpremul_color4f_to_rgba_linear(*color))
         }
@@ -4344,9 +4348,9 @@ fn to_paint_source(dye: &Dye, working: &SkColorSpace) -> PaintSource {
         // the same trip, or handing it back to `set_fill_style` paints
         // something else -- rebeccapurple read back as 0.4, 0.2, 0.6 and
         // repainted as 170, 124, 203.
-        Dye::Color(color, space) => PaintSource::Color(
-            color4f_to_working_linear(*color, space.as_ref(), working),
-        ),
+        Dye::Color(color, space) => {
+            PaintSource::Color(color4f_to_rgba_linear(*color, space.as_ref()))
+        }
         // A gradient only reaches the state through the JavaScript binding;
         // the Rust facade builds every gradient as a `Shader`, and both are
         // the same thing to a caller who can only be told which kind it is.
@@ -4394,21 +4398,16 @@ fn css_dye(css: &str) -> Result<Dye, Error> {
     Ok(Dye::Color(color, Some(space)))
 }
 
-/// Tags a color with the canvas's own working space, in linear light.
+/// An [`RgbaLinear`] as a fill: unpremultiplied and tagged linear sRGB.
 ///
 /// Two conversions, both easy to omit and invisible until alpha drops below
-/// one: [`RgbaLinear`] is premultiplied and Skia's paint color is not, and
-/// Skia decodes an untagged `Color4f` as sRGB, so the linear-light values
-/// need the linear tag to survive.
-///
-/// [`RgbaLinear`] is defined as premultiplied linear light *in the
-/// destination surface's working color space*, so pinning it to linear sRGB
-/// made every color on a Display P3 canvas mean something the type does not
-/// say -- and put wide-gamut colors out of a Rust caller's reach.
-fn to_dye(color: RgbaLinear, working: &SkColorSpace) -> Dye {
+/// one or the canvas is not sRGB: `RgbaLinear` is premultiplied and Skia's
+/// paint color is not, and Skia reads an untagged `Color4f` as sRGB-encoded.
+/// Tagged, Skia converts the color into whatever space the canvas holds.
+fn to_dye(color: RgbaLinear) -> Dye {
     Dye::Color(
         rgba_linear_to_unpremul_color4f(color),
-        Some(working.with_linear_gamma()),
+        Some(linear_srgb_color_space()),
     )
 }
 

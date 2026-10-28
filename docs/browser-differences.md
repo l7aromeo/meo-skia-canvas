@@ -382,6 +382,42 @@ hue, and `a_hue_is_powerless_at_the_chroma_css_color_4_names_and_no_further`
 at the thresholds to the last `f32` step. The conversion is `to_polar` in
 `src/node/utils.rs`.
 
+**`color(rec2020 ...)` decodes by a 2.4 gamma, and Chrome does not. Ours is
+the specification's answer.** CSS Color 4 section 10.8 gives `rec2020`'s
+transfer function as "gamma 2.40, from [REC_BT.1886]", and its sample code's
+`lin_2020` raises each component's magnitude to 2.4 and keeps its sign. The
+changes section dates it: since the Candidate Recommendation Draft of 24
+April 2025, "Defined rec2020 color space to use display-referred, 2.4
+gamma." Drafts before that used BT.2020's piecewise inverse OETF, and Chrome
+152 (152.0.7977.167) still does. Measured on an sRGB canvas, fill and
+`shadowColor` alike:
+
+        color(rec2020 0.2 0.2 0.2)   Chrome 67,67,67      here 40,40,40
+        color(rec2020 0.5 0.5 0.5)   Chrome 139,139,139   here 120,120,120
+        color(rec2020 0.2 0.4 0.6)   Chrome 0,120,168     here 0,97,153
+
+Every figure in the right-hand column is the standard's arithmetic, worked
+in `f64` from its sample code. A Rec. 2020 canvas stores by the same curve,
+so a colour named in `rec2020` reads back from one as the components it was
+named with. The colour space this library builds for `rec2020` is a CICP
+one, BT.2020 primaries with transfer characteristic 1, which Skia's
+`named_transfer_fn::REC709` makes a pure 2.4 gamma, so the colour is handed
+to Skia with that tag and nothing converts it on the way. Skia's own
+`SkNamedTransferFn::kRec2020` is BT.2020's piecewise curve, and is not
+used for it. Pinned in
+`a_rec2020_colour_takes_css_color_4s_curve_on_every_canvas` on sRGB,
+Display P3 and Rec. 2020 canvases.
+
+A gradient interpolated in `rec2020` mixes by the same 2.4 gamma. Skia's
+gradient interpolation space of that name is built from
+`SkNamedTransferFn::kRec2020` too, so the gradient is computed in the
+CICP space instead. On a `rgb(250 2 0)` to `rgb(0 0 254)` ramp the midpoint
+reads 157,18,143 here; Chrome 156 (156.0.8078.48) paints
+`color-mix(in rec2020, ...)` of the same pair as 159,19,147, which is what
+Skia's own space gives. Pinned in
+`a_rec2020_gradient_mixes_by_the_css_gamma` in four geometries, on both
+engines, with translucent and out-of-gamut stops.
+
 **A colour is painted at the precision it names, whatever its spelling,
 and Chrome rounds some spellings to 8 bits. Ours is the specification's
 answer.** CSS Color 4 rounds `rgb()` channels to integers only when it

@@ -878,7 +878,14 @@ impl Svg {
     /// itself declared.
     ///
     /// [section 13.3]: https://www.w3.org/TR/SVG2/painting.html#ColorProperty
+    ///
+    /// SVG takes the colour as eight-bit sRGB, so a colour outside sRGB is
+    /// gamut-mapped into it, as CSS Color 4 maps one, rather than clipped.
     pub fn set_current_color(&mut self, color: RgbaLinear) {
+        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+        // Re-check: grep -n "color?: Color"
+        // ~/.cargo/registry/src/*/skia-safe-*/src/modules/svg/node.rs
+        // An SVG node's `color` is an `SkColor` and nothing wider.
         self.dom.root().set_color(rgba_linear_to_skia_color(color));
     }
 

@@ -12,7 +12,10 @@ use std::cell::RefCell;
 
 use crate::{
     color_filter::{BoxedColorFilter, checkDeleted as checkColorFilterDeleted},
-    utils::{css_to_color, enum_arg_or, filter_blend_mode_arg},
+    utils::{
+        css_to_color, css_to_color4f_in_space, enum_arg_or,
+        filter_blend_mode_arg, skia_paint_color,
+    },
 };
 
 pub type BoxedImageFilter = JsBox<RefCell<ImageFilter>>;
@@ -64,7 +67,10 @@ macro_rules! opt_input_filter {
     };
 }
 
-/// Parses color from argument (CSS string or [r,g,b,a] array) -> `Color4f`.
+/// Parses color from argument (CSS string or [r,g,b,a] array) -> `Color4f`
+/// and the space it is in: a CSS string's own, kept in floating point so a
+/// colour outside sRGB is not clipped, or `None` -- Skia's sRGB -- for an
+/// array, which is CanvasKit's unpremultiplied sRGB `Color4f`.
 macro_rules! parse_color4f {
     ($cx:expr, $idx:expr, $default:expr) => {
         match $cx.argument_opt($idx) {
@@ -74,8 +80,8 @@ macro_rules! parse_color4f {
                 // A colour that does not parse is refused by name. Taking
                 // the default instead made a typo in a shadow colour draw a
                 // black shadow and report nothing.
-                match css_to_color(&color_str) {
-                    Some(c) => Color4f::from(c),
+                match css_to_color4f_in_space(&color_str) {
+                    Some((color, space)) => (color, Some(space)),
                     None => {
                         return $cx.throw_type_error(format!(
                             "Could not parse color \"{color_str}\""
@@ -90,7 +96,7 @@ macro_rules! parse_color4f {
                 let g = arr.get::<JsNumber, _, _>($cx, 1)?.value($cx) as f32;
                 let b = arr.get::<JsNumber, _, _>($cx, 2)?.value($cx) as f32;
                 let a = arr.get::<JsNumber, _, _>($cx, 3)?.value($cx) as f32;
-                Color4f::new(r, g, b, a)
+                (Color4f::new(r, g, b, a), None)
             }
             _ => $default,
         }
@@ -200,7 +206,15 @@ pub fn makeDropShadow(mut cx: FunctionContext) -> JsResult<JsValue> {
     let dy = cx.argument::<JsNumber>(2)?.value(&mut cx) as f32;
     let sigma_x = cx.argument::<JsNumber>(3)?.value(&mut cx) as f32;
     let sigma_y = cx.argument::<JsNumber>(4)?.value(&mut cx) as f32;
-    let color = parse_color4f!(&mut cx, 5, Color4f::new(0.0, 0.0, 0.0, 1.0));
+    let (color, space) =
+        parse_color4f!(&mut cx, 5, (Color4f::new(0.0, 0.0, 0.0, 1.0), None));
+    let (color, space) = match space {
+        Some(space) => {
+            let (color, space) = skia_paint_color(color, &space);
+            (color, Some(space))
+        }
+        None => (color, None),
+    };
     let input = opt_input_filter!(&mut cx, 6);
     // Args: offset, sigma, color, color_space, input, crop_rect
     wrap_image_filter!(
@@ -209,7 +223,7 @@ pub fn makeDropShadow(mut cx: FunctionContext) -> JsResult<JsValue> {
             (dx, dy),
             (sigma_x, sigma_y),
             color,
-            None,
+            space,
             input,
             None
         )
@@ -222,7 +236,15 @@ pub fn makeDropShadowOnly(mut cx: FunctionContext) -> JsResult<JsValue> {
     let dy = cx.argument::<JsNumber>(2)?.value(&mut cx) as f32;
     let sigma_x = cx.argument::<JsNumber>(3)?.value(&mut cx) as f32;
     let sigma_y = cx.argument::<JsNumber>(4)?.value(&mut cx) as f32;
-    let color = parse_color4f!(&mut cx, 5, Color4f::new(0.0, 0.0, 0.0, 1.0));
+    let (color, space) =
+        parse_color4f!(&mut cx, 5, (Color4f::new(0.0, 0.0, 0.0, 1.0), None));
+    let (color, space) = match space {
+        Some(space) => {
+            let (color, space) = skia_paint_color(color, &space);
+            (color, Some(space))
+        }
+        None => (color, None),
+    };
     let input = opt_input_filter!(&mut cx, 6);
     wrap_image_filter!(
         cx,
@@ -230,7 +252,7 @@ pub fn makeDropShadowOnly(mut cx: FunctionContext) -> JsResult<JsValue> {
             (dx, dy),
             (sigma_x, sigma_y),
             color,
-            None,
+            space,
             input,
             None
         )

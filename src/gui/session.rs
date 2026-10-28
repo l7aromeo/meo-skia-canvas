@@ -176,8 +176,10 @@ impl Window {
                 height: canvas.height(),
                 cursor: "default".to_string(),
                 fit: Fit::ContainX,
-                text_contrast: DEFAULT_TEXT_CONTRAST,
-                text_gamma: DEFAULT_TEXT_GAMMA,
+                // The canvas's own, so that the window shows text as an
+                // export of it draws it.
+                text_contrast: canvas.options().text_contrast,
+                text_gamma: canvas.options().text_gamma,
             },
             canvas,
             on_draw: None,
@@ -605,6 +607,7 @@ impl std::fmt::Debug for Window {
 #[cfg(test)]
 mod window_accessor_tests {
     use super::*;
+    use crate::canvas::CanvasOptions;
 
     #[test]
     fn every_setter_has_a_getter_that_reads_it_back() {
@@ -642,6 +645,31 @@ mod window_accessor_tests {
         assert!(!window.visible());
         assert_eq!(window.page(), 3);
         assert_eq!(window.fit(), Fit::Cover);
+    }
+
+    #[test]
+    fn a_window_shows_text_as_its_canvas_draws_it() {
+        // The text contrast and gamma a window rasterizes with are its
+        // canvas's, as an export of the same canvas uses them and as the
+        // Node `Window` reads them from `canvas.engine`.
+        let canvas = Canvas::with_options(
+            200.0,
+            100.0,
+            CanvasOptions {
+                text_contrast: 0.75,
+                text_gamma: 2.0,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("options in range");
+        let window = Window::with_canvas(canvas);
+        assert_eq!(window.text_contrast(), 0.75);
+        assert_eq!(window.text_gamma(), 2.0);
+
+        // A canvas made without options shows at the defaults.
+        let plain = Window::new(10.0, 10.0);
+        assert_eq!(plain.text_contrast(), DEFAULT_TEXT_CONTRAST);
+        assert_eq!(plain.text_gamma(), DEFAULT_TEXT_GAMMA);
     }
 
     #[test]
@@ -771,11 +799,18 @@ mod chosen_ids {
     use super::*;
 
     /// Ids far from anything the counter reaches in this test binary, a
-    /// range per test: the held set and the counter are process-wide and the
-    /// tests run in parallel.
+    /// million apart: the held set and the counter are process-wide and the
+    /// tests run in parallel, and choosing an id moves the counter past it,
+    /// so a window another test builds then takes the ids just above. With
+    /// ids next to each other, one test's next choice was another's window
+    /// often enough to fail a run of these tests 15 times in 300.
     fn id(n: u32) -> NonZeroU32 {
-        NonZeroU32::new(3_000_000_000 + n).expect("not zero")
+        NonZeroU32::new(3_000_000_000 + n * ID_SPACING).expect("not zero")
     }
+
+    /// More windows than the whole test binary builds, so the counter, once
+    /// moved past one chosen id, never climbs to the next.
+    const ID_SPACING: u32 = 1_000_000;
 
     #[test]
     fn a_free_id_is_taken_and_reported() {

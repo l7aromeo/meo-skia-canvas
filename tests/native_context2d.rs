@@ -1300,46 +1300,26 @@ fn a_non_finite_transform_is_ignored_rather_than_poisoning_the_canvas() {
 }
 
 #[test]
-fn a_shadow_colour_round_trips_only_as_far_as_eight_bits_reach() {
-    // The getter goes through `skia_color_to_rgba_linear`, whose doc claimed
-    // a value "reads back as it was written". It does not below alpha 1: the
-    // colour is stored as 8-bit sRGB with 8-bit alpha, so anything off a
-    // whole 255th is quantised, and the premultiplied components shift with
-    // it because they are re-derived from the stored alpha.
+fn a_shadow_colour_round_trips_as_it_was_set() {
+    // Held in floating point, so what is set reads back, at any alpha and
+    // for a colour outside sRGB -- where eight bits of sRGB rounded an alpha
+    // of 0.5 to 128/255 and clipped a wide colour.
     let mut canvas = Canvas::new(10.0, 10.0);
     let ctx = canvas.context();
-
-    // Every byte round-trips exactly at full alpha.
-    for byte in [0u8, 1, 127, 128, 200, 254, 255] {
-        let set = RgbaLinear::from_srgb8(byte, byte, byte, 1.0);
+    for set in [
+        RgbaLinear::from_srgb8(230, 120, 40, 0.5),
+        RgbaLinear::from_srgb8(1, 128, 254, 1.0),
+        RgbaLinear::from_css("color(display-p3 1 0 0 / 0.3)")
+            .expect("a colour"),
+    ] {
         ctx.set_shadow_color(set);
         let got = ctx.shadow_color();
-        assert!(
-            (got.r - set.r).abs() < 1e-6 && (got.a - 1.0).abs() < 1e-6,
-            "byte {byte} should survive: set {set:?}, got {got:?}"
-        );
+        let close =
+            [got.r - set.r, got.g - set.g, got.b - set.b, got.a - set.a]
+                .iter()
+                .all(|d| d.abs() < 1e-6);
+        assert!(close, "set {set:?}, got {got:?}");
     }
-
-    // So does any alpha that is a whole 255th.
-    for step in [0u8, 1, 64, 128, 255] {
-        let alpha = f32::from(step) / 255.0;
-        ctx.set_shadow_color(RgbaLinear::from_srgb8(200, 100, 50, alpha));
-        assert!(
-            (ctx.shadow_color().a - alpha).abs() < 1e-6,
-            "alpha {step}/255 should survive"
-        );
-    }
-
-    // An alpha between two of them does not, and that is what the doc used
-    // to deny.
-    ctx.set_shadow_color(RgbaLinear::from_srgb8(230, 120, 40, 0.5));
-    let got = ctx.shadow_color();
-    assert_ne!(got.a, 0.5, "0.5 is not a whole 255th");
-    assert!(
-        (got.a - 128.0 / 255.0).abs() < 1e-6,
-        "it lands on the nearest one, {}",
-        got.a
-    );
 }
 
 #[test]
@@ -8142,13 +8122,321 @@ fn a_scaled_texture_lays_its_grid_out_in_user_space() {
     );
 }
 
+/// The frame every reader of an [`RgbaLinear`] takes it in: linear-light
+/// sRGB, unbounded (#250). Display P3 red is `color(display-p3 1 0 0)`
+/// whatever it is drawn with and whichever canvas holds it, so on a P3 or
+/// Rec. 2020 canvas each reader paints the same pixel, P3 red, and on an
+/// sRGB canvas the same clipped one.
+#[test]
+fn an_rgba_linear_is_one_colour_in_every_reader_on_every_canvas() {
+    type Reader<'a> = (&'a str, &'a dyn Fn(&mut Context2D));
+    let within = |a: [u8; 4], b: [u8; 4], levels: u8| {
+        a.iter().zip(b).all(|(x, y)| x.abs_diff(y) <= levels)
+    };
+    // Two colours, because each catches what the other cannot. A P3 colour
+    // inside sRGB too reads back the same on every canvas, and reads
+    // differently in any other frame; P3 red is clipped by an 8-bit reader,
+    // and by an sRGB canvas, which holds sRGB red at most.
+    let cases = [
+        (
+            "color(display-p3 0.8 0.3 0.2)",
+            [204, 77, 51, 255],
+            [204, 77, 51, 255],
+        ),
+        (
+            "color(display-p3 1 0 0)",
+            [234, 51, 35, 255],
+            [255, 0, 0, 255],
+        ),
+    ];
+    for ((css, on_srgb, on_wide), space) in cases.into_iter().flat_map(|case| {
+        [
+            PixelColorSpace::Srgb,
+            PixelColorSpace::DisplayP3,
+            PixelColorSpace::Rec2020,
+        ]
+        .map(|space| (case, space))
+    }) {
+        let colour = RgbaLinear::from_css(css).expect("a colour");
+        // The pixel at (60, 20) of an 80x40 canvas, read in Display P3.
+        let read = |draw: &dyn Fn(&mut Context2D)| -> [u8; 4] {
+            let mut canvas = Canvas::with_options(
+                80.0,
+                40.0,
+                CanvasOptions {
+                    color_space: space,
+                    gpu: false,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a space this build can make");
+            draw(canvas.context());
+            let raw = canvas
+                .to_buffer(
+                    ImageFormat::Raw,
+                    &EncodeOptions {
+                        color_space: Some(PixelColorSpace::DisplayP3),
+                        ..EncodeOptions::default()
+                    },
+                )
+                .expect("raw export");
+            let at = (20 * 80 + 60) * 4;
+            [raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]
+        };
+        let want = match space {
+            PixelColorSpace::Srgb => on_srgb,
+            _ => on_wide,
+        };
+        // An eight-bit Rec. 2020 canvas steps coarser than P3 does, so a P3
+        // colour comes back from it a few levels off.
+        let levels = match space {
+            PixelColorSpace::Rec2020 => 4,
+            _ => 1,
+        };
+        let stop = |position| GradientStop {
+            position,
+            color: colour,
+        };
+        let gradient = Shader::linear_gradient(
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 80.0, y: 0.0 },
+            &[stop(0.0), stop(1.0)],
+            GradientColorSpace::Srgb,
+        )
+        .expect("a gradient");
+        // Lines wider than their spacing, so the texture covers the pixel.
+        let texture = Texture::new(&TextureOptions {
+            color: colour,
+            line: 12.0,
+            spacing: (4.0, 4.0),
+            ..TextureOptions::default()
+        });
+        let readers: [Reader; 7] = [
+            ("fill", &|ctx| {
+                ctx.set_fill_style(colour);
+                ctx.fill_rect(0.0, 0.0, 80.0, 40.0);
+            }),
+            ("stroke", &|ctx| {
+                ctx.set_stroke_style(colour);
+                ctx.set_line_width(40.0);
+                ctx.begin_path();
+                ctx.move_to(0.0, 20.0);
+                ctx.line_to(80.0, 20.0);
+                ctx.stroke();
+            }),
+            ("shadow", &|ctx| {
+                ctx.set_shadow_color(colour);
+                ctx.set_shadow_offset(40.0, 0.0);
+                ctx.fill_rect(0.0, 0.0, 40.0, 40.0);
+            }),
+            ("drop-shadow filter", &|ctx| {
+                ctx.set_filter(&[FilterOp::DropShadow {
+                    offset_x: 40.0,
+                    offset_y: 0.0,
+                    blur: 0.0,
+                    color: colour,
+                }])
+                .expect("a filter");
+                ctx.fill_rect(0.0, 0.0, 40.0, 40.0);
+            }),
+            ("gradient stop", &|ctx| {
+                ctx.set_fill_shader(&gradient);
+                ctx.fill_rect(0.0, 0.0, 80.0, 40.0);
+            }),
+            ("texture", &|ctx| {
+                ctx.set_fill_texture(&texture);
+                ctx.fill_rect(0.0, 0.0, 80.0, 40.0);
+            }),
+            ("blend colour filter", &|ctx| {
+                let filter = ColorFilter::blend(colour, BlendMode::Copy)
+                    .expect("a colour filter");
+                ctx.set_color_filter(Some(&filter));
+                ctx.fill_rect(0.0, 0.0, 80.0, 40.0);
+            }),
+        ];
+        // The fill against the colour itself, and every reader against the
+        // fill, to the canvas's own step.
+        let fill = read(readers[0].1);
+        assert!(
+            within(fill, want, levels),
+            "fill, {css} on {space:?}: {fill:?}, want {want:?}"
+        );
+        for (name, draw) in readers {
+            let got = read(draw);
+            assert!(
+                within(got, fill, levels),
+                "{name}, {css} on {space:?}: {got:?}, the fill {fill:?}"
+            );
+        }
+
+        // The two mattes, an export's and a readback's, under nothing drawn.
+        let blank = || {
+            Canvas::with_options(
+                80.0,
+                40.0,
+                CanvasOptions {
+                    color_space: space,
+                    gpu: false,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a space this build can make")
+        };
+        let raw = blank()
+            .to_buffer(
+                ImageFormat::Raw,
+                &EncodeOptions {
+                    color_space: Some(PixelColorSpace::DisplayP3),
+                    matte: Some(colour),
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("raw export");
+        let at = (20 * 80 + 60) * 4;
+        let got = [raw[at], raw[at + 1], raw[at + 2], raw[at + 3]];
+        assert!(
+            within(got, fill, levels),
+            "export matte, {css} on {space:?}: {got:?}, the fill {fill:?}"
+        );
+        let mut canvas = blank();
+        let data = canvas
+            .context()
+            .get_image_data_with(
+                60.0,
+                20.0,
+                1.0,
+                1.0,
+                &ImageDataExport {
+                    pixels: PixelExportOptions {
+                        color_space: PixelColorSpace::DisplayP3,
+                        ..PixelExportOptions::default()
+                    },
+                    matte: Some(colour),
+                    ..ImageDataExport::default()
+                },
+            )
+            .expect("a readback");
+        let px = data.pixels();
+        let got = [px[0], px[1], px[2], px[3]];
+        assert!(
+            within(got, fill, levels),
+            "readback matte, {css} on {space:?}: {got:?}, the fill {fill:?}"
+        );
+
+        // A paragraph's background, read through the text style.
+        let engine = TextEngine::new(&FontLibrary::new());
+        let layout = engine.layout_text(
+            "MMMMMMMMMMMM",
+            &TextStyle {
+                font_size: 60.0,
+                // Glyphs that paint nothing, so the background is all there
+                // is at the pixel read.
+                color: RgbaLinear {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.0,
+                },
+                background_color: Some(colour),
+                ..TextStyle::default()
+            },
+            1000.0,
+        );
+        let got = read(&|ctx| ctx.draw_paragraph(&layout, 0.0, -10.0));
+        assert!(
+            within(got, fill, levels),
+            "text background, {css} on {space:?}: {got:?}, the fill {fill:?}"
+        );
+    }
+}
+
+/// A gradient stop is the colour it names on every canvas, interpolated in
+/// any space: two equal stops of a P3 colour paint that colour on a P3
+/// canvas whichever of the sixteen interpolation spaces carries them. Tagged
+/// stops once crashed Skia's OKLCH interpolation, and untagged ones were read
+/// as already in the canvas's space -- the UPSTREAM note on
+/// `Shader::linear_gradient` re-checks the first by this test.
+#[test]
+fn a_tagged_stop_is_one_colour_in_every_space() {
+    let colour = RgbaLinear::from_css("color(display-p3 0.8 0.3 0.2)")
+        .expect("a colour");
+    let stops = [
+        GradientStop {
+            position: 0.0,
+            color: colour,
+        },
+        GradientStop {
+            position: 1.0,
+            color: colour,
+        },
+    ];
+    for space in [
+        GradientColorSpace::Destination,
+        GradientColorSpace::Srgb,
+        GradientColorSpace::SrgbLinear,
+        GradientColorSpace::Lab,
+        GradientColorSpace::Oklab,
+        GradientColorSpace::Lch,
+        GradientColorSpace::Oklch,
+        GradientColorSpace::Hsl,
+        GradientColorSpace::Hwb,
+        GradientColorSpace::DisplayP3,
+        GradientColorSpace::Rec2020,
+        GradientColorSpace::ProphotoRgb,
+        GradientColorSpace::A98Rgb,
+        GradientColorSpace::Xyz,
+        GradientColorSpace::XyzD65,
+        GradientColorSpace::XyzD50,
+    ] {
+        let mut canvas = Canvas::with_options(
+            20.0,
+            4.0,
+            CanvasOptions {
+                color_space: PixelColorSpace::DisplayP3,
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a P3 canvas");
+        {
+            let ctx = canvas.context();
+            let gradient = Shader::linear_gradient(
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 20.0, y: 0.0 },
+                &stops,
+                space,
+            )
+            .expect("a gradient");
+            ctx.set_fill_shader(&gradient);
+            ctx.fill_rect(0.0, 0.0, 20.0, 4.0);
+        }
+        let raw = canvas
+            .to_buffer(
+                ImageFormat::Raw,
+                &EncodeOptions {
+                    color_space: Some(PixelColorSpace::DisplayP3),
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("raw export");
+        let at = (2 * 20 + 10) * 4;
+        let got = [raw[at], raw[at + 1], raw[at + 2], raw[at + 3]];
+        assert!(
+            got.iter()
+                .zip([204u8, 77, 51, 255])
+                .all(|(a, b)| a.abs_diff(b) <= 1),
+            "{space:?}: {got:?}"
+        );
+    }
+}
+
 #[test]
 fn a_canvas_composites_in_the_space_it_was_built_with() {
-    // `RgbaLinear` is defined as linear light *in the destination surface's
-    // working color space*, and every colour was pinned to linear sRGB
-    // regardless -- so the same call meant sRGB red on a canvas built to hold
-    // a wider one, and no Rust caller could name a colour outside sRGB.
-    let painted = |space: PixelColorSpace| {
+    // An `RgbaLinear` is linear-light sRGB on every canvas, so sRGB red is
+    // sRGB red on a P3 canvas too, and a P3 colour is one with components
+    // outside sRGB's range. What the canvas's space decides is what it can
+    // hold: a P3 canvas keeps P3 red, an sRGB canvas clips it to sRGB red.
+    let painted = |space: PixelColorSpace, color: RgbaLinear| {
         let mut canvas = Canvas::with_options(
             2.0,
             2.0,
@@ -8161,7 +8449,7 @@ fn a_canvas_composites_in_the_space_it_was_built_with() {
         .expect("a space this build can make");
         {
             let ctx = canvas.context();
-            ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.0, 0.0));
+            ctx.set_fill_style(color);
             ctx.fill_rect(0.0, 0.0, 2.0, 2.0);
         }
         let raw = canvas
@@ -8175,16 +8463,26 @@ fn a_canvas_composites_in_the_space_it_was_built_with() {
             .expect("raw export");
         [raw[0], raw[1], raw[2], raw[3]]
     };
+    let srgb_red = RgbaLinear::opaque(1.0, 0.0, 0.0);
+    let p3_red =
+        RgbaLinear::from_css("color(display-p3 1 0 0)").expect("a colour");
 
+    for space in [PixelColorSpace::Srgb, PixelColorSpace::DisplayP3] {
+        assert_eq!(
+            painted(space, srgb_red),
+            [234, 51, 35, 255],
+            "sRGB red on {space:?}, read in P3"
+        );
+    }
     assert_eq!(
-        painted(PixelColorSpace::Srgb),
-        [234, 51, 35, 255],
-        "sRGB red, named on an sRGB canvas and read in P3"
+        painted(PixelColorSpace::DisplayP3, p3_red),
+        [255, 0, 0, 255],
+        "P3 red, on the canvas that can hold it"
     );
     assert_eq!(
-        painted(PixelColorSpace::DisplayP3),
-        [255, 0, 0, 255],
-        "and P3 red when the canvas is the one holding it"
+        painted(PixelColorSpace::Srgb, p3_red),
+        [234, 51, 35, 255],
+        "and clipped to sRGB red on one that cannot"
     );
 }
 
@@ -8295,7 +8593,9 @@ fn a_readback_inherits_the_canvas_space() {
     .expect("display-p3");
     {
         let ctx = canvas.context();
-        ctx.set_fill_style(RgbaLinear::from_srgb8(255, 0, 0, 1.0));
+        ctx.set_fill_style(
+            RgbaLinear::from_css("color(display-p3 1 0 0)").expect("P3 red"),
+        );
         ctx.fill_rect(0.0, 0.0, 2.0, 2.0);
     }
 
@@ -8305,9 +8605,8 @@ fn a_readback_inherits_the_canvas_space() {
     assert_eq!(
         &inherited.pixels()[..4],
         [255, 0, 0, 255],
-        "P3 red, because `RgbaLinear` means whatever the canvas's space says \
-         and this canvas is P3 -- the same answer `to_buffer` gives for the \
-         same drawing",
+        "P3 red, read in the P3 canvas's own space -- the same answer \
+         `to_buffer` gives for the same drawing",
     );
     // This read [234, 51, 35] while `to_buffer` read [255, 0, 0] from the
     // same canvas: the readback built its compositing surface from
@@ -9829,64 +10128,143 @@ fn shadow_color_reads_back_the_colour_it_was_given() {
     assert!((read.a - 1.0).abs() < 0.01);
 }
 
-/// A `rec2020` colour is converted before the paint is set, not clipped.
+/// `color(rec2020 ...)` decodes by the curve CSS Color 4 section 10.8 gives
+/// it, "gamma 2.40, from [REC_BT.1886]", on every canvas.
 ///
-/// Rec. 2020 cannot ride on its colour-space tag. `skia_safe`'s CICP
-/// transfer functions are reference EOTFs, and note 1 of ITU-T H.273 supplies
-/// BT.1886 for transfer characteristics 1, 6, 14 and 15 alike -- so
-/// `REC2020_10BIT` and `REC2020_12BIT` are both aliases of `REC709`, which is
-/// `g: 2.4` with every other coefficient zero. CSS Color 4 wants BT.2020's
-/// own inverse OETF instead, so the colour is converted to sRGB and Skia is
-/// handed an untagged one.
-///
-/// **Every figure here is computed from CSS Color 4's conversion code
-/// (section 12.1), not read back from the surface**, so a defect in the
-/// conversion cannot supply its own expectation. For
-/// `color(rec2020 0.2 0.2 0.2)`: BT.2020's inverse OETF, as ITU-R BT.2020
-/// Table 4 gives it, takes 0.2 to a linear 0.055516; a neutral survives the
-/// primaries matrix as a neutral, and the sRGB transfer function encodes that
-/// as 0.261295, which is byte 67. Tagging painted 40.
-///
-/// The two rows that assert are chosen where clipping and converting must
-/// differ. A primary cannot: `color(rec2020 1 0 0)` lies outside the sRGB
-/// gamut, so the old path's clip and the correct conversion both land on
-/// `[255, 0, 0]`. It is asserted last, and labelled, so a later reader adding
-/// primaries can see why they prove nothing about the conversion.
+/// **Every expected byte is computed here, in `f64`, from CSS Color 4's own
+/// sample code (section 19)** -- `lin_2020`, `lin_2020_to_XYZ`,
+/// `XYZ_to_lin_sRGB`, `XYZ_to_lin_P3` and sRGB's encode -- not read back from
+/// the surface, so the conversion under test cannot supply its own
+/// expectation. A grey isolates the curve from the primaries: BT.2020's
+/// inverse OETF, which the standard used before its Candidate Recommendation
+/// Draft of 24 April 2025 and Chrome 152 still uses, paints
+/// `color(rec2020 0.2 0.2 0.2)` as 67 where 2.4 gamma paints 40.
 #[test]
-fn a_rec2020_colour_is_converted_rather_than_clipped() {
-    let painted = |css: &str| -> [u8; 4] {
-        let mut canvas = Canvas::new(4.0, 4.0);
-        {
-            let ctx = canvas.context();
-            ctx.set_fill_style_css(css).expect("a css colour");
-            ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
-        }
-        at(&pixels(&mut canvas), 4, 1, 1)
+fn a_rec2020_colour_takes_css_color_4s_curve_on_every_canvas() {
+    type Matrix = [[f64; 3]; 3];
+    const LIN_2020_TO_XYZ: Matrix = [
+        [
+            63426534.0 / 99577255.0,
+            20160776.0 / 139408157.0,
+            47086771.0 / 278816314.0,
+        ],
+        [
+            26158966.0 / 99577255.0,
+            472592308.0 / 697040785.0,
+            8267143.0 / 139408157.0,
+        ],
+        [0.0, 19567812.0 / 697040785.0, 295819943.0 / 278816314.0],
+    ];
+    const XYZ_TO_LIN_SRGB: Matrix = [
+        [12831.0 / 3959.0, -329.0 / 214.0, -1974.0 / 3959.0],
+        [
+            -851781.0 / 878810.0,
+            1648619.0 / 878810.0,
+            36519.0 / 878810.0,
+        ],
+        [705.0 / 12673.0, -2585.0 / 12673.0, 705.0 / 667.0],
+    ];
+    const XYZ_TO_LIN_P3: Matrix = [
+        [
+            446124.0 / 178915.0,
+            -333277.0 / 357830.0,
+            -72051.0 / 178915.0,
+        ],
+        [-14852.0 / 17905.0, 63121.0 / 35810.0, 423.0 / 17905.0],
+        [11844.0 / 330415.0, -50337.0 / 660830.0, 316169.0 / 330415.0],
+    ];
+    let apply = |m: Matrix, v: [f64; 3]| {
+        m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
+    };
+    // sRGB's encode, which Display P3 shares.
+    let encode = |c: f64| {
+        let magnitude = c.abs();
+        let encoded = match magnitude > 0.0031308 {
+            true => 1.055 * magnitude.powf(1.0 / 2.4) - 0.055,
+            false => 12.92 * magnitude,
+        };
+        encoded.copysign(c)
+    };
+    // `rec2020` components as bytes in the space `to_linear` leads to,
+    // clipped there as an 8-bit readback clips.
+    let expected = |rgb: [f64; 3], to_linear: Matrix| -> [u8; 4] {
+        let linear = rgb.map(|c| c.abs().powf(2.4).copysign(c));
+        let [r, g, b] = apply(to_linear, apply(LIN_2020_TO_XYZ, linear))
+            .map(|c| (encode(c).clamp(0.0, 1.0) * 255.0).round() as u8);
+        [r, g, b, 255]
     };
 
-    // A neutral, where only the transfer function is in play: the primaries
-    // matrix maps equal components to equal components, so this isolates the
-    // curve from the gamut. Tagged rather than converted, this was 40.
-    assert_eq!(
-        painted("color(rec2020 0.2 0.2 0.2)"),
-        [67, 67, 67, 255],
-        "a neutral rec2020 grey takes BT.2020's curve, not BT.1886's",
-    );
-
-    // Saturated, and inside the sRGB gamut once converted -- so a correct
-    // conversion has somewhere to put it and clipping does not. This was
-    // `[248, 0, 0]`: the green and blue did not merely darken, they were
-    // clipped to zero, and a channel reading 0 where 56 is right carries
-    // nothing a later correction can recover.
-    assert_eq!(
-        painted("color(rec2020 0.8 0.3 0.1)"),
-        [255, 56, 10, 255],
-        "a saturated rec2020 colour converts into the sRGB gamut",
-    );
-
-    // Cannot discriminate, kept to say so: this one is outside the sRGB
-    // gamut, so both behaviours clip it to the same bytes.
-    assert_eq!(painted("color(rec2020 1 0 0)"), [255, 0, 0, 255]);
+    let cases = [
+        ("color(rec2020 0.2 0.2 0.2)", [0.2, 0.2, 0.2]),
+        ("color(rec2020 0.5 0.5 0.5)", [0.5, 0.5, 0.5]),
+        ("color(rec2020 0.2 0.4 0.6)", [0.2, 0.4, 0.6]),
+    ];
+    // Each canvas read where it holds the colour unclipped, or clips it as
+    // the expectation does: an sRGB canvas in sRGB, a P3 canvas in P3, and a
+    // Rec. 2020 canvas, which holds all three, in both.
+    let readings = [
+        (
+            PixelColorSpace::Srgb,
+            PixelColorSpace::Srgb,
+            XYZ_TO_LIN_SRGB,
+        ),
+        (
+            PixelColorSpace::DisplayP3,
+            PixelColorSpace::DisplayP3,
+            XYZ_TO_LIN_P3,
+        ),
+        (
+            PixelColorSpace::Rec2020,
+            PixelColorSpace::Srgb,
+            XYZ_TO_LIN_SRGB,
+        ),
+        (
+            PixelColorSpace::Rec2020,
+            PixelColorSpace::DisplayP3,
+            XYZ_TO_LIN_P3,
+        ),
+    ];
+    for (css, rgb) in cases {
+        for (space, read_in, to_linear) in readings {
+            let mut canvas = Canvas::with_options(
+                4.0,
+                4.0,
+                CanvasOptions {
+                    color_space: space,
+                    gpu: false,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a space this build can make");
+            {
+                let ctx = canvas.context();
+                ctx.set_fill_style_css(css).expect("a css colour");
+                ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+            }
+            let raw = canvas
+                .to_buffer(
+                    ImageFormat::Raw,
+                    &EncodeOptions {
+                        color_space: Some(read_in),
+                        ..EncodeOptions::default()
+                    },
+                )
+                .expect("raw export");
+            let got = [raw[0], raw[1], raw[2], raw[3]];
+            let want = expected(rgb, to_linear);
+            // An eight-bit Rec. 2020 canvas holds 0.5 as 128/255, a step
+            // that converting out of it can widen to two.
+            let levels = match space {
+                PixelColorSpace::Rec2020 => 2,
+                _ => 1,
+            };
+            assert!(
+                got.iter().zip(want).all(|(g, w)| g.abs_diff(w) <= levels),
+                "{css} on {space:?}, read in {read_in:?}: {got:?}, the \
+                 standard's arithmetic gives {want:?}"
+            );
+        }
+    }
 }
 
 #[test]

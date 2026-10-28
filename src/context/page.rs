@@ -7,10 +7,10 @@ use neon::prelude::*;
 use parking_lot::RwLock;
 use rayon::prelude::*;
 use skia_safe::{
-    AlphaType, Canvas as SkCanvas, ClipOp, Color, ColorSpace, ColorType,
-    Document, IRect, ISize, Image as SkImage, ImageInfo, M44, Matrix, Paint,
-    Path, Picture, PictureRecorder, PixelGeometry, Pixmap, Rect, Size, Surface,
-    SurfaceProps, SurfacePropsFlags, XYZD50Hash,
+    AlphaType, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
+    ColorSpace, ColorType, Document, IRect, ISize, Image as SkImage, ImageInfo,
+    M44, Matrix, Paint, Path, Picture, PictureRecorder, PixelGeometry, Pixmap,
+    Rect, Size, Surface, SurfaceProps, SurfacePropsFlags, XYZD50Hash,
     canvas::SrcRectConstraint,
     image::{BitDepth, CachingHint},
     images, jpeg_encoder, pdf, png_encoder, surfaces,
@@ -31,6 +31,9 @@ const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
 use crate::{
     canvas::{DEFAULT_TEXT_CONTRAST, DEFAULT_TEXT_GAMMA},
+    color::{
+        RgbaLinear, linear_srgb_color_space, rgba_linear_to_unpremul_color4f,
+    },
     context::BoxedContext2D,
     encode::{
         self, Frame, FrameDepth, Pixels, SequenceSpec, Sink,
@@ -49,7 +52,7 @@ use crate::{
         completion::{DRAW_ATTEMPTS, discarded, draws_ran},
         owner,
     },
-    node::canvas::BoxedCanvas,
+    node::{canvas::BoxedCanvas, utils::skia_paint_color},
     pixels::PixelColorSpace,
 };
 
@@ -1356,6 +1359,53 @@ fn png_tuning(image: &SkImage) -> PngTuning {
     }
 }
 
+/// A colour composited under a page as it is exported or read: unpremultiplied,
+/// in the space it is tagged with -- the one a CSS string named, or
+/// linear-light sRGB for an `RgbaLinear`.
+///
+/// Painted through a tagged paint rather than `Canvas::clear`, which takes an
+/// eight-bit sRGB `Color` and so clipped a wide matte before a wide surface
+/// saw it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Matte {
+    color: Color4f,
+    space: ColorSpace,
+}
+
+impl Matte {
+    pub fn new(color: Color4f, space: ColorSpace) -> Self {
+        Self { color, space }
+    }
+
+    /// A matte in `color`, linear-light sRGB as every `RgbaLinear` is.
+    pub fn from_rgba_linear(color: RgbaLinear) -> Self {
+        Self::new(
+            rgba_linear_to_unpremul_color4f(color),
+            linear_srgb_color_space(),
+        )
+    }
+
+    /// Covers `canvas` with the matte, replacing what is there.
+    pub fn paint(&self, canvas: &SkCanvas) {
+        let (color, space) = skia_paint_color(self.color, &self.space);
+        let mut paint = Paint::default();
+        paint
+            .set_color4f(color, &space)
+            .set_blend_mode(BlendMode::Src);
+        canvas.draw_paint(&paint);
+    }
+}
+
+/// Clears `canvas` to `matte`, or to transparent where there is none.
+fn clear_to(canvas: &SkCanvas, matte: Option<&Matte>) {
+    match matte {
+        Some(matte) => matte.paint(canvas),
+        None => {
+            canvas.clear(Color::TRANSPARENT);
+        }
+    }
+}
+
 pub struct RecordingSurface {
     surface: Option<Surface>,
     /// The page in squares, for reads too small to be worth compositing it
@@ -1387,7 +1437,7 @@ pub struct RecordingSurface {
     /// pays the sync once.
     served_at: Option<usize>,
     depth: usize,
-    matte: Option<Color>,
+    matte: Option<Matte>,
     msaa: Option<usize>,
     gpu: Option<bool>,
     color_space: ColorSpace,
@@ -1512,7 +1562,7 @@ impl RecordingSurface {
             let canvas = tile.surface.canvas();
             let played = tile.depth.unwrap_or(0);
             if tile.depth.is_none() {
-                canvas.clear(self.matte.unwrap_or(Color::TRANSPARENT));
+                clear_to(canvas, self.matte.as_ref());
             }
             canvas.save();
             // The recording is in page coordinates; a tile draws the same
@@ -1619,7 +1669,7 @@ impl RecordingSurface {
             self.gpu = Some(matches!(engine, RenderingEngine::GPU));
             self.color_space = opts.surface_color_space.clone();
             self.density = opts.density;
-            self.matte = opts.matte;
+            self.matte = opts.matte.clone();
             self.msaa = opts.msaa;
         }
 
@@ -1735,7 +1785,7 @@ impl RecordingSurface {
             self.gpu = Some(matches!(engine, RenderingEngine::GPU));
             self.color_space = opts.surface_color_space.clone();
             self.density = opts.density;
-            self.matte = opts.matte;
+            self.matte = opts.matte.clone();
             self.msaa = opts.msaa;
             self.depth = 0;
 
@@ -1779,7 +1829,7 @@ impl RecordingSurface {
                 }
                 // Nothing on the surface yet, and no cache to start from.
                 _ if self.depth == 0 => {
-                    canvas.clear(self.matte.unwrap_or(Color::TRANSPARENT));
+                    clear_to(canvas, self.matte.as_ref());
                 }
                 // The surface is as far on as the cache or further.
                 _ => {}
@@ -2046,11 +2096,11 @@ impl Page {
         &self,
         canvas: &SkCanvas,
         backend: VectorFeatures,
-        matte: Option<Color>,
+        matte: Option<&Matte>,
         density: f32,
     ) -> Result<(), String> {
-        if let Some(color) = matte {
-            canvas.clear(color);
+        if let Some(matte) = matte {
+            matte.paint(canvas);
         }
 
         // Something was drawn inside an open `saveLayer`, where it could not
@@ -2205,10 +2255,12 @@ impl Page {
         })
     }
 
-    pub fn picture(&self, matte: Option<Color>) -> Option<Picture> {
+    pub fn picture(&self, matte: Option<&Matte>) -> Option<Picture> {
         let mut compositor = PictureRecorder::new();
         let output = compositor.begin_recording(self.bounds, true);
-        matte.map(|c| output.clear(c));
+        if let Some(matte) = matte {
+            matte.paint(output);
+        }
         self.layers.iter().for_each(|pict| pict.playback(output));
         compositor.finish_recording_as_picture(None)
     }
@@ -2286,9 +2338,9 @@ impl Page {
         if let Some(image) = cache_image {
             // use the cached bitmap as the background
             canvas.draw_image(image, (0, 0), None);
-        } else if let Some(color) = options.matte {
+        } else if let Some(matte) = &options.matte {
             // otherwise, fill the canvas if requested
-            canvas.clear(color);
+            matte.paint(canvas);
         }
 
         // draw newly added layers
@@ -2540,8 +2592,8 @@ impl Page {
                 &options.surface_color_space,
             )?;
             let canvas = surface.canvas();
-            if let Some(color) = options.matte {
-                canvas.clear(color);
+            if let Some(matte) = &options.matte {
+                matte.paint(canvas);
             }
             canvas.set_matrix(&img_scale);
             for pict in self.layers.iter() {
@@ -2619,7 +2671,7 @@ impl Page {
             format,
             quality,
             density,
-            matte,
+            ref matte,
             color_type,
             ref color_space,
             ..
@@ -2678,7 +2730,7 @@ impl Page {
                 self.draw_as_document(
                     canvas,
                     VectorFeatures::PDF_CANNOT,
-                    matte,
+                    matte.as_ref(),
                     density,
                 )?;
                 document.end_page().close();
@@ -2693,7 +2745,7 @@ impl Page {
                 self.draw_as_document(
                     &canvas,
                     VectorFeatures::SVG_CANNOT,
-                    matte,
+                    matte.as_ref(),
                     density,
                 )?;
                 Ok(with_view_box(canvas.end().as_bytes(), size))
@@ -3001,7 +3053,7 @@ impl Page {
     fn append_to<'a>(
         &self,
         doc: Document<'a>,
-        matte: Option<Color>,
+        matte: Option<&Matte>,
         density: f32,
     ) -> Result<Document<'a>, String> {
         if !self.bounds.is_empty() {
@@ -3169,7 +3221,7 @@ impl PageSequence {
         self.pages
             .iter()
             .try_fold(pdf_document(out, &metadata), |doc, page| {
-                page.append_to(doc, matte, density)
+                page.append_to(doc, matte.as_ref(), density)
             })
             .map(|doc| doc.close())
     }
@@ -3272,7 +3324,7 @@ fn space_key(space: &ColorSpace) -> ColorSpaceKey {
 struct PageCache {
     image: Option<SkImage>,
     density: f32,
-    matte: Option<Color>,
+    matte: Option<Matte>,
     msaa: Option<usize>,
     /// The space [`Self::image`] was rasterized into, as the two hashes
     /// Skia identifies one by.
@@ -3603,7 +3655,7 @@ impl PageCache {
                 *cache = Self {
                     image: Some(image),
                     density: opts.density,
-                    matte: opts.matte,
+                    matte: opts.matte.clone(),
                     msaa: opts.msaa,
                     color_space: Some(space_key(&opts.color_space)),
                     depth,
@@ -3785,7 +3837,7 @@ pub struct ExportOptions {
     pub quality: f32,
     pub density: f32,
     pub outline: bool,
-    pub matte: Option<Color>,
+    pub matte: Option<Matte>,
     pub msaa: Option<usize>,
     pub color_type: ColorType,
     /// Bits a channel AVIF codes at, or `None` to follow the canvas. See

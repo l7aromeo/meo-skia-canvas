@@ -4,14 +4,12 @@ use neon::prelude::*;
 use skia_safe::{Color, Color4f, ColorSpace, Data, Matrix, Path, Point, RGB};
 use std::{borrow::Cow, cmp};
 
-// One definition of the sRGB transfer function for the whole crate. This
-// file carried its own copy of each direction plus a third inlined into
-// `linear_color4f_to_srgb_color`, all six constants spelled out and
-// uncited at every one -- and the decode here was extended through zero
-// while the one in `color` was not, so the same negative component came
-// back as two different numbers.
+// One definition of the sRGB transfer function for the whole crate, in
+// `color`. A copy here would have to agree with it on every constant and on
+// how a negative component extends through zero, and nothing would check
+// that it did.
 use crate::{
-    color::{RgbaLinear, linear_to_srgb, linear_to_srgb_byte, srgb_to_linear},
+    color::{RgbaLinear, linear_to_srgb, srgb_to_linear},
     css::{
         DEGREES_PER_TURN, Dimension, Expect, FontUnits, Percent, Quantity,
         evaluate, is_math, literal, without_comments,
@@ -54,6 +52,13 @@ pub(crate) fn arg_num(o: usize) -> String {
 /// Named rather than spelled out at each comparison below: a tolerance
 /// written in two places only means anything while the two agree.
 const COORDINATE_EPSILON: f32 = 0.00001;
+
+/// `number` as JavaScript's `ToString` spells it, for a refusal to name:
+/// `1e+21` and `Infinity` where Rust's `Display` writes twenty-two digits
+/// and `inf`.
+pub fn spelled(cx: &mut FunctionContext, number: f64) -> NeonResult<String> {
+    Ok(cx.number(number).to_string(cx)?.value(cx))
+}
 
 /// Whether `a` and `b` are the same coordinate to within
 /// [`COORDINATE_EPSILON`].
@@ -684,6 +689,19 @@ pub fn opt_double_for_key(
     obj.get(cx, attr).ok().and_then(|val| _as_double(cx, &val))
 }
 
+/// As [`opt_double_for_key`], keeping a value that converts to a
+/// non-finite number, for a caller that refuses one by its range rather than
+/// leaving it to fall back to a default.
+pub fn opt_raw_double_for_key(
+    cx: &mut FunctionContext,
+    obj: &Handle<JsObject>,
+    attr: &str,
+) -> Option<f64> {
+    obj.get(cx, attr)
+        .ok()
+        .and_then(|val| _as_double_raw(cx, &val))
+}
+
 pub fn opt_float_for_key(
     cx: &mut FunctionContext,
     obj: &Handle<JsObject>,
@@ -985,50 +1003,26 @@ pub fn float_args_or_bail_at(
 // Colors
 //
 
-/// Rec. 2020's power segment's scale, and the offset that follows from it.
+/// The exponent of `rec2020`'s transfer function.
 ///
-/// ITU-R BT.2020 writes the encode as
-///
-/// ```text
-/// V = 4.5 L                        for L < beta
-/// V = alpha L^0.45 - (alpha - 1)   otherwise
-/// ```
-///
-/// and these are the standard's own constants, to the precision it gives
-/// for ten-bit systems.
-const REC2020_ALPHA: f32 = 1.099_296_8;
-/// Rec. 2020's breakpoint, on the linear-light side.
-const REC2020_BETA: f32 = 0.018_053_97;
-/// Rec. 2020's slope near black. Steeper than sRGB's 12.92 because the
-/// breakpoint sits higher.
-const REC2020_SLOPE: f32 = 4.5;
-/// Rec. 2020's exponent. Unlike sRGB, the standard states this one on the
-/// encode side, so the decode raises to its reciprocal.
-const REC2020_EXPONENT: f32 = 0.45;
+/// CSS Color 4 section 10.8 gives the function as "gamma 2.40, from
+/// [REC_BT.1886]": BT.1886's reference EOTF with black lift `b = 0` and gain
+/// `a = 1`, which is a pure power. Its sample code applies it to the
+/// magnitude and keeps the sign, so a component below zero reaches a colour
+/// outside the gamut rather than being clipped. Fixed by the standard, not
+/// chosen; drafts before the Candidate Recommendation Draft of 24 April 2025
+/// used BT.2020's piecewise inverse OETF instead.
+const REC2020_GAMMA: f32 = 2.4;
 
-/// Rec. 2020's transfer function, extended through zero the way
-/// [`srgb_to_linear`] is: the inverse of the encode [`REC2020_ALPHA`] gives.
+/// `rec2020`'s transfer function, CSS Color 4's `lin_2020`.
 fn rec2020_decode(encoded: f32) -> f32 {
-    let magnitude = encoded.abs();
-    let linear = match magnitude < REC2020_BETA * REC2020_SLOPE {
-        true => magnitude / REC2020_SLOPE,
-        false => ((magnitude + REC2020_ALPHA - 1.0) / REC2020_ALPHA)
-            .powf(1.0 / REC2020_EXPONENT),
-    };
-    linear.copysign(encoded)
+    encoded.abs().powf(REC2020_GAMMA).copysign(encoded)
 }
 
-/// Rec. 2020's encode, the inverse of [`rec2020_decode`].
+/// `rec2020`'s encode, CSS Color 4's `gam_2020`: the inverse of
+/// [`rec2020_decode`].
 fn rec2020_encode(linear: f32) -> f32 {
-    let magnitude = linear.abs();
-    let encoded = match magnitude < REC2020_BETA {
-        true => magnitude * REC2020_SLOPE,
-        false => {
-            REC2020_ALPHA * magnitude.powf(REC2020_EXPONENT)
-                - (REC2020_ALPHA - 1.0)
-        }
-    };
-    encoded.copysign(linear)
+    linear.abs().powf(REC2020_GAMMA.recip()).copysign(linear)
 }
 
 /// Linear-light Display P3 into linear-light sRGB.
@@ -1157,39 +1151,21 @@ fn primaries(space: &ColorSpace) -> Option<&'static str> {
 
 /// A colour as a paint holds it -- `color` in `space`, encoded with that
 /// space's transfer function -- as an [`RgbaLinear`]: premultiplied linear
-/// light in the primaries of `working`, the canvas's working space, which is
-/// what `RgbaLinear` means.
+/// light in sRGB's primaries, unbounded, which is what `RgbaLinear` means on
+/// every canvas.
 ///
 /// Through extended sRGB, so a colour named in any space this crate can name
-/// lands in any working space it can build, and a colour outside a gamut
 /// keeps its negative or above-one components rather than being clipped. An
 /// untagged colour is sRGB, as Skia reads one.
-pub(crate) fn color4f_to_working_linear(
+pub(crate) fn color4f_to_rgba_linear(
     color: Color4f,
     space: Option<&ColorSpace>,
-    working: &ColorSpace,
 ) -> RgbaLinear {
     let srgb = match space.and_then(color_space_name) {
         Some(name) => color_function_to_srgb(color, name),
         None => color,
     };
-    let linear = RgbaLinear::from_srgb(srgb.r, srgb.g, srgb.b, srgb.a);
-    let to_working = match primaries(working) {
-        Some("display-p3") => inverse(LINEAR_P3_TO_LINEAR_SRGB),
-        Some("rec2020") => inverse(LINEAR_REC2020_TO_LINEAR_SRGB),
-        // Linear sRGB is already the working primaries.
-        _ => return linear,
-    };
-    // A linear map, so it applies to premultiplied components as it would
-    // to straight ones.
-    let [r, g, b] = to_working
-        .map(|row| row[0] * linear.r + row[1] * linear.g + row[2] * linear.b);
-    RgbaLinear {
-        r,
-        g,
-        b,
-        a: linear.a,
-    }
+    RgbaLinear::from_srgb(srgb.r, srgb.g, srgb.b, srgb.a)
 }
 
 /// Converts `color()` components into extended sRGB.
@@ -1447,6 +1423,104 @@ fn srgb_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
         OKLAB_LMS_TO_OKLAB,
         apply_matrix(XYZ_D65_TO_OKLAB_LMS, xyz).map(f32::cbrt),
     )
+}
+
+/// CSS Color 4's just noticeable difference, in deltaEOK: section 14.2.1,
+/// "For the OkLCh color space, one JND is is an OkLCh difference of 0.02". A
+/// clipped colour within it of the colour it stands for is taken as it is.
+const GAMUT_MAP_JND: f64 = 0.02;
+
+/// The chroma resolution section 14.2.2's binary search stops at: "let
+/// epsilon be 0.0001".
+const GAMUT_MAP_EPSILON: f64 = 0.0001;
+
+/// Linear-light sRGB into Oklab, in `f64`, by the matrices
+/// [`srgb_to_oklab`] applies.
+fn linear_srgb_to_oklab_f64(rgb: [f64; 3]) -> [f64; 3] {
+    let widen = |m: [[f32; 3]; 3]| m.map(|row| row.map(f64::from));
+    let apply = |m: [[f64; 3]; 3], v: [f64; 3]| {
+        m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
+    };
+    let xyz = apply(widen(inverse(XYZ_D65_TO_LINEAR_SRGB)), rgb);
+    let lms = apply(widen(XYZ_D65_TO_OKLAB_LMS), xyz).map(f64::cbrt);
+    apply(widen(OKLAB_LMS_TO_OKLAB), lms)
+}
+
+/// Oklab into linear-light sRGB, in `f64`, the inverse of
+/// [`linear_srgb_to_oklab_f64`].
+fn oklab_to_linear_srgb_f64(lab: [f64; 3]) -> [f64; 3] {
+    let widen = |m: [[f32; 3]; 3]| m.map(|row| row.map(f64::from));
+    let apply = |m: [[f64; 3]; 3], v: [f64; 3]| {
+        m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
+    };
+    let lms = apply(widen(inverse(OKLAB_LMS_TO_OKLAB)), lab).map(|c| c * c * c);
+    let xyz = apply(widen(inverse(XYZ_D65_TO_OKLAB_LMS)), lms);
+    apply(widen(XYZ_D65_TO_LINEAR_SRGB), xyz)
+}
+
+/// Linear-light sRGB components, inside sRGB's gamut or not, mapped into it
+/// by CSS Color 4 section 14.2.2's binary search with local MINDE: chroma is
+/// reduced in OkLCh, holding lightness and hue, until clipping what is left
+/// moves it by less than [`GAMUT_MAP_JND`]. For the Skia calls that take an
+/// eight-bit sRGB colour and nothing wider, where clipping each channel on
+/// its own would shift a wide colour's hue -- a P3 orange clips towards
+/// yellow.
+///
+/// Returns the components unchanged where they are already inside the
+/// gamut, so the search runs only for a colour outside it, and only where
+/// a colour is set, not as it is drawn: about twenty halvings of the chroma
+/// at most, each two Oklab conversions.
+pub(crate) fn gamut_map_srgb(linear: [f32; 3]) -> [f32; 3] {
+    let in_gamut =
+        |c: [f64; 3]| c.iter().all(|channel| (0.0..=1.0).contains(channel));
+    let origin = linear.map(f64::from);
+    if in_gamut(origin) {
+        return linear;
+    }
+    let [lightness, a, b] = linear_srgb_to_oklab_f64(origin);
+    // Steps 3 and 4: at or past either end of lightness, white or black.
+    if lightness >= 1.0 {
+        return [1.0; 3];
+    }
+    if lightness <= 0.0 {
+        return [0.0; 3];
+    }
+    let chroma = a.hypot(b);
+    let at = |reduced: f64| {
+        let scale = reduced / chroma;
+        oklab_to_linear_srgb_f64([lightness, a * scale, b * scale])
+    };
+    let clip = |c: [f64; 3]| c.map(|channel| channel.clamp(0.0, 1.0));
+    let delta = |one: [f64; 3], two: [f64; 3]| {
+        let [l1, a1, b1] = linear_srgb_to_oklab_f64(one);
+        let [l2, a2, b2] = linear_srgb_to_oklab_f64(two);
+        ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt()
+    };
+    let mut clipped = clip(origin);
+    if delta(clipped, origin) < GAMUT_MAP_JND {
+        return clipped.map(|channel| channel as f32);
+    }
+    let (mut min, mut max, mut min_in_gamut) = (0.0, chroma, true);
+    while max - min > GAMUT_MAP_EPSILON {
+        let reduced = (min + max) / 2.0;
+        let current = at(reduced);
+        if min_in_gamut && in_gamut(current) {
+            min = reduced;
+            continue;
+        }
+        clipped = clip(current);
+        let error = delta(clipped, current);
+        if error < GAMUT_MAP_JND {
+            if GAMUT_MAP_JND - error < GAMUT_MAP_EPSILON {
+                break;
+            }
+            min_in_gamut = false;
+            min = reduced;
+        } else {
+            max = reduced;
+        }
+    }
+    clipped.map(|channel| channel as f32)
 }
 
 /// Oklab into extended sRGB, by the inverses of the matrices
@@ -2409,16 +2483,68 @@ pub fn color4f_to_srgb(color: Color4f, space: Option<&ColorSpace>) -> Color4f {
     }
 }
 
-/// Parses a CSS color and quantises it to 8-bit sRGB.
+/// `color` in `space` as Skia is handed it.
 ///
-/// For the callers that hand Skia an `SkColor` -- window backgrounds, mattes,
-/// texture marks. Anything drawn through a paint should take
-/// [`css_to_color4f`] instead and keep the precision.
+/// Every reader that tags a colour with the space it was named in goes
+/// through this, so a colour decodes by one curve whichever reader paints
+/// it. Each space this crate names decodes correctly from its Skia tag, so
+/// the colour passes through as it is; this is the one place to divert a
+/// space whose tag Skia would decode differently from the standard.
+/// `rec2020` is not one: CSS Color 4 section 10.8 defines it as "gamma
+/// 2.40, from [REC_BT.1886]", and the space [`opt_color_space`] builds for
+/// it is the CICP pair of BT.2020 primaries and transfer characteristic 1,
+/// whose `named_transfer_fn::REC709` is a pure 2.4 gamma, which agrees.
+/// Skia's own `kRec2020` transfer function is BT.2020's piecewise curve.
+pub fn skia_paint_color(
+    color: Color4f,
+    space: &ColorSpace,
+) -> (Color4f, ColorSpace) {
+    (color, space.clone())
+}
+
+/// Parses a CSS color into 8-bit sRGB, gamut-mapped.
+///
+/// For the callers that can only hand Skia an `SkColor` -- a window
+/// background, a light's colour, an SVG's `currentColor`. Anything drawn
+/// through a paint should take [`css_to_color4f`] instead and keep the
+/// precision. A colour outside sRGB is mapped as [`srgb_to_skia_color`] says.
 pub fn css_to_color(css: &str) -> Option<Color> {
+    css_to_color4f(css).map(srgb_to_skia_color)
+}
+
+/// Parses a CSS color into 8-bit sRGB, clamping each channel on its own.
+///
+/// For a colour that is per-channel coefficients rather than a colour --
+/// `ColorFilter.MakeLighting`'s multiply and add -- where mapping in a
+/// perceptual space would change what each channel does.
+pub fn css_to_clamped_color(css: &str) -> Option<Color> {
     css_to_color4f(css).map(|c| {
         let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
         Color::from_argb(byte(c.a), byte(c.r), byte(c.g), byte(c.b))
     })
+}
+
+/// An extended-sRGB colour, straight alpha, as an 8-bit `SkColor`.
+///
+/// A colour inside sRGB is quantised as it is, so its bytes are the ones the
+/// CSS named. One outside is gamut-mapped per CSS Color 4 -- chroma reduced
+/// in Oklch at constant lightness and hue -- by [`gamut_map_srgb`], which
+/// keeps the hue a per-channel clip would shift.
+pub fn srgb_to_skia_color(c: Color4f) -> Color {
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let [r, g, b] = if [c.r, c.g, c.b].iter().all(|v| (0.0..=1.0).contains(v)) {
+        [c.r, c.g, c.b]
+    } else {
+        gamut_map_srgb([c.r, c.g, c.b].map(srgb_to_linear)).map(linear_to_srgb)
+    };
+    Color::from_argb(byte(c.a), byte(r), byte(g), byte(b))
+}
+
+/// A colour as a paint holds it -- `color` in `space` -- as an 8-bit
+/// `SkColor`, for the Skia APIs that take nothing wider. Converted to sRGB
+/// and then as [`srgb_to_skia_color`] says.
+pub fn color4f_to_skia_color(color: Color4f, space: &ColorSpace) -> Color {
+    srgb_to_skia_color(color4f_to_srgb(color, Some(space)))
 }
 
 pub fn color_in<'a>(
@@ -2426,17 +2552,7 @@ pub fn color_in<'a>(
     val: Handle<'a, JsValue>,
 ) -> Option<Color> {
     let (color, space) = color4f_string_in(cx, val)?;
-    let color = match color_space_name(&space) {
-        Some(name) => color_function_to_srgb(color, name),
-        None => color,
-    };
-    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    Some(Color::from_argb(
-        byte(color.a),
-        byte(color.r),
-        byte(color.g),
-        byte(color.b),
-    ))
+    Some(color4f_to_skia_color(color, &space))
 }
 
 /// The CSS-string half of a color argument, kept in floating point.
@@ -2465,18 +2581,15 @@ pub fn color4f_string_in<'a>(
 }
 
 /// Parses a color value that may be a CSS string or a `[r, g, b, a]` float
-/// array. Returns `(Color4f, Option<ColorSpace>)` where:
-/// - Float array: linear-light unpremultiplied float values, returned with
-///   `None` for the color space tag. Callers decide how to tag them -- the
-///   paragraph text path tags as `srgb_linear` (Skia converts to the
-///   destination working space at paint time), the canvas
-///   `fillStyle`/`strokeStyle` path tags with the canvas's working color space
-///   directly.
-/// - CSS string: values are in sRGB gamma, returned with `Some(sRGB)`.
+/// array, as an unpremultiplied `Color4f` and the space it is in:
+/// - Float array: gamma-encoded sRGB components with straight alpha -- CSS's
+///   `color(srgb r g b / a)`, and CanvasKit's convention -- tagged sRGB, so
+///   Skia converts it to whatever canvas it is drawn on.
+/// - CSS string: encoded in the space the string named, tagged with it.
 pub fn color4f_in<'a>(
     cx: &mut FunctionContext<'a>,
     val: Handle<'a, JsValue>,
-) -> Option<(Color4f, Option<ColorSpace>)> {
+) -> Option<(Color4f, ColorSpace)> {
     // An array of four numbers is the float-color form. Anything else that
     // happens to be an array falls through to the string path rather than
     // being rejected: an Array then reaches the JsObject arm and is parsed
@@ -2487,14 +2600,15 @@ pub fn color4f_in<'a>(
     // is converted as WebIDL converts a union, where an array is a sequence
     // of four numbers and `['red']` a `TypeError` -- see `colour_option` in
     // src/node/paragraph.rs.
-    if let Some(rgba) = opt_color4f_from_array(cx, val) {
-        return Some((rgba, None));
+    // Tagged rather than left for Skia to read in the canvas's space, so the
+    // colour is the same on every canvas.
+    if let Some(color) = opt_color4f_from_array(cx, val) {
+        return Some((color, ColorSpace::new_srgb()));
     }
     // Unquantised: `Color4f::from` an 8-bit `Color` clipped every colour the
     // CSS Color 4 functions can name outside sRGB, before the surface it was
     // bound for ever saw it.
-    let (color, space) = color4f_string_in(cx, val)?;
-    Some((color, Some(space)))
+    color4f_string_in(cx, val)
 }
 
 fn opt_color4f_from_array<'a>(
@@ -2517,27 +2631,6 @@ fn opt_color4f_from_array<'a>(
     Some(Color4f::new(r, g, b, a))
 }
 
-/// Quantize an `unpremultiplied`, linear-light `Color4f` (e.g. from a
-/// `[r, g, b, a]` float array) to a Skia `Color` (u32 ARGB, sRGB-encoded by
-/// Skia convention).
-///
-/// Skia APIs that take a `Color` -- `TextStyle::set_decoration_color`,
-/// `TextShadow::new`, etc. -- treat their u32 input as sRGB-encoded and
-/// gamma-decode it back to linear during compositing. To survive that
-/// round-trip our linear value must be gamma-encoded first, *then*
-/// quantized to u8. Naively calling `Color4f::to_color()` clamps and
-/// quantizes as if the value were already sRGB-encoded, which produces a
-/// darker color and quietly drops the linear-light precision the caller
-/// asked for.
-pub fn linear_color4f_to_srgb_color(c: &Color4f) -> Color {
-    Color::from_argb(
-        (c.a.clamp(0.0, 1.0) * 255.0).round() as u8,
-        linear_to_srgb_byte(c.r),
-        linear_to_srgb_byte(c.g),
-        linear_to_srgb_byte(c.b),
-    )
-}
-
 pub fn opt_color_arg(cx: &mut FunctionContext, idx: usize) -> Option<Color> {
     match cx.argument_opt(idx) {
         Some(arg) => color_in(cx, arg),
@@ -2551,6 +2644,18 @@ pub fn opt_color_for_key(
     attr: &str,
 ) -> Option<Color> {
     obj.get(cx, attr).ok().and_then(|val| color_in(cx, val))
+}
+
+/// The CSS colour at `attr` as a matte, kept in floating point in the space
+/// it was named in, so a wide matte reaches a wide export.
+pub fn opt_matte_for_key(
+    cx: &mut FunctionContext,
+    obj: &Handle<JsObject>,
+    attr: &str,
+) -> Option<Matte> {
+    let value = obj.get_value(cx, attr).ok()?;
+    let (color, space) = color4f_string_in(cx, value)?;
+    Some(Matte::new(color, space))
 }
 
 pub fn color_to_css<'a>(
@@ -2798,7 +2903,7 @@ pub fn image_data_settings_arg(
 pub type ImageDataExportArgs = (
     Option<ColorType>,
     Option<ColorSpace>,
-    Option<Color>,
+    Option<Matte>,
     f32,
     Option<usize>,
     Option<AlphaType>,
@@ -2823,7 +2928,7 @@ pub fn image_data_export_arg(
                 Some(space) => Some(color_space_or_throw(cx, &space)?),
                 None => None,
             };
-            let matte = opt_color_for_key(cx, &obj, "matte");
+            let matte = opt_matte_for_key(cx, &obj, "matte");
             let density = opt_float_for_key(cx, &obj, "density").unwrap_or(1.0);
             let msaa = opt_float_for_key(cx, &obj, "msaa").map(|n| n as usize);
             // `None` rather than a substituted `Unpremul`, for the reason the
@@ -3099,7 +3204,7 @@ pub fn from_color_type(color_type: ColorType) -> String {
 //
 
 use crate::{
-    context::page::ExportOptions,
+    context::page::{ExportOptions, Matte},
     export::{ChromaSampling, ImageFormat},
 };
 
@@ -3131,7 +3236,7 @@ pub fn export_options_arg(
     let quality = float_for_key(cx, &opts, "quality")?;
     let density = float_for_key(cx, &opts, "density")?;
     let jpeg_downsample = bool_for_key(cx, &opts, "downsample")?;
-    let matte = opt_color_for_key(cx, &opts, "matte");
+    let matte = opt_matte_for_key(cx, &opts, "matte");
     let msaa =
         opt_float_for_key(cx, &opts, "msaa").map(|num| num.floor() as usize);
     let color_type = match opt_string_for_key(cx, &opts, "colorType") {
@@ -3576,8 +3681,45 @@ pub fn color_arg(
     idx: usize,
     attr: &str,
 ) -> NeonResult<Color> {
+    parsed_color_arg(cx, idx, attr, css_to_color)
+}
+
+/// [`color_arg`] for per-channel coefficients, clamped rather than
+/// gamut-mapped -- see [`css_to_clamped_color`].
+///
+/// # Errors
+///
+/// As [`color_arg`].
+pub fn clamped_color_arg(
+    cx: &mut FunctionContext,
+    idx: usize,
+    attr: &str,
+) -> NeonResult<Color> {
+    parsed_color_arg(cx, idx, attr, css_to_clamped_color)
+}
+
+/// [`color_arg`] kept in floating point, with the space the colour was named
+/// in, for a Skia API that takes a tagged `Color4f`.
+///
+/// # Errors
+///
+/// As [`color_arg`].
+pub fn color4f_arg(
+    cx: &mut FunctionContext,
+    idx: usize,
+    attr: &str,
+) -> NeonResult<(Color4f, ColorSpace)> {
+    parsed_color_arg(cx, idx, attr, css_to_color4f_in_space)
+}
+
+fn parsed_color_arg<T>(
+    cx: &mut FunctionContext,
+    idx: usize,
+    attr: &str,
+    parse: fn(&str) -> Option<T>,
+) -> NeonResult<T> {
     let name = string_arg(cx, idx, attr)?;
-    match css_to_color(&name) {
+    match parse(&name) {
         Some(color) => Ok(color),
         None => cx.throw_type_error(format!(
             "Could not parse {attr} color \"{name}\""
@@ -3766,6 +3908,115 @@ mod tests {
     /// Set to print each input and what it reads as, one per line, to
     /// standard error.
     const DUMP_VARIABLE: &str = "HEX_AND_NAMED_DUMP";
+
+    /// Display P3 colours as linear-light sRGB, through the tree's own
+    /// matrix, so the inputs are the colours CSS names.
+    fn p3(rgb: [f32; 3]) -> [f32; 3] {
+        apply_matrix(LINEAR_P3_TO_LINEAR_SRGB, rgb.map(srgb_to_linear))
+    }
+
+    #[test]
+    fn a_colour_inside_srgb_is_not_gamut_mapped() {
+        for rgb in [
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [0.2, 0.5, 0.9],
+            [1.0, 0.0, 0.0],
+        ] {
+            assert_eq!(gamut_map_srgb(rgb), rgb, "{rgb:?}");
+        }
+    }
+
+    #[test]
+    fn gamut_mapping_matches_css_color_4s_worked_example() {
+        // CSS Color 4 section 14.1.3 reduces Display P3 yellow's chroma in
+        // OkLCh to the edge of sRGB, `color(srgb 0.99116 0.99733 0.00001)`.
+        // Section 14.2.2's search stops as soon as clipping costs less than
+        // a JND, so it lands within one JND of that edge rather than on it.
+        let mapped = gamut_map_srgb(p3([1.0, 1.0, 0.0]));
+        let edge = [0.99116f32, 0.99733, 0.00001].map(srgb_to_linear);
+        let [l1, a1, b1] = linear_srgb_to_oklab_f64(mapped.map(f64::from));
+        let [l2, a2, b2] = linear_srgb_to_oklab_f64(edge.map(f64::from));
+        let distance =
+            ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt();
+        assert!(distance < GAMUT_MAP_JND, "{mapped:?}, {distance} off");
+    }
+
+    #[test]
+    fn an_eight_bit_colour_maps_only_what_srgb_cannot_hold() {
+        // Inside sRGB the bytes are the ones the CSS named, half steps
+        // rounded as Chrome rounds them; nothing passes through the mapping.
+        assert_eq!(
+            css_to_color("rgb(10.5 20.4 30.6)"),
+            Some(Color::from_argb(255, 11, 20, 31))
+        );
+        assert_eq!(
+            css_to_color("#80808080"),
+            Some(Color::from_argb(128, 128, 128, 128))
+        );
+        // Outside it, the mapped colour rather than the clipped one: P3 red
+        // clips to sRGB red, and maps to a red that keeps its hue.
+        let mapped = css_to_color("color(display-p3 1 0 0)").expect("a colour");
+        let clipped =
+            css_to_clamped_color("color(display-p3 1 0 0)").expect("a colour");
+        assert_eq!(clipped, Color::from_argb(255, 255, 0, 0));
+        let expected = gamut_map_srgb(p3([1.0, 0.0, 0.0])).map(linear_to_srgb);
+        let byte = |v: f32| (v * 255.0).round() as u8;
+        assert_eq!(
+            mapped,
+            Color::from_argb(
+                255,
+                byte(expected[0]),
+                byte(expected[1]),
+                byte(expected[2])
+            )
+        );
+        assert_ne!(mapped, clipped);
+    }
+
+    #[test]
+    fn past_either_end_of_lightness_is_white_or_black() {
+        // Steps 3 and 4 of section 14.2.2.
+        assert_eq!(gamut_map_srgb([2.0, 2.0, 2.0]), [1.0; 3]);
+        assert_eq!(gamut_map_srgb([-0.1, -0.1, -0.1]), [0.0; 3]);
+    }
+
+    /// The JND stop, against an `f64` reference: what comes back is inside
+    /// sRGB, and within one JND of a colour of the origin's own lightness
+    /// and hue -- the point the search reduced chroma to.
+    #[test]
+    fn gamut_mapping_stops_within_a_jnd_of_the_origins_hue() {
+        let oklch = |rgb: [f32; 3]| {
+            let [l, a, b] = linear_srgb_to_oklab_f64(rgb.map(f64::from));
+            (l, a.hypot(b), b.atan2(a))
+        };
+        for origin in [
+            p3([1.0, 0.0, 0.0]),
+            p3([0.0, 1.0, 0.0]),
+            p3([1.0, 0.5, 0.0]),
+            p3([0.0, 0.3, 1.0]),
+        ] {
+            let mapped = gamut_map_srgb(origin);
+            assert!(
+                mapped.iter().all(|c| (0.0..=1.0).contains(c)),
+                "{mapped:?} is inside sRGB"
+            );
+            let (l0, _, h0) = oklch(origin);
+            let (l1, c1, h1) = oklch(mapped);
+            // The colour the search held lightness and hue for, at the
+            // chroma the mapped one has.
+            let held = [l0, c1 * h0.cos(), c1 * h0.sin()];
+            let [lm, am, bm] = [l1, c1 * h1.cos(), c1 * h1.sin()];
+            let distance = ((lm - held[0]).powi(2)
+                + (am - held[1]).powi(2)
+                + (bm - held[2]).powi(2))
+            .sqrt();
+            assert!(
+                distance < GAMUT_MAP_JND,
+                "{origin:?} mapped to {mapped:?}, {distance} off its hue"
+            );
+        }
+    }
 
     #[test]
     fn hex_and_named_colours_read_as_they_did() {

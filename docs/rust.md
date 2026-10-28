@@ -53,7 +53,7 @@ let mut canvas = Canvas::with_options(1920.0, 1080.0, CanvasOptions {
 })?;
 ```
 
-- `color_space` fixes the compositing space. `RgbaLinear` is interpreted in it, so `RgbaLinear::opaque(1.0, 0.0, 0.0)` is Display P3 red on a P3 canvas and sRGB red on an sRGB one. A colour outside the canvas's gamut is clipped as it is drawn, not at the export.
+- `color_space` fixes the compositing space. A colour is converted into it as it is drawn, so `RgbaLinear::opaque(1.0, 0.0, 0.0)` is sRGB red on every canvas, and a colour outside the canvas's gamut is clipped as it is drawn, not at the export.
 - `color_type` selects the format exports and readbacks default to, and -- when it is `F16` or `F32` -- the format the page composites in. Blending then keeps what eight bits would round away: sixty fills at 0.6% alpha land on 0.303 in float against 0.239 at eight bits, where 0.303 is right. Reckon on 1.4x the time and twice the memory for `F16`, 1.5x and four times for `F32`. Every other format composites at N32, since an opaque or narrower one loses more inside the page than it saves.
 - The compositing format follows the _canvas_, never the call: `PixelExportOptions { depth: F32 }` on an eight-bit canvas reads back float pixels holding eight-bit values, rather than quietly recompositing the page.
 - A float canvas renders on the raster backend whatever `CanvasOptions::gpu` says, and `Canvas::engine_kind` reports which one took it. No GPU can currently give that precision: Skia's Metal and Vulkan backends implement no 32-bit float surface, and while both provide `F16`, a GPU quantises the paint colour to eight bits before compositing -- the same sixty layers land on 0.235, further from right than the eight-bit 0.361. Metal and Vulkan return that figure to the digit, which is what makes it Skia's limit rather than a driver's.
@@ -66,9 +66,18 @@ The JavaScript side takes the same two settings as `new Canvas(w, h, { colorSpac
 
 ## Colours
 
-`RgbaLinear` is premultiplied linear light, interpreted in the canvas's own
-space: `RgbaLinear::opaque(1.0, 0.0, 0.0)` is Display P3 red on a P3 canvas and
-sRGB red on an sRGB one.
+`RgbaLinear` is premultiplied linear-light sRGB -- CSS's `srgb-linear`,
+unbounded -- on every canvas and in every reader: a fill, a stroke, a shadow, a
+filter, a gradient stop, a texture, a matte. `RgbaLinear::opaque(1.0, 0.0, 0.0)`
+is sRGB red whatever space the canvas was built in, and a colour outside sRGB
+is reached with components below zero or above one --
+`RgbaLinear::from_css("color(display-p3 1 0 0)")` is Display P3 red. The few
+readers Skia gives only an 8-bit sRGB colour -- the lighting filters' light, a
+text decoration and text shadow, an SVG's `currentColor` -- gamut-map a colour
+outside sRGB into it as CSS Color 4 describes, keeping its hue rather than
+clipping each channel. `ColorFilter::lighting`'s multiply and add are
+per-channel coefficients rather than colours, and are clamped to `0.0..=1.0`
+channel by channel.
 
 For a colour written the way CSS writes it, `Context2D::set_fill_style_css`,
 `set_stroke_style_css` and `set_shadow_color_css` take the notations the
@@ -93,7 +102,7 @@ For building an `RgbaLinear` directly rather than through a paint style:
 - `RgbaLinear::opaque(r, g, b)` and `new_premultiplied(r, g, b, a)` take linear-light components -- the second one already multiplied through by alpha, as the name says.
 - `from_srgb(r, g, b, alpha)` and `from_srgb8(r, g, b, alpha)` take **sRGB** components, as floats and as bytes, and convert. This is the pair to reach for when porting JavaScript: `fillStyle = "#808080"` is `RgbaLinear::from_srgb8(0x80, 0x80, 0x80, 1.0)`, not the same three numbers handed to `opaque`, which would be a different, lighter grey.
 - `from_hex(hex)` parses the CSS notations -- `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, the leading `#` optional -- and returns `Error::InvalidColor` for anything else.
-- `from_css(css)` parses any CSS colour `set_fill_style_css` takes, by the same parser, and returns `None` for anything else, as `Affine::from_css` does for a transform. An sRGB colour comes back exactly as `from_srgb8` builds it. The result is linear sRGB, unclamped, so `"color(display-p3 1 0 0)"` keeps its hue as a red above one and a green and blue below zero -- the frame a drop shadow and a text colour are read in. The lighting filters and `ColorFilter::blend` hand Skia an 8-bit sRGB colour and clip it whatever built it. A fill reads an `RgbaLinear` in the canvas's own space instead, so on a canvas built in another space a CSS colour belongs in `set_fill_style_css`, which keeps the space the string named.
+- `from_css(css)` parses any CSS colour `set_fill_style_css` takes, by the same parser, and returns `None` for anything else, as `Affine::from_css` does for a transform. An sRGB colour comes back exactly as `from_srgb8` builds it. The result is linear sRGB, unclamped, so `"color(display-p3 1 0 0)"` keeps its hue as a red above one and a green and blue below zero, and `set_fill_style(RgbaLinear::from_css(css))` paints what `set_fill_style_css(css)` paints, on any canvas.
 - `with_opacity(opacity)` scales every component, alpha included, so the result stays premultiplied.
 - `fading_out()` returns the colour at zero alpha with its hue intact. `with_opacity(0.0)` multiplies the channels away, which is what premultiplication means and is right wherever a colour is painted -- at zero alpha nothing is drawn, so the hue cannot matter. It matters in one place, a gradient stop, because there the colour is interpolated _toward_ rather than painted: multiplied away, a transparent cream is the same four zeros as CSS's `transparent`, which is a transparent _black_, and the gradient fades toward black instead of toward cream.
 
@@ -263,7 +272,7 @@ A built `Path2D` also answers questions about itself and derives new paths from 
 
 ## Shaders
 
-- `Shader::linear_gradient(start, end, stops, interpolation)` builds a linear gradient. The interpolation argument takes a `GradientColorSpace` -- the eight CSS Color 4 names, `Srgb` (the default, gamma-encoded, what a browser draws) through `Oklch` -- or the pair a `GradientColorSpace::hue(HueMethod::{Shorter, Longer, Increasing, Decreasing})` builds, which selects the direction hue travels in the four cylindrical spaces. `GradientStop { position, color }` carries `RgbaLinear` colours in the canvas's own colour space. Stops must be sorted with positions in `0.0..=1.0`; violations return `Error::InvalidGradient`. A stop that is fully transparent wants `RgbaLinear::fading_out()` rather than `with_opacity(0.0)`, so that it says _which_ colour is disappearing: the second multiplies the hue away and leaves CSS's `transparent`, a transparent black, which the gradient then fades toward. OKLCH interpolation flows through Skia's `OKLCH` color space directly -- no silent fallback to sRGB.
+- `Shader::linear_gradient(start, end, stops, interpolation)` builds a linear gradient. The interpolation argument takes a `GradientColorSpace` -- the eight CSS Color 4 names, `Srgb` (the default, gamma-encoded, what a browser draws) through `Oklch` -- or the pair a `GradientColorSpace::hue(HueMethod::{Shorter, Longer, Increasing, Decreasing})` builds, which selects the direction hue travels in the four cylindrical spaces. `GradientStop { position, color }` carries `RgbaLinear` colours, read as every `RgbaLinear` is. Stops must be sorted with positions in `0.0..=1.0`; violations return `Error::InvalidGradient`. A stop that is fully transparent wants `RgbaLinear::fading_out()` rather than `with_opacity(0.0)`, so that it says _which_ colour is disappearing: the second multiplies the hue away and leaves CSS's `transparent`, a transparent black, which the gradient then fades toward. OKLCH interpolation flows through Skia's `OKLCH` color space directly -- no silent fallback to sRGB.
 - `Shader::radial_gradient(center, radius, stops, interpolation)` is the concentric case, and `two_point_conical_gradient(start, start_radius, end, end_radius, stops, interpolation)` the general one the Canvas API spells `createRadialGradient` -- two circles that need share neither centre nor radius.
 - `Shader::sweep_gradient(center, start_angle, end_angle, stops, interpolation)` is the conic gradient, with both angles in degrees. Naming the end angle is what the JavaScript side reaches through the optional fourth argument to `createConicGradient`: a sweep narrower than a full turn, with the end stops clamped across the rest of the circle.
 - `Shader::fractal_noise(base_frequency_x, base_frequency_y, octaves, seed)` and `turbulence(...)` are Perlin noise generators taking the same arguments, matching the SVG `feTurbulence` primitive's two `type` values. Fractal noise is the smoother of the two; turbulence takes the absolute value at each octave, which is what gives it its creased look. A non-finite or negative frequency returns `Error::FilterCreate`.

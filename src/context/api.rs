@@ -257,7 +257,7 @@ verbs! {
     set_shadowColorText as SetShadowColorText (shadowColor @ text) => |ctx| {
         // A colour, so the same treatment as `fillStyle`: recorded when it is
         // written as a string, and crossing when it is anything else.
-        if let Some(color) = css_to_color(shadowColor) {
+        if let Some(color) = css_to_color4f_in_space(shadowColor) {
             ctx.state.shadow_color = color;
         }
     },
@@ -1008,9 +1008,8 @@ pub fn get_fillStyle(mut cx: FunctionContext) -> JsResult<JsValue> {
 pub fn set_fillStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let arg = cx.argument::<JsValue>(1)?;
-    let cs = this.borrow().canvas_color_space.clone();
 
-    if let Some(dye) = Dye::new(&mut cx, arg, &cs) {
+    if let Some(dye) = Dye::new(&mut cx, arg) {
         this.borrow_mut().state.fill_style = dye;
     }
     Ok(cx.undefined())
@@ -1026,9 +1025,8 @@ pub fn get_strokeStyle(mut cx: FunctionContext) -> JsResult<JsValue> {
 pub fn set_strokeStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let arg = cx.argument::<JsValue>(1)?;
-    let cs = this.borrow().canvas_color_space.clone();
 
-    if let Some(dye) = Dye::new(&mut cx, arg, &cs) {
+    if let Some(dye) = Dye::new(&mut cx, arg) {
         this.borrow_mut().state.stroke_style = dye;
     }
     Ok(cx.undefined())
@@ -1911,14 +1909,15 @@ pub fn get_shadowBlur(mut cx: FunctionContext) -> JsResult<JsNumber> {
 pub fn get_shadowColor(mut cx: FunctionContext) -> JsResult<JsValue> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
-    let shadow_color = this.state.shadow_color;
-    color_to_css(&mut cx, &shadow_color)
+    let (color, space) = &this.state.shadow_color;
+    color4f_to_css(&mut cx, color, Some(space))
 }
 
 pub fn set_shadowColor(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut this = this.borrow_mut();
-    if let Some(color) = opt_color_arg(&mut cx, 1) {
+    let value = cx.argument::<JsValue>(1)?;
+    if let Some(color) = color4f_string_in(&mut cx, value) {
         this.state.shadow_color = color;
     }
     Ok(cx.undefined())

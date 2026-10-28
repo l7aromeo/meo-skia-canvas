@@ -2436,24 +2436,23 @@ describe("Context2D", () => {
       );
     });
 
-    test("color(rec2020 ...) converts through Rec. 2020's own curve", () => {
-      // Skia has no transfer function for Rec. 2020: `skia_safe`'s CICP
-      // transfer functions are reference EOTFs, and `REC2020_10BIT` and
-      // `REC2020_12BIT` are both aliases of `REC709`, which is a pure 2.4
-      // gamma. Tagging the paint therefore decoded the components with the
-      // wrong curve. 0,120,168 is what the CSS Color 4 conversion matrices
-      // give for these components, and what Chrome paints.
+    test("color(rec2020 ...) takes CSS Color 4's 2.4 gamma", () => {
+      // CSS Color 4 section 10.8 defines `rec2020`'s transfer function as
+      // "gamma 2.40, from [REC_BT.1886]". Through its sample code these
+      // components are 0, 97, 153 in sRGB, and a grey of 0.2 is 40. Chrome
+      // 152 paints 0, 120, 168 and 67, by BT.2020's inverse OETF, which the
+      // standard used until 2025 -- docs/browser-differences.md has it.
       let ctx2 = new Canvas(4, 4).getContext("2d");
       ctx2.fillStyle = "color(rec2020 0.2 0.4 0.6)";
       ctx2.fillRect(0, 0, 4, 4);
       assert.deepEqual(
         Array.from(ctx2.getImageData(1, 1, 1, 1).data).slice(0, 3),
-        [0, 120, 168],
+        [0, 97, 153],
       );
 
       // Every surface has to answer alike. A grey isolates the transfer
-      // function from the primaries: the wrong curve gave 40 where 67 is
-      // right, and each of these reached the paint by a different route.
+      // function from the primaries, and each of these reaches the paint by
+      // a different route.
       let grey = "color(rec2020 0.2 0.2 0.2)";
       let sample = (draw) => {
         let c = new Canvas(4, 4).getContext("2d");
@@ -2478,7 +2477,7 @@ describe("Context2D", () => {
         c.fillStyle = "#000";
         c.fillRect(-8, 0, 4, 4);
       });
-      assert.deepEqual(byFill, [67, 67, 67], "through a fill");
+      assert.deepEqual(byFill, [40, 40, 40], "through a fill");
       assert.deepEqual(byStop, byFill, "through a gradient stop");
       assert.deepEqual(byShadow, byFill, "through a shadow");
     });
@@ -4874,7 +4873,8 @@ describe("gradient interpolation", () => {
     // than trust them.
     "a98-rgb": [125, 0, 129, 255],
     "prophoto-rgb": [183, 4, 156, 255],
-    rec2020: [159, 19, 147, 255],
+    // CSS Color 4's 2.4 gamma; BT.2020's piecewise curve gives 159,19,147.
+    rec2020: [157, 18, 143, 255],
     lab: [190, 0, 135, 255],
     oklab: [138, 82, 161, 255],
     xyz: [184, 1, 187, 255],
@@ -5516,14 +5516,22 @@ describe("a context and its canvas", () => {
 
 // A canvas rasterizes text with Chrome's text contrast and gamma for the
 // platform, Chromium's `SK_GAMMA_CONTRAST` and `SK_GAMMA_EXPONENT` in its
-// `skia/BUILD.gn`. Chrome 156 on macOS, CPU canvas, black on transparent,
-// drew "Hamburgefonstiv quick brown" at (5, 90) on 1400 by 120 in 48px
-// Oswald to the buffer whose FNV-1a is below, and in 13px Oswald to 155,310
-// of alpha. Ours at 13px differs in one glyph: the `g` sits at 42.375, where
-// Chrome sums the same advances to 42.37495, and Skia's quarter-pixel
-// subpixel buckets part at .375, so the two draw it from neighbouring
-// buckets -- 58 pixels, 15 of alpha. Helvetica at 13px and 48px matched
-// pixel for pixel as well, but is a system font and is not pinned.
+// `skia/BUILD.gn`, and hinted, which on macOS is the outline CoreGraphics
+// dilates. Chrome 156 on macOS 27, CPU canvas, black on transparent, drew
+// "Hamburgefonstiv quick brown" at (5, 90) on 1400 by 120 in 48px Oswald to
+// the buffer whose FNV-1a is below, and in 13px Oswald to 155,310 of alpha.
+// Ours at 13px differs in one glyph: the `g` sits at 42.375, where Chrome
+// sums the same advances to 42.37495, and Skia's quarter-pixel subpixel
+// buckets part at .375, so the two draw it from neighbouring buckets -- 58
+// pixels, 15 of alpha. Helvetica at 13px and 48px matched pixel for pixel
+// as well, but is a system font and is not pinned.
+//
+// Those two are the macOS they were measured on: CoreText rasterizes the
+// same glyph a little differently from one macOS to the next, and macOS 15
+// draws the 13px line to 155,450, another buffer at 48px. So they run on
+// macOS 27 alone, and on every macOS what the defaults do is held instead:
+// the ink within 1% of Chrome's, where a gamma of 1.4 inks 15% more and
+// unhinted outlines 36% less, and each of those two on its own side of it.
 describe("text is drawn as Chrome draws it", () => {
   const OSWALD = "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
     TEXT = "Hamburgefonstiv quick brown",
@@ -5534,6 +5542,23 @@ describe("text is drawn as Chrome draws it", () => {
       : process.platform === "win32"
         ? [1, 0]
         : [0.2, 1.2];
+  // The macOS major version Chrome's buffers were measured on.
+  const MEASURED_ON = 27;
+  const macMajor = mac
+    ? Number(
+        require("child_process")
+          .execFileSync("sw_vers", ["-productVersion"])
+          .toString()
+          .split(".")[0],
+      )
+    : null;
+  const measuredHere =
+    macMajor === MEASURED_ON ||
+    (mac ? `measured on macOS ${MEASURED_ON}` : "measured on macOS");
+  // Chrome's 13px alpha, and how far another macOS's CoreText may stray
+  // from it.
+  const CHROME_13PX_INK = 155310,
+    ACROSS_MACOS = 0.01;
 
   // FNV-1a of a buffer, as the Chrome measurement computed it.
   const fnv = (data) => {
@@ -5541,14 +5566,20 @@ describe("text is drawn as Chrome draws it", () => {
     for (const byte of data) h = Math.imul(h ^ byte, 0x01000193) >>> 0;
     return h.toString(16);
   };
-  const drawn = (size) => {
+  const drawn = (size, options = {}, hinted = true) => {
     FontLibrary.use("ChromeOswald", [OSWALD]);
-    const canvas = new Canvas(1400, 120);
+    const canvas = new Canvas(1400, 120, options);
     canvas.gpu = false;
     const ctx = canvas.getContext("2d");
     ctx.font = `${size}px ChromeOswald`;
+    ctx.fontHinting = hinted;
     ctx.fillText(TEXT, 5, 90);
     return ctx.getImageData(0, 0, 1400, 120).data;
+  };
+  const ink = (data) => {
+    let sum = 0;
+    for (let i = 3; i < data.length; i += 4) sum += data[i];
+    return sum;
   };
 
   test("a canvas takes Chromium's text contrast and gamma by default", () => {
@@ -5559,7 +5590,7 @@ describe("text is drawn as Chrome draws it", () => {
 
   test(
     "48px Oswald is Chrome's, pixel for pixel",
-    { skip: !mac && "measured on macOS" },
+    { skip: measuredHere === true ? false : measuredHere },
     () => {
       assert.equal(fnv(drawn(48)), "3c2114f5");
     },
@@ -5567,12 +5598,24 @@ describe("text is drawn as Chrome draws it", () => {
 
   test(
     "13px Oswald is Chrome's but for one glyph's subpixel bucket",
-    { skip: !mac && "measured on macOS" },
+    { skip: measuredHere === true ? false : measuredHere },
     () => {
-      const data = drawn(13);
-      let ink = 0;
-      for (let i = 3; i < data.length; i += 4) ink += data[i];
-      assert.ok(Math.abs(ink - 155310) <= 15, `${ink}`);
+      const at = ink(drawn(13));
+      assert.ok(Math.abs(at - CHROME_13PX_INK) <= 15, `${at}`);
+    },
+  );
+
+  test(
+    "13px Oswald inks as Chrome's on any macOS, hinted and at its gamma",
+    { skip: !mac && "CoreText's dilation is macOS's" },
+    () => {
+      const at = ink(drawn(13)),
+        band = CHROME_13PX_INK * ACROSS_MACOS;
+      assert.ok(Math.abs(at - CHROME_13PX_INK) <= band, `${at}`);
+      const unhinted = ink(drawn(13, {}, false)),
+        oldGamma = ink(drawn(13, { textGamma: 1.4, textContrast: 0 }));
+      assert.ok(unhinted < CHROME_13PX_INK - band, `unhinted ${unhinted}`);
+      assert.ok(oldGamma > CHROME_13PX_INK + band, `gamma 1.4 ${oldGamma}`);
     },
   );
 });

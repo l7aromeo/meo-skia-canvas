@@ -2213,8 +2213,8 @@ export interface CanvasGradient {
    * v17 and `instanceof Error` is true for it, so nothing downstream has to
    * learn a new shape.
    *
-   * The color may also be a `[r, g, b, a]` array of premultiplied
-   * linear-light floats, which no browser accepts.
+   * The color may also be a `[r, g, b, a]` array of sRGB components, which
+   * no browser accepts -- see {@link Color4fInput}.
    *
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasGradient/addColorStop)
    */
@@ -3889,10 +3889,9 @@ export interface CanvasFillStrokeStyles {
    *   `"currentcolor"` is opaque black, as on a canvas outside a document,
    *   comments are dropped, and whitespace is CSS's: space, tab, line feed,
    *   carriage return and form feed, so a U+00A0 makes a string no colour.
-   * - A **`[r, g, b, a]` array** carries premultiplied **linear-light** floats
-   *   interpreted in the surface's working color space; pass these to avoid
-   *   the lossy sRGB-encoding round-trip used by the CSS form (the shape
-   *   mirrors `TextStyleInput.color` and CanvasKit's `Paint.setColor`).
+   * - A **`[r, g, b, a]` array** carries sRGB components, the same color on
+   *   every canvas -- see {@link Color4fInput} (the shape mirrors
+   *   `TextStyleInput.color` and CanvasKit's `Paint.setColor4f`).
    *
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/fillStyle)
    */
@@ -5284,16 +5283,20 @@ export type TextDecorationStyleValue =
 /**
  * Color input shared across the paint, gradient-stop, and text APIs.
  *
- * - A **CSS string** (`"#ff8800"`, `"rgb(...)"`, named colors): interpreted
- *   as sRGB-gamma; alpha taken from the CSS string when present (e.g.
- *   `"#ff8800ff"` or `"rgba(...)"`).
- * - A `[r, g, b, a]` **array** of premultiplied, **linear-light**
- *   sRGB-primaries floats (CanvasKit's `Paint.setColor4f` convention).
- *   Skia converts the linear value to the destination surface's working
- *   color space at paint time, so HDR (`>1.0`) and out-of-gamut values
- *   survive the round trip. Use this form when you have already done a
- *   perceptual-uniform conversion (e.g. OkLCH -> linear sRGB) and want
- *   to avoid the alpha-dropping `oklchToSrgbHex`-style shortcut.
+ * - A **CSS string** (`"#ff8800"`, `"oklch(70% 0.2 140)"`,
+ *   `"color(display-p3 1 0 0)"`, named colors), in the space it names.
+ * - A `[r, g, b, a]` **array** of gamma-encoded **sRGB** components from
+ *   `0` to `1` with straight (not premultiplied) alpha: `[r, g, b, a]` is
+ *   `color(srgb r g b / a)`, CanvasKit's `Color4f` convention. It is the
+ *   same color on every canvas, whatever space the canvas was built in. A
+ *   component below zero or above one reaches a color outside sRGB, as it
+ *   does in `color(srgb ...)`, which a wider canvas shows and a narrower
+ *   one clips. For a color in another space, write the string:
+ *   `color(display-p3 1 0 0)`, `color(srgb-linear 0.2 0.5 0.8)`.
+ *
+ * Text decoration and shadow colors are 8-bit sRGB in Skia, so a color
+ * outside sRGB, in either form, is gamut-mapped into it as CSS Color 4
+ * describes, keeping its hue.
  *
  * Accepted by:
  * - `CanvasRenderingContext2D.fillStyle` / `strokeStyle`
