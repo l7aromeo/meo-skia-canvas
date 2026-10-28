@@ -31,6 +31,7 @@ use crate::{
     gpu::RenderingEngine,
     gradient::{BoxedCanvasGradient, CanvasGradient},
     node::{
+        decorate::{self, Layer},
         filter::{
             Coverage, Filter, SamplingFilter, SamplingQuality, ScalingOperation,
         },
@@ -41,7 +42,7 @@ use crate::{
     },
     typography::{
         Baseline, DecorationStyle, FontSpec, Painter, PendingInk, Spacing,
-        TextExtents, TypesetInputs, Typesetter,
+        TextExtents, TypesetInputs, Typesetter, glyph_runs,
     },
     utils::*,
 };
@@ -1680,12 +1681,56 @@ impl Context2D {
                 let painter = layout.painter();
                 #[cfg(test)]
                 let painter = PAINTER_OVERRIDE.get().unwrap_or(painter);
-                if painter == Painter::Runs {
-                    typesetter.decorate(&mut layout, paint);
-                }
-                let mut draw = |canvas: &SkCanvas, at: Point| match painter {
-                    Painter::Paragraph => layout.paragraph.paint(canvas, at),
-                    Painter::Runs => layout.paint(canvas, at, paint),
+                // The run is one decorating box: every run of it is the
+                // box's, whatever face draws it.
+                let decoration =
+                    typesetter.decoration(self.state.global_alpha as f32);
+                let runs = match &decoration {
+                    Some(_) => glyph_runs(&mut layout.paragraph),
+                    None => Vec::new(),
+                };
+                let spans = decorate::spans(&runs, |_| Some(0));
+                let boxes = decoration.as_slice();
+                let lines = runs.last().map_or(0, |run| run.line + 1);
+                let mut draw = |canvas: &SkCanvas, at: Point| {
+                    if decoration.is_none() {
+                        match painter {
+                            Painter::Paragraph => {
+                                layout.paragraph.paint(canvas, at)
+                            }
+                            Painter::Runs => layout.paint(canvas, at, paint),
+                        }
+                        return;
+                    }
+                    // A line at a time, in the order CSS 2.1 Appendix E
+                    // paints a line box: underlines and overlines beneath
+                    // the glyphs, line-through over them -- CSS Text
+                    // Decoration 4, section 5.1 -- so that a wrapped line's
+                    // underline lies over the line above's descenders, as in
+                    // Chrome. The glyph runs are drawn by the run painter,
+                    // which draws what `Paragraph::paint` draws.
+                    for line in 0..lines {
+                        let spans = decorate::on_line(&spans, line);
+                        let start = runs.partition_point(|run| run.line < line);
+                        let end = runs.partition_point(|run| run.line <= line);
+                        decorate::paint(
+                            canvas,
+                            spans,
+                            boxes,
+                            at,
+                            Layer::Beneath,
+                            paint,
+                        );
+                        layout.paint_runs(canvas, at, paint, &runs[start..end]);
+                        decorate::paint(
+                            canvas,
+                            spans,
+                            boxes,
+                            at,
+                            Layer::Over,
+                            paint,
+                        );
+                    }
                 };
                 match condensation {
                     // Chrome condenses with a plain anisotropic transform

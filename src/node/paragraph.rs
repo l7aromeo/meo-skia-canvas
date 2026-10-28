@@ -20,7 +20,7 @@ use crate::{
     font_library::{FontLibrary, instance_coordinates},
     node::{
         oblique::{
-            ParagraphRecipe, Sheared, add_slnt, match_oblique, set_coordinates,
+            ParagraphRecipe, Passes, add_slnt, match_oblique, set_coordinates,
             without_paragraph_cache,
         },
         typography::with_oblique_slnt,
@@ -57,8 +57,9 @@ pub type BoxedParagraphBuilder = JsBox<RefCell<ParagraphBuilderWrap>>;
 
 pub struct ParagraphWrap {
     pub paragraph: SkParagraph,
-    /// What draws the paragraph's oblique ranges, where it has any.
-    pub sheared: Option<Sheared>,
+    /// What draws the paragraph's oblique ranges and its decorations,
+    /// where it has any.
+    pub passes: Option<Passes>,
     /// The collection whose paragraph cache a layout goes without -- see
     /// `oblique::without_paragraph_cache`.
     pub uncached: Option<FontCollection>,
@@ -824,12 +825,14 @@ fn parse_text_style<'a>(
     {
         decoration_color = Some(color4f_to_skia_color(color4f, &cs));
     }
-    // Fall back to the text color, as CSS does and as the native TextStyle
-    // documents. Skia defaults it to transparent, so leaving it unset drew an
-    // invisible decoration unless the caller also passed a decorationColor.
-    if let Some(color) = decoration_color.or(text_color) {
-        style.set_decoration_color(color);
-    }
+    // Fall back to the text color, as CSS's `currentcolor` does and as the
+    // native TextStyle documents, and to the style's own colour where none
+    // was named at all, which is the black the text is drawn in. Skia
+    // defaults the decoration's colour to transparent, so a line left at
+    // that default is invisible.
+    style.set_decoration_color(
+        decoration_color.or(text_color).unwrap_or(style.color()),
+    );
 
     // decorationThickness
     if let Some(dt) = float_option(cx, obj, prefix, "decorationThickness")? {
@@ -1171,9 +1174,12 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
     // The matched face is for a caller deciding what Skia may synthesise;
     // a paragraph built here carries its own text style and does not.
     // Hinted, as every paragraph is drawn -- see `ParagraphRecipe::new`.
-    let (mut collection, _) = FontLibrary::with_shared(|lib| {
-        lib.set_hinting(true)
-            .fonts_for_style(&text_style, &instanced)
+    let ((mut collection, _), epoch) = FontLibrary::with_shared(|lib| {
+        (
+            lib.set_hinting(true)
+                .fonts_for_style(&text_style, &instanced),
+            lib.epoch(),
+        )
     });
     let base_oblique = asked.and_then(|degrees| {
         match_oblique(&mut text_style, &mut collection, degrees)
@@ -1193,6 +1199,7 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
             para_style,
             base_oblique,
             collection.clone(),
+            Some(epoch),
         )),
         collection,
         variations,
@@ -1328,10 +1335,10 @@ pub fn build(mut cx: FunctionContext) -> JsResult<BoxedParagraph> {
     match this.recipe.take() {
         Some(recipe) => {
             let uncached = recipe.uncached();
-            let (paragraph, sheared) = recipe.build();
+            let (paragraph, passes) = recipe.build();
             Ok(cx.boxed(RefCell::new(ParagraphWrap {
                 paragraph,
-                sheared,
+                passes,
                 uncached,
             })))
         }
@@ -1352,13 +1359,13 @@ pub fn layout(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let mut this = this.borrow_mut();
     let ParagraphWrap {
         paragraph,
-        sheared,
+        passes,
         uncached,
     } = &mut *this;
     without_paragraph_cache(uncached.as_ref(), || {
         paragraph.layout(width);
-        if let Some(sheared) = sheared {
-            sheared.lay_out(paragraph, width);
+        if let Some(passes) = passes {
+            passes.lay_out(paragraph, width);
         }
     });
     Ok(cx.undefined())
@@ -1605,8 +1612,8 @@ pub fn drawParagraph(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // to be applied around it or they are silently dropped.
     ctx.with_composited_canvas(|canvas| {
         let at = Point::new(x, y);
-        match &para.sheared {
-            Some(sheared) => sheared.paint(&para.paragraph, canvas, at),
+        match &para.passes {
+            Some(passes) => passes.paint(&para.paragraph, canvas, at),
             None => para.paragraph.paint(canvas, at),
         }
     });

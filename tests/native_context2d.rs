@@ -11749,8 +11749,8 @@ fn a_css_decoration_reaches_the_draw_and_reads_back() {
             .expect("raw export");
         // Count opaque pixels just below the baseline. Measured rather
         // than guessed: at 28px with the baseline at y=30 the glyphs of
-        // "mmm" end on row 29 and the underline lands on 30 through 32, so
-        // this band holds decoration ink and nothing else.
+        // "mmm" end on row 29 and the underline lands on 32 and 33, so this
+        // band holds decoration ink and nothing else.
         (30..34)
             .flat_map(|y| (0..120).map(move |x| (y * 120 + x) * 4 + 3))
             .filter(|at| raw[*at] > 0)
@@ -12939,6 +12939,206 @@ fn max_width_condenses_the_run_it_cannot_fit() {
     assert_eq!(thin.height(), wide.height(), "and keeps its height");
 }
 
+/// The decoration metrics a font file states, in font units, read from its
+/// own tables: `post` for the underline (its top and thickness), `OS/2` for
+/// the strikeout (the top of its stroke, positive above the baseline, and
+/// its thickness), and `hhea` for the ascent an overline stands on.
+struct DecorationTables {
+    upm: f32,
+    underline_position: f32,
+    underline_thickness: f32,
+    strikeout_position: f32,
+    strikeout_size: f32,
+    ascender: f32,
+}
+
+impl DecorationTables {
+    fn read(path: &str) -> Self {
+        let data = std::fs::read(path).expect("a bundled font");
+        let u16_at = |at: usize| u16::from_be_bytes([data[at], data[at + 1]]);
+        let i16_at = |at: usize| i16::from_be_bytes([data[at], data[at + 1]]);
+        let u32_at = |at: usize| {
+            u32::from_be_bytes([
+                data[at],
+                data[at + 1],
+                data[at + 2],
+                data[at + 3],
+            ])
+        };
+        let table = |tag: &[u8; 4]| {
+            (0..u16_at(4) as usize)
+                .map(|i| 12 + 16 * i)
+                .find(|&at| &data[at..at + 4] == tag)
+                .map(|at| u32_at(at + 8) as usize)
+                .expect("the table is present")
+        };
+        let (head, post, os2, hhea) = (
+            table(b"head"),
+            table(b"post"),
+            table(b"OS/2"),
+            table(b"hhea"),
+        );
+        Self {
+            upm: f32::from(u16_at(head + 18)),
+            underline_position: f32::from(i16_at(post + 8)),
+            underline_thickness: f32::from(i16_at(post + 10)),
+            strikeout_size: f32::from(i16_at(os2 + 26)),
+            strikeout_position: f32::from(i16_at(os2 + 28)),
+            ascender: f32::from(i16_at(hhea + 4)),
+        }
+    }
+}
+
+/// Times the size a decoration is drawn at, so a line's edges read to a
+/// quarter pixel: Skia's antialiasing resolves an edge to a quarter of a
+/// device pixel, which at 1x hides a 24px line's misplacement.
+const DECORATION_SCALE: f32 = 4.0;
+
+/// How far a drawn line may sit from where its font puts it, in pixels: an
+/// edge reads back within 0.03px at [`DECORATION_SCALE`], and the baseline,
+/// read from a glyph drawn on a whole device pixel, within 0.125px. The
+/// misplacement guarded against is half a line's thickness.
+const DECORATION_EDGE: f32 = 0.2;
+
+/// The vertical spans of ink in device column `x` of `ctx`, as [top,
+/// bottom] in user pixels, a partly covered row counting for its part.
+fn ink_spans(ctx: &mut Context2D, x: f32, height: f32) -> Vec<(f32, f32)> {
+    let column = ctx
+        .get_image_data((x * DECORATION_SCALE).floor(), 0.0, 1.0, height)
+        .expect("readback");
+    let cover = |y: usize| f32::from(column.pixels()[y * 4 + 3]) / 255.0;
+    let rows = height as usize;
+    let mut spans = Vec::new();
+    let mut start = None;
+    for y in 0..=rows {
+        let c = if y < rows { cover(y) } else { 0.0 };
+        match (c > 0.0, start) {
+            (true, None) => start = Some(y),
+            (false, Some(first)) => {
+                spans.push((
+                    (first as f32 + 1.0 - cover(first)) / DECORATION_SCALE,
+                    ((y - 1) as f32 + cover(y - 1)) / DECORATION_SCALE,
+                ));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    spans
+}
+
+/// The baseline glyphs stand on in `ctx`, from the foot of the tallest span
+/// of ink between `from` and `to`: a stem stands on it. Read rather than
+/// taken from the `y` given, because the baseline is drawn on a whole pixel
+/// of the paragraph's own, up to half a pixel from it.
+fn baseline_of(ctx: &mut Context2D, from: f32, to: f32, height: f32) -> f32 {
+    let steps = ((to - from) * DECORATION_SCALE) as usize;
+    (0..steps)
+        .map(|step| from + step as f32 / DECORATION_SCALE)
+        .flat_map(|x| ink_spans(ctx, x, height))
+        .max_by(|a, b| (a.1 - a.0).total_cmp(&(b.1 - b.0)))
+        .expect("the glyph has ink")
+        .1
+}
+
+/// Each line where the font's tables put it: an underline hanging from the
+/// `post` top and growing down, a line-through the `OS/2` stroke, and an
+/// overline standing on the ascent and growing up -- CSS Text Decoration
+/// 4, section 2.8.1, "extending its thickness in the positive direction
+/// only". Read in the gap of a run of spaces, where no glyph is.
+#[test]
+fn a_decoration_sits_where_its_font_says() {
+    const SIZE: f32 = 96.0;
+    const BASELINE: f32 = 200.0;
+    let family = oswald();
+    let t = DecorationTables::read(
+        "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    );
+    let k = SIZE / t.upm;
+    // Each in pixels down from the baseline: (top, bottom) expected.
+    let cases = [
+        (
+            "underline",
+            -t.underline_position * k,
+            (-t.underline_position + t.underline_thickness) * k,
+        ),
+        (
+            "line-through",
+            -t.strikeout_position * k,
+            (-t.strikeout_position + t.strikeout_size) * k,
+        ),
+        (
+            "overline",
+            (-t.ascender - t.underline_thickness) * k,
+            -t.ascender * k,
+        ),
+    ];
+    for (line, top, bottom) in cases {
+        let mut canvas =
+            Canvas::new(900.0 * DECORATION_SCALE, 400.0 * DECORATION_SCALE);
+        let ctx = canvas.context();
+        ctx.scale(DECORATION_SCALE, DECORATION_SCALE);
+        ctx.set_font(&Font::new(family, SIZE));
+        ctx.set_text_decoration_css(line)
+            .expect("the decoration parses");
+        let text = "n      n";
+        let width = ctx.measure_text(text, None).width;
+        let first = ctx.measure_text("n", None).width;
+        ctx.fill_text(text, 10.0, BASELINE, None);
+        let height = 400.0 * DECORATION_SCALE;
+        let baseline = baseline_of(ctx, 10.0, 10.0 + first, height);
+        let spans = ink_spans(ctx, 10.0 + width / 2.0, height);
+        assert_eq!(spans.len(), 1, "{line}: {spans:?}");
+        let (drawn_top, drawn_bottom) = spans[0];
+        assert!(
+            (drawn_top - baseline - top).abs() <= DECORATION_EDGE
+                && (drawn_bottom - baseline - bottom).abs() <= DECORATION_EDGE,
+            "{line}: {:.3}..{:.3} below the baseline, the font says \
+             {top:.3}..{bottom:.3}",
+            drawn_top - baseline,
+            drawn_bottom - baseline,
+        );
+    }
+}
+
+/// The Paragraph API draws the same line from the same table. The
+/// baseline is read from the `H` beside the spaces, whose flat foot
+/// stands on it.
+#[test]
+fn a_paragraphs_underline_hangs_from_the_post_tables_top() {
+    const SIZE: f32 = 96.0;
+    let t = DecorationTables::read(OSWALD_TTF);
+    let k = SIZE / t.upm;
+    let engine = oswald_engine();
+    let style = TextStyle {
+        font_families: vec![OSWALD_PARAGRAPH.into()],
+        font_size: SIZE,
+        decoration: TextDecoration::underline(),
+        ..TextStyle::default()
+    };
+    let laid_out = engine.layout_text("H      H", &style, f32::MAX);
+    let mut canvas =
+        Canvas::new(900.0 * DECORATION_SCALE, 300.0 * DECORATION_SCALE);
+    let ctx = canvas.context();
+    ctx.scale(DECORATION_SCALE, DECORATION_SCALE);
+    ctx.draw_paragraph(&laid_out, 20.0, 20.0);
+    let height = 300.0 * DECORATION_SCALE;
+    let baseline = baseline_of(ctx, 20.0, 60.0, height);
+    let gap =
+        ink_spans(ctx, 20.0 + laid_out.max_intrinsic_width() / 2.0, height);
+    assert_eq!(gap.len(), 1, "{gap:?}");
+    let (top, bottom) = gap[0];
+    assert!(
+        (top - baseline + t.underline_position * k).abs() <= DECORATION_EDGE
+            && (bottom - top - t.underline_thickness * k).abs()
+                <= DECORATION_EDGE,
+        "{:.3}..{:.3} below the baseline, the font says {:.3}..{:.3}",
+        top - baseline,
+        bottom - baseline,
+        -t.underline_position * k,
+        (-t.underline_position + t.underline_thickness) * k,
+    );
+}
 /// The baseline of "H x" in 48px Oswald at a line height of 2, laid out on
 /// `engine`, its leading split half and half where `half_leading` says.
 fn half_leading_baseline(engine: &TextEngine, half_leading: bool) -> f32 {

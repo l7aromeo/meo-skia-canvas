@@ -27,6 +27,7 @@ use crate::{
     },
     image::x_height_ratio,
     memory::note_font_use,
+    node::decorate,
     typography::{
         FontSpec, forget_families, forget_kept_paragraphs, from_slant,
         from_width, typeface_details, typeface_wght_range,
@@ -1682,6 +1683,7 @@ impl FontLibrary {
         self.epoch = Rc::new(FontEpoch {
             fonts: self.fonts.clone(),
         });
+        decorate::forget();
         self.collections = [None, None];
         self.collection_parts = None;
         self.collection_cache.clear();
@@ -1742,7 +1744,10 @@ impl FontLibrary {
     /// since they hold ids and bounds rather than faces, and come to about
     /// 100 KB at most. The matches and names remembered per family list go,
     /// as answers that are cheap to work out again and only worth keeping
-    /// while text is being laid out.
+    /// while text is being laid out. So do the decorations' kept answers,
+    /// through [`decorate::forget`]: each face's lines and each thickness's
+    /// stroked wave chunk, which are rebuilt on the next decoration that
+    /// asks.
     #[cfg(any(test, feature = "node-addon"))]
     pub(crate) fn release_caches(&mut self) {
         self.clear_collection_caches();
@@ -1750,6 +1755,7 @@ impl FontLibrary {
         self.matches.clear();
         self.engine_names.clear();
         forget_kept_paragraphs();
+        decorate::forget();
     }
 
     /// [`release_caches`](Self::release_caches) on this thread's library,

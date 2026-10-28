@@ -191,6 +191,104 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   fixed skew for the angle asked for. Chrome's fixed skew is also not 14deg:
   a quarter is `atan(1/4)`, 14.036deg.
 
+- _Text decorations sit where the font's tables put them, and a line-through
+  follows the `OS/2` stroke where Chrome does not._ HTML gives a canvas no
+  decorations, so the comparison is with CSS text in Chrome 153, `from-font`
+  and skip-ink `none`. An underline's top is `post.underlinePosition`, "the
+  top of the underline", growing down, which is CSS Text Decoration 4
+  section 2.8.1's "extending its thickness in the positive direction only";
+  an overline stands on the ascent and grows up. The ascent is the one Skia
+  reports for the face: on FreeType the `OS/2` typographic ascender where
+  the face sets `USE_TYPO_METRICS` and `hhea`'s otherwise, on macOS
+  `CTFontGetAscent`, and on Windows DirectWrite's `DWRITE_FONT_METRICS`.
+  Oswald, measured here, sets the flag and gives both tables the same
+  ascender, so every platform agrees on it. Chrome agrees on
+  both, to its whole-pixel snapping: 96px Oswald underlines rows 10 to 14
+  below the baseline against a table top of 9.6 and a thickness of 4.8. A
+  line-through is the `OS/2` strikeout stroke, `yStrikeoutPosition` being
+  "the top of the strikeout stroke". Chrome draws it about a third of the
+  ascent up whatever the table says: 96px Oswald, whose stroke is 33.3 to
+  28.5px above the baseline, crosses at 41 to 37, and 96px DejaVu Sans,
+  24.8 to 20.1, at 32 to 28. A thickness other than the font's grows the
+  stroke about its centre, which Chrome does about its own: Oswald at 1px
+  and 8px centres on 38.5 and 38. `node::decorate` places the lines.
+
+  One position and thickness for a box, from its first available font, as
+  section 2.9 asks; the first available font is CSS Fonts 4's, "the first
+  font for which the character U+0020 (space) is not excluded by a
+  unicode-range", and nothing here has a `unicode-range`, so it is the
+  first family there is, whether or not it has a space. Chrome agrees: with
+  a face holding only `H`, whose underline is 18.5 to 25.4px down at 96px,
+  first and Oswald second, Chrome underlines Oswald's spaces on rows 19 to
+  24, the first face's, and Oswald alone on rows 10 to 13. Skia's own
+  decorations took each run's font, so a glyph from a fallback face moved
+  the line.
+
+  Skip-ink is `none`: a line runs through descenders, where Chrome's CSS
+  default, `auto`, breaks it around them.
+
+- _A double line's gap is its thickness, where Chrome's is one pixel._ The
+  lines are `[top, top + t]` and `[top + 2t, top + 3t]`, the second further
+  out the way the line grows, and for a line-through below the first. Chrome
+  153 leaves a fixed 1px: a 4px double underline on 96px Oswald covers 10 to
+  14 and 15 to 19 below the baseline, an 8px one 10 to 18 and 19 to 27. A
+  fixed pixel does not scale with the text or a transform, and at 8px two
+  lines one pixel apart read as one. Dotted and dashed match Chrome's
+  pattern: a dot `t` long and a gap of `t`, a dash `2t` and a gap of `t`,
+  from the box's left edge.
+
+- _A text shadow stays beneath every glyph it reaches -- its own span's,
+  the spans before it on its line, and the lines above -- where Chrome paints
+  a later span's or line's shadow over them._ CSS Text Decoration 3 section 4
+  puts an element's shadow "at a stack level between the element's border
+  and/or background (if present) and the elements text and text
+  decoration", says shadows "may thus overlay each other, but they never
+  overlay the text itself", and adds "UAs should avoid painting text shadows
+  over text in adjacent elements belonging to the same stack level and
+  stacking context." It calls the exact stacking UA-defined, but its
+  preference is plain, so a `Paragraph` paints every line's shadows before
+  any line's glyphs. Chrome does not, on a line or across lines:
+  - Chrome 152, `H<span style="text-shadow:-200px 0 red">H</span>` at 400px
+    Helvetica: the second H's shadow covers the first H's right stem, its
+    crossbar red across the black.
+  - Chrome 156, "HHH HHH" in 48px Oswald wrapped onto two lines with a red
+    shadow cast up as far as the lines are apart: every black pixel of the
+    first line is under the second line's shadow.
+
+  Here the solid pixels of those glyphs are drawn as they are with no shadow
+  at all. Within one span the order is section 5.1's, bottommost first:
+  shadows, underlines and overlines, glyphs, line-through. The lines and
+  glyphs are still painted a line box at a time, as CSS 2.1 Appendix E
+  paints them, so a wrapped line's overline lies over the descenders of the
+  line above, as in Chrome; only the shadows are taken out of that order.
+  Pinned in tests/suite/paragraph.test.js, "a text shadow's stack level" and
+  "a wrapped line's shadow".
+
+- _A wavy line keeps Chrome's proportions without its pixel constants, and
+  hangs from the font's top._ Chrome 153's wave on a 96px Oswald underline,
+  read at four times the size in quarter pixels -- the period from the
+  centreline's autocorrelation, the swing its range, the band the extreme
+  inked rows below the baseline:
+
+  | t   | period | swing  | band          | band height |
+  | --- | ------ | ------ | ------------- | ----------- |
+  | 2   | 8.747  | 3.585  | 8.50 to 14.25 | 5.75        |
+  | 4   | 16.751 | 7.105  | 7.75 to 19.00 | 11.25       |
+  | 8   | 32.747 | 14.079 | 6.25 to 28.50 | 22.25       |
+  | 16  | 64.864 | 27.925 | 3.25 to 47.50 | 44.25       |
+
+  The band height is `2.75t + 0.25` at all four, exactly; the period
+  `4t + 0.75`, within 0.003 to t = 8 and 0.114 high at 16; the swing
+  `1.75t`, within 0.11, with the band's `swing + t` saying `1.75t + 0.25`.
+  The wave here is a stroke `t` wide, period `4t`, swing `1.75t`, in a band
+  `2.75t` high, which differs from Chrome's in three ways. The band starts at
+  the font's underline top, as a solid line does, where Chrome's starts
+  `0.375t + 0.35` above it -- 1.10, 1.85, 3.35 and 6.35px over the measured
+  four. And the period and the band drop Chrome's 0.75px and 0.25px, so that
+  the figure is the same at every size and under every transform: the period
+  is 0.75px shorter than Chrome's, 8.6 per cent at t = 2 and 1.2 at t = 16,
+  and the band 0.25px lower.
+
 - _A transform angle past the `float` range is not matched._ Chrome 152's
   `DOMMatrix` reads `rotate(1e38deg)`, `rotate(1e300deg)` and
   `rotate(calc(infinity * 1deg))` as no rotation, and `skewX()` of any of
