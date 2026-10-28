@@ -1,5 +1,4 @@
 use std::{
-    collections::{HashMap, HashSet},
     fmt::{self, Write as _},
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
@@ -17,6 +16,7 @@ use skia_safe::{
 // Aliased because the public type below now carries the same name: this one
 // is the shared store, that one is the handle a caller holds.
 use crate::{
+    cache_map::{CacheMap, CacheSet},
     context2d::{FontSlant, FontStretch},
     error::Error,
     node::font_library::FontLibrary as SharedFontRegistry,
@@ -391,7 +391,7 @@ pub(crate) const KNOWN_AXES: usize = 256;
 /// owner lives, and dropped at [`KNOWN_AXES`].
 #[derive(Debug, Default)]
 pub(crate) struct KnownAxes {
-    axes: HashMap<u32, Option<Rc<[Axis]>>>,
+    axes: CacheMap<u32, Option<Rc<[Axis]>>>,
     /// How many times a face's axes were asked of the platform.
     #[cfg(test)]
     pub(crate) asked: usize,
@@ -482,7 +482,7 @@ pub(crate) const INSTANCED_POSITIONS: usize = 128;
 pub(crate) struct InstancedPositions {
     /// Families and coordinates, the coordinates by their bits because Skia
     /// tells two argument lists apart by exact equality.
-    seen: HashSet<(String, Vec<(u32, u32)>)>,
+    seen: CacheSet<(String, Vec<(u32, u32)>)>,
 }
 
 impl InstancedPositions {

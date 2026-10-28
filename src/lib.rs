@@ -243,6 +243,8 @@ pub mod canvas;
 /// Colors and color spaces.
 pub mod color;
 pub mod context2d;
+// The hasher of the caches this crate keeps of its own lookups.
+pub(crate) mod cache_map;
 // The CSS-string parsers behind the `_css` setters. Crate-private: what a
 // caller wants is the setter, not the grammar behind it.
 pub(crate) mod css;

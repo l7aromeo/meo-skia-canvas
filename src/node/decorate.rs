@@ -28,9 +28,12 @@
 //! stroke", so every line sat half its thickness high, and it takes each
 //! run's own font rather than the box's.
 
-use crate::node::{
-    font_library::FontEpoch,
-    typography::{GlyphRun, GlyphRunRef},
+use crate::{
+    cache_map::CacheMap,
+    node::{
+        font_library::FontEpoch,
+        typography::{GlyphRun, GlyphRunRef},
+    },
 };
 use skia_safe::{
     Canvas, Color, Color4f, Font, FontStyle, Paint, Path, PathBuilder,
@@ -43,7 +46,6 @@ use skia_safe::{
 };
 use std::{
     cell::RefCell,
-    collections::HashMap,
     hash::{Hash, Hasher},
     ops::Range,
     ptr,
@@ -263,7 +265,7 @@ struct FaceLinesCache {
     /// allocation it points at is not reused, so a later epoch cannot take
     /// its address.
     epoch: Weak<FontEpoch>,
-    lines: HashMap<FaceKey, Option<FaceLines>>,
+    lines: CacheMap<FaceKey, Option<FaceLines>>,
 }
 
 /// What a first-available answer depends on within one epoch.
@@ -1012,7 +1014,7 @@ thread_local! {
     /// The chunks [`WaveChunk::of`] has stroked, by the bits of their
     /// thickness, with the bytes they hold; dropped at
     /// [`WAVE_CHUNKS_BYTES`] and by [`forget`].
-    static WAVE_CHUNKS: RefCell<(HashMap<u32, WaveChunk>, usize)> =
+    static WAVE_CHUNKS: RefCell<(CacheMap<u32, WaveChunk>, usize)> =
         RefCell::default();
 }
 

@@ -172,6 +172,9 @@ required-features = ["window"]
 ash = { version = "0.38", optional = true }
 crc = "3"
 dashmap = "6"
+# The hasher of the font, face and collection caches -- see `cache_map`.
+# Already in the tree by way of `serde_json`, so this adds no build.
+foldhash = "0.2"
 
 # The formats Skia has no encoder for. Skia's encoder list is three modules
 # -- JPEG, PNG and WebP -- so anything else is encoded here,

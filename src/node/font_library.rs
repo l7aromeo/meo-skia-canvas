@@ -5,7 +5,7 @@
 use neon::{prelude::*, types::buffer::TypedArray};
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     fs, iter,
     path::Path,
     rc::Rc,
@@ -22,6 +22,7 @@ use skia_safe::{
 };
 
 use crate::{
+    cache_map::{CacheMap, CacheSet},
     font::{
         FontFamily, GenericFamily, InstancedPositions, KnownAxes, caseless,
         optical_size,
@@ -394,7 +395,7 @@ pub type ResolvedFont = Arc<(FontSpec, Typeface)>;
 /// entry.
 #[derive(Default)]
 struct ResolvedFontCache {
-    entries: HashMap<String, (ResolvedFont, u64)>,
+    entries: CacheMap<String, (ResolvedFont, u64)>,
     uses: u64,
 }
 
@@ -458,7 +459,7 @@ impl ResolvedFontCache {
 /// finds the map full.
 #[derive(Default)]
 struct CollectionCache {
-    entries: HashMap<CollectionKey, (FontCollection, Option<FontStyle>, u64)>,
+    entries: CacheMap<CollectionKey, (FontCollection, Option<FontStyle>, u64)>,
     uses: u64,
 }
 
@@ -466,8 +467,8 @@ thread_local! {
     /// The face each instance an [`InstanceCache`] holds was cloned from, by
     /// id. Thread-local as the library is, and outside it so that a lookup
     /// never has to borrow the library.
-    static INSTANCE_BASES: RefCell<HashMap<TypefaceId, TypefaceId>> =
-        RefCell::new(HashMap::new());
+    static INSTANCE_BASES: RefCell<CacheMap<TypefaceId, TypefaceId>> =
+        RefCell::default();
 }
 
 /// The face `id` was instanced from by [`FontLibrary::fonts_for_style`], or
@@ -541,7 +542,7 @@ type InstanceKey = (TypefaceId, Vec<(u32, u32)>);
 /// that eviction does not scan.
 #[derive(Default)]
 struct InstanceCache {
-    entries: HashMap<InstanceKey, (Typeface, u64)>,
+    entries: CacheMap<InstanceKey, (Typeface, u64)>,
     order: BTreeMap<u64, InstanceKey>,
     bytes: usize,
     uses: u64,
@@ -695,14 +696,14 @@ pub struct FontLibrary {
     known_axes: KnownAxes,
     /// What each family list and style has matched, searched once for as
     /// long as the fonts are unchanged -- see [`MATCHES_KEPT`].
-    matches: HashMap<MatchKey, MatchFacts>,
+    matches: CacheMap<MatchKey, MatchFacts>,
     /// The names an engine's collection is asked for each family list by
     /// -- see [`engine_names`](Self::engine_names).
-    engine_names: HashMap<Vec<FontFamily>, Rc<[String]>>,
+    engine_names: CacheMap<Vec<FontFamily>, Rc<[String]>>,
     /// The system's family names, as [`caseless::key`]s, read once for
     /// [`has_family`](Self::has_family) and dropped with everything else on
     /// [`invalidate`](Self::invalidate).
-    system_families: Option<HashSet<String>>,
+    system_families: Option<CacheSet<String>>,
 }
 
 /// The prefix every private alias carries.
@@ -804,8 +805,8 @@ impl FontLibrary {
             generics_cache: vec![],
             positions: InstancedPositions::default(),
             known_axes: KnownAxes::default(),
-            matches: HashMap::new(),
-            engine_names: HashMap::new(),
+            matches: CacheMap::default(),
+            engine_names: CacheMap::default(),
             system_families: None,
         }
     }

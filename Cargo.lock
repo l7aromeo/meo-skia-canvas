@@ -1202,6 +1202,7 @@ dependencies = [
  "crc32fast",
  "dashmap",
  "flate2",
+ "foldhash 0.2.0",
  "gif",
  "libaom-sys",
  "little_exif",
