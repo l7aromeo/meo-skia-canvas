@@ -873,10 +873,15 @@ impl PageRecorder {
         }
         let mut draw = draw;
         let open = self.blur_run == Some(self.frame) && !self.changed;
+        // An op a page snapshot also holds is not grown, so that the
+        // snapshot keeps what it was given: the draw opens an op of its own
+        // instead. `flush` seals a run before any page is taken, so this is
+        // a guard rather than a path a run takes.
         if open
             && let (Some(Layer::Blur(op)), Some(last)) =
                 (self.layers.last_mut(), self.features.last())
             && *last == features
+            && let Some(op) = Arc::get_mut(op)
         {
             match op.extend(draw) {
                 Ok(()) => return,
@@ -885,7 +890,7 @@ impl PageRecorder {
         }
         self.flush();
         self.layers
-            .push(Layer::Blur(BlurOp::start(draw, matrix, clip)));
+            .push(Layer::Blur(Arc::new(BlurOp::start(draw, matrix, clip))));
         self.features.push(features);
         self.blur_run = Some(self.frame);
     }
@@ -5527,5 +5532,46 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(asked.msaa_from(&vec![0, 1, 2, 4]), Ok(1));
+    }
+
+    /// A blurred black 10px square at `x`, as `Context2D::draw_path` hands
+    /// one to the recorder.
+    fn blurred_square(x: f32) -> BlurDraw {
+        let path = Path::rect(Rect::from_xywh(x, 0.0, 10.0, 10.0), None);
+        let mut paint = Paint::default();
+        paint.set_color(Color::BLACK);
+        BlurDraw::of(&path, path.is_rect(), &paint, 4.0)
+    }
+
+    /// How many layers `recorder` holds after two blurred squares in one
+    /// frame, the first one's layer held elsewhere between them where
+    /// `held`, as a page snapshot would hold it.
+    fn layers_after_two_squares(held: bool) -> usize {
+        let mut recorder = PageRecorder::new(Rect::from_wh(100.0, 100.0));
+        let features = VectorFeatures::default();
+        recorder.append_blur(
+            blurred_square(0.0),
+            Matrix::new_identity(),
+            None,
+            features,
+        );
+        let holder = held.then(|| recorder.layers.last().cloned());
+        recorder.append_blur(
+            blurred_square(20.0),
+            Matrix::new_identity(),
+            None,
+            features,
+        );
+        drop(holder);
+        recorder.layers.len()
+    }
+
+    /// A blurred square joins the run before it, unless something else
+    /// holds that run's op: then it is drawn as an op of its own rather than
+    /// grown into what the holder was given, or dropped.
+    #[test]
+    fn a_blur_op_held_elsewhere_is_not_grown() {
+        assert_eq!(layers_after_two_squares(false), 1, "the run is joined");
+        assert_eq!(layers_after_two_squares(true), 2, "a new op is opened");
     }
 }
