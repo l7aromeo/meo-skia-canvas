@@ -201,23 +201,46 @@ impl ParagraphRecipe {
     /// `epoch` where it came from the shared library.
     ///
     /// A paragraph's glyphs are drawn hinted, every style's, as canvas text
-    /// is by default -- see `font_library::text_hinting` -- so the paragraph
-    /// style's own text style is set so here, and each pushed style in
-    /// [`Self::push_style`].
+    /// is by default -- see `font_library::text_hinting`. Both callers hand
+    /// in a paragraph style whose own text style is hinted already, as
+    /// Skia's `TextStyle` is from the start, and one with no decoration,
+    /// shadow or background either is built from as it stands. Any other is
+    /// copied, hinted and has those taken off it here, so a caller that
+    /// hands in an unhinted style still draws hinted. Each pushed style is
+    /// hinted in [`Self::push_style`].
     pub(crate) fn new(
         mut style: ParagraphStyle,
         base_oblique: Option<f32>,
         mut collection: FontCollection,
         epoch: Option<Rc<FontEpoch>>,
     ) -> Self {
-        let mut base = style.text_style().clone();
-        base.set_font_hinting(text_hinting(true));
-        let decoration =
-            StyleDecoration::take(&mut base, &mut collection, epoch.as_ref());
-        let shadows = take_shadows(&mut base);
-        let background =
-            StyleBackground::take(&mut base, &mut collection, epoch.as_ref());
-        style.set_text_style(&base);
+        let half_leading = style.text_style().half_leading();
+        let (decoration, shadows, background) =
+            match as_given(style.text_style()) {
+                true => (None, Vec::new(), None),
+                false => {
+                    #[cfg(any(
+                        test,
+                        all(feature = "node-addon", debug_assertions)
+                    ))]
+                    STYLE_COPIES.with(|copies| copies.set(copies.get() + 1));
+                    let mut base = style.text_style().clone();
+                    base.set_font_hinting(text_hinting(true));
+                    let decoration = StyleDecoration::take(
+                        &mut base,
+                        &mut collection,
+                        epoch.as_ref(),
+                    );
+                    let shadows = take_shadows(&mut base);
+                    let background = StyleBackground::take(
+                        &mut base,
+                        &mut collection,
+                        epoch.as_ref(),
+                    );
+                    style.set_text_style(&base);
+                    (decoration, shadows, background)
+                }
+            };
         let mut decorations = Vec::with_capacity(4);
         decorations.push(decoration);
         let mut shadow_slots = Vec::with_capacity(4);
@@ -237,7 +260,7 @@ impl ParagraphRecipe {
             length: 0,
             base_oblique,
             oblique: base_oblique.is_some(),
-            half_leading: base.half_leading(),
+            half_leading,
         }
     }
 
@@ -658,6 +681,44 @@ fn whole_graphemes(
             owner = Some(at);
         }
     }
+}
+
+/// Whether a paragraph style's own text style can be built from as it
+/// stands: hinted, and with no decoration, shadow or background for
+/// [`Passes`] to draw in SkParagraph's place -- see [`ParagraphRecipe::new`].
+fn as_given(style: &TextStyle) -> bool {
+    #[cfg(test)]
+    if COPY_ALWAYS.get() {
+        return false;
+    }
+    style.font_hinting() == text_hinting(true)
+        && style.decoration_type() == TextDecoration::NO_DECORATION
+        && style.shadows().is_empty()
+        && !style.has_background()
+}
+
+#[cfg(any(test, all(feature = "node-addon", debug_assertions)))]
+thread_local! {
+    /// How many paragraph styles [`ParagraphRecipe::new`] has copied on this
+    /// thread -- see [`style_copies`].
+    static STYLE_COPIES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether [`ParagraphRecipe::new`] copies every paragraph style, as the
+    /// reference a style built from as it stands is held to.
+    pub(crate) static COPY_ALWAYS: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// How many paragraph styles [`ParagraphRecipe::new`] has copied on this
+/// thread, for the tests to hold each caller to handing in one that needs
+/// no copy: none for a style hinted and with nothing to take off it.
+#[cfg(any(test, all(feature = "node-addon", debug_assertions)))]
+pub(crate) fn style_copies() -> usize {
+    STYLE_COPIES.get()
 }
 
 /// Takes `style`'s text shadows off it, for [`Passes`] to draw.
@@ -1333,9 +1394,16 @@ mod tests {
         ParagraphRecipe, Piece, add_slnt, match_oblique, set_coordinates,
         whole_graphemes,
     };
-    use crate::font::ObliqueAngle;
+    use crate::{
+        color::RgbaLinear,
+        font::ObliqueAngle,
+        font_library::text_hinting,
+        node::typography::glyph_runs,
+        text::{TextShadow as SpanShadow, TextSlant, TextStyle as SpanStyle},
+    };
     use skia_safe::{
-        Color, Data, FontMgr, FontStyle, GlyphId, ImageInfo, Point,
+        Color, Data, FontHinting, FontMgr, FontStyle, GlyphId, ImageInfo,
+        Point,
         font_style::{Slant, Weight, Width},
         surfaces,
         textlayout::{
@@ -2324,5 +2392,153 @@ mod tests {
             assert!(!by_skia, "{what}");
             assert!(skia == runs, "{what}");
         }
+    }
+
+    /// A change made to a paragraph's own style -- see [`GIVEN`].
+    type Change = fn(&mut SpanStyle);
+
+    /// The crate engine's paragraph whose own style is `base` with each
+    /// change in `changes` made to it, a span pushed after it: whether
+    /// [`ParagraphRecipe::new`] copied the paragraph style, and the pixels
+    /// it draws on a canvas, with every style copied where `copied`.
+    fn built_from(changes: Change, copied: bool) -> (bool, Vec<u8>) {
+        use crate::{canvas::Canvas, font::FontLibrary, text::TextEngine};
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            FontLibrary::new()
+                .register_font_from_path(
+                    "GivenOswald",
+                    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+                )
+                .expect("Oswald registers");
+        });
+        let mut base = SpanStyle {
+            font_families: vec!["GivenOswald".into()],
+            font_size: 28.0,
+            color: RgbaLinear::from_srgb8(0x20, 0x30, 0x40, 1.0),
+            ..SpanStyle::default()
+        };
+        changes(&mut base);
+        let engine = TextEngine::new(&FontLibrary::new());
+        super::COPY_ALWAYS.set(copied);
+        let before = super::style_copies();
+        let mut builder = engine.paragraph_builder(&base);
+        let copies = super::style_copies() - before;
+        super::COPY_ALWAYS.set(false);
+        builder.add_text("Hamburgefonstiv ");
+        builder.push_style(&SpanStyle {
+            color: RgbaLinear::from_srgb8(200, 0, 0, 1.0),
+            ..base.clone()
+        });
+        builder.add_text("quick brown fox jumps");
+        builder.pop();
+        let paragraph = builder.build(260.0);
+        let mut canvas = Canvas::new(300.0, 160.0);
+        let ctx = canvas.context();
+        ctx.draw_paragraph(&paragraph, 7.6, 10.3);
+        let pixels = ctx
+            .get_image_data(0.0, 0.0, 300.0, 160.0)
+            .expect("the canvas reads back")
+            .pixels()
+            .to_vec();
+        assert!(copies <= 1, "one paragraph style, copied {copies} times");
+        (copies == 1, pixels)
+    }
+
+    /// A paragraph style's own text style asking for each thing the recipe
+    /// may have to do to it, and whether it has anything to take off.
+    const GIVEN: [(&str, Change, bool); 6] = [
+        ("plain", |_| {}, false),
+        (
+            "oblique",
+            |style| style.slant = TextSlant::Oblique(ObliqueAngle::DEFAULT),
+            false,
+        ),
+        ("half leading", |style| style.half_leading = true, false),
+        (
+            "underlined",
+            |style| style.decoration.underline = true,
+            true,
+        ),
+        (
+            "shadowed",
+            |style| {
+                style.shadows = vec![SpanShadow {
+                    color: RgbaLinear::from_srgb8(0, 0, 200, 0.5),
+                    offset_x: 2.0,
+                    offset_y: 3.0,
+                    blur_sigma: 1.5,
+                }]
+            },
+            true,
+        ),
+        (
+            "backgrounded",
+            |style| {
+                style.background_color =
+                    Some(RgbaLinear::from_srgb8(250, 230, 0, 1.0))
+            },
+            true,
+        ),
+    ];
+
+    /// The engine hands the recipe a hinted paragraph style, so one with
+    /// nothing to take off is built from as it stands and only one with a
+    /// decoration, a shadow or a background is copied: the copy took about
+    /// 4.5 per cent of a two-span build's samples.
+    #[test]
+    fn only_a_style_with_something_to_take_off_is_copied() {
+        for (what, changes, taken) in GIVEN {
+            let (copied, _) = built_from(changes, false);
+            assert_eq!(copied, taken, "{what}");
+        }
+    }
+
+    /// A paragraph style built from as it stands draws byte for byte what
+    /// its copy draws.
+    #[test]
+    fn a_style_built_from_as_it_stands_draws_as_its_copy() {
+        for (what, changes, _) in GIVEN {
+            let (_, given) = built_from(changes, false);
+            let (copied, copy) = built_from(changes, true);
+            assert!(copied, "{what}: the reference is a copy");
+            assert!(given == copy, "{what}");
+        }
+    }
+
+    /// Skia's own text style is hinted as a paragraph is drawn, so a style
+    /// either caller builds from a new one needs no copy for its hinting --
+    /// see [`ParagraphRecipe::new`].
+    #[test]
+    fn a_new_text_style_is_hinted_as_a_paragraph_is_drawn() {
+        assert_eq!(TextStyle::new().font_hinting(), text_hinting(true));
+    }
+
+    /// A paragraph style handed in unhinted, as neither caller hands one,
+    /// is copied and drawn hinted, its own text's runs with the rest.
+    #[test]
+    fn a_paragraph_style_handed_in_unhinted_is_drawn_hinted() {
+        let mut base = TextStyle::new();
+        base.set_font_families(&[RALEWAY])
+            .set_font_size(24.0)
+            .set_font_hinting(FontHinting::None);
+        let mut paragraph_style = ParagraphStyle::new();
+        paragraph_style.set_text_style(&base);
+        let before = super::style_copies();
+        let mut recipe =
+            ParagraphRecipe::new(paragraph_style, None, raleway(), None);
+        assert_eq!(super::style_copies() - before, 1, "copied");
+        recipe.add_text("Hamburgefonstiv");
+        let (mut paragraph, _) = recipe.build();
+        paragraph.layout(1000.0);
+        let hinting: Vec<_> = glyph_runs(&mut paragraph)
+            .iter()
+            .map(|run| run.font.hinting())
+            .collect();
+        assert!(!hinting.is_empty(), "no runs");
+        assert!(
+            hinting.iter().all(|h| *h == text_hinting(true)),
+            "{hinting:?}"
+        );
     }
 }
