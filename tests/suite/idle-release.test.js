@@ -26,15 +26,28 @@ const why = !skiaNode.__cachedParagraphs
   ? "skipped: a release binary does not export __cachedParagraphs"
   : null;
 const cached = () => /** @type {number} */ (skiaNode.__cachedParagraphs());
+/** How many runs the thread keeps laid out for drawing. */
+const laidOut = () => /** @type {number[]} */ (skiaNode.__laidOut())[0];
 const pause = (/** @type {number} */ ms) =>
   new Promise((done) => setTimeout(done, ms));
 
+/**
+ * One context for every frame, so that its text is the same run each time.
+ * Made at the first frame rather than as the file loads: using a font starts
+ * the watcher, and the quiet of the test before would then release.
+ * @type {CanvasRenderingContext2D | undefined}
+ */
+let page;
+
 /** Text drawn and read back, as the pixels it left. */
 const drawn = () => {
-  const ctx = new Canvas(240, 60).getContext("2d");
-  ctx.font = "24px sans-serif";
-  ctx.fillText("Hamburgefonstiv", 4, 40);
-  return Buffer.from(ctx.getImageData(0, 0, 240, 60).data.buffer);
+  if (!page) {
+    page = new Canvas(240, 60).getContext("2d");
+    page.font = "24px sans-serif";
+  }
+  page.clearRect(0, 0, 240, 60);
+  page.fillText("Hamburgefonstiv", 4, 40);
+  return Buffer.from(page.getImageData(0, 0, 240, 60).data.buffer);
 };
 
 describe("An idle process lets its font caches go", () => {
@@ -105,18 +118,24 @@ describe("An idle process lets its font caches go", () => {
     "nothing is let go while frames arrive, and text draws the same after",
     { skip: why ?? false },
     async () => {
+      // Drawn twice, for the run to be kept as well as laid out.
+      drawn();
       const first = drawn();
       for (let frame = 0; frame < PAST_THE_INTERVAL_MS / FRAME_MS; frame++) {
         await pause(FRAME_MS);
         assert.ok(cached() > 0, `the caches are held through frame ${frame}`);
+        assert.ok(laidOut() > 0, `and the runs through frame ${frame}`);
         assert.ok(drawn().equals(first), `frame ${frame} draws the same`);
       }
 
       await pause(PAST_THE_INTERVAL_MS);
       assert.equal(cached(), 0, "the quiet that follows lets them go");
+      assert.equal(laidOut(), 0, "and the runs kept for drawing");
 
       assert.ok(drawn().equals(first), "the text draws the same after");
       assert.ok(cached() > 0, "and fills the caches again");
+      assert.ok(drawn().equals(first), "and again");
+      assert.ok(laidOut() > 0, "and keeps the run again");
     },
   );
 

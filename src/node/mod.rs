@@ -17,6 +17,7 @@ pub mod gradient;
 pub(crate) mod idle;
 pub mod image;
 pub mod image_filter;
+pub(crate) mod lru;
 pub mod mask_filter;
 pub(crate) mod oblique;
 pub mod paragraph;

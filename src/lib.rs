@@ -989,6 +989,10 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
         paragraph::paragraphStyleCopies,
     )?;
     #[cfg(debug_assertions)]
+    cx.export_function("__laidOut", typography::laidOut)?;
+    #[cfg(debug_assertions)]
+    cx.export_function("__forgetLaidOut", typography::forgetLaidOut)?;
+    #[cfg(debug_assertions)]
     cx.export_function("__activity", activity)?;
     cx.export_function("integrityRefusal", integrity_refusal)?;
     cx.export_function("decodeDataURL", data_url_bytes)?;

@@ -30,8 +30,8 @@ use crate::{
     memory::note_font_use,
     node::decorate,
     typography::{
-        FontSpec, forget_families, forget_kept_paragraphs, from_slant,
-        from_width, typeface_details, typeface_wght_range,
+        FontSpec, forget_families, forget_kept_paragraphs, forget_laid_out,
+        from_slant, from_width, typeface_details, typeface_wght_range,
     },
     utils::*,
 };
@@ -1693,7 +1693,9 @@ impl FontLibrary {
     /// collections they describe are the ones replaced here. So do the
     /// paragraphs kept for measurements whose ink is still to be read: they
     /// pin the faces replaced here, and each measurement can lay itself out
-    /// again in those faces from what it was measured with.
+    /// again in those faces from what it was measured with. And the runs kept
+    /// for drawing, which hold the faces they were laid out in, though no
+    /// typesetter can match one laid out before the change.
     fn invalidate(&mut self) {
         self.system_families = None;
         self.epoch = Rc::new(FontEpoch {
@@ -1711,6 +1713,7 @@ impl FontLibrary {
         self.engine_names.clear();
         forget_families();
         forget_kept_paragraphs();
+        forget_laid_out();
     }
 
     /// `face`'s variation axes, asked of the platform once for as long as
@@ -1756,14 +1759,15 @@ impl FontLibrary {
     /// too, through [`forget_kept_paragraphs`]: each pins the typeface
     /// instance it was laid out in, and a measurement whose paragraph has
     /// gone lays out again when its ink is read, as one pushed out by their
-    /// bound does. The ink remembered per face and the family per face stay,
-    /// since they hold ids and bounds rather than faces, and come to about
-    /// 100 KB at most. The matches and names remembered per family list go,
-    /// as answers that are cheap to work out again and only worth keeping
-    /// while text is being laid out. So do the decorations' kept answers,
-    /// through [`decorate::forget`]: each face's lines and each thickness's
-    /// stroked wave chunk, which are rebuilt on the next decoration that
-    /// asks.
+    /// bound does. So do the runs kept for drawing, through
+    /// [`forget_laid_out`], each laid out again the next time it is drawn.
+    /// The ink remembered per face and the family per face stay, since they
+    /// hold ids and bounds rather than faces, and come to about 100 KB at
+    /// most. The matches and names remembered per family list go, as answers
+    /// that are cheap to work out again and only worth keeping while text is
+    /// being laid out. So do the decorations' kept answers, through
+    /// [`decorate::forget`]: each face's lines and each thickness's stroked
+    /// wave chunk, which are rebuilt on the next decoration that asks.
     #[cfg(any(test, feature = "node-addon"))]
     pub(crate) fn release_caches(&mut self) {
         self.clear_collection_caches();
@@ -1772,6 +1776,7 @@ impl FontLibrary {
         self.engine_names.clear();
         forget_kept_paragraphs();
         decorate::forget();
+        forget_laid_out();
     }
 
     /// [`release_caches`](Self::release_caches) on this thread's library,

@@ -5,7 +5,10 @@ use crate::{
     css::{FontUnits, is_font_relative, parse_length, without_comments},
     font::{FontFamily, ObliqueAngle, leans_as_asked, variation_axes},
     font_library::{FontEpoch, FontLibrary, base_face},
-    node::decorate::{self, FaceLines, Thickness},
+    node::{
+        decorate::{self, FaceLines, Layer, Thickness},
+        lru::{Lru, LruId},
+    },
     text::{
         TextAlign as CrateTextAlign, TextBaseline as CrateTextBaseline,
         TextMetricsLine, TextMetricsRun,
@@ -27,10 +30,11 @@ use skia_safe::{
 };
 use std::{
     borrow::Cow,
-    cell::{Cell, RefCell},
-    collections::{HashMap, VecDeque},
+    cell::{Cell, RefCell, RefMut},
+    collections::{HashMap, HashSet, VecDeque},
     fmt,
-    iter::{once, zip},
+    hash::{DefaultHasher, Hash, Hasher},
+    iter::{once, successors, zip},
     ops::Range,
     rc::Rc,
 };
@@ -349,72 +353,561 @@ pub struct TextLayout {
     oblique: Option<f32>,
 }
 
-/// Which painter draws a laid-out run.
+/// Which painter a test has a run drawn with: from the kept runs, as every
+/// draw is, or by `Paragraph::paint`, the oracle the kept runs are held to
+/// -- see `the_run_painter_draws_what_paragraph_paint_draws`.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Painter {
     /// `Paragraph::paint`, the whole paragraph at once.
     Paragraph,
-    /// [`TextLayout::paint`], a glyph run at a time.
+    /// [`LaidOut::paint`], a kept glyph run at a time.
     Runs,
 }
 
 impl TextLayout {
-    /// The painter this run needs.
+    /// `run`, a glyph run of this layout, as a text blob in its own font,
+    /// to draw at the run's origin, or `None` where it draws nothing.
     ///
-    /// Two painters rather than one, and `Paragraph::paint` the default,
-    /// because the run painter costs more where it is not needed: in a
-    /// release build, `fillText` of plain text took about 1.5% longer
-    /// through it. Neither draws decoration lines, which
-    /// [`crate::node::decorate`] draws around either. The two paint the
-    /// same pixels, which `the_run_painter_draws_what_paragraph_paint_draws`
-    /// holds them to.
+    /// A run at a time rather than through `Paragraph::paint`, so that a run
+    /// can be drawn sheared or not on its own -- see [`sheared_blob`] -- and
+    /// in any paint once laid out. The pixels of a run drawn as it stands
+    /// are `Paragraph::paint`'s: each run's `Font` already carries what
+    /// SkParagraph synthesised for it -- an embolden, a skew -- and the run's
+    /// origin is the one `Paragraph::paint` draws from, its baseline snapped
+    /// to a whole pixel (#142). A plain run is about 1.5% slower to draw
+    /// this way than by `Paragraph::paint`, which a kept run cannot use: it
+    /// was laid out with no paint.
+    pub(crate) fn run_blob(&self, run: &GlyphRun) -> Option<TextBlob> {
+        let shear = run_shear(&run.font.typeface(), self.oblique);
+        sheared_blob(&run.font, &run.glyphs, &run.positions, shear)
+    }
+}
+
+/// A run laid out once, and painted from then on with whatever paint a draw
+/// brings: its glyph runs, read off the paragraph when it was laid out, and
+/// the spans and box its decoration lines are drawn from.
+///
+/// Laid out with no paint, because nothing about where a glyph or a line
+/// goes depends on the paint: a draw in another colour, a gradient or
+/// another alpha paints the same runs and the same lines, which is what lets
+/// a run be kept across them. The glyphs are drawn as the blobs
+/// [`TextLayout::run_blob`] builds, whose pixels are `Paragraph::paint`'s,
+/// and the lines by [`decorate::paint`] in the colour the draw's paint
+/// gives them.
+///
+/// Keeping the layout is the point: building the paragraph and laying it out
+/// was 55% of the samples under `fillText` in a release build, and reading
+/// its runs back another 633 of the run painter's 1172.
+pub struct LaidOut {
+    layout: TextLayout,
+    /// The glyph runs, read off the paragraph once.
+    runs: Vec<GlyphRun>,
+    /// The runs' blobs, kept by the paint they were built for, at most
+    /// [`BLOB_PAINTS`] paints' worth, the most recently built last.
     ///
-    /// The run painter is needed where the font is `oblique`: a run that
-    /// does not lean as asked is sheared, and a run that does is not, which
-    /// `Paragraph::paint` cannot tell apart. Asked of one field, so that
-    /// deciding costs plain text nothing.
-    pub fn painter(&self) -> Painter {
-        match self.oblique {
-            Some(_) => Painter::Runs,
-            None => Painter::Paragraph,
+    /// A blob is drawn again only in the paint it was built for, compared
+    /// whole -- see [`PaintedBlobs::matches`]. On Skia's GPU backend a blob
+    /// drawn again in another colour after the canvas had been read back
+    /// came out unlike a blob of its own drawn in that colour: 1330 pixels
+    /// of a run drawn in `#c03010` after the same blob in `green`, and as
+    /// many the other way, while every blob drawn again in the paint it was
+    /// built for drew the same as a fresh one. Which pairs of colours part
+    /// is not settled: of seven opaque colours only those two did, and a
+    /// translucent pink parted from `green` as `#c03010` did.
+    ///
+    /// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+    /// Re-check: cargo test a_run_drawn_again_on_the_gpu_draws_as_a_fresh_one
+    /// with `PaintedBlobs::matches` answering `true` for every paint
+    blobs: RefCell<Vec<PaintedBlobs>>,
+    /// The run's one decorating box, or `None` where it has no lines. Its
+    /// opacity is set by each draw -- see [`LaidOut::paint`].
+    decoration: Option<decorate::Decoration>,
+    /// What each line of the box covers, by [`decorate::spans`].
+    spans: Vec<decorate::Span>,
+    /// How many lines the runs are on.
+    lines: usize,
+    /// What this costs to keep, by [`laid_out_bytes`]'s estimate.
+    bytes: usize,
+}
+
+impl LaidOut {
+    fn new(
+        mut layout: TextLayout,
+        decoration: Option<decorate::Decoration>,
+    ) -> Self {
+        let runs = glyph_runs(&mut layout.paragraph);
+        // The run is one decorating box: every run of it is the box's,
+        // whatever face draws it.
+        let spans = match decoration {
+            Some(_) => decorate::spans(&runs, |_| Some(0)),
+            None => Vec::new(),
+        };
+        let lines = runs.last().map_or(0, |run| run.line + 1);
+        let glyphs = runs.iter().map(|run| run.glyphs.len()).sum();
+        Self {
+            layout,
+            runs,
+            blobs: RefCell::new(Vec::new()),
+            decoration,
+            spans,
+            lines,
+            bytes: laid_out_bytes(glyphs),
         }
     }
 
-    /// Paints the run's glyphs with its anchor at `origin`: each glyph run
-    /// as a text blob in its own font. Decoration lines are drawn around
-    /// this, by [`crate::node::decorate`].
-    ///
-    /// A run at a time rather than through `Paragraph::paint`, so that a run
-    /// can be drawn sheared or not on its own -- see [`sheared_blob`]. The
-    /// pixels of a run drawn as it stands are
-    /// `Paragraph::paint`'s: each run's `Font` already carries what
-    /// SkParagraph synthesised for it -- an embolden, a skew -- and the run's
-    /// origin is the one `Paragraph::paint` draws from, its baseline snapped
-    /// to a whole pixel (#142).
-    pub fn paint(&mut self, canvas: &Canvas, origin: Point, paint: &Paint) {
-        let runs = glyph_runs(&mut self.paragraph);
-        self.paint_runs(canvas, origin, paint, &runs);
+    /// The runs' blobs for `paint`: the ones kept for it, or built now and
+    /// kept, letting the paint built for least recently go past
+    /// [`BLOB_PAINTS`]. `None` where the blobs are already borrowed, for the
+    /// caller to build its own.
+    fn kept_blobs(
+        &self,
+        paint: &Paint,
+    ) -> Option<RefMut<'_, [Option<TextBlob>]>> {
+        let mut kept = self.blobs.try_borrow_mut().ok()?;
+        let at = match kept.iter().position(|painted| painted.matches(paint)) {
+            Some(at) => at,
+            None => {
+                if kept.len() == BLOB_PAINTS {
+                    kept.remove(0);
+                }
+                kept.push(PaintedBlobs {
+                    paint: paint.clone(),
+                    blobs: self.built_blobs(),
+                });
+                kept.len() - 1
+            }
+        };
+        Some(RefMut::map(kept, |kept| kept[at].blobs.as_mut_slice()))
     }
 
-    /// Paints `runs`, glyph runs of this layout, as [`TextLayout::paint`]
-    /// paints them all: for a caller drawing something between one line's
-    /// glyphs and the next's.
-    pub(crate) fn paint_runs(
+    fn built_blobs(&self) -> Vec<Option<TextBlob>> {
+        self.runs
+            .iter()
+            .map(|run| self.layout.run_blob(run))
+            .collect()
+    }
+
+    /// Draws the runs in `range` from `blobs`, the blobs of every run.
+    fn draw_runs(
         &self,
         canvas: &Canvas,
         origin: Point,
         paint: &Paint,
-        runs: &[GlyphRun],
+        range: Range<usize>,
+        blobs: &[Option<TextBlob>],
     ) {
-        for run in runs {
-            let shear = run_shear(&run.font.typeface(), self.oblique);
-            if let Some(blob) =
-                sheared_blob(&run.font, &run.glyphs, &run.positions, shear)
-            {
+        let runs = zip(&self.runs[range.clone()], &blobs[range]);
+        for (run, blob) in runs {
+            if let Some(blob) = blob {
                 canvas.draw_text_blob(blob, origin + run.origin, paint);
             }
         }
     }
+
+    /// Where to paint the run, relative to the anchor -- see
+    /// [`TextLayout::offset`].
+    pub fn offset(&self) -> Point {
+        self.layout.offset
+    }
+
+    /// The horizontal factor the run is squeezed by -- see
+    /// [`TextLayout::condensation`].
+    pub fn condensation(&self) -> f32 {
+        self.layout.condensation
+    }
+
+    /// Paints the run with its anchor at `origin` in `paint`, a named line
+    /// colour's alpha multiplied by `global_alpha`, as
+    /// [`Typesetter::decoration`] takes it.
+    ///
+    /// A decorated run is drawn a line at a time, in the order CSS 2.1
+    /// Appendix E paints a line box: underlines and overlines beneath the
+    /// glyphs, line-through over them -- CSS Text Decoration 4, section 5.1
+    /// -- so that a wrapped line's underline lies over the line above's
+    /// descenders, as in Chrome.
+    pub fn paint(
+        &self,
+        canvas: &Canvas,
+        origin: Point,
+        paint: &Paint,
+        global_alpha: f32,
+    ) {
+        let built;
+        let kept = self.kept_blobs(paint);
+        let blobs: &[Option<TextBlob>] = match &kept {
+            Some(kept) => kept,
+            None => {
+                built = self.built_blobs();
+                &built
+            }
+        };
+        let Some(decoration) = &self.decoration else {
+            self.draw_runs(canvas, origin, paint, 0..self.runs.len(), blobs);
+            return;
+        };
+        let boxes = [decorate::Decoration {
+            opacity: global_alpha,
+            ..decoration.clone()
+        }];
+        for line in 0..self.lines {
+            let spans = decorate::on_line(&self.spans, line);
+            let start = self.runs.partition_point(|run| run.line < line);
+            let end = self.runs.partition_point(|run| run.line <= line);
+            decorate::paint(
+                canvas,
+                spans,
+                &boxes,
+                origin,
+                Layer::Beneath,
+                paint,
+            );
+            self.draw_runs(canvas, origin, paint, start..end, blobs);
+            decorate::paint(canvas, spans, &boxes, origin, Layer::Over, paint);
+        }
+    }
+}
+
+/// A run as one draw paints it: kept, or laid out for that draw alone --
+/// see [`Typesetter::laid_out`].
+pub enum DrawnRun {
+    /// Kept across draws -- see [`LaidOut`].
+    Kept(Rc<LaidOut>),
+    /// Laid out for the draw's paint and drawn by `Paragraph::paint`.
+    Plain(TextLayout),
+    /// Laid out for the draw's paint and drawn from its runs.
+    Runs(LaidOut),
+}
+
+impl DrawnRun {
+    /// Where to paint the run, relative to the anchor -- see
+    /// [`TextLayout::offset`].
+    pub fn offset(&self) -> Point {
+        match self {
+            Self::Kept(laid_out) => laid_out.offset(),
+            Self::Plain(layout) => layout.offset,
+            Self::Runs(laid_out) => laid_out.offset(),
+        }
+    }
+
+    /// The horizontal factor the run is squeezed by -- see
+    /// [`TextLayout::condensation`].
+    pub fn condensation(&self) -> f32 {
+        match self {
+            Self::Kept(laid_out) => laid_out.condensation(),
+            Self::Plain(layout) => layout.condensation,
+            Self::Runs(laid_out) => laid_out.condensation(),
+        }
+    }
+
+    /// Paints the run with its anchor at `origin` in `paint` -- see
+    /// [`LaidOut::paint`].
+    pub fn paint(
+        &self,
+        canvas: &Canvas,
+        origin: Point,
+        paint: &Paint,
+        global_alpha: f32,
+    ) {
+        match self {
+            Self::Kept(laid_out) => {
+                laid_out.paint(canvas, origin, paint, global_alpha)
+            }
+            Self::Plain(layout) => layout.paragraph.paint(canvas, origin),
+            Self::Runs(laid_out) => {
+                laid_out.paint(canvas, origin, paint, global_alpha)
+            }
+        }
+    }
+}
+
+/// The blobs of a kept run's glyph runs, built for one paint: one for each
+/// run, `None` for a run that draws nothing.
+struct PaintedBlobs {
+    /// The paint the blobs were built for, kept whole: holding it keeps its
+    /// shader and other effects alive, so that an address it is compared by
+    /// cannot be freed and given to another.
+    paint: Paint,
+    blobs: Vec<Option<TextBlob>>,
+}
+
+impl PaintedBlobs {
+    /// Whether the blobs may be drawn again in `paint`: only in the paint
+    /// they were built for, every field of it the same -- colour and alpha
+    /// by value, the shader and other effects by identity.
+    fn matches(&self, paint: &Paint) -> bool {
+        self.paint == *paint
+    }
+}
+
+/// How many paints a kept run keeps blobs for: a shadowed run is drawn in
+/// two, the shadow's and the text's, every time.
+const BLOB_PAINTS: usize = 2;
+
+/// What a kept run holds beyond its glyphs: the laid-out paragraph's own
+/// structure, the entry and the blobs it keeps.
+///
+/// Measured as the malloc zone's bytes in use that letting runs of 24px
+/// Oswald go handed back, in a debug build on macOS, each drawn in two
+/// colours so that it kept blobs for two paints: 17.6 KB a run of 12
+/// glyphs, 28.3 KB of 48 and 70.5 KB of 192, which this and
+/// [`LAID_OUT_GLYPH_BYTES`] fit to within 4%. The blobs are inside that:
+/// the same runs drawn in one colour measured the same to within the
+/// meter's noise.
+const LAID_OUT_BASE_BYTES: usize = 13 * 1024;
+
+/// What each glyph of a kept run adds, in the paragraph and in the glyph run
+/// read off it -- see [`LAID_OUT_BASE_BYTES`].
+const LAID_OUT_GLYPH_BYTES: usize = 324;
+
+/// The estimated cost of keeping a run of `glyphs` glyphs.
+fn laid_out_bytes(glyphs: usize) -> usize {
+    LAID_OUT_BASE_BYTES + glyphs * LAID_OUT_GLYPH_BYTES
+}
+
+/// The most the kept runs are estimated to hold together, past which the
+/// least recently drawn go.
+const LAID_OUT_BYTES: usize = 8 * 1024 * 1024;
+
+/// The most runs kept, whatever they are estimated to hold, so that a flood
+/// of tiny ones cannot grow the table without end.
+const LAID_OUT_COUNT: usize = 512;
+
+/// What a kept run was laid out from, compared against a typesetter: the
+/// context's typography, shared rather than copied and held so that its
+/// address cannot be reused, the text as laid out, and the widths.
+///
+/// The typography stands for every setting a run is laid out from, the
+/// `oblique` angle among them, and the fonts registered when it was built
+/// -- see `context::typesetting` -- so a run kept from another font epoch,
+/// or before a setting changed, is one no typesetter can match.
+struct LaidOutKey {
+    typography: Rc<Typography>,
+    text: Box<str>,
+    width: u32,
+    condense_to: Option<u32>,
+}
+
+impl LaidOutKey {
+    fn of(typesetter: &Typesetter<'_>) -> Self {
+        Self {
+            typography: typesetter.typography.clone(),
+            text: typesetter.text.as_ref().into(),
+            width: typesetter.width.to_bits(),
+            condense_to: typesetter.condense_to.map(f32::to_bits),
+        }
+    }
+
+    fn matches(&self, typesetter: &Typesetter<'_>) -> bool {
+        Rc::ptr_eq(&self.typography, &typesetter.typography)
+            && self.width == typesetter.width.to_bits()
+            && self.condense_to == typesetter.condense_to.map(f32::to_bits)
+            && *self.text == *typesetter.text
+    }
+
+    /// The bucket a typesetter's run is filed under.
+    fn hash(typesetter: &Typesetter<'_>) -> u64 {
+        #[cfg(test)]
+        if COLLIDING.get() {
+            return 0;
+        }
+        let mut hasher = DefaultHasher::new();
+        Rc::as_ptr(&typesetter.typography).hash(&mut hasher);
+        typesetter.text.hash(&mut hasher);
+        typesetter.width.to_bits().hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+/// A kept run, filed under its key's hash ahead of the runs filed there
+/// before it.
+struct LaidOutEntry {
+    key: LaidOutKey,
+    hash: u64,
+    laid_out: Rc<LaidOut>,
+    /// The next run filed under the same hash. Two runs share one only where
+    /// their hashes collide, so a chain is almost always one run long.
+    next: Option<LruId>,
+}
+
+/// The kept runs, the least recently drawn going first past
+/// [`LAID_OUT_BYTES`] or [`LAID_OUT_COUNT`].
+///
+/// The runs are in an [`Lru`], so that drawing one, keeping one and letting
+/// the oldest go are each a constant amount of work and the bytes held are a
+/// running total. A run is held in an `Rc` because a draw holds it beyond the
+/// cache, across the shadow pass and the fill, while drawing another run may
+/// let it go.
+#[derive(Default)]
+struct LaidOutCache {
+    runs: Lru<LaidOutEntry>,
+    /// The first run filed under each hash; the rest follow it through
+    /// [`LaidOutEntry::next`].
+    by_hash: HashMap<u64, LruId>,
+    /// The hashes of runs drawn once and not kept, so that the second draw
+    /// of one keeps it -- see [`Typesetter::laid_out`].
+    seen: HashSet<u64>,
+    /// [`LaidOutCache::seen`] in the order the hashes came, for letting the
+    /// oldest go past [`SEEN_ONCE`].
+    seen_order: VecDeque<u64>,
+}
+
+/// How many runs drawn once a thread remembers, so that the next draw of
+/// one keeps it: twice the most runs kept, so that a frame of new labels as
+/// long as the cache can hold is kept from its second frame, with as many
+/// one-off strings drawn between.
+const SEEN_ONCE: usize = 2 * LAID_OUT_COUNT;
+
+impl LaidOutCache {
+    fn find(&self, typesetter: &Typesetter<'_>) -> Option<LruId> {
+        let first = self.by_hash.get(&LaidOutKey::hash(typesetter)).copied();
+        successors(first, |id| self.runs.get(*id)?.next).find(|id| {
+            self.runs
+                .get(*id)
+                .is_some_and(|entry| entry.key.matches(typesetter))
+        })
+    }
+
+    fn get(&mut self, typesetter: &Typesetter<'_>) -> Option<Rc<LaidOut>> {
+        let id = self.find(typesetter)?;
+        Some(self.runs.touch(id)?.laid_out.clone())
+    }
+
+    fn insert(&mut self, typesetter: &Typesetter<'_>, laid_out: Rc<LaidOut>) {
+        let hash = LaidOutKey::hash(typesetter);
+        let bytes = laid_out.bytes;
+        let entry = LaidOutEntry {
+            key: LaidOutKey::of(typesetter),
+            hash,
+            laid_out,
+            next: self.by_hash.get(&hash).copied(),
+        };
+        let id = self.runs.insert(entry, bytes);
+        self.by_hash.insert(hash, id);
+        self.trim();
+    }
+
+    fn trim(&mut self) {
+        while self.runs.len() > LAID_OUT_COUNT
+            || self.runs.bytes() > LAID_OUT_BYTES
+        {
+            let Some(oldest) = self.runs.oldest() else {
+                break;
+            };
+            self.evict(oldest);
+        }
+    }
+
+    /// Lets the run `id` was kept as go, and takes it out of its hash's
+    /// chain.
+    fn evict(&mut self, id: LruId) {
+        let Some(gone) = self.runs.remove(id) else {
+            return;
+        };
+        let mut at = match self.by_hash.get(&gone.hash) {
+            Some(first) if *first == id => {
+                match gone.next {
+                    Some(next) => self.by_hash.insert(gone.hash, next),
+                    None => self.by_hash.remove(&gone.hash),
+                };
+                return;
+            }
+            first => first.copied(),
+        };
+        while let Some(entry) = at.and_then(|before| self.runs.get_mut(before))
+        {
+            if entry.next == Some(id) {
+                entry.next = gone.next;
+                return;
+            }
+            at = entry.next;
+        }
+    }
+
+    /// Whether the run `typesetter` lays out has been drawn since the
+    /// thread's fonts last changed, and so is worth keeping; where not,
+    /// records that it has been now.
+    ///
+    /// By hash alone: two runs whose hashes collide only mean the second is
+    /// kept a draw early, since a kept run is found by its whole key.
+    fn admits(&mut self, typesetter: &Typesetter<'_>) -> bool {
+        let hash = LaidOutKey::hash(typesetter);
+        if self.seen.contains(&hash) {
+            return true;
+        }
+        self.seen.insert(hash);
+        self.seen_order.push_back(hash);
+        if self.seen_order.len() > SEEN_ONCE
+            && let Some(oldest) = self.seen_order.pop_front()
+        {
+            self.seen.remove(&oldest);
+        }
+        false
+    }
+
+    fn clear(&mut self) {
+        self.runs.clear();
+        self.by_hash.clear();
+        self.seen.clear();
+        self.seen_order.clear();
+    }
+}
+
+thread_local! {
+    /// The runs this thread has laid out for drawing -- see [`LaidOut`].
+    static LAID_OUT: RefCell<LaidOutCache> = RefCell::default();
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: files every run under one hash, so that the chains a
+    /// collision makes are walked and cut as a real one's would be.
+    static COLLIDING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Lets every kept run go: called when the registered fonts change, since a
+/// kept run holds the faces it was laid out in, and by the idle release.
+pub(crate) fn forget_laid_out() {
+    let _ = LAID_OUT.try_with(|cache| {
+        if let Ok(mut cache) = cache.try_borrow_mut() {
+            cache.clear();
+        }
+    });
+}
+
+/// Test-only: `[count, bytes]`, how many runs this thread keeps for drawing
+/// and what they are estimated to hold -- see [`LaidOut`].
+///
+/// Exported by debug builds only, as `__discardGpuDraws` is.
+#[cfg(all(feature = "node-addon", debug_assertions))]
+pub fn laidOut(mut cx: FunctionContext) -> JsResult<JsArray> {
+    let (count, bytes) = laid_out_held();
+    let held = cx.empty_array();
+    let count = cx.number(count as f64);
+    held.set(&mut cx, 0, count)?;
+    let bytes = cx.number(bytes as f64);
+    held.set(&mut cx, 1, bytes)?;
+    Ok(held)
+}
+
+/// Test-only: lets every run this thread keeps for drawing go, so that a
+/// test can measure what they held.
+///
+/// Exported by debug builds only, as `__discardGpuDraws` is.
+#[cfg(all(feature = "node-addon", debug_assertions))]
+pub fn forgetLaidOut(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+    forget_laid_out();
+    Ok(cx.undefined())
+}
+
+/// How many runs are kept and what they are estimated to hold, for the tests
+/// here and the debug addon's `__laidOut`.
+#[cfg(any(test, all(debug_assertions, feature = "node-addon")))]
+pub(crate) fn laid_out_held() -> (usize, usize) {
+    LAID_OUT.with(|cache| {
+        let cache = cache.borrow();
+        (cache.runs.len(), cache.runs.bytes())
+    })
 }
 
 /// One glyph run of a laid-out paragraph: the glyphs one font draws, where
@@ -840,7 +1333,7 @@ impl<'a> Typesetter<'a> {
             state.typography(),
             &state.text.variations,
             decoration_thickness(state),
-            state.oblique_angle,
+            state.text.oblique_angle,
             text,
             width,
         )
@@ -1051,6 +1544,51 @@ impl<'a> Typesetter<'a> {
             opacity: global_alpha,
             face,
         })
+    }
+
+    /// The run kept for drawing what this typesetter lays out: the one kept
+    /// already, or one laid out now and kept where the run has been drawn
+    /// before -- see [`LaidOut`] and [`LAID_OUT`]. `None` the first time,
+    /// for the draw to lay the run out for its own paint with
+    /// [`Typesetter::drawn_once`].
+    ///
+    /// Not on the first draw, because keeping a run costs more than drawing
+    /// it once: laid out with no paint, its runs read back and its blobs
+    /// built. A page of strings each drawn once took a fifth longer kept
+    /// than drawn plainly, and holds nothing anyone draws again.
+    pub fn laid_out(&self) -> Option<Rc<LaidOut>> {
+        let found = LAID_OUT.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            let kept = cache.get(self);
+            kept.ok_or_else(|| cache.admits(self))
+        });
+        match found {
+            Ok(kept) => Some(kept),
+            Err(false) => None,
+            Err(true) => {
+                // The opacity is the draw's, put in by `LaidOut::paint`.
+                let laid_out = Rc::new(LaidOut::new(
+                    self.layout(&Paint::default()),
+                    self.decoration(1.0),
+                ));
+                LAID_OUT.with(|cache| {
+                    cache.borrow_mut().insert(self, laid_out.clone())
+                });
+                Some(laid_out)
+            }
+        }
+    }
+
+    /// The run laid out for one draw in `paint` and not kept, as a run is
+    /// drawn the first time: by `Paragraph::paint` where nothing needs its
+    /// runs, and from its runs, lines between them, where it is decorated
+    /// or `oblique`.
+    pub fn drawn_once(&self, paint: &Paint) -> DrawnRun {
+        let layout = self.layout(paint);
+        match (self.decoration(1.0), self.oblique) {
+            (None, None) => DrawnRun::Plain(layout),
+            (decoration, _) => DrawnRun::Runs(LaidOut::new(layout, decoration)),
+        }
     }
 
     /// The run's advance -- every glyph and space, with the letter spacing
@@ -2528,7 +3066,7 @@ impl TypesetInputs {
         // Only for an oblique: the faces it resolves are not kept, so for
         // any other font the search would be work for nothing.
         let mut typography = state.typography();
-        if let Some(angle) = state.oblique_angle {
+        if let Some(angle) = state.text.oblique_angle {
             let hinting = typography.1.hinting_is_on();
             let variations =
                 with_oblique_slnt(&state.text.variations, Some(angle));
@@ -2543,7 +3081,7 @@ impl TypesetInputs {
             typography,
             variations: state.text.variations.clone(),
             decoration_thickness: decoration_thickness(state),
-            oblique: state.oblique_angle,
+            oblique: state.text.oblique_angle,
             text: text.to_string(),
             width,
             fonts: FontLibrary::with_shared(|lib| lib.epoch()),
@@ -3486,6 +4024,541 @@ mod hinting {
             &paragraph_hinting(&engine),
             FontHinting::Slight,
             "a paragraph",
+        );
+    }
+}
+
+#[cfg(test)]
+mod laid_out {
+    use super::{
+        COLLIDING, LAID_OUT, LAID_OUT_BYTES, LAID_OUT_COUNT, SEEN_ONCE,
+        forget_laid_out, laid_out_held,
+    };
+    use crate::{
+        Canvas, Context2D, FontLibrary as Library, GradientInterpolation,
+        GradientStop, RgbaLinear, Shader, geometry::Point,
+        node::font_library::FontLibrary,
+    };
+
+    const OSWALD: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"
+    );
+    const AMSTELVAR: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/assets/fonts/AmstelvarAlpha-VF.ttf"
+    );
+    const TEXT: &str = "Hamburgefonstiv AV";
+
+    /// A change made to a context before it draws.
+    type Setup = Box<dyn Fn(&mut Context2D)>;
+
+    /// A family of these tests' own, in `file`.
+    fn register(family: &str, file: &str) {
+        Library::new()
+            .register_font_from_path(family, file)
+            .expect("a bundled face registers");
+    }
+
+    /// The canvas's pixels after `draw` on `ctx`, once.
+    fn drawn_once(
+        canvas: &mut Canvas,
+        draw: impl Fn(&mut Context2D),
+    ) -> Vec<u8> {
+        let ctx = canvas.context();
+        ctx.clear_rect(0.0, 0.0, 400.0, 120.0);
+        draw(ctx);
+        ctx.get_image_data(0.0, 0.0, 400.0, 120.0)
+            .expect("the canvas reads back")
+            .pixels()
+            .to_vec()
+    }
+
+    /// The canvas's pixels after `draw` on `ctx` twice, so that what it
+    /// draws is kept -- see `Typesetter::laid_out`.
+    fn drawn(canvas: &mut Canvas, draw: impl Fn(&mut Context2D)) -> Vec<u8> {
+        drawn_once(canvas, &draw);
+        drawn_once(canvas, draw)
+    }
+
+    /// What a context given `setup` from the start draws for `draw`, the
+    /// first time, which keeps nothing: the oracle a kept run is held to.
+    fn fresh(
+        setup: impl Fn(&mut Context2D),
+        draw: impl Fn(&mut Context2D),
+    ) -> Vec<u8> {
+        let mut canvas = Canvas::new(400.0, 120.0);
+        setup(canvas.context());
+        drawn_once(&mut canvas, draw)
+    }
+
+    fn fill(
+        text: &'static str,
+        width: Option<f32>,
+    ) -> impl Fn(&mut Context2D) + Copy {
+        move |ctx: &mut Context2D| ctx.fill_text(text, 10.0, 70.0, width)
+    }
+
+    /// Draws `first`, changes `change`, draws `second`: the second has to be
+    /// a run of its own, drawn as a fresh context draws it.
+    fn changed(
+        family: &str,
+        setup: impl Fn(&mut Context2D) + Copy,
+        first: impl Fn(&mut Context2D),
+        change: impl Fn(&mut Context2D) + Copy,
+        second: impl Fn(&mut Context2D) + Copy,
+    ) {
+        forget_laid_out();
+        let font = format!("40px {family}");
+        let mut canvas = Canvas::new(400.0, 120.0);
+        assert!(canvas.context().set_font_css(&font));
+        setup(canvas.context());
+        let before = drawn(&mut canvas, first);
+        change(canvas.context());
+        let after = drawn(&mut canvas, second);
+        let wanted = fresh(
+            |ctx| {
+                assert!(ctx.set_font_css(&font));
+                setup(ctx);
+                change(ctx);
+            },
+            second,
+        );
+        assert_ne!(after, before, "the change shows");
+        assert!(after == wanted, "drawn as a fresh context draws it");
+    }
+
+    #[test]
+    fn a_run_drawn_again_in_another_paint_is_laid_out_once() {
+        // Colour, gradient and alpha change between draws of one run, and
+        // each draw is the one a fresh context makes in that paint.
+        const FAMILY: &str = "LaidOutPaints";
+        register(FAMILY, OSWALD);
+        let gradient = Shader::linear_gradient(
+            Point::new(0.0, 0.0),
+            Point::new(400.0, 0.0),
+            &[
+                GradientStop {
+                    position: 0.0,
+                    color: RgbaLinear::opaque(1.0, 0.0, 0.0),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: RgbaLinear::opaque(0.0, 0.2, 1.0),
+                },
+            ],
+            GradientInterpolation::default(),
+        )
+        .expect("a gradient");
+        let paints: [Setup; 4] = [
+            Box::new(|ctx| ctx.set_fill_style_css("#203040").expect("c")),
+            Box::new(move |ctx| ctx.set_fill_shader(&gradient)),
+            Box::new(|ctx| {
+                ctx.set_fill_style_css("green").expect("c");
+                ctx.set_global_alpha(0.5);
+            }),
+            Box::new(|ctx| {
+                ctx.set_fill_style_css("rgba(200, 30, 90, 0.6)").expect("c")
+            }),
+        ];
+        let font = format!("40px {FAMILY}");
+        let wanted: Vec<_> = paints
+            .iter()
+            .map(|paint| {
+                fresh(
+                    |ctx| {
+                        assert!(ctx.set_font_css(&font));
+                        paint(ctx);
+                    },
+                    fill(TEXT, None),
+                )
+            })
+            .collect();
+        forget_laid_out();
+        let mut canvas = Canvas::new(400.0, 120.0);
+        assert!(canvas.context().set_font_css(&font));
+        for (at, paint) in paints.iter().enumerate() {
+            paint(canvas.context());
+            let kept = drawn(&mut canvas, fill(TEXT, None));
+            canvas.context().set_global_alpha(1.0);
+            assert!(kept == wanted[at], "paint {at}: as a fresh context draws");
+        }
+        assert_eq!(laid_out_held().0, 1, "one run, laid out once");
+    }
+
+    #[test]
+    fn another_text_is_a_run_of_its_own() {
+        const FAMILY: &str = "LaidOutText";
+        register(FAMILY, OSWALD);
+        changed(
+            FAMILY,
+            |_| {},
+            fill("Hamburg", None),
+            |_| {},
+            fill("Handgloves", None),
+        );
+    }
+
+    #[test]
+    fn another_wrap_width_is_a_run_of_its_own() {
+        const FAMILY: &str = "LaidOutWrap";
+        register(FAMILY, OSWALD);
+        changed(
+            FAMILY,
+            |ctx| ctx.set_text_wrap(true),
+            fill(TEXT, Some(160.0)),
+            |_| {},
+            fill(TEXT, Some(380.0)),
+        );
+    }
+
+    #[test]
+    fn another_condensing_width_is_a_run_of_its_own() {
+        const FAMILY: &str = "LaidOutCondense";
+        register(FAMILY, OSWALD);
+        changed(
+            FAMILY,
+            |_| {},
+            fill(TEXT, Some(160.0)),
+            |_| {},
+            fill(TEXT, Some(240.0)),
+        );
+    }
+
+    #[test]
+    fn a_changed_setting_is_a_run_of_its_own() {
+        const FAMILY: &str = "LaidOutSetting";
+        register(FAMILY, OSWALD);
+        changed(
+            FAMILY,
+            |_| {},
+            fill(TEXT, None),
+            |ctx| ctx.set_letter_spacing_css("4px").expect("a spacing"),
+            fill(TEXT, None),
+        );
+    }
+
+    #[test]
+    fn another_oblique_angle_is_a_run_of_its_own() {
+        const FAMILY: &str = "LaidOutOblique";
+        register(FAMILY, OSWALD);
+        changed(
+            FAMILY,
+            |ctx| {
+                assert!(ctx.set_font_css("oblique 10deg 40px LaidOutOblique"))
+            },
+            fill(TEXT, None),
+            |ctx| {
+                assert!(ctx.set_font_css("oblique 30deg 40px LaidOutOblique"))
+            },
+            fill(TEXT, None),
+        );
+    }
+
+    #[test]
+    fn a_run_laid_out_before_a_font_change_is_not_drawn_after_it() {
+        // The family registered again: the context's settings are the same,
+        // and the run has to come out in the face that replaced the first.
+        const FAMILY: &str = "LaidOutEpoch";
+        register(FAMILY, OSWALD);
+        changed(
+            FAMILY,
+            |_| {},
+            fill(TEXT, None),
+            |_| register(FAMILY, AMSTELVAR),
+            fill(TEXT, None),
+        );
+    }
+
+    #[test]
+    fn a_decoration_takes_its_colour_from_the_paint_where_it_has_none() {
+        // Underlined in the text colour: red, then blue, each its own lines.
+        const FAMILY: &str = "LaidOutPaintLines";
+        register(FAMILY, OSWALD);
+        let font = format!("40px {FAMILY}");
+        let colours = ["red", "blue"];
+        let wanted = colours.map(|colour| {
+            fresh(
+                |ctx| {
+                    assert!(ctx.set_font_css(&font));
+                    ctx.set_text_decoration_css("underline").expect("d");
+                    ctx.set_fill_style_css(colour).expect("c");
+                },
+                fill(TEXT, None),
+            )
+        });
+        forget_laid_out();
+        let mut canvas = Canvas::new(400.0, 120.0);
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css(&font));
+        ctx.set_text_decoration_css("underline").expect("d");
+        let mut held = vec![];
+        for (at, colour) in colours.iter().enumerate() {
+            canvas.context().set_fill_style_css(colour).expect("c");
+            let kept = drawn(&mut canvas, fill(TEXT, None));
+            assert!(kept == wanted[at], "{colour}: as a fresh context draws");
+            held.push(laid_out_held());
+        }
+        assert_eq!(held[1].0, 1, "one run");
+        assert_eq!(held[0].1, held[1].1, "its lines drawn from the one box");
+    }
+
+    #[test]
+    fn a_decoration_with_a_colour_of_its_own_is_laid_out_once() {
+        // Green lines under red text and then blue: one decoration paragraph.
+        const FAMILY: &str = "LaidOutOwnLines";
+        register(FAMILY, OSWALD);
+        let font = format!("40px {FAMILY}");
+        let colours = ["red", "blue"];
+        let wanted = colours.map(|colour| {
+            fresh(
+                |ctx| {
+                    assert!(ctx.set_font_css(&font));
+                    ctx.set_text_decoration_css("underline green").expect("d");
+                    ctx.set_fill_style_css(colour).expect("c");
+                },
+                fill(TEXT, None),
+            )
+        });
+        forget_laid_out();
+        let mut canvas = Canvas::new(400.0, 120.0);
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css(&font));
+        ctx.set_text_decoration_css("underline green").expect("d");
+        let mut held = vec![];
+        for (at, colour) in colours.iter().enumerate() {
+            canvas.context().set_fill_style_css(colour).expect("c");
+            let kept = drawn(&mut canvas, fill(TEXT, None));
+            assert!(kept == wanted[at], "{colour}: as a fresh context draws");
+            held.push(laid_out_held());
+        }
+        assert_eq!(held[1].0, 1, "one run");
+        assert_eq!(held[0].1, held[1].1, "the green lines are laid out once");
+    }
+
+    #[test]
+    fn a_named_line_colour_takes_each_draw_s_global_alpha() {
+        // Red lines, drawn opaque and then at half alpha from one run, in a
+        // gap between glyphs that only the line covers: its alpha is the
+        // draw's, which a fresh context drawing the same would get wrong in
+        // the same way, so it is read off the pixels as well.
+        const FAMILY: &str = "LaidOutLineAlpha";
+        register(FAMILY, OSWALD);
+        let font = format!("96px {FAMILY}");
+        let gap =
+            |ctx: &mut Context2D| ctx.fill_text("n      n", 10.0, 100.0, None);
+        let alphas = [1.0, 0.5];
+        let wanted = alphas.map(|alpha| {
+            fresh(
+                |ctx| {
+                    assert!(ctx.set_font_css(&font));
+                    ctx.set_text_decoration_css("underline 8px red")
+                        .expect("d");
+                    ctx.set_global_alpha(alpha);
+                },
+                gap,
+            )
+        });
+        forget_laid_out();
+        let mut canvas = Canvas::new(400.0, 120.0);
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css(&font));
+        ctx.set_text_decoration_css("underline 8px red").expect("d");
+        for (at, alpha) in alphas.into_iter().enumerate() {
+            canvas.context().set_global_alpha(alpha);
+            let kept = drawn(&mut canvas, gap);
+            assert!(kept == wanted[at], "{alpha}: as a fresh context draws");
+            // The line's own pixels: red, where the glyphs are black.
+            let line = kept
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|px| px[0] > 200 && px[1] < 40 && px[2] < 40)
+                .map(|px| px[3])
+                .max()
+                .expect("the line is drawn");
+            let expected = (alpha * 255.0).round() as u8;
+            assert!(
+                line.abs_diff(expected) <= 1,
+                "{alpha}: the line's alpha is {line}, not {expected}"
+            );
+        }
+        assert_eq!(laid_out_held().0, 1, "one run");
+    }
+
+    #[test]
+    fn another_decoration_thickness_is_a_run_of_its_own() {
+        // The thickness reaches the typesetter apart from the typography,
+        // resolved against the font: a run kept at one must not draw the
+        // other.
+        const FAMILY: &str = "LaidOutThickness";
+        register(FAMILY, OSWALD);
+        changed(
+            FAMILY,
+            |ctx| ctx.set_text_decoration_css("underline 0.05em").expect("d"),
+            fill(TEXT, None),
+            |ctx| ctx.set_text_decoration_css("underline 0.2em").expect("d"),
+            fill(TEXT, None),
+        );
+    }
+
+    /// Whether a run of `text` is kept.
+    fn kept(text: &str) -> bool {
+        LAID_OUT.with(|cache| {
+            cache
+                .borrow()
+                .runs
+                .values()
+                .any(|entry| &*entry.key.text == text)
+        })
+    }
+
+    #[test]
+    fn past_the_count_the_least_recently_drawn_runs_go() {
+        least_recently_drawn_go_past_the_count("LaidOutCount");
+    }
+
+    #[test]
+    fn runs_whose_hashes_collide_are_found_and_let_go_as_any_other() {
+        // Every run in one chain: each found among the others, and the
+        // oldest cut out of the chain wherever it sits in it.
+        COLLIDING.set(true);
+        register("LaidOutCollidingText", OSWALD);
+        changed(
+            "LaidOutCollidingText",
+            |_| {},
+            fill("Hamburg", None),
+            |_| {},
+            fill("Handgloves", None),
+        );
+        least_recently_drawn_go_past_the_count("LaidOutCollidingCount");
+        COLLIDING.set(false);
+    }
+
+    /// Draws one run every time and a new one each time, past the count.
+    fn least_recently_drawn_go_past_the_count(family: &str) {
+        register(family, OSWALD);
+        forget_laid_out();
+        let mut canvas = Canvas::new(400.0, 120.0);
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css(&format!("12px {family}")));
+        for at in 0..LAID_OUT_COUNT + 64 {
+            ctx.fill_text("kept throughout", 0.0, 20.0, None);
+            // Twice, for it to be kept.
+            for _ in 0..2 {
+                ctx.fill_text(&format!("run {at}"), 0.0, 40.0, None);
+            }
+        }
+        assert_eq!(laid_out_held().0, LAID_OUT_COUNT);
+        assert!(kept("kept throughout"), "drawn every time, it stays");
+        LAID_OUT.with(|cache| {
+            let cache = cache.borrow();
+            let copies = cache
+                .runs
+                .values()
+                .filter(|entry| &*entry.key.text == "kept throughout")
+                .count();
+            assert_eq!(copies, 1, "found each time rather than laid out again");
+            assert!(
+                cache.by_hash.len() <= cache.runs.len(),
+                "no hash is left filed for a run that has gone"
+            );
+        });
+        assert!(!kept("run 0"), "the first of the others has gone");
+        assert!(kept(&format!("run {}", LAID_OUT_COUNT + 63)));
+    }
+
+    #[test]
+    fn past_the_bytes_the_least_recently_drawn_runs_go() {
+        const FAMILY: &str = "LaidOutBytes";
+        register(FAMILY, OSWALD);
+        forget_laid_out();
+        let mut canvas = Canvas::new(400.0, 120.0);
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css(&format!("12px {FAMILY}")));
+        ctx.set_text_wrap(true);
+        let long = "the quick brown fox jumps over the lazy dog ".repeat(8);
+        for at in 0..200 {
+            for _ in 0..2 {
+                ctx.fill_text(&format!("{at} {long}"), 0.0, 20.0, Some(380.0));
+            }
+        }
+        let (count, bytes) = laid_out_held();
+        assert!(bytes <= LAID_OUT_BYTES, "{bytes} bytes held");
+        assert!(count < 200, "{count} runs kept of 200");
+        assert!(kept(&format!("199 {long}")) && !kept(&format!("0 {long}")));
+    }
+
+    #[test]
+    fn a_font_change_and_the_idle_release_let_every_run_go() {
+        const FAMILY: &str = "LaidOutForgotten";
+        register(FAMILY, OSWALD);
+        let mut canvas = Canvas::new(400.0, 120.0);
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css(&format!("40px {FAMILY}")));
+        drawn(&mut canvas, fill(TEXT, None));
+        assert_eq!(laid_out_held().0, 1);
+        register(FAMILY, AMSTELVAR);
+        assert_eq!(laid_out_held().0, 0, "a registration");
+
+        drawn(&mut canvas, fill(TEXT, None));
+        assert_eq!(laid_out_held().0, 1);
+        FontLibrary::with_shared(FontLibrary::release_caches);
+        assert_eq!(laid_out_held().0, 0, "the idle release");
+    }
+
+    #[test]
+    fn a_run_is_kept_from_its_second_draw() {
+        const FAMILY: &str = "LaidOutSecond";
+        register(FAMILY, OSWALD);
+        forget_laid_out();
+        let mut canvas = Canvas::new(400.0, 120.0);
+        assert!(canvas.context().set_font_css(&format!("40px {FAMILY}")));
+        let wanted = drawn_once(&mut canvas, fill(TEXT, None));
+        assert_eq!(laid_out_held().0, 0, "a run drawn once is not kept");
+        let again = drawn_once(&mut canvas, fill(TEXT, None));
+        assert_eq!(laid_out_held().0, 1, "and is kept when drawn again");
+        assert!(again == wanted, "drawn the same either way");
+    }
+
+    #[test]
+    fn a_font_change_and_the_idle_release_forget_the_runs_drawn_once() {
+        // Drawn once before each: the draw after is a first draw again.
+        const FAMILY: &str = "LaidOutSeenForgotten";
+        register(FAMILY, OSWALD);
+        let mut canvas = Canvas::new(400.0, 120.0);
+        assert!(canvas.context().set_font_css(&format!("40px {FAMILY}")));
+        let forgets: [Setup; 2] = [
+            Box::new(|_| register(FAMILY, OSWALD)),
+            Box::new(|_| FontLibrary::with_shared(FontLibrary::release_caches)),
+        ];
+        for (at, forget) in forgets.iter().enumerate() {
+            drawn_once(&mut canvas, fill(TEXT, None));
+            forget(canvas.context());
+            drawn_once(&mut canvas, fill(TEXT, None));
+            assert_eq!(laid_out_held().0, 0, "forget {at}: not kept");
+        }
+    }
+
+    #[test]
+    fn past_the_runs_remembered_a_run_drawn_once_is_forgotten() {
+        const FAMILY: &str = "LaidOutSeenBound";
+        register(FAMILY, OSWALD);
+        forget_laid_out();
+        let mut canvas = Canvas::new(400.0, 120.0);
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css(&format!("12px {FAMILY}")));
+        ctx.fill_text("the first", 0.0, 20.0, None);
+        for at in 0..SEEN_ONCE {
+            ctx.fill_text(&format!("once {at}"), 0.0, 40.0, None);
+        }
+        ctx.fill_text("the first", 0.0, 20.0, None);
+        assert!(!kept("the first"), "forgotten, so a first draw again");
+        assert_eq!(laid_out_held().0, 0);
+        ctx.fill_text(&format!("once {}", SEEN_ONCE - 1), 0.0, 40.0, None);
+        assert!(
+            kept(&format!("once {}", SEEN_ONCE - 1)),
+            "where the last is not"
         );
     }
 }

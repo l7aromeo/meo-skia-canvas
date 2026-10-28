@@ -4822,6 +4822,60 @@ mod run_painter_tests {
         cases
     }
 
+    /// A run drawn again on the GPU, in any of seven paints after any of
+    /// them and with the canvas read back in between, draws what a fresh
+    /// context draws in that paint -- see `LaidOut`'s blobs, which a kept
+    /// run draws again only in the paint they were built for.
+    #[test]
+    fn a_run_drawn_again_on_the_gpu_draws_as_a_fresh_one() {
+        register();
+        let paints: [(&str, f32); 7] = [
+            ("#000000", 1.0),
+            ("#203040", 1.0),
+            ("green", 1.0),
+            ("green", 0.5),
+            ("#c03010", 1.0),
+            ("#808080", 1.0),
+            ("#ffffff", 1.0),
+        ];
+        let draw = |ctx: &mut Context2D, (colour, alpha): (&str, f32)| {
+            ctx.clear_rect(0.0, 0.0, W, H);
+            ctx.set_global_alpha(alpha);
+            ctx.set_fill_style_css(colour).expect("a colour");
+            ctx.fill_text("Hamburgefonstiv fi AV", 10.0, 70.0, None);
+            ctx.get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec()
+        };
+        let canvas = || {
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(true);
+            assert!(canvas.context().set_font_css("28px Oswald"));
+            canvas
+        };
+        PAINTER_OVERRIDE.set(None);
+        let mut differing = vec![];
+        for second in paints {
+            let wanted = draw(canvas().context(), second);
+            for first in paints {
+                // Twice in the first paint, for the run to be kept with
+                // its blobs for it.
+                let mut again = canvas();
+                draw(again.context(), first);
+                draw(again.context(), first);
+                if draw(again.context(), second) != wanted {
+                    differing.push(format!("{first:?} then {second:?}"));
+                }
+            }
+        }
+        assert!(
+            differing.is_empty(),
+            "drawn unlike a fresh context:\n{}",
+            differing.join("\n")
+        );
+    }
+
     /// The run painter draws what `Paragraph::paint` draws, to the byte, on
     /// both engines, for text with nothing a run would need painted on its
     /// own. Any oblique a run is drawn under rests on this.

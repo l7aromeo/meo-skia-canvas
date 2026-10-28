@@ -22,6 +22,8 @@ pub mod api;
 pub mod page;
 pub mod typesetting;
 
+#[cfg(test)]
+use crate::node::typography::Painter;
 use crate::{
     context2d::{FontKerning, TextRendering},
     css::{FontUnits, ROOT_FONT_PX},
@@ -31,7 +33,6 @@ use crate::{
     gpu::RenderingEngine,
     gradient::{BoxedCanvasGradient, CanvasGradient},
     node::{
-        decorate::{self, Layer},
         filter::{
             Coverage, Filter, SamplingFilter, SamplingQuality, ScalingOperation,
         },
@@ -41,8 +42,8 @@ use crate::{
         texture::{BoxedCanvasTexture, CanvasTexture},
     },
     typography::{
-        Baseline, DecorationStyle, FontSpec, Painter, PendingInk, Spacing,
-        TextExtents, TypesetInputs, Typesetter, glyph_runs,
+        Baseline, DecorationStyle, DrawnRun, FontSpec, PendingInk, Spacing,
+        TextExtents, TypesetInputs, Typesetter,
     },
     utils::*,
 };
@@ -228,9 +229,6 @@ pub struct State {
     /// synonym for `ltr`. With no document to inherit from, `inherit`
     /// resolves to `ltr` for rendering, which is what `graf_style` gets.
     pub direction_inherits: bool,
-    /// The angle an `oblique` font is drawn at, in CSS degrees, or `None`
-    /// where the font is not oblique.
-    pub oblique_angle: Option<f32>,
     pub font_variation_settings: String,
 }
 
@@ -306,8 +304,8 @@ impl Default for State {
                 font_kerning: FontKerning::default(),
                 text_rendering: TextRendering::default(),
                 variations: vec![],
+                oblique_angle: None,
             }),
-            oblique_angle: None,
             font_variation_settings: "normal".to_string(),
         }
     }
@@ -1618,7 +1616,7 @@ impl Context2D {
         self.state.font_width = spec.width;
         self.state.text.edit().char_style = style;
         self.state.text.edit().line_height = spec.line_height;
-        self.state.oblique_angle = spec.oblique_angle();
+        self.state.text.edit().oblique_angle = spec.oblique_angle();
     }
 
     /// Matches a specification against the font library and applies it.
@@ -1674,63 +1672,31 @@ impl Context2D {
             self.draw_path(Some(typesetter.path(origin)), style, None);
         } else {
             let features = self.vector_features(&paint, Some(style));
+            let kept = typesetter.laid_out();
+            let global_alpha = self.state.global_alpha as f32;
             self.render_to_canvas(&paint, features, |canvas, paint| {
-                let mut layout = typesetter.layout(paint);
-                let (offset, condensation) =
-                    (layout.offset, layout.condensation);
-                let painter = layout.painter();
-                #[cfg(test)]
-                let painter = PAINTER_OVERRIDE.get().unwrap_or(painter);
-                // The run is one decorating box: every run of it is the
-                // box's, whatever face draws it.
-                let decoration =
-                    typesetter.decoration(self.state.global_alpha as f32);
-                let runs = match &decoration {
-                    Some(_) => glyph_runs(&mut layout.paragraph),
-                    None => Vec::new(),
+                // The kept run, or, the first time a run is drawn, the run
+                // laid out for this paint -- see `Typesetter::laid_out`.
+                let run = match &kept {
+                    Some(kept) => DrawnRun::Kept(kept.clone()),
+                    None => typesetter.drawn_once(paint),
                 };
-                let spans = decorate::spans(&runs, |_| Some(0));
-                let boxes = decoration.as_slice();
-                let lines = runs.last().map_or(0, |run| run.line + 1);
-                let mut draw = |canvas: &SkCanvas, at: Point| {
-                    if decoration.is_none() {
-                        match painter {
-                            Painter::Paragraph => {
-                                layout.paragraph.paint(canvas, at)
-                            }
-                            Painter::Runs => layout.paint(canvas, at, paint),
-                        }
-                        return;
+                let (offset, condensation) = (run.offset(), run.condensation());
+                // In a test, an undecorated run can be laid out for this
+                // paint and drawn by `Paragraph::paint` instead, as the
+                // oracle the kept runs are held to. A decorated one is drawn
+                // from its runs either way, its lines between them.
+                #[cfg(test)]
+                let oracle = (PAINTER_OVERRIDE.get()
+                    == Some(Painter::Paragraph)
+                    && typesetter.decoration(1.0).is_none())
+                .then(|| typesetter.layout(paint));
+                let draw = |canvas: &SkCanvas, at: Point| {
+                    #[cfg(test)]
+                    if let Some(layout) = &oracle {
+                        return layout.paragraph.paint(canvas, at);
                     }
-                    // A line at a time, in the order CSS 2.1 Appendix E
-                    // paints a line box: underlines and overlines beneath
-                    // the glyphs, line-through over them -- CSS Text
-                    // Decoration 4, section 5.1 -- so that a wrapped line's
-                    // underline lies over the line above's descenders, as in
-                    // Chrome. The glyph runs are drawn by the run painter,
-                    // which draws what `Paragraph::paint` draws.
-                    for line in 0..lines {
-                        let spans = decorate::on_line(&spans, line);
-                        let start = runs.partition_point(|run| run.line < line);
-                        let end = runs.partition_point(|run| run.line <= line);
-                        decorate::paint(
-                            canvas,
-                            spans,
-                            boxes,
-                            at,
-                            Layer::Beneath,
-                            paint,
-                        );
-                        layout.paint_runs(canvas, at, paint, &runs[start..end]);
-                        decorate::paint(
-                            canvas,
-                            spans,
-                            boxes,
-                            at,
-                            Layer::Over,
-                            paint,
-                        );
-                    }
+                    run.paint(canvas, at, paint, global_alpha)
                 };
                 match condensation {
                     // Chrome condenses with a plain anisotropic transform

@@ -57,6 +57,12 @@ pub struct TextSettings {
     /// The font's variation axes, which instance the face a spacing in `ch`
     /// or `ex` is resolved against.
     pub variations: Vec<(FourByteTag, f32)>,
+    /// The angle an `oblique` font is drawn at, in CSS degrees, or `None`
+    /// where the font is not oblique. Not read by the typography itself,
+    /// but kept with the settings it is built from so that what is laid out
+    /// from both follows a change to either -- see
+    /// `node::typography::LaidOutKey`.
+    pub oblique_angle: Option<f32>,
 }
 
 /// A build of the typography, and the fonts it was built against.
