@@ -4,7 +4,9 @@ use neon::prelude::*;
 use skia_safe::{Color, Color4f, ColorSpace, Data, Matrix, Path, Point};
 use std::{
     borrow::Cow,
+    cell::RefCell,
     cmp,
+    collections::HashMap,
     sync::{Arc, OnceLock},
 };
 
@@ -2104,9 +2106,23 @@ pub fn declared_color(declared: &Declared) -> (Color4f, &'static str) {
 /// What [`declared_to_css`] tests a spelling with, without writing it out
 /// and parsing it.
 fn read_back(declared: &Declared, figures: Figures) -> Declared {
-    let read = |value: f64, length: usize| {
-        significant(value, length).parse().unwrap_or(value)
-    };
+    read_back_with(declared, figures, &|value, length| {
+        read_number(value, length)
+    })
+}
+
+/// The number `value` written to `length` significant figures reads as.
+fn read_number(value: f64, length: usize) -> f64 {
+    significant(value, length).parse().unwrap_or(value)
+}
+
+/// [`read_back`], each number read by `read` -- [`read_number`], or a
+/// memo of it.
+fn read_back_with(
+    declared: &Declared,
+    figures: Figures,
+    read: &dyn Fn(f64, usize) -> f64,
+) -> Declared {
     let whole = |c: f64| (c - c.round()).abs() < WHOLE_BYTE_EPSILON;
     let alpha = declared.alpha.map(|alpha| match alpha >= 1.0 {
         true => 1.0,
@@ -3910,8 +3926,10 @@ thread_local! {
 /// there a channel's shortest depends on how the others are written, so
 /// every set of lengths within [`LENGTH_SLACK`] of those is tried, fewest
 /// figures first, each channel at each of its three decimals, widening
-/// until one repaints, and the shortest string of the fewest figures is
-/// kept. A number below [`CONVERSION_RESIDUE`] is tried as `0` first.
+/// until one repaints. Within a number of figures the spellings are tried
+/// shortest written first, so the first that repaints is the shortest
+/// string of the fewest figures. A number below [`CONVERSION_RESIDUE`] is
+/// tried as `0` first.
 ///
 /// What that finds is the shortest spelling within the narrowest window
 /// around each channel's own shortest that holds one -- not a minimum
@@ -3922,18 +3940,35 @@ thread_local! {
 /// `a_mixed_colour_has_no_shorter_spelling` keeps a sample of them.
 ///
 /// A trial is tested on numbers, not text: [`read_back`] gives the
-/// declaration its spelling reads as, and [`declared_color`], the function
-/// every parser stores a colour through, paints it.
+/// declaration its spelling reads as, each number written and read once a
+/// search, and [`declared_color`], the function every parser stores a
+/// colour through, paints it.
 pub fn declared_to_css(declared: &Declared) -> String {
     let all = [EXACT_FIGURES; 4];
     let exact = declared_css(declared, all);
     let held = declared_color(declared);
+    // Each number a trial holds, written out and read back once, with the
+    // length it is written at: a search reads the same few dozen decimals
+    // hundreds of times, and writing a number and parsing it costs more than
+    // the conversion it feeds. A memo of [`read_number`], so a trial reads
+    // exactly as [`read_back`] reads it.
+    let memo: RefCell<HashMap<(u64, usize), (f64, usize)>> = RefCell::default();
+    let written = |value: f64, length: usize| -> (f64, usize) {
+        *memo
+            .borrow_mut()
+            .entry((value.to_bits(), length))
+            .or_insert_with(|| {
+                let text = significant(value, length);
+                (text.parse().unwrap_or(value), text.len())
+            })
+    };
+    let read = |value: f64, length: usize| written(value, length).0;
     // Each trial is the declaration its spelling reads back as, painted by
     // the function the setter stores through.
     let repaints = |trial: &Declared, figures: Figures| {
         #[cfg(test)]
         TRIALS.with(|trials| trials.set(trials.get() + 1));
-        declared_color(&read_back(trial, figures)) == held
+        declared_color(&read_back_with(trial, figures, &read)) == held
     };
 
     // Each number alone, the others exact: the fewest figures, and the
@@ -3988,8 +4023,11 @@ pub fn declared_to_css(declared: &Declared) -> String {
     // moves to the neighbouring decimal, or two channels only together. So
     // every set of lengths within [`LENGTH_SLACK`] of each channel's own is
     // tried, fewest figures first, each channel at each of its three
-    // decimals; the first that repaints is the shortest there is in that
-    // window. A channel already at zero stays there.
+    // decimals. Within a number of figures the candidates are tried in the
+    // order of the length they are written at, ties in the order they are
+    // enumerated, so the first that repaints is the shortest string there is
+    // in that window and nothing after it is tried. A channel already at
+    // zero stays there.
     let channels: Vec<usize> = (0..ALPHA)
         .filter(|&index| lone[index].is_some_and(|(decimal, _)| decimal != 0.0))
         .collect();
@@ -4017,42 +4055,43 @@ pub fn declared_to_css(declared: &Declared) -> String {
             |trial: &Figures| channels.iter().map(|&i| trial[i]).sum::<usize>();
         lengths.sort_by_key(total);
         let combinations = 3usize.pow(channels.len() as u32);
-        let mut best: Option<(usize, String)> = None;
-        for trial_figures in lengths {
-            if best
-                .as_ref()
-                .is_some_and(|(figures, _)| total(&trial_figures) > *figures)
-            {
-                break;
+        for level in lengths.chunk_by(|a, b| total(a) == total(b)) {
+            // Each candidate with the length its varying numbers are written
+            // at; everything else in the string is the same for all of them.
+            let mut candidates: Vec<(usize, Declared, Figures)> = vec![];
+            for &trial_figures in level {
+                let decimals: Vec<[f64; 3]> = channels
+                    .iter()
+                    .filter_map(|&index| {
+                        let value = declared_number(declared, index)?;
+                        Some(neighbouring_decimals(value, trial_figures[index]))
+                    })
+                    .collect();
+                for combination in 0..combinations {
+                    let mut trial = shortest;
+                    let mut choice = combination;
+                    let mut length = 0;
+                    for (&index, options) in channels.iter().zip(&decimals) {
+                        let decimal = options[choice % 3];
+                        set_declared_number(&mut trial, index, decimal);
+                        length += written(decimal, trial_figures[index]).1;
+                        choice /= 3;
+                    }
+                    candidates.push((length, trial, trial_figures));
+                }
             }
-            let decimals: Vec<[f64; 3]> = channels
-                .iter()
-                .filter_map(|&index| {
-                    let value = declared_number(declared, index)?;
-                    Some(neighbouring_decimals(value, trial_figures[index]))
-                })
-                .collect();
-            for combination in 0..combinations {
-                let mut trial = shortest;
-                let mut choice = combination;
-                for (&index, options) in channels.iter().zip(&decimals) {
-                    set_declared_number(&mut trial, index, options[choice % 3]);
-                    choice /= 3;
-                }
-                if !repaints(&trial, trial_figures) {
-                    continue;
-                }
-                let css = declared_css(&trial, trial_figures);
-                if best.as_ref().is_none_or(|(_, kept)| css.len() < kept.len())
-                {
-                    best = Some((total(&trial_figures), css));
-                }
+            // Stable, so equal lengths keep the order they were enumerated in.
+            candidates.sort_by_key(|&(length, _, _)| length);
+            if let Some((_, trial, trial_figures)) = candidates
+                .into_iter()
+                .find(|(_, trial, figures)| repaints(trial, *figures))
+            {
+                return Some(declared_css(&trial, trial_figures));
             }
         }
-        best
+        None
     };
-    let best = (LENGTH_SLACK..EXACT_FIGURES).find_map(search);
-    if let Some((_, css)) = best {
+    if let Some(css) = (LENGTH_SLACK..EXACT_FIGURES).find_map(search) {
         return css;
     }
     (1..=EXACT_FIGURES)
@@ -4078,7 +4117,7 @@ const CONVERSION_RESIDUE: f64 = 1e-10;
 /// Chosen by measurement. Over the 864 relative colours of a grid of 216
 /// sRGB origins in Lab, LCH, Oklab and OkLCh, starting at one figure finds
 /// a spelling as short as a search over every length to ten figures does,
-/// at a median of about 520 trials and 3,600 at most; starting at none
+/// at a median of about 440 trials and 3,500 at most; starting at none
 /// writes nine of them longer, `lab(from #3399cc l a b)` among them, which
 /// `a_mixed_colour_has_no_shorter_spelling` holds.
 const LENGTH_SLACK: usize = 1;
@@ -5562,6 +5601,217 @@ mod tests {
     /// widened its window, wrote longer; `oklab(from #990099 l a b)` is the
     /// one that found a joint local search out, in 1,080 rows. The grid is a
     /// sample of the 864 rows the search was measured over.
+    /// [`declared_to_css`]'s search with every trial read through text and
+    /// every level of figures tried to its end: slower, and what the search
+    /// is held to.
+    fn reference_declared_to_css(declared: &Declared) -> String {
+        let all = [EXACT_FIGURES; 4];
+        let exact = declared_css(declared, all);
+        let held = declared_color(declared);
+        // Each trial is the declaration its spelling reads back as, painted by
+        // the function the setter stores through.
+        let repaints = |trial: &Declared, figures: Figures| {
+            declared_color(&read_back(trial, figures)) == held
+        };
+
+        // Each number alone, the others exact: the fewest figures, and the
+        // decimal of that length, that repaint. Zero first for a number below
+        // [`CONVERSION_RESIDUE`], which no rounding of it reaches: a channel
+        // whose true value is zero holds what a conversion leaves
+        // there, `oklch(from white l c h)`'s chroma of 5e-16. Not for a
+        // larger one: a hue under a chroma of zero repaints at any
+        // value, and `oklch(0.5 -0.1 30)` keeps the hue it was given.
+        let alone = |index: usize| -> Option<(f64, usize)> {
+            let value = declared_number(declared, index)?;
+            let mut zero = *declared;
+            set_declared_number(&mut zero, index, 0.0);
+            let mut one = all;
+            one[index] = 1;
+            if value != 0.0
+                && value.abs() < CONVERSION_RESIDUE
+                && repaints(&zero, one)
+            {
+                return Some((0.0, 1));
+            }
+            (1..EXACT_FIGURES).find_map(|length| {
+                let mut trial_figures = all;
+                trial_figures[index] = length;
+                neighbouring_decimals(value, length)
+                    .into_iter()
+                    .find(|&decimal| {
+                        let mut trial = *declared;
+                        set_declared_number(&mut trial, index, decimal);
+                        repaints(&trial, trial_figures)
+                    })
+                    .map(|decimal| (decimal, length))
+            })
+        };
+        let lone: [Option<(f64, usize)>; 4] = [0, 1, 2, ALPHA].map(alone);
+        let mut shortest = *declared;
+        let mut figures = all;
+        for (index, found) in lone.iter().enumerate() {
+            if let Some((decimal, length)) = *found {
+                set_declared_number(&mut shortest, index, decimal);
+                figures[index] = length;
+            }
+        }
+        // Where each channel is held as written, each is its own shortest and
+        // they hold together.
+        if !declared.form.mixes_channels() && repaints(&shortest, figures) {
+            return declared_css(&shortest, figures);
+        }
+
+        // Where a conversion mixes the channels, one channel's shortest depends
+        // on how the others are written: a hue can lose a figure once
+        // its lightness moves to the neighbouring decimal, or two
+        // channels only together. So every set of lengths within
+        // [`LENGTH_SLACK`] of each channel's own is tried, fewest
+        // figures first, each channel at each of its three
+        // decimals; the first that repaints is the shortest there is in that
+        // window. A channel already at zero stays there.
+        let channels: Vec<usize> = (0..ALPHA)
+            .filter(|&index| {
+                lone[index].is_some_and(|(decimal, _)| decimal != 0.0)
+            })
+            .collect();
+        // A window that holds no spelling is widened until one does: a chroma
+        // whose own shortest was six figures can need eight once the lightness
+        // and hue are written short, `oklch(from #669999 l c h)`'s.
+        let search = |slack: usize| {
+            let mut lengths: Vec<Figures> = vec![figures];
+            for &index in &channels {
+                let own = figures[index];
+                let low = own.saturating_sub(slack).max(1);
+                let high = (own + slack).min(EXACT_FIGURES);
+                lengths = lengths
+                    .into_iter()
+                    .flat_map(|base| {
+                        (low..=high).map(move |length| {
+                            let mut trial = base;
+                            trial[index] = length;
+                            trial
+                        })
+                    })
+                    .collect();
+            }
+            let total = |trial: &Figures| {
+                channels.iter().map(|&i| trial[i]).sum::<usize>()
+            };
+            lengths.sort_by_key(total);
+            let combinations = 3usize.pow(channels.len() as u32);
+            let mut best: Option<(usize, String)> = None;
+            for trial_figures in lengths {
+                if best.as_ref().is_some_and(|(figures, _)| {
+                    total(&trial_figures) > *figures
+                }) {
+                    break;
+                }
+                let decimals: Vec<[f64; 3]> = channels
+                    .iter()
+                    .filter_map(|&index| {
+                        let value = declared_number(declared, index)?;
+                        Some(neighbouring_decimals(value, trial_figures[index]))
+                    })
+                    .collect();
+                for combination in 0..combinations {
+                    let mut trial = shortest;
+                    let mut choice = combination;
+                    for (&index, options) in channels.iter().zip(&decimals) {
+                        set_declared_number(
+                            &mut trial,
+                            index,
+                            options[choice % 3],
+                        );
+                        choice /= 3;
+                    }
+                    if !repaints(&trial, trial_figures) {
+                        continue;
+                    }
+                    let css = declared_css(&trial, trial_figures);
+                    if best
+                        .as_ref()
+                        .is_none_or(|(_, kept)| css.len() < kept.len())
+                    {
+                        best = Some((total(&trial_figures), css));
+                    }
+                }
+            }
+            best
+        };
+        let best = (LENGTH_SLACK..EXACT_FIGURES).find_map(search);
+        if let Some((_, css)) = best {
+            return css;
+        }
+        (1..=EXACT_FIGURES)
+            .find(|&length| repaints(declared, [length; 4]))
+            .map_or(exact, |length| declared_css(declared, [length; 4]))
+    }
+
+    #[test]
+    fn the_search_writes_what_the_reference_writes() {
+        // Every relative colour of a grid of 216 sRGB origins in each mixed
+        // space, and every row of the serialisation table, byte for byte.
+        let hex = |v: u8| format!("{v:02x}");
+        let steps = [0u8, 0x33, 0x66, 0x99, 0xcc, 0xff];
+        let mut css: Vec<String> = vec![];
+        for function in ["lab", "lch", "oklab", "oklch"] {
+            let channels = match function {
+                "lab" | "oklab" => "l a b",
+                _ => "l c h",
+            };
+            for r in steps {
+                for g in steps {
+                    for b in steps {
+                        css.push(format!(
+                            "{function}(from #{}{}{} {channels})",
+                            hex(r),
+                            hex(g),
+                            hex(b)
+                        ));
+                        css.push(format!(
+                            "{function}(from #{}{}{} {channels} / 0.4)",
+                            hex(r),
+                            hex(g),
+                            hex(b)
+                        ));
+                    }
+                }
+            }
+        }
+        let table: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/assets/cases/css-color-serialisation.json"
+        ))
+        .expect("the case file parses");
+        for case in table["cases"].as_array().expect("a list of cases") {
+            css.push(case["css"].as_str().expect("a string").to_string());
+        }
+        let mut compared = 0;
+        for css in &css {
+            let Some((_, _, declared)) = css_to_declared(css) else {
+                continue;
+            };
+            assert_eq!(
+                declared_to_css(&declared),
+                reference_declared_to_css(&declared),
+                "{css}"
+            );
+            compared += 1;
+        }
+        assert!(compared > 1800, "{compared} compared");
+    }
+
+    #[test]
+    fn a_level_is_tried_in_the_order_it_is_written() {
+        // The first spelling that repaints at its number of figures is not
+        // the shortest written: a later one in the level is.
+        let (_, _, declared) =
+            css_to_declared("lab(from #cc66cc l a b)").expect("a colour");
+        assert_eq!(
+            declared_to_css(&declared),
+            "lab(58.62121 51.524382 -35.0494)"
+        );
+    }
+
     #[test]
     fn a_mixed_colour_has_no_shorter_spelling() {
         for (css, written) in [
