@@ -229,6 +229,28 @@ removed and no signature moves.
   `hwb(h calc((100 - s) * v / 100) calc(100 - v))`, and `hwba()` is
   `hwb()`.
 
+- **`fillStyle`, `strokeStyle`, `shadowColor` and `Image.currentColor`
+  read a colour back as CSS Color 4 section 16 serialises it.** A colour
+  reads back in the function it was set in, `none` kept: `lab(29% 39 20)`
+  reads `lab(29 39 20)`, `oklch(0.7 0.35 30)` reads itself where it read
+  `color(srgb 1.2472011 -1.186381 -0.64083284)`, `color(srgb 1 0 0)` reads
+  itself where it read `#ff0000`, and `color(xyz ...)` reads
+  `color(xyz-d65 ...)`. A legacy colour is hex only when its components are
+  whole bytes and it is opaque, and otherwise `rgb()` with the numbers it
+  paints: `hwb(90 10% 20%)` reads `rgb(114.75, 204, 25.5)` where it read
+  `#73cc1a`. Alpha is the number held rather than three places of a byte:
+  `rgba(255, 200, 90, 0.5)` reads back with `0.5` where it read `0.502`,
+  and `#ff000080` with `0.5019608`. Each number takes the fewest figures
+  that repaint the colour exactly, so setting a read-back again paints the
+  same pixel on an `RGBAF32` canvas, which six places did not.
+  `Image.currentColor` gives the string `fillStyle` gives, which it did for
+  some colours and not others. docs/browser-differences.md has where this
+  departs from Chrome, which writes eight bits.
+
+  Migrate: code that compared a getter against a hex string for a colour
+  that is not whole bytes, or against a three-place alpha, compares against
+  the new string, or compares pixels.
+
 ### Security
 
 - **`follow-redirects` is required at `^1.16.1`, up from `^1.15.11`.** It is

@@ -84,14 +84,15 @@ verbs! {
     // this verb only when the value is a string and lets everything else cross
     // as it always did.
     set_fillStyleText as SetFillStyleText (fillStyle @ text) => |ctx| {
-        if let Some((color, space)) = css_to_color4f_in_space(fillStyle) {
-            ctx.state.fill_style = Dye::Color(color, Some(space));
+        if let Some((color, space, declared)) = css_to_declared(fillStyle) {
+            ctx.state.fill_style = Dye::Color(color, Some(space), Some(declared));
         }
     },
 
     set_strokeStyleText as SetStrokeStyleText (strokeStyle @ text) => |ctx| {
-        if let Some((color, space)) = css_to_color4f_in_space(strokeStyle) {
-            ctx.state.stroke_style = Dye::Color(color, Some(space));
+        if let Some((color, space, declared)) = css_to_declared(strokeStyle) {
+            ctx.state.stroke_style =
+                Dye::Color(color, Some(space), Some(declared));
         }
     },
 
@@ -257,8 +258,9 @@ verbs! {
     set_shadowColorText as SetShadowColorText (shadowColor @ text) => |ctx| {
         // A colour, so the same treatment as `fillStyle`: recorded when it is
         // written as a string, and crossing when it is anything else.
-        if let Some(color) = css_to_color4f_in_space(shadowColor) {
-            ctx.state.shadow_color = color;
+        if let Some((color, space, declared)) = css_to_declared(shadowColor) {
+            ctx.state.shadow_color = (color, space);
+            ctx.state.shadow_declared = Some(declared);
         }
     },
 
@@ -1910,15 +1912,19 @@ pub fn get_shadowColor(mut cx: FunctionContext) -> JsResult<JsValue> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
     let (color, space) = &this.state.shadow_color;
-    color4f_to_css(&mut cx, color, Some(space))
+    match &this.state.shadow_declared {
+        Some(declared) => Ok(cx.string(declared_to_css(declared)).upcast()),
+        None => color4f_to_css(&mut cx, color, Some(space)),
+    }
 }
 
 pub fn set_shadowColor(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut this = this.borrow_mut();
     let value = cx.argument::<JsValue>(1)?;
-    if let Some(color) = color4f_string_in(&mut cx, value) {
-        this.state.shadow_color = color;
+    if let Some((color, space, declared)) = declared_string_in(&mut cx, value) {
+        this.state.shadow_color = (color, space);
+        this.state.shadow_declared = Some(declared);
     }
     Ok(cx.undefined())
 }

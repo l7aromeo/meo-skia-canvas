@@ -787,8 +787,9 @@ export class Image extends EventEmitter {
    *
    * Assign a CSS colour string. Reading gives back the override that was
    * set, serialised the way {@link CanvasRenderingContext2D.fillStyle}
-   * serialises -- hex when the alpha is opaque, `rgba()` otherwise, through
-   * the same code -- and **not** the colour any particular shape ended up
+   * serialises, through the same code -- in the function it was declared
+   * in, with the figures the colour holds -- and **not** the colour any
+   * particular shape ended up
    * painted -- a subtree declaring its own `color` resolves against that
    * instead, so there is no single answer to report. `null` until something
    * is set, and `null` once a source has loaded that it cannot reach -- a

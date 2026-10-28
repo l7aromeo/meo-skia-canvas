@@ -2095,16 +2095,17 @@ describe("Context2D", () => {
       ctx.fillStyle = "afasdfasdf";
       assert.equal(ctx.fillStyle, "#ffffff");
 
-      // #rgba and #rrggbbaa
+      // #rgba and #rrggbbaa, whose alpha is a byte: read back as the
+      // fraction it paints, 128/255 rather than a three-place 0.502.
 
       ctx.fillStyle = "#ffccaa80";
-      assert.equal(ctx.fillStyle, "rgba(255, 204, 170, 0.502)");
+      assert.equal(ctx.fillStyle, "rgba(255, 204, 170, 0.5019608)");
 
       ctx.fillStyle = "#acf8";
-      assert.equal(ctx.fillStyle, "rgba(170, 204, 255, 0.533)");
+      assert.equal(ctx.fillStyle, "rgba(170, 204, 255, 0.53333334)");
 
       ctx.fillStyle = "#BEAD";
-      assert.equal(ctx.fillStyle, "rgba(187, 238, 170, 0.867)");
+      assert.equal(ctx.fillStyle, "rgba(187, 238, 170, 0.8666667)");
 
       ctx.fillStyle = "rgb(255,255,255)";
       assert.equal(ctx.fillStyle, "#ffffff");
@@ -2119,16 +2120,16 @@ describe("Context2D", () => {
       assert.equal(ctx.fillStyle, "#000000");
 
       ctx.fillStyle = "rgba( 255, 200, 90, 0.5)";
-      assert.equal(ctx.fillStyle, "rgba(255, 200, 90, 0.502)");
+      assert.equal(ctx.fillStyle, "rgba(255, 200, 90, 0.5)");
 
       ctx.fillStyle = "rgba( 255, 200, 90, 0.75)";
-      assert.equal(ctx.fillStyle, "rgba(255, 200, 90, 0.749)");
+      assert.equal(ctx.fillStyle, "rgba(255, 200, 90, 0.75)");
 
       ctx.fillStyle = "rgba( 255, 200, 90, 0.7555)";
-      assert.equal(ctx.fillStyle, "rgba(255, 200, 90, 0.757)");
+      assert.equal(ctx.fillStyle, "rgba(255, 200, 90, 0.7555)");
 
       ctx.fillStyle = "rgba( 255, 200, 90, .7555)";
-      assert.equal(ctx.fillStyle, "rgba(255, 200, 90, 0.757)");
+      assert.equal(ctx.fillStyle, "rgba(255, 200, 90, 0.7555)");
 
       ctx.fillStyle = "rgb(0, 0, 9000)";
       assert.equal(ctx.fillStyle, "#0000ff");
@@ -2136,7 +2137,8 @@ describe("Context2D", () => {
       ctx.fillStyle = "rgba(0, 0, 0, 42.42)";
       assert.equal(ctx.fillStyle, "#000000");
 
-      // hsl / hsla tests
+      // hsl / hsla tests: sRGB as computed, whole bytes in hex and anything
+      // finer as rgb() numbers, so the read-back paints what was set.
 
       ctx.fillStyle = "hsl(0, 0%, 0%)";
       assert.equal(ctx.fillStyle, "#000000");
@@ -2145,10 +2147,10 @@ describe("Context2D", () => {
       assert.equal(ctx.fillStyle, "#000000");
 
       ctx.fillStyle = "hsl(10, 100%, 42%)";
-      assert.equal(ctx.fillStyle, "#d62400");
+      assert.equal(ctx.fillStyle, "rgb(214.2, 35.7, 0)");
 
       ctx.fillStyle = "hsl(370, 120%, 42%)";
-      assert.equal(ctx.fillStyle, "#d62400");
+      assert.equal(ctx.fillStyle, "rgb(214.2, 35.7, 0)");
 
       ctx.fillStyle = "hsl(0, 100%, 100%)";
       assert.equal(ctx.fillStyle, "#ffffff");
@@ -2157,13 +2159,13 @@ describe("Context2D", () => {
       assert.equal(ctx.fillStyle, "#ffffff");
 
       ctx.fillStyle = "hsl(237, 76%, 25%)";
-      assert.equal(ctx.fillStyle, "#0f1470");
+      assert.equal(ctx.fillStyle, "rgb(15.3, 20.145, 112.2)");
 
       ctx.fillStyle = "hsl(240, 73%, 25%)";
-      assert.equal(ctx.fillStyle, "#11116e");
+      assert.equal(ctx.fillStyle, "rgb(17.2125, 17.2125, 110.2875)");
 
       ctx.fillStyle = "hsl(262, 32%, 42%)";
-      assert.equal(ctx.fillStyle, "#62498d");
+      assert.equal(ctx.fillStyle, "rgb(97.9608, 72.828, 141.372)");
 
       ctx.fillStyle = "hsla(0, 0%, 0%, 1)";
       assert.equal(ctx.fillStyle, "#000000");
@@ -2172,19 +2174,19 @@ describe("Context2D", () => {
       assert.equal(ctx.fillStyle, "#ffffff");
 
       ctx.fillStyle = "hsla(120, 25%, 75%, 0.5)";
-      assert.equal(ctx.fillStyle, "rgba(175, 207, 175, 0.502)");
+      assert.equal(ctx.fillStyle, "rgba(175.3125, 207.1875, 175.3125, 0.5)");
 
       ctx.fillStyle = "hsla(240, 75%, 25%, 0.75)";
-      assert.equal(ctx.fillStyle, "rgba(16, 16, 112, 0.749)");
+      assert.equal(ctx.fillStyle, "rgba(15.9375, 15.9375, 111.5625, 0.75)");
 
       ctx.fillStyle = "hsla(172.0, 33.00000e0%, 42%, 1)";
-      assert.equal(ctx.fillStyle, "#488e85");
+      assert.equal(ctx.fillStyle, "rgb(71.757, 142.443, 133.0182)");
 
       ctx.fillStyle = "hsl(124.5, 76.1%, 47.6%)";
-      assert.equal(ctx.fillStyle, "#1dd62b");
+      assert.equal(ctx.fillStyle, "rgb(29.00982, 213.75018, 42.865347)");
 
       ctx.fillStyle = "hsl(1.24e2, 760e-1%, 4.7e1%)";
-      assert.equal(ctx.fillStyle, "#1dd329");
+      assert.equal(ctx.fillStyle, "rgb(28.764, 210.936, 40.9088)");
 
       // case-insensitive css names
 
@@ -2231,9 +2233,21 @@ describe("Context2D", () => {
     test("CSS Color 4 functions", () => {
       // The parser was CSS Color 3, so every one of these fell through to the
       // "unparseable" path and left the previous colour standing -- which
-      // reads as black on a fresh context.
-      ctx.fillStyle = "hwb(90 10% 20%)";
-      assert.equal(ctx.fillStyle, "#73cc1a", "matches what a browser gives");
+      // paints black on a fresh context. Each is checked by the pixel it
+      // paints on an eight-bit canvas, since the getter reports the colour
+      // as it was declared and so says nothing about the conversion.
+      const paints = (css) => {
+        const c = new Canvas(1, 1).getContext("2d");
+        c.fillStyle = css;
+        c.fillRect(0, 0, 1, 1);
+        const [r, g, b] = c.getImageData(0, 0, 1, 1).data;
+        return `#${[r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+      };
+      assert.equal(
+        paints("hwb(90 10% 20%)"),
+        "#73cc1a",
+        "matches what a browser gives",
+      );
 
       // These assert the colour, not merely that the string parsed. Asserting
       // "not black" cannot see a wrong answer: `lab()` resolved against the
@@ -2241,26 +2255,30 @@ describe("Context2D", () => {
       // expected values are computed from CSS Color 4's conversion code --
       // D50 through a Bradford adaptation to D65 -- rather than read back
       // from this implementation.
-      ctx.fillStyle = "#000";
-      ctx.fillStyle = "lab(50% 70 50)";
-      assert.equal(ctx.fillStyle, "#e32427", "lab() resolves against D50");
+      assert.equal(
+        paints("lab(50% 70 50)"),
+        "#e32427",
+        "lab() resolves against D50",
+      );
 
-      ctx.fillStyle = "#000";
-      ctx.fillStyle = "lch(50% 70 50)";
-      assert.equal(ctx.fillStyle, "#c55218", "lch() resolves against D50");
+      assert.equal(
+        paints("lch(50% 70 50)"),
+        "#c55218",
+        "lch() resolves against D50",
+      );
 
       // Function names are case-insensitive, so upper case is the same
       // conversion. Chrome 153 paints this red 4, the CSS Color 4 value is
       // 4.38, and a reading that is close but not exact gives 4.75, so 5.
-      ctx.fillStyle = "#000";
-      ctx.fillStyle = "LAB(79.18% -50% 30)";
-      assert.equal(ctx.fillStyle, "#04e188", "LAB() is lab()");
+      assert.equal(paints("LAB(79.18% -50% 30)"), "#04e188", "LAB() is lab()");
 
       // Oklab is defined D65-referred and has no adaptation step, so it is
       // the control: it was correct throughout and must stay so.
-      ctx.fillStyle = "#000";
-      ctx.fillStyle = "oklch(0.7 0.2 140)";
-      assert.equal(ctx.fillStyle, "#4dba30", "oklch() is unaffected");
+      assert.equal(
+        paints("oklch(0.7 0.2 140)"),
+        "#4dba30",
+        "oklch() is unaffected",
+      );
 
       // CSS Color 4 types the saturation, lightness, whiteness and blackness
       // of these two as `<percentage> | <number>`, so the bare-number
@@ -2269,39 +2287,53 @@ describe("Context2D", () => {
       // colour rather than a refusal, which is why the percentage rows above
       // never caught it. Both spellings are pinned so that a change to one
       // which leaves the other behind fails here.
-      ctx.fillStyle = "#000";
-      ctx.fillStyle = "hsl(200 40 45)";
-      assert.equal(ctx.fillStyle, "#4582a1", "bare numbers in hsl()");
+      assert.equal(
+        paints("hsl(200 40 45)"),
+        "#4582a1",
+        "bare numbers in hsl()",
+      );
 
-      ctx.fillStyle = "#000";
-      ctx.fillStyle = "hsl(200 40% 45%)";
-      assert.equal(ctx.fillStyle, "#4582a1", "percentages agree with it");
+      assert.equal(
+        paints("hsl(200 40% 45%)"),
+        "#4582a1",
+        "percentages agree with it",
+      );
 
-      ctx.fillStyle = "#000";
-      ctx.fillStyle = "hwb(210 15 20)";
-      assert.equal(ctx.fillStyle, "#2679cc", "bare numbers in hwb()");
+      assert.equal(
+        paints("hwb(210 15 20)"),
+        "#2679cc",
+        "bare numbers in hwb()",
+      );
 
-      ctx.fillStyle = "#000";
-      ctx.fillStyle = "hwb(210 15% 20%)";
-      assert.equal(ctx.fillStyle, "#2679cc", "percentages agree with it");
+      assert.equal(
+        paints("hwb(210 15% 20%)"),
+        "#2679cc",
+        "percentages agree with it",
+      );
 
       // `color(xyz ...)` and its D50 spelling of one triple differ by the
       // chromatic adaptation, so the pair records that the white point is
       // read rather than ignored.
-      ctx.fillStyle = "#000";
-      ctx.fillStyle = "color(xyz 0.2 0.15 0.1)";
-      assert.equal(ctx.fillStyle, "#a35553", "color(xyz ...)");
+      assert.equal(
+        paints("color(xyz 0.2 0.15 0.1)"),
+        "#a35553",
+        "color(xyz ...)",
+      );
 
-      ctx.fillStyle = "#000";
-      ctx.fillStyle = "color(xyz-d50 0.2 0.15 0.1)";
-      assert.equal(ctx.fillStyle, "#9d5761", "color(xyz-d50 ...) adapts");
+      assert.equal(
+        paints("color(xyz-d50 0.2 0.15 0.1)"),
+        "#9d5761",
+        "color(xyz-d50 ...) adapts",
+      );
 
       // On the neutral axis both conversions agree exactly, so this grey
       // says nothing about the white point. Here to stop it being mistaken
       // for coverage.
-      ctx.fillStyle = "#000";
-      ctx.fillStyle = "lab(50% 0 0)";
-      assert.equal(ctx.fillStyle, "#777777", "cannot discriminate; see above");
+      assert.equal(
+        paints("lab(50% 0 0)"),
+        "#777777",
+        "cannot discriminate; see above",
+      );
 
       // A colour the parser cannot read still leaves the previous one alone.
       ctx.fillStyle = "#123456";
@@ -2313,32 +2345,21 @@ describe("Context2D", () => {
       // `oklch(0.7 0.35 30)` is well outside the sRGB gamut. Quantising it to
       // eight bits on the way in threw that away before the surface saw it,
       // and reading it back as `#ff0000` reported a colour the context was
-      // not holding.
+      // not holding. It reads back as declared.
       ctx.fillStyle = "oklch(0.7 0.35 30)";
+      assert.equal(ctx.fillStyle, "oklch(0.7 0.35 30)");
+
+      // A float array has no function of its own and is `color(srgb ...)`,
+      // which carries components outside 0..1 as they are.
+      ctx.fillStyle = [1.25, -0.5, 0, 1];
       let read = ctx.fillStyle;
-      assert.match(
-        read,
-        /^color\(srgb /,
-        `an out-of-gamut colour keeps its components, got ${read}`,
-      );
-      assert.ok(
-        read
-          .split(" ")
-          .slice(1)
-          .some((n) => parseFloat(n) > 1),
-        `and they are outside 0..1, got ${read}`,
-      );
+      assert.equal(read, "color(srgb 1.25 -0.5 0)");
 
       // Setting it back reproduces the same colour, so the reported form is
       // one the parser understands.
       ctx.fillStyle = "#000";
       ctx.fillStyle = read;
       assert.equal(ctx.fillStyle, read, "the serialisation round-trips");
-
-      // Anything inside the gamut still reads back the way a browser writes
-      // it -- hex, and rounded rather than floored.
-      ctx.fillStyle = "hwb(90 10% 20%)";
-      assert.equal(ctx.fillStyle, "#73cc1a");
     });
 
     test("color() names a space of its own", () => {
@@ -2355,15 +2376,15 @@ describe("Context2D", () => {
         assert.equal(ctx.fillStyle, css, "echoed in the space it named");
       }
 
-      // srgb is the space everything else reports in, so it serialises the
-      // ordinary way.
+      // srgb is a space like the others: `color()` is not a legacy colour,
+      // so it is not written as hex.
       ctx.fillStyle = "color(srgb 1 0 0)";
-      assert.equal(ctx.fillStyle, "#ff0000");
+      assert.equal(ctx.fillStyle, "color(srgb 1 0 0)");
 
       // Percentages are components too, and an unknown space is not a colour.
       ctx.fillStyle = "#000";
       ctx.fillStyle = "color(srgb 100% 0% 0%)";
-      assert.equal(ctx.fillStyle, "#ff0000");
+      assert.equal(ctx.fillStyle, "color(srgb 1 0 0)");
 
       ctx.fillStyle = "#123456";
       ctx.fillStyle = "color(bogus 1 0 0)";

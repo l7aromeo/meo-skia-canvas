@@ -1,0 +1,433 @@
+{
+  "about": "What `fillStyle`, `strokeStyle` and `shadowColor` read back after being set to each string, by CSS Color 4 section 16 (editor's draft 1da0d9fb, 2026-10-27). Read by the unit test in src/node/utils.rs, `every_row_serialises_as_the_table_says`, and by tests/suite/color-serialisation.test.js. `expected` is this library's answer; `null` means the setter ignores the string and the getter keeps its previous value.",
+  "source": "`chrome` is Chrome 156.0.8078.48 headless, `ctx.fillStyle` read back after being set on a canvas outside a document, measured 2026-10-28; its `shadowColor` read back the same string for every row.",
+  "why": {
+    "float": "This library holds a colour in floating point and paints `rgb(127.5 0 0)` as 127.5 and `#ff000080`'s alpha as 128/255, so section 16.2.1's hex form, which needs whole-byte components, does not apply and section 16.2.2's `rgb()` carries the number; the alpha takes section 16.1.2's rule rather than 16.1.1's, which is for an alpha held as a byte; and every number takes the fewest figures that repaint the colour held, more than six where it holds more. Chrome holds eight bits and writes six places. docs/browser-differences.md.",
+    "reference": "A relative colour's origin converted to Lab or OkLCh. Chrome 156's channels differ from CSS Color 4's sample code worked in f64 from the fourth figure, and set again they paint red with a green of -6.7e-4 on a float canvas. `expected` is this library's conversion, which runs in f32 and lands within 3e-5 of the sample code, written in the fewest figures that repaint it. docs/browser-differences.md.",
+    "unsupported": "Not read by this library yet: `color-mix()` and the system colours are on their own branch."
+  },
+  "cases": [
+    {
+      "css": "#ff0000",
+      "chrome": "#ff0000",
+      "expected": "#ff0000"
+    },
+    {
+      "css": "#FF0000",
+      "chrome": "#ff0000",
+      "expected": "#ff0000"
+    },
+    {
+      "css": "#f00",
+      "chrome": "#ff0000",
+      "expected": "#ff0000"
+    },
+    {
+      "css": "#ff000080",
+      "chrome": "rgba(255, 0, 0, 0.5)",
+      "expected": "rgba(255, 0, 0, 0.5019608)",
+      "why": "float"
+    },
+    {
+      "css": "#ff00ffed",
+      "chrome": "rgba(255, 0, 255, 0.93)",
+      "expected": "rgba(255, 0, 255, 0.92941176)",
+      "why": "float"
+    },
+    {
+      "css": "#ff00ffec",
+      "chrome": "rgba(255, 0, 255, 0.925)",
+      "expected": "rgba(255, 0, 255, 0.9254902)",
+      "why": "float"
+    },
+    {
+      "css": "rgb(255 0 255)",
+      "chrome": "#ff00ff",
+      "expected": "#ff00ff"
+    },
+    {
+      "css": "rgba(255,0,255,0.5)",
+      "chrome": "rgba(255, 0, 255, 0.5)",
+      "expected": "rgba(255, 0, 255, 0.5)"
+    },
+    {
+      "css": "rgb(255 0 255 / 50%)",
+      "chrome": "rgba(255, 0, 255, 0.5)",
+      "expected": "rgba(255, 0, 255, 0.5)"
+    },
+    {
+      "css": "rgb(127.5 0 0)",
+      "chrome": "#800000",
+      "expected": "rgb(127.5, 0, 0)",
+      "why": "float"
+    },
+    {
+      "css": "rgb(255 0 0 / 0.123456789)",
+      "chrome": "rgba(255, 0, 0, 0.12)",
+      "expected": "rgba(255, 0, 0, 0.12345679)",
+      "why": "float"
+    },
+    {
+      "css": "rgb(none 0 0)",
+      "chrome": "#000000",
+      "expected": "#000000"
+    },
+    {
+      "css": "rgb(255 0 0 / none)",
+      "chrome": "rgba(255, 0, 0, 0)",
+      "expected": "rgba(255, 0, 0, 0)"
+    },
+    {
+      "css": "hsl(120 100% 50%)",
+      "chrome": "#00ff00",
+      "expected": "#00ff00"
+    },
+    {
+      "css": "hsl(120 100% 50% / 0.25)",
+      "chrome": "rgba(0, 255, 0, 0.25)",
+      "expected": "rgba(0, 255, 0, 0.25)"
+    },
+    {
+      "css": "hsl(none 100% 50%)",
+      "chrome": "#ff0000",
+      "expected": "#ff0000"
+    },
+    {
+      "css": "hwb(90 10% 20%)",
+      "chrome": "#73cc1a",
+      "expected": "rgb(114.75, 204, 25.5)",
+      "why": "float"
+    },
+    {
+      "css": "red",
+      "chrome": "#ff0000",
+      "expected": "#ff0000"
+    },
+    {
+      "css": "transparent",
+      "chrome": "rgba(0, 0, 0, 0)",
+      "expected": "rgba(0, 0, 0, 0)"
+    },
+    {
+      "css": "RebeccaPurple",
+      "chrome": "#663399",
+      "expected": "#663399"
+    },
+    {
+      "css": "lab(29% 39 20)",
+      "chrome": "lab(29 39 20)",
+      "expected": "lab(29 39 20)"
+    },
+    {
+      "css": "lab(29 39 20 / 0.5)",
+      "chrome": "lab(29 39 20 / 0.5)",
+      "expected": "lab(29 39 20 / 0.5)"
+    },
+    {
+      "css": "lab(none 39 20)",
+      "chrome": "lab(none 39 20)",
+      "expected": "lab(none 39 20)"
+    },
+    {
+      "css": "lch(50 30 270deg)",
+      "chrome": "lch(50 30 270)",
+      "expected": "lch(50 30 270)"
+    },
+    {
+      "css": "lch(50 30 0.5turn)",
+      "chrome": "lch(50 30 180)",
+      "expected": "lch(50 30 180)"
+    },
+    {
+      "css": "oklab(0.6 0.1 -0.1)",
+      "chrome": "oklab(0.6 0.1 -0.1)",
+      "expected": "oklab(0.6 0.1 -0.1)"
+    },
+    {
+      "css": "oklch(0.7 0.35 30)",
+      "chrome": "oklch(0.7 0.35 30)",
+      "expected": "oklch(0.7 0.35 30)"
+    },
+    {
+      "css": "oklch(70% 0.123456789 30)",
+      "chrome": "oklch(0.7 0.123457 30)",
+      "expected": "oklch(0.7 0.1234568 30)",
+      "why": "float"
+    },
+    {
+      "css": "oklch(0.7 0.1 none)",
+      "chrome": "oklch(0.7 0.1 none)",
+      "expected": "oklch(0.7 0.1 none)"
+    },
+    {
+      "css": "color(srgb 1 0 0)",
+      "chrome": "color(srgb 1 0 0)",
+      "expected": "color(srgb 1 0 0)"
+    },
+    {
+      "css": "color(srgb 1 0 0 / 0.5)",
+      "chrome": "color(srgb 1 0 0 / 0.5)",
+      "expected": "color(srgb 1 0 0 / 0.5)"
+    },
+    {
+      "css": "color(srgb 1.2 -0.1 0)",
+      "chrome": "color(srgb 1.2 -0.1 0)",
+      "expected": "color(srgb 1.2 -0.1 0)"
+    },
+    {
+      "css": "color(srgb-linear 0.5 0.5 0.5)",
+      "chrome": "color(srgb-linear 0.5 0.5 0.5)",
+      "expected": "color(srgb-linear 0.5 0.5 0.5)"
+    },
+    {
+      "css": "color(display-p3 1 0 0)",
+      "chrome": "color(display-p3 1 0 0)",
+      "expected": "color(display-p3 1 0 0)"
+    },
+    {
+      "css": "color(display-p3 none 0 0)",
+      "chrome": "color(display-p3 none 0 0)",
+      "expected": "color(display-p3 none 0 0)"
+    },
+    {
+      "css": "color(rec2020 0.5 0.5 0.5)",
+      "chrome": "color(rec2020 0.5 0.5 0.5)",
+      "expected": "color(rec2020 0.5 0.5 0.5)"
+    },
+    {
+      "css": "color(xyz 0.2 0.3 0.4)",
+      "chrome": "color(xyz-d65 0.2 0.3 0.4)",
+      "expected": "color(xyz-d65 0.2 0.3 0.4)"
+    },
+    {
+      "css": "color(xyz-d50 0.2 0.3 0.4)",
+      "chrome": "color(xyz-d50 0.2 0.3 0.4)",
+      "expected": "color(xyz-d50 0.2 0.3 0.4)"
+    },
+    {
+      "css": "color(a98-rgb 1 0 0)",
+      "chrome": "color(a98-rgb 1 0 0)",
+      "expected": "color(a98-rgb 1 0 0)"
+    },
+    {
+      "css": "color(prophoto-rgb 1 0 0)",
+      "chrome": "color(prophoto-rgb 1 0 0)",
+      "expected": "color(prophoto-rgb 1 0 0)"
+    },
+    {
+      "css": "rgb(calc(255/2) 0 0)",
+      "chrome": "#800000",
+      "expected": "rgb(127.5, 0, 0)",
+      "why": "float"
+    },
+    {
+      "css": "color(srgb calc(0.5) 0 0)",
+      "chrome": "color(srgb 0.5 0 0)",
+      "expected": "color(srgb 0.5 0 0)"
+    },
+    {
+      "css": "lab(150 0 0)",
+      "chrome": "lab(100 0 0)",
+      "expected": "lab(100 0 0)"
+    },
+    {
+      "css": "oklch(0.5 -0.1 30)",
+      "chrome": "oklch(0.5 0 30)",
+      "expected": "oklch(0.5 0 30)"
+    },
+    {
+      "css": "rgb(300 0 0)",
+      "chrome": "#ff0000",
+      "expected": "#ff0000"
+    },
+    {
+      "css": "hsl(400 100% 50%)",
+      "chrome": "#ffaa00",
+      "expected": "#ffaa00"
+    },
+    {
+      "css": "color-mix(in srgb, red, blue)",
+      "chrome": "color(srgb 0.5 0 0.5)",
+      "expected": null,
+      "why": "unsupported"
+    },
+    {
+      "css": "color-mix(in oklch, red, blue)",
+      "chrome": "oklch(0.539974 0.285457 326.643)",
+      "expected": null,
+      "why": "unsupported"
+    },
+    {
+      "css": "rgb(from red r g b / 0.5)",
+      "chrome": "color(srgb 1 0 0 / 0.5)",
+      "expected": "color(srgb 1 0 0 / 0.5)"
+    },
+    {
+      "css": "currentcolor",
+      "chrome": "#000000",
+      "expected": "#000000"
+    },
+    {
+      "css": "hsl(120 50% 50%)",
+      "chrome": "#40bf40",
+      "expected": "rgb(63.75, 191.25, 63.75)",
+      "why": "float"
+    },
+    {
+      "css": "hwb(90 10% 20% / 0.5)",
+      "chrome": "rgba(115, 204, 26, 0.5)",
+      "expected": "rgba(114.75, 204, 25.5, 0.5)",
+      "why": "float"
+    },
+    {
+      "css": "rgb(127.5 0 0 / 0.5)",
+      "chrome": "rgba(128, 0, 0, 0.5)",
+      "expected": "rgba(127.5, 0, 0, 0.5)",
+      "why": "float"
+    },
+    {
+      "css": "rgb(0.4 0 0)",
+      "chrome": "#000000",
+      "expected": "rgb(0.4, 0, 0)",
+      "why": "float"
+    },
+    {
+      "css": "rgba(255,0,0,0.333)",
+      "chrome": "rgba(255, 0, 0, 0.333)",
+      "expected": "rgba(255, 0, 0, 0.333)"
+    },
+    {
+      "css": "rgba(255,0,0,0.3333)",
+      "chrome": "rgba(255, 0, 0, 0.333)",
+      "expected": "rgba(255, 0, 0, 0.3333)",
+      "why": "float"
+    },
+    {
+      "css": "hsl(from red h s l)",
+      "chrome": "color(srgb 1 0 0)",
+      "expected": "color(srgb 1 0 0)"
+    },
+    {
+      "css": "hsl(from red h s l / 0.5)",
+      "chrome": "color(srgb 1 0 0 / 0.5)",
+      "expected": "color(srgb 1 0 0 / 0.5)"
+    },
+    {
+      "css": "lab(from red l a b)",
+      "chrome": "lab(54.29 80.8198 69.8997)",
+      "expected": "lab(54.290535 80.80495 69.89094)",
+      "why": "reference"
+    },
+    {
+      "css": "oklch(from red l c h)",
+      "chrome": "oklch(0.627966 0.257704 29.2346)",
+      "expected": "oklch(0.6279554 0.2576832 29.23389)",
+      "why": "reference"
+    },
+    {
+      "css": "color(from red srgb r g b)",
+      "chrome": "color(srgb 1 0 0)",
+      "expected": "color(srgb 1 0 0)"
+    },
+    {
+      "css": "hwb(from red h w b)",
+      "chrome": "color(srgb 1 0 0)",
+      "expected": "color(srgb 1 0 0)"
+    },
+    {
+      "css": "rgb(from red r g b)",
+      "chrome": "color(srgb 1 0 0)",
+      "expected": "color(srgb 1 0 0)"
+    },
+    {
+      "css": "lch(50 30 270 / 25%)",
+      "chrome": "lch(50 30 270 / 0.25)",
+      "expected": "lch(50 30 270 / 0.25)"
+    },
+    {
+      "css": "oklab(0.6 0.1 -0.1 / 0.123456789)",
+      "chrome": "oklab(0.6 0.1 -0.1 / 0.123457)",
+      "expected": "oklab(0.6 0.1 -0.1 / 0.12345679)",
+      "why": "float"
+    },
+    {
+      "css": "color(srgb 0.5 0 0 / 0.75)",
+      "chrome": "color(srgb 0.5 0 0 / 0.75)",
+      "expected": "color(srgb 0.5 0 0 / 0.75)"
+    },
+    {
+      "css": "lab(29.123456789 39 20)",
+      "chrome": "lab(29.1235 39 20)",
+      "expected": "lab(29.12346 39 20)",
+      "why": "float"
+    },
+    {
+      "css": "oklch(0.7 0.35 390)",
+      "chrome": "oklch(0.7 0.35 30)",
+      "expected": "oklch(0.7 0.35 30)"
+    },
+    {
+      "css": "oklch(0.7 0.35 -30)",
+      "chrome": "oklch(0.7 0.35 330)",
+      "expected": "oklch(0.7 0.35 330)"
+    },
+    {
+      "css": "color(srgb 0.000001 0 0)",
+      "chrome": "color(srgb 0.000001 0 0)",
+      "expected": "color(srgb 0.000001 0 0)"
+    },
+    {
+      "css": "lab(29 39 20 / 1)",
+      "chrome": "lab(29 39 20)",
+      "expected": "lab(29 39 20)"
+    },
+    {
+      "css": "oklch(0 0 0)",
+      "chrome": "oklch(0 0 0)",
+      "expected": "oklch(0 0 0)"
+    },
+    {
+      "css": "lab(0 0 0)",
+      "chrome": "lab(0 0 0)",
+      "expected": "lab(0 0 0)"
+    },
+    {
+      "css": "color(display-p3 0.123456789 0.5 0.25)",
+      "chrome": "color(display-p3 0.123457 0.5 0.25)",
+      "expected": "color(display-p3 0.12345679 0.5 0.25)",
+      "why": "float"
+    },
+    {
+      "css": "lch(none none none)",
+      "chrome": "lch(none none none)",
+      "expected": "lch(none none none)"
+    },
+    {
+      "css": "rgb(255 0 0 / 0)",
+      "chrome": "rgba(255, 0, 0, 0)",
+      "expected": "rgba(255, 0, 0, 0)"
+    },
+    {
+      "css": "color(srgb 1 0 0 / 0)",
+      "chrome": "color(srgb 1 0 0 / 0)",
+      "expected": "color(srgb 1 0 0 / 0)"
+    },
+    {
+      "css": "lab(50 -0 0)",
+      "chrome": "lab(50 0 0)",
+      "expected": "lab(50 0 0)"
+    },
+    {
+      "css": "Canvas",
+      "chrome": "#ffffff",
+      "expected": null,
+      "why": "unsupported"
+    },
+    {
+      "css": "ButtonText",
+      "chrome": "#000000",
+      "expected": null,
+      "why": "unsupported"
+    }
+  ]
+}
