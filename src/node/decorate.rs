@@ -509,14 +509,16 @@ fn draw_line(
 /// [`MIN_DEVICE_PERIOD`] at `device` pixels a unit, which bounds the
 /// half-waves to one per device pixel along it.
 ///
-/// The stroke's outline, cut to its band: square at `left` and `right`,
-/// where the butt caps meet the centreline at a slant and would otherwise
-/// poke past the box, and along the top and bottom, which the stroke only
-/// touches -- the crests swing `WAVE_SWING / 2` thicknesses off the middle
-/// and the stroke adds half a thickness more, `WAVE_BAND / 2` -- but which
-/// the stroker's curves overshoot by a fraction of a pixel. The cut is made
-/// on the outline rather than by a clip, so that a filter or a shadow on the
-/// paint spreads past the line as it spreads past a glyph.
+/// A continuous wave, run on half a wave past each end of the box, its
+/// stroke's outline cut to its band: square at `left` and `right` across
+/// the whole stroke, as Chrome 152 draws a wave, where a stroke ending at
+/// the box would end in butt caps at a slant to it, poking out on one side
+/// and leaving a notch on the other; and along the top and bottom, which
+/// the stroke only touches -- the crests swing `WAVE_SWING / 2` thicknesses
+/// off the middle and the stroke adds half a thickness more, `WAVE_BAND / 2`
+/// -- but which the stroker's curves overshoot by a fraction of a pixel. The
+/// cut is made on the outline rather than by a clip, so that a filter or a
+/// shadow on the paint spreads past the line as it spreads past a glyph.
 fn wave(
     left: f32,
     right: f32,
@@ -533,8 +535,12 @@ fn wave(
     Some(cut_to(&wave_stroke(left, right, middle, t), bounds))
 }
 
-/// The outline of a wave's stroke from `left` to `right` about `middle`,
-/// `t` thick and butt-capped, before [`wave`] cuts it to its band.
+/// The outline of a wave's butt-capped stroke, `t` thick, about `middle`
+/// from half a wave before `left` to at least half a wave past `right`, in
+/// whole half-waves, before [`wave`] cuts it to its band. At `left` the
+/// centreline crosses the middle on its way down, and the half-wave before
+/// bulges up as the wave does there. The caps lie that half-wave outside
+/// the cut, more than the under half a thickness a cap's slant overhangs by.
 fn wave_stroke(left: f32, right: f32, middle: f32, t: f32) -> Path {
     // A quadratic peaks at half its control point's offset, so a control
     // 2 * (swing / 2) off the centreline swings it by `swing` from crest to
@@ -542,27 +548,14 @@ fn wave_stroke(left: f32, right: f32, middle: f32, t: f32) -> Path {
     let control = WAVE_SWING * t;
     let half = WAVE_PERIOD * t / 2.0;
     let mut path = PathBuilder::new();
-    path.move_to((left, middle));
-    let mut x = left;
-    let mut side = 1.0;
-    while x < right {
-        let crest = (x + half / 2.0, middle + side * control);
-        let end = (x + half, middle);
-        // The control point sits halfway along, so the curve's x is linear
-        // in its parameter and the last half-wave stops at `right` where it
-        // is split at `(right - x) / half`.
-        match (right - x) / half {
-            whole if whole >= 1.0 => {
-                path.quad_to(crest, end);
-            }
-            part => {
-                let lerp = |(ax, ay): (f32, f32), (bx, by): (f32, f32)| {
-                    (ax + (bx - ax) * part, ay + (by - ay) * part)
-                };
-                let near = lerp((x, middle), crest);
-                path.quad_to(near, lerp(near, lerp(crest, end)));
-            }
-        }
+    path.move_to((left - half, middle));
+    let mut x = left - half;
+    let mut side = -1.0;
+    while x < right + half {
+        path.quad_to(
+            (x + half / 2.0, middle + side * control),
+            (x + half, middle),
+        );
         x += half;
         side = -side;
     }
@@ -956,8 +949,8 @@ mod tests {
     }
 
     /// A wave is its stroke cut to its band -- square at the ends of its
-    /// box, where the cut goes through a butt cap, and along the band's
-    /// edges, which the stroker's curves overshoot -- at lengths down to
+    /// box, and along the band's edges, which the stroker's curves
+    /// overshoot -- at lengths down to
     /// less than one half-wave and at fractional ends: what a clip to the
     /// band leaves of the stroke, sampled as `a_cut_leaves_what_a_clip_leaves`
     /// samples it. They part by up to 8 of 255, allowed 10, because the
@@ -993,6 +986,81 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A wave's ends are square across the whole stroke, as Chrome 152
+    /// draws one: a continuous wave cut at the box, not a stroke that
+    /// starts and stops there. A butt cap meets the centreline at a slant,
+    /// so a stroke ending at the box leaves a notch on the cap's inner side;
+    /// the same wave run on for whole periods past each end and clipped to
+    /// the band has none.
+    #[test]
+    fn a_wave_is_cut_square_from_a_longer_wave() {
+        for t in [1.0, 4.0, 8.0, 16.0] {
+            for (left, right) in [(10.4, 150.6), (10.7, 10.7 + t * 5.1)] {
+                let mine = averaged(&drawn_wave(left, right, 30.0, t), None);
+                let period = super::WAVE_PERIOD * t;
+                let (longer, band) =
+                    continuous_wave(left - period, right + period, 30.0, t);
+                let band = Rect::new(left, band.top, right, band.bottom);
+                let clipped = averaged(&longer, Some(band));
+                let worst = mine
+                    .iter()
+                    .zip(&clipped)
+                    .map(|(a, b)| a.abs_diff(*b))
+                    .max()
+                    .unwrap_or(0);
+                assert!(
+                    worst <= 10,
+                    "{t}px from {left} to {right}: {worst} off"
+                );
+            }
+        }
+    }
+
+    /// The stroke of a wave of whole half-waves from `from`, starting down
+    /// from the middle, to past `to`, and its band -- built here, apart from
+    /// `wave_stroke`, as the reference a cut wave is held to.
+    fn continuous_wave(
+        from: f32,
+        to: f32,
+        middle: f32,
+        t: f32,
+    ) -> (skia_safe::Path, Rect) {
+        use skia_safe::{
+            paint::{Cap, Style},
+            path_utils::fill_path_with_paint,
+        };
+        let half = super::WAVE_PERIOD * t / 2.0;
+        let mut centre = skia_safe::PathBuilder::new();
+        centre.move_to((from, middle));
+        let (mut x, mut side) = (from, 1.0);
+        while x < to {
+            centre.quad_to(
+                (x + half / 2.0, middle + side * super::WAVE_SWING * t),
+                (x + half, middle),
+            );
+            x += half;
+            side = -side;
+        }
+        let mut stroke = Paint::default();
+        stroke
+            .set_style(Style::Stroke)
+            .set_stroke_width(t)
+            .set_stroke_cap(Cap::Butt);
+        let mut outline = skia_safe::PathBuilder::new();
+        fill_path_with_paint(
+            &centre.detach(),
+            &stroke,
+            &mut outline,
+            None,
+            None,
+        );
+        let band = super::WAVE_BAND * t;
+        (
+            outline.detach(),
+            Rect::new(from, middle - band / 2.0, to, middle + band / 2.0),
+        )
     }
 
     /// The stroker draws a wave's outline in lines and quadratics only,
