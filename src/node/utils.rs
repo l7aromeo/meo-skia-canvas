@@ -1031,14 +1031,14 @@ fn rec2020_encode(linear: f64) -> f64 {
 /// A 3x3 matrix, rows first, applied to a column of three components.
 type Matrix3 = [[f64; 3]; 3];
 
-// The matrices below are CSS Color 4's sample code, conversions.js, as the
-// specification publishes it: the exact fractions where it gives fractions,
-// and its decimals where it gives those, each written as the shortest
-// decimal that reads as the same `f64`. Both directions
-// are its own rather than one derived from the other, so a conversion here
-// and the same conversion worked from the specification are the same
-// arithmetic. Every conversion runs in `f64`, from a colour's channels as it
-// holds them, at `f32`, and its result is rounded to `f32` once, where a
+// The matrices below are CSS Color 4's sample code, section 19, "Sample code
+// for Color Conversions" (conversions.js), as the specification publishes it:
+// the exact fractions where it gives fractions, and its decimals where it gives
+// those, each written as the shortest decimal that reads as the same `f64`.
+// Both directions are its own rather than one derived from the other, so a
+// conversion here and the same conversion worked from the specification are the
+// same arithmetic. Every conversion runs in `f64`, from a colour's channels as
+// it holds them, at `f32`, and its result is rounded to `f32` once, where a
 // `Color4f` is made.
 
 /// CSS Color 4's `lin_sRGB_to_XYZ`: linear-light sRGB into XYZ against D65.
@@ -1436,10 +1436,10 @@ const LAB_WHITE_D50: [f64; 3] =
 
 /// CIE's `kappa`, the linear segment's slope in the Lab transfer function.
 ///
-/// The rational form 24389/27, which CSS Color 4 [section 12.1] uses in
+/// The rational form 24389/27, which CSS Color 4 [section 19] uses in
 /// preference to the rounded 903.3 of older texts.
 ///
-/// [section 12.1]: https://www.w3.org/TR/css-color-4/#color-conversion-code
+/// [section 19]: https://www.w3.org/TR/css-color-4/#color-conversion-code
 const LAB_KAPPA: f64 = 24389.0 / 27.0;
 
 /// CIE's `epsilon`, where that transfer function leaves its linear segment.
@@ -1809,7 +1809,7 @@ impl Relative {
     /// Unclamped, a lightness outside its range included: Chrome 153 reads
     /// `l` as 104.4 in `lab(from color(srgb 1.05 1.05 1.05) calc(l - 30) a
     /// b)`, which paints `lab(74.4 0 0)`. Only the result is clamped, by
-    /// [`color`](Self::color).
+    /// [`declared`](Self::declared).
     ///
     /// Read from the origin's declaration, in `f64`: as declared where the
     /// origin is in this function's own space -- a `lab()` origin for
@@ -1870,60 +1870,15 @@ impl Relative {
     /// when it parses the function, as Chrome 153 applies them: `rgb()` into
     /// `0..=255`, `hsl()` saturation and lightness and `hwb()` whiteness and
     /// blackness at zero. Lightness and chroma are clamped for Lab and Oklab
-    /// by [`color`](Self::color), for a relative colour too; these are not,
-    /// since a relative `rgb(from red calc(r - 300) g b)` keeps its negative
-    /// red there.
+    /// by [`declared`](Self::declared), for a relative colour too; these are
+    /// not, since a relative `rgb(from red calc(r - 300) g b)` keeps its
+    /// negative red there.
     fn parsed(self, [x, y, z]: [f64; 3]) -> [f64; 3] {
         match self {
             Self::Rgb => [x, y, z].map(|c| c.clamp(0.0, RGB_CHANNEL_SCALE)),
             Self::Hsl | Self::Hwb => [x, y.max(0.0), z.max(0.0)],
             _ => [x, y, z],
         }
-    }
-
-    /// The colour the evaluated channels name, and the space it is in: the
-    /// space `color()` named where a canvas can hold it, sRGB otherwise.
-    ///
-    /// Nothing is clipped but what CSS Color 4 clamps when it parses the
-    /// function: Lab and Oklab lightness into its range, and a polar chroma
-    /// at zero. Chrome 153 does both -- `lab(from red calc(l - 200) a b)` is
-    /// `lab(0 a b)` there and `lch(from red l calc(c - 200) h)` grey -- and
-    /// clips nothing else.
-    ///
-    /// The channels are held at `f32`, as every colour is, so any spelling
-    /// of a channel that reads as the same `f32` names the same colour; the
-    /// conversion from them runs in `f64`, by CSS Color 4's own matrices, and
-    /// its result is rounded to `f32` once, where the colour is stored.
-    fn color(self, channels: [f64; 3]) -> ([f32; 3], &'static str) {
-        let narrow = |v: [f64; 3]| v.map(|c| c as f32);
-        let [x, y, z] = narrow(channels).map(f64::from);
-        let lab_l = x.clamp(0.0, PERCENT_CHANNEL_SCALE);
-        let oklab_l = x.clamp(0.0, 1.0);
-        let polar = |l: f64, c: f64, h: f64| from_polar([l, c.max(0.0), h]);
-        let srgb = match self {
-            Self::Rgb => [x, y, z].map(|c| c / RGB_CHANNEL_SCALE),
-            Self::Hsl => hsl_to_srgb(
-                x,
-                y / PERCENT_CHANNEL_SCALE,
-                z / PERCENT_CHANNEL_SCALE,
-            ),
-            Self::Hwb => hwb_to_srgb(
-                x,
-                y / PERCENT_CHANNEL_SCALE,
-                z / PERCENT_CHANNEL_SCALE,
-            ),
-            Self::Lab => lab_to_srgb([lab_l, y, z]),
-            Self::Lch => lab_to_srgb(polar(lab_l, y, z)),
-            Self::Oklab => oklab_to_srgb([oklab_l, y, z]),
-            Self::Oklch => oklab_to_srgb(polar(oklab_l, y, z)),
-            Self::Color(
-                space @ ("srgb" | "srgb-linear" | "display-p3" | "rec2020"),
-            ) => {
-                return (narrow([x, y, z]), space);
-            }
-            Self::Color(space) => color_function_to_srgb_f64(space, [x, y, z]),
-        };
-        (narrow(srgb), "srgb")
     }
 }
 
@@ -2079,6 +2034,114 @@ fn declared_srgb(declared: &Declared) -> [f64; 3] {
         Form::Oklab => oklab_to_srgb(channels),
         Form::Oklch => oklab_to_srgb(from_polar(channels)),
         Form::Color(space) => color_function_to_srgb_f64(space, channels),
+    }
+}
+
+/// The colour a declaration paints, and the space it is held in: the space
+/// `color()` named where a canvas can hold it, sRGB otherwise. The one
+/// function every parser stores a colour through and the one
+/// [`declared_to_css`] tests a spelling with, so that what a read-back is
+/// checked to repaint is what setting it stores.
+///
+/// The channels are held at `f32`, as the colour is, so any spelling of a
+/// channel that reads as the same `f32` names the same colour; the
+/// conversion from them runs in `f64`, by CSS Color 4's own matrices, and
+/// its result is rounded to `f32` once. Nothing is clipped but what CSS
+/// Color 4 clamps when it computes the declaration, which
+/// [`Relative::declared`] has done: Lab and Oklab lightness into its range
+/// and a polar chroma at zero, as Chrome 153 does.
+pub fn declared_color(declared: &Declared) -> (Color4f, &'static str) {
+    let held = declared
+        .channels
+        .map(|c| Some(f64::from(c.unwrap_or(0.0) as f32)));
+    let alpha = declared.alpha.unwrap_or(0.0).clamp(0.0, 1.0) as f32;
+    let (components, space) = match declared.form {
+        Form::Color(
+            space @ ("srgb" | "srgb-linear" | "display-p3" | "rec2020"),
+        ) => (held.map(|c| c.unwrap_or(0.0)), space),
+        _ => {
+            let at_f32 = Declared {
+                channels: held,
+                ..*declared
+            };
+            (declared_srgb(&at_f32), "srgb")
+        }
+    };
+    let [r, g, b] = components.map(|c| c as f32);
+    (Color4f::new(r, g, b, alpha), space)
+}
+
+/// The declaration that reading `declared_css(declared, figures)` back
+/// gives: each number as the text it is written as reads, and computed as
+/// [`Relative::declared`] computes it -- a lightness kept to its range, a
+/// chroma at zero or above, a hue within a turn, an alpha within `0..=1`.
+/// What [`declared_to_css`] tests a spelling with, without writing it out
+/// and parsing it.
+fn read_back(declared: &Declared, figures: Figures) -> Declared {
+    let read = |value: f64, length: usize| {
+        significant(value, length).parse().unwrap_or(value)
+    };
+    let whole = |c: f64| (c - c.round()).abs() < WHOLE_BYTE_EPSILON;
+    let alpha = declared.alpha.map(|alpha| match alpha >= 1.0 {
+        true => 1.0,
+        false => read(alpha, figures[ALPHA]).clamp(0.0, 1.0),
+    });
+    let channel = |index: usize| {
+        declared.channels[index].map(|c| read(c, figures[index]))
+    };
+    let channels = match declared.form {
+        Form::Legacy => {
+            let inside = |c: f64| {
+                (-WHOLE_BYTE_EPSILON..=RGB_CHANNEL_SCALE + WHOLE_BYTE_EPSILON)
+                    .contains(&c)
+            };
+            let rgb = declared.channels.map(|c| c.unwrap_or(0.0));
+            if !rgb.iter().all(|&c| inside(c)) {
+                return Declared {
+                    form: Form::Color("srgb"),
+                    channels: [0, 1, 2].map(|i| {
+                        Some(read(rgb[i] / RGB_CHANNEL_SCALE, figures[i]))
+                    }),
+                    alpha,
+                };
+            }
+            [0, 1, 2].map(|i| {
+                Some(match whole(rgb[i]) {
+                    true => rgb[i].round(),
+                    false => read(rgb[i], figures[i]),
+                })
+            })
+        }
+        Form::Lab | Form::Lch => {
+            let [l, x, y] = [0, 1, 2].map(channel);
+            let l = l.map(|l| l.clamp(0.0, PERCENT_CHANNEL_SCALE));
+            match declared.form {
+                Form::Lch => [
+                    l,
+                    x.map(|c| c.max(0.0)),
+                    y.map(|h| h.rem_euclid(DEGREES_PER_TURN)),
+                ],
+                _ => [l, x, y],
+            }
+        }
+        Form::Oklab | Form::Oklch => {
+            let [l, x, y] = [0, 1, 2].map(channel);
+            let l = l.map(|l| l.clamp(0.0, 1.0));
+            match declared.form {
+                Form::Oklch => [
+                    l,
+                    x.map(|c| c.max(0.0)),
+                    y.map(|h| h.rem_euclid(DEGREES_PER_TURN)),
+                ],
+                _ => [l, x, y],
+            }
+        }
+        Form::Color(_) => [0, 1, 2].map(channel),
+    };
+    Declared {
+        form: declared.form,
+        channels,
+        alpha,
     }
 }
 
@@ -2390,12 +2453,8 @@ fn relative_channels(
         (!alpha.is_some_and(is_none)).then_some(alpha_value),
         true,
     );
-    let ([r, g, b], space) = function.color(values);
-    Some((
-        Color4f::new(r, g, b, alpha_value.clamp(0.0, 1.0) as f32),
-        space,
-        declared,
-    ))
+    let (color, space) = declared_color(&declared);
+    Some((color, space, declared))
 }
 
 /// The colour an absolute colour function names, given what follows the
@@ -2461,12 +2520,8 @@ fn modern_channels(
         (!alpha_text.is_some_and(is_none)).then_some(alpha),
         false,
     );
-    let ([r, g, b], space) = function.color(parsed);
-    Some((
-        Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32),
-        space,
-        declared,
-    ))
+    let (color, space) = declared_color(&declared);
+    Some((color, space, declared))
 }
 
 /// Whether a channel is written `none`, in any case.
@@ -2563,12 +2618,8 @@ fn legacy_channels(
         _ => [x, y, z],
     };
     let declared = function.declared(values, [false; 3], Some(alpha), false);
-    let ([r, g, b], space) = function.color(values);
-    Some((
-        Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32),
-        space,
-        declared,
-    ))
+    let (color, space) = declared_color(&declared);
+    Some((color, space, declared))
 }
 
 /// CSS Color 4's named colours ([section 6.1]), in the order its table lists
@@ -2740,17 +2791,14 @@ const NAMED_COLORS: [(&str, [u8; 3]); 148] = [
 /// anything else is `Some(None)`, a refusal: only hex follows one.
 fn hex_or_named(css: &str) -> Option<Option<(Color4f, Declared)>> {
     let css = css.trim_ascii();
-    let byte = |b: u8| f32::from(b) / 255.0;
     // Section 16.2's sRGB value, the bytes as they were named.
     let legacy = |[r, g, b, a]: [u8; 4]| {
-        (
-            Color4f::new(byte(r), byte(g), byte(b), byte(a)),
-            Declared {
-                form: Form::Legacy,
-                channels: [r, g, b].map(|c| Some(f64::from(c))),
-                alpha: Some(f64::from(a) / f64::from(u8::MAX)),
-            },
-        )
+        let declared = Declared {
+            form: Form::Legacy,
+            channels: [r, g, b].map(|c| Some(f64::from(c))),
+            alpha: Some(f64::from(a) / f64::from(u8::MAX)),
+        };
+        (declared_color(&declared).0, declared)
     };
     if let Some(digits) = css.strip_prefix('#') {
         let nibbles: Option<Vec<u8>> = digits
@@ -3227,16 +3275,27 @@ fn declared_css(declared: &Declared, figures: Figures) -> String {
 /// figures first, each channel at each of its three decimals, widening
 /// until one repaints, and the shortest string of the fewest figures is
 /// kept. A number below [`CONVERSION_RESIDUE`] is tried as `0` first.
+///
+/// What that finds is the shortest spelling within the narrowest window
+/// around each channel's own shortest that holds one -- not a minimum
+/// proved over every spelling. Against an exhaustive search over every
+/// length to ten figures, each channel rounded, at either neighbour or at
+/// zero, it is never longer on 864 relative colours over a grid of 216
+/// sRGB origins in Lab, LCH, Oklab and OkLCh;
+/// `a_mixed_colour_has_no_shorter_spelling` keeps a sample of them.
+///
+/// A trial is tested on numbers, not text: [`read_back`] gives the
+/// declaration its spelling reads as, and [`declared_color`], the function
+/// every parser stores a colour through, paints it.
 pub fn declared_to_css(declared: &Declared) -> String {
     let all = [EXACT_FIGURES; 4];
     let exact = declared_css(declared, all);
-    let painted = |css: &str| {
-        css_to_declared(css).map(|(color, space, _)| (color, space))
+    let held = declared_color(declared);
+    // Each trial is the declaration its spelling reads back as, painted by
+    // the function the setter stores through.
+    let repaints = |trial: &Declared, figures: Figures| {
+        declared_color(&read_back(trial, figures)) == held
     };
-    let Some(held) = painted(&exact) else {
-        return exact;
-    };
-    let repaints = |css: &str| painted(css).as_ref() == Some(&held);
 
     // Each number alone, the others exact: the fewest figures, and the
     // decimal of that length, that repaint. Zero first for a number below
@@ -3253,7 +3312,7 @@ pub fn declared_to_css(declared: &Declared) -> String {
         one[index] = 1;
         if value != 0.0
             && value.abs() < CONVERSION_RESIDUE
-            && repaints(&declared_css(&zero, one))
+            && repaints(&zero, one)
         {
             return Some((0.0, 1));
         }
@@ -3265,7 +3324,7 @@ pub fn declared_to_css(declared: &Declared) -> String {
                 .find(|&decimal| {
                     let mut trial = *declared;
                     set_declared_number(&mut trial, index, decimal);
-                    repaints(&declared_css(&trial, trial_figures))
+                    repaints(&trial, trial_figures)
                 })
                 .map(|decimal| (decimal, length))
         })
@@ -3281,9 +3340,8 @@ pub fn declared_to_css(declared: &Declared) -> String {
     }
     // Where each channel is held as written, each is its own shortest and
     // they hold together.
-    let css = declared_css(&shortest, figures);
-    if !declared.form.mixes_channels() && repaints(&css) {
-        return css;
+    if !declared.form.mixes_channels() && repaints(&shortest, figures) {
+        return declared_css(&shortest, figures);
     }
 
     // Where a conversion mixes the channels, one channel's shortest depends on
@@ -3342,9 +3400,11 @@ pub fn declared_to_css(declared: &Declared) -> String {
                     set_declared_number(&mut trial, index, options[choice % 3]);
                     choice /= 3;
                 }
+                if !repaints(&trial, trial_figures) {
+                    continue;
+                }
                 let css = declared_css(&trial, trial_figures);
                 if best.as_ref().is_none_or(|(_, kept)| css.len() < kept.len())
-                    && repaints(&css)
                 {
                     best = Some((total(&trial_figures), css));
                 }
@@ -3357,9 +3417,8 @@ pub fn declared_to_css(declared: &Declared) -> String {
         return css;
     }
     (1..=EXACT_FIGURES)
-        .map(|length| declared_css(declared, [length; 4]))
-        .find(|css| repaints(css))
-        .unwrap_or(exact)
+        .find(|&length| repaints(declared, [length; 4]))
+        .map_or(exact, |length| declared_css(declared, [length; 4]))
 }
 
 /// The largest a number can be and still be taken for what a conversion
@@ -3380,7 +3439,7 @@ const CONVERSION_RESIDUE: f64 = 1e-10;
 /// Chosen by measurement. Over the 864 relative colours of a grid of 216
 /// sRGB origins in Lab, LCH, Oklab and OkLCh, starting at one figure finds
 /// a spelling as short as a search over every length to ten figures does,
-/// at a median of about 500 parses and 3,500 at most; starting at none
+/// at a median of about 520 trials and 3,600 at most; starting at none
 /// writes nine of them longer, `lab(from #3399cc l a b)` among them, which
 /// `a_mixed_colour_has_no_shorter_spelling` holds.
 const LENGTH_SLACK: usize = 1;
@@ -4795,12 +4854,75 @@ mod tests {
         }
     }
 
-    /// No shorter spelling of a colour whose channels a conversion mixes,
-    /// against a search that is not this one: every combination of shorter
-    /// lengths, each channel rounded or at either neighbouring decimal. The
-    /// rows are ones a search that shortened one channel at a time, stopped
-    /// at the first set of lengths that repaints, or never widened its
-    /// window, wrote longer.
+    /// That `written` is the shortest spelling of `css`, against a search
+    /// that is not [`declared_to_css`]'s: every combination of lengths no
+    /// longer than `written`'s, each channel rounded, at either neighbouring
+    /// decimal or at zero, repainted through the parser.
+    fn no_shorter_spelling(css: &str, written: &str) {
+        let (held, space, declared) = css_to_declared(css).expect("a colour");
+        let digits = |s: &str| s.chars().filter(char::is_ascii_digit).count();
+        let channels: Vec<usize> = (0..ALPHA)
+            .filter(|&i| declared_number(&declared, i).is_some())
+            .collect();
+        // Each channel's figures as written: the tokens between the opening
+        // parenthesis and the closing one, in order.
+        let tokens: Vec<&str> = written
+            .split_once('(')
+            .expect("a function")
+            .1
+            .trim_end_matches(')')
+            .split_whitespace()
+            .collect();
+        let longest: Vec<usize> = channels
+            .iter()
+            .map(|&i| figures_in(tokens[i]).max(1))
+            .collect();
+        let mut lengths = vec![1usize; channels.len()];
+        'every: loop {
+            let mut figures = [EXACT_FIGURES; 4];
+            for (place, &index) in channels.iter().enumerate() {
+                figures[index] = lengths[place];
+            }
+            for combination in 0..4usize.pow(channels.len() as u32) {
+                let mut trial = declared;
+                let mut choice = combination;
+                for (place, &index) in channels.iter().enumerate() {
+                    let value =
+                        declared_number(&declared, index).expect("a number");
+                    let [rounded, below, above] =
+                        neighbouring_decimals(value, lengths[place]);
+                    let options = [rounded, below, above, 0.0];
+                    set_declared_number(&mut trial, index, options[choice % 4]);
+                    choice /= 4;
+                }
+                let spelled = declared_css(&trial, figures);
+                if digits(&spelled) < digits(written) {
+                    let repainted =
+                        css_to_declared(&spelled).map(|(c, s, _)| (c, s));
+                    assert_ne!(
+                        repainted,
+                        Some((held, space.clone())),
+                        "{css}: {spelled} is shorter than {written}"
+                    );
+                }
+            }
+            for place in 0..lengths.len() {
+                lengths[place] += 1;
+                if lengths[place] <= longest[place] {
+                    continue 'every;
+                }
+                lengths[place] = 1;
+            }
+            break;
+        }
+    }
+
+    /// No shorter spelling of a colour whose channels a conversion mixes.
+    /// The pinned rows are ones a search that shortened one channel at a
+    /// time, stopped at the first set of lengths that repaints, or never
+    /// widened its window, wrote longer; `oklab(from #990099 l a b)` is the
+    /// one that found a joint local search out, in 1,080 rows. The grid is a
+    /// sample of the 864 rows the search was measured over.
     #[test]
     fn a_mixed_colour_has_no_shorter_spelling() {
         for (css, written) in [
@@ -4831,67 +4953,19 @@ mod tests {
                 "oklch(0.64711787 0.054385204 195.89)",
             ),
         ] {
-            let (held, space, declared) =
-                css_to_declared(css).expect("a colour");
+            let (_, _, declared) = css_to_declared(css).expect("a colour");
             assert_eq!(declared_to_css(&declared), written, "{css}");
-            let digits =
-                |s: &str| s.chars().filter(char::is_ascii_digit).count();
-            let channels: Vec<usize> = (0..ALPHA)
-                .filter(|&i| declared_number(&declared, i).is_some())
-                .collect();
-            // Each channel's figures as written: the tokens between the
-            // opening parenthesis and the closing one, in order.
-            let tokens: Vec<&str> = written
-                .split_once('(')
-                .expect("a function")
-                .1
-                .trim_end_matches(')')
-                .split_whitespace()
-                .collect();
-            let longest: Vec<usize> = channels
-                .iter()
-                .map(|&i| figures_in(tokens[i]).max(1))
-                .collect();
-            let mut lengths = vec![1usize; channels.len()];
-            'every: loop {
-                let mut figures = [EXACT_FIGURES; 4];
-                for (place, &index) in channels.iter().enumerate() {
-                    figures[index] = lengths[place];
-                }
-                for combination in 0..3usize.pow(channels.len() as u32) {
-                    let mut trial = declared;
-                    let mut choice = combination;
-                    for (place, &index) in channels.iter().enumerate() {
-                        let value = declared_number(&declared, index)
-                            .expect("a number");
-                        let options =
-                            neighbouring_decimals(value, lengths[place]);
-                        set_declared_number(
-                            &mut trial,
-                            index,
-                            options[choice % 3],
-                        );
-                        choice /= 3;
-                    }
-                    let spelled = declared_css(&trial, figures);
-                    if digits(&spelled) < digits(written) {
-                        let repainted =
-                            css_to_declared(&spelled).map(|(c, s, _)| (c, s));
-                        assert_ne!(
-                            repainted,
-                            Some((held, space.clone())),
-                            "{css}: {spelled} is shorter than {written}"
-                        );
-                    }
-                }
-                for place in 0..lengths.len() {
-                    lengths[place] += 1;
-                    if lengths[place] <= longest[place] {
-                        continue 'every;
-                    }
-                    lengths[place] = 1;
-                }
-                break;
+            no_shorter_spelling(css, written);
+        }
+        for origin in ["#33cc99", "#cc3366", "#9999cc", "#ffcc00"] {
+            for function in ["lab", "lch", "oklab", "oklch"] {
+                let channels = match function {
+                    "lab" | "oklab" => "l a b",
+                    _ => "l c h",
+                };
+                let css = format!("{function}(from {origin} {channels})");
+                let (_, _, declared) = css_to_declared(&css).expect("a colour");
+                no_shorter_spelling(&css, &declared_to_css(&declared));
             }
         }
     }
@@ -5117,6 +5191,40 @@ mod tests {
                             "{css}: {got} against {want}"
                         );
                     }
+                }
+            }
+        }
+    }
+
+    /// The sample code publishes both directions of every conversion, so a
+    /// figure mistyped in either matrix shows as their product leaving the
+    /// identity. Measured, the published pairs agree to 4.4e-16, a few `f64`
+    /// steps.
+    #[test]
+    fn each_published_matrix_pair_is_an_inverse_pair() {
+        let product = |a: Matrix3, b: Matrix3| -> Matrix3 {
+            std::array::from_fn(|i| {
+                std::array::from_fn(|j| (0..3).map(|k| a[i][k] * b[k][j]).sum())
+            })
+        };
+        for (name, there, back) in [
+            ("sRGB", XYZ_TO_LINEAR_SRGB, LINEAR_SRGB_TO_XYZ),
+            ("Display P3", XYZ_TO_LINEAR_P3, LINEAR_P3_TO_XYZ),
+            ("Rec. 2020", XYZ_TO_LINEAR_REC2020, LINEAR_REC2020_TO_XYZ),
+            ("A98 RGB", XYZ_TO_LINEAR_A98, LINEAR_A98_TO_XYZ),
+            ("ProPhoto", XYZ_TO_LINEAR_PROPHOTO, LINEAR_PROPHOTO_TO_XYZ),
+            ("Bradford", D50_TO_D65, D65_TO_D50),
+            ("Oklab's cones", OKLAB_LMS_TO_XYZ, XYZ_TO_OKLAB_LMS),
+            ("Oklab", OKLAB_TO_OKLAB_LMS, OKLAB_LMS_TO_OKLAB),
+        ] {
+            let identity = product(there, back);
+            for (i, row) in identity.iter().enumerate() {
+                for (j, &value) in row.iter().enumerate() {
+                    let want = if i == j { 1.0 } else { 0.0 };
+                    assert!(
+                        (value - want).abs() < 1e-15,
+                        "{name}: [{i}][{j}] is {value}"
+                    );
                 }
             }
         }
