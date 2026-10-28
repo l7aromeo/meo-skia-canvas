@@ -1424,6 +1424,19 @@ impl FontLibrary {
         names
     }
 
+    /// The family `name` matches by [`caseless::eq`], spelt as it was
+    /// registered or as the system lists it, the registered one first; `None`
+    /// where neither has it.
+    ///
+    /// What [`has`] answers and what [`family`] reports a family under.
+    pub(crate) fn spelling(&self, name: &str) -> Option<String> {
+        self.registered_spelling(name).or_else(|| {
+            self.mgr
+                .family_names()
+                .find(|family| caseless::eq(family, name))
+        })
+    }
+
     pub(crate) fn family_details(
         &self,
         family: &str,
@@ -1985,15 +1998,20 @@ pub fn get_families(mut cx: FunctionContext) -> JsResult<JsArray> {
 
 pub fn has(mut cx: FunctionContext) -> JsResult<JsBoolean> {
     let family = string_arg(&mut cx, 1, "familyName")?;
-    let found =
-        FontLibrary::with_shared(|lib| lib.families().contains(&family));
+    let found = FontLibrary::with_shared(|lib| lib.spelling(&family).is_some());
     Ok(cx.boolean(found))
 }
 
 pub fn family(mut cx: FunctionContext) -> JsResult<JsValue> {
-    let family = string_arg(&mut cx, 1, "familyName")?;
-    let (weights, widths, styles) =
-        FontLibrary::with_shared(|lib| lib.family_details(&family));
+    let asked = string_arg(&mut cx, 1, "familyName")?;
+    // Under the spelling a matched family has. A name nothing registered or
+    // listed is asked of the platform as it is, whose own aliases stand --
+    // fontconfig answers Helvetica with Nimbus Sans.
+    let (family, (weights, widths, styles)) = FontLibrary::with_shared(|lib| {
+        let family = lib.spelling(&asked).unwrap_or(asked);
+        let details = lib.family_details(&family);
+        (family, details)
+    });
 
     if weights.is_empty() {
         return Ok(cx.undefined().upcast());

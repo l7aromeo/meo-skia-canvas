@@ -5023,10 +5023,18 @@ export interface FontLibrary {
   families: readonly string[];
   /**
    * The weights, widths and styles available under `name`, or `undefined`
-   * when nothing resolves under it.
+   * when nothing resolves under it. `name` is matched as a font's family list
+   * matches it -- by Unicode's full case folding, as CSS Fonts 4 section 5.1
+   * asks -- and `family` is the family as it was registered or as the system
+   * lists it: after `FontLibrary.use("OswaldX", ...)`, `family("oswaldx")`
+   * reports `"OswaldX"`.
    */
   family(name: string): FontFamily | undefined;
-  /** Whether {@link FontLibrary.families} contains `familyName`. */
+  /**
+   * Whether {@link FontLibrary.families} holds a family `familyName` matches,
+   * by the same folding: `has("STRASSE")` finds a family registered as
+   * `"Straße"`.
+   */
   has(familyName: string): boolean;
 
   /**
