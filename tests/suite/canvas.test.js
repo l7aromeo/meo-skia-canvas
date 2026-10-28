@@ -2945,11 +2945,33 @@ describe("a canvas's text gamma and contrast", () => {
       { textContrast: 2 },
       { textContrast: -0.5 },
       { textContrast: NaN },
-    ])
+    ]) {
+      const [[key, value]] = Object.entries(options);
       assert.throws(
         () => new Canvas(1, 1, options),
-        RangeError,
-        JSON.stringify(options),
+        (error) =>
+          error instanceof RangeError &&
+          error.message.includes(`\`${key}\``) &&
+          // The value as JavaScript spells it, NaN included.
+          error.message.includes(`(got ${String(value)})`),
+        `${key}: ${value}`,
+      );
+    }
+  });
+
+  // What the canvas reports is the single-precision value Skia draws with,
+  // not the double it was handed: a gamma of -1e-50 is 0 once it is a
+  // single, and a contrast of 1.00000001 is 1.
+  test("read back as the value in force", () => {
+    for (const [options, key, inForce] of [
+      [{ textGamma: -1e-50 }, "textGamma", 0],
+      [{ textContrast: 1.00000001 }, "textContrast", 1],
+      [{ textGamma: 2.2 }, "textGamma", Math.fround(2.2)],
+      [{ textContrast: 0.3 }, "textContrast", Math.fround(0.3)],
+    ])
+      assert.ok(
+        Object.is(new Canvas(1, 1, options).engine[key], inForce),
+        `${JSON.stringify(options)} reads back ${new Canvas(1, 1, options).engine[key]}`,
       );
   });
 

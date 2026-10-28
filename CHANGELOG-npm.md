@@ -25,9 +25,11 @@ removed and no signature moves.
   are refused.** Skia takes a text gamma from 0 up to, not including, 4. A
   gamma of exactly 4 was quietly made a hair smaller and taken, and NaN or
   an infinity in either option quietly became the default; each is now a
-  `RangeError` naming the option. The check is made on the single-precision
-  value Skia is handed, so a number just under 4 that rounds to 4 there is
-  refused with it.
+  `RangeError` naming the option and the value it got. The check is made
+  on the single-precision value Skia is handed, so a number just under 4
+  that rounds to 4 there is refused with it, and `canvas.engine` reports
+  that value rather than the number passed: `textContrast: 1.00000001`
+  reads back as 1, and `textGamma: -1e-50` as 0.
 
   Migrate: pass a gamma below 4 -- 3.9999997615814209 is the largest a
   canvas takes -- and a finite contrast and gamma, or leave either out for
