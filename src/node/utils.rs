@@ -53,6 +53,13 @@ pub(crate) fn arg_num(o: usize) -> String {
 /// written in two places only means anything while the two agree.
 const COORDINATE_EPSILON: f32 = 0.00001;
 
+/// `number` as JavaScript's `ToString` spells it, for a refusal to name:
+/// `1e+21` and `Infinity` where Rust's `Display` writes twenty-two digits
+/// and `inf`.
+pub fn spelled(cx: &mut FunctionContext, number: f64) -> NeonResult<String> {
+    Ok(cx.number(number).to_string(cx)?.value(cx))
+}
+
 /// Whether `a` and `b` are the same coordinate to within
 /// [`COORDINATE_EPSILON`].
 pub fn almost_equal(a: f32, b: f32) -> bool {
