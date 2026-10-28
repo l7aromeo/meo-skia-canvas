@@ -47,13 +47,19 @@ const why =
 // whose Metal device compiles somewhere else -- says what it found instead.
 const child = `
   const { execFileSync, spawn } = require("child_process");
-  // \`pgrep\`, not \`ps\`: the sandbox refuses to run \`ps\`.
-  const compilers = () => execFileSync("pgrep", ["-il", "compiler|mtl|metal"], { encoding: "utf8" })
-    .split("\\n").filter(Boolean);
+  // \`pgrep\`, not \`ps\`: the sandbox refuses to run \`ps\`. It exits 1 when
+  // nothing matches, which here means no compiler service is running yet.
+  const pgrep = (args) => {
+    try {
+      return execFileSync("pgrep", args, { encoding: "utf8" }).split("\\n").filter(Boolean);
+    } catch (error) {
+      if (error.status === 1) return [];
+      throw error;
+    }
+  };
+  const compilers = () => pgrep(["-il", "compiler|mtl|metal"]);
   const { Canvas, ImageData } = require(${JSON.stringify(path.join(__dirname, "../../lib"))});
-  const services = () => new Set(
-    execFileSync("pgrep", ["-f", "MTLCompilerService.xpc"], { encoding: "utf8" })
-      .split("\\n").filter(Boolean));
+  const services = () => new Set(pgrep(["-f", "MTLCompilerService.xpc"]));
   const pixel = (canvas) => [...canvas.getContext("2d").getImageData(1, 1, 1, 1).data];
   const before = services();
   const seenBefore = compilers();
