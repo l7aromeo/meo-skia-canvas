@@ -3,6 +3,7 @@
 #[cfg(all(feature = "node-addon", debug_assertions))]
 use crate::context::typesetting::BUILDS;
 use crate::{
+    cache_map::{CacheMap, CacheSet},
     context::{State, typesetting::Typography},
     css::{FontUnits, is_font_relative, parse_length, without_comments},
     font::{FontFamily, ObliqueAngle, leans_as_asked, variation_axes},
@@ -33,7 +34,7 @@ use skia_safe::{
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell, RefMut},
-    collections::{HashMap, HashSet, VecDeque},
+    collections::VecDeque,
     fmt,
     hash::{BuildHasher, RandomState},
     iter::{once, successors, zip},
@@ -43,8 +44,8 @@ use std::{
 
 thread_local! {
     /// [`family_of`]'s answers, by the face's [`base_face`].
-    static FAMILIES: RefCell<HashMap<TypefaceId, String>> =
-        RefCell::new(HashMap::new());
+    static FAMILIES: RefCell<CacheMap<TypefaceId, String>> =
+        RefCell::default();
 }
 
 /// How many faces [`glyph_inks`] remembers outline bounds for, the most
@@ -770,10 +771,15 @@ struct LaidOutCache {
     keys: RandomState,
     /// The first run filed under each hash; the rest follow it through
     /// [`LaidOutEntry::next`].
-    by_hash: HashMap<u64, LruId>,
+    ///
+    /// A `CacheMap`, though the text the hash is taken from can come from
+    /// anyone: its keys are digests taken with [`LaidOutCache::keys`], and
+    /// it holds at most [`LAID_OUT_COUNT`], as [`LaidOutCache::seen`] holds
+    /// at most [`SEEN_ONCE`].
+    by_hash: CacheMap<u64, LruId>,
     /// The hashes of runs drawn once and not kept, so that the second draw
     /// of one keeps it -- see [`Typesetter::laid_out`].
-    seen: HashSet<u64>,
+    seen: CacheSet<u64>,
     /// [`LaidOutCache::seen`] in the order the hashes came, for letting the
     /// oldest go past [`SEEN_ONCE`].
     seen_order: VecDeque<u64>,
