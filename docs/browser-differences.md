@@ -537,3 +537,13 @@ encode makes it -3e-8, and a matrix product within its own rounding of zero
 is zero here. A mix in `rec2020` differs from Chrome by the 2.4 gamma above.
 Chrome's `addColorStop` also takes `color-mix(in srgb, red, blue)foo`, which
 its `fillStyle` refuses; both refuse it here.
+
+**`AccentColor` and `AccentColorText` are read; Chrome 156 refuses both.**
+CSS Color 4 section 6.2 lists them among the system colours, valued by the
+user agent like the rest, so a string naming one is a valid colour. Here they
+are `#0075ff` and `#ffffff`: Chromium's light-scheme control accent, measured
+in a screenshot from Chrome 156.0.8078.49 headless with
+`--force-color-profile=srgb`: a checked checkbox, a checked radio button and a
+full progress bar fill with `#0075ff`, and the checkbox's mark is white. The
+other system colours read as Chrome reads them on a canvas, in its light scheme
+on macOS; `tests/assets/cases/css-system-colors.json` has every row.

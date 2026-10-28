@@ -3123,6 +3123,95 @@ fn legacy_channels(
     Some((color, space, declared))
 }
 
+/// CSS Color 4's system colours ([section 6.2]), lower-cased and in
+/// alphabetical order, as Chrome 156.0.8078.49 gives them in its light
+/// scheme on macOS for a canvas outside a document.
+///
+/// The standard leaves their values to the user agent. A canvas here has no
+/// user agent's palette and no colour scheme to follow, so it takes the
+/// values a canvas in a browser reads: measured, not chosen, which is what
+/// lets a page that draws `Canvas` on `CanvasText` draw the same here.
+///
+/// `AccentColor` and `AccentColorText` are the exception: Chrome 156 refuses
+/// both, though section 6.2 defines them. Their values are Chromium's own
+/// light-scheme control accent, measured from the controls it renders. In a
+/// screenshot from Chrome 156.0.8078.49 headless, run with
+/// `--force-color-profile=srgb`, a checked checkbox, a checked radio button
+/// and a full progress bar fill with `#0075ff`, and the checkbox's mark is
+/// `#ffffff`.
+///
+/// [section 6.2]: https://www.w3.org/TR/css-color-4/#css-system-colors
+const SYSTEM_COLORS: [(&str, [u8; 4]); 19] = [
+    ("accentcolor", [0x00, 0x75, 0xff, 0xff]),
+    ("accentcolortext", [0xff, 0xff, 0xff, 0xff]),
+    ("activetext", [0xff, 0x00, 0x00, 0xff]),
+    ("buttonborder", [0x00, 0x00, 0x00, 0xff]),
+    ("buttonface", [0xef, 0xef, 0xef, 0xff]),
+    ("buttontext", [0x00, 0x00, 0x00, 0xff]),
+    ("canvas", [0xff, 0xff, 0xff, 0xff]),
+    ("canvastext", [0x00, 0x00, 0x00, 0xff]),
+    ("field", [0xff, 0xff, 0xff, 0xff]),
+    ("fieldtext", [0x00, 0x00, 0x00, 0xff]),
+    ("graytext", [0x80, 0x80, 0x80, 0xff]),
+    // Translucent: Chrome's selection highlight, at an alpha of 0.6.
+    ("highlight", [0x80, 0xbc, 0xfe, 0x99]),
+    ("highlighttext", [0x00, 0x00, 0x00, 0xff]),
+    ("linktext", [0x00, 0x00, 0xee, 0xff]),
+    ("mark", [0xff, 0xff, 0x00, 0xff]),
+    ("marktext", [0x00, 0x00, 0x00, 0xff]),
+    ("selecteditem", [0xb3, 0xd7, 0xff, 0xff]),
+    ("selecteditemtext", [0x00, 0x00, 0x00, 0xff]),
+    ("visitedtext", [0x55, 0x1a, 0x8b, 0xff]),
+];
+
+/// CSS Color 4's deprecated system colours ([Appendix A]), lower-cased and
+/// in alphabetical order, each with the system colour the appendix says it
+/// computes to. Chrome 156 gives each that colour's value.
+///
+/// [Appendix A]: https://www.w3.org/TR/css-color-4/#deprecated-system-colors
+const DEPRECATED_SYSTEM_COLORS: [(&str, &str); 23] = [
+    ("activeborder", "buttonborder"),
+    ("activecaption", "canvas"),
+    ("appworkspace", "canvas"),
+    ("background", "canvas"),
+    ("buttonhighlight", "buttonface"),
+    ("buttonshadow", "buttonface"),
+    ("captiontext", "canvastext"),
+    ("inactiveborder", "buttonborder"),
+    ("inactivecaption", "canvas"),
+    ("inactivecaptiontext", "graytext"),
+    ("infobackground", "canvas"),
+    ("infotext", "canvastext"),
+    ("menu", "canvas"),
+    ("menutext", "canvastext"),
+    ("scrollbar", "canvas"),
+    ("threeddarkshadow", "buttonborder"),
+    ("threedface", "buttonface"),
+    ("threedhighlight", "buttonborder"),
+    ("threedlightshadow", "buttonborder"),
+    ("threedshadow", "buttonborder"),
+    ("window", "canvas"),
+    ("windowframe", "buttonborder"),
+    ("windowtext", "canvastext"),
+];
+
+/// The value of the system colour `name`, lower-cased, deprecated names
+/// through the colour they compute to; `None` for any other name.
+fn system_color(name: &str) -> Option<[u8; 4]> {
+    let find = |name: &str| {
+        SYSTEM_COLORS
+            .binary_search_by(|&(system, _)| system.cmp(name))
+            .ok()
+            .map(|at| SYSTEM_COLORS[at].1)
+    };
+    find(name).or_else(|| {
+        let at = DEPRECATED_SYSTEM_COLORS
+            .binary_search_by(|&(deprecated, _)| deprecated.cmp(name))
+            .ok()?;
+        find(DEPRECATED_SYSTEM_COLORS[at].1)
+    })
+}
+
 /// CSS Color 4's named colours ([section 6.1]), in the order its table lists
 /// them, which is alphabetical: a binary search finds one.
 ///
@@ -3338,6 +3427,9 @@ fn hex_or_named(css: &str) -> Option<Option<(Color4f, Declared)>> {
     // it opaque black on a canvas outside a document.
     if name == "currentcolor" {
         return Some(Some(legacy([0, 0, 0, u8::MAX])));
+    }
+    if let Some(rgba) = system_color(&name) {
+        return Some(Some(legacy(rgba)));
     }
     let at = NAMED_COLORS
         .binary_search_by(|&(named, _)| named.cmp(name.as_str()))
@@ -6025,6 +6117,45 @@ mod tests {
             css_to_declared("color-mix(in a98-rgb, red, blue)")
                 .expect("a colour");
         assert_eq!(declared.channels[1], Some(0.0));
+    }
+
+    #[test]
+    fn every_system_colour_reads_as_chrome_reads_it() {
+        let table: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/assets/cases/css-system-colors.json"
+        ))
+        .expect("the case file parses");
+        let cases = table["cases"].as_array().expect("a list of cases");
+        for case in cases {
+            let css = case["css"].as_str().expect("a string");
+            match case["expected"].as_str() {
+                None => {
+                    assert!(css_to_declared(css).is_none(), "{css} is read")
+                }
+                Some(expected) => {
+                    let (_, _, declared) = css_to_declared(css).expect(css);
+                    assert_eq!(declared_to_css(&declared), expected, "{css}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_system_colour_tables_are_sorted_and_complete() {
+        // A binary search over an unsorted table misses names in silence.
+        assert!(SYSTEM_COLORS.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert!(
+            DEPRECATED_SYSTEM_COLORS
+                .windows(2)
+                .all(|pair| pair[0].0 < pair[1].0)
+        );
+        for (name, _) in SYSTEM_COLORS {
+            assert!(system_color(name).is_some(), "{name}");
+        }
+        for (name, to) in DEPRECATED_SYSTEM_COLORS {
+            assert_eq!(system_color(name), system_color(to), "{name}");
+            assert!(system_color(name).is_some(), "{name} computes to {to}");
+        }
     }
 
     #[test]

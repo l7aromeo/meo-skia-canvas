@@ -1,0 +1,605 @@
+{
+  "about": "CSS Color 4's system colours and its deprecated ones, each row as set on fillStyle: `expected` is what this library reads back, `null` where it refuses the string; `chrome` and `chromePixel` are what Chrome reads back, `null` where it refuses it, and paints on an 8-bit canvas. Read by src/node/utils.rs and tests/suite/system-colors.test.js. A row without `why` reads as Chrome reads it and paints its pixel to one level; a row with `pixel` paints that instead.",
+  "source": "Chrome 156.0.8078.49 headless on macOS, light scheme, a 1x1 canvas outside a document, measured 2026-10-28.",
+  "why": {
+    "float": "A colour derived from a system colour holds its result in floating point and reads back with the figures it holds, where Chrome writes six; tests/assets/cases/css-color-serialisation.json has the rule.",
+    "accent": "Chrome 156 refuses `AccentColor` and `AccentColorText`, which CSS Color 4 section 6.2 defines; here they are Chromium's light-scheme control accent, measured from a checked checkbox in the same Chrome, and paint `pixel`. docs/browser-differences.md has the measurement."
+  },
+  "cases": [
+    {
+      "css": "AccentColor",
+      "chrome": null,
+      "chromePixel": [
+        18,
+        52,
+        86,
+        255
+      ],
+      "expected": "#0075ff",
+      "pixel": [
+        0,
+        117,
+        255,
+        255
+      ],
+      "why": "accent"
+    },
+    {
+      "css": "AccentColorText",
+      "chrome": null,
+      "chromePixel": [
+        18,
+        52,
+        86,
+        255
+      ],
+      "expected": "#ffffff",
+      "pixel": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "why": "accent"
+    },
+    {
+      "css": "ACCENTCOLOR",
+      "chrome": null,
+      "chromePixel": [
+        18,
+        52,
+        86,
+        255
+      ],
+      "expected": "#0075ff",
+      "pixel": [
+        0,
+        117,
+        255,
+        255
+      ],
+      "why": "accent"
+    },
+    {
+      "css": "ActiveText",
+      "chrome": "#ff0000",
+      "chromePixel": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": "#ff0000"
+    },
+    {
+      "css": "ButtonBorder",
+      "chrome": "#000000",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "expected": "#000000"
+    },
+    {
+      "css": "ButtonFace",
+      "chrome": "#efefef",
+      "chromePixel": [
+        239,
+        239,
+        239,
+        255
+      ],
+      "expected": "#efefef"
+    },
+    {
+      "css": "ButtonText",
+      "chrome": "#000000",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "expected": "#000000"
+    },
+    {
+      "css": "Canvas",
+      "chrome": "#ffffff",
+      "chromePixel": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "expected": "#ffffff"
+    },
+    {
+      "css": "CanvasText",
+      "chrome": "#000000",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "expected": "#000000"
+    },
+    {
+      "css": "Field",
+      "chrome": "#ffffff",
+      "chromePixel": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "expected": "#ffffff"
+    },
+    {
+      "css": "FieldText",
+      "chrome": "#000000",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "expected": "#000000"
+    },
+    {
+      "css": "GrayText",
+      "chrome": "#808080",
+      "chromePixel": [
+        128,
+        128,
+        128,
+        255
+      ],
+      "expected": "#808080"
+    },
+    {
+      "css": "Highlight",
+      "chrome": "rgba(128, 188, 254, 0.6)",
+      "chromePixel": [
+        128,
+        188,
+        253,
+        153
+      ],
+      "expected": "rgba(128, 188, 254, 0.6)"
+    },
+    {
+      "css": "HighlightText",
+      "chrome": "#000000",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "expected": "#000000"
+    },
+    {
+      "css": "LinkText",
+      "chrome": "#0000ee",
+      "chromePixel": [
+        0,
+        0,
+        238,
+        255
+      ],
+      "expected": "#0000ee"
+    },
+    {
+      "css": "Mark",
+      "chrome": "#ffff00",
+      "chromePixel": [
+        255,
+        255,
+        0,
+        255
+      ],
+      "expected": "#ffff00"
+    },
+    {
+      "css": "MarkText",
+      "chrome": "#000000",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "expected": "#000000"
+    },
+    {
+      "css": "SelectedItem",
+      "chrome": "#b3d7ff",
+      "chromePixel": [
+        179,
+        215,
+        255,
+        255
+      ],
+      "expected": "#b3d7ff"
+    },
+    {
+      "css": "SelectedItemText",
+      "chrome": "#000000",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "expected": "#000000"
+    },
+    {
+      "css": "VisitedText",
+      "chrome": "#551a8b",
+      "chromePixel": [
+        85,
+        26,
+        139,
+        255
+      ],
+      "expected": "#551a8b"
+    },
+    {
+      "css": "ActiveBorder",
+      "chrome": "#000000",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "expected": "#000000"
+    },
+    {
+      "css": "ActiveCaption",
+      "chrome": "#ffffff",
+      "chromePixel": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "expected": "#ffffff"
+    },
+    {
+      "css": "AppWorkspace",
+      "chrome": "#ffffff",
+      "chromePixel": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "expected": "#ffffff"
+    },
+    {
+      "css": "Background",
+      "chrome": "#ffffff",
+      "chromePixel": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "expected": "#ffffff"
+    },
+    {
+      "css": "ButtonHighlight",
+      "chrome": "#efefef",
+      "chromePixel": [
+        239,
+        239,
+        239,
+        255
+      ],
+      "expected": "#efefef"
+    },
+    {
+      "css": "ButtonShadow",
+      "chrome": "#efefef",
+      "chromePixel": [
+        239,
+        239,
+        239,
+        255
+      ],
+      "expected": "#efefef"
+    },
+    {
+      "css": "CaptionText",
+      "chrome": "#000000",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "expected": "#000000"
+    },
+    {
+      "css": "InactiveBorder",
+      "chrome": "#000000",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "expected": "#000000"
+    },
+    {
+      "css": "InactiveCaption",
+      "chrome": "#ffffff",
+      "chromePixel": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "expected": "#ffffff"
+    },
+    {
+      "css": "InactiveCaptionText",
+      "chrome": "#808080",
+      "chromePixel": [
+        128,
+        128,
+        128,
+        255
+      ],
+      "expected": "#808080"
+    },
+    {
+      "css": "InfoBackground",
+      "chrome": "#ffffff",
+      "chromePixel": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "expected": "#ffffff"
+    },
+    {
+      "css": "InfoText",
+      "chrome": "#000000",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "expected": "#000000"
+    },
+    {
+      "css": "Menu",
+      "chrome": "#ffffff",
+      "chromePixel": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "expected": "#ffffff"
+    },
+    {
+      "css": "MenuText",
+      "chrome": "#000000",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "expected": "#000000"
+    },
+    {
+      "css": "Scrollbar",
+      "chrome": "#ffffff",
+      "chromePixel": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "expected": "#ffffff"
+    },
+    {
+      "css": "ThreeDDarkShadow",
+      "chrome": "#000000",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "expected": "#000000"
+    },
+    {
+      "css": "ThreeDFace",
+      "chrome": "#efefef",
+      "chromePixel": [
+        239,
+        239,
+        239,
+        255
+      ],
+      "expected": "#efefef"
+    },
+    {
+      "css": "ThreeDHighlight",
+      "chrome": "#000000",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "expected": "#000000"
+    },
+    {
+      "css": "ThreeDLightShadow",
+      "chrome": "#000000",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "expected": "#000000"
+    },
+    {
+      "css": "ThreeDShadow",
+      "chrome": "#000000",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "expected": "#000000"
+    },
+    {
+      "css": "Window",
+      "chrome": "#ffffff",
+      "chromePixel": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "expected": "#ffffff"
+    },
+    {
+      "css": "WindowFrame",
+      "chrome": "#000000",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "expected": "#000000"
+    },
+    {
+      "css": "WindowText",
+      "chrome": "#000000",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "expected": "#000000"
+    },
+    {
+      "css": "canvas",
+      "chrome": "#ffffff",
+      "chromePixel": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "expected": "#ffffff"
+    },
+    {
+      "css": "CANVASTEXT",
+      "chrome": "#000000",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "expected": "#000000"
+    },
+    {
+      "css": "buttontext",
+      "chrome": "#000000",
+      "chromePixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "expected": "#000000"
+    },
+    {
+      "css": "color-mix(in srgb, Canvas, CanvasText)",
+      "chrome": "color(srgb 0.5 0.5 0.5)",
+      "chromePixel": [
+        128,
+        128,
+        128,
+        255
+      ],
+      "expected": "color(srgb 0.5 0.5 0.5)"
+    },
+    {
+      "css": "color-mix(in srgb, Highlight, red)",
+      "chrome": "color(srgb 0.813235 0.276471 0.373529 / 0.8)",
+      "chromePixel": [
+        207,
+        71,
+        95,
+        204
+      ],
+      "expected": "color(srgb 0.8132353 0.2764706 0.3735294 / 0.8)",
+      "why": "float"
+    },
+    {
+      "css": "rgb(from Highlight r g b)",
+      "chrome": "color(srgb 0.501961 0.737255 0.996078 / 0.6)",
+      "chromePixel": [
+        128,
+        188,
+        253,
+        153
+      ],
+      "expected": "color(srgb 0.5019608 0.7372549 0.99607843 / 0.6)",
+      "why": "float"
+    },
+    {
+      "css": "-webkit-link",
+      "chrome": null,
+      "chromePixel": [
+        18,
+        52,
+        86,
+        255
+      ],
+      "expected": null
+    },
+    {
+      "css": "-webkit-focus-ring-color",
+      "chrome": null,
+      "chromePixel": [
+        18,
+        52,
+        86,
+        255
+      ],
+      "expected": null
+    },
+    {
+      "css": "Not-A-Color",
+      "chrome": null,
+      "chromePixel": [
+        18,
+        52,
+        86,
+        255
+      ],
+      "expected": null
+    }
+  ]
+}

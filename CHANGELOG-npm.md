@@ -1186,6 +1186,15 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Added
 
+- **CSS Color 4's system colours**, in any case, wherever a colour string
+  goes: `Canvas`, `CanvasText`, `ButtonFace`, `Highlight`, `LinkText` and
+  the rest, with the values Chrome 156 gives a canvas in its light scheme.
+  `Canvas` is white, `ButtonFace` `#efefef` and `Highlight`
+  `rgba(128, 188, 254, 0.6)`, and the deprecated names such as `Window`
+  and `ThreeDFace` are the colours CSS Color 4 says they compute to. They
+  were refused. `AccentColor` and `AccentColorText` are Chromium's control
+  accent, `#0075ff` and `#ffffff`, although Chrome 156 refuses them.
+
 - **`color-mix()`, CSS Color 5's mix of colours**, anywhere a colour string
   goes: `fillStyle`, `strokeStyle`, `shadowColor`, `addColorStop`,
   `Image.currentColor` and the rest. `color-mix(in oklch, red, blue)` mixes
