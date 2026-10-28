@@ -693,6 +693,12 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Added
 
+- **CSS Color 4's system colours** in the CSS colours the crate reads,
+  with the values Chrome 156 gives a canvas in its light scheme, and the
+  deprecated names as the colours they compute to. `AccentColor` and
+  `AccentColorText` are Chromium's control accent, `#0075ff` and `#ffffff`,
+  although Chrome 156 refuses them.
+
 - **`color-mix()` in the CSS colours the crate reads** --
   `set_fill_style_css`, `set_stroke_style_css`, `set_shadow_color_css` and
   `RgbaLinear::from_css` -- by CSS Color 5 section 3: any CSS Color 4 space,

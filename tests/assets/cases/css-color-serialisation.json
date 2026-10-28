@@ -3,8 +3,7 @@
   "source": "`chrome` is Chrome 156.0.8078.48 headless, `ctx.fillStyle` read back after being set on a canvas outside a document, measured 2026-10-28; its `shadowColor` read back the same string for every row.",
   "why": {
     "float": "This library holds a colour in floating point and paints `rgb(127.5 0 0)` as 127.5 and `#ff000080`'s alpha as 128/255, so section 16.2.1's hex form, which needs whole-byte components, does not apply and section 16.2.2's `rgb()` carries the number; the alpha takes section 16.1.2's rule rather than 16.1.1's, which is for an alpha held as a byte; and every number takes the fewest figures that repaint the colour held, more than six where it holds more. Chrome holds eight bits and writes six places. docs/browser-differences.md.",
-    "reference": "A relative colour's origin converted to Lab or OkLCh. Chrome 156's channels differ from CSS Color 4's sample code worked in f64 from the fourth figure, and set again they paint red with a green of -6.7e-4 on a float canvas. `expected` is this library's conversion, which runs in f32 and lands within 3e-5 of the sample code, written in the fewest figures that repaint it. docs/browser-differences.md.",
-    "unsupported": "Not read by this library yet: the system colours, which come in a commit of their own."
+    "reference": "A relative colour's origin converted to Lab or OkLCh. Chrome 156's channels differ from CSS Color 4's sample code worked in f64 from the fourth figure, and set again they paint red with a green of -6.7e-4 on a float canvas. `expected` is the sample code's arithmetic in f64, held at f32 and written in the fewest figures that repaint it. docs/browser-differences.md."
   },
   "cases": [
     {
@@ -419,14 +418,12 @@
     {
       "css": "Canvas",
       "chrome": "#ffffff",
-      "expected": null,
-      "why": "unsupported"
+      "expected": "#ffffff"
     },
     {
       "css": "ButtonText",
       "chrome": "#000000",
-      "expected": null,
-      "why": "unsupported"
+      "expected": "#000000"
     }
   ]
 }
