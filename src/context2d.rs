@@ -34,7 +34,7 @@ use skia_safe::{
 };
 
 use crate::{
-    canvas::Canvas,
+    canvas::{Canvas, CanvasOptions},
     color::{
         RgbaLinear, linear_srgb_color_space, rgba_css,
         rgba_linear_to_skia_color, rgba_linear_to_unpremul_color4f,
@@ -1403,21 +1403,27 @@ pub struct Context2D {
     /// The canvas's, as a browser does: `getImageData()` on a Display P3
     /// canvas hands back P3 components rather than converting them down.
     pub(crate) canvas_space: PixelColorSpace,
+    /// The text contrast and gamma glyphs are rasterized with in a readback:
+    /// the canvas's, as an export takes them, so that `get_image_data` hands
+    /// back the pixels the canvas exports -- see
+    /// [`CanvasOptions::text_contrast`].
+    pub(crate) canvas_text: (f32, f32),
 }
 
 impl Context2D {
-    /// Wraps a freshly built internal context.
+    /// Wraps a freshly built internal context, for a canvas made with
+    /// `options`.
     pub(crate) fn from_inner(
         inner: Inner,
         gpu: bool,
-        canvas_depth: PixelDepth,
-        canvas_space: PixelColorSpace,
+        options: &CanvasOptions,
     ) -> Self {
         Self {
             inner,
             gpu,
-            canvas_depth,
-            canvas_space,
+            canvas_depth: options.color_type,
+            canvas_space: options.color_space,
+            canvas_text: (options.text_contrast, options.text_gamma),
         }
     }
 
@@ -4015,6 +4021,9 @@ impl Context2D {
             density: export.density as f32,
             matte: export.matte.map(Matte::from_rgba_linear),
             msaa: export.msaa,
+            // Glyphs are rasterized as the canvas's export rasterizes them.
+            text_contrast: self.canvas_text.0,
+            text_gamma: self.canvas_text.1,
             ..ExportOptions::default()
         };
         let engine = self.engine();
