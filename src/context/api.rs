@@ -223,7 +223,7 @@ verbs! {
             _ => None,
         };
         if let Some((direction, inherits)) = resolved {
-            ctx.state.graf_style.set_text_direction(direction);
+            ctx.state.text.edit().graf_style.set_text_direction(direction);
             ctx.state.direction_inherits = inherits;
         }
     },
@@ -236,13 +236,13 @@ verbs! {
 
     set_textAlign as SetTextAlign (textAlign @ text) => |ctx| {
         if let Some(mode) = to_text_align(textAlign) {
-            ctx.state.graf_style.set_text_align(mode.to_skia());
+            ctx.state.text.edit().graf_style.set_text_align(mode.to_skia());
         }
     },
 
     set_textBaseline as SetTextBaseline (textBaseline @ text) => |ctx| {
         if let Some(mode) = to_text_baseline(textBaseline) {
-            ctx.state.text_baseline = mode.into();
+            ctx.state.text.edit().text_baseline = mode.into();
         }
     },
 
@@ -266,13 +266,13 @@ verbs! {
     // HTML's setters are; the types say what each value does.
     set_fontKerning as SetFontKerning (fontKerning @ text) => |ctx| {
         if let Some(kerning) = FontKerning::from_keyword(fontKerning) {
-            ctx.state.font_kerning = kerning;
+            ctx.state.text.edit().font_kerning = kerning;
         }
     },
 
     set_textRendering as SetTextRendering (textRendering @ text) => |ctx| {
         if let Some(rendering) = TextRendering::from_keyword(textRendering) {
-            ctx.state.text_rendering = rendering;
+            ctx.state.text.edit().text_rendering = rendering;
         }
     },
 
@@ -584,11 +584,11 @@ verbs! {
     },
 
     set_fontHinting as SetFontHinting (); fontHinting => |ctx| {
-        ctx.state.font_hinting = fontHinting;
+        ctx.state.text.edit().font_hinting = fontHinting;
     },
 
     set_textWrap as SetTextWrap (); textWrap => |ctx| {
-        ctx.state.text_wrap = textWrap;
+        ctx.state.text.edit().text_wrap = textWrap;
     },
 
     closePath as ClosePath () => |ctx| {
@@ -1670,7 +1670,7 @@ pub fn get_textAlign(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
     let mode = from_text_align(crate::text::TextAlign::from_skia(
-        this.state.graf_style.text_align(),
+        this.state.text.graf_style.text_align(),
     ));
     Ok(cx.string(mode))
 }
@@ -1678,7 +1678,7 @@ pub fn get_textAlign(mut cx: FunctionContext) -> JsResult<JsString> {
 pub fn get_textBaseline(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
-    let mode = from_text_baseline(this.state.text_baseline.into());
+    let mode = from_text_baseline(this.state.text.text_baseline.into());
     Ok(cx.string(mode))
 }
 
@@ -1687,7 +1687,7 @@ pub fn get_direction(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = this.borrow_mut();
     let name = match this.state.direction_inherits {
         true => "inherit",
-        false => match this.state.graf_style.text_direction() {
+        false => match this.state.text.graf_style.text_direction() {
             TextDirection::LTR => "ltr",
             TextDirection::RTL => "rtl",
         },
@@ -1698,7 +1698,7 @@ pub fn get_direction(mut cx: FunctionContext) -> JsResult<JsString> {
 pub fn get_letterSpacing(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
-    Ok(cx.string(this.state.letter_spacing.to_string()))
+    Ok(cx.string(this.state.text.letter_spacing.to_string()))
 }
 
 pub fn set_letterSpacing(mut cx: FunctionContext) -> JsResult<JsUndefined> {
@@ -1707,8 +1707,8 @@ pub fn set_letterSpacing(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
     if let Some(spacing) = opt_spacing_arg(&mut cx, 1)? {
         let px = spacing.in_px(&this.state.font_units());
-        this.state.char_style.set_letter_spacing(px);
-        this.state.letter_spacing = spacing;
+        this.state.text.edit().char_style.set_letter_spacing(px);
+        this.state.text.edit().letter_spacing = spacing;
     }
     Ok(cx.undefined())
 }
@@ -1716,7 +1716,7 @@ pub fn set_letterSpacing(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 pub fn get_wordSpacing(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
-    Ok(cx.string(this.state.word_spacing.to_string()))
+    Ok(cx.string(this.state.text.word_spacing.to_string()))
 }
 
 pub fn set_wordSpacing(mut cx: FunctionContext) -> JsResult<JsUndefined> {
@@ -1725,8 +1725,8 @@ pub fn set_wordSpacing(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
     if let Some(spacing) = opt_spacing_arg(&mut cx, 1)? {
         let px = spacing.in_px(&this.state.font_units());
-        this.state.char_style.set_word_spacing(px);
-        this.state.word_spacing = spacing;
+        this.state.text.edit().char_style.set_word_spacing(px);
+        this.state.text.edit().word_spacing = spacing;
     }
     Ok(cx.undefined())
 }
@@ -1736,20 +1736,20 @@ pub fn set_wordSpacing(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
 pub fn get_fontKerning(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
-    let kerning = this.borrow().state.font_kerning;
+    let kerning = this.borrow().state.text.font_kerning;
     Ok(cx.string(kerning.keyword()))
 }
 
 pub fn get_textRendering(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
-    let rendering = this.borrow().state.text_rendering;
+    let rendering = this.borrow().state.text.text_rendering;
     Ok(cx.string(rendering.keyword()))
 }
 
 pub fn get_fontHinting(mut cx: FunctionContext) -> JsResult<JsBoolean> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
-    Ok(cx.boolean(this.state.font_hinting))
+    Ok(cx.boolean(this.state.text.font_hinting))
 }
 
 pub fn get_fontVariant(mut cx: FunctionContext) -> JsResult<JsString> {
@@ -1773,13 +1773,13 @@ pub fn set_fontVariant(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 pub fn get_textWrap(mut cx: FunctionContext) -> JsResult<JsBoolean> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
-    Ok(cx.boolean(this.state.text_wrap))
+    Ok(cx.boolean(this.state.text.text_wrap))
 }
 
 pub fn get_textDecoration(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
-    Ok(cx.string(this.state.text_decoration.css.clone()))
+    Ok(cx.string(this.state.text.text_decoration.css.clone()))
 }
 
 pub fn set_textDecoration(mut cx: FunctionContext) -> JsResult<JsUndefined> {
@@ -1790,7 +1790,7 @@ pub fn set_textDecoration(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // not parse leaves the decoration alone, as an invalid value does
     // throughout the Canvas API; `"none"` and the empty string clear it.
     if let Some(decoration) = decoration_from_css(&css) {
-        this.borrow_mut().state.text_decoration = decoration;
+        this.borrow_mut().state.text.edit().text_decoration = decoration;
     }
     Ok(cx.undefined())
 }
@@ -1838,7 +1838,7 @@ pub fn set_fontVariationSettings(
     } else {
         this.state.font_variation_settings = css_parts.join(", ");
     }
-    this.state.variations = variations;
+    this.state.text.edit().variations = variations;
     Ok(cx.undefined())
 }
 
