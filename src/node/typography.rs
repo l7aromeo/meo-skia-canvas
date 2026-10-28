@@ -263,8 +263,15 @@ pub struct Typesetter<'a> {
     /// `oblique` asks, where there is an `oblique` to ask about.
     matched_leans: Option<bool>,
     /// Shared with the context that set it, or the [`TypesetInputs`] laying
-    /// a run out again -- see [`State::typography`].
+    /// a run out again -- see [`State::typography`]. For an `oblique` that
+    /// lays out in the upright style, a copy of the context's of its own.
     typography: Rc<Typography>,
+    /// The context's typography as it keeps it, which `typography` is a
+    /// copy of where an `oblique` needed one: what the runs kept for drawing
+    /// are filed under, so that a copy made again for each draw finds the
+    /// run the last one kept -- see [`LaidOutKey`]. The copy is worked out
+    /// from it and the fonts' epoch alone, which it stands for.
+    kept: Rc<Typography>,
     /// The decoration's thickness in pixels, where one was set -- see
     /// [`decoration_thickness`].
     decoration_thickness: Option<f32>,
@@ -674,8 +681,10 @@ const LAID_OUT_BYTES: usize = 8 * 1024 * 1024;
 const LAID_OUT_COUNT: usize = 512;
 
 /// What a kept run was laid out from, compared against a typesetter: the
-/// context's typography, shared rather than copied and held so that its
-/// address cannot be reused, the text as laid out, and the widths.
+/// context's typography as the context keeps it, not the copy an `oblique`
+/// lays out in -- see `Typesetter::kept` -- shared rather than copied and
+/// held so that its address cannot be reused; the text as laid out; and the
+/// widths.
 ///
 /// The typography stands for every setting a run is laid out from, the
 /// `oblique` angle among them, and the fonts registered when it was built
@@ -691,7 +700,7 @@ struct LaidOutKey {
 impl LaidOutKey {
     fn of(typesetter: &Typesetter<'_>) -> Self {
         Self {
-            typography: typesetter.typography.clone(),
+            typography: typesetter.kept.clone(),
             text: typesetter.text.as_ref().into(),
             width: typesetter.width.to_bits(),
             condense_to: typesetter.condense_to.map(f32::to_bits),
@@ -699,7 +708,7 @@ impl LaidOutKey {
     }
 
     fn matches(&self, typesetter: &Typesetter<'_>) -> bool {
-        Rc::ptr_eq(&self.typography, &typesetter.typography)
+        Rc::ptr_eq(&self.typography, &typesetter.kept)
             && self.width == typesetter.width.to_bits()
             && self.condense_to == typesetter.condense_to.map(f32::to_bits)
             && *self.text == *typesetter.text
@@ -712,7 +721,7 @@ impl LaidOutKey {
             return 0;
         }
         let mut hasher = DefaultHasher::new();
-        Rc::as_ptr(&typesetter.typography).hash(&mut hasher);
+        Rc::as_ptr(&typesetter.kept).hash(&mut hasher);
         typesetter.text.hash(&mut hasher);
         typesetter.width.to_bits().hash(&mut hasher);
         hasher.finish()
@@ -1353,6 +1362,7 @@ impl<'a> Typesetter<'a> {
         // The matched style comes back with the collection, from the one
         // search that found it. `layout` used to search again for it, on
         // every call, and it is the same search.
+        let kept = typography.clone();
         let mut typography = typography;
         let hinting = typography.1.hinting_is_on();
         let variations = with_oblique_slnt(variations, oblique);
@@ -1374,7 +1384,7 @@ impl<'a> Typesetter<'a> {
         };
         let fonts = FontLibrary::with_shared(|lib| lib.epoch());
         Self::from_resolved(
-            typography,
+            (typography, kept),
             decoration_thickness,
             oblique,
             faces,
@@ -1388,7 +1398,7 @@ impl<'a> Typesetter<'a> {
     /// for `typography`'s style found and the style it matched first, built
     /// over the fonts of `fonts`.
     fn from_resolved(
-        typography: Rc<Typography>,
+        (typography, kept): (Rc<Typography>, Rc<Typography>),
         decoration_thickness: Option<f32>,
         oblique: Option<f32>,
         (typefaces, matched_style): (FontCollection, Option<FontStyle>),
@@ -1454,6 +1464,7 @@ impl<'a> Typesetter<'a> {
             oblique,
             matched_leans,
             typography,
+            kept,
             decoration_thickness,
             text_wrap,
         }
@@ -3098,7 +3109,7 @@ impl TypesetInputs {
             &with_oblique_slnt(&self.variations, self.oblique),
         );
         Typesetter::from_resolved(
-            self.typography.clone(),
+            (self.typography.clone(), self.typography.clone()),
             self.decoration_thickness,
             self.oblique,
             faces,
@@ -4236,6 +4247,25 @@ mod laid_out {
             |ctx| ctx.set_letter_spacing_css("4px").expect("a spacing"),
             fill(TEXT, None),
         );
+    }
+
+    #[test]
+    fn an_oblique_run_drawn_again_is_found_kept() {
+        // The font set once and the run drawn three times: kept on the
+        // second draw and found on the third, as an upright run is.
+        const FAMILY: &str = "LaidOutObliqueAgain";
+        register(FAMILY, OSWALD);
+        forget_laid_out();
+        let mut canvas = Canvas::new(400.0, 120.0);
+        assert!(
+            canvas
+                .context()
+                .set_font_css(&format!("oblique 10deg 40px {FAMILY}"))
+        );
+        for _ in 0..3 {
+            drawn(&mut canvas, fill(TEXT, None));
+        }
+        assert_eq!(laid_out_held().0, 1, "one run, kept once and found");
     }
 
     #[test]
