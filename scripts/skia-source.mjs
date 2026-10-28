@@ -23,6 +23,7 @@ import {
   existsSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -39,6 +40,12 @@ const READY = ".ready";
 /// Hex digits of the patch's sha256 in the directory name: enough that two
 /// patches never share one, short enough to read.
 const PATCH_DIGEST_LENGTH = 12;
+/// Seconds to wait before each further try of a fetch that failed, so four
+/// tries in all. googlesource answers a burst of git-sync-deps' parallel
+/// fetches with 503s and 429s that clear within a minute, and a cold cache
+/// that failed on one of them failed the build: the waits double from 15 s,
+/// so the last try is nearly two minutes after the first.
+const RETRY_DELAYS_SECONDS = [15, 30, 60];
 
 /** The skia-bindings version Cargo.lock resolves, which is the tag to fetch. */
 function lockedVersion() {
@@ -77,6 +84,42 @@ function run(command, args, options = {}) {
   });
 }
 
+/** Blocks the thread for `seconds`: the script is synchronous throughout. */
+function sleep(seconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, seconds * 1000);
+}
+
+/**
+ * Runs `step`, and again after each of `delays` seconds while it throws,
+ * saying on stderr which try of `what` failed and why. The last failure is
+ * thrown, so one that persists still stops the caller with its own error.
+ */
+export function retry(
+  what,
+  step,
+  { delays = RETRY_DELAYS_SECONDS, wait = sleep } = {},
+) {
+  const tries = delays.length + 1;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return step();
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      if (attempt === tries) {
+        console.error(
+          `skia-source: ${what} failed on try ${attempt} of ${tries}, the last: ${reason}`,
+        );
+        throw error;
+      }
+      const delay = delays[attempt - 1];
+      console.error(
+        `skia-source: ${what} failed on try ${attempt} of ${tries}: ${reason}; trying again in ${delay} s`,
+      );
+      wait(delay);
+    }
+  }
+}
+
 function prepare() {
   const tree = treeDir();
   if (existsSync(join(tree, READY))) return sourceDir(tree);
@@ -84,30 +127,41 @@ function prepare() {
   const partial = `${tree}.partial`;
   rmSync(partial, { recursive: true, force: true });
   const checkout = join(partial, "rust-skia");
-  run("git", [
-    "clone",
-    "--quiet",
-    "--depth",
-    "1",
-    "--branch",
-    lockedVersion(),
-    "--recurse-submodules",
-    "--shallow-submodules",
-    "-j8",
-    RUST_SKIA,
-    checkout,
-  ]);
+  // A clone that failed part way leaves a directory git will not clone into,
+  // so each try starts from none.
+  retry("cloning rust-skia", () => {
+    rmSync(checkout, { recursive: true, force: true });
+    run("git", [
+      "clone",
+      "--quiet",
+      "--depth",
+      "1",
+      "--branch",
+      lockedVersion(),
+      "--recurse-submodules",
+      "--shallow-submodules",
+      "-j8",
+      RUST_SKIA,
+      checkout,
+    ]);
+  });
   // The same invocation skia-bindings makes for a full build
   // (build_support/skia/config.rs): DEPS read from skia-bindings, emsdk skipped.
-  run("python3", ["skia/tools/git-sync-deps"], {
-    cwd: join(checkout, "skia-bindings"),
-    env: {
-      ...process.env,
-      GIT_SYNC_DEPS_PATH: "skia/DEPS",
-      GIT_SYNC_DEPS_SKIP_EMSDK: "1",
-    },
-  });
-  run("python3", ["bin/fetch-gn"], { cwd: sourceDir(partial) });
+  // It fetches into what an earlier try left and checks each dependency out
+  // at its pinned revision, so a try resumes rather than starting over.
+  retry("syncing Skia's DEPS", () =>
+    run("python3", ["skia/tools/git-sync-deps"], {
+      cwd: join(checkout, "skia-bindings"),
+      env: {
+        ...process.env,
+        GIT_SYNC_DEPS_PATH: "skia/DEPS",
+        GIT_SYNC_DEPS_SKIP_EMSDK: "1",
+      },
+    }),
+  );
+  retry("fetching gn", () =>
+    run("python3", ["bin/fetch-gn"], { cwd: sourceDir(partial) }),
+  );
   // `-F0`: a hunk that no longer matches fails here rather than being placed
   // by guesswork.
   run("patch", ["-p1", "-F0", "-d", checkout, "-i", PATCH]);
@@ -122,15 +176,35 @@ function prepare() {
   return sourceDir(tree);
 }
 
-const command = process.argv[2];
-if (command === "env") {
-  if (process.platform === "darwin")
-    console.log(`SKIA_SOURCE_DIR=${sourceDir()}`);
-} else if (command === "dir") {
-  console.log(sourceDir());
-} else if (command === "prepare") {
-  console.log(prepare());
-} else {
-  console.error("usage: node scripts/skia-source.mjs env|dir|prepare");
-  process.exit(2);
+// Run as a command, not when a test imports `retry`. Both sides resolved, as
+// `import.meta.url` is: under /tmp on macOS the two spellings differ.
+if (
+  process.argv[1] &&
+  realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))
+) {
+  // skia-bindings takes a `SKIA_SOURCE_DIR` that is set at all as an offline
+  // build from that directory, an empty one included, and then fails reporting
+  // gn missing. One set but empty is always a mistake upstream of here, so it is
+  // named rather than passed on.
+  if (process.env.SKIA_SOURCE_DIR === "") {
+    console.error(
+      "skia-source: SKIA_SOURCE_DIR is set but empty, which skia-bindings reads " +
+        "as an offline build from no directory. Unset it, or set it to the " +
+        "directory `node scripts/skia-source.mjs prepare` prints.",
+    );
+    process.exit(1);
+  }
+
+  const command = process.argv[2];
+  if (command === "env") {
+    if (process.platform === "darwin")
+      console.log(`SKIA_SOURCE_DIR=${sourceDir()}`);
+  } else if (command === "dir") {
+    console.log(sourceDir());
+  } else if (command === "prepare") {
+    console.log(prepare());
+  } else {
+    console.error("usage: node scripts/skia-source.mjs env|dir|prepare");
+    process.exit(2);
+  }
 }
