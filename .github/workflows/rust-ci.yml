@@ -100,8 +100,34 @@ jobs:
   # everything off, all Linux-gated code on, Metal (macOS only), and both
   # backends at once -- the last because cargo features are additive and
   # nothing else in the matrix compiles the pair. The entry says why.
-  clippy:
+  # The patched Skia tree both macOS clippy legs compile from, prepared once.
+  # On a cold cache the two legs used to prepare it side by side, each running
+  # Skia's git-sync-deps -- dozens of parallel fetches from googlesource -- at
+  # the same moment, and googlesource answered one of them with 429s. Here
+  # one job fetches and saves it, and the legs below restore what it saved.
+  # `lookup-only` makes a warm cache cost a key lookup rather than a download,
+  # so the matrix waits seconds for this on an ordinary run.
+  skia-source:
     needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    name: skia source (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Look up the Skia source
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/meo-skia-canvas
+          key: skia-source-${{ hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch') }}
+          lookup-only: true
+      - name: Prepare the Skia source
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: node scripts/skia-source.mjs prepare
+
+  clippy:
+    needs: [changes, skia-source]
     if: needs.changes.outputs.relevant == 'true'
     name: clippy ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -162,17 +188,27 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install ninja
       # macOS lints what ships: Skia built from the patched tree the justfile's
-      # `dotenv-command` names locally and build.yml's mac job compiles. This
-      # job runs cargo directly, so it sets `SKIA_SOURCE_DIR` itself.
-      - name: Cache the Skia source (macOS)
+      # `dotenv-command` names locally and build.yml's mac job compiles. The
+      # `skia-source` job above saved it; this restores it, and `prepare` then
+      # only names the directory. This job runs cargo directly, so it sets
+      # `SKIA_SOURCE_DIR` itself.
+      - name: Restore the Skia source (macOS)
         if: runner.os == 'macOS'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/meo-skia-canvas
           key: skia-source-${{ hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch') }}
+      # The directory is taken by an assignment of its own before it is
+      # written out. Inside echo's arguments a failing `prepare` did not fail
+      # the step -- `bash -e` does not see a command substitution's status
+      # there -- so a fetch that failed wrote an empty `SKIA_SOURCE_DIR`, and
+      # skia-bindings read that as an offline build from no directory and
+      # died reporting gn missing. An assignment carries the status.
       - name: Prepare the Skia source (macOS)
         if: runner.os == 'macOS'
-        run: echo "SKIA_SOURCE_DIR=$(node scripts/skia-source.mjs prepare)" >> "$GITHUB_ENV"
+        run: |
+          dir=$(node scripts/skia-source.mjs prepare)
+          echo "SKIA_SOURCE_DIR=$dir" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.os }}-${{ matrix.cacheKey }}
@@ -639,6 +675,7 @@ jobs:
       [
         changes,
         fmt,
+        skia-source,
         clippy,
         test,
         binding,

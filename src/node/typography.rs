@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 #![allow(non_snake_case)]
+#[cfg(all(feature = "node-addon", debug_assertions))]
+use crate::context::typesetting::BUILDS;
 use crate::{
+    cache_map::{CacheMap, CacheSet},
     context::{State, typesetting::Typography},
     css::{FontUnits, is_font_relative, parse_length, without_comments},
     font::{FontFamily, ObliqueAngle, leans_as_asked, variation_axes},
@@ -31,9 +34,9 @@ use skia_safe::{
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell, RefMut},
-    collections::{HashMap, HashSet, VecDeque},
+    collections::VecDeque,
     fmt,
-    hash::{DefaultHasher, Hash, Hasher},
+    hash::{BuildHasher, RandomState},
     iter::{once, successors, zip},
     ops::Range,
     rc::Rc,
@@ -41,8 +44,8 @@ use std::{
 
 thread_local! {
     /// [`family_of`]'s answers, by the face's [`base_face`].
-    static FAMILIES: RefCell<HashMap<TypefaceId, String>> =
-        RefCell::new(HashMap::new());
+    static FAMILIES: RefCell<CacheMap<TypefaceId, String>> =
+        RefCell::default();
 }
 
 /// How many faces [`glyph_inks`] remembers outline bounds for, the most
@@ -714,17 +717,29 @@ impl LaidOutKey {
             && *self.text == *typesetter.text
     }
 
-    /// The bucket a typesetter's run is filed under.
-    fn hash(typesetter: &Typesetter<'_>) -> u64 {
+    /// The bucket a typesetter's run is filed under, in the cache whose
+    /// hash keys are `keys`.
+    fn hash(typesetter: &Typesetter<'_>, keys: &RandomState) -> u64 {
         #[cfg(test)]
         if COLLIDING.get() {
             return 0;
         }
-        let mut hasher = DefaultHasher::new();
-        Rc::as_ptr(&typesetter.kept).hash(&mut hasher);
-        typesetter.text.hash(&mut hasher);
-        typesetter.width.to_bits().hash(&mut hasher);
-        hasher.finish()
+        Self::digest(
+            keys,
+            Rc::as_ptr(&typesetter.kept),
+            &typesetter.text,
+            typesetter.width,
+        )
+    }
+
+    /// The hash of a run's typography, text and width under `keys`.
+    fn digest(
+        keys: &RandomState,
+        typography: *const Typography,
+        text: &str,
+        width: f32,
+    ) -> u64 {
+        keys.hash_one((typography, text, width.to_bits()))
     }
 }
 
@@ -750,12 +765,21 @@ struct LaidOutEntry {
 #[derive(Default)]
 struct LaidOutCache {
     runs: Lru<LaidOutEntry>,
+    /// The keys every hash this cache files a run under is taken with,
+    /// chosen at random for this cache, so that which texts share a hash
+    /// cannot be worked out ahead of a draw.
+    keys: RandomState,
     /// The first run filed under each hash; the rest follow it through
     /// [`LaidOutEntry::next`].
-    by_hash: HashMap<u64, LruId>,
+    ///
+    /// A `CacheMap`, though the text the hash is taken from can come from
+    /// anyone: its keys are digests taken with [`LaidOutCache::keys`], and
+    /// it holds at most [`LAID_OUT_COUNT`], as [`LaidOutCache::seen`] holds
+    /// at most [`SEEN_ONCE`].
+    by_hash: CacheMap<u64, LruId>,
     /// The hashes of runs drawn once and not kept, so that the second draw
     /// of one keeps it -- see [`Typesetter::laid_out`].
-    seen: HashSet<u64>,
+    seen: CacheSet<u64>,
     /// [`LaidOutCache::seen`] in the order the hashes came, for letting the
     /// oldest go past [`SEEN_ONCE`].
     seen_order: VecDeque<u64>,
@@ -769,7 +793,10 @@ const SEEN_ONCE: usize = 2 * LAID_OUT_COUNT;
 
 impl LaidOutCache {
     fn find(&self, typesetter: &Typesetter<'_>) -> Option<LruId> {
-        let first = self.by_hash.get(&LaidOutKey::hash(typesetter)).copied();
+        let first = self
+            .by_hash
+            .get(&LaidOutKey::hash(typesetter, &self.keys))
+            .copied();
         successors(first, |id| self.runs.get(*id)?.next).find(|id| {
             self.runs
                 .get(*id)
@@ -783,7 +810,7 @@ impl LaidOutCache {
     }
 
     fn insert(&mut self, typesetter: &Typesetter<'_>, laid_out: Rc<LaidOut>) {
-        let hash = LaidOutKey::hash(typesetter);
+        let hash = LaidOutKey::hash(typesetter, &self.keys);
         let bytes = laid_out.bytes;
         let entry = LaidOutEntry {
             key: LaidOutKey::of(typesetter),
@@ -840,7 +867,7 @@ impl LaidOutCache {
     /// By hash alone: two runs whose hashes collide only mean the second is
     /// kept a draw early, since a kept run is found by its whole key.
     fn admits(&mut self, typesetter: &Typesetter<'_>) -> bool {
-        let hash = LaidOutKey::hash(typesetter);
+        let hash = LaidOutKey::hash(typesetter, &self.keys);
         if self.seen.contains(&hash) {
             return true;
         }
@@ -897,6 +924,15 @@ pub fn laidOut(mut cx: FunctionContext) -> JsResult<JsArray> {
     let bytes = cx.number(bytes as f64);
     held.set(&mut cx, 1, bytes)?;
     Ok(held)
+}
+
+/// Test-only: how many typographies this thread has built -- see
+/// `context::typesetting::BUILDS`.
+///
+/// Exported by debug builds only, as `__discardGpuDraws` is.
+#[cfg(all(feature = "node-addon", debug_assertions))]
+pub fn typographyBuilds(mut cx: FunctionContext) -> JsResult<JsNumber> {
+    Ok(cx.number(BUILDS.get() as f64))
 }
 
 /// Test-only: lets every run this thread keeps for drawing go, so that a
@@ -2415,7 +2451,7 @@ impl From<Baseline> for CrateTextBaseline {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Baseline {
     Top,
     Hanging,
@@ -2473,7 +2509,7 @@ impl Baseline {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DecorationStyle {
     pub css: String,
     pub decoration: Decoration,
@@ -2495,7 +2531,7 @@ impl Default for DecorationStyle {
 //
 // Font-relative lengths (for text spacing & decoration thickness)
 //
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Spacing {
     raw_size: f32,
     unit: String,
@@ -4057,14 +4093,15 @@ mod hinting {
 #[cfg(test)]
 mod laid_out {
     use super::{
-        COLLIDING, LAID_OUT, LAID_OUT_BYTES, LAID_OUT_COUNT, SEEN_ONCE,
-        forget_laid_out, laid_out_held,
+        COLLIDING, LAID_OUT, LAID_OUT_BYTES, LAID_OUT_COUNT, LaidOutCache,
+        LaidOutKey, SEEN_ONCE, forget_laid_out, laid_out_held,
     };
     use crate::{
         Canvas, Context2D, FontLibrary as Library, GradientInterpolation,
         GradientStop, RgbaLinear, Shader, geometry::Point,
         node::font_library::FontLibrary,
     };
+    use std::ptr;
 
     const OSWALD: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -4461,6 +4498,20 @@ mod laid_out {
     #[test]
     fn past_the_count_the_least_recently_drawn_runs_go() {
         least_recently_drawn_go_past_the_count("LaidOutCount");
+    }
+
+    #[test]
+    fn a_run_s_hash_cannot_be_worked_out_ahead_of_its_cache() {
+        let digest = |cache: &LaidOutCache| {
+            LaidOutKey::digest(&cache.keys, ptr::null(), TEXT, 400.0)
+        };
+        let (one, other) = (LaidOutCache::default(), LaidOutCache::default());
+        assert_eq!(digest(&one), digest(&one), "one cache files a run alike");
+        assert_ne!(
+            digest(&one),
+            digest(&other),
+            "another cache, as another process, files the same run elsewhere"
+        );
     }
 
     #[test]

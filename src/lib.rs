@@ -993,6 +993,8 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     #[cfg(debug_assertions)]
     cx.export_function("__laidOut", typography::laidOut)?;
     #[cfg(debug_assertions)]
+    cx.export_function("__typographyBuilds", typography::typographyBuilds)?;
+    #[cfg(debug_assertions)]
     cx.export_function("__forgetLaidOut", typography::forgetLaidOut)?;
     #[cfg(debug_assertions)]
     cx.export_function("__activity", activity)?;

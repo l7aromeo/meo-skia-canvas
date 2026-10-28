@@ -10,7 +10,14 @@
 // setting is shown to matter rather than assumed to.
 
 const { assert, describe, test } = require("../runner"),
-  { Canvas, FontLibrary } = require("../../lib");
+  { Canvas, FontLibrary } = require("../../lib"),
+  { skiaNode } = require("../../lib/classes/neon");
+
+/** How many typographies the thread has built, where the build counts them. */
+const builds = () => /** @type {number} */ (skiaNode.__typographyBuilds());
+const why = !skiaNode.__typographyBuilds
+  ? "skipped: a release binary does not export __typographyBuilds"
+  : null;
 
 const FONTS = `${__dirname}/../assets/fonts`;
 const OSWALD = `${FONTS}/Oswald/Oswald-VariableFont_wght.ttf`;
@@ -201,6 +208,41 @@ describe("A context's kept typography follows every setting it is built from", (
       "restored, it draws as it did before the save",
     );
   });
+
+  test(
+    "a setting set to what it holds builds nothing",
+    { skip: why ?? false },
+    () => {
+      // A drawing loop sets the same font, spacing and alignment before
+      // every draw; none of it may rebuild the typography.
+      for (const [name, apply, setup] of SETTERS) {
+        const ctx = context(setup);
+        apply(ctx);
+        typeset(ctx);
+        const before = builds();
+        apply(ctx);
+        typeset(ctx);
+        apply(ctx);
+        typeset(ctx);
+        assert.equal(builds() - before, 0, `${name}: set again`);
+      }
+    },
+  );
+
+  test(
+    "a font spelled another way reads back as before and builds nothing",
+    { skip: why ?? false },
+    () => {
+      const ctx = context();
+      typeset(ctx);
+      const font = ctx.font;
+      const before = builds();
+      ctx.font = "24px    KeptOswald";
+      typeset(ctx);
+      assert.equal(ctx.font, font, "read back as the font set before");
+      assert.equal(builds() - before, 0, "and laid out as before");
+    },
+  );
 
   test("reset brings back the initial typography", () => {
     const kept = context();
