@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 #![allow(non_snake_case)]
 use crate::{
-    context::State,
+    context::{State, typesetting::Typography},
     css::{FontUnits, is_font_relative, parse_length, without_comments},
     font::{FontFamily, ObliqueAngle, leans_as_asked, variation_axes},
     font_library::{FontEpoch, FontLibrary, base_face},
@@ -254,11 +254,9 @@ pub struct Typesetter<'a> {
     /// Whether the face the style matched first already leans as the
     /// `oblique` asks, where there is an `oblique` to ask about.
     matched_leans: Option<bool>,
-    /// Borrowed from a [`TypesetInputs`] laying a run out again, which keeps
-    /// its own; owned otherwise.
-    char_style: Cow<'a, TextStyle>,
-    graf_style: Cow<'a, ParagraphStyle>,
-    text_decoration: Cow<'a, DecorationStyle>,
+    /// Shared with the context that set it, or the [`TypesetInputs`] laying
+    /// a run out again -- see [`State::typography`].
+    typography: Rc<Typography>,
     /// The decoration's thickness in pixels, where one was set -- see
     /// [`decoration_thickness`].
     decoration_thickness: Option<f32>,
@@ -756,34 +754,23 @@ fn squeeze(rect: Rect, factor: f32) -> Rect {
     }
 }
 
-/// The typography a run is laid out with, as [`State::typography`] gives it.
-type Typography = (TextStyle, ParagraphStyle, DecorationStyle, Baseline, bool);
-
 /// The decoration's thickness in pixels, where one was set, resolved
 /// against `state`: a thickness in `ex` or `ch` needs the face the state
 /// resolves to, which a run laid out again later no longer has to hand.
 fn decoration_thickness(state: &State) -> Option<f32> {
     state
+        .text
         .text_decoration
         .size
         .as_ref()
         .map(|size| size.in_px(&state.font_units()))
 }
 
-/// [`Typography`], owned or borrowed from where it is kept.
-type TypographyRef<'a> = (
-    Cow<'a, TextStyle>,
-    Cow<'a, ParagraphStyle>,
-    Cow<'a, DecorationStyle>,
-    Baseline,
-    bool,
-);
-
 impl<'a> Typesetter<'a> {
     pub fn new(state: &State, text: &'a str, width: Option<f32>) -> Self {
         Self::from_parts(
             state.typography(),
-            &state.variations,
+            &state.text.variations,
             decoration_thickness(state),
             state.oblique_angle,
             text,
@@ -795,7 +782,7 @@ impl<'a> Typesetter<'a> {
     /// in a context's state as it stands, with its faces from the fonts
     /// registered now.
     fn from_parts(
-        typography: Typography,
+        typography: Rc<Typography>,
         variations: &[(FourByteTag, f32)],
         decoration_thickness: Option<f32>,
         oblique: Option<f32>,
@@ -808,21 +795,24 @@ impl<'a> Typesetter<'a> {
         let mut typography = typography;
         let hinting = typography.1.hinting_is_on();
         let variations = with_oblique_slnt(variations, oblique);
-        let faces = resolve_for_oblique(&mut typography.0, oblique, |style| {
+        let resolve = |style: &TextStyle| {
             FontLibrary::with_shared(|lib| {
                 lib.set_hinting(hinting).fonts_for_style(style, &variations)
             })
-        });
-        let (char_style, graf_style, text_decoration, baseline, text_wrap) =
-            typography;
-        Self::from_resolved(
-            (
-                Cow::Owned(char_style),
-                Cow::Owned(graf_style),
-                Cow::Owned(text_decoration),
-                baseline,
-                text_wrap,
+        };
+        let faces = match oblique {
+            // An oblique may lay out in the upright style, which changes the
+            // style for this run alone: a copy of its own, and the kept one
+            // untouched.
+            Some(_) => resolve_for_oblique(
+                &mut Rc::make_mut(&mut typography).0,
+                oblique,
+                resolve,
             ),
+            None => resolve(&typography.0),
+        };
+        Self::from_resolved(
+            typography,
             decoration_thickness,
             oblique,
             faces,
@@ -834,15 +824,14 @@ impl<'a> Typesetter<'a> {
     /// A typesetter laying `text` out in `faces`, the collection a search
     /// for `typography`'s style found and the style it matched first.
     fn from_resolved(
-        typography: TypographyRef<'a>,
+        typography: Rc<Typography>,
         decoration_thickness: Option<f32>,
         oblique: Option<f32>,
         (typefaces, matched_style): (FontCollection, Option<FontStyle>),
         text: &'a str,
         width: Option<f32>,
     ) -> Self {
-        let (char_style, graf_style, text_decoration, baseline, text_wrap) =
-            typography;
+        let (_, _, _, baseline, text_wrap) = *typography;
         // With wrapping on, the width given to a draw is the wrap width and
         // is what the paragraph is laid out to -- this fork's extension, and
         // the only reading under which a paragraph may break. With it off,
@@ -879,6 +868,7 @@ impl<'a> Typesetter<'a> {
         // alone cannot say whether a face leans by design, since CoreText
         // reports an oblique face as italic -- see `leans_as_asked`.
         let matched_leans = oblique.map(|angle| {
+            let char_style = &typography.0;
             let families = char_style.font_families();
             let families: Vec<&str> = families.iter().collect();
             typefaces
@@ -897,12 +887,25 @@ impl<'a> Typesetter<'a> {
             matched_style,
             oblique,
             matched_leans,
-            char_style,
-            graf_style,
-            text_decoration,
+            typography,
             decoration_thickness,
             text_wrap,
         }
+    }
+
+    /// The run's text style.
+    fn char_style(&self) -> &TextStyle {
+        &self.typography.0
+    }
+
+    /// The paragraph style the run is laid out in.
+    fn graf_style(&self) -> &ParagraphStyle {
+        &self.typography.1
+    }
+
+    /// The decoration the run is drawn with.
+    fn text_decoration(&self) -> &DecorationStyle {
+        &self.typography.2
     }
 
     /// Lays the run out, and works out how far it has to be squeezed.
@@ -979,13 +982,13 @@ impl<'a> Typesetter<'a> {
         if natural > 0.0 || self.text.is_empty() {
             return natural;
         }
-        let letter = self.char_style.letter_spacing();
+        let letter = self.char_style().letter_spacing();
         // Enough to make either layout positive: a cluster loses at most
         // its letter and word spacing, and the font size on top keeps the
         // advance clear of zero for every cluster there is.
         let step = letter.abs()
-            + self.char_style.word_spacing().abs()
-            + self.char_style.font_size();
+            + self.char_style().word_spacing().abs()
+            + self.char_style().font_size();
         let style = self.layout_style(&Paint::default());
         let at = |spacing: f32| {
             let mut style = style.clone();
@@ -1003,9 +1006,9 @@ impl<'a> Typesetter<'a> {
 
     /// The style the run is laid out in, painted with `paint`.
     fn layout_style(&self, paint: &Paint) -> TextStyle {
-        let mut char_style = TextStyle::clone(&self.char_style);
+        let mut char_style = TextStyle::clone(self.char_style());
         char_style.set_foreground_paint(paint);
-        char_style.set_decoration(&self.text_decoration.for_layout(
+        char_style.set_decoration(&self.text_decoration().for_layout(
             &char_style,
             paint.color(),
             self.decoration_thickness,
@@ -1020,7 +1023,7 @@ impl<'a> Typesetter<'a> {
         // hand.
         if let Some(matched) = self.matched_style {
             char_style.set_font_style(synthesis_style(
-                self.char_style.font_style(),
+                self.char_style().font_style(),
                 matched,
                 self.matched_leans,
             ));
@@ -1048,7 +1051,7 @@ impl<'a> Typesetter<'a> {
         let first = self.paragraph_with(char_style, &[]);
         let restyled = runs_to_restyle(
             &first,
-            self.char_style.font_style(),
+            self.char_style().font_style(),
             char_style.font_style(),
             self.oblique,
         );
@@ -1069,7 +1072,7 @@ impl<'a> Typesetter<'a> {
         restyled: &[(Range<usize>, FontStyle)],
     ) -> Paragraph {
         let mut paragraph_builder =
-            ParagraphBuilder::new(&self.graf_style, &self.typefaces);
+            ParagraphBuilder::new(self.graf_style(), &self.typefaces);
         let mut unkerned = char_style.clone();
         unkerned.add_font_feature("kern", 0);
 
@@ -1167,10 +1170,10 @@ impl<'a> Typesetter<'a> {
         } = self.layout(&Paint::default());
 
         // Baseline offsets, relative to whatever `textBaseline` selected.
-        let shift = self.char_style.baseline_shift();
-        let hang = Baseline::Hanging.get_offset(&self.char_style) - shift;
-        let norm = Baseline::Alphabetic.get_offset(&self.char_style) - shift;
-        let ideo = Baseline::Ideographic.get_offset(&self.char_style) - shift;
+        let shift = self.char_style().baseline_shift();
+        let hang = Baseline::Hanging.get_offset(self.char_style()) - shift;
+        let norm = Baseline::Alphabetic.get_offset(self.char_style()) - shift;
+        let ideo = Baseline::Ideographic.get_offset(self.char_style()) - shift;
 
         // The laid-out box of each line horizontally, which is what the
         // Canvas API's `width` measures, so trailing whitespace counts.
@@ -1228,7 +1231,7 @@ impl<'a> Typesetter<'a> {
             .unwrap_or_else(|| {
                 let FontMetrics {
                     ascent, descent, ..
-                } = self.char_style.font_metrics();
+                } = self.char_style().font_metrics();
                 (norm - ascent, descent - norm)
             });
 
@@ -1280,9 +1283,9 @@ impl<'a> Typesetter<'a> {
             condensation,
             ..
         } = self.layout(&Paint::default());
-        let headroom = self.char_style.font_metrics().ascent
+        let headroom = self.char_style().font_metrics().ascent
             + paragraph.alphabetic_baseline();
-        let offset = self.baseline.get_offset(&self.char_style);
+        let offset = self.baseline.get_offset(self.char_style());
         let anchor: Point = point.into();
         origin += anchor;
         origin.y -= headroom - offset;
@@ -1360,8 +1363,8 @@ impl<'a> Typesetter<'a> {
     /// direction.
     fn gravity(&self) -> TextAlign {
         match (
-            self.graf_style.text_direction(),
-            self.graf_style.text_align(),
+            self.graf_style().text_direction(),
+            self.graf_style().text_align(),
         ) {
             (TextDirection::LTR, TextAlign::Start)
             | (TextDirection::RTL, TextAlign::End) => TextAlign::Left,
@@ -1399,7 +1402,7 @@ impl<'a> Typesetter<'a> {
         };
 
         alignment_factor * self.width
-            + spacing_step * self.char_style.letter_spacing()
+            + spacing_step * self.char_style().letter_spacing()
     }
 }
 
@@ -2439,7 +2442,7 @@ thread_local! {
 /// measured, the text and the width. Owned, so it outlasts the context's
 /// next change.
 pub struct TypesetInputs {
-    typography: Typography,
+    typography: Rc<Typography>,
     variations: Vec<(FourByteTag, f32)>,
     /// Resolved when the run was measured -- see [`decoration_thickness`].
     decoration_thickness: Option<f32>,
@@ -2462,8 +2465,10 @@ impl TypesetInputs {
         let mut typography = state.typography();
         if let Some(angle) = state.oblique_angle {
             let hinting = typography.1.hinting_is_on();
-            let variations = with_oblique_slnt(&state.variations, Some(angle));
-            resolve_for_oblique(&mut typography.0, Some(angle), |style| {
+            let variations =
+                with_oblique_slnt(&state.text.variations, Some(angle));
+            let style = &mut Rc::make_mut(&mut typography).0;
+            resolve_for_oblique(style, Some(angle), |style| {
                 FontLibrary::with_shared(|lib| {
                     lib.set_hinting(hinting).fonts_for_style(style, &variations)
                 })
@@ -2471,7 +2476,7 @@ impl TypesetInputs {
         }
         Self {
             typography,
-            variations: state.variations.clone(),
+            variations: state.text.variations.clone(),
             decoration_thickness: decoration_thickness(state),
             oblique: state.oblique_angle,
             text: text.to_string(),
@@ -2489,16 +2494,8 @@ impl TypesetInputs {
             &self.typography.0,
             &with_oblique_slnt(&self.variations, self.oblique),
         );
-        let (char_style, graf_style, text_decoration, baseline, text_wrap) =
-            &self.typography;
         Typesetter::from_resolved(
-            (
-                Cow::Borrowed(char_style),
-                Cow::Borrowed(graf_style),
-                Cow::Borrowed(text_decoration),
-                *baseline,
-                *text_wrap,
-            ),
+            self.typography.clone(),
             self.decoration_thickness,
             self.oblique,
             faces,
@@ -3251,15 +3248,13 @@ mod synthesis {
 
 #[cfg(test)]
 mod hinting {
-    use super::{
-        FontLibrary, ParagraphStyle, TextStyle, Typesetter, glyph_runs,
-    };
+    use super::{FontLibrary, TextStyle, Typesetter, glyph_runs};
     use crate::{
         Canvas, Font as CanvasFont, FontLibrary as Library, RichTextSpan,
         TextEngine, TextRendering, TextStyle as SpanStyle,
         node::oblique::ParagraphRecipe,
     };
-    use skia_safe::{FontHinting, Paint};
+    use skia_safe::{FontHinting, Paint, textlayout::ParagraphStyle};
 
     /// The bundled Oswald, under a name of these tests' own.
     const FAMILY: &str = "HintingOswald";
