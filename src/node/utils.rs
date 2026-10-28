@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use core::ops::Range;
 use neon::prelude::*;
-use skia_safe::{Color, Color4f, ColorSpace, Data, Matrix, Path, Point, RGB};
+use skia_safe::{Color, Color4f, ColorSpace, Data, Matrix, Path, Point};
 use std::{borrow::Cow, cmp};
 
 // One definition of the sRGB transfer function for the whole crate, in
@@ -1762,6 +1762,140 @@ impl Relative {
     }
 }
 
+/// A colour as CSS Color 4 section 16 serialises it: the function it was
+/// declared in and its channels as that function computes them, so a getter
+/// reports `lab(29 39 20)` for `lab(29% 39 20)` rather than the sRGB the
+/// colour paints as.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Declared {
+    /// The function it was declared in.
+    pub form: Form,
+    /// The three channels, `None` where the declaration wrote `none`. A
+    /// legacy colour's are its sRGB on `0..=255`; the others are on the scale
+    /// section 16 serialises them on -- Lab lightness `0..=100`, Oklab
+    /// lightness `0..=1`, a hue in degrees, a `color()` channel as written.
+    pub channels: [Option<f64>; 3],
+    /// The alpha on `0..=1`, `None` for `none`.
+    pub alpha: Option<f64>,
+}
+
+/// The function a [`Declared`] colour is serialised in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Form {
+    /// Section 16.2's sRGB values: hex, named, `transparent`,
+    /// `currentcolor`, and absolute `rgb()`, `hsl()` and `hwb()`.
+    Legacy,
+    /// `lab()`.
+    Lab,
+    /// `lch()`.
+    Lch,
+    /// `oklab()`.
+    Oklab,
+    /// `oklch()`.
+    Oklch,
+    /// `color()`, in the space it names, spelled as section 16.5 spells it.
+    Color(&'static str),
+}
+
+impl Form {
+    /// Whether the colour is held in a space other than the one its channels
+    /// are written in, so that one channel's rounding moves the colour the
+    /// others paint: Lab, LCH, Oklab and OkLCh are converted to sRGB, where a
+    /// legacy or `color()` channel is held as written.
+    fn mixes_channels(self) -> bool {
+        matches!(self, Form::Lab | Form::Lch | Form::Oklab | Form::Oklch)
+    }
+}
+
+impl Relative {
+    /// `values` as [`Declared`] holds them, `missing` where a channel was
+    /// `none`.
+    ///
+    /// The clamps are CSS Color 4's computed-value ones, as Chrome 156
+    /// applies them: Lab and Oklab lightness into its range, a polar chroma
+    /// at zero and its hue into `0..360` -- `lab(150 0 0)` reads back as
+    /// `lab(100 0 0)` and `oklch(0.7 0.35 390)` as `oklch(0.7 0.35 30)`. A
+    /// relative colour in a legacy function is serialised as `color(srgb)`,
+    /// which CSS Color 5 section 4.4 gives it and Chrome 156 reports.
+    fn declared(
+        self,
+        [x, y, z]: [f64; 3],
+        missing: [bool; 3],
+        alpha: Option<f64>,
+        relative: bool,
+    ) -> Declared {
+        let hue = |h: f64| h.rem_euclid(DEGREES_PER_TURN);
+        let kept = |values: [f64; 3]| {
+            [0, 1, 2].map(|at| (!missing[at]).then_some(values[at]))
+        };
+        let (form, channels) = match self {
+            Self::Rgb | Self::Hsl | Self::Hwb => {
+                let srgb = self.legacy_srgb([x, y, z]);
+                match relative {
+                    // CSS Color 4 section 4.4: a missing component "behaves
+                    // as a zero value" when the colour is converted to
+                    // another space. `rgb()`'s channels are sRGB's own and
+                    // keep their `none`; `hsl()` and `hwb()` are converted, so
+                    // `hsl(from red none s l)` is red, not `color(srgb none
+                    // 0 0)`.
+                    true if self == Self::Rgb => {
+                        (Form::Color("srgb"), kept(srgb))
+                    }
+                    true => (Form::Color("srgb"), srgb.map(Some)),
+                    // A legacy serialisation has no `none`: section 16.2
+                    // writes it as zero.
+                    false => (
+                        Form::Legacy,
+                        srgb.map(|c| Some(c * RGB_CHANNEL_SCALE)),
+                    ),
+                }
+            }
+            Self::Lab => {
+                (Form::Lab, kept([x.clamp(0.0, PERCENT_CHANNEL_SCALE), y, z]))
+            }
+            Self::Lch => (
+                Form::Lch,
+                kept([x.clamp(0.0, PERCENT_CHANNEL_SCALE), y.max(0.0), hue(z)]),
+            ),
+            Self::Oklab => (Form::Oklab, kept([x.clamp(0.0, 1.0), y, z])),
+            Self::Oklch => {
+                (Form::Oklch, kept([x.clamp(0.0, 1.0), y.max(0.0), hue(z)]))
+            }
+            Self::Color(space) => (
+                // Section 16.5 serialises `xyz` by its canonical name.
+                Form::Color(match space {
+                    "xyz" => "xyz-d65",
+                    other => other,
+                }),
+                kept([x, y, z]),
+            ),
+        };
+        Declared {
+            form,
+            channels,
+            alpha: alpha.map(|a| a.clamp(0.0, 1.0)),
+        }
+    }
+
+    /// An `rgb()`, `hsl()` or `hwb()` colour's channels as the sRGB they
+    /// name, on `0..=1`, in `f64` so a whole byte stays whole.
+    fn legacy_srgb(self, [x, y, z]: [f64; 3]) -> [f64; 3] {
+        match self {
+            Self::Hsl => hsl_to_srgb(
+                x,
+                y / PERCENT_CHANNEL_SCALE,
+                z / PERCENT_CHANNEL_SCALE,
+            ),
+            Self::Hwb => hwb_to_srgb(
+                x,
+                y / PERCENT_CHANNEL_SCALE,
+                z / PERCENT_CHANNEL_SCALE,
+            ),
+            _ => [x, y, z].map(|c| c / RGB_CHANNEL_SCALE),
+        }
+    }
+}
+
 /// Lab or Oklab as lightness, chroma and hue in degrees, the hue zero where
 /// it is powerless: at a chroma of `powerless` or less, which CSS Color 4
 /// sets per space.
@@ -1871,7 +2005,9 @@ fn hwb_to_srgb(hue: f64, white: f64, black: f64) -> [f64; 3] {
 /// `hwba()`, `hsv()` and `hsva()`, absolute or relative, are `Some(None)`:
 /// no CSS function has those names and no browser reads them -- Chrome 153
 /// ignores `hwba(0 0% 0%)` and `hsv(0 100% 100%)`.
-fn read_color_function(css: &str) -> Option<Option<(Color4f, &'static str)>> {
+fn read_color_function(
+    css: &str,
+) -> Option<Option<(Color4f, &'static str, Declared)>> {
     let (name, args) = css.trim_ascii().split_once('(')?;
     let function = match name.to_ascii_lowercase().as_str() {
         "rgb" | "rgba" => Relative::Rgb,
@@ -2014,7 +2150,7 @@ fn read_channel(
 fn relative_channels(
     args: &str,
     function: Relative,
-) -> Option<(Color4f, &'static str)> {
+) -> Option<(Color4f, &'static str, Declared)> {
     fn token(text: &str, (from, to): (usize, usize)) -> &str {
         &text[from..to]
     }
@@ -2048,12 +2184,22 @@ fn relative_channels(
         read_channel(t1, c1, &bound)?,
         read_channel(t2, c2, &bound)?,
     ];
-    let alpha = match alpha {
+    let alpha_value = match alpha {
         Some(text) => read_channel(text, Channel::Scaled(1.0), &bound)?,
         None => f64::from(origin.a),
     };
+    let declared = function.declared(
+        values,
+        [t0, t1, t2].map(is_none),
+        (!alpha.is_some_and(is_none)).then_some(alpha_value),
+        true,
+    );
     let ([r, g, b], space) = function.color(values);
-    Some((Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32), space))
+    Some((
+        Color4f::new(r, g, b, alpha_value.clamp(0.0, 1.0) as f32),
+        space,
+        declared,
+    ))
 }
 
 /// The colour an absolute colour function names, given what follows the
@@ -2061,7 +2207,7 @@ fn relative_channels(
 fn absolute_channels(
     args: &str,
     function: Relative,
-) -> Option<(Color4f, &'static str)> {
+) -> Option<(Color4f, &'static str, Declared)> {
     let body = args.trim_ascii_end().strip_suffix(')')?.trim_ascii();
     match has_top_level_comma(body) {
         true => legacy_channels(body, function),
@@ -2088,7 +2234,7 @@ fn has_top_level_comma(text: &str) -> bool {
 fn modern_channels(
     body: &str,
     function: Relative,
-) -> Option<(Color4f, &'static str)> {
+) -> Option<(Color4f, &'static str, Declared)> {
     let spans = top_level_spans(body);
     // A `)` before the end stops the spans short of it.
     if spans.last()?.1 != body.len() {
@@ -2101,19 +2247,35 @@ fn modern_channels(
         }
         other => (other, body),
     };
-    let ([t0, t1, t2], alpha) = channels_and_alpha(rest)?;
+    let ([t0, t1, t2], alpha_text) = channels_and_alpha(rest)?;
     let [c0, c1, c2] = function.channels();
     let values = [
         read_channel(t0, c0, &[])?,
         read_channel(t1, c1, &[])?,
         read_channel(t2, c2, &[])?,
     ];
-    let alpha = match alpha {
+    let alpha = match alpha_text {
         Some(text) => read_channel(text, Channel::Scaled(1.0), &[])?,
         None => 1.0,
     };
-    let ([r, g, b], space) = function.color(function.parsed(values));
-    Some((Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32), space))
+    let parsed = function.parsed(values);
+    let declared = function.declared(
+        parsed,
+        [t0, t1, t2].map(is_none),
+        (!alpha_text.is_some_and(is_none)).then_some(alpha),
+        false,
+    );
+    let ([r, g, b], space) = function.color(parsed);
+    Some((
+        Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32),
+        space,
+        declared,
+    ))
+}
+
+/// Whether a channel is written `none`, in any case.
+fn is_none(text: &str) -> bool {
+    text.eq_ignore_ascii_case("none")
 }
 
 /// An absolute `rgb()` or `hsl()` in the comma-separated legacy syntax, given
@@ -2131,7 +2293,7 @@ fn modern_channels(
 fn legacy_channels(
     body: &str,
     function: Relative,
-) -> Option<(Color4f, &'static str)> {
+) -> Option<(Color4f, &'static str, Declared)> {
     if !matches!(function, Relative::Rgb | Relative::Hsl) {
         return None;
     }
@@ -2204,8 +2366,13 @@ fn legacy_channels(
         ],
         _ => [x, y, z],
     };
+    let declared = function.declared(values, [false; 3], Some(alpha), false);
     let ([r, g, b], space) = function.color(values);
-    Some((Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32), space))
+    Some((
+        Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32),
+        space,
+        declared,
+    ))
 }
 
 /// CSS Color 4's named colours ([section 6.1]), in the order its table lists
@@ -2375,9 +2542,20 @@ const NAMED_COLORS: [(&str, [u8; 3]); 148] = [
 /// `hex_and_named_colours_read_as_they_did` holds every named colour and
 /// every hex form to the `f32`s earlier releases gave. A `#` followed by
 /// anything else is `Some(None)`, a refusal: only hex follows one.
-fn hex_or_named(css: &str) -> Option<Option<Color4f>> {
+fn hex_or_named(css: &str) -> Option<Option<(Color4f, Declared)>> {
     let css = css.trim_ascii();
     let byte = |b: u8| f32::from(b) / 255.0;
+    // Section 16.2's sRGB value, the bytes as they were named.
+    let legacy = |[r, g, b, a]: [u8; 4]| {
+        (
+            Color4f::new(byte(r), byte(g), byte(b), byte(a)),
+            Declared {
+                form: Form::Legacy,
+                channels: [r, g, b].map(|c| Some(f64::from(c))),
+                alpha: Some(f64::from(a) / f64::from(u8::MAX)),
+            },
+        )
+    };
     if let Some(digits) = css.strip_prefix('#') {
         let nibbles: Option<Vec<u8>> = digits
             .chars()
@@ -2396,16 +2574,16 @@ fn hex_or_named(css: &str) -> Option<Option<Color4f>> {
             _ => return Some(None),
         };
         let alpha = channels.get(3).copied().unwrap_or(u8::MAX);
-        return Some(Some(Color4f::new(
-            byte(channels[0]),
-            byte(channels[1]),
-            byte(channels[2]),
-            byte(alpha),
-        )));
+        return Some(Some(legacy([
+            channels[0],
+            channels[1],
+            channels[2],
+            alpha,
+        ])));
     }
     let name = css.to_ascii_lowercase();
     if name == "transparent" {
-        return Some(Some(Color4f::new(0.0, 0.0, 0.0, 0.0)));
+        return Some(Some(legacy([0, 0, 0, 0])));
     }
     // `currentcolor` is the `color` property of the element a colour is on.
     // A canvas here is on none, and CSS Color 4's "parse a CSS <color>
@@ -2414,13 +2592,13 @@ fn hex_or_named(css: &str) -> Option<Option<Color4f>> {
     // of the properties": `color`'s, `CanvasText`, black. Chrome 152 paints
     // it opaque black on a canvas outside a document.
     if name == "currentcolor" {
-        return Some(Some(Color4f::new(0.0, 0.0, 0.0, 1.0)));
+        return Some(Some(legacy([0, 0, 0, u8::MAX])));
     }
     let at = NAMED_COLORS
         .binary_search_by(|&(named, _)| named.cmp(name.as_str()))
         .ok()?;
     let [r, g, b] = NAMED_COLORS[at].1;
-    Some(Some(Color4f::new(byte(r), byte(g), byte(b), 1.0)))
+    Some(Some(legacy([r, g, b, u8::MAX])))
 }
 
 /// `css` with every bracket still open at its end closed, as CSS Syntax 3
@@ -2449,16 +2627,24 @@ fn closed_at_end(css: &str) -> Cow<'_, str> {
 /// Skia converts at the paint, and converting via sRGB first would cost a
 /// level of the eight the readback quantises to.
 pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
+    css_to_declared(css).map(|(color, space, _)| (color, space))
+}
+
+/// As [`css_to_color4f_in_space`], with the colour as it was declared, which
+/// is what a getter serialises: see [`declared_to_css`].
+pub fn css_to_declared(css: &str) -> Option<(Color4f, ColorSpace, Declared)> {
     let uncommented = without_comments(css)?;
     let css = closed_at_end(uncommented.as_ref());
     let css = css.as_ref();
     if let Some(color) = read_color_function(css) {
-        // SAFETY: `read_color_function` only returns names this builds.
-        return color
-            .and_then(|(color, space)| Some((color, opt_color_space(space)?)));
+        return color.and_then(|(color, space, declared)| {
+            Some((color, opt_color_space(space)?, declared))
+        });
     }
     if let Some(color) = hex_or_named(css) {
-        return color.map(|color| (color, ColorSpace::new_srgb()));
+        return color.map(|(color, declared)| {
+            (color, ColorSpace::new_srgb(), declared)
+        });
     }
     // Neither a colour function nor a hex or named colour, which is all CSS
     // has: hex digits with no `#`, a function name with a space before its
@@ -2564,10 +2750,19 @@ pub fn color4f_string_in<'a>(
     cx: &mut FunctionContext<'a>,
     val: Handle<'a, JsValue>,
 ) -> Option<(Color4f, ColorSpace)> {
+    declared_string_in(cx, val).map(|(color, space, _)| (color, space))
+}
+
+/// As [`color4f_string_in`], with the colour as it was declared, for a
+/// setter whose getter serialises it.
+pub fn declared_string_in<'a>(
+    cx: &mut FunctionContext<'a>,
+    val: Handle<'a, JsValue>,
+) -> Option<(Color4f, ColorSpace, Declared)> {
     if val.is_a::<JsString, _>(cx) {
         // SAFETY: `is_a::<JsString>` check passed above.
         let css = val.downcast::<JsString, _>(cx).unwrap().value(cx);
-        css_to_color4f_in_space(&css)
+        css_to_declared(&css)
     } else {
         // for other objects, try calling their .toString() method (if it
         // exists)
@@ -2576,8 +2771,26 @@ pub fn color4f_string_in<'a>(
         let to_string = attr.downcast::<JsFunction, _>(cx).ok()?;
         let result = to_string.call(cx, obj, vec![]).ok()?;
         let css = result.downcast::<JsString, _>(cx).ok()?.value(cx);
-        css_to_color4f_in_space(&css)
+        css_to_declared(&css)
     }
+}
+
+/// As [`color4f_in`], with the colour as it was declared.
+pub fn declared_in<'a>(
+    cx: &mut FunctionContext<'a>,
+    val: Handle<'a, JsValue>,
+) -> Option<(Color4f, ColorSpace, Option<Declared>)> {
+    // A float array is `color(srgb r g b / a)`, and is serialised as one.
+    if let Some(color) = opt_color4f_from_array(cx, val) {
+        let declared = Declared {
+            form: Form::Color("srgb"),
+            channels: [color.r, color.g, color.b].map(|c| Some(f64::from(c))),
+            alpha: Some(f64::from(color.a).clamp(0.0, 1.0)),
+        };
+        return Some((color, ColorSpace::new_srgb(), Some(declared)));
+    }
+    declared_string_in(cx, val)
+        .map(|(color, space, declared)| (color, space, Some(declared)))
 }
 
 /// Parses a color value that may be a CSS string or a `[r, g, b, a]` float
@@ -2658,81 +2871,380 @@ pub fn opt_matte_for_key(
     Some(Matte::new(color, space))
 }
 
-pub fn color_to_css<'a>(
-    cx: &mut FunctionContext<'a>,
-    color: &Color,
-) -> JsResult<'a, JsValue> {
-    let RGB { r, g, b } = color.to_rgb();
-    let css = match color.a() {
-        255 => format!("#{:02x}{:02x}{:02x}", r, g, b),
-        _ => {
-            let alpha = format!("{:.3}", color.a() as f32 / 255.0);
-            let alpha = alpha.trim_end_matches('0');
-            format!(
-                "rgba({}, {}, {}, {})",
-                r,
-                g,
-                b,
-                if alpha == "0." { "0" } else { alpha }
-            )
-        }
-    };
-    Ok(cx.string(css).upcast())
+/// Significant figures that restate any `f64` exactly, and so the most a
+/// serialised colour ever needs.
+const EXACT_FIGURES: usize = 17;
+
+/// How far a legacy channel may sit from a whole byte and still be one.
+///
+/// `hsl()` and `hwb()` reach sRGB through `f64` arithmetic that can leave a
+/// whole value a few ulps away from itself; anything a stylesheet can name
+/// that is not a whole byte is further off than this by orders of magnitude.
+const WHOLE_BYTE_EPSILON: f64 = 1e-6;
+
+/// `value` as section 16 writes a `<number>`, to `figures` significant
+/// figures: base ten, trailing fractional zeroes and a bare decimal point
+/// omitted, and no negative zero -- `lab(50 -0 0)` reads back as `lab(50 0
+/// 0)`, as it does in Chrome 156.
+fn significant(value: f64, figures: usize) -> String {
+    if value == 0.0 || !value.is_finite() {
+        return "0".to_string();
+    }
+    let magnitude = value.abs().log10().floor() as i64;
+    let places = (figures as i64 - 1 - magnitude).max(0) as usize;
+    trimmed(format!("{value:.places$}"))
 }
 
-/// Serialize a Color4f back to a CSS color string (sRGB).
+/// `text` without trailing fractional zeroes, its decimal point when nothing
+/// follows it, or a minus sign on a zero.
+fn trimmed(text: String) -> String {
+    let text = match text.contains('.') {
+        true => text.trim_end_matches('0').trim_end_matches('.').to_string(),
+        false => text,
+    };
+    match text.as_str() {
+        "-0" => "0".to_string(),
+        _ => text,
+    }
+}
+
+/// A legacy sRGB colour per section 16.2, `rgb` on `0..=255`.
+///
+/// Section 16.2.1's hex form needs the alpha at 1 and "the RGB component
+/// values ... internally represented as integers between 0 and 255
+/// inclusive". This crate holds a colour in floating point and paints
+/// `rgb(127.5 0 0)` as 127.5, so a channel that is not a whole byte takes
+/// section 16.2.2's `rgb()` with the number itself. Chrome 156 holds eight
+/// bits and reports `#800000`; docs/browser-differences.md has the
+/// measurements. A channel outside `0..=255` has no `rgb()` spelling at all,
+/// so that colour is written as `color(srgb ...)`.
+///
+/// The alpha is section 16.1.2's for the same reason. Section 16.1.1's
+/// two-place rule is for an alpha "internally represented as an integer
+/// between 0 and 255", and this one is an `f32`: `#ff000080` holds 128/255
+/// and reads back as `rgba(255, 0, 0, 0.5019608)`, where Chrome's `0.5`
+/// would paint half a level less on a float canvas.
+fn legacy_css(rgb: [f64; 3], alpha: f64, figures: Figures) -> String {
+    let whole = |c: f64| (c - c.round()).abs() < WHOLE_BYTE_EPSILON;
+    let inside = |c: f64| {
+        (-WHOLE_BYTE_EPSILON..=255.0 + WHOLE_BYTE_EPSILON).contains(&c)
+    };
+    if !rgb.iter().all(|&c| inside(c)) {
+        let srgb = rgb.map(|c| Some(c / 255.0));
+        return modern_css("color(srgb ", srgb, Some(alpha), figures);
+    }
+    if alpha >= 1.0 && rgb.iter().all(|&c| whole(c)) {
+        let [r, g, b] = rgb.map(|c| c.round().clamp(0.0, 255.0) as u8);
+        return format!("#{r:02x}{g:02x}{b:02x}");
+    }
+    let [r, g, b] = [0, 1, 2].map(|i| match whole(rgb[i]) {
+        true => format!("{}", rgb[i].round()),
+        false => significant(rgb[i], figures[i]),
+    });
+    match alpha >= 1.0 {
+        true => format!("rgb({r}, {g}, {b})"),
+        false => {
+            let alpha = significant(alpha, figures[ALPHA]);
+            format!("rgba({r}, {g}, {b}, {alpha})")
+        }
+    }
+}
+
+/// Sections 16.3 to 16.5: `opening` -- `lab(`, or `color(srgb ` with its
+/// space -- then the channels space-separated with `none` where they were
+/// missing, and ` / ` and the alpha unless it is 1.
+fn modern_css(
+    opening: &str,
+    channels: [Option<f64>; 3],
+    alpha: Option<f64>,
+    figures: Figures,
+) -> String {
+    let [x, y, z] = [0, 1, 2].map(|i| {
+        channels[i]
+            .map_or_else(|| "none".to_string(), |c| significant(c, figures[i]))
+    });
+    let alpha = match alpha {
+        Some(alpha) if alpha >= 1.0 => String::new(),
+        Some(alpha) => format!(" / {}", significant(alpha, figures[ALPHA])),
+        None => " / none".to_string(),
+    };
+    format!("{opening}{x} {y} {z}{alpha})")
+}
+
+/// Significant figures for each number of a [`Declared`]: its three channels
+/// in order, then its alpha at [`ALPHA`].
+type Figures = [usize; 4];
+
+/// The alpha's place in [`Figures`] and in [`declared_number`].
+const ALPHA: usize = 3;
+
+/// `declared` written with each number to the significant figures `figures`
+/// gives it.
+fn declared_css(declared: &Declared, figures: Figures) -> String {
+    let Declared {
+        form,
+        channels,
+        alpha,
+    } = *declared;
+    match form {
+        Form::Legacy => legacy_css(
+            channels.map(|c| c.unwrap_or(0.0)),
+            alpha.unwrap_or(0.0),
+            figures,
+        ),
+        Form::Lab => modern_css("lab(", channels, alpha, figures),
+        Form::Lch => modern_css("lch(", channels, alpha, figures),
+        Form::Oklab => modern_css("oklab(", channels, alpha, figures),
+        Form::Oklch => modern_css("oklch(", channels, alpha, figures),
+        Form::Color(space) => {
+            modern_css(&format!("color({space} "), channels, alpha, figures)
+        }
+    }
+}
+
+/// A declared colour as CSS Color 4 section 16 serialises it, with the
+/// HTML-compatible form requested, as HTML's canvas getters request it:
+/// legacy sRGB colours by section 16.2, the rest in their own function.
+///
+/// Every number takes the fewest significant figures that paint exactly
+/// the colour held -- the same `f32` components in the same space -- so
+/// setting what a getter returns paints the same pixels on an eight-bit,
+/// half-float or float canvas. Section 16 sets only a floor on precision,
+/// enough to round-trip sixteen bits, and its alpha wants "six decimal
+/// places", which Chrome 156 writes everywhere. Six cannot restate every
+/// `f32`: `#ff000080` holds 128/255, which six places write as 0.501961
+/// and an `RGBAF32` canvas stores 1.8e-7 away from it. So a number is
+/// written with more where the colour holds more -- `0.5019608` -- and a
+/// value that is short stays short: 0.5, 114.75, `lab(29 39 20)`.
+/// docs/browser-differences.md has the rows where that departs from
+/// Chrome.
+///
+/// Each number is first searched on its own, the others held exact: at
+/// each length, the value rounded to that many figures and the decimal
+/// either side of it, since the shortest that repaints need not be the
+/// rounded one -- `#acf8` holds 136/255, whose eight-figure rounding
+/// 0.53333333 lands on the next `f32` down, and 0.53333334 does not. A
+/// legacy or `color()` channel and an alpha are each held as written, so
+/// that is each one's shortest. Lab, LCH, Oklab and OkLCh are converted, and
+/// there a channel's shortest depends on how the others are written, so
+/// every set of lengths within [`LENGTH_SLACK`] of those is tried, fewest
+/// figures first, each channel at each of its three decimals, and the
+/// shortest string of the fewest figures is kept.
+pub fn declared_to_css(declared: &Declared) -> String {
+    let all = [EXACT_FIGURES; 4];
+    let exact = declared_css(declared, all);
+    let painted = |css: &str| {
+        css_to_declared(css).map(|(color, space, _)| (color, space))
+    };
+    let Some(held) = painted(&exact) else {
+        return exact;
+    };
+    let repaints = |css: &str| painted(css).as_ref() == Some(&held);
+
+    // Each number alone, the others exact: the fewest figures, and the
+    // decimal of that length, that repaint.
+    let alone = |index: usize| -> Option<(f64, usize)> {
+        let value = declared_number(declared, index)?;
+        (1..EXACT_FIGURES).find_map(|length| {
+            let mut trial_figures = all;
+            trial_figures[index] = length;
+            neighbouring_decimals(value, length)
+                .into_iter()
+                .find(|&decimal| {
+                    let mut trial = *declared;
+                    set_declared_number(&mut trial, index, decimal);
+                    repaints(&declared_css(&trial, trial_figures))
+                })
+                .map(|decimal| (decimal, length))
+        })
+    };
+    let lone: [Option<(f64, usize)>; 4] = [0, 1, 2, ALPHA].map(alone);
+    let mut shortest = *declared;
+    let mut figures = all;
+    for (index, found) in lone.iter().enumerate() {
+        if let Some((decimal, length)) = *found {
+            set_declared_number(&mut shortest, index, decimal);
+            figures[index] = length;
+        }
+    }
+    // Where each channel is held as written, each is its own shortest and
+    // they hold together.
+    let css = declared_css(&shortest, figures);
+    if !declared.form.mixes_channels() && repaints(&css) {
+        return css;
+    }
+
+    // Where a conversion mixes the channels, one channel's shortest depends on
+    // how the others are written: a hue can lose a figure once its lightness
+    // moves to the neighbouring decimal, or two channels only together. So
+    // every set of lengths within [`LENGTH_SLACK`] of each channel's own is
+    // tried, fewest figures first, each channel at each of its three
+    // decimals; the first that repaints is the shortest there is in that
+    // window.
+    let channels: Vec<usize> =
+        (0..ALPHA).filter(|&index| lone[index].is_some()).collect();
+    let mut lengths: Vec<Figures> = vec![figures];
+    for &index in &channels {
+        let own = figures[index];
+        let low = own.saturating_sub(LENGTH_SLACK).max(1);
+        let high = (own + LENGTH_SLACK).min(EXACT_FIGURES);
+        lengths = lengths
+            .into_iter()
+            .flat_map(|base| {
+                (low..=high).map(move |length| {
+                    let mut trial = base;
+                    trial[index] = length;
+                    trial
+                })
+            })
+            .collect();
+    }
+    let total =
+        |trial: &Figures| channels.iter().map(|&i| trial[i]).sum::<usize>();
+    lengths.sort_by_key(total);
+    let combinations = 3usize.pow(channels.len() as u32);
+    let mut best: Option<(usize, String)> = None;
+    for trial_figures in lengths {
+        if best
+            .as_ref()
+            .is_some_and(|(figures, _)| total(&trial_figures) > *figures)
+        {
+            break;
+        }
+        let decimals: Vec<[f64; 3]> = channels
+            .iter()
+            .filter_map(|&index| {
+                let value = declared_number(declared, index)?;
+                Some(neighbouring_decimals(value, trial_figures[index]))
+            })
+            .collect();
+        for combination in 0..combinations {
+            let mut trial = shortest;
+            let mut choice = combination;
+            for (&index, options) in channels.iter().zip(&decimals) {
+                set_declared_number(&mut trial, index, options[choice % 3]);
+                choice /= 3;
+            }
+            let css = declared_css(&trial, trial_figures);
+            if best.as_ref().is_none_or(|(_, kept)| css.len() < kept.len())
+                && repaints(&css)
+            {
+                best = Some((total(&trial_figures), css));
+            }
+        }
+    }
+    if let Some((_, css)) = best {
+        return css;
+    }
+    (1..=EXACT_FIGURES)
+        .map(|length| declared_css(declared, [length; 4]))
+        .find(|css| repaints(css))
+        .unwrap_or(exact)
+}
+
+/// How far from its own shortest a channel's length is searched when the
+/// channels mix, in figures either way.
+///
+/// Chosen by measurement. Over the 864 relative colours of a grid of 216
+/// sRGB origins in Lab, LCH, Oklab and OkLCh, one figure finds a spelling
+/// as short as a search over every length to ten figures does, at a median
+/// of about 430 parses; two finds the same at about 1,730. None finds a
+/// longer one for `lch(from #000033 l c h)`, which
+/// `a_mixed_colour_has_no_shorter_spelling` holds.
+const LENGTH_SLACK: usize = 1;
+
+/// The number at `index` of [`Figures`] that is written out and can be
+/// shortened: a channel that is not `none`, and not a legacy channel that is
+/// a whole byte, which is written as an integer whatever its figures; or an
+/// alpha below 1, since 1 is not written.
+fn declared_number(declared: &Declared, index: usize) -> Option<f64> {
+    let whole = |c: f64| (c - c.round()).abs() < WHOLE_BYTE_EPSILON;
+    match index {
+        ALPHA => declared.alpha.filter(|&alpha| alpha < 1.0),
+        _ => declared.channels[index].filter(|&channel| {
+            declared.form != Form::Legacy || !whole(channel)
+        }),
+    }
+}
+
+/// Sets the number at `index` of [`Figures`].
+fn set_declared_number(declared: &mut Declared, index: usize, value: f64) {
+    match index {
+        ALPHA => declared.alpha = Some(value),
+        _ => declared.channels[index] = Some(value),
+    }
+}
+
+/// `value` rounded to `length` significant figures, and the decimals one
+/// unit in the last of those figures below and above it.
+///
+/// A spelling that repaints lies in the interval of values that paint the
+/// colour held, which contains `value`. Once that interval is narrower than
+/// one unit -- by the length where a shorter search found nothing, it is --
+/// any decimal of this length inside it is within one unit of `value`, and
+/// so one of these three.
+///
+/// Zero, and anything [`significant`] writes as `0`, has no neighbours.
+fn neighbouring_decimals(value: f64, length: usize) -> [f64; 3] {
+    if value == 0.0 || !value.is_finite() {
+        return [0.0; 3];
+    }
+    let magnitude = value.abs().log10().floor() as i32;
+    let unit = 10f64.powi(magnitude - length as i32 + 1);
+    let rounded = significant(value, length).parse().unwrap_or(value);
+    [rounded, rounded - unit, rounded + unit]
+}
+
+/// A colour that carries no declaration, as CSS: `color()` in the space it
+/// is tagged with when that space has a name other than sRGB, and the
+/// legacy form otherwise, written by [`declared_to_css`] like every other
+/// read-back.
+///
+/// Only a context's initial colours reach this -- black and transparent
+/// black -- but anything else that did would read back exactly too, rather
+/// than rounded to bytes.
 pub fn color4f_to_css<'a>(
     cx: &mut FunctionContext<'a>,
     color: &Color4f,
     space: Option<&ColorSpace>,
 ) -> JsResult<'a, JsValue> {
-    // Reported in the space it was named in when that is one we can name, so
-    // `color(display-p3 …)` reads back as itself. The value is converted only
-    // when the space has no name to give.
-    let named = space.and_then(color_space_name);
-    if let Some(name) = named
-        && name != "srgb"
-    {
-        let css = match color.a >= 1.0 {
-            true => {
-                format!("color({name} {} {} {})", color.r, color.g, color.b)
-            }
-            false => format!(
-                "color({name} {} {} {} / {})",
-                color.r, color.g, color.b, color.a
-            ),
-        };
-        return Ok(cx.string(css).upcast());
-    }
+    Ok(cx
+        .string(declared_to_css(&undeclared(color, space)))
+        .upcast())
+}
 
-    // A colour outside the sRGB gamut has no hex or `rgb()` spelling, and
-    // quantising it to one reports a colour the context is not holding --
-    // `oklch(0.7 0.35 30)` read back as `#ff0000`. CSS Color 4's `color()`
-    // notation carries the components as they are. A browser echoes the
-    // notation the colour was authored in, which needs the source text; this
-    // keeps the value, which is the half that matters.
-    let inside = |v: f32| (-f32::EPSILON..=1.0 + f32::EPSILON).contains(&v);
-    if inside(color.r) && inside(color.g) && inside(color.b) {
-        // Rounded, not truncated: `Color4f::to_color` floors, which reports
-        // `hwb(90 10% 20%)` as `#72cc19` where every browser says `#73cc1a`.
-        let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let quantised = Color::from_argb(
-            byte(color.a),
-            byte(color.r),
-            byte(color.g),
-            byte(color.b),
-        );
-        return color_to_css(cx, &quantised);
+/// The [`Declared`] [`color4f_to_css`] writes for `color` in `space`.
+fn undeclared(color: &Color4f, space: Option<&ColorSpace>) -> Declared {
+    let channels = [color.r, color.g, color.b];
+    let alpha = Some(f64::from(color.a));
+    match space.and_then(color_space_name) {
+        Some(name) if name != "srgb" => Declared {
+            form: Form::Color(name),
+            channels: channels.map(|c| Some(f64::from(c))),
+            alpha,
+        },
+        _ => Declared {
+            form: Form::Legacy,
+            channels: channels.map(|c| Some(byte_scale(c))),
+            alpha,
+        },
     }
+}
 
-    let css = match color.a >= 1.0 {
-        true => format!("color(srgb {} {} {})", color.r, color.g, color.b),
-        false => format!(
-            "color(srgb {} {} {} / {})",
-            color.r, color.g, color.b, color.a
-        ),
-    };
-    Ok(cx.string(css).upcast())
+/// An sRGB channel on `0..=255`, exactly `n` where it is the `f32` byte `n`
+/// converts to.
+///
+/// Scaling an `f32` by 255 does not undo either conversion: Skia's
+/// `Color4f::from` multiplies by `1 / 255`, and 24 comes back as
+/// 24.000002, which [`WHOLE_BYTE_EPSILON`] is too tight to call whole. So
+/// a value is a byte when the byte it rounds to converts back to it, by
+/// division or by Skia's reciprocal, and is scaled as it is otherwise.
+fn byte_scale(channel: f32) -> f64 {
+    let byte = (channel * 255.0).round();
+    match [byte / 255.0, byte * (1.0 / 255.0)].contains(&channel) {
+        true => f64::from(byte),
+        false => f64::from(channel) * 255.0,
+    }
 }
 
 //
@@ -3684,6 +4196,23 @@ pub fn color_arg(
     parsed_color_arg(cx, idx, attr, css_to_color)
 }
 
+/// [`color_arg`] with the colour as it was declared, for a setter whose
+/// getter reads it back: the eight-bit colour to paint with, and the
+/// declaration [`declared_to_css`] writes.
+///
+/// # Errors
+///
+/// As [`color_arg`].
+pub fn declared_color_arg(
+    cx: &mut FunctionContext,
+    idx: usize,
+    attr: &str,
+) -> NeonResult<(Color, Declared)> {
+    parsed_color_arg(cx, idx, attr, |css| {
+        Some((css_to_color(css)?, css_to_declared(css)?.2))
+    })
+}
+
 /// [`color_arg`] for per-channel coefficients, clamped rather than
 /// gamut-mapped -- see [`css_to_clamped_color`].
 ///
@@ -4019,6 +4548,202 @@ mod tests {
     }
 
     #[test]
+    fn a_byte_held_in_f32_reads_back_as_hex() {
+        for byte in 0..=u8::MAX {
+            let divided = f32::from(byte) / 255.0;
+            for color in [
+                Color4f::from(Color::from_rgb(byte, byte, byte)),
+                Color4f::new(divided, divided, divided, 1.0),
+            ] {
+                let css = declared_to_css(&undeclared(&color, None));
+                assert_eq!(css, format!("#{byte:02x}{byte:02x}{byte:02x}"));
+            }
+        }
+    }
+
+    /// No shorter spelling of a colour whose channels a conversion mixes,
+    /// against a search that is not this one: every combination of shorter
+    /// lengths, each channel rounded or at either neighbouring decimal. The
+    /// rows are ones a search that shortened one channel at a time, or
+    /// stopped at the first set of lengths that repaints, wrote longer.
+    #[test]
+    fn a_mixed_colour_has_no_shorter_spelling() {
+        for (css, written) in [
+            (
+                "lch(from #000033 l c h)",
+                "lch(1.8127384 32.51795 290.35566)",
+            ),
+            (
+                "oklab(from #990099 l a b)",
+                "oklab(0.4792106 0.1875161 -0.11552575)",
+            ),
+            (
+                "oklab(from #cc6699 l a b)",
+                "oklab(0.6453705 0.1394026 -0.0233062)",
+            ),
+            (
+                "oklch(from #00ff00 l c h)",
+                "oklch(0.8664396 0.29482706 142.49533)",
+            ),
+            ("lch(from #666666 l c h)", "lch(43.19229 0 0)"),
+            ("lab(from red l a b)", "lab(54.290535 80.80495 69.89094)"),
+        ] {
+            let (held, space, declared) =
+                css_to_declared(css).expect("a colour");
+            assert_eq!(declared_to_css(&declared), written, "{css}");
+            let digits =
+                |s: &str| s.chars().filter(char::is_ascii_digit).count();
+            let channels: Vec<usize> = (0..ALPHA)
+                .filter(|&i| declared_number(&declared, i).is_some())
+                .collect();
+            // Each channel's figures as written: the tokens between the
+            // opening parenthesis and the closing one, in order.
+            let tokens: Vec<&str> = written
+                .split_once('(')
+                .expect("a function")
+                .1
+                .trim_end_matches(')')
+                .split_whitespace()
+                .collect();
+            let longest: Vec<usize> = channels
+                .iter()
+                .map(|&i| figures_in(tokens[i]).max(1))
+                .collect();
+            let mut lengths = vec![1usize; channels.len()];
+            'every: loop {
+                let mut figures = [EXACT_FIGURES; 4];
+                for (place, &index) in channels.iter().enumerate() {
+                    figures[index] = lengths[place];
+                }
+                for combination in 0..3usize.pow(channels.len() as u32) {
+                    let mut trial = declared;
+                    let mut choice = combination;
+                    for (place, &index) in channels.iter().enumerate() {
+                        let value = declared_number(&declared, index)
+                            .expect("a number");
+                        let options =
+                            neighbouring_decimals(value, lengths[place]);
+                        set_declared_number(
+                            &mut trial,
+                            index,
+                            options[choice % 3],
+                        );
+                        choice /= 3;
+                    }
+                    let spelled = declared_css(&trial, figures);
+                    if digits(&spelled) < digits(written) {
+                        let repainted =
+                            css_to_declared(&spelled).map(|(c, s, _)| (c, s));
+                        assert_ne!(
+                            repainted,
+                            Some((held, space.clone())),
+                            "{css}: {spelled} is shorter than {written}"
+                        );
+                    }
+                }
+                for place in 0..lengths.len() {
+                    lengths[place] += 1;
+                    if lengths[place] <= longest[place] {
+                        continue 'every;
+                    }
+                    lengths[place] = 1;
+                }
+                break;
+            }
+        }
+    }
+
+    /// Significant figures in a number as written: its digits without sign,
+    /// point or leading zeroes.
+    fn figures_in(number: &str) -> usize {
+        number
+            .chars()
+            .filter(char::is_ascii_digit)
+            .skip_while(|&digit| digit == '0')
+            .count()
+    }
+
+    #[test]
+    fn a_hex_alpha_takes_the_shortest_spelling_of_its_f32() {
+        // `#acf8` holds 136/255. Its eight-figure rounding, 0.53333333,
+        // lands on the next `f32` down; 0.53333334 is eight figures too and
+        // lands on it.
+        let read = |css: &str| {
+            let (_, _, declared) = css_to_declared(css).expect("a colour");
+            declared_to_css(&declared)
+        };
+        assert_eq!(read("#acf8"), "rgba(170, 204, 255, 0.53333334)");
+        assert_eq!(read("#ff000080"), "rgba(255, 0, 0, 0.5019608)");
+        // Against an oracle that is not this search: Rust's `{}` for an
+        // `f32` is the shortest decimal that reads back as that `f32`.
+        for byte in 1..u8::MAX {
+            let css = format!("#ff0000{byte:02x}");
+            let (held, _, _) = css_to_declared(&css).expect("a colour");
+            let shortest = figures_in(&format!("{}", held.a));
+            let written = read(&css);
+            let alpha = written
+                .trim_end_matches(')')
+                .rsplit(", ")
+                .next()
+                .expect("an alpha");
+            assert_eq!(figures_in(alpha), shortest, "{css} read as {written}");
+        }
+    }
+
+    /// Every row of tests/assets/cases/css-color-serialisation.json: the
+    /// string serialises as `expected`, `expected` set again serialises as
+    /// itself, and the two hold the same `f32` colour in the same space --
+    /// the read-back is the colour held, exactly.
+    #[test]
+    fn a_missing_channel_survives_only_where_no_conversion_runs() {
+        for (css, written) in [
+            ("hsl(from red none s l)", "color(srgb 1 0 0)"),
+            ("hwb(from red h none b)", "color(srgb 1 0 0)"),
+            ("rgb(from red none g b)", "color(srgb none 0 0)"),
+        ] {
+            let (held, space, declared) =
+                css_to_declared(css).expect("a colour");
+            let read = declared_to_css(&declared);
+            assert_eq!(read, written, "{css}");
+            let again = css_to_declared(&read).map(|(c, s, _)| (c, s));
+            assert_eq!(again, Some((held, space)), "{css} repaints");
+        }
+    }
+
+    #[test]
+    fn every_row_serialises_as_the_table_says() {
+        let table: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/assets/cases/css-color-serialisation.json"
+        ))
+        .expect("the case file parses");
+        let cases = table["cases"].as_array().expect("a list of cases");
+        assert!(cases.len() >= 80, "{} rows", cases.len());
+        let held = |css: &str| {
+            let (color, space, declared) = css_to_declared(css)?;
+            Some(((color, space), declared))
+        };
+        for case in cases {
+            let css = case["css"].as_str().expect("a string");
+            let Some(expected) = case["expected"].as_str() else {
+                assert!(css_to_declared(css).is_none(), "{css} is read");
+                continue;
+            };
+            let (painted, declared) = held(css).expect(css);
+            assert_eq!(declared_to_css(&declared), expected, "{css}");
+            let (again, redeclared) = held(expected).expect(expected);
+            assert_eq!(
+                declared_to_css(&redeclared),
+                expected,
+                "{expected}, set again"
+            );
+            assert!(
+                painted == again,
+                "{css} and {expected} hold different colours"
+            );
+        }
+    }
+
+    #[test]
     fn hex_and_named_colours_read_as_they_did() {
         // Every named colour in either case, every short hex form, and the
         // long forms channel by channel with a spread of the rest.
@@ -4040,7 +4765,7 @@ mod tests {
         let mut read = |css: &str| {
             let ours = hex_or_named(css)
                 .flatten()
-                .map(|c| c.as_array().map(f32::to_bits));
+                .map(|(c, _)| c.as_array().map(f32::to_bits));
             if dump {
                 eprintln!("{css} {ours:08x?}");
             }

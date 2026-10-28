@@ -63,7 +63,7 @@ use crate::{
         path::{Path2D as NodePath2D, conic_or_line},
         pattern::CanvasPattern,
         typography::{Baseline, DecorationStyle, FontSpec, Spacing},
-        utils::{color4f_to_rgba_linear, css_to_color4f_in_space},
+        utils::{color4f_to_rgba_linear, css_to_declared},
     },
     paint::{BlendMode, StrokeCap, StrokeJoin},
     path::{FillRule, Path2D},
@@ -3342,6 +3342,7 @@ impl Context2D {
             rgba_linear_to_unpremul_color4f(color),
             linear_srgb_color_space(),
         );
+        self.inner.state.shadow_declared = None;
     }
 
     /// Sets the shadow color from a CSS color string.
@@ -3353,10 +3354,12 @@ impl Context2D {
     ///
     /// Returns [`Error::InvalidColor`] when the string is not a CSS color.
     pub fn set_shadow_color_css(&mut self, css: &str) -> Result<(), Error> {
-        self.inner.state.shadow_color = css_to_color4f_in_space(css)
-            .ok_or_else(|| Error::InvalidColor {
+        let (color, space, declared) =
+            css_to_declared(css).ok_or_else(|| Error::InvalidColor {
                 reason: format!("{css:?}"),
             })?;
+        self.inner.state.shadow_color = (color, space);
+        self.inner.state.shadow_declared = Some(declared);
         Ok(())
     }
 
@@ -4345,7 +4348,7 @@ fn to_paint_source(dye: &Dye) -> PaintSource {
     match dye {
         // Set from an `RgbaLinear`, so already linear sRGB: `to_dye` tagged
         // it so.
-        Dye::Color(color, Some(space))
+        Dye::Color(color, Some(space), _)
             if *space == linear_srgb_color_space() =>
         {
             PaintSource::Color(unpremul_color4f_to_rgba_linear(*color))
@@ -4355,7 +4358,7 @@ fn to_paint_source(dye: &Dye) -> PaintSource {
         // the same trip, or handing it back to `set_fill_style` paints
         // something else -- rebeccapurple read back as 0.4, 0.2, 0.6 and
         // repainted as 170, 124, 203.
-        Dye::Color(color, space) => {
+        Dye::Color(color, space, _) => {
             PaintSource::Color(color4f_to_rgba_linear(*color, space.as_ref()))
         }
         // A gradient only reaches the state through the JavaScript binding;
@@ -4398,11 +4401,11 @@ fn css_spacing(css: &str) -> Result<Spacing, Error> {
 /// space, which is what lets `color(display-p3 ...)` reach a P3 canvas without
 /// a detour through sRGB.
 fn css_dye(css: &str) -> Result<Dye, Error> {
-    let (color, space) =
-        css_to_color4f_in_space(css).ok_or_else(|| Error::InvalidColor {
+    let (color, space, declared) =
+        css_to_declared(css).ok_or_else(|| Error::InvalidColor {
             reason: format!("{css:?}"),
         })?;
-    Ok(Dye::Color(color, Some(space)))
+    Ok(Dye::Color(color, Some(space), Some(declared)))
 }
 
 /// An [`RgbaLinear`] as a fill: unpremultiplied and tagged linear sRGB.
@@ -4415,6 +4418,7 @@ fn to_dye(color: RgbaLinear) -> Dye {
     Dye::Color(
         rgba_linear_to_unpremul_color4f(color),
         Some(linear_srgb_color_space()),
+        None,
     )
 }
 

@@ -255,15 +255,25 @@ describe("Image", () => {
       let img = new Image();
       assert.equal(img.currentColor, null, "null until set");
       // Serialised through the same path `fillStyle` uses, so one library
-      // cannot answer two different strings for one colour: hex when the
-      // alpha is opaque, `rgba()` with three decimals when it is not.
+      // cannot answer two different strings for one colour: as declared,
+      // with the figures the colour holds. The SVG is recorded with eight
+      // bits; the getter reports what was set.
       let ctx = new Canvas(1, 1).getContext("2d");
-      for (let input of ["#0af", "red", "rgba(0,170,255,0.5)"]) {
+      for (let input of [
+        "#0af",
+        "red",
+        "rgba(0,170,255,0.5)",
+        "#ffccaa80",
+        "hwb(90 10% 20%)",
+        "oklch(0.7 0.35 30)",
+        "color(display-p3 1 0 0)",
+      ]) {
         ctx.fillStyle = input;
         img.currentColor = input;
-        assert.equal(img.currentColor, ctx.fillStyle);
+        assert.equal(img.currentColor, ctx.fillStyle, input);
       }
-      assert.equal(img.currentColor, "rgba(0, 170, 255, 0.502)");
+      img.currentColor = "rgba(0,170,255,0.5)";
+      assert.equal(img.currentColor, "rgba(0, 170, 255, 0.5)");
 
       // A raster source has nothing for `currentColor` to reach, so the
       // getter says so rather than reporting a colour that did nothing.

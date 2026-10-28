@@ -187,6 +187,9 @@ pub struct State {
     /// a CSS string named, or linear-light sRGB for an `RgbaLinear`. Never
     /// quantised, so a wide colour reaches a wide canvas.
     pub shadow_color: (Color4f, ColorSpace),
+    /// The shadow colour as it was declared, which `shadowColor` serialises;
+    /// `None` until a CSS string sets it, and again once anything else does.
+    pub shadow_declared: Option<Declared>,
     pub shadow_offset: Point,
 
     pub line_dash_offset: f32,
@@ -253,10 +256,12 @@ impl Default for State {
             stroke_style: Dye::Color(
                 Color4f::from(BLACK),
                 Some(ColorSpace::new_srgb()),
+                None,
             ),
             fill_style: Dye::Color(
                 Color4f::from(BLACK),
                 Some(ColorSpace::new_srgb()),
+                None,
             ),
             line_dash_offset: 0.0,
             line_dash_list: vec![],
@@ -281,6 +286,7 @@ impl Default for State {
                 Color4f::new(0.0, 0.0, 0.0, 0.0),
                 ColorSpace::new_srgb(),
             ),
+            shadow_declared: None,
             shadow_offset: (0.0, 0.0).into(),
 
             font: "10px sans-serif".to_string(),
@@ -1915,7 +1921,10 @@ pub enum Dye {
     /// A solid color, unpremultiplied, with the space it is in: the one a CSS
     /// string named, sRGB for a float array, linear-light sRGB for an
     /// `RgbaLinear`. `None` is sRGB, as Skia reads an untagged colour.
-    Color(Color4f, Option<ColorSpace>),
+    ///
+    /// And the colour as it was declared, which the getter serialises; `None`
+    /// for one with no CSS declaration -- a float array, an `RgbaLinear`.
+    Color(Color4f, Option<ColorSpace>, Option<Declared>),
     Gradient(CanvasGradient),
     Pattern(CanvasPattern),
     Texture(CanvasTexture),
@@ -1947,7 +1956,8 @@ impl Dye {
         } else {
             // Tagged either way by `color4f_in`: a CSS colour with the space
             // it named, a float array as sRGB.
-            color4f_in(cx, value).map(|(c, cs)| Dye::Color(c, Some(cs)))
+            declared_in(cx, value)
+                .map(|(c, cs, declared)| Dye::Color(c, Some(cs), declared))
         }
     }
 
@@ -1956,7 +1966,12 @@ impl Dye {
         cx: &mut FunctionContext<'a>,
     ) -> JsResult<'a, JsValue> {
         match self {
-            Dye::Color(color, cs) => color4f_to_css(cx, color, cs.as_ref()),
+            Dye::Color(_, _, Some(declared)) => {
+                Ok(cx.string(declared_to_css(declared)).upcast())
+            }
+            Dye::Color(color, cs, None) => {
+                color4f_to_css(cx, color, cs.as_ref())
+            }
             _ => Ok(cx.null().upcast()), /* flag to the js context that it
                                           * should use its cached
                                           * pattern/gradient ref */
@@ -1981,7 +1996,7 @@ impl Dye {
 
     pub fn is_opaque(&self) -> bool {
         match self {
-            Dye::Color(color, _) => color.is_opaque(),
+            Dye::Color(color, ..) => color.is_opaque(),
             Dye::Gradient(gradient) => gradient.is_opaque(),
             Dye::Pattern(pattern) => pattern.is_opaque(),
             Dye::Texture(_) => false,
@@ -1996,7 +2011,7 @@ impl Dye {
         sampling_filter: SamplingFilter,
     ) {
         match self {
-            Dye::Color(color, cs) => {
+            Dye::Color(color, cs, _) => {
                 let mut color = *color;
                 color.a *= alpha;
                 // Kept in the space it was named in, so what `fillStyle`

@@ -454,3 +454,53 @@ spellings take its 8-bit path, case included, and a colour whose bytes
 depend on how its function name is cased is not one CSS describes. The
 difference is a level at most where Chrome rounds, and more where its 8-bit
 path clips an `hsl()` outside sRGB that this library keeps.
+
+**A colour reads back in the function it was declared in, with the figures
+the colour holds. Chrome writes eight bits and six figures.** CSS Color 4
+section 16 serialises a colour from its value: hex only for a legacy colour
+whose components are whole bytes and whose alpha is 1 (16.2.1), `rgb()`
+numbers for any other legacy colour (16.2.2), and `lab()`, `oklch()` or
+`color()` in its own function, `none` kept (16.3 to 16.5). Chrome holds a
+legacy colour in bytes, so its getter only has bytes to write; this library
+holds floats and paints `hwb(90 10% 20%)` with a red of 114.75, so that is
+what it reports. Measured against Chrome 156 (156.0.8078.48):
+
+        set                          Chrome                    here
+        hwb(90 10% 20%)              #73cc1a                   rgb(114.75, 204, 25.5)
+        rgb(127.5 0 0)               #800000                   rgb(127.5, 0, 0)
+        #ff000080                    rgba(255, 0, 0, 0.5)      rgba(255, 0, 0, 0.5019608)
+        rgb(255 0 0 / 0.123456789)   rgba(255, 0, 0, 0.12)     rgba(255, 0, 0, 0.12345679)
+        lab(29.123456789 39 20)      lab(29.1235 39 20)        lab(29.12346 39 20)
+        color(display-p3 0.123456789 0.5 0.25)
+                                     color(display-p3 0.123457 0.5 0.25)
+                                                               color(display-p3 0.12345679 0.5 0.25)
+
+Alpha follows section 16.1.2, the rule for an alpha held as a number, and
+not 16.1.1, which writes a byte as the shortest two- or three-place
+fraction that maps back to it. `#ff000080` holds 128/255; Chrome's `0.5`
+names a different alpha, which an eight-bit canvas cannot tell apart and a
+float canvas can.
+
+Six figures cannot restate a colour held in `f32`. 128/255 written to six
+places is 0.501961, 1.8e-7 from the `f32` an `RGBAF32` canvas stores, so
+setting the read-back again paints a different pixel there. Each number
+takes the fewest significant figures that repaint the colour exactly in the
+space it was declared in: a short value stays short -- 0.5, 114.75,
+`lab(29 39 20)` -- and one the colour holds more of carries more.
+`tests/suite/color-serialisation.test.js` pins every row of
+`tests/assets/cases/css-color-serialisation.json` by the pixel the
+read-back paints on `rgba`, `RGBAF16` and `RGBAF32` canvases. Written to
+six figures, nine of those rows repaint differently on `RGBAF32`, two on
+`RGBAF16` and none on `rgba`.
+
+A relative colour converted to Lab or OkLCh reads back with Chrome's
+channels some way from CSS Color 4's sample code: `lab(from red l a b)` is
+`lab(54.29 80.8198 69.8997)` there against 54.290541 80.804928 69.890965
+worked in `f64`, and set again it paints red with a green of -6.7e-4 on a
+float canvas. Here it reads `lab(54.290535 80.80495 69.89094)`, within
+3e-5 of the sample code -- the conversion runs in `f32` -- and repaints the
+relative colour exactly.
+
+`Image.currentColor` reads back through the same code, so it reports the
+string `fillStyle` would for the same colour, although the SVG is recorded
+with its eight-bit equivalent.
