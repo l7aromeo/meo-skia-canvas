@@ -9,15 +9,43 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 > **A change that affects both surfaces appears in both files**, written for
 > each audience rather than copied.
 
-## 📦 ⟩ [v6.0.3] (npm) ⟩ October 19, 2026
+## 📦 ⟩ [v7.0.0] (npm) ⟩ Unreleased
 
-**A patch fixing request headers that could follow a redirect to another
-host, a `redirect` request option that was ignored, a remote image that
-could end the process loading it, a GPU that went unused on a Vulkan 1.4
-loader, Vulkan messages printed to standard output, and two CSS colour
-spellings that resolved to the wrong colour, and raising the
-`follow-redirects` floor past three security advisories.** Nothing is
-removed and no signature moves.
+**A major release. Request headers given as an array of pairs went out under the
+wrong names, which a redirect to another host does not strip, so a credential
+sent that way may have reached that host and should be rotated.** `redirect` and
+`integrity`, which were ignored, are honoured, and `follow-redirects` moves past
+three advisories; the Security section has each.
+
+Twenty-seven changes can break working code, each under Breaking with what to
+change. Values that were taken are refused or ignored: a text gamma of 4 or
+above and a contrast or gamma that is not finite; a `ParagraphBuilder` option of
+the wrong kind, a numeric code outside its set, and a `textDirection` or
+`textAlign` it does not name; colour, font, filter and transform strings Chrome
+153 refuses -- a space before `(`, legacy commas CSS Color 4 does not allow,
+`hwba()`, `hsv()` and hex without `#`, whitespace CSS does not define, and an
+enumerated name in another case; `@0x`; a `data:` URL `fetch` rejects; and a
+twenty-first redirect. Values read back differently: `ctx.font`, `ctx.filter`,
+`fillStyle` and the other colours, a `DOMMatrix` read from a string,
+`TextMetrics`, whose values move to its prototype, and `ctx.fontHinting`, which
+reads `true` until it is set. Some values mean something else: a `[r, g, b, a]`
+colour array is sRGB on every canvas, `color(rec2020 ...)` decodes by a 2.4
+gamma, and a quoted generic keyword in `ctx.font` is a family name. And two
+calls do what they say rather than what they happened to do: `FontLibrary.use()`
+registers every font it is given or none, and an `@2x` in a `toFile` name is
+read whatever `format` says.
+
+Wrong pixels are fixed: `getImageData` after an export drew the exported page
+onto the canvas a second time; a translucent pixel read back up to a level low
+on the GPU engine; a GPU recovery could hand back blank or stale pixels as
+success; and a context whose canvas had been collected lost it. Text is drawn as
+Chrome draws it: with Chrome's contrast and gamma, `fontHinting` taking effect,
+decorations where the font puts them and beneath the glyphs, a family with no
+italic or bold face slanted or emboldened, `oblique` as CSS Fonts 4 matches it,
+a variable font at the weight asked and at the optical size of its font size,
+and a registered family in any case. `fontKerning`, `textRendering`,
+`color-mix()` and CSS Color 4's system colours are added, and the CSS strings
+read the math functions and every length unit.
 
 ### Breaking
 
@@ -31,6 +59,7 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   registered by or the system lists it under, not the name it was asked for.
   A name nothing registered or listed is still asked of the platform as it
   is, so a fontconfig alias such as Helvetica still reports its faces.
+  Drawing a registered family in another case is under Fixed.
 
 - **`textGamma: 4`, and a text contrast or gamma that is NaN or infinite,
   are refused.** Skia takes a text gamma from 0 up to, not including, 4. A
@@ -40,7 +69,9 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   on the single-precision value Skia is handed, so a number just under 4
   that rounds to 4 there is refused with it, and `canvas.engine` reports
   that value rather than the number passed: `textContrast: 1.00000001`
-  reads back as 1, and `textGamma: -1e-50` as 0.
+  reads back as 1, and `textGamma: -1e-50` as 0. A gamma above 4 was
+  taken too, `textGamma: 5` among them, since the upper bound was checked
+  against `textContrast`; it is refused like `-1`.
 
   Migrate: pass a gamma below 4 -- 3.9999997615814209 is the largest a
   canvas takes -- and a finite contrast and gamma, or leave either out for
@@ -53,7 +84,7 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
   Migrate: where the old `false` was taken to mean unhinted text, read it as
   hinted, which is what was drawn; set `ctx.fontHinting = false` to have the
-  outlines as designed.
+  outlines as designed. That the setting now takes effect is under Fixed.
 
 - **A `ParagraphBuilder` option is converted as WebIDL converts it, and
   one that cannot be is a `TypeError` naming it.** Every option of a
@@ -217,7 +248,8 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   these painted here and is ignored by Chrome 153: numbers and percentages
   mixed, `'rgb(255, 0%, 0)'`; separators mixed, `'rgb(255,0 0)'`; `hsl()`
   with bare numbers, `'hsl(120, 100, 50)'`; `none` in a channel,
-  `'rgb(none, 0, 0)'`; and commas in a function with no legacy syntax,
+  `'rgb(none, 0, 0)'`, or as the alpha, `'rgb(255, 0, 0, none)'`, which
+  painted transparent; and commas in a function with no legacy syntax,
   `'hwb(120, 0%, 0%)'`, `'lab(50, 40, 30)'`, `'oklch(0.6, 0.2, 30)'` and
   `'color(srgb 1, 0, 0)'`. Each is now refused as any colour that does not
   parse is: `fillStyle`, `strokeStyle` and `shadowColor` ignore it and keep
@@ -261,6 +293,233 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   Migrate: code that compared a getter against a hex string for a colour
   that is not whole bytes, or against a three-place alpha, compares against
   the new string, or compares pixels.
+
+- **An enumerated attribute takes its names exactly, as Chrome does.**
+  `textAlign`, `textBaseline`, `direction`, `lineCap`, `lineJoin`,
+  `imageSmoothingQuality`, `globalCompositeOperation` and `fontStretch`
+  folded case, so `ctx.textAlign = "CENTER"` centred the text where Chrome
+  152 ignores it, and `"dar\u212Aen"`, whose Kelvin sign lowercases to
+  `k`, was taken as `darken`. WebIDL matches an enumeration's values
+  exactly, and each setter now ignores another spelling, leaving the value
+  it held. `createPattern` throws its `SyntaxError` for `"REPEAT"`, as the
+  standard asks of a repetition not identical to one of its four names.
+  `lineDashFit` and a `CanvasTexture`'s `cap` match exactly too, as their
+  siblings do. The filter
+  factories' blend names still match in any case, as CanvasKit's do.
+
+- **Colours, fonts, filters and transforms read CSS's whitespace,
+  comments and names, and no more.**
+  - Whitespace is space, tab, line feed, carriage return and form feed.
+    A U+00A0, U+000B, U+2028, U+3000 or U+FEFF was trimmed or taken as a
+    separator, so `fillStyle = "red\u00a0"`,
+    `filter = "blur(2px)\u00a0grayscale(1)"`,
+    `new DOMMatrix("\u00a0translate(1px, 2px)")` and
+    `font = "bold\u00a012px serif"` were each read. Chrome 152 ignores the
+    colour, the filter and the font and throws `SyntaxError` for the
+    transform, and so does this library now. `fontVariant` and `fontVariationSettings` split at the
+    same five characters.
+  - A comment is dropped, as CSS Syntax drops one, in a colour, a font, a
+    filter, a transform and a spacing: `rgb(255,/**/0,0)` and `/**/#f00`
+    were refused and now paint red, and `12px/**/serif`,
+    `bold/**/12px serif`, `blur(/**/2px)` and
+    `translate(/**/1px, 2px)` are read, as in Chrome 152. A comment in a
+    quoted family name is part of the name. A comment still ends the
+    token before it, so `rgb/**/(255 0 0)`, `blur(2/**/px)` and
+    `calc(100/**/+/**/155)` stay refused, and a sign it parts from what
+    follows stands alone, so `rgb(255 -/**/10 0)` is refused rather than
+    read as -10. A comment beside a colour keyword, `red/**/`, is dropped
+    too, where Chrome ignores the whole value; docs/browser-differences.md
+    says why.
+  - `letterSpacing` and `wordSpacing` take whitespace and comments around
+    the length, `" 5px "` and `"/**/5px"`, which were ignored: HTML parses
+    the value as a CSS `<length>`, and CSS Syntax discards both there.
+    Chrome 152 ignores them; docs/browser-differences.md records it.
+  - `currentcolor` is opaque black, `rgb(from currentcolor r g b)` too,
+    where it was refused: CSS Color 4 resolves it from the `color`
+    property's initial value when a canvas has no element, and Chrome 152
+    paints it black.
+  - A family name holds only the code points CSS Syntax 3 lists as a
+    name's. `12px a\u00b5b` was read as the family `aµb`, and `12px serif`
+    followed by U+00A0 is now refused rather than trimmed; Chrome 152 takes
+    both under the older rule, which docs/browser-differences.md records.
+    `12px a·b` was refused and is now read, as Chrome reads it. A name
+    starts as CSS Syntax says, so `12px -1x` and `12px -`, which read as
+    families, are refused, and an escape in an unquoted name is decoded,
+    `12px \61 bc` naming `abc` where it was refused, as in Chrome.
+
+- **A quoted generic keyword in `ctx.font` is a family name.** CSS Fonts 4
+  says the generic keywords "must not be quoted", so `16px "serif"` names a
+  family called serif, but it drew and read back as the generic `serif`. It
+  now reads back as itself, and draws a family of that name where one is
+  registered or installed; with none, the next family in the list draws,
+  as for any missing family, where fontconfig on Linux had answered
+  `serif`, `sans-serif` and `monospace` with the generic's faces.
+  `FontLibrary.use("serif", ...)` still claims the generic as well.
+
+- **`ctx.filter` reads back exactly as it was set**, as Chrome reads it:
+  case, spacing, number spelling and a `drop-shadow`'s order and omissions
+  included. It was rewritten into a canonical form -- `BLUR(5PX)` read back
+  as `blur(5px)`, `drop-shadow(red 2px 2px)` as
+  `drop-shadow(2px 2px 0px red)`, `"  blur(5px)  "` as `blur(5px)`, `NONE`
+  as `none`, and two functions written without a space between them with
+  one -- so 14 of 29 filters measured in Chrome 152 read back differently.
+  What draws is unchanged: every one of those spellings draws the same
+  pixels as the form this used to read back.
+
+- **A `DOMMatrix` read from a string reports `is2D` and its values as
+  Chrome does.** A list holding a 3D function is 3D whatever its values:
+  `new DOMMatrix("translate3d(0, 0, 0)")`, `"rotateX(0deg)"` and an identity
+  `matrix3d()` reported `is2D` true and serialised as `matrix()`, and now
+  report false and `matrix3d()`, as in Chrome and as Geometry Interfaces 1
+  says. A length and a scale factor are a `float`, as Chrome keeps them, so
+  `translate(0.1px)` gives an `e` of 0.10000000149011612 and `scale(0.3)` an
+  `a` of 0.30000001192092896, where they were 0.1 and 0.3. And a length is
+  held to the range Chrome holds it to, so `translate(1e40px)` is
+  33554428px where it was 1e40. An angle in `rad` is converted at full
+  width, so `skewY(1.07rad)` agrees with Chrome to the last place where it
+  differed in the seventh.
+
+- **An `@2x` in a `toFile` name is read from the name less its own
+  extension, whatever `format` says.** With a `format` option, the format's
+  name was stripped from the end instead, so naming the format the extension
+  already gave switched the suffix off, and a name ending in the format's
+  letters switched it on. Four calls change, each measured on a 6x4 page:
+  `toFile("f@2x.png", { format: "png" })`,
+  `toFile("f@2x.png", { format: "jpg" })` and
+  `toFile("f@2x.dat", { format: "png" })` wrote it at 1x and now write it at
+  2x, and `toFile("f@2xjpg", { format: "jpg" })` wrote it at 2x and now
+  writes it at 1x. Without `format`, nothing changes. The crate's `to_file`
+  reads the same stem.
+
+- **`@0x` is refused like `{ density: 0 }`.** It reached the encoder as a
+  density of zero and failed with "Could not allocate new 0×0 bitmap"; it
+  now throws the `TypeError` the option does, "Expected a positive number
+  for `density`", before anything is written.
+
+- **`FontLibrary.use()` registers every font it is given or none of them.**
+  A font that failed to load threw after the ones before it were already
+  registered: `FontLibrary.use(["Monoton-Regular.woff", "missing.ttf"])`
+  threw and left Monoton registered, and a map's earlier families stayed
+  when a later one failed. Every font in the call -- across every family of
+  a map, and every buffer -- is now read and parsed before any is
+  registered, as the crate's `FontLibrary::use_paths` does.
+
+- **`data:` URLs decode as `fetch` decodes them, and some that loaded now
+  reject.** The loaders, `new Image(dataURL)` and `img.src` decode a `data:`
+  URL with the Rust crate's `decode_data_url`, which matches Chrome on all 69
+  cases in `tests/assets/data-url-cases.json`. The decoder they replace
+  disagreed with Chrome on 30 of them.
+
+  **These used to load and now reject with a `TypeError`**, as they do in
+  `fetch`: a base64 body using the base64url alphabet (`-` or `_`); a base64
+  body with padding where none belongs or with too much of it (`YQ=`,
+  `aGk==`, `aGk===`); a base64 body holding a character outside the
+  alphabet, such as a `?`, a non-breaking space or an `=` partway through;
+  and a base64 body one character too long to be whole (`a`), which decoded
+  to nothing. A `data:` URL that worked only because the decoder skipped
+  what it could not read needs its base64 fixed.
+
+  **These used to decode to the wrong bytes and now decode correctly:**
+  percent-encoded base64 (`%3D` as padding was read as the digit `3`, and
+  `%61%47%6b%3d` as garbage); a `#fragment`, which was decoded into the image
+  bytes; a `;base64` marker written with spaces (`; base64`), whose body was
+  handed over still encoded; and spaces, tabs or line breaks at the end of
+  the URL, which were kept as body bytes.
+
+  **These used to reject and now decode:** a percent-encoded byte that is not
+  UTF-8 (`%FF`, or a sequence cut short such as `%E2%82`), and a `%` not
+  followed by two hex digits, which is kept as written. And a URL whose
+  scheme is not in lower case (`DATA:`, `Data:`) or that starts with spaces
+  or a tab was read as a file path; it is now read as the `data:` URL it is.
+
+- **At most 20 redirects are followed, as in `fetch`.** The loaders followed
+  21, follow-redirects' default, where the Fetch Standard stops at 20: a
+  load reaching a twenty-first redirect now rejects instead of following
+  it. It rejects with a `TypeError` saying how many redirects it met, which
+  is what Chrome and Node's `fetch` raise there and what a redirect that
+  `redirect` refuses already rejects with, where follow-redirects raised a
+  plain `Error`; follow-redirects' error is its `cause`. The Rust crate's
+  `Image::from_url` stops at the same place. A `maxRedirects` passed in the
+  options is still used as given.
+
+- **`ctx.font` reads a font as Chrome does, and reports it as CSSOM
+  serializes it.** Checked against 101 shorthands measured in Chrome 152,
+  which `Font::from_css` on the crate side is tested against too.
+
+  **What `ctx.font` reads back has changed**, to the form HTML, CSSOM and
+  CSS Fonts 4 give it: style, `small-caps`, weight, width, size and family,
+  in that order, each left out at its initial value. A stretch keyword is
+  kept, so `condensed 16px Arial` reads back as `condensed 16px "Arial"`
+  and `ctx.font = ctx.font` keeps it. `oblique` reads back as `oblique`,
+  with its angle where it is not the default 14deg, as `oblique 10deg`. A
+  weight is its number, so `bold` reads back as `700`. A size is the
+  shortest number to six decimals: `2cm` reads `75.59055px`, the nearest
+  32-bit value to 75.5905511... A family name is a quoted string, with a
+  `"` or `\` inside it escaped, and a generic family its keyword:
+  `16px Arial, sans-serif` reads back as `16px "Arial", sans-serif`. Chrome
+  differs in each of these, and docs/browser-differences.md lists how.
+
+  **Sizes resolve as in Chrome.** `em` and `%` are of the canvas default,
+  10px, not 16px: `1em` is 10px and `150%` is 15px. The keywords follow
+  CSS Fonts 4's table, so `small` is 13px rather than 14.2px, `x-small`
+  10px, `xx-small` 9px, `large` 18px and `xxx-large` 48px. `larger` and
+  `smaller` are 12px and 8.33333px, where they were 19.2px and 14.2px.
+
+  **Accepted now**, as in Chrome: `calc()` in a size or a line height,
+  nested parentheses included; a number with an exponent or a sign, as
+  `1e1px` and `+500`; a fractional weight, with the fraction dropped
+  (`550.7` is 550); a bare `0` as the size; and whitespace before or
+  after the shorthand.
+
+  **Ignored now**, because Chrome ignores them: a shorthand with no family,
+  as `16px`, which set a font with an empty family list; an unquoted
+  family that is not made of identifiers, as `16px 12`, and as
+  `50% 16px Arial`, which set an 8px font named `16px Arial`, or
+  `all-small-caps 16px Arial`, whose `small` was read as a size keyword
+  and which set a 14.2px one; `inherit`, `initial`, `unset`, `revert`,
+  `revert-layer` and `default` as a family; an empty name between commas
+  or after a trailing one; a style, variant or weight given twice, as
+  `italic italic` and `bold 700`; five tokens before the size; a second
+  `/`, as `16px/2px/3px`; and a number ending in a point, as `5.px`.
+
+  **`small-caps` in the shorthand no longer turns on old-style figures.**
+  It enabled `onum` beside `smcp`; CSS Fonts 4 maps `small-caps` to `smcp`
+  alone, which is what `ctx.fontVariantCaps = "small-caps"` already did.
+
+  **System font keywords are still ignored, deliberately.** `caption`,
+  `icon`, `menu`, `message-box`, `small-caption` and `status-bar` name the
+  platform's interface font, which Chrome on macOS reads as 16px Arial and
+  which no other platform has to agree with.
+
+- **`ctx.filter`, `letterSpacing` and `wordSpacing` read numbers and
+  lengths as Chrome does.** Checked against 99 filters and 19 spacings
+  measured in Chrome 152, which the crate's `set_filter_css`,
+  `set_letter_spacing_css` and `set_word_spacing_css` are tested against
+  too.
+
+  **`letterSpacing` and `wordSpacing` no longer throw.** `1em` and `1rem`
+  threw a `TypeError`; they are taken now, and resolved against the font in
+  force when the text is laid out, as in Chrome. A percentage threw too, and
+  is now ignored.
+
+  **Ignored now**, because Chrome ignores them: a number CSS does not have,
+  as `5.px`, `1.2.3px`, `brightness(2.)` and `blur(0.)`, and
+  `brightness(0x10)`, which was read as 0; anything written after the
+  unit, as `5pxx` and `5px5`, which read as `5px`; a space around a spacing
+  or before a unit, as `" 5px "` and `"5 px"`; a negative blur, shadow
+  radius or amount, as `blur(-2px)`, `drop-shadow(2px 2px -3px)` and
+  `brightness(-1)`; and a filter in which any function does not parse or
+  is not a filter function, which kept the functions that did --
+  `blur(2px) wobble(3)` was read as `blur(2px)` -- together with
+  `blur(small)`, read as a size keyword, and `blur(2px,3px)`.
+
+  **Taken now**, as in Chrome: a sign or an exponent, as `+5px`, `1e1px`
+  and `brightness(1e1)`; a fractional percentage, as `brightness(50.5%)`,
+  where only whole ones were read; a function with its argument left out,
+  which takes its default -- `blur()` and `hue-rotate()` are zero,
+  `brightness()` and the other amounts 1; `NONE`; and functions with no
+  space between them, as `blur(2px)brightness(2)`, which read as the blur
+  alone.
 
 ### Security
 
@@ -460,11 +719,6 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   what the arithmetic leaves there. No eight-bit colour the test suites
   pin, Chrome's measurements included, has moved.
 
-- **`new Canvas(w, h, { textGamma })` refuses a gamma above 4.** Skia takes
-  a text gamma from 0 up to 4, and the `RangeError` said so, but the upper
-  bound was checked against `textContrast`, so `textGamma: 5` was taken. It
-  is now refused like `-1`.
-
 - **`ctx.fontHinting = false` draws the outlines as designed.** It turned
   hinting off on the paragraph style, which SkParagraph never reads, so
   every glyph was drawn at Slight hinting whatever it said. `fontHinting =
@@ -474,7 +728,8 @@ false` now takes effect, and its default is on, at Slight, as Chrome draws
   its outline as designed -- undilated on macOS, where 13px text draws more
   than a third lighter, and unhinted under FreeType on Linux. No text moves
   either way, and what is drawn by default does not change. A `Paragraph`,
-  which has no hinting setting, is drawn hinted, as it was.
+  which has no hinting setting, is drawn hinted, as it was. That the
+  property now reads `true` until it is set is under Breaking.
 
 - **Text is drawn with Chrome's text contrast and gamma for the platform.**
   Glyph coverage was corrected with a gamma of 1.4 and no contrast by
@@ -507,60 +762,8 @@ false` now takes effect, and its default is on, at Slight, as Chrome draws
   character to one, so it does not match `ß` to `SS`;
   `docs/browser-differences.md` has the measurement. A generic keyword is
   still matched in ASCII case alone, so registering `"ſerif"`, with a long
-  s, does not take over the generic `serif`.
-
-- **An enumerated attribute takes its names exactly, as Chrome does.**
-  `textAlign`, `textBaseline`, `direction`, `lineCap`, `lineJoin`,
-  `imageSmoothingQuality`, `globalCompositeOperation` and `fontStretch`
-  folded case, so `ctx.textAlign = "CENTER"` centred the text where Chrome
-  152 ignores it, and `"dar\u212Aen"`, whose Kelvin sign lowercases to
-  `k`, was taken as `darken`. WebIDL matches an enumeration's values
-  exactly, and each setter now ignores another spelling, leaving the value
-  it held. `createPattern` throws its `SyntaxError` for `"REPEAT"`, as the
-  standard asks of a repetition not identical to one of its four names.
-  `lineDashFit` and a `CanvasTexture`'s `cap` match exactly too, as their
-  siblings do. The filter
-  factories' blend names still match in any case, as CanvasKit's do.
-
-- **Colours, fonts, filters and transforms read CSS's whitespace,
-  comments and names, and no more.**
-  - Whitespace is space, tab, line feed, carriage return and form feed.
-    A U+00A0, U+000B, U+2028, U+3000 or U+FEFF was trimmed or taken as a
-    separator, so `fillStyle = "red\u00a0"`,
-    `filter = "blur(2px)\u00a0grayscale(1)"`,
-    `new DOMMatrix("\u00a0translate(1px, 2px)")` and
-    `font = "bold\u00a012px serif"` were each read. Chrome 152 ignores the
-    colour, the filter and the font and throws `SyntaxError` for the
-    transform, and so does this library now. `fontVariant` and `fontVariationSettings` split at the
-    same five characters.
-  - A comment is dropped, as CSS Syntax drops one, in a colour, a font, a
-    filter, a transform and a spacing: `rgb(255,/**/0,0)` and `/**/#f00`
-    were refused and now paint red, and `12px/**/serif`,
-    `bold/**/12px serif`, `blur(/**/2px)` and
-    `translate(/**/1px, 2px)` are read, as in Chrome 152. A comment in a
-    quoted family name is part of the name. A comment still ends the
-    token before it, so `rgb/**/(255 0 0)`, `blur(2/**/px)` and
-    `calc(100/**/+/**/155)` stay refused, and a sign it parts from what
-    follows stands alone, so `rgb(255 -/**/10 0)` is refused rather than
-    read as -10. A comment beside a colour keyword, `red/**/`, is dropped
-    too, where Chrome ignores the whole value; docs/browser-differences.md
-    says why.
-  - `letterSpacing` and `wordSpacing` take whitespace and comments around
-    the length, `" 5px "` and `"/**/5px"`, which were ignored: HTML parses
-    the value as a CSS `<length>`, and CSS Syntax discards both there.
-    Chrome 152 ignores them; docs/browser-differences.md records it.
-  - `currentcolor` is opaque black, `rgb(from currentcolor r g b)` too,
-    where it was refused: CSS Color 4 resolves it from the `color`
-    property's initial value when a canvas has no element, and Chrome 152
-    paints it black.
-  - A family name holds only the code points CSS Syntax 3 lists as a
-    name's. `12px a\u00b5b` was read as the family `aµb`, and `12px serif`
-    followed by U+00A0 is now refused rather than trimmed; Chrome 152 takes
-    both under the older rule, which docs/browser-differences.md records.
-    `12px a·b` was refused and is now read, as Chrome reads it. A name
-    starts as CSS Syntax says, so `12px -1x` and `12px -`, which read as
-    families, are refused, and an escape in an unquoted name is decoded,
-    `12px \61 bc` naming `abc` where it was refused, as in Chrome.
+  s, does not take over the generic `serif`. `FontLibrary.has()` and
+  `family()` matching the same way is under Breaking.
 
 - **`halfLeading` takes effect whatever paragraph was laid out before.**
   SkParagraph's paragraph cache matched two paragraphs whose styles differ
@@ -579,15 +782,6 @@ false` now takes effect, and its default is on, at Slight, as Chrome draws
   included, and a release build passed the null slice on. An empty list in
   a text style, a pushed style or a strut now names no family, as leaving
   the option out does.
-
-- **A quoted generic keyword in `ctx.font` is a family name.** CSS Fonts 4
-  says the generic keywords "must not be quoted", so `16px "serif"` names a
-  family called serif, but it drew and read back as the generic `serif`. It
-  now reads back as itself, and draws a family of that name where one is
-  registered or installed; with none, the next family in the list draws,
-  as for any missing family, where fontconfig on Linux had answered
-  `serif`, `sans-serif` and `monospace` with the generic's faces.
-  `FontLibrary.use("serif", ...)` still claims the generic as well.
 
 - **`shadowColor`, a texture's `color` and an export's `matte` keep a
   colour outside sRGB.** Each went through eight-bit sRGB, so
@@ -820,16 +1014,6 @@ false` now takes effect, and its default is on, at Slight, as Chrome draws
   `fillStyle = 'LAB(79.18% -50% 30)'` painted red 5 where Chrome 153 and
   the lower-case spelling paint 4.
 
-- **`ctx.filter` reads back exactly as it was set**, as Chrome reads it:
-  case, spacing, number spelling and a `drop-shadow`'s order and omissions
-  included. It was rewritten into a canonical form -- `BLUR(5PX)` read back
-  as `blur(5px)`, `drop-shadow(red 2px 2px)` as
-  `drop-shadow(2px 2px 0px red)`, `"  blur(5px)  "` as `blur(5px)`, `NONE`
-  as `none`, and two functions written without a space between them with
-  one -- so 14 of 29 filters measured in Chrome 152 read back differently.
-  What draws is unchanged: every one of those spellings draws the same
-  pixels as the form this used to read back.
-
 - **The same `em` filter set again after a font change takes the new
   size.** `ctx.filter = "blur(1em)"` resolves the `em` against the font in
   force, as in Chrome, but assigning the same string again after the font
@@ -847,19 +1031,6 @@ false` now takes effect, and its default is on, at Slight, as Chrome draws
   place of a second one in JavaScript. A thickness in `em` or another
   font-relative unit still follows the font the text is drawn in, and `""`
   and `"none"` still clear the decoration.
-
-- **A `DOMMatrix` read from a string reports `is2D` and its values as
-  Chrome does.** A list holding a 3D function is 3D whatever its values:
-  `new DOMMatrix("translate3d(0, 0, 0)")`, `"rotateX(0deg)"` and an identity
-  `matrix3d()` reported `is2D` true and serialised as `matrix()`, and now
-  report false and `matrix3d()`, as in Chrome and as Geometry Interfaces 1
-  says. A length and a scale factor are a `float`, as Chrome keeps them, so
-  `translate(0.1px)` gives an `e` of 0.10000000149011612 and `scale(0.3)` an
-  `a` of 0.30000001192092896, where they were 0.1 and 0.3. And a length is
-  held to the range Chrome holds it to, so `translate(1e40px)` is
-  33554428px where it was 1e40. An angle in `rad` is converted at full
-  width, so `skewY(1.07rad)` agrees with Chrome to the last place where it
-  differed in the seventh.
 
 - **A family with no italic face is slanted, and a static family with no
   bold face is emboldened, where Chrome does both.** Text drawn or measured
@@ -934,31 +1105,6 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   reads the pixels back is still not checked, because the library
   underneath does not report its failure; a drawing is, and it is the
   longer-lived of the two.
-
-- **An `@2x` in a `toFile` name is read from the name less its own
-  extension, whatever `format` says.** With a `format` option, the format's
-  name was stripped from the end instead, so naming the format the extension
-  already gave switched the suffix off, and a name ending in the format's
-  letters switched it on. Four calls change, each measured on a 6x4 page:
-  `toFile("f@2x.png", { format: "png" })`,
-  `toFile("f@2x.png", { format: "jpg" })` and
-  `toFile("f@2x.dat", { format: "png" })` wrote it at 1x and now write it at
-  2x, and `toFile("f@2xjpg", { format: "jpg" })` wrote it at 2x and now
-  writes it at 1x. Without `format`, nothing changes. The crate's `to_file`
-  reads the same stem.
-
-- **`@0x` is refused like `{ density: 0 }`.** It reached the encoder as a
-  density of zero and failed with "Could not allocate new 0×0 bitmap"; it
-  now throws the `TypeError` the option does, "Expected a positive number
-  for `density`", before anything is written.
-
-- **`FontLibrary.use()` registers every font it is given or none of them.**
-  A font that failed to load threw after the ones before it were already
-  registered: `FontLibrary.use(["Monoton-Regular.woff", "missing.ttf"])`
-  threw and left Monoton registered, and a map's earlier families stayed
-  when a later one failed. Every font in the call -- across every family of
-  a map, and every buffer -- is now read and parsed before any is
-  registered, as the crate's `FontLibrary::use_paths` does.
 
 - **The Linux and Windows builds use the GPU on a Vulkan 1.4 loader.** Where
   the Vulkan loader and the device both report 1.4, `canvas.engine.renderer`
@@ -1038,44 +1184,6 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   the same lists and still refuse with their own `TypeError` naming the
   cause.
 
-- **`data:` URLs decode as `fetch` decodes them, and some that loaded now
-  reject.** The loaders, `new Image(dataURL)` and `img.src` decode a `data:`
-  URL with the Rust crate's `decode_data_url`, which matches Chrome on all 69
-  cases in `tests/assets/data-url-cases.json`. The decoder they replace
-  disagreed with Chrome on 30 of them.
-
-  **These used to load and now reject with a `TypeError`**, as they do in
-  `fetch`: a base64 body using the base64url alphabet (`-` or `_`); a base64
-  body with padding where none belongs or with too much of it (`YQ=`,
-  `aGk==`, `aGk===`); a base64 body holding a character outside the
-  alphabet, such as a `?`, a non-breaking space or an `=` partway through;
-  and a base64 body one character too long to be whole (`a`), which decoded
-  to nothing. A `data:` URL that worked only because the decoder skipped
-  what it could not read needs its base64 fixed.
-
-  **These used to decode to the wrong bytes and now decode correctly:**
-  percent-encoded base64 (`%3D` as padding was read as the digit `3`, and
-  `%61%47%6b%3d` as garbage); a `#fragment`, which was decoded into the image
-  bytes; a `;base64` marker written with spaces (`; base64`), whose body was
-  handed over still encoded; and spaces, tabs or line breaks at the end of
-  the URL, which were kept as body bytes.
-
-  **These used to reject and now decode:** a percent-encoded byte that is not
-  UTF-8 (`%FF`, or a sequence cut short such as `%E2%82`), and a `%` not
-  followed by two hex digits, which is kept as written. And a URL whose
-  scheme is not in lower case (`DATA:`, `Data:`) or that starts with spaces
-  or a tab was read as a file path; it is now read as the `data:` URL it is.
-
-- **At most 20 redirects are followed, as in `fetch`.** The loaders followed
-  21, follow-redirects' default, where the Fetch Standard stops at 20: a
-  load reaching a twenty-first redirect now rejects instead of following
-  it. It rejects with a `TypeError` saying how many redirects it met, which
-  is what Chrome and Node's `fetch` raise there and what a redirect that
-  `redirect` refuses already rejects with, where follow-redirects raised a
-  plain `Error`; follow-redirects' error is its `cause`. The Rust crate's
-  `Image::from_url` stops at the same place. A `maxRedirects` passed in the
-  options is still used as given.
-
 - **A premultiplied `getImageData` goes back in as the colour it was.**
   `getImageData(x, y, w, h, {alphaType: "premultiplied"})` hands back
   colour already scaled by alpha, so a 50% red reads `128, 0, 0, 128` --
@@ -1092,85 +1200,6 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   other name with a `TypeError`. An `ImageData` built without it is
   unpremultiplied, as the standard defines, so nothing changes for code
   that never asks for premultiplied data.
-
-- **`ctx.font` reads a font as Chrome does, and reports it as CSSOM
-  serializes it.** Checked against 101 shorthands measured in Chrome 152,
-  which `Font::from_css` on the crate side is tested against too.
-
-  **What `ctx.font` reads back has changed**, to the form HTML, CSSOM and
-  CSS Fonts 4 give it: style, `small-caps`, weight, width, size and family,
-  in that order, each left out at its initial value. A stretch keyword is
-  kept, so `condensed 16px Arial` reads back as `condensed 16px "Arial"`
-  and `ctx.font = ctx.font` keeps it. `oblique` reads back as `oblique`,
-  with its angle where it is not the default 14deg, as `oblique 10deg`. A
-  weight is its number, so `bold` reads back as `700`. A size is the
-  shortest number to six decimals: `2cm` reads `75.59055px`, the nearest
-  32-bit value to 75.5905511... A family name is a quoted string, with a
-  `"` or `\` inside it escaped, and a generic family its keyword:
-  `16px Arial, sans-serif` reads back as `16px "Arial", sans-serif`. Chrome
-  differs in each of these, and docs/browser-differences.md lists how.
-
-  **Sizes resolve as in Chrome.** `em` and `%` are of the canvas default,
-  10px, not 16px: `1em` is 10px and `150%` is 15px. The keywords follow
-  CSS Fonts 4's table, so `small` is 13px rather than 14.2px, `x-small`
-  10px, `xx-small` 9px, `large` 18px and `xxx-large` 48px. `larger` and
-  `smaller` are 12px and 8.33333px, where they were 19.2px and 14.2px.
-
-  **Accepted now**, as in Chrome: `calc()` in a size or a line height,
-  nested parentheses included; a number with an exponent or a sign, as
-  `1e1px` and `+500`; a fractional weight, with the fraction dropped
-  (`550.7` is 550); a bare `0` as the size; and whitespace before or
-  after the shorthand.
-
-  **Ignored now**, because Chrome ignores them: a shorthand with no family,
-  as `16px`, which set a font with an empty family list; an unquoted
-  family that is not made of identifiers, as `16px 12`, and as
-  `50% 16px Arial`, which set an 8px font named `16px Arial`, or
-  `all-small-caps 16px Arial`, whose `small` was read as a size keyword
-  and which set a 14.2px one; `inherit`, `initial`, `unset`, `revert`,
-  `revert-layer` and `default` as a family; an empty name between commas
-  or after a trailing one; a style, variant or weight given twice, as
-  `italic italic` and `bold 700`; five tokens before the size; a second
-  `/`, as `16px/2px/3px`; and a number ending in a point, as `5.px`.
-
-  **`small-caps` in the shorthand no longer turns on old-style figures.**
-  It enabled `onum` beside `smcp`; CSS Fonts 4 maps `small-caps` to `smcp`
-  alone, which is what `ctx.fontVariantCaps = "small-caps"` already did.
-
-  **System font keywords are still ignored, deliberately.** `caption`,
-  `icon`, `menu`, `message-box`, `small-caption` and `status-bar` name the
-  platform's interface font, which Chrome on macOS reads as 16px Arial and
-  which no other platform has to agree with.
-
-- **`ctx.filter`, `letterSpacing` and `wordSpacing` read numbers and
-  lengths as Chrome does.** Checked against 99 filters and 19 spacings
-  measured in Chrome 152, which the crate's `set_filter_css`,
-  `set_letter_spacing_css` and `set_word_spacing_css` are tested against
-  too.
-
-  **`letterSpacing` and `wordSpacing` no longer throw.** `1em` and `1rem`
-  threw a `TypeError`; they are taken now, and resolved against the font in
-  force when the text is laid out, as in Chrome. A percentage threw too, and
-  is now ignored.
-
-  **Ignored now**, because Chrome ignores them: a number CSS does not have,
-  as `5.px`, `1.2.3px`, `brightness(2.)` and `blur(0.)`, and
-  `brightness(0x10)`, which was read as 0; anything written after the
-  unit, as `5pxx` and `5px5`, which read as `5px`; a space around a spacing
-  or before a unit, as `" 5px "` and `"5 px"`; a negative blur, shadow
-  radius or amount, as `blur(-2px)`, `drop-shadow(2px 2px -3px)` and
-  `brightness(-1)`; and a filter in which any function does not parse or
-  is not a filter function, which kept the functions that did --
-  `blur(2px) wobble(3)` was read as `blur(2px)` -- together with
-  `blur(small)`, read as a size keyword, and `blur(2px,3px)`.
-
-  **Taken now**, as in Chrome: a sign or an exponent, as `+5px`, `1e1px`
-  and `brightness(1e1)`; a fractional percentage, as `brightness(50.5%)`,
-  where only whole ones were read; a function with its argument left out,
-  which takes its default -- `blur()` and `hue-rotate()` are zero,
-  `brightness()` and the other amounts 1; `NONE`; and functions with no
-  space between them, as `blur(2px)brightness(2)`, which read as the blur
-  alone.
 
 - **`hsl()` and `hwb()` written with bare numbers name the colour they
   state.** CSS Color 4 types saturation, lightness, whiteness and blackness
@@ -1215,11 +1244,6 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   Both now convert through CSS Color 4's matrices and transfer functions.
   `COLOR(display-p3 1 0 0)` and `color(DISPLAY-P3 1 0 0)` were ignored
   too, and now parse, since CSS names are case-insensitive.
-
-- **A `none` alpha in legacy syntax is ignored.**
-  `fillStyle = 'rgb(255, 0, 0, none)'` painted transparent, as did
-  `rgba(255, 0, 0, none)` and `hsl(0, 100%, 50%, none)`. Legacy syntax has
-  no `none`, and Chrome 153 ignores each, as this library now does.
 
 - **An absolute colour takes a math function and every alpha, as Chrome
   does.** `fillStyle = 'rgb(calc(255) 0 0)'` was ignored where Chrome 153
