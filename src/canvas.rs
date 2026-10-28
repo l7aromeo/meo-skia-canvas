@@ -387,6 +387,13 @@ impl Canvas {
         Context2D::from_inner(inner, gpu, canvas_depth, canvas_space)
     }
 
+    /// The options the canvas was made with, which a window shows its text
+    /// with.
+    #[cfg(feature = "window")]
+    pub(crate) fn options(&self) -> &CanvasOptions {
+        &self.options
+    }
+
     /// The canvas width in points.
     pub fn width(&self) -> f32 {
         self.width

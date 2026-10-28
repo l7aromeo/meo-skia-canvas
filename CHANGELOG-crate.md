@@ -115,6 +115,13 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A `Window` shows text at its canvas's contrast and gamma.**
+  `Window::with_canvas` took the platform's default `text_contrast` and
+  `text_gamma` whatever the canvas was made with, so a canvas made with a
+  `text_gamma` of 2.0 exported its text at 2.0 and showed it in a window at
+  the default; the Node `Window` already read its canvas's. It now takes the
+  canvas's, and `Window::text_contrast` and `text_gamma` report them.
+
 - **`Context2D::set_font_hinting(false)` draws the outlines as designed.**
   It turned hinting off on the paragraph style, which SkParagraph never
   reads, so every glyph was drawn at Slight hinting whatever it said.
