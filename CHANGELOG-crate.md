@@ -75,15 +75,6 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
-- **Known issue, not fixed for crate builds: on macOS a GPU draw can be
-  dropped when the shader compiler is slow.** The Skia skia-bindings 0.153.3
-  downloads waits one second for each Metal shader and pipeline it compiles
-  and then draws nothing, so on a loaded machine a process's first image
-  draw, blend mode or gradient can come back missing. The npm package's macOS
-  binary is now built without that limit; a crate build gets whatever Skia
-  skia-bindings provides. docs/rust.md, "Metal and skia-bindings' prebuilt
-  Skia", says how to build Skia from source with the patch that removes it.
-
 - **`Context2D::set_font_hinting(false)` draws the outlines as designed.**
   It turned hinting off on the paragraph style, which SkParagraph never
   reads, so every glyph was drawn at Slight hinting whatever it said.
@@ -1035,6 +1026,17 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   bounds are now remembered by face, size and glyph, up to 4,096 of them:
   `measure_text("Hello world")` takes about 4.3 µs in release on macOS where
   it took 5.6, and a seventy-character line about 15 where it took 25.
+
+### Known, and not fixed here
+
+- **On macOS a GPU draw can be dropped when the shader compiler is slow, in
+  a crate build.** The Skia skia-bindings 0.153.3 downloads waits one second
+  for each Metal shader and pipeline it compiles and then draws nothing, so
+  on a loaded machine a process's first image draw, blend mode or gradient
+  can come back missing. The npm package's macOS binary is built without
+  that limit; a crate build gets whatever Skia skia-bindings provides.
+  docs/rust.md, "Metal and skia-bindings' prebuilt Skia", says how to build
+  Skia from source with the patch that removes it.
 
 ## 📦 ⟩ [v0.16.3] (crate) ⟩ September 16, 2026
 
