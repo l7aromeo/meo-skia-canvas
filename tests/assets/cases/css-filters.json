@@ -1,6 +1,6 @@
 {
   "about": "`ctx.filter` strings and whether Chrome takes them. Read by tests/css_grammar.rs for `Context2D::set_filter_css` and by tests/suite/css-grammar.test.js for `ctx.filter`, so the two surfaces answer one table. Whether a filter is taken, and what it reads back as: every filter Chrome takes reads back exactly as it was written, whitespace and letter case included, so a row's own `css` is its reading.",
-  "source": "Chrome 152.0.7977.149: ctx.filter set on a fresh 2D context after `blur(3px)`, then read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving `blur(3px)`. Each taken filter was read back from a fresh context too, and every one came back unchanged. The three blank rows -- the empty string, three spaces and a tab -- were measured in Chrome 152.0.7977.167 on 2026-10-25 the same way.",
+  "source": "Chrome 152.0.7977.149: ctx.filter set on a fresh 2D context after `blur(3px)`, then read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving `blur(3px)`. Each taken filter was read back from a fresh context too, and every one came back unchanged. The three blank rows -- the empty string, three spaces and a tab -- were measured in Chrome 152.0.7977.167 on 2026-10-25 the same way. The rows with a character CSS does not count as whitespace -- U+000B, U+00A0, U+2028, U+3000 and U+FEFF -- and those with a carriage return or a form feed were measured in Chrome 152.0.7977.167 on 2026-10-26 the same way. The rows with a comment were measured in Chrome 152.0.7977.167 on 2026-10-26 the same way.",
   "knownDifferences": "Math functions and the font-relative units are in css-math.json.",
   "cases": [
     {
@@ -400,6 +400,118 @@
     {
       "css": "drop-shadow(1px 2px) blur(-1px)",
       "refused": true
+    },
+    {
+      "css": "\u00a0blur(2px)",
+      "refused": true
+    },
+    {
+      "css": "blur(2px)\u00a0",
+      "refused": true
+    },
+    {
+      "css": "blur(2px)\u00a0grayscale(1)",
+      "refused": true
+    },
+    {
+      "css": "\u000bblur(2px)",
+      "refused": true
+    },
+    {
+      "css": "blur(2px)\u000b",
+      "refused": true
+    },
+    {
+      "css": "blur(2px)\u000bgrayscale(1)",
+      "refused": true
+    },
+    {
+      "css": "\u2028blur(2px)",
+      "refused": true
+    },
+    {
+      "css": "blur(2px)\u2028",
+      "refused": true
+    },
+    {
+      "css": "blur(2px)\u2028grayscale(1)",
+      "refused": true
+    },
+    {
+      "css": "\u3000blur(2px)",
+      "refused": true
+    },
+    {
+      "css": "blur(2px)\u3000",
+      "refused": true
+    },
+    {
+      "css": "blur(2px)\u3000grayscale(1)",
+      "refused": true
+    },
+    {
+      "css": "\ufeffblur(2px)",
+      "refused": true
+    },
+    {
+      "css": "blur(2px)\ufeff",
+      "refused": true
+    },
+    {
+      "css": "blur(2px)\ufeffgrayscale(1)",
+      "refused": true
+    },
+    {
+      "css": "blur(\u00a02px)",
+      "refused": true
+    },
+    {
+      "css": "drop-shadow(1px\u000b1px red)",
+      "refused": true
+    },
+    {
+      "css": "\rblur(2px)"
+    },
+    {
+      "css": "blur(2px)\r"
+    },
+    {
+      "css": "blur(2px)\rgrayscale(1)"
+    },
+    {
+      "css": "\fblur(2px)"
+    },
+    {
+      "css": "blur(2px)\f"
+    },
+    {
+      "css": "blur(2px)\fgrayscale(1)"
+    },
+    {
+      "css": "blur(/**/2px)"
+    },
+    {
+      "css": "blur(2px)/**/grayscale(1)"
+    },
+    {
+      "css": "blur(2/**/px)",
+      "refused": true
+    },
+    {
+      "css": "/**/blur(2px)"
+    },
+    {
+      "css": "blur(2px)/**/"
+    },
+    {
+      "css": "blur/**/(2px)",
+      "refused": true
+    },
+    {
+      "css": "drop-shadow(1px/**/1px red)"
+    },
+    {
+      "css": "blur(2px) /*"
     }
   ]
 }

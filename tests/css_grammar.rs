@@ -152,6 +152,26 @@ const STRETCHES: [(&str, FontStretch); 9] = [
 /// `192` are held to the same number of digits.
 const FONT_SIZE_TOLERANCE: f32 = 1e-5;
 
+/// A family as Chrome's answer names it: the name, or the generic keyword.
+fn family_name(family: &FontFamily) -> &str {
+    match family {
+        FontFamily::Named(name) => name,
+        FontFamily::Generic(generic) => generic.to_css(),
+        _ => unreachable!("a family is a name or a generic"),
+    }
+}
+
+/// Whether `slant` leans, which is what Chrome's taken-apart `style` says by
+/// `italic`: it gives an oblique at any angle but 0deg as `italic`, and
+/// `oblique 0deg`, which draws upright, as `normal`.
+fn leans(slant: FontSlant) -> bool {
+    match slant {
+        FontSlant::Normal => false,
+        FontSlant::Italic => true,
+        FontSlant::Oblique(angle) => angle.degrees() != 0.0,
+    }
+}
+
 /// What `Font::from_css` read, set against Chrome's answer taken apart, or
 /// `None` when every part agrees.
 fn font_parts_disagree(font: &Font, parts: &Value) -> Option<String> {
@@ -177,8 +197,12 @@ fn font_parts_disagree(font: &Font, parts: &Value) -> Option<String> {
     let agrees = (font.size - size).abs()
         <= FONT_SIZE_TOLERANCE * size.max(1.0)
         && u64::from(font.weight) == weight
-        && (font.slant != FontSlant::Normal) == italic
-        && font.families == families
+        && leans(font.slant) == italic
+        && font
+            .families
+            .iter()
+            .map(family_name)
+            .eq(families.iter().copied())
         && font.stretch == stretch
         && line_height.is_none_or(|want| font.line_height == want);
     (!agrees).then(|| {
@@ -239,6 +263,28 @@ fn font_from_css_answers_the_font_table() {
     );
 }
 
+/// The family names Chrome 152 takes and CSS Syntax 3 refuses: each holds a
+/// code point at or above U+0080 that section 4.2 does not list as a
+/// non-ASCII ident code point, so it is no part of a name. Chrome still
+/// reads any such code point as a name's; the font table leaves these out,
+/// and docs/browser-differences.md records the difference.
+const OUTSIDE_THE_IDENTIFIER_LIST: [&str; 7] = [
+    "12px a\u{b5}b",
+    "12px a\u{d7}b",
+    "12px a\u{aa}b",
+    "12px serif\u{a0}",
+    "12px serif\u{2028}",
+    "12px serif\u{3000}",
+    "12px Times\u{a0}New Roman",
+];
+
+#[test]
+fn a_family_name_holds_only_identifier_code_points() {
+    for css in OUTSIDE_THE_IDENTIFIER_LIST {
+        assert!(Font::from_css(css).is_none(), "{css:?} is refused");
+    }
+}
+
 #[test]
 fn set_font_css_answers_the_font_table() {
     /// Set before each case, so a refusal shows as all of it surviving and a
@@ -272,8 +318,11 @@ fn set_font_css_answers_the_font_table() {
                         .find(|(name, _)| case["stretch"] == *name)
                         .map(|&(_, stretch)| stretch)
                         .expect("a stretch keyword");
+                    // Both sides through `Debug`, which escapes what JSON's
+                    // `Display` leaves raw, U+FEFF among them.
                     let want = format!(
-                        "{font}, caps {}, stretch {stretch:?}",
+                        "{:?}, caps {}, stretch {stretch:?}",
+                        font.as_str().expect("a font string"),
                         case["variantCaps"].as_str().expect("a caps keyword")
                     );
                     (!taken || got != want).then(|| {
@@ -326,6 +375,84 @@ fn set_filter_css_answers_the_filter_table() {
         cases.len(),
         wrong.join("\n")
     );
+}
+
+/// The pixel `css` paints as a fill, or the sentinel's where it is refused,
+/// and whether the setter took it.
+fn filled(css: &str) -> (bool, [u8; 4]) {
+    /// What the fill is before each case: `#010203`, which no row paints.
+    const SENTINEL: &str = "#010203";
+    let mut canvas = Canvas::new(2.0, 2.0);
+    canvas.set_gpu(false);
+    let ctx = canvas.context();
+    ctx.set_fill_style_css(SENTINEL)
+        .expect("the sentinel is a colour");
+    let taken = ctx.set_fill_style_css(css).is_ok();
+    ctx.fill_rect(0.0, 0.0, 2.0, 2.0);
+    let image = ctx.get_image_data(0.0, 0.0, 1.0, 1.0).expect("readback");
+    let pixel = image.pixels();
+    (taken, [pixel[0], pixel[1], pixel[2], pixel[3]])
+}
+
+#[test]
+fn set_fill_style_css_answers_the_colour_table() {
+    /// How far a channel may sit from Chrome's, which rounds its own way.
+    const TOLERANCE: u8 = 1;
+    let cases = cases("css-colors");
+    let wrong: Vec<String> = cases
+        .iter()
+        .filter_map(|case| {
+            let css = case["css"].as_str().expect("each case names its css");
+            let (taken, pixel) = filled(css);
+            match case["rgba"].as_array() {
+                None if taken => Some(format!(
+                    "{css:?}: paints {pixel:?}, Chrome ignores it"
+                )),
+                None => None,
+                Some(_) if !taken => {
+                    Some(format!("{css:?}: refused, Chrome takes it"))
+                }
+                Some(want) => {
+                    let want: Vec<u8> = want
+                        .iter()
+                        .map(|v| v.as_u64().expect("a channel") as u8)
+                        .collect();
+                    let near = pixel
+                        .iter()
+                        .zip(&want)
+                        .all(|(got, want)| got.abs_diff(*want) <= TOLERANCE);
+                    (!near).then(|| {
+                        format!("{css:?}: paints {pixel:?}, Chrome {want:?}")
+                    })
+                }
+            }
+        })
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "{} of {} cases disagree with Chrome:\n{}",
+        wrong.len(),
+        cases.len(),
+        wrong.join("\n")
+    );
+}
+
+/// CSS Syntax drops a comment when it tokenizes, so a keyword beside one is
+/// still a `<color>`. Chrome 152 ignores these, and takes a comment beside a
+/// hex colour or a function; the colour table leaves them out, and
+/// docs/browser-differences.md records the difference.
+#[test]
+fn a_comment_beside_a_colour_keyword_is_dropped() {
+    for (css, want) in [
+        ("red/**/", [255, 0, 0, 255]),
+        ("/**/red", [255, 0, 0, 255]),
+        ("red /**/", [255, 0, 0, 255]),
+        ("red/*", [255, 0, 0, 255]),
+        ("transparent/**/", [0, 0, 0, 0]),
+        ("currentcolor/**/", [0, 0, 0, 255]),
+    ] {
+        assert_eq!(filled(css), (true, want), "{css:?}");
+    }
 }
 
 #[test]
@@ -390,6 +517,39 @@ fn the_spacing_setters_answer_the_spacing_table() {
         cases.len(),
         wrong.join("\n")
     );
+}
+
+/// HTML parses a spacing "as a CSS <length>", and CSS Syntax 3's "parse a
+/// component value" discards the whitespace on either side and its
+/// tokenizer the comments. Chrome 152 ignores each; the spacing table leaves
+/// them out and docs/browser-differences.md records the difference.
+#[test]
+fn a_spacing_takes_whitespace_and_comments_around_the_length() {
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    ctx.set_letter_spacing_css("5px").expect("5px is a spacing");
+    let five = ctx.letter_spacing();
+    for css in [
+        " 5px ",
+        "\r5px",
+        "5px\x0c",
+        "\t5px\n",
+        "/**/5px",
+        "5px/**/",
+        " /**/5px ",
+    ] {
+        ctx.set_letter_spacing_css("3px").expect("3px is a spacing");
+        assert!(
+            ctx.set_letter_spacing_css(css).is_ok(),
+            "{css:?} is a spacing"
+        );
+        assert_eq!(ctx.letter_spacing(), five, "{css:?}");
+        ctx.set_word_spacing_css("3px").expect("3px is a spacing");
+        assert!(
+            ctx.set_word_spacing_css(css).is_ok(),
+            "{css:?} is a spacing"
+        );
+    }
 }
 
 #[test]

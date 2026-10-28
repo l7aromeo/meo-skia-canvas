@@ -313,7 +313,7 @@ fn facade_draws_a_layout_at_the_axis_it_was_laid_out_with() -> Result<()> {
 
     let ink_at = |wght: f32| -> Result<usize> {
         let style = TextStyle {
-            font_families: vec!["Oswald".to_string()],
+            font_families: vec!["Oswald".into()],
             color: RgbaLinear::opaque(1.0, 1.0, 1.0),
             font_size: 36.0,
             font_variations: vec![FontVariation::new(FontAxisTag::WGHT, wght)]
@@ -373,7 +373,7 @@ fn a_static_family_first_does_not_hide_the_variable_one() -> Result<()> {
 
     let pixels = |families: &[&str], weight: i32| -> Result<Vec<u8>> {
         let style = TextStyle {
-            font_families: families.iter().map(|f| f.to_string()).collect(),
+            font_families: families.iter().map(|f| (*f).into()).collect(),
             color: RgbaLinear::opaque(1.0, 1.0, 1.0),
             font_size: 48.0,
             font_weight: weight,
@@ -419,7 +419,7 @@ fn a_shared_collection_keeps_each_axis_position_apart() -> Result<()> {
 
     let ink_at = |wght: f32| -> Result<usize> {
         let style = TextStyle {
-            font_families: vec!["Oswald".to_string()],
+            font_families: vec!["Oswald".into()],
             color: RgbaLinear::opaque(1.0, 1.0, 1.0),
             font_size: 36.0,
             font_variations: vec![FontVariation::new(FontAxisTag::WGHT, wght)]
@@ -961,7 +961,7 @@ fn the_rust_surface_takes_css_colors() -> Result<()> {
     //
     // The same colour in other notations: an `xyz` space and a relative
     // colour whose space follows an origin with spaces of its own, both
-    // converted in linear light by `csscolorparser`, and the same Lab colour
+    // converted in linear light, and the same Lab colour
     // in upper case, read by this crate's own Lab conversion. Lab rounds its
     // components to four places, which moves no byte here.
     for css in [
@@ -1181,9 +1181,12 @@ fn every_relative_function_reads_its_channels_as_chrome_does() -> Result<()> {
             "color(from color(display-p3 1 0 0) display-p3 r g b)",
             [255, 0, 0, 255],
         ),
+        // Not Chrome's: Chrome 152 paints 126, 71, 34 by BT.2020's inverse
+        // OETF, and this is CSS Color 4's 2.4 gamma, worked from its sample
+        // code -- docs/browser-differences.md has the difference.
         (
             "color(from red rec2020 calc(r / 2) g b)",
-            [126, 71, 34, 255],
+            [104, 73, 34, 255],
         ),
         (
             "color(from red a98-rgb calc(r / 2) g b)",
@@ -1415,66 +1418,94 @@ fn a_colour_missing_its_closing_brackets_is_read_closed() -> Result<()> {
     Ok(())
 }
 
-/// The colour forms no browser reads that `csscolorparser` always has --
-/// `hwba()`, `hsv()`, `hsva()`, hex without its `#`, and legacy comma syntax
-/// CSS Color 4 does not allow -- still paint, as they did, until npm 7.0 and
-/// crate 0.17 refuse them. Chrome 153 refuses
-/// every one. Their relative forms are read with the others, from the
-/// origin unclipped, so a relative `hsv()` names the colour its absolute
-/// spelling does.
+/// The colour forms no CSS defines -- `hwba()`, `hsv()`, `hsva()`, absolute
+/// or relative, hex without its `#`, and a function name with a space before
+/// its `(`, which CSS Syntax reads as a word and a block -- are refused, and
+/// leave the fill as it was, as Chrome 153 ignores each. The CSS spellings
+/// beside them still parse.
 #[test]
-fn the_deprecated_colour_forms_still_paint() -> Result<()> {
-    for (css, painted) in [
-        ("hwba(0 0% 0%)", [234, 51, 35, 255]),
-        ("HWBA(0 0% 0%)", [234, 51, 35, 255]),
-        ("hwba(0 0% 0% / 0.5)", [233, 52, 36, 128]),
-        ("hsv(0 100% 100%)", [234, 51, 35, 255]),
-        ("hsva(0 100% 100% / 0.5)", [233, 52, 36, 128]),
-        ("ff0000", [234, 51, 35, 255]),
-        ("f00", [234, 51, 35, 255]),
-        ("ff000080", [233, 52, 36, 128]),
-        ("hwba(from red h w b)", [234, 51, 35, 255]),
-        ("hsv(from red h s v)", [234, 51, 35, 255]),
-        ("hsva(from red h s v / 0.5)", [233, 52, 36, 128]),
-        ("hsv(from black h s v)", [0, 0, 0, 255]),
-        // Malformed legacy syntax: numbers and percentages mixed, separators
-        // mixed, `hsl()` without its percentages, `none` in a channel, and
-        // commas where a function has none.
-        ("rgb(255, 0%, 0)", [234, 51, 35, 255]),
-        ("rgb(100%, 0, 0)", [234, 51, 35, 255]),
-        ("rgb(255,0 0)", [234, 51, 35, 255]),
-        ("rgb(255 0,0)", [234, 51, 35, 255]),
-        ("rgb(255, 0, 0 / 0.5)", [233, 52, 36, 128]),
-        ("hsl(120, 100, 50)", [117, 251, 76, 255]),
-        ("hsl(120, 100%, 50)", [117, 251, 76, 255]),
-        ("rgb(none, 0, 0)", [0, 0, 0, 255]),
-        ("hsl(none, 100%, 50%)", [234, 51, 35, 255]),
-        ("hwb(120, 0%, 0%)", [117, 251, 76, 255]),
-        ("lab(50, 40, 30)", [175, 93, 76, 255]),
-        ("lch(50, 40, 30)", [167, 98, 90, 255]),
-        ("oklab(0.6, 0.1, 0.1)", [182, 101, 58, 255]),
-        ("oklch(0.6, 0.2, 30)", [205, 75, 56, 255]),
-        ("color(srgb 1, 0, 0)", [234, 51, 35, 255]),
+fn colour_forms_no_css_defines_are_refused() -> Result<()> {
+    let mut canvas = Canvas::new(4.0, 4.0);
+    let ctx = canvas.context();
+    ctx.set_fill_style_css("#123456")?;
+    let before = ctx.fill_style();
+    for css in [
+        "hwba(0 0% 0%)",
+        "HWBA(0 0% 0%)",
+        "hwba(0 0% 0% / 0.5)",
+        "hsv(0 100% 100%)",
+        "hsva(0 100% 100% / 0.5)",
+        "ff0000",
+        "f00",
+        "ff000080",
+        "add",
+        "hwba(from red h w b)",
+        "hsv(from red h s v)",
+        "hsva(from red h s v / 0.5)",
+        "hsv(from black h s v)",
+        "rgb (255 0 0)",
+        "RGB (255, 0, 0)",
+        "hsl (120 100% 50%)",
+        "lab (50 40 30)",
+        "oklch (0.6 0.2 30)",
+        "color (srgb 1 0 0)",
     ] {
-        assert_eq!(painted_p3(css)?, painted, "{css}");
+        assert!(ctx.set_fill_style_css(css).is_err(), "{css} is refused");
+        assert_eq!(ctx.fill_style(), before, "{css} leaves the fill");
+        assert_eq!(RgbaLinear::from_css(css), None, "{css} is no colour");
     }
-    for (relative, absolute) in [
-        ("hsv(from red h 50% v)", "hsv(0 50% 100%)"),
-        (
-            "hsv(from red calc(h + 120) s calc(v / 2))",
-            "hsv(120 100% 50%)",
-        ),
-        ("hsv(from rgb(51 102 153) h s v)", "hsv(210 66.67% 60%)"),
-        (
-            "hwba(from color(srgb 1.2 0.2 0.1) h w b)",
-            "color(srgb 1.2 0.2 0.1)",
-        ),
-        (
-            "hsv(from color(srgb 1.2 0.2 0.1) h s v)",
-            "color(srgb 1.2 0.2 0.1)",
-        ),
+    for css in [
+        "#f00",
+        "hwb(0 0% 0%)",
+        "hwb(from red h w b)",
+        "rgb(255 0 0)",
     ] {
-        assert_eq!(painted_p3(relative)?, painted_p3(absolute)?, "{relative}");
+        assert!(ctx.set_fill_style_css(css).is_ok(), "{css} still parses");
+    }
+    Ok(())
+}
+
+/// Legacy comma syntax CSS Color 4 does not allow is refused, and leaves the
+/// fill as it was, as Chrome 153 ignores each: numbers and percentages
+/// mixed, separators mixed, `hsl()` without its percentages, `none` in a
+/// channel or the alpha, and commas where a function has none. The legacy
+/// forms CSS Color 4 does allow still parse.
+#[test]
+fn malformed_legacy_colour_syntax_is_refused() -> Result<()> {
+    let mut canvas = Canvas::new(4.0, 4.0);
+    let ctx = canvas.context();
+    ctx.set_fill_style_css("#123456")?;
+    let before = ctx.fill_style();
+    for css in [
+        "rgb(255, 0%, 0)",
+        "rgb(100%, 0, 0)",
+        "rgb(255,0 0)",
+        "rgb(255 0,0)",
+        "rgb(255, 0, 0 / 0.5)",
+        "hsl(120, 100, 50)",
+        "hsl(120, 100%, 50)",
+        "rgb(none, 0, 0)",
+        "hsl(none, 100%, 50%)",
+        "hwb(120, 0%, 0%)",
+        "lab(50, 40, 30)",
+        "lch(50, 40, 30)",
+        "oklab(0.6, 0.1, 0.1)",
+        "oklch(0.6, 0.2, 30)",
+        "color(srgb 1, 0, 0)",
+        "rgb(255, 0, 0, none)",
+    ] {
+        assert!(ctx.set_fill_style_css(css).is_err(), "{css} is refused");
+        assert_eq!(ctx.fill_style(), before, "{css} leaves the fill");
+        assert_eq!(RgbaLinear::from_css(css), None, "{css} is no colour");
+    }
+    for css in [
+        "rgb(255, 0, 0)",
+        "rgba(100%, 0%, 0%, 0.5)",
+        "hsl(120, 100%, 50%)",
+        "hsla(120deg, 100%, 50%, 0.5)",
+        "rgba(calc(255), 0, 0)",
+    ] {
+        assert!(ctx.set_fill_style_css(css).is_ok(), "{css} still parses");
     }
     Ok(())
 }
@@ -3365,7 +3396,7 @@ fn a_condensed_face_is_selected_when_the_family_has_one() -> Result<()> {
     let engine = TextEngine::with_system_fonts();
     let measured = |stretch| {
         let style = TextStyle {
-            font_families: vec![family.clone()],
+            font_families: vec![family.clone().into()],
             font_size: 24.0,
             stretch,
             ..TextStyle::default()
@@ -3408,7 +3439,7 @@ fn a_variable_font_is_instanced_under_the_name_it_was_given() -> Result<()> {
 
     let width_at = |engine: &TextEngine, family: &str, wght: f32| {
         let style = TextStyle {
-            font_families: vec![family.to_string()],
+            font_families: vec![family.into()],
             font_size: 64.0,
             font_variations: vec![FontVariation::new(FontAxisTag::WGHT, wght)]
                 .into(),
@@ -3474,7 +3505,7 @@ fn a_variable_font_is_instanced_under_the_name_it_was_given() -> Result<()> {
             let style = TextStyle {
                 font_families: families
                     .iter()
-                    .map(|family| family.to_string())
+                    .map(|family| (*family).into())
                     .collect(),
                 font_size: 64.0,
                 font_variations: vec![FontVariation::new(
@@ -3836,12 +3867,14 @@ fn a_wide_gamut_canvas_survives_being_drawn_into_another() -> Result<()> {
         Ok([pixels[0], pixels[1], pixels[2], pixels[3]])
     };
 
-    // Red named in the canvas's own space, so it is P3 red rather than sRGB
-    // red converted into P3 -- the difference the round trip destroys.
+    // P3 red rather than sRGB red converted into P3 -- the difference the
+    // round trip destroys.
     let mut inner = p3()?;
     {
         let ctx = inner.context();
-        ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.0, 0.0));
+        ctx.set_fill_style(
+            RgbaLinear::from_css("color(display-p3 1 0 0)").expect("P3 red"),
+        );
         ctx.fill_rect(0.0, 0.0, 2.0, 2.0);
     }
     assert_eq!(read(&mut inner)?, [255, 0, 0, 255], "the source is P3 red");
@@ -3869,85 +3902,117 @@ fn a_wide_gamut_canvas_survives_being_drawn_into_another() -> Result<()> {
 /// region-sized surface, and Skia answers that by materializing the whole
 /// page and copying the sliver out -- so every op in the source ran however
 /// little of it showed. Replaying the picture into that surface lets Skia
-/// cull against its bounds instead.
+/// cull against its bounds instead. The crate reaches this by its own door,
+/// `capture`/`place_capture`, which handed over pixels without the picture
+/// beside them and so could not replay anything.
 ///
-/// A ratio, so the machine cancels out: a hundredfold heavier source cost 66
-/// times more before and does not now. The crate reaches this by its own
-/// door, `capture`/`place_capture`, which handed over pixels without the
-/// picture beside them and so could not replay anything.
+/// So the claim is a comparison with the page itself: drawing a 180x24
+/// region of a 5000-op source costs a small fraction of drawing that source
+/// whole, which it cannot if it rasterizes every op. Each trial times the two
+/// back to back, alternating which goes first, and the assertion takes the
+/// median of the trials' ratios. Load stretches both members of a pair alike
+/// and a stretched trial falls outside the median; a ratio of the fastest
+/// passes of two separate legs, which this replaced, reads high whenever
+/// contention lands on the short one -- it failed once on CI at 5.1 against a
+/// bound of 5.0 with nothing wrong.
+///
+/// The bound is a tenth. That allowance is the clipped draw's own cost: a
+/// fresh page, recording, the 4x4 readback, and replay culling each op
+/// against the region, which is per op but no pixels. Measured in a debug
+/// build with the machine at a load average near 94, eight runs: the region
+/// 0.03ms, the page 12 to 14ms, a median ratio of 0.0025 to 0.0028. With the
+/// region rasterized from the whole page instead, three runs gave medians of
+/// 0.95 to 0.98: the clipped draw then costs what the page does.
 #[test]
 fn a_clipped_nested_draw_does_not_cost_the_whole_page() {
     use std::time::Instant;
 
-    fn elapsed(ops: usize) -> f64 {
-        let mut inner = Canvas::new(1400.0, 1400.0);
-        inner.set_gpu(false);
-        {
-            let ctx = inner.context();
-            ctx.set_fill_style_css("#742").expect("a css colour");
-            ctx.fill_rect(0.0, 0.0, 1400.0, 1400.0);
-            for i in 0..ops {
-                let shade = (i % 12) as f32 / 12.0;
-                ctx.set_fill_style(RgbaLinear::opaque(shade, 0.4, 1.0 - shade));
-                ctx.fill_rect(
-                    ((i * 31) % 1400) as f32,
-                    ((i * 17) % 1400) as f32,
-                    260.0,
-                    140.0,
-                );
-            }
-        }
-        let mut source = Canvas::new(1400.0, 1400.0);
-        source.set_gpu(false);
-        source.context().draw_canvas(&mut inner, 0.0, 0.0);
+    /// Ops on the source page: enough that rasterizing them dominates the
+    /// page's fixed costs, so a whole-page draw is measurably the page.
+    const OPS: usize = 5000;
+    /// A clipped draw may cost this fraction of the whole page -- see above.
+    const ALLOWANCE: f64 = 0.1;
+    /// Paired trials whose median ratio is asserted; odd, so the median is
+    /// one of them.
+    const TRIALS: usize = 7;
 
-        let mut draw = || {
-            let mut dest = Canvas::new(1400.0, 1400.0);
-            dest.set_gpu(false);
-            {
-                let ctx = dest.context();
-                ctx.save();
+    let mut inner = Canvas::new(1400.0, 1400.0);
+    inner.set_gpu(false);
+    {
+        let ctx = inner.context();
+        ctx.set_fill_style_css("#742").expect("a css colour");
+        ctx.fill_rect(0.0, 0.0, 1400.0, 1400.0);
+        for i in 0..OPS {
+            let shade = (i % 12) as f32 / 12.0;
+            ctx.set_fill_style(RgbaLinear::opaque(shade, 0.4, 1.0 - shade));
+            ctx.fill_rect(
+                ((i * 31) % 1400) as f32,
+                ((i * 17) % 1400) as f32,
+                260.0,
+                140.0,
+            );
+        }
+    }
+    let mut source = Canvas::new(1400.0, 1400.0);
+    source.set_gpu(false);
+    source.context().draw_canvas(&mut inner, 0.0, 0.0);
+
+    let mut draw = |clipped: bool| {
+        let mut dest = Canvas::new(1400.0, 1400.0);
+        dest.set_gpu(false);
+        {
+            let ctx = dest.context();
+            ctx.save();
+            if clipped {
                 ctx.begin_path();
                 ctx.rect(0.0, 0.0, 180.0, 24.0);
                 ctx.clip(FillRule::NonZero);
-                ctx.draw_canvas(&mut source, 0.0, 0.0);
-                ctx.restore();
             }
-            let data = dest
-                .context()
-                .get_image_data(0.0, 0.0, 4.0, 4.0)
-                .expect("the page rasterizes");
-            data.pixels()[3]
-        };
-
-        draw(); // warm, so the first page's setup is not in the number
-
-        // The fastest of several passes rather than one. `cargo test` runs
-        // these in parallel, so any single pass can be stretched by whatever
-        // else holds a core -- and it stretches the cheap leg proportionally
-        // more than the expensive one, which is exactly the ratio being
-        // asserted. Load only ever adds time, so the minimum is the reading
-        // least contaminated by it.
-        let mut best = f64::INFINITY;
-        for _ in 0..5 {
-            let started = Instant::now();
-            let mut seen = 0u32;
-            for _ in 0..20 {
-                seen += draw() as u32;
-            }
-            assert_eq!(seen, 20 * 255, "every round actually drew");
-            best = best.min(started.elapsed().as_secs_f64() * 1e3);
+            ctx.draw_canvas(&mut source, 0.0, 0.0);
+            ctx.restore();
         }
-        eprintln!("ops={ops} -> {best:.1}ms");
-        best
-    }
+        let data = dest
+            .context()
+            .get_image_data(0.0, 0.0, 4.0, 4.0)
+            .expect("the page rasterizes");
+        assert_eq!(data.pixels()[3], 255, "the draw actually drew");
+    };
+    // Milliseconds per draw, over `rounds` draws.
+    let mut timed = |clipped: bool, rounds: usize| {
+        let started = Instant::now();
+        for _ in 0..rounds {
+            draw(clipped);
+        }
+        started.elapsed().as_secs_f64() * 1e3 / rounds as f64
+    };
 
-    let light = elapsed(200);
-    let heavy = elapsed(20000);
+    // Warm both paths, so neither first page's setup is in a number.
+    timed(true, 1);
+    timed(false, 1);
+
+    let mut ratios: Vec<(f64, f64, f64)> = (0..TRIALS)
+        .map(|trial| {
+            let (region, page) = match trial % 2 {
+                0 => {
+                    let region = timed(true, 20);
+                    (region, timed(false, 3))
+                }
+                _ => {
+                    let page = timed(false, 3);
+                    (timed(true, 20), page)
+                }
+            };
+            (region / page, region, page)
+        })
+        .collect();
+    ratios.sort_by(|a, b| a.0.total_cmp(&b.0));
+    eprintln!("region/page per trial, sorted: {ratios:.4?}");
+    let (median, region, page) = ratios[TRIALS / 2];
     assert!(
-        heavy < light * 5.0,
-        "a hundredfold heavier source must not cost proportionally more: \
-         {light:.1}ms against {heavy:.1}ms"
+        median < ALLOWANCE,
+        "a clipped draw must cost a fraction of the page: the median trial \
+         drew the region in {region:.2}ms and the page in {page:.2}ms, a \
+         ratio of {median:.3} against {ALLOWANCE}"
     );
 }
 
@@ -4144,4 +4209,71 @@ fn every_depth_crosses_with_either_alpha_mode() -> Result<()> {
         "unpremultiplied F16 is what the four-variant enum had no name for"
     );
     Ok(())
+}
+
+#[test]
+fn a_fonts_line_height_spaces_wrapped_lines_in_pixels() -> Result<()> {
+    // A line height is a length: the lines of a wrapped run lie that far
+    // apart, CSS 2.1 section 10.8.1's line box of one font. It was taken as
+    // a multiple of the size a second time, so 30px at 48px put the second
+    // line 1440px down.
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"
+    ))?;
+    FontLibrary::new().register_font_from_data("LineHeightOswald", &bytes)?;
+    let gaps = |set: &dyn Fn(&mut Context2D)| {
+        let mut canvas = Canvas::new(400.0, 400.0);
+        let ctx = canvas.context();
+        set(ctx);
+        ctx.set_text_wrap(true);
+        let lines = ctx.measure_text("HHH HHH HHH", Some(110.0)).lines;
+        assert_eq!(lines.len(), 3, "three lines");
+        lines
+            .windows(2)
+            .map(|pair| pair[1].baseline - pair[0].baseline)
+            .collect::<Vec<f32>>()
+    };
+    let near = |gaps: Vec<f32>, pixels: f32, what: &str| {
+        for gap in gaps {
+            assert!((gap - pixels).abs() < 0.01, "{what}: {gap}");
+        }
+    };
+    near(
+        gaps(&|ctx| {
+            ctx.set_font(&Font::new("LineHeightOswald", 48.0).line_height(30.0))
+        }),
+        30.0,
+        "Font::line_height(30.0)",
+    );
+    for (css, pixels) in [
+        ("48px/30px LineHeightOswald", 30.0),
+        ("48px/1 LineHeightOswald", 48.0),
+        ("48px/150% LineHeightOswald", 72.0),
+    ] {
+        near(
+            gaps(&|ctx| assert!(ctx.set_font_css(css), "{css} parses")),
+            pixels,
+            css,
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_canvas_rasterizes_text_with_chromiums_contrast_and_gamma() {
+    // Chromium's per-platform `SK_GAMMA_CONTRAST` and `SK_GAMMA_EXPONENT`,
+    // from its `skia/BUILD.gn`: what Chrome's text is drawn with.
+    let (contrast, gamma) = if cfg!(target_os = "macos") {
+        (0.0, 0.0)
+    } else if cfg!(target_os = "windows") {
+        (1.0, 0.0)
+    } else {
+        (0.2, 1.2)
+    };
+    let options = CanvasOptions::default();
+    assert_eq!(
+        (options.text_contrast, options.text_gamma),
+        (contrast, gamma)
+    );
 }

@@ -135,10 +135,8 @@ why = """Four states on each side, and the two `TextHeightBehavior` types pair b
       to 3 its `textHeightBehavior` option takes, the numbers CanvasKit's
       enum carries, so the variants have no member to pair with and the type's
       doc comment says which code is which. The option is typed
-      `TextHeightBehavior | (number & {})` so that code passing a `number`
-      keeps compiling, and a non-integer is truncated today; npm 7.0 narrows
-      the option to `TextHeightBehavior` and refuses a non-integer with a
-      `RangeError`, after which the two sides hold the same four values."""
+      `TextHeightBehavior` and refuses any other number with a `RangeError`,
+      so the two sides hold the same four values."""
 status = "deliberate"
 
 [[capability]]
@@ -1110,6 +1108,18 @@ why  = """Each is the non-`Self` operation applied to the receiver rather than
 status = "deliberate"
 
 [[capability]]
+name = "serialising a text measurement"
+rust = []
+npm  = ["TextMetrics.toJSON"]
+why  = """How JavaScript copies out a measurement whose values are getters on
+       its prototype, as HTML's `TextMetrics` keeps them: `JSON.stringify`
+       and a spread see nothing of the object's own, so `toJSON` hands every
+       value back as a plain object. Rust's `TextMetrics` is a struct with
+       public fields, which a caller reads, clones or destructures directly,
+       so there is nothing to add there."""
+status = "deliberate"
+
+[[capability]]
 name = "JavaScript construction and serialisation of a matrix"
 rust = []
 npm  = ["DOMMatrix.clone",
@@ -1630,6 +1640,75 @@ why = """`Font.size` and `Font.line_height` are metrics of a resolved font that
       constructor. Grouped as one capability, what a font selection
       remembers about itself."""
 status = "deliberate"
+
+[[capability]]
+name = "what a family offers, as FontLibrary reports it"
+rust = ["FontFamilyDetails",
+        "FontFamilyDetails.family",
+        "FontFamilyDetails.weights",
+        "FontFamilyDetails.widths",
+        "FontFamilyDetails.styles"]
+npm = ["FontFamily.family",
+       "FontFamily.weights",
+       "FontFamily.widths",
+       "FontFamily.styles"]
+why = """One record under two names. `FontLibrary::family_details` returns
+      `FontFamilyDetails` and `FontLibrary.family()` returns npm's
+      `FontFamily`, with the same four fields. The crate's `FontFamily` is an
+      entry in a family list, the next capability, and the two cannot share
+      the name -- so the holders pair by name and these fields by this
+      entry."""
+
+[[capability]]
+name = "a family list entry, named or generic"
+rust = ["FontFamily::Named",
+        "FontFamily::Generic",
+        "Named.0",
+        "Generic.0",
+        "GenericFamily",
+        "GenericFamily::Serif",
+        "GenericFamily::SansSerif",
+        "GenericFamily::Cursive",
+        "GenericFamily::Fantasy",
+        "GenericFamily::Monospace",
+        "GenericFamily::SystemUi",
+        "GenericFamily::Emoji",
+        "GenericFamily::Math",
+        "GenericFamily::Fangsong",
+        "GenericFamily::UiSerif",
+        "GenericFamily::UiSansSerif",
+        "GenericFamily::UiMonospace",
+        "GenericFamily::UiRounded",
+        "GenericFamily::ALL",
+        "GenericFamily::from_css",
+        "GenericFamily::to_css"]
+npm = []
+why = """npm takes a family list as strings -- `ctx.font`'s CSS, where quoting
+      decides, and `fontFamilies` in a `ParagraphBuilder` style -- and reads
+      each by the rule `FontFamily`'s `From<&str>` applies: a generic keyword
+      unquoted is the generic, anything else a family name. Rust has no CSS
+      string to carry the quoting in a `Font` or a `TextStyle`, so it is a
+      type there and a spelling in JavaScript."""
+status = "deliberate"
+
+[[capability]]
+name = "the angle of an oblique"
+rust = ["ObliqueAngle",
+        "Oblique.0",
+        "ObliqueAngle::new",
+        "ObliqueAngle::degrees",
+        "ObliqueAngle::DEFAULT",
+        "ObliqueAngle::MAX_DEGREES",
+        "FontSlant::OBLIQUE",
+        "TextSlant::OBLIQUE",
+        "Error::InvalidObliqueAngle",
+        "InvalidObliqueAngle.degrees"]
+npm = ["TextStyleInput.fontStyle.obliqueAngle"]
+why = """A paragraph's `fontStyle.obliqueAngle` is the number of degrees
+      `ObliqueAngle` holds, with the same range and default, refused with a
+      `RangeError` where `ObliqueAngle::new` returns
+      `Error::InvalidObliqueAngle`. A canvas font carries its angle in the
+      `ctx.font` string, as `oblique 10deg`."""
 
 [[capability]]
 name = "a registered face, as registering it describes it"

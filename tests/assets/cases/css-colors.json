@@ -1,0 +1,541 @@
+{
+  "about": "Colour strings and whether Chrome takes them, as the pixel each paints. Read by tests/css_grammar.rs for `Context2D::set_fill_style_css` and by tests/suite/css-grammar.test.js for `ctx.fillStyle`, so the two surfaces answer one table. Comments, `currentcolor` and whitespace: the colour functions' own grammar is pinned in tests/native_api_contract.rs.",
+  "source": "Chrome 152.0.7977.167: ctx.fillStyle set to `#010203` on a fresh 2D context of a canvas outside a document, then to the string, a pixel filled and read back with getImageData, measured 2026-10-26. A refused row is one Chrome ignored, leaving `#010203`; `rgba` is the 8-bit pixel of each it took.",
+  "knownDifferences": "Left out: a comment beside a keyword. Chrome 152 ignores `red/**/`, `/**/red`, `red /**/`, `transparent/**/`, `currentcolor/**/` and `red/*`, and takes a comment beside a hex colour or a function. CSS Syntax drops a comment when it tokenizes, so each of those is a valid <color>, and here each is read; docs/browser-differences.md says so.",
+  "cases": [
+    {
+      "css": "rgb(/*x*/255 0 0)",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(255 0 0/*x*/)",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(255/**/0/**/0)",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(255,/**/0,0)",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(255/**/,0,0)",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgba(255, 0, 0, /*a*/ .5)",
+      "rgba": [
+        255,
+        0,
+        0,
+        128
+      ]
+    },
+    {
+      "css": "rgb( /**/ 255 0 0 )",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(calc(/*x*/255) 0 0)",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(255 0 0 / /*a*/ 0.5)",
+      "rgba": [
+        255,
+        0,
+        0,
+        128
+      ]
+    },
+    {
+      "css": "rgb(255 0 0 /**/ / 0.5)",
+      "rgba": [
+        255,
+        0,
+        0,
+        128
+      ]
+    },
+    {
+      "css": "rgb(255 0 0 / 0.5/**/)",
+      "rgba": [
+        255,
+        0,
+        0,
+        128
+      ]
+    },
+    {
+      "css": "rgb(from /*x*/ red r g b)",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(from/**/red r g b)",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "hsl(120deg/**/100%/**/50%)",
+      "rgba": [
+        0,
+        255,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "color(/*x*/srgb 1 0 0)",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "color(srgb/**/1 0 0)",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "lab(50%/**/40/**/30)",
+      "rgba": [
+        187,
+        88,
+        70,
+        255
+      ]
+    },
+    {
+      "css": "#f00/**/",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "/**/#f00",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(255 0 0)/**/",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "/**/ rgb(255 0 0)",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(255 0 0)/**/ ",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": " /**/rgb(255 0 0)",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(255 0 0) /**/",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(255 0 0 /* x)",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(255 0 0 /* x */",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(255 0 0 /*)*/",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(255 0 0)/*",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb/*x*/(255 0 0)",
+      "refused": true
+    },
+    {
+      "css": "hsl(120/**/deg 100% 50%)",
+      "refused": true
+    },
+    {
+      "css": "oklch(0.8 0.18 165/**/deg)",
+      "refused": true
+    },
+    {
+      "css": "#f/**/00",
+      "refused": true
+    },
+    {
+      "css": "rgb(255 0 0/**//**/0.5)",
+      "refused": true
+    },
+    {
+      "css": "rgb(calc(100/**/+/**/155) 0 0)",
+      "refused": true
+    },
+    {
+      "css": "rgb(calc(100 /**/+/**/ 155) 0 0)",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "/*",
+      "refused": true
+    },
+    {
+      "css": "currentcolor",
+      "rgba": [
+        0,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "currentColor",
+      "rgba": [
+        0,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "CurrentColor",
+      "rgba": [
+        0,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "currentColor ",
+      "rgba": [
+        0,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(from currentcolor r g b)",
+      "rgba": [
+        0,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(from currentColor r g b / 0.5)",
+      "rgba": [
+        0,
+        0,
+        0,
+        128
+      ]
+    },
+    {
+      "css": "color(from currentcolor srgb r g b)",
+      "rgba": [
+        0,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "hsl(from currentcolor h s l)",
+      "rgba": [
+        0,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "\rred\r",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "\fred\f",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(255\r0\r0)",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(255\f0\f0)",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(\n255,\n0,\n0)",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(\t255\t0\t0)",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "\u000bred",
+      "refused": true
+    },
+    {
+      "css": "red\u000b",
+      "refused": true
+    },
+    {
+      "css": "\u00a0red",
+      "refused": true
+    },
+    {
+      "css": "red\u00a0",
+      "refused": true
+    },
+    {
+      "css": "\u2028red",
+      "refused": true
+    },
+    {
+      "css": "\u3000red",
+      "refused": true
+    },
+    {
+      "css": "\ufeffred",
+      "refused": true
+    },
+    {
+      "css": "#f00\u00a0",
+      "refused": true
+    },
+    {
+      "css": "\u00a0#f00",
+      "refused": true
+    },
+    {
+      "css": "rgb(255 0 0)\u00a0",
+      "refused": true
+    },
+    {
+      "css": "rgb(255\u00a00 0)",
+      "refused": true
+    },
+    {
+      "css": "rgb(255\u00a0,0,0)",
+      "refused": true
+    },
+    {
+      "css": "rgb(\u00a0255 0 0)",
+      "refused": true
+    },
+    {
+      "css": "rgb(255 0 0\u00a0)",
+      "refused": true
+    },
+    {
+      "css": "rgb(255\u000b0 0)",
+      "refused": true
+    },
+    {
+      "css": "rgb(255 0 0 \u00a0/ 0.5)",
+      "refused": true
+    },
+    {
+      "css": "color(srgb\u00a01 0 0)",
+      "refused": true
+    },
+    {
+      "css": "rgb(from\u00a0red r g b)",
+      "refused": true
+    },
+    {
+      "css": "rgb(255 -/**/10 0)",
+      "refused": true
+    },
+    {
+      "css": "rgb(255 +/**/10 0)",
+      "refused": true
+    },
+    {
+      "css": "rgb(255/**/-10 0)",
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(calc(255 -/**/10) 0 0)",
+      "refused": true
+    },
+    {
+      "css": "rgb(calc(255 - /**/10) 0 0)",
+      "rgba": [
+        245,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "css": "rgb(-/**/10 0 0)",
+      "refused": true
+    },
+    {
+      "css": "rgb(255 -/**/ 10 0)",
+      "refused": true
+    },
+    {
+      "css": "rgb(calc(255 -/**/ 10) 0 0)",
+      "rgba": [
+        245,
+        0,
+        0,
+        255
+      ]
+    }
+  ]
+}

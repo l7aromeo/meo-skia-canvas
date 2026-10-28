@@ -1639,23 +1639,24 @@ export function backend(): BackendInfo;
  */
 export interface CanvasOptions {
   /**
-   * How much the rasterizer thickens small text, from `0` to `1` (defaults
-   * to `0`).
+   * How much the rasterizer thickens small text, from `0` to `1`.
    *
    * Glyph stems below a pixel wide antialias to something lighter than the
-   * same shape at a larger size, and this compensates. The default is no
-   * compensation.
+   * same shape at a larger size, and this compensates. Defaults to the value
+   * Chrome's text is drawn with on the platform: `0` on macOS, `1` on
+   * Windows and `0.2` elsewhere.
    */
   textContrast?: number;
 
   /**
-   * The gamma the rasterizer corrects glyph coverage against (defaults to
-   * `1.4`).
+   * The gamma the rasterizer corrects glyph coverage against, `0` meaning
+   * the sRGB curve.
    *
    * Works with {@link CanvasOptions.textContrast}: coverage is a linear
    * quantity and the display is not, so blending glyph edges without
    * accounting for that renders light text on dark thinner than dark on
-   * light. The default is Skia's own tuned value.
+   * light. Defaults to the value Chrome's text is drawn with on the
+   * platform: `0` on macOS and Windows and `1.2` elsewhere.
    */
   textGamma?: number;
 
@@ -2212,8 +2213,8 @@ export interface CanvasGradient {
    * v17 and `instanceof Error` is true for it, so nothing downstream has to
    * learn a new shape.
    *
-   * The color may also be a `[r, g, b, a]` array of premultiplied
-   * linear-light floats, which no browser accepts.
+   * The color may also be a `[r, g, b, a]` array of sRGB components, which
+   * no browser accepts -- see {@link Color4fInput}.
    *
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasGradient/addColorStop)
    */
@@ -3474,7 +3475,13 @@ export type CanvasLineCap = "butt" | "round" | "square";
  * @category Drawing Styles
  */
 export type CanvasLineJoin = "bevel" | "miter" | "round";
-// type CanvasFontKerning = "auto" | "none" | "normal";
+/**
+ * Whether kerning is applied: `"auto"` and `"normal"` apply the font's
+ * kerning, as Chrome does, and `"none"` does not.
+ *
+ * @category Text and Fonts
+ */
+export type CanvasFontKerning = "auto" | "none" | "normal";
 /**
  * The small-caps and related capitalisation features, where the font provides them.
  *
@@ -3488,7 +3495,16 @@ export type CanvasFontVariantCaps =
   | "small-caps"
   | "titling-caps"
   | "unicase";
-// type CanvasTextRendering = "auto" | "geometricPrecision" | "optimizeLegibility" | "optimizeSpeed";
+/**
+ * What text is drawn for, with the meanings Chrome gives the SVG keywords:
+ * `"auto"` and `"optimizeLegibility"` alike, `"optimizeSpeed"` without the
+ * font's common ligatures, and `"geometricPrecision"` with the outlines
+ * unhinted.
+ *
+ * @category Text and Fonts
+ */
+export type CanvasTextRendering =
+  "auto" | "geometricPrecision" | "optimizeLegibility" | "optimizeSpeed";
 
 /**
  * A displacement, as an `[x, y]` pair or one number used for both axes.
@@ -3866,15 +3882,16 @@ export interface CanvasFillStrokeStyles {
    * Color inputs follow the [`Color4fInput`] convention:
    *
    * - A **CSS string** (`"#ff8800"`, `"rgb(...)"`, named colors) is parsed as
-   *   sRGB-gamma. `hwba()`, `hsv()`, `hsva()`, hex without its `#`
-   *   (`"ff8800"`) and legacy comma syntax CSS Color 4 does not allow
-   *   (`"rgb(255, 0%, 0)"`, `"hsl(120, 100, 50)"`, `"lab(50, 40, 30)"`) are
-   *   **deprecated**: no browser accepts them, and 7.0 ignores them as a
-   *   browser does. Until then they paint as they always have.
-   * - A **`[r, g, b, a]` array** carries premultiplied **linear-light** floats
-   *   interpreted in the surface's working color space; pass these to avoid
-   *   the lossy sRGB-encoding round-trip used by the CSS form (the shape
-   *   mirrors `TextStyleInput.color` and CanvasKit's `Paint.setColor`).
+   *   sRGB-gamma. `hwba()`, `hsv()`, `hsva()` and hex without its `#`
+   *   (`"ff8800"`), which no CSS defines, and comma syntax CSS Color 4 does
+   *   not allow (`"rgb(255, 0%, 0)"`, `"hsl(120, 100, 50)"`,
+   *   `"lab(50, 40, 30)"`) are ignored, as a browser ignores them.
+   *   `"currentcolor"` is opaque black, as on a canvas outside a document,
+   *   comments are dropped, and whitespace is CSS's: space, tab, line feed,
+   *   carriage return and form feed, so a U+00A0 makes a string no colour.
+   * - A **`[r, g, b, a]` array** carries sRGB components, the same color on
+   *   every canvas -- see {@link Color4fInput} (the shape mirrors
+   *   `TextStyleInput.color` and CanvasKit's `Paint.setColor4f`).
    *
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/fillStyle)
    */
@@ -4214,11 +4231,25 @@ export interface CanvasTextDrawingStyles {
    */
   fontVariantCaps: CanvasFontVariantCaps;
 
-  // UNIMPLEMENTED
-  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/textRendering) */
-  // textRendering: CanvasTextRendering;
-  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/fontKerning) */
-  // fontKerning: CanvasFontKerning;
+  /**
+   * What text is drawn for -- see {@link CanvasTextRendering}.
+   * `"geometricPrecision"` draws unhinted whatever `fontHinting` says, as
+   * SVG 2 asks of it; the other three leave hinting to `fontHinting`, and
+   * `"optimizeSpeed"` changes no hinting. A ligature set through
+   * {@link CanvasRenderingContext2D.fontVariant} stands instead of
+   * `"optimizeSpeed"`'s. An unrecognised value, `"optimizespeed"` among
+   * them, is ignored.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/textRendering)
+   */
+  textRendering: CanvasTextRendering;
+  /**
+   * Whether kerning is applied -- see {@link CanvasFontKerning}. Setting
+   * `font` leaves it as it was. An unrecognised value is ignored.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/fontKerning)
+   */
+  fontKerning: CanvasFontKerning;
 }
 
 /**
@@ -4309,7 +4340,19 @@ export interface CanvasRenderingContext2D
   fontVariant: FontVariantSetting;
   /** 🧪 Not in the HTML Canvas standard. */
   fontVariationSettings: string;
-  /** 🧪 Not in the HTML Canvas standard. */
+  /**
+   * Whether glyphs are hinted. On by default, at slight hinting, as Chrome
+   * draws text: on macOS CoreGraphics' dilated outline, under FreeType
+   * outlines fitted to the pixel grid vertically, with every advance as
+   * designed. Off draws each glyph as its outline is designed -- undilated
+   * on macOS, unhinted under FreeType -- and no text moves either way. A
+   * `Paragraph` is always drawn hinted. It governs text whose
+   * `textRendering` is `"auto"`, `"optimizeLegibility"` or
+   * `"optimizeSpeed"`; `"geometricPrecision"` draws unhinted whatever this
+   * says.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   fontHinting: boolean;
   /** 🧪 Not in the HTML Canvas standard. */
   textWrap: boolean;
@@ -4728,13 +4771,12 @@ declare var Path2D: {
 /**
  * The dimensions of a piece of text in the canvas, as created by the CanvasRenderingContext2D.measureText() method.
  *
- * The values are the object's own properties, and the object is frozen. The
- * four `actualBoundingBox` values and `lines` come from the outline of every
- * glyph, worked out when the first of them is read and kept for the rest.
- *
- * **Deprecated:** in 7.0 the values become getters on `TextMetrics.prototype`
- * alone, as a browser's are, so `Object.keys`, a spread and `JSON.stringify`
- * will see none of them. Read them by name.
+ * The values are getters on `TextMetrics.prototype`, as HTML's interface
+ * defines them, and the object has no properties of its own: `Object.keys`
+ * is empty and a spread copies nothing. `JSON.stringify` gives every value,
+ * through {@link TextMetrics.toJSON}. The four `actualBoundingBox` values and
+ * `lines` come from the outline of every glyph, worked out when the first of
+ * them is read and kept for the rest.
  *
  * [MDN Reference](https://developer.mozilla.org/docs/Web/API/TextMetrics)
  *
@@ -4782,6 +4824,15 @@ export interface TextMetrics {
    * 🧪 Not in the HTML Canvas standard.
    */
   readonly height: number;
+
+  /**
+   * Every value as a plain object, `lines` included -- what
+   * `JSON.stringify` serialises. Calling it works out the ink box.
+   *
+   * 🧪 Not in the HTML Canvas standard, whose `TextMetrics` has no
+   * `toJSON`; WebIDL's default one, as `DOMRect` has.
+   */
+  toJSON(): Omit<TextMetrics, "toJSON">;
 }
 
 // No construct signature: measurements come from
@@ -4934,7 +4985,7 @@ export interface Font {
   /** CSS numeric weight. */
   weight: number;
   /**
-   * Slant, as `to_slant` reports it. Three values and not an open set: the
+   * Slant, as the binding reports it. Three values and not an open set: the
    * binding maps Skia's slant onto exactly these, so a face is never
    * described by anything else.
    */
@@ -5232,16 +5283,20 @@ export type TextDecorationStyleValue =
 /**
  * Color input shared across the paint, gradient-stop, and text APIs.
  *
- * - A **CSS string** (`"#ff8800"`, `"rgb(...)"`, named colors): interpreted
- *   as sRGB-gamma; alpha taken from the CSS string when present (e.g.
- *   `"#ff8800ff"` or `"rgba(...)"`).
- * - A `[r, g, b, a]` **array** of premultiplied, **linear-light**
- *   sRGB-primaries floats (CanvasKit's `Paint.setColor4f` convention).
- *   Skia converts the linear value to the destination surface's working
- *   color space at paint time, so HDR (`>1.0`) and out-of-gamut values
- *   survive the round trip. Use this form when you have already done a
- *   perceptual-uniform conversion (e.g. OkLCH -> linear sRGB) and want
- *   to avoid the alpha-dropping `oklchToSrgbHex`-style shortcut.
+ * - A **CSS string** (`"#ff8800"`, `"oklch(70% 0.2 140)"`,
+ *   `"color(display-p3 1 0 0)"`, named colors), in the space it names.
+ * - A `[r, g, b, a]` **array** of gamma-encoded **sRGB** components from
+ *   `0` to `1` with straight (not premultiplied) alpha: `[r, g, b, a]` is
+ *   `color(srgb r g b / a)`, CanvasKit's `Color4f` convention. It is the
+ *   same color on every canvas, whatever space the canvas was built in. A
+ *   component below zero or above one reaches a color outside sRGB, as it
+ *   does in `color(srgb ...)`, which a wider canvas shows and a narrower
+ *   one clips. For a color in another space, write the string:
+ *   `color(display-p3 1 0 0)`, `color(srgb-linear 0.2 0.5 0.8)`.
+ *
+ * Text decoration and shadow colors are 8-bit sRGB in Skia, so a color
+ * outside sRGB, in either form, is gamut-mapped into it as CSS Color 4
+ * describes, keeping its hue.
  *
  * Accepted by:
  * - `CanvasRenderingContext2D.fillStyle` / `strokeStyle`
@@ -5287,7 +5342,7 @@ export interface TextShadowInput {
  */
 export interface FontVariationInput {
   /** Four-character OpenType axis tag, such as `"wght"` or `"opsz"`. */
-  axis: string;
+  axis: string | null;
   /** Position on that axis, clamped to the range the typeface declares. */
   value: number;
 }
@@ -5305,15 +5360,26 @@ export interface FontVariationInput {
  */
 export interface TextFontFeatures {
   /** Four-character OpenType feature tag, such as `"smcp"` or `"ss01"`. */
-  name: string;
+  name: string | null;
   /**
    * Feature selector: `1` to enable, `0` to disable, or an index where the
-   * feature offers alternates.
+   * feature offers alternates. A whole number, as CSS's
+   * `font-feature-settings` takes, up to 2147483647; another is a
+   * `RangeError`.
    */
   value?: number;
 }
 
 /**
+ * Each option is converted as WebIDL converts a value to its type, as the
+ * Canvas API's own attributes are: a number by `ToNumber`, so `"12"` is 12;
+ * a string by `ToString`; a boolean by `ToBoolean`; an object of options or
+ * a list as a dictionary or a sequence. A value whose conversion fails --
+ * a number that converts to NaN or an infinity, a list that is not
+ * iterable, a Symbol -- is a `TypeError` naming the option, and an option
+ * left out or `undefined` takes its default, as a string option given
+ * `null` does.
+ *
  * 🧪 Not in the HTML Canvas standard.
  *
  * @category Paragraph Layout
@@ -5347,14 +5413,35 @@ export interface TextStyleInput {
   fontStyle?: {
     /** Weight on the CSS scale, `100` to `900`. */
     weight?: number;
-    /** Width as a percentage of normal, where `100` is unstretched. */
+    /**
+     * Width as the CSS numeric code the `font-stretch` keywords stand for:
+     * `1` ultra-condensed, `5` normal, `9` ultra-expanded. It picks among the
+     * widths the family ships rather than stretching the glyphs. A fraction
+     * is truncated, and a value outside `1` to `9` is pinned to the nearer
+     * end, so `100` read as a percentage asks for ultra-expanded.
+     */
     width?: number;
     /**
-     * `0` upright, `1` italic, `2` oblique: 14deg, drawn as `oblique` text on
-     * a canvas is -- the family's face that leans as asked, or else its
-     * upright face sheared, before any italic.
+     * `0` upright, `1` italic, `2` oblique: at `obliqueAngle`, 14deg
+     * unless given, drawn as `oblique` text on a canvas is -- the family's
+     * face that leans as asked, or else its upright face sheared, before any
+     * italic. Another number is a `RangeError`.
      */
-    slant?: number;
+    slant?: 0 | 1 | 2;
+    /**
+     * The angle of an oblique, in degrees clockwise from upright as CSS
+     * counts it: `oblique 10deg` on a canvas is `{ slant: 2, obliqueAngle:
+     * 10 }` here, and draws the same. From -90 to 90, a negative angle
+     * leaning backwards; 0 draws upright. Left out, an oblique leans by
+     * 14deg, the angle CSS Fonts 4 gives `oblique` alone.
+     *
+     * 🧪 Not in CanvasKit, whose obliques carry no angle.
+     *
+     * @throws {TypeError} An angle that converts to NaN or an infinity, or
+     * one given with a `slant` other than `2`.
+     * @throws {RangeError} A finite angle outside -90 to 90.
+     */
+    obliqueAngle?: number;
   };
   /** Extra space added after each glyph, in pixels. */
   letterSpacing?: number;
@@ -5379,9 +5466,13 @@ export interface TextStyleInput {
    * metrics. Setting it at all turns on the override.
    */
   heightMultiplier?: number;
-  /** Which lines to draw. Combine with `|`: `Underline | LineThrough`. */
+  /**
+   * Which lines to draw. Combine with `|`: `Underline | LineThrough`. A
+   * number that is not a whole mask of those flags, `0` to `7`, is a
+   * `RangeError`.
+   */
   decoration?: TextDecorationMask;
-  /** How those lines are drawn. A code outside the set is refused. */
+  /** How those lines are drawn. A code outside the set is a `RangeError`. */
   decorationStyle?: TextDecorationStyleValue;
   /** Color of the decoration lines. Defaults to the text color. */
   decorationColor?: TextColorInput;
@@ -5412,7 +5503,7 @@ export interface TextStyleInput {
    * and font size supply `wght`, `wdth` and `opsz` unless the list names
    * them. Any other string throws a `TypeError`.
    */
-  fontVariations?: FontVariationInput[] | "normal";
+  fontVariations?: FontVariationInput[] | "normal" | null;
   /**
    * OpenType features applied to the run: small caps (`smcp`/`c2sc`),
    * ligatures (`liga`/`dlig`), oldstyle/tabular/proportional figures
@@ -5433,14 +5524,15 @@ export interface TextStyleInput {
    * characters share codepoints across Japanese and Chinese and differ in
    * shape, and nothing in the text itself says which the reader should see.
    */
-  locale?: string;
+  locale?: string | null;
 }
 
 /**
  * A fixed line box independent of the per-run fonts, for deterministic
  * leading (captions, subtitles, vertically-aligned blocks). Mirrors
  * CanvasKit's `StrutStyle`. Presence on a paragraph style enables the
- * strut unless `enabled` is explicitly `false`.
+ * strut unless `enabled` is explicitly `false`. Each option is converted as
+ * in {@link TextStyleInput}.
  *
  * 🧪 Not in the HTML Canvas standard.
  *
@@ -5481,30 +5573,36 @@ export interface StrutStyleInput {
 export type TextHeightBehavior = 0 | 1 | 2 | 3;
 
 /**
+ * Each option is converted as WebIDL converts a value to its type, as the
+ * Canvas API's own attributes are: a number by `ToNumber`, so `"12"` is 12;
+ * a string by `ToString`; a boolean by `ToBoolean`; an object of options or
+ * a list as a dictionary or a sequence. A value whose conversion fails --
+ * a number that converts to NaN or an infinity, a list that is not
+ * iterable, a Symbol -- is a `TypeError` naming the option, and an option
+ * left out or `undefined` takes its default, as a string option given
+ * `null` does.
+ *
  * 🧪 Not in the HTML Canvas standard.
  *
  * @category Paragraph Layout
  */
 export interface ParagraphStyleInput {
-  /**
-   * Matched case-insensitively. An unrecognised value is ignored and the
-   * default alignment stands, so a typo fails silently.
-   */
-  textAlign?:
-    "left" | "right" | "center" | "justify" | "start" | "end" | (string & {});
+  /** Matched exactly, as `ctx.textAlign` is. Another value is a `TypeError`. */
+  textAlign?: "left" | "right" | "center" | "justify" | "start" | "end" | null;
 
   /**
-   * Base direction for the paragraph. Matched case-insensitively; an
-   * unrecognised value is ignored.
+   * Base direction for the paragraph, matched exactly. Another value is a
+   * `TypeError`.
    */
-  textDirection?: "ltr" | "rtl" | (string & {});
+  textDirection?: "ltr" | "rtl" | null;
   /**
    * Cap on the number of lines. Anything past it is dropped, which
-   * {@link Paragraph.didExceedMaxLines} then reports.
+   * {@link Paragraph.didExceedMaxLines} then reports. A whole number from
+   * `1`; another is a `RangeError`.
    */
   maxLines?: number;
   /** String appended to the last line when `maxLines` truncated the text. */
-  ellipsis?: string;
+  ellipsis?: string | null;
   /**
    * The style text starts in, before any {@link ParagraphBuilder.pushStyle}.
    * Font variations are read from here and nowhere else.
@@ -5514,17 +5612,10 @@ export interface ParagraphStyleInput {
   strutStyle?: StrutStyleInput;
   /**
    * First/last-line leading trim, one of the four {@link TextHeightBehavior}
-   * values. Any other integer is a `RangeError`.
-   *
-   * Typed open, as `number`, so code passing a `number` keeps compiling; 7.0
-   * narrows it to {@link TextHeightBehavior}.
-   *
-   * Deprecated: a number that is not an integer. Today `1.5` is truncated
-   * toward zero, to `1`, and `NaN` or an infinity is ignored, leaving the
-   * default `0`. In 7.0 each is a `RangeError`. Not marked `@deprecated`,
-   * because the option itself is not.
+   * values. Any other number -- `1.5`, `NaN`, an infinity, `4` -- is a
+   * `RangeError`.
    */
-  textHeightBehavior?: TextHeightBehavior | (number & {});
+  textHeightBehavior?: TextHeightBehavior;
 }
 
 /**
@@ -5649,8 +5740,8 @@ export class ParagraphBuilder {
    * Reserve a rectangle in the text flow for something drawn separately.
    *
    * `align` and `baseline` were accepted and discarded until 4.2.0, so every
-   * placeholder laid out on the baseline whatever was passed. A value outside
-   * either set now throws rather than silently reverting to the default.
+   * placeholder laid out on the baseline whatever was passed. A number
+   * outside either set is a `RangeError` rather than the default.
    *
    * @param align - see {@link PlaceholderAlignment}
    * @param baseline - see {@link TextBaseline}; consulted by the three
@@ -5743,7 +5834,7 @@ export class Paragraph {
    * default), `1` the full line height, `2`, `3` and `4` distributing line
    * spacing to the middle, top and bottom, and `5` the strut's height.
    * `wStyle` is `0` for tight or `1` to stretch the last box of a line to
-   * the layout width.
+   * the layout width. A number outside either set is a `RangeError`.
    */
   getRectsForRange(
     start: number,

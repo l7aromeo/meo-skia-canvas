@@ -14,11 +14,13 @@ type Exactly<A, B> =
 // an editor offers.
 export const codes: Exactly<TextHeightBehavior, 0 | 1 | 2 | 3> = true;
 
-// Each code is an option value, and so, until 7.0, is any `number`: code
-// passing one kept compiling when the option was typed `number`.
+// Each code is an option value, and nothing else is: a `number` the
+// compiler cannot narrow is refused, as the binding refuses one outside the
+// four at run time.
 const computed: number = 2;
 export const options: ParagraphStyleInput[] = [
   { textHeightBehavior: 0 },
   { textHeightBehavior: 3 },
+  // @ts-expect-error -- a `number` is wider than the four codes.
   { textHeightBehavior: computed },
 ];

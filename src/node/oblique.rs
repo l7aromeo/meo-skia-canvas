@@ -26,8 +26,8 @@
 //! as it is filled in, and painted by `Paragraph::paint` alone.
 
 use crate::{
-    context2d::DEFAULT_OBLIQUE_DEGREES,
     font::leans_as_asked,
+    font_library::text_hinting,
     node::{
         decorate::{
             self, Decoration, FaceLines, Layer, Span, Spans, Thickness,
@@ -57,8 +57,8 @@ use unicode_segmentation::GraphemeCursor;
 /// moves every later text offset.
 const PLACEHOLDER_CHARACTER: char = '\u{FFFC}';
 
-/// The slant a style asking for `font_style` is laid out in, or `None`
-/// where it does not ask for oblique.
+/// The slant a style asking for `font_style`, an oblique of `degrees`, is
+/// laid out in, or `None` where it does not ask for oblique.
 ///
 /// `Oblique` where the family's face for an oblique request leans as asked
 /// -- a face flagged oblique, or one whose `slnt` axis is already set --
@@ -70,6 +70,7 @@ pub(crate) fn oblique_layout_slant(
     collection: &mut FontCollection,
     families: &[&str],
     font_style: FontStyle,
+    degrees: f32,
 ) -> Option<Slant> {
     if font_style.slant() != Slant::Oblique {
         return None;
@@ -77,40 +78,39 @@ pub(crate) fn oblique_layout_slant(
     let leans = collection
         .find_typefaces(families, font_style)
         .first()
-        .is_some_and(|face| leans_as_asked(face, DEFAULT_OBLIQUE_DEGREES));
+        .is_some_and(|face| leans_as_asked(face, degrees));
     Some(match leans {
         true => Slant::Oblique,
         false => Slant::Upright,
     })
 }
 
-/// Sets `style` to the slant [`oblique_layout_slant`] lays it out in, and
-/// says whether it asks for oblique.
+/// Sets `style`, which asks for an oblique of `degrees` if any, to the slant
+/// [`oblique_layout_slant`] lays it out in, and gives the angle back where
+/// it does ask for oblique.
 pub(crate) fn match_oblique(
     style: &mut TextStyle,
     collection: &mut FontCollection,
-) -> bool {
+    degrees: f32,
+) -> Option<f32> {
     let font_style = style.font_style();
     if font_style.slant() != Slant::Oblique {
-        return false;
+        return None;
     }
     let families = style.font_families();
     let families: Vec<&str> = families.iter().collect();
-    let Some(slant) = oblique_layout_slant(collection, &families, font_style)
-    else {
-        return false;
-    };
+    let slant =
+        oblique_layout_slant(collection, &families, font_style, degrees)?;
     style.set_font_style(FontStyle::new(
         font_style.weight(),
         font_style.width(),
         slant,
     ));
-    true
+    Some(degrees)
 }
 
-/// Puts `slnt` among `coordinates`, at the default oblique angle, unless
-/// they set it already: the font arguments of a style that asks for
-/// oblique.
+/// Puts `slnt` among `coordinates`, at an oblique of `degrees`, unless they
+/// set it already: the font arguments of a style that asks for oblique.
 ///
 /// An oblique is a font of its own, and this is how SkParagraph is told so.
 /// It shapes adjacent styles as one run wherever their font style,
@@ -118,12 +118,14 @@ pub(crate) fn match_oblique(
 /// oblique range whose face is the upright one formed a ligature with the
 /// text beside it -- "fi" across the edge drawn half sheared, half not. With
 /// the coordinate, shaping breaks at the edge, as it does at any change of
-/// font. A face without the axis ignores it.
-pub(crate) fn add_slnt(coordinates: &mut Vec<Coordinate>) {
+/// font, and between two obliques of different angles. A face without the
+/// axis ignores it. OpenType counts `slnt` counter-clockwise, so the
+/// coordinate is the angle negated.
+pub(crate) fn add_slnt(coordinates: &mut Vec<Coordinate>, degrees: f32) {
     if !coordinates.iter().any(|coordinate| coordinate.axis == SLNT) {
         coordinates.push(Coordinate {
             axis: SLNT,
-            value: -DEFAULT_OBLIQUE_DEGREES,
+            value: -degrees,
         });
     }
 }
@@ -169,9 +171,9 @@ pub(crate) struct ParagraphRecipe {
     /// found once a epoch -- see [`FaceLines::first_available`].
     epoch: Option<Rc<FontEpoch>>,
     steps: Vec<Step>,
-    /// Each style pushed, without its decoration or its shadows, and
-    /// whether it asks for oblique.
-    styles: Vec<(TextStyle, bool)>,
+    /// Each style pushed, without its decoration or its shadows, and the
+    /// angle of the oblique it asks for, if any.
+    styles: Vec<(TextStyle, Option<f32>)>,
     /// Each style's decoration and shadows, by slot: the paragraph style's
     /// own text style's at 0 and each pushed style's after it, at its index
     /// in `styles` plus 1. Both are drawn here rather than by SkParagraph --
@@ -182,32 +184,40 @@ pub(crate) struct ParagraphRecipe {
     backgrounds: Vec<Option<StyleBackground>>,
     /// The length of the builder's text, in UTF-8 bytes.
     length: usize,
-    /// Whether the paragraph style's own text style asks for oblique.
-    base_oblique: bool,
+    /// The angle of the oblique the paragraph style's own text style asks
+    /// for, if any.
+    base_oblique: Option<f32>,
     /// Whether any style does, the paragraph's own included.
     oblique: bool,
+    /// Whether any style splits its leading half above and half below,
+    /// the paragraph's own included -- see [`without_paragraph_cache`].
+    half_leading: bool,
 }
 
 impl ParagraphRecipe {
-    /// A paragraph in `style`, whose text style says by `base_oblique`
-    /// whether it asks for oblique -- [`match_oblique`]'s answer for it --
-    /// laid out in `collection`, built over the fonts of `epoch` where it
-    /// came from the shared library.
+    /// A paragraph in `style`, whose text style asks for the oblique
+    /// `base_oblique` gives the angle of, if any -- [`match_oblique`]'s
+    /// answer for it -- laid out in `collection`, built over the fonts of
+    /// `epoch` where it came from the shared library.
+    ///
+    /// A paragraph's glyphs are drawn hinted, every style's, as canvas text
+    /// is by default -- see `font_library::text_hinting` -- so the paragraph
+    /// style's own text style is set so here, and each pushed style in
+    /// [`Self::push_style`].
     pub(crate) fn new(
         mut style: ParagraphStyle,
-        base_oblique: bool,
+        base_oblique: Option<f32>,
         mut collection: FontCollection,
         epoch: Option<Rc<FontEpoch>>,
     ) -> Self {
         let mut base = style.text_style().clone();
+        base.set_font_hinting(text_hinting(true));
         let decoration =
             StyleDecoration::take(&mut base, &mut collection, epoch.as_ref());
         let shadows = take_shadows(&mut base);
         let background =
             StyleBackground::take(&mut base, &mut collection, epoch.as_ref());
-        if decoration.is_some() || !shadows.is_empty() || background.is_some() {
-            style.set_text_style(&base);
-        }
+        style.set_text_style(&base);
         let mut decorations = Vec::with_capacity(4);
         decorations.push(decoration);
         let mut shadow_slots = Vec::with_capacity(4);
@@ -226,12 +236,19 @@ impl ParagraphRecipe {
             backgrounds,
             length: 0,
             base_oblique,
-            oblique: base_oblique,
+            oblique: base_oblique.is_some(),
+            half_leading: base.half_leading(),
         }
     }
 
-    /// Pushes `style`, which `oblique` says asks for oblique.
-    pub(crate) fn push_style(&mut self, mut style: TextStyle, oblique: bool) {
+    /// Pushes `style`, which asks for an oblique of the angle `oblique`
+    /// gives, if any, hinted -- see [`Self::new`].
+    pub(crate) fn push_style(
+        &mut self,
+        mut style: TextStyle,
+        oblique: Option<f32>,
+    ) {
+        style.set_font_hinting(text_hinting(true));
         let decoration = StyleDecoration::take(
             &mut style,
             &mut self.collection,
@@ -244,7 +261,8 @@ impl ParagraphRecipe {
             self.epoch.as_ref(),
         );
         self.builder.push_style(&style);
-        self.oblique |= oblique;
+        self.oblique |= oblique.is_some();
+        self.half_leading |= style.half_leading();
         self.steps.push(Step::Push(self.styles.len()));
         self.styles.push((style, oblique));
         self.decorations.push(decoration);
@@ -268,6 +286,13 @@ impl ParagraphRecipe {
         self.builder.add_placeholder(placeholder);
         self.length += PLACEHOLDER_CHARACTER.len_utf8();
         self.steps.push(Step::Placeholder(placeholder.clone()));
+    }
+
+    /// The collection whose paragraph cache this paragraph's layouts have to
+    /// go without, where a style splits its leading -- see
+    /// [`without_paragraph_cache`].
+    pub(crate) fn uncached(&self) -> Option<FontCollection> {
+        self.half_leading.then(|| self.collection.clone())
     }
 
     /// The paragraph, not yet laid out, and what paints it where it has an
@@ -300,7 +325,7 @@ impl ParagraphRecipe {
             .filter(|pair| pair[0].0.end == pair[1].0.start)
             .map(|pair| pair[1].0.start)
             .collect();
-        let (paints, sheared): (Vec<Paint>, Vec<bool>) = self
+        let (paints, sheared): (Vec<Paint>, Vec<Option<f32>>) = self
             .text_styles()
             .zip(once(self.base_oblique).chain(self.styles.iter().map(|s| s.1)))
             .map(|(style, oblique)| (foreground(style), oblique))
@@ -426,12 +451,12 @@ impl ParagraphRecipe {
     /// glyph cluster, a ligature's, which only the layout tells -- see
     /// [`Passes::lay_out`].
     fn keep_graphemes_whole(&mut self, text: &str) -> (bool, Vec<usize>) {
-        let mut stack = vec![(self.base_oblique, 0)];
+        let mut stack = vec![(self.base_oblique.is_some(), 0)];
         let mut pieces = Vec::new();
         for (at, step) in self.steps.iter().enumerate() {
             match step {
                 Step::Push(style) => {
-                    stack.push((self.styles[*style].1, style + 1));
+                    stack.push((self.styles[*style].1.is_some(), style + 1));
                 }
                 Step::Pop if stack.len() > 1 => {
                     stack.pop();
@@ -506,7 +531,7 @@ impl ParagraphRecipe {
     fn replay(
         &self,
         text: &str,
-        restyle: impl Fn(&TextStyle, bool, usize) -> Option<TextStyle>,
+        restyle: impl Fn(&TextStyle, Option<f32>, usize) -> Option<TextStyle>,
     ) -> Paragraph {
         self.replay_builder(text, restyle).build()
     }
@@ -515,7 +540,7 @@ impl ParagraphRecipe {
     fn replay_builder(
         &self,
         text: &str,
-        restyle: impl Fn(&TextStyle, bool, usize) -> Option<TextStyle>,
+        restyle: impl Fn(&TextStyle, Option<f32>, usize) -> Option<TextStyle>,
     ) -> ParagraphBuilder {
         let style = match restyle(self.style.text_style(), self.base_oblique, 0)
         {
@@ -766,6 +791,41 @@ impl StyleDecoration {
     }
 }
 
+/// Runs `lay_out` with `collection`'s paragraph cache off where one is
+/// given -- see [`ParagraphRecipe::uncached`] -- and on again after.
+///
+/// SkParagraph's cache matches two paragraphs whose styles differ only in
+/// `halfLeading` and hands the second the first's runs, whose ascent and
+/// descent the first's leading rule already set, so whichever was laid out
+/// first decides both. With the cache off for its layouts, a paragraph that
+/// splits its leading neither takes another's runs nor leaves its own for
+/// another to take, and every other paragraph keeps the cache. Nothing in
+/// this crate turns a collection's cache off otherwise, so on is what it
+/// goes back to.
+///
+/// The flag is the collection's, so no other layout may run on it between
+/// the two switches, and none can: skia-safe's `FontCollection` is neither
+/// `Send` nor `Sync`, and nothing here wraps one in skia-safe's `Sendable`,
+/// so a collection is used only on the thread that made it -- each thread
+/// has its own `FontLibrary`, and `TextEngine` cannot leave its thread.
+/// `Paragraph::layout` runs to the end without calling back into this
+/// crate, so nothing on that thread lays out between the switches either.
+// UPSTREAM: skia-safe 0.153.3 -- https://github.com/google/skia/commit/e0d79efbf171fdd78063f7673d517491154c9a7a -- worked around
+// Re-check: cargo test a_half_leading_paragraph_is_not_laid_out_as_another_was
+pub(crate) fn without_paragraph_cache<T>(
+    collection: Option<&FontCollection>,
+    lay_out: impl FnOnce() -> T,
+) -> T {
+    let Some(collection) = collection else {
+        return lay_out();
+    };
+    let mut collection = collection.clone();
+    collection.paragraph_cache_mut().turn_on(false);
+    let laid_out = lay_out();
+    collection.paragraph_cache_mut().turn_on(true);
+    laid_out
+}
+
 /// What paints a paragraph that has an oblique range, a decoration, a shadow
 /// or a background, or a ligature in two colours -- see
 /// [`Self::ligature_edges`]: SkParagraph lays it out, and this draws every
@@ -788,7 +848,7 @@ pub(crate) struct Passes {
     /// Each slot's glyph paint, whether it asks for oblique, and its text
     /// shadows.
     paints: Vec<Paint>,
-    sheared: Vec<bool>,
+    sheared: Vec<Option<f32>>,
     shadows: Vec<Vec<TextShadow>>,
     /// Each decorated style's decoration, by box, its text shadows, and the
     /// text each box decorates -- see `decorate::box_at`.
@@ -1032,7 +1092,7 @@ impl Passes {
         if self.per_line_only {
             return false;
         }
-        !self.sheared.contains(&true)
+        self.sheared.iter().all(Option::is_none)
             // A decorated style's shadows are its slot's too, so this
             // covers a decoration's shadow as well as the glyphs'.
             && self.shadows.iter().all(Vec::is_empty)
@@ -1086,12 +1146,11 @@ impl Passes {
         slot: usize,
         out: &mut Vec<PaintedRun>,
     ) {
-        let sheared = self.sheared[slot];
-        let shear = match sheared {
-            true => {
-                run_shear(&run.font.typeface(), Some(DEFAULT_OBLIQUE_DEGREES))
-            }
-            false => Shear::None,
+        let degrees = self.sheared[slot];
+        let sheared = degrees.is_some();
+        let shear = match degrees {
+            Some(degrees) => run_shear(&run.font.typeface(), Some(degrees)),
+            None => Shear::None,
         };
         let Some(blob) = sheared_blob(
             run.font,
@@ -1274,6 +1333,7 @@ mod tests {
         ParagraphRecipe, Piece, add_slnt, match_oblique, set_coordinates,
         whole_graphemes,
     };
+    use crate::font::ObliqueAngle;
     use skia_safe::{
         Color, Data, FontMgr, FontStyle, GlyphId, ImageInfo, Point,
         font_style::{Slant, Weight, Width},
@@ -1425,9 +1485,9 @@ mod tests {
         let mut paragraph_style = ParagraphStyle::new();
         paragraph_style.set_text_style(&style(Color::BLACK));
         let mut recipe =
-            ParagraphRecipe::new(paragraph_style, false, collection, None);
+            ParagraphRecipe::new(paragraph_style, None, collection, None);
         for (text, color) in pieces {
-            recipe.push_style(style(*color), false);
+            recipe.push_style(style(*color), None);
             recipe.add_text(text);
             recipe.pop();
         }
@@ -1580,7 +1640,7 @@ mod tests {
         collection: &mut FontCollection,
         oblique: bool,
         visible: bool,
-    ) -> (TextStyle, bool) {
+    ) -> (TextStyle, Option<f32>) {
         let mut style = TextStyle::new();
         style
             .set_font_families(&[RALEWAY])
@@ -1596,10 +1656,11 @@ mod tests {
                 Slant::Oblique,
             ));
         }
-        let oblique = match_oblique(&mut style, collection);
-        if oblique {
+        let degrees = ObliqueAngle::DEFAULT.degrees();
+        let oblique = match_oblique(&mut style, collection, degrees);
+        if oblique.is_some() {
             let mut coordinates = Vec::new();
-            add_slnt(&mut coordinates);
+            add_slnt(&mut coordinates, degrees);
             set_coordinates(&mut style, &coordinates);
         }
         (style, oblique)
@@ -1899,7 +1960,7 @@ mod tests {
 
         let mut recipe = ParagraphRecipe::new(
             ParagraphStyle::new(),
-            generated.1,
+            generated.1.then_some(ObliqueAngle::DEFAULT.degrees()),
             collection.clone(),
             None,
         );
@@ -2083,9 +2144,9 @@ mod tests {
         let mut paragraph_style = ParagraphStyle::new();
         paragraph_style.set_text_style(&base);
         let mut recipe =
-            ParagraphRecipe::new(paragraph_style, false, collection, None);
+            ParagraphRecipe::new(paragraph_style, None, collection, None);
         for (text, style) in pieces {
-            recipe.push_style(style.clone(), false);
+            recipe.push_style(style.clone(), None);
             recipe.add_text(text);
             recipe.pop();
         }

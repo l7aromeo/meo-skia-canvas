@@ -23,6 +23,96 @@ independently of the npm package.
 CSS colour spellings that resolved to the wrong colour, and letting a Rust
 window be changed after it opens.** No signature moves and nothing is removed.
 
+### Breaking
+
+- **`Context2D::font_hinting` is `true` until it is set.** It was `false`,
+  though text was drawn hinted either way, since the setting did nothing; it
+  now takes effect, and on is what text was always drawn at. Code that read
+  it to decide something gets the other answer.
+
+  Migrate: where the old `false` was taken to mean unhinted text, read it as
+  hinted, which is what was drawn; call `set_font_hinting(false)` to have
+  the outlines as designed.
+
+- **An `RgbaLinear` is linear-light sRGB on every canvas.** It meant
+  linear light in the canvas's own primaries for a fill, a stroke and a
+  gradient stop, and sRGB for a shadow, a drop-shadow filter, a texture, a
+  matte and a text colour, so one value painted two colours on a Display
+  P3 or Rec. 2020 canvas: `RgbaLinear::opaque(1.0, 0.0, 0.0)`
+  filled P3 red and cast an sRGB-red shadow. Every reader now takes CSS's
+  `srgb-linear`, unbounded, and a colour outside sRGB is reached with
+  components below zero or above one, which is what `RgbaLinear::from_css`
+  returns: `from_css("color(display-p3 1 0 0)")` fills, strokes, shadows
+  and stops in P3 red on a P3 canvas, and on an sRGB canvas in the sRGB
+  red it clips to. On an sRGB canvas nothing paints differently.
+
+  Migrate: on a wide canvas, build a colour named in its space with
+  `RgbaLinear::from_css("color(display-p3 r g b)")`, or pass the string to
+  `set_fill_style_css`, where you passed `RgbaLinear::opaque(r, g, b)` or
+  `from_srgb(r, g, b, a)` meaning the canvas's own primaries.
+
+- **`color(rec2020 ...)` decodes by a 2.4 gamma, as CSS Color 4 now
+  defines it.** Section 10.8 gives `rec2020`'s transfer function as "gamma
+  2.40, from [REC_BT.1886]", changed from BT.2020's inverse OETF since the
+  Candidate Recommendation Draft of 24 April 2025. This crate used the old
+  curve, as Chrome 152 still does. `color(rec2020 0.2 0.2 0.2)` paints 40 where it
+  painted 67, in every `set_*_css` setter and `RgbaLinear::from_css`, and
+  `color(rec2020 0.2 0.4 0.6)` paints 0, 97, 153 on an sRGB canvas where it
+  painted 0, 120, 168. A Rec. 2020 canvas stores by the same curve, so a
+  colour named in `rec2020` reads back from one as it was named.
+  docs/browser-differences.md records Chrome's values.
+
+  `GradientColorSpace::Rec2020` mixes by the same curve. Skia's own
+  Rec. 2020 interpolation space uses BT.2020's piecewise curve, so the
+  gradient is now computed in a working space carrying the 2.4 gamma: a
+  `rgb(250 2 0)` to `rgb(0 0 254)` ramp reads 157, 18, 143 at its midpoint
+  where it read 159, 19, 147, in every geometry and on both engines. An SVG
+  export embeds such a gradient as an image, as it does a sweep, because
+  the SVG backend does not recognise the wrapped shader as a gradient.
+
+  Migrate: a `rec2020` colour written for the old curve, with each
+  component `c` above 0.081, is the same colour at
+  `((c + 0.0993) / 1.0993) ^ (1 / 0.45 / 2.4)`.
+
+- **A colour function written with a space before its `(` is refused.**
+  `rgb (255 0 0)`, `lab (50 40 30)`, `color (srgb 1 0 0)` and the rest
+  painted as if the space were not there. CSS Syntax reads such a name and
+  its brackets as a word and a block, not a function, and Chrome 153
+  ignores every one. Each `set_*_css` setter now returns its colour error
+  for them and leaves the style as it was, and `RgbaLinear::from_css`
+  returns `None`. Nothing deprecated this first; it went with the parser
+  that read it, `csscolorparser`, which the crate no longer depends on.
+
+  Migrate: write the name and its `(` together, `rgb(255 0 0)`.
+
+- **Legacy comma syntax CSS Color 4 does not allow is refused.** Each of
+  these painted here and is refused by Chrome 153: numbers and percentages
+  mixed, `rgb(255, 0%, 0)`; separators mixed, `rgb(255,0 0)`; `hsl()` with
+  bare numbers, `hsl(120, 100, 50)`; `none` in a channel,
+  `rgb(none, 0, 0)`; and commas in a function with no legacy syntax,
+  `hwb(120, 0%, 0%)`, `lab(50, 40, 30)`, `oklch(0.6, 0.2, 30)` and
+  `color(srgb 1, 0, 0)`. Each `set_*_css` setter now returns its colour
+  error for them and leaves the style as it was, and `RgbaLinear::from_css`
+  returns `None`.
+
+  Migrate: write the channels space-separated, `rgb(255 0 0)`, or in the
+  legacy form the function allows, `rgb(255, 0, 0)`.
+
+- **`hwba()`, `hsv()`, `hsva()` and hex without its `#` are refused as
+  colours.** No CSS defines them, and Chrome 153 refuses
+  `hwba(0 0% 0%)`, `hsv(0 100% 100%)`, `hsva(0 100% 100% / 0.5)` and
+  `"ff0000"`, each of which every `set_*_css` setter and
+  `RgbaLinear::from_css` read as red. Each `set_*_css` setter now returns
+  the error it returns for any colour that does not parse and leaves the
+  style as it was, and `RgbaLinear::from_css` returns `None`, relative
+  forms included -- `hsv(from red h s v)`. `RgbaLinear::from_hex`, which
+  takes hex without a `#` by design, is unchanged.
+
+  Migrate: write `#` before the hex digits, and `hwb()` for the rest:
+  `hsv(h s v)` with `s` and `v` out of 100 is
+  `hwb(h calc((100 - s) * v / 100) calc(100 - v))`, and `hwba()` is
+  `hwb()`.
+
 ### Fixed
 
 - **Text decorations sit where the font puts them, beneath the glyphs.**
@@ -75,6 +165,113 @@ window be changed after it opens.** No signature moves and nothing is removed.
   font changes inside a cluster, the two sides are shaped apart and each
   keeps its own colour, as in Chrome. A paragraph in several colours with
   no change inside a cluster is drawn as it was.
+- **`Context2D::set_font_hinting(false)` draws the outlines as designed.**
+  It turned hinting off on the paragraph style, which SkParagraph never
+  reads, so every glyph was drawn at Slight hinting whatever it said.
+  `set_font_hinting(false)` now takes effect, and its default is on, at
+  Slight, as Chrome draws text: on macOS, where Skia's CoreText port dilates
+  the outline at every level but none, Chrome 156 draws the same pixels.
+  Turned off, a glyph is its outline as designed -- undilated on macOS,
+  where 13px text draws more than a third lighter, and unhinted under
+  FreeType on Linux. No text moves either way, and what is drawn by default
+  does not change. A paragraph from `TextEngine`, which has no hinting
+  setting, is drawn hinted, as it was.
+
+- **Text is drawn with Chrome's text contrast and gamma for the platform.**
+  Glyph coverage was corrected with a gamma of 1.4 and no contrast by
+  default, Skia's Android setting, which matches no browser: on macOS, 13px
+  Helvetica drew 160,167 of alpha where Chrome 156 draws 136,770. A canvas
+  now takes the text contrast and gamma Chromium builds Skia with on the
+  platform -- on macOS a contrast of 0 and the sRGB curve, on Windows a
+  contrast of 1 and the sRGB curve, elsewhere 0.2 and 1.2 -- and on macOS
+  draws Helvetica at 13px and 48px and 48px Oswald pixel for pixel as Chrome
+  does, and 13px Oswald but for one glyph a hair's width from a subpixel
+  boundary. Text changes on every platform; the Linux and Windows values are
+  Chromium's and have not been compared with a Chrome there.
+  `CanvasOptions::text_contrast` and `text_gamma` still take any value.
+
+- **A registered family matches its name in any case.** CSS Fonts 4
+  matches family names without regard to case, and the system's families
+  were found that way, but a family registered with `FontLibrary::use_paths`
+  or `use_data` was filed under its exact spelling: registered as
+  `"OswaldX"`, `set_font_css("16px oswaldx")` and a `TextEngine` style
+  naming `"oswaldx"` drew the fallback. Each now draws the registered
+  family. Letters outside ASCII still have to match exactly; CSS asks for
+  Unicode case folding there.
+
+- **A font's line height spaces wrapped lines by its pixels.**
+  `Font::line_height` takes pixels, as does the line height in a shorthand
+  `Font::from_css` reads, and wrapped text took it as a multiple of the font
+  size: 30px at 48px put the second line 1440px below the first. Lines now
+  lie the line height apart, with the space beyond the face's ascent and
+  descent split half above and half below, CSS 2.1 section 10.8.1's line
+  box. In a shorthand at 48px, `30px` is 30, `1` 48, `150%` 72 and `0.5em`
+  24, and `normal` keeps the face's own spacing.
+
+- **CSS strings are read with CSS's whitespace, comments and names, and no
+  more.**
+  - Whitespace is space, tab, line feed, carriage return and form feed.
+    `set_fill_style_css`, `RgbaLinear::from_css`, `set_filter_css`,
+    `Font::from_css` and `Affine::from_css` trimmed or split at any Unicode
+    space, so `"red\u{a0}"` was red and
+    `"blur(2px)\u{a0}grayscale(1)"` a filter; each is now refused, as
+    Chrome 152 refuses it.
+  - A comment is dropped, as CSS Syntax drops one, in every CSS string the
+    crate reads -- `set_fill_style_css`, `Font::from_css`, `set_filter_css`,
+    `Affine::from_css` and the spacing setters: `rgb(255,/**/0,0)`,
+    `12px/**/serif` and `blur(/**/2px)` were refused and are read. A
+    comment in a quoted family name is part of the name. A comment still
+    ends the token before it, so `rgb/**/(255 0 0)` and `blur(2/**/px)`
+    stay refused, and a sign it parts from what follows stands alone, so
+    `rgb(255 -/**/10 0)` is refused rather than read as -10. A comment
+    beside a colour keyword, `red/**/`, is dropped too, where Chrome ignores
+    the whole value; docs/browser-differences.md says why.
+  - `set_letter_spacing_css` and `set_word_spacing_css` take whitespace and
+    comments around the length, `" 5px "` and `"/**/5px"`, which they
+    refused: CSS Syntax discards both there. Chrome 152 ignores them;
+    docs/browser-differences.md records it.
+  - `currentcolor` is opaque black, `rgb(from currentcolor r g b)` too,
+    where it was refused: CSS Color 4 resolves it from the `color`
+    property's initial value when there is no element, and a canvas here
+    has none.
+  - A family name holds only the code points CSS Syntax 3 lists as a
+    name's, so `Font::from_css("12px a\u{b5}b")` is `None` where it read
+    the family `aµb`, and `12px a·b` is read where it was refused. Chrome
+    152 takes both, under the older rule that any code point at or above
+    U+0080 is a name's; docs/browser-differences.md records it. A name
+    starts as CSS Syntax says, so `12px -1x` and `12px -`, which read as
+    families, are refused, and an escape in an unquoted name is decoded,
+    `12px \61 bc` naming `abc` where it was refused, as in Chrome.
+
+- **`TextStyle::half_leading` takes effect whatever paragraph was laid out
+  before.** SkParagraph's paragraph cache matched two paragraphs whose
+  styles differ only in `half_leading` and handed the second the first's
+  layout, so the first one laid out decided every later one: in 48px Oswald
+  at a line height of 2, a baseline that splits the spare height half above
+  and half below sits 69.70 down and one that scales the line sits 77.28
+  down. A paragraph with `half_leading` on any style now lays out without
+  the cache, and every other paragraph keeps it. Fixed in Skia, not yet in
+  the skia-safe this release builds on.
+
+- **A shadow, a drop-shadow filter, `ColorFilter::blend`, a texture and an
+  export's matte keep a colour outside sRGB.** `set_shadow_color` and
+  `set_shadow_color_css`, `ColorFilter::blend`, `TextureOptions::color`
+  and the matte of `to_buffer` and `get_image_data_with` held eight-bit
+  sRGB, so `color(display-p3 1 0 0)` cast a shadow of sRGB red on a P3
+  canvas, beside a fill of P3 red, and a shadow colour read back rounded to
+  a 255th. Each is now kept in floating point and reaches the canvas as
+  itself; `shadow_color()` returns the `RgbaLinear` that was set.
+
+- **A colour outside sRGB keeps its hue where Skia takes only eight-bit
+  sRGB.** A text decoration, a text shadow, the lighting filters' light
+  colour, an SVG's `currentColor` and a window's background clipped each
+  channel to `0..1` on its own, which turns P3 red more orange. They now
+  map it into sRGB as CSS Color 4 section 14.2.2 does, reducing its chroma
+  in Oklch at its own lightness and hue until clipping costs less than a
+  just-noticeable difference. A colour inside sRGB gives the bytes it gave.
+  `ColorFilter::lighting`'s multiply and add are per-channel coefficients
+  rather than colours, and are still clamped channel by channel, as its
+  documentation now says.
 
 - **`outline_text` and the ink box put every glyph where `fill_text` draws
   it.** A glyph the shaper moves off its advance -- a mark stacked over
@@ -185,13 +382,12 @@ window be changed after it opens.** No signature moves and nothing is removed.
 - **`Context2D::fill_style()` and `stroke_style()` report a colour set
   from CSS as the colour it paints.** They handed back the components
   `set_fill_style_css` held, sRGB-encoded in the space the colour was named
-  in, as if they were linear light in the canvas's working space, which is
-  what an `RgbaLinear` is. So `"rebeccapurple"` read back as 0.4, 0.2, 0.6,
+  in, as if they were linear light, which is what an `RgbaLinear` is. So `"rebeccapurple"` read back as 0.4, 0.2, 0.6,
   and passing that to `set_fill_style` painted 170, 124, 203 where the CSS
   had painted 102, 51, 153; on a Display P3 canvas even `rgb(255 0 0 / 50%)`
-  came back off. The report is now converted the way a paint converts the
-  colour, into linear light in the working primaries: on an sRGB canvas it
-  is `RgbaLinear::from_css`, and on both an sRGB and a Display P3 canvas,
+  came back off. The report is now converted into linear-light sRGB, the
+  frame an `RgbaLinear` is in: it is `RgbaLinear::from_css`, and on both an
+  sRGB and a Display P3 canvas,
   seven colours named in sRGB, linear sRGB, P3 and Rec. 2020 repaint
   byte-identical from their report. A colour set through `set_fill_style`
   reads back unchanged, as before.
@@ -510,6 +706,18 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Added
 
+- **`Context2D::set_font_kerning` and `set_text_rendering`, with the
+  `FontKerning` and `TextRendering` enums**, the Canvas standard's
+  `fontKerning` and `textRendering`. `FontKerning::None` lays text out
+  without the font's kerning; `TextRendering::OptimizeSpeed` turns the
+  common ligatures off, `OptimizeLegibility` draws as `Auto`, and
+  `GeometricPrecision` draws unhinted whatever `set_font_hinting` says, as
+  Chrome 152 draws each and SVG 2 section 13.10.2 describes the last. Both
+  are kept by `save` and `restore`, reset by `reset`, and left alone by
+  `set_font`; `font_kerning()` and `text_rendering()` read them back. A
+  `liga` or `clig` the caller sets through `set_font_variant` stands
+  instead of `OptimizeSpeed`'s.
+
 - **`set_filter_css` takes the CSS math functions**, as Chrome 152's
   `ctx.filter` does: `calc()` and `-webkit-calc()`, `min()`, `max()`,
   `clamp()`, `round()`, `mod()`, `rem()`, `abs()`, `sign()`, `sin()`
@@ -544,11 +752,11 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   parent, and a computed value held where Chrome holds it: a size to 0
   through 10000px, a weight to 1 through 1000. `ex`, `ch`, `cap` and `ic`
   in a size are those of 10px `serif`, and `rem` and the other root forms
-  of 16px. An `oblique` angle from -90deg to 90deg is taken: any angle but
-  zero is `FontSlant::Oblique`, and `set_font_css` draws it at the angle, as
-  the entry under Changed says, and `font()` reads it back with its angle,
-  the default 14deg as `oblique`. A size written above 10000px is now
-  10000px, as Chrome reads it.
+  of 16px. An `oblique` angle from -90deg to 90deg is taken, zero
+  included, as `FontSlant::Oblique` carrying it: `set_font_css` and
+  `set_font` draw it at the angle, as the entry under Changed says, and
+  `font()` reads it back with its angle, the default 14deg as `oblique`. A
+  size written above 10000px is now 10000px, as Chrome reads it.
 
 - **Every CSS length unit in `set_filter_css`, `set_letter_spacing_css`,
   `set_word_spacing_css` and a `set_text_decoration_css` thickness.** `ex`,
@@ -646,11 +854,10 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `TextStyle`, which take the value. An sRGB colour comes back exactly as
   `from_srgb8` builds it. The result is linear sRGB, unclamped: a colour
   named in a wider space keeps its hue as components outside `0..1` rather
-  than being clipped to the nearest sRGB colour, which is the frame a drop
-  shadow and a text colour are read in. The lighting filters and
-  `ColorFilter::blend` hand Skia an 8-bit sRGB colour and clip it whatever
-  built it. A fill on a canvas built in another space reads an `RgbaLinear` in
-  that space, so there the string belongs in `set_fill_style_css`.
+  than being clipped to the nearest sRGB colour, which is the frame every
+  reader of an `RgbaLinear` takes -- see `RgbaLinear` under Breaking -- so
+  `set_fill_style(RgbaLinear::from_css(css))` paints what
+  `set_fill_style_css(css)` paints, on any canvas.
 
   Its tests compute every expected value from CSS Color 4's published
   matrices rather than reading it off the parser, and found the parser's
@@ -812,6 +1019,41 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Changed
 
+- **`FontSlant::Oblique` and `TextSlant::Oblique` carry their angle, an
+  `ObliqueAngle`.** A `Font` and a paragraph `TextStyle` could ask for
+  oblique only at 14deg, so `Font::from_css("oblique 10deg 16px X")` set
+  with `set_font` drew at 14deg where `set_font_css` drew at 10, and read
+  back as `oblique 16px "X"`. The variant now holds the angle: from -90deg
+  to 90deg, `ObliqueAngle::new` returning `Error::InvalidObliqueAngle`
+  outside it, and `ObliqueAngle::DEFAULT` the 14deg `oblique` means alone.
+  A font or a paragraph range draws at its angle, 0deg upright, and
+  `font()` reads it back. In your code, match `FontSlant::Oblique(_)` and
+  `TextSlant::Oblique(_)` where you matched the bare variant, and write
+  `FontSlant::OBLIQUE` or `TextSlant::OBLIQUE` where you constructed it.
+
+- **`Font::families`, `TextStyle::font_families` and
+  `StrutStyle::font_families` are `Vec<FontFamily>`, so a quoted generic
+  keyword is a family name.** A family list was strings, so `"serif"` in
+  quotes -- a family named serif, by CSS Fonts 4, which says a generic
+  keyword "must not be quoted" -- was the generic `serif` once parsed, and
+  read back unquoted. `FontFamily` is `Named(String)` or
+  `Generic(GenericFamily)`, the thirteen CSS generics. The shorthand keeps
+  the quoting: `16px "serif"` reads back as itself, and `16px serif` as the
+  generic. It draws as itself too: a quoted keyword reaches a family by that
+  name, registered or installed, and with none the list moves on, where
+  fontconfig had answered `serif`, `sans-serif` and `monospace` with the
+  generic's faces. A string converts as CSS reads an unquoted name, a generic
+  keyword in any case becoming the generic, so `Font::new("serif", 16.0)`
+  is unchanged; `FontFamily::Named("serif".into())` names the family. In your code,
+  write `vec!["Helvetica".into(), "serif".into()]` where you wrote
+  `vec!["Helvetica".to_string(), "serif".to_string()]`, and compare against
+  `FontFamily` values rather than strings.
+
+- **`FontFamily`, the details `FontLibrary::family_details` returns, is
+  `FontFamilyDetails`.** The name is `FontFamily`'s above, the entry in a
+  family list, and the two cannot share it. The fields are unchanged. In
+  your code, rename the type where you name it.
+
 - **`set_filter_css` leaves the filter as it was for a blank string.**
   `set_filter_css("")`, and a string of only whitespace, cleared the
   filter. It now returns `Error::InvalidFilter` and changes nothing, as
@@ -865,8 +1107,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   below; its measurements are in docs/browser-differences.md.
   `measure_text` reports the sheared ink, and `font()` reads back as
   `oblique`, with its angle. A paragraph's oblique range is sheared at
-  14deg and draws what `set_font_css("oblique …")` text draws, its decorations level and its
-  shadows leaning with its glyphs. Being a font of its own, it is shaped apart from the
+  its angle and draws what `set_font_css("oblique …")` text draws, its
+  decorations level and its shadows leaning with its glyphs. Being a font of its own, it is shaped apart from the
   text beside it, so no ligature forms across its edge, and a combining
   mark the edge would split from its base is drawn with its base, in the
   base's style. A mark straight after a placeholder has no base, and is
@@ -887,39 +1129,12 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   about 19 µs where the previous release took 11 -- and draws about as
   fast.
 
-  A `Font` carries no angle, so `FontSlant::Oblique` there is 14deg, the
-  default: `Font::from_css("oblique 10deg 16px Oswald")` set with
-  `set_font` slants by 14deg, where the same string through `set_font_css`
-  slants by 10, and `oblique -10deg` leans 14deg forwards rather than 10
-  back. #287 adds the angle to `Font` in 0.17.
-
 - **`measure_text` remembers each glyph's outline bounds.** The ink box is
   joined from the outline of every glyph, and building the outline was two
   thirds of working out a run's ink with every cache in Skia warm. A glyph's
   bounds are now remembered by face, size and glyph, up to 4,096 of them:
   `measure_text("Hello world")` takes about 4.3 µs in release on macOS where
   it took 5.6, and a seventy-character line about 15 where it took 25.
-
-### Deprecated
-
-- **`hwba()`, `hsv()`, `hsva()` and hex without its `#`.** The CSS parser
-  underneath has always read them and no browser does: Chrome 153 refuses
-  `hwba(0 0% 0%)`, `hsv(0 100% 100%)`, `hsva(0 100% 100% / 0.5)` and
-  `"ff0000"`, each of which every `set_*_css` setter and
-  `RgbaLinear::from_css` paint as red. They keep painting as they did,
-  relative forms included, and 0.17 refuses them. Write `#` before the
-  hex digits and `hwb()` for the rest: `hsv(h s v)` with `s` and `v` out
-  of 100 is `hwb(h calc((100 - s) * v / 100) calc(100 - v))`.
-
-- **Legacy comma syntax CSS Color 4 does not allow.** Each of these paints
-  here and is refused by Chrome 153: numbers and percentages mixed,
-  `rgb(255, 0%, 0)`; separators mixed, `rgb(255,0 0)`; `hsl()` with bare
-  numbers, `hsl(120, 100, 50)`; `none` in a channel, `rgb(none, 0, 0)`;
-  and commas in a function with no legacy syntax, `hwb(120, 0%, 0%)`,
-  `lab(50, 40, 30)`, `oklch(0.6, 0.2, 30)` and `color(srgb 1, 0, 0)`.
-  They keep painting as they did, and 0.17 refuses them. Write the
-  channels space-separated, `rgb(255 0 0)`, or in the legacy form the
-  function allows, `rgb(255, 0, 0)`.
 
 ## 📦 ⟩ [v0.16.3] (crate) ⟩ September 16, 2026
 

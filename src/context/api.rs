@@ -12,7 +12,9 @@ use std::cell::RefCell;
 use super::{BoxedContext2D, Context2D, Dye, page::ExportOptions};
 use crate::{
     color_filter::BoxedColorFilter,
-    context2d::{decoration_from_css, font_spec_from_css},
+    context2d::{
+        FontKerning, TextRendering, decoration_from_css, font_spec_from_css,
+    },
     css::parse_filter,
     export::VectorFeatures,
     filter::FilterOp,
@@ -213,7 +215,8 @@ verbs! {
         // context is in. What it *resolves* to is another matter -- it means
         // the canvas element's computed direction, and a canvas with no
         // document around it has none, so `ltr` is what gets laid out.
-        let resolved = match direction.to_lowercase().as_str() {
+        // Matched exactly, as WebIDL matches an enumeration's values.
+        let resolved = match direction {
             "ltr" => Some((TextDirection::LTR, false)),
             "rtl" => Some((TextDirection::RTL, false)),
             "inherit" => Some((TextDirection::LTR, true)),
@@ -254,8 +257,22 @@ verbs! {
     set_shadowColorText as SetShadowColorText (shadowColor @ text) => |ctx| {
         // A colour, so the same treatment as `fillStyle`: recorded when it is
         // written as a string, and crossing when it is anything else.
-        if let Some(color) = css_to_color(shadowColor) {
+        if let Some(color) = css_to_color4f_in_space(shadowColor) {
             ctx.state.shadow_color = color;
+        }
+    },
+
+    // Enumerations, matched exactly and ignored when they name no value, as
+    // HTML's setters are; the types say what each value does.
+    set_fontKerning as SetFontKerning (fontKerning @ text) => |ctx| {
+        if let Some(kerning) = FontKerning::from_keyword(fontKerning) {
+            ctx.state.font_kerning = kerning;
+        }
+    },
+
+    set_textRendering as SetTextRendering (textRendering @ text) => |ctx| {
+        if let Some(rendering) = TextRendering::from_keyword(textRendering) {
+            ctx.state.text_rendering = rendering;
         }
     },
 
@@ -551,7 +568,9 @@ verbs! {
     // is recorded; anything else crosses to the hand-written setter, which
     // ignores it as it always has.
     set_fontStretchText as SetFontStretchText (fontStretch @ text) => |ctx| {
-        ctx.set_font_width(to_width(fontStretch));
+        if let Some(width) = to_width(fontStretch) {
+            ctx.set_font_width(width);
+        }
     },
 
     // The flags. Each arrives as a real boolean -- the JavaScript setter
@@ -989,9 +1008,8 @@ pub fn get_fillStyle(mut cx: FunctionContext) -> JsResult<JsValue> {
 pub fn set_fillStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let arg = cx.argument::<JsValue>(1)?;
-    let cs = this.borrow().canvas_color_space.clone();
 
-    if let Some(dye) = Dye::new(&mut cx, arg, &cs) {
+    if let Some(dye) = Dye::new(&mut cx, arg) {
         this.borrow_mut().state.fill_style = dye;
     }
     Ok(cx.undefined())
@@ -1007,9 +1025,8 @@ pub fn get_strokeStyle(mut cx: FunctionContext) -> JsResult<JsValue> {
 pub fn set_strokeStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let arg = cx.argument::<JsValue>(1)?;
-    let cs = this.borrow().canvas_color_space.clone();
 
-    if let Some(dye) = Dye::new(&mut cx, arg, &cs) {
+    if let Some(dye) = Dye::new(&mut cx, arg) {
         this.borrow_mut().state.stroke_style = dye;
     }
     Ok(cx.undefined())
@@ -1642,7 +1659,9 @@ pub fn set_fontStretch(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     if let Some(stretch) = opt_string_arg(&mut cx, 1) {
         let mut this = this.borrow_mut();
-        this.set_font_width(to_width(&stretch));
+        if let Some(width) = to_width(&stretch) {
+            this.set_font_width(width);
+        }
     }
     Ok(cx.undefined())
 }
@@ -1714,6 +1733,18 @@ pub fn set_wordSpacing(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
 // -- non-standard typography extensions
 // --------------------------------------------
+
+pub fn get_fontKerning(mut cx: FunctionContext) -> JsResult<JsString> {
+    let this = cx.argument::<BoxedContext2D>(0)?;
+    let kerning = this.borrow().state.font_kerning;
+    Ok(cx.string(kerning.keyword()))
+}
+
+pub fn get_textRendering(mut cx: FunctionContext) -> JsResult<JsString> {
+    let this = cx.argument::<BoxedContext2D>(0)?;
+    let rendering = this.borrow().state.text_rendering;
+    Ok(cx.string(rendering.keyword()))
+}
 
 pub fn get_fontHinting(mut cx: FunctionContext) -> JsResult<JsBoolean> {
     let this = cx.argument::<BoxedContext2D>(0)?;
@@ -1878,14 +1909,15 @@ pub fn get_shadowBlur(mut cx: FunctionContext) -> JsResult<JsNumber> {
 pub fn get_shadowColor(mut cx: FunctionContext) -> JsResult<JsValue> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
-    let shadow_color = this.state.shadow_color;
-    color_to_css(&mut cx, &shadow_color)
+    let (color, space) = &this.state.shadow_color;
+    color4f_to_css(&mut cx, color, Some(space))
 }
 
 pub fn set_shadowColor(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut this = this.borrow_mut();
-    if let Some(color) = opt_color_arg(&mut cx, 1) {
+    let value = cx.argument::<JsValue>(1)?;
+    if let Some(color) = color4f_string_in(&mut cx, value) {
         this.state.shadow_color = color;
     }
     Ok(cx.undefined())

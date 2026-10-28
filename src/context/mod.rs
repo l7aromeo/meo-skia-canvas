@@ -23,9 +23,11 @@ pub mod api;
 pub mod page;
 
 use crate::{
+    context2d::{FontKerning, TextRendering},
     css::{FontUnits, ROOT_FONT_PX},
     export::VectorFeatures,
-    font_library::{FontLibrary, ResolvedFont},
+    font::GenericFamily,
+    font_library::{FontLibrary, ResolvedFont, generic_name, text_hinting},
     gpu::RenderingEngine,
     gradient::{BoxedCanvasGradient, CanvasGradient},
     node::{
@@ -75,8 +77,8 @@ impl Finalize for Context2D {}
 
 pub struct Context2D {
     pub bounds: Rect,
-    /// The canvas's working color space. Used to tag untagged colors (float
-    /// arrays) so Skia can convert them during export to a different space.
+    /// The canvas's color space, fixed when the canvas is built. The page's
+    /// image is tagged with it -- see `Context2D::image`.
     pub canvas_color_space: ColorSpace,
     /// The canvas's pixel format.
     ///
@@ -181,7 +183,10 @@ pub struct State {
     pub fill_style: Dye,
     pub stroke_style: Dye,
     pub shadow_blur: f32,
-    pub shadow_color: Color,
+    /// The shadow colour, unpremultiplied, and the space it is in: the space
+    /// a CSS string named, or linear-light sRGB for an `RgbaLinear`. Never
+    /// quantised, so a wide colour reaches a wide canvas.
+    pub shadow_color: (Color4f, ColorSpace),
     pub shadow_offset: Point,
 
     pub line_dash_offset: f32,
@@ -207,6 +212,8 @@ pub struct State {
     pub font_variant: String,
     pub font_width: Width,
     pub font_hinting: bool,
+    pub font_kerning: FontKerning,
+    pub text_rendering: TextRendering,
     pub char_style: TextStyle,
     pub graf_style: ParagraphStyle,
     /// Whether `direction` is the initial `inherit` rather than an explicit
@@ -224,6 +231,8 @@ pub struct State {
     pub word_spacing: Spacing,
     pub text_decoration: DecorationStyle,
     pub text_wrap: bool,
+    /// The font's line height in pixels, or `None` for the face's own
+    /// spacing. Only wrapped text has lines to space.
     pub line_height: Option<f32>,
     /// The angle an `oblique` font is drawn at, in CSS degrees, or `None`
     /// where the font is not oblique.
@@ -279,13 +288,18 @@ impl Default for State {
             dither: false,
 
             shadow_blur: 0.0,
-            shadow_color: TRANSPARENT,
+            shadow_color: (
+                Color4f::new(0.0, 0.0, 0.0, 0.0),
+                ColorSpace::new_srgb(),
+            ),
             shadow_offset: (0.0, 0.0).into(),
 
             font: "10px sans-serif".to_string(),
             font_variant: "normal".to_string(),
             font_width: Width::NORMAL,
-            font_hinting: false,
+            font_hinting: true,
+            font_kerning: FontKerning::default(),
+            text_rendering: TextRendering::default(),
             char_style,
             graf_style,
             text_baseline: Baseline::Alphabetic,
@@ -308,7 +322,10 @@ pub(crate) fn initial_root_face() -> Option<Typeface> {
     FontLibrary::with_shared(|library| {
         let mut collection = library.font_collection();
         collection
-            .find_typefaces(&[ROOT_FONT_FAMILY], FontStyle::normal())
+            .find_typefaces(
+                &[generic_name(ROOT_FONT_FAMILY)],
+                FontStyle::normal(),
+            )
             .into_iter()
             .next()
             .or_else(|| collection.default_fallback())
@@ -317,9 +334,20 @@ pub(crate) fn initial_root_face() -> Option<Typeface> {
 
 /// The family an initial root font is set in: the generic `serif`, which is
 /// CSS's usual initial value and Chrome's default standard font.
-const ROOT_FONT_FAMILY: &str = "serif";
+const ROOT_FONT_FAMILY: GenericFamily = GenericFamily::Serif;
 
 impl State {
+    /// Whether text is drawn hinted: as `fontHinting` says, except under
+    /// `textRendering = "geometricPrecision"`, which is the standard's
+    /// request for unhinted outlines and outranks it -- see
+    /// [`TextRendering`]. The one value every hinting decision reads, so
+    /// that the collection a layout picks and the runs it lays out never
+    /// disagree.
+    pub fn hinted(&self) -> bool {
+        self.font_hinting
+            && self.text_rendering != TextRendering::GeometricPrecision
+    }
+
     /// The typeface the context font resolves to first, as text is drawn
     /// with it.
     ///
@@ -331,8 +359,9 @@ impl State {
     /// `None` only when nothing at all resolves.
     pub fn primary_face(&self) -> Option<Typeface> {
         FontLibrary::with_shared(|library| {
-            let (mut collection, _) =
-                library.fonts_for_style(&self.char_style, &self.variations);
+            let (mut collection, _) = library
+                .set_hinting(self.hinted())
+                .fonts_for_style(&self.char_style, &self.variations);
             let families = self.char_style.font_families();
             let families: Vec<&str> = families.iter().collect();
             collection
@@ -366,10 +395,37 @@ impl State {
             .with_root(FontUnits::new(ROOT_FONT_PX, initial_root_face))
     }
 
+    /// The OpenType features `fontKerning` and `textRendering` ask of
+    /// `style`, added where the style's own features do not name the tag
+    /// already: a `kern`, `liga` or `clig` set through `fontVariant` or the
+    /// font's features is the caller's, as `font-feature-settings` and
+    /// `font-variant-ligatures` outrank these in CSS. See [`FontKerning`] and
+    /// [`TextRendering`] for what each value does and where that is from.
+    fn add_rendering_features(&self, style: &mut TextStyle) {
+        let mut off = Vec::new();
+        if self.font_kerning == FontKerning::None {
+            off.push("kern");
+        }
+        if self.text_rendering == TextRendering::OptimizeSpeed {
+            off.extend(["liga", "clig"]);
+        }
+        let named: Vec<String> = style
+            .font_features()
+            .iter()
+            .map(|feature| feature.name().to_string())
+            .collect();
+        for tag in off {
+            if !named.iter().any(|name| name == tag) {
+                style.add_font_feature(tag, 0);
+            }
+        }
+    }
+
     pub fn typography(
         &self,
     ) -> (TextStyle, ParagraphStyle, DecorationStyle, Baseline, bool) {
         let mut char_style = self.char_style.clone(); // use font size & style to calculate spacing
+        self.add_rendering_features(&mut char_style);
         let units = self.font_units();
         char_style.set_word_spacing(self.word_spacing.in_px(&units));
         char_style.set_letter_spacing(self.letter_spacing.in_px(&units));
@@ -389,14 +445,19 @@ impl State {
                 .set_force_strut_height(true)
                 .set_strut_enabled(true);
 
-            // if lineHeight is unspecified leave letterspacing at -1 to use
-            // font's default spacing, otherwise adjust strut's
-            // height & leading appropriately
-            if let Some(height) = self.line_height {
+            // With no line height the face's own spacing stands. A line
+            // height is in pixels, and the strut takes a multiple of the
+            // font size, every line box that tall with the space beyond the
+            // ascent and descent split half above and half below -- the
+            // half-leading of CSS 2.1 section 10.8.1.
+            let size = char_style.font_size();
+            if let Some(pixels) = self.line_height
+                && size > 0.0
+            {
                 strut_style
-                    .set_leading((height - 1.0).max(0.0))
-                    .set_height(height.min(1.0))
-                    .set_height_override(true);
+                    .set_height(pixels / size)
+                    .set_height_override(true)
+                    .set_half_leading(true);
             }
 
             graf_style.set_strut_style(strut_style);
@@ -405,7 +466,11 @@ impl State {
             graf_style.set_max_lines(Some(1));
         }
 
-        if !self.font_hinting {
+        // The run fonts take the hinting; the paragraph style's flag is
+        // what the layout code reads to choose the collections it lays out
+        // with -- see `FontLibrary::set_hinting`.
+        char_style.set_font_hinting(text_hinting(self.hinted()));
+        if !self.hinted() {
             graf_style.turn_hinting_off();
         }
 
@@ -1521,7 +1586,7 @@ impl Context2D {
         let (spec, typeface) = &**font;
         let mut style = self.state.char_style.clone();
         style.set_typeface(typeface.clone());
-        style.set_font_families(&spec.families);
+        style.set_font_families(&spec.collection_names);
         style.set_font_style(spec.style());
         style.set_font_size(spec.size);
         style.reset_font_features();
@@ -1826,13 +1891,10 @@ impl Context2D {
     }
 
     pub fn paint_for_shadow(&self, base_paint: &Paint) -> Option<Paint> {
-        let State {
-            shadow_color,
-            mut shadow_blur,
-            shadow_offset,
-            ..
-        } = self.state;
-        if shadow_color.a() == 0
+        let (shadow_color, shadow_space) = &self.state.shadow_color;
+        let (mut shadow_blur, shadow_offset) =
+            (self.state.shadow_blur, self.state.shadow_offset);
+        if shadow_color.a == 0.0
             || (shadow_blur == 0.0 && shadow_offset.is_zero())
         {
             return None;
@@ -1863,11 +1925,13 @@ impl Context2D {
             }
         }
         let mut paint = base_paint.clone();
+        let (shadow_color, shadow_space) =
+            skia_paint_color(*shadow_color, shadow_space);
         paint.set_image_filter(image_filters::drop_shadow_only(
             (0.0, 0.0),
             (sigma.x, sigma.y),
             shadow_color,
-            ColorSpace::new_srgb(),
+            shadow_space,
             None,
             None,
         ));
@@ -1881,8 +1945,9 @@ impl Context2D {
 
 #[derive(Clone)]
 pub enum Dye {
-    /// A solid color with its source color space.
-    /// CSS colors carry `Some(sRGB)`, float arrays carry `None` (destination).
+    /// A solid color, unpremultiplied, with the space it is in: the one a CSS
+    /// string named, sRGB for a float array, linear-light sRGB for an
+    /// `RgbaLinear`. `None` is sRGB, as Skia reads an untagged colour.
     Color(Color4f, Option<ColorSpace>),
     Gradient(CanvasGradient),
     Pattern(CanvasPattern),
@@ -1898,7 +1963,6 @@ impl Dye {
     pub fn new<'a>(
         cx: &mut FunctionContext<'a>,
         value: Handle<'a, JsValue>,
-        canvas_color_space: &ColorSpace,
     ) -> Option<Self> {
         if let Ok(gradient) = value.downcast::<BoxedCanvasGradient, _>(cx) {
             Some(Dye::Gradient(gradient.borrow().clone()))
@@ -1914,13 +1978,9 @@ impl Dye {
                 shader.borrow().features,
             ))
         } else {
-            color4f_in(cx, value).map(|(c, cs)| {
-                // CSS colors are tagged as sRGB by color4f_in.
-                // Float arrays return None -- tag them with the canvas's
-                // working color space so Skia can convert during export.
-                let cs = cs.unwrap_or_else(|| canvas_color_space.clone());
-                Dye::Color(c, Some(cs))
-            })
+            // Tagged either way by `color4f_in`: a CSS colour with the space
+            // it named, a float array as sRGB.
+            color4f_in(cx, value).map(|(c, cs)| Dye::Color(c, Some(cs)))
         }
     }
 
@@ -1972,26 +2032,15 @@ impl Dye {
             Dye::Color(color, cs) => {
                 let mut color = *color;
                 color.a *= alpha;
-                // Rec. 2020 cannot ride on its tag, so it is converted here
-                // and Skia is handed sRGB. `skia_safe`'s CICP transfer
-                // functions are reference EOTFs -- note 1 of ITU-T H.273
-                // supplies BT.1886 for transfer characteristics 1, 6, 14 and
-                // 15 alike, so `REC2020_10BIT` and `REC2020_12BIT` are both
-                // aliases of `REC709`, which is `g: 2.4` with every other
-                // coefficient zero. CSS Color 4 wants BT.2020's inverse OETF,
-                // `ColorSpace` takes no explicit coefficients, and tagging
-                // painted `color(rec2020 0.2 0.2 0.2)` as 40 where 67 is
-                // right. Converting here rather than at the parse leaves what
-                // `fillStyle` reports back alone, which echoes the space it
-                // was named in as a browser does.
-                //
-                // Every other space decodes correctly from its tag and keeps
-                // the identity a wide surface is worth: sRGB and Display P3
-                // share the sRGB transfer function, and linear sRGB is linear.
-                match cs.as_ref().and_then(color_space_name) {
-                    Some("rec2020") => paint
-                        .set_color4f(color4f_to_srgb(color, cs.as_ref()), None),
-                    _ => paint.set_color4f(color, cs.as_ref()),
+                // Kept in the space it was named in, so what `fillStyle`
+                // reports back echoes that space as a browser's does, and
+                // handed over by the path every tagged reader shares.
+                match cs {
+                    Some(space) => {
+                        let (color, space) = skia_paint_color(color, space);
+                        paint.set_color4f(color, &space)
+                    }
+                    None => paint.set_color4f(color, None),
                 };
             }
             Dye::Gradient(gradient) => {

@@ -20,7 +20,10 @@
 //! `attr()`, `container-progress()` and `media-progress()` are refused
 //! there, and so are refused here.
 
-use super::{FontUnits, angle_degrees, number_length};
+use super::{
+    FontUnits, angle_degrees, is_ident_code_point, number_length,
+    would_start_ident,
+};
 
 /// A dimension, as the exponent of each base type it is built from.
 ///
@@ -191,7 +194,7 @@ pub(crate) fn is_math(text: &str) -> bool {
 /// The value is not yet [`finished`](Quantity::finished).
 pub(crate) fn evaluate(text: &str, expect: &Expect) -> Option<Quantity> {
     let mut parser = Parser {
-        text: text.trim(),
+        text: text.trim_ascii(),
         at: 0,
         expect,
     };
@@ -207,7 +210,7 @@ pub(crate) fn evaluate(text: &str, expect: &Expect) -> Option<Quantity> {
 /// `hsl(from red calc(e) s l)`.
 pub(crate) fn literal(text: &str, expect: &Expect) -> Option<Quantity> {
     let mut parser = Parser {
-        text: text.trim(),
+        text: text.trim_ascii(),
         at: 0,
         expect,
     };
@@ -256,27 +259,26 @@ impl Parser<'_, '_> {
         (self.peek() == Some(byte)).then(|| self.at += 1)
     }
 
-    /// An identifier: what CSS Syntax 3 allows in a name, restricted to
-    /// ASCII, since no unit, constant or function here is anything else.
+    /// An identifier: what CSS Syntax 3 allows in a name, starting as
+    /// [`would_start_ident`] says and running over the code points
+    /// [`is_ident_code_point`] takes. No unit, constant or function
+    /// here is anything but ASCII, so a name reaching past ASCII is read
+    /// whole and then matches nothing, rather than stopping short of it.
     fn identifier(&mut self) -> Option<&str> {
         let start = self.at;
-        let bytes = self.text.as_bytes();
-        let opens = match bytes.get(self.at) {
-            Some(c) if c.is_ascii_alphabetic() || *c == b'_' => true,
-            Some(b'-') => matches!(
-                bytes.get(self.at + 1),
-                Some(c) if c.is_ascii_alphabetic() || *c == b'_' || *c == b'-'
-            ),
-            _ => false,
-        };
-        if !opens {
+        let rest = &self.text[self.at..];
+        if !would_start_ident(rest) {
             return None;
         }
-        while bytes.get(self.at).is_some_and(|c| {
-            c.is_ascii_alphanumeric() || *c == b'_' || *c == b'-'
-        }) {
-            self.at += 1;
+        let length = rest
+            .find(|c: char| !is_ident_code_point(c))
+            .unwrap_or(rest.len());
+        // An escape is never read here: no unit, constant or function name
+        // needs one, so a name holding one is refused rather than cut short.
+        if length == 0 || rest[length..].starts_with('\\') {
+            return None;
         }
+        self.at += length;
         Some(&self.text[start..self.at])
     }
 

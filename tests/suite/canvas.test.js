@@ -537,8 +537,8 @@ describe("Canvas", () => {
       assert.deepEqual(raw, read, "the two readback paths agree");
       assert.deepEqual(raw, [234, 51, 35, 255]);
 
-      // And a colour named in the canvas's own space survives it whole.
-      wideCtx.fillStyle = [1, 0, 0, 1];
+      // And a colour outside sRGB survives it whole.
+      wideCtx.fillStyle = "color(display-p3 1 0 0)";
       wideCtx.fillRect(0, 0, 2, 2);
       assert.deepEqual(
         Array.from(
@@ -625,7 +625,7 @@ describe("Canvas", () => {
       // converts out of it -- the way a browser's context does. It used to be
       // whatever the *export call* asked for, which made the compositing
       // space a property of the call rather than of the canvas.
-      let wideRed = [1, 0, 0, 1]; // named in the canvas's own space
+      let wideRed = "color(display-p3 1 0 0)";
 
       let wide = new Canvas(2, 2, { colorSpace: "display-p3" });
       let wideCtx = wide.getContext("2d");
@@ -663,7 +663,7 @@ describe("Canvas", () => {
       // unclipped.
       let source = new Canvas(2, 2, { colorSpace: "display-p3" });
       let sourceCtx = source.getContext("2d");
-      sourceCtx.fillStyle = [1, 0, 0, 1];
+      sourceCtx.fillStyle = "color(display-p3 1 0 0)";
       sourceCtx.fillRect(0, 0, 2, 2);
       let wideImage = await loadImage(source.toBufferSync("png"));
 
@@ -744,7 +744,7 @@ describe("Canvas", () => {
       // losing every colour the smaller gamut cannot name. `drawCanvas`
       // replays the picture onto the destination instead and never had the
       // problem, so the two disagreed about the same drawing.
-      let wideRed = [1, 0, 0, 1]; // named in the canvas's own space
+      let wideRed = "color(display-p3 1 0 0)";
       let source = new Canvas(2, 2, { colorSpace: "display-p3" });
       let sourceCtx = source.getContext("2d");
       sourceCtx.fillStyle = wideRed;
@@ -857,7 +857,7 @@ describe("Canvas", () => {
       // that was fixed at N32. That second arm stayed eight-bit sRGB after
       // the first was fixed, and only a clipped draw reaches it -- the test
       // above cannot, because it shows its source whole.
-      let wideRed = [1, 0, 0, 1];
+      let wideRed = "color(display-p3 1 0 0)";
       let inner = new Canvas(1400, 1400, { colorSpace: "display-p3" });
       let innerCtx = inner.getContext("2d");
       innerCtx.fillStyle = wideRed;
@@ -1142,6 +1142,18 @@ describe("Canvas", () => {
       let mixed = conic.toBufferSync("svg").toString("utf-8");
       assert.match(mixed, /<image/);
       assert.match(mixed, /<path/);
+
+      // A linear gradient mixed in `rec2020` is computed in a working space
+      // of its own, and the backend no longer sees a gradient in it.
+      let wide = new Canvas(60, 60);
+      ctx = wide.getContext("2d");
+      gradient = ctx.createLinearGradient(0, 0, 60, 0);
+      gradient.interpolation = "rec2020";
+      gradient.addColorStop(0, "red");
+      gradient.addColorStop(1, "blue");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(10, 10, 40, 40);
+      assert.match(wide.toBufferSync("svg").toString("utf-8"), /<image/);
     });
 
     test("PDFs", () => {
@@ -2913,5 +2925,38 @@ describe("a GPU read", () => {
       swapped.push(bgra[i + 2], bgra[i + 1], bgra[i], bgra[i + 3]);
     }
     assert.deepEqual(swapped, cpu, "BGRA8888");
+  });
+});
+
+// Skia takes a text gamma from 0 up to, not including, 4 and a contrast from
+// 0 to 1, and a canvas refuses anything outside them with a `RangeError`
+// naming the range. A gamma above it was checked against the contrast's
+// variable and accepted.
+describe("a canvas's text gamma and contrast", () => {
+  test("are refused outside Skia's range", () => {
+    for (const options of [
+      { textGamma: 5 },
+      { textGamma: -1 },
+      { textContrast: 2 },
+      { textContrast: -0.5 },
+    ])
+      assert.throws(
+        () => new Canvas(1, 1, options),
+        RangeError,
+        JSON.stringify(options),
+      );
+  });
+
+  test("are taken inside it", () => {
+    for (const options of [
+      { textGamma: 0 },
+      { textGamma: 3.9 },
+      { textContrast: 0 },
+      { textContrast: 1 },
+    ])
+      assert.doesNotThrow(
+        () => new Canvas(1, 1, options),
+        JSON.stringify(options),
+      );
   });
 });

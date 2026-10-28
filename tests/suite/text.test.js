@@ -3,7 +3,7 @@
 "use strict";
 
 const { assert, describe, test } = require("../runner"),
-  { Canvas, FontLibrary } = require("../../lib");
+  { Canvas, FontLibrary, ParagraphBuilder } = require("../../lib");
 
 // The families the machine itself holds, captured before any test registers
 // one. Describe bodies run at collection, so a snapshot taken further down
@@ -1918,13 +1918,17 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
 
   test("a stroke's pen is not sheared with the glyphs", () => {
     // strokeText against stroking the outline outlineText returns, which
-    // is the sheared outline under an unsheared pen.
+    // is the sheared outline under an unsheared pen. Text coverage goes
+    // through the text gamma and a path's does not, so both canvases take
+    // a gamma of 1 and no contrast, which leaves coverage as it is, and the
+    // two compare by shape alone.
     const W = 700,
-      H = 260;
+      H = 260,
+      linear = { textGamma: 1, textContrast: 0 };
     for (const angle of [30, 60]) {
       const font = `bold oblique ${angle}deg 100px Oswald`;
-      const stroked = new Canvas(W, H).getContext("2d"),
-        outlined = new Canvas(W, H).getContext("2d");
+      const stroked = new Canvas(W, H, linear).getContext("2d"),
+        outlined = new Canvas(W, H, linear).getContext("2d");
       for (const ctx of [stroked, outlined]) {
         ctx.font = font;
         ctx.lineWidth = 12;
@@ -2117,5 +2121,111 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
       near(left, chrome[0], 0.01, `${font} left`);
       near(right, chrome[1], 0.01, `${font} right`);
     }
+  });
+});
+
+describe("a quoted generic keyword is a family name", () => {
+  // CSS Fonts 4 section 2.1: the generic keywords "must not be quoted", so
+  // `"serif"` in quotes names a family called serif, never the generic.
+  // Last in this file: one test registers a family under `serif`, which
+  // claims the generic for whatever draws after it.
+  const { createHash } = require("crypto"),
+    FACE = "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf";
+  const painted = (font) => {
+    const canvas = new Canvas(320, 60),
+      ctx = canvas.getContext("2d");
+    ctx.font = font;
+    ctx.fillText("Wgq AVA", 5, 45);
+    return createHash("sha256")
+      .update(Buffer.from(ctx.getImageData(0, 0, 320, 60).data))
+      .digest("hex");
+  };
+
+  test("with no family of that name, the list moves on", () => {
+    // fontconfig answers `serif`, `sans-serif` and `monospace` with faces
+    // of its own choosing, which a quoted name must not take. Reset first:
+    // the tests above register families under `sans-serif` and
+    // `monospace`, and a family of that name exists once they have.
+    FontLibrary.reset();
+    const missing = painted("36px NoSuchFamilyQuoted");
+    for (const font of [
+      '36px "serif"',
+      "36px 'SERIF'",
+      '36px "sans-serif"',
+      '36px "monospace"',
+    ]) {
+      assert.equal(painted(font), missing, font);
+    }
+    // The control: the generics themselves draw something else, or the
+    // comparison above could not tell the two apart.
+    assert.notEqual(painted("36px serif"), missing, "bare serif");
+    // What a missing family draws is the library's `sans-serif`, the canvas
+    // default family: pinned to that family rather than to another
+    // fallback, since the comparisons above move with whatever it is.
+    assert.equal(
+      painted("36px sans-serif"),
+      missing,
+      "a missing family draws the library's sans-serif",
+    );
+    FontLibrary.use("QuotedNextFamily", [FACE]);
+    assert.equal(
+      painted('36px "serif", QuotedNextFamily'),
+      painted("36px QuotedNextFamily"),
+      "the next family in the list draws",
+    );
+  });
+
+  test("a family registered under the name draws, from the next draw on", () => {
+    const missing = painted("36px NoSuchFamilyQuoted"),
+      face = painted("36px QuotedNextFamily");
+    assert.equal(painted('36px "serif"'), missing, "before it is registered");
+    // Registered under `serif`, which is also a claim on the generic: both
+    // spellings draw it.
+    FontLibrary.use("serif", [FACE]);
+    assert.equal(painted('36px "serif"'), face, "quoted, after");
+    assert.equal(painted("36px serif"), face, "bare, the claim");
+    // A family name matches without regard to case, so the quoted name in
+    // capitals is the same family.
+    assert.equal(painted('36px "SERIF"'), face, "quoted, in capitals");
+    FontLibrary.reset();
+  });
+
+  test("a registered family matches its name in any case", () => {
+    // CSS Fonts 4 section 5.1: "User agents must match these names case
+    // insensitively". The provider the library registers faces with matches
+    // a name exactly, so `oswaldx` missed a family registered as `OswaldX`
+    // and drew whatever came next.
+    FontLibrary.use("CaseRegistered", [FACE]);
+    const face = painted("36px CaseRegistered");
+    assert.notEqual(face, painted("36px NoSuchFamilyQuoted"), "the control");
+    for (const font of [
+      "36px caseregistered",
+      "36px CASEREGISTERED",
+      '36px "caseRegistered"',
+    ]) {
+      assert.equal(painted(font), face, font);
+    }
+    // And in a paragraph, whose `fontFamilies` go the same way.
+    const laidOut = (family) => {
+      const pb = ParagraphBuilder.Make({
+        textStyle: { fontSize: 36, fontFamilies: [family] },
+      });
+      pb.addText("Wgq AVA");
+      const paragraph = pb.build();
+      paragraph.layout(1000);
+      return paragraph.getMaxIntrinsicWidth();
+    };
+    const registered = laidOut("CaseRegistered");
+    assert.notEqual(
+      registered,
+      laidOut("NoSuchFamilyQuoted"),
+      "paragraph control",
+    );
+    assert.equal(
+      laidOut("caseregistered"),
+      registered,
+      "paragraph, lower case",
+    );
+    FontLibrary.reset();
   });
 });

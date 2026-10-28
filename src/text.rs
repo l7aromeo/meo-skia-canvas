@@ -31,14 +31,20 @@ use crate::{
         RgbaLinear, linear_srgb_color_space, rgba_linear_to_skia_color,
         rgba_linear_to_unpremul_color4f,
     },
-    context2d::{DEFAULT_OBLIQUE_DEGREES, FontStretch, TextDirection},
+    context2d::{FontStretch, TextDirection},
     font::{
-        FontAxisTag, FontLibrary, FontVariation, InstancedPositions,
-        optical_size, variation_axes,
+        FontAxisTag, FontFamily, FontLibrary, FontVariation, GenericFamily,
+        InstancedPositions, ObliqueAngle, optical_size, variation_axes,
     },
     geometry::Rect,
     image::CSS_INITIAL_FONT_SIZE,
-    node::oblique::{ParagraphRecipe, Passes, add_slnt, match_oblique},
+    node::{
+        font_library::{FontLibrary as SharedFontRegistry, unmatched_name},
+        oblique::{
+            ParagraphRecipe, Passes, add_slnt, match_oblique,
+            without_paragraph_cache,
+        },
+    },
 };
 
 /// Horizontal alignment of text within its layout width.
@@ -239,19 +245,36 @@ pub enum TextSlant {
     Upright,
     /// The font's designed italic, where it has one.
     Italic,
-    /// An oblique at CSS Fonts 4's default angle, 14deg, drawn as
-    /// [`FontSlant::Oblique`](crate::context2d::FontSlant::Oblique) is: the
-    /// family's face that leans as asked, or else its upright face sheared
-    /// by `tan(14deg)`, before any italic.
-    Oblique,
+    /// An oblique at an angle, drawn as
+    /// [`FontSlant::Oblique`](crate::context2d::FontSlant::Oblique) draws it:
+    /// the family's face that leans the same way, or else its upright face
+    /// sheared by `tan(angle)`, before any italic. At 0deg it draws upright.
+    ///
+    /// [`TextSlant::OBLIQUE`] is the default angle, 14deg.
+    Oblique(ObliqueAngle),
 }
 
 impl TextSlant {
+    /// An oblique at CSS Fonts 4's default angle, 14deg.
+    pub const OBLIQUE: Self = Self::Oblique(ObliqueAngle::DEFAULT);
+
+    /// The slant the face matcher is asked for. An oblique of 0deg leans no
+    /// way, so it asks for the upright face that draws it, as a canvas font
+    /// does.
     fn to_skia(self) -> Slant {
         match self {
             Self::Upright => Slant::Upright,
             Self::Italic => Slant::Italic,
-            Self::Oblique => Slant::Oblique,
+            Self::Oblique(angle) if angle.degrees() == 0.0 => Slant::Upright,
+            Self::Oblique(_) => Slant::Oblique,
+        }
+    }
+
+    /// The angle of an oblique, in degrees, or `None` for another slant.
+    fn oblique_degrees(self) -> Option<f32> {
+        match self {
+            Self::Oblique(angle) => Some(angle.degrees()),
+            _ => None,
         }
     }
 }
@@ -303,7 +326,10 @@ impl FontFeature {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StrutStyle {
     /// Strut font families. Empty falls back to the paragraph's fonts.
-    pub font_families: Vec<String>,
+    ///
+    /// A string converts as [`FontFamily`] says: a generic keyword is the
+    /// generic family, anything else a name.
+    pub font_families: Vec<FontFamily>,
     /// Strut font size in pixels. `None` uses the base text size.
     pub font_size: Option<f32>,
     /// Line-height multiplier for the strut line box. `None` leaves it
@@ -422,7 +448,11 @@ impl<const N: usize> From<[FontVariation; N]> for FontVariationSettings {
 pub struct TextStyle {
     /// Families tried in order; the first that has a glyph wins. Empty
     /// uses the system default.
-    pub font_families: Vec<String>,
+    ///
+    /// A string converts as [`FontFamily`] says, so `"serif".into()` is the
+    /// generic family and `"Helvetica".into()` a name;
+    /// [`FontFamily::Named`] names a family that spells a keyword.
+    pub font_families: Vec<FontFamily>,
     /// Em size in pixels.
     ///
     /// On a variable typeface with an `opsz` axis it is also the `opsz`
@@ -1329,11 +1359,14 @@ impl TextEngine {
             base_style,
             &oblique_variations(base_style, base_variations),
         );
-        if base_style.slant == TextSlant::Oblique {
-            add_slnt(&mut instance.coordinates);
+        if let TextSlant::Oblique(angle) = base_style.slant {
+            add_slnt(&mut instance.coordinates, angle.degrees());
         }
         let mut base_sk_style = build_text_style(base_style, &instance);
-        let base_oblique = match_oblique(&mut base_sk_style, &mut collection);
+        let base_oblique =
+            base_style.slant.oblique_degrees().and_then(|degrees| {
+                match_oblique(&mut base_sk_style, &mut collection, degrees)
+            });
         let paragraph_style =
             build_paragraph_style(base_style, &base_sk_style, &strut);
         ParagraphBuilder {
@@ -1420,11 +1453,13 @@ impl ParagraphBuilder {
             style,
             &oblique_variations(style, variations),
         );
-        if style.slant == TextSlant::Oblique {
-            add_slnt(&mut instance.coordinates);
+        if let TextSlant::Oblique(angle) = style.slant {
+            add_slnt(&mut instance.coordinates, angle.degrees());
         }
         let mut sk_style = build_text_style(style, &instance);
-        let oblique = match_oblique(&mut sk_style, &mut self.collection);
+        let oblique = style.slant.oblique_degrees().and_then(|degrees| {
+            match_oblique(&mut sk_style, &mut self.collection, degrees)
+        });
         self.recipe.push_style(sk_style, oblique);
         self
     }
@@ -1453,10 +1488,12 @@ impl ParagraphBuilder {
 
     /// Closes the paragraph and lays it out, wrapping at `max_width`.
     pub fn build(self, max_width: f32) -> Paragraph {
+        let uncached = self.recipe.uncached();
         let (paragraph, passes) = self.recipe.build();
         let mut paragraph = Paragraph {
             paragraph,
             passes,
+            uncached,
             max_width,
         };
         paragraph.layout(max_width);
@@ -1482,6 +1519,9 @@ pub struct Paragraph {
     /// What draws the paragraph's oblique ranges and its decorations,
     /// where it has any.
     passes: Option<Passes>,
+    /// The collection whose paragraph cache a layout goes without -- see
+    /// `node::oblique::without_paragraph_cache`.
+    uncached: Option<FontCollection>,
     max_width: f32,
 }
 
@@ -1498,10 +1538,18 @@ impl Paragraph {
     ///
     /// Every metric on this type reports the new layout afterwards.
     pub fn layout(&mut self, max_width: f32) {
-        self.paragraph.layout(max_width);
-        if let Some(passes) = &mut self.passes {
-            passes.lay_out(&mut self.paragraph, max_width);
-        }
+        let Self {
+            paragraph,
+            passes,
+            uncached,
+            ..
+        } = self;
+        without_paragraph_cache(uncached.as_ref(), || {
+            paragraph.layout(max_width);
+            if let Some(passes) = passes {
+                passes.lay_out(paragraph, max_width);
+            }
+        });
         self.max_width = max_width;
     }
 
@@ -1711,21 +1759,18 @@ fn font_style_for(style: &TextStyle) -> FontStyle {
     )
 }
 
-/// `variations`, with `slnt` set to the default oblique angle ahead of them
-/// where `style` asks for oblique -- negated, as OpenType counts the axis
+/// `variations`, with `slnt` set to the oblique's angle ahead of them where
+/// `style` asks for oblique -- negated, as OpenType counts the axis
 /// counter-clockwise -- so that a `slnt` they name wins.
 fn oblique_variations<'a>(
     style: &TextStyle,
     variations: &'a [FontVariation],
 ) -> Cow<'a, [FontVariation]> {
     match style.slant {
-        TextSlant::Oblique => Cow::Owned(
-            once(FontVariation::new(
-                FontAxisTag::SLNT,
-                -DEFAULT_OBLIQUE_DEGREES,
-            ))
-            .chain(variations.iter().copied())
-            .collect(),
+        TextSlant::Oblique(angle) => Cow::Owned(
+            once(FontVariation::new(FontAxisTag::SLNT, -angle.degrees()))
+                .chain(variations.iter().copied())
+                .collect(),
         ),
         _ => Cow::Borrowed(variations),
     }
@@ -1772,8 +1817,8 @@ fn instance_for(
     style: &TextStyle,
     variations: &[FontVariation],
 ) -> Instance {
-    let families: Vec<&str> =
-        style.font_families.iter().map(String::as_str).collect();
+    let names = collection_names(&style.font_families);
+    let families: Vec<&str> = names.iter().map(String::as_str).collect();
     if families.is_empty() {
         return Instance::default();
     }
@@ -1859,9 +1904,7 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
 
     sk_style.set_font_size(style.font_size);
     if !style.font_families.is_empty() {
-        let families: Vec<&str> =
-            style.font_families.iter().map(String::as_str).collect();
-        sk_style.set_font_families(&families);
+        sk_style.set_font_families(&collection_names(&style.font_families));
     }
     // Pinned to the weight the instance has. Skia fakes a bold wherever the
     // weight asked for is 200 or more above the face's, and an instance is
@@ -1931,6 +1974,13 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
         // which resolves the fallback itself. Setting it explicitly is what
         // makes the documented behaviour true.
         let decoration_color = style.decoration_color.unwrap_or(style.color);
+        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+        // Re-check: grep -n "fn set_decoration_color\|fn new(color" in
+        // skia-safe's src/modules/paragraph/text_style.rs and text_shadow.rs
+        //
+        // SkParagraph takes a decoration's colour, and a text shadow's, as
+        // an eight-bit sRGB `SkColor` and nothing wider, so a wide colour is
+        // gamut-mapped into sRGB on the way in.
         sk_style
             .set_decoration_color(rgba_linear_to_skia_color(decoration_color));
         if (style.decoration_thickness - 1.0).abs() > f32::EPSILON {
@@ -1941,9 +1991,8 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
     }
 
     for shadow in &style.shadows {
-        // `TextShadow::new` takes a Skia `Color` (u32 ARGB, sRGB-encoded);
-        // gamma-encode the linear input the same way as
-        // `decoration_color`.
+        // `TextShadow::new` takes a Skia `Color` (u32 ARGB, sRGB-encoded),
+        // reached the way `decoration_color` is, above.
         sk_style.add_shadow(SkTextShadow::new(
             rgba_linear_to_skia_color(shadow.color),
             SkPoint::new(shadow.offset_x, shadow.offset_y),
@@ -1952,6 +2001,42 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
     }
 
     sk_style
+}
+
+/// The names an engine's font collection is asked for `families` by.
+///
+/// An engine's collection holds what its library registered and nothing
+/// standing in for the generics, so a generic is asked for by its keyword
+/// and answered by the platform -- fontconfig has faces for `serif`,
+/// `sans-serif` and `monospace`, CoreText none. A name that spells a generic
+/// keyword is a family name, and is passed on only where a family of that
+/// name exists, so that fontconfig's answer for the keyword is not taken
+/// for it -- see `FontLibrary::collection_names`, the canvas's counterpart.
+///
+/// A registered family named in another case is asked for in the spelling
+/// it was registered under, as the canvas's counterpart does: the provider
+/// matches a name exactly, and CSS Fonts 4 matches family names without
+/// regard to case.
+fn collection_names(families: &[FontFamily]) -> Vec<String> {
+    families
+        .iter()
+        .map(|family| match family {
+            FontFamily::Generic(generic) => generic.to_css().to_string(),
+            FontFamily::Named(name) => {
+                SharedFontRegistry::with_shared(|library| {
+                    match library.registered_spelling(name) {
+                        Some(registered) => registered,
+                        None if GenericFamily::from_css(name).is_some()
+                            && !library.has_family(name) =>
+                        {
+                            unmatched_name(name)
+                        }
+                        None => name.clone(),
+                    }
+                })
+            }
+        })
+        .collect()
 }
 
 /// The families a strut should be measured in.
@@ -1975,10 +2060,10 @@ fn strut_families(
         return Vec::new();
     };
     if !strut.font_families.is_empty() {
-        return strut.font_families.clone();
+        return collection_names(&strut.font_families);
     }
     if !style.font_families.is_empty() {
-        return style.font_families.clone();
+        return collection_names(&style.font_families);
     }
     collection
         .default_fallback()
@@ -2037,8 +2122,43 @@ fn build_paragraph_style(
 
 #[cfg(test)]
 mod tests {
-    use super::{TextEngine, TextStyle};
+    use super::{SkTextStyle, TextEngine, TextStyle};
     use crate::font::{FontLibrary, INSTANCED_POSITIONS};
+
+    /// Whether skia-safe still turns an empty family list into a slice
+    /// built from a null pointer, which a debug build aborts on: the defect
+    /// the npm binding's `font_families` and this module's `is_empty` tests
+    /// before `set_font_families` keep away from. Run in a child process,
+    /// since the abort does not unwind. Fails once skia-safe takes an empty
+    /// list, which is the cue to drop the guard.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn an_empty_family_list_is_a_null_slice_in_skia_safe() {
+        /// Set for the child, which makes the call the parent watches.
+        const CHILD: &str = "MEO_SKIA_CANVAS_EMPTY_FAMILY_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            SkTextStyle::new().set_font_families(&[] as &[&str]);
+            return;
+        }
+        let status = std::process::Command::new(
+            std::env::current_exe().expect("the test binary"),
+        )
+        .args([
+            "--exact",
+            "text::tests::an_empty_family_list_is_a_null_slice_in_skia_safe",
+            "--test-threads=1",
+        ])
+        .env(CHILD, "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("the test binary runs");
+        assert!(
+            !status.success(),
+            "skia-safe takes an empty family list now: drop `font_families`' \
+             guard in src/node/paragraph.rs and its UPSTREAM marker"
+        );
+    }
 
     #[test]
     fn an_engine_drops_its_caches_past_the_bound_on_instanced_positions() {
@@ -2058,7 +2178,7 @@ mod tests {
         let engine = TextEngine::new(&fonts);
         let lay_out = |step: usize| {
             let style = TextStyle {
-                font_families: vec![FAMILY.to_string()],
+                font_families: vec![FAMILY.into()],
                 font_size: 10.0 + step as f32 * 0.25,
                 ..TextStyle::default()
             };

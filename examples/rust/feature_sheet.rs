@@ -388,7 +388,7 @@ fn decoration_styles(sheet: &mut Sheet<'_>) -> Result<(), Box<dyn Error>> {
         let laid_out = sheet.assets.engine.layout_text(
             &format!("{name} underline"),
             &TextStyle {
-                font_families: vec!["Helvetica".to_string()],
+                font_families: vec!["Helvetica".into()],
                 font_size: 17.0,
                 color: hex(TEXT),
                 decoration: TextDecoration::underline(),

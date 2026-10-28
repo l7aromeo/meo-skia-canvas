@@ -102,6 +102,59 @@ fn a_registered_face_draws_under_the_name_it_was_filed_under() {
 }
 
 #[test]
+fn a_registered_family_is_matched_in_any_case() {
+    // CSS Fonts 4 section 5.1: "User agents must match these names case
+    // insensitively". The faces are filed under the registered spelling,
+    // and a font naming the family in another case reached the fallback.
+    FontLibrary::new()
+        .use_paths(Some("UseCased"), [RALEWAY])
+        .expect("registers");
+    let mut canvas = Canvas::new(400.0, 60.0);
+    let ctx = canvas.context();
+    let width = |ctx: &mut Context2D, css: &str| {
+        assert!(ctx.set_font_css(css), "{css:?}");
+        ctx.measure_text("Wavering", None).width
+    };
+    let filed = width(ctx, "40px UseCased");
+    assert_ne!(
+        filed,
+        width(ctx, "40px NoSuchFamilyAnywhere"),
+        "the control"
+    );
+    for css in ["40px usecased", "40px USECASED", "40px \"useCased\""] {
+        assert_eq!(width(ctx, css), filed, "{css}");
+    }
+
+    // And through a text engine, which asks its collection by name too.
+    let library = FontLibrary::new();
+    library
+        .use_paths(Some("UseEngineCased"), [RALEWAY])
+        .expect("registers");
+    let engine = TextEngine::new(&library);
+    let laid_out = |family: &str| {
+        let style = TextStyle {
+            font_families: vec![family.into()],
+            font_size: 40.0,
+            ..TextStyle::default()
+        };
+        engine
+            .layout_text("Wavering", &style, 1000.0)
+            .max_intrinsic_width()
+    };
+    let filed = laid_out("UseEngineCased");
+    assert_ne!(
+        filed,
+        laid_out("NoSuchFamilyAnywhere"),
+        "the engine's control"
+    );
+    assert_eq!(
+        laid_out("useenginecased"),
+        filed,
+        "the engine, in lower case"
+    );
+}
+
+#[test]
 fn a_failure_registers_nothing() {
     let library = FontLibrary::new();
     let result = library.use_paths(

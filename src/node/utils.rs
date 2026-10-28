@@ -4,20 +4,15 @@ use neon::prelude::*;
 use skia_safe::{Color, Color4f, ColorSpace, Data, Matrix, Path, Point, RGB};
 use std::{borrow::Cow, cmp};
 
-// One definition of the sRGB transfer function for the whole crate. This
-// file carried its own copy of each direction plus a third inlined into
-// `linear_color4f_to_srgb_color`, all six constants spelled out and
-// uncited at every one -- and the decode here was extended through zero
-// while the one in `color` was not, so the same negative component came
-// back as two different numbers.
+// One definition of the sRGB transfer function for the whole crate, in
+// `color`. A copy here would have to agree with it on every constant and on
+// how a negative component extends through zero, and nothing would check
+// that it did.
 use crate::{
-    color::{
-        RgbaLinear, SRGB_SLOPE, linear_to_srgb, linear_to_srgb_byte,
-        srgb_to_linear,
-    },
+    color::{RgbaLinear, linear_to_srgb, srgb_to_linear},
     css::{
         DEGREES_PER_TURN, Dimension, Expect, FontUnits, Percent, Quantity,
-        evaluate, is_math, literal,
+        evaluate, is_math, literal, without_comments,
     },
 };
 
@@ -988,50 +983,26 @@ pub fn float_args_or_bail_at(
 // Colors
 //
 
-/// Rec. 2020's power segment's scale, and the offset that follows from it.
+/// The exponent of `rec2020`'s transfer function.
 ///
-/// ITU-R BT.2020 writes the encode as
-///
-/// ```text
-/// V = 4.5 L                        for L < beta
-/// V = alpha L^0.45 - (alpha - 1)   otherwise
-/// ```
-///
-/// and these are the standard's own constants, to the precision it gives
-/// for ten-bit systems.
-const REC2020_ALPHA: f32 = 1.099_296_8;
-/// Rec. 2020's breakpoint, on the linear-light side.
-const REC2020_BETA: f32 = 0.018_053_97;
-/// Rec. 2020's slope near black. Steeper than sRGB's 12.92 because the
-/// breakpoint sits higher.
-const REC2020_SLOPE: f32 = 4.5;
-/// Rec. 2020's exponent. Unlike sRGB, the standard states this one on the
-/// encode side, so the decode raises to its reciprocal.
-const REC2020_EXPONENT: f32 = 0.45;
+/// CSS Color 4 section 10.8 gives the function as "gamma 2.40, from
+/// [REC_BT.1886]": BT.1886's reference EOTF with black lift `b = 0` and gain
+/// `a = 1`, which is a pure power. Its sample code applies it to the
+/// magnitude and keeps the sign, so a component below zero reaches a colour
+/// outside the gamut rather than being clipped. Fixed by the standard, not
+/// chosen; drafts before the Candidate Recommendation Draft of 24 April 2025
+/// used BT.2020's piecewise inverse OETF instead.
+const REC2020_GAMMA: f32 = 2.4;
 
-/// Rec. 2020's transfer function, extended through zero the way
-/// [`srgb_to_linear`] is: the inverse of the encode [`REC2020_ALPHA`] gives.
+/// `rec2020`'s transfer function, CSS Color 4's `lin_2020`.
 fn rec2020_decode(encoded: f32) -> f32 {
-    let magnitude = encoded.abs();
-    let linear = match magnitude < REC2020_BETA * REC2020_SLOPE {
-        true => magnitude / REC2020_SLOPE,
-        false => ((magnitude + REC2020_ALPHA - 1.0) / REC2020_ALPHA)
-            .powf(1.0 / REC2020_EXPONENT),
-    };
-    linear.copysign(encoded)
+    encoded.abs().powf(REC2020_GAMMA).copysign(encoded)
 }
 
-/// Rec. 2020's encode, the inverse of [`rec2020_decode`].
+/// `rec2020`'s encode, CSS Color 4's `gam_2020`: the inverse of
+/// [`rec2020_decode`].
 fn rec2020_encode(linear: f32) -> f32 {
-    let magnitude = linear.abs();
-    let encoded = match magnitude < REC2020_BETA {
-        true => magnitude * REC2020_SLOPE,
-        false => {
-            REC2020_ALPHA * magnitude.powf(REC2020_EXPONENT)
-                - (REC2020_ALPHA - 1.0)
-        }
-    };
-    encoded.copysign(linear)
+    linear.abs().powf(REC2020_GAMMA.recip()).copysign(linear)
 }
 
 /// Linear-light Display P3 into linear-light sRGB.
@@ -1160,39 +1131,21 @@ fn primaries(space: &ColorSpace) -> Option<&'static str> {
 
 /// A colour as a paint holds it -- `color` in `space`, encoded with that
 /// space's transfer function -- as an [`RgbaLinear`]: premultiplied linear
-/// light in the primaries of `working`, the canvas's working space, which is
-/// what `RgbaLinear` means.
+/// light in sRGB's primaries, unbounded, which is what `RgbaLinear` means on
+/// every canvas.
 ///
 /// Through extended sRGB, so a colour named in any space this crate can name
-/// lands in any working space it can build, and a colour outside a gamut
 /// keeps its negative or above-one components rather than being clipped. An
 /// untagged colour is sRGB, as Skia reads one.
-pub(crate) fn color4f_to_working_linear(
+pub(crate) fn color4f_to_rgba_linear(
     color: Color4f,
     space: Option<&ColorSpace>,
-    working: &ColorSpace,
 ) -> RgbaLinear {
     let srgb = match space.and_then(color_space_name) {
         Some(name) => color_function_to_srgb(color, name),
         None => color,
     };
-    let linear = RgbaLinear::from_srgb(srgb.r, srgb.g, srgb.b, srgb.a);
-    let to_working = match primaries(working) {
-        Some("display-p3") => inverse(LINEAR_P3_TO_LINEAR_SRGB),
-        Some("rec2020") => inverse(LINEAR_REC2020_TO_LINEAR_SRGB),
-        // Linear sRGB is already the working primaries.
-        _ => return linear,
-    };
-    // A linear map, so it applies to premultiplied components as it would
-    // to straight ones.
-    let [r, g, b] = to_working
-        .map(|row| row[0] * linear.r + row[1] * linear.g + row[2] * linear.b);
-    RgbaLinear {
-        r,
-        g,
-        b,
-        a: linear.a,
-    }
+    RgbaLinear::from_srgb(srgb.r, srgb.g, srgb.b, srgb.a)
 }
 
 /// Converts `color()` components into extended sRGB.
@@ -1370,13 +1323,12 @@ const LCH_CHROMA_FULL_SCALE: f32 = 150.0;
 /// Color 4 section 12.1, then [`BRADFORD_D50_TO_D65`] and the sRGB matrix,
 /// clipping nothing, a lightness outside `0..=100` included.
 ///
-/// `csscolorparser` reads Lab too, and the two are not the same reading.
 /// Over a grid of every form the `lab()` and `lch()` grammar takes, 17,712
 /// inputs, this lands within 8.5e-6 of the specification's own conversion
-/// done in `f64`, and `csscolorparser` 0.9 within 2.2e-3: a whole 8-bit level
-/// apart on 121 of them, one of which `the_rust_surface_takes_css_colors`
-/// pins against Chrome. `lab_and_lch_follow_css_color_4_across_their_grammar`
-/// fails if Lab is left to it.
+/// done in `f64`, which `lab_and_lch_follow_css_color_4_across_their_grammar`
+/// holds it to; a conversion within 2.2e-3 puts 121 of them a whole 8-bit
+/// level off, one of which `the_rust_surface_takes_css_colors` pins against
+/// Chrome.
 fn lab_to_srgb([l, a, b]: [f32; 3]) -> [f32; 3] {
     let fy = (l + 16.0) / 116.0;
     let fx = a / 500.0 + fy;
@@ -1453,6 +1405,104 @@ fn srgb_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
     )
 }
 
+/// CSS Color 4's just noticeable difference, in deltaEOK: section 14.2.1,
+/// "For the OkLCh color space, one JND is is an OkLCh difference of 0.02". A
+/// clipped colour within it of the colour it stands for is taken as it is.
+const GAMUT_MAP_JND: f64 = 0.02;
+
+/// The chroma resolution section 14.2.2's binary search stops at: "let
+/// epsilon be 0.0001".
+const GAMUT_MAP_EPSILON: f64 = 0.0001;
+
+/// Linear-light sRGB into Oklab, in `f64`, by the matrices
+/// [`srgb_to_oklab`] applies.
+fn linear_srgb_to_oklab_f64(rgb: [f64; 3]) -> [f64; 3] {
+    let widen = |m: [[f32; 3]; 3]| m.map(|row| row.map(f64::from));
+    let apply = |m: [[f64; 3]; 3], v: [f64; 3]| {
+        m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
+    };
+    let xyz = apply(widen(inverse(XYZ_D65_TO_LINEAR_SRGB)), rgb);
+    let lms = apply(widen(XYZ_D65_TO_OKLAB_LMS), xyz).map(f64::cbrt);
+    apply(widen(OKLAB_LMS_TO_OKLAB), lms)
+}
+
+/// Oklab into linear-light sRGB, in `f64`, the inverse of
+/// [`linear_srgb_to_oklab_f64`].
+fn oklab_to_linear_srgb_f64(lab: [f64; 3]) -> [f64; 3] {
+    let widen = |m: [[f32; 3]; 3]| m.map(|row| row.map(f64::from));
+    let apply = |m: [[f64; 3]; 3], v: [f64; 3]| {
+        m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
+    };
+    let lms = apply(widen(inverse(OKLAB_LMS_TO_OKLAB)), lab).map(|c| c * c * c);
+    let xyz = apply(widen(inverse(XYZ_D65_TO_OKLAB_LMS)), lms);
+    apply(widen(XYZ_D65_TO_LINEAR_SRGB), xyz)
+}
+
+/// Linear-light sRGB components, inside sRGB's gamut or not, mapped into it
+/// by CSS Color 4 section 14.2.2's binary search with local MINDE: chroma is
+/// reduced in OkLCh, holding lightness and hue, until clipping what is left
+/// moves it by less than [`GAMUT_MAP_JND`]. For the Skia calls that take an
+/// eight-bit sRGB colour and nothing wider, where clipping each channel on
+/// its own would shift a wide colour's hue -- a P3 orange clips towards
+/// yellow.
+///
+/// Returns the components unchanged where they are already inside the
+/// gamut, so the search runs only for a colour outside it, and only where
+/// a colour is set, not as it is drawn: about twenty halvings of the chroma
+/// at most, each two Oklab conversions.
+pub(crate) fn gamut_map_srgb(linear: [f32; 3]) -> [f32; 3] {
+    let in_gamut =
+        |c: [f64; 3]| c.iter().all(|channel| (0.0..=1.0).contains(channel));
+    let origin = linear.map(f64::from);
+    if in_gamut(origin) {
+        return linear;
+    }
+    let [lightness, a, b] = linear_srgb_to_oklab_f64(origin);
+    // Steps 3 and 4: at or past either end of lightness, white or black.
+    if lightness >= 1.0 {
+        return [1.0; 3];
+    }
+    if lightness <= 0.0 {
+        return [0.0; 3];
+    }
+    let chroma = a.hypot(b);
+    let at = |reduced: f64| {
+        let scale = reduced / chroma;
+        oklab_to_linear_srgb_f64([lightness, a * scale, b * scale])
+    };
+    let clip = |c: [f64; 3]| c.map(|channel| channel.clamp(0.0, 1.0));
+    let delta = |one: [f64; 3], two: [f64; 3]| {
+        let [l1, a1, b1] = linear_srgb_to_oklab_f64(one);
+        let [l2, a2, b2] = linear_srgb_to_oklab_f64(two);
+        ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt()
+    };
+    let mut clipped = clip(origin);
+    if delta(clipped, origin) < GAMUT_MAP_JND {
+        return clipped.map(|channel| channel as f32);
+    }
+    let (mut min, mut max, mut min_in_gamut) = (0.0, chroma, true);
+    while max - min > GAMUT_MAP_EPSILON {
+        let reduced = (min + max) / 2.0;
+        let current = at(reduced);
+        if min_in_gamut && in_gamut(current) {
+            min = reduced;
+            continue;
+        }
+        clipped = clip(current);
+        let error = delta(clipped, current);
+        if error < GAMUT_MAP_JND {
+            if GAMUT_MAP_JND - error < GAMUT_MAP_EPSILON {
+                break;
+            }
+            min_in_gamut = false;
+            min = reduced;
+        } else {
+            max = reduced;
+        }
+    }
+    clipped.map(|channel| channel as f32)
+}
+
 /// Oklab into extended sRGB, by the inverses of the matrices
 /// [`srgb_to_oklab`] applies, so the two are a pair -- CSS Color 4 publishes
 /// its own inverses, which agree with these to their precision.
@@ -1464,34 +1514,6 @@ fn oklab_to_srgb(oklab: [f32; 3]) -> [f32; 3] {
         apply_matrix(inverse(XYZ_D65_TO_OKLAB_LMS), lms),
     )
     .map(linear_to_srgb)
-}
-
-/// Whether `csscolorparser` builds `css` through `Color::from_linear_rgba`.
-///
-/// It does for the notations whose conversion runs in linear light --
-/// `oklab()`, `oklch()`, `lab()`, `lch()` and `color()` in `srgb-linear` or
-/// an `xyz` space -- and for nothing else: hex, names, `rgb()`, `hsl()`,
-/// `hwb()` and `color(srgb ...)` are stored as written. The distinction
-/// matters because only the first group can carry the encode defect
-/// `css_to_color4f_in_space` repairs, and a negative in the second, such as
-/// `color(srgb -0.1 0 0)`, already means what it says. Every colour function
-/// is read by [`read_color_function`] before this is asked; what reaches
-/// `csscolorparser` from the first group is a legacy comma form
-/// [`legacy_channels`] leaves to it, `oklch(0.8, 0.18, 165)` among them.
-fn built_from_linear_light(css: &str) -> bool {
-    let Some((name, rest)) = css.trim_start().split_once('(') else {
-        return false;
-    };
-    match name.to_ascii_lowercase().as_str() {
-        "oklab" | "oklch" | "lab" | "lch" => true,
-        "color" => color_function_space(rest).is_some_and(|space| {
-            matches!(
-                space.to_ascii_lowercase().as_str(),
-                "srgb-linear" | "xyz" | "xyz-d50" | "xyz-d65"
-            )
-        }),
-        _ => false,
-    }
 }
 
 /// The arguments of a call, given what follows its `(`, as spans of `args`:
@@ -1514,7 +1536,7 @@ fn top_level_spans(args: &str) -> Vec<(usize, usize)> {
                 depth += 1;
                 start.get_or_insert(at);
             }
-            c if c.is_whitespace() && depth == 0 => {
+            c if c.is_ascii_whitespace() && depth == 0 => {
                 spans.extend(start.take().map(|from| (from, at)));
             }
             _ => {
@@ -1579,10 +1601,6 @@ enum Relative {
     Rgb,
     Hsl,
     Hwb,
-    /// `csscolorparser`'s own `hsv()`, which no browser reads. Deprecated:
-    /// it paints until crate 0.17 and npm 7.0 refuse it with the other
-    /// non-CSS forms `css_to_color4f_in_space` lists.
-    Hsv,
     Lab,
     Lch,
     Oklab,
@@ -1598,7 +1616,6 @@ impl Relative {
             Self::Rgb => ["r", "g", "b", "alpha"],
             Self::Hsl => ["h", "s", "l", "alpha"],
             Self::Hwb => ["h", "w", "b", "alpha"],
-            Self::Hsv => ["h", "s", "v", "alpha"],
             Self::Lab | Self::Oklab => ["l", "a", "b", "alpha"],
             Self::Lch | Self::Oklch => ["l", "c", "h", "alpha"],
             Self::Color(space) if space.starts_with("xyz") => {
@@ -1615,9 +1632,7 @@ impl Relative {
         let percent = Channel::Scaled(PERCENT_CHANNEL_SCALE);
         match self {
             Self::Rgb => [Channel::Scaled(RGB_CHANNEL_SCALE); 3],
-            Self::Hsl | Self::Hwb | Self::Hsv => {
-                [Channel::Hue, percent, percent]
-            }
+            Self::Hsl | Self::Hwb => [Channel::Hue, percent, percent],
             Self::Lab => [percent, lab_ab, lab_ab],
             Self::Lch => [
                 percent,
@@ -1654,19 +1669,6 @@ impl Relative {
                     srgb_hue(wide),
                     r.min(g).min(b) * PERCENT_CHANNEL_SCALE,
                     (1.0 - r.max(g).max(b)) * PERCENT_CHANNEL_SCALE,
-                ]
-            }
-            Self::Hsv => {
-                let [r, g, b] = wide;
-                let (max, min) = (r.max(g).max(b), r.min(g).min(b));
-                let saturation = match max == 0.0 {
-                    true => 0.0,
-                    false => (max - min) / max,
-                };
-                [
-                    srgb_hue(wide),
-                    saturation * PERCENT_CHANNEL_SCALE,
-                    max * PERCENT_CHANNEL_SCALE,
                 ]
             }
             Self::Lab => scaled(lab()),
@@ -1720,12 +1722,6 @@ impl Relative {
                 y / PERCENT_CHANNEL_SCALE,
                 z / PERCENT_CHANNEL_SCALE,
             )),
-            // HSV is HWB with whiteness `(1 - s) v` and blackness `1 - v`.
-            Self::Hsv => {
-                let (s, v) =
-                    (y / PERCENT_CHANNEL_SCALE, z / PERCENT_CHANNEL_SCALE);
-                narrow(hwb_to_srgb(x, (1.0 - s) * v, 1.0 - v))
-            }
             Self::Lab => lab_to_srgb(narrow([lab_l, y, z])),
             Self::Lch => lab_to_srgb(from_polar(lab_l, y, z)),
             Self::Oklab => oklab_to_srgb(narrow([oklab_l, y, z])),
@@ -1839,10 +1835,8 @@ fn hwb_to_srgb(hue: f64, white: f64, black: f64) -> [f64; 3] {
 }
 
 /// A colour function -- `rgb(255 0 0)`, `lab(from red l a b)` and the rest --
-/// read by this crate rather than by `csscolorparser`, with the space the
-/// result is in, or `None` for what is left to `csscolorparser`: hex and
-/// named colours, the deprecated forms `css_to_color4f_in_space` lists, and
-/// the legacy comma forms [`legacy_channels`] does not read.
+/// with the space the result is in, or `None` for what is no colour function
+/// this crate knows.
 ///
 /// `Some(None)` when it is a colour function and does not parse, which is a
 /// refusal rather than a cue to read it some other way.
@@ -1852,33 +1846,18 @@ fn hwb_to_srgb(hue: f64, white: f64, black: f64) -> [f64; 3] {
 /// crate's own parser, its channels found in the function's own space from
 /// it as it is, and its channel keywords bound -- so nothing is clipped to
 /// sRGB between the origin and the result, which is what Chrome does and
-/// what CSS Color 5 describes. `hwba(from ...)`, `hsv(from ...)` and
-/// `hsva(from ...)` are read too, as `csscolorparser` always read them, and
-/// are deprecated.
+/// what CSS Color 5 describes.
+///
+/// `hwba()`, `hsv()` and `hsva()`, absolute or relative, are `Some(None)`:
+/// no CSS function has those names and no browser reads them -- Chrome 153
+/// ignores `hwba(0 0% 0%)` and `hsv(0 100% 100%)`.
 fn read_color_function(css: &str) -> Option<Option<(Color4f, &'static str)>> {
-    // UPSTREAM: csscolorparser 0.9.0 -- unfiled -- worked around
-    // Re-check: return `None` here, then cargo test
-    // the_rust_surface_takes_css_colors; its `rgb(from oklch(0.8 0.18 165) r g
-    // b)` row on a Display P3 canvas reads 4 rather than 91 if the defects are
-    // still there.
-    //
-    // `csscolorparser` reads a relative colour's channels out of the one
-    // encoded sRGB value it keeps per colour. The encode is the one
-    // `css_to_color4f_in_space` repairs, so an origin it built in linear light
-    // reaches an sRGB function with its negative channel on the wrong curve,
-    // and the mirror of that holds the other way. `Color::to_hsla` and
-    // `to_hwba` clamp the origin to 0..1 before finding its hue. It cannot
-    // read `display-p3`, `rec2020`, `a98-rgb` or `prophoto-rgb`, absolute or
-    // relative, and its channel grammar refuses math functions, percentages
-    // where CSS takes them, angle units, `calc(e)` and infinities.
-    let (name, args) = css.trim().split_once('(')?;
+    let (name, args) = css.trim_ascii().split_once('(')?;
     let function = match name.to_ascii_lowercase().as_str() {
         "rgb" | "rgba" => Relative::Rgb,
         "hsl" | "hsla" => Relative::Hsl,
-        // `hwba()` is no CSS function, and `csscolorparser` reads it as
-        // `hwb()`; deprecated with `hsv()`, below.
-        "hwb" | "hwba" => Relative::Hwb,
-        "hsv" | "hsva" => Relative::Hsv,
+        "hwb" => Relative::Hwb,
+        "hwba" | "hsv" | "hsva" => return Some(None),
         "lab" => Relative::Lab,
         "lch" => Relative::Lch,
         "oklab" => Relative::Oklab,
@@ -1892,15 +1871,7 @@ fn read_color_function(css: &str) -> Option<Option<(Color4f, &'static str)>> {
         .is_some_and(|&(from, to)| args[from..to].eq_ignore_ascii_case("from"));
     match relative {
         true => Some(relative_channels(args, function)),
-        // The absolute deprecated forms stay with `csscolorparser`, which
-        // reads them as it always has.
-        false
-            if function == Relative::Hsv
-                || name.eq_ignore_ascii_case("hwba") =>
-        {
-            None
-        }
-        false => absolute_channels(args, function),
+        false => Some(absolute_channels(args, function)),
     }
 }
 
@@ -2027,7 +1998,7 @@ fn relative_channels(
     fn token(text: &str, (from, to): (usize, usize)) -> &str {
         &text[from..to]
     }
-    let body = args.trim_end().strip_suffix(')')?.trim_end();
+    let body = args.trim_ascii_end().strip_suffix(')')?.trim_ascii_end();
     let spans = top_level_spans(body);
     // A `)` before the end stops the spans short of it: `hsl(from red h s
     // l))` is refused for the second.
@@ -2066,19 +2037,15 @@ fn relative_channels(
 }
 
 /// The colour an absolute colour function names, given what follows the
-/// `(`, on the terms [`read_color_function`] gives: `Some(None)` refuses it,
-/// `None` leaves it to `csscolorparser`.
+/// `(`, and the space it is in, or `None` where it does not parse.
 fn absolute_channels(
     args: &str,
     function: Relative,
-) -> Option<Option<(Color4f, &'static str)>> {
-    let Some(body) = args.trim_end().strip_suffix(')') else {
-        return Some(None);
-    };
-    let body = body.trim();
+) -> Option<(Color4f, &'static str)> {
+    let body = args.trim_ascii_end().strip_suffix(')')?.trim_ascii();
     match has_top_level_comma(body) {
         true => legacy_channels(body, function),
-        false => Some(modern_channels(body, function)),
+        false => modern_channels(body, function),
     }
 }
 
@@ -2130,7 +2097,7 @@ fn modern_channels(
 }
 
 /// An absolute `rgb()` or `hsl()` in the comma-separated legacy syntax, given
-/// what follows its `(` without the `)`.
+/// what follows its `(` without the `)`, or `None` for any other comma form.
 ///
 /// CSS Color 4 section 5.1 and 7.1 give that syntax three channels and an
 /// optional alpha, no `none`, and for `rgb()` channels all numbers or all
@@ -2138,16 +2105,13 @@ fn modern_channels(
 /// read here, a math function in any channel included -- Chrome 153 reads
 /// `rgba(calc(255), 0, 0)` -- with `hsl()` saturation and lightness held
 /// to `0%..=100%`, which keeps a legacy colour inside sRGB. What does not is
-/// `None` and left to `csscolorparser`, which has always read it and still
-/// does, though Chrome refuses each: `rgb(255, 0%, 0)`, `hsl(120, 100, 50)`,
-/// `lab(50, 40, 30)`, `rgb(none, 0, 0)`. Those are deprecated, and refused
-/// from crate 0.17 and npm 7.0; `the_deprecated_colour_forms_still_paint`
-/// holds what they paint. A `none` alpha is refused now, since
-/// `rgb(255, 0, 0, none)` painted transparent.
+/// refused, as Chrome 153 refuses each: `rgb(255, 0%, 0)`, `rgb(255,0 0)`,
+/// `hsl(120, 100, 50)`, `rgb(none, 0, 0)`, `rgb(255, 0, 0, none)`, and commas
+/// in a function with no legacy syntax, `lab(50, 40, 30)`.
 fn legacy_channels(
     body: &str,
     function: Relative,
-) -> Option<Option<(Color4f, &'static str)>> {
+) -> Option<(Color4f, &'static str)> {
     if !matches!(function, Relative::Rgb | Relative::Hsl) {
         return None;
     }
@@ -2159,25 +2123,18 @@ fn legacy_channels(
             '(' => depth += 1,
             ')' => depth = depth.saturating_sub(1),
             ',' if depth == 0 => {
-                parts.push(body[start..at].trim());
+                parts.push(body[start..at].trim_ascii());
                 start = at + 1;
             }
             _ => {}
         }
     }
-    parts.push(body[start..].trim());
+    parts.push(body[start..].trim_ascii());
     let (channels, alpha) = match parts[..] {
         [a, b, c] => ([a, b, c], None),
         [a, b, c, alpha] => ([a, b, c], Some(alpha)),
         _ => return None,
     };
-    // A `none` alpha painted transparent, where Chrome 153 refuses the
-    // colour: legacy syntax has no `none`, and an alpha of zero is not what
-    // was asked for. Every other malformed legacy form keeps painting as it
-    // always has, deprecated.
-    if alpha.is_some_and(|alpha| alpha.eq_ignore_ascii_case("none")) {
-        return Some(None);
-    }
     if parts.iter().any(|part| {
         part.eq_ignore_ascii_case("none") || top_level_spans(part).len() != 1
     }) {
@@ -2228,10 +2185,7 @@ fn legacy_channels(
         _ => [x, y, z],
     };
     let ([r, g, b], space) = function.color(values);
-    Some(Some((
-        Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32),
-        space,
-    )))
+    Some((Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32), space))
 }
 
 /// CSS Color 4's named colours ([section 6.1]), in the order its table lists
@@ -2397,14 +2351,12 @@ const NAMED_COLORS: [(&str, [u8; 3]); 148] = [
 /// A hex colour -- `#rgb`, `#rgba`, `#rrggbb` or `#rrggbbaa` -- or a named one,
 /// in either case, or `None` for anything else.
 ///
-/// Read here rather than by `csscolorparser`, so that from npm 7.0 and crate
-/// 0.17 it is left only the forms deprecated until then. Each component is
-/// its byte over 255, as `csscolorparser` gives it, so the same string names
-/// the same `f32`s either way; `hex_and_named_colours_read_as_they_did`
-/// holds that for every named colour and every hex form. A `#` followed by
+/// Each component is its byte over 255, and
+/// `hex_and_named_colours_read_as_they_did` holds every named colour and
+/// every hex form to the `f32`s earlier releases gave. A `#` followed by
 /// anything else is `Some(None)`, a refusal: only hex follows one.
 fn hex_or_named(css: &str) -> Option<Option<Color4f>> {
-    let css = css.trim();
+    let css = css.trim_ascii();
     let byte = |b: u8| f32::from(b) / 255.0;
     if let Some(digits) = css.strip_prefix('#') {
         let nibbles: Option<Vec<u8>> = digits
@@ -2434,6 +2386,15 @@ fn hex_or_named(css: &str) -> Option<Option<Color4f>> {
     let name = css.to_ascii_lowercase();
     if name == "transparent" {
         return Some(Some(Color4f::new(0.0, 0.0, 0.0, 0.0)));
+    }
+    // `currentcolor` is the `color` property of the element a colour is on.
+    // A canvas here is on none, and CSS Color 4's "parse a CSS <color>
+    // value", which HTML's `fillStyle` and `strokeStyle` setters run with no
+    // element when the canvas has none, resolves it with "the initial values
+    // of the properties": `color`'s, `CanvasText`, black. Chrome 152 paints
+    // it opaque black on a canvas outside a document.
+    if name == "currentcolor" {
+        return Some(Some(Color4f::new(0.0, 0.0, 0.0, 1.0)));
     }
     let at = NAMED_COLORS
         .binary_search_by(|&(named, _)| named.cmp(name.as_str()))
@@ -2468,7 +2429,8 @@ fn closed_at_end(css: &str) -> Cow<'_, str> {
 /// Skia converts at the paint, and converting via sRGB first would cost a
 /// level of the eight the readback quantises to.
 pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
-    let css = closed_at_end(css);
+    let uncommented = without_comments(css)?;
+    let css = closed_at_end(uncommented.as_ref());
     let css = css.as_ref();
     if let Some(color) = read_color_function(css) {
         // SAFETY: `read_color_function` only returns names this builds.
@@ -2478,42 +2440,11 @@ pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
     if let Some(color) = hex_or_named(css) {
         return color.map(|color| (color, ColorSpace::new_srgb()));
     }
-    // UPSTREAM: csscolorparser 0.9.0 -- unfiled -- worked around
-    // Re-check: return `c.r`, `c.g` and `c.b` unchanged, then fill
-    // `oklch(0.8, 0.18, 165)` -- a comma form `legacy_channels` leaves to
-    // `csscolorparser` -- on a Display P3 canvas and read it back in P3; red
-    // reads 4 rather than 91 if the defect is still there.
-    //
-    // `Color::from_linear_rgba` encodes every value below the sRGB breakpoint
-    // as `12.92 * x`, negatives included, where CSS Color 4 mirrors the curve
-    // through zero. A colour outside sRGB arrives with its negative channel
-    // on the linear segment's slope rather than the curve's -- invisible on
-    // an sRGB canvas, where both clip to zero, and a different colour on a
-    // wider one. Below the breakpoint that encode is linear, so the light it
-    // meant is exactly the value over the slope, and re-encoding it through
-    // the mirrored curve gives the CSS answer. Only a negative channel of a
-    // colour built that way is touched; see `built_from_linear_light`. A
-    // colour function reaches it only in the legacy forms `legacy_channels`
-    // leaves here.
-    let from_linear = built_from_linear_light(css);
-    let channel = |v: f32| match from_linear && v < 0.0 {
-        true => linear_to_srgb(v / SRGB_SLOPE),
-        false => v,
-    };
-    // Only what is deprecated reaches `csscolorparser`, and from crate 0.17 and
-    // npm 7.0 it is refused and the dependency goes: `hwba()`, `hsv()`,
-    // `hsva()`, hex without its `#`, and the legacy comma forms
-    // `legacy_channels` leaves here. `csscolorparser` reads them and no
-    // browser does -- Chrome 153 refuses each -- so they reach it here
-    // unchanged until then. `the_deprecated_colour_forms_still_paint` holds
-    // them, and the relative forms of the first three are read by
-    // `read_color_function`.
-    csscolorparser::parse(css).ok().map(|c| {
-        (
-            Color4f::new(channel(c.r), channel(c.g), channel(c.b), c.a),
-            ColorSpace::new_srgb(),
-        )
-    })
+    // Neither a colour function nor a hex or named colour, which is all CSS
+    // has: hex digits with no `#`, a function name with a space before its
+    // `(` -- `rgb (255 0 0)`, which CSS Syntax reads as a word and a block --
+    // and the rest. Chrome 153 ignores each.
+    None
 }
 
 /// Converts a colour into sRGB when it was named in some other space.
@@ -2532,16 +2463,68 @@ pub fn color4f_to_srgb(color: Color4f, space: Option<&ColorSpace>) -> Color4f {
     }
 }
 
-/// Parses a CSS color and quantises it to 8-bit sRGB.
+/// `color` in `space` as Skia is handed it.
 ///
-/// For the callers that hand Skia an `SkColor` -- window backgrounds, mattes,
-/// texture marks. Anything drawn through a paint should take
-/// [`css_to_color4f`] instead and keep the precision.
+/// Every reader that tags a colour with the space it was named in goes
+/// through this, so a colour decodes by one curve whichever reader paints
+/// it. Each space this crate names decodes correctly from its Skia tag, so
+/// the colour passes through as it is; this is the one place to divert a
+/// space whose tag Skia would decode differently from the standard.
+/// `rec2020` is not one: CSS Color 4 section 10.8 defines it as "gamma
+/// 2.40, from [REC_BT.1886]", and the space [`opt_color_space`] builds for
+/// it is the CICP pair of BT.2020 primaries and transfer characteristic 1,
+/// whose `named_transfer_fn::REC709` is a pure 2.4 gamma, which agrees.
+/// Skia's own `kRec2020` transfer function is BT.2020's piecewise curve.
+pub fn skia_paint_color(
+    color: Color4f,
+    space: &ColorSpace,
+) -> (Color4f, ColorSpace) {
+    (color, space.clone())
+}
+
+/// Parses a CSS color into 8-bit sRGB, gamut-mapped.
+///
+/// For the callers that can only hand Skia an `SkColor` -- a window
+/// background, a light's colour, an SVG's `currentColor`. Anything drawn
+/// through a paint should take [`css_to_color4f`] instead and keep the
+/// precision. A colour outside sRGB is mapped as [`srgb_to_skia_color`] says.
 pub fn css_to_color(css: &str) -> Option<Color> {
+    css_to_color4f(css).map(srgb_to_skia_color)
+}
+
+/// Parses a CSS color into 8-bit sRGB, clamping each channel on its own.
+///
+/// For a colour that is per-channel coefficients rather than a colour --
+/// `ColorFilter.MakeLighting`'s multiply and add -- where mapping in a
+/// perceptual space would change what each channel does.
+pub fn css_to_clamped_color(css: &str) -> Option<Color> {
     css_to_color4f(css).map(|c| {
         let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
         Color::from_argb(byte(c.a), byte(c.r), byte(c.g), byte(c.b))
     })
+}
+
+/// An extended-sRGB colour, straight alpha, as an 8-bit `SkColor`.
+///
+/// A colour inside sRGB is quantised as it is, so its bytes are the ones the
+/// CSS named. One outside is gamut-mapped per CSS Color 4 -- chroma reduced
+/// in Oklch at constant lightness and hue -- by [`gamut_map_srgb`], which
+/// keeps the hue a per-channel clip would shift.
+pub fn srgb_to_skia_color(c: Color4f) -> Color {
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let [r, g, b] = if [c.r, c.g, c.b].iter().all(|v| (0.0..=1.0).contains(v)) {
+        [c.r, c.g, c.b]
+    } else {
+        gamut_map_srgb([c.r, c.g, c.b].map(srgb_to_linear)).map(linear_to_srgb)
+    };
+    Color::from_argb(byte(c.a), byte(r), byte(g), byte(b))
+}
+
+/// A colour as a paint holds it -- `color` in `space` -- as an 8-bit
+/// `SkColor`, for the Skia APIs that take nothing wider. Converted to sRGB
+/// and then as [`srgb_to_skia_color`] says.
+pub fn color4f_to_skia_color(color: Color4f, space: &ColorSpace) -> Color {
+    srgb_to_skia_color(color4f_to_srgb(color, Some(space)))
 }
 
 pub fn color_in<'a>(
@@ -2549,17 +2532,7 @@ pub fn color_in<'a>(
     val: Handle<'a, JsValue>,
 ) -> Option<Color> {
     let (color, space) = color4f_string_in(cx, val)?;
-    let color = match color_space_name(&space) {
-        Some(name) => color_function_to_srgb(color, name),
-        None => color,
-    };
-    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    Some(Color::from_argb(
-        byte(color.a),
-        byte(color.r),
-        byte(color.g),
-        byte(color.b),
-    ))
+    Some(color4f_to_skia_color(color, &space))
 }
 
 /// The CSS-string half of a color argument, kept in floating point.
@@ -2588,32 +2561,34 @@ pub fn color4f_string_in<'a>(
 }
 
 /// Parses a color value that may be a CSS string or a `[r, g, b, a]` float
-/// array. Returns `(Color4f, Option<ColorSpace>)` where:
-/// - Float array: linear-light unpremultiplied float values, returned with
-///   `None` for the color space tag. Callers decide how to tag them -- the
-///   paragraph text path tags as `srgb_linear` (Skia converts to the
-///   destination working space at paint time), the canvas
-///   `fillStyle`/`strokeStyle` path tags with the canvas's working color space
-///   directly.
-/// - CSS string: values are in sRGB gamma, returned with `Some(sRGB)`.
+/// array, as an unpremultiplied `Color4f` and the space it is in:
+/// - Float array: gamma-encoded sRGB components with straight alpha -- CSS's
+///   `color(srgb r g b / a)`, and CanvasKit's convention -- tagged sRGB, so
+///   Skia converts it to whatever canvas it is drawn on.
+/// - CSS string: encoded in the space the string named, tagged with it.
 pub fn color4f_in<'a>(
     cx: &mut FunctionContext<'a>,
     val: Handle<'a, JsValue>,
-) -> Option<(Color4f, Option<ColorSpace>)> {
+) -> Option<(Color4f, ColorSpace)> {
     // An array of four numbers is the float-color form. Anything else that
     // happens to be an array falls through to the string path rather than
     // being rejected: an Array then reaches the JsObject arm and is parsed
-    // as CSS via its `toString()`, so `['red']` sets red. Callers rely on
-    // that, so it is a compatibility guarantee rather than a quirk to be
-    // tidied away -- do not start rejecting malformed arrays here.
-    if let Some(rgba) = opt_color4f_from_array(cx, val) {
-        return Some((rgba, None));
+    // as CSS via its `toString()`, so `['red']` sets red. That holds for the
+    // callers here -- the context's colour styles and `addColorStop` -- and
+    // is what their setters have always done, so do not start rejecting
+    // malformed arrays here. A Paragraph colour option is not read here: it
+    // is converted as WebIDL converts a union, where an array is a sequence
+    // of four numbers and `['red']` a `TypeError` -- see `colour_option` in
+    // src/node/paragraph.rs.
+    // Tagged rather than left for Skia to read in the canvas's space, so the
+    // colour is the same on every canvas.
+    if let Some(color) = opt_color4f_from_array(cx, val) {
+        return Some((color, ColorSpace::new_srgb()));
     }
     // Unquantised: `Color4f::from` an 8-bit `Color` clipped every colour the
     // CSS Color 4 functions can name outside sRGB, before the surface it was
     // bound for ever saw it.
-    let (color, space) = color4f_string_in(cx, val)?;
-    Some((color, Some(space)))
+    color4f_string_in(cx, val)
 }
 
 fn opt_color4f_from_array<'a>(
@@ -2636,27 +2611,6 @@ fn opt_color4f_from_array<'a>(
     Some(Color4f::new(r, g, b, a))
 }
 
-/// Quantize an `unpremultiplied`, linear-light `Color4f` (e.g. from a
-/// `[r, g, b, a]` float array) to a Skia `Color` (u32 ARGB, sRGB-encoded by
-/// Skia convention).
-///
-/// Skia APIs that take a `Color` -- `TextStyle::set_decoration_color`,
-/// `TextShadow::new`, etc. -- treat their u32 input as sRGB-encoded and
-/// gamma-decode it back to linear during compositing. To survive that
-/// round-trip our linear value must be gamma-encoded first, *then*
-/// quantized to u8. Naively calling `Color4f::to_color()` clamps and
-/// quantizes as if the value were already sRGB-encoded, which produces a
-/// darker color and quietly drops the linear-light precision the caller
-/// asked for.
-pub fn linear_color4f_to_srgb_color(c: &Color4f) -> Color {
-    Color::from_argb(
-        (c.a.clamp(0.0, 1.0) * 255.0).round() as u8,
-        linear_to_srgb_byte(c.r),
-        linear_to_srgb_byte(c.g),
-        linear_to_srgb_byte(c.b),
-    )
-}
-
 pub fn opt_color_arg(cx: &mut FunctionContext, idx: usize) -> Option<Color> {
     match cx.argument_opt(idx) {
         Some(arg) => color_in(cx, arg),
@@ -2670,6 +2624,18 @@ pub fn opt_color_for_key(
     attr: &str,
 ) -> Option<Color> {
     obj.get(cx, attr).ok().and_then(|val| color_in(cx, val))
+}
+
+/// The CSS colour at `attr` as a matte, kept in floating point in the space
+/// it was named in, so a wide matte reaches a wide export.
+pub fn opt_matte_for_key(
+    cx: &mut FunctionContext,
+    obj: &Handle<JsObject>,
+    attr: &str,
+) -> Option<Matte> {
+    let value = obj.get_value(cx, attr).ok()?;
+    let (color, space) = color4f_string_in(cx, value)?;
+    Some(Matte::new(color, space))
 }
 
 pub fn color_to_css<'a>(
@@ -2917,7 +2883,7 @@ pub fn image_data_settings_arg(
 pub type ImageDataExportArgs = (
     Option<ColorType>,
     Option<ColorSpace>,
-    Option<Color>,
+    Option<Matte>,
     f32,
     Option<usize>,
     Option<AlphaType>,
@@ -2942,7 +2908,7 @@ pub fn image_data_export_arg(
                 Some(space) => Some(color_space_or_throw(cx, &space)?),
                 None => None,
             };
-            let matte = opt_color_for_key(cx, &obj, "matte");
+            let matte = opt_matte_for_key(cx, &obj, "matte");
             let density = opt_float_for_key(cx, &obj, "density").unwrap_or(1.0);
             let msaa = opt_float_for_key(cx, &obj, "msaa").map(|n| n as usize);
             // `None` rather than a substituted `Unpremul`, for the reason the
@@ -3218,7 +3184,7 @@ pub fn from_color_type(color_type: ColorType) -> String {
 //
 
 use crate::{
-    context::page::ExportOptions,
+    context::page::{ExportOptions, Matte},
     export::{ChromaSampling, ImageFormat},
 };
 
@@ -3250,7 +3216,7 @@ pub fn export_options_arg(
     let quality = float_for_key(cx, &opts, "quality")?;
     let density = float_for_key(cx, &opts, "density")?;
     let jpeg_downsample = bool_for_key(cx, &opts, "downsample")?;
-    let matte = opt_color_for_key(cx, &opts, "matte");
+    let matte = opt_matte_for_key(cx, &opts, "matte");
     let msaa =
         opt_float_for_key(cx, &opts, "msaa").map(|num| num.floor() as usize);
     let color_type = match opt_string_for_key(cx, &opts, "colorType") {
@@ -3474,8 +3440,10 @@ pub fn path2d_arg<'a>(
 
 use crate::node::filter::SamplingQuality;
 
+/// The quality an `imageSmoothingQuality` name asks for, matched exactly as
+/// WebIDL matches an enumeration's values.
 pub fn to_filter_quality(mode_name: &str) -> Option<SamplingQuality> {
-    let mode = match mode_name.to_lowercase().as_str() {
+    let mode = match mode_name {
         "low" => SamplingQuality::Low,
         "medium" => SamplingQuality::Medium,
         "high" => SamplingQuality::High,
@@ -3530,8 +3498,10 @@ use skia_safe::{
     TileMode,
     TileMode::{Decal, Repeat},
 };
+/// The tiling a `createPattern` repetition asks for, matched exactly: the
+/// standard refuses one not "identical to" its four names.
 pub fn to_repeat_mode(repeat: &str) -> Option<(TileMode, TileMode)> {
-    let mode = match repeat.to_lowercase().as_str() {
+    let mode = match repeat {
         "repeat" | "" => (Repeat, Repeat),
         "repeat-x" => (Repeat, Decal),
         "repeat-y" => (Decal, Repeat),
@@ -3548,9 +3518,10 @@ use skia_safe::PaintCap;
 ///
 /// Returns the crate's type rather than Skia's, so the binding and a Rust
 /// caller name the same three caps -- and a name the crate has no word for
-/// cannot be reached from JavaScript. The three arms are the whole enum.
+/// cannot be reached from JavaScript. The three arms are the whole enum,
+/// matched exactly as WebIDL matches an enumeration's values.
 pub fn to_stroke_cap(mode_name: &str) -> Option<StrokeCap> {
-    let mode = match mode_name.to_lowercase().as_str() {
+    let mode = match mode_name {
         "butt" => StrokeCap::Butt,
         "round" => StrokeCap::Round,
         "square" => StrokeCap::Square,
@@ -3573,10 +3544,10 @@ use skia_safe::PaintJoin;
 
 /// The crate's [`StrokeJoin`] a `lineJoin` name asks for.
 ///
-/// As [`to_stroke_cap`]: the crate's type, and the three arms are the whole
-/// enum.
+/// As [`to_stroke_cap`]: the crate's type, the three arms are the whole
+/// enum, and they are matched exactly.
 pub fn to_stroke_join(mode_name: &str) -> Option<StrokeJoin> {
-    let mode = match mode_name.to_lowercase().as_str() {
+    let mode = match mode_name {
         "miter" => StrokeJoin::Miter,
         "round" => StrokeJoin::Round,
         "bevel" => StrokeJoin::Bevel,
@@ -3596,8 +3567,10 @@ pub fn from_stroke_join(mode: PaintJoin) -> String {
 
 use crate::paint::BlendMode as CrateBlend;
 use skia_safe::BlendMode as SkBlend;
+/// The blend a `globalCompositeOperation` name asks for, matched exactly:
+/// the standard ignores a value not "identical to" one it lists.
 pub fn to_blend_mode(mode_name: &str) -> Option<CrateBlend> {
-    let mode = match mode_name.to_lowercase().as_str() {
+    let mode = match mode_name {
         "source-over" => CrateBlend::SourceOver,
         "destination-over" => CrateBlend::DestinationOver,
         "copy" => CrateBlend::Copy,
@@ -3637,19 +3610,22 @@ pub fn to_blend_mode(mode_name: &str) -> Option<CrateBlend> {
 ///
 /// The standard names are tried first, so [`to_blend_mode`] stays the single
 /// definition of what the Canvas API accepts and this only adds to it: Skia's
-/// own `src`/`dst` shorthands and CanvasKit's camel case, matched after
-/// lowercasing so `srcOver` and `srcover` are one arm.
+/// own `src`/`dst` shorthands and CanvasKit's camel case. The name is
+/// lowercased before either is tried, so `srcOver` and `srcover` are one
+/// arm, and `Multiply` is `multiply` here where `globalCompositeOperation`
+/// ignores it.
 ///
 /// Kept separate rather than folded into [`to_blend_mode`] on purpose. These
 /// spellings belong to the CanvasKit-mirroring surface; letting
 /// `globalCompositeOperation` accept `"srcOver"` would put a name in the core
 /// API that no browser has.
 pub fn to_filter_blend_mode(mode_name: &str) -> Option<CrateBlend> {
-    if let Some(mode) = to_blend_mode(mode_name) {
+    let mode_name = mode_name.to_lowercase();
+    if let Some(mode) = to_blend_mode(&mode_name) {
         return Some(mode);
     }
 
-    Some(match mode_name.to_lowercase().as_str() {
+    Some(match mode_name.as_str() {
         "src" | "source" => CrateBlend::Copy,
         "dst" => CrateBlend::Destination,
         "srcover" | "src-over" => CrateBlend::SourceOver,
@@ -3685,8 +3661,45 @@ pub fn color_arg(
     idx: usize,
     attr: &str,
 ) -> NeonResult<Color> {
+    parsed_color_arg(cx, idx, attr, css_to_color)
+}
+
+/// [`color_arg`] for per-channel coefficients, clamped rather than
+/// gamut-mapped -- see [`css_to_clamped_color`].
+///
+/// # Errors
+///
+/// As [`color_arg`].
+pub fn clamped_color_arg(
+    cx: &mut FunctionContext,
+    idx: usize,
+    attr: &str,
+) -> NeonResult<Color> {
+    parsed_color_arg(cx, idx, attr, css_to_clamped_color)
+}
+
+/// [`color_arg`] kept in floating point, with the space the colour was named
+/// in, for a Skia API that takes a tagged `Color4f`.
+///
+/// # Errors
+///
+/// As [`color_arg`].
+pub fn color4f_arg(
+    cx: &mut FunctionContext,
+    idx: usize,
+    attr: &str,
+) -> NeonResult<(Color4f, ColorSpace)> {
+    parsed_color_arg(cx, idx, attr, css_to_color4f_in_space)
+}
+
+fn parsed_color_arg<T>(
+    cx: &mut FunctionContext,
+    idx: usize,
+    attr: &str,
+    parse: fn(&str) -> Option<T>,
+) -> NeonResult<T> {
     let name = string_arg(cx, idx, attr)?;
-    match css_to_color(&name) {
+    match parse(&name) {
         Some(color) => Ok(color),
         None => cx.throw_type_error(format!(
             "Could not parse {attr} color \"{name}\""
@@ -3785,8 +3798,10 @@ pub fn to_path_op(op_name: &str) -> Option<PathOp> {
 }
 
 use skia_safe::path_1d_path_effect;
+/// The style a `lineDashFit` name asks for, matched exactly as the standard
+/// attributes beside it are.
 pub fn to_1d_style(mode_name: &str) -> Option<path_1d_path_effect::Style> {
-    let mode = match mode_name.to_lowercase().as_str() {
+    let mode = match mode_name {
         "move" => path_1d_path_effect::Style::Translate,
         "turn" => path_1d_path_effect::Style::Rotate,
         "follow" => path_1d_path_effect::Style::Morph,
@@ -3859,50 +3874,192 @@ pub fn from_engine(engine: RenderingEngine) -> String {
 mod tests {
     use super::*;
 
+    /// FNV-1a over every input [`hex_and_named_colours_read_as_they_did`]
+    /// reads, a byte saying whether it was read, and the `f32` bits it reads
+    /// as: `csscolorparser` 0.9's answers, which these matched bit for bit,
+    /// input by input, when the inputs were first recorded.
+    const HEX_AND_NAMED_DIGEST: u64 = 0x50bc_dc39_c4f3_3e1b;
+
+    /// FNV-1a's 64-bit offset basis and prime, as the FNV specification,
+    /// draft-eastlake-fnv, gives them.
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x100_0000_01b3;
+
+    /// Set to print each input and what it reads as, one per line, to
+    /// standard error.
+    const DUMP_VARIABLE: &str = "HEX_AND_NAMED_DUMP";
+
+    /// Display P3 colours as linear-light sRGB, through the tree's own
+    /// matrix, so the inputs are the colours CSS names.
+    fn p3(rgb: [f32; 3]) -> [f32; 3] {
+        apply_matrix(LINEAR_P3_TO_LINEAR_SRGB, rgb.map(srgb_to_linear))
+    }
+
+    #[test]
+    fn a_colour_inside_srgb_is_not_gamut_mapped() {
+        for rgb in [
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [0.2, 0.5, 0.9],
+            [1.0, 0.0, 0.0],
+        ] {
+            assert_eq!(gamut_map_srgb(rgb), rgb, "{rgb:?}");
+        }
+    }
+
+    #[test]
+    fn gamut_mapping_matches_css_color_4s_worked_example() {
+        // CSS Color 4 section 14.1.3 reduces Display P3 yellow's chroma in
+        // OkLCh to the edge of sRGB, `color(srgb 0.99116 0.99733 0.00001)`.
+        // Section 14.2.2's search stops as soon as clipping costs less than
+        // a JND, so it lands within one JND of that edge rather than on it.
+        let mapped = gamut_map_srgb(p3([1.0, 1.0, 0.0]));
+        let edge = [0.99116f32, 0.99733, 0.00001].map(srgb_to_linear);
+        let [l1, a1, b1] = linear_srgb_to_oklab_f64(mapped.map(f64::from));
+        let [l2, a2, b2] = linear_srgb_to_oklab_f64(edge.map(f64::from));
+        let distance =
+            ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt();
+        assert!(distance < GAMUT_MAP_JND, "{mapped:?}, {distance} off");
+    }
+
+    #[test]
+    fn an_eight_bit_colour_maps_only_what_srgb_cannot_hold() {
+        // Inside sRGB the bytes are the ones the CSS named, half steps
+        // rounded as Chrome rounds them; nothing passes through the mapping.
+        assert_eq!(
+            css_to_color("rgb(10.5 20.4 30.6)"),
+            Some(Color::from_argb(255, 11, 20, 31))
+        );
+        assert_eq!(
+            css_to_color("#80808080"),
+            Some(Color::from_argb(128, 128, 128, 128))
+        );
+        // Outside it, the mapped colour rather than the clipped one: P3 red
+        // clips to sRGB red, and maps to a red that keeps its hue.
+        let mapped = css_to_color("color(display-p3 1 0 0)").expect("a colour");
+        let clipped =
+            css_to_clamped_color("color(display-p3 1 0 0)").expect("a colour");
+        assert_eq!(clipped, Color::from_argb(255, 255, 0, 0));
+        let expected = gamut_map_srgb(p3([1.0, 0.0, 0.0])).map(linear_to_srgb);
+        let byte = |v: f32| (v * 255.0).round() as u8;
+        assert_eq!(
+            mapped,
+            Color::from_argb(
+                255,
+                byte(expected[0]),
+                byte(expected[1]),
+                byte(expected[2])
+            )
+        );
+        assert_ne!(mapped, clipped);
+    }
+
+    #[test]
+    fn past_either_end_of_lightness_is_white_or_black() {
+        // Steps 3 and 4 of section 14.2.2.
+        assert_eq!(gamut_map_srgb([2.0, 2.0, 2.0]), [1.0; 3]);
+        assert_eq!(gamut_map_srgb([-0.1, -0.1, -0.1]), [0.0; 3]);
+    }
+
+    /// The JND stop, against an `f64` reference: what comes back is inside
+    /// sRGB, and within one JND of a colour of the origin's own lightness
+    /// and hue -- the point the search reduced chroma to.
+    #[test]
+    fn gamut_mapping_stops_within_a_jnd_of_the_origins_hue() {
+        let oklch = |rgb: [f32; 3]| {
+            let [l, a, b] = linear_srgb_to_oklab_f64(rgb.map(f64::from));
+            (l, a.hypot(b), b.atan2(a))
+        };
+        for origin in [
+            p3([1.0, 0.0, 0.0]),
+            p3([0.0, 1.0, 0.0]),
+            p3([1.0, 0.5, 0.0]),
+            p3([0.0, 0.3, 1.0]),
+        ] {
+            let mapped = gamut_map_srgb(origin);
+            assert!(
+                mapped.iter().all(|c| (0.0..=1.0).contains(c)),
+                "{mapped:?} is inside sRGB"
+            );
+            let (l0, _, h0) = oklch(origin);
+            let (l1, c1, h1) = oklch(mapped);
+            // The colour the search held lightness and hue for, at the
+            // chroma the mapped one has.
+            let held = [l0, c1 * h0.cos(), c1 * h0.sin()];
+            let [lm, am, bm] = [l1, c1 * h1.cos(), c1 * h1.sin()];
+            let distance = ((lm - held[0]).powi(2)
+                + (am - held[1]).powi(2)
+                + (bm - held[2]).powi(2))
+            .sqrt();
+            assert!(
+                distance < GAMUT_MAP_JND,
+                "{origin:?} mapped to {mapped:?}, {distance} off its hue"
+            );
+        }
+    }
+
     #[test]
     fn hex_and_named_colours_read_as_they_did() {
-        // The same `f32`s `csscolorparser` gives, bit for bit, over every
-        // named colour in either case, every short hex form, and the long
-        // forms channel by channel with a spread of the rest.
-        let both = |css: &str| {
+        // Every named colour in either case, every short hex form, and the
+        // long forms channel by channel with a spread of the rest.
+        //
+        // A digest names no input when it fails. To find the ones that moved,
+        // run this with `HEX_AND_NAMED_DUMP=1` and `-- --nocapture`, here and
+        // at the last commit it passed, and diff the two outputs.
+        //
+        // A refusal folds a 0 byte and an answer a 1 before its bits. Without
+        // that byte a refusal and transparent black fold the same bytes, so a
+        // reader that refused `transparent` or `#0000` would pass.
+        let dump = std::env::var_os(DUMP_VARIABLE).is_some();
+        let mut digest = FNV_OFFSET_BASIS;
+        let mut fold = |bytes: &[u8]| {
+            for &byte in bytes {
+                digest = (digest ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
+            }
+        };
+        let mut read = |css: &str| {
             let ours = hex_or_named(css)
                 .flatten()
                 .map(|c| c.as_array().map(f32::to_bits));
-            let theirs = csscolorparser::parse(css)
-                .ok()
-                .map(|c| c.to_array().map(f32::to_bits));
-            assert_eq!(ours, theirs, "{css}");
+            if dump {
+                eprintln!("{css} {ours:08x?}");
+            }
+            fold(css.as_bytes());
+            fold(&[u8::from(ours.is_some())]);
+            for bits in ours.unwrap_or_default() {
+                fold(&bits.to_le_bytes());
+            }
         };
-        assert_eq!(NAMED_COLORS.len(), csscolorparser::NAMED_COLORS.len());
-        for (name, _) in csscolorparser::NAMED_COLORS.entries() {
-            both(name.as_str());
-            both(&name.as_str().to_ascii_uppercase());
+        for (name, _) in NAMED_COLORS {
+            read(name);
+            read(&name.to_ascii_uppercase());
         }
         for name in ["transparent", "Transparent", "TRANSPARENT"] {
-            both(name);
+            read(name);
         }
         for value in 0..16u32.pow(4) {
-            both(&format!("#{value:04x}"));
-            both(&format!("#{value:04X}"));
+            read(&format!("#{value:04x}"));
+            read(&format!("#{value:04X}"));
             if value < 16u32.pow(3) {
-                both(&format!("#{value:03x}"));
+                read(&format!("#{value:03x}"));
             }
         }
         for byte in 0..=255u32 {
             for shift in [0, 8, 16, 24] {
-                both(&format!(
+                read(&format!(
                     "#{:08x}",
                     byte << shift | 0x5a5a5a5a & !(0xff << shift)
                 ));
             }
-            both(&format!("#{:06x}", byte * 0x010101));
+            read(&format!("#{:06x}", byte * 0x010101));
         }
         let mut state = 0x2545_f491_u32;
         for _ in 0..50_000 {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            both(&format!("#{state:08x}"));
-            both(&format!("#{:06x}", state >> 8));
+            read(&format!("#{state:08x}"));
+            read(&format!("#{:06x}", state >> 8));
         }
+        assert_eq!(digest, HEX_AND_NAMED_DIGEST);
     }
 
     #[test]
@@ -3972,15 +4129,15 @@ mod tests {
 
     /// Every arm of the two blend parsers is reachable.
     ///
-    /// Both match on `mode_name.to_lowercase()`, so an arm whose literal
-    /// carries a capital can never match. That is not hypothetical:
-    /// [`enum_arg_or`] carries a `debug_assert!` against exactly this for
-    /// table-driven paths, and its comment records that it is "how the camel
-    /// case blend names went unreachable for as long as they were
-    /// advertised". These two are `match` arms rather than tables, so that
-    /// assertion cannot reach them -- and a dead arm raises no warning,
-    /// fails no test, and reads as a supported spelling to anyone reading
-    /// the source.
+    /// `to_filter_blend_mode` lowercases a name before either `match` sees
+    /// it, so an arm whose literal carries a capital can never match. That is
+    /// not hypothetical: [`enum_arg_or`] carries a `debug_assert!` against
+    /// exactly this for table-driven paths, and its comment records that it
+    /// is "how the camel case blend names went unreachable for as long as
+    /// they were advertised". These two are `match` arms rather than
+    /// tables, so that assertion cannot reach them -- and a dead arm raises
+    /// no warning, fails no test, and reads as a supported spelling to
+    /// anyone reading the source.
     ///
     /// The arms are read out of this file rather than listed here, because a
     /// list would be a second copy to maintain and would go stale in the

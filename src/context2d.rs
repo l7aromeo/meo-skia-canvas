@@ -14,14 +14,16 @@
 //! so it is used in a scope rather than held for the canvas's lifetime as it
 //! would be in JavaScript.
 
-use std::iter;
+use std::{
+    iter::{self, Peekable},
+    str::CharIndices,
+};
 
 use skia_safe::{
-    ColorSpace as SkColorSpace, Data, FourByteTag, IRect,
-    ImageInfo as SkImageInfo, Matrix as SkMatrix, Paint as SkPaint,
-    PaintStyle as SkPaintStyle, Path as SkPath, PathBuilder as SkPathBuilder,
-    PathDirection, Picture as SkPicture, Point as SkPoint, RRect,
-    Rect as SkRect, Size as SkSize,
+    Data, FourByteTag, IRect, ImageInfo as SkImageInfo, Matrix as SkMatrix,
+    Paint as SkPaint, PaintStyle as SkPaintStyle, Path as SkPath,
+    PathBuilder as SkPathBuilder, PathDirection, Picture as SkPicture,
+    Point as SkPoint, RRect, Rect as SkRect, Size as SkSize,
     font_style::{Slant, Weight, Width},
     path::AddPathMode,
     path_1d_path_effect,
@@ -34,22 +36,24 @@ use skia_safe::{
 use crate::{
     canvas::Canvas,
     color::{
-        RgbaLinear, rgba_css, rgba_linear_to_skia_color,
-        rgba_linear_to_unpremul_color4f, skia_color_to_rgba_linear,
+        RgbaLinear, linear_srgb_color_space, rgba_css,
+        rgba_linear_to_skia_color, rgba_linear_to_unpremul_color4f,
         unpremul_color4f_to_rgba_linear,
     },
     context::{
-        Context2D as Inner, Dye, initial_root_face, page::ExportOptions,
+        Context2D as Inner, Dye, initial_root_face,
+        page::{ExportOptions, Matte},
     },
     css::{
-        Dimension, Expect, FontUnits, Percent, ROOT_FONT_PX, evaluate, is_math,
-        parse_angle, parse_decoration, parse_filter, split_number,
+        Dimension, Expect, FontUnits, Percent, ROOT_FONT_PX, evaluate,
+        is_ident_code_point, is_math, parse_angle, parse_decoration,
+        parse_filter, split_number, without_comments, would_start_ident,
         written_zero,
     },
     error::Error,
     export::VectorFeatures,
     filter::{ColorFilter, FilterOp, ImageFilter, MaskFilter},
-    font::FontVariation,
+    font::{FontFamily, FontVariation, ObliqueAngle},
     geometry::{Affine, Point, Projection, Rect},
     gpu::{RenderingEngine, completion::typed},
     image::Image,
@@ -59,9 +63,7 @@ use crate::{
         path::{Path2D as NodePath2D, conic_or_line},
         pattern::CanvasPattern,
         typography::{Baseline, DecorationStyle, FontSpec, Spacing},
-        utils::{
-            color4f_to_working_linear, css_to_color, css_to_color4f_in_space,
-        },
+        utils::{color4f_to_rgba_linear, css_to_color4f_in_space},
     },
     paint::{BlendMode, StrokeCap, StrokeJoin},
     path::{FillRule, Path2D},
@@ -132,43 +134,67 @@ pub enum FontSlant {
     Normal,
     /// The family's designed italic.
     Italic,
-    /// An oblique at CSS Fonts 4's default angle, 14deg: the family's
-    /// oblique face, its `slnt` axis set to the angle, or else its upright
-    /// face sheared by `tan(14deg)` -- and its italic only where it has no
-    /// upright face to shear.
+    /// An oblique at an angle: the family's oblique face that leans the
+    /// same way, its `slnt` axis set to the angle, or else its upright face
+    /// sheared by `tan(angle)` -- and its italic only where it has no upright
+    /// face to shear. At 0deg it draws upright, and is still an oblique.
     ///
-    /// A [`Font`] carries no angle of its own until a field for one lands in
-    /// crate 0.17, #287, so `oblique 10deg` reaches it as this 14deg -- and
-    /// so does `oblique -10deg`, which leans the other way.
-    /// [`Context2D::set_font_css`] draws the angle a shorthand names.
-    Oblique,
+    /// [`FontSlant::OBLIQUE`] is the default angle, 14deg, which is what
+    /// `oblique` with no angle means.
+    Oblique(ObliqueAngle),
 }
 
 impl FontSlant {
-    /// The slant Skia reports for a face, as one of the three keywords.
+    /// An oblique at CSS Fonts 4's default angle, 14deg: `oblique` with no
+    /// angle written.
+    pub const OBLIQUE: Self = Self::Oblique(ObliqueAngle::DEFAULT);
+
+    /// The slant Skia reports for a face, as one of the three keywords. A
+    /// face says it is oblique without an angle, so it is the default one.
     pub(crate) fn from_skia(slant: Slant) -> Self {
         match slant {
             Slant::Upright => Self::Normal,
             Slant::Italic => Self::Italic,
-            Slant::Oblique => Self::Oblique,
+            Slant::Oblique => Self::OBLIQUE,
         }
     }
 
-    /// The CSS `font-style` keyword, or `None` for the initial value --
-    /// which a serialized font string leaves out rather than spelling.
-    fn to_css(self) -> Option<&'static str> {
+    /// The CSS `font-style` computed value, or `None` for the initial value
+    /// -- which a serialized font string leaves out rather than spelling.
+    ///
+    /// CSS Fonts 4 section 2.4 gives it as "the keyword specified, plus
+    /// angle in degrees if specified": `italic`, or `oblique` with its angle.
+    /// "The lack of an `<angle>` represents 14deg", so the default reads as
+    /// `oblique` alone, the shorter form.
+    fn to_css(self) -> Option<String> {
         match self {
             Self::Normal => None,
-            Self::Italic => Some("italic"),
-            Self::Oblique => Some("oblique"),
+            Self::Italic => Some("italic".to_string()),
+            Self::Oblique(angle) if angle == ObliqueAngle::DEFAULT => {
+                Some("oblique".to_string())
+            }
+            Self::Oblique(angle) => {
+                Some(format!("oblique {}deg", css_number(angle.degrees())))
+            }
         }
     }
 
+    /// The slant the face matcher is asked for. An oblique of 0deg leans no
+    /// way, so it asks for the upright face that draws it.
     fn to_skia(self) -> Slant {
         match self {
             Self::Normal => Slant::Upright,
             Self::Italic => Slant::Italic,
-            Self::Oblique => Slant::Oblique,
+            Self::Oblique(angle) if angle.degrees() == 0.0 => Slant::Upright,
+            Self::Oblique(_) => Slant::Oblique,
+        }
+    }
+
+    /// The angle an oblique leans by, or `None` for another slant.
+    fn oblique_angle(self) -> Option<ObliqueAngle> {
+        match self {
+            Self::Oblique(angle) => Some(angle),
+            _ => None,
         }
     }
 }
@@ -260,6 +286,115 @@ impl FontStretch {
             Self::ExtraExpanded => Width::EXTRA_EXPANDED,
             Self::UltraExpanded => Width::ULTRA_EXPANDED,
         }
+    }
+}
+
+/// Whether kerning is applied, as the Canvas `fontKerning` attribute and the
+/// CSS `font-kerning` property it sets.
+///
+/// HTML's text preparation algorithm lays text out with `font-kerning` set
+/// to the context's `fontKerning`, and CSS Fonts 4 section 6.3 defines the
+/// three keywords. Kerning is the font's `kern` feature: `None` turns it off
+/// and the other two leave it on, as Chrome 152 does -- `"auto"` and
+/// `"normal"` lay out "AVAVAV" in 100px Times at 368.85 and `"none"` at
+/// 433.30. A `kern` the caller sets among the font's features stands
+/// instead, as CSS lets `font-feature-settings` override `font-kerning`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FontKerning {
+    /// Kerning as the user agent decides: on, as Chrome has it. The initial
+    /// value.
+    #[default]
+    Auto,
+    /// Kerning on.
+    Normal,
+    /// Kerning off.
+    None,
+}
+
+impl FontKerning {
+    /// The keyword the Canvas attribute reads back.
+    pub(crate) fn keyword(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Normal => "normal",
+            Self::None => "none",
+        }
+    }
+
+    /// The value a keyword names, matched exactly, as WebIDL matches an
+    /// enumeration's values.
+    pub(crate) fn from_keyword(keyword: &str) -> Option<Self> {
+        Some(match keyword {
+            "auto" => Self::Auto,
+            "normal" => Self::Normal,
+            "none" => Self::None,
+            _ => return None,
+        })
+    }
+}
+
+/// What text is laid out and drawn for, as the Canvas `textRendering`
+/// attribute and the SVG `text-rendering` property it sets.
+///
+/// HTML gives each keyword SVG's meaning, and SVG 2 section 13.10.2 makes
+/// each one a hint, so what a value does is what Chrome does with it,
+/// measured in Chrome 152's canvas:
+///
+/// - `Auto` and `OptimizeLegibility` draw alike: kerning as [`FontKerning`]
+///   says, and the font's common ligatures on.
+/// - `OptimizeSpeed` turns the common ligatures (`liga`, `clig`) off: "office"
+///   in 100px Times measures 473.15 at `"auto"` and 482.32 here. It leaves
+///   kerning to [`FontKerning`].
+/// - `GeometricPrecision` draws outlines unhinted, at unchanged advances --
+///   SVG: it "will usually cause the user agent to suspend the use of hinting"
+///   -- so on macOS CoreText does not dilate the glyphs, and Chrome's text is
+///   lighter for it.
+///
+/// Hinting: `GeometricPrecision` draws unhinted whatever
+/// [`Context2D::set_font_hinting`] says, because it is the standard's own
+/// request -- SVG 2 section 13.10.2: it "will usually cause the user agent
+/// to suspend the use of hinting so that glyph outlines are drawn with
+/// comparable geometric precision to the rendering of path data". The other
+/// three leave hinting to `set_font_hinting`, this library's extension;
+/// `OptimizeSpeed` changes no hinting, and Chrome's glyphs under it draw as
+/// under `Auto`.
+///
+/// A ligature feature the caller sets -- through `font-variant-ligatures`
+/// or the font's features -- stands instead of `OptimizeSpeed`'s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TextRendering {
+    /// The initial value.
+    #[default]
+    Auto,
+    /// Common ligatures off.
+    OptimizeSpeed,
+    /// As [`TextRendering::Auto`].
+    OptimizeLegibility,
+    /// Outlines drawn unhinted.
+    GeometricPrecision,
+}
+
+impl TextRendering {
+    /// The keyword the Canvas attribute reads back.
+    pub(crate) fn keyword(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::OptimizeSpeed => "optimizeSpeed",
+            Self::OptimizeLegibility => "optimizeLegibility",
+            Self::GeometricPrecision => "geometricPrecision",
+        }
+    }
+
+    /// The value a keyword names, matched exactly, as WebIDL matches an
+    /// enumeration's values: `"optimizespeed"` is none of them.
+    pub(crate) fn from_keyword(keyword: &str) -> Option<Self> {
+        Some(match keyword {
+            "auto" => Self::Auto,
+            "optimizeSpeed" => Self::OptimizeSpeed,
+            "optimizeLegibility" => Self::OptimizeLegibility,
+            "geometricPrecision" => Self::GeometricPrecision,
+            _ => return None,
+        })
     }
 }
 
@@ -405,7 +540,11 @@ impl DashFit {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Font {
     /// Families in preference order. The first that resolves is used.
-    pub families: Vec<String>,
+    ///
+    /// A string converts into a [`FontFamily`] as CSS reads an unquoted name,
+    /// so `vec!["Helvetica".into(), "serif".into()]` is a named family and
+    /// then the generic `serif`.
+    pub families: Vec<FontFamily>,
     /// Em size in pixels.
     pub size: f32,
     /// CSS numeric weight, `1` to `1000`. `400` is regular, `700` bold.
@@ -436,7 +575,10 @@ pub struct Font {
 
 impl Font {
     /// Creates a font of `size` pixels in `family` at regular weight.
-    pub fn new(family: impl Into<String>, size: f32) -> Self {
+    ///
+    /// A string names a family, or a generic family where it spells a
+    /// generic keyword -- see [`FontFamily`].
+    pub fn new(family: impl Into<FontFamily>, size: f32) -> Self {
         Self {
             families: vec![family.into()],
             size,
@@ -530,15 +672,12 @@ impl Font {
     /// where written out, a negative size or an angle past 90deg is refused.
     ///
     /// `small-caps` has no place on a [`Font`]; [`Context2D::set_font_css`]
-    /// applies it as [`FontVariantCaps::SmallCaps`]. Nor has an `oblique`
-    /// angle, until #287 gives it a field in crate 0.17: any angle but zero is
-    /// [`FontSlant::Oblique`], which draws at 14deg, so
-    /// `Font::from_css("oblique 10deg 16px Oswald")` set with
-    /// [`Context2D::set_font`] slants by 14deg where the same string through
-    /// [`Context2D::set_font_css`] slants by 10, and `oblique -10deg` leans
-    /// 14deg forwards rather than 10 back. Zero is [`FontSlant::Normal`].
-    /// A system font keyword such as `caption` is refused, deliberately: what
-    /// it means is the platform's choice.
+    /// applies it as [`FontVariantCaps::SmallCaps`]. An `oblique` angle is
+    /// [`FontSlant::Oblique`]'s, zero included. A family in quotes is a
+    /// [`FontFamily::Named`] even where it spells a generic keyword, and an
+    /// unquoted generic keyword is a [`FontFamily::Generic`]. A system font
+    /// keyword such as `caption` is refused, deliberately: what it means is
+    /// the platform's choice.
     ///
     /// ```
     /// use meo_skia_canvas::prelude::*;
@@ -549,7 +688,13 @@ impl Font {
     ///     (font.size, font.weight, font.line_height),
     ///     (16.0, 700, Some(24.0))
     /// );
-    /// assert_eq!(font.families, ["Helvetica Neue", "serif"]);
+    /// assert_eq!(
+    ///     font.families,
+    ///     [
+    ///         FontFamily::Named("Helvetica Neue".into()),
+    ///         FontFamily::Generic(GenericFamily::Serif)
+    ///     ]
+    /// );
     ///
     /// assert!(Font::from_css("16px").is_none(), "no family");
     /// ```
@@ -567,15 +712,12 @@ impl Font {
     /// As [`Font::to_spec`], with small caps on when `small_caps` is, as a
     /// font shorthand can ask and a [`Font`] cannot carry.
     fn to_spec_with(&self, small_caps: bool) -> FontSpec {
-        // Quoted in the canonical string whenever a name has a space, which
-        // is all the cache key needs to tell names apart.
+        // Every name quoted and every generic bare, as the getter writes
+        // them, so a family called serif and the generic are two keys.
         let families = self
             .families
             .iter()
-            .map(|family| match family.contains(char::is_whitespace) {
-                true => format!("\"{family}\""),
-                false => family.clone(),
-            })
+            .map(FontFamily::to_string)
             .collect::<Vec<_>>()
             .join(", ");
         let variant = match small_caps {
@@ -590,7 +732,7 @@ impl Font {
         // line height left out here would collapse two different fonts onto
         // one entry.
         let mut canonical =
-            vec![self.slant.to_css().unwrap_or("normal").to_string()];
+            vec![self.slant.to_css().unwrap_or_else(|| "normal".to_string())];
         if self.slant != FontSlant::Normal || small_caps {
             canonical.push(variant.to_string());
         }
@@ -607,24 +749,28 @@ impl Font {
 
         FontSpec {
             families: self.families.clone(),
+            collection_names: Vec::new(),
             size: self.size,
             line_height: self.line_height,
             weight: Weight::from(i32::from(self.weight)),
             width: self.stretch.to_skia(),
             slant: self.slant.to_skia(),
-            oblique_degrees: None,
+            oblique_degrees: self
+                .slant
+                .oblique_angle()
+                .filter(|angle| *angle != ObliqueAngle::DEFAULT)
+                .map(ObliqueAngle::degrees),
             features: match small_caps {
                 true => FontVariantCaps::SmallCaps.to_features(),
                 false => vec![],
             },
             variant: variant.to_string(),
             canonical,
-            serialized: self.serialized(small_caps, None),
+            serialized: self.serialized(small_caps),
         }
     }
 
-    /// What `ctx.font` reads back for this font, with `angle` the `oblique`
-    /// angle the shorthand wrote, where it wrote one other than the default.
+    /// What `ctx.font` reads back for this font.
     ///
     /// HTML: "On getting, the font attribute must return the serialized form
     /// of the current font of the context (with no 'line-height' component)",
@@ -642,7 +788,8 @@ impl Font {
     ///   specified, plus angle in degrees if specified": `italic`, or `oblique`
     ///   with its angle. "The lack of an <angle> represents 14deg", so `oblique
     ///   14deg` shortens to `oblique`. `oblique 0deg` stays, judged: it draws
-    ///   upright, as `normal` does, but `normal` is another computed value.
+    ///   upright, as `normal` does, but `normal` is another computed value. See
+    ///   [`FontSlant::to_css`].
     /// - The weight is the computed number. `700` is shorter than `bold`.
     /// - The width is its keyword, `condensed`, the only form the shorthand
     ///   takes.
@@ -651,27 +798,22 @@ impl Font {
     ///   decimals" -- see [`css_number`].
     /// - A family name is "The string serialized as a string" and a generic
     ///   family its keyword: CSSOM's own example serializes `a, 'b"', serif` as
-    ///   `"a", "b\"", serif` -- see [`css_family`].
+    ///   `"a", "b\"", serif` -- see [`FontFamily`]'s `Display`. A generic
+    ///   keyword in quotes is a family name, and reads back quoted.
     ///
     /// Chrome differs in each of these -- it reads `bold`, leaves the width
     /// out, reads `oblique` as `italic`, writes `small-caps` after the
     /// weight, keeps six significant digits and quotes a name only where it
     /// has to -- and docs/browser-differences.md lists them.
-    fn serialized(&self, small_caps: bool, angle: Option<f32>) -> String {
-        let style = match angle {
-            Some(degrees) => {
-                Some(format!("oblique {}deg", css_number(degrees)))
-            }
-            None => self.slant.to_css().map(str::to_string),
-        };
+    fn serialized(&self, small_caps: bool) -> String {
         let families = self
             .families
             .iter()
-            .map(|family| css_family(family))
+            .map(FontFamily::to_string)
             .collect::<Vec<_>>()
             .join(", ");
         [
-            style,
+            self.slant.to_css(),
             small_caps.then(|| "small-caps".to_string()),
             (self.weight != NORMAL_WEIGHT).then(|| self.weight.to_string()),
             (self.stretch != FontStretch::Normal)
@@ -684,58 +826,6 @@ impl Font {
         .collect::<Vec<_>>()
         .join(" ")
     }
-}
-
-/// The generic family keywords of CSS Fonts 4 section 2.1.3, which a font
-/// serializes as themselves where every other family name is a string.
-const GENERIC_FAMILIES: [&str; 13] = [
-    "serif",
-    "sans-serif",
-    "cursive",
-    "fantasy",
-    "monospace",
-    "system-ui",
-    "emoji",
-    "math",
-    "fangsong",
-    "ui-serif",
-    "ui-sans-serif",
-    "ui-monospace",
-    "ui-rounded",
-];
-
-/// A family as a serialized font names it: a generic family as its keyword,
-/// and any other name serialized as a string, by CSSOM section 2.1's
-/// "serialize a string" -- in double quotes, a NULL replaced by U+FFFD, a
-/// control character from U+0001 to U+001F or U+007F escaped as its code
-/// point, and `"` and `\` each after a backslash.
-///
-/// A family named `serif` in quotes is a family and not the generic, which
-/// a [`Font`] cannot tell apart from the keyword; both read as the keyword.
-fn css_family(family: &str) -> String {
-    if let Some(generic) = GENERIC_FAMILIES
-        .iter()
-        .find(|generic| generic.eq_ignore_ascii_case(family))
-    {
-        return generic.to_string();
-    }
-    let mut quoted = String::with_capacity(family.len() + 2);
-    quoted.push('"');
-    for c in family.chars() {
-        match c {
-            '\0' => quoted.push(char::REPLACEMENT_CHARACTER),
-            '\u{1}'..='\u{1f}' | '\u{7f}' => {
-                quoted.push_str(&format!("\\{:x} ", u32::from(c)));
-            }
-            '"' | '\\' => {
-                quoted.push('\\');
-                quoted.push(c);
-            }
-            c => quoted.push(c),
-        }
-    }
-    quoted.push('"');
-    quoted
 }
 
 /// A `<number>` as CSSOM section 6.7.2 serializes it: "in the shortest form
@@ -805,13 +895,6 @@ const LIGHTER_FROM_NORMAL: u16 = 100;
 struct FontShorthand {
     font: Font,
     small_caps: bool,
-    /// An `oblique` angle other than zero and the default 14deg, which a
-    /// [`Font`] has no field for (#287): it is drawn at.
-    oblique_degrees: Option<f32>,
-    /// The angle an `oblique` wrote, where it wrote one other than the
-    /// default 14deg -- zero included, which draws upright -- for the font
-    /// to read back with.
-    written_angle: Option<f32>,
 }
 
 /// The specification a Canvas `font` shorthand names, or `None` where Chrome
@@ -824,21 +907,9 @@ pub(crate) fn font_spec_from_css(css: &str) -> Option<FontSpec> {
 }
 
 impl FontShorthand {
-    /// The specification the shorthand names, angle included.
+    /// The specification the shorthand names.
     fn to_spec(&self) -> FontSpec {
-        let mut spec = self.font.to_spec_with(self.small_caps);
-        if let Some(degrees) = self.oblique_degrees {
-            spec.oblique_degrees = Some(degrees);
-            // Another angle is another font, so the cache key says which.
-            spec.canonical = spec.canonical.replacen(
-                "oblique",
-                &format!("oblique {degrees}deg"),
-                1,
-            );
-        }
-        spec.serialized =
-            self.font.serialized(self.small_caps, self.written_angle);
-        spec
+        self.font.to_spec_with(self.small_caps)
     }
 }
 
@@ -959,27 +1030,23 @@ fn font_line_height(text: &str, size: f32) -> Option<Option<f32>> {
 /// unquoted runs of whitespace taken as one space.
 ///
 /// An unquoted name must be identifiers -- `12` is not a family, and Chrome
-/// ignores `16px 12` -- and a CSS-wide keyword is not one either.
-fn font_families(text: &str) -> Option<Vec<String>> {
+/// ignores `16px 12` -- and a CSS-wide keyword is not one either. An
+/// identifier is CSS Syntax 3's, its code points those
+/// [`is_ident_code_point`] takes, and whitespace is CSS's five characters:
+/// `serif\u{a0}` is no name, since U+00A0 is neither. An unquoted generic
+/// keyword is the generic family; a quoted one is a family name, as CSS
+/// Fonts 4 section 2.1 has it.
+fn font_families(text: &str) -> Option<Vec<FontFamily>> {
     let mut families = Vec::new();
-    let mut rest = text.trim();
+    let mut rest = text.trim_ascii();
     while !rest.is_empty() {
         let (name, after) = match rest.chars().next() {
-            Some(quote @ ('"' | '\'')) => css_string(rest, quote)?,
+            Some(quote @ ('"' | '\'')) => {
+                let (name, after) = css_string(rest, quote)?;
+                (FontFamily::Named(name), after)
+            }
             _ => {
-                let end = rest.find(',').unwrap_or(rest.len());
-                let words: Vec<&str> = rest[..end].split_whitespace().collect();
-                let identifier = |word: &&str| {
-                    let mut chars = word.chars();
-                    chars.next().is_some_and(|c| {
-                        c.is_alphabetic() || c == '_' || c == '-'
-                    }) && word
-                        .chars()
-                        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-                };
-                if words.is_empty() || !words.iter().all(identifier) {
-                    return None;
-                }
+                let (words, end) = identifiers(rest)?;
                 let name = words.join(" ");
                 let keyword = [
                     "inherit",
@@ -992,18 +1059,88 @@ fn font_families(text: &str) -> Option<Vec<String>> {
                 if keyword.contains(&name.to_ascii_lowercase().as_str()) {
                     return None;
                 }
-                (name, &rest[end..])
+                (FontFamily::from(name), &rest[end..])
             }
         };
         families.push(name);
         rest = match after.strip_prefix(',') {
             // A comma promises another name: `16px Arial,` is refused.
-            Some(next) if !next.trim().is_empty() => next.trim_start(),
-            None if after.trim().is_empty() => "",
+            Some(next) if !next.trim_ascii().is_empty() => {
+                next.trim_ascii_start()
+            }
+            None if after.trim_ascii().is_empty() => "",
             _ => return None,
         };
     }
     (!families.is_empty()).then_some(families)
+}
+
+/// The identifiers an unquoted family name is written as, decoded, and the
+/// byte offset of what follows them: the end, or the comma before the next
+/// family. `None` where something other than an identifier stands there --
+/// `12` is not a family, and Chrome ignores `16px 12`.
+///
+/// Each identifier starts as [`would_start_ident`] says, so `-1x` and `-`
+/// alone are none, and runs over [`is_ident_code_point`]s and escapes,
+/// which CSS Syntax 3 section 4.3.11 decodes as it consumes one: `\61 bc`
+/// is `abc` and `a\ b` the one word `a b`. Identifiers apart are joined by a
+/// single space.
+fn identifiers(text: &str) -> Option<(Vec<String>, usize)> {
+    let mut words = Vec::new();
+    let mut chars = text.char_indices().peekable();
+    loop {
+        while chars.next_if(|(_, c)| c.is_ascii_whitespace()).is_some() {}
+        let Some(&(at, c)) = chars.peek() else {
+            break;
+        };
+        if c == ',' {
+            return (!words.is_empty()).then_some((words, at));
+        }
+        if !would_start_ident(&text[at..]) {
+            return None;
+        }
+        let mut word = String::new();
+        while let Some(&(at, c)) = chars.peek() {
+            match c {
+                '\\' if would_start_ident(&text[at..]) => {
+                    chars.next();
+                    word.push(consume_escape(&mut chars));
+                }
+                c if is_ident_code_point(c) => {
+                    chars.next();
+                    word.push(c);
+                }
+                c if c.is_ascii_whitespace() || c == ',' => break,
+                _ => return None,
+            }
+        }
+        words.push(word);
+    }
+    (!words.is_empty()).then_some((words, text.len()))
+}
+
+/// The code point a CSS escape names, its backslash already read, as CSS
+/// Syntax 3 section 4.3.7 consumes one: up to six hex digits and one
+/// whitespace after them, or else the next code point as itself. Zero, a
+/// surrogate, anything past the last code point and the end of the input
+/// are U+FFFD.
+fn consume_escape(chars: &mut Peekable<CharIndices>) -> char {
+    let hex: String = iter::from_fn(|| {
+        chars
+            .next_if(|(_, c)| c.is_ascii_hexdigit())
+            .map(|(_, c)| c)
+    })
+    .take(MAX_CSS_ESCAPE_HEX_DIGITS)
+    .collect();
+    if hex.is_empty() {
+        return chars.next().map_or(char::REPLACEMENT_CHARACTER, |(_, c)| c);
+    }
+    chars.next_if(|(_, c)| c.is_ascii_whitespace());
+    u32::from_str_radix(&hex, 16)
+        .ok()
+        .and_then(char::from_u32)
+        .filter(|&c| c != '\0')
+        .unwrap_or(char::REPLACEMENT_CHARACTER)
 }
 
 /// A CSS string opening `text` with `quote`, unescaped, and what follows it.
@@ -1014,33 +1151,17 @@ fn font_families(text: &str) -> Option<Vec<String>> {
 /// closing quote is `None`.
 fn css_string(text: &str, quote: char) -> Option<(String, &str)> {
     let mut name = String::new();
-    let mut chars = text.char_indices().skip(1).peekable();
+    let mut chars = text.char_indices().peekable();
+    chars.next();
     while let Some((at, c)) = chars.next() {
         match c {
             c if c == quote => {
-                return Some((name, text[at + 1..].trim_start()));
+                return Some((name, text[at + 1..].trim_ascii_start()));
             }
-            '\\' => {
-                let hex: String = iter::from_fn(|| {
-                    chars
-                        .next_if(|(_, c)| c.is_ascii_hexdigit())
-                        .map(|(_, c)| c)
-                })
-                .take(MAX_CSS_ESCAPE_HEX_DIGITS)
-                .collect();
-                if hex.is_empty() {
-                    name.push(chars.next()?.1);
-                } else {
-                    chars.next_if(|(_, c)| c.is_whitespace());
-                    let code = u32::from_str_radix(&hex, 16).ok()?;
-                    // Zero, a surrogate and anything past the last code
-                    // point are all U+FFFD.
-                    name.push(
-                        char::from_u32(code)
-                            .filter(|&c| c != '\0')
-                            .unwrap_or(char::REPLACEMENT_CHARACTER),
-                    );
-                }
+            // A backslash with nothing after it ends the string unclosed,
+            // which is refused below.
+            '\\' if chars.peek().is_some() => {
+                name.push(consume_escape(&mut chars));
             }
             c => name.push(c),
         }
@@ -1113,16 +1234,6 @@ fn computed_weight(text: &str) -> Option<u16> {
     )
 }
 
-/// CSS Fonts 4's default oblique angle, what a bare `oblique` means: "The
-/// lack of an <angle> represents 14deg." So `oblique 14deg` reads back as
-/// `oblique`, the shorter form; Chrome 152 reads it back as `italic`, and
-/// every other angle with no style at all.
-pub(crate) const DEFAULT_OBLIQUE_DEGREES: f32 = 14.0;
-
-/// The largest oblique angle CSS Fonts 4 allows, either way. Chrome refuses
-/// `oblique 91deg` written out and clamps a computed one.
-const MAX_OBLIQUE_DEGREES: f32 = 90.0;
-
 /// An angle following `oblique`, in degrees: one with a unit, or a math
 /// function of one. `None` when `text` is neither, so it is read as the next
 /// token instead -- `oblique 14 16px Arial` is a weight of 14.
@@ -1136,8 +1247,11 @@ fn oblique_angle(text: &str) -> Option<f32> {
         };
         let quantity = evaluate(text, &expect)
             .filter(|quantity| quantity.dimension == Dimension::ANGLE)?;
-        let limit = f64::from(MAX_OBLIQUE_DEGREES);
-        return Some(quantity.finished().clamp(-limit, limit) as f32);
+        // Chrome holds a computed angle in range, where it refuses one
+        // written out of it.
+        return Some(
+            ObliqueAngle::clamped(quantity.finished() as f32).degrees(),
+        );
     }
     // A unit, which `parse_angle` lets a zero go without and this does not:
     // Chrome refuses `oblique 0 16px Arial`.
@@ -1152,11 +1266,11 @@ fn oblique_angle(text: &str) -> Option<f32> {
 /// for the grammar; the error names what could not be read, worded as
 /// [`Font::parse`] has always worded it.
 fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
-    let text = shorthand.trim();
-    let mut font = Font::new(String::new(), 0.0);
+    let uncommented = without_comments(shorthand)
+        .ok_or_else(|| format!("a sign stands alone in {shorthand:?}"))?;
+    let text = uncommented.trim_ascii();
+    let mut font = Font::new(FontFamily::Named("".into()), 0.0);
     let mut small_caps = false;
-    let mut oblique_degrees = None;
-    let mut written_angle = None;
     let (mut style, mut variant, mut weight, mut stretch) =
         (false, false, false, false);
     let mut prefix_tokens = 0;
@@ -1165,12 +1279,12 @@ fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
     loop {
         // A token runs to the next space, or to the `/` that starts a line
         // height, or past the `(...)` of a `calc()`.
-        let end = font_token_end(rest, |c| c.is_whitespace() || c == '/');
+        let end = font_token_end(rest, |c| c.is_ascii_whitespace() || c == '/');
         let token = &rest[..end];
         if token.is_empty() {
             return Err(format!("no `<size>px` in {shorthand:?}"));
         }
-        let after = rest[end..].trim_start();
+        let after = rest[end..].trim_ascii_start();
 
         if let Some(size) = font_size(token) {
             font.size = size;
@@ -1188,30 +1302,21 @@ fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
             }
             "oblique" if !style => {
                 style = true;
-                font.slant = FontSlant::Oblique;
+                font.slant = FontSlant::OBLIQUE;
                 // An angle may follow. Written out it has to be within the
                 // range; computed it is clamped into it.
-                let next_end =
-                    font_token_end(after, |c| c.is_whitespace() || c == '/');
+                let next_end = font_token_end(after, |c| {
+                    c.is_ascii_whitespace() || c == '/'
+                });
                 if let Some(degrees) = oblique_angle(&after[..next_end]) {
-                    if degrees.abs() > MAX_OBLIQUE_DEGREES {
-                        return Err(format!(
-                            "oblique angle out of range in {shorthand:?}"
-                        ));
-                    }
                     // Every angle draws as CSS Fonts 4 says, whatever Chrome
                     // does with it -- see `leans_as_asked` and
-                    // docs/browser-differences.md. Zero is upright: the
-                    // shear to it is none, and no face leans at it.
-                    match degrees {
-                        0.0 => font.slant = FontSlant::Normal,
-                        DEFAULT_OBLIQUE_DEGREES => {}
-                        degrees => oblique_degrees = Some(degrees),
-                    }
-                    if degrees != DEFAULT_OBLIQUE_DEGREES {
-                        written_angle = Some(degrees);
-                    }
-                    rest = after[next_end..].trim_start();
+                    // docs/browser-differences.md.
+                    let angle = ObliqueAngle::new(degrees).map_err(|_| {
+                        format!("oblique angle out of range in {shorthand:?}")
+                    })?;
+                    font.slant = FontSlant::Oblique(angle);
+                    rest = after[next_end..].trim_ascii_start();
                     prefix_tokens += 1;
                     continue;
                 }
@@ -1260,21 +1365,16 @@ fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
     }
 
     if let Some(leading) = rest.strip_prefix('/') {
-        let leading = leading.trim_start();
-        let end = font_token_end(leading, char::is_whitespace);
+        let leading = leading.trim_ascii_start();
+        let end = font_token_end(leading, |c| c.is_ascii_whitespace());
         font.line_height = font_line_height(&leading[..end], font.size)
             .ok_or_else(|| format!("no line height in {shorthand:?}"))?;
-        rest = leading[end..].trim_start();
+        rest = leading[end..].trim_ascii_start();
     }
 
     font.families = font_families(rest)
         .ok_or_else(|| format!("no font family in {shorthand:?}"))?;
-    Ok(FontShorthand {
-        font,
-        small_caps,
-        oblique_degrees,
-        written_angle,
-    })
+    Ok(FontShorthand { font, small_caps })
 }
 
 /// The drawing surface of a [`Canvas`] page.
@@ -1326,9 +1426,13 @@ impl Context2D {
     /// The Canvas API's `fillStyle` also accepts gradients, patterns and
     /// textures; those arrive through their own setters rather than one
     /// union-typed property.
+    ///
+    /// `color` is linear-light sRGB, as every [`RgbaLinear`] is, so it is
+    /// the same colour on every canvas: a Display P3 colour is one with
+    /// components outside `0.0..=1.0`, such as
+    /// `RgbaLinear::from_css("color(display-p3 1 0 0)")`.
     pub fn set_fill_style(&mut self, color: RgbaLinear) {
-        let working = self.inner.canvas_color_space.clone();
-        self.inner.state.fill_style = to_dye(color, &working);
+        self.inner.state.fill_style = to_dye(color);
     }
 
     /// Sets the fill color from a CSS color string.
@@ -1336,15 +1440,20 @@ impl Context2D {
     /// The same notations the JavaScript `fillStyle` takes, parsed by the same
     /// code: named colors, `#rgb`, `rgb()`, `hsl()`, `hwb()`, `lab()`,
     /// `lch()`, `oklab()`, `oklch()` and `color(<space> r g b / a)`, each in
-    /// its relative form too. `hwba()`, `hsv()`, `hsva()`, hex without its
-    /// `#` and legacy comma syntax CSS Color 4 does not allow, such as
-    /// `rgb(255, 0%, 0)` or `lab(50, 40, 30)`, are read as well and are
-    /// deprecated: no browser reads them, and 0.17 refuses them.
+    /// its relative form too, `rgb()` and `hsl()` in the legacy comma syntax
+    /// CSS Color 4 allows, and `currentcolor`, opaque black on a canvas with
+    /// no element to take a colour from, as Chrome paints it. Comments are
+    /// dropped as CSS Syntax drops them, and whitespace is CSS's five
+    /// characters. Anything else is refused and the fill left as it was:
+    /// `hwba()`, `hsv()`, `hsva()` and hex without its `#`, which
+    /// no CSS defines, and comma syntax CSS Color 4 does not allow, such as
+    /// `rgb(255, 0%, 0)` or `lab(50, 40, 30)`.
     ///
-    /// Unlike [`Context2D::set_fill_style`], which takes a value already in
-    /// the canvas's space, this keeps the space the string named: on a Display
-    /// P3 canvas, `"color(display-p3 1 0 0)"` is that canvas's red exactly,
-    /// while `"red"` is sRGB red converted into it.
+    /// The colour keeps the space the string named, so a Display P3 canvas
+    /// paints `"color(display-p3 1 0 0)"` as its own red with no conversion
+    /// at all, and `"red"` as sRGB red converted into it -- the colours
+    /// [`Context2D::set_fill_style`] paints for the same CSS read by
+    /// [`RgbaLinear::from_css`](crate::color::RgbaLinear::from_css).
     ///
     /// # Errors
     ///
@@ -1364,8 +1473,7 @@ impl Context2D {
     /// porting one. Replaces any shader, pattern or texture previously set
     /// as the stroke style.
     pub fn set_stroke_style(&mut self, color: RgbaLinear) {
-        let working = self.inner.canvas_color_space.clone();
-        self.inner.state.stroke_style = to_dye(color, &working);
+        self.inner.state.stroke_style = to_dye(color);
     }
 
     /// Sets the stroke color from a CSS color string.
@@ -1866,10 +1974,37 @@ impl Context2D {
         }
     }
 
-    /// Whether glyph hinting is applied. Off by default, matching the Canvas
-    /// API, which has no hinting control at all.
+    /// Whether glyph hinting is applied.
+    ///
+    /// On by default, at Slight, as Chrome draws text: on macOS that is
+    /// CoreGraphics' dilated outline, and under FreeType outlines fitted to
+    /// the pixel grid vertically, with every advance as designed. Off draws
+    /// each glyph as its outline is designed: undilated on macOS, unhinted
+    /// under FreeType, and visibly lighter on macOS. No text moves either
+    /// way. The Canvas API has no hinting control, and a [`Paragraph`] has
+    /// none either and is drawn hinted.
+    ///
+    /// It governs text under [`TextRendering::Auto`], `OptimizeLegibility`
+    /// and `OptimizeSpeed`; [`TextRendering::GeometricPrecision`] draws
+    /// unhinted whatever this says, as the standard asks of it.
     pub fn set_font_hinting(&mut self, enabled: bool) {
         self.inner.state.font_hinting = enabled;
+    }
+
+    /// Sets whether kerning is applied, as `ctx.fontKerning` does -- see
+    /// [`FontKerning`]. Kept by [`save`](Self::save) and
+    /// [`restore`](Self::restore), and left alone by
+    /// [`set_font`](Self::set_font).
+    pub fn set_font_kerning(&mut self, kerning: FontKerning) {
+        self.inner.state.font_kerning = kerning;
+    }
+
+    /// Sets what text is drawn for, as `ctx.textRendering` does -- see
+    /// [`TextRendering`]. Kept by [`save`](Self::save) and
+    /// [`restore`](Self::restore), and left alone by
+    /// [`set_font`](Self::set_font).
+    pub fn set_text_rendering(&mut self, rendering: TextRendering) {
+        self.inner.state.text_rendering = rendering;
     }
 
     /// Selects how wide a face to use, where the family offers a choice.
@@ -3194,22 +3329,27 @@ impl Context2D {
     }
 
     /// Sets the shadow color. A fully transparent color disables shadows.
+    ///
+    /// Linear-light sRGB, as every [`RgbaLinear`] is, and kept in floating
+    /// point, so a wide colour reaches a wide canvas.
     pub fn set_shadow_color(&mut self, color: RgbaLinear) {
-        self.inner.state.shadow_color = rgba_linear_to_skia_color(color);
+        self.inner.state.shadow_color = (
+            rgba_linear_to_unpremul_color4f(color),
+            linear_srgb_color_space(),
+        );
     }
 
     /// Sets the shadow color from a CSS color string.
     ///
-    /// Takes the same notations as
-    /// [`Context2D::set_fill_style_css`]. Shadows are drawn through an
-    /// eight-bit color, so a wide-gamut string is converted rather than kept.
+    /// Takes the same notations as [`Context2D::set_fill_style_css`], and
+    /// keeps the space the string named, as it does.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidColor`] when the string is not a CSS color.
     pub fn set_shadow_color_css(&mut self, css: &str) -> Result<(), Error> {
-        self.inner.state.shadow_color =
-            css_to_color(css).ok_or_else(|| Error::InvalidColor {
+        self.inner.state.shadow_color = css_to_color4f_in_space(css)
+            .ok_or_else(|| Error::InvalidColor {
                 reason: format!("{css:?}"),
             })?;
         Ok(())
@@ -3313,27 +3453,20 @@ impl Context2D {
 
     /// What fills are painted with.
     ///
-    /// A colour reads back as linear light in the canvas's working space,
-    /// whichever setter it came through, so handing it to
-    /// [`set_fill_style`](Self::set_fill_style) paints what was painted
-    /// before -- `"rebeccapurple"` set through
+    /// A colour reads back as an [`RgbaLinear`], linear-light sRGB,
+    /// whichever setter it came through and whichever canvas holds it, so
+    /// handing it to [`set_fill_style`](Self::set_fill_style) paints what was
+    /// painted before -- `"rebeccapurple"` set through
     /// [`set_fill_style_css`](Self::set_fill_style_css) reads back as
-    /// `RgbaLinear::from_css("rebeccapurple")` on an sRGB canvas, and in
-    /// P3's primaries on a Display P3 one.
+    /// `RgbaLinear::from_css("rebeccapurple")`.
     pub fn fill_style(&self) -> PaintSource {
-        to_paint_source(
-            &self.inner.state.fill_style,
-            &self.inner.canvas_color_space,
-        )
+        to_paint_source(&self.inner.state.fill_style)
     }
 
     /// What strokes are painted with, on the terms of
     /// [`fill_style`](Self::fill_style).
     pub fn stroke_style(&self) -> PaintSource {
-        to_paint_source(
-            &self.inner.state.stroke_style,
-            &self.inner.canvas_color_space,
-        )
+        to_paint_source(&self.inner.state.stroke_style)
     }
 
     /// The reading direction text is laid out in.
@@ -3408,14 +3541,13 @@ impl Context2D {
         self.inner.state.shadow_blur
     }
 
-    /// The shadow color.
+    /// The shadow color, as linear-light sRGB.
     ///
-    /// Stored as 8-bit sRGB with 8-bit alpha, so a colour set from
-    /// [`RgbaLinear::from_srgb8`] with an alpha on a whole 255th reads back
-    /// exactly and anything else is quantised: `0.5` returns as `0.5019608`,
-    /// and the premultiplied components shift with it.
+    /// Held in floating point, so a colour set through
+    /// [`Context2D::set_shadow_color`] reads back as it was set.
     pub fn shadow_color(&self) -> RgbaLinear {
-        skia_color_to_rgba_linear(self.inner.state.shadow_color)
+        let (color, space) = &self.inner.state.shadow_color;
+        color4f_to_rgba_linear(*color, Some(space))
     }
 
     /// The shadow offset, as `(x, y)` pixels.
@@ -3479,9 +3611,20 @@ impl Context2D {
         self.inner.state.font_variation_settings.clone()
     }
 
-    /// Whether glyph hinting is applied.
+    /// Whether glyph hinting is applied -- see
+    /// [`Context2D::set_font_hinting`].
     pub fn font_hinting(&self) -> bool {
         self.inner.state.font_hinting
+    }
+
+    /// Whether kerning is applied: [`FontKerning::Auto`] on a new context.
+    pub fn font_kerning(&self) -> FontKerning {
+        self.inner.state.font_kerning
+    }
+
+    /// What text is drawn for: [`TextRendering::Auto`] on a new context.
+    pub fn text_rendering(&self) -> TextRendering {
+        self.inner.state.text_rendering
     }
 
     /// Sets the spacing between characters from a CSS length.
@@ -3501,10 +3644,12 @@ impl Context2D {
     /// Returns [`Error::InvalidCssLength`] for a unit CSS does not define,
     /// for a bare number other than zero, for a percentage --
     /// `letter-spacing` is defined over a length, and a percentage is not
-    /// one -- for a math function such as `calc()`, and for whitespace
-    /// around the length or before its unit. Chrome ignores each of these:
-    /// `"5"`, `"calc(1px)"`, `" 5px "` and `"5 px"`. A bare `"0"` is taken,
-    /// as CSS Values 4 makes a zero length, where Chrome ignores it.
+    /// one -- for a math function such as `calc()`, and for anything
+    /// between the number and its unit. Chrome ignores each of these:
+    /// `"5"`, `"calc(1px)"` and `"5 px"`. A bare `"0"` is taken, as CSS
+    /// Values 4 makes a zero length, where Chrome ignores it, and so are
+    /// whitespace and comments around the length, `" 5px "` and
+    /// `"/**/5px"`, which CSS Syntax discards and Chrome refuses.
     ///
     /// # Examples
     ///
@@ -3858,7 +4003,7 @@ impl Context2D {
             surface_color_space: self.canvas_space.to_skia_color_space()?,
             surface_color_type: self.canvas_depth.to_skia_color_type(),
             density: export.density as f32,
-            matte: export.matte.map(rgba_linear_to_skia_color),
+            matte: export.matte.map(Matte::from_rgba_linear),
             msaa: export.msaa,
             ..ExportOptions::default()
         };
@@ -4101,7 +4246,7 @@ pub(crate) fn decoration_from_css(css: &str) -> Option<DecorationStyle> {
         parsed.style,
         parsed.color,
         size,
-        css.trim().to_string(),
+        css.trim_ascii().to_string(),
     ))
 }
 
@@ -4128,6 +4273,12 @@ fn decoration_style(
             ..Decoration::default()
         },
         size,
+        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+        // Re-check: grep -n "pub color" in skia-safe's
+        // src/modules/paragraph/text_style.rs
+        //
+        // SkParagraph's `Decoration` holds an eight-bit sRGB `SkColor`, so
+        // a wide decoration colour is gamut-mapped into sRGB.
         color: color.map(rgba_linear_to_skia_color),
     }
 }
@@ -4181,15 +4332,14 @@ fn decoration_css(
 }
 
 /// Reports which kind of source a [`Dye`] is, recovering the colour when it
-/// holds one -- as an [`RgbaLinear`] in `working`, the canvas's working
-/// space, which is what [`set_fill_style`](Context2D::set_fill_style) takes
-/// back.
-fn to_paint_source(dye: &Dye, working: &SkColorSpace) -> PaintSource {
+/// holds one -- as an [`RgbaLinear`], linear-light sRGB, which is what
+/// [`set_fill_style`](Context2D::set_fill_style) takes back.
+fn to_paint_source(dye: &Dye) -> PaintSource {
     match dye {
-        // Set from an `RgbaLinear`, so already linear in the working space:
-        // `to_dye` tagged it so.
+        // Set from an `RgbaLinear`, so already linear sRGB: `to_dye` tagged
+        // it so.
         Dye::Color(color, Some(space))
-            if *space == working.with_linear_gamma() =>
+            if *space == linear_srgb_color_space() =>
         {
             PaintSource::Color(unpremul_color4f_to_rgba_linear(*color))
         }
@@ -4198,9 +4348,9 @@ fn to_paint_source(dye: &Dye, working: &SkColorSpace) -> PaintSource {
         // the same trip, or handing it back to `set_fill_style` paints
         // something else -- rebeccapurple read back as 0.4, 0.2, 0.6 and
         // repainted as 170, 124, 203.
-        Dye::Color(color, space) => PaintSource::Color(
-            color4f_to_working_linear(*color, space.as_ref(), working),
-        ),
+        Dye::Color(color, space) => {
+            PaintSource::Color(color4f_to_rgba_linear(*color, space.as_ref()))
+        }
         // A gradient only reaches the state through the JavaScript binding;
         // the Rust facade builds every gradient as a `Shader`, and both are
         // the same thing to a caller who can only be told which kind it is.
@@ -4248,21 +4398,16 @@ fn css_dye(css: &str) -> Result<Dye, Error> {
     Ok(Dye::Color(color, Some(space)))
 }
 
-/// Tags a color with the canvas's own working space, in linear light.
+/// An [`RgbaLinear`] as a fill: unpremultiplied and tagged linear sRGB.
 ///
 /// Two conversions, both easy to omit and invisible until alpha drops below
-/// one: [`RgbaLinear`] is premultiplied and Skia's paint color is not, and
-/// Skia decodes an untagged `Color4f` as sRGB, so the linear-light values
-/// need the linear tag to survive.
-///
-/// [`RgbaLinear`] is defined as premultiplied linear light *in the
-/// destination surface's working color space*, so pinning it to linear sRGB
-/// made every color on a Display P3 canvas mean something the type does not
-/// say -- and put wide-gamut colors out of a Rust caller's reach.
-fn to_dye(color: RgbaLinear, working: &SkColorSpace) -> Dye {
+/// one or the canvas is not sRGB: `RgbaLinear` is premultiplied and Skia's
+/// paint color is not, and Skia reads an untagged `Color4f` as sRGB-encoded.
+/// Tagged, Skia converts the color into whatever space the canvas holds.
+fn to_dye(color: RgbaLinear) -> Dye {
     Dye::Color(
         rgba_linear_to_unpremul_color4f(color),
-        Some(working.with_linear_gamma()),
+        Some(linear_srgb_color_space()),
     )
 }
 

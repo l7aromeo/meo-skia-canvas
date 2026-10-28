@@ -1865,21 +1865,83 @@ describe("Context2D", () => {
       ctx.filter = "none";
     });
 
-    // Units and keywords are ASCII case-insensitive wherever they appear, not
-    // only in the `font` shorthand. Each of these reaches a different parser.
-    describe("case-insensitivity outside the font shorthand", () => {
-      test("fontStretch", () => {
-        for (let [written, expected] of [
-          ["condensed", "condensed"],
-          ["CONDENSED", "condensed"],
-          ["Semi-Expanded", "semi-expanded"],
-          ["ULTRA-CONDENSED", "ultra-condensed"],
-        ]) {
-          ctx.fontStretch = written;
-          assert.equal(ctx.fontStretch, expected, written);
+    // An enumerated attribute takes its names exactly, as WebIDL matches an
+    // enumeration's values: a name in another case is not one of them, and
+    // the setter ignores it. Each row was measured in Chrome 152.0.7977.167,
+    // which left every attribute at its initial value for each spelling
+    // here and took each exact name.
+    describe("an enumerated attribute matches its names exactly", () => {
+      const ROWS = [
+        ["textAlign", "center", ["CENTER", "Center"]],
+        ["textBaseline", "top", ["TOP"]],
+        ["direction", "rtl", ["RTL", "Rtl"]],
+        ["lineCap", "round", ["ROUND"]],
+        ["lineJoin", "bevel", ["BEVEL"]],
+        ["imageSmoothingQuality", "high", ["HIGH"]],
+        // U+212A KELVIN SIGN lowercases to "k" under Unicode's rules.
+        [
+          "globalCompositeOperation",
+          "darken",
+          ["DARKEN", "Darken", "dar\u212Aen"],
+        ],
+        ["fontStretch", "condensed", ["CONDENSED", "Semi-Expanded"]],
+        ["fontVariantCaps", "small-caps", ["SMALL-CAPS"]],
+        // `lineDashFit` is this library's, and matches as its siblings do.
+        ["lineDashFit", "follow", ["FOLLOW"]],
+      ];
+
+      test("ignores a name in another case", () => {
+        const taken = [];
+        for (const [attr, , spellings] of ROWS)
+          for (const written of spellings) {
+            const fresh = new Canvas(4, 4).getContext("2d"),
+              before = fresh[attr];
+            fresh[attr] = written;
+            if (fresh[attr] !== before)
+              taken.push(
+                `${attr} = ${JSON.stringify(written)}: ${fresh[attr]}`,
+              );
+          }
+        assert.deepEqual(taken, []);
+      });
+
+      test("takes each exact name", () => {
+        for (const [attr, exact] of ROWS) {
+          const fresh = new Canvas(4, 4).getContext("2d");
+          fresh[attr] = exact;
+          assert.equal(fresh[attr], exact, attr);
         }
       });
 
+      // A name in another case leaves a value that is not the default in
+      // place, rather than resetting it.
+      test("keeps the value it held", () => {
+        const fresh = new Canvas(4, 4).getContext("2d");
+        fresh.fontStretch = "condensed";
+        fresh.fontStretch = "EXPANDED";
+        assert.equal(fresh.fontStretch, "condensed");
+      });
+
+      // The standard names the exception: "If repetition is not identical
+      // to one of ..., then throw a SyntaxError DOMException." Chrome 152
+      // throws it for both of these.
+      test("createPattern refuses a repetition in another case", () => {
+        const source = new Canvas(2, 2);
+        for (const written of ["REPEAT", "Repeat-X", "NO-REPEAT"])
+          assert.throws(
+            () => ctx.createPattern(source, written),
+            (e) => e.name === "SyntaxError",
+            written,
+          );
+        assert.ok(ctx.createPattern(source, "repeat-x"));
+      });
+    });
+
+    // Units and keywords in a CSS value are ASCII case-insensitive wherever
+    // they appear, not only in the `font` shorthand. Each of these reaches a
+    // different parser. `fontStretch` is not one: it is an enumeration, and
+    // matched exactly above.
+    describe("case-insensitivity outside the font shorthand", () => {
       test("letterSpacing and wordSpacing", () => {
         // Only the absolute units. `parseFlexibleSize` has no `em` arm, so a
         // font-relative spacing produces `NaN` and the addon refuses it out
@@ -2282,10 +2344,8 @@ describe("Context2D", () => {
 
     test("color() names a space of its own", () => {
       // `color(display-p3 …)` is how CSS Color 4 names a colour outside sRGB.
-      // csscolorparser does not implement the function, so this is parsed
-      // here -- and the colour is kept in the space it was named in rather
-      // than converted, which is what makes it exact on a canvas of that
-      // space.
+      // The colour is kept in the space it was named in rather than
+      // converted, which is what makes it exact on a canvas of that space.
       for (let css of [
         "color(display-p3 0.4 0.8 0.3)",
         "color(rec2020 1 0 0)",
@@ -2377,24 +2437,23 @@ describe("Context2D", () => {
       );
     });
 
-    test("color(rec2020 ...) converts through Rec. 2020's own curve", () => {
-      // Skia has no transfer function for Rec. 2020: `skia_safe`'s CICP
-      // transfer functions are reference EOTFs, and `REC2020_10BIT` and
-      // `REC2020_12BIT` are both aliases of `REC709`, which is a pure 2.4
-      // gamma. Tagging the paint therefore decoded the components with the
-      // wrong curve. 0,120,168 is what the CSS Color 4 conversion matrices
-      // give for these components, and what Chrome paints.
+    test("color(rec2020 ...) takes CSS Color 4's 2.4 gamma", () => {
+      // CSS Color 4 section 10.8 defines `rec2020`'s transfer function as
+      // "gamma 2.40, from [REC_BT.1886]". Through its sample code these
+      // components are 0, 97, 153 in sRGB, and a grey of 0.2 is 40. Chrome
+      // 152 paints 0, 120, 168 and 67, by BT.2020's inverse OETF, which the
+      // standard used until 2025 -- docs/browser-differences.md has it.
       let ctx2 = new Canvas(4, 4).getContext("2d");
       ctx2.fillStyle = "color(rec2020 0.2 0.4 0.6)";
       ctx2.fillRect(0, 0, 4, 4);
       assert.deepEqual(
         Array.from(ctx2.getImageData(1, 1, 1, 1).data).slice(0, 3),
-        [0, 120, 168],
+        [0, 97, 153],
       );
 
       // Every surface has to answer alike. A grey isolates the transfer
-      // function from the primaries: the wrong curve gave 40 where 67 is
-      // right, and each of these reached the paint by a different route.
+      // function from the primaries, and each of these reaches the paint by
+      // a different route.
       let grey = "color(rec2020 0.2 0.2 0.2)";
       let sample = (draw) => {
         let c = new Canvas(4, 4).getContext("2d");
@@ -2419,7 +2478,7 @@ describe("Context2D", () => {
         c.fillStyle = "#000";
         c.fillRect(-8, 0, 4, 4);
       });
-      assert.deepEqual(byFill, [67, 67, 67], "through a fill");
+      assert.deepEqual(byFill, [40, 40, 40], "through a fill");
       assert.deepEqual(byStop, byFill, "through a gradient stop");
       assert.deepEqual(byShadow, byFill, "through a shadow");
     });
@@ -2718,6 +2777,82 @@ describe("Context2D", () => {
       assert.equal(ctx.isPointInStroke(10, NaN), false);
       assert.equal(ctx.isPointInStroke(p2d, 10, NaN), false);
       assert.equal(ctx.isPointInStroke(p2d, 10), false);
+    });
+  });
+
+  // CSS 2.1 section 10.8.1: a line box of one font is `line-height` tall,
+  // so wrapped lines' baselines lie that far apart. A number or a
+  // percentage is of the font size, `em` of the font's own size, and
+  // `normal` the face's own spacing. Chrome's canvas does not wrap, so the
+  // figures are CSS's arithmetic: at 48px, `30px` is 30, `1` 48, `150%` 72
+  // and `0.5em` 24. The shorthand's line height used to be taken as a
+  // multiple of the size a second time, putting the second line of
+  // "48px/30px" 1440px down.
+  describe("a font's line height spaces wrapped lines", () => {
+    FontLibrary.use("LineHeightOswald", [
+      "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    ]);
+    const TEXT = "HHH HHH HHH",
+      WIDTH = 110;
+    const baselines = (font) => {
+      const c = new Canvas(400, 400).getContext("2d");
+      c.font = font;
+      c.textWrap = true;
+      return c.measureText(TEXT, WIDTH).lines.map((line) => line.baseline);
+    };
+    const gaps = (font) => {
+      const at = baselines(font);
+      assert.equal(at.length, 3, `${font}: three lines`);
+      return at.slice(1).map((y, i) => y - at[i]);
+    };
+
+    for (const [height, pixels] of [
+      ["30px", 30],
+      ["1", 48],
+      ["150%", 72],
+      ["0.5em", 24],
+    ]) {
+      test(`48px/${height} puts the lines ${pixels}px apart`, () => {
+        const font = `48px/${height} LineHeightOswald`;
+        for (const gap of gaps(font))
+          assert.ok(Math.abs(gap - pixels) < 0.01, `${font}: ${gap}`);
+        assert.ok(
+          Math.abs(baselines(font)[0]) < 0.01,
+          "the first line's baseline is the y given",
+        );
+      });
+    }
+
+    test("48px/normal spaces them as no line height does", () => {
+      const normal = gaps("48px/normal LineHeightOswald");
+      assert.deepEqual(normal, gaps("48px LineHeightOswald"));
+      // Oswald's ascent and descent, 57.26 and 13.87, and no line gap.
+      for (const gap of normal)
+        assert.ok(Math.abs(gap - 71.14) < 0.5, `${gap}`);
+    });
+
+    // Spacings wider than the cap height, so the two stems do not meet.
+    test("the lines are drawn where they measure", () => {
+      for (const [height, pixels] of [
+        ["1", 48],
+        ["150%", 72],
+      ]) {
+        const c = new Canvas(400, 400).getContext("2d");
+        c.font = `48px/${height} LineHeightOswald`;
+        c.textWrap = true;
+        c.fillText("H H", 10, 100, 40);
+        // The foot of each `H`'s left stem, in the column through it.
+        const { data } = c.getImageData(14, 0, 1, 400),
+          feet = [];
+        for (let y = 1; y < 400; y++)
+          if (data[(y - 1) * 4 + 3] > 128 && data[y * 4 + 3] <= 128)
+            feet.push(y);
+        assert.deepEqual(
+          feet,
+          [100, 100 + pixels],
+          `48px/${height}: stems end at ${feet}`,
+        );
+      }
     });
   });
 
@@ -4420,42 +4555,120 @@ describe("measureText's return shape", () => {
     assert.equal(m.width, before);
   });
 
-  test("keeps 6.0.2's own properties, frozen, in their order", () => {
-    // Deprecated, and kept until 7.0: the values are own properties, as they
-    // were, so `Object.keys`, a spread and `JSON.stringify` see every one,
-    // `lines` included, and the object is frozen.
-    const OWN = [
+  // The order 6.x serialised a measurement in, its values then being own
+  // properties, and the order `toJSON` keeps.
+  const SERIALISED = [
+    "width",
+    "actualBoundingBoxLeft",
+    "actualBoundingBoxRight",
+    "actualBoundingBoxAscent",
+    "actualBoundingBoxDescent",
+    "fontBoundingBoxAscent",
+    "fontBoundingBoxDescent",
+    "emHeightAscent",
+    "emHeightDescent",
+    "hangingBaseline",
+    "alphabeticBaseline",
+    "ideographicBaseline",
+    "height",
+    "lines",
+  ];
+
+  test("puts its values on the prototype, as HTML's interface does", () => {
+    // HTML's attributes in the order its IDL declares them, then this
+    // library's two and `toJSON`. WebIDL makes each attribute an
+    // enumerable, configurable getter with no setter, and an operation an
+    // enumerable, writable, configurable method.
+    const { TextMetrics } = require("../../lib");
+    const HTML = [
       "width",
       "actualBoundingBoxLeft",
       "actualBoundingBoxRight",
-      "actualBoundingBoxAscent",
-      "actualBoundingBoxDescent",
       "fontBoundingBoxAscent",
       "fontBoundingBoxDescent",
+      "actualBoundingBoxAscent",
+      "actualBoundingBoxDescent",
       "emHeightAscent",
       "emHeightDescent",
       "hangingBaseline",
       "alphabeticBaseline",
       "ideographicBaseline",
+    ];
+    assert.deepEqual(Object.getOwnPropertyNames(TextMetrics.prototype), [
+      "constructor",
+      ...HTML,
       "height",
       "lines",
-    ];
-    const m = measured().measureText("Hamburgefonstiv");
-    assert.deepEqual(Object.keys(m), OWN);
-    assert.deepEqual(Object.getOwnPropertyNames(m), OWN);
-    assert.deepEqual(Object.keys({ ...m }), OWN);
-    assert.ok(Object.isFrozen(m));
+      "toJSON",
+    ]);
+    for (const name of [...HTML, "height", "lines"]) {
+      const d = Object.getOwnPropertyDescriptor(TextMetrics.prototype, name);
+      assert.equal(typeof d.get, "function", name);
+      assert.equal(d.set, undefined, name);
+      assert.ok(d.enumerable && d.configurable, name);
+      assert.throws(
+        () => d.get.call({}),
+        TypeError,
+        `${name} on a non-measurement`,
+      );
+    }
+    const toJSON = Object.getOwnPropertyDescriptor(
+      TextMetrics.prototype,
+      "toJSON",
+    );
+    assert.equal(typeof toJSON.value, "function");
+    assert.ok(toJSON.writable && toJSON.enumerable && toJSON.configurable);
+    // WebIDL's default `toJSON` checks its receiver as the getters do, rather
+    // than reading properties a plain object does not have.
+    assert.throws(
+      () => toJSON.value.call({}),
+      TypeError,
+      "toJSON on a non-measurement",
+    );
+    assert.throws(
+      () => toJSON.value.call(Object.create(TextMetrics.prototype)),
+      TypeError,
+      "toJSON on an object made from the prototype",
+    );
 
-    const json = JSON.parse(JSON.stringify(m));
-    assert.deepEqual(Object.keys(json), OWN);
-    for (const name of OWN) assert.deepEqual(json[name], m[name], name);
-    assert.deepEqual(Object.keys(json.lines[0]).at(-1), "runs");
-    assert.equal(typeof json.lines[0].runs[0].family, "string");
+    const m = measured().measureText("Hamburgefonstiv");
+    assert.deepEqual(Object.getOwnPropertyNames(m), []);
+    assert.deepEqual(Object.keys(m), []);
+    assert.deepEqual({ ...m }, {});
+    assert.ok(Object.isExtensible(m));
+    for (const name of HTML) assert.equal(typeof m[name], "number", name);
+  });
+
+  test("serialises as 6.x did, through toJSON", () => {
+    // 6.x serialised its own properties, which were these values in this
+    // order, so the same string is the same values in the same order.
+    const m = measured().measureText("Hamburgefonstiv");
+    const json = JSON.stringify(m);
+    assert.equal(
+      json,
+      JSON.stringify(Object.fromEntries(SERIALISED.map((k) => [k, m[k]]))),
+    );
+    const parsed = JSON.parse(json);
+    assert.deepEqual(Object.keys(parsed), SERIALISED);
+    assert.deepEqual(Object.keys(parsed.lines[0]).at(-1), "runs");
+    assert.equal(typeof parsed.lines[0].runs[0].family, "string");
+  });
+
+  // Node's `console.log` shows own properties, and a measurement has none,
+  // so it would print `TextMetrics {}`: it shows what `toJSON` gives, as a
+  // browser's console lists the values its getters read.
+  test("shows its values when inspected", () => {
+    const { inspect } = require("util");
+    const m = measured().measureText("Hamburgefonstiv");
+    const shown = inspect(m);
+    assert.match(shown, /^TextMetrics \{/);
+    for (const name of SERIALISED)
+      assert.ok(shown.includes(`${name}:`), `${name} in ${shown}`);
+    assert.ok(shown.includes(String(m.width)), "with its values");
   });
 
   test("has the prototype and constructor Chrome's TextMetrics has", () => {
-    // What of Chrome 152's shape costs nothing to keep alongside the own
-    // properties: the prototype, its tag, and a constructor that refuses.
+    // The prototype, its tag, and a constructor that refuses.
     const { TextMetrics } = require("../../lib");
     const m = measured().measureText("Hamburgefonstiv");
     assert.equal(Object.getPrototypeOf(m), TextMetrics.prototype);
@@ -4494,8 +4707,11 @@ describe("measureText's return shape", () => {
       m.actualBoundingBoxDescent;
       assert.ok(m.lines[0].runs.length > 0);
       JSON.stringify(m);
-      ({ ...m });
       assert.equal(calls, 1, "and the ink is computed once per measurement");
+
+      const spread = measured().measureText("Hamburgefonstiv");
+      ({ ...spread });
+      assert.equal(calls, 1, "a spread copies nothing, so reads nothing");
 
       JSON.stringify(measured().measureText("Hamburgefonstiv"));
       assert.equal(calls, 2, "a serialisation reads it, once");
@@ -5136,7 +5352,8 @@ describe("gradient interpolation", () => {
     // than trust them.
     "a98-rgb": [125, 0, 129, 255],
     "prophoto-rgb": [183, 4, 156, 255],
-    rec2020: [159, 19, 147, 255],
+    // CSS Color 4's 2.4 gamma; BT.2020's piecewise curve gives 159,19,147.
+    rec2020: [157, 18, 143, 255],
     lab: [190, 0, 135, 255],
     oklab: [138, 82, 161, 255],
     xyz: [184, 1, 187, 255],
@@ -5774,4 +5991,270 @@ describe("a context and its canvas", () => {
     }
     assert.equal(freed, COUNT);
   });
+});
+
+// A canvas rasterizes text with Chrome's text contrast and gamma for the
+// platform, Chromium's `SK_GAMMA_CONTRAST` and `SK_GAMMA_EXPONENT` in its
+// `skia/BUILD.gn`. Chrome 156 on macOS, CPU canvas, black on transparent,
+// drew "Hamburgefonstiv quick brown" at (5, 90) on 1400 by 120 in 48px
+// Oswald to the buffer whose FNV-1a is below, and in 13px Oswald to 155,310
+// of alpha. Ours at 13px differs in one glyph: the `g` sits at 42.375, where
+// Chrome sums the same advances to 42.37495, and Skia's quarter-pixel
+// subpixel buckets part at .375, so the two draw it from neighbouring
+// buckets -- 58 pixels, 15 of alpha. Helvetica at 13px and 48px matched
+// pixel for pixel as well, but is a system font and is not pinned.
+describe("text is drawn as Chrome draws it", () => {
+  const OSWALD = "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    TEXT = "Hamburgefonstiv quick brown",
+    mac = process.platform === "darwin";
+  const [contrast, gamma] =
+    process.platform === "darwin"
+      ? [0, 0]
+      : process.platform === "win32"
+        ? [1, 0]
+        : [0.2, 1.2];
+
+  // FNV-1a of a buffer, as the Chrome measurement computed it.
+  const fnv = (data) => {
+    let h = 0x811c9dc5;
+    for (const byte of data) h = Math.imul(h ^ byte, 0x01000193) >>> 0;
+    return h.toString(16);
+  };
+  const drawn = (size) => {
+    FontLibrary.use("ChromeOswald", [OSWALD]);
+    const canvas = new Canvas(1400, 120);
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    ctx.font = `${size}px ChromeOswald`;
+    ctx.fillText(TEXT, 5, 90);
+    return ctx.getImageData(0, 0, 1400, 120).data;
+  };
+
+  test("a canvas takes Chromium's text contrast and gamma by default", () => {
+    const { textContrast, textGamma } = new Canvas(1, 1).engine;
+    assert.ok(Math.abs(textContrast - contrast) < 1e-6, `${textContrast}`);
+    assert.ok(Math.abs(textGamma - gamma) < 1e-6, `${textGamma}`);
+  });
+
+  test(
+    "48px Oswald is Chrome's, pixel for pixel",
+    { skip: !mac && "measured on macOS" },
+    () => {
+      assert.equal(fnv(drawn(48)), "3c2114f5");
+    },
+  );
+
+  test(
+    "13px Oswald is Chrome's but for one glyph's subpixel bucket",
+    { skip: !mac && "measured on macOS" },
+    () => {
+      const data = drawn(13);
+      let ink = 0;
+      for (let i = 3; i < data.length; i += 4) ink += data[i];
+      assert.ok(Math.abs(ink - 155310) <= 15, `${ink}`);
+    },
+  );
+});
+
+// `fontKerning` and `textRendering`, as HTML's text preparation algorithm
+// hands them to CSS `font-kerning` and SVG `text-rendering`, and as Chrome
+// 152.0.7977.167 draws them on macOS.
+describe("fontKerning and textRendering", () => {
+  FontLibrary.use("KerningOswald", [
+    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+  ]);
+  const fresh = () => new Canvas(400, 160).getContext("2d");
+  const width = (font, text, set = {}) => {
+    const ctx = fresh();
+    ctx.font = font;
+    Object.assign(ctx, set);
+    return ctx.measureText(text).width;
+  };
+
+  test("start at auto, and are ignored for a name they do not have", () => {
+    const ctx = fresh();
+    assert.equal(ctx.fontKerning, "auto");
+    assert.equal(ctx.textRendering, "auto");
+    for (const [attr, written] of [
+      ["fontKerning", "NONE"],
+      ["fontKerning", "off"],
+      ["textRendering", "optimizespeed"],
+      ["textRendering", "GeometricPrecision"],
+      ["textRendering", "crisp-edges"],
+    ]) {
+      ctx[attr] = written;
+      assert.equal(ctx[attr], "auto", `${attr} = ${written}`);
+    }
+    for (const value of ["normal", "none", "auto"]) {
+      ctx.fontKerning = value;
+      assert.equal(ctx.fontKerning, value);
+    }
+    for (const value of [
+      "optimizeSpeed",
+      "optimizeLegibility",
+      "geometricPrecision",
+      "auto",
+    ]) {
+      ctx.textRendering = value;
+      assert.equal(ctx.textRendering, value);
+    }
+  });
+
+  // Chrome 152 keeps both through save and restore, returns both to auto
+  // on reset(), and leaves both alone when the font is set.
+  test("are saved, restored and reset, and survive a new font", () => {
+    const ctx = fresh();
+    ctx.fontKerning = "none";
+    ctx.textRendering = "optimizeSpeed";
+    ctx.save();
+    ctx.fontKerning = "normal";
+    ctx.textRendering = "geometricPrecision";
+    ctx.restore();
+    assert.deepEqual(
+      [ctx.fontKerning, ctx.textRendering],
+      ["none", "optimizeSpeed"],
+    );
+    ctx.font = "20px serif";
+    assert.deepEqual(
+      [ctx.fontKerning, ctx.textRendering],
+      ["none", "optimizeSpeed"],
+    );
+    ctx.reset();
+    assert.deepEqual([ctx.fontKerning, ctx.textRendering], ["auto", "auto"]);
+  });
+
+  test("none turns kerning off, whatever textRendering says", () => {
+    const font = "100px KerningOswald";
+    const kerned = width(font, "AVAVAV");
+    assert.equal(width(font, "AVAVAV", { fontKerning: "normal" }), kerned);
+    const unkerned = width(font, "AVAVAV", { fontKerning: "none" });
+    assert.ok(unkerned > kerned, `${unkerned} > ${kerned}`);
+    for (const textRendering of ["optimizeLegibility", "geometricPrecision"])
+      assert.equal(
+        width(font, "AVAVAV", { fontKerning: "none", textRendering }),
+        unkerned,
+        textRendering,
+      );
+    assert.equal(
+      width(font, "AVAVAV", { textRendering: "optimizeSpeed" }),
+      kerned,
+      "optimizeSpeed leaves kerning on",
+    );
+  });
+
+  test("optimizeSpeed turns the common ligatures off", () => {
+    const font = "100px KerningOswald";
+    const joined = width(font, "office fluffy");
+    assert.equal(
+      width(font, "office fluffy", { textRendering: "optimizeLegibility" }),
+      joined,
+    );
+    const apart = width(font, "office fluffy", {
+      textRendering: "optimizeSpeed",
+    });
+    assert.ok(apart > joined, `${apart} > ${joined}`);
+    // A ligature setting of the caller's own stands instead.
+    assert.equal(
+      width(font, "office fluffy", {
+        textRendering: "optimizeSpeed",
+        fontVariant: "common-ligatures",
+      }),
+      joined,
+    );
+  });
+
+  // Unhinted, as SVG says geometricPrecision usually is: the pixels
+  // `fontHinting = false` draws, at the same advances.
+  test("geometricPrecision draws outlines unhinted", () => {
+    const drawn = (set) => {
+      const ctx = fresh();
+      ctx.font = "13px KerningOswald";
+      Object.assign(ctx, set);
+      ctx.fillText("Hamburgefonstiv quick brown", 4, 40);
+      return [
+        Buffer.from(ctx.getImageData(0, 0, 400, 160).data).toString("base64"),
+        ctx.measureText("Hamburgefonstiv quick brown").width,
+      ];
+    };
+    const hinted = drawn({ fontHinting: true }),
+      unhinted = drawn({ fontHinting: false }),
+      precise = drawn({
+        fontHinting: true,
+        textRendering: "geometricPrecision",
+      });
+    assert.notEqual(
+      hinted[0],
+      unhinted[0],
+      "hinting must show for this to mean anything",
+    );
+    assert.equal(precise[0], unhinted[0]);
+    assert.equal(precise[1], hinted[1]);
+  });
+
+  // Chrome 152's own widths for macOS's Helvetica and Times, which both
+  // libraries draw through CoreText. Elsewhere the faces differ.
+  test(
+    "measures as Chrome does",
+    { skip: process.platform !== "darwin" },
+    () => {
+      const CHROME = [
+        [
+          "100px Helvetica",
+          "AVAVAV",
+          { auto: 363.33, none: 400.195, optimizeSpeed: 363.33 },
+        ],
+        [
+          "100px Helvetica",
+          "office fluffy",
+          { auto: 476.221, none: 477.979, optimizeSpeed: 474.463 },
+        ],
+        [
+          "100px Times",
+          "AVAVAV",
+          { auto: 368.848, none: 433.301, optimizeSpeed: 368.848 },
+        ],
+        [
+          "100px Times",
+          "To Wa Ty",
+          { auto: 389.014, none: 410.938, optimizeSpeed: 389.014 },
+        ],
+        [
+          "100px Times",
+          "office fluffy",
+          {
+            auto: 473.145,
+            none: 474.902,
+            optimizeSpeed: 482.324,
+            noneAndOptimizeSpeed: 485.84,
+          },
+        ],
+        [
+          "13px Times",
+          "office fluffy",
+          {
+            auto: 61.509,
+            none: 61.737,
+            optimizeSpeed: 62.702,
+            noneAndOptimizeSpeed: 63.159,
+          },
+        ],
+      ];
+      const wrong = [];
+      for (const [font, text, expected] of CHROME)
+        for (const [setting, chrome] of Object.entries(expected)) {
+          // Both together: kerning off and the common ligatures off.
+          const set = {
+            none: { fontKerning: "none" },
+            noneAndOptimizeSpeed: {
+              fontKerning: "none",
+              textRendering: "optimizeSpeed",
+            },
+          }[setting] ?? { textRendering: setting };
+          const here = width(font, text, set);
+          if (Math.abs(here - chrome) > 0.01)
+            wrong.push(`${font} ${text} ${setting}: ${here}, Chrome ${chrome}`);
+        }
+      assert.deepEqual(wrong, []);
+    },
+  );
 });

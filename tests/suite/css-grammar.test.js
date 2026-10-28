@@ -10,6 +10,7 @@ const path = require("path"),
   { execFileSync } = require("child_process"),
   { assert, describe, test } = require("../runner"),
   { Canvas, DOMMatrix, FontLibrary } = require("../../lib"),
+  colors = require("../assets/cases/css-colors.json"),
   filters = require("../assets/cases/css-filters.json"),
   fonts = require("../assets/cases/css-fonts.json"),
   math = require("../assets/cases/css-math.json"),
@@ -106,6 +107,52 @@ describe("CSS transform lists", () => {
   });
 });
 
+describe("CSS colours", () => {
+  // The pixel a fill paints after the setter is given `css`, over a
+  // sentinel no row paints, so a refusal shows as the sentinel.
+  const filled = (css) => {
+    const ctx = new Canvas(2, 2).getContext("2d");
+    ctx.fillStyle = "#010203";
+    ctx.fillStyle = css;
+    const taken = ctx.fillStyle !== "#010203";
+    ctx.fillRect(0, 0, 2, 2);
+    return { taken, pixel: [...ctx.getImageData(0, 0, 1, 1).data] };
+  };
+
+  test("ctx.fillStyle answers the colour table", () => {
+    // Chrome rounds a channel its own way; one level either side.
+    const TOLERANCE = 1,
+      wrong = [];
+    for (const { css, rgba } of colors.cases) {
+      const { taken, pixel } = filled(css);
+      if (!rgba && taken)
+        wrong.push(
+          `${JSON.stringify(css)}: paints ${pixel}, Chrome ignores it`,
+        );
+      else if (rgba && !taken)
+        wrong.push(`${JSON.stringify(css)}: ignored, Chrome takes it`);
+      else if (rgba && pixel.some((v, i) => Math.abs(v - rgba[i]) > TOLERANCE))
+        wrong.push(`${JSON.stringify(css)}: paints ${pixel}, Chrome ${rgba}`);
+    }
+    assert.deepEqual(wrong, []);
+  });
+
+  // CSS Syntax drops a comment when it tokenizes, so a keyword beside one is
+  // still a <color>. Chrome 152 ignores these; the table leaves them out and
+  // docs/browser-differences.md records the difference.
+  test("a comment beside a colour keyword is dropped", () => {
+    for (const [css, want] of [
+      ["red/**/", [255, 0, 0, 255]],
+      ["/**/red", [255, 0, 0, 255]],
+      ["red /**/", [255, 0, 0, 255]],
+      ["red/*", [255, 0, 0, 255]],
+      ["transparent/**/", [0, 0, 0, 0]],
+      ["currentcolor/**/", [0, 0, 0, 255]],
+    ])
+      assert.deepEqual(filled(css), { taken: true, pixel: want }, css);
+  });
+});
+
 describe("CSS font shorthands", () => {
   test("ctx.font answers the font table", () => {
     // Set before each case, so a refusal shows as all of it surviving and a
@@ -132,6 +179,70 @@ describe("CSS font shorthands", () => {
         );
     }
     assert.deepEqual(wrong, []);
+  });
+});
+
+describe("CSS whitespace", () => {
+  // Space, tab, line feed, carriage return and form feed: CSS Syntax 3's
+  // whitespace once its preprocessing has turned the last two into line
+  // feeds. JavaScript's \s takes the Unicode spaces as well, which CSS reads
+  // as part of a token, so a U+00A0 between two keywords joins them.
+  test("fontVariant splits at CSS whitespace alone", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    for (const [css, taken] of [
+      ["small-caps\tslashed-zero", true],
+      ["small-caps\fslashed-zero", true],
+      [" small-caps ", true],
+      ["small-caps\u00a0slashed-zero", false],
+      ["small-caps\u2028slashed-zero", false],
+      ["\u00a0small-caps", false],
+      ["\u000bsmall-caps", false],
+    ]) {
+      ctx.fontVariant = "normal";
+      ctx.fontVariant = css;
+      assert.equal(ctx.fontVariant !== "normal", taken, JSON.stringify(css));
+    }
+  });
+
+  test("fontVariationSettings splits at CSS whitespace alone", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    for (const [css, taken] of [
+      ['"wght"\t700', true],
+      [' "wght" 700 ', true],
+      ['"wght"\u00a0700', false],
+      ['\u00a0"wght" 700', false],
+    ]) {
+      ctx.fontVariationSettings = "normal";
+      ctx.fontVariationSettings = css;
+      assert.equal(
+        ctx.fontVariationSettings !== "normal",
+        taken,
+        JSON.stringify(css),
+      );
+    }
+  });
+});
+
+describe("CSS identifiers", () => {
+  // Chrome 152 takes each and CSS Syntax 3 refuses it: each family name
+  // holds a code point at or above U+0080 that section 4.2 does not list as
+  // a non-ASCII ident code point. The font table leaves these out, and
+  // docs/browser-differences.md records the difference.
+  test("a family name holds only identifier code points", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    for (const css of [
+      "12px a\u00b5b",
+      "12px a\u00d7b",
+      "12px a\u00aab",
+      "12px serif\u00a0",
+      "12px serif\u2028",
+      "12px serif\u3000",
+      "12px Times\u00a0New Roman",
+    ]) {
+      ctx.font = "7px Sentinel";
+      ctx.font = css;
+      assert.equal(ctx.font, '7px "Sentinel"', JSON.stringify(css));
+    }
   });
 });
 
@@ -255,6 +366,29 @@ describe("CSS filters and spacing", () => {
           );
       }
     assert.deepEqual(wrong, []);
+  });
+
+  // HTML parses the value "as a CSS <length>", and CSS Syntax 3's "parse a
+  // component value" discards the whitespace on either side and its
+  // tokenizer the comments. Chrome 152 ignores each; the spacing table
+  // leaves them out and docs/browser-differences.md records the difference.
+  test("letterSpacing and wordSpacing take whitespace and comments around the length", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    for (const css of [
+      " 5px ",
+      "\r5px",
+      "5px\f",
+      "\t5px\n",
+      "/**/5px",
+      "5px/**/",
+      " /**/5px ",
+    ])
+      for (const property of ["letterSpacing", "wordSpacing"])
+        assert.equal(
+          assign(ctx, property, "3px", css),
+          "5px",
+          `${property} ${JSON.stringify(css)}`,
+        );
   });
 
   test("letterSpacing lays out the spacing table's pixels", () => {

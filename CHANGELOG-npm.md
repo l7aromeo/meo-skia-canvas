@@ -19,6 +19,202 @@ spellings that resolved to the wrong colour, and raising the
 `follow-redirects` floor past three security advisories.** Nothing is
 removed and no signature moves.
 
+### Breaking
+
+- **`ctx.fontHinting` reads `true` until it is set.** It read `false`,
+  though text was drawn hinted either way, since the setting did nothing; it
+  now takes effect, and on is what text was always drawn at. Code that read
+  the property to decide something gets the other answer.
+
+  Migrate: where the old `false` was taken to mean unhinted text, read it as
+  hinted, which is what was drawn; set `ctx.fontHinting = false` to have the
+  outlines as designed.
+
+- **A `ParagraphBuilder` option is converted as WebIDL converts it, and
+  one that cannot be is a `TypeError` naming it.** Every option of a
+  paragraph style, a text style, a strut, and the objects and lists inside
+  them was read by whatever reader came to hand and ignored when that
+  failed: `fontSize: "abc"` and `fontSize: NaN` left the default,
+  `fontFamilies: "Arial"` and `shadows: {}` were dropped,
+  `offset: [1, 2, 3]` took its first two numbers, and `halfLeading: 1` was
+  ignored where `fontSize: "12"` was 12. Each option now converts as a
+  Canvas attribute does: a number by `ToNumber`, so `"12"`, `[12]` and
+  `true` convert; a string by `ToString`, `null` meaning the option left
+  out, as it did; a boolean by `ToBoolean`, so
+  `halfLeading: 1` is `true`; an object of options as a dictionary, `null`
+  taking every default; a list as a sequence, any iterable included; a
+  colour as a CSS string or a sequence of four numbers. A conversion WebIDL
+  fails is a `TypeError` naming the option and what it takes: a number
+  that converts to NaN or an infinity, a BigInt or Symbol where a number
+  goes, a dictionary given a primitive, a list given something with no
+  iterator, and an `offset` or a float colour of the wrong length. An
+  option left out or `undefined` still takes its default.
+
+  Two conversions change a value that was taken. A boolean option given
+  a string is `true` unless the string is empty, so `halfLeading: "false"`
+  and `halfLeading: "0"` are `true`, where a string was ignored and the
+  option left `false`. And a colour that is iterable is read as a list of
+  numbers: `["red"]` and `new String("red")`, which a `String` object's
+  iterator makes a list of three letters, are each a `TypeError`, where
+  both were read as the CSS `"red"`.
+
+  Migrate: a number option given a value that converts to NaN or an
+  infinity, a list option given a single value, and a colour array of
+  other than four numbers each throw; pass a finite number, wrap a single
+  family in a list, and pass a CSS colour as a string primitive, `"red"`.
+  Pass a boolean option a boolean.
+
+- **A `[r, g, b, a]` colour array is sRGB, with straight alpha, on every
+  canvas.** It is `color(srgb r g b / a)`: gamma-encoded components from
+  `0` to `1`, as CanvasKit's `Color4f` takes them. `fillStyle`,
+  `strokeStyle` and `addColorStop` read the four numbers in the canvas's
+  own space, so on a Display P3 canvas `[1, 0, 0, 1]` was P3 red; on an
+  sRGB canvas they paint as they did. A paragraph's `color`,
+  `backgroundColor`, `decorationColor` and `shadows` colour read them as
+  premultiplied linear light, so the same array painted another colour
+  there: `[0.2, 0.5, 0.8, 1]` filled `rgb(51 128 204)` and coloured
+  paragraph text `rgb(124 188 231)`. Both now paint `rgb(51 128 204)`, on
+  every canvas. A component below zero or above one reaches a colour
+  outside sRGB, as it does in `color(srgb ...)`, which a wide canvas shows
+  and an sRGB one clips. The declarations called every array
+  "premultiplied linear-light", which no reader did; they now say what
+  each does.
+
+  Migrate: on a wide canvas, an array meant in the canvas's own space
+  becomes a string, `color(display-p3 r g b / a)` or
+  `color(rec2020 r g b / a)`. In a paragraph, an array meant as linear
+  light becomes `color(srgb-linear r g b / a)`, its components divided by
+  its alpha if they were premultiplied.
+
+- **`color(rec2020 ...)` decodes by a 2.4 gamma, as CSS Color 4 now
+  defines it.** Section 10.8 gives `rec2020`'s transfer function as "gamma
+  2.40, from [REC_BT.1886]", changed from BT.2020's inverse OETF since the
+  Candidate Recommendation Draft of 24 April 2025. This library used the old
+  curve, as Chrome 152 still does. `color(rec2020 0.2 0.2 0.2)` paints 40 where it
+  painted 67, as a `fillStyle`, `strokeStyle`, `shadowColor`, gradient stop
+  or anywhere else a colour string goes, and `color(rec2020 0.2 0.4 0.6)`
+  paints 0, 97, 153 on an sRGB canvas where it painted 0, 120, 168, as
+  Chrome still does; docs/browser-differences.md has its values. A
+  Rec. 2020 canvas stores by the same curve, so a colour named in `rec2020`
+  reads back from one as it was named.
+
+  A gradient with `interpolation = "rec2020"` mixes by the same curve.
+  Skia's own Rec. 2020 interpolation space uses BT.2020's piecewise curve,
+  so the gradient is now computed in a working space carrying the 2.4
+  gamma: `rgb(250 2 0)` to `rgb(0 0 254)` reads 157, 18, 143 at its midpoint
+  where it read 159, 19, 147. An SVG export embeds such a gradient as an
+  image, as it does a conic one.
+
+  Migrate: a `rec2020` colour written for the old curve, with each
+  component `c` above 0.081, is the same colour at
+  `((c + 0.0993) / 1.0993) ^ (1 / 0.45 / 2.4)`.
+
+- **`textHeightBehavior` takes `0`, `1`, `2` or `3` and refuses any other
+  number.** `ParagraphBuilder` truncated `1.5` toward zero, to `1`, and
+  ignored `NaN` and the infinities, leaving the default `0`. A finite
+  number outside the four is now a `RangeError`, as an integer outside `0`
+  to `3` already was, and `NaN` and the infinities a `TypeError`, as every
+  number option's are -- see the entry above. The option is typed
+  `TextHeightBehavior`, where `TextHeightBehavior | (number & {})` let any
+  `number` compile.
+
+  Migrate: pass one of the four codes, rounding or checking a computed
+  value first, and type it as `TextHeightBehavior`.
+
+- **A numeric code is read from the number given, and a number outside its
+  set is a `RangeError` naming it.** `fontStyle.slant`, `decorationStyle`,
+  `addPlaceholder`'s `align` and `baseline`, and `getRectsForRange`'s two
+  styles truncated a fraction toward zero, so `slant: 1.5` was italic, and
+  named `1e10` as `2147483647` in the refusal. `decoration` dropped a
+  fraction and any bit past the three flags, so `decoration: 8` drew no
+  line and `1.5` an underline; a feature's `value` was truncated and
+  saturated; and `maxLines` read `1.5` as 1, and `0` and `-1` as one line.
+  Each now takes a whole number in its set -- `decoration` a mask of `0`
+  to `7`, `maxLines` a count from `1`, a feature's `value` one from `0` to
+  `2147483647` -- and refuses another with a `RangeError` spelling the
+  number as JavaScript does. `addPlaceholder` raised a `TypeError` for a
+  code outside its set, and raises the `RangeError` the others do.
+  `fontStyle.slant` is typed `0 | 1 | 2`.
+
+  Migrate: pass a whole code from the set, rounding a computed one first,
+  and catch `RangeError` where `addPlaceholder` was caught for a
+  `TypeError`.
+
+- **A `textDirection` other than `"ltr"` or `"rtl"` is a `TypeError`.** It
+  was ignored, leaving the paragraph left to right. The names match
+  exactly, as `ctx.direction`'s do, so `"RTL"` is refused too. The option
+  is typed `"ltr" | "rtl" | null`, where any string compiled.
+
+  Migrate: pass `"ltr"` or `"rtl"`, in lower case, or leave the option
+  out.
+
+- **A `textAlign` other than the six alignments is a `TypeError`.** It was
+  ignored, leaving the default alignment, so a typo failed silently. The
+  names match exactly, as `ctx.textAlign`'s do, so `"CENTER"` is refused
+  too. The option is typed as the six names or `null`,
+  where any string compiled. `ctx.textAlign` still ignores an unknown
+  name, as HTML's setter does.
+
+  Migrate: pass one of `"left"`, `"right"`, `"center"`, `"justify"`,
+  `"start"` and `"end"`, in lower case, or leave the option out.
+
+- **`TextMetrics` keeps its values on the prototype, as HTML's interface
+  does.** A measurement was a frozen object holding every value as its own
+  property; each is now a getter on `TextMetrics.prototype`, enumerable as
+  WebIDL makes an attribute, and the object has no properties of its own:
+  `Object.keys` is empty and a spread copies nothing, as in Chrome 152, and
+  the object is no longer frozen. A getter or `toJSON` called on anything
+  but a measurement throws a `TypeError`. `structuredClone(m)` gives `{}`,
+  where it gave every value; Chrome throws a `DataCloneError`.
+  `JSON.stringify` gives what it gave, the same values in the same order,
+  through a `toJSON` this library adds -- docs/browser-differences.md has
+  why -- and works the ink box out once. `console.log` and `util.inspect`
+  show the values `toJSON` gives, working the ink box out too. A measurement is cheaper to make:
+  `measureText("Hello world")` with only `width` read takes 4.3 µs where
+  it took 4.7, in a release build on macOS.
+
+  Migrate: read the values by name, or copy them with `m.toJSON()` where
+  you spread a measurement or listed its keys.
+
+- **A colour function written with a space before its `(` is refused.**
+  `'rgb (255 0 0)'`, `'lab (50 40 30)'`, `'color (srgb 1 0 0)'` and the
+  rest painted as if the space were not there. CSS Syntax reads such a
+  name and its brackets as a word and a block, not a function, and Chrome
+  153 ignores every one as a `fillStyle`. Each is now refused as any colour
+  that does not parse is: `fillStyle`, `strokeStyle` and `shadowColor`
+  ignore it and keep what they held, and `addColorStop` throws its
+  `SyntaxError`. Nothing deprecated this first; it went with the parser
+  that read it.
+
+  Migrate: write the name and its `(` together, `rgb(255 0 0)`.
+
+- **Legacy comma syntax CSS Color 4 does not allow is refused.** Each of
+  these painted here and is ignored by Chrome 153: numbers and percentages
+  mixed, `'rgb(255, 0%, 0)'`; separators mixed, `'rgb(255,0 0)'`; `hsl()`
+  with bare numbers, `'hsl(120, 100, 50)'`; `none` in a channel,
+  `'rgb(none, 0, 0)'`; and commas in a function with no legacy syntax,
+  `'hwb(120, 0%, 0%)'`, `'lab(50, 40, 30)'`, `'oklch(0.6, 0.2, 30)'` and
+  `'color(srgb 1, 0, 0)'`. Each is now refused as any colour that does not
+  parse is: `fillStyle`, `strokeStyle` and `shadowColor` ignore it and keep
+  what they held, and `addColorStop` throws its `SyntaxError`.
+
+  Migrate: write the channels space-separated, `rgb(255 0 0)`, or in the
+  legacy form the function allows, `rgb(255, 0, 0)`.
+
+- **`hwba()`, `hsv()`, `hsva()` and hex without its `#` are refused as
+  colours.** No CSS defines them, and Chrome 153 ignores
+  `fillStyle = 'hwba(0 0% 0%)'`, `'hsv(0 100% 100%)'`,
+  `'hsva(0 100% 100% / 0.5)'` and `'ff0000'`, each of which painted red
+  here. Each is now refused as any colour that does not parse is, relative
+  forms included -- `'hsv(from red h s v)'`: `fillStyle`, `strokeStyle`
+  and `shadowColor` ignore it and keep what they held, and `addColorStop`
+  throws its `SyntaxError`.
+
+  Migrate: write `#` before the hex digits, and `hwb()` for the rest:
+  `hsv(h s v)` with `s` and `v` out of 100 is
+  `hwb(h calc((100 - s) * v / 100) calc(100 - v))`, and `hwba()` is
+  `hwb()`.
+
 ### Security
 
 - **`follow-redirects` is required at `^1.16.1`, up from `^1.15.11`.** It is
@@ -153,6 +349,159 @@ removed and no signature moves.
   already rejected or fired `error`.
 
 ### Fixed
+
+- **`new Canvas(w, h, { textGamma })` refuses a gamma above 4.** Skia takes
+  a text gamma from 0 up to 4, and the `RangeError` said so, but the upper
+  bound was checked against `textContrast`, so `textGamma: 5` was taken. It
+  is now refused like `-1`.
+
+- **`ctx.fontHinting = false` draws the outlines as designed.** It turned
+  hinting off on the paragraph style, which SkParagraph never reads, so
+  every glyph was drawn at Slight hinting whatever it said. `fontHinting =
+false` now takes effect, and its default is on, at Slight, as Chrome draws
+  text: on macOS, where Skia's CoreText port dilates the outline at every
+  level but none, Chrome 156 draws the same pixels. Turned off, a glyph is
+  its outline as designed -- undilated on macOS, where 13px text draws more
+  than a third lighter, and unhinted under FreeType on Linux. No text moves
+  either way, and what is drawn by default does not change. A `Paragraph`,
+  which has no hinting setting, is drawn hinted, as it was.
+
+- **Text is drawn with Chrome's text contrast and gamma for the platform.**
+  Glyph coverage was corrected with a gamma of 1.4 and no contrast by
+  default, Skia's Android setting, which matches no browser: on macOS, 13px
+  Helvetica drew 160,167 of alpha where Chrome 156 draws 136,770. A canvas
+  now takes the text contrast and gamma Chromium builds Skia with on the
+  platform -- on macOS a contrast of 0 and the sRGB curve, on Windows a
+  contrast of 1 and the sRGB curve, elsewhere 0.2 and 1.2 -- and on macOS
+  draws Helvetica at 13px and 48px and 48px Oswald pixel for pixel as Chrome
+  does, and 13px Oswald but for one glyph a hair's width from a subpixel
+  boundary. Text changes on every platform; the Linux and Windows values are
+  Chromium's and have not been compared with a Chrome there. `textContrast`
+  and `textGamma` still take any value.
+
+- **A `Paragraph` style that names no colour draws black.** The declarations
+  say a style's `color` defaults to black, and it was white, SkParagraph's
+  own default: text built without a colour was invisible on a white canvas.
+  It is now black, CSS's initial `color`, on the paragraph's own style and
+  on a pushed one.
+
+- **A registered family matches its name in any case.** CSS Fonts 4
+  matches family names without regard to case, and the system's families
+  were found that way, but a family registered with `FontLibrary.use` was
+  filed under its exact spelling: after `FontLibrary.use("OswaldX", ...)`,
+  `ctx.font = "16px oswaldx"` drew the fallback, and so did a paragraph's
+  `fontFamilies: ["oswaldx"]`. Each now draws the registered family.
+  Letters outside ASCII still have to match exactly; CSS asks for Unicode
+  case folding there.
+
+- **An enumerated attribute takes its names exactly, as Chrome does.**
+  `textAlign`, `textBaseline`, `direction`, `lineCap`, `lineJoin`,
+  `imageSmoothingQuality`, `globalCompositeOperation` and `fontStretch`
+  folded case, so `ctx.textAlign = "CENTER"` centred the text where Chrome
+  152 ignores it, and `"dar\u212Aen"`, whose Kelvin sign lowercases to
+  `k`, was taken as `darken`. WebIDL matches an enumeration's values
+  exactly, and each setter now ignores another spelling, leaving the value
+  it held. `createPattern` throws its `SyntaxError` for `"REPEAT"`, as the
+  standard asks of a repetition not identical to one of its four names.
+  `lineDashFit` and a `CanvasTexture`'s `cap` match exactly too, as their
+  siblings do. The filter
+  factories' blend names still match in any case, as CanvasKit's do.
+
+- **Colours, fonts, filters and transforms read CSS's whitespace,
+  comments and names, and no more.**
+  - Whitespace is space, tab, line feed, carriage return and form feed.
+    A U+00A0, U+000B, U+2028, U+3000 or U+FEFF was trimmed or taken as a
+    separator, so `fillStyle = "red\u00a0"`,
+    `filter = "blur(2px)\u00a0grayscale(1)"`,
+    `new DOMMatrix("\u00a0translate(1px, 2px)")` and
+    `font = "bold\u00a012px serif"` were each read. Chrome 152 ignores the
+    colour, the filter and the font and throws `SyntaxError` for the
+    transform, and so does this library now. `fontVariant` and `fontVariationSettings` split at the
+    same five characters.
+  - A comment is dropped, as CSS Syntax drops one, in a colour, a font, a
+    filter, a transform and a spacing: `rgb(255,/**/0,0)` and `/**/#f00`
+    were refused and now paint red, and `12px/**/serif`,
+    `bold/**/12px serif`, `blur(/**/2px)` and
+    `translate(/**/1px, 2px)` are read, as in Chrome 152. A comment in a
+    quoted family name is part of the name. A comment still ends the
+    token before it, so `rgb/**/(255 0 0)`, `blur(2/**/px)` and
+    `calc(100/**/+/**/155)` stay refused, and a sign it parts from what
+    follows stands alone, so `rgb(255 -/**/10 0)` is refused rather than
+    read as -10. A comment beside a colour keyword, `red/**/`, is dropped
+    too, where Chrome ignores the whole value; docs/browser-differences.md
+    says why.
+  - `letterSpacing` and `wordSpacing` take whitespace and comments around
+    the length, `" 5px "` and `"/**/5px"`, which were ignored: HTML parses
+    the value as a CSS `<length>`, and CSS Syntax discards both there.
+    Chrome 152 ignores them; docs/browser-differences.md records it.
+  - `currentcolor` is opaque black, `rgb(from currentcolor r g b)` too,
+    where it was refused: CSS Color 4 resolves it from the `color`
+    property's initial value when a canvas has no element, and Chrome 152
+    paints it black.
+  - A family name holds only the code points CSS Syntax 3 lists as a
+    name's. `12px a\u00b5b` was read as the family `aµb`, and `12px serif`
+    followed by U+00A0 is now refused rather than trimmed; Chrome 152 takes
+    both under the older rule, which docs/browser-differences.md records.
+    `12px a·b` was refused and is now read, as Chrome reads it. A name
+    starts as CSS Syntax says, so `12px -1x` and `12px -`, which read as
+    families, are refused, and an escape in an unquoted name is decoded,
+    `12px \61 bc` naming `abc` where it was refused, as in Chrome.
+
+- **`halfLeading` takes effect whatever paragraph was laid out before.**
+  SkParagraph's paragraph cache matched two paragraphs whose styles differ
+  only in `halfLeading` and handed the second the first's layout, so the
+  first one laid out decided every later one: in 48px Oswald at a line
+  height of 2, a baseline that splits the spare height half above and half
+  below sits 69.70 down and one that scales the line sits 77.28 down. A
+  paragraph with `halfLeading` on any style now lays out without the cache,
+  and every other paragraph keeps it. Fixed in Skia, not yet in the
+  skia-safe this release builds on.
+
+- **An empty `fontFamilies` list lays out in the default families.**
+  `ParagraphBuilder` handed it to Skia as it stood, and skia-safe 0.153.3
+  builds a slice from a null pointer for an empty list: a debug build of
+  the addon aborted the process, `Make({ textStyle: { fontFamilies: [] } })`
+  included, and a release build passed the null slice on. An empty list in
+  a text style, a pushed style or a strut now names no family, as leaving
+  the option out does.
+
+- **A quoted generic keyword in `ctx.font` is a family name.** CSS Fonts 4
+  says the generic keywords "must not be quoted", so `16px "serif"` names a
+  family called serif, but it drew and read back as the generic `serif`. It
+  now reads back as itself, and draws a family of that name where one is
+  registered or installed; with none, the next family in the list draws,
+  as for any missing family, where fontconfig on Linux had answered
+  `serif`, `sans-serif` and `monospace` with the generic's faces.
+  `FontLibrary.use("serif", ...)` still claims the generic as well.
+
+- **`shadowColor`, a texture's `color` and an export's `matte` keep a
+  colour outside sRGB.** Each went through eight-bit sRGB, so
+  `color(display-p3 1 0 0)` cast a shadow of sRGB red on a P3 canvas beside
+  a fill of P3 red. Each is now kept in floating point in the space it was
+  named in, and `shadowColor` reads back as it was set,
+  `color(display-p3 1 0 0)`, as `fillStyle` does. They still take a string
+  only, as they did.
+
+- **`ColorFilter.MakeBlend` and `ImageFilter.MakeDropShadow` keep a CSS
+  colour outside sRGB**, which they clipped to eight-bit sRGB on the way
+  in. An array given to `MakeDropShadow` is still CanvasKit's
+  unpremultiplied sRGB `Color4f`.
+
+- **A paragraph's `decorationColor` and `shadows` colour draw a colour
+  named in another space as that colour.** The components were taken as
+  sRGB whatever the string named, so `color(display-p3 0.8 0.3 0.2)` drew
+  as `rgb(80% 30% 20%)`, and so did a decoration that took its colour from
+  the text's.
+
+- **A colour outside sRGB keeps its hue where Skia takes only eight-bit
+  sRGB.** A paragraph's `decorationColor` and `shadows` colour, the
+  lighting filters' light colour, an SVG's `currentColor` and a window's
+  `background` clipped each channel on its own, which turns P3 red more
+  orange. They now map it into sRGB as CSS Color 4 section 14.2.2 does,
+  reducing its chroma in Oklch at its own lightness and hue. A colour
+  inside sRGB gives the bytes it gave. `ColorFilter.MakeLighting`'s
+  multiply and add are per-channel coefficients rather than colours, and
+  are still clamped channel by channel.
 
 - **`letterSpacing` and `wordSpacing` take `"0"`.** CSS Values 4 lets a
   zero length be written without its unit, and `ctx.letterSpacing = "0"`
@@ -815,6 +1164,33 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Added
 
+- **`ctx.fontKerning` and `ctx.textRendering`, the Canvas standard's two
+  remaining text attributes.** Setting either was a plain property that did
+  nothing. `fontKerning` takes `"auto"`, `"normal"` or `"none"`, and
+  `"none"` lays text out without the font's kerning; `textRendering` takes
+  `"auto"`, `"optimizeSpeed"`, `"optimizeLegibility"` or
+  `"geometricPrecision"`, with the meanings Chrome 152 gives SVG's
+  keywords: `"optimizeSpeed"` turns the common ligatures off,
+  `"optimizeLegibility"` draws as `"auto"`, and `"geometricPrecision"`
+  draws unhinted whatever `fontHinting` says. On macOS the widths match
+  Chrome's to a hundredth of a pixel: "AVAVAV" in 100px Times measures
+  433.30 unkerned and "office fluffy" 482.32 under `"optimizeSpeed"`. Both
+  match their names exactly, ignore any other value, are kept by `save()`
+  and `restore()`, return to `"auto"` on `reset()`, and are left alone by
+  `font`. A ligature set through `fontVariant` stands instead of
+  `"optimizeSpeed"`'s.
+
+- **`fontStyle.obliqueAngle` sets a `Paragraph` oblique's angle.** A range
+  with `slant: 2` leaned by 14deg, with no way to ask for another, where
+  `ctx.font = "oblique 10deg ..."` draws at ten. `{ slant: 2,
+obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
+  draws, pixel for pixel: from -90 to 90 degrees, a negative angle leaning
+  back and 0 upright, and 14 when left out. It converts as the other
+  number options do, so `"10"` is 10 and NaN or an infinity is a
+  `TypeError`; a finite angle outside that range is a `RangeError`, and one
+  given with any other `slant` a `TypeError`, since it would not be drawn.
+  CanvasKit has no counterpart.
+
 - **`fontVariations: "normal"` resets a `ParagraphBuilder` style's axes.**
   A style given to `pushStyle` took the paragraph's axes unless it named its
   own, so it could return an axis to the face's default only by naming the
@@ -826,8 +1202,7 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 - **`TextHeightBehavior` names the four codes `textHeightBehavior` takes**,
   `0` to `3`, with what each trims in its doc comment, so an editor offers
-  them. The option is typed `TextHeightBehavior | (number & {})`, so code
-  passing a `number` compiles as before.
+  them. The option is typed `TextHeightBehavior`; see Breaking.
 
 - **`ctx.filter` takes the CSS math functions**, as Chrome 152 does:
   `calc()` and `-webkit-calc()`, `min()`, `max()`, `clamp()`, `round()`,
@@ -874,8 +1249,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   through 10000px, a weight to 1 through 1000. `ex`, `ch`, `cap` and `ic`
   in a size are those of 10px `serif`, Chrome's standard family, and `rem`
   and the other root forms of 16px. An `oblique` angle from -90deg to 90deg
-  is taken, and drawn as the entry under Changed says. Only the default
-  14deg reads back as `italic`. A size above 10000px, which was
+  is taken, and drawn as the entry under Changed says, and reads back with
+  its angle, the default 14deg as `oblique`. A size above 10000px, which was
   taken as written, is now 10000px. 113 shorthands measured in Chrome join
   `tests/assets/cases/css-fonts.json`, and the JavaScript tests that held
   the old parser to its own internals are rows there instead.
@@ -958,8 +1333,9 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   quarter skew, from 14deg up and draws upright below; its measurements are
   in docs/browser-differences.md. `measureText` reports the sheared ink, and
   `ctx.font` reads back as `oblique`, with its angle. A `Paragraph` range
-  whose `fontStyle` asks for oblique is sheared at 14deg the same way and draws what
-  `oblique` text on a canvas draws, its decorations level and its shadows
+  whose `fontStyle` asks for oblique is sheared the same way, at 14deg or
+  its `obliqueAngle`, and draws what `oblique` text on a canvas draws, its
+  decorations level and its shadows
   leaning with its glyphs. Being a font of its own, it is shaped apart from the
   text beside it, so no ligature forms across its edge, and a combining
   mark the edge would split from its base is drawn with its base, in the
@@ -987,47 +1363,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   rest, and each glyph's outline bounds are remembered by face, size and
   glyph rather than outlined again: `measureText("Hello world")` with only
   `width` read takes about 5.5 µs where it took 7.7, and reading the ink as
-  well about 7.4. Nothing a
-  caller sees moves: the values are still the frozen object's own
-  properties, in the same order, and `JSON.stringify` and a spread give
-  what they gave, the ink then worked out once.
-
-### Deprecated
-
-- **A `textHeightBehavior` that is not an integer.** `ParagraphBuilder`
-  truncates `1.5` toward zero, to `1`, and ignores `NaN` and the
-  infinities, leaving the default `0`. In 7.0 each is a `RangeError`, as
-  an integer outside `0` to `3` is already, and the option is typed as
-  `TextHeightBehavior` alone.
-
-- **`TextMetrics` values as own properties.** In 7.0 they become getters on
-  `TextMetrics.prototype` alone, as Chrome's are, and the object has no
-  properties of its own: `Object.keys` is empty, `JSON.stringify` gives
-  `"{}"` and a spread copies nothing, for this library's `emHeightAscent`,
-  `emHeightDescent`, `height` and `lines` as for the standard values. Read
-  the values by name and nothing changes. `TextMetrics.prototype`, its
-  `Symbol.toStringTag` and the constructor that refuses to be called are
-  Chrome's already.
-
-- **`hwba()`, `hsv()`, `hsva()` and hex without its `#` as colours.**
-  The CSS parser underneath has always read them and no browser does:
-  Chrome 153 ignores `fillStyle = 'hwba(0 0% 0%)'`, `'hsv(0 100% 100%)'`,
-  `'hsva(0 100% 100% / 0.5)'` and `'ff0000'`, each of which paints red
-  here. They keep painting as they did, relative forms included, until
-  7.0 ignores them as a browser does. Write `#` before the hex digits and
-  `hwb()` for the rest: `hsv(h s v)` with `s` and `v` out of 100 is
-  `hwb(h calc((100 - s) * v / 100) calc(100 - v))`.
-
-- **Legacy comma syntax CSS Color 4 does not allow.** Each of these paints
-  here and is ignored by Chrome 153: numbers and percentages mixed,
-  `'rgb(255, 0%, 0)'`; separators mixed, `'rgb(255,0 0)'`; `hsl()` with
-  bare numbers, `'hsl(120, 100, 50)'`; `none` in a channel,
-  `'rgb(none, 0, 0)'`; and commas in a function with no legacy syntax,
-  `'hwb(120, 0%, 0%)'`, `'lab(50, 40, 30)'`, `'oklch(0.6, 0.2, 30)'` and
-  `'color(srgb 1, 0, 0)'`. They keep painting as they did until 7.0
-  ignores them as a browser does. Write the channels space-separated,
-  `rgb(255 0 0)`, or in the legacy form the function allows,
-  `rgb(255, 0, 0)`.
+  well about 7.4. `JSON.stringify` works the ink out once, through
+  `toJSON` -- see Breaking.
 
 ## 📦 ⟩ [v6.0.2] (npm) ⟩ September 16, 2026
 

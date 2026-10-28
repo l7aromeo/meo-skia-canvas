@@ -877,8 +877,8 @@ describe("addPlaceholder", () => {
   test("a value outside either set throws", () => {
     let builder = () => new ParagraphBuilder({});
 
-    assert.throws(() => builder().addPlaceholder(10, 10, 9), TypeError);
-    assert.throws(() => builder().addPlaceholder(10, 10, 0, 7), TypeError);
+    assert.throws(() => builder().addPlaceholder(10, 10, 9), RangeError);
+    assert.throws(() => builder().addPlaceholder(10, 10, 0, 7), RangeError);
   });
 
   test("omitting them still lays out on the baseline", () => {
@@ -1149,6 +1149,182 @@ describe("the numeric style codes", () => {
     assert.ok(ParagraphBuilder.Make({ textStyle: { decorationStyle: 0 } }));
     assert.ok(ParagraphBuilder.Make({ textHeightBehavior: 0 }));
     assert.ok(paragraph.getRectsForRange(0, 2, 0, 0));
+  });
+});
+
+describe("a numeric code is matched on the number it converts to", () => {
+  // Each code is read from the converted `double` rather than from an integer
+  // cast from it, which truncated `1.5` to a code and saturated `1e10` to
+  // 2147483647 in the refusal. A finite number outside the set is a
+  // `RangeError` naming the number as JavaScript spells it -- AGENTS.md's
+  // rule 4 -- and `-0` is 0.
+  const paragraph = () => {
+    const p = ParagraphBuilder.Make({ textStyle: { fontSize: 16 } })
+      .addText("hi")
+      .build();
+    p.layout(100);
+    return p;
+  };
+  const pushed = (style) => ParagraphBuilder.Make({}).pushStyle(style);
+  const CODES = [
+    [
+      "slant",
+      (v) => pushed({ fontStyle: { slant: v } }),
+      [0, 1, 2, -0],
+      [3, 1.5, -0.5, -1, 1e10, 1e21],
+    ],
+    [
+      "decorationStyle",
+      (v) => pushed({ decorationStyle: v }),
+      [0, 1, 2, 3, 4, -0],
+      [5, 1.5, -1, 1e10],
+    ],
+    [
+      "decoration",
+      (v) => pushed({ decoration: v }),
+      [0, 1, 2, 3, 4, 5, 6, 7, -0],
+      [8, 9, 0.5, 1.5, -1, 2 ** 32 + 1, 1e10],
+    ],
+    [
+      "fontFeatures[0].value",
+      (v) => pushed({ fontFeatures: [{ name: "smcp", value: v }] }),
+      [0, 1, 2, 2147483647, -0],
+      [1.5, -1, 2147483648, 1e10],
+    ],
+    [
+      "maxLines",
+      (v) => ParagraphBuilder.Make({ maxLines: v }),
+      [1, 2, 1e10, 1e30],
+      [0, -0, null, 1.5, -1],
+    ],
+    [
+      "placeholder align",
+      (v) => ParagraphBuilder.Make({}).addPlaceholder(10, 10, v),
+      [0, 1, 2, 3, 4, 5],
+      [6, 1.5, -1, 1e10],
+    ],
+    [
+      "placeholder baseline",
+      (v) => ParagraphBuilder.Make({}).addPlaceholder(10, 10, 0, v),
+      [0, 1],
+      [2, 0.5, -1, 1e10],
+    ],
+    [
+      "rect height style",
+      (v) => paragraph().getRectsForRange(0, 2, v, 0),
+      [0, 1, 2, 3, 4, 5],
+      [6, 1.5, -1, 1e10],
+    ],
+    [
+      "rect width style",
+      (v) => paragraph().getRectsForRange(0, 2, 0, v),
+      [0, 1],
+      [2, 0.5, -1, 1e10],
+    ],
+  ];
+
+  test("refuses a number outside the set, naming it as JavaScript does", () => {
+    const wrong = [];
+    for (const [name, make, , refused] of CODES)
+      for (const value of refused) {
+        // `null` converts to 0, and the refusal names the 0.
+        const spelled = String(Number(value));
+        try {
+          make(value);
+          wrong.push(`${name} = ${value}: taken`);
+        } catch (e) {
+          if (
+            !(e instanceof RangeError) ||
+            !e.message.includes(name) ||
+            !e.message.includes(spelled)
+          )
+            wrong.push(
+              `${name} = ${value}: ${e.constructor.name}: ${e.message}`,
+            );
+        }
+      }
+    assert.deepEqual(wrong, []);
+  });
+
+  test("takes each number in the set", () => {
+    for (const [name, make, taken] of CODES)
+      for (const value of taken)
+        assert.doesNotThrow(() => make(value), `${name} = ${value}`);
+  });
+});
+
+describe("a textDirection outside its names", () => {
+  test("is a TypeError naming the option", () => {
+    for (const value of ["up", "", "ltr ", "rtl\u0000", "RTL", "Ltr"])
+      assert.throws(
+        () => ParagraphBuilder.Make({ textDirection: value }),
+        (e) => e instanceof TypeError && /`textDirection`/.test(e.message),
+        JSON.stringify(value),
+      );
+  });
+
+  test("lays out each of its names", () => {
+    const start = (textDirection) => {
+      const p = ParagraphBuilder.Make({
+        textDirection,
+        textStyle: { fontSize: 16 },
+      })
+        .addText("hi")
+        .build();
+      p.layout(200);
+      return p.getRectsForRange(0, 2, 0, 0)[0].rect;
+    };
+    assert.notDeepEqual(
+      start("rtl"),
+      start("ltr"),
+      "the direction must move the text",
+    );
+  });
+});
+
+describe("textHeightBehavior", () => {
+  // A closed set of four integers, as `TextHeightBehavior` types it. A finite
+  // number that is not one of them is refused rather than truncated: rule 4
+  // of AGENTS.md's refusals, a number outside its set. NaN and the
+  // infinities fail the option's WebIDL `double` conversion first, and are a
+  // `TypeError`.
+  test("refuses a number that is not one of the four codes", () => {
+    for (const code of [1.5, -0.5, 3.0000001, 4, -1, 1e21]) {
+      assert.throws(
+        () => ParagraphBuilder.Make({ textHeightBehavior: code }),
+        (e) => e instanceof RangeError && /textHeightBehavior/.test(e.message),
+        `${code} is a RangeError`,
+      );
+    }
+    for (const code of [NaN, Infinity, -Infinity]) {
+      assert.throws(
+        () => ParagraphBuilder.Make({ textHeightBehavior: code }),
+        (e) => e instanceof TypeError && /textHeightBehavior/.test(e.message),
+        `${code} is a TypeError`,
+      );
+    }
+  });
+
+  test("names the number refused as JavaScript spells it", () => {
+    for (const [code, spelled, kind] of [
+      [Infinity, "Infinity", TypeError],
+      [-Infinity, "-Infinity", TypeError],
+      [NaN, "NaN", TypeError],
+      [1e21, "1e+21", RangeError],
+      [1.5, "1.5", RangeError],
+    ]) {
+      assert.throws(
+        () => ParagraphBuilder.Make({ textHeightBehavior: code }),
+        (e) => e instanceof kind && e.message.includes(spelled),
+        `${spelled} in the message`,
+      );
+    }
+  });
+
+  test("takes each of the four codes", () => {
+    for (const code of [0, 1, 2, 3, -0]) {
+      assert.ok(ParagraphBuilder.Make({ textHeightBehavior: code }), `${code}`);
+    }
   });
 });
 
@@ -1466,6 +1642,112 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
         Math.abs(measured + TAN_14) <= 0.005,
         `${family}: slope ${measured}, expected ${-TAN_14}`,
       );
+    }
+  });
+
+  test("obliqueAngle draws at its angle, as oblique text at it does", () => {
+    register();
+    const angled = (obliqueAngle) => ({
+      fontStyle: { slant: OBLIQUE, obliqueAngle },
+    });
+    for (const family of FAMILIES) {
+      assert.ok(
+        same(
+          paragraph(family, [["IH", angled(14)]]),
+          paragraph(family, [["IH", slanted(OBLIQUE)]]),
+        ),
+        `${family}: 14 is the default`,
+      );
+      for (const degrees of [10, -10, 0]) {
+        assert.ok(
+          same(
+            paragraph(family, [["IH", angled(degrees)]]),
+            text(`oblique ${degrees}deg 200px ${family}`, "IH"),
+          ),
+          `${family}: obliqueAngle ${degrees} draws what oblique ${degrees}deg text draws`,
+        );
+      }
+      assert.ok(
+        same(
+          paragraph(family, [["IH", angled("10")]]),
+          paragraph(family, [["IH", angled(10)]]),
+        ),
+        `${family}: "10" converts to 10`,
+      );
+      assert.ok(
+        same(
+          paragraph(family, [["IH", angled(0)]]),
+          paragraph(family, [["IH", slanted(UPRIGHT)]]),
+        ),
+        `${family}: 0 draws upright`,
+      );
+      const measured = slope(paragraph(family, [["I", angled(10)]]));
+      assert.ok(
+        Math.abs(measured + Math.tan((10 * Math.PI) / 180)) <= 0.005,
+        `${family}: slope ${measured} at 10deg`,
+      );
+    }
+  });
+
+  test("obliqueAngle reaches the paragraph's own text style", () => {
+    register();
+    const [family] = FAMILIES;
+    const pb = ParagraphBuilder.Make({
+      textStyle: {
+        fontFamilies: [family],
+        fontSize: 200,
+        color: "black",
+        fontStyle: { slant: OBLIQUE, obliqueAngle: 10 },
+      },
+    });
+    pb.addText("IH");
+    const p = pb.build();
+    p.layout(1000);
+    const ctx = new Canvas(W, H * 2).getContext("2d");
+    ctx.drawParagraph(p, 60, 250 - p.getAlphabeticBaseline());
+    assert.ok(
+      same(
+        ctx.getImageData(0, 0, W, H * 2).data,
+        text(`oblique 10deg 200px ${family}`, "IH"),
+      ),
+    );
+  });
+
+  test("obliqueAngle is refused out of range, off an oblique, or not a number", () => {
+    const pushed = (fontStyle) => () => {
+      const pb = ParagraphBuilder.Make({ textStyle: { fontSize: 20 } });
+      pb.pushStyle({ fontStyle });
+    };
+    // A finite number outside the range CSS allows: rule 4.
+    for (const obliqueAngle of [90.0001, -91, 1e21]) {
+      assert.throws(
+        pushed({ slant: OBLIQUE, obliqueAngle }),
+        RangeError,
+        `${obliqueAngle}`,
+      );
+    }
+    // A value whose conversion to a `double` fails, as for every number
+    // option: a TypeError naming the option where it was written.
+    for (const obliqueAngle of [NaN, Infinity, -Infinity, "ten", {}]) {
+      assert.throws(
+        pushed({ slant: OBLIQUE, obliqueAngle }),
+        { name: "TypeError", message: /`fontStyle\.obliqueAngle`/ },
+        `${String(obliqueAngle)}`,
+      );
+    }
+    for (const fontStyle of [
+      { slant: UPRIGHT, obliqueAngle: 10 },
+      { slant: ITALIC, obliqueAngle: 10 },
+      { obliqueAngle: 10 },
+    ]) {
+      assert.throws(pushed(fontStyle), {
+        name: "TypeError",
+        message: /slant: 2/,
+      });
+    }
+    // A string of digits converts, as `fontSize: "12"` does.
+    for (const obliqueAngle of [90, -90, 0, undefined, "10", [10]]) {
+      assert.doesNotThrow(pushed({ slant: OBLIQUE, obliqueAngle }));
     }
   });
 
@@ -2254,4 +2536,521 @@ describe("a text shadow's stack level", () => {
       assert.equal(layer.changed, 0, what);
     }
   });
+});
+// `halfLeading` splits a line's spare height half above the text and half
+// below, as CSS 2.1 section 10.8.1 does: 48px Oswald at a height of 2 has
+// 96px for its 57.264 of ascent and 13.872 of descent, so the baseline is
+// 57.264 + 24.864 / 2 = 69.696 down, where scaling both puts it at 77.279.
+// SkParagraph's paragraph cache matched two paragraphs that differ only in
+// `halfLeading`, so whichever was laid out first decided both.
+describe("halfLeading", () => {
+  // Registered once a test, not once a layout: registering a font drops
+  // the collection's caches, and with them the stale layout this guards
+  // against.
+  const register = () =>
+    FontLibrary.use("HalfLeadingOswald", [
+      "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    ]);
+  const baseline = (half, where) => {
+    const style = {
+        fontFamilies: ["HalfLeadingOswald"],
+        fontSize: 48,
+        heightMultiplier: 2,
+      },
+      pb = ParagraphBuilder.Make({
+        textStyle: where === "base" ? { ...style, halfLeading: half } : style,
+      });
+    // The paragraph's own style is the text's where nothing is pushed.
+    if (where === "pushed") pb.pushStyle({ ...style, halfLeading: half });
+    pb.addText("H x");
+    if (where === "pushed") pb.pop();
+    const p = pb.build();
+    p.layout(1000);
+    return p.getAlphabeticBaseline();
+  };
+
+  for (const where of ["base", "pushed"]) {
+    test(`on the ${where} style, whatever was laid out before`, () => {
+      register();
+      for (const order of [
+        [false, true, false],
+        [true, false, true],
+      ]) {
+        for (const half of order) {
+          const at = baseline(half, where),
+            expected = half ? 69.696 : 77.279;
+          assert.ok(
+            Math.abs(at - expected) < 0.01,
+            `halfLeading ${half} in ${order}: ${at}, expected ${expected}`,
+          );
+        }
+      }
+    });
+  }
+});
+
+describe("an empty fontFamilies list", () => {
+  // No family names the default list, as the option left out does. It
+  // aborted the process in a debug build: skia-safe 0.153.3 builds a slice
+  // from a null pointer for an empty list -- see the UPSTREAM marker in
+  // src/node/paragraph.rs.
+  test("lays out in the default families", () => {
+    const widthOf = (style) => {
+      const p = ParagraphBuilder.Make(style).addText("Hamburgefonstiv").build();
+      p.layout(10000);
+      return p.getMaxIntrinsicWidth();
+    };
+    const plain = widthOf({ textStyle: { fontSize: 24 } });
+    assert.equal(
+      widthOf({ textStyle: { fontSize: 24, fontFamilies: [] } }),
+      plain,
+    );
+    const pushed = ParagraphBuilder.Make({ textStyle: { fontSize: 24 } })
+      .pushStyle({ fontSize: 24, fontFamilies: [] })
+      .addText("Hamburgefonstiv")
+      .build();
+    pushed.layout(10000);
+    assert.equal(pushed.getMaxIntrinsicWidth(), plain);
+    assert.equal(
+      widthOf({
+        textStyle: { fontSize: 24 },
+        strutStyle: { fontFamilies: [] },
+      }),
+      plain,
+    );
+  });
+});
+
+describe("a ParagraphBuilder option is converted as WebIDL converts it", () => {
+  // Every option the builder reads, where it is read and the WebIDL type it
+  // converts to, as the Canvas API's own attributes convert: a number by
+  // `ToNumber` to a `double`, a string by `ToString`, a boolean by
+  // `ToBoolean`, an object of options as a dictionary and a list as a
+  // sequence. Two tables follow from WebIDL: values that convert, and values
+  // whose conversion throws a `TypeError`, which here names the option. An
+  // absent or `undefined` option takes its default.
+  const DOUBLE = "double",
+    COUNT = "count",
+    STRING = "DOMString",
+    DIRECTION = "direction",
+    ALIGN = "align",
+    BOOLEAN = "boolean",
+    SEQUENCE = "sequence",
+    DICTIONARY = "dictionary",
+    COLOUR = "colour",
+    VARIATIONS = "variations";
+
+  // What converts, by WebIDL section 3.2.7, 3.2.10, 3.2.3, 3.2.17, 3.2.21 and
+  // 3.2.25. A number's values all convert into the range every number
+  // option takes, so a refusal here is a conversion's and nothing else's.
+  // `maxLines` counts from 1, so `null`, which converts to 0, is left to
+  // its own refusal; and a direction and an alignment are enumerations, so
+  // only their names convert.
+  const CONVERTS = {
+    [DOUBLE]: [
+      "1",
+      " 1 ",
+      true,
+      null,
+      [1],
+      "0x1",
+      new Number(1),
+      { valueOf: () => 1 },
+    ],
+    [COUNT]: [
+      "1",
+      " 1 ",
+      true,
+      [1],
+      "0x1",
+      new Number(1),
+      { valueOf: () => 1 },
+    ],
+    [STRING]: [1, true, null, {}, { toString: () => "ltr" }, 1n],
+    [DIRECTION]: ["ltr", "rtl", null, { toString: () => "rtl" }],
+    [ALIGN]: ["left", "center", "start", null, { toString: () => "end" }],
+    [BOOLEAN]: [1, 0, "", "x", null, {}, [], 0n, NaN, Symbol("s")],
+    [SEQUENCE]: [[], new Set(), (function* () {})()],
+    [DICTIONARY]: [null, {}, [], () => {}],
+    [COLOUR]: [
+      { toString: () => "red" },
+      1,
+      true,
+      null,
+      {},
+      [0, 0, 0, 1],
+      new Set([1, 0.5, 0, 0.25]),
+    ],
+    [VARIATIONS]: [
+      "normal",
+      "NORMAL",
+      { toString: () => "normal" },
+      [],
+      new Set(),
+      null,
+    ],
+  };
+  // What throws: ToNumber's NaN and infinities and its refusal of a Symbol
+  // and a BigInt; ToString's of a Symbol; a dictionary that is no Object; a
+  // sequence that is no Object or has no iterator; for the lists of fixed
+  // length, one of another length; and a name no enumeration holds.
+  const THROWS = {
+    [DOUBLE]: ["abc", {}, NaN, Infinity, -Infinity, [1, 2], Symbol("s"), 1n],
+    [COUNT]: ["abc", {}, NaN, Infinity, -Infinity, [1, 2], Symbol("s"), 1n],
+    [STRING]: [Symbol("s")],
+    [DIRECTION]: [Symbol("s"), "up", "", 1, {}, "RTL"],
+    [ALIGN]: [Symbol("s"), "middle", "", 1, {}, "CENTER"],
+    [BOOLEAN]: [],
+    [SEQUENCE]: ["Arial", 1, true, null, {}, Symbol("s")],
+    [DICTIONARY]: ["x", 1, true, Symbol("s"), 1n],
+    [COLOUR]: [Symbol("s"), [1, 0, 0], ["red"], [1, 0, 0, "x"]],
+    [VARIATIONS]: [1, true, {}, "none", Symbol("s")],
+  };
+
+  const pushed = (style) => ParagraphBuilder.Make({}).pushStyle(style),
+    paragraphText = (style) => ParagraphBuilder.Make({ textStyle: style }),
+    paragraph = (style) => ParagraphBuilder.Make(style),
+    strut = (style) => ParagraphBuilder.Make({ strutStyle: style });
+
+  const TEXT = {
+    fontSize: DOUBLE,
+    fontFamilies: SEQUENCE,
+    color: COLOUR,
+    foregroundColor: COLOUR,
+    backgroundColor: COLOUR,
+    strokeWidth: DOUBLE,
+    fontStyle: DICTIONARY,
+    letterSpacing: DOUBLE,
+    wordSpacing: DOUBLE,
+    baselineShift: DOUBLE,
+    heightMultiplier: DOUBLE,
+    decoration: DOUBLE,
+    decorationStyle: DOUBLE,
+    decorationColor: COLOUR,
+    decorationThickness: DOUBLE,
+    shadows: SEQUENCE,
+    fontVariations: VARIATIONS,
+    fontFeatures: SEQUENCE,
+    halfLeading: BOOLEAN,
+    locale: STRING,
+  };
+  const PARAGRAPH = {
+    textAlign: ALIGN,
+    textDirection: DIRECTION,
+    maxLines: COUNT,
+    ellipsis: STRING,
+    textStyle: DICTIONARY,
+    strutStyle: DICTIONARY,
+    textHeightBehavior: DOUBLE,
+  };
+  const STRUT = {
+    enabled: BOOLEAN,
+    fontFamilies: SEQUENCE,
+    fontSize: DOUBLE,
+    heightMultiplier: DOUBLE,
+    leading: DOUBLE,
+    forceStrutHeight: BOOLEAN,
+    halfLeading: BOOLEAN,
+  };
+  // Inside a list or an object an option holds, named by its path. A list's
+  // element has no default, so `undefined` there is converted like any
+  // other value: a dictionary takes it as `{}`, a string as "undefined".
+  const NESTED = [
+    ["fontStyle.weight", (v) => ({ fontStyle: { weight: v } }), DOUBLE],
+    ["fontStyle.width", (v) => ({ fontStyle: { width: v } }), DOUBLE],
+    ["fontStyle.slant", (v) => ({ fontStyle: { slant: v } }), DOUBLE],
+    ["fontFamilies[1]", (v) => ({ fontFamilies: ["Arial", v] }), STRING],
+    ["shadows[0]", (v) => ({ shadows: [v] }), DICTIONARY],
+    ["shadows[0].color", (v) => ({ shadows: [{ color: v }] }), COLOUR],
+    [
+      "shadows[0].blurRadius",
+      (v) => ({ shadows: [{ blurRadius: v }] }),
+      DOUBLE,
+    ],
+    ["fontFeatures[0]", (v) => ({ fontFeatures: [v] }), DICTIONARY],
+    ["fontFeatures[0].name", (v) => ({ fontFeatures: [{ name: v }] }), STRING],
+    [
+      "fontFeatures[0].value",
+      (v) => ({ fontFeatures: [{ name: "smcp", value: v }] }),
+      DOUBLE,
+    ],
+    ["fontVariations[0]", (v) => ({ fontVariations: [v] }), DICTIONARY],
+    [
+      "fontVariations[0].axis",
+      (v) => ({ fontVariations: [{ axis: v, value: 1 }] }),
+      STRING,
+    ],
+    [
+      "fontVariations[0].value",
+      (v) => ({ fontVariations: [{ axis: "wght", value: v }] }),
+      DOUBLE,
+    ],
+  ];
+  // A shadow's offset is a sequence of exactly two doubles.
+  const OFFSET = {
+    converts: [[1, 2], ["1", "2"], new Set([1, 2])],
+    throws: ["1,2", 1, null, {}, [1], [1, 2, 3], [1, "a"], [1, Symbol("s")]],
+  };
+
+  const shown = (value) =>
+    typeof value === "symbol" || typeof value === "bigint"
+      ? String(value)
+      : typeof value === "function"
+        ? "a function"
+        : (JSON.stringify(value) ?? String(value));
+
+  // Every case in `table` reached every way, as `[how, name, style, value]`.
+  const cases = (table) => {
+    const out = [];
+    for (const [key, type] of Object.entries(TEXT))
+      for (const value of table[type]) {
+        out.push([pushed, key, { [key]: value }, value]);
+        out.push([paragraphText, `textStyle.${key}`, { [key]: value }, value]);
+      }
+    for (const [key, type] of Object.entries(PARAGRAPH))
+      for (const value of table[type])
+        out.push([paragraph, key, { [key]: value }, value]);
+    for (const [key, type] of Object.entries(STRUT))
+      for (const value of table[type])
+        out.push([strut, `strutStyle.${key}`, { [key]: value }, value]);
+    for (const [path, style, type] of NESTED)
+      for (const value of table[type])
+        out.push([pushed, path, style(value), value]);
+    return out;
+  };
+
+  test("converts what WebIDL converts", () => {
+    const wrong = [];
+    const all = [
+      ...cases(CONVERTS),
+      ...OFFSET.converts.map((v) => [
+        pushed,
+        "shadows[0].offset",
+        { shadows: [{ offset: v }] },
+        v,
+      ]),
+    ];
+    for (const [make, name, style, value] of all) {
+      try {
+        make(style);
+      } catch (error) {
+        wrong.push(
+          `${name} = ${shown(value)}: ${error.constructor.name}: ${error.message}`,
+        );
+      }
+    }
+    assert.equal(
+      wrong.length,
+      0,
+      `${wrong.length} of ${all.length}:\n${wrong.join("\n")}`,
+    );
+  });
+
+  test("throws a TypeError naming the option where WebIDL throws", () => {
+    const wrong = [];
+    const all = [
+      ...cases(THROWS),
+      ...OFFSET.throws.map((v) => [
+        pushed,
+        "shadows[0].offset",
+        { shadows: [{ offset: v }] },
+        v,
+      ]),
+    ];
+    for (const [make, name, style, value] of all) {
+      let thrown;
+      try {
+        make(style);
+      } catch (error) {
+        thrown = error;
+      }
+      if (!(thrown instanceof TypeError) || !thrown.message.includes(name))
+        wrong.push(
+          `${name} = ${shown(value)}: ${thrown ? `${thrown.constructor.name}: ${thrown.message}` : "taken"}`,
+        );
+    }
+    assert.equal(
+      wrong.length,
+      0,
+      `${wrong.length} of ${all.length}:\n${wrong.join("\n")}`,
+    );
+  });
+
+  // A string option is a `DOMString?`, so `null` is the option left out
+  // rather than the string "null".
+  test("is left out when a string option is null", () => {
+    const lastLine = (ellipsis) => {
+      const p = ParagraphBuilder.Make({
+        maxLines: 1,
+        ...(ellipsis === undefined ? {} : { ellipsis }),
+        textStyle: { fontSize: 16 },
+      })
+        .addText("Hamburgefonstiv ".repeat(20))
+        .build();
+      p.layout(200);
+      return p.getLineMetrics()[0].width;
+    };
+    assert.notEqual(
+      lastLine("null"),
+      lastLine(undefined),
+      "the ellipsis must show for this to mean anything",
+    );
+    assert.equal(lastLine(null), lastLine(undefined));
+  });
+
+  test("is its default when it is undefined", () => {
+    for (const key of Object.keys(TEXT)) {
+      pushed({ [key]: undefined });
+      paragraphText({ [key]: undefined });
+    }
+    for (const key of Object.keys(PARAGRAPH)) paragraph({ [key]: undefined });
+    for (const key of Object.keys(STRUT)) strut({ [key]: undefined });
+    for (const [path, style] of NESTED)
+      if (!path.endsWith("]")) pushed(style(undefined));
+  });
+
+  // A converted value is the value: a numeric string lays out as its number,
+  // an object's `toString` names the colour, any iterable is the list.
+  test("reads the converted value", () => {
+    const widthOf = (style) => {
+      const p = ParagraphBuilder.Make({ textStyle: style })
+        .addText("Hamburgefonstiv")
+        .build();
+      p.layout(10000);
+      return p.getMaxIntrinsicWidth();
+    };
+    assert.equal(widthOf({ fontSize: "24" }), widthOf({ fontSize: 24 }));
+    assert.equal(widthOf({ fontSize: [24] }), widthOf({ fontSize: 24 }));
+    assert.equal(
+      widthOf({ fontSize: 24, fontFamilies: new Set(["serif"]) }),
+      widthOf({ fontSize: 24, fontFamilies: ["serif"] }),
+    );
+    assert.equal(
+      widthOf({ fontSize: 24, letterSpacing: true }),
+      widthOf({ fontSize: 24, letterSpacing: 1 }),
+    );
+
+    const pixel = (color) => {
+      const p = ParagraphBuilder.Make({
+        textStyle: { fontSize: 80, color },
+      })
+        .addText("█")
+        .build();
+      p.layout(1000);
+      const ctx = new Canvas(100, 100).getContext("2d");
+      ctx.drawParagraph(p, 0, 0);
+      return [...ctx.getImageData(20, 50, 1, 1).data];
+    };
+    assert.deepEqual(pixel({ toString: () => "red" }), pixel("red"));
+  });
+});
+
+// A style that names no colour is black, as the type declarations say and
+// as CSS's initial `color` is. SkParagraph's own default is white, which
+// drew unstyled text invisibly on a white canvas.
+describe("a paragraph's text colour", () => {
+  test("is black where no style names one", () => {
+    FontLibrary.use("ColourOswald", [
+      "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    ]);
+    const style = { fontFamilies: ["ColourOswald"], fontSize: 48 };
+    for (const pushed of [false, true]) {
+      const pb = ParagraphBuilder.Make({ textStyle: style });
+      if (pushed) pb.pushStyle(style);
+      pb.addText("H");
+      if (pushed) pb.pop();
+      const p = pb.build();
+      p.layout(1000);
+      const ctx = new Canvas(100, 100).getContext("2d");
+      ctx.drawParagraph(p, 0, 0);
+      const { data } = ctx.getImageData(0, 0, 100, 100);
+      let darkest = [255, 255, 255, 0];
+      for (let i = 0; i < data.length; i += 4)
+        if (data[i + 3] > darkest[3]) darkest = [...data.slice(i, i + 4)];
+      assert.deepEqual(darkest, [0, 0, 0, 255], `pushed ${pushed}`);
+    }
+  });
+});
+
+// Text is drawn at Slight hinting, as Chrome draws it, unless a context's
+// `fontHinting` is turned off; a paragraph has no knob and is always hinted.
+// It was all drawn at Slight whatever `fontHinting` said. Hinting shows on
+// macOS, where Skia's CoreText port dilates the outline at every level but
+// None, and under FreeType on Linux; elsewhere it is not measured. That a
+// paragraph's runs are hinted is pinned on every platform by `hinting` in
+// src/node/typography.rs, which reads the runs' fonts.
+describe("hinting", () => {
+  const OSWALD = "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    TEXT = "Hamburgefonstiv",
+    hints = process.platform === "darwin" || process.platform === "linux";
+  // Registering a font drops every collection, and with them their
+  // paragraph caches: what is drawn next is drawn from nothing cached.
+  const register = () => FontLibrary.use("HintingOswald", [OSWALD]);
+
+  // `text` in 13px Oswald, drawn on canvas.
+  const canvasText = (hinting, text = TEXT) => {
+    const ctx = new Canvas(200, 50).getContext("2d");
+    if (hinting !== undefined) ctx.fontHinting = hinting;
+    ctx.font = "13px HintingOswald";
+    ctx.fillText(text, 10, 30);
+    return Buffer.from(ctx.getImageData(0, 0, 200, 50).data);
+  };
+
+  // The same, as a paragraph.
+  const paragraphText = (text = TEXT) => {
+    const style = { fontFamilies: ["HintingOswald"], fontSize: 13 },
+      pb = ParagraphBuilder.Make({ textStyle: style });
+    pb.addText(text);
+    const p = pb.build();
+    p.layout(1000);
+    const ctx = new Canvas(200, 50).getContext("2d");
+    ctx.drawParagraph(p, 10, 10);
+    return Buffer.from(ctx.getImageData(0, 0, 200, 50).data);
+  };
+
+  test("fontHinting is on by default", () => {
+    register();
+    assert.equal(new Canvas(1, 1).getContext("2d").fontHinting, true);
+    assert.ok(canvasText().equals(canvasText(true)), "default is on");
+  });
+
+  test(
+    "fontHinting off draws the outlines as designed",
+    { skip: !hints && "measured on macOS and Linux" },
+    () => {
+      register();
+      assert.ok(!canvasText(false).equals(canvasText(true)));
+    },
+  );
+
+  // SkParagraph's paragraph cache matches the two without comparing their
+  // hinting, so laid out against one collection the second drawn would
+  // take the first's runs.
+  test(
+    "unhinted canvas text and a paragraph each keep their own, in either order",
+    { skip: !hints && "measured on macOS and Linux" },
+    () => {
+      for (const [index, order] of [
+        ["paragraph", "canvas"],
+        ["canvas", "paragraph"],
+      ].entries()) {
+        const text = `${TEXT} ${index}`,
+          drawn = {};
+        register();
+        for (const what of order)
+          drawn[what] =
+            what === "canvas" ? canvasText(false, text) : paragraphText(text);
+        register();
+        assert.ok(
+          drawn.canvas.equals(canvasText(false, text)),
+          `${order}: canvas`,
+        );
+        register();
+        assert.ok(
+          drawn.paragraph.equals(paragraphText(text)),
+          `${order}: paragraph`,
+        );
+      }
+    },
+  );
 });

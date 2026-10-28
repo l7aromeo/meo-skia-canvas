@@ -2,9 +2,8 @@
 #![allow(non_snake_case)]
 use crate::{
     context::State,
-    context2d::DEFAULT_OBLIQUE_DEGREES,
-    css::{FontUnits, is_font_relative, parse_length},
-    font::{leans_as_asked, variation_axes},
+    css::{FontUnits, is_font_relative, parse_length, without_comments},
+    font::{FontFamily, ObliqueAngle, leans_as_asked, variation_axes},
     font_library::{FontEpoch, FontLibrary, base_face},
     node::decorate::{self, FaceLines, Thickness},
     text::{
@@ -1248,9 +1247,6 @@ impl<'a> Typesetter<'a> {
         let hang = Baseline::Hanging.get_offset(&self.char_style) - shift;
         let norm = Baseline::Alphabetic.get_offset(&self.char_style) - shift;
         let ideo = Baseline::Ideographic.get_offset(&self.char_style) - shift;
-        let half_leading = self.graf_style.strut_style().leading().max(0.0)
-            * self.char_style.font_size()
-            / 2.0;
 
         // The laid-out box of each line horizontally, which is what the
         // Canvas API's `width` measures, so trailing whitespace counts.
@@ -1344,7 +1340,6 @@ impl<'a> Typesetter<'a> {
             paragraph,
             origin,
             condensation,
-            half_leading,
             hang,
             norm,
             ideo,
@@ -1604,14 +1599,20 @@ impl Utf16Index {
 //
 #[derive(Debug, Clone)]
 pub struct FontSpec {
-    pub families: Vec<String>,
+    pub families: Vec<FontFamily>,
+    /// The names a font collection is asked for `families` by, which only
+    /// the library resolving the specification can say -- see
+    /// `FontLibrary::collection_names`. Empty until it has.
+    pub collection_names: Vec<String>,
     pub size: f32,
+    /// The shorthand's line height in pixels, a number or percentage
+    /// already multiplied by `size`, or `None` for `normal`.
     pub line_height: Option<f32>,
     pub weight: Weight,
     pub width: Width,
     pub slant: Slant,
-    /// The angle of an `oblique` other than the default 14deg, which a
-    /// `Font` has no field for (#287), or `None`.
+    /// The angle of an `oblique` other than the default 14deg, or `None`:
+    /// [`FontSpec::slant`] holds no angle.
     pub oblique_degrees: Option<f32>,
     pub features: Vec<(String, i32)>,
     pub variant: String,
@@ -1640,8 +1641,10 @@ impl FontSpec {
     /// The angle an `oblique` specification is drawn at, or `None` where it
     /// is not oblique.
     pub fn oblique_angle(&self) -> Option<f32> {
-        (self.slant == Slant::Oblique)
-            .then(|| self.oblique_degrees.unwrap_or(DEFAULT_OBLIQUE_DEGREES))
+        (self.slant == Slant::Oblique).then(|| {
+            self.oblique_degrees
+                .unwrap_or(ObliqueAngle::DEFAULT.degrees())
+        })
     }
 }
 
@@ -1732,14 +1735,6 @@ pub fn typeface_wght_range(font: &Typeface) -> Vec<i32> {
     wghts
 }
 
-pub fn to_slant(slant_name: &str) -> Slant {
-    match slant_name.to_lowercase().as_str() {
-        "italic" => Slant::Italic,
-        "oblique" => Slant::Oblique,
-        _ => Slant::Upright,
-    }
-}
-
 pub fn from_slant(slant: Slant) -> String {
     match slant {
         Slant::Upright => "normal",
@@ -1749,8 +1744,11 @@ pub fn from_slant(slant: Slant) -> String {
     .to_string()
 }
 
-pub fn to_width(width_name: &str) -> Width {
-    match width_name.to_lowercase().as_str() {
+/// The width a `fontStretch` name asks for, or `None` for a name the
+/// enumeration does not have. Matched exactly, as WebIDL matches an
+/// enumeration's values: Chrome ignores `"CONDENSED"`.
+pub fn to_width(width_name: &str) -> Option<Width> {
+    Some(match width_name {
         "ultra-condensed" => Width::ULTRA_CONDENSED,
         "extra-condensed" => Width::EXTRA_CONDENSED,
         "condensed" => Width::CONDENSED,
@@ -1759,8 +1757,9 @@ pub fn to_width(width_name: &str) -> Width {
         "expanded" => Width::EXPANDED,
         "extra-expanded" => Width::EXTRA_EXPANDED,
         "ultra-expanded" => Width::ULTRA_EXPANDED,
-        _ => Width::NORMAL,
-    }
+        "normal" => Width::NORMAL,
+        _ => return None,
+    })
 }
 
 pub fn from_width(width: Width) -> String {
@@ -1778,8 +1777,10 @@ pub fn from_width(width: Width) -> String {
     .to_string()
 }
 
+/// Matched exactly, as WebIDL matches an enumeration's values: Chrome
+/// ignores `"CENTER"` as it ignores any other name it does not have.
 pub fn to_text_align(mode_name: &str) -> Option<CrateTextAlign> {
-    let mode = match mode_name.to_lowercase().as_str() {
+    let mode = match mode_name {
         "left" => CrateTextAlign::Left,
         "right" => CrateTextAlign::Right,
         "center" => CrateTextAlign::Center,
@@ -1845,8 +1846,9 @@ pub enum Baseline {
     Bottom,
 }
 
+/// Matched exactly, as [`to_text_align`] is.
 pub fn to_text_baseline(mode_name: &str) -> Option<CrateTextBaseline> {
-    let mode = match mode_name.to_lowercase().as_str() {
+    let mode = match mode_name {
         "top" => CrateTextBaseline::Top,
         "hanging" => CrateTextBaseline::Hanging,
         "middle" => CrateTextBaseline::Middle,
@@ -1939,12 +1941,16 @@ impl Spacing {
     /// length is still relative after it is set: [`in_px`](Self::in_px)
     /// resolves it at the moment the text is laid out.
     pub fn from_css(css: &str) -> Option<Self> {
-        // Whitespace around the length is refused too: Chrome ignores
-        // `ctx.letterSpacing = " 5px "`.
-        if css.trim() != css {
-            return None;
-        }
-        let length = parse_length(css)?;
+        // HTML's `letterSpacing` and `wordSpacing` setters parse "the given
+        // value as a CSS <length>", and CSS Syntax 3's "parse a component
+        // value" discards the whitespace on either side -- "Discard
+        // whitespace from input", before the value and after it -- and its
+        // tokenizer the comments, so `" 5px "` and `/**/5px` are 5px. Chrome
+        // 152 ignores both; docs/browser-differences.md records it. Inside
+        // the length nothing may come between the number and its unit, so
+        // `5 px` and `5/**/px` stay refused.
+        let uncommented = without_comments(css)?;
+        let length = parse_length(uncommented.trim_ascii())?;
         // A number with no unit is a length only at zero. CSS Values 4
         // section 6: "For zero lengths the unit identifier is optional (i.e.
         // can be syntactically represented as the <number> 0)." Chrome
@@ -2016,8 +2022,6 @@ pub struct Measured {
     origin: Point,
     /// The horizontal factor the run is squeezed by. See [`TextLayout`].
     condensation: f32,
-    /// Half the strut's leading, which the line baselines are moved by.
-    half_leading: f32,
     /// The hanging, alphabetic and ideographic baselines' offsets from the
     /// selected one.
     hang: f32,
@@ -2039,15 +2043,13 @@ impl Measured {
             paragraph,
             origin,
             condensation,
-            half_leading,
             hang,
             norm,
             ideo,
             char_ranges,
             oblique,
         } = self;
-        let (origin, condensation, half_leading) =
-            (*origin, *condensation, *half_leading);
+        let (origin, condensation) = (*origin, *condensation);
         let (hang, norm, ideo) = (*hang, *norm, *ideo);
 
         // Each run's glyph bounds, with the family and font metrics
@@ -2150,8 +2152,7 @@ impl Measured {
             let char_range = char_range.clone();
 
             if let Some(line_metrics) = paragraph.get_line_metrics_at(line) {
-                let baseline =
-                    line_metrics.baseline as f32 + origin.y - half_leading;
+                let baseline = line_metrics.baseline as f32 + origin.y;
                 line_details.push(TextMetricsLine {
                     x: text_bounds.left,
                     y: text_bounds.top,
@@ -3127,5 +3128,185 @@ mod synthesis {
             );
             assert_eq!(*got.weight(), handed, "asked {asked}, face {face}");
         }
+    }
+}
+
+#[cfg(test)]
+mod hinting {
+    use super::{
+        FontLibrary, ParagraphStyle, TextStyle, Typesetter, glyph_runs,
+    };
+    use crate::{
+        Canvas, Font as CanvasFont, FontLibrary as Library, RichTextSpan,
+        TextEngine, TextRendering, TextStyle as SpanStyle,
+        node::oblique::ParagraphRecipe,
+    };
+    use skia_safe::{FontHinting, Paint};
+
+    /// The bundled Oswald, under a name of these tests' own.
+    const FAMILY: &str = "HintingOswald";
+    const SIZE: f32 = 13.0;
+    const TEXT: &str = "Hamburgefonstiv";
+
+    fn register() -> Library {
+        let library = Library::new();
+        library
+            .register_font_from_path(
+                FAMILY,
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"
+                ),
+            )
+            .expect("bundled Oswald registers");
+        library
+    }
+
+    /// The hinting of every glyph run canvas text is drawn with, its
+    /// `fontHinting` set where `hinted` is given.
+    fn canvas_hinting(hinted: Option<bool>) -> Vec<FontHinting> {
+        let mut canvas = Canvas::new(200.0, 50.0);
+        let ctx = canvas.context();
+        ctx.set_font(&CanvasFont::new(FAMILY, SIZE));
+        if let Some(hinted) = hinted {
+            ctx.set_font_hinting(hinted);
+        }
+        let mut layout = Typesetter::new(&ctx.inner.state, TEXT, None)
+            .layout(&Paint::default());
+        glyph_runs(&mut layout.paragraph)
+            .iter()
+            .map(|run| run.font.hinting())
+            .collect()
+    }
+
+    /// The hinting of every glyph run a paragraph is drawn with.
+    fn paragraph_hinting(engine: &TextEngine) -> Vec<FontHinting> {
+        let style = SpanStyle {
+            font_families: vec![FAMILY.into()],
+            font_size: SIZE,
+            ..SpanStyle::default()
+        };
+        let mut paragraph = engine.layout_rich_text(
+            &[RichTextSpan {
+                text: TEXT.to_string(),
+                style: style.clone(),
+            }],
+            &style,
+            1000.0,
+        );
+        glyph_runs(&mut paragraph.paragraph)
+            .iter()
+            .map(|run| run.font.hinting())
+            .collect()
+    }
+
+    fn all(hinting: &[FontHinting], expected: FontHinting, what: &str) {
+        assert!(!hinting.is_empty(), "{what}: no runs");
+        assert!(
+            hinting.iter().all(|h| *h == expected),
+            "{what}: {hinting:?}, expected {expected:?}"
+        );
+    }
+
+    /// `geometricPrecision` lays every run out unhinted, whatever
+    /// `fontHinting` says: one hinting level for the whole layout. Asking the
+    /// collection for unhinted faces while the run style still carries Slight
+    /// would draw unhinted metrics with hinted glyphs.
+    #[test]
+    fn geometric_precision_lays_every_run_out_unhinted() {
+        register();
+        let mut canvas = Canvas::new(200.0, 50.0);
+        let ctx = canvas.context();
+        ctx.set_font(&CanvasFont::new(FAMILY, SIZE));
+        ctx.set_font_hinting(true);
+        ctx.set_text_rendering(TextRendering::GeometricPrecision);
+        let mut layout = Typesetter::new(&ctx.inner.state, TEXT, None)
+            .layout(&Paint::default());
+        let hinting: Vec<FontHinting> = glyph_runs(&mut layout.paragraph)
+            .iter()
+            .map(|run| run.font.hinting())
+            .collect();
+        all(&hinting, FontHinting::None, "geometricPrecision");
+    }
+
+    #[test]
+    fn canvas_text_is_hinted_unless_turned_off() {
+        register();
+        all(&canvas_hinting(None), FontHinting::Slight, "by default");
+        all(
+            &canvas_hinting(Some(false)),
+            FontHinting::None,
+            "turned off",
+        );
+        all(
+            &canvas_hinting(Some(true)),
+            FontHinting::Slight,
+            "turned on",
+        );
+    }
+
+    /// The hinting of every glyph run a paragraph from the Node binding's
+    /// path is drawn with: its collection from the shared library, as
+    /// `node::paragraph::new` takes it.
+    fn shared_paragraph_hinting() -> Vec<FontHinting> {
+        let mut style = TextStyle::new();
+        style.set_font_families(&[FAMILY]).set_font_size(SIZE);
+        let (collection, _) = FontLibrary::with_shared(|lib| {
+            lib.set_hinting(true).fonts_for_style(&style, &[])
+        });
+        let mut paragraph_style = ParagraphStyle::new();
+        paragraph_style.set_text_style(&style);
+        let mut recipe =
+            ParagraphRecipe::new(paragraph_style, None, collection, None);
+        recipe.push_style(style, None);
+        recipe.add_text(TEXT);
+        recipe.pop();
+        let (mut paragraph, _) = recipe.build();
+        paragraph.layout(1000.0);
+        glyph_runs(&mut paragraph)
+            .iter()
+            .map(|run| run.font.hinting())
+            .collect()
+    }
+
+    /// Canvas text drawn unhinted and a paragraph of the same text, hinted,
+    /// share a library: each keeps its own hinting in either order. The
+    /// paragraph cache matches the two without comparing hinting, so laid
+    /// out against one collection the second takes the first's runs.
+    #[test]
+    fn hinted_and_unhinted_text_keep_their_own_hinting() {
+        register();
+        for canvas_first in [true, false] {
+            let mut seen = Vec::new();
+            for step in 0..4 {
+                let canvas = (step % 2 == 0) == canvas_first;
+                let hinting = match canvas {
+                    true => canvas_hinting(Some(false)),
+                    false => shared_paragraph_hinting(),
+                };
+                let expected = match canvas {
+                    true => FontHinting::None,
+                    false => FontHinting::Slight,
+                };
+                seen.push(hinting.clone());
+                all(
+                    &hinting,
+                    expected,
+                    &format!(
+                        "step {step}, canvas first {canvas_first}: {seen:?}"
+                    ),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_paragraph_is_hinted() {
+        let engine = TextEngine::new(&register());
+        all(
+            &paragraph_hinting(&engine),
+            FontHinting::Slight,
+            "a paragraph",
+        );
     }
 }

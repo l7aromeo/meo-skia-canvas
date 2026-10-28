@@ -506,7 +506,7 @@ fn an_undecorated_colour_follows_the_text_colour() {
     let ink = |decoration_color: Option<RgbaLinear>| {
         let engine = TextEngine::with_system_fonts();
         let style = TextStyle {
-            font_families: vec!["Helvetica".to_string()],
+            font_families: vec!["Helvetica".into()],
             font_size: 32.0,
             color: RgbaLinear::from_hex("#facc15").expect("a literal"),
             decoration: TextDecoration::underline(),
@@ -1300,46 +1300,26 @@ fn a_non_finite_transform_is_ignored_rather_than_poisoning_the_canvas() {
 }
 
 #[test]
-fn a_shadow_colour_round_trips_only_as_far_as_eight_bits_reach() {
-    // The getter goes through `skia_color_to_rgba_linear`, whose doc claimed
-    // a value "reads back as it was written". It does not below alpha 1: the
-    // colour is stored as 8-bit sRGB with 8-bit alpha, so anything off a
-    // whole 255th is quantised, and the premultiplied components shift with
-    // it because they are re-derived from the stored alpha.
+fn a_shadow_colour_round_trips_as_it_was_set() {
+    // Held in floating point, so what is set reads back, at any alpha and
+    // for a colour outside sRGB -- where eight bits of sRGB rounded an alpha
+    // of 0.5 to 128/255 and clipped a wide colour.
     let mut canvas = Canvas::new(10.0, 10.0);
     let ctx = canvas.context();
-
-    // Every byte round-trips exactly at full alpha.
-    for byte in [0u8, 1, 127, 128, 200, 254, 255] {
-        let set = RgbaLinear::from_srgb8(byte, byte, byte, 1.0);
+    for set in [
+        RgbaLinear::from_srgb8(230, 120, 40, 0.5),
+        RgbaLinear::from_srgb8(1, 128, 254, 1.0),
+        RgbaLinear::from_css("color(display-p3 1 0 0 / 0.3)")
+            .expect("a colour"),
+    ] {
         ctx.set_shadow_color(set);
         let got = ctx.shadow_color();
-        assert!(
-            (got.r - set.r).abs() < 1e-6 && (got.a - 1.0).abs() < 1e-6,
-            "byte {byte} should survive: set {set:?}, got {got:?}"
-        );
+        let close =
+            [got.r - set.r, got.g - set.g, got.b - set.b, got.a - set.a]
+                .iter()
+                .all(|d| d.abs() < 1e-6);
+        assert!(close, "set {set:?}, got {got:?}");
     }
-
-    // So does any alpha that is a whole 255th.
-    for step in [0u8, 1, 64, 128, 255] {
-        let alpha = f32::from(step) / 255.0;
-        ctx.set_shadow_color(RgbaLinear::from_srgb8(200, 100, 50, alpha));
-        assert!(
-            (ctx.shadow_color().a - alpha).abs() < 1e-6,
-            "alpha {step}/255 should survive"
-        );
-    }
-
-    // An alpha between two of them does not, and that is what the doc used
-    // to deny.
-    ctx.set_shadow_color(RgbaLinear::from_srgb8(230, 120, 40, 0.5));
-    let got = ctx.shadow_color();
-    assert_ne!(got.a, 0.5, "0.5 is not a whole 255th");
-    assert!(
-        (got.a - 128.0 / 255.0).abs() < 1e-6,
-        "it lands on the nearest one, {}",
-        got.a
-    );
 }
 
 #[test]
@@ -1594,7 +1574,13 @@ fn font_parse_reads_the_shorthand_and_rejects_junk() {
     assert_eq!(font.size, 44.0);
     assert_eq!(font.weight, 700);
     assert_eq!(font.slant, FontSlant::Italic);
-    assert_eq!(font.families, vec!["Helvetica", "Arial"]);
+    assert_eq!(
+        font.families,
+        [
+            FontFamily::Named("Helvetica".into()),
+            FontFamily::Named("Arial".into())
+        ]
+    );
 
     assert!(Font::parse("Helvetica").is_err(), "no size");
     assert!(Font::parse("20px").is_err(), "no family");
@@ -1648,6 +1634,99 @@ fn font_parse_reads_the_stretch_and_the_line_height() {
         Font::parse("16px/wide Helvetica").is_err(),
         "an unparseable line height is rejected, not dropped"
     );
+}
+
+#[test]
+fn a_quoted_generic_keyword_is_a_family_name() {
+    // CSS Fonts 4 section 2.1: generic family keywords "must not be quoted",
+    // so `"serif"` in quotes names a family called serif, and reads back as
+    // one -- through `set_font_css` and through a `Font` alike.
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    for (css, read) in [
+        ("16px \"serif\"", "16px \"serif\""),
+        ("16px 'SERIF'", "16px \"SERIF\""),
+        ("16px \"system-ui\", serif", "16px \"system-ui\", serif"),
+        ("16px serif", "16px serif"),
+        ("16px SANS-SERIF", "16px sans-serif"),
+    ] {
+        assert!(ctx.set_font_css(css), "{css:?}");
+        assert_eq!(ctx.font(), read, "set_font_css({css:?})");
+        ctx.set_font(&Font::from_css(css).expect("parses"));
+        assert_eq!(ctx.font(), read, "set_font(Font::from_css({css:?}))");
+    }
+
+    // And draws as one: with no family called serif, as a missing family,
+    // never as the generic.
+    let painted = |css: &str| {
+        let mut canvas = Canvas::new(320.0, 60.0);
+        {
+            let ctx = canvas.context();
+            assert!(ctx.set_font_css(css), "{css:?}");
+            ctx.fill_text("Wgq AVA", 5.0, 45.0, None);
+        }
+        pixels(&mut canvas)
+    };
+    let missing = painted("36px NoSuchFamilyQuoted");
+    assert!(painted("36px \"serif\"") == missing, "quoted serif");
+    assert!(painted("36px serif") != missing, "the control: bare serif");
+
+    // What a missing family draws is this library's `sans-serif`, the
+    // canvas default family -- pinned to that family rather than to
+    // another fallback, since the comparisons above move with whatever the
+    // fallback is. It drew the `system-ui` face once the curated faces
+    // left the keyword SkParagraph seeds its default list with.
+    assert!(
+        painted("36px sans-serif") == missing,
+        "a missing family draws the library's sans-serif"
+    );
+}
+
+#[test]
+fn an_oblique_angle_is_finite_and_within_ninety_degrees() {
+    // CSS Fonts 4 section 2.4: an oblique angle runs from -90deg to 90deg,
+    // "Values outside that range are invalid".
+    for degrees in [90.0, -90.0, 0.0, 14.0, -45.5] {
+        assert_eq!(
+            ObliqueAngle::new(degrees).expect("in range").degrees(),
+            degrees,
+            "{degrees}"
+        );
+    }
+    for degrees in [90.001, -91.0, f32::NAN, f32::INFINITY] {
+        assert!(
+            matches!(
+                ObliqueAngle::new(degrees),
+                Err(Error::InvalidObliqueAngle { .. })
+            ),
+            "{degrees}"
+        );
+    }
+    // Negative zero is zero, so the two are one angle and one key.
+    let zero = ObliqueAngle::new(0.0).expect("zero");
+    let negative = ObliqueAngle::new(-0.0).expect("negative zero");
+    assert_eq!(zero, negative);
+    assert!(negative.degrees().is_sign_positive());
+    assert_eq!(ObliqueAngle::default(), ObliqueAngle::DEFAULT);
+    assert_eq!(ObliqueAngle::DEFAULT.degrees(), 14.0);
+}
+
+#[test]
+fn a_font_keeps_its_oblique_angle() {
+    // A `Font` read from `oblique 10deg` is that font, so setting it draws
+    // and reads back the angle, as setting the string does.
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    for (css, read) in [
+        ("oblique 10deg 16px X", "oblique 10deg 16px \"X\""),
+        ("oblique -10deg 16px X", "oblique -10deg 16px \"X\""),
+        ("oblique 0deg 16px X", "oblique 0deg 16px \"X\""),
+        ("oblique 14deg 16px X", "oblique 16px \"X\""),
+        ("oblique 16px X", "oblique 16px \"X\""),
+    ] {
+        ctx.set_font(&Font::from_css(css).expect("parses"));
+        assert_eq!(ctx.font(), read, "{css:?}");
+    }
 }
 
 #[test]
@@ -1885,34 +1964,49 @@ fn dither_changes_a_shallow_gradient() {
 }
 
 #[test]
-fn font_hinting_is_carried_even_where_the_rasterizer_ignores_it() {
-    // Hinting is a request the platform's font engine may decline -- macOS
-    // CoreText does, and the same glyphs come out to the pixel either way.
-    // What can be asserted is that the flag is stored, read back, and
-    // saved and restored with the rest of the state.
+fn font_hinting_is_carried_with_the_state_and_reaches_the_glyphs() {
+    // On by default, as Chrome draws text, and saved and restored with the
+    // rest of the state. Turned off it draws each glyph as its outline is
+    // designed, which shows where the font engine hints: macOS, whose
+    // CoreGraphics dilates the outline at every level but none, and
+    // FreeType. Elsewhere it is not measured, and the drawing is only
+    // required to happen.
     let mut canvas = Canvas::new(60.0, 30.0);
     let ctx = canvas.context();
-    assert!(!ctx.font_hinting(), "off by default");
+    assert!(ctx.font_hinting(), "on by default");
 
-    ctx.set_font_hinting(true);
-    assert!(ctx.font_hinting());
-
-    ctx.save();
     ctx.set_font_hinting(false);
     assert!(!ctx.font_hinting());
-    ctx.restore();
-    assert!(ctx.font_hinting(), "restored with the state");
 
-    ctx.set_fill_style(red());
-    ctx.set_font(&Font::new("Helvetica", 16.0));
-    ctx.fill_text("Hinted", 4.0, 20.0, None);
-    let painted = pixels(&mut canvas)
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .filter(|px| px[3] > 0)
-        .count();
-    assert!(painted > 0, "and text still renders with it set");
+    ctx.save();
+    ctx.set_font_hinting(true);
+    assert!(ctx.font_hinting());
+    ctx.restore();
+    assert!(!ctx.font_hinting(), "restored with the state");
+
+    let drawn = |hinted: bool| {
+        let mut canvas = Canvas::new(60.0, 30.0);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        ctx.set_font_hinting(hinted);
+        ctx.set_fill_style(red());
+        ctx.set_font(&Font::new("Helvetica", 16.0));
+        ctx.fill_text("Hinted", 4.0, 20.0, None);
+        pixels(&mut canvas)
+    };
+    let (hinted, unhinted) = (drawn(true), drawn(false));
+    for (pixels, what) in [(&hinted, "hinted"), (&unhinted, "unhinted")] {
+        let painted = pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|px| px[3] > 0)
+            .count();
+        assert!(painted > 0, "{what} text renders");
+    }
+    if cfg!(any(target_os = "macos", target_os = "linux")) {
+        assert_ne!(hinted, unhinted, "the setting reaches the glyphs");
+    }
 }
 
 #[test]
@@ -4049,12 +4143,41 @@ fn drawing_an_empty_canvas_paints_nothing() {
 // -- Paragraphs --------------------------------------------------------------
 
 #[test]
+fn a_paragraph_family_spelling_a_generic_is_a_name() {
+    // `FontFamily::Named("serif")` is a family called serif, and with none
+    // registered or installed the list moves on -- where fontconfig would
+    // otherwise answer `serif` with a face of its choosing.
+    let engine = TextEngine::new(&FontLibrary::new());
+    let width = |families: Vec<FontFamily>| {
+        engine
+            .layout_text(
+                "Hamburgefonstiv",
+                &TextStyle {
+                    font_families: families,
+                    font_size: 32.0,
+                    ..TextStyle::default()
+                },
+                1000.0,
+            )
+            .max_intrinsic_width()
+    };
+    let missing = width(vec![FontFamily::Named("NoSuchFamilyQuoted".into())]);
+    for name in ["serif", "SERIF", "sans-serif", "monospace"] {
+        assert_eq!(
+            width(vec![FontFamily::Named(name.into())]),
+            missing,
+            "{name:?}"
+        );
+    }
+}
+
+#[test]
 fn draw_paragraph_paints_the_laid_out_text() {
     let engine = TextEngine::new(&FontLibrary::new());
     let layout = engine.layout_text(
         "Studio",
         &TextStyle {
-            font_families: vec!["Helvetica".to_string()],
+            font_families: vec!["Helvetica".into()],
             font_size: 24.0,
             color: RgbaLinear::opaque(1.0, 0.0, 0.0),
             ..TextStyle::default()
@@ -4084,7 +4207,7 @@ fn draw_paragraph_takes_its_color_from_the_layout() {
     let layout = engine.layout_text(
         "Studio",
         &TextStyle {
-            font_families: vec!["Helvetica".to_string()],
+            font_families: vec!["Helvetica".into()],
             font_size: 24.0,
             color: RgbaLinear::opaque(0.0, 0.0, 1.0),
             ..TextStyle::default()
@@ -4118,7 +4241,7 @@ fn draw_paragraph_is_composited_through_the_context() {
         let layout = engine.layout_text(
             "Studio",
             &TextStyle {
-                font_families: vec!["Helvetica".to_string()],
+                font_families: vec!["Helvetica".into()],
                 font_size: 24.0,
                 color: RgbaLinear::opaque(1.0, 0.0, 0.0),
                 ..TextStyle::default()
@@ -4593,7 +4716,7 @@ fn oswald_engine() -> TextEngine {
 /// A paragraph style in Oswald at `weight`, 64px.
 fn oswald_paragraph(weight: i32) -> TextStyle {
     TextStyle {
-        font_families: vec![OSWALD_PARAGRAPH.to_string()],
+        font_families: vec![OSWALD_PARAGRAPH.into()],
         font_size: 64.0,
         font_weight: weight,
         ..TextStyle::default()
@@ -4685,7 +4808,7 @@ fn a_spans_own_axes_replace_the_base_styles() {
         .expect("bundled Amstelvar registers");
     let engine = TextEngine::new(&fonts);
     let style = |weight: i32, settings: FontVariationSettings| TextStyle {
-        font_families: vec!["AmstelvarSpans".to_string()],
+        font_families: vec!["AmstelvarSpans".into()],
         font_size: SIZE,
         font_weight: weight,
         font_variations: settings,
@@ -4879,7 +5002,7 @@ fn laid_out_text_takes_its_optical_size_from_each_styles_font_size() {
     let engine = TextEngine::new(&fonts);
     // No axes here means a span that inherits the paragraph's.
     let style = |size: f32, axes: &[(FontAxisTag, f32)]| TextStyle {
-        font_families: vec![FAMILY.to_string()],
+        font_families: vec![FAMILY.into()],
         font_size: size,
         font_variations: match axes.is_empty() {
             true => FontVariationSettings::Inherit,
@@ -5039,7 +5162,7 @@ fn a_paragraph_in_a_static_font_is_not_instanced() {
     let engine = TextEngine::new(&fonts);
     for weight in [200, 400, 700] {
         let style = TextStyle {
-            font_families: vec!["MonotonStatic".to_string()],
+            font_families: vec!["MonotonStatic".into()],
             font_size: 64.0,
             font_weight: weight,
             ..TextStyle::default()
@@ -6839,7 +6962,7 @@ fn oblique_shears_the_upright_face_before_taking_the_italic() {
 
     let upright = signature(FontSlant::Normal);
     let italic = signature(FontSlant::Italic);
-    let oblique = signature(FontSlant::Oblique);
+    let oblique = signature(FontSlant::OBLIQUE);
 
     // Without this the first assertion below passes on any family whose
     // faces happen to render alike, which proves nothing about the order.
@@ -6852,11 +6975,10 @@ fn oblique_shears_the_upright_face_before_taking_the_italic() {
 }
 
 #[test]
-fn a_font_obliques_by_fourteen_degrees_and_a_shorthand_by_its_angle() {
-    // `FontSlant::Oblique` carries no angle, so a `Font` set with it is the
-    // shorthand's bare `oblique`: 14deg, the angle CSS Fonts 4 gives it.
-    // `set_font_css` keeps the angle the shorthand names, and `Font::from_css`
-    // cannot, which is the difference its documentation states.
+fn a_font_obliques_by_its_angle_as_a_shorthand_does() {
+    // `FontSlant::OBLIQUE` is the shorthand's bare `oblique`: 14deg, the
+    // angle CSS Fonts 4 gives it. Any other angle is drawn at, whether the
+    // font came from `set_font_css`, from `Font::from_css` or was built.
     let tan = |degrees: f32| degrees.to_radians().tan();
     let near = |slope: f32, expected: f32, what: &str| {
         assert!(
@@ -6868,10 +6990,20 @@ fn a_font_obliques_by_fourteen_degrees_and_a_shorthand_by_its_angle() {
 
     near(
         stem_slope(|ctx| {
-            ctx.set_font(&Font::new(family, 200.0).slant(FontSlant::Oblique))
+            ctx.set_font(&Font::new(family, 200.0).slant(FontSlant::OBLIQUE))
         }),
         -tan(14.0),
-        "a Font with FontSlant::Oblique",
+        "a Font with FontSlant::OBLIQUE",
+    );
+    near(
+        stem_slope(|ctx| {
+            let angle = ObliqueAngle::new(10.0).expect("in range");
+            ctx.set_font(
+                &Font::new(family, 200.0).slant(FontSlant::Oblique(angle)),
+            )
+        }),
+        -tan(10.0),
+        "a Font with an oblique of 10deg",
     );
     near(
         stem_slope(|ctx| {
@@ -6893,8 +7025,8 @@ fn a_font_obliques_by_fourteen_degrees_and_a_shorthand_by_its_angle() {
                 .expect("parses");
             ctx.set_font(&font);
         }),
-        -tan(14.0),
-        "Font::from_css keeps the slant and not the angle",
+        -tan(10.0),
+        "Font::from_css keeps the angle",
     );
     near(
         stem_slope(|ctx| ctx.set_font(&Font::new(family, 200.0))),
@@ -7277,11 +7409,11 @@ fn oblique_is_a_slant_of_its_own_not_a_spelling_of_italic() {
     );
     assert_eq!(
         Font::parse("oblique 16px X").expect("parses").slant,
-        FontSlant::Oblique
+        FontSlant::OBLIQUE
     );
     assert_eq!(
-        Font::new("X", 16.0).slant(FontSlant::Oblique).slant,
-        FontSlant::Oblique,
+        Font::new("X", 16.0).slant(FontSlant::OBLIQUE).slant,
+        FontSlant::OBLIQUE,
         "and the builder reaches it"
     );
 
@@ -7305,7 +7437,7 @@ fn oblique_is_a_slant_of_its_own_not_a_spelling_of_italic() {
     let (upright, italic, oblique) = (
         width(FontSlant::Normal),
         width(FontSlant::Italic),
-        width(FontSlant::Oblique),
+        width(FontSlant::OBLIQUE),
     );
     assert_ne!(upright, italic, "the italic is a face of its own");
     assert_eq!(oblique, upright, "oblique advances as the upright face");
@@ -7473,7 +7605,7 @@ fn a_text_style_oblique_shears_the_upright_face() {
     let signature = |slant: TextSlant| {
         let engine = TextEngine::with_system_fonts();
         let style = TextStyle {
-            font_families: vec!["Times".to_string()],
+            font_families: vec!["Times".into()],
             font_size: 64.0,
             slant,
             color: red(),
@@ -7496,7 +7628,7 @@ fn a_text_style_oblique_shears_the_upright_face() {
 
     let upright = signature(TextSlant::Upright);
     let italic = signature(TextSlant::Italic);
-    let oblique = signature(TextSlant::Oblique);
+    let oblique = signature(TextSlant::OBLIQUE);
 
     // Without this the assertions below pass on a family whose faces render
     // alike, or on one that resolved to a single fallback for all three.
@@ -7517,7 +7649,7 @@ fn a_paragraph_in_oblique_draws_what_oblique_text_draws() {
     let engine = oswald_engine();
     let paragraph = |slant: TextSlant| {
         let style = TextStyle {
-            font_families: vec![OSWALD_PARAGRAPH.to_string()],
+            font_families: vec![OSWALD_PARAGRAPH.into()],
             font_size: SIZE,
             slant,
             ..TextStyle::default()
@@ -7552,7 +7684,7 @@ fn a_paragraph_in_oblique_draws_what_oblique_text_draws() {
     // instance of the face -- the engine's library instances its own -- and
     // two edge pixels of the sheared glyphs come out one step apart. The npm
     // paragraph and canvas share a face and match exactly.
-    let oblique = paragraph(TextSlant::Oblique);
+    let oblique = paragraph(TextSlant::OBLIQUE);
     let reference = text(&format!("oblique {SIZE}px {OSWALD_PARAGRAPH}"));
     let ink = |buffer: &[u8]| buffer.chunks(4).filter(|px| px[3] > 0).count();
     assert!(
@@ -7573,6 +7705,32 @@ fn a_paragraph_in_oblique_draws_what_oblique_text_draws() {
     assert!(
         (slope + 14f32.to_radians().tan()).abs() <= 0.005,
         "the text it matches slopes by tan(14deg): {slope}"
+    );
+
+    // Any other angle the same way, in both directions, and 0deg upright.
+    for degrees in [10.0f32, -10.0, 0.0] {
+        let angle = ObliqueAngle::new(degrees).expect("in range");
+        let leaning = paragraph(TextSlant::Oblique(angle));
+        let reference =
+            text(&format!("oblique {degrees}deg {SIZE}px {OSWALD_PARAGRAPH}"));
+        assert!(
+            leaning
+                .iter()
+                .zip(&reference)
+                .all(|(a, b)| a.abs_diff(*b) <= 1),
+            "an oblique paragraph at {degrees}deg draws what text at it draws"
+        );
+        assert_eq!(ink(&leaning), ink(&reference), "{degrees}deg");
+    }
+    assert!(
+        paragraph(TextSlant::Oblique(ObliqueAngle::new(10.0).expect("10")))
+            != oblique,
+        "10deg is not 14deg"
+    );
+    assert!(
+        paragraph(TextSlant::Oblique(ObliqueAngle::new(0.0).expect("0")))
+            == paragraph(TextSlant::Upright),
+        "0deg draws upright"
     );
 }
 
@@ -7964,13 +8122,321 @@ fn a_scaled_texture_lays_its_grid_out_in_user_space() {
     );
 }
 
+/// The frame every reader of an [`RgbaLinear`] takes it in: linear-light
+/// sRGB, unbounded (#250). Display P3 red is `color(display-p3 1 0 0)`
+/// whatever it is drawn with and whichever canvas holds it, so on a P3 or
+/// Rec. 2020 canvas each reader paints the same pixel, P3 red, and on an
+/// sRGB canvas the same clipped one.
+#[test]
+fn an_rgba_linear_is_one_colour_in_every_reader_on_every_canvas() {
+    type Reader<'a> = (&'a str, &'a dyn Fn(&mut Context2D));
+    let within = |a: [u8; 4], b: [u8; 4], levels: u8| {
+        a.iter().zip(b).all(|(x, y)| x.abs_diff(y) <= levels)
+    };
+    // Two colours, because each catches what the other cannot. A P3 colour
+    // inside sRGB too reads back the same on every canvas, and reads
+    // differently in any other frame; P3 red is clipped by an 8-bit reader,
+    // and by an sRGB canvas, which holds sRGB red at most.
+    let cases = [
+        (
+            "color(display-p3 0.8 0.3 0.2)",
+            [204, 77, 51, 255],
+            [204, 77, 51, 255],
+        ),
+        (
+            "color(display-p3 1 0 0)",
+            [234, 51, 35, 255],
+            [255, 0, 0, 255],
+        ),
+    ];
+    for ((css, on_srgb, on_wide), space) in cases.into_iter().flat_map(|case| {
+        [
+            PixelColorSpace::Srgb,
+            PixelColorSpace::DisplayP3,
+            PixelColorSpace::Rec2020,
+        ]
+        .map(|space| (case, space))
+    }) {
+        let colour = RgbaLinear::from_css(css).expect("a colour");
+        // The pixel at (60, 20) of an 80x40 canvas, read in Display P3.
+        let read = |draw: &dyn Fn(&mut Context2D)| -> [u8; 4] {
+            let mut canvas = Canvas::with_options(
+                80.0,
+                40.0,
+                CanvasOptions {
+                    color_space: space,
+                    gpu: false,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a space this build can make");
+            draw(canvas.context());
+            let raw = canvas
+                .to_buffer(
+                    ImageFormat::Raw,
+                    &EncodeOptions {
+                        color_space: Some(PixelColorSpace::DisplayP3),
+                        ..EncodeOptions::default()
+                    },
+                )
+                .expect("raw export");
+            let at = (20 * 80 + 60) * 4;
+            [raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]
+        };
+        let want = match space {
+            PixelColorSpace::Srgb => on_srgb,
+            _ => on_wide,
+        };
+        // An eight-bit Rec. 2020 canvas steps coarser than P3 does, so a P3
+        // colour comes back from it a few levels off.
+        let levels = match space {
+            PixelColorSpace::Rec2020 => 4,
+            _ => 1,
+        };
+        let stop = |position| GradientStop {
+            position,
+            color: colour,
+        };
+        let gradient = Shader::linear_gradient(
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 80.0, y: 0.0 },
+            &[stop(0.0), stop(1.0)],
+            GradientColorSpace::Srgb,
+        )
+        .expect("a gradient");
+        // Lines wider than their spacing, so the texture covers the pixel.
+        let texture = Texture::new(&TextureOptions {
+            color: colour,
+            line: 12.0,
+            spacing: (4.0, 4.0),
+            ..TextureOptions::default()
+        });
+        let readers: [Reader; 7] = [
+            ("fill", &|ctx| {
+                ctx.set_fill_style(colour);
+                ctx.fill_rect(0.0, 0.0, 80.0, 40.0);
+            }),
+            ("stroke", &|ctx| {
+                ctx.set_stroke_style(colour);
+                ctx.set_line_width(40.0);
+                ctx.begin_path();
+                ctx.move_to(0.0, 20.0);
+                ctx.line_to(80.0, 20.0);
+                ctx.stroke();
+            }),
+            ("shadow", &|ctx| {
+                ctx.set_shadow_color(colour);
+                ctx.set_shadow_offset(40.0, 0.0);
+                ctx.fill_rect(0.0, 0.0, 40.0, 40.0);
+            }),
+            ("drop-shadow filter", &|ctx| {
+                ctx.set_filter(&[FilterOp::DropShadow {
+                    offset_x: 40.0,
+                    offset_y: 0.0,
+                    blur: 0.0,
+                    color: colour,
+                }])
+                .expect("a filter");
+                ctx.fill_rect(0.0, 0.0, 40.0, 40.0);
+            }),
+            ("gradient stop", &|ctx| {
+                ctx.set_fill_shader(&gradient);
+                ctx.fill_rect(0.0, 0.0, 80.0, 40.0);
+            }),
+            ("texture", &|ctx| {
+                ctx.set_fill_texture(&texture);
+                ctx.fill_rect(0.0, 0.0, 80.0, 40.0);
+            }),
+            ("blend colour filter", &|ctx| {
+                let filter = ColorFilter::blend(colour, BlendMode::Copy)
+                    .expect("a colour filter");
+                ctx.set_color_filter(Some(&filter));
+                ctx.fill_rect(0.0, 0.0, 80.0, 40.0);
+            }),
+        ];
+        // The fill against the colour itself, and every reader against the
+        // fill, to the canvas's own step.
+        let fill = read(readers[0].1);
+        assert!(
+            within(fill, want, levels),
+            "fill, {css} on {space:?}: {fill:?}, want {want:?}"
+        );
+        for (name, draw) in readers {
+            let got = read(draw);
+            assert!(
+                within(got, fill, levels),
+                "{name}, {css} on {space:?}: {got:?}, the fill {fill:?}"
+            );
+        }
+
+        // The two mattes, an export's and a readback's, under nothing drawn.
+        let blank = || {
+            Canvas::with_options(
+                80.0,
+                40.0,
+                CanvasOptions {
+                    color_space: space,
+                    gpu: false,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a space this build can make")
+        };
+        let raw = blank()
+            .to_buffer(
+                ImageFormat::Raw,
+                &EncodeOptions {
+                    color_space: Some(PixelColorSpace::DisplayP3),
+                    matte: Some(colour),
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("raw export");
+        let at = (20 * 80 + 60) * 4;
+        let got = [raw[at], raw[at + 1], raw[at + 2], raw[at + 3]];
+        assert!(
+            within(got, fill, levels),
+            "export matte, {css} on {space:?}: {got:?}, the fill {fill:?}"
+        );
+        let mut canvas = blank();
+        let data = canvas
+            .context()
+            .get_image_data_with(
+                60.0,
+                20.0,
+                1.0,
+                1.0,
+                &ImageDataExport {
+                    pixels: PixelExportOptions {
+                        color_space: PixelColorSpace::DisplayP3,
+                        ..PixelExportOptions::default()
+                    },
+                    matte: Some(colour),
+                    ..ImageDataExport::default()
+                },
+            )
+            .expect("a readback");
+        let px = data.pixels();
+        let got = [px[0], px[1], px[2], px[3]];
+        assert!(
+            within(got, fill, levels),
+            "readback matte, {css} on {space:?}: {got:?}, the fill {fill:?}"
+        );
+
+        // A paragraph's background, read through the text style.
+        let engine = TextEngine::new(&FontLibrary::new());
+        let layout = engine.layout_text(
+            "MMMMMMMMMMMM",
+            &TextStyle {
+                font_size: 60.0,
+                // Glyphs that paint nothing, so the background is all there
+                // is at the pixel read.
+                color: RgbaLinear {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.0,
+                },
+                background_color: Some(colour),
+                ..TextStyle::default()
+            },
+            1000.0,
+        );
+        let got = read(&|ctx| ctx.draw_paragraph(&layout, 0.0, -10.0));
+        assert!(
+            within(got, fill, levels),
+            "text background, {css} on {space:?}: {got:?}, the fill {fill:?}"
+        );
+    }
+}
+
+/// A gradient stop is the colour it names on every canvas, interpolated in
+/// any space: two equal stops of a P3 colour paint that colour on a P3
+/// canvas whichever of the sixteen interpolation spaces carries them. Tagged
+/// stops once crashed Skia's OKLCH interpolation, and untagged ones were read
+/// as already in the canvas's space -- the UPSTREAM note on
+/// `Shader::linear_gradient` re-checks the first by this test.
+#[test]
+fn a_tagged_stop_is_one_colour_in_every_space() {
+    let colour = RgbaLinear::from_css("color(display-p3 0.8 0.3 0.2)")
+        .expect("a colour");
+    let stops = [
+        GradientStop {
+            position: 0.0,
+            color: colour,
+        },
+        GradientStop {
+            position: 1.0,
+            color: colour,
+        },
+    ];
+    for space in [
+        GradientColorSpace::Destination,
+        GradientColorSpace::Srgb,
+        GradientColorSpace::SrgbLinear,
+        GradientColorSpace::Lab,
+        GradientColorSpace::Oklab,
+        GradientColorSpace::Lch,
+        GradientColorSpace::Oklch,
+        GradientColorSpace::Hsl,
+        GradientColorSpace::Hwb,
+        GradientColorSpace::DisplayP3,
+        GradientColorSpace::Rec2020,
+        GradientColorSpace::ProphotoRgb,
+        GradientColorSpace::A98Rgb,
+        GradientColorSpace::Xyz,
+        GradientColorSpace::XyzD65,
+        GradientColorSpace::XyzD50,
+    ] {
+        let mut canvas = Canvas::with_options(
+            20.0,
+            4.0,
+            CanvasOptions {
+                color_space: PixelColorSpace::DisplayP3,
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a P3 canvas");
+        {
+            let ctx = canvas.context();
+            let gradient = Shader::linear_gradient(
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 20.0, y: 0.0 },
+                &stops,
+                space,
+            )
+            .expect("a gradient");
+            ctx.set_fill_shader(&gradient);
+            ctx.fill_rect(0.0, 0.0, 20.0, 4.0);
+        }
+        let raw = canvas
+            .to_buffer(
+                ImageFormat::Raw,
+                &EncodeOptions {
+                    color_space: Some(PixelColorSpace::DisplayP3),
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("raw export");
+        let at = (2 * 20 + 10) * 4;
+        let got = [raw[at], raw[at + 1], raw[at + 2], raw[at + 3]];
+        assert!(
+            got.iter()
+                .zip([204u8, 77, 51, 255])
+                .all(|(a, b)| a.abs_diff(b) <= 1),
+            "{space:?}: {got:?}"
+        );
+    }
+}
+
 #[test]
 fn a_canvas_composites_in_the_space_it_was_built_with() {
-    // `RgbaLinear` is defined as linear light *in the destination surface's
-    // working color space*, and every colour was pinned to linear sRGB
-    // regardless -- so the same call meant sRGB red on a canvas built to hold
-    // a wider one, and no Rust caller could name a colour outside sRGB.
-    let painted = |space: PixelColorSpace| {
+    // An `RgbaLinear` is linear-light sRGB on every canvas, so sRGB red is
+    // sRGB red on a P3 canvas too, and a P3 colour is one with components
+    // outside sRGB's range. What the canvas's space decides is what it can
+    // hold: a P3 canvas keeps P3 red, an sRGB canvas clips it to sRGB red.
+    let painted = |space: PixelColorSpace, color: RgbaLinear| {
         let mut canvas = Canvas::with_options(
             2.0,
             2.0,
@@ -7983,7 +8449,7 @@ fn a_canvas_composites_in_the_space_it_was_built_with() {
         .expect("a space this build can make");
         {
             let ctx = canvas.context();
-            ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.0, 0.0));
+            ctx.set_fill_style(color);
             ctx.fill_rect(0.0, 0.0, 2.0, 2.0);
         }
         let raw = canvas
@@ -7997,16 +8463,26 @@ fn a_canvas_composites_in_the_space_it_was_built_with() {
             .expect("raw export");
         [raw[0], raw[1], raw[2], raw[3]]
     };
+    let srgb_red = RgbaLinear::opaque(1.0, 0.0, 0.0);
+    let p3_red =
+        RgbaLinear::from_css("color(display-p3 1 0 0)").expect("a colour");
 
+    for space in [PixelColorSpace::Srgb, PixelColorSpace::DisplayP3] {
+        assert_eq!(
+            painted(space, srgb_red),
+            [234, 51, 35, 255],
+            "sRGB red on {space:?}, read in P3"
+        );
+    }
     assert_eq!(
-        painted(PixelColorSpace::Srgb),
-        [234, 51, 35, 255],
-        "sRGB red, named on an sRGB canvas and read in P3"
+        painted(PixelColorSpace::DisplayP3, p3_red),
+        [255, 0, 0, 255],
+        "P3 red, on the canvas that can hold it"
     );
     assert_eq!(
-        painted(PixelColorSpace::DisplayP3),
-        [255, 0, 0, 255],
-        "and P3 red when the canvas is the one holding it"
+        painted(PixelColorSpace::Srgb, p3_red),
+        [234, 51, 35, 255],
+        "and clipped to sRGB red on one that cannot"
     );
 }
 
@@ -8117,7 +8593,9 @@ fn a_readback_inherits_the_canvas_space() {
     .expect("display-p3");
     {
         let ctx = canvas.context();
-        ctx.set_fill_style(RgbaLinear::from_srgb8(255, 0, 0, 1.0));
+        ctx.set_fill_style(
+            RgbaLinear::from_css("color(display-p3 1 0 0)").expect("P3 red"),
+        );
         ctx.fill_rect(0.0, 0.0, 2.0, 2.0);
     }
 
@@ -8127,9 +8605,8 @@ fn a_readback_inherits_the_canvas_space() {
     assert_eq!(
         &inherited.pixels()[..4],
         [255, 0, 0, 255],
-        "P3 red, because `RgbaLinear` means whatever the canvas's space says \
-         and this canvas is P3 -- the same answer `to_buffer` gives for the \
-         same drawing",
+        "P3 red, read in the P3 canvas's own space -- the same answer \
+         `to_buffer` gives for the same drawing",
     );
     // This read [234, 51, 35] while `to_buffer` read [255, 0, 0] from the
     // same canvas: the readback built its compositing surface from
@@ -8338,7 +8815,8 @@ fn a_line_texture_draws_its_wider_period_on_both_axes() {
 
 #[test]
 fn to_file_writes_the_format_the_extension_names() {
-    let dir = std::env::temp_dir().join("meo-skia-canvas-to-file");
+    let dir = std::env::temp_dir()
+        .join(format!("meo-skia-canvas-to-file-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
 
     for (name, magic) in [
@@ -8643,7 +9121,13 @@ fn font_parse_reports_what_it_could_not_read() {
     assert_eq!(font.size, 44.0);
     assert_eq!(font.weight, 700);
     assert_eq!(font.slant, FontSlant::Italic);
-    assert_eq!(font.families, vec!["Helvetica", "Arial"]);
+    assert_eq!(
+        font.families,
+        [
+            FontFamily::Named("Helvetica".into()),
+            FontFamily::Named("Arial".into())
+        ]
+    );
 }
 
 // -- Documented behaviour ----------------------------------------------------
@@ -9470,11 +9954,17 @@ fn font_parse_strips_quotes_from_family_names() {
     // constructor is meant to surface.
     let font = Font::parse("bold 16px \"Helvetica Neue\", sans-serif")
         .expect("parses");
-    assert_eq!(font.families, vec!["Helvetica Neue", "sans-serif"]);
+    assert_eq!(
+        font.families,
+        [
+            FontFamily::Named("Helvetica Neue".into()),
+            FontFamily::Generic(GenericFamily::SansSerif)
+        ]
+    );
     assert_eq!(font.weight, 700);
 
     let single = Font::parse("16px 'Comic Sans MS'").expect("parses");
-    assert_eq!(single.families, vec!["Comic Sans MS"]);
+    assert_eq!(single.families, [FontFamily::Named("Comic Sans MS".into())]);
 }
 
 #[test]
@@ -9608,8 +10098,9 @@ fn every_scalar_setter_has_a_reader_that_agrees_with_it() {
     ctx.set_dither(true);
     assert!(ctx.dither());
 
-    ctx.set_font_hinting(true);
-    assert!(ctx.font_hinting());
+    // Off, since on is the default and setting it would prove nothing.
+    ctx.set_font_hinting(false);
+    assert!(!ctx.font_hinting());
 
     ctx.set_text_wrap(true);
     assert!(ctx.text_wrap());
@@ -9637,64 +10128,143 @@ fn shadow_color_reads_back_the_colour_it_was_given() {
     assert!((read.a - 1.0).abs() < 0.01);
 }
 
-/// A `rec2020` colour is converted before the paint is set, not clipped.
+/// `color(rec2020 ...)` decodes by the curve CSS Color 4 section 10.8 gives
+/// it, "gamma 2.40, from [REC_BT.1886]", on every canvas.
 ///
-/// Rec. 2020 cannot ride on its colour-space tag. `skia_safe`'s CICP
-/// transfer functions are reference EOTFs, and note 1 of ITU-T H.273 supplies
-/// BT.1886 for transfer characteristics 1, 6, 14 and 15 alike -- so
-/// `REC2020_10BIT` and `REC2020_12BIT` are both aliases of `REC709`, which is
-/// `g: 2.4` with every other coefficient zero. CSS Color 4 wants BT.2020's
-/// own inverse OETF instead, so the colour is converted to sRGB and Skia is
-/// handed an untagged one.
-///
-/// **Every figure here is computed from CSS Color 4's conversion code
-/// (section 12.1), not read back from the surface**, so a defect in the
-/// conversion cannot supply its own expectation. For
-/// `color(rec2020 0.2 0.2 0.2)`: BT.2020's inverse OETF, as ITU-R BT.2020
-/// Table 4 gives it, takes 0.2 to a linear 0.055516; a neutral survives the
-/// primaries matrix as a neutral, and the sRGB transfer function encodes that
-/// as 0.261295, which is byte 67. Tagging painted 40.
-///
-/// The two rows that assert are chosen where clipping and converting must
-/// differ. A primary cannot: `color(rec2020 1 0 0)` lies outside the sRGB
-/// gamut, so the old path's clip and the correct conversion both land on
-/// `[255, 0, 0]`. It is asserted last, and labelled, so a later reader adding
-/// primaries can see why they prove nothing about the conversion.
+/// **Every expected byte is computed here, in `f64`, from CSS Color 4's own
+/// sample code (section 19)** -- `lin_2020`, `lin_2020_to_XYZ`,
+/// `XYZ_to_lin_sRGB`, `XYZ_to_lin_P3` and sRGB's encode -- not read back from
+/// the surface, so the conversion under test cannot supply its own
+/// expectation. A grey isolates the curve from the primaries: BT.2020's
+/// inverse OETF, which the standard used before its Candidate Recommendation
+/// Draft of 24 April 2025 and Chrome 152 still uses, paints
+/// `color(rec2020 0.2 0.2 0.2)` as 67 where 2.4 gamma paints 40.
 #[test]
-fn a_rec2020_colour_is_converted_rather_than_clipped() {
-    let painted = |css: &str| -> [u8; 4] {
-        let mut canvas = Canvas::new(4.0, 4.0);
-        {
-            let ctx = canvas.context();
-            ctx.set_fill_style_css(css).expect("a css colour");
-            ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
-        }
-        at(&pixels(&mut canvas), 4, 1, 1)
+fn a_rec2020_colour_takes_css_color_4s_curve_on_every_canvas() {
+    type Matrix = [[f64; 3]; 3];
+    const LIN_2020_TO_XYZ: Matrix = [
+        [
+            63426534.0 / 99577255.0,
+            20160776.0 / 139408157.0,
+            47086771.0 / 278816314.0,
+        ],
+        [
+            26158966.0 / 99577255.0,
+            472592308.0 / 697040785.0,
+            8267143.0 / 139408157.0,
+        ],
+        [0.0, 19567812.0 / 697040785.0, 295819943.0 / 278816314.0],
+    ];
+    const XYZ_TO_LIN_SRGB: Matrix = [
+        [12831.0 / 3959.0, -329.0 / 214.0, -1974.0 / 3959.0],
+        [
+            -851781.0 / 878810.0,
+            1648619.0 / 878810.0,
+            36519.0 / 878810.0,
+        ],
+        [705.0 / 12673.0, -2585.0 / 12673.0, 705.0 / 667.0],
+    ];
+    const XYZ_TO_LIN_P3: Matrix = [
+        [
+            446124.0 / 178915.0,
+            -333277.0 / 357830.0,
+            -72051.0 / 178915.0,
+        ],
+        [-14852.0 / 17905.0, 63121.0 / 35810.0, 423.0 / 17905.0],
+        [11844.0 / 330415.0, -50337.0 / 660830.0, 316169.0 / 330415.0],
+    ];
+    let apply = |m: Matrix, v: [f64; 3]| {
+        m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
+    };
+    // sRGB's encode, which Display P3 shares.
+    let encode = |c: f64| {
+        let magnitude = c.abs();
+        let encoded = match magnitude > 0.0031308 {
+            true => 1.055 * magnitude.powf(1.0 / 2.4) - 0.055,
+            false => 12.92 * magnitude,
+        };
+        encoded.copysign(c)
+    };
+    // `rec2020` components as bytes in the space `to_linear` leads to,
+    // clipped there as an 8-bit readback clips.
+    let expected = |rgb: [f64; 3], to_linear: Matrix| -> [u8; 4] {
+        let linear = rgb.map(|c| c.abs().powf(2.4).copysign(c));
+        let [r, g, b] = apply(to_linear, apply(LIN_2020_TO_XYZ, linear))
+            .map(|c| (encode(c).clamp(0.0, 1.0) * 255.0).round() as u8);
+        [r, g, b, 255]
     };
 
-    // A neutral, where only the transfer function is in play: the primaries
-    // matrix maps equal components to equal components, so this isolates the
-    // curve from the gamut. Tagged rather than converted, this was 40.
-    assert_eq!(
-        painted("color(rec2020 0.2 0.2 0.2)"),
-        [67, 67, 67, 255],
-        "a neutral rec2020 grey takes BT.2020's curve, not BT.1886's",
-    );
-
-    // Saturated, and inside the sRGB gamut once converted -- so a correct
-    // conversion has somewhere to put it and clipping does not. This was
-    // `[248, 0, 0]`: the green and blue did not merely darken, they were
-    // clipped to zero, and a channel reading 0 where 56 is right carries
-    // nothing a later correction can recover.
-    assert_eq!(
-        painted("color(rec2020 0.8 0.3 0.1)"),
-        [255, 56, 10, 255],
-        "a saturated rec2020 colour converts into the sRGB gamut",
-    );
-
-    // Cannot discriminate, kept to say so: this one is outside the sRGB
-    // gamut, so both behaviours clip it to the same bytes.
-    assert_eq!(painted("color(rec2020 1 0 0)"), [255, 0, 0, 255]);
+    let cases = [
+        ("color(rec2020 0.2 0.2 0.2)", [0.2, 0.2, 0.2]),
+        ("color(rec2020 0.5 0.5 0.5)", [0.5, 0.5, 0.5]),
+        ("color(rec2020 0.2 0.4 0.6)", [0.2, 0.4, 0.6]),
+    ];
+    // Each canvas read where it holds the colour unclipped, or clips it as
+    // the expectation does: an sRGB canvas in sRGB, a P3 canvas in P3, and a
+    // Rec. 2020 canvas, which holds all three, in both.
+    let readings = [
+        (
+            PixelColorSpace::Srgb,
+            PixelColorSpace::Srgb,
+            XYZ_TO_LIN_SRGB,
+        ),
+        (
+            PixelColorSpace::DisplayP3,
+            PixelColorSpace::DisplayP3,
+            XYZ_TO_LIN_P3,
+        ),
+        (
+            PixelColorSpace::Rec2020,
+            PixelColorSpace::Srgb,
+            XYZ_TO_LIN_SRGB,
+        ),
+        (
+            PixelColorSpace::Rec2020,
+            PixelColorSpace::DisplayP3,
+            XYZ_TO_LIN_P3,
+        ),
+    ];
+    for (css, rgb) in cases {
+        for (space, read_in, to_linear) in readings {
+            let mut canvas = Canvas::with_options(
+                4.0,
+                4.0,
+                CanvasOptions {
+                    color_space: space,
+                    gpu: false,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a space this build can make");
+            {
+                let ctx = canvas.context();
+                ctx.set_fill_style_css(css).expect("a css colour");
+                ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+            }
+            let raw = canvas
+                .to_buffer(
+                    ImageFormat::Raw,
+                    &EncodeOptions {
+                        color_space: Some(read_in),
+                        ..EncodeOptions::default()
+                    },
+                )
+                .expect("raw export");
+            let got = [raw[0], raw[1], raw[2], raw[3]];
+            let want = expected(rgb, to_linear);
+            // An eight-bit Rec. 2020 canvas holds 0.5 as 128/255, a step
+            // that converting out of it can widen to two.
+            let levels = match space {
+                PixelColorSpace::Rec2020 => 2,
+                _ => 1,
+            };
+            assert!(
+                got.iter().zip(want).all(|(g, w)| g.abs_diff(w) <= levels),
+                "{css} on {space:?}, read in {read_in:?}: {got:?}, the \
+                 standard's arithmetic gives {want:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -10659,7 +11229,8 @@ fn writing_an_animation_to_a_file_writes_the_format_that_was_asked_for() {
     // other test of it goes through `to_buffer`. With only PDF covered here,
     // routing an animation into the PDF writer would have written a PDF
     // under a `.gif` name and passed.
-    let directory = std::env::temp_dir().join("meo-skia-canvas-animated");
+    let directory = std::env::temp_dir()
+        .join(format!("meo-skia-canvas-animated-{}", std::process::id()));
     std::fs::create_dir_all(&directory).expect("a place to write");
 
     let mut canvas = Canvas::new(2.0, 1.0);
@@ -10688,6 +11259,7 @@ fn writing_an_animation_to_a_file_writes_the_format_that_was_asked_for() {
             format.extension()
         );
     }
+    std::fs::remove_dir_all(&directory).ok();
 }
 
 #[test]
@@ -12539,7 +13111,7 @@ fn a_paragraphs_underline_hangs_from_the_post_tables_top() {
     let k = SIZE / t.upm;
     let engine = oswald_engine();
     let style = TextStyle {
-        font_families: vec![OSWALD_PARAGRAPH.to_string()],
+        font_families: vec![OSWALD_PARAGRAPH.into()],
         font_size: SIZE,
         decoration: TextDecoration::underline(),
         ..TextStyle::default()
@@ -12566,4 +13138,167 @@ fn a_paragraphs_underline_hangs_from_the_post_tables_top() {
         -t.underline_position * k,
         (-t.underline_position + t.underline_thickness) * k,
     );
+}
+/// The baseline of "H x" in 48px Oswald at a line height of 2, laid out on
+/// `engine`, its leading split half and half where `half_leading` says.
+fn half_leading_baseline(engine: &TextEngine, half_leading: bool) -> f32 {
+    let style = TextStyle {
+        font_size: 48.0,
+        line_height_multiplier: 2.0,
+        half_leading,
+        ..oswald_paragraph(400)
+    };
+    engine
+        .layout_rich_text(
+            &[RichTextSpan {
+                text: "H x".to_string(),
+                style: style.clone(),
+            }],
+            &style,
+            1000.0,
+        )
+        .alphabetic_baseline()
+}
+
+#[test]
+fn a_half_leading_paragraph_is_not_laid_out_as_another_was() {
+    // A line twice the size, 96px, holds Oswald's 57.264 of ascent and
+    // 13.872 of descent: half-leading puts the 24.864 to spare half above,
+    // a baseline at 69.696, and scaling both by 96/71.136 puts it at
+    // 77.279. SkParagraph's paragraph cache matched two paragraphs that
+    // differ only in `half_leading` and handed the second the first's
+    // layout, so whichever came first decided both.
+    for first in [false, true] {
+        let engine = oswald_engine();
+        let order = [first, !first, first];
+        let baselines: Vec<f32> = order
+            .iter()
+            .map(|&half| half_leading_baseline(&engine, half))
+            .collect();
+        for (half, baseline) in order.iter().zip(&baselines) {
+            let expected = if *half { 69.696 } else { 77.279 };
+            assert!(
+                (baseline - expected).abs() < 0.01,
+                "half_leading {half} after {order:?}: baseline {baseline}, \
+                 expected {expected}"
+            );
+        }
+    }
+}
+
+/// The width of `text` in 100px Oswald with `settings` applied.
+fn oswald_width(text: &str, settings: impl Fn(&mut Context2D)) -> f32 {
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::new(oswald(), 100.0));
+    settings(ctx);
+    ctx.measure_text(text, None).width
+}
+
+#[test]
+fn font_kerning_and_text_rendering_are_state_like_the_canvas_attributes() {
+    // Chrome 152: both start at auto, are kept by save and restore, return
+    // to auto on reset(), and survive a new font.
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    assert_eq!(ctx.font_kerning(), FontKerning::Auto);
+    assert_eq!(ctx.text_rendering(), TextRendering::Auto);
+    ctx.set_font_kerning(FontKerning::None);
+    ctx.set_text_rendering(TextRendering::OptimizeSpeed);
+    ctx.save();
+    ctx.set_font_kerning(FontKerning::Normal);
+    ctx.set_text_rendering(TextRendering::GeometricPrecision);
+    ctx.restore();
+    assert_eq!(ctx.font_kerning(), FontKerning::None);
+    assert_eq!(ctx.text_rendering(), TextRendering::OptimizeSpeed);
+    ctx.set_font(&Font::new("serif", 20.0));
+    assert_eq!(ctx.font_kerning(), FontKerning::None);
+    assert_eq!(ctx.text_rendering(), TextRendering::OptimizeSpeed);
+    ctx.reset();
+    assert_eq!(ctx.font_kerning(), FontKerning::Auto);
+    assert_eq!(ctx.text_rendering(), TextRendering::Auto);
+}
+
+#[test]
+fn font_kerning_none_lays_text_out_unkerned_whatever_text_rendering_says() {
+    let kerned = oswald_width("AVAVAV", |_| {});
+    assert_eq!(
+        oswald_width("AVAVAV", |ctx| ctx.set_font_kerning(FontKerning::Normal)),
+        kerned
+    );
+    let unkerned =
+        oswald_width("AVAVAV", |ctx| ctx.set_font_kerning(FontKerning::None));
+    assert!(unkerned > kerned, "{unkerned} > {kerned}");
+    for rendering in [
+        TextRendering::OptimizeLegibility,
+        TextRendering::GeometricPrecision,
+    ] {
+        let width = oswald_width("AVAVAV", |ctx| {
+            ctx.set_font_kerning(FontKerning::None);
+            ctx.set_text_rendering(rendering);
+        });
+        assert_eq!(width, unkerned, "{rendering:?}");
+    }
+    // `optimizeSpeed` leaves kerning to `fontKerning`, as in Chrome.
+    assert_eq!(
+        oswald_width("AVAVAV", |ctx| {
+            ctx.set_text_rendering(TextRendering::OptimizeSpeed)
+        }),
+        kerned
+    );
+}
+
+#[test]
+fn optimize_speed_turns_the_common_ligatures_off_unless_the_caller_set_them() {
+    let joined = oswald_width("office fluffy", |_| {});
+    assert_eq!(
+        oswald_width("office fluffy", |ctx| {
+            ctx.set_text_rendering(TextRendering::OptimizeLegibility)
+        }),
+        joined
+    );
+    let apart = oswald_width("office fluffy", |ctx| {
+        ctx.set_text_rendering(TextRendering::OptimizeSpeed)
+    });
+    assert!(apart > joined, "{apart} > {joined}");
+    // A `liga` of the caller's own stands, as `font-variant-ligatures`
+    // outranks `text-rendering` in CSS.
+    assert_eq!(
+        oswald_width("office fluffy", |ctx| {
+            ctx.set_font_variant(
+                FontVariantCaps::Normal,
+                &[FontFeature::on("liga"), FontFeature::on("clig")],
+            );
+            ctx.set_text_rendering(TextRendering::OptimizeSpeed);
+        }),
+        joined
+    );
+}
+
+#[test]
+fn geometric_precision_draws_outlines_unhinted_whatever_font_hinting_says() {
+    // SVG 2 section 13.10.2: it "will usually cause the user agent to suspend
+    // the use of hinting". So the pixels `set_font_hinting(false)` draws, at
+    // the same advances.
+    let drawn = |settings: &dyn Fn(&mut Context2D)| {
+        let mut canvas = Canvas::new(400.0, 60.0);
+        let ctx = canvas.context();
+        ctx.set_font(&Font::new(oswald(), 13.0));
+        settings(ctx);
+        ctx.fill_text("Hamburgefonstiv quick brown", 4.0, 40.0, None);
+        let width = ctx.measure_text("Hamburgefonstiv quick brown", None).width;
+        (pixels(&mut canvas), width)
+    };
+    let hinted = drawn(&|ctx| ctx.set_font_hinting(true));
+    let unhinted = drawn(&|ctx| ctx.set_font_hinting(false));
+    let precise = drawn(&|ctx| {
+        ctx.set_font_hinting(true);
+        ctx.set_text_rendering(TextRendering::GeometricPrecision);
+    });
+    assert_ne!(
+        hinted.0, unhinted.0,
+        "hinting must show for this to mean anything"
+    );
+    assert_eq!(precise.0, unhinted.0);
+    assert_eq!(precise.1, hinted.1);
 }

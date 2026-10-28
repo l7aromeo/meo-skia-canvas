@@ -10,8 +10,8 @@
 use std::{ops::Range, path::Path};
 
 use crate::{
-    color::{RgbaLinear, rgba_linear_to_skia_color},
-    context::page::{ExportOptions, PageSequence},
+    color::RgbaLinear,
+    context::page::{ExportOptions, Matte, PageSequence},
     encode::avif,
     error::Error,
     gpu::{self, completion::typed},
@@ -45,8 +45,9 @@ pub(crate) struct VectorFeatures(u8);
 impl VectorFeatures {
     /// A blend mode past source-over.
     pub(crate) const BLEND_MODE: Self = Self(1 << 3);
-    /// A sweep gradient or a procedural shader. SVG names four paint
-    /// servers and neither of these is among them.
+    /// A sweep gradient, a gradient mixed in a working space of its own, or a
+    /// procedural shader. SVG names four paint servers and none of these is
+    /// among them.
     pub(crate) const EXOTIC_SHADER: Self = Self(1 << 0);
     /// An image filter, which is also how a shadow is drawn here.
     pub(crate) const IMAGE_FILTER: Self = Self(1 << 1);
@@ -1171,7 +1172,7 @@ impl EncodeOptions {
             lossless: self.lossless,
             density: self.density,
             outline: self.outline,
-            matte: self.matte.map(rgba_linear_to_skia_color),
+            matte: self.matte.map(Matte::from_rgba_linear),
             msaa: self.msaa,
             // The space to convert *into*. Unasked, that is the canvas's
             // own, so a wide-gamut canvas exports wide rather than being

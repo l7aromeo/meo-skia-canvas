@@ -58,6 +58,20 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   reports the glyphs' own ink, -1.68 for that `a`, its ink beginning 1.68
   right of the origin, and 0 for the space. The right edge and the width
   agree with Chrome's.
+- _`TextMetrics` has a `toJSON`._ HTML's interface defines none, and Chrome
+  152 puts its values on `TextMetrics.prototype` as getters with nothing of
+  the object's own, so there `JSON.stringify` of a measurement gives `"{}"`.
+  The values are on the prototype here too, and `Object.keys` is empty and a
+  spread copies nothing, as in Chrome; but `toJSON` returns every value,
+  this library's `emHeightAscent`, `emHeightDescent`, `height` and `lines`
+  included, in the order 6.x serialised them as own properties, so a
+  measurement serialises as it always did. It is WebIDL's default `toJSON`,
+  the one `DOMRect` has, and works the ink box out when it is called.
+  `structuredClone` of a measurement gives `{}`, a plain object with none of
+  the values, where Chrome refuses it with a `DataCloneError`: a class
+  instance in Node is cloned as an ordinary object, and nothing here marks
+  it as uncloneable.
+
 - _`imageSmoothingQuality = "high"` picks its sampler from the device-space
   scale._ The Chrome mapping this ports, and why one unconditional cubic is
   wrong twice over, are documented on `ScalingOperation` and
@@ -96,6 +110,15 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   of its standard font, 10px Times, whatever family is named, with `rem`
   and the other root forms of 16px Times. This library uses the face its
   `serif` resolves to, which is Times where the system's `serif` is Times.
+- _A family list nothing answers draws in this library's `sans-serif`,
+  where Chrome uses its standard font._ What a list naming no available
+  family falls back to is the user agent's choice, and the canvas's own
+  default font, `10px sans-serif`, names this one. Chrome 152 on macOS
+  measures `Hamburgefonstiv` in `16px NoSuchFamilyAnywhere` at 111.70, as in
+  `16px Times` and `16px serif`, in a canvas and in an `OffscreenCanvas`
+  alike; here it measures 126.16, as in `16px sans-serif`. A quoted
+  `"serif"` with no family of that name is such a list. `new_font_collection`
+  in `src/node/font_library.rs` sets the default.
 - _`oblique <angle>` draws as CSS Fonts 4 matches it, and Chrome does not._
   Section 5.2, "Matching font styles", takes an oblique face leaning the
   angle's way first, sets a `slnt` axis to the angle where the family has
@@ -107,7 +130,8 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   `slnt` axis is set as far as it goes, and an italic face is drawn only for
   a family with no upright face to shear. At 90deg either way a sheared
   glyph lies along its baseline and draws nothing, the limit it nears as
-  the angle grows. `resolve_for_oblique` and `run_shear` in
+  the angle grows; Chrome draws 90deg as it draws 14deg and -90deg as any
+  other negative angle, by the rules below. `resolve_for_oblique` and `run_shear` in
   `src/node/typography.rs` are the match, and quote the section. A range of
   a `Paragraph` asking for oblique is matched and sheared the same way, at
   14deg, and draws what canvas text in `oblique` draws -- `src/node/oblique.rs`.
@@ -296,6 +320,12 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   Skia's FreeType port reports that face's ascent, 1.193em, where Chrome on
   Linux was not measured. `declares_x_height` in `src/image.rs` is the check.
 
+- _`ctx.direction` reads `"inherit"` on a fresh context._ The Canvas
+  standard makes `inherit` the attribute's initial value, and a getter that
+  answered `ltr` could not report the state a fresh context is in. Chrome
+  152 reads `"ltr"` from a detached canvas's fresh context. Text is laid out
+  left to right either way: with no element to inherit a direction from,
+  `inherit` resolves to `ltr`.
 - _A system font keyword in `ctx.font` is ignored_ -- `caption`, `icon`,
   `menu`, `message-box`, `small-caption` and `status-bar`, which Chrome takes.
   What each names is the platform's interface font: Chrome 152 on macOS read
@@ -320,6 +350,35 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   `italic 300 small-caps 16px Arial` in Chrome and
   `italic small-caps 300 condensed 16px "Arial"` here.
   `tests/assets/cases/css-fonts.json` holds both, the specification's form as `font` and Chrome's as `chrome`.
+- _A family name, and every other CSS identifier, holds only the code points
+  CSS Syntax 3 lists._ Section 4.2 makes a name of ASCII letters, digits,
+  `_`, `-` and the "non-ASCII ident code points", a list that leaves out
+  U+00A0, U+00AA, U+00B5, U+00D7, U+2028 and U+3000 among others. Chrome 152
+  still reads by the rule the list replaced, that every code point at or
+  above U+0080 is a name's, so it takes `12px aµb`, `12px a×b`, `12px aªb`,
+  `12px serif` followed by U+00A0, read as the family `serif` with that
+  space in it, which matches no face and falls back without a word, and
+  `12px Times New Roman` with U+00A0 between the words. Here each is refused,
+  as the current definition makes it no part of a name; a name of code points
+  on the list, `12px a·b` or `12px Café`, is read as Chrome reads it.
+  `is_ident_code_point` in `src/css.rs` is the one definition, which the font
+  family and math function readers both use.
+- _A comment beside a colour keyword is dropped._ CSS Syntax 3 drops a
+  comment when it tokenizes, so `red/**/` and `/**/red` are the keyword
+  `red`, and here each paints red. Chrome 152 ignores a comment beside a
+  keyword -- `red/**/`, `/**/red`, `red /**/`, `transparent/**/`,
+  `currentcolor/**/` and `red/*` all leave the fill as it was -- while it
+  takes one beside a hex colour or a function, `#f00/**/` and
+  `/**/ rgb(255 0 0)`, and anywhere inside a function.
+- _`letterSpacing` and `wordSpacing` take whitespace and comments around the
+  length._ HTML's setters parse the value "as a CSS <length>", and CSS
+  Syntax 3's "parse a component value" says "Discard whitespace from input"
+  before the value and after it, its tokenizer having dropped the comments,
+  so `" 5px "`, a carriage return or form feed before or after the length,
+  `/**/5px` and `5px/**/` are each 5px here. Chrome 152 ignores each of
+  them, while it takes `/**/-3px`. Inside the length nothing may come
+  between the number and its unit, here as in Chrome: `5 px`, `5/**/px` and
+  `-/**/3px` are refused.
 - _`letterSpacing` and `wordSpacing` take `"0"`_, and any other zero
   written without a unit -- `0.0`, `-0`, `00`, `0e5` -- as no spacing,
   reading back as `0px`, where Chrome 152 ignored each of `0`, `-0`, `+0`
@@ -421,6 +480,42 @@ hue, and `a_hue_is_powerless_at_the_chroma_css_color_4_names_and_no_further`
 at the thresholds to the last `f32` step. The conversion is `to_polar` in
 `src/node/utils.rs`.
 
+**`color(rec2020 ...)` decodes by a 2.4 gamma, and Chrome does not. Ours is
+the specification's answer.** CSS Color 4 section 10.8 gives `rec2020`'s
+transfer function as "gamma 2.40, from [REC_BT.1886]", and its sample code's
+`lin_2020` raises each component's magnitude to 2.4 and keeps its sign. The
+changes section dates it: since the Candidate Recommendation Draft of 24
+April 2025, "Defined rec2020 color space to use display-referred, 2.4
+gamma." Drafts before that used BT.2020's piecewise inverse OETF, and Chrome
+152 (152.0.7977.167) still does. Measured on an sRGB canvas, fill and
+`shadowColor` alike:
+
+        color(rec2020 0.2 0.2 0.2)   Chrome 67,67,67      here 40,40,40
+        color(rec2020 0.5 0.5 0.5)   Chrome 139,139,139   here 120,120,120
+        color(rec2020 0.2 0.4 0.6)   Chrome 0,120,168     here 0,97,153
+
+Every figure in the right-hand column is the standard's arithmetic, worked
+in `f64` from its sample code. A Rec. 2020 canvas stores by the same curve,
+so a colour named in `rec2020` reads back from one as the components it was
+named with. The colour space this library builds for `rec2020` is a CICP
+one, BT.2020 primaries with transfer characteristic 1, which Skia's
+`named_transfer_fn::REC709` makes a pure 2.4 gamma, so the colour is handed
+to Skia with that tag and nothing converts it on the way. Skia's own
+`SkNamedTransferFn::kRec2020` is BT.2020's piecewise curve, and is not
+used for it. Pinned in
+`a_rec2020_colour_takes_css_color_4s_curve_on_every_canvas` on sRGB,
+Display P3 and Rec. 2020 canvases.
+
+A gradient interpolated in `rec2020` mixes by the same 2.4 gamma. Skia's
+gradient interpolation space of that name is built from
+`SkNamedTransferFn::kRec2020` too, so the gradient is computed in the
+CICP space instead. On a `rgb(250 2 0)` to `rgb(0 0 254)` ramp the midpoint
+reads 157,18,143 here; Chrome 156 (156.0.8078.48) paints
+`color-mix(in rec2020, ...)` of the same pair as 159,19,147, which is what
+Skia's own space gives. Pinned in
+`a_rec2020_gradient_mixes_by_the_css_gamma` in four geometries, on both
+engines, with translucent and out-of-gamut stops.
+
 **A colour is painted at the precision it names, whatever its spelling,
 and Chrome rounds some spellings to 8 bits. Ours is the specification's
 answer.** CSS Color 4 rounds `rgb()` channels to integers only when it
@@ -457,39 +552,3 @@ spellings take its 8-bit path, case included, and a colour whose bytes
 depend on how its function name is cased is not one CSS describes. The
 difference is a level at most where Chrome rounds, and more where its 8-bit
 path clips an `hsl()` outside sRGB that this library keeps.
-
-**Kept until 7.0, and deprecated.**
-
-- _Colour forms no browser reads still paint._ The CSS parser underneath,
-  `csscolorparser`, has always accepted them here, and Chrome 153 refuses
-  each, keeping the previous fill:
-  - `hwba()`, `hsv()` and `hsva()`, `"hwba(0 0% 0%)"` and
-    `"hsv(0 100% 100%)"` among them, and their relative forms;
-  - hex without its `#`, `"ff0000"`;
-  - legacy comma syntax CSS Color 4 does not allow: numbers and percentages
-    mixed, `"rgb(255, 0%, 0)"`; separators mixed, `"rgb(255,0 0)"`;
-    `hsl()` with bare numbers, `"hsl(120, 100, 50)"`; `none` in a channel,
-    `"rgb(none, 0, 0)"`; and commas in a function that has no legacy
-    syntax, `"hwb(120, 0%, 0%)"`, `"lab(50, 40, 30)"`,
-    `"oklch(0.6, 0.2, 30)"`, `"color(srgb 1, 0, 0)"`.
-
-  npm 7.0 and crate 0.17 refuse them; until then
-  `the_deprecated_colour_forms_still_paint` in
-  `tests/native_api_contract.rs` holds what each paints. Write `#` before
-  hex digits, spaces between channels, and `hwb()` for `hsv()`. A `none`
-  alpha in legacy syntax, `rgb(255, 0, 0, none)`, painted transparent and
-  is refused already.
-
-  Hex and named colours are read by the library itself, so in 7.0
-  `csscolorparser` goes with the forms above.
-
-- _`TextMetrics` carries its values as its own properties._ Chrome 152 puts
-  the ten it defines on `TextMetrics.prototype` as enumerable getters and
-  gives the object none of its own, so there `Object.keys` is empty,
-  `JSON.stringify` gives `"{}"` and a spread copies nothing. Here every
-  value, this library's `emHeightAscent`, `emHeightDescent`, `height` and
-  `lines` included, is an own property of a frozen object, in the order
-  6.0.2 wrote them, so serialising or spreading a measurement still sees
-  them all. The prototype, its `Symbol.toStringTag` and the constructor
-  that refuses to be called are Chrome's already. In 7.0 the values move to
-  the prototype; read them by name and nothing changes.
