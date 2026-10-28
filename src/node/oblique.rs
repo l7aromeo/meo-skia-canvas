@@ -402,6 +402,9 @@ impl ParagraphRecipe {
             drawn,
             style_edges,
             skia_glyphs: false,
+            followed: false,
+            #[cfg(any(test, debug_assertions))]
+            follows: 0,
             #[cfg(test)]
             per_line_only: false,
         };
@@ -486,7 +489,7 @@ impl ParagraphRecipe {
     /// did, and where the edges that remain between two pieces shaped as
     /// one with different glyph paints lie: those can still fall inside a
     /// glyph cluster, a ligature's, which only the layout tells -- see
-    /// [`Passes::lay_out`]. `text` is the builder's, or `None` where every
+    /// [`Passes::follow`]. `text` is the builder's, or `None` where every
     /// edge is known to lie between two clusters, and nothing moves.
     fn keep_graphemes_whole(
         &mut self,
@@ -975,16 +978,17 @@ pub(crate) struct Passes {
     /// Each style's background, by box, and the text each covers.
     backgrounds: Vec<StyleBackground>,
     background_ranges: Vec<(Range<usize>, usize)>,
-    /// What this layout draws, in line order.
+    /// What this layout draws, in line order, found at its first paint --
+    /// see [`Self::follow`].
     runs: Vec<PaintedRun>,
     spans: Vec<Span>,
     background_spans: Vec<Span>,
     lines: usize,
     /// For a paragraph with nothing else to draw here, the edges between
     /// two styles shaped as one with different glyph paints -- see
-    /// [`ParagraphRecipe::keep_graphemes_whole`]. Each layout asks whether
-    /// one falls inside a glyph cluster, and only then draws the paragraph
-    /// here.
+    /// [`ParagraphRecipe::keep_graphemes_whole`]. The first paint after
+    /// each layout asks whether one falls inside a glyph cluster, and only
+    /// then draws the paragraph here.
     ligature_edges: Option<Vec<usize>>,
     /// Whether this layout is drawn here rather than by `Paragraph::paint`.
     drawn: bool,
@@ -996,6 +1000,15 @@ pub(crate) struct Passes {
     /// between the lines beneath them and the lines over them, rather than
     /// rebuilt here run by run -- see [`Self::skia_glyphs`].
     skia_glyphs: bool,
+    /// Whether the fields above that describe a layout describe the current
+    /// one: false from each layout until the first paint after it follows
+    /// the paragraph.
+    followed: bool,
+    /// How many times a layout has been followed, for the tests to hold
+    /// that one laid out and never painted is followed never, and one
+    /// painted again is not followed again.
+    #[cfg(any(test, debug_assertions))]
+    pub(crate) follows: usize,
     /// Whether every layout is drawn run by run here, for the tests to hold
     /// the two ways of drawing against each other.
     #[cfg(test)]
@@ -1101,8 +1114,28 @@ fn records(paragraph: &mut Paragraph) -> Vec<GlyphRun> {
 }
 
 impl Passes {
-    /// Follows `paragraph`, just laid out at `width`: finds again the glyph
-    /// runs, the decorations' spans and the backgrounds' spans.
+    /// Notes that the paragraph has been laid out again, at `_width`, so that
+    /// the next paint follows it afresh -- see [`Self::follow`] -- and lets
+    /// go of what the last layout drew.
+    ///
+    /// Nothing is read off the paragraph here: following it costs more than
+    /// laying a short paragraph out, and one that is laid out to be measured
+    /// is never drawn.
+    pub(crate) fn lay_out(&mut self, _width: f32) {
+        #[cfg(test)]
+        if let Some(as_asked) = &mut self.as_asked {
+            as_asked.layout(_width);
+        }
+        self.followed = false;
+        self.runs = Vec::new();
+        self.spans = Vec::new();
+        self.background_spans = Vec::new();
+        self.lines = 0;
+    }
+
+    /// Follows `paragraph`, as last laid out, unless that layout has been
+    /// followed already: finds again the glyph runs, the decorations' spans
+    /// and the backgrounds' spans.
     ///
     /// The glyphs are read with `Paragraph::visit`, through [`records`],
     /// which reports the text blobs `Paragraph::paint` draws: each glyph
@@ -1118,10 +1151,14 @@ impl Passes {
     /// A paragraph here only for [`Self::ligature_edges`] is followed only
     /// where one of them falls inside a glyph cluster: a lookup for each
     /// edge, and otherwise `Paragraph::paint` draws it.
-    pub(crate) fn lay_out(&mut self, paragraph: &mut Paragraph, _width: f32) {
-        #[cfg(test)]
-        if let Some(as_asked) = &mut self.as_asked {
-            as_asked.layout(_width);
+    pub(crate) fn follow(&mut self, paragraph: &mut Paragraph) {
+        if self.followed {
+            return;
+        }
+        self.followed = true;
+        #[cfg(any(test, debug_assertions))]
+        {
+            self.follows += 1;
         }
         if let Some(edges) = &self.ligature_edges {
             self.drawn = edges.iter().any(|&edge| {
@@ -1290,13 +1327,26 @@ impl Passes {
         });
     }
 
-    /// Paints `paragraph`, which this was laid out with, at `origin`, a line
-    /// at a time -- see [`Passes`] -- each glyph drawn here with the paint
-    /// SkParagraph would have used. Where the layout found that the order of
-    /// lines changes nothing, the glyphs are `Paragraph::paint`'s instead,
-    /// between every line's lines beneath and over them -- see
-    /// [`Self::skia_glyphs`].
+    /// Paints `paragraph`, which this was laid out with, at `origin`,
+    /// following its layout first where no paint has since it was laid out
+    /// -- see [`Self::follow`].
     pub(crate) fn paint(
+        &mut self,
+        paragraph: &mut Paragraph,
+        canvas: &Canvas,
+        origin: Point,
+    ) {
+        self.follow(paragraph);
+        self.paint_followed(paragraph, canvas, origin);
+    }
+
+    /// Paints `paragraph`, whose layout this has followed, at `origin`, a
+    /// line at a time -- see [`Passes`] -- each glyph drawn here with the
+    /// paint SkParagraph would have used. Where the layout was found to be
+    /// one whose order of lines changes nothing, the glyphs are
+    /// `Paragraph::paint`'s instead, between every line's lines beneath and
+    /// over them -- see [`Self::skia_glyphs`].
+    fn paint_followed(
         &self,
         paragraph: &Paragraph,
         canvas: &Canvas,
@@ -1633,7 +1683,8 @@ mod tests {
         let (mut paragraph, passes) = recipe.build();
         paragraph.layout(WIDTH);
         passes.map(|mut passes| {
-            passes.lay_out(&mut paragraph, WIDTH);
+            passes.lay_out(WIDTH);
+            passes.follow(&mut paragraph);
             passes.drawn
         })
     }
@@ -1911,7 +1962,7 @@ mod tests {
         };
         paragraph.layout(WIDTH);
         if let Some(sheared) = sheared.as_mut() {
-            sheared.lay_out(&mut paragraph, WIDTH);
+            sheared.lay_out(WIDTH);
         }
 
         let mut found = Vec::new();
@@ -1936,9 +1987,9 @@ mod tests {
         let mut surface =
             surfaces::raster_n32_premul(size).expect("a raster surface");
         let origin = Point::new(MARGIN, MARGIN);
-        match &sheared {
+        match &mut sheared {
             Some(sheared) => {
-                sheared.paint(&paragraph, surface.canvas(), origin);
+                sheared.paint(&mut paragraph, surface.canvas(), origin);
             }
             None => paragraph.paint(surface.canvas(), origin),
         }
@@ -2293,7 +2344,7 @@ mod tests {
         let mut passes = passes?;
         passes.per_line_only = per_line_only;
         paragraph.layout(width);
-        passes.lay_out(&mut paragraph, width);
+        passes.lay_out(width);
         let (w, h) = (
             (width + 2.0 * MARGIN) as i32,
             (paragraph.height() + 2.0 * MARGIN) as i32,
@@ -2301,7 +2352,11 @@ mod tests {
         let mut surface =
             surfaces::raster_n32_premul((w, h)).expect("a surface");
         surface.canvas().clear(Color::WHITE);
-        passes.paint(&paragraph, surface.canvas(), Point::new(MARGIN, MARGIN));
+        passes.paint(
+            &mut paragraph,
+            surface.canvas(),
+            Point::new(MARGIN, MARGIN),
+        );
         let info = ImageInfo::new_n32_premul((w, h), None);
         let mut pixels = vec![0u8; (w * h * 4) as usize];
         assert!(surface.read_pixels(
@@ -2717,5 +2772,97 @@ mod tests {
             drawn += usize::from(full.is_some());
         }
         assert!(drawn > CASES / 16, "{drawn} cases drawn by passes");
+    }
+
+    /// The crate engine's paragraph in Oswald, its middle span in its own
+    /// style changed by `change`, laid out at `width`.
+    fn lazily_drawn(change: Change, width: f32) -> crate::text::Paragraph {
+        use crate::{font::FontLibrary, text::TextEngine};
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            FontLibrary::new()
+                .register_font_from_path(
+                    "LazyOswald",
+                    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+                )
+                .expect("Oswald registers");
+        });
+        let base = SpanStyle {
+            font_families: vec!["LazyOswald".into()],
+            font_size: 24.0,
+            color: RgbaLinear::from_srgb8(0x20, 0x30, 0x40, 1.0),
+            ..SpanStyle::default()
+        };
+        let mut middle = base.clone();
+        change(&mut middle);
+        let engine = TextEngine::new(&FontLibrary::new());
+        let mut builder = engine.paragraph_builder(&base);
+        builder.add_text("Hamburgefonstiv quick ");
+        builder.push_style(&middle);
+        builder.add_text("brown fox jumps over the lazy dog while office ");
+        builder.pop();
+        builder.add_text("staff fluff fifty ruffled waffles.");
+        builder.build(width)
+    }
+
+    /// The pixels `paragraph` draws on a canvas of its own.
+    fn lazy_pixels(paragraph: &crate::text::Paragraph) -> Vec<u8> {
+        use crate::canvas::Canvas;
+        let mut canvas = Canvas::new(420.0, 200.0);
+        let ctx = canvas.context();
+        ctx.draw_paragraph(paragraph, 7.6, 10.3);
+        ctx.get_image_data(0.0, 0.0, 420.0, 200.0)
+            .expect("the canvas reads back")
+            .pixels()
+            .to_vec()
+    }
+
+    /// A paragraph's layout is followed for drawing at the first paint after
+    /// it, and only then: one laid out and measured, however often, is
+    /// followed never, and one painted again is not followed again.
+    #[test]
+    fn a_layout_is_followed_at_its_first_paint_only() {
+        let mut drawn = 0;
+        for (what, change, _) in GIVEN {
+            let mut paragraph = lazily_drawn(change, 400.0);
+            if paragraph.follows().is_none() {
+                continue;
+            }
+            drawn += 1;
+            assert_eq!(paragraph.follows(), Some(0), "{what}: built");
+            paragraph.layout(300.0);
+            let _ = (paragraph.height(), paragraph.width());
+            let _ = (paragraph.line_metrics(), paragraph.line_count());
+            let _ = paragraph.glyph_position_at_coordinate(40.0, 10.0);
+            assert_eq!(paragraph.follows(), Some(0), "{what}: laid out");
+            lazy_pixels(&paragraph);
+            assert_eq!(paragraph.follows(), Some(1), "{what}: painted");
+            lazy_pixels(&paragraph);
+            assert_eq!(paragraph.follows(), Some(1), "{what}: painted again");
+            paragraph.layout(160.0);
+            assert_eq!(paragraph.follows(), Some(1), "{what}: laid out again");
+            lazy_pixels(&paragraph);
+            assert_eq!(paragraph.follows(), Some(2), "{what}: then painted");
+        }
+        assert!(drawn >= 4, "{drawn} kinds drawn by passes");
+    }
+
+    /// A paragraph painted, laid out again at another width and painted
+    /// again draws byte for byte what one built at that width draws: what
+    /// the first layout drew is not drawn for the second.
+    #[test]
+    fn a_paragraph_laid_out_again_draws_its_new_layout() {
+        let mut drawn = 0;
+        for (what, change, _) in GIVEN {
+            let mut paragraph = lazily_drawn(change, 400.0);
+            drawn += usize::from(paragraph.follows().is_some());
+            let wide = lazy_pixels(&paragraph);
+            paragraph.layout(160.0);
+            let rewrapped = lazy_pixels(&paragraph);
+            let fresh = lazy_pixels(&lazily_drawn(change, 160.0));
+            assert!(wide != fresh, "{what}: the widths draw alike");
+            assert!(rewrapped == fresh, "{what}");
+        }
+        assert!(drawn >= 4, "{drawn} kinds drawn by passes");
     }
 }

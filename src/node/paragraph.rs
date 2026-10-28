@@ -1162,6 +1162,22 @@ pub fn paragraphStyleCopies(mut cx: FunctionContext) -> JsResult<JsNumber> {
     Ok(cx.number(style_copies() as f64))
 }
 
+/// Test-only: how many times `paragraph`'s layouts have been followed for
+/// drawing -- see `oblique::Passes::follow` -- or `null` where it has
+/// nothing drawn by passes, so that a test can hold one laid out and
+/// measured to never being followed.
+///
+/// Exported by debug builds only, as `__cachedParagraphs` is.
+#[cfg(all(feature = "node-addon", debug_assertions))]
+pub fn paragraphFollows(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let this = cx.argument::<BoxedParagraph>(0)?;
+    let follows = this.borrow().passes.as_ref().map(|passes| passes.follows);
+    Ok(match follows {
+        Some(follows) => cx.number(follows as f64).upcast(),
+        None => cx.null().upcast(),
+    })
+}
+
 //
 // ParagraphBuilder FFI functions
 //
@@ -1377,7 +1393,7 @@ pub fn layout(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     without_paragraph_cache(uncached.as_ref(), || {
         paragraph.layout(width);
         if let Some(passes) = passes {
-            passes.lay_out(paragraph, width);
+            passes.lay_out(width);
         }
     });
     Ok(cx.undefined())
@@ -1616,7 +1632,10 @@ pub fn drawParagraph(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let x = float_arg_or_bail(&mut cx, 2, "x")?;
     let y = float_arg_or_bail(&mut cx, 3, "y")?;
 
-    let para = para.borrow_mut();
+    let mut para = para.borrow_mut();
+    let ParagraphWrap {
+        paragraph, passes, ..
+    } = &mut *para;
     let ctx = ctx.borrow();
 
     // Composited, not bare: `Paragraph::paint` uses the text styles' own
@@ -1624,9 +1643,9 @@ pub fn drawParagraph(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // to be applied around it or they are silently dropped.
     ctx.with_composited_canvas(|canvas| {
         let at = Point::new(x, y);
-        match &para.passes {
-            Some(passes) => passes.paint(&para.paragraph, canvas, at),
-            None => para.paragraph.paint(canvas, at),
+        match passes {
+            Some(passes) => passes.paint(paragraph, canvas, at),
+            None => paragraph.paint(canvas, at),
         }
     });
 

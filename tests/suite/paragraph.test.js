@@ -3098,3 +3098,61 @@ describe("hinting", () => {
     },
   );
 });
+
+// A paragraph with something drawn by passes -- an oblique range, a
+// decoration, a shadow or a background -- reads its layout back for drawing
+// at the first paint after it, and only then, so one laid out to be measured
+// pays nothing for drawing it was never asked for.
+describe("a paragraph's layout is followed for drawing", () => {
+  const { core, skiaNode } = require("../../lib/classes/neon");
+  /** How often `p`'s layouts have been followed, or null with no passes. */
+  const follows = (p) =>
+    /** @type {number | null} */ (skiaNode.__paragraphFollows(core(p)));
+  const why = !skiaNode.__paragraphFollows
+    ? "skipped: a release binary does not export __paragraphFollows"
+    : null;
+  FontLibrary.use("FollowedOswald", [
+    `${__dirname}/../assets/fonts/Oswald/Oswald-VariableFont_wght.ttf`,
+  ]);
+  const base = {
+    fontFamilies: ["FollowedOswald"],
+    fontSize: 24,
+    color: "black",
+  };
+
+  test("at its first paint only", { skip: why ?? false }, () => {
+    const pb = ParagraphBuilder.Make({ textStyle: base });
+    pb.addText("Hamburgefonstiv quick ");
+    pb.pushStyle({ ...base, fontStyle: { slant: 2 } });
+    pb.addText("brown fox jumps over the lazy dog");
+    pb.pop();
+    const p = pb.build(),
+      ctx = new Canvas(400, 200).getContext("2d");
+    p.layout(400);
+    p.getHeight();
+    p.getLineMetrics();
+    p.getGlyphPositionAtCoordinate(40, 10);
+    assert.equal(follows(p), 0, "laid out and measured");
+    ctx.drawParagraph(p, 0, 0);
+    assert.equal(follows(p), 1, "painted");
+    ctx.drawParagraph(p, 0, 0);
+    assert.equal(follows(p), 1, "painted again");
+    p.layout(160);
+    assert.equal(follows(p), 1, "laid out again");
+    ctx.drawParagraph(p, 0, 0);
+    assert.equal(follows(p), 2, "then painted");
+  });
+
+  test(
+    "not at all with nothing drawn by passes",
+    { skip: why ?? false },
+    () => {
+      const pb = ParagraphBuilder.Make({ textStyle: base });
+      pb.addText("Hamburgefonstiv");
+      const p = pb.build();
+      p.layout(400);
+      new Canvas(400, 200).getContext("2d").drawParagraph(p, 0, 0);
+      assert.equal(follows(p), null);
+    },
+  );
+});
