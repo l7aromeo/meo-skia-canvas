@@ -28,8 +28,8 @@ use crate::{
     },
     image::x_height_ratio,
     typography::{
-        FontSpec, forget_families, from_slant, from_width, typeface_details,
-        typeface_wght_range,
+        FontSpec, forget_families, forget_kept_paragraphs, from_slant,
+        from_width, typeface_details, typeface_wght_range,
     },
     utils::*,
 };
@@ -1560,7 +1560,10 @@ impl FontLibrary {
     ///
     /// The families remembered per face and the positions recorded against
     /// the collections go too: the faces and collections they describe are
-    /// the ones replaced here.
+    /// the ones replaced here. So do the paragraphs kept for measurements
+    /// whose ink is still to be read: they pin the faces replaced here, and
+    /// each measurement can lay itself out again in those faces from what it
+    /// was measured with.
     fn invalidate(&mut self) {
         self.system_families = None;
         self.epoch = Rc::new(FontEpoch {
@@ -1573,6 +1576,7 @@ impl FontLibrary {
         self.resolved_fonts.clear();
         self.positions = InstancedPositions::default();
         forget_families();
+        forget_kept_paragraphs();
     }
 
     /// Records that a paragraph builder is about to instance `families` at
