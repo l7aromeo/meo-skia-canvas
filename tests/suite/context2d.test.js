@@ -2183,7 +2183,7 @@ describe("Context2D", () => {
       assert.equal(ctx.fillStyle, "rgb(71.757, 142.443, 133.0182)");
 
       ctx.fillStyle = "hsl(124.5, 76.1%, 47.6%)";
-      assert.equal(ctx.fillStyle, "rgb(29.00982, 213.75018, 42.865347)");
+      assert.equal(ctx.fillStyle, "rgb(29.00982, 213.75018, 42.86535)");
 
       ctx.fillStyle = "hsl(1.24e2, 760e-1%, 4.7e1%)";
       assert.equal(ctx.fillStyle, "rgb(28.764, 210.936, 40.9088)");

@@ -470,7 +470,7 @@ what it reports. Measured against Chrome 156 (156.0.8078.48):
         rgb(127.5 0 0)               #800000                   rgb(127.5, 0, 0)
         #ff000080                    rgba(255, 0, 0, 0.5)      rgba(255, 0, 0, 0.5019608)
         rgb(255 0 0 / 0.123456789)   rgba(255, 0, 0, 0.12)     rgba(255, 0, 0, 0.12345679)
-        lab(29.123456789 39 20)      lab(29.1235 39 20)        lab(29.12346 39 20)
+        lab(29.123456789 39 20)      lab(29.1235 39 20)        lab(29.123457 39 20)
         color(display-p3 0.123456789 0.5 0.25)
                                      color(display-p3 0.123457 0.5 0.25)
                                                                color(display-p3 0.12345679 0.5 0.25)
@@ -497,8 +497,8 @@ A relative colour converted to Lab or OkLCh reads back with Chrome's
 channels some way from CSS Color 4's sample code: `lab(from red l a b)` is
 `lab(54.29 80.8198 69.8997)` there against 54.290541 80.804928 69.890965
 worked in `f64`, and set again it paints red with a green of -6.7e-4 on a
-float canvas. Here it reads `lab(54.290535 80.80495 69.89094)`, within
-3e-5 of the sample code -- the conversion runs in `f32` -- and repaints the
+float canvas. Here it reads `lab(54.290541 80.80493 69.89097)`: the sample
+code's channels, converted in `f64` and held at `f32`, which repaints the
 relative colour exactly.
 
 `Image.currentColor` reads back through the same code, so it reports the
