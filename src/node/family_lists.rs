@@ -39,6 +39,13 @@ pub(crate) struct ListRef {
     id: ListId,
 }
 
+/// A family list as an arena filed it, with the names it was filed by.
+#[derive(Clone)]
+pub(crate) struct FiledList {
+    pub(crate) list: ListRef,
+    pub(crate) names: Rc<[String]>,
+}
+
 /// The next generation any [`FamilyLists`] takes, process-wide.
 static GENERATIONS: AtomicU64 = AtomicU64::new(1);
 
@@ -109,6 +116,12 @@ impl FamilyLists {
     /// handed out before names a list filed after.
     pub(crate) fn clear(&mut self) {
         *self = Self::default();
+    }
+
+    /// Whether `list` was handed out by this arena since it was last
+    /// cleared.
+    pub(crate) fn holds(&self, list: ListRef) -> bool {
+        list.generation == self.generation
     }
 
     /// How many lists, as asked, are filed.

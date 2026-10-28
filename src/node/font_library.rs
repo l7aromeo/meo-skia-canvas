@@ -30,7 +30,7 @@ use crate::{
     memory::note_font_use,
     node::{
         decorate,
-        family_lists::{FamilyLists, ListRef},
+        family_lists::{FamilyLists, FiledList, ListRef},
     },
     typography::{
         FontSpec, forget_families, forget_kept_paragraphs, forget_laid_out,
@@ -170,9 +170,20 @@ pub(crate) fn text_hinting(hinted: bool) -> FontHinting {
     }
 }
 
+/// The family list a key in this library's caches is for: its names, or
+/// the list a caller filed them as -- see [`FontLibrary::canvas_list`].
+///
+/// A filed list is filed by those names, so both forms of one list answer
+/// alike; a caller that holds the list skips hashing its strings.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Families {
+    Names(Vec<String>),
+    Filed(ListRef),
+}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct CollectionKey {
-    families: String,
+    families: Families,
     weight: i32,
     /// Part of the key because a variable font is now instanced at the `wdth`
     /// axis the width asks for. Without it the first width to be asked for
@@ -206,14 +217,13 @@ pub struct CollectionKey {
 const AXIS_KEY_STEPS: f32 = 1000.0;
 
 impl CollectionKey {
-    pub fn new(
+    fn new(
+        families: Families,
         style: &TextStyle,
         variations: &[(FourByteTag, f32)],
         optical_size: Option<f32>,
         hinted: bool,
     ) -> Self {
-        let families = style.font_families();
-        let families = families.iter().collect::<Vec<&str>>().join(", ");
         let weight = *style.font_style().weight();
         let width = *style.font_style().width();
         let slant = style.font_style().slant();
@@ -331,7 +341,7 @@ pub(crate) const MATCHES_KEPT: usize = 256;
 /// matched face rather than which faces match.
 #[derive(PartialEq, Eq, Hash)]
 struct MatchKey {
-    families: Vec<String>,
+    families: Families,
     weight: i32,
     width: i32,
     slant: Slant,
@@ -702,6 +712,15 @@ pub struct FontLibrary {
     /// The family lists an engine's collection has been asked for, each by
     /// the names it resolves to -- see [`engine_list`](Self::engine_list).
     family_lists: FamilyLists,
+    /// The family lists canvas text has filed, each by its collection names
+    /// -- see [`canvas_list`](Self::canvas_list). Kept through the idle
+    /// release, unlike `family_lists`: the collection cache, keyed on these
+    /// lists, is kept through it too, and a list filed again would miss
+    /// every collection cached for it, each rebuilt at the cost of a cache
+    /// miss. At its bound of [`MATCHES_KEPT`] lists it holds about 55 KB of
+    /// heap for lists of one family, and about 104 KB for lists of three
+    /// with a generic, measured with a counting allocator.
+    canvas_lists: FamilyLists,
     /// The system's family names, as [`caseless::key`]s, read once for
     /// [`has_family`](Self::has_family) and dropped with everything else on
     /// [`invalidate`](Self::invalidate).
@@ -809,6 +828,7 @@ impl FontLibrary {
             known_axes: KnownAxes::default(),
             matches: HashMap::new(),
             family_lists: FamilyLists::default(),
+            canvas_lists: FamilyLists::default(),
             system_families: None,
         }
     }
@@ -1724,6 +1744,7 @@ impl FontLibrary {
         self.known_axes.clear();
         self.matches.clear();
         self.family_lists.clear();
+        self.canvas_lists.clear();
         forget_families();
         forget_kept_paragraphs();
         forget_laid_out();
@@ -1780,7 +1801,9 @@ impl FontLibrary {
     /// that are cheap to work out again and only worth keeping while text is
     /// being laid out. So do the decorations' kept answers, through
     /// [`decorate::forget`]: each face's lines and each thickness's stroked
-    /// wave chunk, which are rebuilt on the next decoration that asks.
+    /// wave chunk, which are rebuilt on the next decoration that asks. The
+    /// lists canvas text has filed stay, as the collections cached under them
+    /// do -- see `canvas_lists`.
     #[cfg(any(test, feature = "node-addon"))]
     pub(crate) fn release_caches(&mut self) {
         self.clear_collection_caches();
@@ -1878,12 +1901,78 @@ impl FontLibrary {
     ) -> (FontCollection, Option<FontStyle>) {
         let families = style.font_families();
         let families: Vec<&str> = families.iter().collect();
+        let key = Families::Names(
+            families.iter().map(|family| family.to_string()).collect(),
+        );
+        self.fonts_for(key, &families, style, variations)
+    }
+
+    /// [`fonts_for_style`](Self::fonts_for_style) for a style whose families
+    /// are `filed`'s names, as [`canvas_list`](Self::canvas_list) filed
+    /// them: the same answer, kept under the list rather than its strings,
+    /// so a caller holding the list hashes none of them.
+    pub(crate) fn fonts_for_list(
+        &mut self,
+        filed: &FiledList,
+        style: &TextStyle,
+        variations: &[(FourByteTag, f32)],
+    ) -> (FontCollection, Option<FontStyle>) {
+        let families: Vec<&str> =
+            filed.names.iter().map(String::as_str).collect();
+        debug_assert!(
+            style.font_families().iter().eq(families.iter().copied()),
+            "a style laid out under a list carries the list's names"
+        );
+        self.fonts_for(
+            Families::Filed(filed.list),
+            &families,
+            style,
+            variations,
+        )
+    }
+
+    /// The list `families` is filed as for canvas text, and the names its
+    /// style is to carry: [`collection_names`](Self::collection_names), filed
+    /// by them -- see [`FamilyLists`]. A caller keeps the list and asks
+    /// [`is_current`](Self::is_current) before each use, filing again where
+    /// it is not.
+    pub(crate) fn canvas_list(&mut self, families: &[FontFamily]) -> FiledList {
+        let remember = !forgetful();
+        if remember && let Some((list, names)) = self.canvas_lists.get(families)
+        {
+            return FiledList { list, names };
+        }
+        let names: Rc<[String]> = self.collection_names(families).into();
+        let (list, names) = match remember {
+            true => self.canvas_lists.file(families, names),
+            // Filed in an arena of its own, as `engine_list` does.
+            false => FamilyLists::default().file(families, names),
+        };
+        FiledList { list, names }
+    }
+
+    /// Whether `list`, from [`canvas_list`](Self::canvas_list), still names
+    /// what it was filed as: false once the fonts change, or once the lists
+    /// passed their bound, after which the caller files its families again.
+    pub(crate) fn is_current(&self, list: ListRef) -> bool {
+        self.canvas_lists.holds(list)
+    }
+
+    /// The collection and first match for `style`, whose families are
+    /// `families`, kept under `key`.
+    fn fonts_for(
+        &mut self,
+        key: Families,
+        families: &[&str],
+        style: &TextStyle,
+        variations: &[(FourByteTag, f32)],
+    ) -> (FontCollection, Option<FontStyle>) {
         let opsz_tag = FourByteTag::from_chars('o', 'p', 's', 'z');
         let MatchFacts {
             variable,
             sized,
             first,
-        } = self.match_facts(&families, style.font_style());
+        } = self.match_facts(key.clone(), families, style.font_style());
 
         // if any of the matched typefaces is a variable font, create an
         // instance that matches the current weight settings and add it
@@ -1895,6 +1984,7 @@ impl FontLibrary {
                 variations.iter().any(|(tag, _)| *tag == opsz_tag);
             let optical = (sized && !explicit_opsz).then(|| style.font_size());
             let key = CollectionKey::new(
+                key,
                 style,
                 variations,
                 optical,
@@ -1910,7 +2000,7 @@ impl FontLibrary {
             let mut dynamic = TypefaceFontProvider::new();
             let matches = self
                 .font_collection()
-                .find_typefaces(&families, style.font_style());
+                .find_typefaces(families, style.font_style());
 
             for font in matches.into_iter() {
                 if let Some(params) = self.known_axes.of(&font) {
@@ -1943,7 +2033,7 @@ impl FontLibrary {
             // above.
             let matched = collection
                 .clone()
-                .find_typefaces(&families, style.font_style())
+                .find_typefaces(families, style.font_style())
                 .first()
                 .map(Typeface::font_style);
             self.collection_cache
@@ -1964,14 +2054,12 @@ impl FontLibrary {
     /// misses.
     fn match_facts(
         &mut self,
+        list: Families,
         families: &[&str],
         style: FontStyle,
     ) -> MatchFacts {
         let key = MatchKey {
-            families: families
-                .iter()
-                .map(|family| family.to_string())
-                .collect(),
+            families: list,
             weight: *style.weight(),
             width: *style.width(),
             slant: style.slant(),
@@ -2325,7 +2413,7 @@ mod tests {
     /// A key that is cheap to build, since the cache does not read it.
     fn key(n: i32) -> CollectionKey {
         CollectionKey {
-            families: format!("family {n}"),
+            families: Families::Names(vec![format!("family {n}")]),
             weight: 400,
             width: 5,
             slant: Slant::Upright,
@@ -2513,9 +2601,14 @@ mod tests {
                     ids(&remembered.of(&mut collection, list, &names, *style));
                 assert_eq!(answered, searched, "{families:?} {style:?}");
                 FontLibrary::with_shared(|lib| {
-                    let facts = lib.match_facts(families, *style);
+                    let list = || {
+                        Families::Names(
+                            families.iter().map(|f| f.to_string()).collect(),
+                        )
+                    };
+                    let facts = lib.match_facts(list(), families, *style);
                     FORGETFUL.set(true);
-                    let fresh = lib.match_facts(families, *style);
+                    let fresh = lib.match_facts(list(), families, *style);
                     FORGETFUL.set(false);
                     assert_eq!(
                         (facts.variable, facts.sized, facts.first),
@@ -2688,6 +2781,125 @@ mod tests {
                 ids(&collection.find_typefaces(&["MemoOswald"], style));
             assert_eq!(answered, searched, "{what}: the list's own faces");
         }
+    }
+
+    /// A canvas style laid out under the list its families were filed as is
+    /// answered as one laid out under the families' names, and as a fresh
+    /// search, face for face: every list and style, without variations and
+    /// at an explicit `wght`, with every other asked in between.
+    #[test]
+    fn a_style_under_its_list_answers_as_under_its_names() {
+        memo_fonts();
+        let wght = FourByteTag::from_chars('w', 'g', 'h', 't');
+        let ids =
+            |(collection, matched): (FontCollection, Option<FontStyle>),
+             names: &[&str],
+             style: FontStyle| {
+                let faces = collection
+                    .clone()
+                    .find_typefaces(names, style)
+                    .iter()
+                    .map(Typeface::unique_id)
+                    .collect::<Vec<_>>();
+                (faces, matched)
+            };
+        for _ in 0..2 {
+            for (families, font_style) in memo_styles() {
+                for variations in [vec![], vec![(wght, 350.0)]] {
+                    FontLibrary::with_shared(|lib| {
+                        let filed = lib.canvas_list(&named(&families));
+                        let names: Vec<&str> =
+                            filed.names.iter().map(String::as_str).collect();
+                        let mut style = TextStyle::new();
+                        style
+                            .set_font_families(&names)
+                            .set_font_style(font_style)
+                            .set_font_size(24.0);
+                        let listed = ids(
+                            lib.fonts_for_list(&filed, &style, &variations),
+                            &names,
+                            font_style,
+                        );
+                        let by_names = ids(
+                            lib.fonts_for_style(&style, &variations),
+                            &names,
+                            font_style,
+                        );
+                        FORGETFUL.set(true);
+                        let fresh = ids(
+                            lib.fonts_for_style(&style, &variations),
+                            &names,
+                            font_style,
+                        );
+                        FORGETFUL.set(false);
+                        let what = format!(
+                            "{families:?} {font_style:?} {variations:?}"
+                        );
+                        assert_eq!(listed, by_names, "{what}");
+                        assert_eq!(listed, fresh, "{what}: as a fresh search");
+                    });
+                }
+            }
+        }
+    }
+
+    /// A list canvas text filed stays current through the idle release, and
+    /// is no longer current once the fonts change or the lists pass their
+    /// bound; a family in two cases is one list.
+    #[test]
+    fn a_canvas_list_is_current_until_the_fonts_change() {
+        memo_fonts();
+        let filed = |name: &str| {
+            FontLibrary::with_shared(|lib| lib.canvas_list(&named(&[name])))
+        };
+        let current =
+            |list| FontLibrary::with_shared(|lib| lib.is_current(list));
+        let upper = filed("MEMOOSWALD");
+        let lower = filed("memooswald");
+        assert_eq!(upper.list, lower.list, "one list for two cases");
+        assert_eq!(&*upper.names, ["MemoOswald"], "spelled as registered");
+
+        FontLibrary::with_shared(FontLibrary::release_caches);
+        assert!(current(upper.list), "current through the idle release");
+        assert_eq!(filed("MemoOswald").list, upper.list, "and the same list");
+
+        FontLibrary::with_shared(|lib| lib.invalidate());
+        assert!(!current(upper.list), "not once the fonts change");
+        let again = filed("MemoOswald");
+        assert!(current(again.list), "filed again, current");
+
+        FontLibrary::with_shared(|lib| {
+            for at in lib.canvas_lists.len()..=MATCHES_KEPT {
+                lib.canvas_list(&named(&[format!("MemoCanvas{at}").as_str()]));
+            }
+        });
+        assert!(!current(again.list), "not past the bound");
+    }
+
+    /// A variable face's collection, cached under a canvas list, is still
+    /// there for that list after the idle release: the release keeps both
+    /// the collections and the lists, so the next draw builds none.
+    #[test]
+    fn a_collection_cached_under_a_list_outlives_the_release() {
+        memo_fonts();
+        FontLibrary::with_shared(|lib| {
+            let filed = lib.canvas_list(&named(&["MemoOswald"]));
+            let mut style = TextStyle::new();
+            style
+                .set_font_families(&["MemoOswald"])
+                .set_font_style(FontStyle::bold())
+                .set_font_size(24.0);
+            lib.fonts_for_list(&filed, &style, &[]);
+            let cached = lib.collection_cache.entries.len();
+            lib.release_caches();
+            assert!(lib.is_current(filed.list), "the list is kept");
+            lib.fonts_for_list(&filed, &style, &[]);
+            assert_eq!(
+                lib.collection_cache.entries.len(),
+                cached,
+                "no collection built again"
+            );
+        });
     }
 
     /// A family registered after a style naming it was matched is found by
@@ -3156,7 +3368,13 @@ mod tests {
         FontLibrary::with_shared(|lib| {
             lib.register_typeface(face, Some(FAMILY.to_string()));
             lib.fonts_for_style(&first, &[]);
-            let first_key = CollectionKey::new(&first, &[], Some(10.0), false);
+            let first_key = CollectionKey::new(
+                Families::Names(vec![FAMILY.to_string()]),
+                &first,
+                &[],
+                Some(10.0),
+                false,
+            );
             assert!(
                 lib.collection_cache.entries.contains_key(&first_key),
                 "the first size is cached under the key it was built for"
