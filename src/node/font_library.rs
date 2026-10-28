@@ -27,7 +27,7 @@ use crate::{
         variation_axes,
     },
     image::x_height_ratio,
-    node::decorate::FaceLines,
+    node::decorate,
     typography::{
         FontSpec, from_slant, from_width, typeface_details, typeface_wght_range,
     },
@@ -1536,7 +1536,7 @@ impl FontLibrary {
         self.epoch = Rc::new(FontEpoch {
             fonts: self.fonts.clone(),
         });
-        FaceLines::forget();
+        decorate::forget();
         self.collections = [None, None];
         self.collection_parts = None;
         self.collection_cache.clear();

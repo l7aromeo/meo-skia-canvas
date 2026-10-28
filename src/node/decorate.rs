@@ -34,7 +34,7 @@ use crate::node::{
 };
 use skia_safe::{
     Canvas, Color, Color4f, Font, FontStyle, Paint, Path, PathBuilder,
-    PathVerb, Point, Rect,
+    PathFillType, PathVerb, Point, Rect,
     paint::{Cap, Style},
     path_utils::fill_path_with_paint,
     textlayout::{
@@ -198,10 +198,9 @@ impl FaceLines {
         })
     }
 
-    /// Drops every kept answer -- for the font library to call when the
-    /// fonts it holds change, so that nothing is kept for an epoch that has
-    /// passed.
-    pub(crate) fn forget() {
+    /// Drops every kept answer, so that nothing is kept for an epoch that
+    /// has passed -- through [`forget`].
+    fn forget() {
         FACE_LINES.with_borrow_mut(|cache| *cache = FaceLinesCache::default());
     }
 
@@ -229,6 +228,16 @@ impl FaceLines {
             .next()?;
         Some(Self::of(&Font::from_typeface(typeface, size)))
     }
+}
+
+/// Drops everything this module keeps on this thread: the first-available
+/// answers, which belong to the fonts of an epoch, and the wave periods,
+/// which belong to no font and go too so that one call releases all of it.
+/// For the font library to call when the fonts it holds change, and for
+/// anything releasing memory while the library is idle.
+pub(crate) fn forget() {
+    FaceLines::forget();
+    WavePeriod::forget();
 }
 
 /// How many first-available answers a thread keeps for one epoch of fonts.
@@ -638,7 +647,7 @@ fn draw_line(
 /// A wavy line's ink from `left` to `right`, `t` thick, swinging about
 /// `middle` -- or `None` where its period is shorter than
 /// [`MIN_DEVICE_PERIOD`] at `device` pixels a unit, which bounds the
-/// half-waves to one per device pixel along it.
+/// periods to one per device pixel along it.
 ///
 /// A continuous wave, run on half a wave past each end of the box, its
 /// stroke's outline cut to its band: square at `left` and `right` across
@@ -650,6 +659,16 @@ fn draw_line(
 /// -- but which the stroker's curves overshoot by a fraction of a pixel. The
 /// cut is made on the outline rather than by a clip, so that a filter or a
 /// shadow on the paint spreads past the line as it spreads past a glyph.
+///
+/// Its phase is its box's: the centreline crosses the middle on its way
+/// down at `left`, wherever the box starts. It is laid out as copies of
+/// one period, [`WavePeriod::of`] `t`, already cut along the band, end to
+/// end from half a wave before `left`; only a copy reaching past `left` or
+/// `right` is cut again. Each copy ends where the next begins, across the
+/// same normal to the same centreline, so the copies fill as the one
+/// stroke did -- `a_tiled_wave_is_the_whole_wave` holds them to it. Neither
+/// the stroker nor the cut runs per period on a draw: the stroker was most
+/// of a wavy line's cost when it ran over the whole centreline each time.
 fn wave(
     left: f32,
     right: f32,
@@ -660,30 +679,76 @@ fn wave(
     if WAVE_PERIOD * t * device < MIN_DEVICE_PERIOD {
         return None;
     }
-    let band = WAVE_BAND * t;
-    let bounds =
-        Rect::new(left, middle - band / 2.0, right, middle + band / 2.0);
-    Some(cut_to(&wave_stroke(left, right, middle, t), bounds))
+    #[cfg(test)]
+    if WHOLE_WAVE.get() {
+        return Some(whole_wave(left, right, middle, t));
+    }
+    let period = WavePeriod::of(t);
+    let length = WAVE_PERIOD * t;
+    let start = left - length / 2.0;
+    let x = |v: Point| v.x;
+    let mut path = PathBuilder::new();
+    path.set_fill_type(period.fill_type);
+    let mut add = |pieces: &mut dyn Iterator<Item = Piece>| {
+        let mut pieces = pieces.peekable();
+        let Some(first) = pieces.peek() else {
+            return;
+        };
+        path.move_to(first.start());
+        pieces.for_each(|piece| piece.add_to(&mut path));
+        path.close();
+    };
+    // Each copy's offset from the start rather than a running sum, so that
+    // the last copy is placed as exactly as the first.
+    for at in (0..).map(|n| start + n as f32 * length) {
+        if at >= right + length / 2.0 {
+            break;
+        }
+        let by = Point::new(at, middle);
+        let (cut_left, cut_right) =
+            (at + period.reach.0 < left, at + period.reach.1 > right);
+        for contour in period.contours.iter() {
+            let moved = contour.iter().map(|piece| piece.offset(by));
+            if !cut_left && !cut_right {
+                add(&mut moved.into_iter());
+                continue;
+            }
+            let mut pieces: Vec<Piece> = moved.collect();
+            if cut_left {
+                pieces = cut(&pieces, x, |v| v - left);
+            }
+            if cut_right {
+                pieces = cut(&pieces, x, |v| right - v);
+            }
+            add(&mut pieces.into_iter());
+        }
+    }
+    Some(path.detach())
 }
 
-/// The outline of a wave's butt-capped stroke, `t` thick, about `middle`
-/// from half a wave before `left` to at least half a wave past `right`, in
-/// whole half-waves, before [`wave`] cuts it to its band. At `left` the
-/// centreline crosses the middle on its way down, and the half-wave before
-/// bulges up as the wave does there. The caps lie that half-wave outside
-/// the cut, more than the under half a thickness a cap's slant overhangs by.
-fn wave_stroke(left: f32, right: f32, middle: f32, t: f32) -> Path {
-    // A quadratic peaks at half its control point's offset, so a control
-    // 2 * (swing / 2) off the centreline swings it by `swing` from crest to
-    // trough.
+#[cfg(test)]
+thread_local! {
+    /// Whether [`wave`] draws [`whole_wave`] instead, as the reference a
+    /// tiled wave is held to through everything that draws one.
+    pub(crate) static WHOLE_WAVE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    /// How many pieces [`cut`] has been handed on this thread.
+    static CUT_PIECES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The wave [`wave`] lays out as copies of a period, stroked whole instead:
+/// one centreline from half a wave before `left` to at least half a wave
+/// past `right`, its outline cut to the band.
+#[cfg(test)]
+fn whole_wave(left: f32, right: f32, middle: f32, t: f32) -> Path {
     let control = WAVE_SWING * t;
     let half = WAVE_PERIOD * t / 2.0;
-    let mut path = PathBuilder::new();
-    path.move_to((left - half, middle));
+    let mut centre = PathBuilder::new();
+    centre.move_to((left - half, middle));
     let mut x = left - half;
     let mut side = -1.0;
     while x < right + half {
-        path.quad_to(
+        centre.quad_to(
             (x + half / 2.0, middle + side * control),
             (x + half, middle),
         );
@@ -696,8 +761,118 @@ fn wave_stroke(left: f32, right: f32, middle: f32, t: f32) -> Path {
         .set_stroke_width(t)
         .set_stroke_cap(Cap::Butt);
     let mut outline = PathBuilder::new();
-    fill_path_with_paint(&path.detach(), &stroke, &mut outline, None, None);
-    outline.detach()
+    fill_path_with_paint(&centre.detach(), &stroke, &mut outline, None, None);
+    let band = WAVE_BAND * t;
+    cut_to(
+        &outline.detach(),
+        Rect::new(left, middle - band / 2.0, right, middle + band / 2.0),
+    )
+}
+
+/// One period of a wave `t` thick, about y = 0 from x = 0, where the
+/// centreline crosses the middle on its way down: its butt-capped stroke's
+/// outline, cut to the band's top and bottom -- what [`wave`] lays end to
+/// end. Kept per thickness, since everything in it scales with `t` but the
+/// stroker's tolerance, which does not.
+#[derive(Clone)]
+struct WavePeriod {
+    /// The outline's closed contours.
+    contours: Rc<[Vec<Piece>]>,
+    /// The least and greatest x of any point of them, control points
+    /// included, so that a copy wholly inside a box is known to need no
+    /// cut there.
+    reach: (f32, f32),
+    fill_type: PathFillType,
+}
+
+/// How many wave periods a thread keeps, one per thickness.
+///
+/// A bound rather than a working set, as [`FACE_LINES_KEPT`] is: a
+/// thickness can be any number, so a line whose thickness animates would
+/// add one a frame. Past it, every kept period is dropped and stroked
+/// again.
+const WAVE_PERIODS_KEPT: usize = 256;
+
+thread_local! {
+    /// The periods [`WavePeriod::of`] has stroked, by the bits of their
+    /// thickness, dropped at [`WAVE_PERIODS_KEPT`] and by [`forget`].
+    static WAVE_PERIODS: RefCell<HashMap<u32, WavePeriod>> =
+        RefCell::default();
+}
+
+impl WavePeriod {
+    /// The period of a wave `t` thick, stroked on this thread's first ask
+    /// for `t` and kept.
+    fn of(t: f32) -> Self {
+        WAVE_PERIODS.with_borrow_mut(|kept| {
+            if let Some(period) = kept.get(&t.to_bits()) {
+                return period.clone();
+            }
+            let period = Self::stroked(t);
+            if kept.len() >= WAVE_PERIODS_KEPT {
+                kept.clear();
+            }
+            kept.insert(t.to_bits(), period.clone());
+            period
+        })
+    }
+
+    fn stroked(t: f32) -> Self {
+        // A quadratic peaks at half its control point's offset, so a control
+        // 2 * (swing / 2) off the centreline swings it by `swing` from crest
+        // to trough. Down first: y grows downward, so up is negative.
+        let control = WAVE_SWING * t;
+        let half = WAVE_PERIOD * t / 2.0;
+        let mut centre = PathBuilder::new();
+        centre.move_to((0.0, 0.0));
+        centre.quad_to((half / 2.0, -control), (half, 0.0));
+        centre.quad_to((half * 1.5, control), (2.0 * half, 0.0));
+        let mut stroke = Paint::default();
+        stroke
+            .set_style(Style::Stroke)
+            .set_stroke_width(t)
+            .set_stroke_cap(Cap::Butt);
+        let mut outline = PathBuilder::new();
+        fill_path_with_paint(
+            &centre.detach(),
+            &stroke,
+            &mut outline,
+            None,
+            None,
+        );
+        let outline = outline.detach();
+        let edge = WAVE_BAND * t / 2.0;
+        let y = |p: Point| p.y;
+        let contours: Rc<[Vec<Piece>]> = contours(&outline)
+            .into_iter()
+            .map(|pieces| cut(&pieces, y, |v| v + edge))
+            .map(|pieces| cut(&pieces, y, |v| edge - v))
+            .filter(|pieces| !pieces.is_empty())
+            .collect();
+        let reach = contours
+            .iter()
+            .flatten()
+            .flat_map(|piece| piece.points())
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), p| {
+                (low.min(p.x), high.max(p.x))
+            });
+        Self {
+            contours,
+            reach,
+            fill_type: outline.fill_type(),
+        }
+    }
+
+    /// Drops every kept period -- through [`forget`].
+    fn forget() {
+        WAVE_PERIODS.with_borrow_mut(HashMap::clear);
+    }
+
+    /// How many periods this thread keeps.
+    #[cfg(test)]
+    fn kept() -> usize {
+        WAVE_PERIODS.with_borrow(HashMap::len)
+    }
 }
 
 /// One piece of an outline: a line or a quadratic, each from its first
@@ -778,6 +953,23 @@ impl Piece {
         std::iter::once(first).chain(second)
     }
 
+    /// Its points, the control point included.
+    fn points(self) -> impl Iterator<Item = Point> {
+        let (a, c, b) = match self {
+            Piece::Line(a, b) => (a, None, b),
+            Piece::Quad(a, c, b) => (a, Some(c), b),
+        };
+        std::iter::once(a).chain(c).chain(std::iter::once(b))
+    }
+
+    /// The piece moved `by`.
+    fn offset(self, by: Point) -> Piece {
+        match self {
+            Piece::Line(a, b) => Piece::Line(a + by, b + by),
+            Piece::Quad(a, c, b) => Piece::Quad(a + by, c + by, b + by),
+        }
+    }
+
     fn add_to(self, path: &mut PathBuilder) {
         match self {
             Piece::Line(_, b) => path.line_to(b),
@@ -790,21 +982,10 @@ impl Piece {
 /// an `f32` parameter, so the crossing is as exact as the type holds.
 const CROSSING_STEPS: usize = 32;
 
-/// `outline` cut to `bounds`, each cut a straight edge along the side it
-/// is made on.
-///
-/// Each closed contour is clipped against one side at a time, as
-/// Sutherland and Hodgman clip a polygon by a half-plane: a piece inside is
-/// kept, a piece crossing is split where it crosses, and the stretch
-/// outside is replaced by the straight edge along the side from where the
-/// contour left to where it came back. Every point inside keeps the winding
-/// number it had, so the outline fills as it did wherever it is kept, even
-/// where a stroke's inner side folds over itself. Linear in the outline's
-/// size, where a boolean operation rebuilds all of it.
-///
-/// The outline is the stroke of a quadratic centreline with butt caps and
-/// the default join, which Skia's stroker draws in lines and quadratics
-/// only; `a_wave_is_lines_and_quadratics` pins that.
+/// `outline` cut to `bounds` by [`cut`], one side at a time: the whole
+/// wave a tiled one is held to, and what `a_cut_leaves_what_a_clip_leaves`
+/// holds `cut` to.
+#[cfg(test)]
 fn cut_to(outline: &Path, bounds: Rect) -> Path {
     let x = |p: Point| p.x;
     let y = |p: Point| p.y;
@@ -885,13 +1066,27 @@ fn contours(outline: &Path) -> Vec<Vec<Piece>> {
 }
 
 /// The closed contour `pieces` cut to where `inside` of its coordinate
-/// `along` is not negative, the cut a straight edge -- one side of
-/// [`cut_to`].
+/// `along` is not negative, the cut a straight edge along that side.
+///
+/// As Sutherland and Hodgman clip a polygon by a half-plane: a piece inside
+/// is kept, a piece crossing is split where it crosses, and the stretch
+/// outside is replaced by the straight edge along the side from where the
+/// contour left to where it came back. Every point inside keeps the winding
+/// number it had, so the outline fills as it did wherever it is kept, even
+/// where a stroke's inner side folds over itself. Linear in the contour's
+/// size, where a boolean operation rebuilds the whole outline.
+///
+/// The contours cut here are a wave's: the stroke of a quadratic
+/// centreline with butt caps and the default join, which Skia's stroker
+/// draws in lines and quadratics only; `a_wave_is_lines_and_quadratics`
+/// pins that.
 fn cut(
     pieces: &[Piece],
     along: impl Fn(Point) -> f32 + Copy,
     inside: impl Fn(f32) -> f32,
 ) -> Vec<Piece> {
+    #[cfg(test)]
+    CUT_PIECES.set(CUT_PIECES.get() + pieces.len());
     let mut kept: Vec<Piece> = Vec::with_capacity(pieces.len() + 2);
     // Where the contour last left the kept side, to join to where it
     // comes back.
@@ -1033,19 +1228,19 @@ mod tests {
         );
     }
 
-    /// A wave's uncut stroke and its band: the reference the cut one is
-    /// held to, drawn under a clip to the band.
+    /// A wave's uncut stroke, from half a wave before `left` to half a wave
+    /// past `right`, and its band: the reference the cut one is held to,
+    /// drawn under a clip to the band.
     fn stroke_and_band(
         left: f32,
         right: f32,
         middle: f32,
         t: f32,
     ) -> (skia_safe::Path, Rect) {
-        let band = super::WAVE_BAND * t;
-        (
-            super::wave_stroke(left, right, middle, t),
-            Rect::new(left, middle - band / 2.0, right, middle + band / 2.0),
-        )
+        let half = super::WAVE_PERIOD * t / 2.0;
+        let (stroke, band) =
+            continuous_wave(left - 2.0 * half, right + half, middle, t);
+        (stroke, Rect::new(left, band.top, right, band.bottom))
     }
 
     /// The wave this module draws, from `left` to `right` about `middle`.
@@ -1151,7 +1346,7 @@ mod tests {
 
     /// The stroke of a wave of whole half-waves from `from`, starting down
     /// from the middle, to past `to`, and its band -- built here, apart from
-    /// `wave_stroke`, as the reference a cut wave is held to.
+    /// [`super::WavePeriod`], as the reference a cut wave is held to.
     fn continuous_wave(
         from: f32,
         to: f32,
@@ -1195,7 +1390,7 @@ mod tests {
     }
 
     /// The stroker draws a wave's outline in lines and quadratics only,
-    /// which is all `cut_to` takes: at every thickness, at lengths
+    /// which is all `cut` takes: at every thickness, at lengths
     /// that end inside a half-wave, and scaled.
     #[test]
     fn a_wave_is_lines_and_quadratics() {
@@ -1315,6 +1510,281 @@ mod tests {
             .collect()
     }
 
+    /// Each pixel's alpha with `path` filled black on the engine `gpu`
+    /// names, the context scaled by `scale` and then turned by `turn`
+    /// radians, on a canvas big enough for any wave here at twice its size.
+    fn filled(
+        path: &skia_safe::Path,
+        gpu: bool,
+        (scale, turn): (f32, f32),
+    ) -> Vec<u8> {
+        use crate::{
+            canvas::{Canvas, EngineKind},
+            path::{FillRule, Path2D},
+        };
+        let mut canvas = Canvas::new(400.0, 200.0);
+        canvas.set_gpu(gpu);
+        assert_eq!(
+            canvas.engine_kind() == EngineKind::Gpu,
+            gpu,
+            "the engine named"
+        );
+        let ctx = canvas.context();
+        ctx.scale(scale, scale);
+        ctx.rotate(turn);
+        ctx.fill_path(&Path2D::from_inner(path.clone()), FillRule::NonZero);
+        ctx.get_image_data(0.0, 0.0, 400.0, 200.0)
+            .expect("the canvas reads back")
+            .pixels()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|px| px[3])
+            .collect()
+    }
+
+    /// The largest difference between two images, byte for byte.
+    fn worst(a: &[u8], b: &[u8]) -> u8 {
+        assert_eq!(a.len(), b.len());
+        a.iter()
+            .zip(b)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Whether this machine has a GPU engine to run a GPU leg on.
+    fn gpu_reachable() -> bool {
+        use crate::canvas::{Canvas, EngineKind};
+        let mut probe = Canvas::new(4.0, 4.0);
+        probe.set_gpu(true);
+        probe.engine_kind() == EngineKind::Gpu
+    }
+
+    /// The engines to draw on: the CPU, and the GPU where there is one.
+    fn engines() -> &'static [bool] {
+        if gpu_reachable() {
+            &[false, true]
+        } else {
+            &[false]
+        }
+    }
+
+    /// Scaled up, down, and turned -- where a seam along a copy's end would
+    /// no longer fall on a pixel column.
+    const VIEWS: [(f32, f32); 4] =
+        [(1.0, 0.0), (2.0, 0.0), (2.0, 0.05), (0.75, 0.0)];
+
+    /// A wave laid out as copies of one period fills as the same wave
+    /// stroked whole: no seam where one copy meets the next, and the same
+    /// phase, at every thickness, at fractional starts, and at lengths inside
+    /// one half-wave and across many -- rasterized directly, not averaged,
+    /// which would hide a seam, on the CPU and the GPU, as drawn, scaled and
+    /// turned.
+    #[test]
+    fn a_tiled_wave_is_the_whole_wave() {
+        for &gpu in engines() {
+            for t in [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 8.0, 16.0] {
+                for left in [10.0, 10.25, 10.5, 10.73] {
+                    for length in [t * 0.3, t * 1.7, t * 5.1, 140.6] {
+                        let right = left + length;
+                        let tiled = drawn_wave(left, right, 30.0, t);
+                        let whole = super::whole_wave(left, right, 30.0, t);
+                        for view in VIEWS {
+                            let off = worst(
+                                &filled(&tiled, gpu, view),
+                                &filled(&whole, gpu, view),
+                            );
+                            assert!(
+                                off <= tiled_off(gpu),
+                                "gpu {gpu}, {t}px from {left} to {right}, \
+                                 scaled and turned {view:?}: {off} off"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// How far a tiled wave's pixels may part from the whole one's on the
+    /// engine `gpu` names: as far as the whole wave parts from itself when
+    /// it is built 37 and 11 pixels away and drawn back in place, which
+    /// moves no curve but rounds every coordinate differently. On the CPU
+    /// that is up to 10 of 255, the stroker's subdivision of a quadratic
+    /// depending on where it lies; on the GPU it is one sample of a pixel's
+    /// [`GPU_SAMPLES`] turning over, in up to 15 pixels a wave. A seam
+    /// where two copies met would mark a pixel at every copy's end; leaving
+    /// a 0.05 pixel gap between them parts the CPU's pixels by more than 10.
+    fn tiled_off(gpu: bool) -> u8 {
+        match gpu {
+            false => 10,
+            true => (256 / GPU_SAMPLES) as u8,
+        }
+    }
+
+    /// The samples a GPU canvas takes per pixel unless asked otherwise --
+    /// `ExportOptions::msaa_from`'s default.
+    const GPU_SAMPLES: usize = 4;
+
+    /// Drawing a longer wave cuts no more of it: only the copies reaching
+    /// past the box's ends are cut, and the band's top and bottom were cut
+    /// once, when the period was stroked.
+    #[test]
+    fn a_long_wave_cuts_only_its_end_periods() {
+        let (left, t) = (10.3, 2.0);
+        let period = super::WAVE_PERIOD * t;
+        let cut = |right: f32| {
+            wave(left, right, 30.0, t, 1.0).expect("a wave");
+            super::CUT_PIECES.set(0);
+            wave(left, right, 30.0, t, 1.0).expect("a wave");
+            super::CUT_PIECES.get()
+        };
+        let short = cut(left + 5.0 * period + 3.1);
+        let long = cut(left + 50.0 * period + 3.1);
+        assert!(short > 0, "the ends are cut");
+        assert_eq!(long, short, "and nothing between them");
+    }
+
+    /// A period is kept per thickness, no more of them than the bound, and
+    /// none after [`super::forget`].
+    #[test]
+    fn kept_periods_are_bounded_and_forgotten() {
+        use super::{WAVE_PERIODS_KEPT, WavePeriod};
+        super::forget();
+        assert_eq!(WavePeriod::kept(), 0);
+        wave(0.0, 40.0, 10.0, 1.0, 1.0).expect("a wave");
+        wave(0.0, 80.0, 10.0, 1.0, 1.0).expect("a wave");
+        assert_eq!(WavePeriod::kept(), 1, "one thickness, one period");
+        for n in 0..=WAVE_PERIODS_KEPT {
+            let t = 1.0 + n as f32 / 64.0;
+            wave(0.0, 20.0, 10.0, t, 1.0).expect("a wave");
+        }
+        assert!(
+            (1..=WAVE_PERIODS_KEPT).contains(&WavePeriod::kept()),
+            "{}",
+            WavePeriod::kept()
+        );
+        super::forget();
+        assert_eq!(WavePeriod::kept(), 0);
+    }
+
+    /// Wavy text drawn with `WHOLE_WAVE` at `whole` on the engine `gpu`
+    /// names, `view` scaling then turning the context: canvas text from a
+    /// fractional x, and a paragraph whose wave changes thickness and colour
+    /// mid-line, so that each span takes its own phase, and wraps to a
+    /// second line.
+    fn wavy_text(gpu: bool, whole: bool, (scale, turn): (f32, f32)) -> Vec<u8> {
+        use crate::{
+            canvas::{Canvas, EngineKind},
+            color::RgbaLinear,
+            font::FontLibrary,
+            text::{
+                TextDecoration as Lines, TextDecorationStyle as LineStyle,
+                TextEngine, TextStyle,
+            },
+        };
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            FontLibrary::new()
+                .register_font_from_path(
+                    "WaveOswald",
+                    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+                )
+                .expect("Oswald registers");
+        });
+        let base = TextStyle {
+            font_families: vec!["WaveOswald".into()],
+            font_size: 28.0,
+            color: RgbaLinear::from_srgb8(0x20, 0x30, 0x40, 1.0),
+            decoration: Lines {
+                underline: true,
+                overline: false,
+                line_through: true,
+            },
+            decoration_style: LineStyle::Wavy,
+            ..TextStyle::default()
+        };
+        let engine = TextEngine::new(&FontLibrary::new());
+        let mut builder = engine.paragraph_builder(&base);
+        builder.add_text("Hamburgefonstiv ");
+        builder.push_style(&TextStyle {
+            decoration_thickness: 2.5,
+            decoration_color: Some(RgbaLinear::from_srgb8(200, 0, 0, 1.0)),
+            ..base.clone()
+        });
+        builder.add_text("quick brown fox jumps");
+        builder.pop();
+        let paragraph = builder.build(260.0);
+
+        super::WHOLE_WAVE.set(whole);
+        let mut canvas = Canvas::new(360.0, 240.0);
+        canvas.set_gpu(gpu);
+        // What the canvas draws with, not what it was asked for: asking
+        // for the GPU falls back to the raster engine silently.
+        assert_eq!(
+            canvas.engine_kind() == EngineKind::Gpu,
+            gpu,
+            "the leg runs on the engine it is named for"
+        );
+        let ctx = canvas.context();
+        ctx.scale(scale, scale);
+        ctx.rotate(turn);
+        assert!(ctx.set_font_css("24px WaveOswald"));
+        ctx.set_text_decoration_css("underline line-through wavy")
+            .expect("a wavy decoration");
+        ctx.fill_text("Hamburgefonstiv", 10.37, 30.6, None);
+        ctx.draw_paragraph(&paragraph, 7.6, 40.3);
+        let pixels = ctx
+            .get_image_data(0.0, 0.0, 360.0, 240.0)
+            .expect("the canvas reads back")
+            .pixels()
+            .to_vec();
+        super::WHOLE_WAVE.set(false);
+        // Premultiplied, as the canvas holds them: unpremultiplied, a pixel
+        // a wave's edge barely touches reads as the full colour or none.
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|px| {
+                let alpha = u16::from(px[3]);
+                let premultiplied =
+                    |c: u8| ((u16::from(c) * alpha + 127) / 255) as u8;
+                [
+                    premultiplied(px[0]),
+                    premultiplied(px[1]),
+                    premultiplied(px[2]),
+                    px[3],
+                ]
+            })
+            .collect()
+    }
+
+    /// Wavy text draws the same with its waves tiled as stroked whole,
+    /// through everything that draws one -- canvas text and the Paragraph
+    /// API, a span edge mid-line and a second line -- on the CPU and, where
+    /// this machine has one, the GPU, as drawn, scaled, and scaled and
+    /// turned.
+    #[test]
+    fn tiled_waves_draw_as_whole_ones_on_every_engine() {
+        for &gpu in engines() {
+            for view in [(1.0, 0.0), (2.0, 0.0), (1.5, 0.05)] {
+                let tiled = wavy_text(gpu, false, view);
+                let whole = wavy_text(gpu, true, view);
+                assert!(
+                    tiled.iter().any(|byte| *byte != 0),
+                    "something is drawn"
+                );
+                let off = worst(&tiled, &whole);
+                assert!(
+                    off <= tiled_off(gpu),
+                    "gpu {gpu}, scaled and turned {view:?}: {off} off"
+                );
+            }
+        }
+    }
+
     /// The collection and epoch the shared library hands out for
     /// `families` at 24px.
     fn shared_fonts(
@@ -1355,6 +1825,8 @@ mod tests {
         let (mut before_fonts, before_epoch) = shared_fonts(&family);
         let before = ask(&mut before_fonts, &before_epoch);
         assert!(FaceLines::kept() > 0, "the answer is kept");
+        wave(0.0, 40.0, 10.0, 1.0, 1.0).expect("a wave");
+        assert!(super::WavePeriod::kept() > 0, "and a wave's period");
 
         let file = "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf";
         let data = Data::new_copy(&std::fs::read(file).expect("Oswald"));
@@ -1363,6 +1835,7 @@ mod tests {
             lib.register_typeface(face, Some(family[0].to_string()))
         });
         assert_eq!(FaceLines::kept(), 0, "the change drops what was kept");
+        assert_eq!(super::WavePeriod::kept(), 0, "periods too");
 
         let (mut after_fonts, after_epoch) = shared_fonts(&family);
         let after = ask(&mut after_fonts, &after_epoch);
