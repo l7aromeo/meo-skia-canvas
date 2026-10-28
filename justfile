@@ -406,6 +406,9 @@ check-release-guards:
     # commented out, stripped of its flag and moved below the bump.
     node scripts/check-release-parity.mjs --self-test
     node scripts/check-release-parity.mjs
+    # build.yml's mac job refuses a darwin binary whose Skia is not the
+    # patched source; the self-test keeps that check able to refuse.
+    node scripts/check-patched-skia.mjs --self-test
 
 [doc("Fail when a changelog's prose disagrees with the entries it counts.")]
 check-changelog:

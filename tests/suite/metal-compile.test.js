@@ -42,19 +42,29 @@ const why =
         : null;
 
 // The child's whole run, as JSON on its last line. It finds its compiler service
-// as the one that appeared between before and after its first GPU draw.
+// as the one that appeared between before and after its first GPU draw. What it
+// saw is reported too, so a run where that precondition fails -- a runner
+// whose Metal device compiles somewhere else -- says what it found instead.
 const child = `
   const { execFileSync, spawn } = require("child_process");
+  // \`pgrep\`, not \`ps\`: the sandbox refuses to run \`ps\`.
+  const compilers = () => execFileSync("pgrep", ["-il", "compiler|mtl|metal"], { encoding: "utf8" })
+    .split("\\n").filter(Boolean);
   const { Canvas, ImageData } = require(${JSON.stringify(path.join(__dirname, "../../lib"))});
   const services = () => new Set(
     execFileSync("pgrep", ["-f", "MTLCompilerService.xpc"], { encoding: "utf8" })
       .split("\\n").filter(Boolean));
   const pixel = (canvas) => [...canvas.getContext("2d").getImageData(1, 1, 1, 1).data];
   const before = services();
+  const seenBefore = compilers();
+  const warmStart = Date.now();
   const warm = new Canvas(4, 4);
   warm.getContext("2d").fillRect(0, 0, 4, 4);
   pixel(warm);
+  const warmMs = Date.now() - warmStart;
   const mine = [...services()].filter((pid) => !before.has(pid));
+  const diagnosis = { pid: process.pid, engine: warm.engine, warmMs,
+    compilersBefore: seenBefore, compilersAfter: compilers() };
   if (mine.length === 1) {
     process.kill(Number(mine[0]), "SIGSTOP");
     spawn("sh", ["-c", "sleep ${PAUSE_MS / 1000}; kill -CONT " + mine[0]], {
@@ -72,7 +82,7 @@ const child = `
   const start = Date.now();
   const first = draw();
   const ms = Date.now() - start;
-  console.log(JSON.stringify({ services: mine.length, first, ms, again: draw() }));
+  console.log(JSON.stringify({ services: mine.length, first, ms, again: draw(), diagnosis }));
 `;
 
 describe("A Metal compile that outlasts a second", () => {
@@ -101,7 +111,11 @@ describe("A Metal compile that outlasts a second", () => {
 
       // The instrument first: one service found and stopped, and the draw
       // held for the pause. Without these the colour below proves nothing.
-      assert.equal(run.services, 1, "the child's own compiler service");
+      assert.equal(
+        run.services,
+        1,
+        `the child's own compiler service; it saw ${JSON.stringify(run.diagnosis)}`,
+      );
       assert.ok(run.ms >= PAUSE_MS, `held ${run.ms} ms, not ${PAUSE_MS}`);
       assert.deepEqual(run.first, HALF_RED, "the draw that waited");
       assert.deepEqual(run.again, HALF_RED, "the same draw afterwards");
