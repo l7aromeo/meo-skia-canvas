@@ -1,6 +1,6 @@
 //! Letting go of what a render left behind, once rendering stops.
 //!
-//! Two things outlive a finished render, at two different levels.
+//! Three things outlive a finished render, at three different levels.
 //!
 //! The page cache holds a rasterized bitmap per page so that exporting an
 //! unchanged canvas again does not composite it again -- worth 1.9
@@ -21,10 +21,20 @@
 //! come. glibc exposes `malloc_trim` for exactly this, and it releases only
 //! whole pages that are already free.
 //!
-//! The watcher below waits for rendering to stop and then does both, in that
-//! order. The order is the point: trimming while the bitmaps are still live
-//! allocations cannot hand their pages back, so the two steps were worth far
-//! less apart than together.
+//! The font caches sit beside both. Each collection keeps the paragraphs it
+//! has laid out, and the faces and variable-font instances it has cloned, so
+//! that the next layout of the same text costs nothing. After sixty
+//! text-heavy pages they held 40.4 MB of the 78.1 the allocator had in use,
+//! in a debug build on macOS. They belong to the thread that filled them, so
+//! the watcher's own thread cannot empty them: in the Node addon it posts the
+//! release to each JavaScript thread, where it runs between two tasks -- see
+//! `node::idle`.
+//!
+//! The watcher below waits for rendering to stop and then does all three,
+//! bitmaps and fonts before the trim. The order is the point: trimming while
+//! the bitmaps are still live allocations cannot hand their pages back, so
+//! the steps were worth far less apart than together. A font release runs on
+//! its own thread after the watcher has moved on, so it trims again there.
 //!
 //! # Why this is not done after every render
 //!
@@ -51,16 +61,20 @@ use std::{
 };
 
 use crate::context::page::release_cached_pages;
+#[cfg(feature = "node-addon")]
+use crate::node::idle::release_font_caches;
 
-/// Bumped once per rasterization. Only ever compared against itself.
-static RENDERS: AtomicU64 = AtomicU64::new(0);
+/// Bumped once per rasterization and once per use of a thread's fonts. Only
+/// ever compared against itself.
+static ACTIVITY: AtomicU64 = AtomicU64::new(0);
 
 /// Holds the watcher thread, so it is started once and only if something
-/// renders. A process that loads the addon and draws nothing pays for no
-/// thread at all.
+/// renders or reaches for a font. A process that loads the addon and does
+/// neither pays for no thread at all.
 static WATCHER: OnceLock<()> = OnceLock::new();
 
-/// How long rendering has to have stopped before the memory goes back.
+/// How long rendering and text layout have to have stopped before the memory
+/// goes back, in ticks.
 ///
 /// Long enough that a pause between frames of an animation, or between two
 /// requests arriving, does not drop a cache entry or trigger a walk of the
@@ -78,8 +92,26 @@ const TICK: Duration = Duration::from_secs(1);
 /// counter nothing reads for correctness -- the watcher only asks whether it
 /// changed.
 pub(crate) fn note_render() {
-    RENDERS.fetch_add(1, Ordering::Relaxed);
+    ACTIVITY.fetch_add(1, Ordering::Relaxed);
     WATCHER.get_or_init(spawn);
+}
+
+/// Records that a thread used its fonts, and starts the watcher on the first
+/// use, so that laying text out holds a release off as rendering does.
+///
+/// Called from `FontLibrary::with_shared`, which a canvas's text and the
+/// addon's `Paragraph` reach their fonts through. The release itself does not
+/// pass through it, or it would count as the activity that holds off the next.
+pub(crate) fn note_font_use() {
+    note_render();
+}
+
+/// The activity count, for the debug addon's `__activity`, which a test reads
+/// either side of a posted font release to see that the release is not
+/// counted as activity itself.
+#[cfg(all(debug_assertions, feature = "node-addon"))]
+pub(crate) fn activity() -> u64 {
+    ACTIVITY.load(Ordering::Relaxed)
 }
 
 /// Hands back memory this process has freed but is still holding.
@@ -125,41 +157,67 @@ pub fn trim() -> bool {
     false
 }
 
-/// Reclaims once the render count has held still for a few ticks, and not
+/// Reclaims once the activity count has held still for a few ticks, and not
 /// again until it moves.
+fn spawn() {
+    thread::spawn(|| {
+        let mut quiet = Quiet::default();
+        loop {
+            thread::sleep(TICK);
+            if quiet.tick(ACTIVITY.load(Ordering::Relaxed)) {
+                reclaim();
+            }
+        }
+    });
+}
+
+/// Hands back what the last spell of rendering left behind.
+fn reclaim() {
+    // Posted, so it runs on each JavaScript thread after this returns, and
+    // trims there once its caches have gone.
+    #[cfg(feature = "node-addon")]
+    release_font_caches();
+    // Bitmaps first: they are live allocations until they are dropped, and a
+    // trim cannot hand back a page something is still using.
+    release_cached_pages();
+    trim();
+}
+
+/// When the watcher reclaims, from the activity count it reads once a tick:
+/// once the count has held still for [`IDLE_TICKS_BEFORE_RECLAIM`] ticks in a
+/// row, and not again until it moves.
 ///
 /// The "not again" is the part that matters: without it an idle process drops
 /// cache entries it has already dropped and walks its arenas every second
 /// forever, which is pure waste once the first pass has taken what there was.
-fn spawn() {
-    thread::spawn(|| {
-        let mut last_seen = 0;
-        let mut idle_ticks = 0;
-        let mut reclaimed_after = u64::MAX;
+#[derive(Debug, Default)]
+struct Quiet {
+    /// The count at the last tick. Zero to begin with, which the count has
+    /// already passed when the watcher starts, since the first bump starts it.
+    last_seen: u64,
+    /// Ticks in a row the count has held still for.
+    idle_ticks: u32,
+    /// The count the last reclaim ran at, if any has.
+    reclaimed_at: Option<u64>,
+}
 
-        loop {
-            thread::sleep(TICK);
-
-            let renders = RENDERS.load(Ordering::Relaxed);
-            if renders != last_seen {
-                last_seen = renders;
-                idle_ticks = 0;
-                continue;
-            }
-
-            idle_ticks += 1;
-            if idle_ticks >= IDLE_TICKS_BEFORE_RECLAIM
-                && reclaimed_after != renders
-            {
-                // Bitmaps first: they are live allocations until they are
-                // dropped, and a trim cannot hand back a page something is
-                // still using.
-                release_cached_pages();
-                trim();
-                reclaimed_after = renders;
-            }
+impl Quiet {
+    /// Takes one tick's reading of the count, and answers whether to reclaim
+    /// now.
+    fn tick(&mut self, count: u64) -> bool {
+        if count != self.last_seen {
+            self.last_seen = count;
+            self.idle_ticks = 0;
+            return false;
         }
-    });
+        self.idle_ticks = self.idle_ticks.saturating_add(1);
+        let due = self.idle_ticks >= IDLE_TICKS_BEFORE_RECLAIM
+            && self.reclaimed_at != Some(count);
+        if due {
+            self.reclaimed_at = Some(count);
+        }
+        due
+    }
 }
 
 #[cfg(target_env = "gnu")]
@@ -175,5 +233,48 @@ mod gnu {
         unsafe {
             malloc_trim(0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The interval, in ticks.
+    const INTERVAL: usize = IDLE_TICKS_BEFORE_RECLAIM as usize;
+
+    /// The ticks on which the watcher reclaims, reading `counts` one a tick.
+    fn reclaims(counts: impl IntoIterator<Item = u64>) -> Vec<usize> {
+        let mut quiet = Quiet::default();
+        counts
+            .into_iter()
+            .enumerate()
+            .filter_map(|(at, count)| quiet.tick(count).then_some(at))
+            .collect()
+    }
+
+    #[test]
+    fn nothing_is_reclaimed_while_the_count_moves_every_tick() {
+        assert_eq!(reclaims(1..=20), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn nothing_is_reclaimed_while_the_count_moves_once_an_interval() {
+        // A frame or a request every few ticks holds it off, the count
+        // standing still for one tick fewer than the interval each time.
+        let counts = (0..20).map(|tick| (tick / INTERVAL) as u64 + 1);
+        assert_eq!(reclaims(counts), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_quiet_spell_reclaims_once_after_the_interval() {
+        // The count moves on the first tick and then holds still.
+        assert_eq!(reclaims([5; 20]), vec![INTERVAL]);
+    }
+
+    #[test]
+    fn the_next_spell_reclaims_again_after_its_own_interval() {
+        let counts = [vec![5; 10], vec![6; 11]].concat();
+        assert_eq!(reclaims(counts), vec![INTERVAL, 10 + INTERVAL]);
     }
 }
