@@ -1834,13 +1834,9 @@ impl Context2D {
     /// );
     /// ```
     pub fn set_font_css(&mut self, css: &str) -> bool {
-        let Ok(shorthand) = parse_font_shorthand(css) else {
-            return false;
-        };
         // The spec carries the stretch and the caps features, and applying
         // it replaces both, which is the reset Chrome's setter performs.
-        self.inner.set_font_spec(shorthand.to_spec());
-        true
+        self.inner.set_font_css(css)
     }
 
     /// Fills a rectangle with the current fill style.
@@ -1916,17 +1912,15 @@ impl Context2D {
     /// Sets how a drawn run is positioned horizontally against its x
     /// coordinate.
     pub fn set_text_align(&mut self, align: TextAlign) {
-        self.inner
-            .state
-            .text
-            .edit()
-            .graf_style
-            .set_text_align(align.to_skia());
+        let text = &mut self.inner.state.text;
+        if text.graf_style.text_align() != align.to_skia() {
+            text.edit().graf_style.set_text_align(align.to_skia());
+        }
     }
 
     /// Sets which line of the font a drawn run sits on vertically.
     pub fn set_text_baseline(&mut self, baseline: TextBaseline) {
-        self.inner.state.text.edit().text_baseline = match baseline {
+        let baseline = match baseline {
             TextBaseline::Top => Baseline::Top,
             TextBaseline::Hanging => Baseline::Hanging,
             TextBaseline::Middle => Baseline::Middle,
@@ -1934,6 +1928,10 @@ impl Context2D {
             TextBaseline::Ideographic => Baseline::Ideographic,
             TextBaseline::Bottom => Baseline::Bottom,
         };
+        self.inner
+            .state
+            .text
+            .set(|text| &mut text.text_baseline, baseline);
     }
 
     /// Whether text wraps at the width given to a draw rather than being
@@ -1942,7 +1940,7 @@ impl Context2D {
     /// Not in the Canvas standard, where `max_width` always condenses. With
     /// this on, that argument becomes a wrap width instead.
     pub fn set_text_wrap(&mut self, wrap: bool) {
-        self.inner.state.text.edit().text_wrap = wrap;
+        self.inner.state.text.set(|text| &mut text.text_wrap, wrap);
     }
 
     /// Sets the reading direction used when laying out a run.
@@ -1953,14 +1951,16 @@ impl Context2D {
     pub fn set_direction(&mut self, direction: TextDirection) {
         self.inner.state.direction_inherits =
             direction == TextDirection::Inherit;
-        self.inner.state.text.edit().graf_style.set_text_direction(
-            match direction {
-                TextDirection::RightToLeft => SkTextDirection::RTL,
-                TextDirection::LeftToRight | TextDirection::Inherit => {
-                    SkTextDirection::LTR
-                }
-            },
-        );
+        let direction = match direction {
+            TextDirection::RightToLeft => SkTextDirection::RTL,
+            TextDirection::LeftToRight | TextDirection::Inherit => {
+                SkTextDirection::LTR
+            }
+        };
+        let text = &mut self.inner.state.text;
+        if text.graf_style.text_direction() != direction {
+            text.edit().graf_style.set_text_direction(direction);
+        }
     }
 
     /// Sets extra space added between characters, in pixels.
@@ -1969,7 +1969,10 @@ impl Context2D {
         // keeps the previous spacing rather than poisoning layout.
         if let Some(spacing) = Spacing::parse(pixels, "px".to_string(), pixels)
         {
-            self.inner.state.text.edit().letter_spacing = spacing;
+            self.inner
+                .state
+                .text
+                .set(|text| &mut text.letter_spacing, spacing);
         }
     }
 
@@ -1980,7 +1983,10 @@ impl Context2D {
     pub fn set_word_spacing(&mut self, pixels: f32) {
         if let Some(spacing) = Spacing::parse(pixels, "px".to_string(), pixels)
         {
-            self.inner.state.text.edit().word_spacing = spacing;
+            self.inner
+                .state
+                .text
+                .set(|text| &mut text.word_spacing, spacing);
         }
     }
 
@@ -1998,7 +2004,10 @@ impl Context2D {
     /// and `OptimizeSpeed`; [`TextRendering::GeometricPrecision`] draws
     /// unhinted whatever this says, as the standard asks of it.
     pub fn set_font_hinting(&mut self, enabled: bool) {
-        self.inner.state.text.edit().font_hinting = enabled;
+        self.inner
+            .state
+            .text
+            .set(|text| &mut text.font_hinting, enabled);
     }
 
     /// Sets whether kerning is applied, as `ctx.fontKerning` does -- see
@@ -2006,7 +2015,10 @@ impl Context2D {
     /// [`restore`](Self::restore), and left alone by
     /// [`set_font`](Self::set_font).
     pub fn set_font_kerning(&mut self, kerning: FontKerning) {
-        self.inner.state.text.edit().font_kerning = kerning;
+        self.inner
+            .state
+            .text
+            .set(|text| &mut text.font_kerning, kerning);
     }
 
     /// Sets what text is drawn for, as `ctx.textRendering` does -- see
@@ -2014,7 +2026,10 @@ impl Context2D {
     /// [`restore`](Self::restore), and left alone by
     /// [`set_font`](Self::set_font).
     pub fn set_text_rendering(&mut self, rendering: TextRendering) {
-        self.inner.state.text.edit().text_rendering = rendering;
+        self.inner
+            .state
+            .text
+            .set(|text| &mut text.text_rendering, rendering);
     }
 
     /// Selects how wide a face to use, where the family offers a choice.
@@ -2132,7 +2147,7 @@ impl Context2D {
         &mut self,
         variations: &[FontVariation],
     ) {
-        self.inner.state.text.edit().variations = variations
+        let axes: Vec<(FourByteTag, f32)> = variations
             .iter()
             .map(|variation| {
                 let [a, b, c, d] = *variation.axis.as_bytes();
@@ -2161,6 +2176,7 @@ impl Context2D {
                 .collect::<Vec<_>>()
                 .join(", "),
         };
+        self.inner.state.text.set(|text| &mut text.variations, axes);
     }
 
     /// Sets the text decoration from a CSS `text-decoration` shorthand.
@@ -2201,10 +2217,14 @@ impl Context2D {
     /// # Ok::<(), meo_skia_canvas::error::Error>(())
     /// ```
     pub fn set_text_decoration_css(&mut self, css: &str) -> Result<(), Error> {
-        self.inner.state.text.edit().text_decoration = decoration_from_css(css)
-            .ok_or_else(|| Error::InvalidColor {
+        let decoration =
+            decoration_from_css(css).ok_or_else(|| Error::InvalidColor {
                 reason: format!("{css:?}"),
             })?;
+        self.inner
+            .state
+            .text
+            .set(|text| &mut text.text_decoration, decoration);
         Ok(())
     }
 
@@ -2256,8 +2276,11 @@ impl Context2D {
         let css = decoration_css(lines, style, color, thickness);
         let size =
             thickness.and_then(|px| Spacing::parse(px, "px".to_string(), px));
-        self.inner.state.text.edit().text_decoration =
-            decoration_style(lines, style, color, size, css);
+        let decoration = decoration_style(lines, style, color, size, css);
+        self.inner
+            .state
+            .text
+            .set(|text| &mut text.text_decoration, decoration);
     }
 
     /// The current text decoration as CSS, or `"none"`.
@@ -3682,7 +3705,11 @@ impl Context2D {
     /// # Ok::<(), meo_skia_canvas::error::Error>(())
     /// ```
     pub fn set_letter_spacing_css(&mut self, css: &str) -> Result<(), Error> {
-        self.inner.state.text.edit().letter_spacing = css_spacing(css)?;
+        let spacing = css_spacing(css)?;
+        self.inner
+            .state
+            .text
+            .set(|text| &mut text.letter_spacing, spacing);
         Ok(())
     }
 
@@ -3695,7 +3722,11 @@ impl Context2D {
     ///
     /// Returns [`Error::InvalidCssLength`] on the same terms.
     pub fn set_word_spacing_css(&mut self, css: &str) -> Result<(), Error> {
-        self.inner.state.text.edit().word_spacing = css_spacing(css)?;
+        let spacing = css_spacing(css)?;
+        self.inner
+            .state
+            .text
+            .set(|text| &mut text.word_spacing, spacing);
         Ok(())
     }
 

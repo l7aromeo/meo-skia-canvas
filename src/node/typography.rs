@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 #![allow(non_snake_case)]
+#[cfg(all(feature = "node-addon", debug_assertions))]
+use crate::context::typesetting::BUILDS;
 use crate::{
     context::{State, typesetting::Typography},
     css::{FontUnits, is_font_relative, parse_length, without_comments},
@@ -888,6 +890,15 @@ pub fn laidOut(mut cx: FunctionContext) -> JsResult<JsArray> {
     let bytes = cx.number(bytes as f64);
     held.set(&mut cx, 1, bytes)?;
     Ok(held)
+}
+
+/// Test-only: how many typographies this thread has built -- see
+/// `context::typesetting::BUILDS`.
+///
+/// Exported by debug builds only, as `__discardGpuDraws` is.
+#[cfg(all(feature = "node-addon", debug_assertions))]
+pub fn typographyBuilds(mut cx: FunctionContext) -> JsResult<JsNumber> {
+    Ok(cx.number(BUILDS.get() as f64))
 }
 
 /// Test-only: lets every run this thread keeps for drawing go, so that a
@@ -2389,7 +2400,7 @@ impl From<Baseline> for CrateTextBaseline {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Baseline {
     Top,
     Hanging,
@@ -2447,7 +2458,7 @@ impl Baseline {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DecorationStyle {
     pub css: String,
     pub decoration: Decoration,
@@ -2469,7 +2480,7 @@ impl Default for DecorationStyle {
 //
 // Font-relative lengths (for text spacing & decoration thickness)
 //
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Spacing {
     raw_size: f32,
     unit: String,

@@ -25,7 +25,7 @@ pub mod typesetting;
 #[cfg(test)]
 use crate::node::typography::Painter;
 use crate::{
-    context2d::{FontKerning, TextRendering},
+    context2d::{FontKerning, TextRendering, font_spec_from_css},
     css::{FontUnits, ROOT_FONT_PX},
     export::VectorFeatures,
     font::GenericFamily,
@@ -1614,16 +1614,58 @@ impl Context2D {
         self.state.font = spec.serialized.clone();
         self.state.font_variant = spec.variant.clone();
         self.state.font_width = spec.width;
+        // A font that sets the text settings to what they hold changes
+        // nothing laid out, so the typography built from them stays kept: a
+        // drawing loop sets the same font before every draw. The style's own
+        // equality leaves its typeface out, and need not compare it: the
+        // build sets the face the fonts registered now resolve to, and a
+        // registration changes their epoch, which builds the typography
+        // again whatever the settings hold.
+        let text = &self.state.text;
+        if text.line_height == spec.line_height
+            && text.oblique_angle == spec.oblique_angle()
+            && text.char_style == style
+        {
+            return;
+        }
         self.state.text.edit().char_style = style;
         self.state.text.edit().line_height = spec.line_height;
         self.state.text.edit().oblique_angle = spec.oblique_angle();
     }
 
+    /// Applies the font a CSS `font` shorthand names, answering whether it
+    /// parsed.
+    ///
+    /// Read by the crate's own shorthand parser, so the two surfaces take one
+    /// grammar from one implementation, and remembered under the string as
+    /// given: a drawing loop sets the same few strings over and over, and a
+    /// hit is one lookup, which skips the parse and the match. A string that
+    /// does not parse, or names no family the library has, leaves the font
+    /// alone, as the Canvas API says.
+    pub fn set_font_css(&mut self, css: &str) -> bool {
+        if let Some(font) = FontLibrary::with_shared(|lib| lib.resolved(css)) {
+            self.set_font(&font);
+            return true;
+        }
+        let Some(spec) = font_spec_from_css(css) else {
+            return false;
+        };
+        let font = FontLibrary::with_shared(|lib| {
+            let font = lib.resolve(spec)?;
+            lib.remember(css.to_string(), font.clone());
+            Some(font)
+        });
+        if let Some(font) = font {
+            self.set_font(&font);
+        }
+        true
+    }
+
     /// Matches a specification against the font library and applies it.
     ///
-    /// The path a caller with a specification in hand takes. The one that
-    /// starts from a canonical string goes through
-    /// [`FontLibrary::resolved`] first and only reaches this on a miss.
+    /// The path a caller with a specification in hand takes, as
+    /// `Context2D::set_font` with a [`Font`](crate::context2d::Font) does; one
+    /// starting from a CSS string takes [`set_font_css`](Self::set_font_css).
     pub fn set_font_spec(&mut self, spec: FontSpec) {
         if let Some(font) = FontLibrary::with_shared(|lib| lib.resolve(spec)) {
             self.set_font(&font);
@@ -1635,6 +1677,16 @@ impl Context2D {
         variant: &str,
         features: &[(String, i32)],
     ) {
+        // The variant already set changes nothing -- see `set_font`.
+        let held = self.state.text.char_style.font_features();
+        if self.state.font_variant == variant
+            && held.len() == features.len()
+            && held.iter().zip(features).all(|(held, (name, value))| {
+                held.name() == name && held.value() == *value
+            })
+        {
+            return;
+        }
         self.state.text.edit().char_style.reset_font_features();
         for (feat, val) in features {
             self.state
@@ -1649,6 +1701,10 @@ impl Context2D {
     pub fn set_font_width(&mut self, width: Width) {
         let style = self.state.text.char_style.font_style();
         let font_style = FontStyle::new(style.weight(), width, style.slant());
+        // The width already set changes nothing -- see `set_font`.
+        if self.state.font_width == width && style == font_style {
+            return;
+        }
         self.state.text.edit().char_style.set_font_style(font_style);
         self.state.font_width = width;
     }

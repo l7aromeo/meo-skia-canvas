@@ -12,9 +12,7 @@ use std::cell::RefCell;
 use super::{BoxedContext2D, Context2D, Dye, page::ExportOptions};
 use crate::{
     color_filter::BoxedColorFilter,
-    context2d::{
-        FontKerning, TextRendering, decoration_from_css, font_spec_from_css,
-    },
+    context2d::{FontKerning, TextRendering, decoration_from_css},
     css::parse_filter,
     export::VectorFeatures,
     filter::FilterOp,
@@ -23,7 +21,6 @@ use crate::{
     node::{
         canvas::BoxedCanvas,
         filter::{Filter, FilterSpec},
-        font_library::FontLibrary,
         image::{Content, Source},
         path::{Path2D, conic_or_line},
     },
@@ -225,7 +222,9 @@ verbs! {
             _ => None,
         };
         if let Some((direction, inherits)) = resolved {
-            ctx.state.text.edit().graf_style.set_text_direction(direction);
+            if ctx.state.text.graf_style.text_direction() != direction {
+                ctx.state.text.edit().graf_style.set_text_direction(direction);
+            }
             ctx.state.direction_inherits = inherits;
         }
     },
@@ -237,14 +236,16 @@ verbs! {
     },
 
     set_textAlign as SetTextAlign (textAlign @ text) => |ctx| {
-        if let Some(mode) = to_text_align(textAlign) {
+        if let Some(mode) = to_text_align(textAlign)
+            && ctx.state.text.graf_style.text_align() != mode.to_skia()
+        {
             ctx.state.text.edit().graf_style.set_text_align(mode.to_skia());
         }
     },
 
     set_textBaseline as SetTextBaseline (textBaseline @ text) => |ctx| {
         if let Some(mode) = to_text_baseline(textBaseline) {
-            ctx.state.text.edit().text_baseline = mode.into();
+            ctx.state.text.set(|text| &mut text.text_baseline, mode.into());
         }
     },
 
@@ -269,13 +270,13 @@ verbs! {
     // HTML's setters are; the types say what each value does.
     set_fontKerning as SetFontKerning (fontKerning @ text) => |ctx| {
         if let Some(kerning) = FontKerning::from_keyword(fontKerning) {
-            ctx.state.text.edit().font_kerning = kerning;
+            ctx.state.text.set(|text| &mut text.font_kerning, kerning);
         }
     },
 
     set_textRendering as SetTextRendering (textRendering @ text) => |ctx| {
         if let Some(rendering) = TextRendering::from_keyword(textRendering) {
-            ctx.state.text.edit().text_rendering = rendering;
+            ctx.state.text.set(|text| &mut text.text_rendering, rendering);
         }
     },
 
@@ -587,11 +588,11 @@ verbs! {
     },
 
     set_fontHinting as SetFontHinting (); fontHinting => |ctx| {
-        ctx.state.text.edit().font_hinting = fontHinting;
+        ctx.state.text.set(|text| &mut text.font_hinting, fontHinting);
     },
 
     set_textWrap as SetTextWrap (); textWrap => |ctx| {
-        ctx.state.text.edit().text_wrap = textWrap;
+        ctx.state.text.set(|text| &mut text.text_wrap, textWrap);
     },
 
     closePath as ClosePath () => |ctx| {
@@ -1632,23 +1633,7 @@ pub fn set_font(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let css = cx.argument::<JsString>(1)?.value(&mut cx);
 
-    // Read by the crate's own shorthand parser, so the two surfaces take one
-    // grammar from one implementation, and remembered under the string as
-    // given: a drawing loop sets the same few strings over and over, and a
-    // hit is one lookup. A string that does not parse, or names no family
-    // the library has, leaves the font alone, as the Canvas API says.
-    let font =
-        FontLibrary::with_shared(|lib| lib.resolved(&css)).or_else(|| {
-            let spec = font_spec_from_css(&css)?;
-            FontLibrary::with_shared(|lib| {
-                let font = lib.resolve(spec)?;
-                lib.remember(css, font.clone());
-                Some(font)
-            })
-        });
-    if let Some(font) = font {
-        this.borrow_mut().set_font(&font);
-    }
+    this.borrow_mut().set_font_css(&css);
     Ok(cx.undefined())
 }
 
@@ -1710,8 +1695,13 @@ pub fn set_letterSpacing(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
     if let Some(spacing) = opt_spacing_arg(&mut cx, 1)? {
         let px = spacing.in_px(&this.state.font_units());
-        this.state.text.edit().char_style.set_letter_spacing(px);
-        this.state.text.edit().letter_spacing = spacing;
+        let text = &this.state.text;
+        if text.letter_spacing != spacing
+            || text.char_style.letter_spacing() != px
+        {
+            this.state.text.edit().char_style.set_letter_spacing(px);
+            this.state.text.edit().letter_spacing = spacing;
+        }
     }
     Ok(cx.undefined())
 }
@@ -1728,8 +1718,12 @@ pub fn set_wordSpacing(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
     if let Some(spacing) = opt_spacing_arg(&mut cx, 1)? {
         let px = spacing.in_px(&this.state.font_units());
-        this.state.text.edit().char_style.set_word_spacing(px);
-        this.state.text.edit().word_spacing = spacing;
+        let text = &this.state.text;
+        if text.word_spacing != spacing || text.char_style.word_spacing() != px
+        {
+            this.state.text.edit().char_style.set_word_spacing(px);
+            this.state.text.edit().word_spacing = spacing;
+        }
     }
     Ok(cx.undefined())
 }
@@ -1793,7 +1787,10 @@ pub fn set_textDecoration(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // not parse leaves the decoration alone, as an invalid value does
     // throughout the Canvas API; `"none"` and the empty string clear it.
     if let Some(decoration) = decoration_from_css(&css) {
-        this.borrow_mut().state.text.edit().text_decoration = decoration;
+        this.borrow_mut()
+            .state
+            .text
+            .set(|text| &mut text.text_decoration, decoration);
     }
     Ok(cx.undefined())
 }
@@ -1841,7 +1838,7 @@ pub fn set_fontVariationSettings(
     } else {
         this.state.font_variation_settings = css_parts.join(", ");
     }
-    this.state.text.edit().variations = variations;
+    this.state.text.set(|text| &mut text.variations, variations);
     Ok(cx.undefined())
 }
 
