@@ -48,7 +48,7 @@ use crate::{
     },
     utils::*,
 };
-use layer::BlurOp;
+use layer::BlurDraw;
 use page::{ExportOptions, Page, PageRecorder};
 use typesetting::{TextSettings, Typesetting, Typography};
 
@@ -1039,15 +1039,34 @@ impl Context2D {
             });
         }
 
-        let coverage = coverage_of(&path, &self.state.matrix);
-        let paint = self.paint_for_drawing(style, coverage);
-        let features = self.vector_features(&paint, Some(style));
-        if let Some(op) = self.blur_op(&path, style, &paint) {
+        // A draw under a sole `blur()` may become a `BlurOp`, which reads
+        // whether the path is a rectangle, as the coverage does; asked once
+        // for both. Any other draw takes the coverage as it always has and
+        // pays nothing for the op.
+        let blurred = self.state.filter.sole_blur().is_some();
+        let rect = blurred.then(|| path.is_rect()).flatten();
+        let coverage = match blurred {
+            true => coverage_given(&path, rect.is_some(), &self.state.matrix),
+            false => coverage_of(&path, &self.state.matrix),
+        };
+        // A blurred draw the recorder keeps as a `BlurOp` is built from the
+        // state without the paint `paint_for_drawing` makes, whose filters
+        // the op replaces. Built this way it records in about the time an
+        // unblurred draw does, 69 ns against 64 on the CPU; from that paint
+        // it took about 94.
+        if let Some(sigma) = blurred.then(|| self.blurs_as_op(style)).flatten()
+        {
+            let paint = self.paint_for_blur(style);
+            let draw = BlurDraw::of(&path, rect, &paint, sigma);
+            let features = self.state.filter.blur_features(coverage);
+            let (matrix, clip) = (self.state.matrix, self.state.clip.as_ref());
             self.with_recorder(|mut recorder| {
-                recorder.append_blur(op, features);
+                recorder.append_blur(draw, matrix, clip, features);
             });
             return;
         }
+        let paint = self.paint_for_drawing(style, coverage);
+        let features = self.vector_features(&paint, Some(style));
         self.render_to_canvas(&paint, features, |canvas, paint| {
             if let Some(tile) = self.state.texture(style) {
                 // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
@@ -1882,53 +1901,59 @@ impl Context2D {
         paint
     }
 
-    /// The draw of `path` with `paint` as a [`BlurOp`], whose blur is made
-    /// at playback, where it is a flat-colour fill or stroke blurred by a
-    /// `blur()` filter alone. `None` for any other draw, which records its
-    /// blur as it always has.
+    /// The blur's standard deviation where a draw in `style` would be kept
+    /// as a [`BlurOp`](layer::BlurOp), whose blur is made at playback: a
+    /// flat-colour fill or stroke blurred by a `blur()` filter alone. `None`
+    /// for any other draw, which records its blur as it always has.
     ///
     /// Left out: a draw with a shadow, which is drawn beside it in one
     /// recorded frame; a blend mode other than source-over, which
     /// `render_to_canvas` composites through a layer of its own; and
-    /// anything carrying a CanvasKit filter, a texture or a dash, whose
-    /// paint this does not keep.
-    fn blur_op(
-        &self,
-        path: &Path,
-        style: PaintStyle,
-        paint: &Paint,
-    ) -> Option<BlurOp> {
+    /// anything carrying a CanvasKit filter, a texture or a dash, which the
+    /// op's paint does not keep.
+    fn blurs_as_op(&self, style: PaintStyle) -> Option<f32> {
         let sigma = self.state.filter.sole_blur()?;
+        let dashed =
+            style != PaintStyle::Fill && !self.state.line_dash_list.is_empty();
         let plain = self.state.global_composite_operation == BlendMode::SrcOver
             && matches!(self.state.dye(style), Dye::Color(..))
             && self.state.texture(style).is_none()
             && self.state.skia_image_filter.is_none()
             && self.state.skia_mask_filter.is_none()
             && self.state.skia_color_filter.is_none()
-            && paint.shader().is_none()
-            && paint.path_effect().is_none()
-            && self.paint_for_shadow(paint).is_none();
-        plain.then(|| {
-            // `Paint::set_color4f` converts to sRGB, so the colour read
-            // back is sRGB whatever space it was set in.
-            BlurOp::new(
-                path,
-                self.state.matrix,
-                self.state.clip.as_ref(),
-                paint,
-                ColorSpace::new_srgb(),
-                sigma,
-            )
-        })
+            && !dashed
+            && !self.casts_shadow();
+        plain.then_some(sigma)
+    }
+
+    /// What `paint_for_drawing` makes for a draw [`Self::blurs_as_op`] lets
+    /// through, less the filters: the state's paint, dither, the colour with
+    /// the global alpha in it, and `style`.
+    fn paint_for_blur(&self, style: PaintStyle) -> Paint {
+        let mut paint = self.state.paint.clone();
+        paint.set_dither(self.state.dither);
+        self.state.dye(style).mix_into(
+            &mut paint,
+            self.state.global_alpha as f32,
+            self.state.sampling_filter,
+        );
+        paint.set_style(style);
+        paint
+    }
+
+    /// Whether a draw now casts a shadow: what `paint_for_shadow` answers
+    /// without making the paint.
+    fn casts_shadow(&self) -> bool {
+        let (color, _) = &self.state.shadow_color;
+        color.a != 0.0
+            && !(self.state.shadow_blur == 0.0
+                && self.state.shadow_offset.is_zero())
     }
 
     pub fn paint_for_shadow(&self, base_paint: &Paint) -> Option<Paint> {
         let (shadow_color, shadow_space) = &self.state.shadow_color;
-        let (mut shadow_blur, shadow_offset) =
-            (self.state.shadow_blur, self.state.shadow_offset);
-        if shadow_color.a == 0.0
-            || (shadow_blur == 0.0 && shadow_offset.is_zero())
-        {
+        let mut shadow_blur = self.state.shadow_blur;
+        if !self.casts_shadow() {
             return None;
         }
 
@@ -2110,10 +2135,16 @@ impl Dye {
 /// keeps it one, since Skia's cheap coverage blur for those shapes works on
 /// axis-aligned device rectangles.
 pub(crate) fn coverage_of(path: &Path, matrix: &Matrix) -> Coverage {
+    coverage_given(path, path.is_rect().is_some(), matrix)
+}
+
+/// As [`coverage_of`], for a caller that has already asked whether `path` is
+/// a rectangle and has the answer in `rect`.
+fn coverage_given(path: &Path, rect: bool, matrix: &Matrix) -> Coverage {
     if !matrix.rect_stays_rect() {
         return Coverage::Path;
     }
-    if path.is_rect().is_some() {
+    if rect {
         Coverage::Rect
     } else if path.is_oval().is_some() || path.is_rrect().is_some() {
         Coverage::Rounded
@@ -2125,9 +2156,59 @@ pub(crate) fn coverage_of(path: &Path, matrix: &Matrix) -> Coverage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node::filter::FilterSpec;
 
     /// Builds a context the size of a small canvas, as `Canvas::new` does.
     fn context() -> Context2D {
         Context2D::new(ColorSpace::new_srgb(), ColorType::N32, (200.0, 100.0))
+    }
+
+    #[test]
+    fn a_blurred_draw_kept_as_an_op_reads_as_its_painted_draw_would() {
+        // `draw_path` builds a `BlurOp`'s paint and features without the
+        // paint `paint_for_drawing` makes; they have to be what that paint
+        // says, or an export routes the draw differently and the op paints
+        // another colour.
+        let mut ctx = context();
+        ctx.state.global_alpha = 0.6;
+        // Away from their defaults, so that a value lost on the way shows.
+        ctx.state.dither = true;
+        ctx.state.paint.set_anti_alias(false);
+        let color = Dye::Color(Color4f::new(0.2, 0.4, 0.8, 0.9), None, None);
+        ctx.state.fill_style = color.clone();
+        ctx.state.stroke_style = color;
+        for sigma in [0.5f32, 12.0, 60.0] {
+            ctx.state.filter = Filter::new(
+                &format!("blur({sigma}px)"),
+                &[FilterSpec::Plain {
+                    name: "blur".into(),
+                    value: sigma,
+                }],
+            );
+            for coverage in [
+                Coverage::Rect,
+                Coverage::Rounded,
+                Coverage::Path,
+                Coverage::Text { em: 20.0 },
+            ] {
+                for style in [PaintStyle::Fill, PaintStyle::Stroke] {
+                    let full = ctx.paint_for_drawing(style, coverage);
+                    let lean = ctx.paint_for_blur(style);
+                    assert_eq!(
+                        ctx.state.filter.blur_features(coverage),
+                        ctx.vector_features(&full, Some(style)),
+                        "features, sigma {sigma} {coverage:?} {style:?}"
+                    );
+                    assert_eq!(full.color4f(), lean.color4f());
+                    assert_eq!(full.style(), lean.style());
+                    assert_eq!(full.is_anti_alias(), lean.is_anti_alias());
+                    assert_eq!(full.is_dither(), lean.is_dither());
+                    assert_eq!(full.stroke_width(), lean.stroke_width());
+                    assert_eq!(full.stroke_miter(), lean.stroke_miter());
+                    assert_eq!(full.stroke_cap(), lean.stroke_cap());
+                    assert_eq!(full.stroke_join(), lean.stroke_join());
+                }
+            }
+        }
     }
 }

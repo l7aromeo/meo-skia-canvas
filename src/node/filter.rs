@@ -10,7 +10,7 @@ use skia_safe::{
 };
 use std::fmt;
 
-use crate::utils::*;
+use crate::{export::VectorFeatures, utils::*};
 
 /// The luminance coefficients CSS Filter Effects Level 1 uses for
 /// `grayscale()` and `saturate()`.
@@ -300,6 +300,18 @@ impl Filter {
             }
             _ => true,
         })
+    }
+
+    /// What a flat-colour draw of `coverage` blurred by this filter asks of
+    /// a vector backend: the mask filter where [`Self::mix_into`] blurs its
+    /// coverage, the image filter where it blurs its result. As
+    /// `Context2D::vector_features` reads off the paint `mix_into` makes,
+    /// for a draw that never makes it.
+    pub(crate) fn blur_features(&self, coverage: Coverage) -> VectorFeatures {
+        match self.blurs_coverage(coverage) {
+            true => VectorFeatures::MASK_FILTER,
+            false => VectorFeatures::IMAGE_FILTER,
+        }
     }
 
     /// Puts this filter onto `paint`.

@@ -36,7 +36,7 @@ use crate::{
     },
     context::{
         BoxedContext2D,
-        layer::{BlurOp, Layer},
+        layer::{BlurDraw, BlurOp, Layer},
     },
     encode::{
         self, Frame, FrameDepth, Pixels, SequenceSpec, Sink,
@@ -351,6 +351,13 @@ pub struct PageRecorder {
     /// Set when `matrix` or `clip` has moved but the recording canvas has
     /// not been rebuilt to match. See [`PageRecorder::settle`].
     state_dirty: bool,
+    /// Counts changes to `matrix` and `clip`, so that a draw can tell the
+    /// frame is the one an earlier draw was made under.
+    frame: u64,
+    /// The frame the last layer, a [`BlurOp`], was opened in while it can
+    /// still be joined; `None` once anything could have seen it -- a flush,
+    /// which every export goes through, records it for good.
+    blur_run: Option<u64>,
     /// How many times one replay of this page walks a nested picture.
     ///
     /// Zero for a page that has only been drawn on directly, however much has
@@ -428,6 +435,8 @@ impl PageRecorder {
             changed: false,
             isolated: None,
             state_dirty: false,
+            frame: 0,
+            blur_run: None,
             matrix: Matrix::default(),
             clip: None,
             bounds,
@@ -563,6 +572,7 @@ impl PageRecorder {
     /// `clip`. The rebuild happens in [`Self::settle`], before the next draw.
     pub fn restore(&mut self) {
         self.state_dirty = true;
+        self.frame = self.frame.wrapping_add(1);
     }
 
     fn rebuild_frame(&mut self) {
@@ -745,6 +755,9 @@ impl PageRecorder {
     /// A no-op when nothing has been drawn since the last one, so calling it
     /// to open a segment boundary cannot leave an empty layer behind.
     fn flush(&mut self) {
+        // A page taken now may hold the last op; extending it afterwards
+        // would change a layer a cache has already drawn.
+        self.blur_run = None;
         if !self.changed {
             return;
         }
@@ -827,15 +840,28 @@ impl PageRecorder {
         }
     }
 
-    /// Records `op` as a layer of its own, so that its blur is made where
-    /// the page is played back -- see [`BlurOp`].
+    /// Records `draw` as a [`BlurOp`], so that its blur is made where the
+    /// page is played back, under `matrix` and `clip` -- the frame the
+    /// recorder holds.
+    ///
+    /// A draw straight after a `BlurOp` it can join -- nothing recorded
+    /// between them, the frame unchanged since, and the same `features` --
+    /// joins it rather than opening an op of its own: see
+    /// [`BlurOp::extend`].
     ///
     /// Inside an open `saveLayer` the draw cannot be split out, for the
     /// reason [`Self::append_isolated`] gives; there it is played into the
     /// recording at once, which makes its blur at the recording's scale.
-    pub fn append_blur(&mut self, op: BlurOp, features: VectorFeatures) {
+    pub fn append_blur(
+        &mut self,
+        draw: BlurDraw,
+        matrix: Matrix,
+        clip: Option<&Path>,
+        features: VectorFeatures,
+    ) {
         if !self.layer_floors.is_empty() {
             self.page_features = self.page_features.with(features);
+            let op = BlurOp::start(draw, matrix, clip);
             // The op carries its own frame; the layer's floor is identity.
             self.append(|canvas| {
                 canvas.save();
@@ -845,9 +871,23 @@ impl PageRecorder {
             });
             return;
         }
+        let mut draw = draw;
+        let open = self.blur_run == Some(self.frame) && !self.changed;
+        if open
+            && let (Some(Layer::Blur(op)), Some(last)) =
+                (self.layers.last_mut(), self.features.last())
+            && *last == features
+        {
+            match op.extend(draw) {
+                Ok(()) => return,
+                Err(back) => draw = back,
+            }
+        }
         self.flush();
-        self.layers.push(Layer::Blur(op));
+        self.layers
+            .push(Layer::Blur(BlurOp::start(draw, matrix, clip)));
         self.features.push(features);
+        self.blur_run = Some(self.frame);
     }
 
     /// What one replay of this page costs; see the field.
