@@ -10,6 +10,7 @@ use skia_safe::{
     Canvas as SkCanvas, FontArguments, FontMgr, FontStyle, FourByteTag,
     Paint as SkPaint, PaintStyle as SkPaintStyle, Point as SkPoint,
     font_arguments::{VariationPosition, variation_position::Coordinate},
+    font_parameters::variation::Axis,
     font_style::{Slant, Weight},
     textlayout::{
         Affinity as SkAffinity, FontCollection, Paragraph as SkParagraph,
@@ -1852,6 +1853,29 @@ fn instance_for(
         }])
         .chain(opsz)
         .collect::<Vec<_>>();
+    let weight = axes
+        .iter()
+        .find(|axis| *axis.tag == wght_tag)
+        .map(|axis| wght.clamp(axis.min, axis.max).round() as i32);
+    // At the faces' own position an instance draws as the faces do, glyph
+    // for glyph and advance for advance, and costs a typeface, its font
+    // arguments on every style copied and a position recorded; so where
+    // every variable face the families resolve to is there, none is made.
+    // Every face, since the arguments reach a fallback face as well as the
+    // first, and its own defaults may differ.
+    let at_default = faces.iter().all(|face| {
+        known
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .of(face)
+            .is_none_or(|axes| at_default_position(&axes, &coordinates))
+    });
+    if at_default {
+        return Instance {
+            coordinates: Vec::new(),
+            weight,
+        };
+    }
     // A poisoned record is still a record: the panic that poisoned it was
     // elsewhere, and the worst a stale entry can do is drop the caches early.
     if positions
@@ -1861,14 +1885,28 @@ fn instance_for(
     {
         collection.clear_caches();
     }
-    let weight = axes
-        .iter()
-        .find(|axis| *axis.tag == wght_tag)
-        .map(|axis| wght.clamp(axis.min, axis.max).round() as i32);
     Instance {
         coordinates,
         weight,
     }
+}
+
+/// Whether `coordinates` leave a face with `axes` where it is without them:
+/// each at its axis's default, a coordinate for an axis the face lacks being
+/// one Skia ignores. Never for a face with an `opsz` axis, whose position
+/// follows the font size, [`optical_size`]'s: uninstanced, FreeType draws
+/// it at the axis's default whatever the size, and CoreText at an optical
+/// size it picks for itself, which differs from the instance even at that
+/// default.
+fn at_default_position(axes: &[Axis], coordinates: &[Coordinate]) -> bool {
+    let opsz =
+        FourByteTag::from(u32::from_be_bytes(*FontAxisTag::OPSZ.as_bytes()));
+    !axes.iter().any(|axis| axis.tag == opsz)
+        && coordinates.iter().all(|coordinate| {
+            axes.iter()
+                .find(|axis| axis.tag == coordinate.axis)
+                .is_none_or(|axis| axis.def == coordinate.value)
+        })
 }
 
 /// The Skia text style for `style`, with its variable faces instanced as
@@ -2119,8 +2157,14 @@ fn build_paragraph_style(
 
 #[cfg(test)]
 mod tests {
-    use super::{SkTextStyle, TextEngine, TextStyle};
-    use crate::font::{FontLibrary, INSTANCED_POSITIONS};
+    use super::{SkPaint, SkTextStyle, TextEngine, TextStyle, instance_for};
+    use crate::font::{
+        FontAxisTag, FontLibrary, INSTANCED_POSITIONS, variation_axes,
+    };
+    use skia_safe::{
+        Data, FontArguments, FontMgr, FourByteTag,
+        font_arguments::{VariationPosition, variation_position::Coordinate},
+    };
 
     /// Whether skia-safe still turns an empty family list into a slice
     /// built from a null pointer, which a debug build aborts on: the defect
@@ -2202,5 +2246,182 @@ mod tests {
             cached()
         );
         assert_eq!(engine.positions.lock().map(|p| p.len()).ok(), Some(1));
+    }
+
+    /// The engine over the bundled Oswald, Raleway and Amstelvar, each its
+    /// own family.
+    fn variable_engine() -> TextEngine {
+        let fonts = FontLibrary::new();
+        for (family, file) in [
+            (
+                "OswaldDefault",
+                "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+            ),
+            (
+                "RalewayDefault",
+                "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+            ),
+            (
+                "AmstelvarDefault",
+                "tests/assets/fonts/AmstelvarAlpha-VF.ttf",
+            ),
+        ] {
+            fonts
+                .register_font_from_path(family, file)
+                .expect("a bundled variable font registers");
+        }
+        TextEngine::new(&fonts)
+    }
+
+    /// The coordinates a style is instanced at on `engine`.
+    fn instanced(
+        engine: &TextEngine,
+        families: &[&str],
+        weight: i32,
+        size: f32,
+    ) -> Vec<Coordinate> {
+        let style = TextStyle {
+            font_families: families
+                .iter()
+                .map(|family| (*family).into())
+                .collect(),
+            font_weight: weight,
+            font_size: size,
+            ..TextStyle::default()
+        };
+        instance_for(
+            &mut engine.collection.clone(),
+            &engine.positions,
+            &engine.axes,
+            &style,
+            &[],
+        )
+        .coordinates
+    }
+
+    /// `text` drawn in `face`, at `size`, instanced at `coordinates` where
+    /// there are any: its pixels and its advance.
+    fn drawn_in(
+        face: &skia_safe::Typeface,
+        coordinates: &[Coordinate],
+        size: f32,
+    ) -> (Vec<u8>, f32) {
+        let face = match coordinates.is_empty() {
+            true => face.clone(),
+            false => face
+                .clone_with_arguments(
+                    &FontArguments::new().set_variation_design_position(
+                        VariationPosition { coordinates },
+                    ),
+                )
+                .expect("an instance"),
+        };
+        let font = skia_safe::Font::from_typeface(face, size);
+        let text = "Hamburgefonstiv quick 0123";
+        let mut surface = skia_safe::surfaces::raster_n32_premul((900, 120))
+            .expect("a surface");
+        surface.canvas().clear(skia_safe::Color::WHITE);
+        let mut paint = SkPaint::default();
+        paint.set_anti_alias(true);
+        surface.canvas().draw_str(text, (4, 90), &font, &paint);
+        let info = skia_safe::ImageInfo::new_n32_premul((900, 120), None);
+        let mut pixels = vec![0u8; 900 * 120 * 4];
+        assert!(surface.read_pixels(&info, &mut pixels, 900 * 4, (0, 0)));
+        (pixels, font.measure_str(text, None).0)
+    }
+
+    /// A style at its faces' own position is not instanced, and drawn so it
+    /// is the instance glyph for glyph and advance for advance; one off it
+    /// by a single unit of weight is instanced, as is one whose fallback
+    /// face's defaults differ, and one in a face with an optical size, at
+    /// every size, its default among them.
+    #[test]
+    fn a_style_at_its_faces_own_position_is_not_instanced() {
+        let engine = variable_engine();
+        let wght = FourByteTag::from(u32::from_be_bytes(
+            *FontAxisTag::WGHT.as_bytes(),
+        ));
+        let face = |file: &str| {
+            FontMgr::new()
+                .new_from_data(
+                    Data::new_copy(&std::fs::read(file).expect("a font")),
+                    None,
+                )
+                .expect("a face")
+        };
+        // Oswald stands at 400 and Raleway at 100 without arguments.
+        for (family, file, weight) in [
+            (
+                "OswaldDefault",
+                "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+                400,
+            ),
+            (
+                "RalewayDefault",
+                "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+                100,
+            ),
+        ] {
+            assert!(
+                instanced(&engine, &[family], weight, 24.0).is_empty(),
+                "{family} at {weight}"
+            );
+            let at = [Coordinate {
+                axis: wght,
+                value: weight as f32,
+            }];
+            assert_eq!(
+                drawn_in(&face(file), &[], 24.0),
+                drawn_in(&face(file), &at, 24.0),
+                "{family}: the face is its instance at {weight}"
+            );
+            assert!(
+                !instanced(&engine, &[family], weight + 1, 24.0).is_empty(),
+                "{family} at {}",
+                weight + 1
+            );
+        }
+        // Oswald stands at 400; Raleway behind it does not.
+        assert!(
+            !instanced(
+                &engine,
+                &["OswaldDefault", "RalewayDefault"],
+                400,
+                24.0
+            )
+            .is_empty(),
+            "a fallback face away from its own position"
+        );
+        // Amstelvar's optical size follows the font size, so it is
+        // instanced at every size -- even at its `opsz` default, where every
+        // coordinate is the axis's own.
+        let amstelvar = face("tests/assets/fonts/AmstelvarAlpha-VF.ttf");
+        let opsz = FourByteTag::from(u32::from_be_bytes(
+            *FontAxisTag::OPSZ.as_bytes(),
+        ));
+        let default = variation_axes(&amstelvar)
+            .and_then(|axes| axes.iter().find(|a| a.tag == opsz).map(|a| a.def))
+            .expect("an optical size axis");
+        for size in [default, 24.0] {
+            let coordinates =
+                instanced(&engine, &["AmstelvarDefault"], 400, size);
+            assert!(!coordinates.is_empty(), "an optical size at {size}px");
+            let apart = drawn_in(&amstelvar, &[], size)
+                != drawn_in(&amstelvar, &coordinates, size);
+            // Uninstanced, FreeType draws the face at its `opsz` default
+            // whatever the size, so it is the instance there and only
+            // there; CoreText draws it at an optical size it picks for
+            // itself, which is the instance at neither. DirectWrite's has
+            // not been measured.
+            if cfg!(target_os = "macos") {
+                assert!(apart, "CoreText's own optical size at {size}px");
+            } else if !cfg!(target_os = "windows") {
+                assert_eq!(
+                    apart,
+                    size != default,
+                    "FreeType's default optical size, asked at {size}px"
+                );
+            }
+        }
     }
 }
