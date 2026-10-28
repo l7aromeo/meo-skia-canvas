@@ -376,9 +376,11 @@ impl Filter {
                                         // the radius it was asked for.
                                         //
                                         // Divided by the scale so the sigma
-                                        // lands in device space, which is
-                                        // where the mask filter's own
-                                        // `respect_ctm: false` puts it.
+                                        // is the length in device pixels
+                                        // under the recording's transform,
+                                        // as the mask filter's is below, and
+                                        // scales with any transform the
+                                        // draw is replayed under.
                                         let sigma_x = value / matrix.scale_x();
                                         let sigma_y = value / matrix.scale_y();
                                         image_filters::blur(
@@ -388,11 +390,35 @@ impl Filter {
                                             None,
                                         )
                                     } else {
-                                        mask_filter = MaskFilter::blur(
-                                            BlurStyle::Normal,
-                                            *value,
-                                            false,
-                                        );
+                                        // The same length in local units,
+                                        // with `respect_ctm` set, so that
+                                        // Skia maps it back through the
+                                        // transform the draw is replayed
+                                        // under: the recording's own, or
+                                        // that scaled by an export density
+                                        // or by a canvas drawn into another
+                                        // at a size. A sigma fixed in device
+                                        // pixels stayed the width it was at
+                                        // density 1 at every density. A
+                                        // transform that maps no length to
+                                        // a positive one draws nothing, and
+                                        // keeps the device sigma.
+                                        let scale =
+                                            matrix.map_radius(1.0).filter(
+                                                |s| s.is_normal() && *s > 0.0,
+                                            );
+                                        mask_filter = match scale {
+                                            Some(scale) => MaskFilter::blur(
+                                                BlurStyle::Normal,
+                                                value / scale,
+                                                true,
+                                            ),
+                                            None => MaskFilter::blur(
+                                                BlurStyle::Normal,
+                                                *value,
+                                                false,
+                                            ),
+                                        };
                                         chain
                                     }
                                 }

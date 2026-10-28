@@ -137,6 +137,17 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A blur set with `Context2D::set_filter` keeps its width at every export
+  density.** The blur of a flat-colour rectangle, rounded rectangle or line
+  of text was sized in output pixels, so at `density: 3` in
+  `ImageDataExport` or `EncodeOptions` it stayed as wide in pixels as at 1
+  while everything around it grew -- a `blur(2px)` rectangle read up to 105
+  levels off the same blur drawn three times as large -- and a canvas drawn
+  into another at twice its size with `Context2D::draw_canvas_sized` kept
+  the blur at half the width it should have had. Its width is now in canvas
+  pixels, as a shader fill's blur already was, so it scales with the export
+  and with the drawing it is placed in.
+
 - **`get_image_data` draws text at the canvas's own contrast and gamma.** A
   canvas made with `CanvasOptions::text_gamma` or `text_contrast` exported
   its text with them, but `Context2D::get_image_data` rasterized it at the
