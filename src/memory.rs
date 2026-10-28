@@ -36,6 +36,14 @@
 //! the steps were worth far less apart than together. A font release runs on
 //! its own thread after the watcher has moved on, so it trims again there.
 //!
+//! On glibc that second trim is what hands the caches' pages back: after the
+//! same sixty pages, also in a debug build, it takes the heap in use from 66
+//! to 29 MB and resident memory from 198 to 172, since `malloc_trim` returns
+//! only whole free pages and the rest of what was freed shares its pages with
+//! live allocations. On macOS the 40 MB goes back to the allocator for the
+//! next work to reuse, and the physical footprint, which Activity Monitor and
+//! jetsam read, does not fall with it in the thirty seconds after.
+//!
 //! # Why this is not done after every render
 //!
 //! Measured on glibc after two hundred card exports: `malloc_trim` took 1.41
