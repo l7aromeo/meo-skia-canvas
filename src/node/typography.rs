@@ -7,6 +7,7 @@ use crate::{
     font_library::{FontEpoch, FontLibrary, base_face},
     node::{
         decorate::{self, FaceLines, Layer, Thickness},
+        family_lists::FiledList,
         lru::{Lru, LruId},
     },
     text::{
@@ -1329,8 +1330,10 @@ fn decoration_thickness(state: &State) -> Option<f32> {
 
 impl<'a> Typesetter<'a> {
     pub fn new(state: &State, text: &'a str, width: Option<f32>) -> Self {
+        let typography = state.typography();
         Self::from_parts(
-            state.typography(),
+            typography,
+            state.filed_list(),
             &state.text.variations,
             decoration_thickness(state),
             state.text.oblique_angle,
@@ -1344,6 +1347,7 @@ impl<'a> Typesetter<'a> {
     /// registered now.
     fn from_parts(
         typography: Rc<Typography>,
+        filed: Option<FiledList>,
         variations: &[(FourByteTag, f32)],
         decoration_thickness: Option<f32>,
         oblique: Option<f32>,
@@ -1356,9 +1360,17 @@ impl<'a> Typesetter<'a> {
         let mut typography = typography;
         let hinting = typography.1.hinting_is_on();
         let variations = with_oblique_slnt(variations, oblique);
+        // By the filed list where the font was set, which compares a
+        // reference where looking the style up would hash its family names.
         let resolve = |style: &TextStyle| {
             FontLibrary::with_shared(|lib| {
-                lib.set_hinting(hinting).fonts_for_style(style, &variations)
+                let lib = lib.set_hinting(hinting);
+                match &filed {
+                    Some(filed) => {
+                        lib.fonts_for_list(filed, style, &variations)
+                    }
+                    None => lib.fonts_for_style(style, &variations),
+                }
             })
         };
         let faces = match oblique {

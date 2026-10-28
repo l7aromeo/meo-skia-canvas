@@ -33,6 +33,7 @@ use crate::{
     gpu::RenderingEngine,
     gradient::{BoxedCanvasGradient, CanvasGradient},
     node::{
+        family_lists::FiledList,
         filter::{
             Coverage, Filter, SamplingFilter, SamplingQuality, ScalingOperation,
         },
@@ -305,6 +306,7 @@ impl Default for State {
                 text_rendering: TextRendering::default(),
                 variations: vec![],
                 oblique_angle: None,
+                families: None,
             }),
             font_variation_settings: "normal".to_string(),
         }
@@ -423,6 +425,21 @@ impl State {
     pub fn typography(&self) -> Rc<Typography> {
         let epoch = FontLibrary::with_shared(|library| library.epoch());
         self.text.typography(epoch, || self.build_typography())
+    }
+
+    /// The family list [`typography`](Self::typography)'s style looks its
+    /// faces up by, filed again where the library has let it go -- see
+    /// `Typesetting::filed_list`. Asked for after the typography, which it
+    /// is kept with.
+    pub(crate) fn filed_list(&self) -> Option<FiledList> {
+        self.text.filed_list(
+            |list| FontLibrary::with_shared(|library| library.is_current(list)),
+            |families| {
+                FontLibrary::with_shared(|library| {
+                    library.canvas_list(families)
+                })
+            },
+        )
     }
 
     fn build_typography(&self) -> Typography {
@@ -1617,6 +1634,7 @@ impl Context2D {
         self.state.text.edit().char_style = style;
         self.state.text.edit().line_height = spec.line_height;
         self.state.text.edit().oblique_angle = spec.oblique_angle();
+        self.state.text.edit().families = Some(spec.families.clone());
     }
 
     /// Matches a specification against the font library and applies it.
