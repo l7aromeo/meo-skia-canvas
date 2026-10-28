@@ -18,6 +18,15 @@
 // It needs macOS, the GPU engine and `sandbox-exec`, and skips without them --
 // unless `MEO_SKIA_CANVAS_REQUIRE_METAL` is set, as on the release build, where
 // a skip would let an unpatched binary through.
+//
+// One machine is skipped even then: a macOS virtual machine, whose Metal
+// device is the Apple Paravirtual device. Its processes share a compiler
+// service that was running before the child and outlives it, so there is no
+// service of the child's own to stop, and stopping the shared one would stall
+// every other process compiling through it. That is the only case
+// `sharedService` names; anything else without a service of its own fails. On
+// such a machine, which is what build.yml's mac runner is,
+// scripts/check-patched-skia.mjs proves the patched source structurally.
 
 const { assert, describe, test } = require("../runner"),
   { Canvas } = require("../../lib"),
@@ -31,6 +40,38 @@ const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 const PAUSE_MS = 3000;
 // One red pixel drawn at half alpha, read back unpremultiplied.
 const HALF_RED = [255, 0, 0, 128];
+/** What Metal names the GPU of a macOS virtual machine, as `engine.device`
+ * reports it inside a longer name: "Integrated GPU (Apple Paravirtual
+ * device)" on GitHub's macos-15-arm64 runner. */
+const PARAVIRTUAL_DEVICE = "Apple Paravirtual device";
+
+/**
+ * Why the child had no compiler service of its own to stop, when that is the
+ * shared service of a virtual machine, or `null` -- in which case a missing
+ * service is a failure.
+ *
+ * All three must hold: the device is the paravirtual one, no service appeared
+ * for the child, and the services running before it are the ones running
+ * after, at least one of them. A paravirtual machine that does start one per
+ * process runs the test; a real GPU without one fails it.
+ *
+ * @param {{ engine?: { device?: string }, servicesBefore: string[], servicesAfter: string[] }} seen
+ * @returns {string | null}
+ */
+function sharedService({ engine, servicesBefore, servicesAfter }) {
+  const before = new Set(servicesBefore),
+    after = new Set(servicesAfter);
+  const unchanged =
+    before.size > 0 &&
+    before.size === after.size &&
+    [...before].every((pid) => after.has(pid));
+  if (!engine?.device?.includes(PARAVIRTUAL_DEVICE) || !unchanged) return null;
+  return (
+    `skipped: ${engine.device} compiles through the shared service ` +
+    `${[...before].join(", ")}, which this test cannot stop alone; ` +
+    "scripts/check-patched-skia.mjs proves the patched source instead"
+  );
+}
 
 const why =
   process.platform !== "darwin"
@@ -70,7 +111,8 @@ const child = `
   const warmMs = Date.now() - warmStart;
   const mine = [...services()].filter((pid) => !before.has(pid));
   const diagnosis = { pid: process.pid, engine: warm.engine, warmMs,
-    compilersBefore: seenBefore, compilersAfter: compilers() };
+    compilersBefore: seenBefore, compilersAfter: compilers(),
+    servicesBefore: [...before], servicesAfter: [...services()] };
   if (mine.length === 1) {
     process.kill(Number(mine[0]), "SIGSTOP");
     spawn("sh", ["-c", "sleep ${PAUSE_MS / 1000}; kill -CONT " + mine[0]], {
@@ -95,7 +137,7 @@ describe("A Metal compile that outlasts a second", () => {
   test(
     "still draws",
     { skip: (!process.env.MEO_SKIA_CANVAS_REQUIRE_METAL && why) || false },
-    () => {
+    (t) => {
       assert.equal(why, null, `required, but ${why}`);
       const cache = path.join(
         fs.realpathSync(
@@ -115,6 +157,9 @@ describe("A Metal compile that outlasts a second", () => {
       );
       const run = JSON.parse(output.trim().split("\n").at(-1) ?? "");
 
+      const shared = run.services === 0 && sharedService(run.diagnosis);
+      if (shared) return t.skip(shared);
+
       // The instrument first: one service found and stopped, and the draw
       // held for the pause. Without these the colour below proves nothing.
       assert.equal(
@@ -127,4 +172,59 @@ describe("A Metal compile that outlasts a second", () => {
       assert.deepEqual(run.again, HALF_RED, "the same draw afterwards");
     },
   );
+
+  test("skips only a virtual machine's shared compiler service", () => {
+    const paravirtual = { device: `Integrated GPU (${PARAVIRTUAL_DEVICE})` };
+    const real = { device: "Apple M2 Pro" };
+    for (const [seen, skipped, what] of [
+      [
+        {
+          engine: paravirtual,
+          servicesBefore: ["37387"],
+          servicesAfter: ["37387"],
+        },
+        true,
+        "a shared service on the paravirtual device",
+      ],
+      [
+        { engine: real, servicesBefore: ["37387"], servicesAfter: ["37387"] },
+        false,
+        "a real GPU with no service of the child's own",
+      ],
+      [
+        {
+          engine: paravirtual,
+          servicesBefore: ["37387"],
+          servicesAfter: ["37387", "40001"],
+        },
+        false,
+        "the paravirtual device starting a service for the child",
+      ],
+      [
+        { engine: paravirtual, servicesBefore: ["37387"], servicesAfter: [] },
+        false,
+        "the shared service gone afterwards",
+      ],
+      [
+        {
+          engine: paravirtual,
+          servicesBefore: ["37387"],
+          servicesAfter: ["40001"],
+        },
+        false,
+        "the shared service replaced by another",
+      ],
+      [
+        { engine: paravirtual, servicesBefore: [], servicesAfter: [] },
+        false,
+        "no service at all",
+      ],
+      [
+        { servicesBefore: ["37387"], servicesAfter: ["37387"] },
+        false,
+        "no engine reported",
+      ],
+    ])
+      assert.equal(sharedService(seen) !== null, skipped, what);
+  });
 });

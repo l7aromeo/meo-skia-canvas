@@ -58,4 +58,8 @@ whose skia-bindings output does not say it built offline from that tree, and
 `tests/suite/metal-compile.test.js`, required there by
 `MEO_SKIA_CANVAS_REQUIRE_METAL`, stops the process's own compiler service for
 three seconds under a sandbox that hides the Metal shader cache, and reads a
-transparent pixel from a timed build.
+transparent pixel from a timed build. The structural check is the one that
+holds on the hosted runner: a macOS virtual machine shares one compiler service
+between processes, so the test has none of its own to stop there, and it skips
+on the Apple Paravirtual device alone. An Apple Silicon Mac on macOS 27 starts
+a service per process and runs it, and any other machine without one fails it.

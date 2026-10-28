@@ -103,8 +103,11 @@ jobs:
       - name: Add to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # tests/suite/metal-compile.test.js fails rather than skips here: on
-          # the release build a skipped check would let an unpatched binary out.
+          # tests/suite/metal-compile.test.js fails rather than skips here for
+          # a missing GPU engine or sandbox. It still skips on this runner's
+          # Apple Paravirtual device, whose compiler service is shared and
+          # cannot be stopped for one process; the step above is the proof
+          # that holds there.
           MEO_SKIA_CANVAS_REQUIRE_METAL: "1"
         run: |
           bun run test:suite && bun run upload
