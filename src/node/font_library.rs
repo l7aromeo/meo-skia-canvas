@@ -23,8 +23,7 @@ use skia_safe::{
 
 use crate::{
     font::{
-        FontFamily, GenericFamily, InstancedPositions, optical_size,
-        variation_axes,
+        FontFamily, GenericFamily, InstancedPositions, KnownAxes, optical_size,
     },
     image::x_height_ratio,
     typography::{
@@ -634,6 +633,9 @@ pub struct FontLibrary {
     /// The positions paragraph builders have instanced through font
     /// arguments on the collections this hands out.
     positions: InstancedPositions,
+    /// The axes of the faces styles have resolved to, asked of the platform
+    /// once each -- see [`KnownAxes`]. Forgotten when the fonts change.
+    known_axes: KnownAxes,
     /// The system's family names, in lower case, read once for
     /// [`has_family`](Self::has_family) and dropped with everything else on
     /// [`invalidate`](Self::invalidate).
@@ -736,6 +738,7 @@ impl FontLibrary {
             collection_hinted: false,
             generics_cache: vec![],
             positions: InstancedPositions::default(),
+            known_axes: KnownAxes::default(),
             system_families: None,
         }
     }
@@ -1558,12 +1561,12 @@ impl FontLibrary {
     /// alternative is a cache whose correctness rests on which of two
     /// lookups happens to win.
     ///
-    /// The families remembered per face and the positions recorded against
-    /// the collections go too: the faces and collections they describe are
-    /// the ones replaced here. So do the paragraphs kept for measurements
-    /// whose ink is still to be read: they pin the faces replaced here, and
-    /// each measurement can lay itself out again in those faces from what it
-    /// was measured with.
+    /// The families and variation axes remembered per face and the
+    /// positions recorded against the collections go too: the faces and
+    /// collections they describe are the ones replaced here. So do the
+    /// paragraphs kept for measurements whose ink is still to be read: they
+    /// pin the faces replaced here, and each measurement can lay itself out
+    /// again in those faces from what it was measured with.
     fn invalidate(&mut self) {
         self.system_families = None;
         self.epoch = Rc::new(FontEpoch {
@@ -1575,8 +1578,15 @@ impl FontLibrary {
         self.instances.clear();
         self.resolved_fonts.clear();
         self.positions = InstancedPositions::default();
+        self.known_axes.clear();
         forget_families();
         forget_kept_paragraphs();
+    }
+
+    /// `face`'s variation axes, asked of the platform once for as long as
+    /// the fonts are unchanged -- see [`KnownAxes`].
+    pub(crate) fn axes_of(&mut self, face: &Typeface) -> Option<Rc<[Axis]>> {
+        self.known_axes.of(face)
     }
 
     /// Records that a paragraph builder is about to instance `families` at
@@ -1644,12 +1654,13 @@ impl FontLibrary {
         let opsz_tag = FourByteTag::from_chars('o', 'p', 's', 'z');
         // One pass over the matches' axes, for both questions the cache key
         // needs answered before the cache can be asked.
-        let (variable, sized) = matches.iter().filter_map(variation_axes).fold(
-            (false, false),
-            |(_, sized), axes| {
+        let known_axes = &mut self.known_axes;
+        let (variable, sized) = matches
+            .iter()
+            .filter_map(|face| known_axes.of(face))
+            .fold((false, false), |(_, sized), axes| {
                 (true, sized || axes.iter().any(|axis| axis.tag == opsz_tag))
-            },
-        );
+            });
 
         // if any of the matched typefaces is a variable font, create an
         // instance that matches the current weight settings and add it
@@ -1676,7 +1687,7 @@ impl FontLibrary {
             let mut dynamic = TypefaceFontProvider::new();
 
             for font in matches.into_iter() {
-                if let Some(params) = variation_axes(&font) {
+                if let Some(params) = self.known_axes.of(&font) {
                     let coords =
                         instance_coordinates(&params, style, variations);
 
@@ -2069,6 +2080,24 @@ mod tests {
     }
 
     #[test]
+    fn a_library_forgets_the_axes_it_knew_when_its_fonts_change() {
+        // Asked once a face while the fonts stand, and asked again after a
+        // registration, which forgets them with the rest of what the
+        // library derived from its fonts.
+        let bytes = std::fs::read("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+            .expect("bundled Amstelvar is readable");
+        let face = FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("Amstelvar parses");
+        let mut lib = FontLibrary::with_fonts(vec![]);
+        assert!(lib.axes_of(&face).is_some());
+        assert!(lib.axes_of(&face).is_some());
+        assert_eq!(lib.known_axes.asked, 1, "asked once");
+        lib.register_typeface(face.clone(), Some("AxesProbe".to_string()));
+        assert_eq!(lib.known_axes.len(), 0, "forgotten on a change");
+    }
+
+    #[test]
     fn an_instance_places_every_axis_of_the_face() {
         // Every axis, so a pushed style's position replaces the paragraph's
         // rather than moving only the axes it names over it.
@@ -2077,7 +2106,8 @@ mod tests {
         let face = FontMgr::new()
             .new_from_data(Data::new_copy(&bytes), None)
             .expect("Amstelvar parses");
-        let axes = variation_axes(&face).expect("Amstelvar is variable");
+        let axes =
+            crate::font::variation_axes(&face).expect("Amstelvar is variable");
         let [wght, wdth, opsz] = [b"wght", b"wdth", b"opsz"].map(|t| {
             FourByteTag::from_chars(
                 t[0] as char,

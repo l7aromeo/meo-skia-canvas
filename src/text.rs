@@ -34,7 +34,7 @@ use crate::{
     context2d::{FontStretch, TextDirection},
     font::{
         FontAxisTag, FontFamily, FontLibrary, FontVariation, GenericFamily,
-        InstancedPositions, ObliqueAngle, optical_size, variation_axes,
+        InstancedPositions, KnownAxes, ObliqueAngle, optical_size,
     },
     geometry::Rect,
     image::CSS_INITIAL_FONT_SIZE,
@@ -1204,6 +1204,11 @@ pub struct TextEngine {
     /// engine is neither `Send` nor `Sync`, and a `RefCell` would take away
     /// `UnwindSafe` and `RefUnwindSafe`, which it has.
     positions: Rc<Mutex<InstancedPositions>>,
+    /// The axes of the faces `collection` has resolved a style to, so that
+    /// each is asked of the platform once -- see [`KnownAxes`]. Shared with
+    /// every builder this engine opens, and held, like `positions`, in a
+    /// `Mutex` for the unwind safety it keeps.
+    axes: Rc<Mutex<KnownAxes>>,
 }
 
 impl TextEngine {
@@ -1234,6 +1239,7 @@ impl TextEngine {
         Self {
             collection,
             positions: Rc::default(),
+            axes: Rc::default(),
         }
     }
 
@@ -1260,6 +1266,7 @@ impl TextEngine {
         Self {
             collection,
             positions: Rc::default(),
+            axes: Rc::default(),
         }
     }
 
@@ -1356,6 +1363,7 @@ impl TextEngine {
         let mut instance = instance_for(
             &mut collection.clone(),
             &self.positions,
+            &self.axes,
             base_style,
             &oblique_variations(base_style, base_variations),
         );
@@ -1377,6 +1385,7 @@ impl TextEngine {
             ),
             collection,
             positions: self.positions.clone(),
+            axes: self.axes.clone(),
             variations: base_variations.to_vec(),
         }
     }
@@ -1427,6 +1436,8 @@ pub struct ParagraphBuilder {
     collection: FontCollection,
     /// The engine's record of the positions instanced through `collection`.
     positions: Rc<Mutex<InstancedPositions>>,
+    /// The engine's record of its faces' axes.
+    axes: Rc<Mutex<KnownAxes>>,
     /// The base style's axes, which a pushed style that inherits is
     /// instanced at.
     variations: Vec<FontVariation>,
@@ -1447,6 +1458,7 @@ impl ParagraphBuilder {
         let mut instance = instance_for(
             &mut self.collection.clone(),
             &self.positions,
+            &self.axes,
             style,
             &oblique_variations(style, variations),
         );
@@ -1793,6 +1805,7 @@ struct Instance {
 fn instance_for(
     collection: &mut FontCollection,
     positions: &Mutex<InstancedPositions>,
+    known: &Mutex<KnownAxes>,
     style: &TextStyle,
     variations: &[FontVariation],
 ) -> Instance {
@@ -1802,7 +1815,12 @@ fn instance_for(
         return Instance::default();
     }
     let faces = collection.find_typefaces(&families, font_style_for(style));
-    let Some(axes) = faces.iter().find_map(variation_axes) else {
+    let Some(axes) = faces.iter().find_map(|face| {
+        known
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .of(face)
+    }) else {
         return Instance::default();
     };
     let wght_tag = u32::from_be_bytes(*FontAxisTag::WGHT.as_bytes());

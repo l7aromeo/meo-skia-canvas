@@ -1,8 +1,9 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::{self, Write as _},
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 use parking_lot::Mutex;
@@ -366,6 +367,63 @@ pub(crate) fn leans_as_asked(face: &Typeface, angle: f32) -> bool {
 pub(crate) fn variation_axes(face: &Typeface) -> Option<Vec<Axis>> {
     face.variation_design_parameters()
         .filter(|axes| !axes.is_empty())
+}
+
+/// How many faces a [`KnownAxes`] keeps the axes of before it forgets them
+/// all and asks again.
+///
+/// A bound rather than a working set: the faces a family list resolves to
+/// are the registered and system faces, which are few, but an instance made
+/// for a style's font arguments is a face of its own, and a page animating
+/// a variable font's axes makes one a frame.
+pub(crate) const KNOWN_AXES: usize = 256;
+
+/// The variation axes of the faces already asked about, by
+/// `Typeface::unique_id`.
+///
+/// A face's axes are fixed when it is made, and asking for them is a call
+/// into the platform -- on macOS CoreText's, which a style resolving its
+/// faces made every time it was laid out. Skia counts unique ids up from
+/// one and never hands one out twice, so an id names one face for the life
+/// of the process, and an entry is never wrong; it is only kept while its
+/// owner lives, and dropped at [`KNOWN_AXES`].
+#[derive(Debug, Default)]
+pub(crate) struct KnownAxes {
+    axes: HashMap<u32, Option<Rc<[Axis]>>>,
+    /// How many times a face's axes were asked of the platform.
+    #[cfg(test)]
+    pub(crate) asked: usize,
+}
+
+impl KnownAxes {
+    /// `face`'s axes, as [`variation_axes`] reports them.
+    pub(crate) fn of(&mut self, face: &Typeface) -> Option<Rc<[Axis]>> {
+        let id = face.unique_id();
+        if let Some(axes) = self.axes.get(&id) {
+            return axes.clone();
+        }
+        if self.axes.len() >= KNOWN_AXES {
+            self.axes.clear();
+        }
+        #[cfg(test)]
+        {
+            self.asked += 1;
+        }
+        let axes = variation_axes(face).map(Rc::from);
+        self.axes.insert(id, axes.clone());
+        axes
+    }
+
+    /// Forgets every face, as when the fonts a library holds change.
+    pub(crate) fn clear(&mut self) {
+        self.axes.clear();
+    }
+
+    /// How many faces' axes are kept.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.axes.len()
+    }
 }
 
 /// The `opsz` position for text set at `font_size` CSS pixels in a face with
@@ -992,7 +1050,9 @@ mod tests {
 
     use skia_safe::{Data, FontMgr, FourByteTag};
 
-    use super::{FontAxisTag, optical_size, variation_axes};
+    use super::{
+        FontAxisTag, KNOWN_AXES, KnownAxes, optical_size, variation_axes,
+    };
 
     fn face(path: &str) -> skia_safe::Typeface {
         let bytes = fs::read(path).expect(path);
@@ -1048,5 +1108,39 @@ mod tests {
             None,
             "Oswald varies its weight and nothing else"
         );
+    }
+
+    /// A face's axes are asked of the platform once, a static face's absence
+    /// of them included, and each answer is the platform's.
+    #[test]
+    fn a_face_is_asked_for_its_axes_once() {
+        let oswald =
+            face("tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf");
+        let monoton = face("tests/assets/fonts/Monoton-Regular.woff2");
+        let mut known = KnownAxes::default();
+        for _ in 0..3 {
+            assert_eq!(
+                known.of(&oswald).as_deref(),
+                variation_axes(&oswald).as_deref()
+            );
+            assert!(known.of(&monoton).is_none());
+        }
+        assert_eq!(known.asked, 2, "once for each face");
+    }
+
+    /// However many faces are asked about, no more than [`KNOWN_AXES`] are
+    /// kept, and a library forgets them when its fonts change.
+    #[test]
+    fn known_axes_are_bounded_and_forgotten() {
+        let mut known = KnownAxes::default();
+        for _ in 0..=KNOWN_AXES {
+            // Each load is a face of its own, with an id of its own.
+            known.of(&face(
+                "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+            ));
+            assert!(known.len() <= KNOWN_AXES);
+        }
+        known.clear();
+        assert_eq!(known.len(), 0);
     }
 }
