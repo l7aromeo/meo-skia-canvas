@@ -75,12 +75,12 @@ static CACHE: OnceLock<Arc<DashMap<usize, PageCache>>> = OnceLock::new();
 
 /// Drops every cached page bitmap, keeping the identities that hold none.
 ///
-/// Called by the idle watcher in [`crate::memory`] once rendering has stopped
-/// for a few seconds, which is the only moment at which a bitmap is known not
-/// to be about to pay for itself. The entry it saves is worth 1.9
-/// milliseconds on a repeat 400x300 raw export and 1.2 on a 1200x900 PNG, so
-/// this is not free -- what makes it worth doing is that most of what is held
-/// when a process goes quiet belongs to canvases JavaScript has already
+/// Called by the idle watcher in [`crate::memory`] once rendering and text
+/// layout have stopped for a few seconds, which is the only moment at which a
+/// bitmap is known not to be about to pay for itself. The entry it saves is
+/// worth 1.9 milliseconds on a repeat 400x300 raw export and 1.2 on a 1200x900
+/// PNG, so this is not free -- what makes it worth doing is that most of what
+/// is held when a process goes quiet belongs to canvases JavaScript has already
 /// dropped, and V8 will not finalize those for as long as it does not feel
 /// the weight.
 ///
