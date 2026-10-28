@@ -1,5 +1,6 @@
 use std::{
     borrow::Cow,
+    collections::HashMap,
     iter::once,
     ops::Range,
     rc::Rc,
@@ -8,7 +9,7 @@ use std::{
 
 use skia_safe::{
     Canvas as SkCanvas, FontArguments, FontMgr, FontStyle, FourByteTag,
-    Paint as SkPaint, PaintStyle as SkPaintStyle, Point as SkPoint,
+    Paint as SkPaint, PaintStyle as SkPaintStyle, Point as SkPoint, Typeface,
     font_arguments::{VariationPosition, variation_position::Coordinate},
     font_parameters::variation::Axis,
     font_style::{Slant, Weight},
@@ -34,13 +35,13 @@ use crate::{
     },
     context2d::{FontStretch, TextDirection},
     font::{
-        FontAxisTag, FontFamily, FontLibrary, FontVariation, GenericFamily,
+        FontAxisTag, FontFamily, FontLibrary, FontVariation,
         InstancedPositions, KnownAxes, ObliqueAngle, optical_size,
     },
     geometry::Rect,
     image::CSS_INITIAL_FONT_SIZE,
     node::{
-        font_library::{FontLibrary as SharedFontRegistry, unmatched_name},
+        font_library::{FontLibrary as SharedFontRegistry, forgetful},
         oblique::{
             ParagraphRecipe, Sheared, add_slnt, match_oblique,
             without_paragraph_cache,
@@ -1210,6 +1211,9 @@ pub struct TextEngine {
     /// every builder this engine opens, and held, like `positions`, in a
     /// `Mutex` for the unwind safety it keeps.
     axes: Rc<Mutex<KnownAxes>>,
+    /// The faces `collection` has matched each family list and style to --
+    /// see [`FaceMatches`]. Shared with every builder this engine opens.
+    matches: Rc<Mutex<FaceMatches>>,
 }
 
 impl TextEngine {
@@ -1241,6 +1245,7 @@ impl TextEngine {
             collection,
             positions: Rc::default(),
             axes: Rc::default(),
+            matches: Rc::default(),
         }
     }
 
@@ -1268,6 +1273,7 @@ impl TextEngine {
             collection,
             positions: Rc::default(),
             axes: Rc::default(),
+            matches: Rc::default(),
         }
     }
 
@@ -1365,6 +1371,7 @@ impl TextEngine {
             &mut collection.clone(),
             &self.positions,
             &self.axes,
+            &self.matches,
             base_style,
             &oblique_variations(base_style, base_variations),
         );
@@ -1387,6 +1394,7 @@ impl TextEngine {
             collection,
             positions: self.positions.clone(),
             axes: self.axes.clone(),
+            matches: self.matches.clone(),
             variations: base_variations.to_vec(),
         }
     }
@@ -1439,6 +1447,8 @@ pub struct ParagraphBuilder {
     positions: Rc<Mutex<InstancedPositions>>,
     /// The engine's record of its faces' axes.
     axes: Rc<Mutex<KnownAxes>>,
+    /// The engine's record of what each family list and style matched.
+    matches: Rc<Mutex<FaceMatches>>,
     /// The base style's axes, which a pushed style that inherits is
     /// instanced at.
     variations: Vec<FontVariation>,
@@ -1460,6 +1470,7 @@ impl ParagraphBuilder {
             &mut self.collection.clone(),
             &self.positions,
             &self.axes,
+            &self.matches,
             style,
             &oblique_variations(style, variations),
         );
@@ -1780,6 +1791,69 @@ struct Instance {
     weight: Option<i32>,
 }
 
+/// How many family lists and styles an engine remembers the matches of.
+///
+/// A bound rather than a working set: a weight that animates names a new
+/// style every frame. Past it every remembered match is dropped and searched
+/// again.
+const MATCHES_KEPT: usize = 256;
+
+/// The faces an engine's collection has matched each family list and style
+/// to, searched once each.
+///
+/// The collection is the engine's for its life, built over a snapshot of
+/// its library, so a search of it answers the same every time: an entry is
+/// never stale, and goes only at [`MATCHES_KEPT`] or with the engine. The
+/// search was most of what instancing a style for its variable faces cost
+/// on a style met before.
+#[derive(Default)]
+pub(crate) struct FaceMatches {
+    matches: HashMap<FaceMatchKey, Rc<[Typeface]>>,
+}
+
+/// What a search of an engine's collection is asked: the family list and
+/// the style's weight, width and slant.
+#[derive(PartialEq, Eq, Hash)]
+struct FaceMatchKey {
+    families: Vec<String>,
+    weight: i32,
+    width: i32,
+    slant: Slant,
+}
+
+impl FaceMatches {
+    /// The faces `families` in `style` match in `collection`.
+    pub(crate) fn of(
+        &mut self,
+        collection: &mut FontCollection,
+        families: &[&str],
+        style: FontStyle,
+    ) -> Rc<[Typeface]> {
+        let key = FaceMatchKey {
+            families: families
+                .iter()
+                .map(|family| family.to_string())
+                .collect(),
+            weight: *style.weight(),
+            width: *style.width(),
+            slant: style.slant(),
+        };
+        let remember = !forgetful();
+        if remember && let Some(faces) = self.matches.get(&key) {
+            return faces.clone();
+        }
+        let faces: Rc<[Typeface]> =
+            collection.find_typefaces(families, style).into();
+        if remember {
+            if self.matches.len() >= MATCHES_KEPT {
+                self.matches.clear();
+            }
+            self.matches.insert(key, faces.clone());
+        }
+        faces
+    }
+}
+
 /// How `style`'s variable faces are instanced: at the explicit
 /// `variations`, at `wght` from `style`'s own weight unless they name it,
 /// and at `opsz` from its font size unless they name that.
@@ -1807,6 +1881,7 @@ fn instance_for(
     collection: &mut FontCollection,
     positions: &Mutex<InstancedPositions>,
     known: &Mutex<KnownAxes>,
+    matches: &Mutex<FaceMatches>,
     style: &TextStyle,
     variations: &[FontVariation],
 ) -> Instance {
@@ -1815,7 +1890,11 @@ fn instance_for(
     if families.is_empty() {
         return Instance::default();
     }
-    let faces = collection.find_typefaces(&families, font_style_for(style));
+    let faces = matches.lock().unwrap_or_else(PoisonError::into_inner).of(
+        collection,
+        &families,
+        font_style_for(style),
+    );
     let Some(axes) = faces.iter().find_map(|face| {
         known
             .lock()
@@ -2052,26 +2131,11 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
 /// it was registered under, as the canvas's counterpart does: the provider
 /// matches a name exactly, and CSS Fonts 4 matches family names without
 /// regard to case.
-fn collection_names(families: &[FontFamily]) -> Vec<String> {
-    families
-        .iter()
-        .map(|family| match family {
-            FontFamily::Generic(generic) => generic.to_css().to_string(),
-            FontFamily::Named(name) => {
-                SharedFontRegistry::with_shared(|library| {
-                    match library.registered_spelling(name) {
-                        Some(registered) => registered,
-                        None if GenericFamily::from_css(name).is_some()
-                            && !library.has_family(name) =>
-                        {
-                            unmatched_name(name)
-                        }
-                        None => name.clone(),
-                    }
-                })
-            }
-        })
-        .collect()
+///
+/// Worked out once per family list while the library's fonts stand -- see
+/// `FontLibrary::engine_names`.
+fn collection_names(families: &[FontFamily]) -> Rc<[String]> {
+    SharedFontRegistry::with_shared(|library| library.engine_names(families))
 }
 
 /// The families a strut should be measured in.
@@ -2095,10 +2159,10 @@ fn strut_families(
         return Vec::new();
     };
     if !strut.font_families.is_empty() {
-        return collection_names(&strut.font_families);
+        return collection_names(&strut.font_families).to_vec();
     }
     if !style.font_families.is_empty() {
-        return collection_names(&style.font_families);
+        return collection_names(&style.font_families).to_vec();
     }
     collection
         .default_fallback()
@@ -2293,6 +2357,7 @@ mod tests {
             &mut engine.collection.clone(),
             &engine.positions,
             &engine.axes,
+            &engine.matches,
             &style,
             &[],
         )
