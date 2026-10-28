@@ -2929,21 +2929,49 @@ describe("a GPU read", () => {
 });
 
 // Skia takes a text gamma from 0 up to, not including, 4 and a contrast from
-// 0 to 1, and a canvas refuses anything outside them with a `RangeError`
-// naming the range. A gamma above it was checked against the contrast's
-// variable and accepted.
+// 0 to 1, and a canvas refuses anything outside them, NaN included, with a
+// `RangeError` naming the range. A gamma of exactly 4 is refused too, where
+// it was quietly made a hair smaller.
 describe("a canvas's text gamma and contrast", () => {
   test("are refused outside Skia's range", () => {
     for (const options of [
       { textGamma: 5 },
+      { textGamma: 4 },
+      // Under 4 as a double, 4 once it is the single-precision value Skia
+      // is handed.
+      { textGamma: 3.99999999 },
       { textGamma: -1 },
+      { textGamma: NaN },
       { textContrast: 2 },
       { textContrast: -0.5 },
-    ])
+      { textContrast: NaN },
+    ]) {
+      const [[key, value]] = Object.entries(options);
       assert.throws(
         () => new Canvas(1, 1, options),
-        RangeError,
-        JSON.stringify(options),
+        (error) =>
+          error instanceof RangeError &&
+          error.message.includes(`\`${key}\``) &&
+          // The value as JavaScript spells it, NaN included.
+          error.message.includes(`(got ${String(value)})`),
+        `${key}: ${value}`,
+      );
+    }
+  });
+
+  // What the canvas reports is the single-precision value Skia draws with,
+  // not the double it was handed: a gamma of -1e-50 is 0 once it is a
+  // single, and a contrast of 1.00000001 is 1.
+  test("read back as the value in force", () => {
+    for (const [options, key, inForce] of [
+      [{ textGamma: -1e-50 }, "textGamma", 0],
+      [{ textContrast: 1.00000001 }, "textContrast", 1],
+      [{ textGamma: 2.2 }, "textGamma", Math.fround(2.2)],
+      [{ textContrast: 0.3 }, "textContrast", Math.fround(0.3)],
+    ])
+      assert.ok(
+        Object.is(new Canvas(1, 1, options).engine[key], inForce),
+        `${JSON.stringify(options)} reads back ${new Canvas(1, 1, options).engine[key]}`,
       );
   });
 
@@ -2951,6 +2979,8 @@ describe("a canvas's text gamma and contrast", () => {
     for (const options of [
       { textGamma: 0 },
       { textGamma: 3.9 },
+      // The largest single-precision value below 4.
+      { textGamma: 3.9999997615814209 },
       { textContrast: 0 },
       { textContrast: 1 },
     ])

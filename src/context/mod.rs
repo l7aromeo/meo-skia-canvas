@@ -320,7 +320,7 @@ impl Default for State {
 /// font shorthand's parent is set in.
 pub(crate) fn initial_root_face() -> Option<Typeface> {
     FontLibrary::with_shared(|library| {
-        let mut collection = library.font_collection();
+        let mut collection = library.face_collection();
         collection
             .find_typefaces(
                 &[generic_name(ROOT_FONT_FAMILY)],

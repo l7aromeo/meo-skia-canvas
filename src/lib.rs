@@ -515,6 +515,15 @@ fn discard_gpu_draws(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
+/// Test-only: the idle watcher's activity count -- see [`memory`] -- which a
+/// test reads either side of a posted font release.
+///
+/// Exported by debug builds only, as `__discardGpuDraws` is.
+#[cfg(all(feature = "node-addon", debug_assertions))]
+fn activity(mut cx: FunctionContext) -> JsResult<JsNumber> {
+    Ok(cx.number(memory::activity() as f64))
+}
+
 /// Module-level function checking bytes against Subresource Integrity
 /// metadata: `integrityRefusal(bytes, metadata)`.
 ///
@@ -575,6 +584,10 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     // it writes to the environment, and the narrowest window available is the
     // one with none of this addon's threads in it yet.
     install_fontconfig_fallback();
+
+    // Once per JavaScript thread, as this runs on each that loads the addon:
+    // the channel the idle watcher empties this thread's font caches through.
+    node::idle::register(&mut cx);
 
     // initialize thread pool w/ non-default size if requested
     if let Ok(value) = std::env::var("SKIA_CANVAS_THREADS")
@@ -968,6 +981,10 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("colorTypes", color_types)?;
     #[cfg(all(debug_assertions, any(feature = "metal", feature = "vulkan")))]
     cx.export_function("__discardGpuDraws", discard_gpu_draws)?;
+    #[cfg(debug_assertions)]
+    cx.export_function("__cachedParagraphs", font_library::cachedParagraphs)?;
+    #[cfg(debug_assertions)]
+    cx.export_function("__activity", activity)?;
     cx.export_function("integrityRefusal", integrity_refusal)?;
     cx.export_function("decodeDataURL", data_url_bytes)?;
     cx.export_function("parseTransformList", transform_list)?;

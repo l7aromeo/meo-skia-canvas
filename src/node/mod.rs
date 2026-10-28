@@ -13,6 +13,8 @@ pub(crate) mod decorate;
 pub mod filter;
 pub mod font_library;
 pub mod gradient;
+#[cfg(feature = "node-addon")]
+pub(crate) mod idle;
 pub mod image;
 pub mod image_filter;
 pub mod mask_filter;

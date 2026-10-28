@@ -53,6 +53,13 @@ pub(crate) fn arg_num(o: usize) -> String {
 /// written in two places only means anything while the two agree.
 const COORDINATE_EPSILON: f32 = 0.00001;
 
+/// `number` as JavaScript's `ToString` spells it, for a refusal to name:
+/// `1e+21` and `Infinity` where Rust's `Display` writes twenty-two digits
+/// and `inf`.
+pub fn spelled(cx: &mut FunctionContext, number: f64) -> NeonResult<String> {
+    Ok(cx.number(number).to_string(cx)?.value(cx))
+}
+
 /// Whether `a` and `b` are the same coordinate to within
 /// [`COORDINATE_EPSILON`].
 pub fn almost_equal(a: f32, b: f32) -> bool {
@@ -680,6 +687,19 @@ pub fn opt_double_for_key(
     attr: &str,
 ) -> Option<f64> {
     obj.get(cx, attr).ok().and_then(|val| _as_double(cx, &val))
+}
+
+/// As [`opt_double_for_key`], keeping a value that converts to a
+/// non-finite number, for a caller that refuses one by its range rather than
+/// leaving it to fall back to a default.
+pub fn opt_raw_double_for_key(
+    cx: &mut FunctionContext,
+    obj: &Handle<JsObject>,
+    attr: &str,
+) -> Option<f64> {
+    obj.get(cx, attr)
+        .ok()
+        .and_then(|val| _as_double_raw(cx, &val))
 }
 
 pub fn opt_float_for_key(

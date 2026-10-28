@@ -205,13 +205,6 @@ fn float_option<'a>(
     Ok(number_option(cx, obj, prefix, key)?.map(|number| number as f32))
 }
 
-/// `number` as JavaScript's `ToString` spells it, for a refusal to name:
-/// `1e+21` and `Infinity` where Rust's `Display` writes twenty-two digits
-/// and `inf`.
-fn spelled(cx: &mut FunctionContext, number: f64) -> NeonResult<String> {
-    Ok(cx.number(number).to_string(cx)?.value(cx))
-}
-
 /// The code `number` names in `codes`, which lists them in order from 0, or
 /// a `RangeError` naming `number` -- AGENTS.md's rule 4, a number outside
 /// the set it is read from, where a misspelt name would be rule 2's

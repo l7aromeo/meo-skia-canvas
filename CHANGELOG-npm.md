@@ -21,6 +21,20 @@ removed and no signature moves.
 
 ### Breaking
 
+- **`textGamma: 4`, and a text contrast or gamma that is NaN or infinite,
+  are refused.** Skia takes a text gamma from 0 up to, not including, 4. A
+  gamma of exactly 4 was quietly made a hair smaller and taken, and NaN or
+  an infinity in either option quietly became the default; each is now a
+  `RangeError` naming the option and the value it got. The check is made
+  on the single-precision value Skia is handed, so a number just under 4
+  that rounds to 4 there is refused with it, and `canvas.engine` reports
+  that value rather than the number passed: `textContrast: 1.00000001`
+  reads back as 1, and `textGamma: -1e-50` as 0.
+
+  Migrate: pass a gamma below 4 -- 3.9999997615814209 is the largest a
+  canvas takes -- and a finite contrast and gamma, or leave either out for
+  the platform's default.
+
 - **`ctx.fontHinting` reads `true` until it is set.** It read `false`,
   though text was drawn hinted either way, since the setting did nothing; it
   now takes effect, and on is what text was always drawn at. Code that read
@@ -1365,6 +1379,23 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
   `width` read takes about 5.5 µs where it took 7.7, and reading the ink as
   well about 7.4. `JSON.stringify` works the ink out once, through
   `toJSON` -- see Breaking.
+
+- **A process that has stopped drawing lets its font caches go.** Each font
+  collection keeps the paragraphs it has laid out and the faces and
+  variable-font instances it made for them, and nothing emptied them short
+  of `FontLibrary.reset()` or a registration: after sixty text-heavy pages
+  in two variable fonts, an idle process held 40.4 MB in them of the 78.1 MB
+  its allocator had in use, in a debug build on macOS. The idle watcher that
+  drops cached page bitmaps a few seconds after the last draw now empties
+  these too, on each thread that loaded the addon, between two of its tasks
+  and so never during a layout, and lets go of the paragraphs kept for
+  `measureText` results whose ink has not been read: one read later lays
+  its text out again and reports the same ink. Measuring text and looking
+  fonts up count as use, as drawing does, so a server answering with widths
+  alone keeps its caches while it works. The collections and their
+  instances stay: the next text drawn lays out again from faces already
+  loaded, and draws the same. Nothing the watcher leaves on a thread keeps
+  its event loop alive.
 
 ## 📦 ⟩ [v6.0.2] (npm) ⟩ September 16, 2026
 

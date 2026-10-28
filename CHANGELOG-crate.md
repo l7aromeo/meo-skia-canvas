@@ -25,6 +25,17 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Breaking
 
+- **`Canvas::with_options` refuses a text contrast or gamma outside Skia's
+  range.** `CanvasOptions::text_contrast` and `text_gamma` were handed to
+  Skia as they came, whatever they were. A contrast outside 0 to 1, a gamma
+  outside 0 up to, not including, 4, or NaN in either now returns
+  `Error::InvalidCanvasOption`, a new variant naming the field, as the Node
+  binding refuses them.
+
+  Migrate: pass a contrast from 0 to 1 and a gamma below 4 --
+  `f32::from_bits(4.0f32.to_bits() - 1)` is the largest taken -- or leave
+  both at `CanvasOptions::default()`'s.
+
 - **`Context2D::font_hinting` is `true` until it is set.** It was `false`,
   though text was drawn hinted either way, since the setting did nothing; it
   now takes effect, and on is what text was always drawn at. Code that read
@@ -165,6 +176,14 @@ window be changed after it opens.** No signature moves and nothing is removed.
   font changes inside a cluster, the two sides are shaped apart and each
   keeps its own colour, as in Chrome. A paragraph in several colours with
   no change inside a cluster is drawn as it was.
+
+- **A `Window` shows text at its canvas's contrast and gamma.**
+  `Window::with_canvas` took the platform's default `text_contrast` and
+  `text_gamma` whatever the canvas was made with, so a canvas made with a
+  `text_gamma` of 2.0 exported its text at 2.0 and showed it in a window at
+  the default; the Node `Window` already read its canvas's. It now takes the
+  canvas's, and `Window::text_contrast` and `text_gamma` report them.
+
 - **`Context2D::set_font_hinting(false)` draws the outlines as designed.**
   It turned hinting off on the paragraph style, which SkParagraph never
   reads, so every glyph was drawn at Slight hinting whatever it said.
@@ -1135,6 +1154,16 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   bounds are now remembered by face, size and glyph, up to 4,096 of them:
   `measure_text("Hello world")` takes about 4.3 µs in release on macOS where
   it took 5.6, and a seventy-character line about 15 where it took 25.
+
+- **Laying text out holds the idle watcher off, as drawing does.** The
+  watcher that drops cached page bitmaps and trims the allocator once
+  rendering stops counted only rasterization, so a program that measured
+  text without drawing it never started it, and one that drew and then only
+  measured had its pages dropped a few seconds into the measuring. A
+  canvas's text reaching its fonts now counts too; a `TextEngine`, which
+  keeps fonts of its own, does not. The font caches themselves are emptied
+  at idle by the npm addon alone, which can post the release to the
+  JavaScript thread that owns them; a Rust program's are kept as before.
 
 ## 📦 ⟩ [v0.16.3] (crate) ⟩ September 16, 2026
 

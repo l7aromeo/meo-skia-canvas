@@ -27,9 +27,11 @@ use crate::{
         variation_axes,
     },
     image::x_height_ratio,
+    memory::note_font_use,
     node::decorate,
     typography::{
-        FontSpec, from_slant, from_width, typeface_details, typeface_wght_range,
+        FontSpec, forget_families, forget_kept_paragraphs, from_slant,
+        from_width, typeface_details, typeface_wght_range,
     },
     utils::*,
 };
@@ -773,10 +775,17 @@ impl FontLibrary {
         })
     }
 
+    /// Runs `f` on this thread's library, made on first use.
+    ///
+    /// Counts as use of the fonts for the idle watcher -- see
+    /// [`note_font_use`] -- so that text laid out without being drawn, a
+    /// server measuring and nothing else, holds a release off as drawing
+    /// does.
     pub fn with_shared<T, F>(f: F) -> T
     where
         F: FnOnce(&mut FontLibrary) -> T,
     {
+        note_font_use();
         LIBRARY.with(|lib_lock| {
             let shared_lib = lib_lock.get_or_init(|| {
                 // Covers the crate channel, which has no entry point to run
@@ -789,6 +798,32 @@ impl FontLibrary {
 
             f(&mut shared_lib.borrow_mut())
         })
+    }
+
+    /// A collection to find faces in, for a caller that lays nothing out:
+    /// whichever of the two sets exists, the hinted one first, and the
+    /// hinted one made where neither does, since text is drawn hinted by
+    /// default.
+    ///
+    /// The two sets hold the same faces and differ only in the paragraphs
+    /// they cache, so a face search answers the same in either.
+    /// [`font_collection`](Self::font_collection) instead makes the set
+    /// [`set_hinting`](Self::set_hinting) last chose, which is right for a
+    /// layout and wrong here: on a fresh library that is the unhinted set,
+    /// so setting a font built a set of collections that text drawn hinted
+    /// never uses.
+    pub fn face_collection(&mut self) -> FontCollection {
+        let hinted = usize::from(true);
+        let slot = match self.collections {
+            [Some(_), None] => usize::from(false),
+            _ => hinted,
+        };
+        if self.collections[slot].is_none() {
+            self.collections[slot] = Some(self.new_font_collection());
+        }
+        // SAFETY: the `if` above assigns `Some` when the slot is `None`, so
+        // it is `Some` on every path to here.
+        self.collections[slot].as_ref().unwrap().clone()
     }
 
     /// The collection over every registered and generic face for the
@@ -1147,7 +1182,7 @@ impl FontLibrary {
         // caches for cost. That is why it has not been done here rather than
         // an oversight; it puts a fresh collection on a per-document path.
         let candidates: Vec<Typeface> = self
-            .font_collection()
+            .face_collection()
             .find_typefaces(
                 &[
                     GenericFamily::SystemUi,
@@ -1507,7 +1542,7 @@ impl FontLibrary {
     pub fn resolve(&mut self, mut spec: FontSpec) -> Option<ResolvedFont> {
         spec.collection_names = self.collection_names(&spec.families);
         let typeface = self
-            .font_collection()
+            .face_collection()
             .find_typefaces(&spec.collection_names, spec.style())
             .into_iter()
             .next()?;
@@ -1531,6 +1566,13 @@ impl FontLibrary {
     /// call on a path taken when a program registers a font, and the
     /// alternative is a cache whose correctness rests on which of two
     /// lookups happens to win.
+    ///
+    /// The families remembered per face and the positions recorded against
+    /// the collections go too: the faces and collections they describe are
+    /// the ones replaced here. So do the paragraphs kept for measurements
+    /// whose ink is still to be read: they pin the faces replaced here, and
+    /// each measurement can lay itself out again in those faces from what it
+    /// was measured with.
     fn invalidate(&mut self) {
         self.system_families = None;
         self.epoch = Rc::new(FontEpoch {
@@ -1542,6 +1584,9 @@ impl FontLibrary {
         self.collection_cache.clear();
         self.instances.clear();
         self.resolved_fonts.clear();
+        self.positions = InstancedPositions::default();
+        forget_families();
+        forget_kept_paragraphs();
     }
 
     /// Records that a paragraph builder is about to instance `families` at
@@ -1560,12 +1605,87 @@ impl FontLibrary {
     ) -> bool {
         let full = self.positions.admit(families, coordinates);
         if full {
-            self.collection_cache.clear_caches();
-            for collection in self.collections.iter_mut().flatten() {
-                collection.clear_caches();
-            }
+            self.clear_collection_caches();
         }
         full
+    }
+
+    /// Empties the paragraph, face and variation caches of every collection
+    /// held, keeping the collections themselves and the instances they were
+    /// built over: what the idle watcher asks of a thread's library once
+    /// rendering stops -- see `node::idle`.
+    ///
+    /// The record of positions starts again, since the typefaces it counts
+    /// went with the caches. The instances stay: after sixty text-heavy pages
+    /// in two variable fonts, measured in a debug build on macOS, emptying
+    /// the collections' caches hands back 40.4 MB of the 78.1 MB the
+    /// allocator had in use, and halving the instances as well only 0.8 MB
+    /// more, for a rebuild of each on the next layout that needs it.
+    ///
+    /// The paragraphs kept for measurements whose ink is still to be read go
+    /// too, through [`forget_kept_paragraphs`]: each pins the typeface
+    /// instance it was laid out in, and a measurement whose paragraph has
+    /// gone lays out again when its ink is read, as one pushed out by their
+    /// bound does. The ink remembered per face and the family per face stay,
+    /// since they hold ids and bounds rather than faces, and come to about
+    /// 100 KB at most.
+    #[cfg(any(test, feature = "node-addon"))]
+    pub(crate) fn release_caches(&mut self) {
+        self.clear_collection_caches();
+        self.positions = InstancedPositions::default();
+        forget_kept_paragraphs();
+    }
+
+    /// [`release_caches`](Self::release_caches) on this thread's library,
+    /// if it has one.
+    ///
+    /// Not through [`with_shared`](Self::with_shared), which makes a library
+    /// on a thread that has none and counts as use of the fonts: a release
+    /// would hold off the next, and so be the cause of it. It runs between
+    /// two JavaScript tasks, when no borrow of the library can be
+    /// outstanding; one that is is left alone rather than panicked over.
+    #[cfg(any(test, feature = "node-addon"))]
+    pub(crate) fn release_shared_caches() {
+        Self::with_existing(Self::release_caches);
+    }
+
+    /// Runs `f` on this thread's library if it has one that nothing is
+    /// borrowing, without counting as use of the fonts.
+    #[cfg(any(test, feature = "node-addon"))]
+    fn with_existing<T>(f: impl FnOnce(&mut FontLibrary) -> T) -> Option<T> {
+        LIBRARY.with(|lib| {
+            let mut lib = lib.get()?.try_borrow_mut().ok()?;
+            Some(f(&mut lib))
+        })
+    }
+
+    /// How many paragraphs the caches of every collection held keep, for
+    /// the tests here and the debug addon's `__cachedParagraphs`.
+    #[cfg(any(test, all(debug_assertions, feature = "node-addon")))]
+    pub(crate) fn cached_paragraphs(&mut self) -> usize {
+        self.collections
+            .iter_mut()
+            .flatten()
+            .chain(
+                self.collection_cache
+                    .entries
+                    .values_mut()
+                    .map(|(collection, ..)| collection),
+            )
+            .map(|collection| {
+                usize::try_from(collection.paragraph_cache_mut().count())
+                    .unwrap_or_default()
+            })
+            .sum()
+    }
+
+    /// Empties the caches of every collection held, the base sets and the
+    /// cached instanced ones alike.
+    fn clear_collection_caches(&mut self) {
+        self.collection_cache.clear_caches();
+        for collection in self.collections.iter_mut().flatten() {
+            collection.clear_caches();
+        }
     }
 
     /// Chooses the collections handed out from here on: those for text
@@ -1843,6 +1963,19 @@ pub fn addFamilyFromData(mut cx: FunctionContext) -> JsResult<JsValue> {
     results.get_value(&mut cx, 0)
 }
 
+/// Test-only: how many paragraphs the collections this thread's library
+/// holds keep in their caches, so that a test can watch the idle watcher
+/// empty them and the next layout fill them again. Reads without counting as
+/// use of the fonts, which would hold the release off.
+///
+/// Exported by debug builds only, as `__discardGpuDraws` is.
+#[cfg(all(feature = "node-addon", debug_assertions))]
+pub fn cachedParagraphs(mut cx: FunctionContext) -> JsResult<JsNumber> {
+    let held = FontLibrary::with_existing(FontLibrary::cached_paragraphs)
+        .unwrap_or_default();
+    Ok(cx.number(held as f64))
+}
+
 pub fn reset(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     FontLibrary::with_shared(|lib| {
         lib.fonts.clear();
@@ -1861,6 +1994,43 @@ mod tests {
 
     use super::*;
     use crate::font::INSTANCED_POSITIONS;
+
+    /// Which of the two sets of collections exist: `[unhinted, hinted]`.
+    fn sets_built() -> [bool; 2] {
+        FontLibrary::with_shared(|lib| {
+            lib.collections.each_ref().map(Option::is_some)
+        })
+    }
+
+    #[test]
+    fn finding_a_face_builds_no_collection_of_another_hinting() {
+        // Setting a font and finding the root font look faces up and lay
+        // nothing out, so they need whichever set is there -- the hinted
+        // one, which text draws with by default, where there is none.
+        use crate::{
+            canvas::Canvas, context::initial_root_face, context2d::Font,
+        };
+        let mut canvas = Canvas::new(10.0, 10.0);
+        canvas.context().set_font(&Font::new("serif", 20.0));
+        initial_root_face();
+        assert_eq!(sets_built(), [false, true], "only the hinted set");
+    }
+
+    #[test]
+    fn finding_a_face_takes_the_set_already_built() {
+        // Text drawn unhinted only: its set is the one built, and a face
+        // search takes it rather than building the other.
+        use crate::{
+            canvas::Canvas, context::initial_root_face, context2d::Font,
+        };
+        FontLibrary::with_shared(|lib| {
+            lib.set_hinting(false).font_collection();
+        });
+        let mut canvas = Canvas::new(10.0, 10.0);
+        canvas.context().set_font(&Font::new("serif", 20.0));
+        initial_root_face();
+        assert_eq!(sets_built(), [true, false], "only the unhinted set");
+    }
 
     /// The manager handed to `SkSVGDOM` answers a null family.
     ///
@@ -2069,6 +2239,35 @@ mod tests {
     }
 
     #[test]
+    fn a_change_to_the_fonts_forgets_the_positions_recorded_before_it() {
+        // The positions count toward dropping the caches of the collections
+        // they were instanced through; a change to the fonts replaces those
+        // collections, so the count starts again with them.
+        const FAMILY: &str = "AmstelvarPositionsForgotten";
+        let bytes = std::fs::read("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+            .expect("bundled Amstelvar is readable");
+        let face = || {
+            FontMgr::new()
+                .new_from_data(Data::new_copy(&bytes), None)
+                .expect("Amstelvar parses")
+        };
+        let opsz = FourByteTag::from_chars('o', 'p', 's', 'z');
+        FontLibrary::with_shared(|lib| {
+            lib.register_typeface(face(), Some(FAMILY.to_string()));
+            for n in 0..10 {
+                let at = [Coordinate {
+                    axis: opsz,
+                    value: 10.0 + n as f32,
+                }];
+                assert!(!lib.admit_position(&[FAMILY], &at));
+            }
+            assert_eq!(lib.positions.len(), 10);
+            lib.register_typeface(face(), Some(FAMILY.to_string()));
+            assert_eq!(lib.positions.len(), 0);
+        });
+    }
+
+    #[test]
     fn a_builders_positions_past_the_bound_drop_every_held_collection() {
         // A paragraph builder instances a pushed style through font arguments
         // on whichever collection it was handed, cached or not, and Skia
@@ -2134,6 +2333,70 @@ mod tests {
                 "and the cached and the main collection are dropped here"
             );
         });
+    }
+
+    #[test]
+    fn a_release_empties_every_held_collection_and_keeps_them() {
+        // What the idle watcher posts to a thread: a paragraph laid out
+        // through the base set and one through a cached instanced collection
+        // are both let go, the collections and their instances stay, and the
+        // next layout through either caches again.
+        const FAMILY: &str = "AmstelvarRelease";
+        let bytes = std::fs::read("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+            .expect("bundled Amstelvar is readable");
+        let face = FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("Amstelvar parses");
+        let cache_paragraph = |collection: &FontCollection| {
+            let mut builder =
+                SkParagraphBuilder::new(&ParagraphStyle::new(), collection);
+            builder.add_text("Hamburgefonstiv");
+            builder.build().layout(f32::MAX);
+        };
+        let axis = FourByteTag::from_chars('w', 'g', 'h', 't');
+        let wght = [Coordinate { axis, value: 300.0 }];
+
+        FontLibrary::with_shared(|lib| {
+            lib.register_typeface(face, Some(FAMILY.to_string()));
+            let mut style = TextStyle::new();
+            style.set_font_families(&[FAMILY]);
+            let (instanced, _) = lib.fonts_for_style(&style, &[(axis, 300.0)]);
+            let main = lib.font_collection();
+            cache_paragraph(&instanced);
+            cache_paragraph(&main);
+            assert!(!lib.admit_position(&[FAMILY], &wght));
+            let collections = lib.collection_cache.entries.len();
+            let instances = lib.instances.entries.len();
+            assert_eq!(lib.cached_paragraphs(), 2, "one through each");
+
+            lib.release_caches();
+            assert_eq!(lib.cached_paragraphs(), 0, "both are let go");
+            assert_eq!(lib.positions.len(), 0, "with the positions they used");
+            assert_eq!(
+                (
+                    lib.collection_cache.entries.len(),
+                    lib.instances.entries.len()
+                ),
+                (collections, instances),
+                "the collections and instances stay"
+            );
+
+            cache_paragraph(&instanced);
+            cache_paragraph(&main);
+            assert_eq!(lib.cached_paragraphs(), 2, "and fill again");
+        });
+    }
+
+    #[test]
+    fn a_release_on_a_thread_without_a_library_makes_none() {
+        // The watcher posts to every thread that loaded the addon, and one
+        // that never reached a font has no library for a release to empty.
+        std::thread::spawn(|| {
+            FontLibrary::release_shared_caches();
+            LIBRARY.with(|lib| assert!(lib.get().is_none()));
+        })
+        .join()
+        .expect("the thread runs to the end");
     }
 
     #[test]
