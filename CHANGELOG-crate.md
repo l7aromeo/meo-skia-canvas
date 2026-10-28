@@ -126,6 +126,15 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A font registered after `set_font` moves the baselines with the
+  glyphs.** Registering a family again changed the face a context's text
+  was drawn in, but its baselines kept the face the font resolved to when it
+  was set: at 24px, a family moved from Oswald to Amstelvar still measured
+  Oswald's hanging baseline of 22.91 and ideographic baseline of -6.94,
+  where a fresh context reads Amstelvar's 18.24 and -6.00, and
+  `TextBaseline::Top` drew the text Oswald's ascent below the anchor. The
+  baselines are now read off the face the text is drawn in.
+
 - **A `Window` shows text at its canvas's contrast and gamma.**
   `Window::with_canvas` took the platform's default `text_contrast` and
   `text_gamma` whatever the canvas was made with, so a canvas made with a

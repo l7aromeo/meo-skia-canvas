@@ -423,7 +423,16 @@ impl State {
     fn build_typography(&self) -> Typography {
         let mut char_style = self.text.char_style.clone(); // use font size & style to calculate spacing
         self.add_rendering_features(&mut char_style);
-        let units = self.font_units();
+        // The face the run is drawn in, as the fonts registered now resolve
+        // it. The baselines are placed by its metrics, which the style reads
+        // off its typeface: left as the face the font resolved to when it
+        // was set, a family registered again since would place them by the
+        // face it replaced while the glyphs came from the new one.
+        let face = self.primary_face();
+        if let Some(face) = &face {
+            char_style.set_typeface(face.clone());
+        }
+        let units = FontUnits::new(char_style.font_size(), || face.clone());
         char_style.set_word_spacing(self.text.word_spacing.in_px(&units));
         char_style.set_letter_spacing(self.text.letter_spacing.in_px(&units));
         char_style.set_baseline_shift(

@@ -364,6 +364,16 @@ removed and no signature moves.
 
 ### Fixed
 
+- **A font registered after `ctx.font` was set moves the baselines with the
+  glyphs.** Registering a family again with `FontLibrary.use` changed the
+  face a context's text was drawn in, but the baselines kept the face the
+  font had resolved to when it was set: at 24px, a family moved from Oswald
+  to Amstelvar still measured a `hangingBaseline` of 22.91 and an
+  `ideographicBaseline` of -6.94, Oswald's, where a fresh context reads
+  Amstelvar's 18.24 and -6.00, and `textBaseline = "top"` drew the text
+  Oswald's ascent below the anchor. The baselines are now read off the face
+  the text is drawn in, as the fonts registered at the time resolve it.
+
 - **On macOS, a GPU draw is no longer dropped when the system's shader
   compiler is slow.** Skia's Metal backend, as rust-skia builds it, waited one
   second for each shader and pipeline it needed compiled and then drew
