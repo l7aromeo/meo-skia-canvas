@@ -23,8 +23,7 @@ use skia_safe::{
 
 use crate::{
     font::{
-        FontFamily, GenericFamily, InstancedPositions, optical_size,
-        variation_axes,
+        FontFamily, GenericFamily, InstancedPositions, KnownAxes, optical_size,
     },
     image::x_height_ratio,
     memory::note_font_use,
@@ -311,6 +310,60 @@ pub(crate) fn instance_coordinates(
 /// and at thirty thousand by 90, where a static font at the same thirty
 /// thousand sizes grows by 65 with nothing instanced at all.
 const COLLECTION_CACHE_SIZE: usize = 128;
+
+/// How many family lists and styles [`FontLibrary::fonts_for_style`]
+/// remembers the matches of.
+///
+/// A bound rather than a working set, as the collection cache's is: a page
+/// names a handful of family lists in a handful of styles, but a weight that
+/// animates names a new style every frame. Past it every remembered match
+/// is dropped and searched again.
+const MATCHES_KEPT: usize = 256;
+
+/// The family list and style a search of this library's collections is
+/// asked for: everything its answer depends on while the registered fonts
+/// stand. Not the hinting, since the collections for either hold the same
+/// faces, and not the size or the variations, which choose an instance of a
+/// matched face rather than which faces match.
+#[derive(PartialEq, Eq, Hash)]
+struct MatchKey {
+    families: Vec<String>,
+    weight: i32,
+    width: i32,
+    slant: Slant,
+}
+
+/// What [`FontLibrary::fonts_for_style`] needs to know of the faces a family
+/// list and style match before it can ask its collection cache.
+#[derive(Clone, Copy)]
+struct MatchFacts {
+    /// Whether any face matched is variable.
+    variable: bool,
+    /// Whether any face matched has an `opsz` axis.
+    sized: bool,
+    /// The style of the first face matched: what a style that matches no
+    /// variable face is laid out in.
+    first: Option<FontStyle>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether the faces and names remembered per family list are neither
+    /// asked nor filled, so that every style is searched and spelled afresh:
+    /// the reference they are held to -- see [`forgetful`].
+    pub(crate) static FORGETFUL: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Whether what is remembered per family list -- this library's matches and
+/// names, and an engine's matches -- is bypassed, as the tests that hold it
+/// to a fresh search ask. Never outside them.
+pub(crate) fn forgetful() -> bool {
+    #[cfg(test)]
+    return FORGETFUL.get();
+    #[cfg(not(test))]
+    false
+}
 
 /// How many resolved fonts to remember.
 ///
@@ -636,6 +689,15 @@ pub struct FontLibrary {
     /// The positions paragraph builders have instanced through font
     /// arguments on the collections this hands out.
     positions: InstancedPositions,
+    /// The axes of the faces styles have resolved to, asked of the platform
+    /// once each -- see [`KnownAxes`]. Forgotten when the fonts change.
+    known_axes: KnownAxes,
+    /// What each family list and style has matched, searched once for as
+    /// long as the fonts are unchanged -- see [`MATCHES_KEPT`].
+    matches: HashMap<MatchKey, MatchFacts>,
+    /// The names an engine's collection is asked for each family list by
+    /// -- see [`engine_names`](Self::engine_names).
+    engine_names: HashMap<Vec<FontFamily>, Rc<[String]>>,
     /// The system's family names, in lower case, read once for
     /// [`has_family`](Self::has_family) and dropped with everything else on
     /// [`invalidate`](Self::invalidate).
@@ -738,6 +800,9 @@ impl FontLibrary {
             collection_hinted: false,
             generics_cache: vec![],
             positions: InstancedPositions::default(),
+            known_axes: KnownAxes::default(),
+            matches: HashMap::new(),
+            engine_names: HashMap::new(),
             system_families: None,
         }
     }
@@ -1514,6 +1579,45 @@ impl FontLibrary {
             .collect()
     }
 
+    /// The names a `TextEngine`'s collection is asked for `families` by: as
+    /// [`collection_names`](Self::collection_names) gives them but for a
+    /// generic, which an engine's collection does not hold, and asks for by
+    /// its keyword. Worked out once per family list while the fonts stand,
+    /// since a registration can change the spelling a name is asked for in,
+    /// and dropped at [`MATCHES_KEPT`].
+    pub(crate) fn engine_names(
+        &mut self,
+        families: &[FontFamily],
+    ) -> Rc<[String]> {
+        let remember = !forgetful();
+        if remember && let Some(names) = self.engine_names.get(families) {
+            return names.clone();
+        }
+        let names: Rc<[String]> = families
+            .iter()
+            .map(|family| match family {
+                FontFamily::Generic(generic) => generic.to_css().to_string(),
+                FontFamily::Named(name) => match self.registered_spelling(name)
+                {
+                    Some(registered) => registered,
+                    None if GenericFamily::from_css(name).is_some()
+                        && !self.has_family(name) =>
+                    {
+                        unmatched_name(name)
+                    }
+                    None => name.clone(),
+                },
+            })
+            .collect();
+        if remember {
+            if self.engine_names.len() >= MATCHES_KEPT {
+                self.engine_names.clear();
+            }
+            self.engine_names.insert(families.to_vec(), names.clone());
+        }
+        names
+    }
+
     /// The name a registered family is filed under, where `name` is that
     /// family in another case.
     ///
@@ -1567,12 +1671,13 @@ impl FontLibrary {
     /// alternative is a cache whose correctness rests on which of two
     /// lookups happens to win.
     ///
-    /// The families remembered per face and the positions recorded against
-    /// the collections go too: the faces and collections they describe are
-    /// the ones replaced here. So do the paragraphs kept for measurements
-    /// whose ink is still to be read: they pin the faces replaced here, and
-    /// each measurement can lay itself out again in those faces from what it
-    /// was measured with.
+    /// The families and variation axes remembered per face, the matches and
+    /// names remembered per family list, and the positions recorded
+    /// against the collections go too: the faces and
+    /// collections they describe are the ones replaced here. So do the
+    /// paragraphs kept for measurements whose ink is still to be read: they
+    /// pin the faces replaced here, and each measurement can lay itself out
+    /// again in those faces from what it was measured with.
     fn invalidate(&mut self) {
         self.system_families = None;
         self.epoch = Rc::new(FontEpoch {
@@ -1585,8 +1690,17 @@ impl FontLibrary {
         self.instances.clear();
         self.resolved_fonts.clear();
         self.positions = InstancedPositions::default();
+        self.known_axes.clear();
+        self.matches.clear();
+        self.engine_names.clear();
         forget_families();
         forget_kept_paragraphs();
+    }
+
+    /// `face`'s variation axes, asked of the platform once for as long as
+    /// the fonts are unchanged -- see [`KnownAxes`].
+    pub(crate) fn axes_of(&mut self, face: &Typeface) -> Option<Rc<[Axis]>> {
+        self.known_axes.of(face)
     }
 
     /// Records that a paragraph builder is about to instance `families` at
@@ -1628,13 +1742,18 @@ impl FontLibrary {
     /// gone lays out again when its ink is read, as one pushed out by their
     /// bound does. The ink remembered per face and the family per face stay,
     /// since they hold ids and bounds rather than faces, and come to about
-    /// 100 KB at most. So do the decorations' kept answers, through
-    /// [`decorate::forget`]: each face's lines and each thickness's stroked
-    /// wave chunk, which are rebuilt on the next decoration that asks.
+    /// 100 KB at most. The matches and names remembered per family list go,
+    /// as answers that are cheap to work out again and only worth keeping
+    /// while text is being laid out. So do the decorations' kept answers,
+    /// through [`decorate::forget`]: each face's lines and each thickness's
+    /// stroked wave chunk, which are rebuilt on the next decoration that
+    /// asks.
     #[cfg(any(test, feature = "node-addon"))]
     pub(crate) fn release_caches(&mut self) {
         self.clear_collection_caches();
         self.positions = InstancedPositions::default();
+        self.matches.clear();
+        self.engine_names.clear();
         forget_kept_paragraphs();
         decorate::forget();
     }
@@ -1725,19 +1844,12 @@ impl FontLibrary {
     ) -> (FontCollection, Option<FontStyle>) {
         let families = style.font_families();
         let families: Vec<&str> = families.iter().collect();
-        let matches = self
-            .font_collection()
-            .find_typefaces(&families, style.font_style());
-
         let opsz_tag = FourByteTag::from_chars('o', 'p', 's', 'z');
-        // One pass over the matches' axes, for both questions the cache key
-        // needs answered before the cache can be asked.
-        let (variable, sized) = matches.iter().filter_map(variation_axes).fold(
-            (false, false),
-            |(_, sized), axes| {
-                (true, sized || axes.iter().any(|axis| axis.tag == opsz_tag))
-            },
-        );
+        let MatchFacts {
+            variable,
+            sized,
+            first,
+        } = self.match_facts(&families, style.font_style());
 
         // if any of the matched typefaces is a variable font, create an
         // instance that matches the current weight settings and add it
@@ -1762,9 +1874,12 @@ impl FontLibrary {
             // the 'dynamic' font mgr (which is searched before the
             // 'asset' or the 'default' mgr)
             let mut dynamic = TypefaceFontProvider::new();
+            let matches = self
+                .font_collection()
+                .find_typefaces(&families, style.font_style());
 
             for font in matches.into_iter() {
-                if let Some(params) = variation_axes(&font) {
+                if let Some(params) = self.known_axes.of(&font) {
                     let coords =
                         instance_coordinates(&params, style, variations);
 
@@ -1801,11 +1916,59 @@ impl FontLibrary {
                 .insert(key, collection.clone(), matched);
             (collection, matched)
         } else {
-            // Not variable, so the collection just searched is the one to lay
+            // Not variable, so the collection searched is the one to lay
             // out with and the match is the one already in hand.
-            let matched = matches.first().map(Typeface::font_style);
-            (self.font_collection(), matched)
+            (self.font_collection(), first)
         }
+    }
+
+    /// What `families` in `style` match in this library's collections,
+    /// searched on the first ask while the fonts stand and remembered: the
+    /// search, with the axes of every face it finds, was most of a style's
+    /// cost for one met before. The collection cache is asked after this,
+    /// and a variable face's matches are searched again only where it
+    /// misses.
+    fn match_facts(
+        &mut self,
+        families: &[&str],
+        style: FontStyle,
+    ) -> MatchFacts {
+        let key = MatchKey {
+            families: families
+                .iter()
+                .map(|family| family.to_string())
+                .collect(),
+            weight: *style.weight(),
+            width: *style.width(),
+            slant: style.slant(),
+        };
+        let remember = !forgetful();
+        if remember && let Some(facts) = self.matches.get(&key) {
+            return *facts;
+        }
+        let matches = self.font_collection().find_typefaces(families, style);
+        let opsz_tag = FourByteTag::from_chars('o', 'p', 's', 'z');
+        // One pass over the matches' axes, for both questions the cache key
+        // needs answered before the cache can be asked.
+        let known_axes = &mut self.known_axes;
+        let (variable, sized) = matches
+            .iter()
+            .filter_map(|face| known_axes.of(face))
+            .fold((false, false), |(_, sized), axes| {
+                (true, sized || axes.iter().any(|axis| axis.tag == opsz_tag))
+            });
+        let facts = MatchFacts {
+            variable,
+            sized,
+            first: matches.first().map(Typeface::font_style),
+        };
+        if remember {
+            if self.matches.len() >= MATCHES_KEPT {
+                self.matches.clear();
+            }
+            self.matches.insert(key, facts);
+        }
+        facts
     }
 }
 
@@ -2133,6 +2296,336 @@ mod tests {
         }
     }
 
+    /// Registers the bundled faces the memo tests draw in, once a thread:
+    /// a variable face, one whose `wght` default is not 400, one with an
+    /// optical size, and a static one, each under its own family.
+    fn memo_fonts() {
+        thread_local! {
+            static DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        if DONE.replace(true) {
+            return;
+        }
+        let fonts = crate::font::FontLibrary::new();
+        for (family, file) in [
+            ("MemoOswald", "Oswald/Oswald-VariableFont_wght.ttf"),
+            ("MemoRaleway", "Raleway/Raleway-VariableFont_wght.ttf"),
+            (
+                "MemoRaleway",
+                "Raleway/Raleway-Italic-VariableFont_wght.ttf",
+            ),
+            ("MemoAmstelvar", "AmstelvarAlpha-VF.ttf"),
+            ("MemoMonoton", "Monoton-Regular.woff2"),
+            (
+                "MemoMontserrat",
+                "montserrat-latin/montserrat-v30-latin-200.woff2",
+            ),
+            (
+                "MemoMontserrat",
+                "montserrat-latin/montserrat-v30-latin-regular.woff2",
+            ),
+            (
+                "MemoMontserrat",
+                "montserrat-latin/montserrat-v30-latin-700.woff2",
+            ),
+        ] {
+            fonts
+                .register_font_from_path(
+                    family,
+                    format!(
+                        "{}/tests/assets/fonts/{file}",
+                        env!("CARGO_MANIFEST_DIR")
+                    ),
+                )
+                .expect("a bundled face registers");
+        }
+    }
+
+    /// The fonts the memo gate draws in: registered families, one named in
+    /// another case, one missing in front of one that is there, generics,
+    /// a quoted generic keyword, a variable face at, off and away from its
+    /// own position, a face with an optical size across sizes, and a static
+    /// family whose weights are faces of their own.
+    const MEMO_FONTS: [&str; 17] = [
+        "200 24px MemoMontserrat",
+        "700 24px MemoMontserrat",
+        "24px memomontserrat",
+        "24px MemoOswald",
+        "700 24px MemoOswald",
+        "401 24px MemoOswald",
+        "24px memooswald",
+        "24px NoSuchFamily, MemoOswald",
+        "100 24px MemoRaleway",
+        "600 24px MemoRaleway, MemoOswald",
+        "10px MemoAmstelvar",
+        "14px MemoAmstelvar",
+        "72px MemoAmstelvar",
+        "24px MemoMonoton",
+        "24px serif",
+        "24px \"sans-serif\", MemoOswald",
+        "italic 24px MemoRaleway, sans-serif",
+    ];
+
+    /// What `font` draws and measures on a canvas, and what a `TextEngine`
+    /// paragraph in the same families draws: pixels, then advances.
+    fn drawn_in(font: &str) -> (Vec<u8>, Vec<f32>) {
+        use crate::{
+            canvas::Canvas,
+            context2d::Font,
+            text::{TextEngine, TextStyle},
+        };
+        const TEXT: &str = "Hamburgefonstiv 0123";
+        let mut canvas = Canvas::new(640.0, 220.0);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css(font), "{font}");
+        ctx.fill_text(TEXT, 4.0, 80.0, None);
+        let canvas_width = ctx.measure_text(TEXT, None).width;
+        let parsed = Font::from_css(font).expect("the font parses");
+        let engine = TextEngine::new(&crate::font::FontLibrary::new());
+        let style = TextStyle {
+            font_families: parsed.families,
+            font_size: parsed.size,
+            font_weight: i32::from(parsed.weight),
+            ..TextStyle::default()
+        };
+        let mut builder = engine.paragraph_builder(&style);
+        builder.add_text(TEXT);
+        let paragraph = builder.build(600.0);
+        ctx.draw_paragraph(&paragraph, 4.0, 120.0);
+        let pixels = ctx
+            .get_image_data(0.0, 0.0, 640.0, 220.0)
+            .expect("the canvas reads back")
+            .pixels()
+            .to_vec();
+        (pixels, vec![canvas_width, paragraph.max_intrinsic_width()])
+    }
+
+    /// Drawn with the matches and names remembered -- the second time a
+    /// style is met, from what the first remembered -- the corpus draws and
+    /// measures byte for byte as it does searched and spelled afresh, on
+    /// the canvas and through a `TextEngine` alike.
+    #[test]
+    fn remembered_matches_draw_as_a_fresh_search_does() {
+        memo_fonts();
+        for font in MEMO_FONTS {
+            FORGETFUL.set(true);
+            let fresh = drawn_in(font);
+            FORGETFUL.set(false);
+            drawn_in(font);
+            let remembered = drawn_in(font);
+            assert!(fresh.0.iter().any(|byte| *byte != 0), "{font} draws");
+            assert_eq!(remembered.1, fresh.1, "{font}: advances");
+            assert!(remembered.0 == fresh.0, "{font}: pixels");
+        }
+    }
+
+    /// The family lists and styles the remembered matches are held to
+    /// directly, where a match can differ without the pixels showing it.
+    fn memo_styles() -> Vec<(Vec<&'static str>, FontStyle)> {
+        // Lists that share a first family and part after it, so that one
+        // answered for the other is caught.
+        let lists: [&[&str]; 8] = [
+            &["MemoMontserrat"],
+            &["MemoOswald"],
+            &["MemoRaleway"],
+            &["NoSuchFamily", "MemoRaleway"],
+            &["NoSuchFamily", "MemoMonoton"],
+            &["MemoMonoton"],
+            &["MemoMonoton", "MemoOswald"],
+            &["memomontserrat", "MemoOswald"],
+        ];
+        let styles = [200, 400, 700]
+            .into_iter()
+            .flat_map(|weight| {
+                [Slant::Upright, Slant::Italic].map(|slant| {
+                    FontStyle::new(Weight::from(weight), Width::NORMAL, slant)
+                })
+            })
+            .collect::<Vec<_>>();
+        lists
+            .iter()
+            .flat_map(|list| styles.iter().map(|style| (list.to_vec(), *style)))
+            .collect()
+    }
+
+    /// Each family list and style is answered from what it matched before
+    /// exactly as a search answers it now, face for face, by this library
+    /// and by an engine, with every other list and style asked in between.
+    #[test]
+    fn a_remembered_match_is_the_search_it_stands_for() {
+        use crate::text::{FaceMatches, TextEngine};
+        memo_fonts();
+        let styles = memo_styles();
+        let ids = |faces: &[Typeface]| {
+            faces.iter().map(Typeface::unique_id).collect::<Vec<_>>()
+        };
+        let engine = TextEngine::new(&crate::font::FontLibrary::new());
+        let mut collection = engine.collection.clone();
+        let mut remembered = FaceMatches::default();
+        for _ in 0..2 {
+            for (families, style) in &styles {
+                let searched =
+                    ids(&collection.find_typefaces(families, *style));
+                let names = FontLibrary::with_shared(|lib| {
+                    lib.engine_names(&named(families))
+                });
+                let answered =
+                    ids(&remembered.of(&mut collection, &names, *style));
+                assert_eq!(answered, searched, "{families:?} {style:?}");
+                FontLibrary::with_shared(|lib| {
+                    let facts = lib.match_facts(families, *style);
+                    FORGETFUL.set(true);
+                    let fresh = lib.match_facts(families, *style);
+                    FORGETFUL.set(false);
+                    assert_eq!(
+                        (facts.variable, facts.sized, facts.first),
+                        (fresh.variable, fresh.sized, fresh.first),
+                        "{families:?} {style:?}"
+                    );
+                });
+            }
+        }
+    }
+
+    /// `families` as the family names a style lists.
+    fn named(families: &[&str]) -> Vec<FontFamily> {
+        families
+            .iter()
+            .map(|family| FontFamily::Named(family.to_string()))
+            .collect()
+    }
+
+    /// A family list the library works out again after its fonts change is
+    /// searched again by an engine, never answered from what the list it
+    /// replaced matched -- even once nothing else holds that list, and
+    /// where the same family is now spelled another way.
+    #[test]
+    fn a_family_list_worked_out_again_is_searched_again() {
+        use crate::text::{FaceMatches, SEARCHES, TextEngine};
+        memo_fonts();
+        let families = named(&["HashOnceFamily", "MemoMonoton"]);
+        let style = FontStyle::normal();
+        let engine = TextEngine::new(&crate::font::FontLibrary::new());
+        let mut collection = engine.collection.clone();
+        let mut remembered = FaceMatches::default();
+        let before =
+            FontLibrary::with_shared(|lib| lib.engine_names(&families));
+        remembered.of(&mut collection, &before, style);
+        let searched = SEARCHES.get();
+        remembered.of(&mut collection, &before, style);
+        assert_eq!(
+            SEARCHES.get(),
+            searched,
+            "a list met before is not searched"
+        );
+        drop(before);
+
+        crate::font::FontLibrary::new()
+            .register_font_from_path(
+                "hashoncefamily",
+                format!(
+                    "{}/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+                    env!("CARGO_MANIFEST_DIR")
+                ),
+            )
+            .expect("Oswald registers");
+        let after = FontLibrary::with_shared(|lib| lib.engine_names(&families));
+        assert_eq!(after[0], "hashoncefamily", "spelled as registered");
+        let answered = remembered.of(&mut collection, &after, style);
+        assert_eq!(SEARCHES.get(), searched + 1, "the new list is searched");
+        let names: Vec<&str> = after.iter().map(String::as_str).collect();
+        assert_eq!(
+            answered.iter().map(Typeface::unique_id).collect::<Vec<_>>(),
+            collection
+                .find_typefaces(&names, style)
+                .iter()
+                .map(Typeface::unique_id)
+                .collect::<Vec<_>>(),
+            "and answered as a search answers it"
+        );
+    }
+
+    /// A family registered after a style naming it was matched is found by
+    /// the next style that names it: what was remembered for the fonts that
+    /// stood before goes with them, on the canvas and through an engine made
+    /// afterwards. The late face is instanced at the weight asked, and a
+    /// family asked in another case than it is registered in is asked for
+    /// in the registered spelling.
+    #[test]
+    fn a_family_registered_late_is_matched_afresh() {
+        memo_fonts();
+        for (asked, registered) in [
+            ("LateMemoFamily", "LateMemoFamily"),
+            ("LateMemoCase", "latememocase"),
+        ] {
+            let font = format!("700 24px {asked}, MemoMonoton");
+            let before = drawn_in(&font);
+            crate::font::FontLibrary::new()
+                .register_font_from_path(
+                    registered,
+                    format!(
+                        "{}/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+                        env!("CARGO_MANIFEST_DIR")
+                    ),
+                )
+                .expect("Oswald registers");
+            let after = drawn_in(&font);
+            FORGETFUL.set(true);
+            let fresh = drawn_in(&font);
+            FORGETFUL.set(false);
+            assert!(after.0 != before.0, "{font}: the late family draws");
+            assert_eq!(
+                after.1, fresh.1,
+                "{font}: advances as a fresh search's"
+            );
+            assert!(after.0 == fresh.0, "{font}: pixels as a fresh search's");
+        }
+    }
+
+    /// What is remembered per family list goes when the fonts change and
+    /// when the idle release runs, and stays within its bound.
+    #[test]
+    fn remembered_matches_are_bounded_and_released() {
+        memo_fonts();
+        drawn_in("700 24px MemoOswald");
+        let held = || {
+            FontLibrary::with_shared(|lib| {
+                (lib.matches.len(), lib.engine_names.len())
+            })
+        };
+        let (matches, names) = held();
+        assert!(matches > 0 && names > 0, "{matches} matches, {names} names");
+        FontLibrary::with_shared(FontLibrary::release_caches);
+        assert_eq!(held(), (0, 0), "none past a release");
+
+        drawn_in("700 24px MemoOswald");
+        FontLibrary::with_shared(|lib| lib.invalidate());
+        assert_eq!(held(), (0, 0), "none past a change of fonts");
+
+        for weight in 1..=MATCHES_KEPT + 1 {
+            let style = {
+                let mut style = TextStyle::new();
+                style.set_font_families(&["MemoOswald"]).set_font_style(
+                    FontStyle::new(
+                        Weight::from(weight as i32),
+                        Width::NORMAL,
+                        Slant::Upright,
+                    ),
+                );
+                style
+            };
+            let families = [FontFamily::Named(format!("MemoName{weight}"))];
+            FontLibrary::with_shared(|lib| {
+                lib.fonts_for_style(&style, &[]);
+                lib.engine_names(&families);
+            });
+        }
+        let (matches, names) = held();
+        assert!(matches <= MATCHES_KEPT, "{matches} matches");
+        assert!(names <= MATCHES_KEPT, "{names} names");
+    }
+
     #[test]
     fn the_collection_cache_evicts_the_least_recently_used() {
         // The map was unbounded and only ever cleared wholesale, so a page
@@ -2170,6 +2663,24 @@ mod tests {
     }
 
     #[test]
+    fn a_library_forgets_the_axes_it_knew_when_its_fonts_change() {
+        // Asked once a face while the fonts stand, and asked again after a
+        // registration, which forgets them with the rest of what the
+        // library derived from its fonts.
+        let bytes = std::fs::read("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+            .expect("bundled Amstelvar is readable");
+        let face = FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("Amstelvar parses");
+        let mut lib = FontLibrary::with_fonts(vec![]);
+        assert!(lib.axes_of(&face).is_some());
+        assert!(lib.axes_of(&face).is_some());
+        assert_eq!(lib.known_axes.asked, 1, "asked once");
+        lib.register_typeface(face.clone(), Some("AxesProbe".to_string()));
+        assert_eq!(lib.known_axes.len(), 0, "forgotten on a change");
+    }
+
+    #[test]
     fn an_instance_places_every_axis_of_the_face() {
         // Every axis, so a pushed style's position replaces the paragraph's
         // rather than moving only the axes it names over it.
@@ -2178,7 +2689,8 @@ mod tests {
         let face = FontMgr::new()
             .new_from_data(Data::new_copy(&bytes), None)
             .expect("Amstelvar parses");
-        let axes = variation_axes(&face).expect("Amstelvar is variable");
+        let axes =
+            crate::font::variation_axes(&face).expect("Amstelvar is variable");
         let [wght, wdth, opsz] = [b"wght", b"wdth", b"opsz"].map(|t| {
             FourByteTag::from_chars(
                 t[0] as char,

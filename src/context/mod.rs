@@ -2,11 +2,10 @@
 use neon::prelude::*;
 use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
-    ColorFilter as SkColorFilter, ColorSpace, ColorType, Contains, Data,
-    FourByteTag, IRect, Image, ImageFilter as SkImageFilter, ImageInfo,
-    MaskFilter as SkMaskFilter, Paint, PaintStyle, Path, PathBuilder,
-    PathFillType, PathOp, Picture, PictureRecorder, Point, Rect, RoundOut,
-    Shader as SkShader, Size, Typeface,
+    ColorFilter as SkColorFilter, ColorSpace, ColorType, Contains, Data, IRect,
+    Image, ImageFilter as SkImageFilter, ImageInfo, MaskFilter as SkMaskFilter,
+    Paint, PaintStyle, Path, PathBuilder, PathFillType, PathOp, Picture,
+    PictureRecorder, Point, Rect, RoundOut, Shader as SkShader, Size, Typeface,
     canvas::{SaveLayerRec, SrcRectConstraint::Strict},
     dash_path_effect,
     font_style::{FontStyle, Width},
@@ -17,10 +16,11 @@ use skia_safe::{
     path_utils::fill_path_with_paint,
     textlayout::{ParagraphStyle, StrutStyle, TextStyle},
 };
-use std::cell::RefCell;
+use std::{cell::RefCell, rc::Rc};
 
 pub mod api;
 pub mod page;
+pub mod typesetting;
 
 use crate::{
     context2d::{FontKerning, TextRendering},
@@ -47,6 +47,7 @@ use crate::{
     utils::*,
 };
 use page::{ExportOptions, Page, PageRecorder};
+use typesetting::{TextSettings, Typesetting, Typography};
 
 const BLACK: Color = Color::BLACK;
 const TRANSPARENT: Color = Color::TRANSPARENT;
@@ -187,6 +188,9 @@ pub struct State {
     /// a CSS string named, or linear-light sRGB for an `RgbaLinear`. Never
     /// quantised, so a wide colour reaches a wide canvas.
     pub shadow_color: (Color4f, ColorSpace),
+    /// The shadow colour as it was declared, which `shadowColor` serialises;
+    /// `None` until a CSS string sets it, and again once anything else does.
+    pub shadow_declared: Option<Declaration>,
     pub shadow_offset: Point,
 
     pub line_dash_offset: f32,
@@ -211,33 +215,22 @@ pub struct State {
     pub font: String,
     pub font_variant: String,
     pub font_width: Width,
-    pub font_hinting: bool,
-    pub font_kerning: FontKerning,
-    pub text_rendering: TextRendering,
-    pub char_style: TextStyle,
-    pub graf_style: ParagraphStyle,
+    /// Every setting text is laid out with, and the typography built from
+    /// them -- see [`typesetting`].
+    pub text: Typesetting,
     /// Whether `direction` is the initial `inherit` rather than an explicit
     /// `ltr` or `rtl`.
     ///
-    /// `graf_style` holds only the resolved direction, because that is all
-    /// Skia lays text out with, so the keyword the author wrote has to be
-    /// carried beside it: the Canvas standard makes `inherit` the initial
-    /// value and a state the attribute reports, not a synonym for `ltr`.
-    /// With no document to inherit from, `inherit` resolves to `ltr` for
-    /// rendering, which is what `graf_style` gets.
+    /// The text settings' `graf_style` holds only the resolved direction,
+    /// because that is all Skia lays text out with, so the keyword the
+    /// author wrote has to be carried beside it: the Canvas standard makes
+    /// `inherit` the initial value and a state the attribute reports, not a
+    /// synonym for `ltr`. With no document to inherit from, `inherit`
+    /// resolves to `ltr` for rendering, which is what `graf_style` gets.
     pub direction_inherits: bool,
-    pub text_baseline: Baseline,
-    pub letter_spacing: Spacing,
-    pub word_spacing: Spacing,
-    pub text_decoration: DecorationStyle,
-    pub text_wrap: bool,
-    /// The font's line height in pixels, or `None` for the face's own
-    /// spacing. Only wrapped text has lines to space.
-    pub line_height: Option<f32>,
     /// The angle an `oblique` font is drawn at, in CSS degrees, or `None`
     /// where the font is not oblique.
     pub oblique_angle: Option<f32>,
-    pub variations: Vec<(FourByteTag, f32)>,
     pub font_variation_settings: String,
 }
 
@@ -264,10 +257,12 @@ impl Default for State {
             stroke_style: Dye::Color(
                 Color4f::from(BLACK),
                 Some(ColorSpace::new_srgb()),
+                None,
             ),
             fill_style: Dye::Color(
                 Color4f::from(BLACK),
                 Some(ColorSpace::new_srgb()),
+                None,
             ),
             line_dash_offset: 0.0,
             line_dash_list: vec![],
@@ -292,24 +287,27 @@ impl Default for State {
                 Color4f::new(0.0, 0.0, 0.0, 0.0),
                 ColorSpace::new_srgb(),
             ),
+            shadow_declared: None,
             shadow_offset: (0.0, 0.0).into(),
 
             font: "10px sans-serif".to_string(),
             font_variant: "normal".to_string(),
             font_width: Width::NORMAL,
-            font_hinting: true,
-            font_kerning: FontKerning::default(),
-            text_rendering: TextRendering::default(),
-            char_style,
-            graf_style,
-            text_baseline: Baseline::Alphabetic,
-            letter_spacing: Spacing::default(),
-            word_spacing: Spacing::default(),
-            text_decoration: DecorationStyle::default(),
-            text_wrap: false,
-            line_height: None,
+            text: Typesetting::new(TextSettings {
+                char_style,
+                graf_style,
+                text_baseline: Baseline::Alphabetic,
+                letter_spacing: Spacing::default(),
+                word_spacing: Spacing::default(),
+                text_decoration: DecorationStyle::default(),
+                text_wrap: false,
+                line_height: None,
+                font_hinting: true,
+                font_kerning: FontKerning::default(),
+                text_rendering: TextRendering::default(),
+                variations: vec![],
+            }),
             oblique_angle: None,
-            variations: vec![],
             font_variation_settings: "normal".to_string(),
         }
     }
@@ -344,8 +342,8 @@ impl State {
     /// that the collection a layout picks and the runs it lays out never
     /// disagree.
     pub fn hinted(&self) -> bool {
-        self.font_hinting
-            && self.text_rendering != TextRendering::GeometricPrecision
+        self.text.font_hinting
+            && self.text.text_rendering != TextRendering::GeometricPrecision
     }
 
     /// The typeface the context font resolves to first, as text is drawn
@@ -361,11 +359,11 @@ impl State {
         FontLibrary::with_shared(|library| {
             let (mut collection, _) = library
                 .set_hinting(self.hinted())
-                .fonts_for_style(&self.char_style, &self.variations);
-            let families = self.char_style.font_families();
+                .fonts_for_style(&self.text.char_style, &self.text.variations);
+            let families = self.text.char_style.font_families();
             let families: Vec<&str> = families.iter().collect();
             collection
-                .find_typefaces(&families, self.char_style.font_style())
+                .find_typefaces(&families, self.text.char_style.font_style())
                 .into_iter()
                 .next()
                 .or_else(|| collection.default_fallback())
@@ -376,7 +374,7 @@ impl State {
     /// font's size, and [`primary_face`](Self::primary_face) when a unit
     /// needs more than the size.
     pub(crate) fn font_units(&self) -> FontUnits<'_> {
-        FontUnits::new(self.char_style.font_size(), || self.primary_face())
+        FontUnits::new(self.text.char_style.font_size(), || self.primary_face())
     }
 
     /// [`font_units`](Self::font_units) as `ctx.filter` reads them, with the
@@ -403,10 +401,10 @@ impl State {
     /// [`TextRendering`] for what each value does and where that is from.
     fn add_rendering_features(&self, style: &mut TextStyle) {
         let mut off = Vec::new();
-        if self.font_kerning == FontKerning::None {
+        if self.text.font_kerning == FontKerning::None {
             off.push("kern");
         }
-        if self.text_rendering == TextRendering::OptimizeSpeed {
+        if self.text.text_rendering == TextRendering::OptimizeSpeed {
             off.extend(["liga", "clig"]);
         }
         let named: Vec<String> = style
@@ -421,21 +419,37 @@ impl State {
         }
     }
 
-    pub fn typography(
-        &self,
-    ) -> (TextStyle, ParagraphStyle, DecorationStyle, Baseline, bool) {
-        let mut char_style = self.char_style.clone(); // use font size & style to calculate spacing
-        self.add_rendering_features(&mut char_style);
-        let units = self.font_units();
-        char_style.set_word_spacing(self.word_spacing.in_px(&units));
-        char_style.set_letter_spacing(self.letter_spacing.in_px(&units));
-        char_style
-            .set_baseline_shift(self.text_baseline.get_offset(&char_style));
+    /// The typography text is laid out with: built from the text settings
+    /// and the fonts registered now, or shared with the last build where
+    /// neither has changed since -- see [`typesetting`].
+    pub fn typography(&self) -> Rc<Typography> {
+        let epoch = FontLibrary::with_shared(|library| library.epoch());
+        self.text.typography(epoch, || self.build_typography())
+    }
 
-        let mut graf_style = self.graf_style.clone(); // inherit align & ltr/rtl settings
+    fn build_typography(&self) -> Typography {
+        let mut char_style = self.text.char_style.clone(); // use font size & style to calculate spacing
+        self.add_rendering_features(&mut char_style);
+        // The face the run is drawn in, as the fonts registered now resolve
+        // it. The baselines are placed by its metrics, which the style reads
+        // off its typeface: left as the face the font resolved to when it
+        // was set, a family registered again since would place them by the
+        // face it replaced while the glyphs came from the new one.
+        let face = self.primary_face();
+        if let Some(face) = &face {
+            char_style.set_typeface(face.clone());
+        }
+        let units = FontUnits::new(char_style.font_size(), || face.clone());
+        char_style.set_word_spacing(self.text.word_spacing.in_px(&units));
+        char_style.set_letter_spacing(self.text.letter_spacing.in_px(&units));
+        char_style.set_baseline_shift(
+            self.text.text_baseline.get_offset(&char_style),
+        );
+
+        let mut graf_style = self.text.graf_style.clone(); // inherit align & ltr/rtl settings
         let font_families = char_style.font_families(); // consult proper metrics for height & leading defaults
 
-        if self.text_wrap {
+        if self.text.text_wrap {
             // handle multi-line spacing
             let mut strut_style = StrutStyle::new();
             strut_style
@@ -451,7 +465,7 @@ impl State {
             // ascent and descent split half above and half below -- the
             // half-leading of CSS 2.1 section 10.8.1.
             let size = char_style.font_size();
-            if let Some(pixels) = self.line_height
+            if let Some(pixels) = self.text.line_height
                 && size > 0.0
             {
                 strut_style
@@ -477,9 +491,9 @@ impl State {
         (
             char_style,
             graf_style,
-            self.text_decoration.clone(),
-            self.text_baseline,
-            self.text_wrap,
+            self.text.text_decoration.clone(),
+            self.text.text_baseline,
+            self.text.text_wrap,
         )
     }
 
@@ -1584,7 +1598,7 @@ impl Context2D {
     /// which is what they did when this cloned the style inside the library.
     pub fn set_font(&mut self, font: &ResolvedFont) {
         let (spec, typeface) = &**font;
-        let mut style = self.state.char_style.clone();
+        let mut style = self.state.text.char_style.clone();
         style.set_typeface(typeface.clone());
         style.set_font_families(&spec.collection_names);
         style.set_font_style(spec.style());
@@ -1602,8 +1616,8 @@ impl Context2D {
         self.state.font = spec.serialized.clone();
         self.state.font_variant = spec.variant.clone();
         self.state.font_width = spec.width;
-        self.state.char_style = style;
-        self.state.line_height = spec.line_height;
+        self.state.text.edit().char_style = style;
+        self.state.text.edit().line_height = spec.line_height;
         self.state.oblique_angle = spec.oblique_angle();
     }
 
@@ -1623,17 +1637,21 @@ impl Context2D {
         variant: &str,
         features: &[(String, i32)],
     ) {
-        self.state.char_style.reset_font_features();
+        self.state.text.edit().char_style.reset_font_features();
         for (feat, val) in features {
-            self.state.char_style.add_font_feature(feat, *val);
+            self.state
+                .text
+                .edit()
+                .char_style
+                .add_font_feature(feat, *val);
         }
         self.state.font_variant = variant.to_string();
     }
 
     pub fn set_font_width(&mut self, width: Width) {
-        let style = self.state.char_style.font_style();
+        let style = self.state.text.char_style.font_style();
         let font_style = FontStyle::new(style.weight(), width, style.slant());
-        self.state.char_style.set_font_style(font_style);
+        self.state.text.edit().char_style.set_font_style(font_style);
         self.state.font_width = width;
     }
 
@@ -1645,7 +1663,7 @@ impl Context2D {
         width: Option<f32>,
         style: PaintStyle,
     ) {
-        let em = self.state.char_style.font_size()
+        let em = self.state.text.char_style.font_size()
             * self.state.matrix.max_scale().max(0.0);
         let paint = self.paint_for_drawing(style, Coverage::Text { em });
         let mut typesetter = Typesetter::new(&self.state, text, width);
@@ -1948,7 +1966,11 @@ pub enum Dye {
     /// A solid color, unpremultiplied, with the space it is in: the one a CSS
     /// string named, sRGB for a float array, linear-light sRGB for an
     /// `RgbaLinear`. `None` is sRGB, as Skia reads an untagged colour.
-    Color(Color4f, Option<ColorSpace>),
+    ///
+    /// And the colour as it was declared, which the getter serialises and
+    /// keeps the read-back of; `None` for one set through the crate as an
+    /// `RgbaLinear`, which no getter reads back as CSS.
+    Color(Color4f, Option<ColorSpace>, Option<Declaration>),
     Gradient(CanvasGradient),
     Pattern(CanvasPattern),
     Texture(CanvasTexture),
@@ -1980,7 +2002,9 @@ impl Dye {
         } else {
             // Tagged either way by `color4f_in`: a CSS colour with the space
             // it named, a float array as sRGB.
-            color4f_in(cx, value).map(|(c, cs)| Dye::Color(c, Some(cs)))
+            declared_in(cx, value).map(|(c, cs, declared)| {
+                Dye::Color(c, Some(cs), declared.map(Declaration::new))
+            })
         }
     }
 
@@ -1989,7 +2013,12 @@ impl Dye {
         cx: &mut FunctionContext<'a>,
     ) -> JsResult<'a, JsValue> {
         match self {
-            Dye::Color(color, cs) => color4f_to_css(cx, color, cs.as_ref()),
+            Dye::Color(_, _, Some(declared)) => {
+                Ok(cx.string(declared.css()).upcast())
+            }
+            Dye::Color(color, cs, None) => {
+                color4f_to_css(cx, color, cs.as_ref())
+            }
             _ => Ok(cx.null().upcast()), /* flag to the js context that it
                                           * should use its cached
                                           * pattern/gradient ref */
@@ -2014,7 +2043,7 @@ impl Dye {
 
     pub fn is_opaque(&self) -> bool {
         match self {
-            Dye::Color(color, _) => color.is_opaque(),
+            Dye::Color(color, ..) => color.is_opaque(),
             Dye::Gradient(gradient) => gradient.is_opaque(),
             Dye::Pattern(pattern) => pattern.is_opaque(),
             Dye::Texture(_) => false,
@@ -2029,7 +2058,7 @@ impl Dye {
         sampling_filter: SamplingFilter,
     ) {
         match self {
-            Dye::Color(color, cs) => {
+            Dye::Color(color, cs, _) => {
                 let mut color = *color;
                 color.a *= alpha;
                 // Kept in the space it was named in, so what `fillStyle`

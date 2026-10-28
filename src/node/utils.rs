@@ -1,15 +1,22 @@
 #![allow(dead_code)]
 use core::ops::Range;
 use neon::prelude::*;
-use skia_safe::{Color, Color4f, ColorSpace, Data, Matrix, Path, Point, RGB};
-use std::{borrow::Cow, cmp};
+use skia_safe::{Color, Color4f, ColorSpace, Data, Matrix, Path, Point};
+use std::{
+    borrow::Cow,
+    cmp,
+    sync::{Arc, OnceLock},
+};
 
 // One definition of the sRGB transfer function for the whole crate, in
 // `color`. A copy here would have to agree with it on every constant and on
 // how a negative component extends through zero, and nothing would check
 // that it did.
 use crate::{
-    color::{RgbaLinear, linear_to_srgb, srgb_to_linear},
+    color::{
+        RgbaLinear, linear_to_srgb, linear_to_srgb_f64, srgb_to_linear,
+        srgb_to_linear_f64,
+    },
     css::{
         DEGREES_PER_TURN, Dimension, Expect, FontUnits, Percent, Quantity,
         evaluate, is_math, literal, without_comments,
@@ -1012,89 +1019,251 @@ pub fn float_args_or_bail_at(
 /// outside the gamut rather than being clipped. Fixed by the standard, not
 /// chosen; drafts before the Candidate Recommendation Draft of 24 April 2025
 /// used BT.2020's piecewise inverse OETF instead.
-const REC2020_GAMMA: f32 = 2.4;
+const REC2020_GAMMA: f64 = 2.4;
 
 /// `rec2020`'s transfer function, CSS Color 4's `lin_2020`.
-fn rec2020_decode(encoded: f32) -> f32 {
+fn rec2020_decode(encoded: f64) -> f64 {
     encoded.abs().powf(REC2020_GAMMA).copysign(encoded)
 }
 
 /// `rec2020`'s encode, CSS Color 4's `gam_2020`: the inverse of
 /// [`rec2020_decode`].
-fn rec2020_encode(linear: f32) -> f32 {
+fn rec2020_encode(linear: f64) -> f64 {
     linear.abs().powf(REC2020_GAMMA.recip()).copysign(linear)
 }
 
-/// Linear-light Display P3 into linear-light sRGB.
-///
-/// The `f32` nearest the product of two matrices CSS Color 4's sample code
-/// publishes as exact fractions, `lin_P3_to_XYZ` then `XYZ_to_lin_sRGB`; the
-/// same product derived from each space's primaries and the D65 white point
-/// agrees to nine places. `colour_from_css` holds a primary to `1e-5`, which
-/// a matrix written to four places misses.
-const LINEAR_P3_TO_LINEAR_SRGB: [[f32; 3]; 3] = [
-    [1.224_940_2, -0.224_940_18, 0.0],
-    [-0.042_056_955, 1.042_056_9, 0.0],
-    [-0.019_637_555, -0.078_636_04, 1.098_273_6],
+/// A 3x3 matrix, rows first, applied to a column of three components.
+type Matrix3 = [[f64; 3]; 3];
+
+// The matrices below are CSS Color 4's sample code, section 19, "Sample code
+// for Color Conversions" (conversions.js), as the specification publishes it:
+// the exact fractions where it gives fractions, and its decimals where it gives
+// those, each written as the shortest decimal that reads as the same `f64`.
+// Both directions are its own rather than one derived from the other, so a
+// conversion here and the same conversion worked from the specification are the
+// same arithmetic. Every conversion runs in `f64`, from a colour's channels as
+// it holds them, at `f32`, and its result is rounded to `f32` once, where a
+// `Color4f` is made.
+
+/// CSS Color 4's `lin_sRGB_to_XYZ`: linear-light sRGB into XYZ against D65.
+const LINEAR_SRGB_TO_XYZ: Matrix3 = [
+    [506752.0 / 1228815.0, 87881.0 / 245763.0, 12673.0 / 70218.0],
+    [87098.0 / 409605.0, 175762.0 / 245763.0, 12673.0 / 175545.0],
+    [7918.0 / 409605.0, 87881.0 / 737289.0, 1001167.0 / 1053270.0],
 ];
 
-/// Linear-light Rec. 2020 into linear-light sRGB, by `lin_2020_to_XYZ` then
-/// `XYZ_to_lin_sRGB`, on the terms given for [`LINEAR_P3_TO_LINEAR_SRGB`].
-const LINEAR_REC2020_TO_LINEAR_SRGB: [[f32; 3]; 3] = [
-    [1.660_491, -0.587_641_1, -0.072_849_86],
-    [-0.124_550_48, 1.132_899_9, -0.008_349_422],
-    [-0.018_150_764, -0.100_578_9, 1.118_729_7],
+/// CSS Color 4's `XYZ_to_lin_sRGB`.
+const XYZ_TO_LINEAR_SRGB: Matrix3 = [
+    [12831.0 / 3959.0, -329.0 / 214.0, -1974.0 / 3959.0],
+    [
+        -851781.0 / 878810.0,
+        1648619.0 / 878810.0,
+        36519.0 / 878810.0,
+    ],
+    [705.0 / 12673.0, -2585.0 / 12673.0, 705.0 / 667.0],
 ];
 
-/// Linear-light A98 RGB into linear-light sRGB.
-///
-/// The `f32` nearest the product of CSS Color 4's `lin_a98rgb_to_XYZ` and
-/// `XYZ_to_lin_sRGB`, both published as exact fractions; the same product
-/// derived from Adobe RGB (1998)'s primaries and the D65 white point agrees
-/// to fifteen places. The two spaces share their red and blue primaries and
-/// their white, so A98's red and blue land on sRGB's own, scaled, and only
-/// its green mixes.
-const LINEAR_A98_TO_LINEAR_SRGB: [[f32; 3]; 3] = [
-    [1.398_355_7, -0.398_355_75, 0.0],
-    [0.0, 1.0, 0.0],
-    [0.0, -0.042_928_99, 1.042_928_9],
+/// CSS Color 4's `lin_P3_to_XYZ`, against D65.
+const LINEAR_P3_TO_XYZ: Matrix3 = [
+    [
+        608311.0 / 1250200.0,
+        189793.0 / 714400.0,
+        198249.0 / 1000160.0,
+    ],
+    [
+        35783.0 / 156275.0,
+        247089.0 / 357200.0,
+        198249.0 / 2500400.0,
+    ],
+    [0.0, 32229.0 / 714400.0, 5220557.0 / 5000800.0],
 ];
 
-/// Linear-light ProPhoto RGB into linear-light sRGB: CSS Color 4's
-/// `lin_ProPhoto_to_XYZ`, then `D50_to_D65`, since ProPhoto is referred to
-/// D50, then `XYZ_to_lin_sRGB`. The product derived from ProPhoto's
-/// primaries and the D50 white point agrees with it to seventeen places.
-const LINEAR_PROPHOTO_TO_LINEAR_SRGB: [[f32; 3]; 3] = [
-    [2.034_381, -0.727_635_8, -0.306_745_05],
-    [-0.228_825_73, 1.231_742_5, -0.002_916_809_6],
-    [-0.008_558_828, -0.153_266_7, 1.161_825_5],
+/// CSS Color 4's `XYZ_to_lin_P3`.
+const XYZ_TO_LINEAR_P3: Matrix3 = [
+    [
+        446124.0 / 178915.0,
+        -333277.0 / 357830.0,
+        -72051.0 / 178915.0,
+    ],
+    [-14852.0 / 17905.0, 63121.0 / 35810.0, 423.0 / 17905.0],
+    [11844.0 / 330415.0, -50337.0 / 660830.0, 316169.0 / 330415.0],
 ];
+
+/// CSS Color 4's `lin_2020_to_XYZ`, against D65.
+const LINEAR_REC2020_TO_XYZ: Matrix3 = [
+    [
+        63426534.0 / 99577255.0,
+        20160776.0 / 139408157.0,
+        47086771.0 / 278816314.0,
+    ],
+    [
+        26158966.0 / 99577255.0,
+        472592308.0 / 697040785.0,
+        8267143.0 / 139408157.0,
+    ],
+    [0.0, 19567812.0 / 697040785.0, 295819943.0 / 278816314.0],
+];
+
+/// CSS Color 4's `XYZ_to_lin_2020`.
+const XYZ_TO_LINEAR_REC2020: Matrix3 = [
+    [
+        30757411.0 / 17917100.0,
+        -6372589.0 / 17917100.0,
+        -4539589.0 / 17917100.0,
+    ],
+    [
+        -19765991.0 / 29648200.0,
+        47925759.0 / 29648200.0,
+        467509.0 / 29648200.0,
+    ],
+    [
+        792561.0 / 44930125.0,
+        -1921689.0 / 44930125.0,
+        42328811.0 / 44930125.0,
+    ],
+];
+
+/// CSS Color 4's `lin_a98rgb_to_XYZ`, against D65. A98 RGB shares its red
+/// and blue primaries and its white with sRGB, so only its green mixes.
+const LINEAR_A98_TO_XYZ: Matrix3 = [
+    [
+        573536.0 / 994567.0,
+        263643.0 / 1420810.0,
+        187206.0 / 994567.0,
+    ],
+    [
+        591459.0 / 1989134.0,
+        6239551.0 / 9945670.0,
+        374412.0 / 4972835.0,
+    ],
+    [
+        53769.0 / 1989134.0,
+        351524.0 / 4972835.0,
+        4929758.0 / 4972835.0,
+    ],
+];
+
+/// CSS Color 4's `XYZ_to_lin_a98rgb`.
+const XYZ_TO_LINEAR_A98: Matrix3 = [
+    [
+        1829569.0 / 896150.0,
+        -506331.0 / 896150.0,
+        -308931.0 / 896150.0,
+    ],
+    [
+        -851781.0 / 878810.0,
+        1648619.0 / 878810.0,
+        36519.0 / 878810.0,
+    ],
+    [
+        16779.0 / 1248040.0,
+        -147721.0 / 1248040.0,
+        1266979.0 / 1248040.0,
+    ],
+];
+
+/// CSS Color 4's `lin_ProPhoto_to_XYZ`, against D50, ProPhoto's own white.
+const LINEAR_PROPHOTO_TO_XYZ: Matrix3 = [
+    [
+        0.797_766_644_900_642_3,
+        0.135_181_297_400_533_08,
+        0.031_347_734_128_392_2,
+    ],
+    [
+        0.288_074_828_819_401_3,
+        0.711_835_234_241_873,
+        0.000_089_936_938_725_64,
+    ],
+    [0.0, 0.0, 0.825_104_602_510_460_2],
+];
+
+/// CSS Color 4's `XYZ_to_lin_ProPhoto`.
+const XYZ_TO_LINEAR_PROPHOTO: Matrix3 = [
+    [
+        1.345_786_881_647_158_3,
+        -0.255_572_087_379_794_64,
+        -0.051_101_864_975_545_26,
+    ],
+    [
+        -0.544_630_705_124_901_9,
+        1.508_247_742_845_146_8,
+        0.020_527_447_436_421_39,
+    ],
+    [0.0, 0.0, 1.211_967_545_638_945_2],
+];
+
+/// Bradford chromatic adaptation from D50 to D65, CSS Color 4's
+/// `D50_to_D65`. Section 12.1 requires it between a D50 space -- Lab,
+/// ProPhoto, `xyz-d50` -- and a D65 one: "chromatic adaptation ... using
+/// the Bradford method". Omitting it shifts blues and yellows while leaving
+/// greys alone.
+const D50_TO_D65: Matrix3 = [
+    [
+        0.955_473_421_488_075,
+        -0.023_098_454_948_764_71,
+        0.063_259_243_200_570_72,
+    ],
+    [
+        -0.028_369_709_333_863_7,
+        1.009_995_398_081_304_1,
+        0.021_041_441_191_917_323,
+    ],
+    [
+        0.012_314_014_864_481_998,
+        -0.020_507_649_298_898_964,
+        1.330_365_926_242_124,
+    ],
+];
+
+/// CSS Color 4's `D65_to_D50`, the other direction of [`D50_TO_D65`].
+const D65_TO_D50: Matrix3 = [
+    [
+        1.047_929_792_544_996_9,
+        0.022_946_870_601_609_652,
+        -0.050_192_266_289_205_24,
+    ],
+    [
+        0.029_627_808_770_055_99,
+        0.990_434_426_753_879_9,
+        -0.017_073_799_063_418_826,
+    ],
+    [
+        -0.009_243_040_646_204_504,
+        0.015_055_191_490_298_152,
+        0.751_874_281_428_137_1,
+    ],
+];
+
+/// `m` times `v`.
+fn apply_matrix(m: Matrix3, v: [f64; 3]) -> [f64; 3] {
+    m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
+}
 
 /// A98 RGB's exponent, which Adobe RGB (1998) specifies as 2 51/256.
-const A98_EXPONENT: f32 = 563.0 / 256.0;
+const A98_EXPONENT: f64 = 563.0 / 256.0;
 
 /// A98 RGB's transfer function, CSS Color 4's `lin_a98rgb`: a pure power,
 /// mirrored through zero so a negative component keeps its sign.
-fn a98_decode(encoded: f32) -> f32 {
+fn a98_decode(encoded: f64) -> f64 {
     encoded.abs().powf(A98_EXPONENT).copysign(encoded)
 }
 
 /// A98 RGB's encode, CSS Color 4's `gam_a98rgb`.
-fn a98_encode(linear: f32) -> f32 {
-    linear.abs().powf(1.0 / A98_EXPONENT).copysign(linear)
+fn a98_encode(linear: f64) -> f64 {
+    linear.abs().powf(A98_EXPONENT.recip()).copysign(linear)
 }
 
 /// Where ProPhoto RGB's linear toe ends, on the encoded side: CSS Color 4's
 /// `Et2`.
-const PROPHOTO_TOE: f32 = 16.0 / 512.0;
+const PROPHOTO_TOE: f64 = 16.0 / 512.0;
 /// The toe's slope, as the encoded value over the linear one.
-const PROPHOTO_TOE_SLOPE: f32 = 16.0;
+const PROPHOTO_TOE_SLOPE: f64 = 16.0;
 /// ProPhoto RGB's power above the toe.
-const PROPHOTO_EXPONENT: f32 = 1.8;
+const PROPHOTO_EXPONENT: f64 = 1.8;
 
 /// ProPhoto RGB's transfer function, CSS Color 4's `lin_ProPhoto`: a 1.8
 /// power above a short linear toe, mirrored through zero.
-fn prophoto_decode(encoded: f32) -> f32 {
+fn prophoto_decode(encoded: f64) -> f64 {
     let magnitude = encoded.abs();
     let linear = match magnitude <= PROPHOTO_TOE {
         true => magnitude / PROPHOTO_TOE_SLOPE,
@@ -1106,37 +1275,13 @@ fn prophoto_decode(encoded: f32) -> f32 {
 /// ProPhoto RGB's encode, CSS Color 4's `gam_ProPhoto`, mirrored through
 /// zero as the decode is. The toe ends at `Et`, 1/512, on the linear side,
 /// which is where it ends on the encoded side over its slope.
-fn prophoto_encode(linear: f32) -> f32 {
+fn prophoto_encode(linear: f64) -> f64 {
     let magnitude = linear.abs();
     let encoded = match magnitude >= PROPHOTO_TOE / PROPHOTO_TOE_SLOPE {
-        true => magnitude.powf(1.0 / PROPHOTO_EXPONENT),
+        true => magnitude.powf(PROPHOTO_EXPONENT.recip()),
         false => magnitude * PROPHOTO_TOE_SLOPE,
     };
     encoded.copysign(linear)
-}
-
-/// `m` times `v`.
-fn apply_matrix(m: [[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
-    m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
-}
-
-/// The inverse of a 3x3 matrix, by its adjugate, in `f64` so the inverse
-/// carries no more error than the `f32` matrix it came from.
-///
-/// For the conversions out of linear sRGB, derived from the ones into it
-/// rather than written out a second time, so the pair cannot disagree.
-fn inverse(m: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
-    let m = m.map(|row| row.map(f64::from));
-    let cofactor = |r: usize, c: usize| {
-        let (r0, r1) = ((r + 1) % 3, (r + 2) % 3);
-        let (c0, c1) = ((c + 1) % 3, (c + 2) % 3);
-        m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0]
-    };
-    let determinant = (0..3).map(|c| m[0][c] * cofactor(0, c)).sum::<f64>();
-    // The adjugate is the transpose of the cofactor matrix.
-    std::array::from_fn(|r| {
-        std::array::from_fn(|c| (cofactor(c, r) / determinant) as f32)
-    })
 }
 
 /// The primaries `space` is built on, by name: `"srgb"`, `"display-p3"` or
@@ -1168,6 +1313,64 @@ pub(crate) fn color4f_to_rgba_linear(
     RgbaLinear::from_srgb(srgb.r, srgb.g, srgb.b, srgb.a)
 }
 
+/// `color()` components in `space` as XYZ against D65, by the space's own
+/// transfer function and matrix, adapted from D50 where the space is D50's.
+/// `None` for a space `color()` does not name.
+fn color_function_to_xyz(space: &str, [x, y, z]: [f64; 3]) -> Option<[f64; 3]> {
+    let linear = |decode: fn(f64) -> f64| [x, y, z].map(decode);
+    Some(match space {
+        "srgb" => apply_matrix(LINEAR_SRGB_TO_XYZ, linear(srgb_to_linear_f64)),
+        "srgb-linear" => apply_matrix(LINEAR_SRGB_TO_XYZ, [x, y, z]),
+        "display-p3" => {
+            apply_matrix(LINEAR_P3_TO_XYZ, linear(srgb_to_linear_f64))
+        }
+        "rec2020" => {
+            apply_matrix(LINEAR_REC2020_TO_XYZ, linear(rec2020_decode))
+        }
+        "a98-rgb" => apply_matrix(LINEAR_A98_TO_XYZ, linear(a98_decode)),
+        "prophoto-rgb" => apply_matrix(
+            D50_TO_D65,
+            apply_matrix(LINEAR_PROPHOTO_TO_XYZ, linear(prophoto_decode)),
+        ),
+        "xyz" | "xyz-d65" => [x, y, z],
+        "xyz-d50" => apply_matrix(D50_TO_D65, [x, y, z]),
+        _ => return None,
+    })
+}
+
+/// XYZ against D65 as `color()` components in `space`, the inverse of
+/// [`color_function_to_xyz`].
+fn xyz_to_color_function(space: &str, xyz: [f64; 3]) -> Option<[f64; 3]> {
+    let encode = |m: Matrix3, f: fn(f64) -> f64| apply_matrix(m, xyz).map(f);
+    Some(match space {
+        "srgb" => encode(XYZ_TO_LINEAR_SRGB, linear_to_srgb_f64),
+        "srgb-linear" => apply_matrix(XYZ_TO_LINEAR_SRGB, xyz),
+        "display-p3" => encode(XYZ_TO_LINEAR_P3, linear_to_srgb_f64),
+        "rec2020" => encode(XYZ_TO_LINEAR_REC2020, rec2020_encode),
+        "a98-rgb" => encode(XYZ_TO_LINEAR_A98, a98_encode),
+        "prophoto-rgb" => {
+            apply_matrix(XYZ_TO_LINEAR_PROPHOTO, apply_matrix(D65_TO_D50, xyz))
+                .map(prophoto_encode)
+        }
+        "xyz" | "xyz-d65" => xyz,
+        "xyz-d50" => apply_matrix(D65_TO_D50, xyz),
+        _ => return None,
+    })
+}
+
+/// `color()` components in `space` as extended sRGB, in `f64`: through XYZ,
+/// as the sample code converts, and nothing clipped. An unknown space passes
+/// through as sRGB.
+fn color_function_to_srgb_f64(space: &str, components: [f64; 3]) -> [f64; 3] {
+    match space {
+        "srgb" => components,
+        "srgb-linear" => components.map(linear_to_srgb_f64),
+        _ => color_function_to_xyz(space, components)
+            .and_then(|xyz| xyz_to_color_function("srgb", xyz))
+            .unwrap_or(components),
+    }
+}
+
 /// Converts `color()` components into extended sRGB.
 ///
 /// For the callers that need a colour in sRGB rather than tagged with its
@@ -1176,78 +1379,27 @@ pub(crate) fn color4f_to_rgba_linear(
 /// among them. A paint keeps the colour in the space it was named
 /// in, so a P3 colour on a P3 canvas needs no conversion at all, and a round
 /// trip through sRGB would cost it about a level of the eight the readback
-/// quantises to.
+/// quantises to. Computed in `f64` and rounded to `f32` once.
 fn color_function_to_srgb(color: Color4f, space: &str) -> Color4f {
-    let apply = |m: [[f32; 3]; 3], v: [f32; 3]| {
-        [
-            m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
-            m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
-            m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
-        ]
-    };
-    let linear = |f: fn(f32) -> f32| [f(color.r), f(color.g), f(color.b)];
-
-    // The CSS Color 4 conversions, applied in linear light.
-    let [r, g, b] = match space {
-        "srgb" => return color,
-        "srgb-linear" => [
-            linear_to_srgb(color.r),
-            linear_to_srgb(color.g),
-            linear_to_srgb(color.b),
-        ],
-        "display-p3" => apply(LINEAR_P3_TO_LINEAR_SRGB, linear(srgb_to_linear))
-            .map(linear_to_srgb),
-        "rec2020" => {
-            apply(LINEAR_REC2020_TO_LINEAR_SRGB, linear(rec2020_decode))
-                .map(linear_to_srgb)
-        }
-        "a98-rgb" => apply(LINEAR_A98_TO_LINEAR_SRGB, linear(a98_decode))
-            .map(linear_to_srgb),
-        "prophoto-rgb" => {
-            apply(LINEAR_PROPHOTO_TO_LINEAR_SRGB, linear(prophoto_decode))
-                .map(linear_to_srgb)
-        }
-        "xyz" | "xyz-d65" => {
-            apply(XYZ_D65_TO_LINEAR_SRGB, [color.r, color.g, color.b])
-                .map(linear_to_srgb)
-        }
-        "xyz-d50" => apply(
-            XYZ_D65_TO_LINEAR_SRGB,
-            apply(BRADFORD_D50_TO_D65, [color.r, color.g, color.b]),
-        )
-        .map(linear_to_srgb),
-        _ => return color,
-    };
+    let wide = [color.r, color.g, color.b].map(f64::from);
+    let [r, g, b] = color_function_to_srgb_f64(space, wide).map(|c| c as f32);
     Color4f::new(r, g, b, color.a)
 }
 
 /// Extended sRGB into the components `color()` names in `space`, the
-/// inverse of [`color_function_to_srgb`]: into linear light, through the
-/// inverse of the matrix that space converts by, and out through its own
-/// transfer function. `None` for a space `color()` does not name.
-fn srgb_to_color_function(rgb: [f32; 3], space: &str) -> Option<[f32; 3]> {
-    let linear = rgb.map(srgb_to_linear);
-    let through = |m: [[f32; 3]; 3], encode: fn(f32) -> f32| {
-        apply_matrix(inverse(m), linear).map(encode)
-    };
-    Some(match space {
-        "srgb" => rgb,
-        "srgb-linear" => linear,
-        "display-p3" => through(LINEAR_P3_TO_LINEAR_SRGB, linear_to_srgb),
-        "rec2020" => through(LINEAR_REC2020_TO_LINEAR_SRGB, rec2020_encode),
-        "a98-rgb" => through(LINEAR_A98_TO_LINEAR_SRGB, a98_encode),
-        "prophoto-rgb" => {
-            through(LINEAR_PROPHOTO_TO_LINEAR_SRGB, prophoto_encode)
-        }
-        "xyz" | "xyz-d65" => {
-            apply_matrix(inverse(XYZ_D65_TO_LINEAR_SRGB), linear)
-        }
-        "xyz-d50" => apply_matrix(
-            inverse(BRADFORD_D50_TO_D65),
-            apply_matrix(inverse(XYZ_D65_TO_LINEAR_SRGB), linear),
-        ),
-        _ => return None,
-    })
+/// inverse of [`color_function_to_srgb_f64`]. `None` for a space `color()`
+/// does not name.
+///
+/// sRGB and its linear form share sRGB's primaries, so they take the
+/// transfer function alone: through XYZ and back, the matrices' product is
+/// the identity only to within `f64` rounding, and `color(from red srgb r g
+/// b)` would read a green of -6.7e-16.
+fn srgb_to_color_function(rgb: [f64; 3], space: &str) -> Option<[f64; 3]> {
+    match space {
+        "srgb" => Some(rgb),
+        "srgb-linear" => Some(rgb.map(srgb_to_linear_f64)),
+        _ => xyz_to_color_function(space, color_function_to_xyz("srgb", rgb)?),
+    }
 }
 
 /// The name of a color space this crate can build, by comparing against each.
@@ -1283,108 +1435,68 @@ pub fn css_to_color4f(css: &str) -> Option<Color4f> {
 /// `Y = 1`.
 ///
 /// [Section 10.1]: https://www.w3.org/TR/css-color-4/#cie-lab
-const LAB_WHITE_D50: [f32; 3] =
+const LAB_WHITE_D50: [f64; 3] =
     [0.3457 / 0.3585, 1.0, (1.0 - 0.3457 - 0.3585) / 0.3585];
-
-/// Bradford chromatic adaptation from D50 to D65.
-///
-/// CSS Color 4 [section 12.1] requires this step between Lab's D50 reference
-/// and sRGB's D65 one: "chromatic adaptation ... using the Bradford method".
-/// Omitting it shifts blues and yellows while leaving greys alone;
-/// [`lab_to_srgb`] says why this crate converts Lab itself.
-///
-/// [section 12.1]: https://www.w3.org/TR/css-color-4/#color-conversion-code
-const BRADFORD_D50_TO_D65: [[f32; 3]; 3] = [
-    [0.955_473_4, -0.023_098_5, 0.063_259_3],
-    [-0.028_369_7, 1.009_995_5, 0.021_041_4],
-    [0.012_314, -0.020_507_7, 1.330_365_9],
-];
-
-/// XYZ with a D65 reference white into linear-light sRGB.
-///
-/// The inverse of the sRGB primaries matrix, as CSS Color 4 [section 12.1]
-/// gives it.
-///
-/// [section 12.1]: https://www.w3.org/TR/css-color-4/#color-conversion-code
-const XYZ_D65_TO_LINEAR_SRGB: [[f32; 3]; 3] = [
-    [3.240_97, -1.537_383_2, -0.498_610_8],
-    [-0.969_243_6, 1.875_967_5, 0.041_555_1],
-    [0.055_630_1, -0.203_977, 1.056_971_5],
-];
 
 /// CIE's `kappa`, the linear segment's slope in the Lab transfer function.
 ///
-/// The rational form 24389/27, which CSS Color 4 [section 12.1] uses in
+/// The rational form 24389/27, which CSS Color 4 [section 19] uses in
 /// preference to the rounded 903.3 of older texts.
 ///
-/// [section 12.1]: https://www.w3.org/TR/css-color-4/#color-conversion-code
-const LAB_KAPPA: f32 = 24389.0 / 27.0;
+/// [section 19]: https://www.w3.org/TR/css-color-4/#color-conversion-code
+const LAB_KAPPA: f64 = 24389.0 / 27.0;
 
 /// CIE's `epsilon`, where that transfer function leaves its linear segment.
 ///
 /// The rational form 216/24389, for the reason given on [`LAB_KAPPA`].
-const LAB_EPSILON: f32 = 216.0 / 24389.0;
+const LAB_EPSILON: f64 = 216.0 / 24389.0;
 
 /// A `lab()` percentage on the `a` and `b` axes is this many units.
 ///
 /// CSS Color 4 [section 10.1]: "the percentage 100% ... means 125".
 ///
 /// [section 10.1]: https://www.w3.org/TR/css-color-4/#specifying-lab-lch
-const LAB_AB_FULL_SCALE: f32 = 125.0;
+const LAB_AB_FULL_SCALE: f64 = 125.0;
 
 /// An `lch()` percentage on the chroma axis is this many units.
 ///
 /// CSS Color 4 [section 10.2]: "the percentage 100% ... means 150".
 ///
 /// [section 10.2]: https://www.w3.org/TR/css-color-4/#specifying-lab-lch
-const LCH_CHROMA_FULL_SCALE: f32 = 150.0;
+const LCH_CHROMA_FULL_SCALE: f64 = 150.0;
 
-/// CIE Lab into extended sRGB: to XYZ against Lab's own D50 white, CSS
-/// Color 4 section 12.1, then [`BRADFORD_D50_TO_D65`] and the sRGB matrix,
-/// clipping nothing, a lightness outside `0..=100` included.
-///
-/// Over a grid of every form the `lab()` and `lch()` grammar takes, 17,712
-/// inputs, this lands within 8.5e-6 of the specification's own conversion
-/// done in `f64`, which `lab_and_lch_follow_css_color_4_across_their_grammar`
-/// holds it to; a conversion within 2.2e-3 puts 121 of them a whole 8-bit
-/// level off, one of which `the_rust_surface_takes_css_colors` pins against
-/// Chrome.
-fn lab_to_srgb([l, a, b]: [f32; 3]) -> [f32; 3] {
-    let fy = (l + 16.0) / 116.0;
-    let fx = a / 500.0 + fy;
-    let fz = fy - b / 200.0;
-    let inverse = |f: f32| {
-        let cubed = f * f * f;
-        if cubed > LAB_EPSILON {
-            cubed
-        } else {
-            (116.0 * f - 16.0) / LAB_KAPPA
-        }
+/// CIE Lab into extended sRGB: CSS Color 4's `Lab_to_XYZ` against Lab's own
+/// D50 white, then [`D50_TO_D65`] and `XYZ_to_lin_sRGB`, clipping nothing, a
+/// lightness outside `0..=100` included. The same steps in the same order
+/// as the sample code, `L` kept out of `L + 16` for precision near black as
+/// it keeps it.
+fn lab_to_srgb([l, a, b]: [f64; 3]) -> [f64; 3] {
+    let lightness = l / 116.0;
+    let (a500, b200) = (a / 500.0, b / 200.0);
+    let fy = lightness + 16.0 / 116.0;
+    let (fx, fz) = (fy + a500, fy - b200);
+    let cube = |f: f64, linear: f64| match f.powi(3) > LAB_EPSILON {
+        true => f.powi(3),
+        false => linear * (116.0 / LAB_KAPPA),
     };
-    let y = if l > LAB_KAPPA * LAB_EPSILON {
-        fy * fy * fy
-    } else {
-        l / LAB_KAPPA
+    let y = match l > LAB_KAPPA * LAB_EPSILON {
+        true => ((l + 16.0) / 116.0).powi(3),
+        false => l / LAB_KAPPA,
     };
     let xyz_d50 = [
-        inverse(fx) * LAB_WHITE_D50[0],
+        cube(fx, lightness + a500) * LAB_WHITE_D50[0],
         y * LAB_WHITE_D50[1],
-        inverse(fz) * LAB_WHITE_D50[2],
+        cube(fz, lightness - b200) * LAB_WHITE_D50[2],
     ];
-    apply_matrix(
-        XYZ_D65_TO_LINEAR_SRGB,
-        apply_matrix(BRADFORD_D50_TO_D65, xyz_d50),
-    )
-    .map(linear_to_srgb)
+    xyz_to_color_function("srgb", apply_matrix(D50_TO_D65, xyz_d50))
+        .unwrap_or_default()
 }
 
-/// Extended sRGB into CIE Lab, CSS Color 4's `XYZ_to_Lab` after the
-/// inverses of the matrices [`lab_to_srgb`] applies, so the two are a pair.
-fn srgb_to_lab(rgb: [f32; 3]) -> [f32; 3] {
-    let xyz_d50 = apply_matrix(
-        inverse(BRADFORD_D50_TO_D65),
-        apply_matrix(inverse(XYZ_D65_TO_LINEAR_SRGB), rgb.map(srgb_to_linear)),
-    );
+/// Extended sRGB into CIE Lab: `lin_sRGB_to_XYZ`, [`D65_TO_D50`] and CSS
+/// Color 4's `XYZ_to_Lab`, the inverse of [`lab_to_srgb`].
+fn srgb_to_lab(rgb: [f64; 3]) -> [f64; 3] {
+    let xyz_d65 = color_function_to_xyz("srgb", rgb).unwrap_or_default();
+    let xyz_d50 = apply_matrix(D65_TO_D50, xyz_d65);
     let [fx, fy, fz] = std::array::from_fn(|i| {
         let scaled = xyz_d50[i] / LAB_WHITE_D50[i];
         match scaled > LAB_EPSILON {
@@ -1397,32 +1509,99 @@ fn srgb_to_lab(rgb: [f32; 3]) -> [f32; 3] {
 
 /// XYZ with a D65 white into Oklab's cone responses: the first matrix of
 /// CSS Color 4's `XYZ_to_OKLab` ([section 19]), recalculated there for a
-/// consistent white.
+/// consistent white and for 64-bit precision.
 ///
 /// [section 19]: https://www.w3.org/TR/css-color-4/#color-conversion-code
-const XYZ_D65_TO_OKLAB_LMS: [[f32; 3]; 3] = [
-    [0.819_022_4, 0.361_906_26, -0.128_873_78],
-    [0.032_983_654, 0.929_286_86, 0.036_144_666],
-    [0.048_177_19, 0.264_239_53, 0.633_547_8],
+const XYZ_TO_OKLAB_LMS: Matrix3 = [
+    [
+        0.819_022_437_996_703,
+        0.361_906_260_052_890_4,
+        -0.128_873_781_520_987_9,
+    ],
+    [
+        0.032_983_653_932_388_5,
+        0.929_286_861_586_343_4,
+        0.036_144_666_350_642_4,
+    ],
+    [
+        0.048_177_189_359_624_2,
+        0.264_239_531_752_730_8,
+        0.633_547_828_469_430_9,
+    ],
 ];
 
 /// Oklab's cube-rooted cone responses into `L`, `a` and `b`, the second
 /// matrix of CSS Color 4's `XYZ_to_OKLab`.
-const OKLAB_LMS_TO_OKLAB: [[f32; 3]; 3] = [
-    [0.210_454_27, 0.793_617_8, -0.004_072_043],
-    [1.977_998_5, -2.428_592_2, 0.450_593_7],
-    [0.025_904_042, 0.782_771_7, -0.808_675_77],
+const OKLAB_LMS_TO_OKLAB: Matrix3 = [
+    [
+        0.210_454_268_309_314,
+        0.793_617_774_702_305_4,
+        -0.004_072_043_011_619_3,
+    ],
+    [
+        1.977_998_532_431_168_4,
+        -2.428_592_242_048_58,
+        0.450_593_709_617_411,
+    ],
+    [
+        0.025_904_042_465_547_8,
+        0.782_771_712_457_529_6,
+        -0.808_675_754_923_077_4,
+    ],
 ];
 
-/// Extended sRGB into Oklab, by CSS Color 4's `XYZ_to_OKLab`. The cube root
-/// keeps its sign, as the sample code warns a port must.
-fn srgb_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
-    let xyz =
-        apply_matrix(inverse(XYZ_D65_TO_LINEAR_SRGB), rgb.map(srgb_to_linear));
-    apply_matrix(
-        OKLAB_LMS_TO_OKLAB,
-        apply_matrix(XYZ_D65_TO_OKLAB_LMS, xyz).map(f32::cbrt),
-    )
+/// Oklab into cube-rooted cone responses, the first matrix of CSS Color 4's
+/// `OKLab_to_XYZ`.
+const OKLAB_TO_OKLAB_LMS: Matrix3 = [
+    [1.0, 0.396_337_777_376_174_9, 0.215_803_757_309_913_6],
+    [1.0, -0.105_561_345_815_658_6, -0.063_854_172_825_813_3],
+    [1.0, -0.089_484_177_529_811_9, -1.291_485_548_019_409_2],
+];
+
+/// Oklab's cone responses into XYZ with a D65 white, the second matrix of
+/// CSS Color 4's `OKLab_to_XYZ`.
+const OKLAB_LMS_TO_XYZ: Matrix3 = [
+    [
+        1.226_879_875_845_924_3,
+        -0.557_814_994_460_217_1,
+        0.281_391_045_665_964_7,
+    ],
+    [
+        -0.040_575_745_214_800_8,
+        1.112_286_803_280_317,
+        -0.071_711_058_065_516_4,
+    ],
+    [
+        -0.076_372_936_674_660_1,
+        -0.421_493_332_402_243_2,
+        1.586_924_019_836_781_6,
+    ],
+];
+
+/// Linear-light sRGB into Oklab, CSS Color 4's `lin_sRGB_to_XYZ` then
+/// `XYZ_to_OKLab`. The cube root keeps its sign, as the sample code warns a
+/// port must.
+fn linear_srgb_to_oklab(rgb: [f64; 3]) -> [f64; 3] {
+    let xyz = apply_matrix(LINEAR_SRGB_TO_XYZ, rgb);
+    let lms = apply_matrix(XYZ_TO_OKLAB_LMS, xyz).map(f64::cbrt);
+    apply_matrix(OKLAB_LMS_TO_OKLAB, lms)
+}
+
+/// Oklab into linear-light sRGB, CSS Color 4's `OKLab_to_XYZ` then
+/// `XYZ_to_lin_sRGB`, the inverse of [`linear_srgb_to_oklab`].
+fn oklab_to_linear_srgb(lab: [f64; 3]) -> [f64; 3] {
+    let lms = apply_matrix(OKLAB_TO_OKLAB_LMS, lab).map(|c| c * c * c);
+    apply_matrix(XYZ_TO_LINEAR_SRGB, apply_matrix(OKLAB_LMS_TO_XYZ, lms))
+}
+
+/// Extended sRGB into Oklab.
+fn srgb_to_oklab(rgb: [f64; 3]) -> [f64; 3] {
+    linear_srgb_to_oklab(rgb.map(srgb_to_linear_f64))
+}
+
+/// Oklab into extended sRGB, the inverse of [`srgb_to_oklab`].
+fn oklab_to_srgb(oklab: [f64; 3]) -> [f64; 3] {
+    oklab_to_linear_srgb(oklab).map(linear_to_srgb_f64)
 }
 
 /// CSS Color 4's just noticeable difference, in deltaEOK: section 14.2.1,
@@ -1433,30 +1612,6 @@ const GAMUT_MAP_JND: f64 = 0.02;
 /// The chroma resolution section 14.2.2's binary search stops at: "let
 /// epsilon be 0.0001".
 const GAMUT_MAP_EPSILON: f64 = 0.0001;
-
-/// Linear-light sRGB into Oklab, in `f64`, by the matrices
-/// [`srgb_to_oklab`] applies.
-fn linear_srgb_to_oklab_f64(rgb: [f64; 3]) -> [f64; 3] {
-    let widen = |m: [[f32; 3]; 3]| m.map(|row| row.map(f64::from));
-    let apply = |m: [[f64; 3]; 3], v: [f64; 3]| {
-        m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
-    };
-    let xyz = apply(widen(inverse(XYZ_D65_TO_LINEAR_SRGB)), rgb);
-    let lms = apply(widen(XYZ_D65_TO_OKLAB_LMS), xyz).map(f64::cbrt);
-    apply(widen(OKLAB_LMS_TO_OKLAB), lms)
-}
-
-/// Oklab into linear-light sRGB, in `f64`, the inverse of
-/// [`linear_srgb_to_oklab_f64`].
-fn oklab_to_linear_srgb_f64(lab: [f64; 3]) -> [f64; 3] {
-    let widen = |m: [[f32; 3]; 3]| m.map(|row| row.map(f64::from));
-    let apply = |m: [[f64; 3]; 3], v: [f64; 3]| {
-        m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
-    };
-    let lms = apply(widen(inverse(OKLAB_LMS_TO_OKLAB)), lab).map(|c| c * c * c);
-    let xyz = apply(widen(inverse(XYZ_D65_TO_OKLAB_LMS)), lms);
-    apply(widen(XYZ_D65_TO_LINEAR_SRGB), xyz)
-}
 
 /// Linear-light sRGB components, inside sRGB's gamut or not, mapped into it
 /// by CSS Color 4 section 14.2.2's binary search with local MINDE: chroma is
@@ -1477,7 +1632,7 @@ pub(crate) fn gamut_map_srgb(linear: [f32; 3]) -> [f32; 3] {
     if in_gamut(origin) {
         return linear;
     }
-    let [lightness, a, b] = linear_srgb_to_oklab_f64(origin);
+    let [lightness, a, b] = linear_srgb_to_oklab(origin);
     // Steps 3 and 4: at or past either end of lightness, white or black.
     if lightness >= 1.0 {
         return [1.0; 3];
@@ -1488,12 +1643,12 @@ pub(crate) fn gamut_map_srgb(linear: [f32; 3]) -> [f32; 3] {
     let chroma = a.hypot(b);
     let at = |reduced: f64| {
         let scale = reduced / chroma;
-        oklab_to_linear_srgb_f64([lightness, a * scale, b * scale])
+        oklab_to_linear_srgb([lightness, a * scale, b * scale])
     };
     let clip = |c: [f64; 3]| c.map(|channel| channel.clamp(0.0, 1.0));
     let delta = |one: [f64; 3], two: [f64; 3]| {
-        let [l1, a1, b1] = linear_srgb_to_oklab_f64(one);
-        let [l2, a2, b2] = linear_srgb_to_oklab_f64(two);
+        let [l1, a1, b1] = linear_srgb_to_oklab(one);
+        let [l2, a2, b2] = linear_srgb_to_oklab(two);
         ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt()
     };
     let mut clipped = clip(origin);
@@ -1521,19 +1676,6 @@ pub(crate) fn gamut_map_srgb(linear: [f32; 3]) -> [f32; 3] {
         }
     }
     clipped.map(|channel| channel as f32)
-}
-
-/// Oklab into extended sRGB, by the inverses of the matrices
-/// [`srgb_to_oklab`] applies, so the two are a pair -- CSS Color 4 publishes
-/// its own inverses, which agree with these to their precision.
-fn oklab_to_srgb(oklab: [f32; 3]) -> [f32; 3] {
-    let lms =
-        apply_matrix(inverse(OKLAB_LMS_TO_OKLAB), oklab).map(|c| c * c * c);
-    apply_matrix(
-        XYZ_D65_TO_LINEAR_SRGB,
-        apply_matrix(inverse(XYZ_D65_TO_OKLAB_LMS), lms),
-    )
-    .map(linear_to_srgb)
 }
 
 /// The arguments of a call, given what follows its `(`, as spans of `args`:
@@ -1598,11 +1740,11 @@ const OKLAB_CHROMA_FULL_SCALE: f64 = 0.4;
 
 /// Where an LCH hue becomes powerless: CSS Color 4 section 9.3's table,
 /// "C <= 0.0015", the `epsilon` of its `Lab_to_LCH`.
-const LCH_POWERLESS_CHROMA: f32 = 0.0015;
+const LCH_POWERLESS_CHROMA: f64 = 0.0015;
 
 /// Where an OkLCh hue becomes powerless: CSS Color 4 section 9.4's table,
 /// "C <= 0.000004", the `epsilon` of its `OKLab_to_OKLCH`.
-const OKLCH_POWERLESS_CHROMA: f32 = 0.000_004;
+const OKLCH_POWERLESS_CHROMA: f64 = 0.000_004;
 
 /// What one channel of a relative colour may be written as besides a
 /// number.
@@ -1647,7 +1789,7 @@ impl Relative {
 
     /// What each of the three channels may be written as.
     fn channels(self) -> [Channel; 3] {
-        let lab_ab = Channel::Scaled(f64::from(LAB_AB_FULL_SCALE));
+        let lab_ab = Channel::Scaled(LAB_AB_FULL_SCALE);
         let oklab_ab = Channel::Scaled(OKLAB_CHROMA_FULL_SCALE);
         let percent = Channel::Scaled(PERCENT_CHANNEL_SCALE);
         match self {
@@ -1656,7 +1798,7 @@ impl Relative {
             Self::Lab => [percent, lab_ab, lab_ab],
             Self::Lch => [
                 percent,
-                Channel::Scaled(f64::from(LCH_CHROMA_FULL_SCALE)),
+                Channel::Scaled(LCH_CHROMA_FULL_SCALE),
                 Channel::Hue,
             ],
             Self::Oklab => [Channel::Scaled(1.0), oklab_ab, oklab_ab],
@@ -1671,12 +1813,41 @@ impl Relative {
     /// Unclamped, a lightness outside its range included: Chrome 153 reads
     /// `l` as 104.4 in `lab(from color(srgb 1.05 1.05 1.05) calc(l - 30) a
     /// b)`, which paints `lab(74.4 0 0)`. Only the result is clamped, by
-    /// [`color`](Self::color).
-    fn origin(self, rgb: [f32; 3]) -> Option<[f64; 3]> {
-        let wide = rgb.map(f64::from);
-        let lab = || srgb_to_lab(rgb);
-        let oklab = || srgb_to_oklab(rgb);
-        let scaled = |[x, y, z]: [f32; 3]| [x, y, z].map(f64::from);
+    /// [`declared`](Self::declared).
+    ///
+    /// Read from the origin's declaration, in `f64`: as declared where the
+    /// origin is in this function's own space -- a `lab()` origin for
+    /// `lch()` only changes to polar form -- and through sRGB otherwise, so
+    /// `color(from color(rec2020 0 1 0) rec2020 r g b)` reads 0, 1, 0 rather
+    /// than a pure-power encode of the residue near zero a round trip leaves.
+    fn origin(self, origin: &Declared) -> Option<[f64; 3]> {
+        let declared = origin.channels.map(|c| c.unwrap_or(0.0));
+        let same_space = |space: &str| matches!(origin.form, Form::Color(declared) if canonical_space(declared) == canonical_space(space));
+        match (self, origin.form) {
+            (Self::Rgb, Form::Legacy)
+            | (Self::Lab, Form::Lab)
+            | (Self::Lch, Form::Lch)
+            | (Self::Oklab, Form::Oklab)
+            | (Self::Oklch, Form::Oklch) => return Some(declared),
+            (Self::Lch, Form::Lab) => {
+                return Some(to_polar(declared, LCH_POWERLESS_CHROMA));
+            }
+            (Self::Oklch, Form::Oklab) => {
+                return Some(to_polar(declared, OKLCH_POWERLESS_CHROMA));
+            }
+            (Self::Lab | Self::Oklab, Form::Lch | Form::Oklch)
+                if (self == Self::Lab) == (origin.form == Form::Lch) =>
+            {
+                return Some(from_polar(declared));
+            }
+            (Self::Color(space), _) if same_space(space) => {
+                return Some(declared);
+            }
+            _ => {}
+        }
+        let wide = declared_srgb(origin);
+        let lab = || srgb_to_lab(wide);
+        let oklab = || srgb_to_oklab(wide);
         Some(match self {
             Self::Rgb => wide.map(|c| c * RGB_CHANNEL_SCALE),
             Self::Hsl => {
@@ -1691,11 +1862,11 @@ impl Relative {
                     (1.0 - r.max(g).max(b)) * PERCENT_CHANNEL_SCALE,
                 ]
             }
-            Self::Lab => scaled(lab()),
-            Self::Lch => scaled(to_polar(lab(), LCH_POWERLESS_CHROMA)),
-            Self::Oklab => scaled(oklab()),
-            Self::Oklch => scaled(to_polar(oklab(), OKLCH_POWERLESS_CHROMA)),
-            Self::Color(space) => scaled(srgb_to_color_function(rgb, space)?),
+            Self::Lab => lab(),
+            Self::Lch => to_polar(lab(), LCH_POWERLESS_CHROMA),
+            Self::Oklab => oklab(),
+            Self::Oklch => to_polar(oklab(), OKLCH_POWERLESS_CHROMA),
+            Self::Color(space) => srgb_to_color_function(wide, space)?,
         })
     }
 
@@ -1703,9 +1874,9 @@ impl Relative {
     /// when it parses the function, as Chrome 153 applies them: `rgb()` into
     /// `0..=255`, `hsl()` saturation and lightness and `hwb()` whiteness and
     /// blackness at zero. Lightness and chroma are clamped for Lab and Oklab
-    /// by [`color`](Self::color), for a relative colour too; these are not,
-    /// since a relative `rgb(from red calc(r - 300) g b)` keeps its negative
-    /// red there.
+    /// by [`declared`](Self::declared), for a relative colour too; these are
+    /// not, since a relative `rgb(from red calc(r - 300) g b)` keeps its
+    /// negative red there.
     fn parsed(self, [x, y, z]: [f64; 3]) -> [f64; 3] {
         match self {
             Self::Rgb => [x, y, z].map(|c| c.clamp(0.0, RGB_CHANNEL_SCALE)),
@@ -1713,52 +1884,277 @@ impl Relative {
             _ => [x, y, z],
         }
     }
+}
 
-    /// The colour the evaluated channels name, and the space it is in: the
-    /// space `color()` named where a canvas can hold it, sRGB otherwise.
+/// A colour as CSS Color 4 section 16 serialises it: the function it was
+/// declared in and its channels as that function computes them, so a getter
+/// reports `lab(29 39 20)` for `lab(29% 39 20)` rather than the sRGB the
+/// colour paints as.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Declared {
+    /// The function it was declared in.
+    pub form: Form,
+    /// The three channels, `None` where the declaration wrote `none`. A
+    /// legacy colour's are its sRGB on `0..=255`; the others are on the scale
+    /// section 16 serialises them on -- Lab lightness `0..=100`, Oklab
+    /// lightness `0..=1`, a hue in degrees, a `color()` channel as written.
+    pub channels: [Option<f64>; 3],
+    /// The alpha on `0..=1`, `None` for `none`.
+    pub alpha: Option<f64>,
+}
+
+/// The function a [`Declared`] colour is serialised in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Form {
+    /// Section 16.2's sRGB values: hex, named, `transparent`,
+    /// `currentcolor`, and absolute `rgb()`, `hsl()` and `hwb()`.
+    Legacy,
+    /// `lab()`.
+    Lab,
+    /// `lch()`.
+    Lch,
+    /// `oklab()`.
+    Oklab,
+    /// `oklch()`.
+    Oklch,
+    /// `color()`, in the space it names, spelled as section 16.5 spells it.
+    Color(&'static str),
+}
+
+impl Form {
+    /// Whether the colour is held in a space other than the one its channels
+    /// are written in, so that one channel's rounding moves the colour the
+    /// others paint: Lab, LCH, Oklab and OkLCh are converted to sRGB, where a
+    /// legacy or `color()` channel is held as written.
+    fn mixes_channels(self) -> bool {
+        matches!(self, Form::Lab | Form::Lch | Form::Oklab | Form::Oklch)
+    }
+}
+
+impl Relative {
+    /// `values` as [`Declared`] holds them, `missing` where a channel was
+    /// `none`.
     ///
-    /// Nothing is clipped but what CSS Color 4 clamps when it parses the
-    /// function: Lab and Oklab lightness into its range, and a polar chroma
-    /// at zero. Chrome 153 does both -- `lab(from red calc(l - 200) a b)` is
-    /// `lab(0 a b)` there and `lch(from red l calc(c - 200) h)` grey -- and
-    /// clips nothing else.
-    fn color(self, [x, y, z]: [f64; 3]) -> ([f32; 3], &'static str) {
-        let narrow = |v: [f64; 3]| v.map(|c| c as f32);
-        let lab_l = x.clamp(0.0, PERCENT_CHANNEL_SCALE);
-        let oklab_l = x.clamp(0.0, 1.0);
-        let from_polar = |l: f64, c: f64, h: f64| {
-            let (sin, cos) = h.to_radians().sin_cos();
-            narrow([l, c.max(0.0) * cos, c.max(0.0) * sin])
+    /// The clamps are CSS Color 4's computed-value ones, as Chrome 156
+    /// applies them: Lab and Oklab lightness into its range, a polar chroma
+    /// at zero and its hue into `0..360` -- `lab(150 0 0)` reads back as
+    /// `lab(100 0 0)` and `oklch(0.7 0.35 390)` as `oklch(0.7 0.35 30)`. A
+    /// relative colour in a legacy function is serialised as `color(srgb)`,
+    /// which CSS Color 5 section 4.4 gives it and Chrome 156 reports.
+    fn declared(
+        self,
+        [x, y, z]: [f64; 3],
+        missing: [bool; 3],
+        alpha: Option<f64>,
+        relative: bool,
+    ) -> Declared {
+        let hue = |h: f64| h.rem_euclid(DEGREES_PER_TURN);
+        let kept = |values: [f64; 3]| {
+            [0, 1, 2].map(|at| (!missing[at]).then_some(values[at]))
         };
-        let srgb = match self {
-            Self::Rgb => narrow([x, y, z].map(|c| c / RGB_CHANNEL_SCALE)),
-            Self::Hsl => narrow(hsl_to_srgb(
+        let (form, channels) = match self {
+            Self::Rgb | Self::Hsl | Self::Hwb => {
+                let srgb = self.legacy_srgb([x, y, z]);
+                match relative {
+                    // CSS Color 4 section 4.4: a missing component "behaves
+                    // as a zero value" when the colour is converted to
+                    // another space. `rgb()`'s channels are sRGB's own and
+                    // keep their `none`; `hsl()` and `hwb()` are converted, so
+                    // `hsl(from red none s l)` is red, not `color(srgb none
+                    // 0 0)`.
+                    true if self == Self::Rgb => {
+                        (Form::Color("srgb"), kept(srgb))
+                    }
+                    true => (Form::Color("srgb"), srgb.map(Some)),
+                    // A legacy serialisation has no `none`: section 16.2
+                    // writes it as zero.
+                    false => (
+                        Form::Legacy,
+                        srgb.map(|c| Some(c * RGB_CHANNEL_SCALE)),
+                    ),
+                }
+            }
+            Self::Lab => {
+                (Form::Lab, kept([x.clamp(0.0, PERCENT_CHANNEL_SCALE), y, z]))
+            }
+            Self::Lch => (
+                Form::Lch,
+                kept([x.clamp(0.0, PERCENT_CHANNEL_SCALE), y.max(0.0), hue(z)]),
+            ),
+            Self::Oklab => (Form::Oklab, kept([x.clamp(0.0, 1.0), y, z])),
+            Self::Oklch => {
+                (Form::Oklch, kept([x.clamp(0.0, 1.0), y.max(0.0), hue(z)]))
+            }
+            Self::Color(space) => (
+                // Section 16.5 serialises `xyz` by its canonical name.
+                Form::Color(match space {
+                    "xyz" => "xyz-d65",
+                    other => other,
+                }),
+                kept([x, y, z]),
+            ),
+        };
+        Declared {
+            form,
+            channels,
+            alpha: alpha.map(|a| a.clamp(0.0, 1.0)),
+        }
+    }
+
+    /// An `rgb()`, `hsl()` or `hwb()` colour's channels as the sRGB they
+    /// name, on `0..=1`, in `f64` so a whole byte stays whole.
+    fn legacy_srgb(self, [x, y, z]: [f64; 3]) -> [f64; 3] {
+        match self {
+            Self::Hsl => hsl_to_srgb(
                 x,
                 y / PERCENT_CHANNEL_SCALE,
                 z / PERCENT_CHANNEL_SCALE,
-            )),
-            Self::Hwb => narrow(hwb_to_srgb(
+            ),
+            Self::Hwb => hwb_to_srgb(
                 x,
                 y / PERCENT_CHANNEL_SCALE,
                 z / PERCENT_CHANNEL_SCALE,
-            )),
-            Self::Lab => lab_to_srgb(narrow([lab_l, y, z])),
-            Self::Lch => lab_to_srgb(from_polar(lab_l, y, z)),
-            Self::Oklab => oklab_to_srgb(narrow([oklab_l, y, z])),
-            Self::Oklch => oklab_to_srgb(from_polar(oklab_l, y, z)),
-            Self::Color(
-                space @ ("srgb" | "srgb-linear" | "display-p3" | "rec2020"),
-            ) => {
-                return (narrow([x, y, z]), space);
+            ),
+            _ => [x, y, z].map(|c| c / RGB_CHANNEL_SCALE),
+        }
+    }
+}
+
+/// Lightness, chroma and hue in degrees as lightness and the two axes, the
+/// inverse of [`to_polar`]: CSS Color 4's `LCH_to_Lab`.
+fn from_polar([l, chroma, hue]: [f64; 3]) -> [f64; 3] {
+    let (sin, cos) = hue.to_radians().sin_cos();
+    [l, chroma * cos, chroma * sin]
+}
+
+/// A colour's declared channels as extended sRGB, in `f64`, a channel
+/// declared `none` read as zero.
+fn declared_srgb(declared: &Declared) -> [f64; 3] {
+    let channels = declared.channels.map(|c| c.unwrap_or(0.0));
+    match declared.form {
+        Form::Legacy => channels.map(|c| c / RGB_CHANNEL_SCALE),
+        Form::Lab => lab_to_srgb(channels),
+        Form::Lch => lab_to_srgb(from_polar(channels)),
+        Form::Oklab => oklab_to_srgb(channels),
+        Form::Oklch => oklab_to_srgb(from_polar(channels)),
+        Form::Color(space) => color_function_to_srgb_f64(space, channels),
+    }
+}
+
+/// The colour a declaration paints, and the space it is held in: the space
+/// `color()` named where a canvas can hold it, sRGB otherwise. The one
+/// function every parser stores a colour through and the one
+/// [`declared_to_css`] tests a spelling with, so that what a read-back is
+/// checked to repaint is what setting it stores.
+///
+/// The channels are held at `f32`, as the colour is, so any spelling of a
+/// channel that reads as the same `f32` names the same colour; the
+/// conversion from them runs in `f64`, by CSS Color 4's own matrices, and
+/// its result is rounded to `f32` once. Nothing is clipped but what CSS
+/// Color 4 clamps when it computes the declaration, which
+/// [`Relative::declared`] has done: Lab and Oklab lightness into its range
+/// and a polar chroma at zero, as Chrome 153 does.
+pub fn declared_color(declared: &Declared) -> (Color4f, &'static str) {
+    let held = declared
+        .channels
+        .map(|c| Some(f64::from(c.unwrap_or(0.0) as f32)));
+    let alpha = declared.alpha.unwrap_or(0.0).clamp(0.0, 1.0) as f32;
+    let (components, space) = match declared.form {
+        Form::Color(
+            space @ ("srgb" | "srgb-linear" | "display-p3" | "rec2020"),
+        ) => (held.map(|c| c.unwrap_or(0.0)), space),
+        _ => {
+            let at_f32 = Declared {
+                channels: held,
+                ..*declared
+            };
+            (declared_srgb(&at_f32), "srgb")
+        }
+    };
+    let [r, g, b] = components.map(|c| c as f32);
+    (Color4f::new(r, g, b, alpha), space)
+}
+
+/// The declaration that reading `declared_css(declared, figures)` back
+/// gives: each number as the text it is written as reads, and computed as
+/// [`Relative::declared`] computes it -- a lightness kept to its range, a
+/// chroma at zero or above, a hue within a turn, an alpha within `0..=1`.
+/// What [`declared_to_css`] tests a spelling with, without writing it out
+/// and parsing it.
+fn read_back(declared: &Declared, figures: Figures) -> Declared {
+    let read = |value: f64, length: usize| {
+        significant(value, length).parse().unwrap_or(value)
+    };
+    let whole = |c: f64| (c - c.round()).abs() < WHOLE_BYTE_EPSILON;
+    let alpha = declared.alpha.map(|alpha| match alpha >= 1.0 {
+        true => 1.0,
+        false => read(alpha, figures[ALPHA]).clamp(0.0, 1.0),
+    });
+    let channel = |index: usize| {
+        declared.channels[index].map(|c| read(c, figures[index]))
+    };
+    let channels = match declared.form {
+        Form::Legacy => {
+            let inside = |c: f64| {
+                (-WHOLE_BYTE_EPSILON..=RGB_CHANNEL_SCALE + WHOLE_BYTE_EPSILON)
+                    .contains(&c)
+            };
+            let rgb = declared.channels.map(|c| c.unwrap_or(0.0));
+            if !rgb.iter().all(|&c| inside(c)) {
+                return Declared {
+                    form: Form::Color("srgb"),
+                    channels: [0, 1, 2].map(|i| {
+                        Some(read(rgb[i] / RGB_CHANNEL_SCALE, figures[i]))
+                    }),
+                    alpha,
+                };
             }
-            Self::Color(space) => {
-                let [r, g, b] = narrow([x, y, z]);
-                let c =
-                    color_function_to_srgb(Color4f::new(r, g, b, 1.0), space);
-                [c.r, c.g, c.b]
+            [0, 1, 2].map(|i| {
+                Some(match whole(rgb[i]) {
+                    true => rgb[i].round(),
+                    false => read(rgb[i], figures[i]),
+                })
+            })
+        }
+        Form::Lab | Form::Lch => {
+            let [l, x, y] = [0, 1, 2].map(channel);
+            let l = l.map(|l| l.clamp(0.0, PERCENT_CHANNEL_SCALE));
+            match declared.form {
+                Form::Lch => [
+                    l,
+                    x.map(|c| c.max(0.0)),
+                    y.map(|h| h.rem_euclid(DEGREES_PER_TURN)),
+                ],
+                _ => [l, x, y],
             }
-        };
-        (srgb, "srgb")
+        }
+        Form::Oklab | Form::Oklch => {
+            let [l, x, y] = [0, 1, 2].map(channel);
+            let l = l.map(|l| l.clamp(0.0, 1.0));
+            match declared.form {
+                Form::Oklch => [
+                    l,
+                    x.map(|c| c.max(0.0)),
+                    y.map(|h| h.rem_euclid(DEGREES_PER_TURN)),
+                ],
+                _ => [l, x, y],
+            }
+        }
+        Form::Color(_) => [0, 1, 2].map(channel),
+    };
+    Declared {
+        form: declared.form,
+        channels,
+        alpha,
+    }
+}
+
+/// `space` by the name section 16.5 serialises it under: `xyz` is
+/// `xyz-d65`.
+fn canonical_space(space: &str) -> &str {
+    match space {
+        "xyz" => "xyz-d65",
+        other => other,
     }
 }
 
@@ -1771,11 +2167,11 @@ impl Relative {
 /// in OkLCh -- so `lch(from white l 50 h)` is magenta there, where here its
 /// hue is zero. That hue is rounding noise, and this follows the standard;
 /// `docs/browser-differences.md` has the measurements.
-fn to_polar([l, a, b]: [f32; 3], powerless: f32) -> [f32; 3] {
+fn to_polar([l, a, b]: [f64; 3], powerless: f64) -> [f64; 3] {
     let chroma = a.hypot(b);
     let hue = match chroma <= powerless {
         true => 0.0,
-        false => b.atan2(a).to_degrees().rem_euclid(DEGREES_PER_TURN as f32),
+        false => b.atan2(a).to_degrees().rem_euclid(DEGREES_PER_TURN),
     };
     [l, chroma, hue]
 }
@@ -1871,7 +2267,9 @@ fn hwb_to_srgb(hue: f64, white: f64, black: f64) -> [f64; 3] {
 /// `hwba()`, `hsv()` and `hsva()`, absolute or relative, are `Some(None)`:
 /// no CSS function has those names and no browser reads them -- Chrome 153
 /// ignores `hwba(0 0% 0%)` and `hsv(0 100% 100%)`.
-fn read_color_function(css: &str) -> Option<Option<(Color4f, &'static str)>> {
+fn read_color_function(
+    css: &str,
+) -> Option<Option<(Color4f, &'static str, Declared)>> {
     let (name, args) = css.trim_ascii().split_once('(')?;
     let function = match name.to_ascii_lowercase().as_str() {
         "rgb" | "rgba" => Relative::Rgb,
@@ -2014,7 +2412,7 @@ fn read_channel(
 fn relative_channels(
     args: &str,
     function: Relative,
-) -> Option<(Color4f, &'static str)> {
+) -> Option<(Color4f, &'static str, Declared)> {
     fn token(text: &str, (from, to): (usize, usize)) -> &str {
         &text[from..to]
     }
@@ -2028,7 +2426,7 @@ fn relative_channels(
     let [_, origin @ (_, origin_end), ..] = spans[..] else {
         return None;
     };
-    let origin = css_to_color4f(token(body, origin))?;
+    let (_, _, origin) = css_to_declared(token(body, origin))?;
     let (function, rest) = match function {
         Relative::Color(_) => {
             let &space @ (_, space_end) = spans.get(2)?;
@@ -2040,20 +2438,27 @@ fn relative_channels(
     let ([t0, t1, t2], alpha) = channels_and_alpha(rest)?;
 
     let [k0, k1, k2, k_alpha] = function.keywords();
-    let [o0, o1, o2] = function.origin([origin.r, origin.g, origin.b])?;
-    let bound = [(k0, o0), (k1, o1), (k2, o2), (k_alpha, f64::from(origin.a))];
+    let [o0, o1, o2] = function.origin(&origin)?;
+    let origin_alpha = origin.alpha.unwrap_or(0.0);
+    let bound = [(k0, o0), (k1, o1), (k2, o2), (k_alpha, origin_alpha)];
     let [c0, c1, c2] = function.channels();
     let values = [
         read_channel(t0, c0, &bound)?,
         read_channel(t1, c1, &bound)?,
         read_channel(t2, c2, &bound)?,
     ];
-    let alpha = match alpha {
+    let alpha_value = match alpha {
         Some(text) => read_channel(text, Channel::Scaled(1.0), &bound)?,
-        None => f64::from(origin.a),
+        None => origin_alpha,
     };
-    let ([r, g, b], space) = function.color(values);
-    Some((Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32), space))
+    let declared = function.declared(
+        values,
+        [t0, t1, t2].map(is_none),
+        (!alpha.is_some_and(is_none)).then_some(alpha_value),
+        true,
+    );
+    let (color, space) = declared_color(&declared);
+    Some((color, space, declared))
 }
 
 /// The colour an absolute colour function names, given what follows the
@@ -2061,7 +2466,7 @@ fn relative_channels(
 fn absolute_channels(
     args: &str,
     function: Relative,
-) -> Option<(Color4f, &'static str)> {
+) -> Option<(Color4f, &'static str, Declared)> {
     let body = args.trim_ascii_end().strip_suffix(')')?.trim_ascii();
     match has_top_level_comma(body) {
         true => legacy_channels(body, function),
@@ -2088,7 +2493,7 @@ fn has_top_level_comma(text: &str) -> bool {
 fn modern_channels(
     body: &str,
     function: Relative,
-) -> Option<(Color4f, &'static str)> {
+) -> Option<(Color4f, &'static str, Declared)> {
     let spans = top_level_spans(body);
     // A `)` before the end stops the spans short of it.
     if spans.last()?.1 != body.len() {
@@ -2101,19 +2506,31 @@ fn modern_channels(
         }
         other => (other, body),
     };
-    let ([t0, t1, t2], alpha) = channels_and_alpha(rest)?;
+    let ([t0, t1, t2], alpha_text) = channels_and_alpha(rest)?;
     let [c0, c1, c2] = function.channels();
     let values = [
         read_channel(t0, c0, &[])?,
         read_channel(t1, c1, &[])?,
         read_channel(t2, c2, &[])?,
     ];
-    let alpha = match alpha {
+    let alpha = match alpha_text {
         Some(text) => read_channel(text, Channel::Scaled(1.0), &[])?,
         None => 1.0,
     };
-    let ([r, g, b], space) = function.color(function.parsed(values));
-    Some((Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32), space))
+    let parsed = function.parsed(values);
+    let declared = function.declared(
+        parsed,
+        [t0, t1, t2].map(is_none),
+        (!alpha_text.is_some_and(is_none)).then_some(alpha),
+        false,
+    );
+    let (color, space) = declared_color(&declared);
+    Some((color, space, declared))
+}
+
+/// Whether a channel is written `none`, in any case.
+fn is_none(text: &str) -> bool {
+    text.eq_ignore_ascii_case("none")
 }
 
 /// An absolute `rgb()` or `hsl()` in the comma-separated legacy syntax, given
@@ -2131,7 +2548,7 @@ fn modern_channels(
 fn legacy_channels(
     body: &str,
     function: Relative,
-) -> Option<(Color4f, &'static str)> {
+) -> Option<(Color4f, &'static str, Declared)> {
     if !matches!(function, Relative::Rgb | Relative::Hsl) {
         return None;
     }
@@ -2204,8 +2621,9 @@ fn legacy_channels(
         ],
         _ => [x, y, z],
     };
-    let ([r, g, b], space) = function.color(values);
-    Some((Color4f::new(r, g, b, alpha.clamp(0.0, 1.0) as f32), space))
+    let declared = function.declared(values, [false; 3], Some(alpha), false);
+    let (color, space) = declared_color(&declared);
+    Some((color, space, declared))
 }
 
 /// CSS Color 4's named colours ([section 6.1]), in the order its table lists
@@ -2375,9 +2793,17 @@ const NAMED_COLORS: [(&str, [u8; 3]); 148] = [
 /// `hex_and_named_colours_read_as_they_did` holds every named colour and
 /// every hex form to the `f32`s earlier releases gave. A `#` followed by
 /// anything else is `Some(None)`, a refusal: only hex follows one.
-fn hex_or_named(css: &str) -> Option<Option<Color4f>> {
+fn hex_or_named(css: &str) -> Option<Option<(Color4f, Declared)>> {
     let css = css.trim_ascii();
-    let byte = |b: u8| f32::from(b) / 255.0;
+    // Section 16.2's sRGB value, the bytes as they were named.
+    let legacy = |[r, g, b, a]: [u8; 4]| {
+        let declared = Declared {
+            form: Form::Legacy,
+            channels: [r, g, b].map(|c| Some(f64::from(c))),
+            alpha: Some(f64::from(a) / f64::from(u8::MAX)),
+        };
+        (declared_color(&declared).0, declared)
+    };
     if let Some(digits) = css.strip_prefix('#') {
         let nibbles: Option<Vec<u8>> = digits
             .chars()
@@ -2396,16 +2822,16 @@ fn hex_or_named(css: &str) -> Option<Option<Color4f>> {
             _ => return Some(None),
         };
         let alpha = channels.get(3).copied().unwrap_or(u8::MAX);
-        return Some(Some(Color4f::new(
-            byte(channels[0]),
-            byte(channels[1]),
-            byte(channels[2]),
-            byte(alpha),
-        )));
+        return Some(Some(legacy([
+            channels[0],
+            channels[1],
+            channels[2],
+            alpha,
+        ])));
     }
     let name = css.to_ascii_lowercase();
     if name == "transparent" {
-        return Some(Some(Color4f::new(0.0, 0.0, 0.0, 0.0)));
+        return Some(Some(legacy([0, 0, 0, 0])));
     }
     // `currentcolor` is the `color` property of the element a colour is on.
     // A canvas here is on none, and CSS Color 4's "parse a CSS <color>
@@ -2414,13 +2840,13 @@ fn hex_or_named(css: &str) -> Option<Option<Color4f>> {
     // of the properties": `color`'s, `CanvasText`, black. Chrome 152 paints
     // it opaque black on a canvas outside a document.
     if name == "currentcolor" {
-        return Some(Some(Color4f::new(0.0, 0.0, 0.0, 1.0)));
+        return Some(Some(legacy([0, 0, 0, u8::MAX])));
     }
     let at = NAMED_COLORS
         .binary_search_by(|&(named, _)| named.cmp(name.as_str()))
         .ok()?;
     let [r, g, b] = NAMED_COLORS[at].1;
-    Some(Some(Color4f::new(byte(r), byte(g), byte(b), 1.0)))
+    Some(Some(legacy([r, g, b, u8::MAX])))
 }
 
 /// `css` with every bracket still open at its end closed, as CSS Syntax 3
@@ -2449,16 +2875,24 @@ fn closed_at_end(css: &str) -> Cow<'_, str> {
 /// Skia converts at the paint, and converting via sRGB first would cost a
 /// level of the eight the readback quantises to.
 pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
+    css_to_declared(css).map(|(color, space, _)| (color, space))
+}
+
+/// As [`css_to_color4f_in_space`], with the colour as it was declared, which
+/// is what a getter serialises: see [`declared_to_css`].
+pub fn css_to_declared(css: &str) -> Option<(Color4f, ColorSpace, Declared)> {
     let uncommented = without_comments(css)?;
     let css = closed_at_end(uncommented.as_ref());
     let css = css.as_ref();
     if let Some(color) = read_color_function(css) {
-        // SAFETY: `read_color_function` only returns names this builds.
-        return color
-            .and_then(|(color, space)| Some((color, opt_color_space(space)?)));
+        return color.and_then(|(color, space, declared)| {
+            Some((color, opt_color_space(space)?, declared))
+        });
     }
     if let Some(color) = hex_or_named(css) {
-        return color.map(|color| (color, ColorSpace::new_srgb()));
+        return color.map(|(color, declared)| {
+            (color, ColorSpace::new_srgb(), declared)
+        });
     }
     // Neither a colour function nor a hex or named colour, which is all CSS
     // has: hex digits with no `#`, a function name with a space before its
@@ -2564,10 +2998,19 @@ pub fn color4f_string_in<'a>(
     cx: &mut FunctionContext<'a>,
     val: Handle<'a, JsValue>,
 ) -> Option<(Color4f, ColorSpace)> {
+    declared_string_in(cx, val).map(|(color, space, _)| (color, space))
+}
+
+/// As [`color4f_string_in`], with the colour as it was declared, for a
+/// setter whose getter serialises it.
+pub fn declared_string_in<'a>(
+    cx: &mut FunctionContext<'a>,
+    val: Handle<'a, JsValue>,
+) -> Option<(Color4f, ColorSpace, Declared)> {
     if val.is_a::<JsString, _>(cx) {
         // SAFETY: `is_a::<JsString>` check passed above.
         let css = val.downcast::<JsString, _>(cx).unwrap().value(cx);
-        css_to_color4f_in_space(&css)
+        css_to_declared(&css)
     } else {
         // for other objects, try calling their .toString() method (if it
         // exists)
@@ -2576,8 +3019,26 @@ pub fn color4f_string_in<'a>(
         let to_string = attr.downcast::<JsFunction, _>(cx).ok()?;
         let result = to_string.call(cx, obj, vec![]).ok()?;
         let css = result.downcast::<JsString, _>(cx).ok()?.value(cx);
-        css_to_color4f_in_space(&css)
+        css_to_declared(&css)
     }
+}
+
+/// As [`color4f_in`], with the colour as it was declared.
+pub fn declared_in<'a>(
+    cx: &mut FunctionContext<'a>,
+    val: Handle<'a, JsValue>,
+) -> Option<(Color4f, ColorSpace, Option<Declared>)> {
+    // A float array is `color(srgb r g b / a)`, and is serialised as one.
+    if let Some(color) = opt_color4f_from_array(cx, val) {
+        let declared = Declared {
+            form: Form::Color("srgb"),
+            channels: [color.r, color.g, color.b].map(|c| Some(f64::from(c))),
+            alpha: Some(f64::from(color.a).clamp(0.0, 1.0)),
+        };
+        return Some((color, ColorSpace::new_srgb(), Some(declared)));
+    }
+    declared_string_in(cx, val)
+        .map(|(color, space, declared)| (color, space, Some(declared)))
 }
 
 /// Parses a color value that may be a CSS string or a `[r, g, b, a]` float
@@ -2658,81 +3119,473 @@ pub fn opt_matte_for_key(
     Some(Matte::new(color, space))
 }
 
-pub fn color_to_css<'a>(
-    cx: &mut FunctionContext<'a>,
-    color: &Color,
-) -> JsResult<'a, JsValue> {
-    let RGB { r, g, b } = color.to_rgb();
-    let css = match color.a() {
-        255 => format!("#{:02x}{:02x}{:02x}", r, g, b),
-        _ => {
-            let alpha = format!("{:.3}", color.a() as f32 / 255.0);
-            let alpha = alpha.trim_end_matches('0');
-            format!(
-                "rgba({}, {}, {}, {})",
-                r,
-                g,
-                b,
-                if alpha == "0." { "0" } else { alpha }
-            )
-        }
-    };
-    Ok(cx.string(css).upcast())
+/// Significant figures that restate any `f64` exactly, and so the most a
+/// serialised colour ever needs.
+const EXACT_FIGURES: usize = 17;
+
+/// How far a legacy channel may sit from a whole byte and still be one.
+///
+/// `hsl()` and `hwb()` reach sRGB through `f64` arithmetic that can leave a
+/// whole value a few ulps away from itself; anything a stylesheet can name
+/// that is not a whole byte is further off than this by orders of magnitude.
+const WHOLE_BYTE_EPSILON: f64 = 1e-6;
+
+/// `value` as section 16 writes a `<number>`, to `figures` significant
+/// figures: base ten, trailing fractional zeroes and a bare decimal point
+/// omitted, and no negative zero -- `lab(50 -0 0)` reads back as `lab(50 0
+/// 0)`, as it does in Chrome 156.
+fn significant(value: f64, figures: usize) -> String {
+    if value == 0.0 || !value.is_finite() {
+        return "0".to_string();
+    }
+    let magnitude = value.abs().log10().floor() as i64;
+    let places = (figures as i64 - 1 - magnitude).max(0) as usize;
+    trimmed(format!("{value:.places$}"))
 }
 
-/// Serialize a Color4f back to a CSS color string (sRGB).
+/// `text` without trailing fractional zeroes, its decimal point when nothing
+/// follows it, or a minus sign on a zero.
+fn trimmed(text: String) -> String {
+    let text = match text.contains('.') {
+        true => text.trim_end_matches('0').trim_end_matches('.').to_string(),
+        false => text,
+    };
+    match text.as_str() {
+        "-0" => "0".to_string(),
+        _ => text,
+    }
+}
+
+/// A legacy sRGB colour per section 16.2, `rgb` on `0..=255`.
+///
+/// Section 16.2.1's hex form needs the alpha at 1 and "the RGB component
+/// values ... internally represented as integers between 0 and 255
+/// inclusive". This crate holds a colour in floating point and paints
+/// `rgb(127.5 0 0)` as 127.5, so a channel that is not a whole byte takes
+/// section 16.2.2's `rgb()` with the number itself. Chrome 156 holds eight
+/// bits and reports `#800000`; docs/browser-differences.md has the
+/// measurements. A channel outside `0..=255` has no `rgb()` spelling at all,
+/// so that colour is written as `color(srgb ...)`.
+///
+/// The alpha is section 16.1.2's for the same reason. Section 16.1.1's
+/// two-place rule is for an alpha "internally represented as an integer
+/// between 0 and 255", and this one is an `f32`: `#ff000080` holds 128/255
+/// and reads back as `rgba(255, 0, 0, 0.5019608)`, where Chrome's `0.5`
+/// would paint half a level less on a float canvas.
+fn legacy_css(rgb: [f64; 3], alpha: f64, figures: Figures) -> String {
+    let whole = |c: f64| (c - c.round()).abs() < WHOLE_BYTE_EPSILON;
+    let inside = |c: f64| {
+        (-WHOLE_BYTE_EPSILON..=255.0 + WHOLE_BYTE_EPSILON).contains(&c)
+    };
+    if !rgb.iter().all(|&c| inside(c)) {
+        let srgb = rgb.map(|c| Some(c / 255.0));
+        return modern_css("color(srgb ", srgb, Some(alpha), figures);
+    }
+    if alpha >= 1.0 && rgb.iter().all(|&c| whole(c)) {
+        let [r, g, b] = rgb.map(|c| c.round().clamp(0.0, 255.0) as u8);
+        return format!("#{r:02x}{g:02x}{b:02x}");
+    }
+    let [r, g, b] = [0, 1, 2].map(|i| match whole(rgb[i]) {
+        true => format!("{}", rgb[i].round()),
+        false => significant(rgb[i], figures[i]),
+    });
+    match alpha >= 1.0 {
+        true => format!("rgb({r}, {g}, {b})"),
+        false => {
+            let alpha = significant(alpha, figures[ALPHA]);
+            format!("rgba({r}, {g}, {b}, {alpha})")
+        }
+    }
+}
+
+/// Sections 16.3 to 16.5: `opening` -- `lab(`, or `color(srgb ` with its
+/// space -- then the channels space-separated with `none` where they were
+/// missing, and ` / ` and the alpha unless it is 1.
+fn modern_css(
+    opening: &str,
+    channels: [Option<f64>; 3],
+    alpha: Option<f64>,
+    figures: Figures,
+) -> String {
+    let [x, y, z] = [0, 1, 2].map(|i| {
+        channels[i]
+            .map_or_else(|| "none".to_string(), |c| significant(c, figures[i]))
+    });
+    let alpha = match alpha {
+        Some(alpha) if alpha >= 1.0 => String::new(),
+        Some(alpha) => format!(" / {}", significant(alpha, figures[ALPHA])),
+        None => " / none".to_string(),
+    };
+    format!("{opening}{x} {y} {z}{alpha})")
+}
+
+/// Significant figures for each number of a [`Declared`]: its three channels
+/// in order, then its alpha at [`ALPHA`].
+type Figures = [usize; 4];
+
+/// The alpha's place in [`Figures`] and in [`declared_number`].
+const ALPHA: usize = 3;
+
+/// `declared` written with each number to the significant figures `figures`
+/// gives it.
+fn declared_css(declared: &Declared, figures: Figures) -> String {
+    let Declared {
+        form,
+        channels,
+        alpha,
+    } = *declared;
+    match form {
+        Form::Legacy => legacy_css(
+            channels.map(|c| c.unwrap_or(0.0)),
+            alpha.unwrap_or(0.0),
+            figures,
+        ),
+        Form::Lab => modern_css("lab(", channels, alpha, figures),
+        Form::Lch => modern_css("lch(", channels, alpha, figures),
+        Form::Oklab => modern_css("oklab(", channels, alpha, figures),
+        Form::Oklch => modern_css("oklch(", channels, alpha, figures),
+        Form::Color(space) => {
+            modern_css(&format!("color({space} "), channels, alpha, figures)
+        }
+    }
+}
+
+/// A colour as declared, with its read-back, written the first time a
+/// getter asks for it and kept.
+///
+/// [`declared_to_css`] tries hundreds of spellings for a Lab, LCH, Oklab or
+/// OkLCh colour, and code reads a style far more often than it sets one --
+/// `const old = ctx.fillStyle; ...; ctx.fillStyle = old`. So the string is
+/// made once per declaration and held beside it. Every set builds a new
+/// `Declaration`, so a set is never answered with the string of the colour
+/// it replaced; a clone, which `save()` makes, shares the one cell, so a
+/// restored style keeps a read-back already written.
+#[derive(Clone, Debug)]
+pub struct Declaration {
+    declared: Declared,
+    css: Arc<OnceLock<String>>,
+}
+
+impl Declaration {
+    /// `declared`, its read-back not yet written.
+    pub fn new(declared: Declared) -> Self {
+        Self {
+            declared,
+            css: Arc::default(),
+        }
+    }
+
+    /// The colour as declared.
+    pub fn declared(&self) -> &Declared {
+        &self.declared
+    }
+
+    /// The colour as section 16 serialises it, by [`declared_to_css`]:
+    /// written at the first call, read from the cell at every later one.
+    pub fn css(&self) -> &str {
+        self.css.get_or_init(|| declared_to_css(&self.declared))
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Spellings [`declared_to_css`] has tested on this thread, so a test
+    /// can tell a read-back that was searched for from one that was kept.
+    static TRIALS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A declared colour as CSS Color 4 section 16 serialises it, with the
+/// HTML-compatible form requested, as HTML's canvas getters request it:
+/// legacy sRGB colours by section 16.2, the rest in their own function.
+///
+/// Every number takes the fewest significant figures that paint exactly
+/// the colour held -- the same `f32` components in the same space -- so
+/// setting what a getter returns paints the same pixels on an eight-bit,
+/// half-float or float canvas. Section 16 sets only a floor on precision,
+/// enough to round-trip sixteen bits, and its alpha wants "six decimal
+/// places", which Chrome 156 writes everywhere. Six cannot restate every
+/// `f32`: `#ff000080` holds 128/255, which six places write as 0.501961
+/// and an `RGBAF32` canvas stores 1.8e-7 away from it. So a number is
+/// written with more where the colour holds more -- `0.5019608` -- and a
+/// value that is short stays short: 0.5, 114.75, `lab(29 39 20)`.
+/// docs/browser-differences.md has the rows where that departs from
+/// Chrome.
+///
+/// Each number is first searched on its own, the others held exact: at
+/// each length, the value rounded to that many figures and the decimal
+/// either side of it, since the shortest that repaints need not be the
+/// rounded one -- `#acf8` holds 136/255, whose eight-figure rounding
+/// 0.53333333 lands on the next `f32` down, and 0.53333334 does not. A
+/// legacy or `color()` channel and an alpha are each held as written, so
+/// that is each one's shortest. Lab, LCH, Oklab and OkLCh are converted, and
+/// there a channel's shortest depends on how the others are written, so
+/// every set of lengths within [`LENGTH_SLACK`] of those is tried, fewest
+/// figures first, each channel at each of its three decimals, widening
+/// until one repaints, and the shortest string of the fewest figures is
+/// kept. A number below [`CONVERSION_RESIDUE`] is tried as `0` first.
+///
+/// What that finds is the shortest spelling within the narrowest window
+/// around each channel's own shortest that holds one -- not a minimum
+/// proved over every spelling. Against an exhaustive search over every
+/// length to ten figures, each channel rounded, at either neighbour or at
+/// zero, it is never longer on 864 relative colours over a grid of 216
+/// sRGB origins in Lab, LCH, Oklab and OkLCh;
+/// `a_mixed_colour_has_no_shorter_spelling` keeps a sample of them.
+///
+/// A trial is tested on numbers, not text: [`read_back`] gives the
+/// declaration its spelling reads as, and [`declared_color`], the function
+/// every parser stores a colour through, paints it.
+pub fn declared_to_css(declared: &Declared) -> String {
+    let all = [EXACT_FIGURES; 4];
+    let exact = declared_css(declared, all);
+    let held = declared_color(declared);
+    // Each trial is the declaration its spelling reads back as, painted by
+    // the function the setter stores through.
+    let repaints = |trial: &Declared, figures: Figures| {
+        #[cfg(test)]
+        TRIALS.with(|trials| trials.set(trials.get() + 1));
+        declared_color(&read_back(trial, figures)) == held
+    };
+
+    // Each number alone, the others exact: the fewest figures, and the
+    // decimal of that length, that repaint. Zero first for a number below
+    // [`CONVERSION_RESIDUE`], which no rounding of it reaches: a channel whose
+    // true value is zero holds what a conversion leaves there,
+    // `oklch(from white l c h)`'s chroma of 5e-16. Not for a larger one: a
+    // hue under a chroma of zero repaints at any value, and `oklch(0.5 -0.1
+    // 30)` keeps the hue it was given.
+    let alone = |index: usize| -> Option<(f64, usize)> {
+        let value = declared_number(declared, index)?;
+        let mut zero = *declared;
+        set_declared_number(&mut zero, index, 0.0);
+        let mut one = all;
+        one[index] = 1;
+        if value != 0.0
+            && value.abs() < CONVERSION_RESIDUE
+            && repaints(&zero, one)
+        {
+            return Some((0.0, 1));
+        }
+        (1..EXACT_FIGURES).find_map(|length| {
+            let mut trial_figures = all;
+            trial_figures[index] = length;
+            neighbouring_decimals(value, length)
+                .into_iter()
+                .find(|&decimal| {
+                    let mut trial = *declared;
+                    set_declared_number(&mut trial, index, decimal);
+                    repaints(&trial, trial_figures)
+                })
+                .map(|decimal| (decimal, length))
+        })
+    };
+    let lone: [Option<(f64, usize)>; 4] = [0, 1, 2, ALPHA].map(alone);
+    let mut shortest = *declared;
+    let mut figures = all;
+    for (index, found) in lone.iter().enumerate() {
+        if let Some((decimal, length)) = *found {
+            set_declared_number(&mut shortest, index, decimal);
+            figures[index] = length;
+        }
+    }
+    // Where each channel is held as written, each is its own shortest and
+    // they hold together.
+    if !declared.form.mixes_channels() && repaints(&shortest, figures) {
+        return declared_css(&shortest, figures);
+    }
+
+    // Where a conversion mixes the channels, one channel's shortest depends on
+    // how the others are written: a hue can lose a figure once its lightness
+    // moves to the neighbouring decimal, or two channels only together. So
+    // every set of lengths within [`LENGTH_SLACK`] of each channel's own is
+    // tried, fewest figures first, each channel at each of its three
+    // decimals; the first that repaints is the shortest there is in that
+    // window. A channel already at zero stays there.
+    let channels: Vec<usize> = (0..ALPHA)
+        .filter(|&index| lone[index].is_some_and(|(decimal, _)| decimal != 0.0))
+        .collect();
+    // A window that holds no spelling is widened until one does: a chroma
+    // whose own shortest was six figures can need eight once the lightness
+    // and hue are written short, `oklch(from #669999 l c h)`'s.
+    let search = |slack: usize| {
+        let mut lengths: Vec<Figures> = vec![figures];
+        for &index in &channels {
+            let own = figures[index];
+            let low = own.saturating_sub(slack).max(1);
+            let high = (own + slack).min(EXACT_FIGURES);
+            lengths = lengths
+                .into_iter()
+                .flat_map(|base| {
+                    (low..=high).map(move |length| {
+                        let mut trial = base;
+                        trial[index] = length;
+                        trial
+                    })
+                })
+                .collect();
+        }
+        let total =
+            |trial: &Figures| channels.iter().map(|&i| trial[i]).sum::<usize>();
+        lengths.sort_by_key(total);
+        let combinations = 3usize.pow(channels.len() as u32);
+        let mut best: Option<(usize, String)> = None;
+        for trial_figures in lengths {
+            if best
+                .as_ref()
+                .is_some_and(|(figures, _)| total(&trial_figures) > *figures)
+            {
+                break;
+            }
+            let decimals: Vec<[f64; 3]> = channels
+                .iter()
+                .filter_map(|&index| {
+                    let value = declared_number(declared, index)?;
+                    Some(neighbouring_decimals(value, trial_figures[index]))
+                })
+                .collect();
+            for combination in 0..combinations {
+                let mut trial = shortest;
+                let mut choice = combination;
+                for (&index, options) in channels.iter().zip(&decimals) {
+                    set_declared_number(&mut trial, index, options[choice % 3]);
+                    choice /= 3;
+                }
+                if !repaints(&trial, trial_figures) {
+                    continue;
+                }
+                let css = declared_css(&trial, trial_figures);
+                if best.as_ref().is_none_or(|(_, kept)| css.len() < kept.len())
+                {
+                    best = Some((total(&trial_figures), css));
+                }
+            }
+        }
+        best
+    };
+    let best = (LENGTH_SLACK..EXACT_FIGURES).find_map(search);
+    if let Some((_, css)) = best {
+        return css;
+    }
+    (1..=EXACT_FIGURES)
+        .find(|&length| repaints(declared, [length; 4]))
+        .map_or(exact, |length| declared_css(declared, [length; 4]))
+}
+
+/// The largest a number can be and still be taken for what a conversion
+/// leaves where the true value is zero.
+///
+/// CSS Color 4's conversions run here in `f64`, whose rounding leaves
+/// residues around 1e-16 to 1e-13 on channels of unit scale -- 5e-16 on
+/// white's OkLCh chroma, 6e-14 on a Lab grey's axes through sRGB. A
+/// thousand times the largest of those, and far below anything an `f32`
+/// colour of unit scale can tell from zero.
+const CONVERSION_RESIDUE: f64 = 1e-10;
+
+/// How far from its own shortest a channel's length is searched when the
+/// channels mix, in figures either way.
+///
+/// Where it holds no spelling, the window widens a figure at a time, so
+/// this sets where the search starts rather than how far it reaches.
+/// Chosen by measurement. Over the 864 relative colours of a grid of 216
+/// sRGB origins in Lab, LCH, Oklab and OkLCh, starting at one figure finds
+/// a spelling as short as a search over every length to ten figures does,
+/// at a median of about 520 trials and 3,600 at most; starting at none
+/// writes nine of them longer, `lab(from #3399cc l a b)` among them, which
+/// `a_mixed_colour_has_no_shorter_spelling` holds.
+const LENGTH_SLACK: usize = 1;
+
+/// The number at `index` of [`Figures`] that is written out and can be
+/// shortened: a channel that is not `none`, and not a legacy channel that is
+/// a whole byte, which is written as an integer whatever its figures; or an
+/// alpha below 1, since 1 is not written.
+fn declared_number(declared: &Declared, index: usize) -> Option<f64> {
+    let whole = |c: f64| (c - c.round()).abs() < WHOLE_BYTE_EPSILON;
+    match index {
+        ALPHA => declared.alpha.filter(|&alpha| alpha < 1.0),
+        _ => declared.channels[index].filter(|&channel| {
+            declared.form != Form::Legacy || !whole(channel)
+        }),
+    }
+}
+
+/// Sets the number at `index` of [`Figures`].
+fn set_declared_number(declared: &mut Declared, index: usize, value: f64) {
+    match index {
+        ALPHA => declared.alpha = Some(value),
+        _ => declared.channels[index] = Some(value),
+    }
+}
+
+/// `value` rounded to `length` significant figures, and the decimals one
+/// unit in the last of those figures below and above it.
+///
+/// A spelling that repaints lies in the interval of values that paint the
+/// colour held, which contains `value`. Once that interval is narrower than
+/// one unit -- by the length where a shorter search found nothing, it is --
+/// any decimal of this length inside it is within one unit of `value`, and
+/// so one of these three.
+///
+/// Zero, and anything [`significant`] writes as `0`, has no neighbours.
+fn neighbouring_decimals(value: f64, length: usize) -> [f64; 3] {
+    if value == 0.0 || !value.is_finite() {
+        return [0.0; 3];
+    }
+    let magnitude = value.abs().log10().floor() as i32;
+    let unit = 10f64.powi(magnitude - length as i32 + 1);
+    let rounded = significant(value, length).parse().unwrap_or(value);
+    [rounded, rounded - unit, rounded + unit]
+}
+
+/// A colour that carries no declaration, as CSS: `color()` in the space it
+/// is tagged with when that space has a name other than sRGB, and the
+/// legacy form otherwise, written by [`declared_to_css`] like every other
+/// read-back.
+///
+/// Only a context's initial colours reach this -- black and transparent
+/// black -- but anything else that did would read back exactly too, rather
+/// than rounded to bytes.
 pub fn color4f_to_css<'a>(
     cx: &mut FunctionContext<'a>,
     color: &Color4f,
     space: Option<&ColorSpace>,
 ) -> JsResult<'a, JsValue> {
-    // Reported in the space it was named in when that is one we can name, so
-    // `color(display-p3 …)` reads back as itself. The value is converted only
-    // when the space has no name to give.
-    let named = space.and_then(color_space_name);
-    if let Some(name) = named
-        && name != "srgb"
-    {
-        let css = match color.a >= 1.0 {
-            true => {
-                format!("color({name} {} {} {})", color.r, color.g, color.b)
-            }
-            false => format!(
-                "color({name} {} {} {} / {})",
-                color.r, color.g, color.b, color.a
-            ),
-        };
-        return Ok(cx.string(css).upcast());
-    }
+    Ok(cx
+        .string(declared_to_css(&undeclared(color, space)))
+        .upcast())
+}
 
-    // A colour outside the sRGB gamut has no hex or `rgb()` spelling, and
-    // quantising it to one reports a colour the context is not holding --
-    // `oklch(0.7 0.35 30)` read back as `#ff0000`. CSS Color 4's `color()`
-    // notation carries the components as they are. A browser echoes the
-    // notation the colour was authored in, which needs the source text; this
-    // keeps the value, which is the half that matters.
-    let inside = |v: f32| (-f32::EPSILON..=1.0 + f32::EPSILON).contains(&v);
-    if inside(color.r) && inside(color.g) && inside(color.b) {
-        // Rounded, not truncated: `Color4f::to_color` floors, which reports
-        // `hwb(90 10% 20%)` as `#72cc19` where every browser says `#73cc1a`.
-        let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let quantised = Color::from_argb(
-            byte(color.a),
-            byte(color.r),
-            byte(color.g),
-            byte(color.b),
-        );
-        return color_to_css(cx, &quantised);
+/// The [`Declared`] [`color4f_to_css`] writes for `color` in `space`.
+fn undeclared(color: &Color4f, space: Option<&ColorSpace>) -> Declared {
+    let channels = [color.r, color.g, color.b];
+    let alpha = Some(f64::from(color.a));
+    match space.and_then(color_space_name) {
+        Some(name) if name != "srgb" => Declared {
+            form: Form::Color(name),
+            channels: channels.map(|c| Some(f64::from(c))),
+            alpha,
+        },
+        _ => Declared {
+            form: Form::Legacy,
+            channels: channels.map(|c| Some(byte_scale(c))),
+            alpha,
+        },
     }
+}
 
-    let css = match color.a >= 1.0 {
-        true => format!("color(srgb {} {} {})", color.r, color.g, color.b),
-        false => format!(
-            "color(srgb {} {} {} / {})",
-            color.r, color.g, color.b, color.a
-        ),
-    };
-    Ok(cx.string(css).upcast())
+/// An sRGB channel on `0..=255`, exactly `n` where it is the `f32` byte `n`
+/// converts to.
+///
+/// Scaling an `f32` by 255 does not undo either conversion: Skia's
+/// `Color4f::from` multiplies by `1 / 255`, and 24 comes back as
+/// 24.000002, which [`WHOLE_BYTE_EPSILON`] is too tight to call whole. So
+/// a value is a byte when the byte it rounds to converts back to it, by
+/// division or by Skia's reciprocal, and is scaled as it is otherwise.
+fn byte_scale(channel: f32) -> f64 {
+    let byte = (channel * 255.0).round();
+    match [byte / 255.0, byte * (1.0 / 255.0)].contains(&channel) {
+        true => f64::from(byte),
+        false => f64::from(channel) * 255.0,
+    }
 }
 
 //
@@ -3684,6 +4537,23 @@ pub fn color_arg(
     parsed_color_arg(cx, idx, attr, css_to_color)
 }
 
+/// [`color_arg`] with the colour as it was declared, for a setter whose
+/// getter reads it back: the eight-bit colour to paint with, and the
+/// declaration [`declared_to_css`] writes.
+///
+/// # Errors
+///
+/// As [`color_arg`].
+pub fn declared_color_arg(
+    cx: &mut FunctionContext,
+    idx: usize,
+    attr: &str,
+) -> NeonResult<(Color, Declared)> {
+    parsed_color_arg(cx, idx, attr, |css| {
+        Some((css_to_color(css)?, css_to_declared(css)?.2))
+    })
+}
+
 /// [`color_arg`] for per-channel coefficients, clamped rather than
 /// gamut-mapped -- see [`css_to_clamped_color`].
 ///
@@ -3912,7 +4782,9 @@ mod tests {
     /// Display P3 colours as linear-light sRGB, through the tree's own
     /// matrix, so the inputs are the colours CSS names.
     fn p3(rgb: [f32; 3]) -> [f32; 3] {
-        apply_matrix(LINEAR_P3_TO_LINEAR_SRGB, rgb.map(srgb_to_linear))
+        let xyz = color_function_to_xyz("display-p3", rgb.map(f64::from))
+            .expect("a space");
+        apply_matrix(XYZ_TO_LINEAR_SRGB, xyz).map(|c| c as f32)
     }
 
     #[test]
@@ -3935,8 +4807,8 @@ mod tests {
         // a JND, so it lands within one JND of that edge rather than on it.
         let mapped = gamut_map_srgb(p3([1.0, 1.0, 0.0]));
         let edge = [0.99116f32, 0.99733, 0.00001].map(srgb_to_linear);
-        let [l1, a1, b1] = linear_srgb_to_oklab_f64(mapped.map(f64::from));
-        let [l2, a2, b2] = linear_srgb_to_oklab_f64(edge.map(f64::from));
+        let [l1, a1, b1] = linear_srgb_to_oklab(mapped.map(f64::from));
+        let [l2, a2, b2] = linear_srgb_to_oklab(edge.map(f64::from));
         let distance =
             ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt();
         assert!(distance < GAMUT_MAP_JND, "{mapped:?}, {distance} off");
@@ -3987,7 +4859,7 @@ mod tests {
     #[test]
     fn gamut_mapping_stops_within_a_jnd_of_the_origins_hue() {
         let oklch = |rgb: [f32; 3]| {
-            let [l, a, b] = linear_srgb_to_oklab_f64(rgb.map(f64::from));
+            let [l, a, b] = linear_srgb_to_oklab(rgb.map(f64::from));
             (l, a.hypot(b), b.atan2(a))
         };
         for origin in [
@@ -4019,6 +4891,522 @@ mod tests {
     }
 
     #[test]
+    fn a_byte_held_in_f32_reads_back_as_hex() {
+        for byte in 0..=u8::MAX {
+            let divided = f32::from(byte) / 255.0;
+            for color in [
+                Color4f::from(Color::from_rgb(byte, byte, byte)),
+                Color4f::new(divided, divided, divided, 1.0),
+            ] {
+                let css = declared_to_css(&undeclared(&color, None));
+                assert_eq!(css, format!("#{byte:02x}{byte:02x}{byte:02x}"));
+            }
+        }
+    }
+
+    /// That `written` is the shortest spelling of `css`, against a search
+    /// that is not [`declared_to_css`]'s: every combination of lengths no
+    /// longer than `written`'s, each channel rounded, at either neighbouring
+    /// decimal or at zero, repainted through the parser.
+    fn no_shorter_spelling(css: &str, written: &str) {
+        let (held, space, declared) = css_to_declared(css).expect("a colour");
+        let digits = |s: &str| s.chars().filter(char::is_ascii_digit).count();
+        let channels: Vec<usize> = (0..ALPHA)
+            .filter(|&i| declared_number(&declared, i).is_some())
+            .collect();
+        // Each channel's figures as written: the tokens between the opening
+        // parenthesis and the closing one, in order.
+        let tokens: Vec<&str> = written
+            .split_once('(')
+            .expect("a function")
+            .1
+            .trim_end_matches(')')
+            .split_whitespace()
+            .collect();
+        let longest: Vec<usize> = channels
+            .iter()
+            .map(|&i| figures_in(tokens[i]).max(1))
+            .collect();
+        let mut lengths = vec![1usize; channels.len()];
+        'every: loop {
+            let mut figures = [EXACT_FIGURES; 4];
+            for (place, &index) in channels.iter().enumerate() {
+                figures[index] = lengths[place];
+            }
+            for combination in 0..4usize.pow(channels.len() as u32) {
+                let mut trial = declared;
+                let mut choice = combination;
+                for (place, &index) in channels.iter().enumerate() {
+                    let value =
+                        declared_number(&declared, index).expect("a number");
+                    let [rounded, below, above] =
+                        neighbouring_decimals(value, lengths[place]);
+                    let options = [rounded, below, above, 0.0];
+                    set_declared_number(&mut trial, index, options[choice % 4]);
+                    choice /= 4;
+                }
+                let spelled = declared_css(&trial, figures);
+                if digits(&spelled) < digits(written) {
+                    let repainted =
+                        css_to_declared(&spelled).map(|(c, s, _)| (c, s));
+                    assert_ne!(
+                        repainted,
+                        Some((held, space.clone())),
+                        "{css}: {spelled} is shorter than {written}"
+                    );
+                }
+            }
+            for place in 0..lengths.len() {
+                lengths[place] += 1;
+                if lengths[place] <= longest[place] {
+                    continue 'every;
+                }
+                lengths[place] = 1;
+            }
+            break;
+        }
+    }
+
+    /// No shorter spelling of a colour whose channels a conversion mixes.
+    /// The pinned rows are ones a search that shortened one channel at a
+    /// time, stopped at the first set of lengths that repaints, or never
+    /// widened its window, wrote longer; `oklab(from #990099 l a b)` is the
+    /// one that found a joint local search out, in 1,080 rows. The grid is a
+    /// sample of the 864 rows the search was measured over.
+    #[test]
+    fn a_mixed_colour_has_no_shorter_spelling() {
+        for (css, written) in [
+            (
+                "lch(from #000033 l c h)",
+                "lch(1.8127392 32.51795 290.35566)",
+            ),
+            (
+                "oklab(from #990099 l a b)",
+                "oklab(0.47921055 0.18751599 -0.11552572)",
+            ),
+            (
+                "oklab(from #cc6699 l a b)",
+                "oklab(0.6453704 0.13940273 -0.02330621)",
+            ),
+            (
+                "oklch(from #00ff00 l c h)",
+                "oklch(0.86643962 0.29482722 142.49535)",
+            ),
+            ("lch(from #666666 l c h)", "lch(43.19229 0 0)"),
+            ("lab(from red l a b)", "lab(54.290541 80.80493 69.89097)"),
+            (
+                "lab(from #3399cc l a b)",
+                "lab(59.189518 -16.951413 -35.27614)",
+            ),
+            (
+                "oklch(from #669999 l c h)",
+                "oklch(0.64711787 0.054385204 195.89)",
+            ),
+        ] {
+            let (_, _, declared) = css_to_declared(css).expect("a colour");
+            assert_eq!(declared_to_css(&declared), written, "{css}");
+            no_shorter_spelling(css, written);
+        }
+        for origin in ["#33cc99", "#cc3366", "#9999cc", "#ffcc00"] {
+            for function in ["lab", "lch", "oklab", "oklch"] {
+                let channels = match function {
+                    "lab" | "oklab" => "l a b",
+                    _ => "l c h",
+                };
+                let css = format!("{function}(from {origin} {channels})");
+                let (_, _, declared) = css_to_declared(&css).expect("a colour");
+                no_shorter_spelling(&css, &declared_to_css(&declared));
+            }
+        }
+    }
+
+    /// `red` converted to Lab and OkLCh by CSS Color 4's sample code,
+    /// conversions.js, written out here rather than shared with the code
+    /// under test: `lin_sRGB_to_XYZ`, then `D65_to_D50` and `XYZ_to_Lab`, or
+    /// `XYZ_to_OKLab` and the polar form. Red is 1, 0, 0, so the linear light
+    /// is the first column of the matrix.
+    fn red_by_the_sample_code() -> ([f64; 3], [f64; 3]) {
+        let xyz_d65 =
+            [506752.0 / 1228815.0, 87098.0 / 409605.0, 7918.0 / 409605.0];
+        let d65_to_d50 = [
+            [
+                1.0479297925449969,
+                0.022946870601609652,
+                -0.05019226628920524,
+            ],
+            [
+                0.02962780877005599,
+                0.9904344267538799,
+                -0.017073799063418826,
+            ],
+            [
+                -0.009243040646204504,
+                0.015055191490298152,
+                0.7518742814281371,
+            ],
+        ];
+        let apply = |m: [[f64; 3]; 3], v: [f64; 3]| {
+            m.map(|r| r[0] * v[0] + r[1] * v[1] + r[2] * v[2])
+        };
+        let white = [0.3457 / 0.3585, 1.0, (1.0 - 0.3457 - 0.3585) / 0.3585];
+        let (kappa, epsilon) = (24389.0 / 27.0, 216.0 / 24389.0);
+        let xyz_d50 = apply(d65_to_d50, xyz_d65);
+        let f: [f64; 3] = std::array::from_fn(|i| {
+            let v = xyz_d50[i] / white[i];
+            if v > epsilon {
+                v.cbrt()
+            } else {
+                (kappa * v + 16.0) / 116.0
+            }
+        });
+        let lab = [
+            116.0 * f[1] - 16.0,
+            500.0 * (f[0] - f[1]),
+            200.0 * (f[1] - f[2]),
+        ];
+        let lms = apply(
+            [
+                [0.819022437996703, 0.3619062600528904, -0.1288737815209879],
+                [0.0329836539323885, 0.9292868615863434, 0.0361446663506424],
+                [0.0481771893596242, 0.2642395317527308, 0.6335478284694309],
+            ],
+            xyz_d65,
+        )
+        .map(f64::cbrt);
+        let [l, a, b] = apply(
+            [
+                [0.210454268309314, 0.7936177747023054, -0.0040720430116193],
+                [1.9779985324311684, -2.42859224204858, 0.450593709617411],
+                [0.0259040424655478, 0.7827717124575296, -0.8086757549230774],
+            ],
+            lms,
+        );
+        let hue = b.atan2(a).to_degrees().rem_euclid(360.0);
+        (lab, [l, a.hypot(b), hue])
+    }
+
+    #[test]
+    fn a_relative_colour_holds_the_sample_codes_channels() {
+        // To `f32` precision: the channels a relative colour reads off its
+        // origin are the ones CSS Color 4's conversion gives, rounded once.
+        let (lab, oklch) = red_by_the_sample_code();
+        for (css, want) in [
+            ("lab(from red l a b)", lab),
+            ("oklch(from red l c h)", oklch),
+        ] {
+            let (_, _, declared) = css_to_declared(css).expect("a colour");
+            let held = declared.channels.map(|c| c.expect("a channel") as f32);
+            assert_eq!(held, want.map(|c| c as f32), "{css}");
+        }
+    }
+
+    #[test]
+    fn a_relative_colour_in_its_own_space_reads_its_origin_as_written() {
+        // Through sRGB and back, a pure-power encode turns the residue near
+        // zero into a visible channel: rec2020's green read -0.00066.
+        let read = |css: &str| {
+            let (_, _, declared) = css_to_declared(css).expect("a colour");
+            declared_to_css(&declared)
+        };
+        for (css, written) in [
+            (
+                "color(from color(rec2020 0 1 0) rec2020 r g b)",
+                "color(rec2020 0 1 0)",
+            ),
+            (
+                "color(from color(display-p3 1 0 0) display-p3 r g b)",
+                "color(display-p3 1 0 0)",
+            ),
+            (
+                "color(from color(a98-rgb 1 0 0) a98-rgb r g b)",
+                "color(a98-rgb 1 0 0)",
+            ),
+            (
+                "color(from color(xyz 0.2 0.3 0.4) xyz-d65 x y z)",
+                "color(xyz-d65 0.2 0.3 0.4)",
+            ),
+            ("lab(from lab(50 0 0) l a b)", "lab(50 0 0)"),
+            ("lch(from lab(50 0 0) l c h)", "lch(50 0 0)"),
+            ("oklab(from oklch(0.5 0 0) l a b)", "oklab(0.5 0 0)"),
+        ] {
+            assert_eq!(read(css), written, "{css}");
+        }
+    }
+
+    #[test]
+    fn a_conversion_residue_reads_as_zero_and_a_written_hue_does_not() {
+        let read = |css: &str| {
+            let (_, _, declared) = css_to_declared(css).expect("a colour");
+            declared_to_css(&declared)
+        };
+        // White's OkLCh chroma is 5e-16 through `f64`, a grey's Lab axes
+        // 6e-14; neither is a number anyone wrote.
+        assert_eq!(read("oklch(from white l c h)"), "oklch(1 0 0)");
+        assert_eq!(read("oklab(from #666666 l a b)"), "oklab(0.51027836 0 0)");
+        // A hue under a chroma of zero paints nothing, and still reads as
+        // given, as Chrome 156 reads it.
+        assert_eq!(read("oklch(0.5 -0.1 30)"), "oklch(0.5 0 30)");
+    }
+
+    /// CSS Color 4's `Lab_to_XYZ`, `D50_to_D65`, `XYZ_to_lin_sRGB` and
+    /// `gam_sRGB`, in `f64`, written out from conversions.js rather than
+    /// shared with the code under test.
+    fn lab_by_the_sample_code([l, a, b]: [f64; 3]) -> [f64; 3] {
+        let (kappa, epsilon) = (24389.0 / 27.0, 216.0 / 24389.0);
+        let white = [0.3457 / 0.3585, 1.0, (1.0 - 0.3457 - 0.3585) / 0.3585];
+        let (l116, a500, b200) = (l / 116.0, a / 500.0, b / 200.0);
+        let f1 = l116 + 16.0 / 116.0;
+        let (f0, f2) = (f1 + a500, f1 - b200);
+        let xyz = [
+            if f0.powi(3) > epsilon {
+                f0.powi(3)
+            } else {
+                (l116 + a500) * (116.0 / kappa)
+            },
+            if l > kappa * epsilon {
+                ((l + 16.0) / 116.0).powi(3)
+            } else {
+                l / kappa
+            },
+            if f2.powi(3) > epsilon {
+                f2.powi(3)
+            } else {
+                (l116 - b200) * (116.0 / kappa)
+            },
+        ];
+        let apply = |m: [[f64; 3]; 3], v: [f64; 3]| {
+            m.map(|r| r[0] * v[0] + r[1] * v[1] + r[2] * v[2])
+        };
+        let d65 = apply(
+            [
+                [0.955473421488075, -0.02309845494876471, 0.06325924320057072],
+                [
+                    -0.0283697093338637,
+                    1.0099953980813041,
+                    0.021041441191917323,
+                ],
+                [
+                    0.012314014864481998,
+                    -0.020507649298898964,
+                    1.330365926242124,
+                ],
+            ],
+            [0, 1, 2].map(|i| xyz[i] * white[i]),
+        );
+        let linear = apply(
+            [
+                [12831.0 / 3959.0, -329.0 / 214.0, -1974.0 / 3959.0],
+                [
+                    -851781.0 / 878810.0,
+                    1648619.0 / 878810.0,
+                    36519.0 / 878810.0,
+                ],
+                [705.0 / 12673.0, -2585.0 / 12673.0, 705.0 / 667.0],
+            ],
+            d65,
+        );
+        linear.map(|v: f64| {
+            let abs = v.abs();
+            let encoded = if abs > 0.0031308 {
+                1.055 * abs.powf(1.0 / 2.4) - 0.055
+            } else {
+                12.92 * abs
+            };
+            encoded.copysign(v)
+        })
+    }
+
+    #[test]
+    fn lab_is_converted_in_f64_and_rounded_once() {
+        // The channels are stored at `f32`, as the colour is; from them, each
+        // channel painted is the `f32` nearest the sample code's `f64`
+        // answer, or one `f32` step from it where the two `powf`s round
+        // apart.
+        let lightness = [0.0, 12.5, 25.0, 50.0, 79.18, 100.0];
+        let axis = [-160.0, -62.27, -30.0, 0.0, 17.56, 60.0, 125.0];
+        for l in lightness {
+            for a in axis {
+                for b in axis {
+                    let css = format!("lab({l} {a} {b})");
+                    let held = css_to_color4f(&css).expect("a colour");
+                    let stored = [l, a, b].map(|c: f64| f64::from(c as f32));
+                    let want = lab_by_the_sample_code(stored).map(|c| c as f32);
+                    for (got, want) in
+                        [held.r, held.g, held.b].into_iter().zip(want)
+                    {
+                        assert!(
+                            got == want
+                                || got == want.next_up()
+                                || got == want.next_down(),
+                            "{css}: {got} against {want}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The sample code publishes both directions of every conversion, so a
+    /// figure mistyped in either matrix shows as their product leaving the
+    /// identity. Measured, the published pairs agree to 4.4e-16, a few `f64`
+    /// steps.
+    #[test]
+    fn each_published_matrix_pair_is_an_inverse_pair() {
+        let product = |a: Matrix3, b: Matrix3| -> Matrix3 {
+            std::array::from_fn(|i| {
+                std::array::from_fn(|j| (0..3).map(|k| a[i][k] * b[k][j]).sum())
+            })
+        };
+        for (name, there, back) in [
+            ("sRGB", XYZ_TO_LINEAR_SRGB, LINEAR_SRGB_TO_XYZ),
+            ("Display P3", XYZ_TO_LINEAR_P3, LINEAR_P3_TO_XYZ),
+            ("Rec. 2020", XYZ_TO_LINEAR_REC2020, LINEAR_REC2020_TO_XYZ),
+            ("A98 RGB", XYZ_TO_LINEAR_A98, LINEAR_A98_TO_XYZ),
+            ("ProPhoto", XYZ_TO_LINEAR_PROPHOTO, LINEAR_PROPHOTO_TO_XYZ),
+            ("Bradford", D50_TO_D65, D65_TO_D50),
+            ("Oklab's cones", OKLAB_LMS_TO_XYZ, XYZ_TO_OKLAB_LMS),
+            ("Oklab", OKLAB_TO_OKLAB_LMS, OKLAB_LMS_TO_OKLAB),
+        ] {
+            let identity = product(there, back);
+            for (i, row) in identity.iter().enumerate() {
+                for (j, &value) in row.iter().enumerate() {
+                    let want = if i == j { 1.0 } else { 0.0 };
+                    assert!(
+                        (value - want).abs() < 1e-15,
+                        "{name}: [{i}][{j}] is {value}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Significant figures in a number as written: its digits without sign,
+    /// point or leading zeroes.
+    fn figures_in(number: &str) -> usize {
+        number
+            .chars()
+            .filter(char::is_ascii_digit)
+            .skip_while(|&digit| digit == '0')
+            .count()
+    }
+
+    #[test]
+    fn a_hex_alpha_takes_the_shortest_spelling_of_its_f32() {
+        // `#acf8` holds 136/255. Its eight-figure rounding, 0.53333333,
+        // lands on the next `f32` down; 0.53333334 is eight figures too and
+        // lands on it.
+        let read = |css: &str| {
+            let (_, _, declared) = css_to_declared(css).expect("a colour");
+            declared_to_css(&declared)
+        };
+        assert_eq!(read("#acf8"), "rgba(170, 204, 255, 0.53333334)");
+        assert_eq!(read("#ff000080"), "rgba(255, 0, 0, 0.5019608)");
+        // Against an oracle that is not this search: Rust's `{}` for an
+        // `f32` is the shortest decimal that reads back as that `f32`.
+        for byte in 1..u8::MAX {
+            let css = format!("#ff0000{byte:02x}");
+            let (held, _, _) = css_to_declared(&css).expect("a colour");
+            let shortest = figures_in(&format!("{}", held.a));
+            let written = read(&css);
+            let alpha = written
+                .trim_end_matches(')')
+                .rsplit(", ")
+                .next()
+                .expect("an alpha");
+            assert_eq!(figures_in(alpha), shortest, "{css} read as {written}");
+        }
+    }
+
+    /// Every row of tests/assets/cases/css-color-serialisation.json: the
+    /// string serialises as `expected`, `expected` set again serialises as
+    /// itself, and the two hold the same `f32` colour in the same space --
+    /// the read-back is the colour held, exactly.
+    #[test]
+    fn a_missing_channel_survives_only_where_no_conversion_runs() {
+        for (css, written) in [
+            ("hsl(from red none s l)", "color(srgb 1 0 0)"),
+            ("hwb(from red h none b)", "color(srgb 1 0 0)"),
+            ("rgb(from red none g b)", "color(srgb none 0 0)"),
+        ] {
+            let (held, space, declared) =
+                css_to_declared(css).expect("a colour");
+            let read = declared_to_css(&declared);
+            assert_eq!(read, written, "{css}");
+            let again = css_to_declared(&read).map(|(c, s, _)| (c, s));
+            assert_eq!(again, Some((held, space)), "{css} repaints");
+        }
+    }
+
+    #[test]
+    fn a_trial_is_tested_as_its_text_reads() {
+        // `hsl(200 130% 60%)` keeps its saturation in the space-separated
+        // syntax, so its blue is 1.12 times 255: a legacy channel outside
+        // `0..=255`, written as `color(srgb ...)` with the channel divided by
+        // 255. Tested as the number in 0..=255 rather than as its text, the
+        // green's 0.7733 looks as if it repaints, and does not.
+        let css = "hsl(200 130% 60% / 0.5)";
+        let (held, space, declared) = css_to_declared(css).expect("a colour");
+        let read = declared_to_css(&declared);
+        assert_eq!(read, "color(srgb 0.08 0.7733333 1.12 / 0.5)");
+        let again = css_to_declared(&read).map(|(c, s, _)| (c, s));
+        assert_eq!(again, Some((held, space)), "{read} repaints {css}");
+    }
+
+    #[test]
+    fn a_declaration_is_read_back_once() {
+        let trials = || TRIALS.with(std::cell::Cell::get);
+        let (_, _, declared) =
+            css_to_declared("lab(from red l a b)").expect("a colour");
+        let held = Declaration::new(declared);
+        let before = trials();
+        let first = held.css().to_string();
+        assert!(trials() > before, "the first read searches");
+        let searched = trials();
+        assert_eq!(held.css(), first);
+        assert_eq!(trials(), searched, "a second read tries nothing");
+        // A clone, as `save()` makes, shares what was written.
+        assert_eq!(held.clone().css(), first);
+        assert_eq!(trials(), searched, "nor does a clone's");
+        // A new declaration of the same colour is searched for again.
+        let again = Declaration::new(*held.declared());
+        assert_eq!(again.css(), first);
+        assert!(trials() > searched, "a new declaration searches");
+    }
+
+    #[test]
+    fn every_row_serialises_as_the_table_says() {
+        let table: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/assets/cases/css-color-serialisation.json"
+        ))
+        .expect("the case file parses");
+        let cases = table["cases"].as_array().expect("a list of cases");
+        assert!(cases.len() >= 80, "{} rows", cases.len());
+        let held = |css: &str| {
+            let (color, space, declared) = css_to_declared(css)?;
+            Some(((color, space), declared))
+        };
+        for case in cases {
+            let css = case["css"].as_str().expect("a string");
+            let Some(expected) = case["expected"].as_str() else {
+                assert!(css_to_declared(css).is_none(), "{css} is read");
+                continue;
+            };
+            let (painted, declared) = held(css).expect(css);
+            assert_eq!(declared_to_css(&declared), expected, "{css}");
+            let (again, redeclared) = held(expected).expect(expected);
+            assert_eq!(
+                declared_to_css(&redeclared),
+                expected,
+                "{expected}, set again"
+            );
+            assert!(
+                painted == again,
+                "{css} and {expected} hold different colours"
+            );
+        }
+    }
+
+    #[test]
     fn hex_and_named_colours_read_as_they_did() {
         // Every named colour in either case, every short hex form, and the
         // long forms channel by channel with a spread of the rest.
@@ -4040,7 +5428,7 @@ mod tests {
         let mut read = |css: &str| {
             let ours = hex_or_named(css)
                 .flatten()
-                .map(|c| c.as_array().map(f32::to_bits));
+                .map(|(c, _)| c.as_array().map(f32::to_bits));
             if dump {
                 eprintln!("{css} {ours:08x?}");
             }

@@ -13302,3 +13302,46 @@ fn geometric_precision_draws_outlines_unhinted_whatever_font_hinting_says() {
     assert_eq!(precise.0, unhinted.0);
     assert_eq!(precise.1, hinted.1);
 }
+
+#[test]
+fn a_family_registered_again_moves_the_baselines_with_the_glyphs() {
+    // A context whose font was set before its family was registered again
+    // draws in the new face, and has to place its baselines by it: Oswald
+    // hangs at 22.91 at 24px and Amstelvar at 18.24.
+    const FAMILY: &str = "BaselinesRegisteredAgain";
+    const TEXT: &str = "Hamburgefonstiv";
+    let fonts = FontLibrary::new();
+    fonts
+        .register_font_from_path(FAMILY, OSWALD_TTF)
+        .expect("bundled Oswald registers");
+    let set_up = |canvas: &mut Canvas| {
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css(&format!("24px {FAMILY}")));
+        ctx.set_text_baseline(TextBaseline::Top);
+    };
+    let baselines = |canvas: &mut Canvas| {
+        let measured = canvas.context().measure_text(TEXT, None);
+        (
+            measured.hanging_baseline,
+            measured.ideographic_baseline,
+            measured.alphabetic_baseline,
+        )
+    };
+
+    let mut kept = Canvas::new(10.0, 10.0);
+    set_up(&mut kept);
+    let before = baselines(&mut kept);
+    fonts
+        .register_font_from_path(
+            FAMILY,
+            "tests/assets/fonts/AmstelvarAlpha-VF.ttf",
+        )
+        .expect("bundled Amstelvar registers");
+    let after = baselines(&mut kept);
+    let mut fresh = Canvas::new(10.0, 10.0);
+    set_up(&mut fresh);
+    let wanted = baselines(&mut fresh);
+
+    assert_ne!(wanted, before, "the two faces place their baselines apart");
+    assert_eq!(after, wanted, "the new face's baselines");
+}

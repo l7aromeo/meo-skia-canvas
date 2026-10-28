@@ -177,6 +177,25 @@ window be changed after it opens.** No signature moves and nothing is removed.
   keeps its own colour, as in Chrome. A paragraph in several colours with
   no change inside a cluster is drawn as it was.
 
+- **A font registered after `set_font` moves the baselines with the
+  glyphs.** Registering a family again changed the face a context's text
+  was drawn in, but its baselines kept the face the font resolved to when it
+  was set: at 24px, a family moved from Oswald to Amstelvar still measured
+  Oswald's hanging baseline of 22.91 and ideographic baseline of -6.94,
+  where a fresh context reads Amstelvar's 18.24 and -6.00, and
+  `TextBaseline::Top` drew the text Oswald's ascent below the anchor. The
+  baselines are now read off the face the text is drawn in.
+
+- **`RgbaLinear::from_css`, `set_fill_style_css` and every other reader of
+  a CSS colour convert Lab, LCH, Oklab, OkLCh and the `color()` spaces as
+  CSS Color 4's sample code does, to `f32` precision.** The conversions ran
+  in `f32` with matrices rounded to `f32`; they now run in `f64` with the
+  sample code's own matrices and round to `f32` once. `lab(0 -160 -160)`
+  gives a red of 0.27520016 where it gave 0.2752, and a relative colour in
+  its origin's own space reads that origin's channels unchanged:
+  `color(from color(rec2020 0 1 0) rec2020 r g b)` is green, where a round
+  trip through sRGB left a red of -0.00066.
+
 - **A `Window` shows text at its canvas's contrast and gamma.**
   `Window::with_canvas` took the platform's default `text_contrast` and
   `text_gamma` whatever the canvas was made with, so a canvas made with a
@@ -1164,6 +1183,17 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   keeps fonts of its own, does not. The font caches themselves are emptied
   at idle by the npm addon alone, which can post the release to the
   JavaScript thread that owns them; a Rust program's are kept as before.
+
+### Known, and not fixed here
+
+- **On macOS a GPU draw can be dropped when the shader compiler is slow, in
+  a crate build.** The Skia skia-bindings 0.153.3 downloads waits one second
+  for each Metal shader and pipeline it compiles and then draws nothing, so
+  on a loaded machine a process's first image draw, blend mode or gradient
+  can come back missing. The npm package's macOS binary is built without
+  that limit; a crate build gets whatever Skia skia-bindings provides.
+  docs/rust.md, "Metal and skia-bindings' prebuilt Skia", says how to build
+  Skia from source with the patch that removes it.
 
 ## 📦 ⟩ [v0.16.3] (crate) ⟩ September 16, 2026
 

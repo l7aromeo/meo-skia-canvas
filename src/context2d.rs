@@ -63,7 +63,7 @@ use crate::{
         path::{Path2D as NodePath2D, conic_or_line},
         pattern::CanvasPattern,
         typography::{Baseline, DecorationStyle, FontSpec, Spacing},
-        utils::{color4f_to_rgba_linear, css_to_color4f_in_space},
+        utils::{Declaration, color4f_to_rgba_linear, css_to_declared},
     },
     paint::{BlendMode, StrokeCap, StrokeJoin},
     path::{FillRule, Path2D},
@@ -1910,12 +1910,17 @@ impl Context2D {
     /// Sets how a drawn run is positioned horizontally against its x
     /// coordinate.
     pub fn set_text_align(&mut self, align: TextAlign) {
-        self.inner.state.graf_style.set_text_align(align.to_skia());
+        self.inner
+            .state
+            .text
+            .edit()
+            .graf_style
+            .set_text_align(align.to_skia());
     }
 
     /// Sets which line of the font a drawn run sits on vertically.
     pub fn set_text_baseline(&mut self, baseline: TextBaseline) {
-        self.inner.state.text_baseline = match baseline {
+        self.inner.state.text.edit().text_baseline = match baseline {
             TextBaseline::Top => Baseline::Top,
             TextBaseline::Hanging => Baseline::Hanging,
             TextBaseline::Middle => Baseline::Middle,
@@ -1931,7 +1936,7 @@ impl Context2D {
     /// Not in the Canvas standard, where `max_width` always condenses. With
     /// this on, that argument becomes a wrap width instead.
     pub fn set_text_wrap(&mut self, wrap: bool) {
-        self.inner.state.text_wrap = wrap;
+        self.inner.state.text.edit().text_wrap = wrap;
     }
 
     /// Sets the reading direction used when laying out a run.
@@ -1942,15 +1947,14 @@ impl Context2D {
     pub fn set_direction(&mut self, direction: TextDirection) {
         self.inner.state.direction_inherits =
             direction == TextDirection::Inherit;
-        self.inner
-            .state
-            .graf_style
-            .set_text_direction(match direction {
+        self.inner.state.text.edit().graf_style.set_text_direction(
+            match direction {
                 TextDirection::RightToLeft => SkTextDirection::RTL,
                 TextDirection::LeftToRight | TextDirection::Inherit => {
                     SkTextDirection::LTR
                 }
-            });
+            },
+        );
     }
 
     /// Sets extra space added between characters, in pixels.
@@ -1959,7 +1963,7 @@ impl Context2D {
         // keeps the previous spacing rather than poisoning layout.
         if let Some(spacing) = Spacing::parse(pixels, "px".to_string(), pixels)
         {
-            self.inner.state.letter_spacing = spacing;
+            self.inner.state.text.edit().letter_spacing = spacing;
         }
     }
 
@@ -1970,7 +1974,7 @@ impl Context2D {
     pub fn set_word_spacing(&mut self, pixels: f32) {
         if let Some(spacing) = Spacing::parse(pixels, "px".to_string(), pixels)
         {
-            self.inner.state.word_spacing = spacing;
+            self.inner.state.text.edit().word_spacing = spacing;
         }
     }
 
@@ -1988,7 +1992,7 @@ impl Context2D {
     /// and `OptimizeSpeed`; [`TextRendering::GeometricPrecision`] draws
     /// unhinted whatever this says, as the standard asks of it.
     pub fn set_font_hinting(&mut self, enabled: bool) {
-        self.inner.state.font_hinting = enabled;
+        self.inner.state.text.edit().font_hinting = enabled;
     }
 
     /// Sets whether kerning is applied, as `ctx.fontKerning` does -- see
@@ -1996,7 +2000,7 @@ impl Context2D {
     /// [`restore`](Self::restore), and left alone by
     /// [`set_font`](Self::set_font).
     pub fn set_font_kerning(&mut self, kerning: FontKerning) {
-        self.inner.state.font_kerning = kerning;
+        self.inner.state.text.edit().font_kerning = kerning;
     }
 
     /// Sets what text is drawn for, as `ctx.textRendering` does -- see
@@ -2004,7 +2008,7 @@ impl Context2D {
     /// [`restore`](Self::restore), and left alone by
     /// [`set_font`](Self::set_font).
     pub fn set_text_rendering(&mut self, rendering: TextRendering) {
-        self.inner.state.text_rendering = rendering;
+        self.inner.state.text.edit().text_rendering = rendering;
     }
 
     /// Selects how wide a face to use, where the family offers a choice.
@@ -2030,6 +2034,7 @@ impl Context2D {
         let kept = self
             .inner
             .state
+            .text
             .char_style
             .font_features()
             .iter()
@@ -2121,7 +2126,7 @@ impl Context2D {
         &mut self,
         variations: &[FontVariation],
     ) {
-        self.inner.state.variations = variations
+        self.inner.state.text.edit().variations = variations
             .iter()
             .map(|variation| {
                 let [a, b, c, d] = *variation.axis.as_bytes();
@@ -2190,7 +2195,7 @@ impl Context2D {
     /// # Ok::<(), meo_skia_canvas::error::Error>(())
     /// ```
     pub fn set_text_decoration_css(&mut self, css: &str) -> Result<(), Error> {
-        self.inner.state.text_decoration = decoration_from_css(css)
+        self.inner.state.text.edit().text_decoration = decoration_from_css(css)
             .ok_or_else(|| Error::InvalidColor {
                 reason: format!("{css:?}"),
             })?;
@@ -2245,7 +2250,7 @@ impl Context2D {
         let css = decoration_css(lines, style, color, thickness);
         let size =
             thickness.and_then(|px| Spacing::parse(px, "px".to_string(), px));
-        self.inner.state.text_decoration =
+        self.inner.state.text.edit().text_decoration =
             decoration_style(lines, style, color, size, css);
     }
 
@@ -2258,7 +2263,7 @@ impl Context2D {
     /// the CSS shorthand's own order -- line, style, colour, thickness --
     /// with the colour as `rgba(255,0,0,1)`.
     pub fn text_decoration(&self) -> String {
-        self.inner.state.text_decoration.css.clone()
+        self.inner.state.text.text_decoration.css.clone()
     }
 
     /// Measures `text` under the current font and text state, without
@@ -3337,6 +3342,7 @@ impl Context2D {
             rgba_linear_to_unpremul_color4f(color),
             linear_srgb_color_space(),
         );
+        self.inner.state.shadow_declared = None;
     }
 
     /// Sets the shadow color from a CSS color string.
@@ -3348,10 +3354,12 @@ impl Context2D {
     ///
     /// Returns [`Error::InvalidColor`] when the string is not a CSS color.
     pub fn set_shadow_color_css(&mut self, css: &str) -> Result<(), Error> {
-        self.inner.state.shadow_color = css_to_color4f_in_space(css)
-            .ok_or_else(|| Error::InvalidColor {
+        let (color, space, declared) =
+            css_to_declared(css).ok_or_else(|| Error::InvalidColor {
                 reason: format!("{css:?}"),
             })?;
+        self.inner.state.shadow_color = (color, space);
+        self.inner.state.shadow_declared = Some(Declaration::new(declared));
         Ok(())
     }
 
@@ -3474,7 +3482,7 @@ impl Context2D {
         if self.inner.state.direction_inherits {
             return TextDirection::Inherit;
         }
-        match self.inner.state.graf_style.text_direction() {
+        match self.inner.state.text.graf_style.text_direction() {
             SkTextDirection::RTL => TextDirection::RightToLeft,
             _ => TextDirection::LeftToRight,
         }
@@ -3485,7 +3493,7 @@ impl Context2D {
     /// Read back off the font features themselves, so a variant set through
     /// [`Context2D::set_font_variant`] is reported here too.
     pub fn font_variant_caps(&self) -> FontVariantCaps {
-        let features = self.inner.state.char_style.font_features();
+        let features = self.inner.state.text.char_style.font_features();
         let tags = features
             .iter()
             .filter(|feature| feature.value() != 0)
@@ -3614,17 +3622,17 @@ impl Context2D {
     /// Whether glyph hinting is applied -- see
     /// [`Context2D::set_font_hinting`].
     pub fn font_hinting(&self) -> bool {
-        self.inner.state.font_hinting
+        self.inner.state.text.font_hinting
     }
 
     /// Whether kerning is applied: [`FontKerning::Auto`] on a new context.
     pub fn font_kerning(&self) -> FontKerning {
-        self.inner.state.font_kerning
+        self.inner.state.text.font_kerning
     }
 
     /// What text is drawn for: [`TextRendering::Auto`] on a new context.
     pub fn text_rendering(&self) -> TextRendering {
-        self.inner.state.text_rendering
+        self.inner.state.text.text_rendering
     }
 
     /// Sets the spacing between characters from a CSS length.
@@ -3668,7 +3676,7 @@ impl Context2D {
     /// # Ok::<(), meo_skia_canvas::error::Error>(())
     /// ```
     pub fn set_letter_spacing_css(&mut self, css: &str) -> Result<(), Error> {
-        self.inner.state.letter_spacing = css_spacing(css)?;
+        self.inner.state.text.edit().letter_spacing = css_spacing(css)?;
         Ok(())
     }
 
@@ -3681,7 +3689,7 @@ impl Context2D {
     ///
     /// Returns [`Error::InvalidCssLength`] on the same terms.
     pub fn set_word_spacing_css(&mut self, css: &str) -> Result<(), Error> {
-        self.inner.state.word_spacing = css_spacing(css)?;
+        self.inner.state.text.edit().word_spacing = css_spacing(css)?;
         Ok(())
     }
 
@@ -3689,6 +3697,7 @@ impl Context2D {
     pub fn letter_spacing(&self) -> f32 {
         self.inner
             .state
+            .text
             .letter_spacing
             .in_px(&self.inner.state.font_units())
     }
@@ -3697,18 +3706,19 @@ impl Context2D {
     pub fn word_spacing(&self) -> f32 {
         self.inner
             .state
+            .text
             .word_spacing
             .in_px(&self.inner.state.font_units())
     }
 
     /// Where a text run sits horizontally relative to its origin.
     pub fn text_align(&self) -> TextAlign {
-        TextAlign::from_skia(self.inner.state.graf_style.text_align())
+        TextAlign::from_skia(self.inner.state.text.graf_style.text_align())
     }
 
     /// Which horizontal line of the font a text draw sits on.
     pub fn text_baseline(&self) -> TextBaseline {
-        match self.inner.state.text_baseline {
+        match self.inner.state.text.text_baseline {
             Baseline::Top => TextBaseline::Top,
             Baseline::Hanging => TextBaseline::Hanging,
             Baseline::Middle => TextBaseline::Middle,
@@ -3720,7 +3730,7 @@ impl Context2D {
 
     /// Whether text wraps at the width given to a draw.
     pub fn text_wrap(&self) -> bool {
-        self.inner.state.text_wrap
+        self.inner.state.text.text_wrap
     }
 
     // -- Image data --------------------------------------------------------
@@ -4338,7 +4348,7 @@ fn to_paint_source(dye: &Dye) -> PaintSource {
     match dye {
         // Set from an `RgbaLinear`, so already linear sRGB: `to_dye` tagged
         // it so.
-        Dye::Color(color, Some(space))
+        Dye::Color(color, Some(space), _)
             if *space == linear_srgb_color_space() =>
         {
             PaintSource::Color(unpremul_color4f_to_rgba_linear(*color))
@@ -4348,7 +4358,7 @@ fn to_paint_source(dye: &Dye) -> PaintSource {
         // the same trip, or handing it back to `set_fill_style` paints
         // something else -- rebeccapurple read back as 0.4, 0.2, 0.6 and
         // repainted as 170, 124, 203.
-        Dye::Color(color, space) => {
+        Dye::Color(color, space, _) => {
             PaintSource::Color(color4f_to_rgba_linear(*color, space.as_ref()))
         }
         // A gradient only reaches the state through the JavaScript binding;
@@ -4391,11 +4401,15 @@ fn css_spacing(css: &str) -> Result<Spacing, Error> {
 /// space, which is what lets `color(display-p3 ...)` reach a P3 canvas without
 /// a detour through sRGB.
 fn css_dye(css: &str) -> Result<Dye, Error> {
-    let (color, space) =
-        css_to_color4f_in_space(css).ok_or_else(|| Error::InvalidColor {
+    let (color, space, declared) =
+        css_to_declared(css).ok_or_else(|| Error::InvalidColor {
             reason: format!("{css:?}"),
         })?;
-    Ok(Dye::Color(color, Some(space)))
+    Ok(Dye::Color(
+        color,
+        Some(space),
+        Some(Declaration::new(declared)),
+    ))
 }
 
 /// An [`RgbaLinear`] as a fill: unpremultiplied and tagged linear sRGB.
@@ -4408,6 +4422,7 @@ fn to_dye(color: RgbaLinear) -> Dye {
     Dye::Color(
         rgba_linear_to_unpremul_color4f(color),
         Some(linear_srgb_color_space()),
+        None,
     )
 }
 

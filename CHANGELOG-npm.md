@@ -229,6 +229,28 @@ removed and no signature moves.
   `hwb(h calc((100 - s) * v / 100) calc(100 - v))`, and `hwba()` is
   `hwb()`.
 
+- **`fillStyle`, `strokeStyle`, `shadowColor` and `Image.currentColor`
+  read a colour back as CSS Color 4 section 16 serialises it.** A colour
+  reads back in the function it was set in, `none` kept: `lab(29% 39 20)`
+  reads `lab(29 39 20)`, `oklch(0.7 0.35 30)` reads itself where it read
+  `color(srgb 1.2472011 -1.186381 -0.64083284)`, `color(srgb 1 0 0)` reads
+  itself where it read `#ff0000`, and `color(xyz ...)` reads
+  `color(xyz-d65 ...)`. A legacy colour is hex only when its components are
+  whole bytes and it is opaque, and otherwise `rgb()` with the numbers it
+  paints: `hwb(90 10% 20%)` reads `rgb(114.75, 204, 25.5)` where it read
+  `#73cc1a`. Alpha is the number held rather than three places of a byte:
+  `rgba(255, 200, 90, 0.5)` reads back with `0.5` where it read `0.502`,
+  and `#ff000080` with `0.5019608`. Each number takes the fewest figures
+  that repaint the colour exactly, so setting a read-back again paints the
+  same pixel on an `RGBAF32` canvas, which six places did not.
+  `Image.currentColor` gives the string `fillStyle` gives, which it did for
+  some colours and not others. docs/browser-differences.md has where this
+  departs from Chrome, which writes eight bits.
+
+  Migrate: code that compared a getter against a hex string for a colour
+  that is not whole bytes, or against a three-place alpha, compares against
+  the new string, or compares pixels.
+
 ### Security
 
 - **`follow-redirects` is required at `^1.16.1`, up from `^1.15.11`.** It is
@@ -363,6 +385,42 @@ removed and no signature moves.
   already rejected or fired `error`.
 
 ### Fixed
+
+- **A font registered after `ctx.font` was set moves the baselines with the
+  glyphs.** Registering a family again with `FontLibrary.use` changed the
+  face a context's text was drawn in, but the baselines kept the face the
+  font had resolved to when it was set: at 24px, a family moved from Oswald
+  to Amstelvar still measured a `hangingBaseline` of 22.91 and an
+  `ideographicBaseline` of -6.94, Oswald's, where a fresh context reads
+  Amstelvar's 18.24 and -6.00, and `textBaseline = "top"` drew the text
+  Oswald's ascent below the anchor. The baselines are now read off the face
+  the text is drawn in, as the fonts registered at the time resolve it.
+
+- **On macOS, a GPU draw is no longer dropped when the system's shader
+  compiler is slow.** Skia's Metal backend, as rust-skia builds it, waited one
+  second for each shader and pipeline it needed compiled and then drew
+  nothing, reporting only a line on stderr. On a loaded machine a process's
+  first image draw, blend mode or gradient could come back missing -- a
+  transparent PNG, an export with a shape gone. The darwin binary is now
+  built from Skia source with the version check upstream Skia makes, so the
+  draw waits for the compiler. Seen in the test suites as one-off empty
+  pixels; reproduced by pausing the compiler for three seconds, which a timed
+  build reads as `[0, 0, 0, 0]` and this one as the colour drawn.
+
+- **A colour named in Lab, LCH, Oklab, OkLCh or a `color()` space other
+  than sRGB is converted as CSS Color 4's sample code converts it, to
+  `f32` precision.** The conversions ran in `f32`, with matrices rounded to
+  `f32`, so a converted colour sat up to a few units in the seventh figure
+  from the specification's: `lab(from red l a b)` read its lightness as
+  54.290535 where the sample code gives 54.290541, and `lab(0 -160 -160)`
+  painted a red of 0.2752 where it gives 0.27520016. They now run in `f64`
+  with the sample code's own matrices, from the channels as the colour
+  holds them, and the result is rounded to `f32` once.
+  `color(from color(rec2020 0 1 0) rec2020 r g b)` reads
+  `color(rec2020 0 1 0)`, where a round trip through sRGB read a red of
+  -0.00066, and a channel whose true value is zero reads `0` rather than
+  what the arithmetic leaves there. No eight-bit colour the test suites
+  pin, Chrome's measurements included, has moved.
 
 - **`new Canvas(w, h, { textGamma })` refuses a gamma above 4.** Skia takes
   a text gamma from 0 up to 4, and the `RangeError` said so, but the upper

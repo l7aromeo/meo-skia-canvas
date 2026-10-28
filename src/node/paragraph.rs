@@ -16,7 +16,7 @@ use skia_safe::{
 };
 
 use crate::{
-    font::{FontFamily, ObliqueAngle, variation_axes},
+    font::{FontFamily, ObliqueAngle},
     font_library::{FontLibrary, instance_coordinates},
     node::{
         oblique::{
@@ -1236,10 +1236,10 @@ pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     });
     let families = text_style.font_families();
     let families: Vec<&str> = families.iter().collect();
-    let axes = collection
-        .find_typefaces(&families, text_style.font_style())
-        .iter()
-        .find_map(variation_axes);
+    let faces = collection.find_typefaces(&families, text_style.font_style());
+    let axes = FontLibrary::with_shared(|lib| {
+        faces.iter().find_map(|face| lib.axes_of(face))
+    });
     let mut coordinates = match axes {
         Some(axes) => {
             let coordinates =

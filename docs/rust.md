@@ -240,6 +240,12 @@ Swap `metal` for `vulkan` on Linux and Windows.
 - `BackendInfo::query()` reports what this build on this machine offers before a canvas exists: `renderer`, `api`, `device`, `driver`, `threads`, `gpu_available`, and an `error` naming why the GPU declined, which is what tells a build with no GPU support apart from a driver that refused. The device and driver strings come from the driver and are for logs, not for matching on.
 - The two backends are not bit-identical. The GPU composites through 4x MSAA by default, so coverage lands in quarter steps where the raster backend computes it exactly; sub-pixel geometry is where the two differ most. `EncodeOptions::msaa` changes the sample count, and `0` or `1` mean none.
 
+### Metal and skia-bindings' prebuilt Skia
+
+On macOS, the Skia that skia-bindings 0.153.3 downloads waits at most one second for each Metal shader and pipeline it compiles, then drops the draw. On a loaded machine a process's first image draw, blend mode or gradient can come back missing, with only a line on stderr ("Compilation took longer than 1000 ms"). The npm package's macOS binary is built without that limit, but a crate build uses whatever Skia skia-bindings gives it.
+
+To build without it, compile Skia from source with this repository's patch, `containers/skia-metal-untimed-compile.patch`. `node scripts/skia-source.mjs prepare`, run in a checkout of this repository, fetches rust-skia at the matching tag, applies the patch and prints the directory to set as `SKIA_SOURCE_DIR` for your build. It is about 1 GB, and the build compiles Skia, which takes a few minutes.
+
 ## Paint
 
 - `Paint` carries the full Canvas paint accumulator: `color`, `style` (`Fill` / `Stroke`), `stroke_width`, `stroke_cap`, `dash`, `anti_alias`, `alpha` modulator, `blend_mode`, optional `shader`, optional `image_filter`, optional `color_filter`.

@@ -1,5 +1,7 @@
 use std::{
     borrow::Cow,
+    collections::HashMap,
+    hash::{Hash, Hasher},
     iter::once,
     ops::Range,
     rc::Rc,
@@ -8,8 +10,9 @@ use std::{
 
 use skia_safe::{
     Canvas as SkCanvas, FontArguments, FontMgr, FontStyle, FourByteTag,
-    Paint as SkPaint, PaintStyle as SkPaintStyle, Point as SkPoint,
+    Paint as SkPaint, PaintStyle as SkPaintStyle, Point as SkPoint, Typeface,
     font_arguments::{VariationPosition, variation_position::Coordinate},
+    font_parameters::variation::Axis,
     font_style::{Slant, Weight},
     textlayout::{
         Affinity as SkAffinity, FontCollection, Paragraph as SkParagraph,
@@ -33,13 +36,13 @@ use crate::{
     },
     context2d::{FontStretch, TextDirection},
     font::{
-        FontAxisTag, FontFamily, FontLibrary, FontVariation, GenericFamily,
-        InstancedPositions, ObliqueAngle, optical_size, variation_axes,
+        FontAxisTag, FontFamily, FontLibrary, FontVariation,
+        InstancedPositions, KnownAxes, ObliqueAngle, optical_size,
     },
     geometry::Rect,
     image::CSS_INITIAL_FONT_SIZE,
     node::{
-        font_library::{FontLibrary as SharedFontRegistry, unmatched_name},
+        font_library::{FontLibrary as SharedFontRegistry, forgetful},
         oblique::{
             ParagraphRecipe, Passes, add_slnt, match_oblique,
             without_paragraph_cache,
@@ -1204,6 +1207,14 @@ pub struct TextEngine {
     /// engine is neither `Send` nor `Sync`, and a `RefCell` would take away
     /// `UnwindSafe` and `RefUnwindSafe`, which it has.
     positions: Rc<Mutex<InstancedPositions>>,
+    /// The axes of the faces `collection` has resolved a style to, so that
+    /// each is asked of the platform once -- see [`KnownAxes`]. Shared with
+    /// every builder this engine opens, and held, like `positions`, in a
+    /// `Mutex` for the unwind safety it keeps.
+    axes: Rc<Mutex<KnownAxes>>,
+    /// The faces `collection` has matched each family list and style to --
+    /// see [`FaceMatches`]. Shared with every builder this engine opens.
+    matches: Rc<Mutex<FaceMatches>>,
 }
 
 impl TextEngine {
@@ -1234,6 +1245,8 @@ impl TextEngine {
         Self {
             collection,
             positions: Rc::default(),
+            axes: Rc::default(),
+            matches: Rc::default(),
         }
     }
 
@@ -1260,6 +1273,8 @@ impl TextEngine {
         Self {
             collection,
             positions: Rc::default(),
+            axes: Rc::default(),
+            matches: Rc::default(),
         }
     }
 
@@ -1356,6 +1371,8 @@ impl TextEngine {
         let mut instance = instance_for(
             &mut collection.clone(),
             &self.positions,
+            &self.axes,
+            &self.matches,
             base_style,
             &oblique_variations(base_style, base_variations),
         );
@@ -1380,6 +1397,8 @@ impl TextEngine {
             ),
             collection,
             positions: self.positions.clone(),
+            axes: self.axes.clone(),
+            matches: self.matches.clone(),
             variations: base_variations.to_vec(),
         }
     }
@@ -1430,6 +1449,10 @@ pub struct ParagraphBuilder {
     collection: FontCollection,
     /// The engine's record of the positions instanced through `collection`.
     positions: Rc<Mutex<InstancedPositions>>,
+    /// The engine's record of its faces' axes.
+    axes: Rc<Mutex<KnownAxes>>,
+    /// The engine's record of what each family list and style matched.
+    matches: Rc<Mutex<FaceMatches>>,
     /// The base style's axes, which a pushed style that inherits is
     /// instanced at.
     variations: Vec<FontVariation>,
@@ -1450,6 +1473,8 @@ impl ParagraphBuilder {
         let mut instance = instance_for(
             &mut self.collection.clone(),
             &self.positions,
+            &self.axes,
+            &self.matches,
             style,
             &oblique_variations(style, variations),
         );
@@ -1786,6 +1811,109 @@ struct Instance {
     /// face's axis as Skia clamps it. `None` when nothing is instanced or
     /// the face has no `wght` axis.
     weight: Option<i32>,
+    /// The names the style's families are asked for by, as
+    /// [`collection_names`] gave them to find the faces, so that the text
+    /// style is given the same ones without working them out again. `None`
+    /// for a style that names no family.
+    names: Option<Rc<[String]>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times [`FaceMatches::of`] has searched a collection on this
+    /// thread, for the tests that hold it to remembering.
+    pub(crate) static SEARCHES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// How many family lists and styles an engine remembers the matches of.
+///
+/// A bound rather than a working set: a weight that animates names a new
+/// style every frame. Past it every remembered match is dropped and searched
+/// again.
+const MATCHES_KEPT: usize = 256;
+
+/// The faces an engine's collection has matched each family list and style
+/// to, searched once each.
+///
+/// The collection is the engine's for its life, built over a snapshot of
+/// its library, so a search of it answers the same every time: an entry is
+/// never stale, and goes only at [`MATCHES_KEPT`] or with the engine. The
+/// search was most of what instancing a style for its variable faces cost
+/// on a style met before.
+#[derive(Default)]
+pub(crate) struct FaceMatches {
+    matches: HashMap<FaceMatchKey, Rc<[Typeface]>>,
+}
+
+/// What a search of an engine's collection is asked: a family list, as the
+/// names [`collection_names`] handed out for it, and the style's weight,
+/// width and slant.
+///
+/// The names are compared and hashed by which list they are, not by what
+/// they spell: the library hands out one list for a family list for as long
+/// as it keeps it, so this costs no hash of the strings, which the lookup
+/// that found the list has already paid. The key holds the list, so its
+/// allocation cannot be freed and its address taken by another while the
+/// entry lives -- equal addresses are the same list. A list the library
+/// works out again, after the fonts change or past its bound, is a new
+/// allocation, and misses rather than answering for the one before.
+struct FaceMatchKey {
+    names: Rc<[String]>,
+    weight: i32,
+    width: i32,
+    slant: Slant,
+}
+
+impl PartialEq for FaceMatchKey {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.names, &other.names)
+            && (self.weight, self.width, self.slant)
+                == (other.weight, other.width, other.slant)
+    }
+}
+
+impl Eq for FaceMatchKey {}
+
+impl Hash for FaceMatchKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Rc::as_ptr(&self.names).cast::<()>().hash(state);
+        (self.weight, self.width, self.slant).hash(state);
+    }
+}
+
+impl FaceMatches {
+    /// The faces the family list `names` -- as [`collection_names`] handed
+    /// it out -- in `style` match in `collection`.
+    pub(crate) fn of(
+        &mut self,
+        collection: &mut FontCollection,
+        names: &Rc<[String]>,
+        style: FontStyle,
+    ) -> Rc<[Typeface]> {
+        let key = FaceMatchKey {
+            names: names.clone(),
+            weight: *style.weight(),
+            width: *style.width(),
+            slant: style.slant(),
+        };
+        let remember = !forgetful();
+        if remember && let Some(faces) = self.matches.get(&key) {
+            return faces.clone();
+        }
+        #[cfg(test)]
+        SEARCHES.set(SEARCHES.get() + 1);
+        let families: Vec<&str> = names.iter().map(String::as_str).collect();
+        let faces: Rc<[Typeface]> =
+            collection.find_typefaces(&families, style).into();
+        if remember {
+            if self.matches.len() >= MATCHES_KEPT {
+                self.matches.clear();
+            }
+            self.matches.insert(key, faces.clone());
+        }
+        faces
+    }
 }
 
 /// How `style`'s variable faces are instanced: at the explicit
@@ -1814,17 +1942,30 @@ struct Instance {
 fn instance_for(
     collection: &mut FontCollection,
     positions: &Mutex<InstancedPositions>,
+    known: &Mutex<KnownAxes>,
+    matches: &Mutex<FaceMatches>,
     style: &TextStyle,
     variations: &[FontVariation],
 ) -> Instance {
-    let names = collection_names(&style.font_families);
-    let families: Vec<&str> = names.iter().map(String::as_str).collect();
-    if families.is_empty() {
+    if style.font_families.is_empty() {
         return Instance::default();
     }
-    let faces = collection.find_typefaces(&families, font_style_for(style));
-    let Some(axes) = faces.iter().find_map(variation_axes) else {
-        return Instance::default();
+    let names = collection_names(&style.font_families);
+    let faces = matches.lock().unwrap_or_else(PoisonError::into_inner).of(
+        collection,
+        &names,
+        font_style_for(style),
+    );
+    let Some(axes) = faces.iter().find_map(|face| {
+        known
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .of(face)
+    }) else {
+        return Instance {
+            names: Some(names),
+            ..Instance::default()
+        };
     };
     let wght_tag = u32::from_be_bytes(*FontAxisTag::WGHT.as_bytes());
     let explicit_wght = variations
@@ -1855,8 +1996,33 @@ fn instance_for(
         }])
         .chain(opsz)
         .collect::<Vec<_>>();
+    let weight = axes
+        .iter()
+        .find(|axis| *axis.tag == wght_tag)
+        .map(|axis| wght.clamp(axis.min, axis.max).round() as i32);
+    // At the faces' own position an instance draws as the faces do, glyph
+    // for glyph and advance for advance, and costs a typeface, its font
+    // arguments on every style copied and a position recorded; so where
+    // every variable face the families resolve to is there, none is made.
+    // Every face, since the arguments reach a fallback face as well as the
+    // first, and its own defaults may differ.
+    let at_default = faces.iter().all(|face| {
+        known
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .of(face)
+            .is_none_or(|axes| at_default_position(&axes, &coordinates))
+    });
+    if at_default {
+        return Instance {
+            coordinates: Vec::new(),
+            weight,
+            names: Some(names),
+        };
+    }
     // A poisoned record is still a record: the panic that poisoned it was
     // elsewhere, and the worst a stale entry can do is drop the caches early.
+    let families: Vec<&str> = names.iter().map(String::as_str).collect();
     if positions
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -1864,14 +2030,29 @@ fn instance_for(
     {
         collection.clear_caches();
     }
-    let weight = axes
-        .iter()
-        .find(|axis| *axis.tag == wght_tag)
-        .map(|axis| wght.clamp(axis.min, axis.max).round() as i32);
     Instance {
         coordinates,
         weight,
+        names: Some(names),
     }
+}
+
+/// Whether `coordinates` leave a face with `axes` where it is without them:
+/// each at its axis's default, a coordinate for an axis the face lacks being
+/// one Skia ignores. Never for a face with an `opsz` axis, whose position
+/// follows the font size, [`optical_size`]'s: uninstanced, FreeType draws
+/// it at the axis's default whatever the size, and CoreText at an optical
+/// size it picks for itself, which differs from the instance even at that
+/// default.
+fn at_default_position(axes: &[Axis], coordinates: &[Coordinate]) -> bool {
+    let opsz =
+        FourByteTag::from(u32::from_be_bytes(*FontAxisTag::OPSZ.as_bytes()));
+    !axes.iter().any(|axis| axis.tag == opsz)
+        && coordinates.iter().all(|coordinate| {
+            axes.iter()
+                .find(|axis| axis.tag == coordinate.axis)
+                .is_none_or(|axis| axis.def == coordinate.value)
+        })
 }
 
 /// The Skia text style for `style`, with its variable faces instanced as
@@ -1904,7 +2085,12 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
 
     sk_style.set_font_size(style.font_size);
     if !style.font_families.is_empty() {
-        sk_style.set_font_families(&collection_names(&style.font_families));
+        // The names instancing found the faces by, where it ran.
+        let names = match &instance.names {
+            Some(names) => names.clone(),
+            None => collection_names(&style.font_families),
+        };
+        sk_style.set_font_families(&names);
     }
     // Pinned to the weight the instance has. Skia fakes a bold wherever the
     // weight asked for is 200 or more above the face's, and an instance is
@@ -2017,26 +2203,11 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
 /// it was registered under, as the canvas's counterpart does: the provider
 /// matches a name exactly, and CSS Fonts 4 matches family names without
 /// regard to case.
-fn collection_names(families: &[FontFamily]) -> Vec<String> {
-    families
-        .iter()
-        .map(|family| match family {
-            FontFamily::Generic(generic) => generic.to_css().to_string(),
-            FontFamily::Named(name) => {
-                SharedFontRegistry::with_shared(|library| {
-                    match library.registered_spelling(name) {
-                        Some(registered) => registered,
-                        None if GenericFamily::from_css(name).is_some()
-                            && !library.has_family(name) =>
-                        {
-                            unmatched_name(name)
-                        }
-                        None => name.clone(),
-                    }
-                })
-            }
-        })
-        .collect()
+///
+/// Worked out once per family list while the library's fonts stand -- see
+/// `FontLibrary::engine_names`.
+fn collection_names(families: &[FontFamily]) -> Rc<[String]> {
+    SharedFontRegistry::with_shared(|library| library.engine_names(families))
 }
 
 /// The families a strut should be measured in.
@@ -2060,10 +2231,10 @@ fn strut_families(
         return Vec::new();
     };
     if !strut.font_families.is_empty() {
-        return collection_names(&strut.font_families);
+        return collection_names(&strut.font_families).to_vec();
     }
     if !style.font_families.is_empty() {
-        return collection_names(&style.font_families);
+        return collection_names(&style.font_families).to_vec();
     }
     collection
         .default_fallback()
@@ -2122,8 +2293,14 @@ fn build_paragraph_style(
 
 #[cfg(test)]
 mod tests {
-    use super::{SkTextStyle, TextEngine, TextStyle};
-    use crate::font::{FontLibrary, INSTANCED_POSITIONS};
+    use super::{SkPaint, SkTextStyle, TextEngine, TextStyle, instance_for};
+    use crate::font::{
+        FontAxisTag, FontLibrary, INSTANCED_POSITIONS, variation_axes,
+    };
+    use skia_safe::{
+        Data, FontArguments, FontMgr, FourByteTag,
+        font_arguments::{VariationPosition, variation_position::Coordinate},
+    };
 
     /// Whether skia-safe still turns an empty family list into a slice
     /// built from a null pointer, which a debug build aborts on: the defect
@@ -2205,5 +2382,183 @@ mod tests {
             cached()
         );
         assert_eq!(engine.positions.lock().map(|p| p.len()).ok(), Some(1));
+    }
+
+    /// The engine over the bundled Oswald, Raleway and Amstelvar, each its
+    /// own family.
+    fn variable_engine() -> TextEngine {
+        let fonts = FontLibrary::new();
+        for (family, file) in [
+            (
+                "OswaldDefault",
+                "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+            ),
+            (
+                "RalewayDefault",
+                "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+            ),
+            (
+                "AmstelvarDefault",
+                "tests/assets/fonts/AmstelvarAlpha-VF.ttf",
+            ),
+        ] {
+            fonts
+                .register_font_from_path(family, file)
+                .expect("a bundled variable font registers");
+        }
+        TextEngine::new(&fonts)
+    }
+
+    /// The coordinates a style is instanced at on `engine`.
+    fn instanced(
+        engine: &TextEngine,
+        families: &[&str],
+        weight: i32,
+        size: f32,
+    ) -> Vec<Coordinate> {
+        let style = TextStyle {
+            font_families: families
+                .iter()
+                .map(|family| (*family).into())
+                .collect(),
+            font_weight: weight,
+            font_size: size,
+            ..TextStyle::default()
+        };
+        instance_for(
+            &mut engine.collection.clone(),
+            &engine.positions,
+            &engine.axes,
+            &engine.matches,
+            &style,
+            &[],
+        )
+        .coordinates
+    }
+
+    /// `text` drawn in `face`, at `size`, instanced at `coordinates` where
+    /// there are any: its pixels and its advance.
+    fn drawn_in(
+        face: &skia_safe::Typeface,
+        coordinates: &[Coordinate],
+        size: f32,
+    ) -> (Vec<u8>, f32) {
+        let face = match coordinates.is_empty() {
+            true => face.clone(),
+            false => face
+                .clone_with_arguments(
+                    &FontArguments::new().set_variation_design_position(
+                        VariationPosition { coordinates },
+                    ),
+                )
+                .expect("an instance"),
+        };
+        let font = skia_safe::Font::from_typeface(face, size);
+        let text = "Hamburgefonstiv quick 0123";
+        let mut surface = skia_safe::surfaces::raster_n32_premul((900, 120))
+            .expect("a surface");
+        surface.canvas().clear(skia_safe::Color::WHITE);
+        let mut paint = SkPaint::default();
+        paint.set_anti_alias(true);
+        surface.canvas().draw_str(text, (4, 90), &font, &paint);
+        let info = skia_safe::ImageInfo::new_n32_premul((900, 120), None);
+        let mut pixels = vec![0u8; 900 * 120 * 4];
+        assert!(surface.read_pixels(&info, &mut pixels, 900 * 4, (0, 0)));
+        (pixels, font.measure_str(text, None).0)
+    }
+
+    /// A style at its faces' own position is not instanced, and drawn so it
+    /// is the instance glyph for glyph and advance for advance; one off it
+    /// by a single unit of weight is instanced, as is one whose fallback
+    /// face's defaults differ, and one in a face with an optical size, at
+    /// every size, its default among them.
+    #[test]
+    fn a_style_at_its_faces_own_position_is_not_instanced() {
+        let engine = variable_engine();
+        let wght = FourByteTag::from(u32::from_be_bytes(
+            *FontAxisTag::WGHT.as_bytes(),
+        ));
+        let face = |file: &str| {
+            FontMgr::new()
+                .new_from_data(
+                    Data::new_copy(&std::fs::read(file).expect("a font")),
+                    None,
+                )
+                .expect("a face")
+        };
+        // Oswald stands at 400 and Raleway at 100 without arguments.
+        for (family, file, weight) in [
+            (
+                "OswaldDefault",
+                "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+                400,
+            ),
+            (
+                "RalewayDefault",
+                "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+                100,
+            ),
+        ] {
+            assert!(
+                instanced(&engine, &[family], weight, 24.0).is_empty(),
+                "{family} at {weight}"
+            );
+            let at = [Coordinate {
+                axis: wght,
+                value: weight as f32,
+            }];
+            assert_eq!(
+                drawn_in(&face(file), &[], 24.0),
+                drawn_in(&face(file), &at, 24.0),
+                "{family}: the face is its instance at {weight}"
+            );
+            assert!(
+                !instanced(&engine, &[family], weight + 1, 24.0).is_empty(),
+                "{family} at {}",
+                weight + 1
+            );
+        }
+        // Oswald stands at 400; Raleway behind it does not.
+        assert!(
+            !instanced(
+                &engine,
+                &["OswaldDefault", "RalewayDefault"],
+                400,
+                24.0
+            )
+            .is_empty(),
+            "a fallback face away from its own position"
+        );
+        // Amstelvar's optical size follows the font size, so it is
+        // instanced at every size -- even at its `opsz` default, where every
+        // coordinate is the axis's own.
+        let amstelvar = face("tests/assets/fonts/AmstelvarAlpha-VF.ttf");
+        let opsz = FourByteTag::from(u32::from_be_bytes(
+            *FontAxisTag::OPSZ.as_bytes(),
+        ));
+        let default = variation_axes(&amstelvar)
+            .and_then(|axes| axes.iter().find(|a| a.tag == opsz).map(|a| a.def))
+            .expect("an optical size axis");
+        for size in [default, 24.0] {
+            let coordinates =
+                instanced(&engine, &["AmstelvarDefault"], 400, size);
+            assert!(!coordinates.is_empty(), "an optical size at {size}px");
+            let apart = drawn_in(&amstelvar, &[], size)
+                != drawn_in(&amstelvar, &coordinates, size);
+            // Uninstanced, FreeType draws the face at its `opsz` default
+            // whatever the size, so it is the instance there and only
+            // there; CoreText draws it at an optical size it picks for
+            // itself, which is the instance at neither. DirectWrite's has
+            // not been measured.
+            if cfg!(target_os = "macos") {
+                assert!(apart, "CoreText's own optical size at {size}px");
+            } else if !cfg!(target_os = "windows") {
+                assert_eq!(
+                    apart,
+                    size != default,
+                    "FreeType's default optical size, asked at {size}px"
+                );
+            }
+        }
     }
 }

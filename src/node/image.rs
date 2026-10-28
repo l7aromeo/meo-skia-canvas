@@ -56,13 +56,11 @@ pub struct Image {
     /// `color` resolves against that instead, so there is no single colour
     /// this could report. See [`Svg::set_current_color`].
     ///
-    /// Held as the parsed `Color` rather than as the crate's `RgbaLinear` so
-    /// the getter can hand it to the serializer `fillStyle` uses and get the
-    /// same string back for the same colour. Converting to linear and back
-    /// quantizes the alpha -- `0.5` returns as `0.5019608`, as
-    /// `skia_color_to_rgba_linear` documents -- and one library answering two
-    /// different strings for one colour is worse than either string.
-    current_color: Option<Color>,
+    /// Held as the parsed `Color` the recording takes, beside the colour as
+    /// it was declared, which the getter serialises the way `fillStyle` does:
+    /// one library answering two different strings for one colour is worse
+    /// than either string.
+    current_color: Option<(Color, Declaration)>,
 }
 
 impl Default for Image {
@@ -414,8 +412,10 @@ pub fn get_current_color(mut cx: FunctionContext) -> JsResult<JsValue> {
 
     let could_reach =
         matches!(this.content, Content::Vector(..) | Content::Loading);
-    match this.current_color {
-        Some(color) if could_reach => color_to_css(&mut cx, &color),
+    match &this.current_color {
+        Some((_, declared)) if could_reach => {
+            Ok(cx.string(declared.css()).upcast())
+        }
         _ => Ok(cx.null().upcast()),
     }
 }
@@ -435,7 +435,8 @@ pub fn set_current_color(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedImage>(0)?;
     let mut this = this.borrow_mut();
 
-    let color = color_arg(&mut cx, 1, "currentColor")?;
+    let (color, declared) = declared_color_arg(&mut cx, 1, "currentColor")?;
+    let color = (color, Declaration::new(declared));
 
     // Two situations that an `if let` would collapse into one silent no-op.
     // With no source yet the colour has to be stored for the load to apply,
@@ -445,7 +446,7 @@ pub fn set_current_color(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // which is the one thing its contract is arranged to exclude.
     match this.svg_source.clone() {
         None => this.current_color = Some(color),
-        Some(source) => match record_svg(&source, Some(color)) {
+        Some(source) => match record_svg(&source, Some(color.0)) {
             Some((content, autosized)) => {
                 this.current_color = Some(color);
                 this.content = content;
@@ -496,7 +497,7 @@ pub fn set_data<'a>(
         this.delays = frame_delays(&data);
         this.encoded = (this.delays.len() > 1).then_some(data);
     } else if let Some((content, autosized)) =
-        record_svg(&data, this.current_color)
+        record_svg(&data, this.current_color.as_ref().map(|(color, _)| *color))
     {
         // Finally, try parsing as SVG.
         this.content = content;

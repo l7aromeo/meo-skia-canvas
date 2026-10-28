@@ -153,20 +153,23 @@ pub(crate) fn skia_color_to_rgba_linear(color: SkColor) -> RgbaLinear {
 // the pure power function that approximates the whole of it -- which is what
 // `encode/apng.rs` writes into a PNG `gAMA` chunk, and why that file says so.
 
+// Written once, in `f64`, for both widths: the `f32` curve narrows each
+// constant, which gives the `f32` literal it always used.
+
 /// Breakpoint on the linear-light side.
-const SRGB_LINEAR_THRESHOLD: f32 = 0.003_130_8;
+const SRGB_LINEAR_THRESHOLD: f64 = 0.003_130_8;
 /// Breakpoint on the gamma-encoded side. The same point as
 /// [`SRGB_LINEAR_THRESHOLD`], through the curve.
-const SRGB_ENCODED_THRESHOLD: f32 = 0.040_45;
+const SRGB_ENCODED_THRESHOLD: f64 = 0.040_45;
 /// Slope of the linear segment near black, which exists so the curve has a
 /// finite derivative at zero.
-pub(crate) const SRGB_SLOPE: f32 = 12.92;
+const SRGB_SLOPE: f64 = 12.92;
 /// Scale and offset of the power segment, chosen so the two segments meet
 /// with matching value and slope at the breakpoint.
-const SRGB_SCALE: f32 = 1.055;
-const SRGB_OFFSET: f32 = 0.055;
+const SRGB_SCALE: f64 = 1.055;
+const SRGB_OFFSET: f64 = 0.055;
 /// Exponent of the power segment.
-const SRGB_EXPONENT: f32 = 2.4;
+const SRGB_EXPONENT: f64 = 2.4;
 
 /// Applies `curve` to the magnitude and puts the sign back.
 ///
@@ -185,18 +188,41 @@ fn odd_symmetric(v: f32, curve: impl Fn(f32) -> f32) -> f32 {
 /// The exact inverse of [`linear_to_srgb`], so a value built by
 /// [`RgbaLinear::from_srgb8`] reads back as the byte it came from.
 pub(crate) fn srgb_to_linear(v: f32) -> f32 {
-    odd_symmetric(v, |v| match v <= SRGB_ENCODED_THRESHOLD {
-        true => v / SRGB_SLOPE,
-        false => ((v + SRGB_OFFSET) / SRGB_SCALE).powf(SRGB_EXPONENT),
+    odd_symmetric(v, |v| match v <= SRGB_ENCODED_THRESHOLD as f32 {
+        true => v / SRGB_SLOPE as f32,
+        false => ((v + SRGB_OFFSET as f32) / SRGB_SCALE as f32)
+            .powf(SRGB_EXPONENT as f32),
     })
 }
 
 /// The sRGB transfer function: linear light in, gamma-encoded out.
 pub(crate) fn linear_to_srgb(v: f32) -> f32 {
-    odd_symmetric(v, |v| match v <= SRGB_LINEAR_THRESHOLD {
-        true => SRGB_SLOPE * v,
-        false => SRGB_SCALE * v.powf(1.0 / SRGB_EXPONENT) - SRGB_OFFSET,
+    odd_symmetric(v, |v| match v <= SRGB_LINEAR_THRESHOLD as f32 {
+        true => SRGB_SLOPE as f32 * v,
+        false => {
+            SRGB_SCALE as f32 * v.powf(1.0 / SRGB_EXPONENT as f32)
+                - SRGB_OFFSET as f32
+        }
     })
+}
+
+/// [`srgb_to_linear`] in `f64`, CSS Color 4's `lin_sRGB`, for the colour
+/// conversions that round to `f32` only once, at the end.
+pub(crate) fn srgb_to_linear_f64(v: f64) -> f64 {
+    let curve = |v: f64| match v <= SRGB_ENCODED_THRESHOLD {
+        true => v / SRGB_SLOPE,
+        false => ((v + SRGB_OFFSET) / SRGB_SCALE).powf(SRGB_EXPONENT),
+    };
+    curve(v.abs()).copysign(v)
+}
+
+/// [`linear_to_srgb`] in `f64`, CSS Color 4's `gam_sRGB`.
+pub(crate) fn linear_to_srgb_f64(v: f64) -> f64 {
+    let curve = |v: f64| match v <= SRGB_LINEAR_THRESHOLD {
+        true => SRGB_SLOPE * v,
+        false => SRGB_SCALE * v.powf(SRGB_EXPONENT.recip()) - SRGB_OFFSET,
+    };
+    curve(v.abs()).copysign(v)
 }
 
 /// [`linear_to_srgb`] clamped to the displayable range and quantized to the
@@ -511,11 +537,16 @@ mod transfer_function_tests {
     /// side: encoding the linear one lands on the encoded one.
     #[test]
     fn the_two_thresholds_are_one_point() {
-        let encoded = linear_to_srgb(SRGB_LINEAR_THRESHOLD);
-        assert!(
-            (encoded - SRGB_ENCODED_THRESHOLD).abs() < 1e-6,
-            "linear {SRGB_LINEAR_THRESHOLD} encodes to {encoded}, \
-             but the decode breaks at {SRGB_ENCODED_THRESHOLD}"
-        );
+        let encoded = [
+            f64::from(linear_to_srgb(SRGB_LINEAR_THRESHOLD as f32)),
+            linear_to_srgb_f64(SRGB_LINEAR_THRESHOLD),
+        ];
+        for encoded in encoded {
+            assert!(
+                (encoded - SRGB_ENCODED_THRESHOLD).abs() < 1e-6,
+                "linear {SRGB_LINEAR_THRESHOLD} encodes to {encoded}, \
+                 but the decode breaks at {SRGB_ENCODED_THRESHOLD}"
+            );
+        }
     }
 }
