@@ -696,24 +696,28 @@ false` now takes effect, and its default is on, at Slight, as Chrome draws
   loop after it has begun" for the rest of the process. The app is now marked
   started only once the native side has accepted the launch.
 
-- **A large `blur()` in `ctx.filter` draws as Chrome's.** A flat-colour
-  shape or text was blurred on its coverage, which Skia holds to a sigma of
-  128, so a larger blur drew as 128 did: on a 100 pixel canvas a square
-  blurred by 200, 500 and 1000px all summed to the same alpha, where
-  Chrome's GPU canvas fades to nothing at 1000px, and on a 400 pixel one
-  `blur(1000px)` left a centre alpha of 108 where Chrome's is 9. A draw is now blurred on its
-  result wherever that is nearer Chrome or cheaper -- a rectangle above
-  40px, a rounded rectangle or an oval above 10px, other paths always, and
-  text once its blurred glyphs outgrow Skia's glyph cache. Chrome blurs a
-  large radius differently on its GPU canvas and on its CPU one -- the
-  CPU canvas, which `willReadFrequently` selects, leaves an alpha of 1 at
-  1000px rather than nothing -- and each engine here now matches Chrome's
-  same engine: the square sums to within half a percent of Chrome's GPU
-  canvas at 50, 100, 200, 500 and 1000px on the GPU engine, and to its CPU
-  canvas exactly on the CPU engine at all of them but 200px, 0.9% off. 48px text blurred by 40px or more draws 5 to 11 times faster,
-  as Skia no longer re-blurs each glyph on every draw; a rectangle blurred by
-  more than 40px costs about 200 microseconds a draw where it cost almost
-  nothing, the price of Chrome's picture.
+- **A large `blur()` in `ctx.filter` draws as Chrome's.** A flat-colour shape
+  or text was blurred on its coverage, which Skia holds to a sigma of 128, so
+  a larger blur drew as 128 did: on a 100 pixel canvas a square blurred by
+  200, 500 and 1000px all summed to the same alpha, where Chrome's GPU canvas
+  fades to nothing at 1000px, and on a 400 pixel one `blur(1000px)` left a
+  centre alpha of 108 where Chrome's is 9. A draw is now blurred on its
+  result wherever that is nearer Chrome or cheaper -- a rectangle above 40px,
+  a rounded rectangle or an oval above 10px, other paths and text always.
+  Skia's coverage blur of text blurs each glyph on its own and draws the
+  glyphs over one another, so where their blurs overlapped the text lost ink
+  -- 16px Oswald blurred by 20px kept 58% of it and 48px blurred by 40px 75%
+  -- and at every size measured it was two to seven times further from the
+  exact Gaussian than the blurred text now is. Chrome blurs a large radius
+  differently on its GPU canvas and on its CPU one -- the CPU canvas, which
+  `willReadFrequently` selects, leaves an alpha of 1 at 1000px rather than
+  nothing -- and each engine here now matches Chrome's same engine: the
+  square sums to within half a percent of Chrome's GPU canvas at 50, 100,
+  200, 500 and 1000px on the GPU engine, and to its CPU canvas exactly on the
+  CPU engine at all of them but 200px, 0.9% off. Blurred text costs what any
+  blurred path does, and a rectangle blurred by more than 40px about 200
+  microseconds a draw where it cost almost nothing: the price of Chrome's
+  picture.
 
 - **`measureText().width` is the same whatever the text alignment, and
   keeps a letter spacing whole.** The width came from the laid-out boxes,

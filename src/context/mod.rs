@@ -1744,9 +1744,7 @@ impl Context2D {
         width: Option<f32>,
         style: PaintStyle,
     ) {
-        let em = self.state.text.char_style.font_size()
-            * self.state.matrix.max_scale().max(0.0);
-        let paint = self.paint_for_drawing(style, Coverage::Text { em });
+        let paint = self.paint_for_drawing(style, Coverage::Path);
         let mut typesetter = Typesetter::new(&self.state, text, width);
         let origin = Point::new(x, y);
 
@@ -2241,12 +2239,8 @@ mod tests {
                     value: sigma,
                 }],
             );
-            for coverage in [
-                Coverage::Rect,
-                Coverage::Rounded,
-                Coverage::Path,
-                Coverage::Text { em: 20.0 },
-            ] {
+            for coverage in [Coverage::Rect, Coverage::Rounded, Coverage::Path]
+            {
                 for style in [PaintStyle::Fill, PaintStyle::Stroke] {
                     let full = ctx.paint_for_drawing(style, coverage);
                     let lean = ctx.paint_for_blur(style);

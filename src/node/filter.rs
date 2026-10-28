@@ -151,17 +151,6 @@ const _: () = assert!(
         && ROUNDED_COVERAGE_BLUR_MAX_SIGMA <= MASK_BLUR_MAX_SIGMA
 );
 
-/// The largest side, in device pixels, of a glyph Skia keeps as a cached
-/// mask: `SkGlyph::kSkSideTooBigForAtlas`. A glyph with a coverage blur is
-/// as large as its outline plus the blur's window, and one past this is
-/// drawn as a path and blurred again on every draw -- 48px text cost 22
-/// microseconds a draw at a sigma of 38 and 2,537 at 42.
-const GLYPH_ATLAS_SIDE: f32 = 256.0;
-
-/// How many sigmas wide a coverage blur's window is: `SkBlurMask` sizes it
-/// `ceil(6 * sigma)`, three to each side.
-const BLUR_WINDOW_SIGMAS: f32 = 6.0;
-
 /// What a draw covers, as far as choosing how to blur it goes.
 #[derive(Clone, Copy, Debug)]
 pub enum Coverage {
@@ -169,12 +158,7 @@ pub enum Coverage {
     Rect,
     /// A rounded rectangle or an oval that stays one on the device.
     Rounded,
-    /// Text set at this many device pixels to the em.
-    Text {
-        /// The em, in device pixels.
-        em: f32,
-    },
-    /// Any other geometry.
+    /// Any other geometry, text included.
     Path,
 }
 
@@ -184,14 +168,19 @@ impl Coverage {
     /// closely and costs less. Other paths are blurred as a result at
     /// every sigma: a circle took 145 microseconds a draw through its
     /// coverage at a sigma of 2 against 82, and a star no less.
+    ///
+    /// Text is too, because Skia's coverage blur of text is not the blur of
+    /// the text: `SkScalerContext` blurs each glyph's mask on its own and
+    /// the glyphs are then drawn over one another, so where their blurs
+    /// overlap they combine as `1 - (1 - a)(1 - b)` rather than adding.
+    /// 16px Oswald blurred by 20 kept 65% of its ink that way and 48px
+    /// blurred by 24 kept 91%, and at every size and sigma measured on the
+    /// CPU engine it was two to seven times further from the exact Gaussian
+    /// than the blurred result.
     pub(crate) fn blurs_alike(self, sigma: f32) -> bool {
         match self {
             Coverage::Rect => sigma <= RECT_COVERAGE_BLUR_MAX_SIGMA,
             Coverage::Rounded => sigma <= ROUNDED_COVERAGE_BLUR_MAX_SIGMA,
-            Coverage::Text { em } => {
-                sigma <= RECT_COVERAGE_BLUR_MAX_SIGMA
-                    && em + BLUR_WINDOW_SIGMAS * sigma <= GLYPH_ATLAS_SIDE
-            }
             Coverage::Path => false,
         }
     }
@@ -995,23 +984,5 @@ mod tests {
                 .blurs_alike(ROUNDED_COVERAGE_BLUR_MAX_SIGMA + 1.0)
         );
         assert!(!Coverage::Path.blurs_alike(1.0));
-    }
-
-    /// The switch for text falls before the cliff measured at each size --
-    /// a blurred glyph costs about 20 microseconds a draw below it and
-    /// over 1,000 past it -- since the em stands in for the glyph's
-    /// largest side, which is smaller: 48px text measured cheap at a sigma
-    /// of 38 and dear at 40, and switches at 34.
-    #[test]
-    fn text_takes_the_coverage_blur_while_its_glyph_fits_the_cache() {
-        for (em, cheap_at, dear_at) in
-            [(24.0, 42.0, 45.0), (48.0, 38.0, 40.0), (96.0, 30.0, 35.0)]
-        {
-            let text = Coverage::Text { em };
-            assert!(!text.blurs_alike(dear_at), "{em}px at {dear_at}");
-            let switch = (GLYPH_ATLAS_SIDE - em) / BLUR_WINDOW_SIGMAS;
-            assert!(switch <= cheap_at, "{em}px switches at {switch}");
-            assert!(text.blurs_alike(switch.min(RECT_COVERAGE_BLUR_MAX_SIGMA)));
-        }
     }
 }
