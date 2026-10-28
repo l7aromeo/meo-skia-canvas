@@ -1856,6 +1856,34 @@ mod tests {
 
     /// The answers a thread keeps are bounded, however many sizes are
     /// asked for, and each is the one the collection gives uncached.
+    /// What the idle watcher posts to a thread lets the kept faces' lines
+    /// and the kept wave periods go with the font caches.
+    #[test]
+    fn an_idle_release_lets_kept_lines_and_waves_go() {
+        use super::{FaceLines, WavePeriod};
+        use crate::node::font_library::FontLibrary;
+        use skia_safe::FontStyle;
+        let family = ["DecorIdleProbe"];
+        let (mut fonts, epoch) = shared_fonts(&family);
+        FaceLines::first_available(
+            &mut fonts,
+            Some(&epoch),
+            &family,
+            FontStyle::normal(),
+            24.0,
+            None,
+        );
+        for t in [1.0, 2.5] {
+            wave(0.0, 40.0, 10.0, t, 1.0).expect("a wave");
+        }
+        assert!(FaceLines::kept() > 0, "a face's lines are kept");
+        assert_eq!(WavePeriod::kept(), 2, "and a period per thickness");
+
+        FontLibrary::with_shared(FontLibrary::release_caches);
+        assert_eq!(FaceLines::kept(), 0, "no face's lines past a release");
+        assert_eq!(WavePeriod::kept(), 0, "and no wave period");
+    }
+
     #[test]
     fn kept_faces_are_bounded_and_answer_as_the_collection_does() {
         use super::{FACE_LINES_KEPT, FaceLines};

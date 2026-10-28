@@ -1628,12 +1628,15 @@ impl FontLibrary {
     /// gone lays out again when its ink is read, as one pushed out by their
     /// bound does. The ink remembered per face and the family per face stay,
     /// since they hold ids and bounds rather than faces, and come to about
-    /// 100 KB at most.
+    /// 100 KB at most. So do the decorations' kept answers, through
+    /// [`decorate::forget`]: each face's lines and each thickness's stroked
+    /// wave period, which are rebuilt on the next decoration that asks.
     #[cfg(any(test, feature = "node-addon"))]
     pub(crate) fn release_caches(&mut self) {
         self.clear_collection_caches();
         self.positions = InstancedPositions::default();
         forget_kept_paragraphs();
+        decorate::forget();
     }
 
     /// [`release_caches`](Self::release_caches) on this thread's library,
