@@ -1295,14 +1295,14 @@ impl Passes {
             let spans = decorate::on_line(&self.spans, line);
             for run in runs_on(line) {
                 for shadow in &self.shadows[run.slot] {
-                    if let Some(paint) = shadow_paint(shadow) {
+                    if let Some(paint) = shadow_paint(shadow, canvas) {
                         run.draw(canvas, origin + shadow.offset, &paint);
                     }
                 }
             }
             for (index, shadows) in self.box_shadows.iter().enumerate() {
                 for shadow in shadows {
-                    if let Some(paint) = shadow_paint(shadow) {
+                    if let Some(paint) = shadow_paint(shadow, canvas) {
                         decorate::paint_shadow(
                             canvas,
                             spans,
@@ -1369,21 +1369,36 @@ impl PaintedRun {
     }
 }
 
-/// The paint SkParagraph draws a text shadow with, `CanvasParagraphPainter::
-/// drawTextShadow`'s: the shadow's colour, blurred by its sigma where it has
-/// one. `None` for a shadow that casts nothing.
-fn shadow_paint(shadow: &TextShadow) -> Option<Paint> {
+/// The paint a text shadow is drawn with on `canvas`: the shadow's colour,
+/// blurred by its sigma where it has one. `None` for a shadow that casts
+/// nothing.
+///
+/// The sigma is in pixels of the canvas whatever its transform, as
+/// `CanvasParagraphPainter::drawTextShadow` takes it, and as a canvas
+/// shadow's blur is. It goes to the mask filter in local units with
+/// `respect_ctm` set, so that a replay at another scale -- an export
+/// density, a canvas drawn into another at a size -- scales it with the
+/// text. SkParagraph's own fixes it in device pixels, which kept a shadow as
+/// wide in pixels at density 2 as at 1 while its text doubled. A transform
+/// that maps no length to a positive one keeps the device sigma.
+fn shadow_paint(shadow: &TextShadow, canvas: &Canvas) -> Option<Paint> {
     if !shadow.has_shadow() {
         return None;
     }
     let mut paint = Paint::default();
     paint.set_color(shadow.color);
     if shadow.blur_sigma != 0.0 {
-        paint.set_mask_filter(MaskFilter::blur(
-            BlurStyle::Normal,
-            shadow.blur_sigma as f32,
-            false,
-        ));
+        let sigma = shadow.blur_sigma as f32;
+        let scale = canvas
+            .local_to_device_as_3x3()
+            .map_radius(1.0)
+            .filter(|s| s.is_normal() && *s > 0.0);
+        paint.set_mask_filter(match scale {
+            Some(scale) => {
+                MaskFilter::blur(BlurStyle::Normal, sigma / scale, true)
+            }
+            None => MaskFilter::blur(BlurStyle::Normal, sigma, false),
+        });
     }
     Some(paint)
 }

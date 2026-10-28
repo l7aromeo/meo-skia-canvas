@@ -137,6 +137,13 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A paragraph's text shadow keeps its blur at every export density.** A
+  `TextShadow`'s `blur_sigma` was sized in output pixels, so a paragraph
+  drawn with `Context2D::draw_paragraph` and exported at `density: 2` kept
+  its shadow's blur at the density-1 width while the text doubled. The
+  blur now scales with the export and with a canvas drawn into another at a
+  size, as `set_filter`'s does; at density 1 it is unchanged.
+
 - **A blur set with `Context2D::set_filter` keeps its width at every export
   density.** The blur of a flat-colour rectangle, rounded rectangle or line
   of text was sized in output pixels, so at `density: 3` in
