@@ -771,11 +771,18 @@ mod chosen_ids {
     use super::*;
 
     /// Ids far from anything the counter reaches in this test binary, a
-    /// range per test: the held set and the counter are process-wide and the
-    /// tests run in parallel.
+    /// million apart: the held set and the counter are process-wide and the
+    /// tests run in parallel, and choosing an id moves the counter past it,
+    /// so a window another test builds then takes the ids just above. With
+    /// ids next to each other, one test's next choice was another's window
+    /// often enough to fail a run of these tests 15 times in 300.
     fn id(n: u32) -> NonZeroU32 {
-        NonZeroU32::new(3_000_000_000 + n).expect("not zero")
+        NonZeroU32::new(3_000_000_000 + n * ID_SPACING).expect("not zero")
     }
+
+    /// More windows than the whole test binary builds, so the counter, once
+    /// moved past one chosen id, never climbs to the next.
+    const ID_SPACING: u32 = 1_000_000;
 
     #[test]
     fn a_free_id_is_taken_and_reported() {
