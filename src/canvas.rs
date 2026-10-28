@@ -357,8 +357,7 @@ impl Canvas {
                 height,
                 options.gpu,
                 space,
-                options.color_type,
-                options.color_space,
+                &options,
             )],
             gpu: options.gpu,
             options,
@@ -421,15 +420,14 @@ impl Canvas {
         height: f32,
         gpu: bool,
         space: ColorSpace,
-        canvas_depth: PixelDepth,
-        canvas_space: PixelColorSpace,
+        options: &CanvasOptions,
     ) -> Context2D {
         let inner = Inner::new(
             space,
-            canvas_depth.to_skia_color_type(),
+            options.color_type.to_skia_color_type(),
             (width, height),
         );
-        Context2D::from_inner(inner, gpu, canvas_depth, canvas_space)
+        Context2D::from_inner(inner, gpu, options)
     }
 
     /// The options the canvas was made with, which a window shows its text
@@ -600,8 +598,7 @@ impl Canvas {
             height,
             self.gpu,
             self.surface_space(),
-            self.options.color_type,
-            self.options.color_space,
+            &self.options,
         ));
         self.context()
     }
@@ -1516,5 +1513,56 @@ mod pages_tests {
             refused.unwrap_err().to_string().contains("page 0"),
             "the contradiction should name the page that was asked for"
         );
+    }
+}
+
+#[cfg(test)]
+mod readback_text_tests {
+    use super::*;
+    use crate::FontLibrary;
+
+    const OSWALD: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"
+    );
+
+    /// A canvas's text reads back as it exports, at a text gamma other
+    /// than the platform's default: the readback rasterizes glyphs as the
+    /// canvas does, not at the defaults.
+    #[test]
+    fn a_readback_draws_text_at_the_canvas_s_gamma() {
+        FontLibrary::new()
+            .register_font_from_path("ReadbackGammaOswald", OSWALD)
+            .expect("a bundled face registers");
+        let drawn = |text_gamma: f32| {
+            let options = CanvasOptions {
+                text_gamma,
+                gpu: false,
+                ..CanvasOptions::default()
+            };
+            let mut canvas = Canvas::with_options(420.0, 120.0, options)
+                .expect("a gamma in range");
+            let ctx = canvas.context();
+            // Opaque, so that a raw export and a readback agree whether or
+            // not either is premultiplied.
+            ctx.set_fill_style_css("white").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, 420.0, 120.0);
+            ctx.set_fill_style_css("#203040").expect("a colour");
+            assert!(ctx.set_font_css("28px ReadbackGammaOswald"));
+            ctx.fill_text("Hamburgefonstiv fi AV", 10.0, 70.0, None);
+            let read = ctx
+                .get_image_data(0.0, 0.0, 420.0, 120.0)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            let exported = canvas
+                .to_buffer(ImageFormat::Raw, &EncodeOptions::default())
+                .expect("a raw export");
+            (read, exported)
+        };
+        let (read, exported) = drawn(2.2);
+        assert!(read == exported, "read back as exported");
+        let (default_read, _) = drawn(CanvasOptions::default().text_gamma);
+        assert!(read != default_read, "and unlike the default gamma");
     }
 }

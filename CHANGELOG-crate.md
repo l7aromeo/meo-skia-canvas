@@ -137,6 +137,14 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **`get_image_data` draws text at the canvas's own contrast and gamma.** A
+  canvas made with `CanvasOptions::text_gamma` or `text_contrast` exported
+  its text with them, but `Context2D::get_image_data` rasterized it at the
+  platform defaults, so the pixels read back were not the ones exported:
+  28px Oswald at a gamma of 2.2 read back as it drew at the default, and its
+  raw export differed from the readback. The readback now takes both from
+  the canvas, as the export does, and the two agree byte for byte.
+
 - **Text decorations sit where the font puts them, beneath the glyphs.**
   Every line `set_text_decoration` or a `TextStyle`'s `decoration` asked for
   was centred on the position the font gives for its top, so each sat half
