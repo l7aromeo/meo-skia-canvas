@@ -231,13 +231,13 @@ impl FaceLines {
 }
 
 /// Drops everything this module keeps on this thread: the first-available
-/// answers, which belong to the fonts of an epoch, and the wave periods,
+/// answers, which belong to the fonts of an epoch, and the wave chunks,
 /// which belong to no font and go too so that one call releases all of it.
 /// For the font library to call when the fonts it holds change, and for
 /// anything releasing memory while the library is idle.
 pub(crate) fn forget() {
     FaceLines::forget();
-    WavePeriod::forget();
+    WaveChunk::forget();
 }
 
 /// How many first-available answers a thread keeps for one epoch of fonts.
@@ -661,14 +661,15 @@ fn draw_line(
 /// shadow on the paint spreads past the line as it spreads past a glyph.
 ///
 /// Its phase is its box's: the centreline crosses the middle on its way
-/// down at `left`, wherever the box starts. It is laid out as copies of
-/// one period, [`WavePeriod::of`] `t`, already cut along the band, end to
-/// end from half a wave before `left`; only a copy reaching past `left` or
-/// `right` is cut again. Each copy ends where the next begins, across the
-/// same normal to the same centreline, so the copies fill as the one
-/// stroke did -- `a_tiled_wave_is_the_whole_wave` holds them to it. Neither
-/// the stroker nor the cut runs per period on a draw: the stroker was most
-/// of a wavy line's cost when it ran over the whole centreline each time.
+/// down at `left`, wherever the box starts. It is laid out as copies of a
+/// run of [`WAVE_CHUNK`] periods, [`WaveChunk::of`] `t`, already cut along
+/// the band, end to end from half a wave before `left`; only a copy
+/// reaching past `left` or `right` is cut again. Each copy ends where the
+/// next begins, across the same normal to the same centreline, so the
+/// copies fill as the one stroke did -- `a_tiled_wave_is_the_whole_wave`
+/// holds them to it. Neither the stroker nor the cut runs per period on a
+/// draw: the stroker was most of a wavy line's cost when it ran over the
+/// whole centreline each time.
 fn wave(
     left: f32,
     right: f32,
@@ -683,12 +684,25 @@ fn wave(
     if WHOLE_WAVE.get() {
         return Some(whole_wave(left, right, middle, t));
     }
-    let period = WavePeriod::of(t);
+    Some(lay_out(&WaveChunk::of(t), left, right, middle, t))
+}
+
+/// Copies of `chunk`, a wave `t` thick, laid end to end about `middle` from
+/// half a wave before `left` to at least half a wave past `right`, cut
+/// square at both -- [`wave`]'s body, apart from the chunk it is given.
+fn lay_out(
+    chunk: &WaveChunk,
+    left: f32,
+    right: f32,
+    middle: f32,
+    t: f32,
+) -> Path {
     let length = WAVE_PERIOD * t;
+    let step = length * chunk.periods as f32;
     let start = left - length / 2.0;
     let x = |v: Point| v.x;
     let mut path = PathBuilder::new();
-    path.set_fill_type(period.fill_type);
+    path.set_fill_type(chunk.fill_type);
     let mut add = |pieces: &mut dyn Iterator<Item = Piece>| {
         let mut pieces = pieces.peekable();
         let Some(first) = pieces.peek() else {
@@ -700,15 +714,25 @@ fn wave(
     };
     // Each copy's offset from the start rather than a running sum, so that
     // the last copy is placed as exactly as the first.
-    for at in (0..).map(|n| start + n as f32 * length) {
-        if at >= right + length / 2.0 {
-            break;
-        }
+    let offset = |n: usize| start + n as f32 * step;
+    let laid = |at: f32| at < right + length / 2.0;
+    for n in (0..).take_while(|n| laid(offset(*n))) {
+        let at = offset(n);
         let by = Point::new(at, middle);
         let (cut_left, cut_right) =
-            (at + period.reach.0 < left, at + period.reach.1 > right);
-        for contour in period.contours.iter() {
-            let moved = contour.iter().map(|piece| piece.offset(by));
+            (at + chunk.reach.0 < left, at + chunk.reach.1 > right);
+        // Where another copy follows, this one ends on exactly the points
+        // the next starts on, placed as the next places them.
+        let next = Point::new(offset(n + 1), middle);
+        let meets = chunk.caps.filter(|_| laid(next.x));
+        for (index, contour) in chunk.contours.iter().enumerate() {
+            let moved = contour.iter().enumerate().map(|(at, piece)| {
+                let piece = piece.offset(by);
+                match meets.filter(|caps| caps.contour == index) {
+                    Some(caps) => caps.meet(contour, at, piece, next),
+                    None => piece,
+                }
+            });
             if !cut_left && !cut_right {
                 add(&mut moved.into_iter());
                 continue;
@@ -723,7 +747,7 @@ fn wave(
             add(&mut pieces.into_iter());
         }
     }
-    Some(path.detach())
+    path.detach()
 }
 
 #[cfg(test)]
@@ -769,13 +793,13 @@ fn whole_wave(left: f32, right: f32, middle: f32, t: f32) -> Path {
     )
 }
 
-/// One period of a wave `t` thick, about y = 0 from x = 0, where the
+/// A run of periods of a wave `t` thick, about y = 0 from x = 0, where the
 /// centreline crosses the middle on its way down: its butt-capped stroke's
 /// outline, cut to the band's top and bottom -- what [`wave`] lays end to
 /// end. Kept per thickness, since everything in it scales with `t` but the
 /// stroker's tolerance, which does not.
 #[derive(Clone)]
-struct WavePeriod {
+struct WaveChunk {
     /// The outline's closed contours.
     contours: Rc<[Vec<Piece>]>,
     /// The least and greatest x of any point of them, control points
@@ -783,41 +807,168 @@ struct WavePeriod {
     /// cut there.
     reach: (f32, f32),
     fill_type: PathFillType,
+    /// How many periods the run is.
+    periods: usize,
+    /// Where its caps are, so that copies laid end to end meet exactly.
+    caps: Option<Caps>,
+    /// What it holds, in bytes, against [`WAVE_CHUNKS_BYTES`].
+    bytes: usize,
 }
 
-/// How many wave periods a thread keeps, one per thickness.
+/// Where a chunk's two butt caps lie in its outline -- the line across the
+/// stroke at its start and the one at its end -- so that where copies are
+/// laid end to end, each copy's end cap can be given exactly the points the
+/// next copy's start cap is placed at.
 ///
-/// A bound rather than a working set, as [`FACE_LINES_KEPT`] is: a
-/// thickness can be any number, so a line whose thickness animates would
-/// add one a frame. Past it, every kept period is dropped and stroked
-/// again.
-const WAVE_PERIODS_KEPT: usize = 256;
-
-thread_local! {
-    /// The periods [`WavePeriod::of`] has stroked, by the bits of their
-    /// thickness, dropped at [`WAVE_PERIODS_KEPT`] and by [`forget`].
-    static WAVE_PERIODS: RefCell<HashMap<u32, WavePeriod>> =
-        RefCell::default();
+/// The two are the same line in exact arithmetic, and in floating point a
+/// millionth of a pixel apart, more the longer the chunk. Two edges that
+/// cancel exactly leave the fill as one stroke would; two that nearly do
+/// leave the antialiasing a sliver, which reached 16 of 255 at a chunk's
+/// end in a wave scaled by 2 and turned.
+#[derive(Clone, Copy)]
+struct Caps {
+    /// The contour both lie in.
+    contour: usize,
+    /// The index of the start cap's line in it.
+    start: usize,
+    /// The index of the end cap's line in it.
+    end: usize,
 }
 
-impl WavePeriod {
-    /// The period of a wave `t` thick, stroked on this thread's first ask
-    /// for `t` and kept.
-    fn of(t: f32) -> Self {
-        WAVE_PERIODS.with_borrow_mut(|kept| {
-            if let Some(period) = kept.get(&t.to_bits()) {
-                return period.clone();
-            }
-            let period = Self::stroked(t);
-            if kept.len() >= WAVE_PERIODS_KEPT {
-                kept.clear();
-            }
-            kept.insert(t.to_bits(), period.clone());
-            period
+impl Caps {
+    /// The caps of `contours`, a chunk `length` long: the one line across
+    /// the middle at each end, in one contour. `None` where the outline is
+    /// not shaped so, which leaves copies meeting as they are placed.
+    fn find(contours: &[Vec<Piece>], length: f32, t: f32) -> Option<Self> {
+        let across = |x: f32| {
+            contours
+                .iter()
+                .enumerate()
+                .flat_map(move |(contour, pieces)| {
+                    pieces.iter().enumerate().filter_map(move |(at, piece)| {
+                        let Piece::Line(a, b) = piece else {
+                            return None;
+                        };
+                        let mid = (*a + *b) * 0.5;
+                        ((mid.x - x).abs() < t / 4.0 && mid.y.abs() < t / 4.0)
+                            .then_some((contour, at))
+                    })
+                })
+        };
+        let mut starts = across(0.0);
+        let mut ends = across(length);
+        let (Some(start), None) = (starts.next(), starts.next()) else {
+            return None;
+        };
+        let (Some(end), None) = (ends.next(), ends.next()) else {
+            return None;
+        };
+        if start.0 != end.0 {
+            return None;
+        }
+        // The end cap runs from the outer side to the inner and the start
+        // cap back, so the end's first point is the start's last moved on
+        // by the chunk's length.
+        let pieces = &contours[start.0];
+        let (Piece::Line(_, outer), Piece::Line(from, _)) =
+            (pieces[start.1], pieces[end.1])
+        else {
+            return None;
+        };
+        let along = from - Point::new(length, 0.0);
+        ((along - outer).length() < t / 4.0).then_some(Self {
+            contour: start.0,
+            start: start.1,
+            end: end.1,
         })
     }
 
-    fn stroked(t: f32) -> Self {
+    /// `piece`, at index `at` of `contour` and already placed, made to meet
+    /// the copy placed at `next`: the end cap becomes the next copy's start
+    /// cap run the other way, and the pieces either side of it end and
+    /// start where it now does.
+    fn meet(
+        self,
+        contour: &[Piece],
+        at: usize,
+        piece: Piece,
+        next: Point,
+    ) -> Piece {
+        let Piece::Line(inner, outer) = contour[self.start] else {
+            return piece;
+        };
+        let (inner, outer) = (inner + next, outer + next);
+        let count = contour.len();
+        if at == self.end {
+            Piece::Line(outer, inner)
+        } else if at == (self.end + count - 1) % count {
+            piece.with_end(outer)
+        } else if at == (self.end + 1) % count {
+            piece.with_start(inner)
+        } else {
+            piece
+        }
+    }
+}
+
+/// How many periods [`wave`] strokes as one and lays end to end.
+///
+/// Each copy is a closed contour of its own, and where two meet, the end of
+/// one and the start of the next are the same edge run both ways: nothing
+/// to the fill but edges, which the rasterizer pays for on every row they
+/// cross. Fewer, longer copies leave fewer of them, for a chunk that costs
+/// more to keep and more to cut at a box's ends, where a copy is cut whole.
+///
+/// Four is where filling stops getting cheaper. Measured on a 200px wave
+/// against the same wave stroked whole as one contour, over three runs: at
+/// 1.2px thick a copy of one period fills in 1.2 to 1.4 times the whole
+/// wave's time and a copy of four in 1.0 to 1.1; at 2px, 1.2 to 1.9 times
+/// and 1.1 to 1.2. Longer copies fill no faster within that spread, while
+/// laying out a wave three periods long costs about 1.6 times as much with
+/// copies of four as of one, and about 5 times with copies of sixteen,
+/// since its one copy holds and is cut through every period of the chunk
+/// -- timed in a debug build, so as a ratio only. A chunk of four is about
+/// a kilobyte.
+const WAVE_CHUNK: usize = 4;
+
+/// How many bytes of stroked chunks a thread keeps, all thicknesses
+/// together: about 250 chunks of [`WAVE_CHUNK`] periods.
+///
+/// A bound rather than a working set, as [`FACE_LINES_KEPT`] is: a
+/// thickness can be any number, so a line whose thickness animates would
+/// add a chunk a frame. Past it, every kept chunk is dropped and stroked
+/// again.
+const WAVE_CHUNKS_BYTES: usize = 256 * 1024;
+
+thread_local! {
+    /// The chunks [`WaveChunk::of`] has stroked, by the bits of their
+    /// thickness, with the bytes they hold; dropped at
+    /// [`WAVE_CHUNKS_BYTES`] and by [`forget`].
+    static WAVE_CHUNKS: RefCell<(HashMap<u32, WaveChunk>, usize)> =
+        RefCell::default();
+}
+
+impl WaveChunk {
+    /// The chunk of a wave `t` thick, stroked on this thread's first ask
+    /// for `t` and kept.
+    fn of(t: f32) -> Self {
+        WAVE_CHUNKS.with_borrow_mut(|(kept, bytes)| {
+            if let Some(chunk) = kept.get(&t.to_bits()) {
+                return chunk.clone();
+            }
+            let chunk = Self::stroked(t, WAVE_CHUNK);
+            if *bytes + chunk.bytes > WAVE_CHUNKS_BYTES {
+                kept.clear();
+                *bytes = 0;
+            }
+            *bytes += chunk.bytes;
+            kept.insert(t.to_bits(), chunk.clone());
+            chunk
+        })
+    }
+
+    /// `periods` periods of a wave `t` thick, stroked as one.
+    fn stroked(t: f32, periods: usize) -> Self {
         // A quadratic peaks at half its control point's offset, so a control
         // 2 * (swing / 2) off the centreline swings it by `swing` from crest
         // to trough. Down first: y grows downward, so up is negative.
@@ -825,8 +976,11 @@ impl WavePeriod {
         let half = WAVE_PERIOD * t / 2.0;
         let mut centre = PathBuilder::new();
         centre.move_to((0.0, 0.0));
-        centre.quad_to((half / 2.0, -control), (half, 0.0));
-        centre.quad_to((half * 1.5, control), (2.0 * half, 0.0));
+        for n in 0..periods {
+            let at = 2.0 * half * n as f32;
+            centre.quad_to((at + half / 2.0, -control), (at + half, 0.0));
+            centre.quad_to((at + half * 1.5, control), (at + 2.0 * half, 0.0));
+        }
         let mut stroke = Paint::default();
         stroke
             .set_style(Style::Stroke)
@@ -856,22 +1010,32 @@ impl WavePeriod {
             .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), p| {
                 (low.min(p.x), high.max(p.x))
             });
+        let caps = Caps::find(&contours, WAVE_PERIOD * t * periods as f32, t);
+        let bytes = contours
+            .iter()
+            .map(|pieces| {
+                size_of::<Vec<Piece>>() + pieces.len() * size_of::<Piece>()
+            })
+            .sum();
         Self {
             contours,
             reach,
             fill_type: outline.fill_type(),
+            periods,
+            caps,
+            bytes,
         }
     }
 
-    /// Drops every kept period -- through [`forget`].
+    /// Drops every kept chunk -- through [`forget`].
     fn forget() {
-        WAVE_PERIODS.with_borrow_mut(HashMap::clear);
+        WAVE_CHUNKS.with_borrow_mut(|kept| *kept = Default::default());
     }
 
-    /// How many periods this thread keeps.
+    /// How many chunks this thread keeps, and the bytes they hold.
     #[cfg(test)]
-    fn kept() -> usize {
-        WAVE_PERIODS.with_borrow(HashMap::len)
+    fn kept() -> (usize, usize) {
+        WAVE_CHUNKS.with_borrow(|(kept, bytes)| (kept.len(), *bytes))
     }
 }
 
@@ -960,6 +1124,22 @@ impl Piece {
             Piece::Quad(a, c, b) => (a, Some(c), b),
         };
         std::iter::once(a).chain(c).chain(std::iter::once(b))
+    }
+
+    /// The piece with its first point moved to `point`.
+    fn with_start(self, point: Point) -> Piece {
+        match self {
+            Piece::Line(_, b) => Piece::Line(point, b),
+            Piece::Quad(_, c, b) => Piece::Quad(point, c, b),
+        }
+    }
+
+    /// The piece with its last point moved to `point`.
+    fn with_end(self, point: Point) -> Piece {
+        match self {
+            Piece::Line(a, _) => Piece::Line(a, point),
+            Piece::Quad(a, c, _) => Piece::Quad(a, c, point),
+        }
     }
 
     /// The piece moved `by`.
@@ -1096,7 +1276,24 @@ fn cut(
             kept.push(Piece::Line(from, to));
         }
     };
-    for piece in pieces.iter().flat_map(|piece| piece.monotone(along)) {
+    for piece in pieces.iter().flat_map(|piece| {
+        // A piece lies within the hull of its points, so one whose points
+        // are all on one side is wholly there, and is kept or dropped whole
+        // rather than split where it turns: splitting adds a piece that the
+        // outline then carries, for nothing.
+        let sides = piece.points().map(|point| inside(along(point)) >= 0.0);
+        let (mut any_in, mut any_out) = (false, false);
+        sides.for_each(|side| match side {
+            true => any_in = true,
+            false => any_out = true,
+        });
+        let whole = !(any_in && any_out);
+        let (first, second) = match whole {
+            true => (Some(*piece), None),
+            false => (None, Some(piece.monotone(along))),
+        };
+        first.into_iter().chain(second.into_iter().flatten())
+    }) {
         let (a, b) = (
             inside(along(piece.start())) >= 0.0,
             inside(along(piece.end())) >= 0.0,
@@ -1346,7 +1543,7 @@ mod tests {
 
     /// The stroke of a wave of whole half-waves from `from`, starting down
     /// from the middle, to past `to`, and its band -- built here, apart from
-    /// [`super::WavePeriod`], as the reference a cut wave is held to.
+    /// [`super::WaveChunk`], as the reference a cut wave is held to.
     fn continuous_wave(
         from: f32,
         to: f32,
@@ -1629,9 +1826,9 @@ mod tests {
 
     /// Drawing a longer wave cuts no more of it: only the copies reaching
     /// past the box's ends are cut, and the band's top and bottom were cut
-    /// once, when the period was stroked.
+    /// once, when the chunk was stroked.
     #[test]
-    fn a_long_wave_cuts_only_its_end_periods() {
+    fn a_long_wave_cuts_only_its_end_chunks() {
         let (left, t) = (10.3, 2.0);
         let period = super::WAVE_PERIOD * t;
         let cut = |right: f32| {
@@ -1640,33 +1837,121 @@ mod tests {
             wave(left, right, 30.0, t, 1.0).expect("a wave");
             super::CUT_PIECES.get()
         };
-        let short = cut(left + 5.0 * period + 3.1);
-        let long = cut(left + 50.0 * period + 3.1);
+        let chunk = super::WAVE_CHUNK as f32;
+        let short = cut(left + 3.0 * chunk * period + 3.1);
+        let long = cut(left + 30.0 * chunk * period + 3.1);
         assert!(short > 0, "the ends are cut");
         assert_eq!(long, short, "and nothing between them");
     }
 
-    /// A period is kept per thickness, no more of them than the bound, and
-    /// none after [`super::forget`].
+    /// A cut keeps a piece whose points all lie on its kept side as it is,
+    /// and drops one whose points all lie on the other, splitting only a
+    /// piece that may cross: a quadratic lies within the triangle of its
+    /// points. Splitting every piece where it turns gave the outline a
+    /// piece more for each turn, and the fill an edge more to walk.
     #[test]
-    fn kept_periods_are_bounded_and_forgotten() {
-        use super::{WAVE_PERIODS_KEPT, WavePeriod};
+    fn a_cut_splits_only_what_it_crosses() {
+        use super::{Piece, cut};
+        let p = |x: f32, y: f32| Point::new(x, y);
+        // A closed contour of quadratics that each turn in x.
+        let contour = vec![
+            Piece::Quad(p(0.0, 0.0), p(20.0, 5.0), p(0.0, 10.0)),
+            Piece::Quad(p(0.0, 10.0), p(-20.0, 15.0), p(0.0, 20.0)),
+            Piece::Line(p(0.0, 20.0), p(0.0, 0.0)),
+        ];
+        let x = |point: Point| point.x;
+        let kept = cut(&contour, x, |v| v + 100.0);
+        assert_eq!(kept.len(), contour.len(), "nothing crosses: kept whole");
+        let dropped = cut(&contour, x, |v| v - 100.0);
+        assert!(dropped.is_empty(), "all outside: nothing kept");
+        let crossed = cut(&contour, x, |v| v - 5.0);
+        assert!(
+            crossed
+                .iter()
+                .all(|piece| piece.points().all(|q| q.x >= 5.0 - 1e-3)),
+            "what crosses is cut: {crossed:?}"
+        );
+        // Ends on the kept side, bulging past it: crosses twice, and is cut
+        // at both, though neither end says so.
+        let bulging = cut(&contour, x, |v| 5.0 - v);
+        assert!(
+            bulging
+                .iter()
+                .all(|piece| piece.points().all(|q| q.x <= 5.0 + 1e-3)),
+            "what bulges across is cut: {bulging:?}"
+        );
+    }
+
+    /// Every chunk knows its caps, so that copies of it meet exactly: at
+    /// every thickness a wave is drawn at, from a fraction of a pixel to
+    /// many, the outline has one line across the middle at each end. Where
+    /// it did not, copies would meet a rounding apart and the fill would
+    /// leave a sliver -- `a_tiled_wave_is_the_whole_wave` finds one at a
+    /// chunk's end, 1px thick, scaled by 2 and turned.
+    #[test]
+    fn a_chunk_knows_its_caps() {
+        for t in [0.25, 0.5, 1.0, 1.2, 2.0, 3.0, 4.0, 8.0, 16.0, 40.0] {
+            let chunk = super::WaveChunk::stroked(t, super::WAVE_CHUNK);
+            assert!(chunk.caps.is_some(), "{t}px");
+        }
+    }
+
+    /// A chunk is kept per thickness, no more bytes of them than the
+    /// bound, and none after [`super::forget`].
+    #[test]
+    fn kept_chunks_are_bounded_and_forgotten() {
+        use super::{WAVE_CHUNKS_BYTES, WaveChunk};
         super::forget();
-        assert_eq!(WavePeriod::kept(), 0);
+        assert_eq!(WaveChunk::kept(), (0, 0));
         wave(0.0, 40.0, 10.0, 1.0, 1.0).expect("a wave");
         wave(0.0, 80.0, 10.0, 1.0, 1.0).expect("a wave");
-        assert_eq!(WavePeriod::kept(), 1, "one thickness, one period");
-        for n in 0..=WAVE_PERIODS_KEPT {
+        let (chunks, bytes) = WaveChunk::kept();
+        assert_eq!(chunks, 1, "one thickness, one chunk");
+        // Enough thicknesses to pass the bound twice over.
+        let passes = 2 * WAVE_CHUNKS_BYTES / bytes + 1;
+        for n in 0..passes {
             let t = 1.0 + n as f32 / 64.0;
             wave(0.0, 20.0, 10.0, t, 1.0).expect("a wave");
+            let (_, held) = WaveChunk::kept();
+            assert!(held <= WAVE_CHUNKS_BYTES, "{held} bytes held");
         }
-        assert!(
-            (1..=WAVE_PERIODS_KEPT).contains(&WavePeriod::kept()),
-            "{}",
-            WavePeriod::kept()
-        );
+        assert!(WaveChunk::kept().0 >= 1);
         super::forget();
-        assert_eq!(WavePeriod::kept(), 0);
+        assert_eq!(WaveChunk::kept(), (0, 0));
+    }
+
+    /// A wave is as few contours as the copies of its chunk it is laid out
+    /// from: one per [`super::WAVE_CHUNK`] periods and one more, where one
+    /// per period left every pair of copies an edge run both ways to fill.
+    #[test]
+    fn a_wave_is_a_contour_a_chunk() {
+        use skia_safe::PathVerb;
+        for t in [0.5, 1.2, 2.0, 8.0] {
+            let period = super::WAVE_PERIOD * t;
+            for periods in [0.3, 3.0, 17.0, 40.0, 100.0] {
+                let path = wave(10.0, 10.0 + periods * period, 30.0, t, 1.0)
+                    .expect("a wave");
+                let contours = path
+                    .verbs()
+                    .iter()
+                    .filter(|verb| **verb == PathVerb::Move)
+                    .count();
+                // At most half as many contours as periods for a long one,
+                // whatever the chunk is, so that a contour a period fails.
+                if periods >= 17.0 {
+                    assert!(
+                        2.0 * contours as f32 <= periods + 2.0,
+                        "{t}px, {periods} periods: {contours} contours"
+                    );
+                }
+                let chunks =
+                    ((periods + 1.0) / super::WAVE_CHUNK as f32).ceil();
+                assert!(
+                    contours as f32 <= chunks + 1.0,
+                    "{t}px, {periods} periods: {contours} contours"
+                );
+            }
+        }
     }
 
     /// Wavy text drawn with `WHOLE_WAVE` at `whole` on the engine `gpu`
@@ -1826,7 +2111,7 @@ mod tests {
         let before = ask(&mut before_fonts, &before_epoch);
         assert!(FaceLines::kept() > 0, "the answer is kept");
         wave(0.0, 40.0, 10.0, 1.0, 1.0).expect("a wave");
-        assert!(super::WavePeriod::kept() > 0, "and a wave's period");
+        assert!(super::WaveChunk::kept().0 > 0, "and a wave's chunk");
 
         let file = "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf";
         let data = Data::new_copy(&std::fs::read(file).expect("Oswald"));
@@ -1835,7 +2120,7 @@ mod tests {
             lib.register_typeface(face, Some(family[0].to_string()))
         });
         assert_eq!(FaceLines::kept(), 0, "the change drops what was kept");
-        assert_eq!(super::WavePeriod::kept(), 0, "periods too");
+        assert_eq!(super::WaveChunk::kept().0, 0, "chunks too");
 
         let (mut after_fonts, after_epoch) = shared_fonts(&family);
         let after = ask(&mut after_fonts, &after_epoch);
@@ -1857,10 +2142,10 @@ mod tests {
     /// The answers a thread keeps are bounded, however many sizes are
     /// asked for, and each is the one the collection gives uncached.
     /// What the idle watcher posts to a thread lets the kept faces' lines
-    /// and the kept wave periods go with the font caches.
+    /// and the kept wave chunks go with the font caches.
     #[test]
     fn an_idle_release_lets_kept_lines_and_waves_go() {
-        use super::{FaceLines, WavePeriod};
+        use super::{FaceLines, WaveChunk};
         use crate::node::font_library::FontLibrary;
         use skia_safe::FontStyle;
         let family = ["DecorIdleProbe"];
@@ -1877,11 +2162,11 @@ mod tests {
             wave(0.0, 40.0, 10.0, t, 1.0).expect("a wave");
         }
         assert!(FaceLines::kept() > 0, "a face's lines are kept");
-        assert_eq!(WavePeriod::kept(), 2, "and a period per thickness");
+        assert_eq!(WaveChunk::kept().0, 2, "and a chunk per thickness");
 
         FontLibrary::with_shared(FontLibrary::release_caches);
         assert_eq!(FaceLines::kept(), 0, "no face's lines past a release");
-        assert_eq!(WavePeriod::kept(), 0, "and no wave period");
+        assert_eq!(WaveChunk::kept().0, 0, "and no wave chunk");
     }
 
     #[test]

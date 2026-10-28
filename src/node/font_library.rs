@@ -1630,7 +1630,7 @@ impl FontLibrary {
     /// since they hold ids and bounds rather than faces, and come to about
     /// 100 KB at most. So do the decorations' kept answers, through
     /// [`decorate::forget`]: each face's lines and each thickness's stroked
-    /// wave period, which are rebuilt on the next decoration that asks.
+    /// wave chunk, which are rebuilt on the next decoration that asks.
     #[cfg(any(test, feature = "node-addon"))]
     pub(crate) fn release_caches(&mut self) {
         self.clear_collection_caches();
