@@ -1223,9 +1223,10 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Changed
 
-- **Text costs less to lay out, draw and measure, and blurred shapes
-  less to record and export.** Each figure below is from one release-prep
-  window [RE-TIME: the window and its load].
+- **Text costs less to lay out, draw and measure, blurred shapes less to
+  record and export, and a repeated read of a GPU canvas less to wait
+  for.** Each figure below is from one release-prep window [RE-TIME: the
+  window and its load].
   - A line of text a `Context2D` draws a second time in the same settings
     is kept as laid out, and every later draw of it, in any paint and
     oblique included, is drawn from what was kept rather than laid out
@@ -1245,6 +1246,11 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
     once, and the caches holding these hash their keys with foldhash
     rather than SipHash: setting a font and drawing costs [RE-TIME vs
     0.16.3] of what it did.
+  - `Context2D::set_font` with a `Font` it has been given before neither
+    lowers it to a font specification again nor looks it up: setting one
+    of two alternating fonts costs [RE-TIME vs 0.16.3] of what it did. The
+    fonts resolved this way are kept under the library's existing bound
+    and let go when the registered fonts change.
   - A paragraph from `TextEngine` in several styles reads its text for a
     grapheme cluster crossing an edge between them only where the bytes
     either side of the edge do not rule one out, and its base style is no
@@ -1257,6 +1263,12 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
     the filter paint it never uses, and consecutive rectangles blurred
     alike in one frame are kept as one operation, each still drawn on its
     own.
+  - A repeated `Context2D::get_image_data` of a region within one
+    256-pixel tile of a GPU canvas, that tile unchanged since the last
+    read, no longer waits on the GPU to confirm it [RE-TIME vs 0.16.3]. A
+    read of the whole canvas, and a small one after something has
+    composited the whole canvas since the last draw -- a full read or an
+    export -- still waits each time.
 
   What is kept costs memory, and each part of it is bounded. Each thread
   keeps up to 512 lines of text or an estimated 8 MiB of them, the least

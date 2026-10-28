@@ -1487,9 +1487,10 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
 
 ### Changed
 
-- **Text costs less to lay out, draw and measure, and blurred shapes
-  less to record and export.** Each figure below is from one release-prep
-  window [RE-TIME: the window and its load].
+- **Text costs less to lay out, draw and measure, blurred shapes less to
+  record and export, and a repeated read of a GPU canvas less to wait
+  for.** Each figure below is from one release-prep window [RE-TIME: the
+  window and its load].
   - A line of text drawn a second time in the same settings is kept as
     laid out, and every later draw of it, in any paint and `oblique`
     included, is drawn from what was kept rather than laid out afresh: a
@@ -1519,6 +1520,12 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
     [RE-TIME vs 6.0.2]. A blurred flat-colour draw is recorded without the
     filter paint it never uses, and consecutive rectangles blurred alike
     in one frame are kept as one operation, each still drawn on its own.
+  - A repeated `getImageData` of a region within one 256-pixel tile of a
+    GPU canvas, that tile unchanged since the last read, no longer waits
+    on the GPU to confirm it [RE-TIME vs 6.0.2]. A read of the whole
+    canvas, and a small one after something has composited the whole
+    canvas since the last draw -- a full read or an export -- still waits
+    each time.
 
   What is kept costs memory, and each part of it is bounded. Each thread
   keeps up to 512 lines of text or an estimated 8 MiB of them, the least
