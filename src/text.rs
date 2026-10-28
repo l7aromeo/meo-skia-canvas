@@ -1,6 +1,7 @@
 use std::{
     borrow::Cow,
     collections::HashMap,
+    hash::{Hash, Hasher},
     iter::once,
     ops::Range,
     rc::Rc,
@@ -1789,6 +1790,19 @@ struct Instance {
     /// face's axis as Skia clamps it. `None` when nothing is instanced or
     /// the face has no `wght` axis.
     weight: Option<i32>,
+    /// The names the style's families are asked for by, as
+    /// [`collection_names`] gave them to find the faces, so that the text
+    /// style is given the same ones without working them out again. `None`
+    /// for a style that names no family.
+    names: Option<Rc<[String]>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times [`FaceMatches::of`] has searched a collection on this
+    /// thread, for the tests that hold it to remembering.
+    pub(crate) static SEARCHES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 /// How many family lists and styles an engine remembers the matches of.
@@ -1811,29 +1825,53 @@ pub(crate) struct FaceMatches {
     matches: HashMap<FaceMatchKey, Rc<[Typeface]>>,
 }
 
-/// What a search of an engine's collection is asked: the family list and
-/// the style's weight, width and slant.
-#[derive(PartialEq, Eq, Hash)]
+/// What a search of an engine's collection is asked: a family list, as the
+/// names [`collection_names`] handed out for it, and the style's weight,
+/// width and slant.
+///
+/// The names are compared and hashed by which list they are, not by what
+/// they spell: the library hands out one list for a family list for as long
+/// as it keeps it, so this costs no hash of the strings, which the lookup
+/// that found the list has already paid. The key holds the list, so its
+/// allocation cannot be freed and its address taken by another while the
+/// entry lives -- equal addresses are the same list. A list the library
+/// works out again, after the fonts change or past its bound, is a new
+/// allocation, and misses rather than answering for the one before.
 struct FaceMatchKey {
-    families: Vec<String>,
+    names: Rc<[String]>,
     weight: i32,
     width: i32,
     slant: Slant,
 }
 
+impl PartialEq for FaceMatchKey {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.names, &other.names)
+            && (self.weight, self.width, self.slant)
+                == (other.weight, other.width, other.slant)
+    }
+}
+
+impl Eq for FaceMatchKey {}
+
+impl Hash for FaceMatchKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Rc::as_ptr(&self.names).cast::<()>().hash(state);
+        (self.weight, self.width, self.slant).hash(state);
+    }
+}
+
 impl FaceMatches {
-    /// The faces `families` in `style` match in `collection`.
+    /// The faces the family list `names` -- as [`collection_names`] handed
+    /// it out -- in `style` match in `collection`.
     pub(crate) fn of(
         &mut self,
         collection: &mut FontCollection,
-        families: &[&str],
+        names: &Rc<[String]>,
         style: FontStyle,
     ) -> Rc<[Typeface]> {
         let key = FaceMatchKey {
-            families: families
-                .iter()
-                .map(|family| family.to_string())
-                .collect(),
+            names: names.clone(),
             weight: *style.weight(),
             width: *style.width(),
             slant: style.slant(),
@@ -1842,8 +1880,11 @@ impl FaceMatches {
         if remember && let Some(faces) = self.matches.get(&key) {
             return faces.clone();
         }
+        #[cfg(test)]
+        SEARCHES.set(SEARCHES.get() + 1);
+        let families: Vec<&str> = names.iter().map(String::as_str).collect();
         let faces: Rc<[Typeface]> =
-            collection.find_typefaces(families, style).into();
+            collection.find_typefaces(&families, style).into();
         if remember {
             if self.matches.len() >= MATCHES_KEPT {
                 self.matches.clear();
@@ -1885,14 +1926,13 @@ fn instance_for(
     style: &TextStyle,
     variations: &[FontVariation],
 ) -> Instance {
-    let names = collection_names(&style.font_families);
-    let families: Vec<&str> = names.iter().map(String::as_str).collect();
-    if families.is_empty() {
+    if style.font_families.is_empty() {
         return Instance::default();
     }
+    let names = collection_names(&style.font_families);
     let faces = matches.lock().unwrap_or_else(PoisonError::into_inner).of(
         collection,
-        &families,
+        &names,
         font_style_for(style),
     );
     let Some(axes) = faces.iter().find_map(|face| {
@@ -1901,7 +1941,10 @@ fn instance_for(
             .unwrap_or_else(PoisonError::into_inner)
             .of(face)
     }) else {
-        return Instance::default();
+        return Instance {
+            names: Some(names),
+            ..Instance::default()
+        };
     };
     let wght_tag = u32::from_be_bytes(*FontAxisTag::WGHT.as_bytes());
     let explicit_wght = variations
@@ -1953,10 +1996,12 @@ fn instance_for(
         return Instance {
             coordinates: Vec::new(),
             weight,
+            names: Some(names),
         };
     }
     // A poisoned record is still a record: the panic that poisoned it was
     // elsewhere, and the worst a stale entry can do is drop the caches early.
+    let families: Vec<&str> = names.iter().map(String::as_str).collect();
     if positions
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -1967,6 +2012,7 @@ fn instance_for(
     Instance {
         coordinates,
         weight,
+        names: Some(names),
     }
 }
 
@@ -2018,7 +2064,12 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
 
     sk_style.set_font_size(style.font_size);
     if !style.font_families.is_empty() {
-        sk_style.set_font_families(&collection_names(&style.font_families));
+        // The names instancing found the faces by, where it ran.
+        let names = match &instance.names {
+            Some(names) => names.clone(),
+            None => collection_names(&style.font_families),
+        };
+        sk_style.set_font_families(&names);
     }
     // Pinned to the weight the instance has. Skia fakes a bold wherever the
     // weight asked for is 200 or more above the face's, and an instance is

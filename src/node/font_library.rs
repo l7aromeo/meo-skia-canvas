@@ -2461,8 +2461,11 @@ mod tests {
             for (families, style) in &styles {
                 let searched =
                     ids(&collection.find_typefaces(families, *style));
+                let names = FontLibrary::with_shared(|lib| {
+                    lib.engine_names(&named(families))
+                });
                 let answered =
-                    ids(&remembered.of(&mut collection, families, *style));
+                    ids(&remembered.of(&mut collection, &names, *style));
                 assert_eq!(answered, searched, "{families:?} {style:?}");
                 FontLibrary::with_shared(|lib| {
                     let facts = lib.match_facts(families, *style);
@@ -2477,6 +2480,64 @@ mod tests {
                 });
             }
         }
+    }
+
+    /// `families` as the family names a style lists.
+    fn named(families: &[&str]) -> Vec<FontFamily> {
+        families
+            .iter()
+            .map(|family| FontFamily::Named(family.to_string()))
+            .collect()
+    }
+
+    /// A family list the library works out again after its fonts change is
+    /// searched again by an engine, never answered from what the list it
+    /// replaced matched -- even once nothing else holds that list, and
+    /// where the same family is now spelled another way.
+    #[test]
+    fn a_family_list_worked_out_again_is_searched_again() {
+        use crate::text::{FaceMatches, SEARCHES, TextEngine};
+        memo_fonts();
+        let families = named(&["HashOnceFamily", "MemoMonoton"]);
+        let style = FontStyle::normal();
+        let engine = TextEngine::new(&crate::font::FontLibrary::new());
+        let mut collection = engine.collection.clone();
+        let mut remembered = FaceMatches::default();
+        let before =
+            FontLibrary::with_shared(|lib| lib.engine_names(&families));
+        remembered.of(&mut collection, &before, style);
+        let searched = SEARCHES.get();
+        remembered.of(&mut collection, &before, style);
+        assert_eq!(
+            SEARCHES.get(),
+            searched,
+            "a list met before is not searched"
+        );
+        drop(before);
+
+        crate::font::FontLibrary::new()
+            .register_font_from_path(
+                "hashoncefamily",
+                format!(
+                    "{}/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+                    env!("CARGO_MANIFEST_DIR")
+                ),
+            )
+            .expect("Oswald registers");
+        let after = FontLibrary::with_shared(|lib| lib.engine_names(&families));
+        assert_eq!(after[0], "hashoncefamily", "spelled as registered");
+        let answered = remembered.of(&mut collection, &after, style);
+        assert_eq!(SEARCHES.get(), searched + 1, "the new list is searched");
+        let names: Vec<&str> = after.iter().map(String::as_str).collect();
+        assert_eq!(
+            answered.iter().map(Typeface::unique_id).collect::<Vec<_>>(),
+            collection
+                .find_typefaces(&names, style)
+                .iter()
+                .map(Typeface::unique_id)
+                .collect::<Vec<_>>(),
+            "and answered as a search answers it"
+        );
     }
 
     /// A family registered after a style naming it was matched is found by
