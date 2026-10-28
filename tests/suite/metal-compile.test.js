@@ -15,6 +15,11 @@
 // A timed build drops the draw and reads transparent; the patched one waits
 // for the compiler and reads the colour.
 //
+// The child finds its service in its own launchd domain, which lists the
+// instance started for it, rather than as the service that appeared while it
+// drew: other test files' children start services of their own at the same
+// time, and one of those must never be stopped.
+//
 // It needs macOS, the GPU engine and `sandbox-exec`, and skips without them --
 // unless `MEO_SKIA_CANVAS_REQUIRE_METAL` is set, as on the release build, where
 // a skip would let an unpatched binary through.
@@ -44,6 +49,41 @@ const HALF_RED = [255, 0, 0, 128];
  * reports it inside a longer name: "Integrated GPU (Apple Paravirtual
  * device)" on GitHub's macos-15-arm64 runner. */
 const PARAVIRTUAL_DEVICE = "Apple Paravirtual device";
+
+/**
+ * The compiler services launchd lists in a process's own domain, from
+ * `launchctl print pid/<pid>`, that were not running before it drew.
+ *
+ * A service started for a client is listed there by its pid, under an
+ * instance name, `com.apple.MTLCompilerService.<UUID>`; an entry with pid 0
+ * is not running. One already running before the draw is not the child's own
+ * whatever its domain says -- on a virtual machine that would be the shared
+ * service.
+ *
+ * @param {string} domain
+ * @param {string[]} before
+ * @returns {string[]}
+ */
+function ownServices(domain, before) {
+  return [
+    ...domain.matchAll(
+      /^\s*([1-9]\d*)\s.*\scom\.apple\.MTLCompilerService(\.\S+)?\s*$/gm,
+    ),
+  ]
+    .map((match) => match[1])
+    .filter((pid) => !before.includes(pid));
+}
+
+/**
+ * The `services` block of `launchctl print pid/<pid>`, or the whole output
+ * where it has none.
+ *
+ * @param {string} domain
+ * @returns {string}
+ */
+function servicesBlock(domain) {
+  return (domain.match(/^\s*services = \{[\s\S]*?^\s*\}/m) ?? [domain])[0];
+}
 
 /**
  * Why the child had no compiler service of its own to stop, when that is the
@@ -83,9 +123,9 @@ const why =
         : null;
 
 // The child's whole run, as JSON on its last line. It finds its compiler service
-// as the one that appeared between before and after its first GPU draw. What it
-// saw is reported too, so a run where that precondition fails -- a runner
-// whose Metal device compiles somewhere else -- says what it found instead.
+// by `ownServices` after its first GPU draw. What it saw is reported too, so a
+// run where that precondition fails -- a runner whose Metal device compiles
+// somewhere else -- says what it found instead.
 const child = `
   const { execFileSync, spawn } = require("child_process");
   // \`pgrep\`, not \`ps\`: the sandbox refuses to run \`ps\`. It exits 1 when
@@ -109,8 +149,23 @@ const child = `
   warm.getContext("2d").fillRect(0, 0, 4, 4);
   pixel(warm);
   const warmMs = Date.now() - warmStart;
-  const mine = [...services()].filter((pid) => !before.has(pid));
-  const diagnosis = { pid: process.pid, engine: warm.engine, warmMs,
+  const ownServices = ${ownServices};
+  // A domain that cannot be read lists no service, which the test then
+  // reports with the error rather than dying here without a diagnosis.
+  let domain = "", domainError;
+  try {
+    domain = execFileSync("launchctl", ["print", "pid/" + process.pid], {
+      encoding: "utf8" });
+  } catch (error) {
+    domainError = String(error.message).split("\\n")[0];
+  }
+  const mine = ownServices(domain, [...before]);
+  const servicesBlock = ${servicesBlock};
+  const diagnosis = { pid: process.pid, engine: warm.engine, warmMs, mine,
+    domainError,
+    // What launchd listed, whenever it did not give one service: the format
+    // is not documented, so a failure carries the text it was read from.
+    domain: mine.length === 1 ? undefined : servicesBlock(domain),
     compilersBefore: seenBefore, compilersAfter: compilers(),
     servicesBefore: [...before], servicesAfter: [...services()] };
   if (mine.length === 1) {
@@ -172,6 +227,73 @@ describe("A Metal compile that outlasts a second", () => {
       assert.deepEqual(run.again, HALF_RED, "the same draw afterwards");
     },
   );
+
+  test("finds only the compiler service started for the child", () => {
+    // The services block of `launchctl print pid/<pid>` as macOS 27 printed
+    // it for a sandboxed child after its first draw, whose instance is 59511.
+    const domain = [
+      "\tservices = {",
+      "\t\t       0      - \tcom.apple.MTLCompilerService",
+      "\t\t   59511      - \tcom.apple.MTLCompilerService.5725A1F5-A544-4DB6-A893-0C85E08FDD90",
+      "\t}",
+      "",
+      "\tservice stubs = {",
+      "\t\tcom.apple.StreamingUnzipService",
+      "\t}",
+    ].join("\n");
+    /** `domain` with `line` listed after the child's instance. */
+    const beside = (line) =>
+      domain.replace(/^(.*59511.*)$/m, (own) => `${own}\n${line}`);
+    assert.deepEqual(ownServices(domain, []), ["59511"], "its instance");
+    assert.equal(servicesBlock(domain), domain.split("\n\n")[0], "the block");
+    assert.equal(servicesBlock("no block"), "no block", "the whole output");
+
+    // Two services listed, only the child's own counted.
+    assert.deepEqual(
+      ownServices(
+        beside(
+          "\t\t   59600      - \tcom.apple.StreamingUnzipService.0B7A3C21-5D2E-4F7A-9C11-2E3D4F5A6B7C",
+        ),
+        [],
+      ),
+      ["59511"],
+      "another kind of service running beside it",
+    );
+    assert.deepEqual(
+      ownServices(
+        beside(
+          "\t\t   37387      - \tcom.apple.MTLCompilerService.9E1D2C3B-4A5F-4E6D-8C7B-1A2B3C4D5E6F",
+        ),
+        ["37387"],
+      ),
+      ["59511"],
+      "a compiler service that was running before the draw",
+    );
+
+    assert.deepEqual(
+      ownServices(domain, ["59511"]),
+      [],
+      "an instance running before the draw, as a shared one is",
+    );
+    assert.deepEqual(
+      ownServices(domain.replace("59511", "    0"), []),
+      [],
+      "an instance not running",
+    );
+    assert.deepEqual(
+      ownServices(domain.replace(/^.*59511.*$/m, ""), ["40001"]),
+      [],
+      "no instance listed, whatever else is running",
+    );
+    assert.deepEqual(
+      ownServices(
+        domain.replace("MTLCompilerService.5725", "MTLCompilerServiceX.5725"),
+        [],
+      ),
+      [],
+      "another service whose name begins the same",
+    );
+  });
 
   test("skips only a virtual machine's shared compiler service", () => {
     const paravirtual = { device: `Integrated GPU (${PARAVIRTUAL_DEVICE})` };
