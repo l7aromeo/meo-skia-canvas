@@ -1646,6 +1646,11 @@ export interface CanvasOptions {
    * same shape at a larger size, and this compensates. Defaults to the value
    * Chrome's text is drawn with on the platform: `0` on macOS, `1` on
    * Windows and `0.2` elsewhere.
+   *
+   * On macOS it changes nothing while {@link CanvasRenderingContext2D.fontHinting}
+   * is on, as it is by default: Skia sets hinted glyphs' contrast to `0` there,
+   * leaving their weight to CoreGraphics' own dilation of them. It reaches
+   * unhinted text only.
    */
   textContrast?: number;
 
