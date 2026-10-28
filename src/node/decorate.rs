@@ -665,11 +665,12 @@ fn draw_line(
 /// run of [`WAVE_CHUNK`] periods, [`WaveChunk::of`] `t`, already cut along
 /// the band, end to end from half a wave before `left`; only a copy
 /// reaching past `left` or `right` is cut again. Each copy ends where the
-/// next begins, across the same normal to the same centreline, so the
-/// copies fill as the one stroke did -- `a_tiled_wave_is_the_whole_wave`
-/// holds them to it. Neither the stroker nor the cut runs per period on a
-/// draw: the stroker was most of a wavy line's cost when it ran over the
-/// whole centreline each time.
+/// next begins, across the same normal to the same centreline, and the
+/// copies between the two cut at the ends are joined into one contour --
+/// see [`Joined`] -- so the wave fills as the one stroke did:
+/// `a_tiled_wave_is_the_whole_wave` holds it to that. Neither the stroker
+/// nor the cut runs per period on a draw: the stroker was most of a wavy
+/// line's cost when it ran over the whole centreline each time.
 fn wave(
     left: f32,
     right: f32,
@@ -716,6 +717,9 @@ fn lay_out(
     // the last copy is placed as exactly as the first.
     let offset = |n: usize| start + n as f32 * step;
     let laid = |at: f32| at < right + length / 2.0;
+    // The copies no end of the box cuts, joined into one contour as they
+    // come, while the chunk's caps are known.
+    let mut joined = Joined::default();
     for n in (0..).take_while(|n| laid(offset(*n))) {
         let at = offset(n);
         let by = Point::new(at, middle);
@@ -733,9 +737,16 @@ fn lay_out(
                     None => piece,
                 }
             });
+            let caps = chunk.caps.filter(|caps| caps.contour == index);
             if !cut_left && !cut_right {
-                add(&mut moved.into_iter());
+                match caps {
+                    Some(caps) => joined.push(caps, moved.collect()),
+                    None => add(&mut moved.into_iter()),
+                }
                 continue;
+            }
+            if caps.is_some() {
+                joined.finish(&mut add);
             }
             let mut pieces: Vec<Piece> = moved.collect();
             if cut_left {
@@ -747,7 +758,61 @@ fn lay_out(
             add(&mut pieces.into_iter());
         }
     }
+    joined.finish(&mut add);
     path.detach()
+}
+
+/// Copies of a chunk laid end to end and joined into one contour: each
+/// copy's outer side after the last, then the last copy's end cap, the inner
+/// sides back from the last copy to the first, and the first copy's start
+/// cap. Where two copies meet, the one's end cap and the other's start cap
+/// are the same line run both ways, which the fill only ever cancels; joined,
+/// neither is there to fill, and the wave is the one contour the stroke of
+/// its whole centreline would be.
+#[derive(Default)]
+struct Joined {
+    outer: Vec<Piece>,
+    /// Each copy's inner side, first copy first.
+    inner: Vec<Vec<Piece>>,
+    start_cap: Option<Piece>,
+    end_cap: Option<Piece>,
+}
+
+impl Joined {
+    /// Adds the next copy, placed: its contour as `pieces`, its caps where
+    /// `caps` says they are.
+    fn push(&mut self, caps: Caps, pieces: Vec<Piece>) {
+        let count = pieces.len();
+        // The pieces after `from` and before `to`, round the contour.
+        let between = |from: usize, to: usize| {
+            (1..count)
+                .map(move |k| (from + k) % count)
+                .take_while(move |at| *at != to)
+        };
+        self.outer
+            .extend(between(caps.start, caps.end).map(|at| pieces[at]));
+        self.inner
+            .push(between(caps.end, caps.start).map(|at| pieces[at]).collect());
+        self.start_cap.get_or_insert(pieces[caps.start]);
+        self.end_cap = Some(pieces[caps.end]);
+    }
+
+    /// Adds the copies pushed so far as one contour, and starts again.
+    fn finish(&mut self, add: &mut dyn FnMut(&mut dyn Iterator<Item = Piece>)) {
+        let joined = std::mem::take(self);
+        let (Some(start_cap), Some(end_cap)) =
+            (joined.start_cap, joined.end_cap)
+        else {
+            return;
+        };
+        let mut pieces = joined
+            .outer
+            .into_iter()
+            .chain(std::iter::once(end_cap))
+            .chain(joined.inner.into_iter().rev().flatten())
+            .chain(std::iter::once(start_cap));
+        add(&mut pieces);
+    }
 }
 
 #[cfg(test)]
@@ -755,6 +820,10 @@ thread_local! {
     /// Whether [`wave`] draws [`whole_wave`] instead, as the reference a
     /// tiled wave is held to through everything that draws one.
     pub(crate) static WHOLE_WAVE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    /// Whether [`Caps::find`] finds none, as it would after a change to
+    /// Skia's stroker: the copies are then laid out unjoined.
+    pub(crate) static NO_CAPS: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
     /// How many pieces [`cut`] has been handed on this thread.
     static CUT_PIECES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -840,6 +909,10 @@ impl Caps {
     /// the middle at each end, in one contour. `None` where the outline is
     /// not shaped so, which leaves copies meeting as they are placed.
     fn find(contours: &[Vec<Piece>], length: f32, t: f32) -> Option<Self> {
+        #[cfg(test)]
+        if NO_CAPS.get() {
+            return None;
+        }
         let across = |x: f32| {
             contours
                 .iter()
@@ -913,26 +986,21 @@ impl Caps {
 
 /// How many periods [`wave`] strokes as one and lays end to end.
 ///
-/// Each copy is a closed contour of its own, and where two meet, the end of
-/// one and the start of the next are the same edge run both ways: nothing
-/// to the fill but edges, which the rasterizer pays for on every row they
-/// cross. Fewer, longer copies leave fewer of them, for a chunk that costs
-/// more to keep and more to cut at a box's ends, where a copy is cut whole.
-///
-/// Four is where filling stops getting cheaper. Measured on a 200px wave
-/// against the same wave stroked whole as one contour, over three runs: at
-/// 1.2px thick a copy of one period fills in 1.2 to 1.4 times the whole
-/// wave's time and a copy of four in 1.0 to 1.1; at 2px, 1.2 to 1.9 times
-/// and 1.1 to 1.2. Longer copies fill no faster within that spread, while
-/// laying out a wave three periods long costs about 1.6 times as much with
-/// copies of four as of one, and about 5 times with copies of sixteen,
-/// since its one copy holds and is cut through every period of the chunk
-/// -- timed in a debug build, so as a ratio only. A chunk of four is about
-/// a kilobyte.
-const WAVE_CHUNK: usize = 4;
+/// Copies are joined into one contour wherever the chunk's caps are known,
+/// so the chunk's length no longer decides how many contours the fill
+/// walks: from one period to sixteen, a 200px wave is at most three contours
+/// and fills in the same time within 5%. What it decides is the rest of a
+/// wave's cost. Copies of two lay out a 200px wave fastest -- 5 to 10% under
+/// copies of one, and level with or under four; a wave three periods long,
+/// which is cut through a whole copy, costs about 1.4 times as much at four
+/// and 2.3 at eight; and stroking a chunk the first time a thickness is drawn
+/// costs 1.5 to 1.8 times one period's at two, 2.7 to 3.1 at four and 9 to 11
+/// at sixteen. Measured at 1.2px and 2px on a quiet machine, timed in a debug
+/// build, so as ratios only. A chunk of two is about 550 bytes.
+const WAVE_CHUNK: usize = 2;
 
 /// How many bytes of stroked chunks a thread keeps, all thicknesses
-/// together: about 250 chunks of [`WAVE_CHUNK`] periods.
+/// together: about 450 chunks of [`WAVE_CHUNK`] periods.
 ///
 /// A bound rather than a working set, as [`FACE_LINES_KEPT`] is: a
 /// thickness can be any number, so a line whose thickness animates would
@@ -1920,36 +1988,122 @@ mod tests {
         assert_eq!(WaveChunk::kept(), (0, 0));
     }
 
-    /// A wave is as few contours as the copies of its chunk it is laid out
-    /// from: one per [`super::WAVE_CHUNK`] periods and one more, where one
-    /// per period left every pair of copies an edge run both ways to fill.
+    /// A wave is at most three contours, whatever its length: the copy cut
+    /// at its left end, the copies between joined into one, and the copy cut
+    /// at its right -- each closed by two lines, its caps or its cuts. Laid
+    /// out unjoined, as it is where the caps are not found, it is a contour a
+    /// chunk and one more.
     #[test]
-    fn a_wave_is_a_contour_a_chunk() {
+    fn a_wave_is_at_most_three_contours() {
         use skia_safe::PathVerb;
+        let count = |path: &skia_safe::Path, verb: PathVerb| {
+            path.verbs().iter().filter(|v| **v == verb).count()
+        };
         for t in [0.5, 1.2, 2.0, 8.0] {
             let period = super::WAVE_PERIOD * t;
             for periods in [0.3, 3.0, 17.0, 40.0, 100.0] {
-                let path = wave(10.0, 10.0 + periods * period, 30.0, t, 1.0)
-                    .expect("a wave");
-                let contours = path
-                    .verbs()
-                    .iter()
-                    .filter(|verb| **verb == PathVerb::Move)
-                    .count();
-                // At most half as many contours as periods for a long one,
-                // whatever the chunk is, so that a contour a period fails.
-                if periods >= 17.0 {
-                    assert!(
-                        2.0 * contours as f32 <= periods + 2.0,
-                        "{t}px, {periods} periods: {contours} contours"
-                    );
-                }
+                let right = 10.0 + periods * period;
+                let path = wave(10.0, right, 30.0, t, 1.0).expect("a wave");
+                let contours = count(&path, PathVerb::Move);
+                assert!(contours <= 3, "{t}px, {periods} periods: {contours}");
+                let lines = count(&path, PathVerb::Line);
+                assert!(
+                    lines <= 2 * contours,
+                    "{t}px, {periods} periods: {lines} lines"
+                );
+                super::forget();
+                super::NO_CAPS.set(true);
+                let unjoined = wave(10.0, right, 30.0, t, 1.0).expect("a wave");
+                super::NO_CAPS.set(false);
+                super::forget();
                 let chunks =
                     ((periods + 1.0) / super::WAVE_CHUNK as f32).ceil();
                 assert!(
-                    contours as f32 <= chunks + 1.0,
-                    "{t}px, {periods} periods: {contours} contours"
+                    count(&unjoined, PathVerb::Move) as f32 <= chunks + 1.0,
+                    "{t}px, {periods} periods, unjoined"
                 );
+            }
+        }
+    }
+
+    /// Where a copy cut at an end of the box meets the copies joined between,
+    /// the one's cap and the other's are the same line exactly, run both
+    /// ways: every line across the middle of one contour has its reverse,
+    /// bit for bit, in another. A rounding apart, the antialiasing leaves a
+    /// sliver along them, which reached 16 of 255 for chunks of four scaled
+    /// and turned.
+    #[test]
+    fn copies_meet_on_exactly_the_same_points() {
+        for t in [0.5, 1.2, 2.0, 8.0] {
+            let period = super::WAVE_PERIOD * t;
+            for (left, periods) in [(10.0, 40.0), (10.73, 17.3), (3.31, 100.0)]
+            {
+                let path = wave(left, left + periods * period, 30.0, t, 1.0)
+                    .expect("a wave");
+                let contours = super::contours(&path);
+                // The caps: lines crossing the middle at a slant, the cuts at
+                // the ends being upright -- to a bisection's rounding -- and
+                // the band's edges level.
+                let caps: Vec<(usize, Point, Point)> = contours
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(at, pieces)| {
+                        pieces.iter().filter_map(move |piece| match piece {
+                            super::Piece::Line(a, b)
+                                if (a.y - 30.0) * (b.y - 30.0) < 0.0
+                                    && (a.x - b.x).abs() > t / 100.0 =>
+                            {
+                                Some((at, *a, *b))
+                            }
+                            _ => None,
+                        })
+                    })
+                    .collect();
+                assert!(!caps.is_empty(), "{t}px, {periods} periods: caps");
+                for (at, a, b) in &caps {
+                    assert!(
+                        caps.iter().any(|(other, c, d)| other != at
+                            && c == b
+                            && d == a),
+                        "{t}px from {left}, {periods} periods: {a:?} {b:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Where the caps are not found -- as after a change to Skia's stroker
+    /// moves them -- the copies are laid out unjoined, and draw as the joined
+    /// wave does within the seam floor, on the CPU and the GPU, as drawn,
+    /// scaled and turned. Unjoined, two copies meet a rounding apart rather
+    /// than exactly, which the CPU's antialiasing shows as 1 of 255 as drawn
+    /// and up to 8 scaled and turned; the GPU draws them the same.
+    /// `a_chunk_knows_its_caps` is what says the caps have stopped being
+    /// found.
+    #[test]
+    fn a_wave_whose_caps_are_not_found_draws_as_the_joined_one() {
+        for &gpu in engines() {
+            for t in [0.5, 1.0, 2.0, 8.0] {
+                for (left, length) in [(10.0, 140.6), (10.73, t * 21.0)] {
+                    let right = left + length;
+                    super::forget();
+                    super::NO_CAPS.set(true);
+                    let unjoined = drawn_wave(left, right, 30.0, t);
+                    super::NO_CAPS.set(false);
+                    super::forget();
+                    let joined = drawn_wave(left, right, 30.0, t);
+                    for view in VIEWS {
+                        let off = worst(
+                            &filled(&unjoined, gpu, view),
+                            &filled(&joined, gpu, view),
+                        );
+                        assert!(
+                            off <= tiled_off(gpu),
+                            "gpu {gpu}, {t}px from {left} to {right}, \
+                             {view:?}: {off} off"
+                        );
+                    }
+                }
             }
         }
     }
