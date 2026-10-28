@@ -10,6 +10,8 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+mod enclosure;
+
 // One definition of the sRGB transfer function for the whole crate, in
 // `color`. A copy here would have to agree with it on every constant and on
 // how a negative component extends through zero, and nothing would check
@@ -3761,6 +3763,126 @@ fn trimmed(text: String) -> String {
     }
 }
 
+/// The powers of ten an `f64` holds exactly: `10^22` is the last whose
+/// significand fits in 53 bits.
+const EXACT_POWERS_OF_TEN: [f64; 23] = [
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13,
+    1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+];
+
+/// A number as [`significant`] writes it, held as its digits rather than
+/// its text: `-0.0123` is negative, digits `123`, places `4`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Written {
+    negative: bool,
+    /// The digits, trailing zeroes after the point removed.
+    digits: u64,
+    /// How many of the digits follow the point.
+    places: usize,
+}
+
+impl Written {
+    /// `value` to `figures` significant figures, as [`significant`] writes
+    /// it, without writing it; `None` where that cannot be shown here, and
+    /// the text has to be written.
+    ///
+    /// `significant` rounds the exact binary value of `value` to `places`
+    /// decimals, `places` from the same expression as here, never below
+    /// zero. That is the integer nearest `T = |value| * 10^places`. Here `T`
+    /// is `t`, one product rounded to within half an ulp of `t`, `|t| *
+    /// 2^-53` -- for `places` up to 22, where `10^places` is exact, and `t`
+    /// below `2^53`, where every integer is exact. The integer nearest `t`
+    /// is the integer nearest `T` unless `T` can be at the midpoint between
+    /// two integers, so a `t` within `|t| * 2^-52` of a midpoint -- twice the
+    /// rounding, to err wide -- takes the text instead. Formatting rounds a
+    /// true tie to even; none is taken here.
+    fn of(value: f64, figures: usize) -> Option<Self> {
+        if value == 0.0 || !value.is_finite() {
+            return Some(Self {
+                negative: false,
+                digits: 0,
+                places: 0,
+            });
+        }
+        let magnitude = value.abs().log10().floor() as i64;
+        let places =
+            usize::try_from((figures as i64 - 1 - magnitude).max(0)).ok()?;
+        let scale = *EXACT_POWERS_OF_TEN.get(places)?;
+        let t = value.abs() * scale;
+        if t.is_nan() || t >= (1u64 << f64::MANTISSA_DIGITS) as f64 {
+            return None;
+        }
+        let whole = t.floor();
+        let fraction = t - whole;
+        // `t * 2^-52`: twice the product's rounding.
+        if (fraction - 0.5).abs() <= t * f64::EPSILON {
+            return None;
+        }
+        let mut digits = whole as u64 + u64::from(fraction > 0.5);
+        let mut places = places;
+        while places > 0 && digits.is_multiple_of(10) {
+            digits /= 10;
+            places -= 1;
+        }
+        Some(Self {
+            // `significant` writes a negative zero as `0`.
+            negative: value < 0.0 && digits != 0,
+            digits,
+            places,
+        })
+    }
+
+    /// The length of the text [`significant`] writes.
+    fn len(self) -> usize {
+        let count = self.digits.checked_ilog10().map_or(1, |l| l as usize + 1);
+        let sign = usize::from(self.negative);
+        match self.places {
+            0 => sign + count,
+            places => sign + count.max(places + 1) + 1,
+        }
+    }
+
+    /// What that text reads as: the decimal correctly rounded, as
+    /// `str::parse` reads it. `digits` and `10^places` are both exact, so
+    /// one division rounds their quotient once, correctly -- and at most 22
+    /// places of a nonzero digit is far above the subnormal range.
+    fn read(self) -> f64 {
+        let magnitude = match self.places {
+            0 => self.digits as f64,
+            places => self.digits as f64 / EXACT_POWERS_OF_TEN[places],
+        };
+        match self.negative {
+            true => -magnitude,
+            false => magnitude,
+        }
+    }
+}
+
+/// `value` written to [`EXACT_FIGURES`] and read back, where it can be
+/// shown to be `value` itself; `None` where that is not shown.
+///
+/// Seventeen significant figures, correctly rounded, restate any `f64`, and
+/// eighteen do too. [`significant`] gives seventeen when the magnitude it
+/// takes from `log10` is right and eighteen when it is one too small; one
+/// too large would give sixteen, which may not. So it is enough that
+/// `|value| >= 10^m`: exactly, where `10^m` is exact, and with a margin of
+/// four ulps on the product `|value| * 10^-m` where it is not.
+fn read_exact(value: f64) -> Option<f64> {
+    if value == 0.0 || !value.is_finite() {
+        return Some(0.0);
+    }
+    let magnitude = value.abs().log10().floor() as i64;
+    let shown = match usize::try_from(magnitude) {
+        Ok(power) => value.abs() >= *EXACT_POWERS_OF_TEN.get(power)?,
+        Err(_) => {
+            let power = usize::try_from(-magnitude).ok()?;
+            value.abs() * EXACT_POWERS_OF_TEN.get(power)?
+                >= 1.0 + 4.0 * f64::EPSILON
+        }
+    };
+    shown.then_some(value)
+}
+
 /// A legacy sRGB colour per section 16.2, `rgb` on `0..=255`.
 ///
 /// Section 16.2.1's hex form needs the alpha at 1 and "the RGB component
@@ -3897,6 +4019,9 @@ thread_local! {
     /// Spellings [`declared_to_css`] has tested on this thread, so a test
     /// can tell a read-back that was searched for from one that was kept.
     static TRIALS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Trials [`declared_to_css`] converted in full on this thread, so a test
+    /// can tell that the enclosure refused the rest.
+    static CONVERTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// A declared colour as CSS Color 4 section 16 serialises it, with the
@@ -3940,18 +4065,22 @@ thread_local! {
 /// `a_mixed_colour_has_no_shorter_spelling` keeps a sample of them.
 ///
 /// A trial is tested on numbers, not text: [`read_back`] gives the
-/// declaration its spelling reads as, each number written and read once a
-/// search, and [`declared_color`], the function every parser stores a
-/// colour through, paints it.
+/// declaration its spelling reads as -- each number read once a search,
+/// by [`Written`] where it can show what the text says and through the
+/// text where it cannot -- and [`declared_color`], the function every
+/// parser stores a colour through, paints it. Where the channels mix, the
+/// [`enclosure`] refuses most trials first without converting them; it
+/// only refuses what provably could not repaint, so the answer is the same
+/// either way.
 pub fn declared_to_css(declared: &Declared) -> String {
     let all = [EXACT_FIGURES; 4];
     let exact = declared_css(declared, all);
     let held = declared_color(declared);
-    // Each number a trial holds, written out and read back once, with the
-    // length it is written at: a search reads the same few dozen decimals
-    // hundreds of times, and writing a number and parsing it costs more than
-    // the conversion it feeds. A memo of [`read_number`], so a trial reads
-    // exactly as [`read_back`] reads it.
+    // A number [`Written`] cannot read without its text, written out and
+    // read back once, with the length it is written at: a search reads the
+    // same few dozen decimals hundreds of times, and writing a number and
+    // parsing it costs more than the conversion it feeds. A memo of
+    // [`read_number`], so a trial reads exactly as [`read_back`] reads it.
     let memo: RefCell<HashMap<(u64, usize), (f64, usize)>> = RefCell::default();
     let written = |value: f64, length: usize| -> (f64, usize) {
         *memo
@@ -3964,11 +4093,137 @@ pub fn declared_to_css(declared: &Declared) -> String {
     };
     let read = |value: f64, length: usize| written(value, length).0;
     // Each trial is the declaration its spelling reads back as, painted by
-    // the function the setter stores through.
+    // the function the setter stores through. That function reads each
+    // number as an `f32` before it converts, so two trials whose numbers
+    // read as the same `f32`s in the same form paint the same, and each set
+    // of `f32`s is painted once: at eight figures and more, a decimal and
+    // its neighbours are often the same `f32`.
+    //
+    // A set that differs from the colour held in its alpha cannot repaint
+    // it, and in a form that mixes its channels the [`enclosure`] refuses
+    // most of the rest without converting them: see
+    // [`enclosure::Enclosure`] for why it only ever refuses what could not
+    // repaint.
+    let painted: RefCell<HashMap<[u32; 4], bool>> = RefCell::default();
+    let number = |n: Option<f64>| (n.unwrap_or(0.0) as f32).to_bits();
+    let as_painted = |d: &Declared| {
+        [
+            number(d.channels[0]),
+            number(d.channels[1]),
+            number(d.channels[2]),
+            number(d.alpha.map(|alpha| alpha.clamp(0.0, 1.0))),
+        ]
+    };
+    let held_numbers = as_painted(declared);
+    let enclosure = declared
+        .form
+        .mixes_channels()
+        .then(|| enclosure::Enclosure::of(declared, enclosure::Enclosure::NEAR))
+        .flatten();
     let repaints = |trial: &Declared, figures: Figures| {
         #[cfg(test)]
         TRIALS.with(|trials| trials.set(trials.get() + 1));
-        declared_color(&read_back_with(trial, figures, &read)) == held
+        let read = read_back_with(trial, figures, &read);
+        if read.form != declared.form {
+            return declared_color(&read) == held;
+        }
+        let key = as_painted(&read);
+        if key[ALPHA] != held_numbers[ALPHA] {
+            return false;
+        }
+        *painted.borrow_mut().entry(key).or_insert_with(|| {
+            #[cfg(test)]
+            CONVERTED.with(|converted| converted.set(converted.get() + 1));
+            declared_color(&read) == held
+        })
+    };
+
+    // A form that mixes its channels reads each number as itself, so a
+    // trial can carry its numbers already read and skip the reading: each
+    // number held is read once here, and each decimal tried once in
+    // `decimals`, by the same reader. Only the clamps are left to apply.
+    let mixed = declared.form.mixes_channels();
+    let declared_read = {
+        let mut read_once = *declared;
+        for index in 0..4 {
+            if let Some(value) = declared_number(declared, index) {
+                let exact = read_exact(value)
+                    .unwrap_or_else(|| read(value, EXACT_FIGURES));
+                set_declared_number(&mut read_once, index, exact);
+            }
+        }
+        read_once
+    };
+    // A trial whose numbers are already read.
+    let repaints_read = |trial: &Declared, figures: Figures| {
+        #[cfg(test)]
+        TRIALS.with(|trials| trials.set(trials.get() + 1));
+        let read = read_back_with(trial, figures, &|value, _| value);
+        let key = as_painted(&read);
+        if key[ALPHA] != held_numbers[ALPHA] {
+            return false;
+        }
+        let channels = [0, 1, 2].map(|i| f64::from(f32::from_bits(key[i])));
+        if enclosure.as_ref().is_some_and(|e| e.refuses(channels)) {
+            return false;
+        }
+        *painted.borrow_mut().entry(key).or_insert_with(|| {
+            #[cfg(test)]
+            CONVERTED.with(|converted| converted.set(converted.get() + 1));
+            declared_color(&read) == held
+        })
+    };
+    // The channel `index` as the conversion reads it when its number reads
+    // as `read`: clamped as [`read_back`] clamps it, then an `f32`. Each
+    // channel is clamped on its own, so the others do not matter.
+    let painted_channel = |index: usize, read: f64| -> f64 {
+        let mut trial = declared_read;
+        set_declared_number(&mut trial, index, read);
+        let clamped = read_back_with(&trial, all, &|value, _| value);
+        f64::from(clamped.channels[index].unwrap_or(0.0) as f32)
+    };
+    // A channel's share of the enclosure's prediction, where there is one.
+    let part = |index: usize, read: f64| -> Option<enclosure::Part> {
+        let e = enclosure.as_ref()?;
+        (index < ALPHA).then(|| e.part(index, painted_channel(index, read)))?
+    };
+    // Whether the enclosure refuses a candidate by its channels' shares,
+    // counted as a trial: the same question [`repaints_read`] would answer
+    // `false` to, asked without building the candidate.
+    let refused = |parts: &[Option<enclosure::Part>; 3]| -> bool {
+        let refused = match (enclosure.as_ref(), parts) {
+            (Some(e), [Some(a), Some(b), Some(c)]) => {
+                e.refuses_parts([a, b, c])
+            }
+            _ => false,
+        };
+        #[cfg(test)]
+        if refused {
+            TRIALS.with(|trials| trials.set(trials.get() + 1));
+        }
+        refused
+    };
+    // The three decimals of each number at each length: as written, as
+    // read, the length of their text, and their share of the prediction.
+    type Decimals = [(f64, f64, usize, Option<enclosure::Part>); 3];
+    let table: RefCell<[[Option<Decimals>; EXACT_FIGURES + 1]; 4]> =
+        RefCell::new([[None; EXACT_FIGURES + 1]; 4]);
+    let decimals = |index: usize, length: usize| -> Option<Decimals> {
+        let value = declared_number(declared, index)?;
+        let mut table = table.borrow_mut();
+        Some(*table[index][length].get_or_insert_with(|| {
+            neighbouring_decimals(value, length).map(|decimal| {
+                let (read, written) = Written::of(decimal, length).map_or_else(
+                    || written(decimal, length),
+                    |w| (w.read(), w.len()),
+                );
+                let share = match mixed {
+                    true => part(index, read),
+                    false => None,
+                };
+                (decimal, read, written, share)
+            })
+        }))
     };
 
     // Each number alone, the others exact: the fewest figures, and the
@@ -3978,29 +4233,52 @@ pub fn declared_to_css(declared: &Declared) -> String {
     // `oklch(from white l c h)`'s chroma of 5e-16. Not for a larger one: a
     // hue under a chroma of zero repaints at any value, and `oklch(0.5 -0.1
     // 30)` keeps the hue it was given.
+    // The share of each channel held, read at all its figures.
+    let held_parts: [Option<enclosure::Part>; 3] = [0, 1, 2].map(|index| {
+        part(index, declared_number(&declared_read, index).unwrap_or(0.0))
+    });
     let alone = |index: usize| -> Option<(f64, usize)> {
         let value = declared_number(declared, index)?;
         let mut zero = *declared;
         set_declared_number(&mut zero, index, 0.0);
         let mut one = all;
         one[index] = 1;
-        if value != 0.0
-            && value.abs() < CONVERSION_RESIDUE
-            && repaints(&zero, one)
-        {
+        let zero_repaints = || match mixed {
+            true => {
+                let mut zero_read = declared_read;
+                set_declared_number(&mut zero_read, index, 0.0);
+                repaints_read(&zero_read, one)
+            }
+            false => repaints(&zero, one),
+        };
+        if value != 0.0 && value.abs() < CONVERSION_RESIDUE && zero_repaints() {
             return Some((0.0, 1));
         }
         (1..EXACT_FIGURES).find_map(|length| {
             let mut trial_figures = all;
             trial_figures[index] = length;
-            neighbouring_decimals(value, length)
+            decimals(index, length)?
                 .into_iter()
-                .find(|&decimal| {
-                    let mut trial = *declared;
-                    set_declared_number(&mut trial, index, decimal);
-                    repaints(&trial, trial_figures)
+                .find(|&(decimal, read, _, share)| match mixed {
+                    true => {
+                        let mut parts = held_parts;
+                        if index < ALPHA {
+                            parts[index] = share;
+                            if refused(&parts) {
+                                return false;
+                            }
+                        }
+                        let mut trial = declared_read;
+                        set_declared_number(&mut trial, index, read);
+                        repaints_read(&trial, trial_figures)
+                    }
+                    false => {
+                        let mut trial = *declared;
+                        set_declared_number(&mut trial, index, decimal);
+                        repaints(&trial, trial_figures)
+                    }
                 })
-                .map(|decimal| (decimal, length))
+                .map(|(decimal, _, _, _)| (decimal, length))
         })
     };
     let lone: [Option<(f64, usize)>; 4] = [0, 1, 2, ALPHA].map(alone);
@@ -4014,8 +4292,27 @@ pub fn declared_to_css(declared: &Declared) -> String {
     }
     // Where each channel is held as written, each is its own shortest and
     // they hold together.
-    if !declared.form.mixes_channels() && repaints(&shortest, figures) {
+    if !mixed && repaints(&shortest, figures) {
         return declared_css(&shortest, figures);
+    }
+    // The shortest of each number alone, read: its decimal was read in
+    // `decimals` at its length, and zero reads as zero.
+    let mut shortest_read = declared_read;
+    for (index, found) in lone.iter().enumerate() {
+        if let Some((decimal, length)) = *found {
+            let read = match decimal == 0.0 {
+                true => 0.0,
+                false => decimals(index, length)
+                    .and_then(|options| {
+                        options.into_iter().find(|&(d, _, _, _)| d == decimal)
+                    })
+                    .map_or_else(
+                        || read(decimal, length),
+                        |(_, read, _, _)| read,
+                    ),
+            };
+            set_declared_number(&mut shortest_read, index, read);
+        }
     }
 
     // Where a conversion mixes the channels, one channel's shortest depends on
@@ -4055,38 +4352,122 @@ pub fn declared_to_css(declared: &Declared) -> String {
             |trial: &Figures| channels.iter().map(|&i| trial[i]).sum::<usize>();
         lengths.sort_by_key(total);
         let combinations = 3usize.pow(channels.len() as u32);
+        // The share of each channel that does not vary, from its shortest.
+        let fixed: [Option<enclosure::Part>; 3] = [0, 1, 2].map(|index| {
+            part(index, declared_number(&shortest_read, index).unwrap_or(0.0))
+        });
+        // The held sRGB with the fixed channels' shares added, per channel:
+        // `None` where some share is missing and nothing can be refused.
+        let base: Option<([f64; 3], [f64; 3], [f64; 3])> =
+            enclosure.as_ref().and_then(|e| {
+                let mut sum = [0.0; 3].map(|_| 0.0);
+                let mut magnitude = [0.0; 3];
+                let mut slack = [0.0; 3];
+                for k in 0..3 {
+                    sum[k] = e.held(k);
+                    magnitude[k] = sum[k].abs();
+                }
+                for (index, share) in fixed.iter().enumerate() {
+                    if channels.contains(&index) {
+                        continue;
+                    }
+                    let share = share.as_ref()?;
+                    for k in 0..3 {
+                        sum[k] += share.terms[k];
+                        magnitude[k] += share.terms[k].abs();
+                        slack[k] += share.slack[k];
+                    }
+                }
+                Some((sum, magnitude, slack))
+            });
         for level in lengths.chunk_by(|a, b| total(a) == total(b)) {
-            // Each candidate with the length its varying numbers are written
-            // at; everything else in the string is the same for all of them.
-            let mut candidates: Vec<(usize, Declared, Figures)> = vec![];
-            for &trial_figures in level {
-                let decimals: Vec<[f64; 3]> = channels
-                    .iter()
-                    .filter_map(|&index| {
-                        let value = declared_number(declared, index)?;
-                        Some(neighbouring_decimals(value, trial_figures[index]))
-                    })
-                    .collect();
+            let options: Vec<Vec<Decimals>> = level
+                .iter()
+                .map(|trial_figures| {
+                    channels
+                        .iter()
+                        .filter_map(|&index| {
+                            decimals(index, trial_figures[index])
+                        })
+                        .collect()
+                })
+                .collect();
+            // The candidates the enclosure does not refuse, each as the
+            // length its varying numbers are written at -- everything else
+            // in the string is the same for all of them -- its length
+            // vector and its combination of decimals, in the order they are
+            // enumerated.
+            let mut survivors: Vec<(usize, usize, usize)> = vec![];
+            for (vector, options) in options.iter().enumerate() {
                 for combination in 0..combinations {
-                    let mut trial = shortest;
                     let mut choice = combination;
                     let mut length = 0;
-                    for (&index, options) in channels.iter().zip(&decimals) {
-                        let decimal = options[choice % 3];
-                        set_declared_number(&mut trial, index, decimal);
-                        length += written(decimal, trial_figures[index]).1;
+                    let mut sum = base.map(|(sum, _, _)| sum);
+                    let mut magnitude = base.map(|(_, magnitude, _)| magnitude);
+                    let mut slack = base.map(|(_, _, slack)| slack);
+                    for option in options {
+                        let (_, _, written, share) = &option[choice % 3];
+                        length += written;
+                        match (
+                            share,
+                            sum.as_mut(),
+                            magnitude.as_mut(),
+                            slack.as_mut(),
+                        ) {
+                            (
+                                Some(share),
+                                Some(sum),
+                                Some(magnitude),
+                                Some(slack),
+                            ) => {
+                                for k in 0..3 {
+                                    sum[k] += share.terms[k];
+                                    magnitude[k] += share.terms[k].abs();
+                                    slack[k] += share.slack[k];
+                                }
+                            }
+                            _ => sum = None,
+                        }
                         choice /= 3;
                     }
-                    candidates.push((length, trial, trial_figures));
+                    let refused =
+                        match (enclosure.as_ref(), sum, magnitude, slack) {
+                            (
+                                Some(e),
+                                Some(sum),
+                                Some(magnitude),
+                                Some(slack),
+                            ) => (0..3).any(|k| {
+                                e.outside(k, sum[k], magnitude[k], slack[k])
+                            }),
+                            _ => false,
+                        };
+                    #[cfg(test)]
+                    if refused {
+                        TRIALS.with(|trials| trials.set(trials.get() + 1));
+                    }
+                    if !refused {
+                        survivors.push((length, vector, combination));
+                    }
                 }
             }
-            // Stable, so equal lengths keep the order they were enumerated in.
-            candidates.sort_by_key(|&(length, _, _)| length);
-            if let Some((_, trial, trial_figures)) = candidates
-                .into_iter()
-                .find(|(_, trial, figures)| repaints(trial, *figures))
-            {
-                return Some(declared_css(&trial, trial_figures));
+            // Stable, so equal lengths keep the order they were enumerated
+            // in; a refused candidate is one that would not have repainted.
+            survivors.sort_by_key(|&(length, _, _)| length);
+            for (_, vector, combination) in survivors {
+                let trial_figures = level[vector];
+                let mut trial = shortest;
+                let mut trial_read = shortest_read;
+                let mut choice = combination;
+                for (&index, option) in channels.iter().zip(&options[vector]) {
+                    let (decimal, read, _, _) = option[choice % 3];
+                    set_declared_number(&mut trial, index, decimal);
+                    set_declared_number(&mut trial_read, index, read);
+                    choice /= 3;
+                }
+                if repaints_read(&trial_read, trial_figures) {
+                    return Some(declared_css(&trial, trial_figures));
+                }
             }
         }
         None
@@ -4117,7 +4498,8 @@ const CONVERSION_RESIDUE: f64 = 1e-10;
 /// Chosen by measurement. Over the 864 relative colours of a grid of 216
 /// sRGB origins in Lab, LCH, Oklab and OkLCh, starting at one figure finds
 /// a spelling as short as a search over every length to ten figures does,
-/// at a median of about 440 trials and 3,500 at most; starting at none
+/// at a median of about 520 trials and 3,600 at most, all but a median of
+/// 25 refused by the [`enclosure`] without a conversion; starting at none
 /// writes nine of them longer, `lab(from #3399cc l a b)` among them, which
 /// `a_mixed_colour_has_no_shorter_spelling` holds.
 const LENGTH_SLACK: usize = 1;
@@ -4160,7 +4542,10 @@ fn neighbouring_decimals(value: f64, length: usize) -> [f64; 3] {
     }
     let magnitude = value.abs().log10().floor() as i32;
     let unit = 10f64.powi(magnitude - length as i32 + 1);
-    let rounded = significant(value, length).parse().unwrap_or(value);
+    let rounded = Written::of(value, length).map_or_else(
+        || significant(value, length).parse().unwrap_or(value),
+        Written::read,
+    );
     [rounded, rounded - unit, rounded + unit]
 }
 
@@ -5798,6 +6183,118 @@ mod tests {
             compared += 1;
         }
         assert!(compared > 1800, "{compared} compared");
+    }
+
+    #[test]
+    fn a_number_written_without_text_is_what_the_text_says() {
+        // `Written` against `significant` and `str::parse`, wherever it
+        // answers, on values of every scale a colour channel takes, near
+        // ties and near powers of ten.
+        let text = |w: Written| {
+            let digits = w.digits.to_string();
+            let body = match w.places {
+                0 => digits,
+                places => {
+                    let padded =
+                        format!("{digits:0>width$}", width = places + 1);
+                    let (whole, fraction) =
+                        padded.split_at(padded.len() - places);
+                    format!("{whole}.{fraction}")
+                }
+            };
+            match w.negative {
+                true => format!("-{body}"),
+                false => body,
+            }
+        };
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let (mut answered, mut declined) = (0, 0);
+        for _ in 0..200_000 {
+            let r = next();
+            let scale = 10f64.powi((r % 13) as i32 - 6);
+            let base = (next() % 1_000_000_007) as f64 / 1_000_000_007.0;
+            let value = match r % 5 {
+                // A tie at some length, give or take an ulp.
+                0 => {
+                    let tie = ((next() % 20_000) as f64 + 0.5)
+                        / 10f64.powi((r % 6) as i32);
+                    let ulps = (next() % 5) as i64 - 2;
+                    f64::from_bits((tie.to_bits() as i64 + ulps) as u64)
+                }
+                // Just under a power of ten.
+                1 => f64::from_bits(scale.to_bits() - (next() % 4)),
+                // An `f32`, as a channel is held.
+                2 => f64::from(((base - 0.5) * 2.0 * scale) as f32),
+                _ => (base - 0.5) * 2.0 * scale,
+            };
+            for figures in 1..=EXACT_FIGURES {
+                let Some(w) = Written::of(value, figures) else {
+                    declined += 1;
+                    continue;
+                };
+                answered += 1;
+                let expected = significant(value, figures);
+                assert_eq!(text(w), expected, "{value:e} at {figures}");
+                assert_eq!(w.len(), expected.len(), "{value:e} at {figures}");
+                let parsed: f64 = expected.parse().expect("a number");
+                assert_eq!(
+                    w.read().to_bits(),
+                    parsed.to_bits(),
+                    "{value:e} at {figures}"
+                );
+            }
+            if let Some(exact) = read_exact(value) {
+                let parsed: f64 = significant(value, EXACT_FIGURES)
+                    .parse()
+                    .expect("a number");
+                assert_eq!(
+                    exact.to_bits(),
+                    parsed.to_bits(),
+                    "{value:e} exact"
+                );
+            }
+        }
+        assert!(
+            answered > declined * 4,
+            "{answered} answered, {declined} declined"
+        );
+    }
+
+    #[test]
+    fn most_spellings_are_refused_without_converting_them() {
+        // The enclosure refuses most candidates of a mixed colour; this
+        // fails if it stops refusing -- a knee it gave up at, a bound gone
+        // infinite -- since the search would still answer, only slower.
+        let count = || {
+            (
+                TRIALS.with(std::cell::Cell::get),
+                CONVERTED.with(std::cell::Cell::get),
+            )
+        };
+        for css in [
+            "lab(from #3399cc l a b)",
+            "lch(from #000033 l c h)",
+            "oklab(from #cc6699 l a b)",
+            "oklch(from #669999 l c h)",
+        ] {
+            let (_, _, declared) = css_to_declared(css).expect("a colour");
+            let (trials, converted) = count();
+            let _ = declared_to_css(&declared);
+            let (trials, converted) = (
+                TRIALS.with(std::cell::Cell::get) - trials,
+                CONVERTED.with(std::cell::Cell::get) - converted,
+            );
+            assert!(
+                converted * 4 < trials,
+                "{css}: {converted} of {trials} trials converted"
+            );
+        }
     }
 
     #[test]

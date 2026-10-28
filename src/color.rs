@@ -157,19 +157,19 @@ pub(crate) fn skia_color_to_rgba_linear(color: SkColor) -> RgbaLinear {
 // constant, which gives the `f32` literal it always used.
 
 /// Breakpoint on the linear-light side.
-const SRGB_LINEAR_THRESHOLD: f64 = 0.003_130_8;
+pub(crate) const SRGB_LINEAR_THRESHOLD: f64 = 0.003_130_8;
 /// Breakpoint on the gamma-encoded side. The same point as
 /// [`SRGB_LINEAR_THRESHOLD`], through the curve.
 const SRGB_ENCODED_THRESHOLD: f64 = 0.040_45;
 /// Slope of the linear segment near black, which exists so the curve has a
 /// finite derivative at zero.
-const SRGB_SLOPE: f64 = 12.92;
+pub(crate) const SRGB_SLOPE: f64 = 12.92;
 /// Scale and offset of the power segment, chosen so the two segments meet
 /// with matching value and slope at the breakpoint.
-const SRGB_SCALE: f64 = 1.055;
-const SRGB_OFFSET: f64 = 0.055;
+pub(crate) const SRGB_SCALE: f64 = 1.055;
+pub(crate) const SRGB_OFFSET: f64 = 0.055;
 /// Exponent of the power segment.
-const SRGB_EXPONENT: f64 = 2.4;
+pub(crate) const SRGB_EXPONENT: f64 = 2.4;
 
 /// Applies `curve` to the magnitude and puts the sign back.
 ///
