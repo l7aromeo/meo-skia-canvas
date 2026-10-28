@@ -21,6 +21,17 @@ removed and no signature moves.
 
 ### Breaking
 
+- **`FontLibrary.has()` and `FontLibrary.family()` match a family name as a
+  font does.** Both compared the name exactly, while drawing matched it in
+  any case: after `FontLibrary.use("OswaldX", ...)`, `ctx.font = "16px
+oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
+  `undefined`. Both now match by the Unicode case folding a font's family
+  list uses, so `has("STRASSE")` is `true` for a family registered as
+  `"Straße"`, and `family()` reports the family under the name it was
+  registered by or the system lists it under, not the name it was asked for.
+  A name nothing registered or listed is still asked of the platform as it
+  is, so a fontconfig alias such as Helvetica still reports its faces.
+
 - **`textGamma: 4`, and a text contrast or gamma that is NaN or infinite,
   are refused.** Skia takes a text gamma from 0 up to, not including, 4. A
   gamma of exactly 4 was quietly made a hair smaller and taken, and NaN or

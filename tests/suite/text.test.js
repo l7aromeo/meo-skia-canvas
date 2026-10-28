@@ -1334,6 +1334,22 @@ describe("a family name matches by its full case folding", () => {
       assert.equal(painted(family), face, family);
   });
 
+  test("FontLibrary.has and FontLibrary.family match the same way", () => {
+    for (const asked of [FAMILY, "STRASSE ΣΊΣΥΦΟΣ IRIS CAFÉ"]) {
+      assert.equal(FontLibrary.has(asked), true, asked);
+      // Reported under the name it was registered by, whatever it was
+      // asked for by.
+      assert.equal(FontLibrary.family(asked)?.family, FAMILY, asked);
+    }
+    for (const asked of [
+      "Straße Σίσυφος ırıs Café",
+      "Strase Σίσυφος Iris Café",
+    ]) {
+      assert.equal(FontLibrary.has(asked), false, asked);
+      assert.equal(FontLibrary.family(asked), undefined, asked);
+    }
+  });
+
   test("asked for in another case before it is registered", () => {
     // A spelling resolved while nothing answered it must not be kept as a
     // miss once a registration under another case does.

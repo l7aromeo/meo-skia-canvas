@@ -25,6 +25,17 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Breaking
 
+- **`FontLibrary::has_font` and `FontLibrary::family_details` match a family
+  name as a font does.** `has_font` compared the alias exactly and
+  `family_details` asked Skia, which matches a registered alias exactly,
+  while drawing matched it in any case: registered as `"OswaldX"`,
+  `has_font("oswaldx")` was `false` and `family_details("oswaldx")` `None`.
+  Both now match by the Unicode case folding a font's family list uses, so
+  `has_font("STRASSE")` finds a family registered as `"Straße"`, and
+  `FontFamilyDetails::family` is the family as it was registered or as the
+  system lists it, not the name it was asked for. A name nothing registered
+  or listed is still asked of the platform as it is.
+
 - **`Canvas::with_options` refuses a text contrast or gamma outside Skia's
   range.** `CanvasOptions::text_contrast` and `text_gamma` were handed to
   Skia as they came, whatever they were. A contrast outside 0 to 1, a gamma

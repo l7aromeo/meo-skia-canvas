@@ -987,10 +987,13 @@ impl FontLibrary {
         self.register_font_from_data(family, &bytes)
     }
 
-    /// Whether a family alias has at least one registered typeface.
+    /// Whether a family alias has at least one registered typeface, the
+    /// name matched as CSS Fonts 4 section 5.1 matches family names: by
+    /// Unicode's full case folding, so `has_font("STRASSE")` finds a family
+    /// registered as `"Straße"`.
     pub fn has_font(&self, family: &str) -> bool {
         let inner = self.inner.lock();
-        inner.families.iter().any(|f| f == family)
+        inner.families.iter().any(|f| caseless::eq(f, family))
     }
 
     /// All registered family aliases in registration order.
@@ -1014,20 +1017,29 @@ impl FontLibrary {
 
     /// What `family` offers, or `None` when nothing resolves under that name.
     ///
+    /// The name is matched as a font's family list matches it, by Unicode's
+    /// full case folding, and the details carry the family as it was
+    /// registered or as the system lists it: asked for `"oswaldx"`, a family
+    /// registered as `"OswaldX"` reports `"OswaldX"`.
+    ///
     /// The counterpart of the JavaScript `FontLibrary.family()`. Use it to ask
     /// whether a family has the face a draw needs before asking for it:
     /// [`Context2D::set_font_stretch`](crate::context2d::Context2D::set_font_stretch)
     /// picks a narrower face only where the family ships one, and there is
     /// otherwise no way to find out except by measuring.
     pub fn family_details(&self, family: &str) -> Option<FontFamilyDetails> {
-        let (weights, widths, styles) =
+        let (family, (weights, widths, styles)) =
             SharedFontRegistry::with_shared(|library| {
-                library.family_details(family)
+                let family = library
+                    .spelling(family)
+                    .unwrap_or_else(|| family.to_string());
+                let details = library.family_details(&family);
+                (family, details)
             });
         match weights.is_empty() {
             true => None,
             false => Some(FontFamilyDetails {
-                family: family.to_string(),
+                family,
                 weights,
                 widths,
                 styles,

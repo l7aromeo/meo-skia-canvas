@@ -194,6 +194,25 @@ fn a_registered_family_is_matched_by_its_full_case_folding() {
 }
 
 #[test]
+fn has_font_and_family_details_match_by_the_same_folding() {
+    let library = FontLibrary::new();
+    library
+        .use_paths(Some("Straße Detail Σ"), [RALEWAY])
+        .expect("registers");
+    for asked in ["Straße Detail Σ", "STRASSE DETAIL σ", "strasse detail ς"]
+    {
+        assert!(library.has_font(asked), "{asked}");
+        let details = library.family_details(asked).expect(asked);
+        // Reported under the name it was registered by.
+        assert_eq!(details.family, "Straße Detail Σ", "{asked}");
+    }
+    for asked in ["Strase Detail Σ", "Straße Detaıl Σ"] {
+        assert!(!library.has_font(asked), "{asked}");
+        assert!(library.family_details(asked).is_none(), "{asked}");
+    }
+}
+
+#[test]
 fn a_failure_registers_nothing() {
     let library = FontLibrary::new();
     let result = library.use_paths(
