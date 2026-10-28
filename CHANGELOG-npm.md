@@ -1186,6 +1186,23 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Added
 
+- **`color-mix()`, CSS Color 5's mix of colours**, anywhere a colour string
+  goes: `fillStyle`, `strokeStyle`, `shadowColor`, `addColorStop`,
+  `Image.currentColor` and the rest. `color-mix(in oklch, red, blue)` mixes
+  in OkLCh along the shorter hue arc; `in srgb`, `in lab`, `in display-p3`
+  and the other CSS Color 4 spaces work the same way, a polar space takes
+  `shorter`, `longer`, `increasing` or `decreasing hue`, and with no
+  method the mix is in Oklab. Percentages weight the colours and are
+  normalised as CSS defines: `color-mix(in srgb, red 30%, blue 30%)` is the
+  50/50 mix at an alpha of 0.6. A `none` channel takes the other colour's,
+  and a colour converted into a polar space with no chroma takes the other
+  colour's hue. The getters read a mix back in the space it was mixed in --
+  `color(srgb 0.5 0 0.5)`, `oklch(0.5399845 0.28544885 326.64295)` -- and
+  HSL and HWB mixes as `color(srgb ...)`. One colour, or three or more, mix
+  as the draft's grammar allows, where Chrome 156 takes exactly two; and
+  figures that Chrome rounds away from CSS Color 4's sample code are that
+  code's here. docs/browser-differences.md has both.
+
 - **`ctx.fontKerning` and `ctx.textRendering`, the Canvas standard's two
   remaining text attributes.** Setting either was a plain property that did
   nothing. `fontKerning` takes `"auto"`, `"normal"` or `"none"`, and

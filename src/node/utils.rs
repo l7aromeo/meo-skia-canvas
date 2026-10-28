@@ -21,6 +21,7 @@ use crate::{
         DEGREES_PER_TURN, Dimension, Expect, FontUnits, Percent, Quantity,
         evaluate, is_math, literal, without_comments,
     },
+    shader::HueMethod,
 };
 
 //
@@ -1234,9 +1235,30 @@ const D65_TO_D50: Matrix3 = [
     ],
 ];
 
-/// `m` times `v`.
+/// How many units in the last place of its largest term a row of
+/// [`apply_matrix`] may be off by, its input included.
+///
+/// A three-term dot product rounds at most three times, so its result is
+/// within `3 * f64::EPSILON / 2` of the sum of its terms' magnitudes; an
+/// input that came out of another product carries as much again. Eight is
+/// that and a margin. A result inside the bound cannot be told from zero,
+/// and where a space's primary is shared -- sRGB's red is A98 RGB's red --
+/// the true value is zero: left as it is, A98's pure-power encode turns a
+/// residue of 1e-17 into a green of -3e-8.
+const MATRIX_ROUNDING: f64 = 8.0 * f64::EPSILON;
+
+/// `m` times `v`, a row whose result is within its own rounding of zero
+/// taken as zero: see [`MATRIX_ROUNDING`].
 fn apply_matrix(m: Matrix3, v: [f64; 3]) -> [f64; 3] {
-    m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
+    m.map(|row| {
+        let terms = [row[0] * v[0], row[1] * v[1], row[2] * v[2]];
+        let sum = terms[0] + terms[1] + terms[2];
+        let magnitude: f64 = terms.iter().map(|term| term.abs()).sum();
+        match sum.abs() <= magnitude * MATRIX_ROUNDING {
+            true => 0.0,
+            false => sum,
+        }
+    })
 }
 
 /// A98 RGB's exponent, which Adobe RGB (1998) specifies as 2 51/256.
@@ -2282,6 +2304,7 @@ fn read_color_function(
         "oklch" => Relative::Oklch,
         // The space is read with the channels, below.
         "color" => Relative::Color(""),
+        "color-mix" => return Some(mixed_color(args)),
         _ => return None,
     };
     let relative = top_level_spans(args)
@@ -2459,6 +2482,480 @@ fn relative_channels(
     );
     let (color, space) = declared_color(&declared);
     Some((color, space, declared))
+}
+
+/// A space `color-mix()` mixes in, CSS Color 4 section 13.2's
+/// `<color-space>`, named by the function its result is written in.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum MixSpace {
+    /// A `color()` space, by the name section 16.5 writes it under.
+    Color(&'static str),
+    Lab,
+    Lch,
+    Oklab,
+    Oklch,
+    Hsl,
+    Hwb,
+}
+
+/// The analogous component a channel is, by CSS Color 4 section 13.3's
+/// table, for carrying a missing one from a colour's own space into the one
+/// it is mixed in. HWB's whiteness and blackness have none.
+#[derive(Clone, Copy, PartialEq)]
+enum Analogue {
+    Red,
+    Green,
+    Blue,
+    Lightness,
+    Colourfulness,
+    Hue,
+    OpponentA,
+    OpponentB,
+    Unmatched,
+}
+
+impl MixSpace {
+    /// The space `token` names, in any case, or `None`.
+    fn named(token: &str) -> Option<Self> {
+        Some(match token.to_ascii_lowercase().as_str() {
+            "lab" => Self::Lab,
+            "lch" => Self::Lch,
+            "oklab" => Self::Oklab,
+            "oklch" => Self::Oklch,
+            "hsl" => Self::Hsl,
+            "hwb" => Self::Hwb,
+            other => Self::Color(canonical_space(color_space(other)?)),
+        })
+    }
+
+    /// Where the hue is in a polar space's channels; `None` for a
+    /// rectangular one.
+    fn hue(self) -> Option<usize> {
+        match self {
+            Self::Lch | Self::Oklch => Some(2),
+            Self::Hsl | Self::Hwb => Some(0),
+            _ => None,
+        }
+    }
+
+    /// What each channel is analogous to. Section 13.3 counts the XYZ
+    /// spaces as super-saturated RGB, so `x` is a red.
+    fn analogues(self) -> [Analogue; 3] {
+        use Analogue::*;
+        match self {
+            Self::Color(_) => [Red, Green, Blue],
+            Self::Lab | Self::Oklab => [Lightness, OpponentA, OpponentB],
+            Self::Lch | Self::Oklch => [Lightness, Colourfulness, Hue],
+            Self::Hsl => [Hue, Colourfulness, Lightness],
+            Self::Hwb => [Hue, Unmatched, Unmatched],
+        }
+    }
+
+    /// The space a declaration is written in, and its channels there, a
+    /// legacy colour's as `color(srgb ...)`'s.
+    fn of(declared: &Declared) -> (Self, [Option<f64>; 3]) {
+        let channels = declared.channels;
+        match declared.form {
+            Form::Legacy => (
+                Self::Color("srgb"),
+                channels.map(|c| c.map(|c| c / RGB_CHANNEL_SCALE)),
+            ),
+            Form::Lab => (Self::Lab, channels),
+            Form::Lch => (Self::Lch, channels),
+            Form::Oklab => (Self::Oklab, channels),
+            Form::Oklch => (Self::Oklch, channels),
+            Form::Color(space) => {
+                (Self::Color(canonical_space(space)), channels)
+            }
+        }
+    }
+
+    /// Channels in this space as extended sRGB, in `f64`.
+    fn to_srgb(self, [x, y, z]: [f64; 3]) -> [f64; 3] {
+        match self {
+            Self::Color(space) => color_function_to_srgb_f64(space, [x, y, z]),
+            Self::Lab => lab_to_srgb([x, y, z]),
+            Self::Lch => lab_to_srgb(from_polar([x, y, z])),
+            Self::Oklab => oklab_to_srgb([x, y, z]),
+            Self::Oklch => oklab_to_srgb(from_polar([x, y, z])),
+            Self::Hsl => hsl_to_srgb(
+                x,
+                y / PERCENT_CHANNEL_SCALE,
+                z / PERCENT_CHANNEL_SCALE,
+            ),
+            Self::Hwb => hwb_to_srgb(
+                x,
+                y / PERCENT_CHANNEL_SCALE,
+                z / PERCENT_CHANNEL_SCALE,
+            ),
+        }
+    }
+
+    /// Extended sRGB as this space's channels, a hue missing where it is
+    /// powerless, as CSS Color 4 section 4.4.1 has a converted colour's:
+    /// at a chroma within the space's threshold, an HSL saturation of zero,
+    /// or HWB whiteness and blackness that reach 100% together.
+    fn channels_of(self, srgb: [f64; 3]) -> [Option<f64>; 3] {
+        let polar = |[l, c, h]: [f64; 3], powerless: f64| {
+            [Some(l), Some(c), (c > powerless).then_some(h)]
+        };
+        match self {
+            Self::Color(space) => srgb_to_color_function(srgb, space)
+                .unwrap_or(srgb)
+                .map(Some),
+            Self::Lab => srgb_to_lab(srgb).map(Some),
+            Self::Oklab => srgb_to_oklab(srgb).map(Some),
+            Self::Lch => polar(
+                to_polar(srgb_to_lab(srgb), LCH_POWERLESS_CHROMA),
+                LCH_POWERLESS_CHROMA,
+            ),
+            Self::Oklch => polar(
+                to_polar(srgb_to_oklab(srgb), OKLCH_POWERLESS_CHROMA),
+                OKLCH_POWERLESS_CHROMA,
+            ),
+            Self::Hsl => {
+                let [h, s, l] = srgb_to_hsl(srgb);
+                [
+                    (s != 0.0).then_some(h),
+                    Some(s * PERCENT_CHANNEL_SCALE),
+                    Some(l * PERCENT_CHANNEL_SCALE),
+                ]
+            }
+            Self::Hwb => {
+                let [r, g, b] = srgb;
+                let (white, black) = (r.min(g).min(b), 1.0 - r.max(g).max(b));
+                [
+                    (white + black < 1.0).then_some(srgb_hue(srgb)),
+                    Some(white * PERCENT_CHANNEL_SCALE),
+                    Some(black * PERCENT_CHANNEL_SCALE),
+                ]
+            }
+        }
+    }
+
+    /// The declaration a colour mixed in this space is written as: its own
+    /// function, and `color(srgb ...)` for HSL and HWB, as CSS Color 5's
+    /// examples and Chrome 156 write them -- a legacy function has no
+    /// `none` and no room for a colour outside sRGB.
+    fn declared(
+        self,
+        channels: [Option<f64>; 3],
+        alpha: Option<f64>,
+    ) -> Declared {
+        let (form, channels) = match self {
+            Self::Color(space) => (Form::Color(space), channels),
+            Self::Lab => (Form::Lab, channels),
+            Self::Lch => (Form::Lch, channels),
+            Self::Oklab => (Form::Oklab, channels),
+            Self::Oklch => (Form::Oklch, channels),
+            Self::Hsl | Self::Hwb => (
+                Form::Color("srgb"),
+                self.to_srgb(channels.map(|c| c.unwrap_or(0.0))).map(Some),
+            ),
+        };
+        Declared {
+            form,
+            channels,
+            alpha,
+        }
+    }
+}
+
+/// One colour of a mix, in the space it is mixed in: `None` where a channel
+/// or the alpha is missing.
+#[derive(Clone, Copy)]
+struct Mixable {
+    channels: [Option<f64>; 3],
+    alpha: Option<f64>,
+}
+
+/// An absolute `hsl()` or `hwb()` as its own channels, `none` kept, rather
+/// than the sRGB its declaration holds: mixed in its own space, a hue it
+/// was given survives where its saturation is zero, as Chrome 156 keeps
+/// `hsl(120 0% 50%)`'s. `None` for anything else, and for a relative one,
+/// which computes to `color(srgb ...)`.
+fn hsl_or_hwb_channels(text: &str) -> Option<(MixSpace, [Option<f64>; 3])> {
+    let (name, args) = text.trim_ascii().split_once('(')?;
+    let (space, function) = match name.to_ascii_lowercase().as_str() {
+        "hsl" | "hsla" => (MixSpace::Hsl, Relative::Hsl),
+        "hwb" => (MixSpace::Hwb, Relative::Hwb),
+        _ => return None,
+    };
+    let body = args.trim_ascii_end().strip_suffix(')')?.trim_ascii();
+    let relative = top_level_spans(body)
+        .first()
+        .is_some_and(|&(from, to)| body[from..to].eq_ignore_ascii_case("from"));
+    if relative {
+        return None;
+    }
+    let commas = top_level_commas(body);
+    let (tokens, legacy) = match commas[..] {
+        [a, b, c] | [a, b, c, _] => ([a, b, c], true),
+        _ => (channels_and_alpha(body)?.0, false),
+    };
+    let [c0, c1, c2] = function.channels();
+    let values = [
+        read_channel(tokens[0], c0, &[])?,
+        read_channel(tokens[1], c1, &[])?,
+        read_channel(tokens[2], c2, &[])?,
+    ];
+    let [h, x, y] = function.parsed(values);
+    // Legacy `hsl()` holds saturation and lightness to `0%..=100%`.
+    let [x, y] = match legacy {
+        true => [x, y].map(|c| c.min(PERCENT_CHANNEL_SCALE)),
+        false => [x, y],
+    };
+    let kept = [h, x, y];
+    Some((
+        space,
+        [0, 1, 2].map(|i| (!is_none(tokens[i])).then_some(kept[i])),
+    ))
+}
+
+/// `text` split at its top-level commas, each part trimmed.
+fn top_level_commas(text: &str) -> Vec<&str> {
+    let mut depth = 0usize;
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for (at, c) in text.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(text[start..at].trim_ascii());
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(text[start..].trim_ascii());
+    parts
+}
+
+/// The colour `text` names, in `space`: converted from its own space with
+/// its missing components carried forward to their analogues, by CSS
+/// Color 4 section 13.3 -- and, where every one of the components that has
+/// no analogue there is missing, all of the space's own that have none.
+fn mixable(text: &str, space: MixSpace) -> Option<Mixable> {
+    let (_, _, declared) = css_to_declared(text)?;
+    let (own, channels) =
+        hsl_or_hwb_channels(text).unwrap_or_else(|| MixSpace::of(&declared));
+    let alpha = declared.alpha;
+    if own == space {
+        return Some(Mixable { channels, alpha });
+    }
+    let srgb = own.to_srgb(channels.map(|c| c.unwrap_or(0.0)));
+    let mut converted = space.channels_of(srgb);
+    let (from, to) = (own.analogues(), space.analogues());
+    for (index, analogue) in from.iter().enumerate() {
+        if channels[index].is_none() && *analogue != Analogue::Unmatched {
+            for (target, &other) in to.iter().enumerate() {
+                if other == *analogue {
+                    converted[target] = None;
+                }
+            }
+        }
+    }
+    let unmatched = |of: &[Analogue; 3], other: &[Analogue; 3]| {
+        (0..3)
+            .filter(|&i| {
+                of[i] == Analogue::Unmatched || !other.contains(&of[i])
+            })
+            .collect::<Vec<_>>()
+    };
+    let (rest_from, rest_to) = (unmatched(&from, &to), unmatched(&to, &from));
+    if !rest_from.is_empty() && rest_from.iter().all(|&i| channels[i].is_none())
+    {
+        for target in rest_to {
+            converted[target] = None;
+        }
+    }
+    Some(Mixable {
+        channels: converted,
+        alpha,
+    })
+}
+
+/// Two hues made ready to interpolate by `method`, CSS Color 4 section
+/// 13.5: each within a turn, and one of them moved a turn so that the arc
+/// between them is the one `method` asks for.
+fn hue_pair(a: f64, b: f64, method: HueMethod) -> (f64, f64) {
+    let (a, b) = (
+        a.rem_euclid(DEGREES_PER_TURN),
+        b.rem_euclid(DEGREES_PER_TURN),
+    );
+    let half = DEGREES_PER_TURN / 2.0;
+    let difference = b - a;
+    match method {
+        HueMethod::Shorter if difference > half => (a + DEGREES_PER_TURN, b),
+        HueMethod::Shorter if difference < -half => (a, b + DEGREES_PER_TURN),
+        HueMethod::Longer if 0.0 < difference && difference < half => {
+            (a + DEGREES_PER_TURN, b)
+        }
+        HueMethod::Longer if -half < difference && difference <= 0.0 => {
+            (a, b + DEGREES_PER_TURN)
+        }
+        HueMethod::Increasing if b < a => (a, b + DEGREES_PER_TURN),
+        HueMethod::Decreasing if a < b => (a + DEGREES_PER_TURN, b),
+        _ => (a, b),
+    }
+}
+
+/// `a` and `b` mixed `progress` of the way from `a` to `b`, by CSS Color 4
+/// section 13: a channel missing in one takes the other's, one missing in
+/// both stays missing (13.3); the alpha is premultiplied into every channel
+/// but the hue, and divided out again unless the mixed alpha is zero
+/// (13.4).
+fn mix_pair(
+    a: Mixable,
+    b: Mixable,
+    progress: f64,
+    space: MixSpace,
+    method: HueMethod,
+) -> Mixable {
+    let filled = |x: Option<f64>, y: Option<f64>| (x.or(y), y.or(x));
+    let (alpha_a, alpha_b) = filled(a.alpha, b.alpha);
+    let (weight_a, weight_b) = (alpha_a.unwrap_or(1.0), alpha_b.unwrap_or(1.0));
+    let alpha = weight_a + (weight_b - weight_a) * progress;
+    let channels = [0, 1, 2].map(|index| {
+        let (Some(x), Some(y)) = filled(a.channels[index], b.channels[index])
+        else {
+            return None;
+        };
+        Some(match space.hue() == Some(index) {
+            true => {
+                let (x, y) = hue_pair(x, y, method);
+                (x + (y - x) * progress).rem_euclid(DEGREES_PER_TURN)
+            }
+            false => {
+                let (x, y) = (x * weight_a, y * weight_b);
+                let mixed = x + (y - x) * progress;
+                match alpha == 0.0 {
+                    true => mixed,
+                    false => mixed / alpha,
+                }
+            }
+        })
+    });
+    Mixable {
+        channels,
+        alpha: alpha_a.is_some().then_some(alpha),
+    }
+}
+
+/// A percentage in a `color-mix()` item, as a fraction: a `<percentage>`,
+/// math included, within `0%..=100%`.
+fn mix_percentage(text: &str) -> Option<f64> {
+    let quantity = channel_quantity(text, &[])?;
+    let fraction = match quantity.dimension {
+        Dimension::PERCENT => quantity.finished(),
+        _ => return None,
+    };
+    (0.0..=1.0).contains(&fraction).then_some(fraction)
+}
+
+/// The colour `color-mix()` names, given what follows its `(`, by CSS Color
+/// 5 section 3.3: the interpolation method, Oklab where none is given, then
+/// one or more colours, each with an optional percentage before or after it.
+///
+/// The percentages are normalised as CSS Values 5 section 6.1 has a mix
+/// normalise them, with the "forced normalization" flag set: omitted ones
+/// share what the given ones leave, a sum over 100% is scaled down, and a
+/// sum under it scales the result's alpha instead -- `color-mix(in srgb, red
+/// 30%, blue 30%)` is the 50/50 mix at 0.6. The colours are mixed in order,
+/// each pair weighted by its share, the result standing in for both.
+///
+/// Chrome 156 takes exactly two colours. The draft takes one or more, and
+/// so does this; docs/browser-differences.md has the difference.
+fn mixed_color(args: &str) -> Option<(Color4f, &'static str, Declared)> {
+    let body = args.trim_ascii_end().strip_suffix(')')?;
+    let mut parts = top_level_commas(body);
+    let first = parts.first()?;
+    let spans = top_level_spans(first);
+    let (space, method) = match word_at(first, &spans, 0) {
+        Some(word) if word.eq_ignore_ascii_case("in") => {
+            let space = MixSpace::named(word_at(first, &spans, 1)?)?;
+            let method = match spans.len() {
+                2 => HueMethod::Shorter,
+                4 if space.hue().is_some()
+                    && word_at(first, &spans, 3)?
+                        .eq_ignore_ascii_case("hue") =>
+                {
+                    match word_at(first, &spans, 2)?
+                        .to_ascii_lowercase()
+                        .as_str()
+                    {
+                        "shorter" => HueMethod::Shorter,
+                        "longer" => HueMethod::Longer,
+                        "increasing" => HueMethod::Increasing,
+                        "decreasing" => HueMethod::Decreasing,
+                        _ => return None,
+                    }
+                }
+                _ => return None,
+            };
+            parts.remove(0);
+            (space, method)
+        }
+        _ => (MixSpace::Oklab, HueMethod::Shorter),
+    };
+    if parts.is_empty() {
+        return None;
+    }
+    let mut items = Vec::with_capacity(parts.len());
+    for part in parts {
+        let spans = top_level_spans(part);
+        let token = |at: usize| word_at(part, &spans, at);
+        let (colour, percentage) = match spans.len() {
+            1 => (token(0)?, None),
+            2 => match (channel_quantity(token(0)?, &[]), token(1)?) {
+                (Some(_), colour) => (colour, Some(mix_percentage(token(0)?)?)),
+                (None, other) => (token(0)?, Some(mix_percentage(other)?)),
+            },
+            _ => return None,
+        };
+        items.push((mixable(colour, space)?, percentage));
+    }
+
+    let given: f64 = items.iter().filter_map(|(_, p)| *p).sum();
+    let omitted = items.iter().filter(|(_, p)| p.is_none()).count();
+    let share = (1.0 - given.min(1.0)) / omitted.max(1) as f64;
+    let mut weighted: Vec<(Mixable, f64)> = items
+        .into_iter()
+        .map(|(colour, p)| (colour, p.unwrap_or(share)))
+        .collect();
+    let total: f64 = weighted.iter().map(|(_, p)| p).sum();
+    if total > 0.0 {
+        for (_, p) in &mut weighted {
+            *p /= total;
+        }
+    }
+    let leftover = (1.0 - total).max(0.0);
+
+    let mut stack = weighted.into_iter();
+    let (mut mixed, mut weight) = stack.next()?;
+    for (next, next_weight) in stack {
+        let combined = weight + next_weight;
+        let progress = match combined > 0.0 {
+            true => next_weight / combined,
+            false => 0.5,
+        };
+        mixed = mix_pair(mixed, next, progress, space, method);
+        weight = combined;
+    }
+    let alpha = mixed.alpha.map(|alpha| alpha * (1.0 - leftover));
+    let declared = space.declared(mixed.channels, alpha);
+    let (color, space) = declared_color(&declared);
+    Some((color, space, declared))
+}
+
+/// The text of `spans[at]` in `text`, or `None` past the end.
+fn word_at<'a>(
+    text: &'a str,
+    spans: &[(usize, usize)],
+    at: usize,
+) -> Option<&'a str> {
+    spans.get(at).map(|&(from, to)| &text[from..to])
 }
 
 /// The colour an absolute colour function names, given what follows the
@@ -5371,6 +5868,163 @@ mod tests {
         let again = Declaration::new(*held.declared());
         assert_eq!(again.css(), first);
         assert!(trials() > searched, "a new declaration searches");
+    }
+
+    #[test]
+    fn every_mix_row_reads_back_as_the_table_says() {
+        let table: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/assets/cases/css-color-mix.json"
+        ))
+        .expect("the case file parses");
+        let cases = table["cases"].as_array().expect("a list of cases");
+        assert!(cases.len() >= 90, "{} rows", cases.len());
+        let held = |css: &str| {
+            css_to_declared(css)
+                .map(|(color, space, declared)| ((color, space), declared))
+        };
+        for case in cases {
+            let css = case["css"].as_str().expect("a string");
+            let Some(expected) = case["expected"].as_str() else {
+                assert!(css_to_declared(css).is_none(), "{css} is read");
+                continue;
+            };
+            let (painted, declared) = held(css).expect(css);
+            assert_eq!(declared_to_css(&declared), expected, "{css}");
+            let (again, _) = held(expected).expect(expected);
+            assert_eq!(again, painted, "{expected} repaints {css}");
+        }
+    }
+
+    /// sRGB colours in Lab and Oklab by CSS Color 4's sample code, written
+    /// out here rather than shared with the code under test: `lin_sRGB`,
+    /// `lin_sRGB_to_XYZ`, then `D65_to_D50` and `XYZ_to_Lab`, or
+    /// `XYZ_to_OKLab`.
+    fn lab_and_oklab_by_the_sample_code(rgb: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+        let apply = |m: [[f64; 3]; 3], v: [f64; 3]| {
+            m.map(|r| r[0] * v[0] + r[1] * v[1] + r[2] * v[2])
+        };
+        let linear = rgb.map(|c: f64| match c.abs() <= 0.04045 {
+            true => c / 12.92,
+            false => ((c.abs() + 0.055) / 1.055).powf(2.4).copysign(c),
+        });
+        let xyz = apply(
+            [
+                [506752.0 / 1228815.0, 87881.0 / 245763.0, 12673.0 / 70218.0],
+                [87098.0 / 409605.0, 175762.0 / 245763.0, 12673.0 / 175545.0],
+                [7918.0 / 409605.0, 87881.0 / 737289.0, 1001167.0 / 1053270.0],
+            ],
+            linear,
+        );
+        let d50 = apply(
+            [
+                [
+                    1.0479297925449969,
+                    0.022946870601609652,
+                    -0.05019226628920524,
+                ],
+                [
+                    0.02962780877005599,
+                    0.9904344267538799,
+                    -0.017073799063418826,
+                ],
+                [
+                    -0.009243040646204504,
+                    0.015055191490298152,
+                    0.7518742814281371,
+                ],
+            ],
+            xyz,
+        );
+        let white = [0.3457 / 0.3585, 1.0, (1.0 - 0.3457 - 0.3585) / 0.3585];
+        let (kappa, epsilon) = (24389.0 / 27.0, 216.0 / 24389.0);
+        let f: [f64; 3] = std::array::from_fn(|i| {
+            let v = d50[i] / white[i];
+            if v > epsilon {
+                v.cbrt()
+            } else {
+                (kappa * v + 16.0) / 116.0
+            }
+        });
+        let lab = [
+            116.0 * f[1] - 16.0,
+            500.0 * (f[0] - f[1]),
+            200.0 * (f[1] - f[2]),
+        ];
+        let lms = apply(
+            [
+                [0.819022437996703, 0.3619062600528904, -0.1288737815209879],
+                [0.0329836539323885, 0.9292868615863434, 0.0361446663506424],
+                [0.0481771893596242, 0.2642395317527308, 0.6335478284694309],
+            ],
+            xyz,
+        )
+        .map(f64::cbrt);
+        let oklab = apply(
+            [
+                [0.210454268309314, 0.7936177747023054, -0.0040720430116193],
+                [1.9779985324311684, -2.42859224204858, 0.450593709617411],
+                [0.0259040424655478, 0.7827717124575296, -0.8086757549230774],
+            ],
+            lms,
+        );
+        (lab, oklab)
+    }
+
+    #[test]
+    fn a_mix_is_the_sample_codes_arithmetic() {
+        // Chrome 156 strays from these from the fifth figure; see the
+        // `reference` rows of tests/assets/cases/css-color-mix.json.
+        let (red_lab, red_oklab) =
+            lab_and_oklab_by_the_sample_code([1.0, 0.0, 0.0]);
+        let (blue_lab, blue_oklab) =
+            lab_and_oklab_by_the_sample_code([0.0, 0.0, 1.0]);
+        let polar = |[l, a, b]: [f64; 3]| {
+            [l, a.hypot(b), b.atan2(a).to_degrees().rem_euclid(360.0)]
+        };
+        let halfway =
+            |x: [f64; 3], y: [f64; 3]| [0, 1, 2].map(|i| (x[i] + y[i]) / 2.0);
+        let (red_lch, blue_lch) = (polar(red_lab), polar(blue_lab));
+        // Red's hue is 40.9 and blue's 301.4: the shorter arc runs through
+        // 360, so it is carried a turn before the two are averaged.
+        let lch = [
+            (red_lch[0] + blue_lch[0]) / 2.0,
+            (red_lch[1] + blue_lch[1]) / 2.0,
+            ((red_lch[2] + 360.0 + blue_lch[2]) / 2.0).rem_euclid(360.0),
+        ];
+        // Premultiplied: red at half alpha and blue at a quarter.
+        let alpha = (0.5 + 0.25) / 2.0;
+        let translucent = [0, 1, 2]
+            .map(|i| (red_oklab[i] * 0.5 + blue_oklab[i] * 0.25) / 2.0 / alpha);
+        for (css, want) in [
+            (
+                "color-mix(in oklab, red, blue)",
+                halfway(red_oklab, blue_oklab),
+            ),
+            ("color-mix(in lab, red, blue)", halfway(red_lab, blue_lab)),
+            ("color-mix(in lch, red, blue)", lch),
+            (
+                "color-mix(in oklab, rgb(255 0 0 / 0.5), rgb(0 0 255 / 0.25))",
+                translucent,
+            ),
+        ] {
+            let (_, _, declared) = css_to_declared(css).expect("a colour");
+            let held = declared.channels.map(|c| c.expect("a channel") as f32);
+            assert_eq!(held, want.map(|c| c as f32), "{css}");
+        }
+    }
+
+    #[test]
+    fn a_shared_primary_converts_to_an_exact_zero() {
+        // sRGB's red and blue are A98 RGB's: red there is a red alone. The
+        // matrix products leave 1e-17 in the green, which A98's pure-power
+        // encode would make a green of -3.9e-8.
+        let a98 = srgb_to_color_function([1.0, 0.0, 0.0], "a98-rgb")
+            .expect("a space");
+        assert_eq!([a98[1], a98[2]], [0.0, 0.0], "{a98:?}");
+        let (_, _, declared) =
+            css_to_declared("color-mix(in a98-rgb, red, blue)")
+                .expect("a colour");
+        assert_eq!(declared.channels[1], Some(0.0));
     }
 
     #[test]

@@ -539,3 +539,25 @@ fn lab_and_lch_follow_css_color_4_across_their_grammar() {
     );
     assert!(cases.len() > 2000, "the grid is the point: {}", cases.len());
 }
+
+#[test]
+fn a_color_mix_is_read_wherever_a_css_colour_is() -> Result<(), Error> {
+    // CSS Color 5's mix, through the crate's own readers: the 50/50 sRGB mix
+    // of red and blue is `color(srgb 0.5 0 0.5)`, and a second spelling of
+    // the same colour is the same colour.
+    let mixed = RgbaLinear::from_css("color-mix(in srgb, red, blue)");
+    assert!(mixed.is_some(), "RgbaLinear::from_css reads it");
+    assert_eq!(mixed, RgbaLinear::from_css("color(srgb 0.5 0 0.5)"));
+    assert_eq!(RgbaLinear::from_css("color-mix(in srgb, red blue)"), None);
+
+    let mut canvas = Canvas::new(4.0, 4.0);
+    let ctx = canvas.context();
+    ctx.set_fill_style_css("color-mix(in oklch, red, blue)")?;
+    ctx.set_stroke_style_css("color-mix(red 25%, blue)")?;
+    ctx.set_shadow_color_css("color-mix(in srgb, red 30%, blue 30%)")?;
+    assert!(
+        ctx.set_fill_style_css("color-mix(in srgb shorter hue, red, blue)")
+            .is_err()
+    );
+    Ok(())
+}
