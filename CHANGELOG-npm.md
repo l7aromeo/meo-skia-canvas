@@ -407,6 +407,21 @@ removed and no signature moves.
   pixels; reproduced by pausing the compiler for three seconds, which a timed
   build reads as `[0, 0, 0, 0]` and this one as the colour drawn.
 
+- **A colour named in Lab, LCH, Oklab, OkLCh or a `color()` space other
+  than sRGB is converted as CSS Color 4's sample code converts it, to
+  `f32` precision.** The conversions ran in `f32`, with matrices rounded to
+  `f32`, so a converted colour sat up to a few units in the seventh figure
+  from the specification's: `lab(from red l a b)` read its lightness as
+  54.290535 where the sample code gives 54.290541, and `lab(0 -160 -160)`
+  painted a red of 0.2752 where it gives 0.27520016. They now run in `f64`
+  with the sample code's own matrices, from the channels as the colour
+  holds them, and the result is rounded to `f32` once.
+  `color(from color(rec2020 0 1 0) rec2020 r g b)` reads
+  `color(rec2020 0 1 0)`, where a round trip through sRGB read a red of
+  -0.00066, and a channel whose true value is zero reads `0` rather than
+  what the arithmetic leaves there. No eight-bit colour the test suites
+  pin, Chrome's measurements included, has moved.
+
 - **`new Canvas(w, h, { textGamma })` refuses a gamma above 4.** Skia takes
   a text gamma from 0 up to 4, and the `RangeError` said so, but the upper
   bound was checked against `textContrast`, so `textGamma: 5` was taken. It

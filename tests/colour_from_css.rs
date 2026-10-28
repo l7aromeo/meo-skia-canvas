@@ -439,11 +439,12 @@ fn css_color_4_lab(l: f64, a: f64, b: f64, alpha: f64) -> [f64; 4] {
 
 /// The largest error `lab()` and `lch()` may carry against CSS Color 4.
 ///
-/// Above what `f32` arithmetic accumulates through Lab, two matrices and the
-/// sRGB curve and back, which on this grid is at most 2.4e-6; far below the
-/// 1.07e-3 the dependency underneath reaches on its own, which is what this
-/// exists to refuse.
-const LAB_TOLERANCE: f64 = 4e-5;
+/// Above what holding the channels and the result at `f32`, and decoding the
+/// result to linear light in `f32`, leave on this grid -- at most 2.9e-6,
+/// at `lab(100 17.56 -160)`, where the conversion itself runs in `f64` --
+/// and far below the 1.07e-3 the dependency underneath reaches on its own,
+/// which is what this exists to refuse.
+const LAB_TOLERANCE: f64 = 5e-6;
 
 #[test]
 fn lab_and_lch_follow_css_color_4_across_their_grammar() {

@@ -135,6 +135,16 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `TextBaseline::Top` drew the text Oswald's ascent below the anchor. The
   baselines are now read off the face the text is drawn in.
 
+- **`RgbaLinear::from_css`, `set_fill_style_css` and every other reader of
+  a CSS colour convert Lab, LCH, Oklab, OkLCh and the `color()` spaces as
+  CSS Color 4's sample code does, to `f32` precision.** The conversions ran
+  in `f32` with matrices rounded to `f32`; they now run in `f64` with the
+  sample code's own matrices and round to `f32` once. `lab(0 -160 -160)`
+  gives a red of 0.27520016 where it gave 0.2752, and a relative colour in
+  its origin's own space reads that origin's channels unchanged:
+  `color(from color(rec2020 0 1 0) rec2020 r g b)` is green, where a round
+  trip through sRGB left a red of -0.00066.
+
 - **A `Window` shows text at its canvas's contrast and gamma.**
   `Window::with_canvas` took the platform's default `text_contrast` and
   `text_gamma` whatever the canvas was made with, so a canvas made with a

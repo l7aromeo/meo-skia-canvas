@@ -9,7 +9,10 @@ use std::{borrow::Cow, cmp};
 // how a negative component extends through zero, and nothing would check
 // that it did.
 use crate::{
-    color::{RgbaLinear, linear_to_srgb, srgb_to_linear},
+    color::{
+        RgbaLinear, linear_to_srgb, linear_to_srgb_f64, srgb_to_linear,
+        srgb_to_linear_f64,
+    },
     css::{
         DEGREES_PER_TURN, Dimension, Expect, FontUnits, Percent, Quantity,
         evaluate, is_math, literal, without_comments,
@@ -1012,89 +1015,251 @@ pub fn float_args_or_bail_at(
 /// outside the gamut rather than being clipped. Fixed by the standard, not
 /// chosen; drafts before the Candidate Recommendation Draft of 24 April 2025
 /// used BT.2020's piecewise inverse OETF instead.
-const REC2020_GAMMA: f32 = 2.4;
+const REC2020_GAMMA: f64 = 2.4;
 
 /// `rec2020`'s transfer function, CSS Color 4's `lin_2020`.
-fn rec2020_decode(encoded: f32) -> f32 {
+fn rec2020_decode(encoded: f64) -> f64 {
     encoded.abs().powf(REC2020_GAMMA).copysign(encoded)
 }
 
 /// `rec2020`'s encode, CSS Color 4's `gam_2020`: the inverse of
 /// [`rec2020_decode`].
-fn rec2020_encode(linear: f32) -> f32 {
+fn rec2020_encode(linear: f64) -> f64 {
     linear.abs().powf(REC2020_GAMMA.recip()).copysign(linear)
 }
 
-/// Linear-light Display P3 into linear-light sRGB.
-///
-/// The `f32` nearest the product of two matrices CSS Color 4's sample code
-/// publishes as exact fractions, `lin_P3_to_XYZ` then `XYZ_to_lin_sRGB`; the
-/// same product derived from each space's primaries and the D65 white point
-/// agrees to nine places. `colour_from_css` holds a primary to `1e-5`, which
-/// a matrix written to four places misses.
-const LINEAR_P3_TO_LINEAR_SRGB: [[f32; 3]; 3] = [
-    [1.224_940_2, -0.224_940_18, 0.0],
-    [-0.042_056_955, 1.042_056_9, 0.0],
-    [-0.019_637_555, -0.078_636_04, 1.098_273_6],
+/// A 3x3 matrix, rows first, applied to a column of three components.
+type Matrix3 = [[f64; 3]; 3];
+
+// The matrices below are CSS Color 4's sample code, conversions.js, as the
+// specification publishes it: the exact fractions where it gives fractions,
+// and its decimals where it gives those, each written as the shortest
+// decimal that reads as the same `f64`. Both directions
+// are its own rather than one derived from the other, so a conversion here
+// and the same conversion worked from the specification are the same
+// arithmetic. Every conversion runs in `f64`, from a colour's channels as it
+// holds them, at `f32`, and its result is rounded to `f32` once, where a
+// `Color4f` is made.
+
+/// CSS Color 4's `lin_sRGB_to_XYZ`: linear-light sRGB into XYZ against D65.
+const LINEAR_SRGB_TO_XYZ: Matrix3 = [
+    [506752.0 / 1228815.0, 87881.0 / 245763.0, 12673.0 / 70218.0],
+    [87098.0 / 409605.0, 175762.0 / 245763.0, 12673.0 / 175545.0],
+    [7918.0 / 409605.0, 87881.0 / 737289.0, 1001167.0 / 1053270.0],
 ];
 
-/// Linear-light Rec. 2020 into linear-light sRGB, by `lin_2020_to_XYZ` then
-/// `XYZ_to_lin_sRGB`, on the terms given for [`LINEAR_P3_TO_LINEAR_SRGB`].
-const LINEAR_REC2020_TO_LINEAR_SRGB: [[f32; 3]; 3] = [
-    [1.660_491, -0.587_641_1, -0.072_849_86],
-    [-0.124_550_48, 1.132_899_9, -0.008_349_422],
-    [-0.018_150_764, -0.100_578_9, 1.118_729_7],
+/// CSS Color 4's `XYZ_to_lin_sRGB`.
+const XYZ_TO_LINEAR_SRGB: Matrix3 = [
+    [12831.0 / 3959.0, -329.0 / 214.0, -1974.0 / 3959.0],
+    [
+        -851781.0 / 878810.0,
+        1648619.0 / 878810.0,
+        36519.0 / 878810.0,
+    ],
+    [705.0 / 12673.0, -2585.0 / 12673.0, 705.0 / 667.0],
 ];
 
-/// Linear-light A98 RGB into linear-light sRGB.
-///
-/// The `f32` nearest the product of CSS Color 4's `lin_a98rgb_to_XYZ` and
-/// `XYZ_to_lin_sRGB`, both published as exact fractions; the same product
-/// derived from Adobe RGB (1998)'s primaries and the D65 white point agrees
-/// to fifteen places. The two spaces share their red and blue primaries and
-/// their white, so A98's red and blue land on sRGB's own, scaled, and only
-/// its green mixes.
-const LINEAR_A98_TO_LINEAR_SRGB: [[f32; 3]; 3] = [
-    [1.398_355_7, -0.398_355_75, 0.0],
-    [0.0, 1.0, 0.0],
-    [0.0, -0.042_928_99, 1.042_928_9],
+/// CSS Color 4's `lin_P3_to_XYZ`, against D65.
+const LINEAR_P3_TO_XYZ: Matrix3 = [
+    [
+        608311.0 / 1250200.0,
+        189793.0 / 714400.0,
+        198249.0 / 1000160.0,
+    ],
+    [
+        35783.0 / 156275.0,
+        247089.0 / 357200.0,
+        198249.0 / 2500400.0,
+    ],
+    [0.0, 32229.0 / 714400.0, 5220557.0 / 5000800.0],
 ];
 
-/// Linear-light ProPhoto RGB into linear-light sRGB: CSS Color 4's
-/// `lin_ProPhoto_to_XYZ`, then `D50_to_D65`, since ProPhoto is referred to
-/// D50, then `XYZ_to_lin_sRGB`. The product derived from ProPhoto's
-/// primaries and the D50 white point agrees with it to seventeen places.
-const LINEAR_PROPHOTO_TO_LINEAR_SRGB: [[f32; 3]; 3] = [
-    [2.034_381, -0.727_635_8, -0.306_745_05],
-    [-0.228_825_73, 1.231_742_5, -0.002_916_809_6],
-    [-0.008_558_828, -0.153_266_7, 1.161_825_5],
+/// CSS Color 4's `XYZ_to_lin_P3`.
+const XYZ_TO_LINEAR_P3: Matrix3 = [
+    [
+        446124.0 / 178915.0,
+        -333277.0 / 357830.0,
+        -72051.0 / 178915.0,
+    ],
+    [-14852.0 / 17905.0, 63121.0 / 35810.0, 423.0 / 17905.0],
+    [11844.0 / 330415.0, -50337.0 / 660830.0, 316169.0 / 330415.0],
 ];
+
+/// CSS Color 4's `lin_2020_to_XYZ`, against D65.
+const LINEAR_REC2020_TO_XYZ: Matrix3 = [
+    [
+        63426534.0 / 99577255.0,
+        20160776.0 / 139408157.0,
+        47086771.0 / 278816314.0,
+    ],
+    [
+        26158966.0 / 99577255.0,
+        472592308.0 / 697040785.0,
+        8267143.0 / 139408157.0,
+    ],
+    [0.0, 19567812.0 / 697040785.0, 295819943.0 / 278816314.0],
+];
+
+/// CSS Color 4's `XYZ_to_lin_2020`.
+const XYZ_TO_LINEAR_REC2020: Matrix3 = [
+    [
+        30757411.0 / 17917100.0,
+        -6372589.0 / 17917100.0,
+        -4539589.0 / 17917100.0,
+    ],
+    [
+        -19765991.0 / 29648200.0,
+        47925759.0 / 29648200.0,
+        467509.0 / 29648200.0,
+    ],
+    [
+        792561.0 / 44930125.0,
+        -1921689.0 / 44930125.0,
+        42328811.0 / 44930125.0,
+    ],
+];
+
+/// CSS Color 4's `lin_a98rgb_to_XYZ`, against D65. A98 RGB shares its red
+/// and blue primaries and its white with sRGB, so only its green mixes.
+const LINEAR_A98_TO_XYZ: Matrix3 = [
+    [
+        573536.0 / 994567.0,
+        263643.0 / 1420810.0,
+        187206.0 / 994567.0,
+    ],
+    [
+        591459.0 / 1989134.0,
+        6239551.0 / 9945670.0,
+        374412.0 / 4972835.0,
+    ],
+    [
+        53769.0 / 1989134.0,
+        351524.0 / 4972835.0,
+        4929758.0 / 4972835.0,
+    ],
+];
+
+/// CSS Color 4's `XYZ_to_lin_a98rgb`.
+const XYZ_TO_LINEAR_A98: Matrix3 = [
+    [
+        1829569.0 / 896150.0,
+        -506331.0 / 896150.0,
+        -308931.0 / 896150.0,
+    ],
+    [
+        -851781.0 / 878810.0,
+        1648619.0 / 878810.0,
+        36519.0 / 878810.0,
+    ],
+    [
+        16779.0 / 1248040.0,
+        -147721.0 / 1248040.0,
+        1266979.0 / 1248040.0,
+    ],
+];
+
+/// CSS Color 4's `lin_ProPhoto_to_XYZ`, against D50, ProPhoto's own white.
+const LINEAR_PROPHOTO_TO_XYZ: Matrix3 = [
+    [
+        0.797_766_644_900_642_3,
+        0.135_181_297_400_533_08,
+        0.031_347_734_128_392_2,
+    ],
+    [
+        0.288_074_828_819_401_3,
+        0.711_835_234_241_873,
+        0.000_089_936_938_725_64,
+    ],
+    [0.0, 0.0, 0.825_104_602_510_460_2],
+];
+
+/// CSS Color 4's `XYZ_to_lin_ProPhoto`.
+const XYZ_TO_LINEAR_PROPHOTO: Matrix3 = [
+    [
+        1.345_786_881_647_158_3,
+        -0.255_572_087_379_794_64,
+        -0.051_101_864_975_545_26,
+    ],
+    [
+        -0.544_630_705_124_901_9,
+        1.508_247_742_845_146_8,
+        0.020_527_447_436_421_39,
+    ],
+    [0.0, 0.0, 1.211_967_545_638_945_2],
+];
+
+/// Bradford chromatic adaptation from D50 to D65, CSS Color 4's
+/// `D50_to_D65`. Section 12.1 requires it between a D50 space -- Lab,
+/// ProPhoto, `xyz-d50` -- and a D65 one: "chromatic adaptation ... using
+/// the Bradford method". Omitting it shifts blues and yellows while leaving
+/// greys alone.
+const D50_TO_D65: Matrix3 = [
+    [
+        0.955_473_421_488_075,
+        -0.023_098_454_948_764_71,
+        0.063_259_243_200_570_72,
+    ],
+    [
+        -0.028_369_709_333_863_7,
+        1.009_995_398_081_304_1,
+        0.021_041_441_191_917_323,
+    ],
+    [
+        0.012_314_014_864_481_998,
+        -0.020_507_649_298_898_964,
+        1.330_365_926_242_124,
+    ],
+];
+
+/// CSS Color 4's `D65_to_D50`, the other direction of [`D50_TO_D65`].
+const D65_TO_D50: Matrix3 = [
+    [
+        1.047_929_792_544_996_9,
+        0.022_946_870_601_609_652,
+        -0.050_192_266_289_205_24,
+    ],
+    [
+        0.029_627_808_770_055_99,
+        0.990_434_426_753_879_9,
+        -0.017_073_799_063_418_826,
+    ],
+    [
+        -0.009_243_040_646_204_504,
+        0.015_055_191_490_298_152,
+        0.751_874_281_428_137_1,
+    ],
+];
+
+/// `m` times `v`.
+fn apply_matrix(m: Matrix3, v: [f64; 3]) -> [f64; 3] {
+    m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
+}
 
 /// A98 RGB's exponent, which Adobe RGB (1998) specifies as 2 51/256.
-const A98_EXPONENT: f32 = 563.0 / 256.0;
+const A98_EXPONENT: f64 = 563.0 / 256.0;
 
 /// A98 RGB's transfer function, CSS Color 4's `lin_a98rgb`: a pure power,
 /// mirrored through zero so a negative component keeps its sign.
-fn a98_decode(encoded: f32) -> f32 {
+fn a98_decode(encoded: f64) -> f64 {
     encoded.abs().powf(A98_EXPONENT).copysign(encoded)
 }
 
 /// A98 RGB's encode, CSS Color 4's `gam_a98rgb`.
-fn a98_encode(linear: f32) -> f32 {
-    linear.abs().powf(1.0 / A98_EXPONENT).copysign(linear)
+fn a98_encode(linear: f64) -> f64 {
+    linear.abs().powf(A98_EXPONENT.recip()).copysign(linear)
 }
 
 /// Where ProPhoto RGB's linear toe ends, on the encoded side: CSS Color 4's
 /// `Et2`.
-const PROPHOTO_TOE: f32 = 16.0 / 512.0;
+const PROPHOTO_TOE: f64 = 16.0 / 512.0;
 /// The toe's slope, as the encoded value over the linear one.
-const PROPHOTO_TOE_SLOPE: f32 = 16.0;
+const PROPHOTO_TOE_SLOPE: f64 = 16.0;
 /// ProPhoto RGB's power above the toe.
-const PROPHOTO_EXPONENT: f32 = 1.8;
+const PROPHOTO_EXPONENT: f64 = 1.8;
 
 /// ProPhoto RGB's transfer function, CSS Color 4's `lin_ProPhoto`: a 1.8
 /// power above a short linear toe, mirrored through zero.
-fn prophoto_decode(encoded: f32) -> f32 {
+fn prophoto_decode(encoded: f64) -> f64 {
     let magnitude = encoded.abs();
     let linear = match magnitude <= PROPHOTO_TOE {
         true => magnitude / PROPHOTO_TOE_SLOPE,
@@ -1106,37 +1271,13 @@ fn prophoto_decode(encoded: f32) -> f32 {
 /// ProPhoto RGB's encode, CSS Color 4's `gam_ProPhoto`, mirrored through
 /// zero as the decode is. The toe ends at `Et`, 1/512, on the linear side,
 /// which is where it ends on the encoded side over its slope.
-fn prophoto_encode(linear: f32) -> f32 {
+fn prophoto_encode(linear: f64) -> f64 {
     let magnitude = linear.abs();
     let encoded = match magnitude >= PROPHOTO_TOE / PROPHOTO_TOE_SLOPE {
-        true => magnitude.powf(1.0 / PROPHOTO_EXPONENT),
+        true => magnitude.powf(PROPHOTO_EXPONENT.recip()),
         false => magnitude * PROPHOTO_TOE_SLOPE,
     };
     encoded.copysign(linear)
-}
-
-/// `m` times `v`.
-fn apply_matrix(m: [[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
-    m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
-}
-
-/// The inverse of a 3x3 matrix, by its adjugate, in `f64` so the inverse
-/// carries no more error than the `f32` matrix it came from.
-///
-/// For the conversions out of linear sRGB, derived from the ones into it
-/// rather than written out a second time, so the pair cannot disagree.
-fn inverse(m: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
-    let m = m.map(|row| row.map(f64::from));
-    let cofactor = |r: usize, c: usize| {
-        let (r0, r1) = ((r + 1) % 3, (r + 2) % 3);
-        let (c0, c1) = ((c + 1) % 3, (c + 2) % 3);
-        m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0]
-    };
-    let determinant = (0..3).map(|c| m[0][c] * cofactor(0, c)).sum::<f64>();
-    // The adjugate is the transpose of the cofactor matrix.
-    std::array::from_fn(|r| {
-        std::array::from_fn(|c| (cofactor(c, r) / determinant) as f32)
-    })
 }
 
 /// The primaries `space` is built on, by name: `"srgb"`, `"display-p3"` or
@@ -1168,6 +1309,64 @@ pub(crate) fn color4f_to_rgba_linear(
     RgbaLinear::from_srgb(srgb.r, srgb.g, srgb.b, srgb.a)
 }
 
+/// `color()` components in `space` as XYZ against D65, by the space's own
+/// transfer function and matrix, adapted from D50 where the space is D50's.
+/// `None` for a space `color()` does not name.
+fn color_function_to_xyz(space: &str, [x, y, z]: [f64; 3]) -> Option<[f64; 3]> {
+    let linear = |decode: fn(f64) -> f64| [x, y, z].map(decode);
+    Some(match space {
+        "srgb" => apply_matrix(LINEAR_SRGB_TO_XYZ, linear(srgb_to_linear_f64)),
+        "srgb-linear" => apply_matrix(LINEAR_SRGB_TO_XYZ, [x, y, z]),
+        "display-p3" => {
+            apply_matrix(LINEAR_P3_TO_XYZ, linear(srgb_to_linear_f64))
+        }
+        "rec2020" => {
+            apply_matrix(LINEAR_REC2020_TO_XYZ, linear(rec2020_decode))
+        }
+        "a98-rgb" => apply_matrix(LINEAR_A98_TO_XYZ, linear(a98_decode)),
+        "prophoto-rgb" => apply_matrix(
+            D50_TO_D65,
+            apply_matrix(LINEAR_PROPHOTO_TO_XYZ, linear(prophoto_decode)),
+        ),
+        "xyz" | "xyz-d65" => [x, y, z],
+        "xyz-d50" => apply_matrix(D50_TO_D65, [x, y, z]),
+        _ => return None,
+    })
+}
+
+/// XYZ against D65 as `color()` components in `space`, the inverse of
+/// [`color_function_to_xyz`].
+fn xyz_to_color_function(space: &str, xyz: [f64; 3]) -> Option<[f64; 3]> {
+    let encode = |m: Matrix3, f: fn(f64) -> f64| apply_matrix(m, xyz).map(f);
+    Some(match space {
+        "srgb" => encode(XYZ_TO_LINEAR_SRGB, linear_to_srgb_f64),
+        "srgb-linear" => apply_matrix(XYZ_TO_LINEAR_SRGB, xyz),
+        "display-p3" => encode(XYZ_TO_LINEAR_P3, linear_to_srgb_f64),
+        "rec2020" => encode(XYZ_TO_LINEAR_REC2020, rec2020_encode),
+        "a98-rgb" => encode(XYZ_TO_LINEAR_A98, a98_encode),
+        "prophoto-rgb" => {
+            apply_matrix(XYZ_TO_LINEAR_PROPHOTO, apply_matrix(D65_TO_D50, xyz))
+                .map(prophoto_encode)
+        }
+        "xyz" | "xyz-d65" => xyz,
+        "xyz-d50" => apply_matrix(D65_TO_D50, xyz),
+        _ => return None,
+    })
+}
+
+/// `color()` components in `space` as extended sRGB, in `f64`: through XYZ,
+/// as the sample code converts, and nothing clipped. An unknown space passes
+/// through as sRGB.
+fn color_function_to_srgb_f64(space: &str, components: [f64; 3]) -> [f64; 3] {
+    match space {
+        "srgb" => components,
+        "srgb-linear" => components.map(linear_to_srgb_f64),
+        _ => color_function_to_xyz(space, components)
+            .and_then(|xyz| xyz_to_color_function("srgb", xyz))
+            .unwrap_or(components),
+    }
+}
+
 /// Converts `color()` components into extended sRGB.
 ///
 /// For the callers that need a colour in sRGB rather than tagged with its
@@ -1176,78 +1375,27 @@ pub(crate) fn color4f_to_rgba_linear(
 /// among them. A paint keeps the colour in the space it was named
 /// in, so a P3 colour on a P3 canvas needs no conversion at all, and a round
 /// trip through sRGB would cost it about a level of the eight the readback
-/// quantises to.
+/// quantises to. Computed in `f64` and rounded to `f32` once.
 fn color_function_to_srgb(color: Color4f, space: &str) -> Color4f {
-    let apply = |m: [[f32; 3]; 3], v: [f32; 3]| {
-        [
-            m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
-            m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
-            m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
-        ]
-    };
-    let linear = |f: fn(f32) -> f32| [f(color.r), f(color.g), f(color.b)];
-
-    // The CSS Color 4 conversions, applied in linear light.
-    let [r, g, b] = match space {
-        "srgb" => return color,
-        "srgb-linear" => [
-            linear_to_srgb(color.r),
-            linear_to_srgb(color.g),
-            linear_to_srgb(color.b),
-        ],
-        "display-p3" => apply(LINEAR_P3_TO_LINEAR_SRGB, linear(srgb_to_linear))
-            .map(linear_to_srgb),
-        "rec2020" => {
-            apply(LINEAR_REC2020_TO_LINEAR_SRGB, linear(rec2020_decode))
-                .map(linear_to_srgb)
-        }
-        "a98-rgb" => apply(LINEAR_A98_TO_LINEAR_SRGB, linear(a98_decode))
-            .map(linear_to_srgb),
-        "prophoto-rgb" => {
-            apply(LINEAR_PROPHOTO_TO_LINEAR_SRGB, linear(prophoto_decode))
-                .map(linear_to_srgb)
-        }
-        "xyz" | "xyz-d65" => {
-            apply(XYZ_D65_TO_LINEAR_SRGB, [color.r, color.g, color.b])
-                .map(linear_to_srgb)
-        }
-        "xyz-d50" => apply(
-            XYZ_D65_TO_LINEAR_SRGB,
-            apply(BRADFORD_D50_TO_D65, [color.r, color.g, color.b]),
-        )
-        .map(linear_to_srgb),
-        _ => return color,
-    };
+    let wide = [color.r, color.g, color.b].map(f64::from);
+    let [r, g, b] = color_function_to_srgb_f64(space, wide).map(|c| c as f32);
     Color4f::new(r, g, b, color.a)
 }
 
 /// Extended sRGB into the components `color()` names in `space`, the
-/// inverse of [`color_function_to_srgb`]: into linear light, through the
-/// inverse of the matrix that space converts by, and out through its own
-/// transfer function. `None` for a space `color()` does not name.
-fn srgb_to_color_function(rgb: [f32; 3], space: &str) -> Option<[f32; 3]> {
-    let linear = rgb.map(srgb_to_linear);
-    let through = |m: [[f32; 3]; 3], encode: fn(f32) -> f32| {
-        apply_matrix(inverse(m), linear).map(encode)
-    };
-    Some(match space {
-        "srgb" => rgb,
-        "srgb-linear" => linear,
-        "display-p3" => through(LINEAR_P3_TO_LINEAR_SRGB, linear_to_srgb),
-        "rec2020" => through(LINEAR_REC2020_TO_LINEAR_SRGB, rec2020_encode),
-        "a98-rgb" => through(LINEAR_A98_TO_LINEAR_SRGB, a98_encode),
-        "prophoto-rgb" => {
-            through(LINEAR_PROPHOTO_TO_LINEAR_SRGB, prophoto_encode)
-        }
-        "xyz" | "xyz-d65" => {
-            apply_matrix(inverse(XYZ_D65_TO_LINEAR_SRGB), linear)
-        }
-        "xyz-d50" => apply_matrix(
-            inverse(BRADFORD_D50_TO_D65),
-            apply_matrix(inverse(XYZ_D65_TO_LINEAR_SRGB), linear),
-        ),
-        _ => return None,
-    })
+/// inverse of [`color_function_to_srgb_f64`]. `None` for a space `color()`
+/// does not name.
+///
+/// sRGB and its linear form share sRGB's primaries, so they take the
+/// transfer function alone: through XYZ and back, the matrices' product is
+/// the identity only to within `f64` rounding, and `color(from red srgb r g
+/// b)` would read a green of -6.7e-16.
+fn srgb_to_color_function(rgb: [f64; 3], space: &str) -> Option<[f64; 3]> {
+    match space {
+        "srgb" => Some(rgb),
+        "srgb-linear" => Some(rgb.map(srgb_to_linear_f64)),
+        _ => xyz_to_color_function(space, color_function_to_xyz("srgb", rgb)?),
+    }
 }
 
 /// The name of a color space this crate can build, by comparing against each.
@@ -1283,34 +1431,8 @@ pub fn css_to_color4f(css: &str) -> Option<Color4f> {
 /// `Y = 1`.
 ///
 /// [Section 10.1]: https://www.w3.org/TR/css-color-4/#cie-lab
-const LAB_WHITE_D50: [f32; 3] =
+const LAB_WHITE_D50: [f64; 3] =
     [0.3457 / 0.3585, 1.0, (1.0 - 0.3457 - 0.3585) / 0.3585];
-
-/// Bradford chromatic adaptation from D50 to D65.
-///
-/// CSS Color 4 [section 12.1] requires this step between Lab's D50 reference
-/// and sRGB's D65 one: "chromatic adaptation ... using the Bradford method".
-/// Omitting it shifts blues and yellows while leaving greys alone;
-/// [`lab_to_srgb`] says why this crate converts Lab itself.
-///
-/// [section 12.1]: https://www.w3.org/TR/css-color-4/#color-conversion-code
-const BRADFORD_D50_TO_D65: [[f32; 3]; 3] = [
-    [0.955_473_4, -0.023_098_5, 0.063_259_3],
-    [-0.028_369_7, 1.009_995_5, 0.021_041_4],
-    [0.012_314, -0.020_507_7, 1.330_365_9],
-];
-
-/// XYZ with a D65 reference white into linear-light sRGB.
-///
-/// The inverse of the sRGB primaries matrix, as CSS Color 4 [section 12.1]
-/// gives it.
-///
-/// [section 12.1]: https://www.w3.org/TR/css-color-4/#color-conversion-code
-const XYZ_D65_TO_LINEAR_SRGB: [[f32; 3]; 3] = [
-    [3.240_97, -1.537_383_2, -0.498_610_8],
-    [-0.969_243_6, 1.875_967_5, 0.041_555_1],
-    [0.055_630_1, -0.203_977, 1.056_971_5],
-];
 
 /// CIE's `kappa`, the linear segment's slope in the Lab transfer function.
 ///
@@ -1318,73 +1440,59 @@ const XYZ_D65_TO_LINEAR_SRGB: [[f32; 3]; 3] = [
 /// preference to the rounded 903.3 of older texts.
 ///
 /// [section 12.1]: https://www.w3.org/TR/css-color-4/#color-conversion-code
-const LAB_KAPPA: f32 = 24389.0 / 27.0;
+const LAB_KAPPA: f64 = 24389.0 / 27.0;
 
 /// CIE's `epsilon`, where that transfer function leaves its linear segment.
 ///
 /// The rational form 216/24389, for the reason given on [`LAB_KAPPA`].
-const LAB_EPSILON: f32 = 216.0 / 24389.0;
+const LAB_EPSILON: f64 = 216.0 / 24389.0;
 
 /// A `lab()` percentage on the `a` and `b` axes is this many units.
 ///
 /// CSS Color 4 [section 10.1]: "the percentage 100% ... means 125".
 ///
 /// [section 10.1]: https://www.w3.org/TR/css-color-4/#specifying-lab-lch
-const LAB_AB_FULL_SCALE: f32 = 125.0;
+const LAB_AB_FULL_SCALE: f64 = 125.0;
 
 /// An `lch()` percentage on the chroma axis is this many units.
 ///
 /// CSS Color 4 [section 10.2]: "the percentage 100% ... means 150".
 ///
 /// [section 10.2]: https://www.w3.org/TR/css-color-4/#specifying-lab-lch
-const LCH_CHROMA_FULL_SCALE: f32 = 150.0;
+const LCH_CHROMA_FULL_SCALE: f64 = 150.0;
 
-/// CIE Lab into extended sRGB: to XYZ against Lab's own D50 white, CSS
-/// Color 4 section 12.1, then [`BRADFORD_D50_TO_D65`] and the sRGB matrix,
-/// clipping nothing, a lightness outside `0..=100` included.
-///
-/// Over a grid of every form the `lab()` and `lch()` grammar takes, 17,712
-/// inputs, this lands within 8.5e-6 of the specification's own conversion
-/// done in `f64`, which `lab_and_lch_follow_css_color_4_across_their_grammar`
-/// holds it to; a conversion within 2.2e-3 puts 121 of them a whole 8-bit
-/// level off, one of which `the_rust_surface_takes_css_colors` pins against
-/// Chrome.
-fn lab_to_srgb([l, a, b]: [f32; 3]) -> [f32; 3] {
-    let fy = (l + 16.0) / 116.0;
-    let fx = a / 500.0 + fy;
-    let fz = fy - b / 200.0;
-    let inverse = |f: f32| {
-        let cubed = f * f * f;
-        if cubed > LAB_EPSILON {
-            cubed
-        } else {
-            (116.0 * f - 16.0) / LAB_KAPPA
-        }
+/// CIE Lab into extended sRGB: CSS Color 4's `Lab_to_XYZ` against Lab's own
+/// D50 white, then [`D50_TO_D65`] and `XYZ_to_lin_sRGB`, clipping nothing, a
+/// lightness outside `0..=100` included. The same steps in the same order
+/// as the sample code, `L` kept out of `L + 16` for precision near black as
+/// it keeps it.
+fn lab_to_srgb([l, a, b]: [f64; 3]) -> [f64; 3] {
+    let lightness = l / 116.0;
+    let (a500, b200) = (a / 500.0, b / 200.0);
+    let fy = lightness + 16.0 / 116.0;
+    let (fx, fz) = (fy + a500, fy - b200);
+    let cube = |f: f64, linear: f64| match f.powi(3) > LAB_EPSILON {
+        true => f.powi(3),
+        false => linear * (116.0 / LAB_KAPPA),
     };
-    let y = if l > LAB_KAPPA * LAB_EPSILON {
-        fy * fy * fy
-    } else {
-        l / LAB_KAPPA
+    let y = match l > LAB_KAPPA * LAB_EPSILON {
+        true => ((l + 16.0) / 116.0).powi(3),
+        false => l / LAB_KAPPA,
     };
     let xyz_d50 = [
-        inverse(fx) * LAB_WHITE_D50[0],
+        cube(fx, lightness + a500) * LAB_WHITE_D50[0],
         y * LAB_WHITE_D50[1],
-        inverse(fz) * LAB_WHITE_D50[2],
+        cube(fz, lightness - b200) * LAB_WHITE_D50[2],
     ];
-    apply_matrix(
-        XYZ_D65_TO_LINEAR_SRGB,
-        apply_matrix(BRADFORD_D50_TO_D65, xyz_d50),
-    )
-    .map(linear_to_srgb)
+    xyz_to_color_function("srgb", apply_matrix(D50_TO_D65, xyz_d50))
+        .unwrap_or_default()
 }
 
-/// Extended sRGB into CIE Lab, CSS Color 4's `XYZ_to_Lab` after the
-/// inverses of the matrices [`lab_to_srgb`] applies, so the two are a pair.
-fn srgb_to_lab(rgb: [f32; 3]) -> [f32; 3] {
-    let xyz_d50 = apply_matrix(
-        inverse(BRADFORD_D50_TO_D65),
-        apply_matrix(inverse(XYZ_D65_TO_LINEAR_SRGB), rgb.map(srgb_to_linear)),
-    );
+/// Extended sRGB into CIE Lab: `lin_sRGB_to_XYZ`, [`D65_TO_D50`] and CSS
+/// Color 4's `XYZ_to_Lab`, the inverse of [`lab_to_srgb`].
+fn srgb_to_lab(rgb: [f64; 3]) -> [f64; 3] {
+    let xyz_d65 = color_function_to_xyz("srgb", rgb).unwrap_or_default();
+    let xyz_d50 = apply_matrix(D65_TO_D50, xyz_d65);
     let [fx, fy, fz] = std::array::from_fn(|i| {
         let scaled = xyz_d50[i] / LAB_WHITE_D50[i];
         match scaled > LAB_EPSILON {
@@ -1397,32 +1505,99 @@ fn srgb_to_lab(rgb: [f32; 3]) -> [f32; 3] {
 
 /// XYZ with a D65 white into Oklab's cone responses: the first matrix of
 /// CSS Color 4's `XYZ_to_OKLab` ([section 19]), recalculated there for a
-/// consistent white.
+/// consistent white and for 64-bit precision.
 ///
 /// [section 19]: https://www.w3.org/TR/css-color-4/#color-conversion-code
-const XYZ_D65_TO_OKLAB_LMS: [[f32; 3]; 3] = [
-    [0.819_022_4, 0.361_906_26, -0.128_873_78],
-    [0.032_983_654, 0.929_286_86, 0.036_144_666],
-    [0.048_177_19, 0.264_239_53, 0.633_547_8],
+const XYZ_TO_OKLAB_LMS: Matrix3 = [
+    [
+        0.819_022_437_996_703,
+        0.361_906_260_052_890_4,
+        -0.128_873_781_520_987_9,
+    ],
+    [
+        0.032_983_653_932_388_5,
+        0.929_286_861_586_343_4,
+        0.036_144_666_350_642_4,
+    ],
+    [
+        0.048_177_189_359_624_2,
+        0.264_239_531_752_730_8,
+        0.633_547_828_469_430_9,
+    ],
 ];
 
 /// Oklab's cube-rooted cone responses into `L`, `a` and `b`, the second
 /// matrix of CSS Color 4's `XYZ_to_OKLab`.
-const OKLAB_LMS_TO_OKLAB: [[f32; 3]; 3] = [
-    [0.210_454_27, 0.793_617_8, -0.004_072_043],
-    [1.977_998_5, -2.428_592_2, 0.450_593_7],
-    [0.025_904_042, 0.782_771_7, -0.808_675_77],
+const OKLAB_LMS_TO_OKLAB: Matrix3 = [
+    [
+        0.210_454_268_309_314,
+        0.793_617_774_702_305_4,
+        -0.004_072_043_011_619_3,
+    ],
+    [
+        1.977_998_532_431_168_4,
+        -2.428_592_242_048_58,
+        0.450_593_709_617_411,
+    ],
+    [
+        0.025_904_042_465_547_8,
+        0.782_771_712_457_529_6,
+        -0.808_675_754_923_077_4,
+    ],
 ];
 
-/// Extended sRGB into Oklab, by CSS Color 4's `XYZ_to_OKLab`. The cube root
-/// keeps its sign, as the sample code warns a port must.
-fn srgb_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
-    let xyz =
-        apply_matrix(inverse(XYZ_D65_TO_LINEAR_SRGB), rgb.map(srgb_to_linear));
-    apply_matrix(
-        OKLAB_LMS_TO_OKLAB,
-        apply_matrix(XYZ_D65_TO_OKLAB_LMS, xyz).map(f32::cbrt),
-    )
+/// Oklab into cube-rooted cone responses, the first matrix of CSS Color 4's
+/// `OKLab_to_XYZ`.
+const OKLAB_TO_OKLAB_LMS: Matrix3 = [
+    [1.0, 0.396_337_777_376_174_9, 0.215_803_757_309_913_6],
+    [1.0, -0.105_561_345_815_658_6, -0.063_854_172_825_813_3],
+    [1.0, -0.089_484_177_529_811_9, -1.291_485_548_019_409_2],
+];
+
+/// Oklab's cone responses into XYZ with a D65 white, the second matrix of
+/// CSS Color 4's `OKLab_to_XYZ`.
+const OKLAB_LMS_TO_XYZ: Matrix3 = [
+    [
+        1.226_879_875_845_924_3,
+        -0.557_814_994_460_217_1,
+        0.281_391_045_665_964_7,
+    ],
+    [
+        -0.040_575_745_214_800_8,
+        1.112_286_803_280_317,
+        -0.071_711_058_065_516_4,
+    ],
+    [
+        -0.076_372_936_674_660_1,
+        -0.421_493_332_402_243_2,
+        1.586_924_019_836_781_6,
+    ],
+];
+
+/// Linear-light sRGB into Oklab, CSS Color 4's `lin_sRGB_to_XYZ` then
+/// `XYZ_to_OKLab`. The cube root keeps its sign, as the sample code warns a
+/// port must.
+fn linear_srgb_to_oklab(rgb: [f64; 3]) -> [f64; 3] {
+    let xyz = apply_matrix(LINEAR_SRGB_TO_XYZ, rgb);
+    let lms = apply_matrix(XYZ_TO_OKLAB_LMS, xyz).map(f64::cbrt);
+    apply_matrix(OKLAB_LMS_TO_OKLAB, lms)
+}
+
+/// Oklab into linear-light sRGB, CSS Color 4's `OKLab_to_XYZ` then
+/// `XYZ_to_lin_sRGB`, the inverse of [`linear_srgb_to_oklab`].
+fn oklab_to_linear_srgb(lab: [f64; 3]) -> [f64; 3] {
+    let lms = apply_matrix(OKLAB_TO_OKLAB_LMS, lab).map(|c| c * c * c);
+    apply_matrix(XYZ_TO_LINEAR_SRGB, apply_matrix(OKLAB_LMS_TO_XYZ, lms))
+}
+
+/// Extended sRGB into Oklab.
+fn srgb_to_oklab(rgb: [f64; 3]) -> [f64; 3] {
+    linear_srgb_to_oklab(rgb.map(srgb_to_linear_f64))
+}
+
+/// Oklab into extended sRGB, the inverse of [`srgb_to_oklab`].
+fn oklab_to_srgb(oklab: [f64; 3]) -> [f64; 3] {
+    oklab_to_linear_srgb(oklab).map(linear_to_srgb_f64)
 }
 
 /// CSS Color 4's just noticeable difference, in deltaEOK: section 14.2.1,
@@ -1433,30 +1608,6 @@ const GAMUT_MAP_JND: f64 = 0.02;
 /// The chroma resolution section 14.2.2's binary search stops at: "let
 /// epsilon be 0.0001".
 const GAMUT_MAP_EPSILON: f64 = 0.0001;
-
-/// Linear-light sRGB into Oklab, in `f64`, by the matrices
-/// [`srgb_to_oklab`] applies.
-fn linear_srgb_to_oklab_f64(rgb: [f64; 3]) -> [f64; 3] {
-    let widen = |m: [[f32; 3]; 3]| m.map(|row| row.map(f64::from));
-    let apply = |m: [[f64; 3]; 3], v: [f64; 3]| {
-        m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
-    };
-    let xyz = apply(widen(inverse(XYZ_D65_TO_LINEAR_SRGB)), rgb);
-    let lms = apply(widen(XYZ_D65_TO_OKLAB_LMS), xyz).map(f64::cbrt);
-    apply(widen(OKLAB_LMS_TO_OKLAB), lms)
-}
-
-/// Oklab into linear-light sRGB, in `f64`, the inverse of
-/// [`linear_srgb_to_oklab_f64`].
-fn oklab_to_linear_srgb_f64(lab: [f64; 3]) -> [f64; 3] {
-    let widen = |m: [[f32; 3]; 3]| m.map(|row| row.map(f64::from));
-    let apply = |m: [[f64; 3]; 3], v: [f64; 3]| {
-        m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
-    };
-    let lms = apply(widen(inverse(OKLAB_LMS_TO_OKLAB)), lab).map(|c| c * c * c);
-    let xyz = apply(widen(inverse(XYZ_D65_TO_OKLAB_LMS)), lms);
-    apply(widen(XYZ_D65_TO_LINEAR_SRGB), xyz)
-}
 
 /// Linear-light sRGB components, inside sRGB's gamut or not, mapped into it
 /// by CSS Color 4 section 14.2.2's binary search with local MINDE: chroma is
@@ -1477,7 +1628,7 @@ pub(crate) fn gamut_map_srgb(linear: [f32; 3]) -> [f32; 3] {
     if in_gamut(origin) {
         return linear;
     }
-    let [lightness, a, b] = linear_srgb_to_oklab_f64(origin);
+    let [lightness, a, b] = linear_srgb_to_oklab(origin);
     // Steps 3 and 4: at or past either end of lightness, white or black.
     if lightness >= 1.0 {
         return [1.0; 3];
@@ -1488,12 +1639,12 @@ pub(crate) fn gamut_map_srgb(linear: [f32; 3]) -> [f32; 3] {
     let chroma = a.hypot(b);
     let at = |reduced: f64| {
         let scale = reduced / chroma;
-        oklab_to_linear_srgb_f64([lightness, a * scale, b * scale])
+        oklab_to_linear_srgb([lightness, a * scale, b * scale])
     };
     let clip = |c: [f64; 3]| c.map(|channel| channel.clamp(0.0, 1.0));
     let delta = |one: [f64; 3], two: [f64; 3]| {
-        let [l1, a1, b1] = linear_srgb_to_oklab_f64(one);
-        let [l2, a2, b2] = linear_srgb_to_oklab_f64(two);
+        let [l1, a1, b1] = linear_srgb_to_oklab(one);
+        let [l2, a2, b2] = linear_srgb_to_oklab(two);
         ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt()
     };
     let mut clipped = clip(origin);
@@ -1521,19 +1672,6 @@ pub(crate) fn gamut_map_srgb(linear: [f32; 3]) -> [f32; 3] {
         }
     }
     clipped.map(|channel| channel as f32)
-}
-
-/// Oklab into extended sRGB, by the inverses of the matrices
-/// [`srgb_to_oklab`] applies, so the two are a pair -- CSS Color 4 publishes
-/// its own inverses, which agree with these to their precision.
-fn oklab_to_srgb(oklab: [f32; 3]) -> [f32; 3] {
-    let lms =
-        apply_matrix(inverse(OKLAB_LMS_TO_OKLAB), oklab).map(|c| c * c * c);
-    apply_matrix(
-        XYZ_D65_TO_LINEAR_SRGB,
-        apply_matrix(inverse(XYZ_D65_TO_OKLAB_LMS), lms),
-    )
-    .map(linear_to_srgb)
 }
 
 /// The arguments of a call, given what follows its `(`, as spans of `args`:
@@ -1598,11 +1736,11 @@ const OKLAB_CHROMA_FULL_SCALE: f64 = 0.4;
 
 /// Where an LCH hue becomes powerless: CSS Color 4 section 9.3's table,
 /// "C <= 0.0015", the `epsilon` of its `Lab_to_LCH`.
-const LCH_POWERLESS_CHROMA: f32 = 0.0015;
+const LCH_POWERLESS_CHROMA: f64 = 0.0015;
 
 /// Where an OkLCh hue becomes powerless: CSS Color 4 section 9.4's table,
 /// "C <= 0.000004", the `epsilon` of its `OKLab_to_OKLCH`.
-const OKLCH_POWERLESS_CHROMA: f32 = 0.000_004;
+const OKLCH_POWERLESS_CHROMA: f64 = 0.000_004;
 
 /// What one channel of a relative colour may be written as besides a
 /// number.
@@ -1647,7 +1785,7 @@ impl Relative {
 
     /// What each of the three channels may be written as.
     fn channels(self) -> [Channel; 3] {
-        let lab_ab = Channel::Scaled(f64::from(LAB_AB_FULL_SCALE));
+        let lab_ab = Channel::Scaled(LAB_AB_FULL_SCALE);
         let oklab_ab = Channel::Scaled(OKLAB_CHROMA_FULL_SCALE);
         let percent = Channel::Scaled(PERCENT_CHANNEL_SCALE);
         match self {
@@ -1656,7 +1794,7 @@ impl Relative {
             Self::Lab => [percent, lab_ab, lab_ab],
             Self::Lch => [
                 percent,
-                Channel::Scaled(f64::from(LCH_CHROMA_FULL_SCALE)),
+                Channel::Scaled(LCH_CHROMA_FULL_SCALE),
                 Channel::Hue,
             ],
             Self::Oklab => [Channel::Scaled(1.0), oklab_ab, oklab_ab],
@@ -1672,11 +1810,40 @@ impl Relative {
     /// `l` as 104.4 in `lab(from color(srgb 1.05 1.05 1.05) calc(l - 30) a
     /// b)`, which paints `lab(74.4 0 0)`. Only the result is clamped, by
     /// [`color`](Self::color).
-    fn origin(self, rgb: [f32; 3]) -> Option<[f64; 3]> {
-        let wide = rgb.map(f64::from);
-        let lab = || srgb_to_lab(rgb);
-        let oklab = || srgb_to_oklab(rgb);
-        let scaled = |[x, y, z]: [f32; 3]| [x, y, z].map(f64::from);
+    ///
+    /// Read from the origin's declaration, in `f64`: as declared where the
+    /// origin is in this function's own space -- a `lab()` origin for
+    /// `lch()` only changes to polar form -- and through sRGB otherwise, so
+    /// `color(from color(rec2020 0 1 0) rec2020 r g b)` reads 0, 1, 0 rather
+    /// than a pure-power encode of the residue near zero a round trip leaves.
+    fn origin(self, origin: &Declared) -> Option<[f64; 3]> {
+        let declared = origin.channels.map(|c| c.unwrap_or(0.0));
+        let same_space = |space: &str| matches!(origin.form, Form::Color(declared) if canonical_space(declared) == canonical_space(space));
+        match (self, origin.form) {
+            (Self::Rgb, Form::Legacy)
+            | (Self::Lab, Form::Lab)
+            | (Self::Lch, Form::Lch)
+            | (Self::Oklab, Form::Oklab)
+            | (Self::Oklch, Form::Oklch) => return Some(declared),
+            (Self::Lch, Form::Lab) => {
+                return Some(to_polar(declared, LCH_POWERLESS_CHROMA));
+            }
+            (Self::Oklch, Form::Oklab) => {
+                return Some(to_polar(declared, OKLCH_POWERLESS_CHROMA));
+            }
+            (Self::Lab | Self::Oklab, Form::Lch | Form::Oklch)
+                if (self == Self::Lab) == (origin.form == Form::Lch) =>
+            {
+                return Some(from_polar(declared));
+            }
+            (Self::Color(space), _) if same_space(space) => {
+                return Some(declared);
+            }
+            _ => {}
+        }
+        let wide = declared_srgb(origin);
+        let lab = || srgb_to_lab(wide);
+        let oklab = || srgb_to_oklab(wide);
         Some(match self {
             Self::Rgb => wide.map(|c| c * RGB_CHANNEL_SCALE),
             Self::Hsl => {
@@ -1691,11 +1858,11 @@ impl Relative {
                     (1.0 - r.max(g).max(b)) * PERCENT_CHANNEL_SCALE,
                 ]
             }
-            Self::Lab => scaled(lab()),
-            Self::Lch => scaled(to_polar(lab(), LCH_POWERLESS_CHROMA)),
-            Self::Oklab => scaled(oklab()),
-            Self::Oklch => scaled(to_polar(oklab(), OKLCH_POWERLESS_CHROMA)),
-            Self::Color(space) => scaled(srgb_to_color_function(rgb, space)?),
+            Self::Lab => lab(),
+            Self::Lch => to_polar(lab(), LCH_POWERLESS_CHROMA),
+            Self::Oklab => oklab(),
+            Self::Oklch => to_polar(oklab(), OKLCH_POWERLESS_CHROMA),
+            Self::Color(space) => srgb_to_color_function(wide, space)?,
         })
     }
 
@@ -1722,43 +1889,41 @@ impl Relative {
     /// at zero. Chrome 153 does both -- `lab(from red calc(l - 200) a b)` is
     /// `lab(0 a b)` there and `lch(from red l calc(c - 200) h)` grey -- and
     /// clips nothing else.
-    fn color(self, [x, y, z]: [f64; 3]) -> ([f32; 3], &'static str) {
+    ///
+    /// The channels are held at `f32`, as every colour is, so any spelling
+    /// of a channel that reads as the same `f32` names the same colour; the
+    /// conversion from them runs in `f64`, by CSS Color 4's own matrices, and
+    /// its result is rounded to `f32` once, where the colour is stored.
+    fn color(self, channels: [f64; 3]) -> ([f32; 3], &'static str) {
         let narrow = |v: [f64; 3]| v.map(|c| c as f32);
+        let [x, y, z] = narrow(channels).map(f64::from);
         let lab_l = x.clamp(0.0, PERCENT_CHANNEL_SCALE);
         let oklab_l = x.clamp(0.0, 1.0);
-        let from_polar = |l: f64, c: f64, h: f64| {
-            let (sin, cos) = h.to_radians().sin_cos();
-            narrow([l, c.max(0.0) * cos, c.max(0.0) * sin])
-        };
+        let polar = |l: f64, c: f64, h: f64| from_polar([l, c.max(0.0), h]);
         let srgb = match self {
-            Self::Rgb => narrow([x, y, z].map(|c| c / RGB_CHANNEL_SCALE)),
-            Self::Hsl => narrow(hsl_to_srgb(
+            Self::Rgb => [x, y, z].map(|c| c / RGB_CHANNEL_SCALE),
+            Self::Hsl => hsl_to_srgb(
                 x,
                 y / PERCENT_CHANNEL_SCALE,
                 z / PERCENT_CHANNEL_SCALE,
-            )),
-            Self::Hwb => narrow(hwb_to_srgb(
+            ),
+            Self::Hwb => hwb_to_srgb(
                 x,
                 y / PERCENT_CHANNEL_SCALE,
                 z / PERCENT_CHANNEL_SCALE,
-            )),
-            Self::Lab => lab_to_srgb(narrow([lab_l, y, z])),
-            Self::Lch => lab_to_srgb(from_polar(lab_l, y, z)),
-            Self::Oklab => oklab_to_srgb(narrow([oklab_l, y, z])),
-            Self::Oklch => oklab_to_srgb(from_polar(oklab_l, y, z)),
+            ),
+            Self::Lab => lab_to_srgb([lab_l, y, z]),
+            Self::Lch => lab_to_srgb(polar(lab_l, y, z)),
+            Self::Oklab => oklab_to_srgb([oklab_l, y, z]),
+            Self::Oklch => oklab_to_srgb(polar(oklab_l, y, z)),
             Self::Color(
                 space @ ("srgb" | "srgb-linear" | "display-p3" | "rec2020"),
             ) => {
                 return (narrow([x, y, z]), space);
             }
-            Self::Color(space) => {
-                let [r, g, b] = narrow([x, y, z]);
-                let c =
-                    color_function_to_srgb(Color4f::new(r, g, b, 1.0), space);
-                [c.r, c.g, c.b]
-            }
+            Self::Color(space) => color_function_to_srgb_f64(space, [x, y, z]),
         };
-        (srgb, "srgb")
+        (narrow(srgb), "srgb")
     }
 }
 
@@ -1896,6 +2061,36 @@ impl Relative {
     }
 }
 
+/// Lightness, chroma and hue in degrees as lightness and the two axes, the
+/// inverse of [`to_polar`]: CSS Color 4's `LCH_to_Lab`.
+fn from_polar([l, chroma, hue]: [f64; 3]) -> [f64; 3] {
+    let (sin, cos) = hue.to_radians().sin_cos();
+    [l, chroma * cos, chroma * sin]
+}
+
+/// A colour's declared channels as extended sRGB, in `f64`, a channel
+/// declared `none` read as zero.
+fn declared_srgb(declared: &Declared) -> [f64; 3] {
+    let channels = declared.channels.map(|c| c.unwrap_or(0.0));
+    match declared.form {
+        Form::Legacy => channels.map(|c| c / RGB_CHANNEL_SCALE),
+        Form::Lab => lab_to_srgb(channels),
+        Form::Lch => lab_to_srgb(from_polar(channels)),
+        Form::Oklab => oklab_to_srgb(channels),
+        Form::Oklch => oklab_to_srgb(from_polar(channels)),
+        Form::Color(space) => color_function_to_srgb_f64(space, channels),
+    }
+}
+
+/// `space` by the name section 16.5 serialises it under: `xyz` is
+/// `xyz-d65`.
+fn canonical_space(space: &str) -> &str {
+    match space {
+        "xyz" => "xyz-d65",
+        other => other,
+    }
+}
+
 /// Lab or Oklab as lightness, chroma and hue in degrees, the hue zero where
 /// it is powerless: at a chroma of `powerless` or less, which CSS Color 4
 /// sets per space.
@@ -1905,11 +2100,11 @@ impl Relative {
 /// in OkLCh -- so `lch(from white l 50 h)` is magenta there, where here its
 /// hue is zero. That hue is rounding noise, and this follows the standard;
 /// `docs/browser-differences.md` has the measurements.
-fn to_polar([l, a, b]: [f32; 3], powerless: f32) -> [f32; 3] {
+fn to_polar([l, a, b]: [f64; 3], powerless: f64) -> [f64; 3] {
     let chroma = a.hypot(b);
     let hue = match chroma <= powerless {
         true => 0.0,
-        false => b.atan2(a).to_degrees().rem_euclid(DEGREES_PER_TURN as f32),
+        false => b.atan2(a).to_degrees().rem_euclid(DEGREES_PER_TURN),
     };
     [l, chroma, hue]
 }
@@ -2164,7 +2359,7 @@ fn relative_channels(
     let [_, origin @ (_, origin_end), ..] = spans[..] else {
         return None;
     };
-    let origin = css_to_color4f(token(body, origin))?;
+    let (_, _, origin) = css_to_declared(token(body, origin))?;
     let (function, rest) = match function {
         Relative::Color(_) => {
             let &space @ (_, space_end) = spans.get(2)?;
@@ -2176,8 +2371,9 @@ fn relative_channels(
     let ([t0, t1, t2], alpha) = channels_and_alpha(rest)?;
 
     let [k0, k1, k2, k_alpha] = function.keywords();
-    let [o0, o1, o2] = function.origin([origin.r, origin.g, origin.b])?;
-    let bound = [(k0, o0), (k1, o1), (k2, o2), (k_alpha, f64::from(origin.a))];
+    let [o0, o1, o2] = function.origin(&origin)?;
+    let origin_alpha = origin.alpha.unwrap_or(0.0);
+    let bound = [(k0, o0), (k1, o1), (k2, o2), (k_alpha, origin_alpha)];
     let [c0, c1, c2] = function.channels();
     let values = [
         read_channel(t0, c0, &bound)?,
@@ -2186,7 +2382,7 @@ fn relative_channels(
     ];
     let alpha_value = match alpha {
         Some(text) => read_channel(text, Channel::Scaled(1.0), &bound)?,
-        None => f64::from(origin.a),
+        None => origin_alpha,
     };
     let declared = function.declared(
         values,
@@ -3028,8 +3224,9 @@ fn declared_css(declared: &Declared, figures: Figures) -> String {
 /// that is each one's shortest. Lab, LCH, Oklab and OkLCh are converted, and
 /// there a channel's shortest depends on how the others are written, so
 /// every set of lengths within [`LENGTH_SLACK`] of those is tried, fewest
-/// figures first, each channel at each of its three decimals, and the
-/// shortest string of the fewest figures is kept.
+/// figures first, each channel at each of its three decimals, widening
+/// until one repaints, and the shortest string of the fewest figures is
+/// kept. A number below [`CONVERSION_RESIDUE`] is tried as `0` first.
 pub fn declared_to_css(declared: &Declared) -> String {
     let all = [EXACT_FIGURES; 4];
     let exact = declared_css(declared, all);
@@ -3042,9 +3239,24 @@ pub fn declared_to_css(declared: &Declared) -> String {
     let repaints = |css: &str| painted(css).as_ref() == Some(&held);
 
     // Each number alone, the others exact: the fewest figures, and the
-    // decimal of that length, that repaint.
+    // decimal of that length, that repaint. Zero first for a number below
+    // [`CONVERSION_RESIDUE`], which no rounding of it reaches: a channel whose
+    // true value is zero holds what a conversion leaves there,
+    // `oklch(from white l c h)`'s chroma of 5e-16. Not for a larger one: a
+    // hue under a chroma of zero repaints at any value, and `oklch(0.5 -0.1
+    // 30)` keeps the hue it was given.
     let alone = |index: usize| -> Option<(f64, usize)> {
         let value = declared_number(declared, index)?;
+        let mut zero = *declared;
+        set_declared_number(&mut zero, index, 0.0);
+        let mut one = all;
+        one[index] = 1;
+        if value != 0.0
+            && value.abs() < CONVERSION_RESIDUE
+            && repaints(&declared_css(&zero, one))
+        {
+            return Some((0.0, 1));
+        }
         (1..EXACT_FIGURES).find_map(|length| {
             let mut trial_figures = all;
             trial_figures[index] = length;
@@ -3080,59 +3292,67 @@ pub fn declared_to_css(declared: &Declared) -> String {
     // every set of lengths within [`LENGTH_SLACK`] of each channel's own is
     // tried, fewest figures first, each channel at each of its three
     // decimals; the first that repaints is the shortest there is in that
-    // window.
-    let channels: Vec<usize> =
-        (0..ALPHA).filter(|&index| lone[index].is_some()).collect();
-    let mut lengths: Vec<Figures> = vec![figures];
-    for &index in &channels {
-        let own = figures[index];
-        let low = own.saturating_sub(LENGTH_SLACK).max(1);
-        let high = (own + LENGTH_SLACK).min(EXACT_FIGURES);
-        lengths = lengths
-            .into_iter()
-            .flat_map(|base| {
-                (low..=high).map(move |length| {
-                    let mut trial = base;
-                    trial[index] = length;
-                    trial
+    // window. A channel already at zero stays there.
+    let channels: Vec<usize> = (0..ALPHA)
+        .filter(|&index| lone[index].is_some_and(|(decimal, _)| decimal != 0.0))
+        .collect();
+    // A window that holds no spelling is widened until one does: a chroma
+    // whose own shortest was six figures can need eight once the lightness
+    // and hue are written short, `oklch(from #669999 l c h)`'s.
+    let search = |slack: usize| {
+        let mut lengths: Vec<Figures> = vec![figures];
+        for &index in &channels {
+            let own = figures[index];
+            let low = own.saturating_sub(slack).max(1);
+            let high = (own + slack).min(EXACT_FIGURES);
+            lengths = lengths
+                .into_iter()
+                .flat_map(|base| {
+                    (low..=high).map(move |length| {
+                        let mut trial = base;
+                        trial[index] = length;
+                        trial
+                    })
                 })
-            })
-            .collect();
-    }
-    let total =
-        |trial: &Figures| channels.iter().map(|&i| trial[i]).sum::<usize>();
-    lengths.sort_by_key(total);
-    let combinations = 3usize.pow(channels.len() as u32);
-    let mut best: Option<(usize, String)> = None;
-    for trial_figures in lengths {
-        if best
-            .as_ref()
-            .is_some_and(|(figures, _)| total(&trial_figures) > *figures)
-        {
-            break;
+                .collect();
         }
-        let decimals: Vec<[f64; 3]> = channels
-            .iter()
-            .filter_map(|&index| {
-                let value = declared_number(declared, index)?;
-                Some(neighbouring_decimals(value, trial_figures[index]))
-            })
-            .collect();
-        for combination in 0..combinations {
-            let mut trial = shortest;
-            let mut choice = combination;
-            for (&index, options) in channels.iter().zip(&decimals) {
-                set_declared_number(&mut trial, index, options[choice % 3]);
-                choice /= 3;
-            }
-            let css = declared_css(&trial, trial_figures);
-            if best.as_ref().is_none_or(|(_, kept)| css.len() < kept.len())
-                && repaints(&css)
+        let total =
+            |trial: &Figures| channels.iter().map(|&i| trial[i]).sum::<usize>();
+        lengths.sort_by_key(total);
+        let combinations = 3usize.pow(channels.len() as u32);
+        let mut best: Option<(usize, String)> = None;
+        for trial_figures in lengths {
+            if best
+                .as_ref()
+                .is_some_and(|(figures, _)| total(&trial_figures) > *figures)
             {
-                best = Some((total(&trial_figures), css));
+                break;
+            }
+            let decimals: Vec<[f64; 3]> = channels
+                .iter()
+                .filter_map(|&index| {
+                    let value = declared_number(declared, index)?;
+                    Some(neighbouring_decimals(value, trial_figures[index]))
+                })
+                .collect();
+            for combination in 0..combinations {
+                let mut trial = shortest;
+                let mut choice = combination;
+                for (&index, options) in channels.iter().zip(&decimals) {
+                    set_declared_number(&mut trial, index, options[choice % 3]);
+                    choice /= 3;
+                }
+                let css = declared_css(&trial, trial_figures);
+                if best.as_ref().is_none_or(|(_, kept)| css.len() < kept.len())
+                    && repaints(&css)
+                {
+                    best = Some((total(&trial_figures), css));
+                }
             }
         }
-    }
+        best
+    };
+    let best = (LENGTH_SLACK..EXACT_FIGURES).find_map(search);
     if let Some((_, css)) = best {
         return css;
     }
@@ -3142,14 +3362,26 @@ pub fn declared_to_css(declared: &Declared) -> String {
         .unwrap_or(exact)
 }
 
+/// The largest a number can be and still be taken for what a conversion
+/// leaves where the true value is zero.
+///
+/// CSS Color 4's conversions run here in `f64`, whose rounding leaves
+/// residues around 1e-16 to 1e-13 on channels of unit scale -- 5e-16 on
+/// white's OkLCh chroma, 6e-14 on a Lab grey's axes through sRGB. A
+/// thousand times the largest of those, and far below anything an `f32`
+/// colour of unit scale can tell from zero.
+const CONVERSION_RESIDUE: f64 = 1e-10;
+
 /// How far from its own shortest a channel's length is searched when the
 /// channels mix, in figures either way.
 ///
+/// Where it holds no spelling, the window widens a figure at a time, so
+/// this sets where the search starts rather than how far it reaches.
 /// Chosen by measurement. Over the 864 relative colours of a grid of 216
-/// sRGB origins in Lab, LCH, Oklab and OkLCh, one figure finds a spelling
-/// as short as a search over every length to ten figures does, at a median
-/// of about 430 parses; two finds the same at about 1,730. None finds a
-/// longer one for `lch(from #000033 l c h)`, which
+/// sRGB origins in Lab, LCH, Oklab and OkLCh, starting at one figure finds
+/// a spelling as short as a search over every length to ten figures does,
+/// at a median of about 500 parses and 3,500 at most; starting at none
+/// writes nine of them longer, `lab(from #3399cc l a b)` among them, which
 /// `a_mixed_colour_has_no_shorter_spelling` holds.
 const LENGTH_SLACK: usize = 1;
 
@@ -4441,7 +4673,9 @@ mod tests {
     /// Display P3 colours as linear-light sRGB, through the tree's own
     /// matrix, so the inputs are the colours CSS names.
     fn p3(rgb: [f32; 3]) -> [f32; 3] {
-        apply_matrix(LINEAR_P3_TO_LINEAR_SRGB, rgb.map(srgb_to_linear))
+        let xyz = color_function_to_xyz("display-p3", rgb.map(f64::from))
+            .expect("a space");
+        apply_matrix(XYZ_TO_LINEAR_SRGB, xyz).map(|c| c as f32)
     }
 
     #[test]
@@ -4464,8 +4698,8 @@ mod tests {
         // a JND, so it lands within one JND of that edge rather than on it.
         let mapped = gamut_map_srgb(p3([1.0, 1.0, 0.0]));
         let edge = [0.99116f32, 0.99733, 0.00001].map(srgb_to_linear);
-        let [l1, a1, b1] = linear_srgb_to_oklab_f64(mapped.map(f64::from));
-        let [l2, a2, b2] = linear_srgb_to_oklab_f64(edge.map(f64::from));
+        let [l1, a1, b1] = linear_srgb_to_oklab(mapped.map(f64::from));
+        let [l2, a2, b2] = linear_srgb_to_oklab(edge.map(f64::from));
         let distance =
             ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt();
         assert!(distance < GAMUT_MAP_JND, "{mapped:?}, {distance} off");
@@ -4516,7 +4750,7 @@ mod tests {
     #[test]
     fn gamut_mapping_stops_within_a_jnd_of_the_origins_hue() {
         let oklch = |rgb: [f32; 3]| {
-            let [l, a, b] = linear_srgb_to_oklab_f64(rgb.map(f64::from));
+            let [l, a, b] = linear_srgb_to_oklab(rgb.map(f64::from));
             (l, a.hypot(b), b.atan2(a))
         };
         for origin in [
@@ -4564,29 +4798,38 @@ mod tests {
     /// No shorter spelling of a colour whose channels a conversion mixes,
     /// against a search that is not this one: every combination of shorter
     /// lengths, each channel rounded or at either neighbouring decimal. The
-    /// rows are ones a search that shortened one channel at a time, or
-    /// stopped at the first set of lengths that repaints, wrote longer.
+    /// rows are ones a search that shortened one channel at a time, stopped
+    /// at the first set of lengths that repaints, or never widened its
+    /// window, wrote longer.
     #[test]
     fn a_mixed_colour_has_no_shorter_spelling() {
         for (css, written) in [
             (
                 "lch(from #000033 l c h)",
-                "lch(1.8127384 32.51795 290.35566)",
+                "lch(1.8127392 32.51795 290.35566)",
             ),
             (
                 "oklab(from #990099 l a b)",
-                "oklab(0.4792106 0.1875161 -0.11552575)",
+                "oklab(0.47921055 0.18751599 -0.11552572)",
             ),
             (
                 "oklab(from #cc6699 l a b)",
-                "oklab(0.6453705 0.1394026 -0.0233062)",
+                "oklab(0.6453704 0.13940273 -0.02330621)",
             ),
             (
                 "oklch(from #00ff00 l c h)",
-                "oklch(0.8664396 0.29482706 142.49533)",
+                "oklch(0.86643962 0.29482722 142.49535)",
             ),
             ("lch(from #666666 l c h)", "lch(43.19229 0 0)"),
-            ("lab(from red l a b)", "lab(54.290535 80.80495 69.89094)"),
+            ("lab(from red l a b)", "lab(54.290541 80.80493 69.89097)"),
+            (
+                "lab(from #3399cc l a b)",
+                "lab(59.189518 -16.951413 -35.27614)",
+            ),
+            (
+                "oklch(from #669999 l c h)",
+                "oklch(0.64711787 0.054385204 195.89)",
+            ),
         ] {
             let (held, space, declared) =
                 css_to_declared(css).expect("a colour");
@@ -4649,6 +4892,232 @@ mod tests {
                     lengths[place] = 1;
                 }
                 break;
+            }
+        }
+    }
+
+    /// `red` converted to Lab and OkLCh by CSS Color 4's sample code,
+    /// conversions.js, written out here rather than shared with the code
+    /// under test: `lin_sRGB_to_XYZ`, then `D65_to_D50` and `XYZ_to_Lab`, or
+    /// `XYZ_to_OKLab` and the polar form. Red is 1, 0, 0, so the linear light
+    /// is the first column of the matrix.
+    fn red_by_the_sample_code() -> ([f64; 3], [f64; 3]) {
+        let xyz_d65 =
+            [506752.0 / 1228815.0, 87098.0 / 409605.0, 7918.0 / 409605.0];
+        let d65_to_d50 = [
+            [
+                1.0479297925449969,
+                0.022946870601609652,
+                -0.05019226628920524,
+            ],
+            [
+                0.02962780877005599,
+                0.9904344267538799,
+                -0.017073799063418826,
+            ],
+            [
+                -0.009243040646204504,
+                0.015055191490298152,
+                0.7518742814281371,
+            ],
+        ];
+        let apply = |m: [[f64; 3]; 3], v: [f64; 3]| {
+            m.map(|r| r[0] * v[0] + r[1] * v[1] + r[2] * v[2])
+        };
+        let white = [0.3457 / 0.3585, 1.0, (1.0 - 0.3457 - 0.3585) / 0.3585];
+        let (kappa, epsilon) = (24389.0 / 27.0, 216.0 / 24389.0);
+        let xyz_d50 = apply(d65_to_d50, xyz_d65);
+        let f: [f64; 3] = std::array::from_fn(|i| {
+            let v = xyz_d50[i] / white[i];
+            if v > epsilon {
+                v.cbrt()
+            } else {
+                (kappa * v + 16.0) / 116.0
+            }
+        });
+        let lab = [
+            116.0 * f[1] - 16.0,
+            500.0 * (f[0] - f[1]),
+            200.0 * (f[1] - f[2]),
+        ];
+        let lms = apply(
+            [
+                [0.819022437996703, 0.3619062600528904, -0.1288737815209879],
+                [0.0329836539323885, 0.9292868615863434, 0.0361446663506424],
+                [0.0481771893596242, 0.2642395317527308, 0.6335478284694309],
+            ],
+            xyz_d65,
+        )
+        .map(f64::cbrt);
+        let [l, a, b] = apply(
+            [
+                [0.210454268309314, 0.7936177747023054, -0.0040720430116193],
+                [1.9779985324311684, -2.42859224204858, 0.450593709617411],
+                [0.0259040424655478, 0.7827717124575296, -0.8086757549230774],
+            ],
+            lms,
+        );
+        let hue = b.atan2(a).to_degrees().rem_euclid(360.0);
+        (lab, [l, a.hypot(b), hue])
+    }
+
+    #[test]
+    fn a_relative_colour_holds_the_sample_codes_channels() {
+        // To `f32` precision: the channels a relative colour reads off its
+        // origin are the ones CSS Color 4's conversion gives, rounded once.
+        let (lab, oklch) = red_by_the_sample_code();
+        for (css, want) in [
+            ("lab(from red l a b)", lab),
+            ("oklch(from red l c h)", oklch),
+        ] {
+            let (_, _, declared) = css_to_declared(css).expect("a colour");
+            let held = declared.channels.map(|c| c.expect("a channel") as f32);
+            assert_eq!(held, want.map(|c| c as f32), "{css}");
+        }
+    }
+
+    #[test]
+    fn a_relative_colour_in_its_own_space_reads_its_origin_as_written() {
+        // Through sRGB and back, a pure-power encode turns the residue near
+        // zero into a visible channel: rec2020's green read -0.00066.
+        let read = |css: &str| {
+            let (_, _, declared) = css_to_declared(css).expect("a colour");
+            declared_to_css(&declared)
+        };
+        for (css, written) in [
+            (
+                "color(from color(rec2020 0 1 0) rec2020 r g b)",
+                "color(rec2020 0 1 0)",
+            ),
+            (
+                "color(from color(display-p3 1 0 0) display-p3 r g b)",
+                "color(display-p3 1 0 0)",
+            ),
+            (
+                "color(from color(a98-rgb 1 0 0) a98-rgb r g b)",
+                "color(a98-rgb 1 0 0)",
+            ),
+            (
+                "color(from color(xyz 0.2 0.3 0.4) xyz-d65 x y z)",
+                "color(xyz-d65 0.2 0.3 0.4)",
+            ),
+            ("lab(from lab(50 0 0) l a b)", "lab(50 0 0)"),
+            ("lch(from lab(50 0 0) l c h)", "lch(50 0 0)"),
+            ("oklab(from oklch(0.5 0 0) l a b)", "oklab(0.5 0 0)"),
+        ] {
+            assert_eq!(read(css), written, "{css}");
+        }
+    }
+
+    #[test]
+    fn a_conversion_residue_reads_as_zero_and_a_written_hue_does_not() {
+        let read = |css: &str| {
+            let (_, _, declared) = css_to_declared(css).expect("a colour");
+            declared_to_css(&declared)
+        };
+        // White's OkLCh chroma is 5e-16 through `f64`, a grey's Lab axes
+        // 6e-14; neither is a number anyone wrote.
+        assert_eq!(read("oklch(from white l c h)"), "oklch(1 0 0)");
+        assert_eq!(read("oklab(from #666666 l a b)"), "oklab(0.51027836 0 0)");
+        // A hue under a chroma of zero paints nothing, and still reads as
+        // given, as Chrome 156 reads it.
+        assert_eq!(read("oklch(0.5 -0.1 30)"), "oklch(0.5 0 30)");
+    }
+
+    /// CSS Color 4's `Lab_to_XYZ`, `D50_to_D65`, `XYZ_to_lin_sRGB` and
+    /// `gam_sRGB`, in `f64`, written out from conversions.js rather than
+    /// shared with the code under test.
+    fn lab_by_the_sample_code([l, a, b]: [f64; 3]) -> [f64; 3] {
+        let (kappa, epsilon) = (24389.0 / 27.0, 216.0 / 24389.0);
+        let white = [0.3457 / 0.3585, 1.0, (1.0 - 0.3457 - 0.3585) / 0.3585];
+        let (l116, a500, b200) = (l / 116.0, a / 500.0, b / 200.0);
+        let f1 = l116 + 16.0 / 116.0;
+        let (f0, f2) = (f1 + a500, f1 - b200);
+        let xyz = [
+            if f0.powi(3) > epsilon {
+                f0.powi(3)
+            } else {
+                (l116 + a500) * (116.0 / kappa)
+            },
+            if l > kappa * epsilon {
+                ((l + 16.0) / 116.0).powi(3)
+            } else {
+                l / kappa
+            },
+            if f2.powi(3) > epsilon {
+                f2.powi(3)
+            } else {
+                (l116 - b200) * (116.0 / kappa)
+            },
+        ];
+        let apply = |m: [[f64; 3]; 3], v: [f64; 3]| {
+            m.map(|r| r[0] * v[0] + r[1] * v[1] + r[2] * v[2])
+        };
+        let d65 = apply(
+            [
+                [0.955473421488075, -0.02309845494876471, 0.06325924320057072],
+                [
+                    -0.0283697093338637,
+                    1.0099953980813041,
+                    0.021041441191917323,
+                ],
+                [
+                    0.012314014864481998,
+                    -0.020507649298898964,
+                    1.330365926242124,
+                ],
+            ],
+            [0, 1, 2].map(|i| xyz[i] * white[i]),
+        );
+        let linear = apply(
+            [
+                [12831.0 / 3959.0, -329.0 / 214.0, -1974.0 / 3959.0],
+                [
+                    -851781.0 / 878810.0,
+                    1648619.0 / 878810.0,
+                    36519.0 / 878810.0,
+                ],
+                [705.0 / 12673.0, -2585.0 / 12673.0, 705.0 / 667.0],
+            ],
+            d65,
+        );
+        linear.map(|v: f64| {
+            let abs = v.abs();
+            let encoded = if abs > 0.0031308 {
+                1.055 * abs.powf(1.0 / 2.4) - 0.055
+            } else {
+                12.92 * abs
+            };
+            encoded.copysign(v)
+        })
+    }
+
+    #[test]
+    fn lab_is_converted_in_f64_and_rounded_once() {
+        // The channels are stored at `f32`, as the colour is; from them, each
+        // channel painted is the `f32` nearest the sample code's `f64`
+        // answer, or one `f32` step from it where the two `powf`s round
+        // apart.
+        let lightness = [0.0, 12.5, 25.0, 50.0, 79.18, 100.0];
+        let axis = [-160.0, -62.27, -30.0, 0.0, 17.56, 60.0, 125.0];
+        for l in lightness {
+            for a in axis {
+                for b in axis {
+                    let css = format!("lab({l} {a} {b})");
+                    let held = css_to_color4f(&css).expect("a colour");
+                    let stored = [l, a, b].map(|c: f64| f64::from(c as f32));
+                    let want = lab_by_the_sample_code(stored).map(|c| c as f32);
+                    for (got, want) in
+                        [held.r, held.g, held.b].into_iter().zip(want)
+                    {
+                        assert!(
+                            got == want
+                                || got == want.next_up()
+                                || got == want.next_down(),
+                            "{css}: {got} against {want}"
+                        );
+                    }
+                }
             }
         }
     }

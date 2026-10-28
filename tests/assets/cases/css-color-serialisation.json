@@ -151,7 +151,7 @@
     {
       "css": "oklch(70% 0.123456789 30)",
       "chrome": "oklch(0.7 0.123457 30)",
-      "expected": "oklch(0.7 0.1234568 30)",
+      "expected": "oklch(0.7 0.12345679 30)",
       "why": "float"
     },
     {
@@ -315,13 +315,13 @@
     {
       "css": "lab(from red l a b)",
       "chrome": "lab(54.29 80.8198 69.8997)",
-      "expected": "lab(54.290535 80.80495 69.89094)",
+      "expected": "lab(54.290541 80.80493 69.89097)",
       "why": "reference"
     },
     {
       "css": "oklch(from red l c h)",
       "chrome": "oklch(0.627966 0.257704 29.2346)",
-      "expected": "oklch(0.6279554 0.2576832 29.23389)",
+      "expected": "oklch(0.6279554 0.2576833 29.233881)",
       "why": "reference"
     },
     {
@@ -358,7 +358,7 @@
     {
       "css": "lab(29.123456789 39 20)",
       "chrome": "lab(29.1235 39 20)",
-      "expected": "lab(29.12346 39 20)",
+      "expected": "lab(29.123457 39 20)",
       "why": "float"
     },
     {
