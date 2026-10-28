@@ -331,13 +331,27 @@ impl ParagraphRecipe {
         if !drawn && self.styles.is_empty() {
             return (self.builder.build(), None);
         }
-        let text = self.builder.get_text().to_owned();
+        // Copied only where an edge may fall inside a grapheme cluster, the
+        // one thing the text is read for here -- see `ascii_boundary`.
+        let text = {
+            let text = self.builder.get_text();
+            #[cfg(test)]
+            let full = FULL_GRAPHEMES.get();
+            #[cfg(not(test))]
+            let full = false;
+            let may_split = full || self.steps.iter().any(|step| {
+                matches!(step, Step::Text(bytes) if !ascii_boundary(text, bytes.start))
+            });
+            may_split.then(|| text.to_owned())
+        };
+        #[cfg(test)]
+        let asked_text = self.builder.get_text().to_owned();
         // The builder holds the text where it was added, so once an edge
         // has moved, only the steps say where it went.
-        let (moved, edges) = self.keep_graphemes_whole(&text);
-        let paragraph = match moved {
-            true => self.replay(&text, |_, _, _| None),
-            false => self.builder.build(),
+        let (moved, edges) = self.keep_graphemes_whole(text.as_deref());
+        let paragraph = match (moved, &text) {
+            (true, Some(text)) => self.replay(text, |_, _, _| None),
+            _ => self.builder.build(),
         };
         if !drawn && edges.is_empty() {
             return (paragraph, None);
@@ -367,7 +381,7 @@ impl ParagraphRecipe {
             .unzip();
         let passes = Passes {
             #[cfg(test)]
-            as_asked: self.as_asked(&text),
+            as_asked: self.as_asked(&asked_text),
             box_ranges: remap(&slots, &box_slots),
             background_ranges: remap(&slots, &background_slots),
             slots,
@@ -472,10 +486,15 @@ impl ParagraphRecipe {
     /// did, and where the edges that remain between two pieces shaped as
     /// one with different glyph paints lie: those can still fall inside a
     /// glyph cluster, a ligature's, which only the layout tells -- see
-    /// [`Passes::lay_out`].
-    fn keep_graphemes_whole(&mut self, text: &str) -> (bool, Vec<usize>) {
-        let mut stack = vec![(self.base_oblique.is_some(), 0)];
-        let mut pieces = Vec::new();
+    /// [`Passes::lay_out`]. `text` is the builder's, or `None` where every
+    /// edge is known to lie between two clusters, and nothing moves.
+    fn keep_graphemes_whole(
+        &mut self,
+        text: Option<&str>,
+    ) -> (bool, Vec<usize>) {
+        let mut stack = Vec::with_capacity(self.styles.len() + 1);
+        stack.push((self.base_oblique.is_some(), 0));
+        let mut pieces = Vec::with_capacity(self.steps.len());
         for (at, step) in self.steps.iter().enumerate() {
             match step {
                 Step::Push(style) => {
@@ -502,7 +521,9 @@ impl ParagraphRecipe {
             self.text_style(left)
                 .match_one_attribute(StyleType::Font, self.text_style(right))
         };
-        whole_graphemes(text, &mut pieces, shaped_as_one);
+        if let Some(text) = text {
+            whole_graphemes(text, &mut pieces, shaped_as_one);
+        }
         let mut edges = Vec::new();
         let mut owner: Option<&Piece> = None;
         for piece in pieces.iter().filter(|piece| !piece.bytes.is_empty()) {
@@ -526,7 +547,7 @@ impl ParagraphRecipe {
             self.steps[piece.step] = step;
         }
         debug_assert!(
-            self.covers(text),
+            text.is_none_or(|text| self.covers(text)),
             "the pieces of text cover the builder's, byte for byte"
         );
         (moved, edges)
@@ -606,6 +627,41 @@ struct Piece {
     bytes: Range<usize>,
     oblique: bool,
     slot: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether [`ParagraphRecipe::build`] reads the text for every edge, as
+    /// the reference its byte-pair shortcut is held to -- see
+    /// [`ascii_boundary`].
+    pub(crate) static FULL_GRAPHEMES: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Whether a grapheme cluster boundary lies at byte `at` of `text`, judged
+/// from the two bytes either side of it alone: where both are ASCII and are
+/// not CR then LF, it does, and `false` here means only that the two bytes
+/// cannot say.
+///
+/// UAX #29, section 3.1.1, breaks everywhere except where a rule says not
+/// to, and these are the rules that join two characters across a point:
+/// GB3, CR × LF, which is excluded here; GB9b, Prepend × anything, which
+/// needs a Prepend character before the point, and no ASCII character is
+/// one; and GB6 to GB8, GB9, GB9a, GB9c, GB11 and GB12 to GB13, which each
+/// need the character after it to be Hangul, Extend, ZWJ, a SpacingMark, an
+/// Indic consonant, Extended_Pictographic or a Regional_Indicator, which no
+/// ASCII character is either. GB4 and GB5 only break, and the ends of the
+/// text are boundaries by GB1 and GB2. The properties are Unicode 17.0's,
+/// the version `unicode-segmentation` carries.
+fn ascii_boundary(text: &str, at: usize) -> bool {
+    let bytes = text.as_bytes();
+    if at == 0 || at >= bytes.len() {
+        return true;
+    }
+    let (before, after) = (bytes[at - 1], bytes[at]);
+    before.is_ascii()
+        && after.is_ascii()
+        && !(before == b'\r' && after == b'\n')
 }
 
 /// Moves each edge between two adjacent pieces of `text` that falls inside
@@ -1406,8 +1462,8 @@ fn shadow_paint(shadow: &TextShadow, canvas: &Canvas) -> Option<Paint> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ParagraphRecipe, Piece, add_slnt, match_oblique, set_coordinates,
-        whole_graphemes,
+        FULL_GRAPHEMES, ParagraphRecipe, Piece, add_slnt, ascii_boundary,
+        match_oblique, set_coordinates, whole_graphemes,
     };
     use crate::{
         color::RgbaLinear,
@@ -1848,7 +1904,7 @@ mod tests {
             Painter::Recipe => recipe.build(),
             Painter::Assigned => {
                 let text = recipe.builder.get_text().to_owned();
-                recipe.keep_graphemes_whole(&text);
+                recipe.keep_graphemes_whole(Some(&text));
                 (recipe.replay(&text, |_, _, _| None), None)
             }
             Painter::Plain => (builder.build(), None),
@@ -2062,7 +2118,7 @@ mod tests {
             }
         }
         let text = recipe.builder.get_text().to_owned();
-        recipe.keep_graphemes_whole(&text);
+        recipe.keep_graphemes_whole(Some(&text));
         let replayed = recipe
             .replay_builder(&text, |_, _, _| None)
             .get_text()
@@ -2555,5 +2611,111 @@ mod tests {
             hinting.iter().all(|h| *h == text_hinting(true)),
             "{hinting:?}"
         );
+    }
+
+    /// A style in Raleway at the generated size, in `color`.
+    fn colored(color: Color) -> TextStyle {
+        let mut style = TextStyle::new();
+        style
+            .set_font_families(&[RALEWAY])
+            .set_font_size(SIZE)
+            .set_color(color);
+        style
+    }
+
+    /// Whether `GraphemeCursor` puts a boundary between `a` and `b`.
+    fn cursor_boundary(a: char, b: char) -> bool {
+        let text = format!("{a}{b}");
+        let at = a.len_utf8();
+        unicode_segmentation::GraphemeCursor::new(at, text.len(), true)
+            .is_boundary(&text, 0)
+            == Ok(true)
+    }
+
+    /// Where the two bytes either side of a point say it is a boundary, it
+    /// is one: every pair of ASCII characters, the only pairs they vouch
+    /// for, against `GraphemeCursor`. And every character in Unicode that
+    /// joins an ASCII letter after it into one cluster -- the Prepend
+    /// characters, found by scanning rather than listed -- is one they do
+    /// not vouch for, as CR is before LF.
+    #[test]
+    fn two_ascii_bytes_say_where_a_cluster_ends() {
+        for a in (0u8..0x80).map(char::from) {
+            for b in (0u8..0x80).map(char::from) {
+                if ascii_boundary(&format!("{a}{b}"), 1) {
+                    assert!(cursor_boundary(a, b), "{a:?} {b:?}");
+                }
+            }
+        }
+        assert!(!cursor_boundary('\r', '\n'), "CR LF is one cluster");
+        assert!(!ascii_boundary("\r\n", 1), "and not vouched for");
+        let joining: Vec<char> = (0..=0x10FFFF)
+            .filter_map(char::from_u32)
+            .filter(|&c| !cursor_boundary(c, 'a'))
+            .collect();
+        assert!(joining.contains(&'\u{600}'), "Prepend joins: {joining:?}");
+        for c in joining {
+            let text = format!("{c}a");
+            assert!(!ascii_boundary(&text, c.len_utf8()), "{c:?}");
+        }
+    }
+
+    /// The edge between two pieces in different paints of one font, as
+    /// each piece's first bytes and slots end up: a Prepend character or a
+    /// CR before an ASCII piece is one cluster with its first character,
+    /// which goes with it, whatever the byte pair would say.
+    #[test]
+    fn a_cluster_across_an_ascii_edge_is_kept_whole() {
+        for (left, right, slots) in [
+            ("\u{600}", "12", vec![(0..3, 1), (3..4, 2)]),
+            ("\u{110BD}", "ab", vec![(0..5, 1), (5..6, 2)]),
+            ("a\r", "\nb", vec![(0..3, 1), (3..4, 2)]),
+            ("e", "\u{301}x", vec![(0..3, 1), (3..4, 2)]),
+            ("ab", "cd", vec![(0..2, 1), (2..4, 2)]),
+        ] {
+            let mut base = TextStyle::new();
+            base.set_font_families(&[RALEWAY]).set_font_size(SIZE);
+            let mut paragraph_style = ParagraphStyle::new();
+            paragraph_style.set_text_style(&base);
+            let mut recipe =
+                ParagraphRecipe::new(paragraph_style, None, raleway(), None);
+            for (text, color) in [(left, Color::RED), (right, Color::BLUE)] {
+                recipe.push_style(colored(color), None);
+                recipe.add_text(text);
+                recipe.pop();
+            }
+            let (_, passes) = recipe.build();
+            let passes = passes.expect("a colour edge between one font's");
+            assert_eq!(passes.slots, slots, "{left:?} {right:?}");
+        }
+    }
+
+    /// The byte-pair shortcut changes nothing a paragraph draws: generated
+    /// paragraphs, Prepend characters, CR LF and marks among their pieces,
+    /// draw byte for byte as with every edge read from the text.
+    #[test]
+    fn reading_fewer_edges_draws_the_same() {
+        let extra = ["\u{600}", "1", "\r", "\n", "\u{605}x", "x\r"];
+        let all: Vec<&str> = PIECES.iter().copied().chain(extra).collect();
+        let colors = [Color::BLACK, Color::RED, Color::BLUE];
+        let mut random = SplitMix(SEED);
+        let mut drawn = 0;
+        for _ in 0..CASES / 4 {
+            let pieces: Vec<(&str, TextStyle)> = (0..2 + random.below(4))
+                .map(|_| {
+                    let text = all[random.below(all.len())];
+                    (text, colored(colors[random.below(colors.len())]))
+                })
+                .collect();
+            let width = [WIDTH, 60.0][random.below(2)];
+            FULL_GRAPHEMES.set(true);
+            let full = drawn_with(&pieces, width, true);
+            FULL_GRAPHEMES.set(false);
+            let short = drawn_with(&pieces, width, true);
+            let texts: Vec<&str> = pieces.iter().map(|piece| piece.0).collect();
+            assert!(full == short, "{texts:?}");
+            drawn += usize::from(full.is_some());
+        }
+        assert!(drawn > CASES / 16, "{drawn} cases drawn by passes");
     }
 }
