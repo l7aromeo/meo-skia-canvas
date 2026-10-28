@@ -35,7 +35,7 @@ use std::{
     cell::{Cell, RefCell, RefMut},
     collections::{HashMap, HashSet, VecDeque},
     fmt,
-    hash::{DefaultHasher, Hash, Hasher},
+    hash::{BuildHasher, RandomState},
     iter::{once, successors, zip},
     ops::Range,
     rc::Rc,
@@ -716,17 +716,29 @@ impl LaidOutKey {
             && *self.text == *typesetter.text
     }
 
-    /// The bucket a typesetter's run is filed under.
-    fn hash(typesetter: &Typesetter<'_>) -> u64 {
+    /// The bucket a typesetter's run is filed under, in the cache whose
+    /// hash keys are `keys`.
+    fn hash(typesetter: &Typesetter<'_>, keys: &RandomState) -> u64 {
         #[cfg(test)]
         if COLLIDING.get() {
             return 0;
         }
-        let mut hasher = DefaultHasher::new();
-        Rc::as_ptr(&typesetter.kept).hash(&mut hasher);
-        typesetter.text.hash(&mut hasher);
-        typesetter.width.to_bits().hash(&mut hasher);
-        hasher.finish()
+        Self::digest(
+            keys,
+            Rc::as_ptr(&typesetter.kept),
+            &typesetter.text,
+            typesetter.width,
+        )
+    }
+
+    /// The hash of a run's typography, text and width under `keys`.
+    fn digest(
+        keys: &RandomState,
+        typography: *const Typography,
+        text: &str,
+        width: f32,
+    ) -> u64 {
+        keys.hash_one((typography, text, width.to_bits()))
     }
 }
 
@@ -752,6 +764,10 @@ struct LaidOutEntry {
 #[derive(Default)]
 struct LaidOutCache {
     runs: Lru<LaidOutEntry>,
+    /// The keys every hash this cache files a run under is taken with,
+    /// chosen at random for this cache, so that which texts share a hash
+    /// cannot be worked out ahead of a draw.
+    keys: RandomState,
     /// The first run filed under each hash; the rest follow it through
     /// [`LaidOutEntry::next`].
     by_hash: HashMap<u64, LruId>,
@@ -771,7 +787,10 @@ const SEEN_ONCE: usize = 2 * LAID_OUT_COUNT;
 
 impl LaidOutCache {
     fn find(&self, typesetter: &Typesetter<'_>) -> Option<LruId> {
-        let first = self.by_hash.get(&LaidOutKey::hash(typesetter)).copied();
+        let first = self
+            .by_hash
+            .get(&LaidOutKey::hash(typesetter, &self.keys))
+            .copied();
         successors(first, |id| self.runs.get(*id)?.next).find(|id| {
             self.runs
                 .get(*id)
@@ -785,7 +804,7 @@ impl LaidOutCache {
     }
 
     fn insert(&mut self, typesetter: &Typesetter<'_>, laid_out: Rc<LaidOut>) {
-        let hash = LaidOutKey::hash(typesetter);
+        let hash = LaidOutKey::hash(typesetter, &self.keys);
         let bytes = laid_out.bytes;
         let entry = LaidOutEntry {
             key: LaidOutKey::of(typesetter),
@@ -842,7 +861,7 @@ impl LaidOutCache {
     /// By hash alone: two runs whose hashes collide only mean the second is
     /// kept a draw early, since a kept run is found by its whole key.
     fn admits(&mut self, typesetter: &Typesetter<'_>) -> bool {
-        let hash = LaidOutKey::hash(typesetter);
+        let hash = LaidOutKey::hash(typesetter, &self.keys);
         if self.seen.contains(&hash) {
             return true;
         }
@@ -4068,14 +4087,15 @@ mod hinting {
 #[cfg(test)]
 mod laid_out {
     use super::{
-        COLLIDING, LAID_OUT, LAID_OUT_BYTES, LAID_OUT_COUNT, SEEN_ONCE,
-        forget_laid_out, laid_out_held,
+        COLLIDING, LAID_OUT, LAID_OUT_BYTES, LAID_OUT_COUNT, LaidOutCache,
+        LaidOutKey, SEEN_ONCE, forget_laid_out, laid_out_held,
     };
     use crate::{
         Canvas, Context2D, FontLibrary as Library, GradientInterpolation,
         GradientStop, RgbaLinear, Shader, geometry::Point,
         node::font_library::FontLibrary,
     };
+    use std::ptr;
 
     const OSWALD: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -4472,6 +4492,20 @@ mod laid_out {
     #[test]
     fn past_the_count_the_least_recently_drawn_runs_go() {
         least_recently_drawn_go_past_the_count("LaidOutCount");
+    }
+
+    #[test]
+    fn a_run_s_hash_cannot_be_worked_out_ahead_of_its_cache() {
+        let digest = |cache: &LaidOutCache| {
+            LaidOutKey::digest(&cache.keys, ptr::null(), TEXT, 400.0)
+        };
+        let (one, other) = (LaidOutCache::default(), LaidOutCache::default());
+        assert_eq!(digest(&one), digest(&one), "one cache files a run alike");
+        assert_ne!(
+            digest(&one),
+            digest(&other),
+            "another cache, as another process, files the same run elsewhere"
+        );
     }
 
     #[test]
