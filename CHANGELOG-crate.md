@@ -1223,8 +1223,9 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Changed
 
-- **Text costs less to lay out, draw and measure.** Each figure below is
-  from one release-prep window [RE-TIME: the window and its load].
+- **Text costs less to lay out, draw and measure, and blurred shapes
+  less to record and export.** Each figure below is from one release-prep
+  window [RE-TIME: the window and its load].
   - A line of text a `Context2D` draws a second time in the same settings
     is kept as laid out, and every later draw of it, in any paint and
     oblique included, is drawn from what was kept rather than laid out
@@ -1246,6 +1247,14 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
     grapheme cluster crossing an edge between them only where the bytes
     either side of the edge do not rule one out, and its base style is no
     longer copied to set its hinting [RE-TIME vs 0.16.3].
+  - A page of cards, each drawn over its own shadow blurred through a
+    `blur()` filter, records about 31% faster on either engine and exports
+    about 5% faster on the GPU, and a page of blurred rectangles alone
+    records as fast as before and exports about 3.5% faster on the CPU
+    [RE-TIME vs 0.16.3]. A blurred flat-colour draw is recorded without
+    the filter paint it never uses, and consecutive rectangles blurred
+    alike in one frame are kept as one operation, each still drawn on its
+    own.
 
   What is kept costs memory, and each part of it is bounded. Each thread
   keeps up to 512 lines of text or an estimated 8 MiB of them, the least
