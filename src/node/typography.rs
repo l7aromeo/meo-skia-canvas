@@ -995,6 +995,18 @@ pub(crate) fn visit_glyph_runs(
     paragraph: &mut Paragraph,
     mut each: impl FnMut(GlyphRunRef<'_>),
 ) {
+    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+    // Re-check: a profile of a canvas `oblique` fillText in a variable face
+    // shows SkTextBlobBuilder::TightRunBounds under TextLine::buildTextBlob,
+    // called from ParagraphImpl::visit.
+    //
+    // `visit` reports the runs from each line's text blobs, building them
+    // first, and SkParagraph allocates every run in them without bounds, so a
+    // variable face's are worked out glyph by glyph for blobs nothing draws:
+    // 1.8 to 2.5 per cent of the samples of an oblique 24px Oswald
+    // `fillText`. The blobs cannot be skipped, since they are where the
+    // glyphs' shaper offsets are -- see `glyph_runs` -- and the bounds are
+    // SkParagraph's to give, in `TextLine::buildTextBlob`.
     paragraph.visit(|line, visit| {
         if let Some(info) = visit {
             let count = info.glyphs().len();
@@ -1127,7 +1139,10 @@ pub(crate) enum Shear {
 /// head table's box need not hold an instance's ink. Handing a rectangle
 /// from those metrics instead would be cheaper and is not done: blob bounds
 /// cull the draw and size a filter's layer, and nothing guarantees such a
-/// rectangle holds the glyphs.
+/// rectangle holds the glyphs. The bounds Skia works out here cost about 2
+/// per cent of an oblique `fillText` -- 1.9 per cent of the samples of 24px
+/// Oswald drawn and read back -- which is less than a rectangle that has to
+/// be padded for the ink outside each outline, in device pixels, is worth.
 pub(crate) fn sheared_blob(
     font: &Font,
     glyphs: &[GlyphId],
