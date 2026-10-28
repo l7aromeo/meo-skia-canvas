@@ -246,6 +246,12 @@ pub struct CanvasOptions {
     /// macOS, `1.0` on Windows and `0.2` elsewhere. The value the Node
     /// binding takes under the name `textContrast`. Outside `0.0` to `1.0`,
     /// Skia's range, [`Canvas::with_options`] refuses it.
+    ///
+    /// On macOS it changes nothing while
+    /// [`Context2D::set_font_hinting`](crate::Context2D::set_font_hinting)
+    /// is on, as it is by default: Skia sets hinted glyphs' contrast to `0`
+    /// there, leaving their weight to CoreGraphics' own dilation of them. It
+    /// reaches unhinted text only.
     pub text_contrast: f32,
     /// The gamma the rasterizer corrects glyph coverage against, `0.0`
     /// meaning the sRGB curve.
@@ -1564,5 +1570,49 @@ mod readback_text_tests {
         assert!(read == exported, "read back as exported");
         let (default_read, _) = drawn(CanvasOptions::default().text_gamma);
         assert!(read != default_read, "and unlike the default gamma");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod text_contrast_tests {
+    use super::*;
+    use crate::FontLibrary;
+
+    const OSWALD: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"
+    );
+
+    /// A line of text on a CPU canvas made with `text_contrast`, hinted or
+    /// not.
+    fn drawn(text_contrast: f32, hinting: bool) -> Vec<u8> {
+        let options = CanvasOptions {
+            text_contrast,
+            gpu: false,
+            ..CanvasOptions::default()
+        };
+        let mut canvas = Canvas::with_options(420.0, 120.0, options)
+            .expect("a contrast in range");
+        let ctx = canvas.context();
+        ctx.set_font_hinting(hinting);
+        assert!(ctx.set_font_css("28px TextContrastOswald"));
+        ctx.fill_text("Hamburgefonstiv fi AV", 10.0, 70.0, None);
+        ctx.get_image_data(0.0, 0.0, 420.0, 120.0)
+            .expect("the canvas reads back")
+            .pixels()
+            .to_vec()
+    }
+
+    /// Skia's CoreText scaler leaves a hinted glyph's contrast to
+    /// CoreGraphics, so the option reaches unhinted text alone -- see
+    /// `ExportOptions::surface_props`. Fails, as the sign to look again,
+    /// once a hinted run takes it too.
+    #[test]
+    fn hinted_macos_text_ignores_contrast() {
+        FontLibrary::new()
+            .register_font_from_path("TextContrastOswald", OSWALD)
+            .expect("a bundled face registers");
+        assert!(drawn(0.0, true) == drawn(1.0, true), "hinted: the same");
+        assert!(drawn(0.0, false) != drawn(1.0, false), "unhinted: not");
     }
 }

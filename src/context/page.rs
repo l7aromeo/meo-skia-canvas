@@ -3937,6 +3937,11 @@ impl Default for ExportOptions {
 
 impl ExportOptions {
     pub fn surface_props(&self) -> SurfaceProps {
+        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+        // Re-check: cargo test hinted_macos_text_ignores_contrast
+        // The contrast reaches only unhinted text on macOS: Skia's CoreText
+        // scaler sets a hinted glyph's contrast to 0, leaving its weight to
+        // CoreGraphics' dilation of smoothed text, in `SkTypeface_mac_ct.cpp`.
         SurfaceProps::new_with_text_properties(
             SurfacePropsFlags::default(),
             PixelGeometry::Unknown,
