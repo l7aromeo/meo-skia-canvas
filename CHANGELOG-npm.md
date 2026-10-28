@@ -397,6 +397,16 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A blur set with `ctx.filter` keeps its width at every export density.**
+  The blur of a flat-colour rectangle, rounded rectangle or line of text was
+  sized in output pixels, so it stayed as wide in pixels as it was at
+  density 1 while everything around it grew: exported at `density: 3`, a
+  `blur(2px)` rectangle read up to 105 levels off the same blur drawn three
+  times as large, and a canvas drawn into another at twice its size kept the
+  blur at half the width it should have. Its width is now in canvas pixels,
+  as a gradient's or an image's blur already was, so it scales with the
+  export and with the drawing it is placed in.
+
 - **A font registered after `ctx.font` was set moves the baselines with the
   glyphs.** Registering a family again with `FontLibrary.use` changed the
   face a context's text was drawn in, but the baselines kept the face the
