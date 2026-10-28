@@ -1240,7 +1240,7 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
     family list and style while the registered fonts stand, a `TextEngine`
     remembers the faces each family list matched and spells a list's names
     once, and the caches holding these hash their keys with foldhash
-    rather than SipHash: a lookup that finds its answer takes [RE-TIME vs
+    rather than SipHash: setting a font and drawing costs [RE-TIME vs
     0.16.3] of what it did.
   - A paragraph from `TextEngine` in several styles reads its text for a
     grapheme cluster crossing an edge between them only where the bytes

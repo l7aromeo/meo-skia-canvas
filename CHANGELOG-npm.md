@@ -1502,8 +1502,8 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
     redrawn every frame draw 8 to 16 times faster [RE-TIME vs 6.0.2].
   - The faces and collection a font resolves to are remembered for each
     family list and style while the registered fonts stand, and the caches
-    holding them hash their keys with foldhash rather than SipHash: a
-    lookup that finds its answer takes [RE-TIME vs 6.0.2] of what it did.
+    holding them hash their keys with foldhash rather than SipHash:
+    setting a font and drawing costs [RE-TIME vs 6.0.2] of what it did.
   - A `Paragraph` in several styles reads its text for a grapheme cluster
     crossing an edge between them only where the bytes either side of the
     edge do not rule one out, and a style in the paragraph's own text
