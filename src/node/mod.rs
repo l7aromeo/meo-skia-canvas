@@ -10,6 +10,7 @@
 pub mod canvas;
 pub mod color_filter;
 pub(crate) mod decorate;
+pub(crate) mod family_lists;
 pub mod filter;
 pub mod font_library;
 pub mod gradient;

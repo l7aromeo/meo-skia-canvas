@@ -1,7 +1,6 @@
 use std::{
     borrow::Cow,
     collections::HashMap,
-    hash::{Hash, Hasher},
     iter::once,
     ops::Range,
     rc::Rc,
@@ -42,6 +41,7 @@ use crate::{
     geometry::Rect,
     image::CSS_INITIAL_FONT_SIZE,
     node::{
+        family_lists::ListRef,
         font_library::{FontLibrary as SharedFontRegistry, forgetful},
         oblique::{
             ParagraphRecipe, Passes, add_slnt, match_oblique,
@@ -1846,53 +1846,35 @@ pub(crate) struct FaceMatches {
     matches: HashMap<FaceMatchKey, Rc<[Typeface]>>,
 }
 
-/// What a search of an engine's collection is asked: a family list, as the
-/// names [`collection_names`] handed out for it, and the style's weight,
-/// width and slant.
+/// What a search of an engine's collection is asked: a family list, as
+/// [`collection_list`] filed it, and the style's weight, width and slant.
 ///
-/// The names are compared and hashed by which list they are, not by what
-/// they spell: the library hands out one list for a family list for as long
-/// as it keeps it, so this costs no hash of the strings, which the lookup
-/// that found the list has already paid. The key holds the list, so its
-/// allocation cannot be freed and its address taken by another while the
-/// entry lives -- equal addresses are the same list. A list the library
-/// works out again, after the fonts change or past its bound, is a new
-/// allocation, and misses rather than answering for the one before.
+/// The list is the library's ref to it, not its names, so the key costs no
+/// hash of the strings, which the lookup that found the list has already
+/// paid. Equal refs are the same names: a list the library files again,
+/// after the fonts change or past its bound, is filed in a new generation,
+/// and misses rather than answering for the one before -- see
+/// `FamilyLists`.
+#[derive(PartialEq, Eq, Hash)]
 struct FaceMatchKey {
-    names: Rc<[String]>,
+    list: ListRef,
     weight: i32,
     width: i32,
     slant: Slant,
 }
 
-impl PartialEq for FaceMatchKey {
-    fn eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.names, &other.names)
-            && (self.weight, self.width, self.slant)
-                == (other.weight, other.width, other.slant)
-    }
-}
-
-impl Eq for FaceMatchKey {}
-
-impl Hash for FaceMatchKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        Rc::as_ptr(&self.names).cast::<()>().hash(state);
-        (self.weight, self.width, self.slant).hash(state);
-    }
-}
-
 impl FaceMatches {
-    /// The faces the family list `names` -- as [`collection_names`] handed
-    /// it out -- in `style` match in `collection`.
+    /// The faces the family list `list`, whose names are `names` -- as
+    /// [`collection_list`] filed it -- in `style` match in `collection`.
     pub(crate) fn of(
         &mut self,
         collection: &mut FontCollection,
-        names: &Rc<[String]>,
+        list: ListRef,
+        names: &[String],
         style: FontStyle,
     ) -> Rc<[Typeface]> {
         let key = FaceMatchKey {
-            names: names.clone(),
+            list,
             weight: *style.weight(),
             width: *style.width(),
             slant: style.slant(),
@@ -1950,9 +1932,10 @@ fn instance_for(
     if style.font_families.is_empty() {
         return Instance::default();
     }
-    let names = collection_names(&style.font_families);
+    let (list, names) = collection_list(&style.font_families);
     let faces = matches.lock().unwrap_or_else(PoisonError::into_inner).of(
         collection,
+        list,
         &names,
         font_style_for(style),
     );
@@ -2207,7 +2190,12 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
 /// Worked out once per family list while the library's fonts stand -- see
 /// `FontLibrary::engine_names`.
 fn collection_names(families: &[FontFamily]) -> Rc<[String]> {
-    SharedFontRegistry::with_shared(|library| library.engine_names(families))
+    collection_list(families).1
+}
+
+/// The list `families` is filed as, with its [`collection_names`].
+fn collection_list(families: &[FontFamily]) -> (ListRef, Rc<[String]>) {
+    SharedFontRegistry::with_shared(|library| library.engine_list(families))
 }
 
 /// The families a strut should be measured in.

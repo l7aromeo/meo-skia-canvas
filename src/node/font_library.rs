@@ -28,7 +28,10 @@ use crate::{
     },
     image::x_height_ratio,
     memory::note_font_use,
-    node::decorate,
+    node::{
+        decorate,
+        family_lists::{FamilyLists, ListRef},
+    },
     typography::{
         FontSpec, forget_families, forget_kept_paragraphs, forget_laid_out,
         from_slant, from_width, typeface_details, typeface_wght_range,
@@ -319,7 +322,7 @@ const COLLECTION_CACHE_SIZE: usize = 128;
 /// names a handful of family lists in a handful of styles, but a weight that
 /// animates names a new style every frame. Past it every remembered match
 /// is dropped and searched again.
-const MATCHES_KEPT: usize = 256;
+pub(crate) const MATCHES_KEPT: usize = 256;
 
 /// The family list and style a search of this library's collections is
 /// asked for: everything its answer depends on while the registered fonts
@@ -696,9 +699,9 @@ pub struct FontLibrary {
     /// What each family list and style has matched, searched once for as
     /// long as the fonts are unchanged -- see [`MATCHES_KEPT`].
     matches: HashMap<MatchKey, MatchFacts>,
-    /// The names an engine's collection is asked for each family list by
-    /// -- see [`engine_names`](Self::engine_names).
-    engine_names: HashMap<Vec<FontFamily>, Rc<[String]>>,
+    /// The family lists an engine's collection has been asked for, each by
+    /// the names it resolves to -- see [`engine_list`](Self::engine_list).
+    family_lists: FamilyLists,
     /// The system's family names, as [`caseless::key`]s, read once for
     /// [`has_family`](Self::has_family) and dropped with everything else on
     /// [`invalidate`](Self::invalidate).
@@ -805,7 +808,7 @@ impl FontLibrary {
             positions: InstancedPositions::default(),
             known_axes: KnownAxes::default(),
             matches: HashMap::new(),
-            engine_names: HashMap::new(),
+            family_lists: FamilyLists::default(),
             system_families: None,
         }
     }
@@ -1595,19 +1598,30 @@ impl FontLibrary {
             .collect()
     }
 
-    /// The names a `TextEngine`'s collection is asked for `families` by: as
-    /// [`collection_names`](Self::collection_names) gives them but for a
-    /// generic, which an engine's collection does not hold, and asks for by
-    /// its keyword. Worked out once per family list while the fonts stand,
-    /// since a registration can change the spelling a name is asked for in,
-    /// and dropped at [`MATCHES_KEPT`].
+    /// The names a `TextEngine`'s collection is asked for `families` by --
+    /// see [`engine_list`](Self::engine_list).
     pub(crate) fn engine_names(
         &mut self,
         families: &[FontFamily],
     ) -> Rc<[String]> {
+        self.engine_list(families).1
+    }
+
+    /// The list `families` is filed as for a `TextEngine`'s collection, and
+    /// the names that collection is asked for it by: as
+    /// [`collection_names`](Self::collection_names) gives them but for a
+    /// generic, which an engine's collection does not hold, and asks for by
+    /// its keyword. Worked out once per family list while the fonts stand,
+    /// since a registration can change the spelling a name is asked for in,
+    /// and filed by those names, so that two lists asked for in the same
+    /// names are one -- see [`FamilyLists`].
+    pub(crate) fn engine_list(
+        &mut self,
+        families: &[FontFamily],
+    ) -> (ListRef, Rc<[String]>) {
         let remember = !forgetful();
-        if remember && let Some(names) = self.engine_names.get(families) {
-            return names.clone();
+        if remember && let Some(found) = self.family_lists.get(families) {
+            return found;
         }
         let names: Rc<[String]> = families
             .iter()
@@ -1625,13 +1639,12 @@ impl FontLibrary {
                 },
             })
             .collect();
-        if remember {
-            if self.engine_names.len() >= MATCHES_KEPT {
-                self.engine_names.clear();
-            }
-            self.engine_names.insert(families.to_vec(), names.clone());
+        match remember {
+            true => self.family_lists.file(families, names),
+            // Filed in an arena of its own, so that no ref handed out here
+            // is one a remembered entry was keyed on.
+            false => FamilyLists::default().file(families, names),
         }
-        names
     }
 
     /// The name a registered family is filed under, where `name` is that
@@ -1710,7 +1723,7 @@ impl FontLibrary {
         self.positions = InstancedPositions::default();
         self.known_axes.clear();
         self.matches.clear();
-        self.engine_names.clear();
+        self.family_lists.clear();
         forget_families();
         forget_kept_paragraphs();
         forget_laid_out();
@@ -1773,7 +1786,7 @@ impl FontLibrary {
         self.clear_collection_caches();
         self.positions = InstancedPositions::default();
         self.matches.clear();
-        self.engine_names.clear();
+        self.family_lists.clear();
         forget_kept_paragraphs();
         decorate::forget();
         forget_laid_out();
@@ -2493,11 +2506,11 @@ mod tests {
             for (families, style) in &styles {
                 let searched =
                     ids(&collection.find_typefaces(families, *style));
-                let names = FontLibrary::with_shared(|lib| {
-                    lib.engine_names(&named(families))
+                let (list, names) = FontLibrary::with_shared(|lib| {
+                    lib.engine_list(&named(families))
                 });
                 let answered =
-                    ids(&remembered.of(&mut collection, &names, *style));
+                    ids(&remembered.of(&mut collection, list, &names, *style));
                 assert_eq!(answered, searched, "{families:?} {style:?}");
                 FontLibrary::with_shared(|lib| {
                     let facts = lib.match_facts(families, *style);
@@ -2522,10 +2535,10 @@ mod tests {
             .collect()
     }
 
-    /// A family list the library works out again after its fonts change is
+    /// A family list the library files again after its fonts change is
     /// searched again by an engine, never answered from what the list it
-    /// replaced matched -- even once nothing else holds that list, and
-    /// where the same family is now spelled another way.
+    /// replaced matched -- where the same family is now spelled another
+    /// way, and where it is spelled as before.
     #[test]
     fn a_family_list_worked_out_again_is_searched_again() {
         use crate::text::{FaceMatches, SEARCHES, TextEngine};
@@ -2535,17 +2548,16 @@ mod tests {
         let engine = TextEngine::new(&crate::font::FontLibrary::new());
         let mut collection = engine.collection.clone();
         let mut remembered = FaceMatches::default();
-        let before =
-            FontLibrary::with_shared(|lib| lib.engine_names(&families));
-        remembered.of(&mut collection, &before, style);
+        let (list, before) =
+            FontLibrary::with_shared(|lib| lib.engine_list(&families));
+        remembered.of(&mut collection, list, &before, style);
         let searched = SEARCHES.get();
-        remembered.of(&mut collection, &before, style);
+        remembered.of(&mut collection, list, &before, style);
         assert_eq!(
             SEARCHES.get(),
             searched,
             "a list met before is not searched"
         );
-        drop(before);
 
         crate::font::FontLibrary::new()
             .register_font_from_path(
@@ -2556,9 +2568,10 @@ mod tests {
                 ),
             )
             .expect("Oswald registers");
-        let after = FontLibrary::with_shared(|lib| lib.engine_names(&families));
+        let (list, after) =
+            FontLibrary::with_shared(|lib| lib.engine_list(&families));
         assert_eq!(after[0], "hashoncefamily", "spelled as registered");
-        let answered = remembered.of(&mut collection, &after, style);
+        let answered = remembered.of(&mut collection, list, &after, style);
         assert_eq!(SEARCHES.get(), searched + 1, "the new list is searched");
         let names: Vec<&str> = after.iter().map(String::as_str).collect();
         assert_eq!(
@@ -2570,6 +2583,111 @@ mod tests {
                 .collect::<Vec<_>>(),
             "and answered as a search answers it"
         );
+    }
+
+    /// A registered family asked for in two cases is one list, filed by
+    /// the spelling both resolve to, and a registration between two asks
+    /// files it again, so an engine searches it again.
+    #[test]
+    fn a_family_in_two_cases_is_one_list() {
+        use crate::text::{FaceMatches, SEARCHES, TextEngine};
+        memo_fonts();
+        let list = |name: &str| {
+            FontLibrary::with_shared(|lib| lib.engine_list(&named(&[name])))
+        };
+        let (upper, upper_names) = list("MEMOOSWALD");
+        let (lower, lower_names) = list("memooswald");
+        assert_eq!(upper, lower, "one list");
+        assert_eq!(&*upper_names, ["MemoOswald"], "spelled as registered");
+        assert_eq!(upper_names, lower_names);
+
+        let engine = TextEngine::new(&crate::font::FontLibrary::new());
+        let mut collection = engine.collection.clone();
+        let mut remembered = FaceMatches::default();
+        let style = FontStyle::normal();
+        remembered.of(&mut collection, upper, &upper_names, style);
+        let searched = SEARCHES.get();
+        remembered.of(&mut collection, lower, &lower_names, style);
+        assert_eq!(SEARCHES.get(), searched, "searched once for both cases");
+
+        FontLibrary::with_shared(|lib| lib.invalidate());
+        let (again, names) = list("memooswald");
+        assert_ne!(again, lower, "filed again after the fonts change");
+        remembered.of(&mut collection, again, &names, style);
+        assert_eq!(SEARCHES.get(), searched + 1, "and searched again");
+    }
+
+    /// A quoted `"serif"` and `"ſerif"` -- a long s, which Unicode's case
+    /// folding takes to `s` -- are two lists. CSS matches a generic keyword
+    /// in ASCII case alone, so the first is asked for by a name nothing has
+    /// unless a family is registered under it, and the second is passed to
+    /// the platform as written. A list filed by its families' folded names
+    /// would answer one for the other.
+    #[test]
+    fn a_keyword_and_its_unicode_fold_are_two_lists() {
+        let list = |name: &str| {
+            FontLibrary::with_shared(|lib| lib.engine_list(&named(&[name])))
+        };
+        let (keyword, keyword_names) = list("serif");
+        let (folded, folded_names) = list("\u{17f}erif");
+        assert_ne!(keyword, folded, "two lists");
+        assert_eq!(&*keyword_names, [unmatched_name("serif")]);
+        assert_eq!(&*folded_names, ["\u{17f}erif"]);
+        assert_eq!(
+            &*list("SERIF").1,
+            [unmatched_name("SERIF")],
+            "a keyword in any ASCII case is not asked of the platform"
+        );
+    }
+
+    /// A ref handed out before the arena is cleared -- by the idle release,
+    /// a change of fonts or its bound -- never answers for a list filed
+    /// after it, though that list takes the same place.
+    #[test]
+    fn a_ref_from_before_a_clear_is_no_other_list() {
+        use crate::text::{FaceMatches, TextEngine};
+        memo_fonts();
+        let engine = TextEngine::new(&crate::font::FontLibrary::new());
+        let mut collection = engine.collection.clone();
+        let style = FontStyle::normal();
+        let ids = |faces: &[Typeface]| {
+            faces.iter().map(Typeface::unique_id).collect::<Vec<_>>()
+        };
+        /// What empties the arena, for one round.
+        type Clear = fn(&mut FontLibrary);
+        let clears: [(&str, Clear); 3] = [
+            ("the idle release", FontLibrary::release_caches),
+            ("a change of fonts", FontLibrary::invalidate),
+            ("the bound", |lib| {
+                for at in lib.family_lists.len()..MATCHES_KEPT {
+                    lib.engine_list(&named(&[
+                        format!("MemoBound{at}").as_str()
+                    ]));
+                }
+            }),
+        ];
+        for (what, clear) in clears {
+            let mut remembered = FaceMatches::default();
+            FontLibrary::with_shared(FontLibrary::release_caches);
+            let (first, first_names) = FontLibrary::with_shared(|lib| {
+                lib.engine_list(&named(&["MemoMonoton"]))
+            });
+            remembered.of(&mut collection, first, &first_names, style);
+            FontLibrary::with_shared(clear);
+            let (second, second_names) = FontLibrary::with_shared(|lib| {
+                lib.engine_list(&named(&["MemoOswald"]))
+            });
+            assert_ne!(first, second, "{what}: another ref");
+            let answered = ids(&remembered.of(
+                &mut collection,
+                second,
+                &second_names,
+                style,
+            ));
+            let searched =
+                ids(&collection.find_typefaces(&["MemoOswald"], style));
+            assert_eq!(answered, searched, "{what}: the list's own faces");
+        }
     }
 
     /// A family registered after a style naming it was matched is found by
@@ -2617,7 +2735,7 @@ mod tests {
         drawn_in("700 24px MemoOswald");
         let held = || {
             FontLibrary::with_shared(|lib| {
-                (lib.matches.len(), lib.engine_names.len())
+                (lib.matches.len(), lib.family_lists.len())
             })
         };
         let (matches, names) = held();
