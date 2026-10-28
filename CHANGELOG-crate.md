@@ -75,6 +75,15 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **Known issue, not fixed for crate builds: on macOS a GPU draw can be
+  dropped when the shader compiler is slow.** The Skia skia-bindings 0.153.3
+  downloads waits one second for each Metal shader and pipeline it compiles
+  and then draws nothing, so on a loaded machine a process's first image
+  draw, blend mode or gradient can come back missing. The npm package's macOS
+  binary is now built without that limit; a crate build gets whatever Skia
+  skia-bindings provides. docs/rust.md, "Metal and skia-bindings' prebuilt
+  Skia", says how to build Skia from source with the patch that removes it.
+
 - **`Context2D::set_font_hinting(false)` draws the outlines as designed.**
   It turned hinting off on the paragraph style, which SkParagraph never
   reads, so every glyph was drawn at Slight hinting whatever it said.
