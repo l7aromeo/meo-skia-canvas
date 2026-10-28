@@ -75,14 +75,41 @@ jobs:
       - name: Install just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
 
+      # The patched Skia tree the macOS build compiles from -- rust-skia at the
+      # Cargo.lock tag, Skia's DEPS and gn, and
+      # containers/skia-metal-untimed-compile.patch. `just build-release`
+      # prepares it when the cache misses; scripts/skia-source.mjs names it by
+      # version and patch digest, so the key below follows the same two files.
+      - name: Cache the Skia source
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/meo-skia-canvas
+          key: skia-source-${{ hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch') }}
+
       - name: Build module
         env:
           MACOSX_DEPLOYMENT_TARGET: 10.14
         run: just build-release
 
+      # A binary built against rust-skia's prebuilt Skia carries the one-second
+      # Metal compile timeout the patch removes, and passes every other test.
+      # skia-bindings records in its build output whether it compiled the tree
+      # `SKIA_SOURCE_DIR` names or downloaded a prebuilt, so a build that fell
+      # back is refused here, before the test below has to catch it.
+      - name: Check Skia was built from the patched source
+        run: |
+          out=$(cat target/release/build/skia-bindings-*/output)
+          if ! grep -q "STARTING OFFLINE BUILD" <<<"$out" || grep -q "DOWNLOAD AND INSTALL" <<<"$out"; then
+            echo "::error::skia-bindings did not build from the patched Skia source, so the Metal compile timeout is still in this binary."
+            exit 1
+          fi
+
       - name: Add to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # tests/suite/metal-compile.test.js fails rather than skips here: on
+          # the release build a skipped check would let an unpatched binary out.
+          MEO_SKIA_CANVAS_REQUIRE_METAL: "1"
         run: |
           bun run test:suite && bun run upload
 

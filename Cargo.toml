@@ -311,6 +311,13 @@ serde_json = { version = "1", features = ["preserve_order"] }
 [build-dependencies]
 cc = "1"
 
+# Skia at full optimisation in debug builds too. skia-bindings compiles Skia
+# at the `OPT_LEVEL` cargo hands its build script, which is 0 in a dev
+# profile, so tests would otherwise exercise Skia's arithmetic at a
+# different optimisation from the release binary that ships.
+[profile.dev.package.skia-bindings]
+opt-level = 3
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

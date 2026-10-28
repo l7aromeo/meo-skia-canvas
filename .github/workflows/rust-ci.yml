@@ -133,9 +133,9 @@ jobs:
           # reaches that: every other entry has at most one backend, so the
           # duplicate binding compiled everywhere it was tested.
           #
-          # rust-skia publishes no prebuilt for the pair, so this entry builds
-          # Skia from source and is the slow one. The cache carries it after the
-          # first run on main.
+          # Like the entry above, it builds Skia from the patched source the
+          # steps below prepare, and it compiles Vulkan's half as well, so it
+          # is the slow one. The cache carries both after the first run on main.
           - name: macos (metal,vulkan,window)
             os: macos-latest
             features: metal,vulkan,window
@@ -161,6 +161,18 @@ jobs:
       - name: Install Skia build dependencies (macOS)
         if: runner.os == 'macOS'
         run: brew install ninja
+      # macOS lints what ships: Skia built from the patched tree the justfile's
+      # `dotenv-command` names locally and build.yml's mac job compiles. This
+      # job runs cargo directly, so it sets `SKIA_SOURCE_DIR` itself.
+      - name: Cache the Skia source (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/meo-skia-canvas
+          key: skia-source-${{ hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch') }}
+      - name: Prepare the Skia source (macOS)
+        if: runner.os == 'macOS'
+        run: echo "SKIA_SOURCE_DIR=$(node scripts/skia-source.mjs prepare)" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.os }}-${{ matrix.cacheKey }}

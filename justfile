@@ -1,5 +1,24 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
+# On macOS every recipe builds skia-bindings from a patched Skia source tree:
+# this prints `SKIA_SOURCE_DIR=<dir>` there and nothing elsewhere, and just
+# loads it into every recipe's environment, shebang recipes included. An
+# exported variable cannot be left unset on Linux, and skia-bindings reads an
+# empty `SKIA_SOURCE_DIR` as a source directory. The tree itself is prepared by
+# `ensure-skia-source`, because this runs on every invocation and must not
+# download. A variable already set in the environment wins.
+#
+# UPSTREAM: skia-bindings 0.153.3 -- unfiled -- worked around
+# Re-check: node --test tests/suite/metal-compile.test.js, against a binary built without SKIA_SOURCE_DIR
+#
+# skia-bindings replaces Skia's two `@available(macOS 10.15, *)` checks with
+# `false` (GrMtlUtil.mm:76-77, GrMtlPipelineStateBuilder.mm:684-685, still so at
+# m156), which sends every Metal shader compile and pipeline creation through
+# a one-second timeout that drops the draw when it expires. The patch,
+# containers/skia-metal-untimed-compile.patch, asks the OS version at run time
+# instead, as upstream Skia does.
+set dotenv-command := "node scripts/skia-source.mjs env"
+
 # On Linux, `metal` feature does not compile -- use feature subset.
 
 lib := justfile_directory() / "lib" / "skia.node"
@@ -70,8 +89,14 @@ ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards ch
 # Installs when node_modules is missing *or* no longer matches bun.lock, which
 # a rebase or merge can move under a warm worktree. scripts/install-deps.mjs
 # says how it tells, and why it is not a `test -d`.
+# The patched Skia tree `dotenv-command` names, fetched once into the cache on
+# macOS. Nothing elsewhere, where skia-bindings builds as it always has.
 [private]
-ensure-deps:
+ensure-skia-source:
+    @{{ if os() == "macos" { "node scripts/skia-source.mjs prepare >/dev/null" } else { "true" } }}
+
+[private]
+ensure-deps: ensure-skia-source
     @node scripts/install-deps.mjs
 
 # Always builds, never just checks the file exists. A stale `lib/skia.node`
@@ -586,7 +611,7 @@ test-js: ensure-binary
 # clippy and the JavaScript tests, and never ran `cargo test` at all. The Rust
 # suite is the larger of the two.
 [doc("The Rust suite alone. `test` runs this and `test-js` together.")]
-test-rust:
+test-rust: ensure-deps
     node scripts/gpu-events.mjs --run -- cargo test --features "{{ if os() == "macos" { "metal,window,freetype" } else { linux_features } }},fetch"
 
 # Run the JavaScript suite in watch mode.
@@ -750,7 +775,7 @@ unused:
 docs: docs-rust docs-js
 
 [doc("Fail on a rustdoc warning -- broken intra-doc links above all.")]
-docs-rust:
+docs-rust: ensure-deps
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --no-default-features \
       --features "{{ if os() == "macos" { "metal,window" } else { "vulkan,window" } }},fetch"
 
