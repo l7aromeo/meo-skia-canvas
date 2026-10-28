@@ -366,6 +366,50 @@ describe("ParagraphBuilder", () => {
   });
 });
 
+describe("A paragraph's own style", () => {
+  const { TextDecoration } = require("../../lib"),
+    { skiaNode } = require("../../lib/classes/neon");
+
+  // Read through `__paragraphStyleCopies`, which debug builds alone export:
+  // against a release binary these are skipped by name.
+  const why = !skiaNode.__paragraphStyleCopies
+    ? "skipped: a release binary does not export __paragraphStyleCopies"
+    : null;
+
+  /** How many times making a builder in `textStyle` copied its style. */
+  const copies = (/** @type {object} */ textStyle) => {
+    const before = skiaNode.__paragraphStyleCopies();
+    ParagraphBuilder.Make({ textStyle: { fontSize: 24, ...textStyle } });
+    return skiaNode.__paragraphStyleCopies() - before;
+  };
+
+  test(
+    "is built from as it stands where nothing has to be taken off it",
+    { skip: why ?? false },
+    () => {
+      for (const [what, textStyle] of [
+        ["plain", {}],
+        ["in a family", { fontFamilies: ["serif"] }],
+        ["oblique", { fontStyle: { slant: 2 } }],
+        ["at an axis", { fontVariations: [{ axis: "wght", value: 600 }] }],
+        ["with half leading", { halfLeading: true, heightMultiplier: 2 }],
+      ]) {
+        assert.equal(copies(textStyle), 0, what);
+      }
+      for (const [what, textStyle] of [
+        ["underlined", { decoration: TextDecoration.Underline }],
+        [
+          "shadowed",
+          { shadows: [{ color: "blue", offset: [1, 1], blurRadius: 0 }] },
+        ],
+        ["backgrounded", { backgroundColor: "yellow" }],
+      ]) {
+        assert.equal(copies(textStyle), 1, what);
+      }
+    },
+  );
+});
+
 describe("TextDecoration", () => {
   const { Canvas, TextDecoration, TextDecorationStyle } = require("../../lib");
   const { fontTables } = require("../support/font-tables.js");

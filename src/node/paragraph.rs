@@ -15,6 +15,8 @@ use skia_safe::{
     },
 };
 
+#[cfg(all(feature = "node-addon", debug_assertions))]
+use crate::node::oblique::style_copies;
 use crate::{
     font::{FontFamily, ObliqueAngle},
     font_library::{FontLibrary, instance_coordinates},
@@ -1148,6 +1150,16 @@ fn parse_paragraph_font_variations<'a>(
     // A paragraph has nothing to inherit, so taking the axes in force and
     // `"normal"` are both no axes of its own.
     Ok(parse_font_variations(cx, &ts_obj, "textStyle.")?.unwrap_or_default())
+}
+
+/// Test-only: how many paragraph styles `ParagraphRecipe::new` has copied
+/// on this thread, so that a test can hold `ParagraphBuilder.Make` to
+/// handing in one that needs no copy -- see `oblique::style_copies`.
+///
+/// Exported by debug builds only, as `__cachedParagraphs` is.
+#[cfg(all(feature = "node-addon", debug_assertions))]
+pub fn paragraphStyleCopies(mut cx: FunctionContext) -> JsResult<JsNumber> {
+    Ok(cx.number(style_copies() as f64))
 }
 
 //
