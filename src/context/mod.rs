@@ -189,7 +189,7 @@ pub struct State {
     pub shadow_color: (Color4f, ColorSpace),
     /// The shadow colour as it was declared, which `shadowColor` serialises;
     /// `None` until a CSS string sets it, and again once anything else does.
-    pub shadow_declared: Option<Declared>,
+    pub shadow_declared: Option<Declaration>,
     pub shadow_offset: Point,
 
     pub line_dash_offset: f32,
@@ -1922,9 +1922,10 @@ pub enum Dye {
     /// string named, sRGB for a float array, linear-light sRGB for an
     /// `RgbaLinear`. `None` is sRGB, as Skia reads an untagged colour.
     ///
-    /// And the colour as it was declared, which the getter serialises; `None`
-    /// for one with no CSS declaration -- a float array, an `RgbaLinear`.
-    Color(Color4f, Option<ColorSpace>, Option<Declared>),
+    /// And the colour as it was declared, which the getter serialises and
+    /// keeps the read-back of; `None` for one set through the crate as an
+    /// `RgbaLinear`, which no getter reads back as CSS.
+    Color(Color4f, Option<ColorSpace>, Option<Declaration>),
     Gradient(CanvasGradient),
     Pattern(CanvasPattern),
     Texture(CanvasTexture),
@@ -1956,8 +1957,9 @@ impl Dye {
         } else {
             // Tagged either way by `color4f_in`: a CSS colour with the space
             // it named, a float array as sRGB.
-            declared_in(cx, value)
-                .map(|(c, cs, declared)| Dye::Color(c, Some(cs), declared))
+            declared_in(cx, value).map(|(c, cs, declared)| {
+                Dye::Color(c, Some(cs), declared.map(Declaration::new))
+            })
         }
     }
 
@@ -1967,7 +1969,7 @@ impl Dye {
     ) -> JsResult<'a, JsValue> {
         match self {
             Dye::Color(_, _, Some(declared)) => {
-                Ok(cx.string(declared_to_css(declared)).upcast())
+                Ok(cx.string(declared.css()).upcast())
             }
             Dye::Color(color, cs, None) => {
                 color4f_to_css(cx, color, cs.as_ref())

@@ -2,7 +2,11 @@
 use core::ops::Range;
 use neon::prelude::*;
 use skia_safe::{Color, Color4f, ColorSpace, Data, Matrix, Path, Point};
-use std::{borrow::Cow, cmp};
+use std::{
+    borrow::Cow,
+    cmp,
+    sync::{Arc, OnceLock},
+};
 
 // One definition of the sRGB transfer function for the whole crate, in
 // `color`. A copy here would have to agree with it on every constant and on
@@ -3246,6 +3250,50 @@ fn declared_css(declared: &Declared, figures: Figures) -> String {
     }
 }
 
+/// A colour as declared, with its read-back, written the first time a
+/// getter asks for it and kept.
+///
+/// [`declared_to_css`] tries hundreds of spellings for a Lab, LCH, Oklab or
+/// OkLCh colour, and code reads a style far more often than it sets one --
+/// `const old = ctx.fillStyle; ...; ctx.fillStyle = old`. So the string is
+/// made once per declaration and held beside it. Every set builds a new
+/// `Declaration`, so a set is never answered with the string of the colour
+/// it replaced; a clone, which `save()` makes, shares the one cell, so a
+/// restored style keeps a read-back already written.
+#[derive(Clone, Debug)]
+pub struct Declaration {
+    declared: Declared,
+    css: Arc<OnceLock<String>>,
+}
+
+impl Declaration {
+    /// `declared`, its read-back not yet written.
+    pub fn new(declared: Declared) -> Self {
+        Self {
+            declared,
+            css: Arc::default(),
+        }
+    }
+
+    /// The colour as declared.
+    pub fn declared(&self) -> &Declared {
+        &self.declared
+    }
+
+    /// The colour as section 16 serialises it, by [`declared_to_css`]:
+    /// written at the first call, read from the cell at every later one.
+    pub fn css(&self) -> &str {
+        self.css.get_or_init(|| declared_to_css(&self.declared))
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Spellings [`declared_to_css`] has tested on this thread, so a test
+    /// can tell a read-back that was searched for from one that was kept.
+    static TRIALS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// A declared colour as CSS Color 4 section 16 serialises it, with the
 /// HTML-compatible form requested, as HTML's canvas getters request it:
 /// legacy sRGB colours by section 16.2, the rest in their own function.
@@ -3294,6 +3342,8 @@ pub fn declared_to_css(declared: &Declared) -> String {
     // Each trial is the declaration its spelling reads back as, painted by
     // the function the setter stores through.
     let repaints = |trial: &Declared, figures: Figures| {
+        #[cfg(test)]
+        TRIALS.with(|trials| trials.set(trials.get() + 1));
         declared_color(&read_back(trial, figures)) == held
     };
 
@@ -5300,6 +5350,27 @@ mod tests {
         assert_eq!(read, "color(srgb 0.08 0.7733333 1.12 / 0.5)");
         let again = css_to_declared(&read).map(|(c, s, _)| (c, s));
         assert_eq!(again, Some((held, space)), "{read} repaints {css}");
+    }
+
+    #[test]
+    fn a_declaration_is_read_back_once() {
+        let trials = || TRIALS.with(std::cell::Cell::get);
+        let (_, _, declared) =
+            css_to_declared("lab(from red l a b)").expect("a colour");
+        let held = Declaration::new(declared);
+        let before = trials();
+        let first = held.css().to_string();
+        assert!(trials() > before, "the first read searches");
+        let searched = trials();
+        assert_eq!(held.css(), first);
+        assert_eq!(trials(), searched, "a second read tries nothing");
+        // A clone, as `save()` makes, shares what was written.
+        assert_eq!(held.clone().css(), first);
+        assert_eq!(trials(), searched, "nor does a clone's");
+        // A new declaration of the same colour is searched for again.
+        let again = Declaration::new(*held.declared());
+        assert_eq!(again.css(), first);
+        assert!(trials() > searched, "a new declaration searches");
     }
 
     #[test]
