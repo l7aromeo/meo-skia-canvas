@@ -2519,6 +2519,36 @@ pub struct PendingInk {
 
 impl Finalize for PendingInk {}
 
+/// Lets the paragraph kept for this measurement go with it.
+///
+/// A `TextMetrics` collected before its ink was read would otherwise leave
+/// its paragraph, and the typeface instance that holds, among the recent
+/// layouts until sixty-four newer measurements pushed it out -- which an
+/// idle process never makes. Neon drops a boxed value on the JavaScript
+/// thread when it finalizes it, the thread whose layouts these are; a
+/// thread already tearing its storage down has nothing left to remove.
+impl Drop for PendingInk {
+    fn drop(&mut self) {
+        let _ = RECENT_LAYOUTS.try_with(|recent| {
+            let mut recent = recent.borrow_mut();
+            if let Some(at) = recent.iter().position(|(id, _)| *id == self.id) {
+                recent.remove(at);
+            }
+        });
+    }
+}
+
+/// Lets every kept paragraph go, called by `FontLibrary::invalidate` when
+/// the registered fonts change.
+///
+/// A kept paragraph pins the faces it was laid out in, which the change has
+/// just replaced. Its measurement still has what it was laid out from, and
+/// lays out again in those same faces if its ink is read -- see
+/// [`PendingInk::ink`].
+pub(crate) fn forget_kept_paragraphs() {
+    RECENT_LAYOUTS.with(|recent| recent.borrow_mut().clear());
+}
+
 impl PendingInk {
     /// Holds `measured` among the recent layouts, and `inputs` for when it
     /// has left them.
@@ -2883,6 +2913,72 @@ mod measurement {
     }
 
     #[test]
+    fn a_measurement_let_go_of_takes_its_paragraph_with_it() {
+        // A `TextMetrics` collected before its ink is read has no further
+        // use for the paragraph kept for it.
+        use super::RECENT_LAYOUTS;
+
+        let mut canvas = Canvas::new(10.0, 10.0);
+        let ctx = canvas.context();
+        ctx.set_font(&Font::new("sans-serif", 24.0));
+        let kept = ctx.inner.measure_text_lazily("Hamburgefonstiv", None).1;
+        let dropped = ctx.inner.measure_text_lazily("Handgloves", None).1;
+        let held = |id: u64| {
+            RECENT_LAYOUTS.with(|recent| {
+                recent.borrow().iter().any(|(held, _)| *held == id)
+            })
+        };
+        let dropped_id = dropped.id;
+        assert!(held(dropped_id));
+        drop(dropped);
+        assert!(!held(dropped_id), "the paragraph went with its measurement");
+        assert!(held(kept.id), "and no other one did");
+    }
+
+    #[test]
+    fn a_change_to_the_fonts_lets_every_kept_paragraph_go() {
+        // A kept paragraph pins the faces it was laid out in, which a change
+        // to the fonts has replaced; the measurement lays out again from
+        // what it was measured with instead, in the same faces.
+        use super::RECENT_LAYOUTS;
+
+        const FAMILY: &str = "KeptParagraphsForgotten";
+        const TEXT: &str = "Hamburgefonstiv";
+        let path = |file: &str| {
+            format!("{}/tests/assets/fonts/{file}", env!("CARGO_MANIFEST_DIR"))
+        };
+        let fonts = Fonts::new();
+        fonts
+            .register_font_from_path(FAMILY, path("AmstelvarAlpha-VF.ttf"))
+            .expect("bundled Amstelvar registers");
+        let mut canvas = Canvas::new(10.0, 10.0);
+        let ctx = canvas.context();
+        ctx.set_font(&Font::new(FAMILY, 24.0));
+        let measured = ctx.inner.measure_text_extents(TEXT, None);
+        let pending: Vec<_> = (0..8)
+            .map(|_| ctx.inner.measure_text_lazily(TEXT, None).1)
+            .collect();
+        assert_eq!(RECENT_LAYOUTS.with(|recent| recent.borrow().len()), 8);
+
+        fonts
+            .register_font_from_path(
+                FAMILY,
+                path("Oswald/Oswald-VariableFont_wght.ttf"),
+            )
+            .expect("bundled Oswald registers");
+        assert_eq!(
+            RECENT_LAYOUTS.with(|recent| recent.borrow().len()),
+            0,
+            "no paragraph of the replaced fonts is kept"
+        );
+        for each in &pending {
+            let (ink, lines) = each.ink().expect("not yet read");
+            assert_eq!(ink, measured.ink);
+            assert_eq!(lines, measured.line_details);
+        }
+    }
+
+    #[test]
     fn an_evicted_measurement_lays_out_again_in_the_faces_it_was_measured_in() {
         // A font registered between `measureText` and the first ink read
         // must not reach a measurement that has to be laid out again: its
@@ -2917,9 +3013,11 @@ mod measurement {
             "the family has to draw differently for this to mean anything"
         );
 
-        for _ in 0..PENDING_LAYOUTS {
-            ctx.inner.measure_text_lazily(TEXT, None);
-        }
+        // Kept, so that their paragraphs push the first one out: one let go
+        // of takes its paragraph with it.
+        let _newer: Vec<_> = (0..PENDING_LAYOUTS)
+            .map(|_| ctx.inner.measure_text_lazily(TEXT, None).1)
+            .collect();
         assert!(
             !RECENT_LAYOUTS.with(|recent| {
                 recent.borrow().iter().any(|(id, _)| *id == pending.id)
