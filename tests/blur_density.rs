@@ -290,6 +290,57 @@ fn a_rounded_rect_or_text_blurs_at_density_two_as_drawn_twice_as_large() {
     }
 }
 
+/// How far from the exact blur a blur the coverage blur cannot reach may be
+/// drawn: the image blur's own error at those sigmas, 7.4 levels on the CPU
+/// and 5.1 on the GPU at 160 device pixels. Drawn at Skia's coverage-blur
+/// cap of 128 instead it was 48.7 and 40.9.
+const PAST_THE_CAP: f64 = 10.0;
+
+#[test]
+fn a_blur_past_the_coverage_cap_at_a_density_is_drawn_at_its_width() {
+    // `blur(40px)` on a flat rectangle takes the coverage blur at density 1,
+    // and at density 4 comes to 160 device pixels, past the 128 that blur
+    // can draw. The choice is made again where the page is played back.
+    let (width, height) = (400.0f32, 300.0f32);
+    let rect = [150.0f32, 100.25, 100.0, 100.0];
+    let sigma = 40.0f32;
+    for gpu in [false, true] {
+        let mut canvas = Canvas::new(width, height);
+        canvas.set_gpu(gpu);
+        if gpu && canvas.engine_kind() != EngineKind::Gpu {
+            continue;
+        }
+        let ctx = canvas.context();
+        ctx.set_fill_style_css("black").expect("a colour");
+        ctx.set_filter_css(&format!("blur({sigma}px)"))
+            .expect("a filter");
+        let [x, y, w, h] = rect;
+        ctx.fill_rect(x, y, w, h);
+        let density = 4;
+        let data = canvas
+            .to_image_data(
+                None,
+                &ImageDataExport {
+                    density,
+                    ..ImageDataExport::default()
+                },
+            )
+            .expect("pixels");
+        let scale = density as f32;
+        let size = ((width * scale) as usize, (height * scale) as usize);
+        let error = worst(
+            &alpha(&data),
+            size,
+            rect.map(|v| f64::from(v * scale)),
+            f64::from(sigma * scale),
+        );
+        assert!(
+            error <= PAST_THE_CAP,
+            "gpu {gpu}: {error:.1} levels from the exact blur at density {density}"
+        );
+    }
+}
+
 /// `image`, `width` pixels wide, blurred by `sigma` with the Gaussian's
 /// weight over each pixel, one axis and then the other.
 fn gaussian(image: &[f64], width: usize, sigma: f64) -> Vec<f64> {

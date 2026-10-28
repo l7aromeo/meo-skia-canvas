@@ -402,8 +402,11 @@ impl MetalRenderer {
 
                 // draw newly added vector layers
                 canvas.scale((dpr, dpr)).clip_rect(clip, None, Some(true));
-                for pict in page.layers.iter().skip(self.cache.depth()) {
-                    canvas.draw_picture(pict, Some(&matrix), None);
+                for layer in page.layers.iter().skip(self.cache.depth()) {
+                    canvas.save();
+                    canvas.concat(&matrix);
+                    layer.playback(canvas);
+                    canvas.restore();
                 }
             },
         );
