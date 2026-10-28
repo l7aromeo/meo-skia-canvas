@@ -85,14 +85,15 @@ verbs! {
     // as it always did.
     set_fillStyleText as SetFillStyleText (fillStyle @ text) => |ctx| {
         if let Some((color, space, declared)) = css_to_declared(fillStyle) {
-            ctx.state.fill_style = Dye::Color(color, Some(space), Some(declared));
+            ctx.state.fill_style =
+                Dye::Color(color, Some(space), Some(Declaration::new(declared)));
         }
     },
 
     set_strokeStyleText as SetStrokeStyleText (strokeStyle @ text) => |ctx| {
         if let Some((color, space, declared)) = css_to_declared(strokeStyle) {
             ctx.state.stroke_style =
-                Dye::Color(color, Some(space), Some(declared));
+                Dye::Color(color, Some(space), Some(Declaration::new(declared)));
         }
     },
 
@@ -260,7 +261,7 @@ verbs! {
         // written as a string, and crossing when it is anything else.
         if let Some((color, space, declared)) = css_to_declared(shadowColor) {
             ctx.state.shadow_color = (color, space);
-            ctx.state.shadow_declared = Some(declared);
+            ctx.state.shadow_declared = Some(Declaration::new(declared));
         }
     },
 
@@ -1913,7 +1914,7 @@ pub fn get_shadowColor(mut cx: FunctionContext) -> JsResult<JsValue> {
     let this = this.borrow_mut();
     let (color, space) = &this.state.shadow_color;
     match &this.state.shadow_declared {
-        Some(declared) => Ok(cx.string(declared_to_css(declared)).upcast()),
+        Some(declared) => Ok(cx.string(declared.css()).upcast()),
         None => color4f_to_css(&mut cx, color, Some(space)),
     }
 }
@@ -1924,7 +1925,7 @@ pub fn set_shadowColor(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let value = cx.argument::<JsValue>(1)?;
     if let Some((color, space, declared)) = declared_string_in(&mut cx, value) {
         this.state.shadow_color = (color, space);
-        this.state.shadow_declared = Some(declared);
+        this.state.shadow_declared = Some(Declaration::new(declared));
     }
     Ok(cx.undefined())
 }

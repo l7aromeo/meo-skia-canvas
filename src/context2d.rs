@@ -63,7 +63,7 @@ use crate::{
         path::{Path2D as NodePath2D, conic_or_line},
         pattern::CanvasPattern,
         typography::{Baseline, DecorationStyle, FontSpec, Spacing},
-        utils::{color4f_to_rgba_linear, css_to_declared},
+        utils::{Declaration, color4f_to_rgba_linear, css_to_declared},
     },
     paint::{BlendMode, StrokeCap, StrokeJoin},
     path::{FillRule, Path2D},
@@ -3359,7 +3359,7 @@ impl Context2D {
                 reason: format!("{css:?}"),
             })?;
         self.inner.state.shadow_color = (color, space);
-        self.inner.state.shadow_declared = Some(declared);
+        self.inner.state.shadow_declared = Some(Declaration::new(declared));
         Ok(())
     }
 
@@ -4405,7 +4405,11 @@ fn css_dye(css: &str) -> Result<Dye, Error> {
         css_to_declared(css).ok_or_else(|| Error::InvalidColor {
             reason: format!("{css:?}"),
         })?;
-    Ok(Dye::Color(color, Some(space), Some(declared)))
+    Ok(Dye::Color(
+        color,
+        Some(space),
+        Some(Declaration::new(declared)),
+    ))
 }
 
 /// An [`RgbaLinear`] as a fill: unpremultiplied and tagged linear sRGB.

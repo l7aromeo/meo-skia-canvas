@@ -8,7 +8,7 @@
 // paint the same pixels, which is what makes the read-back the colour held.
 
 const { assert, describe, test } = require("../runner"),
-  { Canvas } = require("../../lib"),
+  { Canvas, Image } = require("../../lib"),
   table = require("../assets/cases/css-color-serialisation.json");
 
 /** What a getter keeps when the setter ignores a string. */
@@ -73,6 +73,35 @@ describe("Colour getters serialise by CSS Color 4 section 16", () => {
       ctx.fillStyle = css;
       assert.equal(ctx.fillStyle, read, css);
     }
+  });
+
+  test("a set is read back as itself after the colour before it was read", () => {
+    // The read-back is written once per colour set and kept; a set must
+    // never be answered with the string of the colour it replaced.
+    const first = "lab(from red l a b)",
+      second = "oklch(0.7 0.35 30)";
+    const ctx = new Canvas(1, 1).getContext("2d");
+    for (const property of ["fillStyle", "strokeStyle", "shadowColor"]) {
+      ctx[property] = first;
+      const read = ctx[property];
+      assert.equal(ctx[property], read, `${property} read twice`);
+      ctx[property] = second;
+      assert.equal(ctx[property], second, property);
+
+      // `save()` keeps the colour, and `restore()` brings back its string.
+      ctx[property] = first;
+      ctx.save();
+      ctx[property] = second;
+      assert.equal(ctx[property], second, `${property} after save`);
+      ctx.restore();
+      assert.equal(ctx[property], read, `${property} after restore`);
+    }
+    const image = new Image();
+    image.currentColor = first;
+    const read = image.currentColor;
+    image.currentColor = second;
+    assert.equal(image.currentColor, second, "currentColor");
+    assert.notEqual(read, second);
   });
 
   test("alpha 1 and alpha 0 are exact", () => {

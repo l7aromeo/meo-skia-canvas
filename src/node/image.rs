@@ -60,7 +60,7 @@ pub struct Image {
     /// it was declared, which the getter serialises the way `fillStyle` does:
     /// one library answering two different strings for one colour is worse
     /// than either string.
-    current_color: Option<(Color, Declared)>,
+    current_color: Option<(Color, Declaration)>,
 }
 
 impl Default for Image {
@@ -414,7 +414,7 @@ pub fn get_current_color(mut cx: FunctionContext) -> JsResult<JsValue> {
         matches!(this.content, Content::Vector(..) | Content::Loading);
     match &this.current_color {
         Some((_, declared)) if could_reach => {
-            Ok(cx.string(declared_to_css(declared)).upcast())
+            Ok(cx.string(declared.css()).upcast())
         }
         _ => Ok(cx.null().upcast()),
     }
@@ -435,7 +435,8 @@ pub fn set_current_color(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedImage>(0)?;
     let mut this = this.borrow_mut();
 
-    let color = declared_color_arg(&mut cx, 1, "currentColor")?;
+    let (color, declared) = declared_color_arg(&mut cx, 1, "currentColor")?;
+    let color = (color, Declaration::new(declared));
 
     // Two situations that an `if let` would collapse into one silent no-op.
     // With no source yet the colour has to be stored for the load to apply,
@@ -496,7 +497,7 @@ pub fn set_data<'a>(
         this.delays = frame_delays(&data);
         this.encoded = (this.delays.len() > 1).then_some(data);
     } else if let Some((content, autosized)) =
-        record_svg(&data, this.current_color.map(|(color, _)| color))
+        record_svg(&data, this.current_color.as_ref().map(|(color, _)| *color))
     {
         // Finally, try parsing as SVG.
         this.content = content;
