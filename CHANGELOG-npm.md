@@ -463,8 +463,13 @@ false` now takes effect, and its default is on, at Slight, as Chrome draws
   filed under its exact spelling: after `FontLibrary.use("OswaldX", ...)`,
   `ctx.font = "16px oswaldx"` drew the fallback, and so did a paragraph's
   `fontFamilies: ["oswaldx"]`. Each now draws the registered family.
-  Letters outside ASCII still have to match exactly; CSS asks for Unicode
-  case folding there.
+  Letters outside ASCII match too, by the Default Caseless Matching CSS
+  Fonts 4 names, Unicode's full case folding: `"STRASSE ΣΊΣΥΦΟΣ"` draws a
+  family registered as `"Straße Σίσυφος"`. Chrome 156 folds only one
+  character to one, so it does not match `ß` to `SS`;
+  `docs/browser-differences.md` has the measurement. A generic keyword is
+  still matched in ASCII case alone, so registering `"ſerif"`, with a long
+  s, does not take over the generic `serif`.
 
 - **An enumerated attribute takes its names exactly, as Chrome does.**
   `textAlign`, `textBaseline`, `direction`, `lineCap`, `lineJoin`,

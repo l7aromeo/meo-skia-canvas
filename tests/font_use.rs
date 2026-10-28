@@ -155,6 +155,45 @@ fn a_registered_family_is_matched_in_any_case() {
 }
 
 #[test]
+fn a_registered_family_is_matched_by_its_full_case_folding() {
+    // CSS Fonts 4 section 5.1 names Unicode's Default Caseless Matching:
+    // full case folding, so `ß` matches `SS` and a final `ς` matches `Σ`,
+    // with no Turkic `ı` and no normalisation.
+    FontLibrary::new()
+        .use_paths(Some("Straße Σίσυφος"), [RALEWAY])
+        .expect("registers");
+    FontLibrary::new()
+        .use_paths(Some("Iris Café"), [RALEWAY])
+        .expect("registers");
+    let mut canvas = Canvas::new(400.0, 60.0);
+    let ctx = canvas.context();
+    let width = |ctx: &mut Context2D, css: &str| {
+        assert!(ctx.set_font_css(css), "{css:?}");
+        ctx.measure_text("Wavering", None).width
+    };
+    let fallback = width(ctx, "40px NoSuchFamilyAnywhere");
+    let filed = width(ctx, "40px \"Straße Σίσυφος\"");
+    assert_ne!(filed, fallback, "the control");
+    for css in [
+        "40px \"STRASSE ΣΊΣΥΦΟΣ\"",
+        "40px \"strasse σίσυφοσ\"",
+        "40px \"Straße σίσυφος\"",
+        "40px \"IRIS CAFÉ\"",
+    ] {
+        assert_eq!(width(ctx, css), filed, "{css}");
+    }
+    for css in [
+        // Turkic dotless i is not a default match for I.
+        "40px \"ırıs café\"",
+        // Not normalised: e and a combining acute is not é.
+        "40px \"Iris Cafe\u{301}\"",
+        "40px \"Strase Σίσυφος\"",
+    ] {
+        assert_eq!(width(ctx, css), fallback, "{css}");
+    }
+}
+
+#[test]
 fn a_failure_registers_nothing() {
     let library = FontLibrary::new();
     let result = library.use_paths(

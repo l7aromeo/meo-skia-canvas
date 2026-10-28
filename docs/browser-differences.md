@@ -119,6 +119,19 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   alike; here it measures 126.16, as in `16px sans-serif`. A quoted
   `"serif"` with no family of that name is such a list. `new_font_collection`
   in `src/node/font_library.rs` sets the default.
+- _A family name matches by Unicode's full case folding, and Chrome folds one
+  character to one._ CSS Fonts 4 section 5.1 matches family names by the
+  Default Caseless Matching of The Unicode Standard section 3.13, "using the
+  case mappings with status field C or F" of `CaseFolding.txt`, without
+  normalising and without language tailoring. Chrome 156 matches an
+  `@font-face` family `"Straße Σίσυφος Iris Café"` by
+  `"STRAßE ΣΊΣΥΦΟΣ IRIS CAFÉ"` and by `"sTRAßE σΊσυφος iRIS cafÉ"`, so it
+  folds `Σ`, `ς` and `É`, and a family `"ſerif"` by `"SERIF"`, so it folds
+  the long s; but not by `"STRASSE ΣΊΣΥΦΟΣ IRIS CAFÉ"`, which needs the F
+  mapping of `ß` to `ss`. Here all of these match. Neither matches a Turkic
+  `ı` for `I` or a decomposed `e` and acute for `é`, as the standard has it.
+  The table is `src/font/caseless/folding.rs`, generated from Unicode 18.0's
+  file.
 - _`oblique <angle>` draws as CSS Fonts 4 matches it, and Chrome does not._
   Section 5.2, "Matching font styles", takes an oblique face leaning the
   angle's way first, sets a `slnt` axis to the angle where the family has

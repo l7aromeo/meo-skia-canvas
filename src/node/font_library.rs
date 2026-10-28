@@ -23,7 +23,8 @@ use skia_safe::{
 
 use crate::{
     font::{
-        FontFamily, GenericFamily, InstancedPositions, KnownAxes, optical_size,
+        FontFamily, GenericFamily, InstancedPositions, KnownAxes, caseless,
+        optical_size,
     },
     image::x_height_ratio,
     memory::note_font_use,
@@ -698,7 +699,7 @@ pub struct FontLibrary {
     /// The names an engine's collection is asked for each family list by
     /// -- see [`engine_names`](Self::engine_names).
     engine_names: HashMap<Vec<FontFamily>, Rc<[String]>>,
-    /// The system's family names, in lower case, read once for
+    /// The system's family names, as [`caseless::key`]s, read once for
     /// [`has_family`](Self::has_family) and dropped with everything else on
     /// [`invalidate`](Self::invalidate).
     system_families: Option<HashSet<String>>,
@@ -774,9 +775,11 @@ pub(crate) fn unmatched_name(family: &str) -> String {
 
 /// Whether `alias` is one the caller has already claimed.
 ///
-/// Compared without case, because a family name is case-insensitive: a
-/// caller writing `"Sans-Serif"` claims the same name the curated stack
-/// would otherwise be filed under.
+/// Compared without ASCII case, because a claim is on a generic keyword and
+/// CSS matches keywords in ASCII case alone: a caller writing `"Sans-Serif"`
+/// claims the name the curated stack would otherwise be filed under, and one
+/// writing `"ſans-serif"` -- a long s, which [`caseless::eq`] folds to `s` --
+/// names a family of its own and leaves the generic alone.
 fn claims(claimed: &[String], alias: Option<&str>) -> bool {
     alias.is_some_and(|name| {
         claimed.iter().any(|held| held.eq_ignore_ascii_case(name))
@@ -1521,17 +1524,17 @@ impl FontLibrary {
         self.resolved_fonts.insert(name, font);
     }
 
-    /// Whether a family named `name` exists, compared without case: one
-    /// registered here, under its alias or its own name, or one the system
-    /// lists among its families.
+    /// Whether a family named `name` exists, compared by [`caseless::eq`]:
+    /// one registered here, under its alias or its own name, or one the
+    /// system lists among its families.
     ///
     /// The system's list is read once and kept until
     /// [`invalidate`](Self::invalidate); the registered fonts are read as
     /// they stand.
     pub(crate) fn has_family(&mut self, name: &str) -> bool {
         let registered = self.fonts.iter().any(|(font, alias)| match alias {
-            Some(alias) => alias.eq_ignore_ascii_case(name),
-            None => font.family_name().eq_ignore_ascii_case(name),
+            Some(alias) => caseless::eq(alias, name),
+            None => caseless::eq(&font.family_name(), name),
         });
         registered
             || self
@@ -1539,10 +1542,10 @@ impl FontLibrary {
                 .get_or_insert_with(|| {
                     self.mgr
                         .family_names()
-                        .map(|family| family.to_ascii_lowercase())
+                        .map(|family| caseless::key(&family).into_owned())
                         .collect()
                 })
-                .contains(&name.to_ascii_lowercase())
+                .contains(caseless::key(name).as_ref())
     }
 
     /// The names a font collection of this library is asked for `families`
@@ -1625,14 +1628,14 @@ impl FontLibrary {
     /// insensitively". The system managers do, and the provider the
     /// registered faces are filed with matches a name exactly, so a family
     /// registered as `OswaldX` is asked for in that spelling whatever case
-    /// the font names it in. Compared ASCII case-insensitively, as
-    /// [`has_family`](Self::has_family) and a claim on a generic are; the
-    /// section names Unicode's Default Caseless Matching, which also folds
-    /// letters outside ASCII and is not done here.
+    /// the font names it in. Compared by [`caseless::eq`], the Default
+    /// Caseless Matching the section names, as
+    /// [`has_family`](Self::has_family) is, so `Straße` is asked for by
+    /// `STRASSE` too. A claim on a generic is not: see [`claims`].
     pub(crate) fn registered_spelling(&self, name: &str) -> Option<String> {
         self.fonts.iter().find_map(|(font, alias)| {
             let filed = alias.clone().unwrap_or_else(|| font.family_name());
-            filed.eq_ignore_ascii_case(name).then_some(filed)
+            caseless::eq(&filed, name).then_some(filed)
         })
     }
 
