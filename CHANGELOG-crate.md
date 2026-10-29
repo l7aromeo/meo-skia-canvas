@@ -197,6 +197,13 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **Reading a GPU canvas back drains its own autorelease pool.** On macOS,
+  `Context2D::get_image_data` and its variants on a GPU canvas make Metal
+  objects that are autoreleased. Read from a Node addon's main thread, which
+  has no pool, each whole-page read of a 2000x1600 canvas left 12.2 MB
+  resident until the process ended. The read now runs in a pool of its own,
+  as an export does.
+
 - **A colour lands exactly on an sRGB float canvas.** On a canvas made with
   `PixelDepth::F32` in `PixelColorSpace::Srgb`, a fill, stroke or matte in
   an `RgbaLinear` -- or in a CSS colour named in another space -- read back

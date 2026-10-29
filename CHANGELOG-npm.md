@@ -464,6 +464,16 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **Reading a GPU canvas back keeps nothing per read.** Each whole-page
+  `getImageData()` of a GPU canvas on macOS left about what it read resident
+  until the process ended -- 12.2 MB a read of a 2000x1600 canvas -- so a
+  server reading GPU canvases back grew without bound, by 243 MB for every
+  twenty such reads. The readback's Metal objects are autoreleased, and
+  Node's main thread has no autorelease pool to drain them; the exports ran
+  in one of their own, and the read now does too: five passes of the same
+  twenty reads now end within 13 MB of the first, where they climbed from 434
+  MB to 1435. 6.0.2 has the same unwrapped read, by its source.
+
 - **A colour named in another space lands exactly on an sRGB float canvas.**
   On a canvas made with `colorType: "RGBAF32"` in sRGB, a fill, stroke or
   matte named in another space -- `color(srgb-linear 0.5 0 0)`, say -- read
