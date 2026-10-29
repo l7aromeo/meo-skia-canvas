@@ -146,7 +146,17 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   `16px Times` and `16px serif`, in a canvas and in an `OffscreenCanvas`
   alike; here it measures 120.95, as in `16px sans-serif`. A quoted
   `"serif"` with no family of that name is such a list. `new_font_collection`
-  in `src/node/font_library.rs` sets the default.
+  in `src/node/font_library.rs` sets the default. On Linux a family the
+  machine lacks but fontconfig binds strongly or as "same" -- Times New Roman
+  to Liberation Serif or Tinos, by its metric aliases -- resolves to that
+  substitute, and one it binds only weakly, through the generic defaults,
+  does not: Skia's fontconfig `matchFamilyStyle` drops weak bindings before
+  matching, so in a container holding only DejaVu, `16px Times New Roman`
+  draws in this library's `sans-serif` rather than the DejaVu Serif `fc-match`
+  names. Chrome on Linux resolves families through the same call and, as
+  `FontCache::GetLastResortFallbackFont` in `font_cache_skia.cc` walks its
+  list, is expected to land on a sans face there too; that is inferred from
+  the code, and Chrome on Linux was not run.
 - _A family name matches by Unicode's full case folding, and Chrome folds one
   character to one._ CSS Fonts 4 section 5.1 matches family names by the
   Default Caseless Matching of The Unicode Standard section 3.13, "using the
