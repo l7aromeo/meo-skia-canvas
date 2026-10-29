@@ -33,6 +33,17 @@ Chrome on Linux was not measured. `ch` and `ic` take the advance from the
 face's tables and are the interpolation's on every platform. The `UPSTREAM`
 note at the width in `Typesetter::measure` carries the re-check.
 
+A line fits a paragraph up to a hundredth narrower than it. With
+SkParagraph's rounding hack off, as every paragraph here is,
+`LineBreakerWithLittleRounding` in `TextWrapper.cpp` still floors a line's
+width to hundredths before comparing it with the paragraph's width, within a
+quarter pixel of it. So "Hamburgefonstiv quick" in 24px Oswald, 200.51942
+wide on Linux, fits on one line down to a width of 200.51 rather than
+breaking below its own width; on macOS its width is 200.52002, just above the
+hundredth, and the two edges coincide. No width given to `layout` undoes a
+floor taken on the line's side. The `UPSTREAM` note at `paragraph_style`
+carries the re-check.
+
 `actualBoundingBoxAscent` and `actualBoundingBoxDescent` differ from Chrome
 because `SkParagraph` snaps a run's baseline to a whole pixel and Chrome does
 not. **The reported box is the box that is painted**, which is why it is not

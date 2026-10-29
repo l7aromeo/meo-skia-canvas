@@ -33,13 +33,12 @@ use std::sync::{
 use parking_lot::Mutex;
 use skia_safe::{
     AlphaType, Bitmap, BlendMode, Canvas as SkCanvas, Color4f, ColorSpace,
-    ColorType, IPoint, IRect, Image, ImageInfo, Paint, Rect, images, shaders,
-    surfaces,
+    ColorType, IPoint, IRect, Image, ImageInfo, Paint, Rect, shaders,
 };
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 use skia_safe::{Data, RuntimeEffect, color_filters};
 
-use crate::cache_map::CacheMap;
+use crate::{cache_map::CacheMap, started};
 
 /// How closely the blur is drawn on a surface: how far past each edge, and
 /// how near the middle's value a column has to be to count as the flat
@@ -467,7 +466,7 @@ fn baked_image(
     let stride = pixmap.row_bytes();
     fill(pixmap.bytes_mut()?, stride);
     bitmap.set_immutable();
-    images::raster_from_bitmap(&bitmap)
+    started::raster_from_bitmap(&bitmap)
 }
 
 /// Writes the pixels of `region` of the rectangle, `color` times the two
@@ -828,7 +827,7 @@ fn premultiplied(color: Color4f, target: &ImageInfo) -> Option<[f32; 4]> {
         AlphaType::Premul,
         target.color_space(),
     );
-    let mut pixel = surfaces::raster(&info, None, None)?;
+    let mut pixel = started::raster(&info, None, None)?;
     pixel.canvas().draw_color(color, BlendMode::Src);
     let mut bytes = [0u8; 16];
     pixel
@@ -877,7 +876,6 @@ fn draw_on_gpu(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::start_skia;
 
     /// The profile against the blurred interval integrated over each pixel
     /// numerically: the midpoint rule over `erf`, with no antiderivative.
@@ -969,9 +967,6 @@ mod tests {
         down: [f32; 2],
         k: f64,
     ) -> Vec<f32> {
-        // A raster surface made here reaches Skia without a canvas, so
-        // nothing else has started it: see `start_skia`.
-        start_skia();
         let effect = RuntimeEffect::make_for_shader(RECT_BLUR_SKSL, None)
             .expect("the shader compiles");
         let uniforms: Vec<u8> =
@@ -993,7 +988,7 @@ mod tests {
             None,
         );
         let mut surface =
-            surfaces::raster(&info, None, None).expect("a surface");
+            started::raster(&info, None, None).expect("a surface");
         surface.canvas().draw_paint(&paint);
         let mut bytes = vec![0u8; n * 16];
         assert!(surface.read_pixels(&info, &mut bytes, n * 16, (0, 0)));
@@ -1187,7 +1182,6 @@ mod tests {
 
     #[test]
     fn a_trimmed_bake_is_the_whole_product() {
-        start_skia();
         // The frame leaves out the columns and rows that round to zero and
         // fills the interior where it rounds as the middle does. Drawn, it
         // is every byte of the outer product baked whole, worked out here a
@@ -1222,7 +1216,7 @@ mod tests {
                     None,
                 );
                 let mut surface =
-                    surfaces::raster(&info, None, None).expect("a surface");
+                    started::raster(&info, None, None).expect("a surface");
                 baked.draw(surface.canvas(), IPoint::new(0, 0), color);
                 let mut got = vec![0u8; cols * rows * 4];
                 assert!(surface.read_pixels(&info, &mut got, cols * 4, (0, 0)));
@@ -1252,7 +1246,6 @@ mod tests {
 
     #[test]
     fn a_bake_for_float_pixels_draws_the_whole_outer_product() {
-        start_skia();
         // On F16 pixels nothing is trimmed and the interior is the run that
         // is level to 1e-7; drawn, the bake is the outer product to the
         // precision of a half float.
@@ -1276,7 +1269,7 @@ mod tests {
                 None,
             );
             let mut surface =
-                surfaces::raster(&info, None, None).expect("a surface");
+                started::raster(&info, None, None).expect("a surface");
             baked.draw(surface.canvas(), IPoint::new(0, 0), color);
             let read = ImageInfo::new(
                 (cols as i32, rows as i32),

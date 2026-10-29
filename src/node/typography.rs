@@ -208,6 +208,44 @@ fn family_of(typeface: &Typeface) -> String {
 /// measurement still holding that face, and the next one asks for it once
 /// more. Without this every registration of a font left one entry behind
 /// for good -- two hundred registrations kept two hundred.
+/// The maximum intrinsic width SkParagraph's `TextWrapper` starts from and
+/// reports for a paragraph whose every line is no wider than nothing:
+/// `std::numeric_limits<SkScalar>::min()`, the smallest positive normal
+/// float -- see `Typesetter::signed_advance`. It comes back as itself, the
+/// rounding hack being off; with the hack on it would round to zero.
+const INTRINSIC_WIDTH_FLOOR: f32 = f32::MIN_POSITIVE;
+
+/// A paragraph style as every paragraph here is laid out in: SkParagraph's
+/// rounding hack off.
+///
+/// With it on, SkParagraph rounds intrinsic widths, line metrics, rects and
+/// the glyph ends hit-testing reports to hundredths (`littleRound`, which its
+/// source says is there to match Flutter's tests), compares widths rounded
+/// when it breaks lines (`compareRound`), and breaks at its width floored to
+/// a whole pixel (`ParagraphImpl::layout`). Chrome does none of these: its
+/// `measureText` width is the advances' sum as a float, and its text wraps
+/// at the width it is given -- Chrome 156 fits "Hamburgefonstiv quick" in
+/// Oswald 24px, 200.53 wide, at 200.7px, where the floored width does not.
+pub(crate) fn paragraph_style() -> ParagraphStyle {
+    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+    // Re-check: "a line breaks within a hundredth of the edge" in
+    // tests/suite/paragraph.test.js, its last assertion red once fixed.
+    // With the hack off, `LineBreakerWithLittleRounding::breakLine` in
+    // `TextWrapper.cpp` breaks, within a quarter pixel of `maxWidth`, where
+    // `floor(width * 100) / 100 > maxWidth`: where the width reaches the
+    // first hundredth above `maxWidth`, so a line up to a hundredth wider
+    // than the paragraph still fits. Not worked around, as nothing exact
+    // reaches it: no `maxWidth` makes that test `width > maxWidth` unless it
+    // sits just under a hundredth, and `lookAhead` also measures each word
+    // and cluster and the line aligns against the same `maxWidth`; laying an
+    // overhanging line out again at a narrower width breaks every other
+    // line there too; and breaking it by hand changes the text a
+    // `Paragraph`'s ranges index.
+    let mut style = ParagraphStyle::new();
+    style.set_apply_rounding_hack(false);
+    style
+}
+
 pub(crate) fn forget_families() {
     FAMILIES.with(|families| families.borrow_mut().clear());
 }
@@ -1694,11 +1732,11 @@ impl<'a> Typesetter<'a> {
     /// does not clamp the sum; what follows is how it is reached through
     /// SkParagraph, which does.
     ///
-    /// `max_intrinsic_width` is that advance wherever it is not negative,
-    /// trailing spaces included, which the line's own width leaves out. A
-    /// negative one it reports as zero: SkParagraph's `TextWrapper` starts
-    /// its maximum at `std::numeric_limits<SkScalar>::min()`, the smallest
-    /// positive float, and keeps the larger of that and each line. The
+    /// `max_intrinsic_width` is that advance wherever it is positive,
+    /// trailing spaces included, which the line's own width leaves out. One
+    /// that is not it reports as [`INTRINSIC_WIDTH_FLOOR`], where
+    /// SkParagraph's `TextWrapper` starts its maximum before keeping the
+    /// larger of that and each line. The
     /// advance is linear in the letter spacing, which every cluster carries
     /// once, so two layouts at spacings large enough to be positive give the
     /// slope -- the number of clusters -- and the line through them gives
@@ -1706,7 +1744,7 @@ impl<'a> Typesetter<'a> {
     /// face as the drawing is, so the advance is of the weights drawn.
     fn signed_advance(&self, paragraph: &Paragraph) -> f32 {
         let natural = paragraph.max_intrinsic_width();
-        if natural > 0.0 || self.text.is_empty() {
+        if natural > INTRINSIC_WIDTH_FLOOR || self.text.is_empty() {
             return natural;
         }
         let letter = self.char_style().letter_spacing();
@@ -1723,10 +1761,8 @@ impl<'a> Typesetter<'a> {
             self.restyled_paragraph(&style).max_intrinsic_width()
         };
         let (near, far) = (at(letter + step), at(letter + 2.0 * step));
-        // A whole number of clusters, rounded because SkParagraph rounds an
-        // intrinsic width to hundredths (`littleRound`); left unrounded it is
-        // off by at most a hundredth over `step`, too little to see at the
-        // two decimals the width is good to.
+        // A whole number of clusters, rounded off the float error of the
+        // two widths' difference.
         let clusters = ((far - near) / step).round();
         near - clusters * step
     }
@@ -1974,13 +2010,10 @@ impl<'a> Typesetter<'a> {
         //
         // An unwrapped run measures its advance, every glyph and space with
         // its spacing, signed -- what Chrome reports. Not the laid-out boxes:
-        // those are sorted rectangles, so never negative; they leave out a
-        // trailing space's negative spacing, so `"a "` at -10px measured 7.04
-        // where the advance is 6.2; and their edges are rounded where they
-        // lie -- to hundredths, with half the letter spacing at each end, on
-        // a left-aligned run -- so 5.17px of spacing at 10px lost a
-        // hundredth and a centred run measured differently from the same
-        // run aligned left. A wrapped run measures its laid-out lines, since
+        // those are sorted rectangles, so never negative, and they leave out
+        // a trailing space's negative spacing, so `"a "` at -10px measured
+        // 7.04 where the advance is 6.2. A wrapped run measures its laid-out
+        // lines, since
         // the advance is what it would take unwrapped and would contradict
         // both the ink bounds beside it and the pixels drawn.
         let width = match self.text_wrap {

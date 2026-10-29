@@ -135,6 +135,24 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `hwb(h calc((100 - s) * v / 100) calc(100 - v))`, and `hwba()` is
   `hwb()`.
 
+- **Text widths, line metrics, rects and hit-testing are no longer rounded
+  to hundredths, and a paragraph wraps at the width it is given rather than
+  at that width floored to a whole pixel.** SkParagraph's rounding hack was
+  on for every paragraph a `Context2D` or a `TextEngine` laid out: it
+  rounded `measure_text`'s width and a `Paragraph`'s widths, line metrics,
+  rects and the glyph edges `glyph_position_at_coordinate` splits at to
+  hundredths, compared line widths rounded when it broke lines, and broke a
+  paragraph laid out at 200.7 as if it were 200 wide. It is off:
+  `measure_text("Hamburgefonstiv")` in 24px Oswald is 148.17601 where it was
+  148.18 and Chrome 156 measures 148.17590, and `layout_text` at 200.7 fits
+  "Hamburgefonstiv quick", 200.52 wide, on its first line, as Chrome does,
+  where it wrapped after "Hamburgefonstiv". Code that sizes or compares
+  against these values can see them move by up to half a hundredth, and a
+  paragraph at a fractional width can lay out on fewer lines. A line still
+  fits a paragraph up to a hundredth narrower than it, as SkParagraph's
+  line breaker compares the line's width floored to hundredths;
+  docs/browser-differences.md has it.
+
 ### Fixed
 
 - **A rectangle the closed-form blur cannot take is blurred exactly.** A
@@ -195,6 +213,15 @@ window be changed after it opens.** No signature moves and nothing is removed.
   the CPU and 40.9 on the GPU: which blur it took was decided when it was
   recorded into the layer, at density 1. It is decided where the page is
   played back, as it is outside a layer, and the blur is the exact one.
+
+- **A colour lands exactly on an sRGB float canvas.** On a canvas made with
+  `PixelDepth::F32` in `PixelColorSpace::Srgb`, a fill, stroke or matte in
+  an `RgbaLinear` -- or in a CSS colour named in another space -- read back
+  as much as 9.6e-5 from its sRGB encoding: Skia stores a paint's colour in
+  sRGB and converts it through an approximate transfer function as it does.
+  Such a colour is now converted here, in double precision, and reads back
+  as named. A canvas in another space keeps up to about 2e-4 from the
+  conversion Skia makes as it draws, which no colour handed to it avoids.
 
 - **A half-float canvas stores the nearest half on x86.** On an x86
   machine, a canvas made with `PixelDepth::F16` as its `color_type` truncated each value it
@@ -560,7 +587,8 @@ window be changed after it opens.** No signature moves and nothing is removed.
   keeps a letter spacing whole.** It was read from the laid-out boxes, whose
   edges are rounded where they lie, so a centred run measured up to 0.019
   differently from a left-aligned one, and 5.17px of spacing at 10px Oswald lost a hundredth. The width is
-  now the run's advance, within a hundredth of Chrome's.
+  now the run's advance, within 0.0005 of Chrome 156's -- the widths are no
+  longer rounded to hundredths, under Breaking.
 
 - **`measure_text` reports a negative width where the spacing makes the
   advance negative, and counts a trailing space's spacing.** At 40px Oswald
@@ -972,6 +1000,13 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   CSS's, so `matrix(NaN, 0, 0, 1, 0, 0)` gave a matrix of NaN rather than
   `None`. Three of these lists are in the transform table both surfaces are
   tested against.
+
+- **Text no longer wraps early at a fractional width.** A paragraph laid
+  out at 200.7 broke as if it were 200 wide, and line widths were compared
+  rounded to hundredths; text now fits where Chrome fits it, to within the
+  hundredth SkParagraph's line breaker floors widths to. The values this
+  moves are under Breaking: "Text widths, line metrics, rects and
+  hit-testing are no longer rounded to hundredths".
 
 ### Added
 

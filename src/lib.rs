@@ -372,6 +372,7 @@ pub mod js_names {
 // Shared internal infrastructure (not part of the public API).
 pub(crate) mod context;
 pub(crate) mod gpu;
+pub(crate) mod started;
 
 /// winit-backed windowing, behind the `window` feature.
 ///
