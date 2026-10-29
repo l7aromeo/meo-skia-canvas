@@ -164,8 +164,10 @@ fn norm_of(sigma: f64) -> f64 {
 }
 
 /// The blur of `image`, `width` by `height`, by `sigma_x` along rows and
-/// `sigma_y` along columns, made on `context`, written as `out_type`
-/// pixels: rounded to a level for an 8-bit type, unrounded for a float one.
+/// `sigma_y` along columns, scaled by `gain`, made on `context`, written as
+/// `out_type` pixels: rounded to a level for an 8-bit type, unrounded for a
+/// float one. The gain is the last pass's, so that a blurred draw composited
+/// at an alpha is rounded once.
 /// `None` where the effect does not compile or a target cannot be made, and
 /// for a blur that reaches past the image along either axis by more than
 /// [`REACH_PER_LINE`] times its length, which the CPU blur takes.
@@ -177,6 +179,7 @@ pub(crate) fn blur(
     sigma_x: f32,
     sigma_y: f32,
     out_type: ColorType,
+    gain: f32,
 ) -> Option<Image> {
     // An infinite sigma reaches past any image, and is the CPU's as well.
     let reaches = |sigma: f32, n: usize| {
@@ -228,7 +231,7 @@ pub(crate) fn blur(
         height,
         width,
         sigma_y,
-        Some((last, out_type)),
+        Some((last, out_type, f64::from(gain))),
     )
     .map(|(image, _)| image)
 }
@@ -370,7 +373,7 @@ impl Gpu<'_> {
         n: usize,
         other: usize,
         sigma: f32,
-        last: Option<(Part, ColorType)>,
+        last: Option<(Part, ColorType, f64)>,
     ) -> Option<(Image, Image)> {
         let size = |len: usize| {
             if dir[0] == 1.0 {
@@ -383,9 +386,14 @@ impl Gpu<'_> {
                       from: (&Image, &Image),
                       input: Input,
                       taps: Taps| match last {
-            Some((part, ct)) => gpu
-                .pass(from, input, dir, taps, part, size(n), ct)
-                .map(|image| (image.clone(), image)),
+            Some((part, ct, gain)) => {
+                let taps = Taps {
+                    norm: taps.norm * gain,
+                    ..taps
+                };
+                gpu.pass(from, input, dir, taps, part, size(n), ct)
+                    .map(|image| (image.clone(), image))
+            }
             None => gpu.split(from, input, dir, taps, size(n)),
         };
         if !(sigma.is_finite() && sigma > 0.0) {
@@ -524,8 +532,16 @@ mod tests {
         up.canvas().draw_image(&raster, (0, 0), Some(&paint));
         let texture = up.image_snapshot();
         let mut context = up.recording_context()?;
-        let out =
-            blur(&mut context, &texture, w, h, sx, sy, ColorType::RGBA8888)?;
+        let out = blur(
+            &mut context,
+            &texture,
+            w,
+            h,
+            sx,
+            sy,
+            ColorType::RGBA8888,
+            1.0,
+        )?;
         let mut down = surface(w, h, ColorType::RGBA8888)?;
         down.canvas().draw_image(&out, (0, 0), Some(&paint));
         let mut px = vec![0u8; w * h * 4];

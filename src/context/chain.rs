@@ -18,9 +18,10 @@
 //! lands on them unresampled.
 
 use skia_safe::{
-    AlphaType, Canvas as SkCanvas, Color, ColorType, Data, FilterMode, IRect,
-    Image, ImageFilter, ImageInfo, Matrix, MipmapMode, Paint, Rect, RoundOut,
-    SamplingOptions, Surface, Vector, image::CachingHint, images, surfaces,
+    AlphaType, BlendMode, Canvas as SkCanvas, Color, Color4f, ColorFilter,
+    ColorType, Data, FilterMode, IRect, Image, ImageInfo, Matrix, MipmapMode,
+    Paint, Rect, RoundOut, SamplingOptions, Surface, Vector, color_filters,
+    image::CachingHint, image_filters, images, surfaces,
 };
 
 #[cfg(any(feature = "metal", feature = "vulkan"))]
@@ -35,8 +36,8 @@ use crate::context::exact_blur_gpu;
 pub(crate) enum Step {
     /// The exact Gaussian blur of this standard deviation, in canvas pixels.
     Blur(f32),
-    /// A filter Skia applies, in the layer's pixels.
-    Skia(ImageFilter),
+    /// A colour filter, which is the same at any scale.
+    Colour(ColorFilter),
 }
 
 /// How the chain's pixels are kept where the canvas it is played onto has
@@ -51,6 +52,11 @@ pub(crate) enum Depth {
 }
 
 /// Plays `draw` onto `canvas` through `steps`, composited through `paint`.
+///
+/// `paint`'s alpha is taken into the last step rather than composited
+/// after it, so that the result is rounded once: an 8-bit blur rounded,
+/// scaled by an alpha of a half and rounded again lands on an exact tie for
+/// every odd byte.
 ///
 /// `canvas`'s transform maps canvas pixels to its device, and its clip
 /// confines what the result paints, not what the chain reads: a blur
@@ -95,15 +101,23 @@ pub(crate) fn apply(
     let mut image = surface.image_snapshot();
 
     let scale = (layer.scale_x().abs(), layer.scale_y().abs());
-    for step in steps {
+    let last = steps.len().saturating_sub(1);
+    for (i, step) in steps.iter().enumerate() {
+        let gain = match i == last {
+            true => paint.alpha_f(),
+            false => 1.0,
+        };
         let next = match step {
             Step::Blur(sigma) => blurred(
                 context.as_mut(),
                 &image,
                 sigma * scale.0,
                 sigma * scale.1,
+                gain,
             ),
-            Step::Skia(filter) => filtered(context.as_mut(), &image, filter),
+            Step::Colour(filter) => {
+                filtered(context.as_mut(), &image, filter, gain)
+            }
         };
         let Some(next) = next else {
             return;
@@ -118,13 +132,15 @@ pub(crate) fn apply(
         true => SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
         false => SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
     };
+    let mut paint = paint.clone();
+    paint.set_alpha_f(1.0);
     canvas.save();
     canvas.set_matrix(&rest.into());
     canvas.draw_image_with_sampling_options(
         &image,
         (region.left as f32, region.top as f32),
         sampling,
-        Some(paint),
+        Some(&paint),
     );
     canvas.restore();
 }
@@ -191,7 +207,10 @@ fn region(
     // only the clip bounds the layer then.
     let bounded = steps.iter().all(|step| match step {
         Step::Blur(_) => true,
-        Step::Skia(filter) => filter.can_compute_fast_bounds(),
+        Step::Colour(filter) => {
+            image_filters::color_filter(filter.clone(), None, None)
+                .is_some_and(|filter| filter.can_compute_fast_bounds())
+        }
     });
     let region = match content.filter(|_| bounded) {
         Some(content) => {
@@ -222,7 +241,7 @@ fn reach(steps: &[Step], layer: &Matrix) -> Vector {
         .iter()
         .filter_map(|step| match step {
             Step::Blur(sigma) => Some(*sigma),
-            Step::Skia(_) => None,
+            Step::Colour(_) => None,
         })
         .filter(|sigma| sigma.is_finite() && *sigma > 0.0)
         .fold(0.0, |sum, sigma| sum + sigma);
@@ -292,14 +311,15 @@ fn make_surface(
     }
 }
 
-/// `image` blurred by `sigma_x` along rows and `sigma_y` along columns, in
-/// its own pixel type: on the GPU it lives on where that can, on the CPU
-/// otherwise.
+/// `image` blurred by `sigma_x` along rows and `sigma_y` along columns and
+/// scaled by `gain`, in its own pixel type: on the GPU it lives on where
+/// that can, on the CPU otherwise.
 fn blurred(
     context: Option<&mut Gpu>,
     image: &Image,
     sigma_x: f32,
     sigma_y: f32,
+    gain: f32,
 ) -> Option<Image> {
     let raster = match context {
         #[cfg(any(feature = "metal", feature = "vulkan"))]
@@ -313,6 +333,7 @@ fn blurred(
                 sigma_x,
                 sigma_y,
                 image.color_type(),
+                gain,
             );
             if on_gpu.is_some() {
                 return on_gpu;
@@ -326,12 +347,18 @@ fn blurred(
         Some(never) => match *never {},
         None => image.clone(),
     };
-    blurred_on_cpu(&raster, sigma_x, sigma_y)
+    blurred_on_cpu(&raster, sigma_x, sigma_y, gain)
 }
 
-/// `image`, a raster image, blurred on the CPU: its bytes rounded once
-/// where it is eight bits a channel, its floats unrounded otherwise.
-fn blurred_on_cpu(image: &Image, sigma_x: f32, sigma_y: f32) -> Option<Image> {
+/// `image`, a raster image, blurred on the CPU and scaled by `gain`: its
+/// bytes rounded once where it is eight bits a channel, its floats
+/// unrounded otherwise.
+fn blurred_on_cpu(
+    image: &Image,
+    sigma_x: f32,
+    sigma_y: f32,
+    gain: f32,
+) -> Option<Image> {
     let (w, h) = (image.width() as usize, image.height() as usize);
     let space = image.color_space();
     let bytes = matches!(
@@ -355,7 +382,7 @@ fn blurred_on_cpu(image: &Image, sigma_x: f32, sigma_y: f32) -> Option<Image> {
             }
             (
                 info,
-                exact_blur::blur_bytes(&pixels, w, h, sigma_x, sigma_y),
+                exact_blur::blur_bytes(&pixels, w, h, sigma_x, sigma_y, gain),
             )
         }
         false => {
@@ -379,7 +406,7 @@ fn blurred_on_cpu(image: &Image, sigma_x: f32, sigma_y: f32) -> Option<Image> {
             let blurred = exact_blur::blur(&pixels, w, h, sigma_x, sigma_y);
             let bytes = blurred
                 .iter()
-                .flat_map(|v| v.to_ne_bytes())
+                .flat_map(|v| (v * gain).to_ne_bytes())
                 .collect::<Vec<u8>>();
             (info, bytes)
         }
@@ -388,16 +415,28 @@ fn blurred_on_cpu(image: &Image, sigma_x: f32, sigma_y: f32) -> Option<Image> {
     images::raster_from_data(&info, Data::new_copy(&pixels), row_bytes)
 }
 
-/// `image` drawn through `filter` onto a layer of its size and type.
+/// `image` drawn through `filter` and then scaled by `gain`, as one colour
+/// filter, onto a layer of its size and type: written once, so rounded
+/// once.
 fn filtered(
     context: Option<&mut Gpu>,
     image: &Image,
-    filter: &ImageFilter,
+    filter: &ColorFilter,
+    gain: f32,
 ) -> Option<Image> {
+    let filter = match gain < 1.0 {
+        true => color_filters::blend_with_color_space(
+            Color4f::new(0.0, 0.0, 0.0, gain),
+            None,
+            BlendMode::DstIn,
+        )?
+        .composed(filter.clone())?,
+        false => filter.clone(),
+    };
     let info = image.image_info();
     let mut surface = make_surface(context, info)?;
     let mut paint = Paint::default();
-    paint.set_image_filter(filter.clone());
+    paint.set_color_filter(filter);
     let canvas = surface.canvas();
     canvas.clear(Color::TRANSPARENT);
     canvas.draw_image(image, (0, 0), Some(&paint));

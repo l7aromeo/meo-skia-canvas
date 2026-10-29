@@ -137,6 +137,22 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **An image drawn under a blur is its exact Gaussian blur.** An image
+  drawn with `Context2D::draw_image`, `draw_image_sized` or
+  `draw_image_region` under a filter of blurs and colour functions was
+  blurred by Skia's image filter, as Chrome's is: a 40px red square drawn in
+  and blurred by 8px read 233 ten pixels inside its edge where the exact blur
+  is 228. It is now blurred by the exact Gaussian on either engine, as a
+  blurred path is. A `drop-shadow()`, a shadow, or a composite operation
+  that composites the whole canvas keeps Skia's filter.
+
+- **A blurred draw composited at a global alpha is rounded once.** On an
+  eight-bit canvas the blur of a drawn image or canvas was rounded to a
+  level and then scaled by the alpha and rounded again, which for an alpha
+  of 0.5 lands every odd level on an exact tie and moved hundreds of pixels
+  of a blurred image a level off. The alpha is now taken into the blur
+  before its one rounding.
+
 - **A canvas drawn in under a filter spreads past where it is drawn.** A
   canvas drawn into another with `Context2D::draw_canvas` or
   `draw_canvas_sized` under `Context2D::set_filter_css` was cut at its

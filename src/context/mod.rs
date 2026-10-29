@@ -1383,16 +1383,7 @@ impl Context2D {
                 .paint_for_shadow(&paint)
                 .map(|shadow| self.faint().drawable(&shadow).into_owned());
             let offset = self.state.shadow_offset;
-            // A filter the crate can run itself is run on the group's
-            // pixels, exactly; Skia's own image filter, set beside it,
-            // would have to run after it, and keeps the whole filter Skia's.
-            let steps = self
-                .state
-                .skia_image_filter
-                .is_none()
-                .then(|| self.state.filter.steps())
-                .flatten()
-                .map(Arc::<[Step]>::from);
+            let steps = self.exact_steps();
             self.with_recorder(|mut recorder| {
                 let mut group = |paint: Paint, shift: Point, own: bool| {
                     let rec = LayerRec {
@@ -1559,8 +1550,66 @@ impl Context2D {
         ));
         let paint = self.paint_for_image();
         let features = self.vector_features(&paint, None);
+        let sampling = self.state.sampling_filter.sampling_for(scaling);
+
+        // Under a filter the crate runs itself, the image is drawn unfiltered
+        // and opaque as a group of its own, which runs the filter on its
+        // pixels exactly and composites the result through the alpha and the
+        // blend, in the order the Canvas drawing model applies them. A shadow
+        // is still Skia's, and so is a blend that covers beyond the draw,
+        // which composites the whole canvas.
+        if let Some(steps) = self.exact_steps()
+            && !covers_beyond_the_draw(self.state.global_composite_operation)
+            && !self.casts_shadow()
+        {
+            let mut drawn = paint.clone();
+            drawn.set_image_filter(None).set_alpha_f(1.0);
+            let mut recorder = PictureRecorder::new();
+            let canvas = recorder.begin_recording(*dst_rect, false);
+            canvas.draw_image_rect_with_sampling_options(
+                image,
+                Some((src_rect, Strict)),
+                dst_rect,
+                sampling,
+                &drawn,
+            );
+            let contents = Arc::new(
+                recorder
+                    .finish_recording_as_picture(None)
+                    .map(Layer::Picture)
+                    .into_iter()
+                    .collect(),
+            );
+            let mut through = Paint::default();
+            through
+                .set_alpha_f(paint.alpha_f())
+                .set_blend_mode(self.state.global_composite_operation)
+                .set_image_filter(paint.image_filter());
+            let through = self.faint().drawable(&through).into_owned();
+            let matrix = self.state.matrix;
+            self.with_recorder(|mut recorder| {
+                recorder.append_group(
+                    Composite::Chain {
+                        steps,
+                        rec: LayerRec {
+                            paint: Some(through),
+                            ..LayerRec::default()
+                        },
+                    },
+                    // Unconfined: the image's own edge is where it ends,
+                    // and a clip to it would take its partial pixels a
+                    // second time. The picture is recorded within it.
+                    None,
+                    matrix,
+                    contents,
+                    features,
+                    Point::default(),
+                );
+            });
+            return;
+        }
+
         self.render_to_canvas(&paint, features, |canvas, paint| {
-            let sampling = self.state.sampling_filter.sampling_for(scaling);
             canvas.draw_image_rect_with_sampling_options(
                 image,
                 Some((src_rect, Strict)),
@@ -2113,6 +2162,20 @@ impl Context2D {
         );
         paint.set_style(style);
         paint
+    }
+
+    /// The filter as steps the crate runs on a draw's pixels exactly -- see
+    /// [`Filter::steps`] -- or `None` where Skia's filter draws it: no
+    /// filter, one Skia has to run itself, or one beside a Skia image
+    /// filter, which would have to run after it and keeps the whole filter
+    /// Skia's.
+    fn exact_steps(&self) -> Option<Arc<[Step]>> {
+        self.state
+            .skia_image_filter
+            .is_none()
+            .then(|| self.state.filter.steps())
+            .flatten()
+            .map(Arc::<[Step]>::from)
     }
 
     /// Whether a draw now casts a shadow: what `paint_for_shadow` answers

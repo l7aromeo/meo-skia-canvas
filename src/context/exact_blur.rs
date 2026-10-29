@@ -104,21 +104,24 @@ pub(crate) fn blur(
     rows
 }
 
-/// Blurs `pixels`, premultiplied RGBA bytes, as [`blur`] does, rounding once
-/// at the end.
+/// Blurs `pixels`, premultiplied RGBA bytes, as [`blur`] does, scales the
+/// result by `gain` and rounds once at the end: a blurred draw composited
+/// at an alpha takes its alpha here, so that it is not rounded twice.
 pub(crate) fn blur_bytes(
     pixels: &[u8],
     width: usize,
     height: usize,
     sigma_x: f32,
     sigma_y: f32,
+    gain: f32,
 ) -> Vec<u8> {
     let floats: Vec<f32> = pixels.par_iter().map(|&b| f32::from(b)).collect();
     blur(&floats, width, height, sigma_x, sigma_y)
         .into_par_iter()
-        // Each value is a weighted mean of bytes, so it lies in [0, 255]
-        // up to float noise; the cast saturates what noise puts outside.
-        .map(|v| (v + 0.5) as u8)
+        // Each value is a weighted mean of bytes times a gain in [0, 1], so
+        // it lies in [0, 255] up to float noise; the cast saturates what
+        // noise puts outside.
+        .map(|v| (v * gain + 0.5) as u8)
         .collect()
 }
 
@@ -433,7 +436,7 @@ mod tests {
             (7, 130),
         ] {
             for src in scenes(w, h) {
-                let got = blur_bytes(&src, w, h, sx, sy);
+                let got = blur_bytes(&src, w, h, sx, sy, 1.0);
                 let want = reference(&src, w, h, sx, sy);
                 for (&g, &e) in got.iter().zip(&want) {
                     if f64::from(g) != (e + 0.5).floor() {
@@ -487,8 +490,8 @@ mod tests {
     #[test]
     fn a_sigma_of_nothing_leaves_its_axis_alone() {
         let src: Vec<u8> = (0..20 * 4).map(|i| (i * 7 % 256) as u8).collect();
-        assert_eq!(blur_bytes(&src, 20, 1, 0.0, 0.0), src);
-        assert_eq!(blur_bytes(&src, 20, 1, f32::NAN, -1.0), src);
+        assert_eq!(blur_bytes(&src, 20, 1, 0.0, 0.0, 1.0), src);
+        assert_eq!(blur_bytes(&src, 20, 1, f32::NAN, -1.0, 1.0), src);
     }
 
     #[test]
@@ -550,7 +553,7 @@ mod tests {
         let pixels = vec![255u8; w * h * 4];
         // `blur(calc(1px * infinity))`, and an infinite sigma.
         for sigma in [f32::MAX, f32::INFINITY] {
-            let out = blur_bytes(&pixels, w, h, sigma, sigma);
+            let out = blur_bytes(&pixels, w, h, sigma, sigma, 1.0);
             assert!(out.iter().all(|&v| v == 0), "{sigma}");
         }
     }

@@ -259,8 +259,8 @@ impl Filter {
 
     /// This filter as steps the crate runs on pixels itself -- see
     /// [`chain`](crate::context::chain) -- in the order CSS applies them: a
-    /// `blur()` as the exact Gaussian, a colour function through Skia's
-    /// colour filter, which is the same at any scale. `None` for no filter,
+    /// `blur()` as the exact Gaussian, a colour function as Skia's colour
+    /// filter, which is the same at any scale. `None` for no filter,
     /// and for one holding a `drop-shadow()`, which Skia still draws.
     pub(crate) fn steps(&self) -> Option<Vec<Step>> {
         if self.specs.is_empty() {
@@ -273,11 +273,7 @@ impl Filter {
                     Some(Step::Blur(*value))
                 }
                 FilterSpec::Plain { name, value } => {
-                    colour_function(name, *value)
-                        .and_then(|filter| {
-                            image_filters::color_filter(filter, None, None)
-                        })
-                        .map(Step::Skia)
+                    colour_function(name, *value).map(Step::Colour)
                 }
                 FilterSpec::Shadow { .. } => None,
             })

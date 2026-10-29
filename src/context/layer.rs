@@ -203,14 +203,21 @@ impl Group {
                 paint.set_image_filter(None);
                 // The chain's lengths are in the pixels of the canvas the
                 // group was drawn on, which `base` maps to the device.
-                let content =
-                    self.within.map(|within| self.matrix.map_rect(within).0);
+                // What is drawn is bounded by `within`, or for a single
+                // picture by what it was recorded within.
+                let content = match (&self.within, self.contents.as_slice()) {
+                    (Some(within), _) => Some(self.matrix.map_rect(within).0),
+                    (None, [Layer::Picture(picture)]) => Some(
+                        self.contents_matrix.map_rect(picture.cull_rect()).0,
+                    ),
+                    (None, _) => None,
+                };
                 chain::apply(
                     canvas,
                     steps,
                     content,
                     Depth::Floats,
-                    &composited(&paint),
+                    &paint,
                     |layer| {
                         let to_layer = layer.local_to_device_as_3x3();
                         layer.set_matrix(

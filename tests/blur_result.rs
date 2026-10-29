@@ -429,3 +429,78 @@ fn a_canvas_drawn_in_casts_its_drop_shadow_past_where_it_is_drawn() {
         assert_eq!(pixel(80), [255, 0, 0, 255], "gpu {gpu}: the square");
     }
 }
+
+/// A 40px image whose alpha varies across it, so a blur has structure to
+/// spread and not only an edge.
+fn varied_image() -> Image {
+    let pixels: Vec<u8> = (0..40 * 40)
+        .flat_map(|i| {
+            let (x, y) = (i % 40, i / 40);
+            let alpha = ((x * 7 + y * 13) % 256) as u8;
+            [alpha, 0, alpha / 2, alpha]
+        })
+        .collect();
+    Image::from_pixels(
+        &pixels,
+        40,
+        40,
+        40 * 4,
+        PixelExportOptions {
+            premultiplied: true,
+            ..PixelExportOptions::default()
+        },
+    )
+    .expect("an image")
+}
+
+/// A canvas on `gpu`'s engine with [`varied_image`] drawn at (60.25, 30)
+/// through `filter` at `global_alpha`, or `None` where that engine is not
+/// available.
+fn drawn_image(gpu: bool, filter: &str, global_alpha: f32) -> Option<Canvas> {
+    let mut canvas = Canvas::new(SIZE.0, SIZE.1);
+    canvas.set_gpu(gpu);
+    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+        return None;
+    }
+    let ctx = canvas.context();
+    ctx.set_filter_css(filter).expect("a filter");
+    ctx.set_global_alpha(global_alpha);
+    ctx.draw_image(&varied_image(), 60.25, 30.0);
+    Some(canvas)
+}
+
+#[test]
+fn a_blurred_image_is_the_exact_gaussian_of_what_it_draws() {
+    // The filter applies to what is drawn, and the global alpha after it,
+    // as the Canvas drawing model orders them: the reference is the image
+    // drawn opaque, blurred, then scaled by the alpha.
+    for gpu in [false, true] {
+        for sigma in [2.0f32, 8.0] {
+            for global in [1.0f32, 0.5] {
+                let (Some(mut drawn), Some(mut blurred)) = (
+                    drawn_image(gpu, "none", 1.0),
+                    drawn_image(gpu, &format!("blur({sigma}px)"), global),
+                ) else {
+                    continue;
+                };
+                let drawn: Vec<f64> = alpha(&mut drawn)
+                    .into_iter()
+                    .map(|a| f64::from(a) / 255.0)
+                    .collect();
+                let reference: Vec<f64> =
+                    sampled(&drawn, SIZE.0 as usize, f64::from(sigma))
+                        .into_iter()
+                        .map(|v| v * f64::from(global))
+                        .collect();
+                let misses = misses(&alpha(&mut blurred), &reference);
+                assert!(
+                    misses.is_empty(),
+                    "gpu {gpu} sigma {sigma} alpha {global}: {} pixels off \
+                     the exact blur, first {:?}",
+                    misses.len(),
+                    &misses[..misses.len().min(4)],
+                );
+            }
+        }
+    }
+}
