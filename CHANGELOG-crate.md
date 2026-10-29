@@ -1346,6 +1346,14 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
     grapheme cluster crossing an edge between them only where the bytes
     either side of the edge do not rule one out, and its base style is no
     longer copied to set its hinting [RE-TIME vs 0.16.3].
+  - A `TextEngine` paragraph is built with fewer lookups, walks and
+    allocations, taking the font library's lock once, asking the platform
+    for a face's variation axes once, and leaving a face drawn at its own
+    position uninstanced. Its builds still cost more than 0.16.3's
+    [RE-TIME vs 0.16.3], for work 0.16.3 did not do: the recipe each
+    paragraph keeps so that its decorations, shadows, backgrounds and
+    oblique ranges are drawn as CSS places them, and a variable face
+    instanced at each style's own axes.
   - A page of cards, each drawn over its own shadow blurred through a
     `blur()` filter, records about 31% faster on either engine and exports
     about 5% faster on the GPU, and a page of blurred rectangles alone
