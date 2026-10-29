@@ -48,7 +48,7 @@ use crate::{
             FontLibrary as SharedFontRegistry, font_generation, forgetful,
         },
         oblique::{
-            PaintKey, ParagraphRecipe, Passes, add_slnt, match_oblique,
+            ParagraphRecipe, Passes, add_slnt, match_oblique,
             without_paragraph_cache,
         },
     },
@@ -1394,8 +1394,7 @@ impl TextEngine {
                 base_oblique,
                 collection.clone(),
                 None,
-            )
-            .with_base_paint(paint_key(base_style)),
+            ),
             collection,
             positions: self.positions.clone(),
             faces: self.faces.clone(),
@@ -1481,10 +1480,9 @@ impl ParagraphBuilder {
         let oblique = style.slant.oblique_degrees().and_then(|degrees| {
             match_oblique(&mut sk_style, &mut self.collection, degrees)
         });
-        let paint = Some(paint_key(style));
         match carries_taken(style) {
-            true => self.recipe.push_style_keyed(sk_style, oblique, paint),
-            false => self.recipe.push_style_as_given(sk_style, oblique, paint),
+            true => self.recipe.push_style(sk_style, oblique),
+            false => self.recipe.push_style_as_given(sk_style, oblique),
         }
         self
     }
@@ -2320,17 +2318,6 @@ fn at_default_position(
         })
 }
 
-/// What [`build_text_style`] builds `style`'s glyph paint from: its fill
-/// colour, `foreground_color` where it is set, and its stroke width where
-/// it is positive -- see [`PaintKey`].
-fn paint_key(style: &TextStyle) -> PaintKey {
-    let fill = style.foreground_color.unwrap_or(style.color);
-    PaintKey::new(
-        [fill.r, fill.g, fill.b, fill.a],
-        style.stroke_width.filter(|width| *width > 0.0),
-    )
-}
-
 /// Whether [`build_text_style`] gives `style`'s Skia style a decoration,
 /// shadows or a background, the three things a recipe takes off a style
 /// to draw itself: decided here, from the fields it builds them from, so
@@ -2822,133 +2809,6 @@ mod tests {
             ..amstelvar()
         };
         assert_eq!(takes_pushing(&backed), 1, "backed");
-    }
-
-    /// A crate paragraph in `spans`, each pushed over the base style in
-    /// Oswald and popped, built at `width`: its ligature edges and its
-    /// pixels, painted.
-    fn keyed_paragraph(
-        engine: &TextEngine,
-        spans: &[(&str, TextStyle)],
-        width: f32,
-    ) -> (Option<Vec<usize>>, Vec<u8>) {
-        let base = TextStyle {
-            font_families: vec!["OswaldDefault".into()],
-            font_size: 32.0,
-            ..TextStyle::default()
-        };
-        let mut builder = engine.paragraph_builder(&base);
-        for (text, style) in spans {
-            builder.push_style(style);
-            builder.add_text(text);
-            builder.pop();
-        }
-        let paragraph = builder.build(width);
-        let edges = paragraph.passes.borrow().as_ref().and_then(|passes| {
-            passes.ligature_edges_for_test().map(<[usize]>::to_vec)
-        });
-        let (w, h) = (width as i32 + 40, paragraph.height().ceil() as i32 + 40);
-        let mut surface =
-            skia_safe::surfaces::raster_n32_premul((w, h)).expect("a surface");
-        surface.canvas().clear(skia_safe::Color::WHITE);
-        paragraph.paint(surface.canvas(), skia_safe::Point::new(20.0, 20.0));
-        let info = skia_safe::ImageInfo::new_n32_premul((w, h), None);
-        let mut pixels = vec![0u8; (w * h * 4) as usize];
-        assert!(surface.read_pixels(
-            &info,
-            &mut pixels,
-            (w * 4) as usize,
-            (0, 0)
-        ));
-        (edges, pixels)
-    }
-
-    /// Two spans of one paint are told apart from no paint edge without a
-    /// comparison through Skia.
-    #[test]
-    fn spans_of_one_paint_compare_no_paints_through_skia() {
-        let engine = variable_engine();
-        let span = TextStyle {
-            font_families: vec!["OswaldDefault".into()],
-            font_size: 32.0,
-            ..TextStyle::default()
-        };
-        let before = crate::node::oblique::PAINT_COMPARISONS.get();
-        keyed_paragraph(
-            &engine,
-            &[("Hamburgefonstiv ", span.clone()), ("quick brown", span)],
-            560.0,
-        );
-        assert_eq!(crate::node::oblique::PAINT_COMPARISONS.get() - before, 0);
-    }
-
-    /// The paint keys change nothing a paragraph finds or draws: over
-    /// generated crate paragraphs of ligatures and plain text across span
-    /// edges, in two colours, a colour given as `foreground_color` rather
-    /// than `color`, a stroke and a larger size, the edges and the pixels are
-    /// those found with every pair of paints compared through Skia. Some
-    /// paragraphs have edges and some do not.
-    #[test]
-    fn paint_keys_find_the_edges_skia_finds() {
-        use crate::color::RgbaLinear;
-        let engine = variable_engine();
-        let red = RgbaLinear::from_srgb8(200, 30, 30, 1.0);
-        let blue = RgbaLinear::from_srgb8(30, 30, 200, 1.0);
-        let styled = |pick: u64| {
-            let mut style = TextStyle {
-                font_families: vec!["OswaldDefault".into()],
-                font_size: 32.0,
-                color: red,
-                ..TextStyle::default()
-            };
-            match pick % 6 {
-                0 => {}
-                1 => style.color = blue,
-                2 => style.foreground_color = Some(red),
-                3 => {
-                    style.color = blue;
-                    style.foreground_color = Some(red);
-                }
-                4 => style.stroke_width = Some(1.5),
-                _ => style.font_size = 40.0,
-            }
-            style
-        };
-        let pieces =
-            ["fi", "f", "i", "ffl", "ab ", "Hamburgefonstiv", "fl", " "];
-        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
-        let mut next = || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
-        };
-        let (mut with_edges, mut cases) = (0, 0);
-        for _ in 0..60 {
-            let spans: Vec<(&str, TextStyle)> = (0..2 + next() % 4)
-                .map(|_| {
-                    (
-                        pieces[(next() % pieces.len() as u64) as usize],
-                        styled(next()),
-                    )
-                })
-                .collect();
-            let width = [600.0, 90.0][(next() % 2) as usize];
-            crate::node::oblique::IGNORE_PAINT_KEYS.set(true);
-            let skia = keyed_paragraph(&engine, &spans, width);
-            crate::node::oblique::IGNORE_PAINT_KEYS.set(false);
-            let keyed = keyed_paragraph(&engine, &spans, width);
-            let texts: Vec<&str> = spans.iter().map(|span| span.0).collect();
-            assert_eq!(keyed.0, skia.0, "edges {texts:?}");
-            assert!(keyed.1 == skia.1, "pixels {texts:?}");
-            with_edges +=
-                usize::from(skia.0.as_ref().is_some_and(|e| !e.is_empty()));
-            cases += 1;
-        }
-        assert!(
-            with_edges > cases / 10,
-            "{with_edges} of {cases} with edges"
-        );
     }
 
     /// The style each of the reuse pins starts from: Amstelvar, whose `wght`
