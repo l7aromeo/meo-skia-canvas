@@ -23,7 +23,11 @@
 //!
 //! - Ganesh's Metal backend has no 32-bit float render target. A pass's result
 //!   is kept in two half-float targets, the value and its remainder, in units
-//!   of levels, which together hold it to about 22 bits.
+//!   of levels, which together hold it to about 22 bits. The value is snapped
+//!   to its nearest half in float arithmetic, not cast to `half`: SPIR-V marks
+//!   `half` relaxed precision only, which a driver may compute in full float,
+//!   and on Mesa's lavapipe that left the remainder zero and a blur rounding up
+//!   to 0.11 of a level to the wrong side of a half.
 //! - A child shader returns half precision, which cannot hold `n / 255`
 //!   exactly. An 8-bit source's byte is recovered as the nearest level, which
 //!   the half's error, under 0.06 of a level, cannot cross.
@@ -80,6 +84,14 @@ uniform float c;
 uniform float norm;
 uniform float part;
 uniform float source;
+float4 snap(float4 x) {
+    float4 a = abs(x);
+    float4 e = floor(log2(max(a, 6.103515625e-05)));
+    e += step(exp2(e + 1), a);
+    e -= 1 - step(exp2(e), max(a, 6.103515625e-05));
+    float4 ulp = exp2(e - 10);
+    return sign(x) * floor(a / ulp + 0.5) * ulp;
+}
 float4 at(float2 q) {
     float4 v = float4(hi.eval(q)) + float4(lo.eval(q));
     if (source == 1) { return floor(v * 255 + 0.5); }
@@ -109,7 +121,7 @@ float4 main(float2 p) {
     acc *= norm;
     if (part == 0) { return floor(acc + 0.5) / 255; }
     if (part == 3) { return acc / 255; }
-    float4 h = float4(half4(acc));
+    float4 h = snap(acc);
     return part == 1 ? h : acc - h;
 }
 "#;
