@@ -75,6 +75,28 @@ const PLACEHOLDER_CHARACTER: char = '\u{FFFC}';
 /// a caller builds again and again.
 const KEPT_LIST_CAPACITY: usize = 64;
 
+/// What a crate style's glyph paint is built from, by the bits of each
+/// number: its fill colour and the width of its stroke, where it has one.
+/// `text::build_text_style` builds the paint from these and nothing else,
+/// so two styles with equal keys have equal paints, and the edge walk
+/// compares the keys before it compares the paints through Skia -- see
+/// [`ParagraphRecipe::paint_edge`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PaintKey {
+    fill: [u32; 4],
+    stroke: Option<u32>,
+}
+
+impl PaintKey {
+    /// The key for a paint filled with `fill` and stroked at `stroke`.
+    pub(crate) fn new(fill: [f32; 4], stroke: Option<f32>) -> Self {
+        Self {
+            fill: fill.map(f32::to_bits),
+            stroke: stroke.map(f32::to_bits),
+        }
+    }
+}
+
 thread_local! {
     /// The lists the last [`ParagraphRecipe`] on this thread handed back,
     /// emptied, for the next one to fill -- see [`KEPT_LIST_CAPACITY`].
@@ -219,6 +241,9 @@ pub(crate) struct ParagraphRecipe {
     /// The slot of the style text is added in now: 0 for the paragraph's
     /// own, and a pushed style's index plus 1.
     top: usize,
+    /// What the paragraph's own style's glyph paint was built from, where
+    /// the caller says -- see [`Self::with_base_paint`].
+    base_paint: Option<PaintKey>,
     /// Whether [`ascii_boundary`] holds at every text step's start, judged
     /// as the bytes either side of it are added rather than by reading the
     /// builder's text back -- see [`Self::meet`].
@@ -310,6 +335,7 @@ impl ParagraphRecipe {
             oblique: base_oblique.is_some(),
             half_leading,
             top: 0,
+            base_paint: None,
             ascii_edges: true,
             last_byte: None,
             edge_waiting: false,
@@ -320,8 +346,19 @@ impl ParagraphRecipe {
     /// gives, if any, hinted -- see [`Self::new`].
     pub(crate) fn push_style(
         &mut self,
+        style: TextStyle,
+        oblique: Option<f32>,
+    ) {
+        self.push_style_keyed(style, oblique, None);
+    }
+
+    /// Pushes `style` as [`Self::push_style`] does, its glyph paint built
+    /// from `paint` where that is `Some` -- see [`PaintKey`].
+    pub(crate) fn push_style_keyed(
+        &mut self,
         mut style: TextStyle,
         oblique: Option<f32>,
+        paint: Option<PaintKey>,
     ) {
         style.set_font_hinting(text_hinting(true));
         #[cfg(test)]
@@ -344,16 +381,17 @@ impl ParagraphRecipe {
             shadows,
             background,
         };
-        self.push(style, oblique, taken);
+        self.push(style, oblique, taken, paint);
     }
 
-    /// Pushes `style`, as [`Self::push_style`] does, where the caller knows
-    /// it has no decoration, shadow or background to take off: built from
-    /// a description that names none, as a crate `TextStyle` is.
+    /// Pushes `style`, as [`Self::push_style_keyed`] does, where the caller
+    /// knows it has no decoration, shadow or background to take off: built
+    /// from a description that names none, as a crate `TextStyle` is.
     pub(crate) fn push_style_as_given(
         &mut self,
         mut style: TextStyle,
         oblique: Option<f32>,
+        paint: Option<PaintKey>,
     ) {
         style.set_font_hinting(text_hinting(true));
         debug_assert!(
@@ -365,17 +403,25 @@ impl ParagraphRecipe {
             shadows: Vec::new(),
             background: None,
         };
-        self.push(style, oblique, taken);
+        self.push(style, oblique, taken, paint);
     }
 
-    /// Pushes `style`, with `taken` taken off it.
-    fn push(&mut self, style: TextStyle, oblique: Option<f32>, taken: Taken) {
+    /// Pushes `style`, with `taken` taken off it and its glyph paint built
+    /// from `paint` where that is `Some`.
+    fn push(
+        &mut self,
+        style: TextStyle,
+        oblique: Option<f32>,
+        taken: Taken,
+        paint: Option<PaintKey>,
+    ) {
         self.builder.push_style(&style);
         self.oblique |= oblique.is_some();
         self.half_leading |= style.half_leading();
         self.steps.push(Step::Push(self.pushed.len()));
         self.pushed.push(Pushed {
             parent: self.top,
+            paint,
             style,
             oblique,
             taken,
@@ -742,9 +788,38 @@ impl ParagraphRecipe {
     /// ligature can straddle in two paints: the two shaped as one, with
     /// glyph paints that differ.
     fn paint_edge(&self, left: usize, right: usize) -> bool {
+        #[cfg(test)]
+        let keyed = !IGNORE_PAINT_KEYS.get();
+        #[cfg(not(test))]
+        let keyed = true;
+        if keyed
+            && let (Some(a), Some(b)) =
+                (self.paint_key(left), self.paint_key(right))
+            && a == b
+        {
+            return false;
+        }
+        #[cfg(test)]
+        PAINT_COMPARISONS.set(PAINT_COMPARISONS.get() + 1);
         self.shaped_as_one(left, right)
             && foreground(self.text_style(left))
                 != foreground(self.text_style(right))
+    }
+
+    /// What the glyph paint of the style in `slot` was built from, where
+    /// its caller said -- see [`PaintKey`].
+    fn paint_key(&self, slot: usize) -> Option<PaintKey> {
+        match slot {
+            0 => self.base_paint,
+            _ => self.pushed[slot - 1].paint,
+        }
+    }
+
+    /// This recipe, its paragraph's own style's glyph paint built from
+    /// `paint` -- see [`PaintKey`].
+    pub(crate) fn with_base_paint(mut self, paint: PaintKey) -> Self {
+        self.base_paint = Some(paint);
+        self
     }
 
     /// Whether the text steps and placeholders, in order, are exactly
@@ -848,6 +923,8 @@ impl Drop for ParagraphRecipe {
 struct Pushed {
     /// The slot of the style it was pushed over, which a pop returns to.
     parent: usize,
+    /// What its glyph paint was built from, where the caller says.
+    paint: Option<PaintKey>,
     style: TextStyle,
     oblique: Option<f32>,
     taken: Taken,
@@ -891,6 +968,15 @@ thread_local! {
     /// tests that hold a plain style to none.
     pub(crate) static TAKES: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    /// How many times the edge walk has compared two styles' glyph paints
+    /// through Skia on this thread, for the test that holds two styles of
+    /// one paint key to none.
+    pub(crate) static PAINT_COMPARISONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    /// Whether the edge walk compares every pair of paints through Skia,
+    /// paint keys or not: the reference the keys are held to.
+    pub(crate) static IGNORE_PAINT_KEYS: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 /// Whether a grapheme cluster boundary lies at byte `at` of `text`, judged
@@ -1366,6 +1452,13 @@ fn records(paragraph: &mut Paragraph) -> Vec<GlyphRun> {
 }
 
 impl Passes {
+    /// The edges between styles shaped as one with different paints, for a
+    /// paragraph here only for them -- see [`Self::ligature_edges`].
+    #[cfg(test)]
+    pub(crate) fn ligature_edges_for_test(&self) -> Option<&[usize]> {
+        self.ligature_edges.as_deref()
+    }
+
     /// Notes that the paragraph has been laid out again, at `_width`, so that
     /// the next paint follows it afresh -- see [`Self::follow`] -- and lets
     /// go of what the last layout drew.
