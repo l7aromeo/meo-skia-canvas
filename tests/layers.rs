@@ -164,6 +164,58 @@ fn nested_layers_read_from_the_innermost_show_every_depth() {
     }
 }
 
+/// A shadow and a blur drawn in a layer reach past what casts them, and the
+/// layer keeps what they spread there: the shadow of a square in the first
+/// third lands in the middle one, and a square blurred in the middle third
+/// spreads into the last, each read inside the layer and after it closes.
+#[test]
+fn a_layer_keeps_what_its_shadows_and_blurs_spread() {
+    type Spread = fn(&mut Context2D);
+    let cases: [(&str, Spread, (f32, f32)); 2] = [
+        (
+            "a shadow",
+            |ctx| {
+                ctx.set_shadow_color(RgbaLinear::opaque(0.0, 0.0, 1.0));
+                ctx.set_shadow_offset(20.0, 0.0);
+                ctx.set_shadow_blur(2.0);
+                square(ctx, 0);
+            },
+            (30.0, 10.0),
+        ),
+        (
+            "a blur",
+            |ctx| {
+                ctx.set_filter_css("blur(4px)").expect("a blur");
+                square(ctx, 1);
+            },
+            (41.0, 10.0),
+        ),
+    ];
+    for gpu in ENGINES {
+        for (name, draw, (x, y)) in cases {
+            let mut canvas = white_page(gpu);
+            canvas.context().save_layer_with(0.5, None, None);
+            draw(canvas.context());
+            let read = |canvas: &mut Canvas| {
+                canvas
+                    .context()
+                    .get_image_data(x, y, 1.0, 1.0)
+                    .expect("a pixel")
+                    .pixels()
+                    .to_vec()
+            };
+            let inside = read(&mut canvas);
+            canvas.context().restore();
+            let closed = read(&mut canvas);
+            assert!(
+                closed[..3] != WHITE[..3],
+                "gpu {gpu}: {name} past what cast it read {closed:?}"
+            );
+            assert_eq!(inside, closed, "gpu {gpu}: {name} inside and after");
+        }
+    }
+}
+
 /// A layer opened under a transform and a clip, with bounds of its own, reads
 /// the same inside as after: translated 20 to the right, its bounds cover
 /// the middle and last thirds, and the clip leaves only the middle.

@@ -4758,8 +4758,14 @@ mod unpremultiply_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::faint::Faint;
+    use crate::context::{faint::Faint, layer::reach_of};
     use parking_lot::Mutex;
+    use skia_safe::{
+        BlurStyle, FilterMode, Font, MaskFilter, MipmapMode, PaintCap,
+        PaintJoin, PaintStyle, Point, SamplingOptions, TileMode, color_filters,
+        gradient::{Colors, Gradient, Interpolation, shaders},
+        image_filters,
+    };
     use std::{collections::BTreeSet, ptr, thread};
 
     /// Serialises the tests that assert on the process-wide page cache.
@@ -5780,6 +5786,588 @@ mod tests {
             .join()
             .expect("the reads return");
         assert_eq!(pixel[3], 128, "the layer composites at its alpha");
+    }
+
+    /// The page the confined-layer cases draw on.
+    const CONFINED_PAGE: Rect = Rect {
+        left: 0.0,
+        top: 0.0,
+        right: 48.0,
+        bottom: 40.0,
+    };
+
+    /// The contents a confined layer is held to, each drawn in page
+    /// coordinates and recorded as the recorder records them: the draws
+    /// whose pixels reach past their geometry, where a layer's bounds could
+    /// clip them if Skia's bounds for the draw fell short of what it marks.
+    fn confined_contents() -> Vec<(&'static str, Picture)> {
+        let typeface = corpus_typeface();
+        let stroke = |width: f32| {
+            let mut paint = Paint::default();
+            paint
+                .set_anti_alias(true)
+                .set_style(PaintStyle::Stroke)
+                .set_stroke_width(width);
+            paint
+        };
+        type Draw = Box<dyn Fn(&SkCanvas)>;
+        let photo = {
+            let mut tiny =
+                started::raster_n32_premul((7, 5)).expect("a raster surface");
+            for (x, y) in (0..7).flat_map(|x| (0..5).map(move |y| (x, y))) {
+                let mut paint = Paint::default();
+                paint.set_color(Color::from_rgb(x * 36, y * 50, 128));
+                tiny.canvas().draw_rect(
+                    Rect::from_xywh(f32::from(x), f32::from(y), 1.0, 1.0),
+                    &paint,
+                );
+            }
+            tiny.image_snapshot()
+        };
+        let draws: [(&'static str, Draw); 10] = [
+            (
+                "an antialiased rect at fractions",
+                Box::new(|canvas| {
+                    let mut paint = Paint::default();
+                    paint.set_anti_alias(true).set_color(Color::RED);
+                    canvas.draw_rect(
+                        Rect::from_xywh(10.3, 7.7, 5.2, 3.9),
+                        &paint,
+                    );
+                }),
+            ),
+            (
+                "a hairline",
+                Box::new(move |canvas| {
+                    canvas.draw_line((5.5, 5.5), (30.2, 12.7), &stroke(0.0));
+                }),
+            ),
+            (
+                "a wide mitred stroke",
+                Box::new(move |canvas| {
+                    let mut paint = stroke(9.0);
+                    paint
+                        .set_stroke_join(PaintJoin::Miter)
+                        .set_stroke_miter(10.0);
+                    let v = [(12.0, 30.0), (20.0, 12.0), (28.0, 30.0)]
+                        .map(Point::from);
+                    canvas.draw_path(
+                        &Path::polygon(&v, false, None, None),
+                        &paint,
+                    );
+                }),
+            ),
+            (
+                "square caps",
+                Box::new(move |canvas| {
+                    let mut paint = stroke(6.0);
+                    paint.set_stroke_cap(PaintCap::Square);
+                    canvas.draw_line((14.0, 20.0), (34.0, 20.0), &paint);
+                }),
+            ),
+            (
+                "a blur past the shape",
+                Box::new(|canvas| {
+                    let mut paint = Paint::default();
+                    paint.set_mask_filter(MaskFilter::blur(
+                        BlurStyle::Normal,
+                        5.0,
+                        false,
+                    ));
+                    canvas.draw_rect(
+                        Rect::from_xywh(16.0, 12.0, 10.0, 8.0),
+                        &paint,
+                    );
+                }),
+            ),
+            (
+                "a shadow past the shape",
+                Box::new(|canvas| {
+                    let mut paint = Paint::default();
+                    paint.set_image_filter(image_filters::drop_shadow(
+                        (14.0, 9.0),
+                        (3.0, 3.0),
+                        Color4f::from(Color::BLUE),
+                        None,
+                        None,
+                        None,
+                    ));
+                    canvas
+                        .draw_rect(Rect::from_xywh(8.0, 6.0, 8.0, 8.0), &paint);
+                }),
+            ),
+            (
+                "text",
+                Box::new(move |canvas| {
+                    let font = Font::from_typeface(typeface.clone(), 23.0);
+                    canvas.draw_str(
+                        "Wavy",
+                        (3.0, 30.0),
+                        &font,
+                        &Paint::default(),
+                    );
+                }),
+            ),
+            (
+                "a gradient",
+                Box::new(|canvas| {
+                    let ends = [Color::BLUE.into(), Color::RED.into()];
+                    let stops = Colors::new(
+                        &ends,
+                        Some([0.0f32, 1.0].as_slice()),
+                        TileMode::Clamp,
+                        None,
+                    );
+                    let gradient =
+                        Gradient::new(stops, Interpolation::default());
+                    let mut paint = Paint::default();
+                    paint.set_anti_alias(true).set_shader(
+                        shaders::linear_gradient(
+                            ((9.3, 0.0), (31.7, 0.0)),
+                            &gradient,
+                            None,
+                        ),
+                    );
+                    canvas.draw_rect(
+                        Rect::from_xywh(9.3, 7.2, 22.4, 17.9),
+                        &paint,
+                    );
+                }),
+            ),
+            (
+                "an image, sampled",
+                Box::new(move |canvas| {
+                    canvas.draw_image_rect_with_sampling_options(
+                        &photo,
+                        None,
+                        Rect::from_xywh(11.37, 8.61, 19.3, 14.2),
+                        SamplingOptions::new(
+                            FilterMode::Linear,
+                            MipmapMode::None,
+                        ),
+                        &Paint::default(),
+                    );
+                }),
+            ),
+            ("nothing", Box::new(|_| {})),
+        ];
+        draws
+            .into_iter()
+            .map(|(name, draw)| {
+                let mut recorder = PictureRecorder::new();
+                draw(recorder.begin_recording(CONFINED_PAGE, true));
+                let picture = recorder
+                    .finish_recording_as_picture(None)
+                    .expect("a picture of the contents");
+                (name, picture)
+            })
+            .collect()
+    }
+
+    /// `contents` drawn in a [`Group`] opened by `rec` under `matrix` and
+    /// `clip`, as `PageRecorder::close_layer` files it, confined to `within`,
+    /// over a page of two colours at `density`: the bytes of the page.
+    fn composited(
+        rec: &LayerRec,
+        contents: &Picture,
+        within: Play,
+        (matrix, clip): (&Matrix, Option<&Path>),
+        density: f32,
+        engine: RenderingEngine,
+    ) -> Vec<u8> {
+        let group = Group {
+            rec: rec.clone(),
+            matrix: *matrix,
+            clip: clip.map(Path::serialize),
+            within: None,
+            contents_matrix: Matrix::new_identity(),
+            contents: Arc::new(vec![Layer::Picture(contents.clone())]),
+        };
+        let size = CONFINED_PAGE.size() * density;
+        let info = ImageInfo::new_n32_premul(
+            (size.width as i32, size.height as i32),
+            None,
+        );
+        let mut surface = engine
+            .make_surface(&info, &ExportOptions::default())
+            .expect("a surface");
+        let canvas = surface.canvas();
+        canvas.clear(Color::from_rgb(40, 150, 220));
+        canvas.scale((density, density));
+        let mut green = Paint::default();
+        green.set_color(Color::from_rgb(60, 200, 90));
+        canvas.draw_rect(Rect::from_xywh(0.0, 20.0, 48.0, 20.0), &green);
+        match within {
+            Play::Within(within) => {
+                group.playback_within(canvas, Target::Pixels, within)
+            }
+            Play::AsPlayed => group.playback(canvas, Target::Pixels),
+        }
+        let mut pixels = vec![0; info.compute_min_byte_size()];
+        assert!(
+            surface.read_pixels(
+                &info,
+                &mut pixels,
+                info.min_row_bytes(),
+                (0, 0)
+            ),
+            "the surface's pixels"
+        );
+        pixels
+    }
+
+    /// How [`composited`] plays its group back: confined to a rectangle, or
+    /// not, or as [`Group::playback`] chooses.
+    #[derive(Clone, Copy)]
+    enum Play {
+        Within(Option<Rect>),
+        AsPlayed,
+    }
+
+    /// A layer confined to what it drew composites to the bytes of the same
+    /// layer covering the page, for every draw that reaches past its own
+    /// geometry -- an antialiased edge, a hairline, a mitre, a square cap, a
+    /// blur, a shadow, a glyph -- under a turned and fractionally shifted
+    /// transform and under a round clip, with bounds of the layer's own,
+    /// and at density 2.
+    #[test]
+    fn a_confined_layer_composites_as_one_covering_the_page() {
+        let mut half = Paint::default();
+        half.set_alpha_f(0.5);
+        let recs = [
+            (
+                "at alpha 0.5",
+                LayerRec {
+                    paint: Some(half.clone()),
+                    ..LayerRec::default()
+                },
+            ),
+            (
+                "with bounds of its own",
+                LayerRec {
+                    paint: Some(half),
+                    bounds: Some(Rect::from_xywh(14.0, 8.0, 26.0, 30.0)),
+                    ..LayerRec::default()
+                },
+            ),
+            ("with no paint", LayerRec::default()),
+        ];
+        let mut turned = Matrix::rotate_deg_pivot(30.0, (24.0, 20.0));
+        turned.post_translate((0.37, 0.61));
+        let round = Path::circle((22.0, 18.0), 12.0, None);
+        let frames = [
+            ("untransformed", (&Matrix::default(), None)),
+            ("turned and shifted", (&turned, None)),
+            ("clipped round", (&Matrix::default(), Some(&round))),
+        ];
+        let mut wrong = Vec::new();
+        let engines = match RenderingEngine::default() {
+            RenderingEngine::GPU => {
+                vec![RenderingEngine::CPU, RenderingEngine::GPU]
+            }
+            RenderingEngine::CPU => vec![RenderingEngine::CPU],
+        };
+        for (drawn, contents) in confined_contents() {
+            for ((layer, rec), engine) in recs
+                .iter()
+                .flat_map(|rec| engines.iter().map(move |e| (rec, *e)))
+            {
+                let within = rec
+                    .footprint(reach_of(&[Layer::Picture(contents.clone())]));
+                assert!(within.is_some(), "{drawn} {layer}: confined");
+                for (frame, at) in frames {
+                    for density in [1.0, 2.0] {
+                        let covering = composited(
+                            rec,
+                            &contents,
+                            Play::Within(None),
+                            at,
+                            density,
+                            engine,
+                        );
+                        let confined = composited(
+                            rec,
+                            &contents,
+                            Play::AsPlayed,
+                            at,
+                            density,
+                            engine,
+                        );
+                        if covering != confined {
+                            wrong.push(format!(
+                                "{drawn}, {layer}, {frame}, density {density}, {engine:?}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+
+        // The filter cases can fail: confined to the shape alone rather
+        // than to what Skia says it draws, the blur and the shadow lose
+        // what they spread past it.
+        let shapes = [
+            (
+                "a blur past the shape",
+                Rect::from_xywh(16.0, 12.0, 10.0, 8.0),
+            ),
+            (
+                "a shadow past the shape",
+                Rect::from_xywh(8.0, 6.0, 8.0, 8.0),
+            ),
+        ];
+        let contents = confined_contents();
+        let (_, rec) = &recs[0];
+        for (drawn, shape) in shapes {
+            let (_, picture) = contents
+                .iter()
+                .find(|(name, _)| *name == drawn)
+                .expect("the filter case");
+            let at = (&Matrix::default(), None);
+            assert_ne!(
+                composited(
+                    rec,
+                    picture,
+                    Play::Within(Some(shape)),
+                    at,
+                    1.0,
+                    RenderingEngine::CPU
+                ),
+                composited(
+                    rec,
+                    picture,
+                    Play::Within(None),
+                    at,
+                    1.0,
+                    RenderingEngine::CPU
+                ),
+                "{drawn}: confined to its shape"
+            );
+        }
+    }
+
+    /// A group played into a recording is left covering its clip, so that
+    /// it composites as it would anywhere the recording is drawn: a group
+    /// with bounds of its own, recorded untransformed and drawn turned, as
+    /// a pattern of a canvas is, reads as the same group drawn turned
+    /// straight onto the page.
+    #[test]
+    fn a_group_recorded_for_later_is_not_confined() {
+        let mut half = Paint::default();
+        half.set_alpha_f(0.5);
+        let mut turned = Matrix::rotate_deg_pivot(30.0, (24.0, 20.0));
+        turned.post_translate((0.37, 0.61));
+        for (drawn, contents) in confined_contents() {
+            let group = Group {
+                rec: LayerRec {
+                    paint: Some(half.clone()),
+                    bounds: Some(Rect::from_xywh(14.0, 8.0, 26.0, 30.0)),
+                    ..LayerRec::default()
+                },
+                matrix: Matrix::new_identity(),
+                clip: None,
+                within: None,
+                contents_matrix: Matrix::new_identity(),
+                contents: Arc::new(vec![Layer::Picture(contents)]),
+            };
+            let mut recorder = PictureRecorder::new();
+            group.playback(
+                recorder.begin_recording(CONFINED_PAGE, true),
+                Target::Pixels,
+            );
+            let recorded = recorder
+                .finish_recording_as_picture(None)
+                .expect("a picture of the group");
+            let page = |draw: &dyn Fn(&SkCanvas)| {
+                let mut surface = started::raster_n32_premul((48, 40))
+                    .expect("a raster surface");
+                let canvas = surface.canvas();
+                canvas.clear(Color::WHITE);
+                canvas.concat(&turned);
+                draw(canvas);
+                let pixmap = surface.peek_pixels().expect("the pixels");
+                pixmap.bytes().expect("the bytes").to_vec()
+            };
+            assert!(
+                page(&|canvas| {
+                    canvas.draw_picture(&recorded, None, None);
+                }) == page(&|canvas| {
+                    group.playback_within(canvas, Target::Pixels, None)
+                }),
+                "{drawn}"
+            );
+        }
+    }
+
+    /// A group in a document is written as it was, covering its clip: a
+    /// PDF of a group holding a square is the PDF the group writes with no
+    /// rectangle to keep to.
+    #[test]
+    fn a_group_in_a_document_is_not_confined() {
+        let mut half = Paint::default();
+        half.set_alpha_f(0.5);
+        let mut recorder = PictureRecorder::new();
+        recorder.begin_recording(CONFINED_PAGE, true).draw_rect(
+            Rect::from_xywh(16.0, 12.0, 10.0, 8.0),
+            &Paint::default(),
+        );
+        let group = Group {
+            rec: LayerRec {
+                paint: Some(half),
+                ..LayerRec::default()
+            },
+            matrix: Matrix::new_identity(),
+            clip: None,
+            within: None,
+            contents_matrix: Matrix::new_identity(),
+            contents: Arc::new(vec![Layer::Picture(
+                recorder
+                    .finish_recording_as_picture(None)
+                    .expect("a picture of the square"),
+            )]),
+        };
+        let pdf = |draw: &dyn Fn(&SkCanvas)| {
+            let mut bytes = Vec::new();
+            let document = pdf::new_document(&mut bytes, None);
+            let mut page = document.begin_page(CONFINED_PAGE.size(), None);
+            draw(page.canvas());
+            page.end_page().close();
+            bytes
+        };
+        assert!(
+            pdf(&|canvas| group.playback(canvas, Target::Document))
+                == pdf(&|canvas| group.playback_within(
+                    canvas,
+                    Target::Document,
+                    None
+                )),
+            "the PDF of the group"
+        );
+    }
+
+    /// A layer whose transparent pixels can mark the page covers the clip:
+    /// through a colour filter, an image filter, a backdrop or a blend other
+    /// than source-over. One that can confine composites with nothing more
+    /// than an alpha.
+    #[test]
+    fn only_a_layer_that_leaves_the_page_where_it_is_transparent_is_confined() {
+        let painted = |change: fn(&mut Paint)| {
+            let mut paint = Paint::default();
+            change(&mut paint);
+            LayerRec {
+                paint: Some(paint),
+                ..LayerRec::default()
+            }
+        };
+        let drawn = Some(Rect::from_xywh(1.0, 2.0, 3.0, 4.0));
+        let unconfined = [
+            (
+                "a colour filter",
+                painted(|paint| {
+                    paint.set_color_filter(color_filters::blend(
+                        Color::RED,
+                        BlendMode::DstOver,
+                    ));
+                }),
+            ),
+            (
+                "an image filter",
+                painted(|paint| {
+                    paint.set_image_filter(image_filters::blur(
+                        (2.0, 2.0),
+                        None,
+                        None,
+                        None,
+                    ));
+                }),
+            ),
+            (
+                "a copy",
+                painted(|paint| {
+                    paint.set_blend_mode(BlendMode::Src);
+                }),
+            ),
+            (
+                "destination-in",
+                painted(|paint| {
+                    paint.set_blend_mode(BlendMode::DstIn);
+                }),
+            ),
+            (
+                "a backdrop",
+                LayerRec {
+                    backdrop: image_filters::blur((2.0, 2.0), None, None, None),
+                    ..LayerRec::default()
+                },
+            ),
+        ];
+        for (name, rec) in unconfined {
+            assert_eq!(rec.footprint(drawn), None, "{name}");
+        }
+        let confined = painted(|paint| {
+            paint.set_alpha_f(0.25);
+        });
+        assert_eq!(confined.footprint(drawn), drawn, "an alpha alone");
+        let nothing = Some(Rect::new_empty());
+        assert_eq!(confined.footprint(nothing), nothing, "nothing drawn");
+        assert_eq!(confined.footprint(None), None, "what it draws not known");
+    }
+
+    /// What a group's entries draw in: a picture's cull rectangle, the
+    /// union of them, a nested group's own entries through the transform
+    /// they are played under, and nothing known where a blurred draw or a
+    /// group that covers the clip is among them.
+    #[test]
+    fn a_group_reaches_as_far_as_its_entries_draw() {
+        let picture = |rect: Rect| {
+            let mut recorder = PictureRecorder::new();
+            recorder
+                .begin_recording(CONFINED_PAGE, true)
+                .draw_rect(rect, &Paint::default());
+            Layer::Picture(
+                recorder
+                    .finish_recording_as_picture(None)
+                    .expect("a picture of the rectangle"),
+            )
+        };
+        let group = |rec: LayerRec, contents_matrix: Matrix, contents| {
+            Layer::Group(Arc::new(Group {
+                rec,
+                matrix: Matrix::new_identity(),
+                clip: None,
+                within: None,
+                contents_matrix,
+                contents: Arc::new(contents),
+            }))
+        };
+        let (a, b) = (
+            Rect::from_xywh(2.0, 3.0, 4.0, 5.0),
+            Rect::from_xywh(10.0, 1.0, 2.0, 2.0),
+        );
+        let mut both = a;
+        both.join(b);
+        assert_eq!(reach_of(&[]), Some(Rect::new_empty()), "nothing");
+        assert_eq!(reach_of(&[picture(a), picture(b)]), Some(both), "two");
+        let moved = Matrix::translate((20.0, 0.0));
+        let inner = group(LayerRec::default(), moved, vec![picture(a)]);
+        assert_eq!(
+            reach_of(&[picture(b), inner]),
+            Some(Rect::from_xywh(10.0, 1.0, 16.0, 7.0)),
+            "a nested group, moved"
+        );
+        let blurred = Layer::Blur(Arc::new(BlurOp::start(
+            blurred_square(0.0),
+            Matrix::new_identity(),
+            None,
+        )));
+        assert_eq!(reach_of(&[picture(a), blurred]), None, "a blur");
+        let copy = LayerRec {
+            backdrop: image_filters::blur((2.0, 2.0), None, None, None),
+            ..LayerRec::default()
+        };
+        let covering = group(copy, Matrix::new_identity(), vec![picture(a)]);
+        assert_eq!(reach_of(&[picture(b), covering]), None, "a backdrop");
     }
 
     /// Ten thousand reads inside one layer, each after a draw, leave the

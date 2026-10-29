@@ -62,6 +62,30 @@ impl Layer {
             Layer::Group(group) => group.playback(canvas, target),
         }
     }
+
+    /// The rectangle this entry can draw in, in the coordinates it is played
+    /// back under: a picture's cull rectangle, which Skia computes from what
+    /// it draws because every recording here is begun with a bounding
+    /// hierarchy, and a group's [`Group::reach`]. `None` where it is not
+    /// known: a blurred draw has no such rectangle to take.
+    fn reach(&self) -> Option<Rect> {
+        match self {
+            Layer::Picture(picture) => Some(picture.cull_rect()),
+            Layer::Blur(_) => None,
+            Layer::Group(group) => group.reach(),
+        }
+    }
+}
+
+/// The rectangle everything in `entries` can draw in -- see [`Layer::reach`]
+/// -- empty where they are none, `None` where one of them is not known.
+pub(crate) fn reach_of(entries: &[Layer]) -> Option<Rect> {
+    entries
+        .iter()
+        .try_fold(Rect::new_empty(), |mut all, entry| {
+            all.join(entry.reach()?);
+            Some(all)
+        })
 }
 
 /// What a page is played back onto, which decides how a [`Group`]
@@ -90,24 +114,77 @@ impl LayerRec {
     /// carries, compositing as `target` needs: on pixels through the paint
     /// [`composited`] hands over, which keeps the alpha exact; in a
     /// document through the paint as it is, which the backend writes as an
-    /// opacity and keeps vector.
-    fn open_on(&self, canvas: &SkCanvas, target: Target) {
+    /// opacity and keeps vector. Confined to `within` where that is `Some`:
+    /// a rectangle in device pixels -- see [`Self::footprint`].
+    fn open_on(&self, canvas: &SkCanvas, target: Target, within: Option<Rect>) {
         let paint = match (&self.paint, target) {
             (Some(paint), Target::Pixels) => Some(composited(paint)),
             (Some(paint), Target::Document) => Some(Cow::Borrowed(paint)),
             (None, _) => None,
         };
+        // Skia maps a layer's bounds through the transform it opens under,
+        // to the device rectangle around them, so `within` is taken back
+        // through it first. A transform with no inverse leaves the layer
+        // unconfined, and so does one that turns a layer with bounds of its
+        // own: Skia covers the device rectangle around the turned bounds,
+        // which reaches past them at the corners, and the rectangle around
+        // their intersection with `within` would cut those corners off.
+        let matrix = canvas.local_to_device_as_3x3();
+        let within = within
+            .filter(|_| self.bounds.is_none() || matrix.rect_stays_rect())
+            .and_then(|within| {
+                let within = matrix.invert()?.map_rect(within).0;
+                Some(match self.bounds {
+                    Some(mut bounds) => match bounds.intersect(within) {
+                        true => bounds,
+                        false => Rect::new_empty(),
+                    },
+                    None => within,
+                })
+            });
         let mut rec = SaveLayerRec::default();
         if let Some(paint) = &paint {
             rec = rec.paint(paint);
         }
-        if let Some(bounds) = &self.bounds {
+        if let Some(bounds) = within.as_ref().or(self.bounds.as_ref()) {
             rec = rec.bounds(bounds);
         }
         if let Some(backdrop) = &self.backdrop {
             rec = rec.backdrop(backdrop);
         }
         canvas.save_layer(&rec);
+    }
+
+    /// The rectangle the layer can be confined to without changing what it
+    /// composites, in the coordinates its contents are drawn in: `drawn`,
+    /// the rectangle they draw in, where what the layer leaves transparent
+    /// composites as nothing. `None` where the layer has to cover what the
+    /// clip allows, or `drawn` is not known.
+    ///
+    /// Unconfined, Skia makes a layer the size of the clip -- the whole page,
+    /// for a layer opened on it -- and blends every pixel of it back on
+    /// closing, whatever the layer holds: a 10x10 fill in a layer on an
+    /// 800x600 page is the blend of 480,000 pixels each time the layer is
+    /// drawn. Confining it changes no pixel only where a transparent pixel
+    /// of the layer leaves the page as it was: composited source-over,
+    /// through nothing but an alpha, with no filter over what lies beneath
+    /// it. A colour filter can make a transparent pixel opaque and an image
+    /// filter can draw past what it is given, so either leaves the layer
+    /// covering the clip, as do a backdrop and any other blend. Skia widens
+    /// such a layer past bounds it is given as well -- each of those five
+    /// composites a square the same confined to it as not -- but the rule
+    /// here does not rest on that. The paint judged is the layer's own:
+    /// [`composited`] trades its alpha for a colour filter that leaves a
+    /// transparent pixel transparent.
+    pub(crate) fn footprint(&self, drawn: Option<Rect>) -> Option<Rect> {
+        let plain = self.paint.as_ref().is_none_or(|paint| {
+            paint.image_filter().is_none()
+                && paint.color_filter().is_none()
+                && paint.as_blend_mode() == Some(BlendMode::SrcOver)
+        });
+        (plain && self.backdrop.is_none())
+            .then_some(drawn)
+            .flatten()
     }
 
     /// Whether a layer holding nothing still changes the page: through a
@@ -153,8 +230,40 @@ impl Group {
     /// with the one the canvas carries: a recorded picture replays its
     /// matrices relative to the canvas it is played onto, and these have to
     /// as well, or a density or a tile's origin would be lost.
+    ///
+    /// On a surface with pixels the layer is confined to what its entries
+    /// draw -- see [`LayerRec::footprint`]. Not in a recording: whether a
+    /// layer with bounds of its own may be confined depends on the transform
+    /// it is drawn under, and a recording is drawn later under one this
+    /// cannot see. Not in a document either, which keeps its groups as they
+    /// were.
     pub fn playback(&self, canvas: &SkCanvas, target: Target) {
+        let pixels = target == Target::Pixels && blur_mask::draws_on(canvas);
+        let within =
+            pixels.then(|| self.rec.footprint(reach_of(&self.contents)));
+        self.playback_within(canvas, target, within.flatten());
+    }
+
+    /// The rectangle the group can draw in, under the transform it is
+    /// played back under: what its entries draw in, through the transform
+    /// they are played under, where the layer can be confined to it. `None`
+    /// where it covers what the clip allows.
+    pub fn reach(&self) -> Option<Rect> {
+        let drawn = self.rec.footprint(reach_of(&self.contents))?;
+        Some(self.contents_matrix.map_rect(drawn).0)
+    }
+
+    /// [`Self::playback`], the layer confined to `within`, a rectangle in
+    /// the coordinates the entries are played under, where it is `Some`.
+    pub(crate) fn playback_within(
+        &self,
+        canvas: &SkCanvas,
+        target: Target,
+        within: Option<Rect>,
+    ) {
         let base = canvas.local_to_device_as_3x3();
+        let entries = Matrix::concat(&base, &self.contents_matrix);
+        let within = within.map(|within| entries.map_rect(within).0);
         canvas.save();
         if let Some(clip) = self.clip.as_ref().and_then(Path::deserialize) {
             canvas.clip_path(&clip, ClipOp::Intersect, true);
@@ -163,8 +272,8 @@ impl Group {
         if let Some(within) = &self.within {
             canvas.clip_rect(within, ClipOp::Intersect, true);
         }
-        self.rec.open_on(canvas, target);
-        canvas.set_matrix(&Matrix::concat(&base, &self.contents_matrix).into());
+        self.rec.open_on(canvas, target, within);
+        canvas.set_matrix(&entries.into());
         for entry in self.contents.iter() {
             entry.playback(canvas, target);
         }
