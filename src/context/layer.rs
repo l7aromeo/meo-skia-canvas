@@ -13,6 +13,10 @@
 //! rectangle that stays one on the device as its exact blur -- see
 //! [`blur_mask`] -- and anything else with the blur the recording chose,
 //! checked against Skia's cap.
+//!
+//! A [`CutOp`] is a fill or stroke its clip cuts, kept as ours so that a
+//! raster playback on the CPU applies the clip as coverage rather than as
+//! the bounds Skia rasterizes the path against -- see [`CutOp`].
 
 use std::{
     borrow::Cow,
@@ -23,9 +27,10 @@ use std::{
 
 use skia_safe::{
     AlphaType, BlendMode, BlurStyle, Canvas as SkCanvas, ClipOp, Color4f,
-    ColorSpace, ColorType, Data, ImageFilter, ImageInfo, MaskFilter, Matrix,
-    Paint, PaintCap, PaintJoin, PaintStyle, Path, PathDirection, Picture, Rect,
-    SamplingOptions, Shader, TileMode, canvas::SaveLayerRec, image_filters,
+    ColorSpace, ColorType, Data, FilterMode, IRect, ImageFilter, ImageInfo,
+    MaskFilter, Matrix, Paint, PaintCap, PaintJoin, PaintStyle, Path,
+    PathDirection, Picture, PictureRecorder, Rect, RoundOut, SamplingOptions,
+    Shader, TileMode, canvas::SaveLayerRec, image_filters,
 };
 
 use crate::{
@@ -34,6 +39,7 @@ use crate::{
         chain::{self, Depth, Step},
         chain_cache, coverage_of,
         faint::{Faint, composited},
+        page::Recording,
     },
     node::filter::MASK_BLUR_MAX_SIGMA,
     started,
@@ -60,6 +66,9 @@ pub enum Layer {
     /// exactly in the page's own space for pixels, and as a plain colour for
     /// a document. Shared, so the two pictures are one pointer.
     Targeted(Arc<(Picture, Picture)>),
+    /// A fill or stroke its clip cuts, or a run of them under one clip, the
+    /// clip applied at playback.
+    Cut(Arc<CutOp>),
 }
 
 impl Layer {
@@ -74,15 +83,17 @@ impl Layer {
                 Target::Pixels => pictures.0.playback(canvas),
                 Target::Document => pictures.1.playback(canvas),
             },
+            Layer::Cut(op) => op.playback(canvas, target),
         }
     }
 
     /// The rectangle this entry can draw in, in the coordinates it is played
     /// back under: a picture's cull rectangle -- a pair's, the one played as
     /// pixels -- which Skia computes from what it draws because every
-    /// recording here is begun with a bounding hierarchy, and a group's
-    /// [`Group::reach`]. `None` where it is not
-    /// known: a blurred draw has no such rectangle to take.
+    /// recording here is begun with a bounding hierarchy, a group's
+    /// [`Group::reach`], and what a cut draw paints before its clip applies
+    /// -- see [`CutOp::reach`]. `None` where it is not known: a blurred draw
+    /// has no such rectangle to take.
     fn reach(&self) -> Option<Rect> {
         match self {
             Layer::Picture(picture) => Some(picture.cull_rect()),
@@ -91,6 +102,7 @@ impl Layer {
             // The pixels' recording: the document's holds the same draws,
             // and a document is never confined.
             Layer::Targeted(pictures) => Some(pictures.0.cull_rect()),
+            Layer::Cut(op) => Some(op.reach()),
         }
     }
 }
@@ -377,7 +389,23 @@ impl Group {
         let within = within.map(|within| entries.map_rect(within).0);
         canvas.save();
         if let Some(clip) = self.clip.as_ref().and_then(Path::deserialize) {
-            canvas.clip_path(&clip, ClipOp::Intersect, true);
+            // A layer opened under a clip path is made no larger than the
+            // clip's bounds, and a cut draw in it is then cut at the layer's
+            // edge, as the page's edge cuts one: a triangle clipped at x 82
+            // before a layer was opened moved 57 pixels far inside the clip.
+            // A clip shader leaves the layer's bounds alone and multiplies
+            // what the layer composites, as the cut draw's own clip does.
+            let coverage = (target == Target::Pixels
+                && blur_mask::draws_on_cpu(canvas)
+                && holds_a_cut(&self.contents))
+            .then(|| Coverage::of(&clip))
+            .flatten();
+            match coverage {
+                Some(coverage) => coverage.clip(canvas),
+                None => {
+                    canvas.clip_path(&clip, ClipOp::Intersect, true);
+                }
+            }
         }
         match (&self.composite, target) {
             (Composite::Chain { steps, rec }, Target::Pixels) => {
@@ -461,6 +489,211 @@ impl Group {
                 }
                 canvas.restore();
             }
+        }
+        canvas.restore();
+    }
+}
+
+/// A fill or stroke its clip cuts, or a run of them under one clip: the
+/// draws, and the clip as coverage.
+///
+/// Skia's analytic anti-aliasing rasterizes a path against the clip's bounds
+/// where they do not contain it, adding edges at the cut, and the strips it
+/// steps a row in are cut at every edge's ends: so the edges the clip adds
+/// move the coverage of every edge in the rows they span, however far from
+/// the cut. A triangle cut 60 pixels right of its left edge drew that edge
+/// up to 19 levels away from how it drew it uncut, and on the edge pixels
+/// the cut draw was 4.60 levels from the exact coverage on average where
+/// the uncut one was 1.55 (`SkScan_AAAPath.cpp`, `containedInClip`).
+///
+/// On a raster surface on the CPU this applies the clip as a clip shader
+/// instead -- a picture of the clip filled, which Skia rasterizes at the
+/// scale it is drawn at -- so the device clip leaves the path whole, the
+/// draw is the unclipped draw, and the clip multiplies its coverage. Inside
+/// the clip the pixels are the uncut draw's, byte for byte, at any density;
+/// at its edge the coverage is the draw's times the clip's. Anywhere else --
+/// the GPU, whose multisampled coverage the clip does not move, a vector
+/// document, a recording -- it clips as the page always has. A run of cut
+/// draws shares one op, so that a document clips the run once, as it clips
+/// the draws of an ordinary layer, rather than once for each.
+#[derive(Clone, Debug)]
+pub struct CutOp {
+    /// The draws, in order, each under the transform it was drawn with: the
+    /// only recording of a page that keeps one, or the one played as pixels
+    /// on a page that keeps two -- see `page::Recording`.
+    draws: Vec<Picture>,
+    /// On a page that keeps two recordings, the same draws as recorded for a
+    /// document.
+    documents: Option<Vec<Picture>>,
+    /// The clip, in device pixels of the recording, for a playback that
+    /// clips with it.
+    clip: Data,
+    /// The clip as coverage, for a playback that applies it so.
+    coverage: Coverage,
+}
+
+/// A clip filled, anti-aliased, as coverage a CPU raster playback is clipped
+/// by: the path drawn whole and multiplied by it rather than rasterized
+/// against it -- see [`CutOp`].
+#[derive(Clone, Debug)]
+pub struct Coverage {
+    /// The clip filled, its tile's corner at the origin.
+    picture: Picture,
+    /// The pixels the clip covers any part of, from the origin, which the
+    /// picture is tiled over and is transparent outside.
+    tile: Rect,
+    /// Where the tile's corner lies in device pixels of the recording.
+    corner: Matrix,
+}
+
+impl Coverage {
+    /// `clip`, in device pixels of the recording, as coverage; `None` where
+    /// a picture could not be made.
+    pub fn of(clip: &Path) -> Option<Self> {
+        // Recorded with the clip's corner at the origin, where a picture
+        // shader puts its tile, and moved back by the shader's matrix.
+        let corner: IRect = clip.bounds().round_out();
+        let tile = Rect::from_wh(corner.width() as f32, corner.height() as f32);
+        let mut recorder = PictureRecorder::new();
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        let canvas = recorder.begin_recording(tile, false);
+        canvas.translate((-corner.left as f32, -corner.top as f32));
+        canvas.draw_path(clip, &paint);
+        Some(Coverage {
+            picture: recorder.finish_recording_as_picture(None)?,
+            tile,
+            corner: Matrix::translate((corner.left as f32, corner.top as f32)),
+        })
+    }
+
+    /// Clips `canvas` by the coverage, under its transform: rasterized at
+    /// the density it is played at, at the device's own phase.
+    pub fn clip(&self, canvas: &SkCanvas) {
+        let shader = self.picture.to_shader(
+            (TileMode::Decal, TileMode::Decal),
+            FilterMode::Nearest,
+            Some(&self.corner),
+            Some(&self.tile),
+        );
+        canvas.clip_shader(shader, ClipOp::Intersect);
+    }
+}
+
+/// Whether `entries`, or a group among them, hold a [`CutOp`].
+fn holds_a_cut(entries: &[Layer]) -> bool {
+    entries.iter().any(|entry| match entry {
+        Layer::Cut(_) => true,
+        Layer::Group(group) => holds_a_cut(&group.contents),
+        Layer::Picture(_) | Layer::Blur(_) | Layer::Targeted(_) => false,
+    })
+}
+
+impl CutOp {
+    /// The draw `draw` records, under `clip`, in device pixels of the
+    /// recording, and `matrix`, into one recording or, with `dual`, one for
+    /// each kind of target; `None` where a picture could not be made.
+    pub fn new(
+        clip: &Path,
+        matrix: &Matrix,
+        bounds: Rect,
+        dual: bool,
+        draw: impl Fn(&SkCanvas, Recording),
+    ) -> Option<Self> {
+        let (pixels, document) = match dual {
+            false => (Recording::Shared, None),
+            true => (Recording::Pixels, Some(Recording::Document)),
+        };
+        let documents = match document {
+            Some(document) => {
+                Some(vec![Self::record(matrix, bounds, document, &draw)?])
+            }
+            None => None,
+        };
+        Some(CutOp {
+            draws: vec![Self::record(matrix, bounds, pixels, &draw)?],
+            documents,
+            clip: clip.serialize(),
+            coverage: Coverage::of(clip)?,
+        })
+    }
+
+    /// Adds the draw `draw` records under `matrix` to the run, under the
+    /// op's clip, into each recording the op keeps, unless a picture could
+    /// not be made of it -- which drops it, as [`CutOp::new`] does.
+    pub fn extend(
+        &mut self,
+        matrix: &Matrix,
+        bounds: Rect,
+        draw: impl Fn(&SkCanvas, Recording),
+    ) {
+        let Some(documents) = &mut self.documents else {
+            self.draws.extend(Self::record(
+                matrix,
+                bounds,
+                Recording::Shared,
+                &draw,
+            ));
+            return;
+        };
+        // Both or neither, so that the two recordings hold the same draws.
+        if let (Some(pixels), Some(document)) = (
+            Self::record(matrix, bounds, Recording::Pixels, &draw),
+            Self::record(matrix, bounds, Recording::Document, &draw),
+        ) {
+            self.draws.push(pixels);
+            documents.push(document);
+        }
+    }
+
+    /// What the draws paint before the clip applies, in device pixels of
+    /// the recording: the rectangle a layer holding the op is confined to.
+    /// The recording played as pixels, as for a pair -- a document is never
+    /// confined.
+    ///
+    /// Not the clip's bounds, though nothing the op draws shows outside
+    /// them: a layer confined to the clip has its edge there, Skia's
+    /// analytic anti-aliasing builds the path's edges against the layer's
+    /// bounds as against a clip, and a triangle cut at x 82 in a layer so
+    /// confined moved 57 pixels far inside the clip -- the route undone.
+    pub fn reach(&self) -> Rect {
+        self.draws.iter().fold(Rect::new_empty(), |mut all, draw| {
+            all.join(draw.cull_rect());
+            all
+        })
+    }
+
+    /// The draw `draw` makes into `recording` under `matrix`, recorded in
+    /// `bounds` with a bounding hierarchy, so that its cull rectangle is
+    /// what it draws -- see [`CutOp::reach`].
+    fn record(
+        matrix: &Matrix,
+        bounds: Rect,
+        recording: Recording,
+        draw: &impl Fn(&SkCanvas, Recording),
+    ) -> Option<Picture> {
+        let mut recorder = PictureRecorder::new();
+        let canvas = recorder.begin_recording(bounds, true);
+        canvas.concat(matrix);
+        draw(canvas, recording);
+        recorder.finish_recording_as_picture(None)
+    }
+
+    /// Draws the cut draws for `target` onto `canvas`, under whatever
+    /// transform and clip the canvas already carries.
+    pub fn playback(&self, canvas: &SkCanvas, target: Target) {
+        let draws = match (target, &self.documents) {
+            (Target::Document, Some(documents)) => documents,
+            _ => &self.draws,
+        };
+        canvas.save();
+        if blur_mask::draws_on_cpu(canvas) {
+            self.coverage.clip(canvas);
+        } else if let Some(clip) = Path::deserialize(&self.clip) {
+            canvas.clip_path(&clip, ClipOp::Intersect, true);
+        }
+        for draw in draws {
+            canvas.draw_picture(draw, None, None);
         }
         canvas.restore();
     }

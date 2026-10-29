@@ -869,6 +869,56 @@ level at densities 1 and 2. One played into a picture -- a canvas used as a
 pattern -- has no pixels for the closed form, and is blurred on its result,
 by the exact Gaussian of the entry above.
 
+**A fill or stroke a clip cuts is drawn whole and multiplied by the clip on
+the CPU engine, and Chrome's CPU canvas is not.** Where a clip covers part of
+a path, Skia's analytic anti-aliasing builds the path's edges against the
+clip (`containedInClip` in `SkScan_AAAPath.cpp`), and the edges it adds at
+the cut split the strips every other edge in those rows is stepped in, so
+pixels far from the cut change. A triangle from (20, 80) through
+(80, 15.25) to (140.5, 85), clipped at x 82, drew 60 pixels more than two
+pixels inside the clip differently from the same triangle unclipped, by up to
+17 levels, and Chrome 156's headless CPU canvas measures as Skia does. The
+mean error over the pixels left partly covered, in levels from the exact area
+of the triangle within the clip, at densities 1, 2 and 3:
+
+        clip                  x1      x2      x3
+        none                1.57    1.58    1.59
+        cut at x 82
+          Skia, Chrome      4.60    5.90    2.96
+          here              1.55    1.55    1.56
+        cut at x 82.5
+          Skia              4.85    4.15    2.88
+          here              1.42    1.56    1.35
+        rectangle, edges between pixels
+          Skia              5.79    6.39    3.79
+          here              2.02    2.30    2.13
+        circle of radius 45.3
+          Skia              6.70    8.85   13.65
+          here              3.38    3.65    5.23
+
+Chrome was measured at density 1 under the cut at x 82 only. Here the draw is
+recorded as a `CutOp` and played back on a CPU raster under the clip as a clip
+shader -- a picture of the clip filled, rasterized at the density it is
+played at -- so the path is drawn unclipped and the clip multiplies its
+coverage. More than two pixels inside the clip the pixels are the unclipped
+draw's, byte for byte, at every density, for fills, strokes, dashed strokes
+and marker strokes alike, where Skia moved up to 273 of them by up to 92
+levels; at the clip's edge the error left is the clip's own rasterization and
+the product of the two coverages where both edges cross a pixel.
+`tests/clip_cut.rs` holds both. The GPU engine is unchanged: its multisampled
+coverage is not moved by the clip, and the clip shader would move 50 bytes of
+a circle-clipped draw there. A PDF or SVG export is unchanged too, clipped by
+the clip's path as before.
+
+A draw goes this way only when the clip cuts it: one wholly inside or outside
+the clip, an axis-aligned rectangle filled, text, an image, a texture fill, a
+draw with a shadow, a filter or a blend that reaches past it, and anything
+drawn inside an open `saveLayer` are clipped as Skia clips them. A draw inside
+a layer is recorded into the layer's own picture, where the clip is already
+applied and cannot be lifted. A canvas drawn into another, or used as a
+pattern, is replayed as a recording, where there are no pixels to choose the
+clip shader for, and is clipped as Skia clips it.
+
 **A fill or stroke the page's edge cuts is drawn differently far inside the
 page on the CPU engine.** The page's edge cuts a path as a clip does: Skia's
 analytic anti-aliasing builds a path's edges against the raster's bounds where

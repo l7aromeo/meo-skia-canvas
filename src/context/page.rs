@@ -37,7 +37,9 @@ use crate::{
     context::{
         BoxedContext2D,
         faint::composited,
-        layer::{BlurDraw, BlurOp, Composite, Group, Layer, LayerRec, Target},
+        layer::{
+            BlurDraw, BlurOp, Composite, CutOp, Group, Layer, LayerRec, Target,
+        },
     },
     encode::{
         self, Frame, FrameDepth, Pixels, SequenceSpec, Sink,
@@ -363,6 +365,9 @@ pub struct PageRecorder {
     /// can still be joined; `None` once anything could have seen it -- a
     /// flush, which every export goes through, records it for good.
     blur_run: Option<u64>,
+    /// The frame the last layer, a [`CutOp`], was opened in while it can
+    /// still be joined, as `blur_run` is for a [`BlurOp`].
+    cut_run: Option<u64>,
     /// How many times one replay of this page walks a nested picture.
     ///
     /// Zero for a page that has only been drawn on directly, however much has
@@ -613,6 +618,7 @@ impl PageRecorder {
             state_dirty: false,
             frame: 0,
             blur_run: None,
+            cut_run: None,
             matrix: Matrix::default(),
             clip: None,
             bounds,
@@ -1115,6 +1121,7 @@ impl PageRecorder {
         // A page taken now may hold the last op; extending it afterwards
         // would change a layer a cache has already drawn.
         self.blur_run = None;
+        self.cut_run = None;
         if !self.changed {
             return;
         }
@@ -1246,6 +1253,63 @@ impl PageRecorder {
             }
         }
         self.blur_run = Some(self.frame);
+    }
+
+    /// Records the draw `draw` makes, under `matrix`, as a [`CutOp`]: a fill
+    /// or stroke `clip`, the frame's clip, cuts, so that a raster playback
+    /// on the CPU applies the clip as coverage and draws the path whole.
+    ///
+    /// A draw straight after a `CutOp` it can join -- nothing recorded
+    /// between them, the frame and the layer it is filed in unchanged since,
+    /// and on the page the same `features` -- joins it rather than opening
+    /// an op of its own, so that a document clips a run of cut draws once,
+    /// as it clips an ordinary layer's.
+    ///
+    /// Inside an open `saveLayer` the op is filed among the layer's entries,
+    /// as a blur is, and played inside the layer when it closes.
+    pub fn append_cut<F>(
+        &mut self,
+        clip: &Path,
+        matrix: Matrix,
+        features: VectorFeatures,
+        draw: F,
+    ) where
+        F: Fn(&SkCanvas, Recording),
+    {
+        if let Some(layer) = self.open.last_mut() {
+            layer.features = layer.features.with(features);
+        }
+        // An op a page snapshot also holds is not grown, as with a run of
+        // blurs in `append_blur`.
+        if self.cut_run == Some(self.frame) && !self.changed {
+            let (entries, last_features) = match self.open.last_mut() {
+                Some(layer) => (&mut layer.entries, None),
+                None => (Arc::make_mut(&mut self.layers), self.features.last()),
+            };
+            if let Some(Layer::Cut(op)) = entries.last_mut()
+                && last_features.is_none_or(|last| *last == features)
+                && let Some(op) = Arc::get_mut(op)
+            {
+                op.extend(&matrix, self.bounds, draw);
+                return;
+            }
+        }
+        let dual = self.dual();
+        let Some(op) = CutOp::new(clip, &matrix, self.bounds, dual, draw)
+        else {
+            return;
+        };
+        let op = Layer::Cut(Arc::new(op));
+        // Filed after what is current, which filing closes no layer to do.
+        self.file_current();
+        match self.open.last_mut() {
+            Some(layer) => layer.entries.push(op),
+            None => {
+                Arc::make_mut(&mut self.layers).push(op);
+                Arc::make_mut(&mut self.features).push(features);
+            }
+        }
+        self.cut_run = Some(self.frame);
     }
 
     /// What one replay of this page costs; see the field.
@@ -7401,6 +7465,7 @@ mod tests {
                     Layer::Blur(_) => "blur",
                     Layer::Group(_) => "group",
                     Layer::Targeted(_) => "pair",
+                    Layer::Cut(_) => "cut",
                 })
                 .collect();
             kinds.join(" ")

@@ -4,8 +4,9 @@ use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
     ColorFilter as SkColorFilter, ColorSpace, ColorType, Contains, Data, IRect,
     Image, ImageFilter as SkImageFilter, ImageInfo, MaskFilter as SkMaskFilter,
-    Paint, PaintStyle, Path, PathBuilder, PathFillType, PathOp, Picture,
-    PictureRecorder, Point, Rect, RoundOut, Shader as SkShader, Size, Typeface,
+    Paint, PaintCap, PaintJoin, PaintStyle, Path, PathBuilder, PathFillType,
+    PathOp, Picture, PictureRecorder, Point, Rect, RoundOut,
+    Shader as SkShader, Size, Typeface,
     canvas::SrcRectConstraint::Strict,
     dash_path_effect,
     font_style::{FontStyle, Width},
@@ -1203,6 +1204,24 @@ impl Context2D {
         let paint = self.paint_for_drawing(style, coverage);
         let features = self.vector_features(&paint, Some(style));
         let exact = self.exact_paint(&paint, style);
+        if let Some(clip) = self.cut_clip(&path, &paint, style) {
+            let (matrix, faint) = (self.state.matrix, self.faint());
+            self.with_recorder(|mut recorder| {
+                recorder.append_cut(
+                    clip,
+                    matrix,
+                    features,
+                    |canvas, recording| {
+                        let paint = match (recording, exact.as_ref()) {
+                            (Recording::Pixels, Some(exact)) => exact,
+                            _ => &paint,
+                        };
+                        canvas.draw_path(&path, &faint.drawable(paint));
+                    },
+                );
+            });
+            return;
+        }
         self.render_to_canvas(
             &paint,
             exact.as_ref(),
@@ -1313,6 +1332,67 @@ impl Context2D {
                 }
             },
         );
+    }
+
+    /// The clip a fill or stroke of `path` in `paint` is recorded under as a
+    /// [`CutOp`](layer::CutOp): the frame's clip, where it cuts the draw --
+    /// covers part of where the draw can put coverage, and not all of it.
+    ///
+    /// `None` where it leaves the draw whole or misses it, which Skia draws
+    /// alike clipped or not, and for the draws the op does not take: an
+    /// axis-aligned rectangle filled, which Skia draws by a rectangle blitter
+    /// the clip does not move; a texture, whose clip is its own outline; a
+    /// shadow, a filter or a mask filter, each drawn through a layer of its
+    /// own; and a blend that reaches past the draw, which is drawn through a
+    /// picture of its own.
+    fn cut_clip(
+        &self,
+        path: &Path,
+        paint: &Paint,
+        style: PaintStyle,
+    ) -> Option<&Path> {
+        #[cfg(test)]
+        if !ROUTES_CUTS.get() {
+            return None;
+        }
+        let clip = self.state.clip.as_ref()?;
+        let matrix = &self.state.matrix;
+        let rectangle = style == PaintStyle::Fill
+            && matrix.rect_stays_rect()
+            && path.is_rect().is_some();
+        let plain = !rectangle
+            && self.state.texture(style).is_none()
+            && !matches!(
+                self.state.global_composite_operation,
+                BlendMode::SrcIn
+                    | BlendMode::SrcOut
+                    | BlendMode::DstIn
+                    | BlendMode::DstOut
+                    | BlendMode::DstATop
+                    | BlendMode::Src
+            )
+            && paint.image_filter().is_none()
+            && paint.mask_filter().is_none()
+            && !self.casts_shadow();
+        if !plain {
+            return None;
+        }
+        let cuts = |drawn: Rect| {
+            !clip.conservatively_contains_rect(drawn)
+                && clip.bounds().intersects(drawn)
+        };
+        // The estimate takes a mitred stroke as reaching its miter limit
+        // everywhere, ten half-widths by default, which would route every
+        // line drawn that near the clip. Where it says cut, a stroke's
+        // outline settles it, which costs a stroker pass on a draw near the
+        // clip and spares the op where the stroke does not reach it.
+        let outlined = style != PaintStyle::Fill
+            && paint.path_effect().is_none()
+            && paint.stroke_width() > 0.0;
+        let cut = cuts(drawn_bounds(path, paint, style, matrix, false))
+            && (!outlined
+                || cuts(drawn_bounds(path, paint, style, matrix, true)));
+        cut.then_some(clip)
     }
 
     pub fn clip_path(&mut self, path: Option<Path>, rule: PathFillType) {
@@ -2612,6 +2692,58 @@ fn coverage_given(path: &Path, rect: bool, matrix: &Matrix) -> Coverage {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// Whether [`Context2D::cut_clip`] routes a cut draw at all on this
+    /// thread: off, a page records every draw as it did before the route,
+    /// the reference the route's vector and GPU playbacks are held to.
+    static ROUTES_CUTS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Where a fill or stroke of `path` in `paint` under `matrix` can put
+/// coverage, in device pixels: the path's bounds, widened by the stroke --
+/// half its width, times the miter limit where joins are mitred and the
+/// square root of two where caps are square -- or, where `outline` is set or
+/// a path effect makes the path drawn, the bounds of the outline Skia fills;
+/// and a pixel either side for anti-aliasing, two for a hairline.
+fn drawn_bounds(
+    path: &Path,
+    paint: &Paint,
+    style: PaintStyle,
+    matrix: &Matrix,
+    outline: bool,
+) -> Rect {
+    let stroked = style != PaintStyle::Fill;
+    let local = match outline || paint.path_effect().is_some() {
+        true => {
+            let mut filled = PathBuilder::new();
+            fill_path_with_paint(path, paint, &mut filled, None, Some(*matrix));
+            *filled.detach().bounds()
+        }
+        false if stroked => {
+            let reach = [
+                1.0,
+                match paint.stroke_join() {
+                    PaintJoin::Miter => paint.stroke_miter(),
+                    _ => 1.0,
+                },
+                match paint.stroke_cap() {
+                    PaintCap::Square => std::f32::consts::SQRT_2,
+                    _ => 1.0,
+                },
+            ]
+            .into_iter()
+            .fold(0.0, f32::max);
+            let half = paint.stroke_width().max(0.0) * 0.5 * reach;
+            path.bounds().with_outset((half, half))
+        }
+        false => *path.bounds(),
+    };
+    let hairline = stroked && paint.stroke_width() <= 0.0;
+    let margin = if hairline { 2.0 } else { 1.0 };
+    matrix.map_rect(local).0.with_outset((margin, margin))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::node::filter::FilterSpec;
@@ -2619,6 +2751,261 @@ mod tests {
     /// Builds a context the size of a small canvas, as `Canvas::new` does.
     fn context() -> Context2D {
         Context2D::new(ColorSpace::new_srgb(), ColorType::N32, (200.0, 100.0))
+    }
+
+    /// A triangle reaching from x 20 to x 140.5, a third of it right of a
+    /// cut at x 82.
+    fn cut_triangle(ctx: &mut crate::context2d::Context2D) {
+        ctx.begin_path();
+        ctx.move_to(20.0, 80.0);
+        ctx.line_to(80.0, 15.25);
+        ctx.line_to(140.5, 85.0);
+        ctx.close_path();
+        ctx.fill(crate::path::FillRule::NonZero);
+    }
+
+    /// Clips at x 82.
+    fn cut(ctx: &mut crate::context2d::Context2D) {
+        ctx.rect(-10.0, -10.0, 92.0, 200.0);
+    }
+
+    /// Clips to a circle off the pixel grid, which the GPU clips by other
+    /// than a rectangle's bounds.
+    fn circle(ctx: &mut crate::context2d::Context2D) {
+        ctx.arc(90.3, 60.2, 45.3, 0.0, std::f32::consts::TAU, false)
+            .expect("a positive radius");
+    }
+
+    /// A page clipped by the path `clip` makes, with `draw` on it, the route
+    /// on or off.
+    fn clipped_canvas(
+        routed: bool,
+        gpu: bool,
+        clip: fn(&mut crate::context2d::Context2D),
+        draw: fn(&mut crate::context2d::Context2D),
+    ) -> crate::canvas::Canvas {
+        ROUTES_CUTS.set(routed);
+        let mut canvas = crate::canvas::Canvas::new(200.0, 120.0);
+        canvas.set_gpu(gpu);
+        {
+            let ctx = canvas.context();
+            ctx.begin_path();
+            clip(ctx);
+            ctx.clip(crate::path::FillRule::NonZero);
+            ctx.set_line_width(3.3);
+            draw(ctx);
+        }
+        ROUTES_CUTS.set(true);
+        canvas
+    }
+
+    /// `document` with each clip's id renumbered in the order it first
+    /// appears: Skia numbers an SVG's clips from a count the whole process
+    /// shares, so two exports of one page are told apart by nothing else.
+    fn numbered(document: &[u8]) -> Vec<u8> {
+        const PREFIX: &[u8] = b"cl_";
+        let mut seen: Vec<&[u8]> = vec![];
+        let mut out = Vec::with_capacity(document.len());
+        let mut rest = document;
+        while let Some(at) =
+            rest.windows(PREFIX.len()).position(|w| w == PREFIX)
+        {
+            let digits = rest[at + PREFIX.len()..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_digit())
+                .count();
+            let (head, tail) = rest.split_at(at + PREFIX.len());
+            let (id, tail) = tail.split_at(digits);
+            let index = seen
+                .iter()
+                .position(|known| *known == id)
+                .unwrap_or_else(|| {
+                    seen.push(id);
+                    seen.len() - 1
+                });
+            out.extend_from_slice(head);
+            out.extend_from_slice(index.to_string().as_bytes());
+            rest = tail;
+        }
+        out.extend_from_slice(rest);
+        out
+    }
+
+    /// The `CutOp`s among `layers`, and among the entries of every group
+    /// they hold.
+    fn cut_ops(layers: &[layer::Layer]) -> usize {
+        layers
+            .iter()
+            .map(|layer| match layer {
+                layer::Layer::Cut(..) => 1,
+                layer::Layer::Group(group) => cut_ops(&group.contents),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// Only a fill or stroke the clip cuts is recorded as a `CutOp`: not one
+    /// it leaves whole, not one it misses, and not an axis-aligned rectangle
+    /// filled, which Skia draws by a blitter the clip does not move. One
+    /// inside a layer is, among the layer's entries.
+    #[test]
+    fn only_a_draw_the_clip_cuts_records_a_cut_op() {
+        let cuts = |draw: fn(&mut crate::context2d::Context2D)| {
+            let mut canvas = clipped_canvas(true, false, cut, draw);
+            let page = canvas.page(0).expect("a page").inner.page();
+            cut_ops(&page.layers)
+        };
+        assert_eq!(cuts(cut_triangle), 1, "a triangle the clip cuts");
+        assert_eq!(
+            cuts(|ctx| {
+                ctx.begin_path();
+                ctx.move_to(80.5, 20.0);
+                ctx.line_to(80.5, 90.0);
+                ctx.stroke();
+            }),
+            1,
+            "a line the clip misses whose stroke it cuts"
+        );
+        assert_eq!(
+            cuts(|ctx| {
+                ctx.begin_path();
+                ctx.move_to(78.0, 20.0);
+                ctx.line_to(78.0, 90.0);
+                ctx.stroke();
+            }),
+            0,
+            "a stroke wholly inside"
+        );
+        assert_eq!(
+            cuts(|ctx| {
+                ctx.begin_path();
+                ctx.move_to(10.0, 80.0);
+                ctx.line_to(40.0, 15.0);
+                ctx.line_to(70.0, 85.0);
+                ctx.close_path();
+                ctx.fill(crate::path::FillRule::NonZero);
+            }),
+            0,
+            "a triangle wholly inside"
+        );
+        assert_eq!(
+            cuts(|ctx| {
+                ctx.begin_path();
+                ctx.move_to(110.0, 80.0);
+                ctx.line_to(140.0, 15.0);
+                ctx.line_to(170.0, 85.0);
+                ctx.close_path();
+                ctx.fill(crate::path::FillRule::NonZero);
+            }),
+            0,
+            "a triangle wholly outside"
+        );
+        assert_eq!(
+            cuts(|ctx| ctx.fill_rect(40.25, 20.5, 80.0, 50.0)),
+            0,
+            "an aligned rectangle"
+        );
+        assert_eq!(
+            cuts(|ctx| {
+                ctx.save_layer();
+                cut_triangle(ctx);
+                ctx.restore();
+            }),
+            1,
+            "a cut triangle inside a layer"
+        );
+        assert_eq!(
+            cuts(|ctx| {
+                ctx.set_shadow_color_css("red").expect("a colour");
+                ctx.set_shadow_offset(4.0, 4.0);
+                cut_triangle(ctx);
+            }),
+            0,
+            "a cut triangle casting a shadow"
+        );
+        assert_eq!(
+            cuts(|ctx| {
+                ctx.set_filter_css("brightness(50%)").expect("a filter");
+                cut_triangle(ctx);
+            }),
+            0,
+            "a cut triangle through a filter"
+        );
+        assert_eq!(
+            cuts(|ctx| {
+                ctx.set_global_composite_operation(
+                    crate::paint::BlendMode::DestinationIn,
+                );
+                cut_triangle(ctx);
+            }),
+            0,
+            "a cut triangle in a blend reaching past it"
+        );
+        assert_eq!(
+            cuts(|ctx| {
+                ctx.set_fill_texture(&crate::texture::Texture::new(
+                    &crate::texture::TextureOptions::default(),
+                ));
+                cut_triangle(ctx);
+            }),
+            0,
+            "a cut triangle filled with a texture"
+        );
+    }
+
+    /// A cut draw exports to SVG and to PDF exactly as it did before the
+    /// route, and draws on the GPU exactly as it did: only a raster playback
+    /// on the CPU applies its clip as coverage. The GPU half runs where a GPU
+    /// does; under this circle the coverage route moves 50 bytes there.
+    #[test]
+    fn a_cut_draw_exports_to_vectors_and_draws_on_the_gpu_as_it_did() {
+        use crate::export::{EncodeOptions, ImageFormat};
+        fn draw(ctx: &mut crate::context2d::Context2D) {
+            cut_triangle(ctx);
+            ctx.begin_path();
+            ctx.move_to(10.2, 100.4);
+            ctx.line_to(70.7, 20.1);
+            ctx.line_to(150.3, 90.9);
+            ctx.stroke();
+        }
+        for format in [ImageFormat::Svg, ImageFormat::Pdf] {
+            let export = |routed| {
+                clipped_canvas(routed, false, circle, draw)
+                    .to_buffer(format, &EncodeOptions::default())
+                    .expect("an export")
+            };
+            assert!(
+                numbered(&export(true)) == numbered(&export(false)),
+                "{format:?}"
+            );
+        }
+        let gpu = |routed| {
+            let mut canvas = clipped_canvas(routed, true, circle, draw);
+            (canvas.engine_kind() == crate::canvas::EngineKind::Gpu).then(
+                || {
+                    canvas
+                        .to_image_data(
+                            None,
+                            &crate::pixels::ImageDataExport::default(),
+                        )
+                        .expect("pixels")
+                        .pixels()
+                        .to_vec()
+                },
+            )
+        };
+        if let (Some(routed), Some(plain)) = (gpu(true), gpu(false)) {
+            assert!(routed == plain, "the GPU");
+        }
+        // The control: on the CPU the route does change the pixels.
+        let cpu = |routed| {
+            clipped_canvas(routed, false, circle, draw)
+                .to_image_data(None, &crate::pixels::ImageDataExport::default())
+                .expect("pixels")
+                .pixels()
+                .to_vec()
+        };
+        assert!(cpu(true) != cpu(false), "the CPU");
     }
 
     #[test]
