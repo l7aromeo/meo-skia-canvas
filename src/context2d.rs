@@ -2129,7 +2129,11 @@ impl Context2D {
 
     /// Sets extra space added after every word-separator character, in
     /// pixels: a space or a no-break space, as CSS Text 3 section 8.2 names
-    /// them, leading, doubled and trailing ones included.
+    /// them, leading, doubled and trailing ones included. A `TextEngine`
+    /// paragraph's
+    /// [`TextStyle::word_spacing`](crate::text::TextStyle::word_spacing)
+    /// keeps SkParagraph's rule instead, once per run of spaces between two
+    /// words.
     ///
     /// A `NaN` is ignored and the previous spacing stands, as for
     /// [`Context2D::set_letter_spacing`].
