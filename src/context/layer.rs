@@ -18,7 +18,10 @@ use skia_safe::{
     PathDirection, Picture, Rect, TileMode, image_filters,
 };
 
-use crate::{context::coverage_of, node::filter::MASK_BLUR_MAX_SIGMA};
+use crate::{
+    context::{coverage_of, faint::Faint},
+    node::filter::MASK_BLUR_MAX_SIGMA,
+};
 
 /// One entry of a page's recording, played back in order.
 #[derive(Clone, Debug)]
@@ -54,7 +57,8 @@ pub struct BlurDraw {
 }
 
 impl BlurDraw {
-    /// The draw of `path` with `paint`, blurred by `sigma` canvas pixels.
+    /// The draw of `path` with `paint`, blurred by `sigma` canvas pixels,
+    /// onto a canvas whose pixels do with a faint paint what `faint` says.
     /// `rect` is what `Path::is_rect` answered for `path`, asked once by the
     /// caller. `paint` gives the colour and how the path is painted -- a
     /// paint with a shader or a path effect is not one this keeps -- and its
@@ -64,6 +68,7 @@ impl BlurDraw {
         rect: Option<(Rect, bool, PathDirection)>,
         paint: &Paint,
         sigma: f32,
+        faint: Faint,
     ) -> Self {
         let style = paint.style();
         // A fill reads none of these, so it is spared asking for them.
@@ -91,6 +96,7 @@ impl BlurDraw {
                 anti_alias: paint.is_anti_alias(),
                 dither: paint.is_dither(),
                 sigma,
+                faint,
             },
         }
     }
@@ -111,6 +117,9 @@ struct BlurPaint {
     /// The blur's standard deviation in canvas pixels: in pixels of the
     /// canvas whatever its transform, as a filter's length is.
     sigma: f32,
+    /// What the recording canvas's pixels do with a paint too faint for
+    /// eight bits, decided when it was recorded as every other draw's is.
+    faint: Faint,
 }
 
 /// A run of blurred rectangles, or one blurred path, in one flat colour and
@@ -303,6 +312,7 @@ impl BlurOp {
             Made::Coverage(filter) => paint.set_mask_filter(filter),
             Made::Result(filter) => paint.set_image_filter(filter),
         };
+        let paint = self.paint.faint.drawable(&paint);
         canvas.draw_path(&path, &paint);
         // The rest of a run, each drawn on its own as it was recorded.
         self.geometry

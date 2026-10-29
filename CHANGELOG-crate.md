@@ -137,6 +137,18 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A draw too faint for eight bits draws on a float canvas.** On a canvas
+  made with `PixelDepth::F16` or `PixelDepth::F32` as its `color_type`, a
+  fill under `set_global_alpha(0.001)`, or in a colour of alpha 0.001, drew
+  nothing, and so did a stroke, text, an image, a pattern, a gradient, a
+  texture, a layer or a shadow under half of one 255th: Skia drops a draw
+  whose alpha rounds to zero in eight bits, whatever the canvas holds. Each
+  now leaves the alpha it was drawn with, 0.001 read back in float. A
+  shadow on a float canvas also takes the global alpha exactly, where under
+  0.5 it came back 128/255. An eight-bit canvas draws as it did. Still
+  drawn as nothing: a `Paragraph` whose `TextStyle::color` is that faint,
+  and a text decoration colour that faint, which is kept in eight bits.
+
 - **A canvas drawn into another takes the context's colour filter.**
   `Context2D::draw_canvas` under `Context2D::set_color_filter`, at full
   global alpha and in `SourceOver`, drew a canvas of plain drawing
