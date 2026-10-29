@@ -2230,7 +2230,9 @@ impl RecordingSurface {
     /// by whole pixels, so each pixel is rasterized as it is on the page.
     /// `read.whole` composes the page instead, for an `over` that can draw at
     /// a pixel what lies outside the read -- see
-    /// `PageRecorder::open_layers_reach_past_a_read`.
+    /// `PageRecorder::open_layers_reach_past_a_read` -- and so does a GPU
+    /// surface, where a layer composites by the size of the surface it is
+    /// composed on.
     ///
     /// `over` is drawn on a surface made like this one, so on the GPU it is
     /// composited on the GPU, as it would be once filed: the engines round a
@@ -2256,6 +2258,15 @@ impl RecordingSurface {
         let mut copy = Paint::default();
         copy.set_blend_mode(BlendMode::Src);
         let page_info = surface.image_info();
+        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+        // Re-check: cargo test a_read_inside_a_layer_reads_what_the_page_does
+        // with `metal` and the `||` below dropped. On the GPU Skia draws
+        // a layer into a texture it sizes up to a bucket of the surface's,
+        // and what the layer composites rounds by that bucket: an exact blur
+        // in a layer read 227 at one pixel on a surface 20, 30 or 32 wide,
+        // and 228 at 16, 33 or 60. The page is composed whole there, as it
+        // is once the layer closes.
+        let whole = whole || surface.recording_context().is_some();
         let (info, at) = match whole {
             true => (page_info, origin),
             false => (page_info.with_dimensions(dst_info.dimensions()), (0, 0)),
