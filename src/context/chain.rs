@@ -34,7 +34,7 @@ use crate::context::exact_blur_gpu;
 
 /// One step of a chain, applied in order to what the step before it left.
 #[derive(Clone, Debug)]
-pub(crate) enum Step {
+pub enum Step {
     /// The exact Gaussian blur of this standard deviation, in canvas pixels.
     Blur(f32),
     /// A colour filter, which is the same at any scale.
@@ -400,8 +400,7 @@ fn blurred(
             let on_gpu = exact_blur_gpu::blur(
                 context,
                 image,
-                w,
-                h,
+                (w, h),
                 sigma_x,
                 sigma_y,
                 image.color_type(),

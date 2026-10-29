@@ -163,7 +163,7 @@ fn norm_of(sigma: f64) -> f64 {
     1.0 / gaussian_sum(sigma)
 }
 
-/// The blur of `image`, `width` by `height`, by `sigma_x` along rows and
+/// The blur of `image`, `(width, height)`, by `sigma_x` along rows and
 /// `sigma_y` along columns, scaled by `gain`, made on `context`, written as
 /// `out_type` pixels: rounded to a level for an 8-bit type, unrounded for a
 /// float one. The gain is the last pass's, so that a blurred draw composited
@@ -174,8 +174,7 @@ fn norm_of(sigma: f64) -> f64 {
 pub(crate) fn blur(
     context: &mut RecordingContext,
     image: &Image,
-    width: usize,
-    height: usize,
+    (width, height): (usize, usize),
     sigma_x: f32,
     sigma_y: f32,
     out_type: ColorType,
@@ -535,8 +534,7 @@ mod tests {
         let out = blur(
             &mut context,
             &texture,
-            w,
-            h,
+            (w, h),
             sx,
             sy,
             ColorType::RGBA8888,
