@@ -8,7 +8,9 @@
 //! runs is chosen by `SkGraphics::Init`, so these values tell the two apart:
 //! a tie, a value three quarters of the way to the next half, and a
 //! subnormal. An x86 CPU without AVX2 and F16C keeps the portable stage even
-//! then, and the half-float test skips there, saying why.
+//! then, and the half-float test skips there, saying why. libtest has no
+//! skip, so it prints the reason and counts as passed: a green run on such a
+//! machine checked nothing.
 
 use meo_skia_canvas::prelude::*;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]

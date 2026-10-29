@@ -13,7 +13,9 @@
 //! anything started Skia, so on an ARM machine every child passes and only an
 //! x86 run can show an entry that does not start it. An x86 machine without
 //! AVX2 and F16C keeps the portable stage even once started, so there the
-//! entries skip, saying why, rather than fail or pass.
+//! entries skip, saying why, rather than fail. libtest has no skip, so a
+//! skipped entry prints the reason and counts as passed: on such a machine a
+//! green run says only that nothing ran, and the message says so.
 
 use meo_skia_canvas::prelude::*;
 use skia_safe::{
