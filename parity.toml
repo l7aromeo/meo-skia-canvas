@@ -1139,10 +1139,9 @@ why  = """How JavaScript spells construction, copying and serialisation. `clone`
         and `Affine::translation` and friends, and `toJSON`/`toString` are the
         `Serialize` and `Debug` derives. `setMatrixValue` is not in the list
         above because it pairs: it parses a CSS transform list, which
-        `Affine::from_css` does on the Rust side. Not every list:
-        `from_css` returns `None` for `matrix3d`, `translate3d` and
-        `rotateZ`, which `setMatrixValue` flattens to the 2D matrix -- a gap
-        in the crate that no entry can name, since the two ids pair."""
+        `Affine::from_css` does on the Rust side through the same parser,
+        the 3D functions included, reading the matrix they compose to as the
+        2D one an `Affine` holds."""
 status = "deliberate"
 
 [[capability]]
