@@ -17,25 +17,27 @@ sent that way may have reached that host and should be rotated.** `redirect` and
 `integrity`, which were ignored, are honoured, and `follow-redirects` moves past
 three advisories; the Security section has each.
 
-Thirty changes can break working code, each under Breaking with what to change.
-Values that were taken are refused or ignored: a text gamma of 4 or above and a
-contrast or gamma that is not finite; a `ParagraphBuilder` option of the wrong
-kind, a numeric code outside its set, and a `textDirection` or `textAlign` it
-does not name; colour, font, filter and transform strings Chrome 153 refuses --
-a space before `(`, legacy commas CSS Color 4 does not allow, `hwba()`, `hsv()`
-and hex without `#`, whitespace CSS does not define, and an enumerated name in
-another case; `@0x`; a `data:` URL `fetch` rejects; and a twenty-first redirect.
-Values read back differently: `ctx.font`, `ctx.filter`, `fillStyle` and the
-other colours, a `DOMMatrix` read from a string, `TextMetrics`, whose values
-move to its prototype, text widths, line metrics and rects, which are no longer
-rounded to hundredths, and `ctx.fontHinting`, which reads `true` until it is
-set. Some values mean something else: a `[r, g, b, a]` colour array is sRGB on
-every canvas, `color(rec2020 ...)` decodes by a 2.4 gamma, a quoted generic
-keyword in `ctx.font` is a family name, `sans-serif` is the face Chrome draws it
-in, and `wordSpacing` is added after every word separator. And two calls do what
-they say rather than what they happened to do: `FontLibrary.use()` registers
-every font it is given or none, and an `@2x` in a `toFile` name is read whatever
-`format` says.
+Thirty-one changes can break working code, each under Breaking with what to
+change. Values that were taken are refused or ignored: a text gamma of 4 or
+above and a contrast or gamma that is not finite; a `ParagraphBuilder` option of
+the wrong kind, a numeric code outside its set, and a `textDirection` or
+`textAlign` it does not name; colour, font, filter and transform strings Chrome
+153 refuses -- a space before `(`, legacy commas CSS Color 4 does not allow,
+`hwba()`, `hsv()` and hex without `#`, whitespace CSS does not define, and an
+enumerated name in another case; `@0x`; a `data:` URL `fetch` rejects; and a
+twenty-first redirect. Values read back differently: `ctx.font`, `ctx.filter`,
+`fillStyle` and the other colours, a `DOMMatrix` read from a string,
+`TextMetrics`, whose values move to its prototype, text widths, line metrics and
+rects, which are no longer rounded to hundredths, and `ctx.fontHinting`, which
+reads `true` until it is set. Some values mean something else: a `[r, g, b, a]`
+colour array is sRGB on every canvas, `color(rec2020 ...)` decodes by a 2.4
+gamma, a quoted generic keyword in `ctx.font` is a family name, `sans-serif` is
+the face Chrome draws it in, and `wordSpacing` is added after every word
+separator. And two calls do what they say rather than what they happened to do:
+`FontLibrary.use()` registers every font it is given or none, and an `@2x` in a
+`toFile` name is read whatever `format` says. One file is removed: `lib/fonts`,
+the fontconfig configuration a Linux machine without one was pointed at through
+`FONTCONFIG_PATH`, which the addon no longer sets.
 
 Wrong pixels are fixed: `getImageData` after an export drew the exported page
 onto the canvas a second time; a translucent pixel read back up to a level low
