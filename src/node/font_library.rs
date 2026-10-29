@@ -143,6 +143,10 @@ fn stretch_percent(class: i32) -> f32 {
 
 thread_local!(
     static LIBRARY: OnceLock<RefCell<FontLibrary>> = const { OnceLock::new() };
+    /// How many times this thread's library has had its fonts change -- see
+    /// [`font_generation`].
+    static FONT_GENERATION: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
 );
 
 /// The hinting a context draws text with when its `fontHinting` is turned
@@ -809,6 +813,14 @@ fn claims(claimed: &[String], alias: Option<&str>) -> bool {
     alias.is_some_and(|name| {
         claimed.iter().any(|held| held.eq_ignore_ascii_case(name))
     })
+}
+
+/// A number this thread's shared library changes every time its fonts
+/// change, by a registration or a reset: what is worked out from the fonts
+/// and kept elsewhere is kept against it and dropped when it moves, without
+/// a visit to the library to compare its epoch.
+pub(crate) fn font_generation() -> u64 {
+    FONT_GENERATION.get()
 }
 
 impl FontLibrary {
@@ -1743,6 +1755,7 @@ impl FontLibrary {
     /// for drawing, which hold the faces they were laid out in, though no
     /// typesetter can match one laid out before the change.
     fn invalidate(&mut self) {
+        FONT_GENERATION.set(FONT_GENERATION.get().wrapping_add(1));
         self.system_families = None;
         self.epoch = Rc::new(FontEpoch {
             fonts: self.fonts.clone(),

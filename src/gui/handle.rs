@@ -401,7 +401,7 @@ impl WindowHandle {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::{
         Arc, Barrier,
         atomic::{AtomicUsize, Ordering},
@@ -409,9 +409,11 @@ mod tests {
 
     use super::*;
 
-    // Every test here touches the one process-wide registry, and the test
-    // harness runs tests on several threads at once. Serialised so that one
-    // test's `forget_all` cannot land in the middle of another's queue.
+    // Every test that touches the one process-wide registry holds this --
+    // those here, and any elsewhere that runs `App::run`, which forgets
+    // every window on its way out -- and the test harness runs tests on
+    // several threads at once. Serialised so that one test's `forget_all`
+    // cannot land in the middle of another's queue.
     static SERIAL: Mutex<()> = Mutex::new(());
 
     /// A window registered as open on the calling thread, as `open` would.
@@ -421,7 +423,9 @@ mod tests {
         window
     }
 
-    fn serial() -> MutexGuard<'static, ()> {
+    /// The registry to the calling test alone until the guard drops,
+    /// emptied, with nothing to wake -- see [`SERIAL`].
+    pub(crate) fn serial() -> MutexGuard<'static, ()> {
         let guard = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         forget_all();
         set_wake(None);

@@ -19,6 +19,7 @@ use skia_safe::{
 use std::{cell::RefCell, rc::Rc};
 
 pub mod api;
+pub(crate) mod blur_mask;
 pub(crate) mod faint;
 pub mod layer;
 pub mod page;
