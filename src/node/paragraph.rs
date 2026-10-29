@@ -25,7 +25,7 @@ use crate::{
             ParagraphRecipe, Passes, add_slnt, match_oblique, set_coordinates,
             without_paragraph_cache,
         },
-        typography::with_oblique_slnt,
+        typography::with_style_axes,
     },
     text::{
         PlaceholderAlignment as CratePlaceholderAlignment, PlaceholderBaseline,
@@ -655,12 +655,13 @@ fn parse_text_style<'a>(
     cx: &mut FunctionContext<'a>,
     obj: &Handle<'a, JsObject>,
     prefix: &str,
-) -> NeonResult<(TextStyle, Option<f32>)> {
+) -> NeonResult<(TextStyle, Option<f32>, Option<f32>)> {
     // Black where no colour is named, as CSS's initial `color` is and as
     // the declarations promise; SkParagraph's own default is white.
     let mut style = TextStyle::new();
     style.set_color(Color::BLACK);
     let mut oblique = None;
+    let mut fraction = None;
 
     refuse_unknown_keys(cx, obj, TEXT_STYLE_KEYS, "text style")?;
 
@@ -714,7 +715,11 @@ fn parse_text_style<'a>(
     // fontStyle: { weight, width, slant }
     if let Some(fs_obj) = object_option(cx, obj, prefix, "fontStyle")? {
         let inner = format!("{prefix}fontStyle.");
-        let weight = float_option(cx, &fs_obj, &inner, "weight")?
+        let exact = float_option(cx, &fs_obj, &inner, "weight")?;
+        // The whole weight the face is matched by, and a fraction apart,
+        // for the instance it is drawn at -- see `with_style_axes`.
+        fraction = exact.filter(|weight| weight.fract() != 0.0);
+        let weight = exact
             .map(|w| Weight::from(w as i32))
             .unwrap_or(Weight::NORMAL);
         let width = float_option(cx, &fs_obj, &inner, "width")?
@@ -972,7 +977,7 @@ fn parse_text_style<'a>(
         style.set_half_leading(half);
     }
 
-    Ok((style, oblique))
+    Ok((style, oblique, fraction))
 }
 
 /// `fontStyle.obliqueAngle` in degrees, `None` where it is not given.
@@ -1017,9 +1022,10 @@ fn oblique_angle_for_key<'a>(
 fn parse_paragraph_style<'a>(
     cx: &mut FunctionContext<'a>,
     obj: &Handle<'a, JsObject>,
-) -> NeonResult<(ParagraphStyle, Option<f32>)> {
+) -> NeonResult<(ParagraphStyle, Option<f32>, Option<f32>)> {
     let mut style = ParagraphStyle::new();
     let mut oblique = None;
+    let mut fraction = None;
 
     refuse_unknown_keys(cx, obj, PARAGRAPH_STYLE_KEYS, "paragraph style")?;
 
@@ -1079,9 +1085,11 @@ fn parse_paragraph_style<'a>(
 
     // textStyle (default text style for the paragraph)
     if let Some(ts_obj) = object_option(cx, obj, "", "textStyle")? {
-        let (text_style, asked) = parse_text_style(cx, &ts_obj, "textStyle.")?;
+        let (text_style, asked, weight) =
+            parse_text_style(cx, &ts_obj, "textStyle.")?;
         style.set_text_style(&text_style);
         oblique = asked;
+        fraction = weight;
     }
 
     // textHeightBehavior: 0 = All, 1 = DisableFirstAscent,
@@ -1130,7 +1138,7 @@ fn parse_paragraph_style<'a>(
         style.set_strut_style(strut);
     }
 
-    Ok((style, oblique))
+    Ok((style, oblique, fraction))
 }
 
 /// Parses the `textStyle.fontVariations` array from a
@@ -1184,7 +1192,8 @@ pub fn paragraphFollows(mut cx: FunctionContext) -> JsResult<JsValue> {
 
 pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
     let style_arg = cx.argument::<JsObject>(1)?;
-    let (para_style, asked) = parse_paragraph_style(&mut cx, &style_arg)?;
+    let (para_style, asked, weight) =
+        parse_paragraph_style(&mut cx, &style_arg)?;
     let variations = parse_paragraph_font_variations(&mut cx, &style_arg)?;
 
     // Route through `fonts_for_style` so any variable typefaces in the
@@ -1198,7 +1207,7 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
     let mut text_style = para_style.text_style().clone();
     // An oblique paragraph is instanced at `slnt` where its faces have the
     // axis, as a pushed oblique style is.
-    let instanced = with_oblique_slnt(&variations, asked);
+    let instanced = with_style_axes(&variations, asked, weight);
     // The matched face is for a caller deciding what Skia may synthesise;
     // a paragraph built here carries its own text style and does not.
     // Hinted, as every paragraph is drawn -- see `ParagraphRecipe::new`.
@@ -1237,7 +1246,8 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
 pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedParagraphBuilder>(0)?;
     let style_obj = cx.argument::<JsObject>(1)?;
-    let (mut text_style, asked) = parse_text_style(&mut cx, &style_obj, "")?;
+    let (mut text_style, asked, weight) =
+        parse_text_style(&mut cx, &style_obj, "")?;
     let own = parse_font_variations(&mut cx, &style_obj, "")?;
 
     let mut this = this.borrow_mut();
@@ -1258,7 +1268,7 @@ pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // An oblique is set at `slnt` where the face has the axis, ahead of the
     // style's own variations so that a `slnt` they name wins, and is laid
     // out upright where no face leans as asked -- see `match_oblique`.
-    let variations = with_oblique_slnt(variations, asked);
+    let variations = with_style_axes(variations, asked, weight);
     let oblique = asked.and_then(|degrees| {
         match_oblique(&mut text_style, collection, degrees)
     });

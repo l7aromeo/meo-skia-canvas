@@ -367,6 +367,12 @@ jobs:
           cargo test \
             --no-default-features \
             --features "node-addon,vulkan,window,freetype"
+      # The cfg combination no other step compiles: tests on, debug
+      # assertions off. Here because this job's feature set is the release
+      # addon's, which keeps skia-bindings on the prebuilt Skia it already
+      # resolved, so the step costs a check-mode compile rather than a build.
+      - name: Lint the release test build
+        run: just check-release-tests
       # The step above runs `window_handle` with no display, where it reports
       # a skip. Here it opens a real window: a `WindowHandle` change made on a
       # worker thread has to reach the window system. Required, so a missing

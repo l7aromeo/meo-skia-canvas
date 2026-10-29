@@ -63,6 +63,11 @@ pub struct TextSettings {
     /// from both follows a change to either -- see
     /// `node::typography::LaidOutKey`.
     pub oblique_angle: Option<f32>,
+    /// The font's weight where it is not a whole number, which the
+    /// character style's `FontStyle` cannot hold, or `None`. Kept beside
+    /// `oblique_angle` for the same reason -- see
+    /// `node::typography::with_style_axes`.
+    pub weight: Option<f32>,
 }
 
 #[cfg(any(test, debug_assertions))]

@@ -397,6 +397,18 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A half-float canvas stores the nearest half on x86.** On an x86
+  machine, a canvas made with `colorType: "RGBAF16"` truncated each value it
+  stored instead of rounding it, so a pixel could land up to one half-float
+  step low -- 0.0005 near one half -- and flushed values under 2^-14 to zero,
+  so a faint enough blur or gradient vanished. ARM machines were unaffected.
+  Skia picks the raster stages built for the CPU it runs on only when it is
+  started, and nothing started it; it is now started before anything else
+  reaches it, which rounds to nearest, keeps subnormals, and gives an x86
+  machine with AVX2 the stages built for it. That holds where the CPU has
+  AVX2 and F16C: an older x86 CPU keeps Skia's portable stage, which still
+  truncates. A value written with `putImageData` and read back shows it.
+
 - **An SVG export keeps what a `saveLayer` holds.** Skia's SVG backend has
   no layers and dropped whatever was drawn inside one: a red square in
   `ctx.saveLayer()`, in a translucent or nested layer, or a paragraph drawn
@@ -404,6 +416,19 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   is now rasterized into the SVG, as one with a filtered draw inside a
   layer already was; a layer that holds nothing leaves it vector. PDF drew
   all of these correctly and stays vector.
+
+- **A text decoration's colour is painted at the precision it names, as a
+  fill's is.** The colour in `ctx.textDecoration` was rounded to eight bits
+  of sRGB when it was set. On a canvas made with `colorType: "RGBAF16"` or
+  `"RGBAF32"`, `underline rgb(0 0 0 / 0.3)` drew its line at 77/255 beside
+  text drawn at 0.3, and a colour under half of one 255th drew no line at
+  all. On an eight-bit canvas a colour outside sRGB was gamut-mapped where
+  a fill of it is clipped: `color(display-p3 0 1 0)` drew its line at
+  `0,251,41` beside a fill at `0,255,0`. The line now draws the bytes a fill
+  draws, on every canvas; a colour of whole bytes draws as it did. The
+  colour of a `drop-shadow()` in `ctx.filter` is kept as named too, which
+  changes no pixel yet: Skia's raster backend resolves the shadow on an
+  eight-bit layer either way.
 
 - **A draw too faint for eight bits draws on a float canvas.** On a canvas
   made with `colorType: "RGBAF16"` or `"RGBAF32"`, a fill under
@@ -414,8 +439,7 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   it was drawn with, 0.001 read back in float. A shadow on a float canvas
   also takes `globalAlpha` exactly, where under 0.5 it came back 128/255.
   An eight-bit canvas draws as it did. Still drawn as nothing: a
-  `ParagraphBuilder` style whose own colour is that faint, and a text
-  decoration colour that faint, which is kept in eight bits.
+  `ParagraphBuilder` style whose own colour is that faint.
 
 - **A canvas drawn into another takes the context's `colorFilter`.**
   `ctx.drawImage(canvas, ...)` under `ctx.colorFilter`, at full
@@ -1231,6 +1255,18 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   and matches Chrome, which instances at the weight requested.
   `font-weight: 400` and `fontVariationSettings = '"wght" 400'` now name one
   instance rather than two.
+
+- **A fractional font weight is drawn at its fraction.**
+  `ctx.font = "512.5 1000px Oswald"` drew and measured the face at 512, and a
+  `ParagraphBuilder`'s `fontStyle: { weight: 512.5 }` the same: the
+  fraction was dropped when the shorthand was read. CSS Fonts 4 makes the
+  weight a number from 1 to 1000, so a variable face is now instanced at
+  512.5 -- its "0" at 1000px measures 535.15 on macOS, as in Chrome, where
+  512 measures 535.11 -- and `1ch` follows it on every platform. `ctx.font`
+  reads the weight back as written, `512.5 1000px "Oswald"`, where it read
+  `512`. Chrome reads it back as `512` and draws a weight at the quarter
+  below it, and on Linux FreeType rounds a variable face's advances to
+  whole font units; docs/browser-differences.md has both.
 
 - **A colour outside sRGB named in `oklab()`, `oklch()` or an `xyz` space
   paints as itself on a wide canvas.** A negative channel was
