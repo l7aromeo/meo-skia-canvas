@@ -2,11 +2,14 @@
 #[cfg(feature = "metal")]
 use objc2::rc::autoreleasepool;
 
-use crate::context::page::{ExportOptions, Page};
+use crate::{
+    context::page::{ExportOptions, Page},
+    start_skia, started,
+};
 use serde_json::{Value, json};
 use skia_safe::{
     AlphaType, Color, Color4f, ColorSpace, ColorType, Image, ImageInfo, Matrix,
-    Paint, Rect, Surface, gpu::DirectContext, surfaces,
+    Paint, Rect, Surface, gpu::DirectContext,
 };
 use std::sync::OnceLock;
 
@@ -272,8 +275,11 @@ impl RenderingEngine {
         opts: &ExportOptions,
     ) -> Result<Surface, String> {
         match self {
-            Self::GPU => Engine::make_surface(image_info, opts),
-            Self::CPU => surfaces::raster(
+            Self::GPU => {
+                start_skia();
+                Engine::make_surface(image_info, opts)
+            }
+            Self::CPU => started::raster(
                 image_info,
                 None,
                 Some(&opts.surface_props()),

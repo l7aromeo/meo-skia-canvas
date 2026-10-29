@@ -372,6 +372,7 @@ pub mod js_names {
 // Shared internal infrastructure (not part of the public API).
 pub(crate) mod context;
 pub(crate) mod gpu;
+pub(crate) mod started;
 
 /// winit-backed windowing, behind the `window` feature.
 ///
@@ -404,6 +405,44 @@ pub(crate) use node::{
     color_filter, font_library, gradient, image_filter, mask_filter, paragraph,
     typography, utils,
 };
+
+use skia_safe::graphics;
+use std::sync::Once;
+
+/// Runs Skia's process start-up, once.
+///
+/// `SkGraphics::Init` is what selects the raster pipeline's CPU-specific
+/// stages: an x86 build is compiled for SSE2, and only this call moves a
+/// machine with AVX2 or AVX-512 onto the stages built for it. Nothing in Skia
+/// makes the call on its own. Without it an x86 half-float store truncates and
+/// flushes subnormals to zero, where the hardware conversion the other stages
+/// use rounds to nearest -- a unit in the last place of difference that
+/// `tests/half_float_store.rs` pins. Chrome makes the same call at start-up.
+///
+/// Every public entry that can reach the raster pipeline first -- a canvas,
+/// an image, the Node module -- calls this; once any of them has, every later
+/// draw has the stages. Skia documents the call as thread-safe and
+/// idempotent, so the `Once` only saves repeating it.
+///
+/// Which entries those are is a judgement, made from what the call changes:
+/// it swaps in raster-pipeline stages, blitters, memset and swizzlers, which
+/// run only when pixels are drawn or converted. So the constructors that only
+/// describe something -- a `Path2D` and its operations, a font registered
+/// with the library, a shader, a filter, an `ImageData` buffer -- do not call
+/// it, since none of them touches a pixel before a canvas has.
+//
+// UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+// Re-check: cargo test a_half_float_canvas_stores_the_nearest_half
+// on an x86 machine without AVX2 or F16C, where the test skips today. There
+// the started pipeline is still the portable stage, whose `to_half`
+// (src/opts/SkRasterPipeline_opts.h) truncates and flushes subnormal halves
+// instead of rounding to nearest, so a half-float canvas on such a machine
+// stores values up to one half-float step low. Nothing here can pick a stage
+// the CPU lacks; the rounding is Skia's to change.
+pub(crate) fn start_skia() {
+    static STARTED: Once = Once::new();
+    STARTED.call_once(graphics::init);
+}
 
 #[cfg(feature = "node-addon")]
 use context::api as ctx;
@@ -582,6 +621,8 @@ fn transform_list(mut cx: FunctionContext) -> JsResult<JsValue> {
 #[cfg(feature = "node-addon")]
 #[neon::main]
 fn main(mut cx: ModuleContext) -> NeonResult<()> {
+    start_skia();
+
     // Before the thread pool below, and before anything else this module does:
     // it writes to the environment, and the narrowest window available is the
     // one with none of this addon's threads in it yet.

@@ -10,15 +10,16 @@ use skia_safe::{
     dash_path_effect,
     font_style::{FontStyle, Width},
     image_filter::MapDirection,
-    image_filters, images,
+    image_filters,
     matrix::{Matrix, TypeMask},
     path_1d_path_effect,
     path_utils::fill_path_with_paint,
-    textlayout::{ParagraphStyle, StrutStyle, TextStyle},
+    textlayout::{StrutStyle, TextStyle},
 };
 use std::{cell::RefCell, rc::Rc};
 
 pub mod api;
+pub(crate) mod blur_mask;
 pub(crate) mod faint;
 pub mod layer;
 pub mod page;
@@ -44,9 +45,10 @@ use crate::{
         texture::{BoxedCanvasTexture, CanvasTexture},
         typography::with_style_axes,
     },
+    started,
     typography::{
         Baseline, DecorationStyle, DrawnRun, FontSpec, PendingInk, Spacing,
-        TextExtents, TypesetInputs, Typesetter,
+        TextExtents, TypesetInputs, Typesetter, paragraph_style,
     },
     utils::*,
 };
@@ -159,7 +161,7 @@ fn rasterize_region(
     region: IRect,
 ) -> Option<Image> {
     let info = image.image_info().with_dimensions(region.size());
-    let mut surface = skia_safe::surfaces::raster(&info, None, None)?;
+    let mut surface = started::raster(&info, None, None)?;
 
     match picture {
         Some(pict) => {
@@ -250,7 +252,7 @@ impl Default for State {
             .set_stroke_width(1.0)
             .set_style(PaintStyle::Fill);
 
-        let graf_style = ParagraphStyle::new();
+        let graf_style = paragraph_style();
         let mut char_style = TextStyle::new();
         char_style.set_font_size(DEFAULT_FONT_SIZE);
 
@@ -1618,7 +1620,7 @@ impl Context2D {
         // dst_rect and then draws without clips, transforms, alpha,
         // blend, or shadows
         if let Some(bitmap) =
-            images::raster_from_data(&info, buffer, info.min_row_bytes())
+            started::raster_from_data(&info, buffer, info.min_row_bytes())
         {
             self.push(); // cache matrix & clip in self.state
             self.with_canvas(|canvas| {
@@ -1917,6 +1919,7 @@ impl Context2D {
             &mut paint,
             self.state.global_alpha as f32,
             self.state.sampling_filter,
+            &self.canvas_color_space,
         );
         paint.set_style(style);
 
@@ -2027,6 +2030,7 @@ impl Context2D {
             &mut paint,
             self.state.global_alpha as f32,
             self.state.sampling_filter,
+            &self.canvas_color_space,
         );
         paint.set_style(style);
         paint
@@ -2073,8 +2077,11 @@ impl Context2D {
             }
         }
         let mut paint = base_paint.clone();
-        let (mut shadow_color, shadow_space) =
-            skia_paint_color(*shadow_color, shadow_space);
+        let (mut shadow_color, shadow_space) = skia_paint_color_onto(
+            *shadow_color,
+            shadow_space,
+            &self.canvas_color_space,
+        );
         // On float pixels the paint's own alpha moves into the shadow's
         // colour, which the filter applies to the shape in float: the shape
         // is drawn into the filter's layer, and on Skia's raster backend a
@@ -2194,11 +2201,13 @@ impl Dye {
         }
     }
 
+    /// Puts the dye on `paint` at `alpha`, for a page in `destination`.
     pub fn mix_into(
         &self,
         paint: &mut Paint,
         alpha: f32,
         sampling_filter: SamplingFilter,
+        destination: &ColorSpace,
     ) {
         match self {
             Dye::Color(color, cs, _) => {
@@ -2206,10 +2215,11 @@ impl Dye {
                 color.a *= alpha;
                 // Kept in the space it was named in, so what `fillStyle`
                 // reports back echoes that space as a browser's does, and
-                // handed over by the path every tagged reader shares.
+                // handed over as the page it is drawn onto needs.
                 match cs {
                     Some(space) => {
-                        let (color, space) = skia_paint_color(color, space);
+                        let (color, space) =
+                            skia_paint_color_onto(color, space, destination);
                         paint.set_color4f(color, &space)
                     }
                     None => paint.set_color4f(color, None),
