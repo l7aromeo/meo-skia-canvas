@@ -1488,7 +1488,7 @@ describe("a generic family is the face Chrome's default names", () => {
         if (font) ctx.font = font;
         const { width } = ctx.measureText("Hamburgefonstiv");
         assert.ok(
-          Math.abs(width - chrome) <= 0.01,
+          Math.abs(width - chrome) <= CHROME_FLOAT,
           `${font ?? "the default font"}: ${width}, Chrome ${chrome}`,
         );
       }

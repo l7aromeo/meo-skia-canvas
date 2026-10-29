@@ -35,7 +35,7 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `locale_settings_*.grd`: Helvetica and Times on macOS, Arial and Times New
   Roman on Linux and Windows, which on Linux reach whatever fontconfig
   substitutes, as they do for Chrome. On macOS `sans-serif` now measures as
-  Chrome's within a hundredth. An SVG `<text>` naming no family, or one the
+  Chrome's to the float. An SVG `<text>` naming no family, or one the
   machine does not have, was drawn in the `system-ui` face, Helvetica Neue on
   macOS, and is now drawn in `serif`, as Chrome draws it in its standard font,
   Times on macOS, and its `ex` is that face's x-height. Text set in
