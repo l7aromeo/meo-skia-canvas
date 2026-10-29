@@ -4,7 +4,7 @@
 use crate::context::typesetting::BUILDS;
 use crate::{
     cache_map::{CacheMap, CacheSet},
-    context::{State, typesetting::Typography},
+    context::{State, faint::Faint, typesetting::Typography},
     css::{FontUnits, is_font_relative, parse_length, without_comments},
     font::{FontFamily, ObliqueAngle, leans_as_asked, variation_axes},
     font_library::{FontEpoch, FontLibrary, base_face},
@@ -498,7 +498,8 @@ impl LaidOut {
             .collect()
     }
 
-    /// Draws the runs in `range` from `blobs`, the blobs of every run.
+    /// Draws the runs in `range` from `blobs`, the blobs of every run, onto
+    /// pixels that do with a faint paint what `faint` says.
     fn draw_runs(
         &self,
         canvas: &Canvas,
@@ -506,11 +507,13 @@ impl LaidOut {
         paint: &Paint,
         range: Range<usize>,
         blobs: &[Option<TextBlob>],
+        faint: Faint,
     ) {
+        let paint = faint.drawable(paint);
         let runs = zip(&self.runs[range.clone()], &blobs[range]);
         for (run, blob) in runs {
             if let Some(blob) = blob {
-                canvas.draw_text_blob(blob, origin + run.origin, paint);
+                canvas.draw_text_blob(blob, origin + run.origin, &paint);
             }
         }
     }
@@ -529,7 +532,8 @@ impl LaidOut {
 
     /// Paints the run with its anchor at `origin` in `paint`, a named line
     /// colour's alpha multiplied by `global_alpha`, as
-    /// [`Typesetter::decoration`] takes it.
+    /// [`Typesetter::decoration`] takes it, onto pixels that do with a faint
+    /// paint what `faint` says.
     ///
     /// A decorated run is drawn a line at a time, in the order CSS 2.1
     /// Appendix E paints a line box: underlines and overlines beneath the
@@ -542,6 +546,7 @@ impl LaidOut {
         origin: Point,
         paint: &Paint,
         global_alpha: f32,
+        faint: Faint,
     ) {
         let built;
         let kept = self.kept_blobs(paint);
@@ -553,7 +558,8 @@ impl LaidOut {
             }
         };
         let Some(decoration) = &self.decoration else {
-            self.draw_runs(canvas, origin, paint, 0..self.runs.len(), blobs);
+            let all = 0..self.runs.len();
+            self.draw_runs(canvas, origin, paint, all, blobs, faint);
             return;
         };
         let boxes = [decorate::Decoration {
@@ -571,9 +577,18 @@ impl LaidOut {
                 origin,
                 Layer::Beneath,
                 paint,
+                faint,
             );
-            self.draw_runs(canvas, origin, paint, start..end, blobs);
-            decorate::paint(canvas, spans, &boxes, origin, Layer::Over, paint);
+            self.draw_runs(canvas, origin, paint, start..end, blobs, faint);
+            decorate::paint(
+                canvas,
+                spans,
+                &boxes,
+                origin,
+                Layer::Over,
+                paint,
+                faint,
+            );
         }
     }
 }
@@ -611,21 +626,24 @@ impl DrawnRun {
     }
 
     /// Paints the run with its anchor at `origin` in `paint` -- see
-    /// [`LaidOut::paint`].
+    /// [`LaidOut::paint`]. A run laid out for one draw paints in the paint
+    /// it was laid out for, so a caller drawing onto pixels that keep a
+    /// faint paint lays it out for `faint.drawable(paint)`.
     pub fn paint(
         &self,
         canvas: &Canvas,
         origin: Point,
         paint: &Paint,
         global_alpha: f32,
+        faint: Faint,
     ) {
         match self {
             Self::Kept(laid_out) => {
-                laid_out.paint(canvas, origin, paint, global_alpha)
+                laid_out.paint(canvas, origin, paint, global_alpha, faint)
             }
             Self::Plain(layout) => layout.paragraph.paint(canvas, origin),
             Self::Runs(laid_out) => {
-                laid_out.paint(canvas, origin, paint, global_alpha)
+                laid_out.paint(canvas, origin, paint, global_alpha, faint)
             }
         }
     }

@@ -26,6 +26,7 @@
 //! as it is filled in, and painted by `Paragraph::paint` alone.
 
 use crate::{
+    context::faint::Faint,
     font::leans_as_asked,
     font_library::text_hinting,
     node::{
@@ -51,6 +52,12 @@ use skia_safe::{
 };
 use std::{borrow::Cow, iter::once, ops::Range, rc::Rc};
 use unicode_segmentation::GraphemeCursor;
+
+/// What a paragraph's lines are drawn to do with a paint too faint for eight
+/// bits: left to Skia's skip, because a paragraph's glyph paints are fixed
+/// when it is built, before the canvas it is drawn on is known, and a line
+/// redrawn where its glyphs are not would draw half the paragraph.
+const PARAGRAPH_FAINT: Faint = Faint::Dropped;
 
 /// The character SkParagraph adds to a paragraph's text for each
 /// placeholder, U+FFFC OBJECT REPLACEMENT CHARACTER, whose UTF-8 length
@@ -1407,6 +1414,7 @@ impl Passes {
                     origin,
                     Layer::Beneath,
                     &base,
+                    PARAGRAPH_FAINT,
                 );
             }
             paragraph.paint(canvas, origin);
@@ -1419,6 +1427,7 @@ impl Passes {
                     origin,
                     Layer::Over,
                     &base,
+                    PARAGRAPH_FAINT,
                 );
             }
             return;
@@ -1455,6 +1464,7 @@ impl Passes {
                             index,
                             origin + shadow.offset,
                             &paint,
+                            PARAGRAPH_FAINT,
                         );
                     }
                 }
@@ -1469,6 +1479,7 @@ impl Passes {
                 origin,
                 Layer::Beneath,
                 &base,
+                PARAGRAPH_FAINT,
             );
             for run in runs_on(line) {
                 run.draw(canvas, origin, &self.paints[run.slot]);
@@ -1480,6 +1491,7 @@ impl Passes {
                 origin,
                 Layer::Over,
                 &base,
+                PARAGRAPH_FAINT,
             );
         }
     }

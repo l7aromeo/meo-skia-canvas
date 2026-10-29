@@ -4397,6 +4397,7 @@ mod unpremultiply_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::faint::Faint;
     use parking_lot::Mutex;
     use std::ptr;
 
@@ -5580,7 +5581,7 @@ mod tests {
         let path = Path::rect(Rect::from_xywh(x, 0.0, 10.0, 10.0), None);
         let mut paint = Paint::default();
         paint.set_color(Color::BLACK);
-        BlurDraw::of(&path, path.is_rect(), &paint, 4.0)
+        BlurDraw::of(&path, path.is_rect(), &paint, 4.0, Faint::Dropped)
     }
 
     /// How many layers `recorder` holds after two blurred squares in one

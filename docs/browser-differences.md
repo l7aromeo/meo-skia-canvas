@@ -566,6 +566,29 @@ depend on how its function name is cased is not one CSS describes. The
 difference is a level at most where Chrome rounds, and more where its 8-bit
 path clips an `hsl()` outside sRGB that this library keeps.
 
+**A draw too faint for eight bits draws on a float canvas, and Chrome drops
+it. Ours is the arithmetic's answer.** Skia skips a source-over draw whose
+paint alpha rounds to zero as a byte -- `SkPaint::nothingToDraw` tests
+`getAlpha()` -- whatever the pixels it would land in, and Chrome draws
+through it. On a `float16` canvas, which holds 0.001 to within a
+two-thousandth, Chrome 152 (152.0.7977.167) reads back:
+
+        draw                                      Chrome        here
+        fillRect in rgba(0, 0, 0, 0.001)          0             0.001
+        fillRect under globalAlpha 0.001          0             0.001
+        a shadow under globalAlpha 0.001          0.000999      0.001
+        a shadow under globalAlpha 0.5            0.5           0.5
+
+So Chrome keeps a faint shadow and drops the faint fill casting it. Nothing
+in the Canvas standard lets an alpha below a byte's resolution be treated
+as zero on a canvas that stores more than a byte, and every draw here --
+fills, strokes, text, images, patterns, gradients, textures, layers and
+shadows -- keeps it: `Faint::drawable` hands Skia such a paint opaque with
+its alpha in a colour filter, and a shadow takes the paint's alpha in its
+colour. An eight-bit canvas keeps Skia's skip and draws what Chrome does.
+`tests/faint_alpha.rs` pins each draw on `RGBAF16` and `RGBAF32`, and the
+eight-bit canvas to the bytes it drew before.
+
 **A colour reads back in the function it was declared in, with the figures
 the colour holds. Chrome writes eight bits and six figures.** CSS Color 4
 section 16 serialises a colour from its value: hex only for a legacy colour

@@ -397,6 +397,18 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A draw too faint for eight bits draws on a float canvas.** On a canvas
+  made with `colorType: "RGBAF16"` or `"RGBAF32"`, a fill under
+  `globalAlpha` 0.001, or in `rgba(0, 0, 0, 0.001)`, drew nothing, and so
+  did a stroke, text, an image, a pattern, a gradient, a texture, a layer or
+  a shadow under half of one 255th: Skia drops a draw whose alpha rounds to
+  zero in eight bits, whatever the canvas holds. Each now leaves the alpha
+  it was drawn with, 0.001 read back in float. A shadow on a float canvas
+  also takes `globalAlpha` exactly, where under 0.5 it came back 128/255.
+  An eight-bit canvas draws as it did. Still drawn as nothing: a
+  `ParagraphBuilder` style whose own colour is that faint, and a text
+  decoration colour that faint, which is kept in eight bits.
+
 - **A canvas drawn into another takes the context's `colorFilter`.**
   `ctx.drawImage(canvas, ...)` under `ctx.colorFilter`, at full
   `globalAlpha` and in `source-over`, drew a canvas of plain drawing

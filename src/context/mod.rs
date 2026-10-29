@@ -19,6 +19,7 @@ use skia_safe::{
 use std::{cell::RefCell, rc::Rc};
 
 pub mod api;
+pub(crate) mod faint;
 pub mod layer;
 pub mod page;
 pub mod typesetting;
@@ -48,6 +49,7 @@ use crate::{
     },
     utils::*,
 };
+use faint::Faint;
 use layer::BlurDraw;
 use page::{ExportOptions, Page, PageRecorder};
 use typesetting::{TextSettings, Typesetting, Typography};
@@ -91,6 +93,9 @@ pub struct Context2D {
     /// `PageRecorder::image_flattened`. Fixed when the canvas is built;
     /// there is no setter for it, so a copy here cannot go stale.
     pub canvas_color_type: ColorType,
+    /// What the surface `canvas_color_type` composites in does with a
+    /// paint too faint for eight bits, fixed with it.
+    faint: Faint,
     recorder: RefCell<PageRecorder>,
     pub state: State,
     stack: Vec<State>,
@@ -540,6 +545,7 @@ impl Context2D {
             bounds,
             canvas_color_space,
             canvas_color_type,
+            faint: Faint::of(canvas_color_type),
             recorder: RefCell::new(PageRecorder::new(bounds)),
             path: PathBuilder::new(),
             stack: vec![],
@@ -788,11 +794,13 @@ impl Context2D {
             return;
         }
 
+        let faint = self.faint();
         self.with_canvas(|canvas| {
             let mut paint = Paint::default();
             paint.set_alpha_f(alpha);
             paint.set_blend_mode(blend);
 
+            let paint = faint.drawable(&paint);
             canvas.save_layer(&SaveLayerRec::default().paint(&paint));
             f(canvas);
             canvas.restore();
@@ -812,6 +820,8 @@ impl Context2D {
         bounds: Option<Rect>,
         backdrop: Option<SkImageFilter>,
     ) {
+        let paint =
+            paint.map(|paint| self.faint().drawable(&paint).into_owned());
         // open_layer, not with_canvas: the layer frame has to be recorded on
         // the recorder's save stack, or the next transform or clip
         // tears it down.
@@ -1057,7 +1067,7 @@ impl Context2D {
         if let Some(sigma) = blurred.then(|| self.blurs_as_op(style)).flatten()
         {
             let paint = self.paint_for_blur(style);
-            let draw = BlurDraw::of(&path, rect, &paint, sigma);
+            let draw = BlurDraw::of(&path, rect, &paint, sigma, self.faint());
             let features = self.state.filter.blur_features(coverage);
             let (matrix, clip) = (self.state.matrix, self.state.clip.as_ref());
             self.with_recorder(|mut recorder| {
@@ -1124,7 +1134,10 @@ impl Context2D {
                         Some(ClipOp::Intersect),
                         Some(true),
                     );
-                    canvas.draw_path(&enclosing_frame, &tile_paint);
+                    canvas.draw_path(
+                        &enclosing_frame,
+                        &self.faint().drawable(&tile_paint),
+                    );
                     canvas.restore();
                 } else {
                     // create a path merging the the tile pattern outlines and
@@ -1154,11 +1167,14 @@ impl Context2D {
                     if let Some(fill_path) =
                         stencil.op(&textured_frame, PathOp::Intersect)
                     {
-                        canvas.draw_path(&fill_path, &fill_paint);
+                        canvas.draw_path(
+                            &fill_path,
+                            &self.faint().drawable(&fill_paint),
+                        );
                     }
                 }
             } else {
-                canvas.draw_path(&path, paint);
+                canvas.draw_path(&path, &self.faint().drawable(paint));
             }
         });
     }
@@ -1336,7 +1352,10 @@ impl Context2D {
             //
             // Past that, the paint is only worth carrying if it says
             // something -- alpha, a blend mode, a filter, a colour filter.
-            let paint = carries(source, paint).then_some(paint);
+            // A faint paint drawn as its opaque stand-in is carried as well:
+            // its alpha is in a colour filter -- see `Faint::drawable`.
+            let paint = self.faint().drawable(paint);
+            let paint = carries(source, &paint).then_some(&*paint);
             canvas.save();
             canvas.clip_rect(dst_rect, ClipOp::Intersect, true);
             canvas.draw_picture(picture, Some(&matrix), paint);
@@ -1463,7 +1482,7 @@ impl Context2D {
                 Some((src_rect, Strict)),
                 dst_rect,
                 sampling,
-                paint,
+                &self.faint().drawable(paint),
             );
         });
     }
@@ -1757,12 +1776,13 @@ impl Context2D {
             let features = self.vector_features(&paint, Some(style));
             let kept = typesetter.laid_out();
             let global_alpha = self.state.global_alpha as f32;
+            let faint = self.faint();
             self.render_to_canvas(&paint, features, |canvas, paint| {
                 // The kept run, or, the first time a run is drawn, the run
                 // laid out for this paint -- see `Typesetter::laid_out`.
                 let run = match &kept {
                     Some(kept) => DrawnRun::Kept(kept.clone()),
-                    None => typesetter.drawn_once(paint),
+                    None => typesetter.drawn_once(&faint.drawable(paint)),
                 };
                 let (offset, condensation) = (run.offset(), run.condensation());
                 // In a test, an undecorated run can be laid out for this
@@ -1773,13 +1793,13 @@ impl Context2D {
                 let oracle = (PAINTER_OVERRIDE.get()
                     == Some(Painter::Paragraph)
                     && typesetter.decoration(1.0).is_none())
-                .then(|| typesetter.layout(paint));
+                .then(|| typesetter.layout(&faint.drawable(paint)));
                 let draw = |canvas: &SkCanvas, at: Point| {
                     #[cfg(test)]
                     if let Some(layout) = &oracle {
                         return layout.paragraph.paint(canvas, at);
                     }
-                    run.paint(canvas, at, paint, global_alpha)
+                    run.paint(canvas, at, paint, global_alpha, faint)
                 };
                 match condensation {
                     // Chrome condenses with a plain anisotropic transform
@@ -1830,6 +1850,11 @@ impl Context2D {
         let inputs = TypesetInputs::new(&self.state, text, width);
         let (extents, measured) = inputs.typesetter().measure();
         (extents, PendingInk::new(inputs, measured))
+    }
+
+    /// What this canvas's pixels do with a paint too faint for eight bits.
+    pub(crate) fn faint(&self) -> Faint {
+        self.faint
     }
 
     pub fn paint_for_drawing(
@@ -2038,8 +2063,21 @@ impl Context2D {
             }
         }
         let mut paint = base_paint.clone();
-        let (shadow_color, shadow_space) =
+        let (mut shadow_color, shadow_space) =
             skia_paint_color(*shadow_color, shadow_space);
+        // On float pixels the paint's own alpha moves into the shadow's
+        // colour, which the filter applies to the shape in float: the shape
+        // is drawn into the filter's layer, and on Skia's raster backend a
+        // filtered layer on an F16 or F32 page comes back in steps of one
+        // 255th, so a `globalAlpha` of 0.5 cast a shadow of 128/255 and one
+        // of 0.001 none at all. The two are one product whatever order they
+        // are taken in -- the shadow is the shape's alpha times its colour
+        // -- except through a colour filter, which sees the alpha before
+        // the shadow does and is left to have it there.
+        if self.faint() == Faint::Kept && paint.color_filter().is_none() {
+            shadow_color.a *= paint.alpha_f();
+            paint.set_alpha_f(1.0);
+        }
         paint.set_image_filter(image_filters::drop_shadow_only(
             (0.0, 0.0),
             (sigma.x, sigma.y),
