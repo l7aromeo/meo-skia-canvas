@@ -50,7 +50,7 @@ use skia_safe::{
         PlaceholderStyle, StyleType, TextDecoration, TextShadow, TextStyle,
     },
 };
-use std::{borrow::Cow, iter::once, ops::Range, rc::Rc};
+use std::{borrow::Cow, cell::RefCell, iter::once, mem, ops::Range, rc::Rc};
 use unicode_segmentation::GraphemeCursor;
 
 /// What a paragraph's lines are drawn to do with a paint too faint for eight
@@ -63,6 +63,24 @@ const PARAGRAPH_FAINT: Faint = Faint::Dropped;
 /// placeholder, U+FFFC OBJECT REPLACEMENT CHARACTER, whose UTF-8 length
 /// moves every later text offset.
 const PLACEHOLDER_CHARACTER: char = '\u{FFFC}';
+
+/// The most entries a list a [`ParagraphRecipe`] hands back may hold room
+/// for and still be kept for the next recipe on the thread.
+///
+/// A kept list keeps its capacity for as long as the thread lives, so one
+/// paragraph of thousands of styles would otherwise pin room for thousands
+/// on every thread that ever built it. A list past this is dropped and the
+/// next recipe allocates its own. Every paragraph of up to this many
+/// styles, steps or both reuses what the last left, which is the paragraph
+/// a caller builds again and again.
+const KEPT_LIST_CAPACITY: usize = 64;
+
+thread_local! {
+    /// The lists the last [`ParagraphRecipe`] on this thread handed back,
+    /// emptied, for the next one to fill -- see [`KEPT_LIST_CAPACITY`].
+    static SPARE_LISTS: RefCell<(Vec<Step>, Vec<Pushed>)> =
+        const { RefCell::new((Vec::new(), Vec::new())) };
+}
 
 /// The slant a style asking for `font_style`, an oblique of `degrees`, is
 /// laid out in, or `None` where it does not ask for oblique.
@@ -168,7 +186,9 @@ enum Step {
 ///
 /// The steps hold no text of their own, only where it lies in the
 /// builder's. A paragraph in one style is built as it was filled in; one in
-/// several copies its text once, to look at each edge.
+/// several reads its text back, once, only where the bytes either side of
+/// an edge, noted as they are added, leave a grapheme cluster across it
+/// possible.
 pub(crate) struct ParagraphRecipe {
     builder: ParagraphBuilder,
     style: ParagraphStyle,
@@ -177,12 +197,14 @@ pub(crate) struct ParagraphRecipe {
     /// shared library's, so that a decoration's or background's face is
     /// found once a epoch -- see [`FaceLines::first_available`].
     epoch: Option<Rc<FontEpoch>>,
+    /// How the paragraph was filled in, in order.
     steps: Vec<Step>,
     /// What was taken off the paragraph style's own text style, its slot 0.
     base_taken: Taken,
     /// Each style pushed, in slot 1 and on, at its index plus 1: one list
-    /// rather than one for each thing kept of it, and none at all until a
-    /// style is pushed, since every paragraph is built through here.
+    /// rather than one for each thing kept of it. Taken, with `steps`, from
+    /// what the last recipe on the thread handed back, since every
+    /// paragraph is built through here -- see [`SPARE_LISTS`].
     pushed: Vec<Pushed>,
     /// The length of the builder's text, in UTF-8 bytes.
     length: usize,
@@ -194,6 +216,19 @@ pub(crate) struct ParagraphRecipe {
     /// Whether any style splits its leading half above and half below,
     /// the paragraph's own included -- see [`without_paragraph_cache`].
     half_leading: bool,
+    /// The slot of the style text is added in now: 0 for the paragraph's
+    /// own, and a pushed style's index plus 1.
+    top: usize,
+    /// Whether [`ascii_boundary`] holds at every text step's start, judged
+    /// as the bytes either side of it are added rather than by reading the
+    /// builder's text back -- see [`Self::meet`].
+    ascii_edges: bool,
+    /// The last byte added, a placeholder's included: the one before the
+    /// next step's start.
+    last_byte: Option<u8>,
+    /// Whether a text step added empty starts where the builder's text
+    /// ends, so that the byte after its start is the next one added.
+    edge_waiting: bool,
 }
 
 impl ParagraphRecipe {
@@ -232,33 +267,52 @@ impl ParagraphRecipe {
                         &mut base,
                         &mut collection,
                         epoch.as_ref(),
-                    );
+                    )
+                    .map(Box::new);
                     let shadows = take_shadows(&mut base);
                     let background = StyleBackground::take(
                         &mut base,
                         &mut collection,
                         epoch.as_ref(),
-                    );
+                    )
+                    .map(Box::new);
                     style.set_text_style(&base);
                     (decoration, shadows, background)
                 }
             };
+        // The lists the last recipe on this thread left, or new ones where
+        // another recipe holds them or none has been made.
+        let (mut steps, pushed) = SPARE_LISTS
+            .try_with(|spare| {
+                spare
+                    .try_borrow_mut()
+                    .map(|mut spare| mem::take(&mut *spare))
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        if steps.capacity() == 0 {
+            steps.reserve(8);
+        }
         Self {
             builder: ParagraphBuilder::new(&style, &collection),
             style,
             collection,
             epoch,
-            steps: Vec::with_capacity(8),
+            steps,
             base_taken: Taken {
                 decoration,
                 shadows,
                 background,
             },
-            pushed: Vec::new(),
+            pushed,
             length: 0,
             base_oblique,
             oblique: base_oblique.is_some(),
             half_leading,
+            top: 0,
+            ascii_edges: true,
+            last_byte: None,
+            edge_waiting: false,
         }
     }
 
@@ -270,39 +324,81 @@ impl ParagraphRecipe {
         oblique: Option<f32>,
     ) {
         style.set_font_hinting(text_hinting(true));
+        #[cfg(test)]
+        TAKES.set(TAKES.get() + 1);
         let decoration = StyleDecoration::take(
             &mut style,
             &mut self.collection,
             self.epoch.as_ref(),
-        );
+        )
+        .map(Box::new);
         let shadows = take_shadows(&mut style);
         let background = StyleBackground::take(
             &mut style,
             &mut self.collection,
             self.epoch.as_ref(),
+        )
+        .map(Box::new);
+        let taken = Taken {
+            decoration,
+            shadows,
+            background,
+        };
+        self.push(style, oblique, taken);
+    }
+
+    /// Pushes `style`, as [`Self::push_style`] does, where the caller knows
+    /// it has no decoration, shadow or background to take off: built from
+    /// a description that names none, as a crate `TextStyle` is.
+    pub(crate) fn push_style_as_given(
+        &mut self,
+        mut style: TextStyle,
+        oblique: Option<f32>,
+    ) {
+        style.set_font_hinting(text_hinting(true));
+        debug_assert!(
+            as_given(&style),
+            "a style pushed as given has nothing to take off"
         );
+        let taken = Taken {
+            decoration: None,
+            shadows: Vec::new(),
+            background: None,
+        };
+        self.push(style, oblique, taken);
+    }
+
+    /// Pushes `style`, with `taken` taken off it.
+    fn push(&mut self, style: TextStyle, oblique: Option<f32>, taken: Taken) {
         self.builder.push_style(&style);
         self.oblique |= oblique.is_some();
         self.half_leading |= style.half_leading();
         self.steps.push(Step::Push(self.pushed.len()));
         self.pushed.push(Pushed {
+            parent: self.top,
             style,
             oblique,
-            taken: Taken {
-                decoration,
-                shadows,
-                background,
-            },
+            taken,
         });
+        self.top = self.pushed.len();
     }
 
     pub(crate) fn pop(&mut self) {
         self.builder.pop();
         self.steps.push(Step::Pop);
+        // As the builder's stack does, a pop with nothing pushed keeps the
+        // paragraph's own style.
+        if self.top != 0 {
+            self.top = self.pushed[self.top - 1].parent;
+        }
     }
 
     pub(crate) fn add_text(&mut self, text: &str) {
         self.builder.add_text(text);
+        match (text.as_bytes().first(), text.as_bytes().last()) {
+            (Some(&first), Some(&last)) => self.meet(first, last, true),
+            _ => self.edge_waiting = true,
+        }
         let start = self.length;
         self.length += text.len();
         self.steps.push(Step::Text(start..self.length));
@@ -310,8 +406,28 @@ impl ParagraphRecipe {
 
     pub(crate) fn add_placeholder(&mut self, placeholder: &PlaceholderStyle) {
         self.builder.add_placeholder(placeholder);
-        self.length += PLACEHOLDER_CHARACTER.len_utf8();
+        let mut bytes = [0; 4];
+        let bytes = PLACEHOLDER_CHARACTER.encode_utf8(&mut bytes).as_bytes();
+        self.meet(bytes[0], bytes[bytes.len() - 1], false);
+        self.length += bytes.len();
         self.steps.push(Step::Placeholder(placeholder.clone()));
+    }
+
+    /// Notes bytes from `first` to `last` added where the builder's text
+    /// ends, by a text step where `text` and by a placeholder otherwise:
+    /// whether [`ascii_boundary`] holds where they start, for a text step
+    /// starting there -- this one, or an empty one waiting -- from the byte
+    /// before and `first`, as it would read them from the builder's text.
+    fn meet(&mut self, first: u8, last: u8, text: bool) {
+        if text || self.edge_waiting {
+            self.ascii_edges &= self.last_byte.is_none_or(|before| {
+                before.is_ascii()
+                    && first.is_ascii()
+                    && !(before == b'\r' && first == b'\n')
+            });
+        }
+        self.edge_waiting = false;
+        self.last_byte = Some(last);
     }
 
     /// The collection whose paragraph cache this paragraph's layouts have to
@@ -334,19 +450,18 @@ impl ParagraphRecipe {
         if !drawn && self.pushed.is_empty() {
             return (self.builder.build(), None);
         }
-        // Copied only where an edge may fall inside a grapheme cluster, the
-        // one thing the text is read for here -- see `ascii_boundary`.
-        let text = {
-            let text = self.builder.get_text();
+        // Read back and copied only where an edge may fall inside a
+        // grapheme cluster, the one thing the text is read for here -- see
+        // `ascii_boundary`, judged as the text was added.
+        #[cfg(test)]
+        let full = FULL_GRAPHEMES.get();
+        #[cfg(not(test))]
+        let full = false;
+        let text = (full || !self.ascii_edges).then(|| {
             #[cfg(test)]
-            let full = FULL_GRAPHEMES.get();
-            #[cfg(not(test))]
-            let full = false;
-            let may_split = full || self.steps.iter().any(|step| {
-                matches!(step, Step::Text(bytes) if !ascii_boundary(text, bytes.start))
-            });
-            may_split.then(|| text.to_owned())
-        };
+            TEXT_READS.set(TEXT_READS.get() + 1);
+            self.builder.get_text().to_owned()
+        });
         #[cfg(test)]
         let asked_text = self.builder.get_text().to_owned();
         // The builder holds the text where it was added, so once an edge
@@ -378,7 +493,7 @@ impl ParagraphRecipe {
         for taken in self.taken() {
             background_slots.push(taken.background.as_ref().map(
                 |background| {
-                    backgrounds.push(background.clone());
+                    backgrounds.push(StyleBackground::clone(background));
                     backgrounds.len() - 1
                 },
             ));
@@ -395,9 +510,11 @@ impl ParagraphRecipe {
             slots,
             paints,
             sheared,
-            shadows: once(self.base_taken.shadows)
+            shadows: once(mem::take(&mut self.base_taken.shadows))
                 .chain(
-                    self.pushed.into_iter().map(|pushed| pushed.taken.shadows),
+                    self.pushed
+                        .iter_mut()
+                        .map(|pushed| mem::take(&mut pushed.taken.shadows)),
                 )
                 .collect(),
             boxes,
@@ -461,7 +578,7 @@ impl ParagraphRecipe {
             .taken()
             .map(|taken| {
                 taken.decoration.as_ref().map(|decoration| {
-                    boxes.push(decoration.clone());
+                    boxes.push(StyleDecoration::clone(decoration));
                     boxes.len() - 1
                 })
             })
@@ -517,11 +634,15 @@ impl ParagraphRecipe {
     /// one with different glyph paints lie: those can still fall inside a
     /// glyph cluster, a ligature's, which only the layout tells -- see
     /// [`Passes::follow`]. `text` is the builder's, or `None` where every
-    /// edge is known to lie between two clusters, and nothing moves.
+    /// edge is known to lie between two clusters, and nothing moves -- see
+    /// [`Self::edges_between_clusters`].
     fn keep_graphemes_whole(
         &mut self,
         text: Option<&str>,
     ) -> (bool, Vec<usize>) {
+        let Some(text) = text else {
+            return (false, self.edges_between_clusters());
+        };
         let mut stack = Vec::with_capacity(self.pushed.len() + 1);
         stack.push((self.base_oblique.is_some(), 0));
         let mut pieces = Vec::with_capacity(self.steps.len());
@@ -550,21 +671,15 @@ impl ParagraphRecipe {
                 }
             }
         }
-        let shaped_as_one = |left: usize, right: usize| {
-            self.text_style(left)
-                .match_one_attribute(StyleType::Font, self.text_style(right))
-        };
-        if let Some(text) = text {
-            whole_graphemes(text, &mut pieces, shaped_as_one);
-        }
+        whole_graphemes(text, &mut pieces, |left, right| {
+            self.shaped_as_one(left, right)
+        });
         let mut edges = Vec::new();
         let mut owner: Option<&Piece> = None;
         for piece in pieces.iter().filter(|piece| !piece.bytes.is_empty()) {
             if let Some(left) = owner
                 && left.bytes.end == piece.bytes.start
-                && shaped_as_one(left.slot, piece.slot)
-                && foreground(self.text_style(left.slot))
-                    != foreground(self.text_style(piece.slot))
+                && self.paint_edge(left.slot, piece.slot)
             {
                 edges.push(piece.bytes.start);
             }
@@ -580,10 +695,56 @@ impl ParagraphRecipe {
             self.steps[piece.step] = step;
         }
         debug_assert!(
-            text.is_none_or(|text| self.covers(text)),
+            self.covers(text),
             "the pieces of text cover the builder's, byte for byte"
         );
         (moved, edges)
+    }
+
+    /// The edges [`Self::keep_graphemes_whole`] finds where every edge
+    /// lies between two grapheme clusters, so that no piece of text moves:
+    /// found in one walk of the steps, the style each piece is in followed
+    /// through [`Pushed::parent`], with nothing collected but the edges.
+    fn edges_between_clusters(&self) -> Vec<usize> {
+        let mut edges = Vec::new();
+        let mut slot = 0;
+        // The end and slot of the last text that was not empty.
+        let mut owner: Option<(usize, usize)> = None;
+        for step in &self.steps {
+            match step {
+                Step::Push(style) => slot = style + 1,
+                Step::Pop if slot != 0 => slot = self.pushed[slot - 1].parent,
+                Step::Pop | Step::Placeholder(_) => {}
+                Step::Text(bytes) if bytes.is_empty() => {}
+                Step::Text(bytes) => {
+                    if let Some((end, left)) = owner
+                        && end == bytes.start
+                        && self.paint_edge(left, slot)
+                    {
+                        edges.push(bytes.start);
+                    }
+                    owner = Some((bytes.end, slot));
+                }
+            }
+        }
+        edges
+    }
+
+    /// Whether SkParagraph shapes the styles in slots `left` and `right`
+    /// as one font, so that a ligature can form across an edge between
+    /// them.
+    fn shaped_as_one(&self, left: usize, right: usize) -> bool {
+        self.text_style(left)
+            .match_one_attribute(StyleType::Font, self.text_style(right))
+    }
+
+    /// Whether an edge between text in slots `left` and `right` is one a
+    /// ligature can straddle in two paints: the two shaped as one, with
+    /// glyph paints that differ.
+    fn paint_edge(&self, left: usize, right: usize) -> bool {
+        self.shaped_as_one(left, right)
+            && foreground(self.text_style(left))
+                != foreground(self.text_style(right))
     }
 
     /// Whether the text steps and placeholders, in order, are exactly
@@ -653,9 +814,40 @@ impl ParagraphRecipe {
     }
 }
 
-/// A style pushed onto a [`ParagraphRecipe`]: the style, without what
-/// was taken off it, and the angle of the oblique it asks for, if any.
+impl Drop for ParagraphRecipe {
+    /// Hands the recipe's lists back, emptied, for the next recipe on the
+    /// thread, where they are no longer than [`KEPT_LIST_CAPACITY`] and
+    /// longer than what is kept already.
+    fn drop(&mut self) {
+        let mut steps = mem::take(&mut self.steps);
+        let mut pushed = mem::take(&mut self.pushed);
+        steps.clear();
+        pushed.clear();
+        // Nothing to hand back to once the thread's storage is gone, nor
+        // while something else on the thread holds it.
+        let _ = SPARE_LISTS.try_with(|spare| {
+            if let Ok(mut spare) = spare.try_borrow_mut() {
+                if steps.capacity() <= KEPT_LIST_CAPACITY
+                    && steps.capacity() > spare.0.capacity()
+                {
+                    spare.0 = steps;
+                }
+                if pushed.capacity() <= KEPT_LIST_CAPACITY
+                    && pushed.capacity() > spare.1.capacity()
+                {
+                    spare.1 = pushed;
+                }
+            }
+        });
+    }
+}
+
+/// A style pushed onto a [`ParagraphRecipe`]: the slot it was pushed over,
+/// the style, without what was taken off it, and the angle of the oblique
+/// it asks for, if any.
 struct Pushed {
+    /// The slot of the style it was pushed over, which a pop returns to.
+    parent: usize,
     style: TextStyle,
     oblique: Option<f32>,
     taken: Taken,
@@ -663,10 +855,14 @@ struct Pushed {
 
 /// What was taken off a style to be drawn here rather than by SkParagraph
 /// -- see [`Passes`]: its decoration, its shadows and its background.
+///
+/// The decoration and the background each behind a pointer, made only for
+/// a style that has one: a recipe moves one of these for its own style and
+/// keeps one for each style pushed, and most styles have neither.
 struct Taken {
-    decoration: Option<StyleDecoration>,
+    decoration: Option<Box<StyleDecoration>>,
     shadows: Vec<TextShadow>,
-    background: Option<StyleBackground>,
+    background: Option<Box<StyleBackground>>,
 }
 
 /// One piece of a paragraph's text: the step that adds it, its bytes,
@@ -685,6 +881,16 @@ thread_local! {
     /// [`ascii_boundary`].
     pub(crate) static FULL_GRAPHEMES: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    /// How many times [`ParagraphRecipe::build`] has read the builder's
+    /// text back on this thread, for the test that holds a paragraph whose
+    /// edges are all ASCII to reading none.
+    pub(crate) static TEXT_READS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    /// How many pushed styles [`ParagraphRecipe::push_style`] has taken
+    /// decorations, shadows and backgrounds off on this thread, for the
+    /// tests that hold a plain style to none.
+    pub(crate) static TAKES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 /// Whether a grapheme cluster boundary lies at byte `at` of `text`, judged
@@ -1563,8 +1769,8 @@ fn shadow_paint(shadow: &TextShadow, canvas: &Canvas) -> Option<Paint> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FULL_GRAPHEMES, ParagraphRecipe, Piece, add_slnt, ascii_boundary,
-        match_oblique, set_coordinates, whole_graphemes,
+        FULL_GRAPHEMES, ParagraphRecipe, Piece, Step, TEXT_READS, add_slnt,
+        ascii_boundary, match_oblique, set_coordinates, whole_graphemes,
     };
     use crate::{
         color::RgbaLinear,
@@ -2794,6 +3000,257 @@ mod tests {
             let passes = passes.expect("a colour edge between one font's");
             assert_eq!(passes.slots, slots, "{left:?} {right:?}");
         }
+    }
+
+    /// What the edge tests' paragraphs are made of: text ASCII at both
+    /// ends, at one end only, CR and LF apart, a ligature, and empty text.
+    const EDGE_PIECES: &[&str] = &[
+        "ab", "cd", " ", "fi", "mn op", "x\r", "\n", "\r", "\u{e9}",
+        "e\u{301}", "\u{301}x", "",
+    ];
+
+    /// A step of an edge test's paragraph: a style pushed, by its index in
+    /// [`edge_styles`], a pop, text, or a placeholder.
+    #[derive(Debug, Clone, Copy)]
+    enum EdgeOp {
+        Push(usize),
+        Pop,
+        Text(&'static str),
+        Placeholder,
+    }
+
+    /// The styles an edge test pushes: the paragraph's own and two other
+    /// colours of it, each shaped as one with it, a larger size, which is
+    /// shaped apart, and a decoration, which is drawn by the passes.
+    fn edge_styles() -> Vec<TextStyle> {
+        use skia_safe::textlayout::{TextDecoration, TextDecorationStyle};
+        let sized = |color: Color, size: f32| {
+            let mut style = TextStyle::new();
+            style
+                .set_font_families(&[RALEWAY])
+                .set_font_size(size)
+                .set_color(color);
+            style
+        };
+        vec![
+            sized(Color::BLACK, SIZE),
+            sized(Color::RED, SIZE),
+            sized(Color::BLUE, SIZE),
+            sized(Color::BLACK, SIZE * 1.5),
+            decorated_style(
+                Color::RED,
+                TextDecoration::UNDERLINE,
+                TextDecorationStyle::Solid,
+                None,
+            ),
+        ]
+    }
+
+    fn edge_ops(random: &mut SplitMix) -> Vec<EdgeOp> {
+        (0..1 + random.below(10))
+            .map(|_| match random.below(12) {
+                0..=5 => {
+                    EdgeOp::Text(EDGE_PIECES[random.below(EDGE_PIECES.len())])
+                }
+                6..=8 => EdgeOp::Push(random.below(edge_styles().len())),
+                9..=10 => EdgeOp::Pop,
+                _ => EdgeOp::Placeholder,
+            })
+            .collect()
+    }
+
+    /// The recipe `ops` make, over the paragraph style of
+    /// [`edge_styles`]'s first.
+    fn edge_recipe(ops: &[EdgeOp]) -> ParagraphRecipe {
+        let styles = edge_styles();
+        let mut paragraph_style = ParagraphStyle::new();
+        paragraph_style.set_text_style(&styles[0]);
+        let mut recipe =
+            ParagraphRecipe::new(paragraph_style, None, raleway(), None);
+        let placeholder = PlaceholderStyle::new(
+            SIZE * 0.75,
+            SIZE * 0.75,
+            PlaceholderAlignment::Baseline,
+            TextBaseline::Alphabetic,
+            0.0,
+        );
+        for op in ops {
+            match *op {
+                EdgeOp::Push(style) => {
+                    recipe.push_style(styles[style].clone(), None)
+                }
+                EdgeOp::Pop => recipe.pop(),
+                EdgeOp::Text(text) => recipe.add_text(text),
+                EdgeOp::Placeholder => recipe.add_placeholder(&placeholder),
+            }
+        }
+        recipe
+    }
+
+    /// A recipe's text steps, as the bytes each covers.
+    fn text_steps(recipe: &ParagraphRecipe) -> Vec<Range<usize>> {
+        recipe
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Text(bytes) => Some(bytes.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether every text step starts at an ASCII boundary is judged as the
+    /// text is added exactly as `ascii_boundary` judges it from the text
+    /// read back: over generated paragraphs whose edges are ASCII on both
+    /// sides, on one side only, CR then LF, beside placeholders and beside
+    /// empty text. Both answers come up, so neither side is untested.
+    #[test]
+    fn edges_judged_as_added_are_edges_read_back() {
+        let mut random = SplitMix(SEED);
+        let mut answers = [0; 2];
+        for _ in 0..CASES {
+            let ops = edge_ops(&mut random);
+            let mut recipe = edge_recipe(&ops);
+            let text = recipe.builder.get_text().to_owned();
+            let read = text_steps(&recipe)
+                .iter()
+                .all(|bytes| ascii_boundary(&text, bytes.start));
+            assert_eq!(recipe.ascii_edges, read, "{ops:?}");
+            answers[usize::from(read)] += 1;
+        }
+        assert!(answers.iter().all(|&n| n > CASES / 10), "{answers:?}");
+    }
+
+    /// Where every edge is ASCII, the walk of the steps finds the edges the
+    /// full pass finds, the full pass moves nothing, and the paragraph
+    /// draws byte for byte as with the text read for every edge: over
+    /// generated paragraphs in colours shaped as one, a size shaped apart,
+    /// a decoration and placeholders. Some have edges and some do not.
+    #[test]
+    fn the_walk_finds_the_edges_the_full_pass_finds() {
+        let mut random = SplitMix(SEED);
+        let (mut walked, mut with_edges) = (0, 0);
+        for _ in 0..CASES {
+            let ops = edge_ops(&mut random);
+            let mut recipe = edge_recipe(&ops);
+            if !recipe.ascii_edges {
+                continue;
+            }
+            let text = recipe.builder.get_text().to_owned();
+            let walk = recipe.edges_between_clusters();
+            let steps = text_steps(&recipe);
+            let (moved, full) = recipe.keep_graphemes_whole(Some(&text));
+            assert!(!moved, "{ops:?}");
+            assert_eq!(walk, full, "{ops:?}");
+            assert_eq!(text_steps(&recipe), steps, "{ops:?}");
+            // Drawn where there are edges, and in a quarter of the rest,
+            // since a debug build draws slowly.
+            if !walk.is_empty() || walked % 4 == 0 {
+                FULL_GRAPHEMES.set(true);
+                let read = edge_painted(&ops);
+                FULL_GRAPHEMES.set(false);
+                assert!(read == edge_painted(&ops), "{ops:?}");
+            }
+            walked += 1;
+            with_edges += usize::from(!walk.is_empty());
+        }
+        assert!(walked > CASES / 4, "{walked} walked");
+        assert!(with_edges > CASES / 40, "{with_edges} with edges");
+    }
+
+    /// The paragraph `ops` make, laid out and painted, its passes' where it
+    /// has them.
+    fn edge_painted(ops: &[EdgeOp]) -> Vec<u8> {
+        let (mut paragraph, passes) = edge_recipe(ops).build();
+        paragraph.layout(WIDTH);
+        let (w, h) = (
+            (WIDTH + 2.0 * MARGIN) as i32,
+            (paragraph.height() + 2.0 * MARGIN) as i32,
+        );
+        let mut surface =
+            surfaces::raster_n32_premul((w, h)).expect("a surface");
+        surface.canvas().clear(Color::WHITE);
+        let origin = Point::new(MARGIN, MARGIN);
+        match passes {
+            Some(mut passes) => {
+                passes.lay_out(WIDTH);
+                passes.paint(&mut paragraph, surface.canvas(), origin);
+            }
+            None => paragraph.paint(surface.canvas(), origin),
+        }
+        let info = ImageInfo::new_n32_premul((w, h), None);
+        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        assert!(surface.read_pixels(
+            &info,
+            &mut pixels,
+            (w * 4) as usize,
+            (0, 0)
+        ));
+        pixels
+    }
+
+    /// A paragraph of `styles` pushed styles, each over a little text.
+    fn styled(styles: usize) -> Vec<EdgeOp> {
+        (0..styles)
+            .flat_map(|_| [EdgeOp::Push(1), EdgeOp::Text("ab")])
+            .collect()
+    }
+
+    /// A recipe starts with the lists the one before it on the thread
+    /// handed back, whether that one was built or dropped unbuilt, so a
+    /// caller building paragraph after paragraph allocates neither.
+    #[test]
+    fn a_recipe_takes_the_lists_the_last_one_left() {
+        let ops = styled(20);
+        drop(edge_recipe(&ops).build());
+        let next = edge_recipe(&[]);
+        assert!(next.steps.capacity() >= 40, "{}", next.steps.capacity());
+        assert!(next.pushed.capacity() >= 20, "{}", next.pushed.capacity());
+        drop(next);
+        drop(edge_recipe(&styled(30)));
+        let next = edge_recipe(&[]);
+        assert!(
+            next.pushed.capacity() >= 30,
+            "kept from one dropped unbuilt"
+        );
+        assert!(next.steps.is_empty() && next.pushed.is_empty());
+    }
+
+    /// A list longer than the cap is not handed back, so one paragraph of
+    /// many styles leaves its capacity behind on no thread.
+    #[test]
+    fn a_recipe_keeps_no_list_past_the_cap() {
+        drop(edge_recipe(&styled(super::KEPT_LIST_CAPACITY + 1)).build());
+        let next = edge_recipe(&[]);
+        assert!(next.steps.capacity() <= super::KEPT_LIST_CAPACITY);
+        assert!(next.pushed.capacity() <= super::KEPT_LIST_CAPACITY);
+    }
+
+    /// What is taken off a style is a few words, its decoration and its
+    /// background each behind a pointer: every recipe moves one for its own
+    /// style and keeps one for each style pushed, and most styles have
+    /// neither, so their size was copied with every move of a builder for
+    /// nothing.
+    #[test]
+    fn what_is_taken_off_a_style_is_a_few_words() {
+        let words =
+            std::mem::size_of::<super::Taken>() / std::mem::size_of::<usize>();
+        assert!(words <= 5, "{words} words");
+    }
+
+    /// A paragraph in two styles whose edges are all ASCII is built without
+    /// its text read back.
+    #[test]
+    fn an_ascii_paragraph_is_built_without_its_text_read() {
+        let before = TEXT_READS.get();
+        edge_recipe(&[
+            EdgeOp::Text("Hamburgefonstiv "),
+            EdgeOp::Push(1),
+            EdgeOp::Text("quick brown"),
+            EdgeOp::Pop,
+        ])
+        .build();
+        assert_eq!(TEXT_READS.get() - before, 0);
     }
 
     /// The byte-pair shortcut changes nothing a paragraph draws: generated
