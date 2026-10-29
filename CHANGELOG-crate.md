@@ -1263,6 +1263,12 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
     the filter paint it never uses, and consecutive rectangles blurred
     alike in one frame are kept as one operation, each still drawn on its
     own.
+  - Every `Context2D::get_image_data`, export and window frame takes a
+    snapshot of the page, and the snapshot no longer copies the list of
+    what the page has recorded, so a canvas read again and again without
+    being cleared no longer costs more with each read: 10x10 rectangles
+    read back every 200 draws cost the same per draw over a run eight
+    times as long, and [RE-TIME vs 0.16.3] of what they did.
   - A repeated `Context2D::get_image_data` of a region within one
     256-pixel tile of a GPU canvas, that tile unchanged since the last
     read, no longer waits on the GPU to confirm it [RE-TIME vs 0.16.3]. A
