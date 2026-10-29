@@ -10,7 +10,7 @@
 //! checks that choice when it is played back, against the sigma it has
 //! there.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use skia_safe::{
     BlurStyle, Canvas as SkCanvas, ClipOp, Color4f, Data, ImageFilter,
@@ -27,7 +27,11 @@ pub enum Layer {
     Picture(Picture),
     /// A blurred flat-colour draw, or a run of them, its blur made at
     /// playback.
-    Blur(BlurOp),
+    ///
+    /// Shared, so that a layer is two words whichever kind it is: a page
+    /// snapshot copies a pointer for it rather than the op, and every
+    /// snapshot of the page draws from the one blur the op makes.
+    Blur(Arc<BlurOp>),
 }
 
 impl Layer {
