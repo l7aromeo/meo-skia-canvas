@@ -282,10 +282,11 @@ fn split(base: &Matrix) -> Option<(Matrix, Matrix)> {
 ///   the layer is the page's own size, or the page and the region together
 ///   where the region runs past it, and it drew as the page does at all 520
 ///   positions and sizes tried from 500 to 8193 on either axis. A layer that
-///   runs past the page is no longer the page's size, though, and a draw
-///   reaching 3 pixels past the left edge of a 5000 by 4100 page came out 2
-///   pixels off; on either engine such a draw is also cut otherwise than the
-///   page cuts it, as [`region`] notes.
+///   runs past the page draws what lies past its edge as well, up to the
+///   chain's reach, which the blur of the whole draw is made from and the page
+///   itself never holds: past every edge of a 300 by 200 page that is the exact
+///   blur of the whole draw. Past the reach the layer cuts it, as [`region`]
+///   notes.
 /// - That layer costs a second target the page's size, at the page's sample
 ///   count, for as long as [`layer_surface`] says Skia keeps it.
 /// - Where Skia refuses one, the layer is the region alone, widened to an even
