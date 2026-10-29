@@ -86,22 +86,21 @@ pub(crate) fn apply(
     };
     let on_gpu = is_on_gpu(canvas);
     let (region, drawn) = placed(canvas, region, rest.is_identity(), on_gpu);
-    let info = layer_info(canvas, depth, drawn);
-    // A surface the canvas's own device makes, so that the draw lands as
-    // it would on the page: on the GPU at the page's sample count. A layer
-    // without the page's samples drew edges another way, and left a path's
-    // blur by 2 up to 3.7 levels off the blur of what the page draws. A
-    // canvas recording a picture has no device to ask, and gets memory.
-    let Some(mut surface) = canvas
-        .new_surface(&info, None)
-        .or_else(|| started::raster(&info, None, None))
+    // The region alone where Skia refuses a layer from the device's origin,
+    // as `placed` says.
+    let Some((mut surface, drawn)) = std::iter::once(drawn)
+        .chain((drawn != region).then_some(region))
+        .find_map(|drawn| {
+            layer_surface(canvas, depth, drawn).map(|surface| (surface, drawn))
+        })
     else {
         return;
     };
     let mut context = gpu_of(&mut surface);
     let offscreen = surface.canvas();
-    // Only what the chain reads is cleared: the columns the CPU's layer
-    // starts at the page's origin with lie before it and are never read.
+    // Only what the chain reads is cleared: the rows and columns the CPU's
+    // layer starts at the device's origin with lie before it, are never
+    // read, and are left untouched.
     let read = region.with_offset((-drawn.left, -drawn.top));
     offscreen.save();
     offscreen.clip_irect(read, None);
@@ -192,18 +191,38 @@ fn split(base: &Matrix) -> Option<(Matrix, Matrix)> {
 /// the device's own pixels is placed so that Skia draws into it as it draws
 /// onto the page, which depends on where the layer's origin falls.
 ///
-/// - On the CPU the anti-aliasing of an edge moves with the surface's x origin,
-///   with no period: a rounded rectangle's corners came out alike with its left
-///   edge 48, 42, 40, 38, 33 or 13 pixels into the layer and up to 8 levels
-///   apart with it 56, 49, 44, 41, 39, 36, 32, 24 or 8 in. Its y origin and its
-///   size moved nothing. So the layer is drawn from the page's own left edge,
-///   or the region's where that lies further left, and the chain runs on the
-///   region alone.
+/// - On the CPU Skia splits curves in floats at the device's own coordinates --
+///   a conic into quadratics, a curve at its turning points -- and how a float
+///   rounds depends on its magnitude, so a path translated by whole pixels can
+///   be drawn otherwise. A rounded rectangle 7900 pixels in came out as the
+///   page draws it at 46 of 203 integer origins and up to 8 levels apart at the
+///   rest, along either axis; lines and rectangles came out alike at every one.
+///   So the layer starts at the device's origin, as the page does, or at the
+///   region's where that lies before it, and the chain runs on the region
+///   alone. Only the region is written, and memory nothing writes is never
+///   mapped, so the layer costs the pages its rows touch: a page or more a row,
+///   which for a narrow region far into a wide page is most of its cost -- 8.5
+///   MB for 518 rows of 16 KB pages, where the region alone is 0.3 MB.
+/// - Where Skia refuses a layer that large -- one past the `i32::MAX` bytes it
+///   allows a raster surface, which an F32 layer for a picture being recorded
+///   can pass when the picture's own pixels would not -- the layer is the
+///   region alone, and a curve in it can be drawn up to 8 levels from how the
+///   page draws it. No shift short of the whole keeps the rounding: shifting
+///   that rounded rectangle by multiples of 2^4 drew it as the page does at 106
+///   of 493 shifts, and by multiples of 2^11 at 1 of 3.
 /// - On the GPU, Metal with multisampling and its surfaces' origin at the
 ///   bottom, an edge comes out as the page draws it wherever the layer's left
 ///   edge and its bottom are an even number of pixels from the page's; an odd
 ///   one moved a rounded rectangle's corners by up to 7 levels. So the region
 ///   is widened by a pixel on either side that needs it.
+/// - That is not all the GPU's edges depend on: the page's own edges move with
+///   its size. The same rounded rectangle drawn on pages 4000, 4096, 4097, 4500
+///   and 8192 pixels wide came out alike, and on pages 5000, 6000 and 8193 wide
+///   11 of its pixels were a level apart from those; a page 4000 to 8193 pixels
+///   tall moved them as well. A layer smaller than such a page then blurs edges
+///   the page does not draw, by up to 12 pixels a rounded rectangle and 0.13 of
+///   a level past a tie. A layer as wide as the page drew it as the page does
+///   at every width tried. This is not worked around.
 ///
 /// A layer the rest of the transform maps onto the device is not in its
 /// pixels, and is left where the region puts it.
@@ -223,9 +242,30 @@ fn placed(
         region.bottom += (region.bottom - height).rem_euclid(2);
         return (region, region);
     }
-    let mut drawn = region;
-    drawn.left = region.left.min(0);
+    let drawn = IRect::from_ltrb(
+        region.left.min(0),
+        region.top.min(0),
+        region.right,
+        region.bottom,
+    );
     (region, drawn)
+}
+
+/// A layer of `drawn`'s size for `canvas`, made by the canvas's own device
+/// so that a draw lands on it as it would on the page: on the GPU at the
+/// page's sample count. A layer without the page's samples drew edges
+/// another way, and left a path's blur by 2 up to 3.7 levels off the blur of
+/// what the page draws. A canvas recording a picture has no device to ask,
+/// and gets memory. `None` where neither makes one.
+fn layer_surface(
+    canvas: &SkCanvas,
+    depth: Depth,
+    drawn: IRect,
+) -> Option<Surface> {
+    let info = layer_info(canvas, depth, drawn);
+    canvas
+        .new_surface(&info, None)
+        .or_else(|| started::raster(&info, None, None))
 }
 
 /// The layer's bounds, in its own pixels: the pixels a visible result is
@@ -237,11 +277,10 @@ fn placed(
 /// the clip widened by the reach. `None` where nothing would show.
 ///
 /// Bounded this tightly rather than by the clip widened by the reach,
-/// which held the same result, for where the layer then starts as well as
-/// for its size: Skia's anti-aliasing of an edge moves by a level or more
-/// with where the surface's origin falls, and a layer starting where the
-/// page does, as it does for a draw on the page within reach of its edge,
-/// draws the edge as the page does.
+/// which held the same result, for the layer's size, and on the GPU for
+/// where it starts: there [`placed`] keeps the layer where the region puts
+/// it, and a layer starting where the page does, as it does for a draw
+/// within reach of the page's edge, draws the edge as the page does.
 fn region(
     canvas: &SkCanvas,
     steps: &[Step],
@@ -519,9 +558,68 @@ fn filtered(
 
 #[cfg(test)]
 mod tests {
-    use skia_safe::{Color, ImageInfo, Paint, PathBuilder, Rect, Surface};
+    use skia_safe::{
+        Color, ImageInfo, Matrix, Paint, PathBuilder, PictureRecorder, Rect,
+        Surface,
+    };
 
+    use super::{Depth, Step, apply};
     use crate::started;
+
+    /// A side whose square of F32 pixels passes the `i32::MAX` bytes Skia
+    /// allows a raster surface, so that no layer from the origin of a
+    /// picture this large can be made: 12000 squared is 2.3 GB at 16 bytes
+    /// a pixel.
+    const PAST_RASTER_LIMIT: f32 = 12000.0;
+
+    /// The bytes an F32 pixel takes.
+    const F32_PIXEL: f64 = 16.0;
+
+    /// The alpha of a 40-pixel square `at` from a picture's origin, blurred
+    /// through a chain into the picture recorded over a square `bounds`
+    /// wide, and played 40 pixels round.
+    fn blurred_square(bounds: f32, at: f32) -> Vec<u8> {
+        let mut recorder = PictureRecorder::new();
+        let canvas =
+            recorder.begin_recording(Rect::from_wh(bounds, bounds), false);
+        let square = Rect::from_xywh(at, at, 40.0, 40.0);
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        apply(
+            canvas,
+            &[Step::Blur(4.0)],
+            Some(square),
+            Depth::Floats,
+            &Paint::default(),
+            |canvas| {
+                canvas.draw_rect(square, &paint);
+            },
+        );
+        let picture = recorder
+            .finish_recording_as_picture(None)
+            .expect("a picture");
+        let info = ImageInfo::new_n32_premul((120, 120), None);
+        let mut surface: Surface =
+            started::raster(&info, None, None).expect("a surface");
+        let origin = Matrix::translate((40.0 - at, 40.0 - at));
+        surface.canvas().draw_picture(&picture, Some(&origin), None);
+        let mut pixels = vec![0u8; 120 * 120 * 4];
+        assert!(surface.read_pixels(&info, &mut pixels, 120 * 4, (0, 0)));
+        pixels.chunks(4).map(|p| p[3]).collect()
+    }
+
+    /// A layer Skia will not make from the origin is the region alone, and
+    /// a draw of lines in it -- which Skia draws alike wherever its origin
+    /// falls -- blurs as it does from the origin.
+    #[test]
+    fn a_layer_too_large_from_the_origin_is_drawn_as_the_region_alone() {
+        let side = f64::from(PAST_RASTER_LIMIT);
+        assert!(side * side * F32_PIXEL > f64::from(i32::MAX));
+        let near = blurred_square(300.0, 200.0);
+        let far = blurred_square(PAST_RASTER_LIMIT, PAST_RASTER_LIMIT - 100.0);
+        assert!(near.iter().any(|a| *a > 0), "the blur drew nothing");
+        assert_eq!(near, far);
+    }
 
     /// The surface's width, and where [`cut`] clips the triangle: through
     /// it, 60 pixels right of the edge measured.

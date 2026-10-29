@@ -564,6 +564,74 @@ fn a_blurred_rounded_rectangle_is_the_exact_gaussian_of_what_it_draws() {
     }
 }
 
+/// The alpha of `window`, (left, top, width, height), of a canvas `size`
+/// large on the CPU with [`rounded`]'s rectangle at `at` filled through
+/// `filter`, read as a whole: a read of part of a canvas plays it from that
+/// part's origin.
+fn far(
+    size: (f32, f32),
+    at: (f32, f32),
+    filter: &str,
+    window: (usize, usize, usize, usize),
+) -> Vec<u8> {
+    let mut canvas = Canvas::new(size.0, size.1);
+    canvas.set_gpu(false);
+    let ctx = canvas.context();
+    ctx.set_fill_style_css("black").expect("a colour");
+    ctx.set_filter_css(filter).expect("a filter");
+    ctx.begin_path();
+    ctx.round_rect(at.0, at.1, 80.0, 40.0, [12.0; 4])
+        .expect("a rounded rectangle");
+    ctx.fill(FillRule::NonZero);
+    let data = ctx
+        .get_image_data(0.0, 0.0, size.0, size.1)
+        .expect("image data");
+    let (left, top, width, height) = window;
+    let pixels = data.pixels();
+    (top..top + height)
+        .flat_map(|row| {
+            let start = (row * size.0 as usize + left) * 4;
+            pixels[start..start + width * 4].chunks(4).map(|p| p[3])
+        })
+        .collect()
+}
+
+#[test]
+fn a_blurred_rounded_rectangle_far_into_the_page_is_the_exact_gaussian_of_what_it_draws()
+ {
+    // Skia splits a curve in floats at the device's own coordinates, so a
+    // curve thousands of pixels in is drawn otherwise once translated
+    // nearer the origin: a layer starting at the region's top left this
+    // one 7000.7 pixels down off the exact blur by 7 pixels. Each window
+    // holds the whole rectangle, and beyond it the canvas's edge or nothing.
+    //
+    // The CPU alone: on the GPU a page this large draws its edges otherwise
+    // than a layer smaller than it does, as `placed` in
+    // `src/context/chain.rs` says.
+    let rows = [
+        ((160.0, 7100.0), (41.0, 7000.7), (0, 6960, 160, 120)),
+        ((8000.0, 120.0), (7900.0, 30.25), (7860, 0, 140, 120)),
+    ];
+    for (size, at, window) in rows {
+        for sigma in [2.0f32, 8.0] {
+            let drawn: Vec<f64> = far(size, at, "none", window)
+                .into_iter()
+                .map(|a| f64::from(a) / 255.0)
+                .collect();
+            let reference = sampled(&drawn, window.2, f64::from(sigma));
+            let blurred = far(size, at, &format!("blur({sigma}px)"), window);
+            let misses = misses(&blurred, &reference);
+            assert!(
+                misses.is_empty(),
+                "sigma {sigma} at {at:?}: {} pixels off the exact blur, \
+                 first {:?}",
+                misses.len(),
+                &misses[..misses.len().min(4)],
+            );
+        }
+    }
+}
+
 /// A canvas on `gpu`'s engine with a rectangle stroked 6px wide in flat
 /// black through `filter`, or `None` where that engine is not available.
 fn stroked(gpu: bool, filter: &str) -> Option<Canvas> {
