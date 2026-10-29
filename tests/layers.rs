@@ -966,3 +966,140 @@ fn a_blur_inside_a_layer_is_the_blur_outside_one() {
         assert!(worst <= LAYER_ROUNDING, "gpu {gpu}: {worst} levels apart");
     }
 }
+
+/// One draw of the scene the raster cases build, and a read after it.
+type Step = fn(&mut Context2D);
+
+/// Draws reaching past their geometry, each in its own colour, put down one
+/// at a time inside layers so that a read after each tops up what the
+/// layers have drawn rather than starting over.
+const STEPS: [Step; 7] = [
+    |ctx| {
+        ctx.set_fill_style(RgbaLinear::opaque(0.9, 0.1, 0.1));
+        ctx.fill_rect(10.3, 7.7, 23.2, 11.9);
+    },
+    |ctx| {
+        ctx.set_stroke_style(RgbaLinear::opaque(0.1, 0.5, 0.9));
+        ctx.set_line_width(0.6);
+        ctx.begin_path();
+        ctx.move_to(4.5, 3.25);
+        ctx.line_to(57.75, 16.5);
+        ctx.stroke();
+    },
+    |ctx| {
+        ctx.set_fill_style(RgbaLinear::opaque(0.2, 0.7, 0.3));
+        ctx.set_font_css("bold 13px sans-serif");
+        ctx.fill_text("Wavy", 21.4, 15.6, None);
+    },
+    |ctx| {
+        ctx.set_filter_css("blur(3px)").expect("a blur");
+        ctx.set_fill_style(RgbaLinear::opaque(0.6, 0.2, 0.8));
+        ctx.fill_rect(30.0, 4.0, 14.0, 9.0);
+        ctx.set_filter_css("none").expect("no filter");
+    },
+    |ctx| {
+        ctx.set_shadow_color(RgbaLinear::opaque(0.0, 0.0, 0.0));
+        ctx.set_shadow_offset(6.0, 3.0);
+        ctx.set_shadow_blur(4.0);
+        ctx.set_fill_style(RgbaLinear::opaque(0.9, 0.8, 0.1));
+        ctx.fill_rect(42.6, 2.2, 8.0, 8.0);
+        ctx.set_shadow_color(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
+    },
+    |ctx| {
+        // Over the fills before it, across the clip's edge.
+        ctx.set_fill_style(RgbaLinear::opaque(0.1, 0.8, 0.8));
+        ctx.fill_rect(5.5, 9.5, 50.0, 6.0);
+    },
+    |ctx| {
+        ctx.set_fill_style(RgbaLinear::opaque(0.95, 0.5, 0.0));
+        ctx.fill_rect(0.0, 0.0, 7.3, 20.0);
+    },
+];
+
+/// What `canvas` reads of all of it, in the page's depth, as bytes.
+fn page_bytes(canvas: &mut Canvas, depth: PixelDepth) -> Vec<u8> {
+    canvas
+        .context()
+        .get_image_data_as(
+            0.0,
+            0.0,
+            WIDTH,
+            HEIGHT,
+            PixelExportOptions {
+                depth,
+                ..PixelExportOptions::default()
+            },
+        )
+        .expect("pixels")
+        .pixels()
+        .to_vec()
+}
+
+/// Reads inside layers read what the layers close to, however many reads
+/// come between the draws: three layers nested, at 0.5, 0.75 and no paint,
+/// the outer two under clips the draws cross -- rectangles on whole pixels,
+/// and circles, whose antialiased edges a raster of the layers would round
+/// otherwise -- with a read of part of the page after every draw, on both
+/// engines, at eight bits and in F16 and F32.
+#[test]
+fn reads_between_draws_read_what_layers_close_to() {
+    for gpu in ENGINES {
+        for depth in [PixelDepth::Uint8, PixelDepth::F16, PixelDepth::F32] {
+            for round in [false, true] {
+                let mut canvas = Canvas::with_options(
+                    WIDTH,
+                    HEIGHT,
+                    CanvasOptions {
+                        gpu,
+                        color_type: depth,
+                        ..CanvasOptions::default()
+                    },
+                )
+                .expect("a canvas");
+                let ctx = canvas.context();
+                ctx.set_fill_style(RgbaLinear::opaque(1.0, 1.0, 1.0));
+                ctx.fill_rect(0.0, 0.0, WIDTH, HEIGHT);
+                for (alpha, clip) in [
+                    (Some(0.5), Some((28.0, 10.0, 17.5))),
+                    (Some(0.75), Some((24.0, 9.0, 13.25))),
+                    (None, None),
+                ] {
+                    let ctx = canvas.context();
+                    if let Some((x, y, r)) = clip {
+                        ctx.begin_path();
+                        match round {
+                            true => ctx
+                                .arc(x, y, r, 0.0, std::f32::consts::TAU, false)
+                                .expect("an arc"),
+                            false => ctx.rect(
+                                (x - r).round(),
+                                0.0,
+                                (2.0 * r).round(),
+                                (y + r).round(),
+                            ),
+                        }
+                        ctx.clip(FillRule::NonZero);
+                    }
+                    match alpha {
+                        Some(alpha) => ctx.save_layer_with(alpha, None, None),
+                        None => ctx.save_layer(),
+                    }
+                }
+                for (at, step) in STEPS.iter().enumerate() {
+                    step(canvas.context());
+                    let x = (at * 7) as f32;
+                    read(&mut canvas, x, 2.0, 13.0, 11.0);
+                }
+                let inside = page_bytes(&mut canvas, depth);
+                for _ in 0..3 {
+                    canvas.context().restore();
+                }
+                let closed = page_bytes(&mut canvas, depth);
+                assert!(
+                    inside == closed,
+                    "gpu {gpu}, {depth:?}, round {round}: inside and after"
+                );
+            }
+        }
+    }
+}

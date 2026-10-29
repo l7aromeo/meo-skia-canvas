@@ -36,6 +36,7 @@ use crate::{
     },
     context::{
         BoxedContext2D,
+        faint::composited,
         layer::{BlurDraw, BlurOp, Group, Layer, LayerRec, Target},
     },
     encode::{
@@ -402,6 +403,10 @@ pub struct PageRecorder {
 /// through a copy of the group for that read alone, while the contents go
 /// on recording into the one layer they belong to.
 struct OpenLayer {
+    /// Names the layer to the raster a read keeps of what it has drawn --
+    /// see [`RecordingSurface::read_rastered`]. Unique for the process, so
+    /// that a layer opened where another closed is never taken for it.
+    id: u64,
     /// What the layer holds, filed in order: what `current` recorded before
     /// a group was filed among it, and the groups -- a layer opened inside
     /// this one, a canvas drawn in through a paint.
@@ -413,6 +418,40 @@ struct OpenLayer {
     /// What the layer's contents asked of a vector backend, which the layer
     /// asks of it in turn.
     features: VectorFeatures,
+}
+
+impl OpenLayer {
+    /// Whether a read can keep a raster of what the layer has drawn and
+    /// composite it as the layer would -- see
+    /// [`RecordingSurface::read_rastered`]: a layer that composites
+    /// source-over through nothing but an alpha, onto nothing it filters,
+    /// confined to nothing of its own, and opened under a clip that covers
+    /// each pixel of `density`'s device whole or not at all. Its device then
+    /// starts transparent, holds what is drawn in it and nothing else, and
+    /// on closing is drawn through its paint, which a raster drawn the same
+    /// way reproduces. Any other is replayed.
+    ///
+    /// The clip, because Skia clips an antialiased edge as it blends each
+    /// draw, at eight bits: a raster of the draws clipped afterwards rounds
+    /// that edge another way, and one clipped as it is drawn and again as it
+    /// is composited rounds it twice. A layer opened under a round clip read
+    /// from a raster came out up to 12 levels from the layer closed at its
+    /// edge, either way. A clip on whole pixels clips nothing by part.
+    fn rasters(&self, density: f32) -> bool {
+        let whole_pixels = |clip: &Path| {
+            !clip.is_inverse_fill_type()
+                && clip.is_rect().is_some_and(|(rect, ..)| {
+                    let device =
+                        Matrix::scale((density, density)).map_rect(rect).0;
+                    [device.left, device.top, device.right, device.bottom]
+                        .iter()
+                        .all(|edge| edge.fract() == 0.0)
+                })
+        };
+        self.rec.bounds.is_none()
+            && self.rec.footprint(Some(Rect::new_empty())).is_some()
+            && self.clip.as_ref().is_none_or(whole_pixels)
+    }
 }
 
 /// The depth a deferred picture image can carry for a canvas of `color_type`.
@@ -626,8 +665,10 @@ impl PageRecorder {
     /// a read taken while it is open finds the page beneath it already
     /// filed.
     pub fn open_layer(&mut self, rec: LayerRec) {
+        static LAYERS: AtomicU64 = AtomicU64::new(0);
         self.file_current();
         self.open.push(OpenLayer {
+            id: LAYERS.fetch_add(1, Ordering::Relaxed),
             entries: Vec::new(),
             rec,
             matrix: self.matrix,
@@ -653,6 +694,7 @@ impl PageRecorder {
         let Some(layer) = self.open.pop() else {
             return;
         };
+        self.surface.forget_layers_past(self.open.len());
         if !layer.entries.is_empty() || layer.rec.marks_when_empty() {
             let group = Group {
                 rec: layer.rec,
@@ -892,13 +934,27 @@ impl PageRecorder {
         dst_info: &ImageInfo,
     ) -> Result<Vec<u8>, String> {
         let filed = self.filed_page();
-        let whole = self.open_layers_reach_past_a_read();
-        let drawn = self.open_layers_entry();
+        self.file_current();
+        self.restore();
         self.surface.confirmed_update(&filed, opts, engine)?;
         let mut pixels = vec![0; checked_byte_size(dst_info)?];
+        let origin = (crop.x(), crop.y());
+        let rastered =
+            self.open.iter().all(|layer| layer.rasters(opts.density))
+                && self.surface.read_rastered(
+                    &self.open,
+                    opts.density,
+                    (dst_info, origin),
+                    &mut pixels,
+                )?;
+        if rastered {
+            return Ok(pixels);
+        }
+        let whole = self.open_layers_reach_past_a_read();
+        let drawn = self.open_layers_entry();
         let read = Read {
             info: dst_info,
-            origin: (crop.x(), crop.y()),
+            origin,
             whole,
         };
         self.surface.read_overlaid(
@@ -1749,7 +1805,43 @@ pub struct RecordingSurface {
     gpu: Option<bool>,
     color_space: ColorSpace,
     density: f32,
+    /// What the layers open on the page have drawn so far, outermost first,
+    /// for each that a read has been taken inside -- see
+    /// [`Self::read_rastered`]. Made like `surface` and dropped with it.
+    layers: Vec<LayerRaster>,
 }
+
+/// Clips `canvas` as the layers in `open` clip what is drawn inside the
+/// last of them: by each one's clip, outermost first, under the transform
+/// the canvas carries.
+fn clip_to(canvas: &SkCanvas, open: &[OpenLayer]) {
+    for clip in open.iter().filter_map(|layer| layer.clip.as_ref()) {
+        canvas.clip_path(clip, ClipOp::Intersect, true);
+    }
+}
+
+/// What an open layer has drawn, rastered: see
+/// [`RecordingSurface::read_rastered`].
+struct LayerRaster {
+    /// The [`OpenLayer`] it holds.
+    id: u64,
+    /// The size of the page's surface, and at its origin: the layer's
+    /// entries are drawn at the very device pixels they land on when the
+    /// layer closes onto the page, so an antialiased edge, a dither or a
+    /// gradient far from the origin rounds as it does there.
+    surface: Surface,
+    /// How many of the layer's entries are drawn in it.
+    drawn: usize,
+}
+
+/// The most a page's surface keeps of the layers open on it, in bytes, as
+/// rasters of what each has drawn -- see
+/// [`RecordingSurface::read_rastered`]. A raster is the page's surface again,
+/// so three nested layers on an eight-bit 4000x4000 page keep 192 MB and fit,
+/// where one on an F32 8000x8000 page would keep a gigabyte. Past it a read
+/// inside a layer replays the layers instead: exact, and slower the more
+/// they hold, rather than larger.
+const LAYER_RASTER_BUDGET: usize = 256 << 20;
 
 impl Default for RecordingSurface {
     fn default() -> Self {
@@ -1764,6 +1856,7 @@ impl Default for RecordingSurface {
             gpu: None,
             color_space: ColorSpace::new_srgb(),
             density: 0.0,
+            layers: Vec::new(),
         }
     }
 }
@@ -2089,6 +2182,7 @@ impl RecordingSurface {
             self.raster = None;
             self.served_at = None;
             self.depth = 0;
+            self.layers.clear();
         }
         Err(discarded("drawing the page for a read"))
     }
@@ -2112,6 +2206,7 @@ impl RecordingSurface {
             self.matte = opts.matte.clone();
             self.msaa = opts.msaa;
             self.depth = 0;
+            self.layers.clear();
 
             // only allocate a new surface if the dimensions (size * density)
             // have changed or engine switched
@@ -2218,6 +2313,164 @@ impl RecordingSurface {
                 raster
             }
         })
+    }
+
+    /// Drops the rasters of open layers past the first `open`, which have
+    /// closed -- see [`Self::read_rastered`].
+    fn forget_layers_past(&mut self, open: usize) {
+        self.layers.truncate(open);
+    }
+
+    /// Reads the page as composited with the layers `open` on it drawn over
+    /// it, at `density`, into `pixels`, laid out as `read`'s image info and
+    /// starting at its origin. `false`, having read nothing, where the read
+    /// is to be replayed instead -- see [`Self::read_overlaid`]: on the GPU,
+    /// and where the rasters would come to more than [`LAYER_RASTER_BUDGET`].
+    ///
+    /// Each open layer keeps a raster of what it has drawn, and a read draws
+    /// into it only the entries it has not seen, so that a read costs what
+    /// was drawn since the last rather than everything the layer holds: n
+    /// reads inside a layer, a draw apiece, cost O(n) rather than O(n^2).
+    /// The raster is drawn as the layer's device is -- transparent to begin
+    /// with, at the page's scale, under the clip of every layer around it
+    /// and its own -- and composited as the layer is on closing: the
+    /// raster's pixels of the read drawn through the layer's paint, under
+    /// those clips, onto what the layer is opened over, innermost first.
+    /// Which layers that reproduces is [`OpenLayer::rasters`].
+    fn read_rastered(
+        &mut self,
+        open: &[OpenLayer],
+        density: f32,
+        read: (&ImageInfo, (i32, i32)),
+        pixels: &mut [u8],
+    ) -> Result<bool, String> {
+        let unreadable = || "Could not read the page beneath an open layer";
+        let surface = self.surface.as_mut().ok_or_else(unreadable)?;
+        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+        // Re-check: cargo test reads_between_draws_read_what_layers_close_to
+        // with `metal` and this return dropped. On the GPU Skia draws a
+        // layer into a texture it sizes up to a bucket of the surface's, and
+        // a raster the page's size is not that bucket: an exact blur read
+        // from rasters came out a level from the layers closed, at 8 of
+        // 4800 bytes. The GPU replays -- see `Self::read_overlaid`.
+        if surface.recording_context().is_some() {
+            return Ok(false);
+        }
+        let page_bytes = surface.image_info().compute_min_byte_size();
+        if open.len().saturating_mul(page_bytes) > LAYER_RASTER_BUDGET {
+            self.layers.clear();
+            return Ok(false);
+        }
+        self.draw_rasters(open, density)?;
+        self.compose_rastered(open, density, read, pixels)?;
+        Ok(true)
+    }
+
+    /// Brings the raster of each layer in `open` up to what it has drawn,
+    /// making the ones a read has not yet been taken inside.
+    fn draw_rasters(
+        &mut self,
+        open: &[OpenLayer],
+        density: f32,
+    ) -> Result<(), String> {
+        let unreadable = || "Could not read the page beneath an open layer";
+        let surface = self.surface.as_mut().ok_or_else(unreadable)?;
+        let page_info = surface.image_info();
+        // The rasters of the layers still open, a stack like them.
+        let still = self
+            .layers
+            .iter()
+            .zip(open)
+            .take_while(|(raster, layer)| raster.id == layer.id)
+            .count();
+        self.layers.truncate(still);
+        for layer in &open[still..] {
+            let mut raster =
+                surface.new_surface(&page_info).ok_or_else(unreadable)?;
+            raster.canvas().clear(Color::TRANSPARENT);
+            self.layers.push(LayerRaster {
+                id: layer.id,
+                surface: raster,
+                drawn: 0,
+            });
+        }
+        for (at, raster) in self.layers.iter_mut().enumerate() {
+            let entries = &open[at].entries;
+            if raster.drawn == entries.len() {
+                continue;
+            }
+            let canvas = raster.surface.canvas();
+            canvas.save();
+            canvas.scale((density, density));
+            clip_to(canvas, &open[..=at]);
+            for entry in &entries[raster.drawn..] {
+                entry.playback(canvas, Target::Pixels);
+            }
+            canvas.restore();
+            raster.drawn = entries.len();
+        }
+        Ok(())
+    }
+
+    /// Composites the rasters of the layers in `open` over the page, for the
+    /// read's rectangle alone, and reads the result into `pixels`.
+    fn compose_rastered(
+        &mut self,
+        open: &[OpenLayer],
+        density: f32,
+        (dst_info, origin): (&ImageInfo, (i32, i32)),
+        pixels: &mut [u8],
+    ) -> Result<(), String> {
+        let unreadable = || "Could not read the page beneath an open layer";
+        let surface = self.surface.as_mut().ok_or_else(unreadable)?;
+        let crop = surface.image_info().with_dimensions(dst_info.dimensions());
+        let shift = (-origin.0 as f32, -origin.1 as f32);
+        let mut copy = Paint::default();
+        copy.set_blend_mode(BlendMode::Src);
+        // What each layer holds of the read, with the layers inside it
+        // composited in, innermost first; then the page, with the outermost.
+        let mut inside: Option<SkImage> = None;
+        for at in (0..=open.len()).rev() {
+            let mut composed =
+                surface.new_surface(&crop).ok_or_else(unreadable)?;
+            let canvas = composed.canvas();
+            // At `at`, what layer `at - 1` holds -- or, at 0, the page --
+            // and over it, through its paint, what layer `at` holds.
+            let beneath = match at {
+                0 => surface.image_snapshot(),
+                _ => self.layers[at - 1].surface.image_snapshot(),
+            };
+            canvas.draw_image(beneath, shift, Some(&copy));
+            if let Some(layer) = inside.take() {
+                canvas.save();
+                canvas.translate(shift);
+                canvas.scale((density, density));
+                clip_to(canvas, &open[..=at]);
+                canvas.reset_matrix();
+                let paint = open[at].rec.paint.as_ref().map(composited);
+                canvas.draw_image(layer, (0, 0), paint.as_deref());
+                canvas.restore();
+            }
+            if at > 0 {
+                inside = Some(composed.image_snapshot());
+                continue;
+            }
+            let row_bytes = dst_info.min_row_bytes();
+            return match read_converted_on_cpu(
+                &mut composed,
+                dst_info,
+                pixels,
+                row_bytes,
+                (0, 0),
+            ) {
+                true => Ok(()),
+                false => Err(format!(
+                    "Could not get image data (format: {:?})",
+                    dst_info.color_type()
+                )),
+            };
+        }
+        Err(unreadable().to_string())
     }
 
     /// Reads the page as composited, with `over` drawn on top of it at
@@ -6406,6 +6659,119 @@ mod tests {
             1,
             "every picture holds one read's draw: {ops:?}"
         );
+    }
+
+    /// A recorder with `depth` layers open at 0.5, each opened under `clip`
+    /// and drawn in, a read of a corner taken after each draw.
+    fn read_in_layers(
+        side: f32,
+        depth: usize,
+        clip: Option<Path>,
+    ) -> PageRecorder {
+        let mut recorder = PageRecorder::new(Rect::from_wh(side, side));
+        recorder.set_clip(&clip);
+        let mut half = Paint::default();
+        half.set_alpha_f(0.5);
+        for at in 0..depth {
+            recorder.open_layer(LayerRec {
+                paint: Some(half.clone()),
+                ..LayerRec::default()
+            });
+            recorder.append(|canvas| {
+                canvas.draw_rect(
+                    Rect::from_xywh(at as f32, 1.5, 3.25, 2.0),
+                    &Paint::default(),
+                );
+            });
+            recorder
+                .pixels(
+                    IRect::from_xywh(0, 0, 4, 4),
+                    ExportOptions::default(),
+                    RenderingEngine::CPU,
+                )
+                .expect("a read of the page");
+        }
+        recorder
+    }
+
+    /// Reads inside layers keep a raster of each open layer, drawn as far as
+    /// it has been: under no clip, and under a clip on whole pixels.
+    #[test]
+    fn reads_inside_layers_keep_a_raster_of_each() {
+        let square = Path::rect(Rect::from_xywh(1.0, 0.0, 6.0, 7.0), None);
+        for clip in [None, Some(square)] {
+            let recorder = read_in_layers(8.0, 3, clip.clone());
+            let rasters = &recorder.surface.layers;
+            assert_eq!(rasters.len(), 3, "{clip:?}: one raster a layer");
+            for (raster, layer) in rasters.iter().zip(&recorder.open) {
+                assert_eq!(raster.id, layer.id, "{clip:?}: the layer's own");
+                assert_eq!(
+                    raster.drawn,
+                    layer.entries.len(),
+                    "{clip:?}: drawn as far as the layer"
+                );
+            }
+        }
+    }
+
+    /// Reads inside layers keep no raster where it would not composite as
+    /// the layer closes: under a clip that covers pixels by part, and past
+    /// [`LAYER_RASTER_BUDGET`] -- seventeen layers on a 2048x2048 page, at
+    /// 16 MB a raster -- where the read replays the layers instead.
+    #[test]
+    fn reads_inside_layers_replay_what_a_raster_cannot_hold() {
+        let round = Path::circle((4.0, 4.0), 3.5, None);
+        let recorder = read_in_layers(8.0, 2, Some(round));
+        assert!(recorder.surface.layers.is_empty(), "under a round clip");
+        let side = 2048.0;
+        let over = LAYER_RASTER_BUDGET / (side * side * 4.0) as usize + 1;
+        let mut recorder = read_in_layers(side, over, None);
+        assert!(recorder.surface.layers.is_empty(), "past the budget");
+        let crop = IRect::from_xywh(0, 0, 24, 4);
+        let read = |recorder: &mut PageRecorder| {
+            recorder
+                .pixels(crop, ExportOptions::default(), RenderingEngine::CPU)
+                .expect("a read of the page")
+        };
+        let inside = read(&mut recorder);
+        for _ in 0..over {
+            recorder.close_layer();
+        }
+        assert_eq!(inside, read(&mut recorder), "replayed as they close");
+    }
+
+    /// A layer's raster goes when the layer closes, and a layer opened where
+    /// it was is drawn into a raster of its own: what a read inside it finds
+    /// is what it drew, not what the one before it did.
+    #[test]
+    fn a_layer_opened_where_one_closed_reads_its_own() {
+        let mut recorder = read_in_layers(8.0, 2, None);
+        recorder.close_layer();
+        assert_eq!(recorder.surface.layers.len(), 1, "the closed one goes");
+        let mut half = Paint::default();
+        half.set_alpha_f(0.5);
+        recorder.open_layer(LayerRec {
+            paint: Some(half),
+            ..LayerRec::default()
+        });
+        recorder.append(|canvas| {
+            canvas.draw_rect(
+                Rect::from_xywh(5.0, 5.0, 2.0, 2.0),
+                &Paint::default(),
+            );
+        });
+        let crop = IRect::from_xywh(0, 0, 8, 8);
+        let read = |recorder: &mut PageRecorder| {
+            recorder
+                .pixels(crop, ExportOptions::default(), RenderingEngine::CPU)
+                .expect("a read of the page")
+        };
+        let inside = read(&mut recorder);
+        assert_eq!(recorder.surface.layers.len(), 2, "a raster of its own");
+        recorder.close_layer();
+        recorder.close_layer();
+        assert!(recorder.surface.layers.is_empty(), "both go");
+        assert_eq!(inside, read(&mut recorder), "inside and after");
     }
 
     /// Reads inside a layer with nothing drawn between them keep nothing
