@@ -18,6 +18,7 @@ use skia_safe::{
 #[cfg(all(feature = "node-addon", debug_assertions))]
 use crate::node::oblique::style_copies;
 use crate::{
+    context::layer::reach_the_clip,
     font::{FontFamily, ObliqueAngle},
     font_library::{FontLibrary, instance_coordinates},
     node::{
@@ -1675,6 +1676,7 @@ pub fn drawParagraph(mut cx: FunctionContext) -> JsResult<JsUndefined> {
             Some(passes) => passes.paint(paragraph, canvas, at),
             None => paragraph.paint(canvas, at),
         }
+        reach_the_clip(canvas);
     });
 
     Ok(cx.undefined())

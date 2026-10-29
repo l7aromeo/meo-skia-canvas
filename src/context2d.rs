@@ -45,7 +45,7 @@ use crate::{
     },
     context::{
         Context2D as Inner, Dye, initial_root_face,
-        layer::Layer,
+        layer::{Layer, reach_the_clip},
         page::{ExportOptions, Matte},
     },
     css::{
@@ -3237,6 +3237,7 @@ impl Context2D {
         // silently dropped.
         self.inner.with_composited_canvas(|canvas| {
             layout.paint(canvas, SkPoint::new(x, y));
+            reach_the_clip(canvas);
         });
     }
 

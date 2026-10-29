@@ -5011,7 +5011,10 @@ mod unpremultiply_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::{faint::Faint, layer::reach_of};
+    use crate::context::{
+        faint::Faint,
+        layer::{reach_of, reach_the_clip},
+    };
     use parking_lot::Mutex;
     use skia_safe::{
         BlurStyle, FilterMode, Font, MaskFilter, MipmapMode, PaintCap,
@@ -6077,7 +6080,7 @@ mod tests {
             }
             tiny.image_snapshot()
         };
-        let draws: [(&'static str, Draw); 10] = [
+        let draws: [(&'static str, Draw); 11] = [
             (
                 "an antialiased rect at fractions",
                 Box::new(|canvas| {
@@ -6151,14 +6154,34 @@ mod tests {
             ),
             (
                 "text",
+                Box::new({
+                    let typeface = typeface.clone();
+                    move |canvas| {
+                        let font = Font::from_typeface(typeface.clone(), 23.0);
+                        canvas.draw_str(
+                            "Wavy",
+                            (3.0, 30.0),
+                            &font,
+                            &Paint::default(),
+                        );
+                        reach_the_clip(canvas);
+                    }
+                }),
+            ),
+            (
+                "text scaled where it is recorded",
                 Box::new(move |canvas| {
-                    let font = Font::from_typeface(typeface.clone(), 23.0);
+                    let font = Font::from_typeface(typeface.clone(), 11.5);
+                    canvas.save();
+                    canvas.scale((2.0, 2.0));
                     canvas.draw_str(
                         "Wavy",
-                        (3.0, 30.0),
+                        (1.5, 15.0),
                         &font,
                         &Paint::default(),
                     );
+                    canvas.restore();
+                    reach_the_clip(canvas);
                 }),
             ),
             (
@@ -6397,6 +6420,53 @@ mod tests {
                 ),
                 "{drawn}: confined to its shape"
             );
+        }
+    }
+
+    /// Text in a layer, however it is drawn, reaches as far as the clip it is
+    /// drawn under: `fillText`, `strokeText` and a paragraph each leave the
+    /// layer reaching the page -- see [`reach_the_clip`] -- where a
+    /// rectangle in a layer reaches only the rectangle.
+    #[test]
+    fn text_in_a_layer_reaches_the_clip_it_is_drawn_under() {
+        let side = 64.0;
+        let reach = |draw: &dyn Fn(&mut crate::Context2D)| {
+            let mut canvas = crate::Canvas::new(side, side);
+            let ctx = canvas.context();
+            ctx.save_layer_with(0.5, None, None);
+            draw(ctx);
+            ctx.restore();
+            let mut reach = None;
+            canvas.context().inner.with_recorder(|mut recorder| {
+                reach =
+                    recorder.page().layers.iter().find_map(
+                        |layer| match layer {
+                            Layer::Group(group) => Some(group.reach()),
+                            _ => None,
+                        },
+                    );
+            });
+            reach.expect("the layer, filed as a group")
+        };
+        assert_eq!(
+            reach(&|ctx| ctx.fill_rect(10.0, 10.0, 5.0, 5.0)),
+            Some(Rect::from_xywh(10.0, 10.0, 5.0, 5.0)),
+            "a rectangle"
+        );
+        type Text = fn(&mut crate::Context2D);
+        let texts: [(&str, Text); 3] = [
+            ("fillText", |ctx| ctx.fill_text("Wavy", 4.0, 30.0, None)),
+            ("strokeText", |ctx| ctx.stroke_text("Wavy", 4.0, 30.0, None)),
+            ("a paragraph", |ctx| {
+                let engine = crate::TextEngine::new(&crate::FontLibrary::new());
+                let mut builder =
+                    engine.paragraph_builder(&crate::TextStyle::default());
+                builder.add_text("Wavy");
+                ctx.draw_paragraph(&builder.build(60.0), 4.0, 10.0);
+            }),
+        ];
+        for (name, draw) in texts {
+            assert_eq!(reach(&draw), Some(Rect::from_wh(side, side)), "{name}");
         }
     }
 

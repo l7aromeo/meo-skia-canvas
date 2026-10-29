@@ -53,7 +53,7 @@ use crate::{
     utils::*,
 };
 use faint::Faint;
-use layer::{BlurDraw, Layer, LayerRec};
+use layer::{BlurDraw, Layer, LayerRec, reach_the_clip};
 use page::{ExportOptions, Page, PageRecorder};
 use typesetting::{TextSettings, Typesetting, Typography};
 
@@ -1882,9 +1882,11 @@ impl Context2D {
                 let draw = |canvas: &SkCanvas, at: Point| {
                     #[cfg(test)]
                     if let Some(layout) = &oracle {
-                        return layout.paragraph.paint(canvas, at);
+                        layout.paragraph.paint(canvas, at);
+                        return reach_the_clip(canvas);
                     }
-                    run.paint(canvas, at, paint, global_alpha, faint)
+                    run.paint(canvas, at, paint, global_alpha, faint);
+                    reach_the_clip(canvas);
                 };
                 match condensation {
                     // Chrome condenses with a plain anisotropic transform

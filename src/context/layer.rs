@@ -77,6 +77,35 @@ impl Layer {
     }
 }
 
+/// The key of the annotation [`reach_the_clip`] records. No backend acts on
+/// it: raster and GPU devices draw no annotation, and a PDF or SVG writes
+/// only the ones whose keys it knows -- a link, a named destination.
+const TEXT_REACH: &str = "meo-skia-canvas/text-reach";
+
+/// Records on `canvas`, beside a text draw, an annotation over what its clip
+/// allows, so that the bounds Skia gives the recording -- the rectangle
+/// [`LayerRec::footprint`] confines a layer to -- take in all of it.
+///
+/// Skia bounds a run of text by its glyphs hinted at the scale it is
+/// recorded at, and played back at another -- a page exported or read at a
+/// density -- hinting puts the ink elsewhere: on FreeType a line of text at
+/// density 2 drew a device row above its bounds, which a layer confined to
+/// them cut off. Text scaled by a transform where it is recorded is bounded
+/// at that scale, and kept to its bounds. The scale a page is played back
+/// at is not known when it is recorded, so text is bounded by the clip
+/// instead, which scales with the page, and a layer holding text is left as
+/// large as the clip, as every layer was before layers were confined. Draws
+/// that are not text keep their own bounds.
+pub(crate) fn reach_the_clip(canvas: &SkCanvas) {
+    let Some(clip) = canvas.device_clip_bounds() else {
+        return;
+    };
+    canvas.save();
+    canvas.reset_matrix();
+    canvas.draw_annotation(Rect::from(clip), TEXT_REACH, &Data::new_empty());
+    canvas.restore();
+}
+
 /// The rectangle everything in `entries` can draw in -- see [`Layer::reach`]
 /// -- empty where they are none, `None` where one of them is not known.
 pub(crate) fn reach_of(entries: &[Layer]) -> Option<Rect> {
