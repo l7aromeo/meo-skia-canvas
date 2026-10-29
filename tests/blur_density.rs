@@ -278,11 +278,14 @@ const PAST_THE_CAP: f64 = 10.0;
 fn a_blur_past_the_coverage_cap_at_a_density_is_drawn_at_its_width() {
     // `blur(40px)` on a flat rectangle takes the coverage blur at density 1,
     // and at density 4 comes to 160 device pixels, past the 128 that blur
-    // can draw. The choice is made again where the page is played back.
+    // can draw. The choice is made again where the page is played back --
+    // inside a `saveLayer` as well, whose contents are played back with it.
     let (width, height) = (400.0f32, 300.0f32);
     let rect = [150.0f32, 100.25, 100.0, 100.0];
     let sigma = 40.0f32;
-    for gpu in [false, true] {
+    for (gpu, layered) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
         let mut canvas = Canvas::new(width, height);
         canvas.set_gpu(gpu);
         if gpu && canvas.engine_kind() != EngineKind::Gpu {
@@ -292,8 +295,14 @@ fn a_blur_past_the_coverage_cap_at_a_density_is_drawn_at_its_width() {
         ctx.set_fill_style_css("black").expect("a colour");
         ctx.set_filter_css(&format!("blur({sigma}px)"))
             .expect("a filter");
+        if layered {
+            ctx.save_layer();
+        }
         let [x, y, w, h] = rect;
         ctx.fill_rect(x, y, w, h);
+        if layered {
+            ctx.restore();
+        }
         let density = 4;
         let data = canvas
             .to_image_data(
@@ -314,7 +323,8 @@ fn a_blur_past_the_coverage_cap_at_a_density_is_drawn_at_its_width() {
         );
         assert!(
             error <= PAST_THE_CAP,
-            "gpu {gpu}: {error:.1} levels from the exact blur at density {density}"
+            "gpu {gpu} layered {layered}: {error:.1} levels from the exact \
+             blur at density {density}"
         );
     }
 }

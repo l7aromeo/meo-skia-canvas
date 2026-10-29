@@ -498,10 +498,20 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 - **An SVG export keeps what a `saveLayer` holds.** Skia's SVG backend has
   no layers and dropped whatever was drawn inside one: a red square in
   `ctx.saveLayer()`, in a translucent or nested layer, or a paragraph drawn
-  in one, exported as a page without it. A page with a draw inside a layer
-  is now rasterized into the SVG, as one with a filtered draw inside a
-  layer already was; a layer that holds nothing leaves it vector. PDF drew
-  all of these correctly and stays vector.
+  in one, exported as a page without it. A layer holding a draw is now
+  rasterized into the SVG on its own and the rest of the page stays
+  vector; a filtered draw inside a layer, which rasterized the whole page,
+  now rasterizes only its layer as well, and a layer that holds nothing
+  leaves the page vector. PDF drew all of these correctly and stays
+  vector.
+
+- **A read inside a `saveLayer` no longer ends it.** `getImageData()`,
+  `toBuffer()` or any export taken while a layer was open closed the layer
+  at that point, and whatever was drawn after it landed outside: a second
+  red square in `ctx.saveLayer(0.5)` on white read opaque red beside a first
+  composited at half, and three nested layers at 0.5 composited every square
+  through one of them. The layer now stays open, and the read or export sees
+  it composited as it stands -- the pixels the page reads once it closes.
 
 - **A paragraph's decoration and text shadow are painted in the colours its
   style names.** SkParagraph holds both as an eight-bit sRGB colour, and
@@ -512,6 +522,15 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   it is clipped. Both are drawn here rather than by SkParagraph, so they now
   take the colours as named, as the text does; a colour of whole bytes
   draws as it did.
+- **A translucent layer composites at its alpha.** On the CPU engine a layer
+  under `ctx.saveLayer(alpha)`, a canvas drawn in by `ctx.drawCanvas()`
+  under `globalAlpha` -- with or without a shadow -- and either of them
+  inside another layer composited up to 1.5 levels off: red over white
+  through a layer at 0.5 read 126, where the exact value is 127.5. Skia
+  composites such a layer on an eight-bit page by an alpha out of 256 and
+  truncates. Each now reads within half a level of the exact value at every
+  alpha, on both engines -- a shadowed one within the rounding of the shadow
+  beneath it -- and a PDF still writes it as an opacity, in vectors.
 
 - **A text decoration's colour is painted at the precision it names, as a
   fill's is.** The colour in `ctx.textDecoration` was rounded to eight bits

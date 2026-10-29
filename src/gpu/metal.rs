@@ -16,7 +16,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{context::page::ExportOptions, gpu::ThreadBound};
+use crate::{
+    context::{layer::Target, page::ExportOptions},
+    gpu::ThreadBound,
+};
 
 thread_local!(
     static MTL_CONTEXT: RefCell<Option<MetalContext>> =
@@ -405,7 +408,7 @@ impl MetalRenderer {
                 for layer in page.layers.iter().skip(self.cache.depth()) {
                     canvas.save();
                     canvas.concat(&matrix);
-                    layer.playback(canvas);
+                    layer.playback(canvas, Target::Pixels);
                     canvas.restore();
                 }
             },

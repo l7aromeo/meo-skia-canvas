@@ -19,6 +19,7 @@ use std::{
     hash::{Hash, Hasher},
     iter::{self, Peekable},
     str::CharIndices,
+    sync::Arc,
 };
 
 use skia_safe::{
@@ -44,6 +45,7 @@ use crate::{
     },
     context::{
         Context2D as Inner, Dye, initial_root_face,
+        layer::{Layer, reach_the_clip},
         page::{ExportOptions, Matte},
     },
     css::{
@@ -3235,6 +3237,7 @@ impl Context2D {
         // silently dropped.
         self.inner.with_composited_canvas(|canvas| {
             layout.paint(canvas, SkPoint::new(x, y));
+            reach_the_clip(canvas);
         });
     }
 
@@ -4372,6 +4375,10 @@ struct Captured {
     /// draw can replay just the region it shows rather than materializing
     /// the whole page. `None` when the content is already a picture.
     picture: Option<SkPicture>,
+    /// The source page's own entries where the content is its picture, so a
+    /// draw through a paint holds the page as recorded -- see
+    /// `Inner::draw_picture_costing`.
+    entries: Option<Arc<Vec<Layer>>>,
 }
 
 fn capture(source: &mut Canvas) -> Option<Captured> {
@@ -4400,6 +4407,7 @@ fn capture(source: &mut Canvas) -> Option<Captured> {
             features,
             cost,
             picture: context.inner.picture(),
+            entries: None,
         }),
         false => context.inner.picture().map(|picture| Captured {
             content: Content::Vector(picture, size),
@@ -4407,6 +4415,7 @@ fn capture(source: &mut Canvas) -> Option<Captured> {
             features,
             cost,
             picture: None,
+            entries: Some(context.inner.entries()),
         }),
     }
 }
@@ -4423,13 +4432,19 @@ fn place_capture(
         features,
         cost,
         picture,
+        entries,
         ..
     } = captured;
     let (features, cost) = (*features, *cost);
     match content {
-        Content::Vector(picture, _) => {
-            ctx.draw_picture_costing(picture, src, dst, features, cost.max(1))
-        }
+        Content::Vector(picture, _) => ctx.draw_picture_costing(
+            picture,
+            entries.clone(),
+            src,
+            dst,
+            features,
+            cost.max(1),
+        ),
         // A bitmap here is a source that carries nesting and has yet to be
         // rasterized; `draw_nested_image` takes only the part this draw can
         // show. Charged as well, because the destination now carries it.
