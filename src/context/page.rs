@@ -4760,7 +4760,7 @@ mod tests {
     use super::*;
     use crate::context::faint::Faint;
     use parking_lot::Mutex;
-    use std::{ptr, thread};
+    use std::{collections::BTreeSet, ptr, thread};
 
     /// Serialises the tests that assert on the process-wide page cache.
     ///
@@ -5780,6 +5780,44 @@ mod tests {
             .join()
             .expect("the reads return");
         assert_eq!(pixel[3], 128, "the layer composites at its alpha");
+    }
+
+    /// Ten thousand reads inside one layer, each after a draw, leave the
+    /// layer's recording one picture per read, each holding that read's draw
+    /// and nothing of the reads before it. Drawn in a corner the reads never
+    /// look at, so that Skia rejects each picture by its bounds and the
+    /// reads stay cheap.
+    #[test]
+    fn ten_thousand_reads_inside_a_layer_keep_each_draw_its_own_picture() {
+        /// Many reads, for a pin on depth rather than on stack.
+        const READS: usize = 10_000;
+        let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
+        let crop = IRect::from_xywh(7, 7, 1, 1);
+        recorder.open_layer(LayerRec::default());
+        for _ in 0..READS {
+            recorder.append(|canvas| {
+                canvas.draw_rect(Rect::from_wh(1.0, 1.0), &Paint::default());
+            });
+            recorder
+                .pixels(crop, ExportOptions::default(), RenderingEngine::CPU)
+                .expect("a read of the page");
+        }
+        let entries = &recorder.open[0].entries;
+        assert_eq!(entries.len(), READS, "one picture per read");
+        // The frame the draw is recorded under, and the draw: as many
+        // operations in the last picture as in the first.
+        let ops: BTreeSet<_> = entries
+            .iter()
+            .map(|entry| match entry {
+                Layer::Picture(picture) => Some(picture.approximate_op_count()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ops.len(),
+            1,
+            "every picture holds one read's draw: {ops:?}"
+        );
     }
 
     /// Reads inside a layer with nothing drawn between them keep nothing
