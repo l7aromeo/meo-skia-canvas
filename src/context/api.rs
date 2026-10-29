@@ -1374,8 +1374,15 @@ pub fn drawCanvas(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let (src, dst) = content.snap_rects_to_bounds(src, dst);
     match &content {
         Content::Vector(pict, _) => {
-            this.borrow_mut()
-                .draw_picture_costing(pict, &src, &dst, source, cost);
+            let entries = context.borrow().entries();
+            this.borrow_mut().draw_picture_costing(
+                pict,
+                Some(entries),
+                &src,
+                &dst,
+                source,
+                cost,
+            );
             Ok(cx.undefined())
         }
         Content::Bitmap(image) => {
