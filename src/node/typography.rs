@@ -230,11 +230,17 @@ pub(crate) fn paragraph_style() -> ParagraphStyle {
     // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
     // Re-check: "a line breaks within a hundredth of the edge" in
     // tests/suite/paragraph.test.js, its last assertion red once fixed.
-    // With the hack off, `LineBreakerWithLittleRounding` in
-    // `TextWrapper.cpp` still floors a line's width to hundredths before
-    // comparing it with the paragraph's, within a quarter pixel of it, so a
-    // line up to a hundredth wider than the paragraph still fits. No width
-    // passed to `layout` undoes a floor applied to the line's side.
+    // With the hack off, `LineBreakerWithLittleRounding::breakLine` in
+    // `TextWrapper.cpp` breaks, within a quarter pixel of `maxWidth`, where
+    // `floor(width * 100) / 100 > maxWidth`: where the width reaches the
+    // first hundredth above `maxWidth`, so a line up to a hundredth wider
+    // than the paragraph still fits. Not worked around, as nothing exact
+    // reaches it: no `maxWidth` makes that test `width > maxWidth` unless it
+    // sits just under a hundredth, and `lookAhead` also measures each word
+    // and cluster and the line aligns against the same `maxWidth`; laying an
+    // overhanging line out again at a narrower width breaks every other
+    // line there too; and breaking it by hand changes the text a
+    // `Paragraph`'s ranges index.
     let mut style = ParagraphStyle::new();
     style.set_apply_rounding_hack(false);
     style
