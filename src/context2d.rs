@@ -15,6 +15,8 @@
 //! would be in JavaScript.
 
 use std::{
+    borrow::Borrow,
+    hash::{Hash, Hasher},
     iter::{self, Peekable},
     str::CharIndices,
 };
@@ -54,6 +56,7 @@ use crate::{
     export::VectorFeatures,
     filter::{ColorFilter, FilterOp, ImageFilter, MaskFilter},
     font::{FontFamily, FontVariation, ObliqueAngle},
+    font_library::FontLibrary as SharedFonts,
     geometry::{Affine, Point, Projection, Rect},
     gpu::{RenderingEngine, completion::typed},
     image::Image,
@@ -532,6 +535,91 @@ impl DashFit {
     }
 }
 
+/// What a [`Font`] is resolved from -- see [`Font::field_values`].
+///
+/// Every field of [`Font`], and nothing else, because the one caller,
+/// [`Context2D::set_font`], lowers a font with `small_caps` off. A caller
+/// resolving through [`FontKey`] with small caps on, as
+/// [`Font::to_spec_with`] can, has to add it here, or a small-caps font and
+/// the same font without would share an entry.
+#[derive(PartialEq, Eq, Hash)]
+pub(crate) struct FontFieldValues<'a> {
+    families: &'a [FontFamily],
+    size: u32,
+    weight: u16,
+    slant: FontSlant,
+    stretch: FontStretch,
+    line_height: Option<u32>,
+}
+
+/// A [`Font`] the library has resolved, as the key it is kept under:
+/// compared and hashed by [`Font::field_values`], and found by a borrowed
+/// `Font` through [`FontFields`] without cloning one to look it up.
+pub(crate) struct FontKey(Font);
+
+impl FontKey {
+    pub(crate) fn new(font: &Font) -> Self {
+        Self(font.clone())
+    }
+}
+
+/// A [`Font`] or a [`FontKey`], seen as the fields it resolves from.
+pub(crate) trait FontFields {
+    fn fields(&self) -> FontFieldValues<'_>;
+}
+
+impl FontFields for Font {
+    fn fields(&self) -> FontFieldValues<'_> {
+        self.field_values()
+    }
+}
+
+impl FontFields for FontKey {
+    fn fields(&self) -> FontFieldValues<'_> {
+        self.0.field_values()
+    }
+}
+
+impl<'a> Borrow<dyn FontFields + 'a> for FontKey {
+    fn borrow(&self) -> &(dyn FontFields + 'a) {
+        self
+    }
+}
+
+impl PartialEq for dyn FontFields + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.fields() == other.fields()
+    }
+}
+
+impl Eq for dyn FontFields + '_ {}
+
+impl Hash for dyn FontFields + '_ {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.fields().hash(state);
+    }
+}
+
+impl PartialEq for FontKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.fields() == other.fields()
+    }
+}
+
+impl Eq for FontKey {}
+
+impl Hash for FontKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.fields().hash(state);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: how many fonts this thread has lowered to a specification.
+    static SPECS_LOWERED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// A font selection: families, size, weight, and slant.
 ///
 /// The Canvas API packs these into one `font` string. Here they are fields,
@@ -709,9 +797,26 @@ impl Font {
         self.to_spec_with(false)
     }
 
+    /// Every field the specification is lowered from, floats by their bits,
+    /// so that two fonts agreeing here resolve to the same font and two that
+    /// differ anywhere do not -- `-0.0` and `0.0` included, which serialize
+    /// apart.
+    fn field_values(&self) -> FontFieldValues<'_> {
+        FontFieldValues {
+            families: &self.families,
+            size: self.size.to_bits(),
+            weight: self.weight,
+            slant: self.slant,
+            stretch: self.stretch,
+            line_height: self.line_height.map(f32::to_bits),
+        }
+    }
+
     /// As [`Font::to_spec`], with small caps on when `small_caps` is, as a
     /// font shorthand can ask and a [`Font`] cannot carry.
     fn to_spec_with(&self, small_caps: bool) -> FontSpec {
+        #[cfg(test)]
+        SPECS_LOWERED.set(SPECS_LOWERED.get() + 1);
         // Every name quoted and every generic bare, as the getter writes
         // them, so a family called serif and the generic are two keys.
         let families = self
@@ -1797,7 +1902,19 @@ impl Context2D {
     /// has no equivalent field and must be set afterwards, or `small-caps`
     /// given in a shorthand to [`Context2D::set_font_css`].
     pub fn set_font(&mut self, font: &Font) {
-        self.inner.set_font_spec(font.to_spec());
+        // A font set before is resolved already: lowering it to a
+        // specification and looking that up cost more than the rest of
+        // setting it.
+        let resolved = SharedFonts::with_shared(|lib| {
+            lib.resolved_by_value(font).or_else(|| {
+                let resolved = lib.resolve(font.to_spec())?;
+                lib.remember_by_value(font, resolved.clone());
+                Some(resolved)
+            })
+        });
+        if let Some(resolved) = resolved {
+            self.inner.set_font(&resolved);
+        }
     }
 
     /// Sets the font from a CSS `font` shorthand, as assigning `ctx.font`
@@ -4489,6 +4606,161 @@ pub(crate) fn affine_to_matrix(t: Affine) -> SkMatrix {
     let mut matrix = SkMatrix::new_identity();
     matrix.set_affine(&[t.a, t.b, t.c, t.d, t.tx, t.ty]);
     matrix
+}
+
+#[cfg(test)]
+mod font_value_tests {
+    use super::{
+        Canvas, Font, FontFamily, FontSlant, FontStretch, SPECS_LOWERED,
+    };
+    use crate::{
+        font::{FontLibrary, ObliqueAngle},
+        font_library::FontLibrary as SharedFonts,
+    };
+
+    const OSWALD: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"
+    );
+
+    fn register(family: &str) {
+        FontLibrary::new()
+            .register_font_from_path(family, OSWALD)
+            .expect("a bundled face registers");
+    }
+
+    /// What a context reads back after `fonts` are set on it in turn: the
+    /// font string and the line height, the two places a font shows.
+    fn after(fonts: &[&Font]) -> (String, Option<f32>) {
+        let mut canvas = Canvas::new(200.0, 100.0);
+        let ctx = canvas.context();
+        for font in fonts {
+            ctx.set_font(font);
+        }
+        (ctx.font(), ctx.inner.state.text.line_height)
+    }
+
+    /// What setting `font` should read back, worked out from the font itself
+    /// rather than through a context, whose library a wrong key would answer
+    /// from the same wrong entry.
+    fn own(font: &Font) -> (String, Option<f32>) {
+        let spec = font.to_spec();
+        (spec.serialized, spec.line_height)
+    }
+
+    fn lowered() -> usize {
+        SPECS_LOWERED.get()
+    }
+
+    #[test]
+    fn a_font_set_again_is_not_lowered_again() {
+        register("FontValueAgain");
+        let regular = Font::new("FontValueAgain", 16.0);
+        let bold = Font {
+            weight: 700,
+            ..regular.clone()
+        };
+        let before = lowered();
+        after(&[&regular, &bold, &regular, &bold]);
+        assert_eq!(lowered() - before, 2, "each font lowered once");
+    }
+
+    #[test]
+    fn fonts_differing_in_any_one_field_resolve_apart() {
+        register("FontValueOne");
+        register("FontValueTwo");
+        let base = Font::new("FontValueOne", 16.0);
+        let angle = |degrees| {
+            FontSlant::Oblique(ObliqueAngle::new(degrees).expect("an angle"))
+        };
+        let differing = [
+            (
+                "families",
+                Font {
+                    families: vec![FontFamily::Named("FontValueTwo".into())],
+                    ..base.clone()
+                },
+            ),
+            (
+                "size",
+                Font {
+                    size: 18.0,
+                    ..base.clone()
+                },
+            ),
+            (
+                "weight",
+                Font {
+                    weight: 700,
+                    ..base.clone()
+                },
+            ),
+            (
+                "slant",
+                Font {
+                    slant: FontSlant::Italic,
+                    ..base.clone()
+                },
+            ),
+            (
+                "stretch",
+                Font {
+                    stretch: FontStretch::Condensed,
+                    ..base.clone()
+                },
+            ),
+            (
+                "line height",
+                Font {
+                    line_height: Some(24.0),
+                    ..base.clone()
+                },
+            ),
+        ];
+        for (field, other) in &differing {
+            assert_ne!(own(&base), own(other), "{field} shows");
+            assert_eq!(
+                after(&[&base, other]),
+                own(other),
+                "a font differing in its {field} reads back as itself"
+            );
+            assert_eq!(
+                after(&[other, &base]),
+                own(&base),
+                "and the font it differs from as itself after it ({field})"
+            );
+        }
+        let (ten, twenty) = (
+            Font {
+                slant: angle(10.0),
+                ..base.clone()
+            },
+            Font {
+                slant: angle(20.0),
+                ..base.clone()
+            },
+        );
+        assert_ne!(own(&ten), own(&twenty), "the angle shows");
+        assert_eq!(after(&[&ten, &twenty]), own(&twenty), "the oblique angle");
+    }
+
+    #[test]
+    fn a_registration_or_a_release_lowers_a_font_again() {
+        register("FontValueEpoch");
+        let font = Font::new("FontValueEpoch", 16.0);
+        let mut canvas = Canvas::new(200.0, 100.0);
+        let ctx = canvas.context();
+        ctx.set_font(&font);
+        let before = lowered();
+        ctx.set_font(&font);
+        assert_eq!(lowered(), before, "kept");
+        register("FontValueEpochOther");
+        ctx.set_font(&font);
+        assert_eq!(lowered(), before + 1, "a registration lets it go");
+        SharedFonts::with_shared(SharedFonts::release_caches);
+        ctx.set_font(&font);
+        assert_eq!(lowered(), before + 2, "so does the idle release");
+    }
 }
 
 #[cfg(test)]

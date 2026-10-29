@@ -4,9 +4,12 @@
 #![allow(non_snake_case)]
 use neon::{prelude::*, types::buffer::TypedArray};
 use std::{
+    borrow::Borrow,
     cell::RefCell,
     collections::{BTreeMap, HashMap},
-    fs, iter,
+    fs,
+    hash::Hash,
+    iter,
     path::Path,
     rc::Rc,
     sync::{Arc, OnceLock},
@@ -23,6 +26,7 @@ use skia_safe::{
 
 use crate::{
     cache_map::{CacheMap, CacheSet},
+    context2d::{Font, FontFields, FontKey},
     font::{
         FontFamily, GenericFamily, InstancedPositions, KnownAxes, caseless,
         optical_size,
@@ -372,7 +376,9 @@ pub(crate) fn forgetful() -> bool {
 /// Matched to the memo the JavaScript CSS parser keeps of the same strings,
 /// which holds 1024. A drawing uses a handful of fonts; the bound is here
 /// because a program that animates a font size names a new one every frame,
-/// and neither side should grow without one.
+/// and neither side should grow without one. The fonts kept by [`Font`]
+/// value take the same bound, for the same program written against the
+/// crate.
 const RESOLVED_FONT_CACHE_SIZE: usize = 1024;
 
 /// A font specification, and the typeface the library matched it to.
@@ -393,30 +399,46 @@ pub type ResolvedFont = Arc<(FontSpec, Typeface)>;
 /// serialized form the `font` getter reports, is the key: the serialized form
 /// drops the line height, so two fonts differing only there would share an
 /// entry.
-#[derive(Default)]
-struct ResolvedFontCache {
-    entries: CacheMap<String, (ResolvedFont, u64)>,
+///
+/// The same cache keyed by a [`FontKey`] holds the fonts the crate's
+/// `Context2D::set_font` resolved from a [`Font`] value, so that setting a
+/// font again neither lowers it to a specification nor looks it up -- the two
+/// together cost more than everything else setting a font does.
+struct ResolvedFontCache<K = String> {
+    entries: CacheMap<K, (ResolvedFont, u64)>,
     uses: u64,
 }
 
-impl ResolvedFontCache {
-    fn get(&mut self, canonical: &str) -> Option<ResolvedFont> {
+impl<K> Default for ResolvedFontCache<K> {
+    fn default() -> Self {
+        Self {
+            entries: CacheMap::default(),
+            uses: 0,
+        }
+    }
+}
+
+impl<K: Hash + Eq> ResolvedFontCache<K> {
+    fn get<Q: Hash + Eq + ?Sized>(&mut self, key: &Q) -> Option<ResolvedFont>
+    where
+        K: Borrow<Q>,
+    {
         self.uses += 1;
         let uses = self.uses;
-        self.entries.get_mut(canonical).map(|(font, stamp)| {
+        self.entries.get_mut(key).map(|(font, stamp)| {
             *stamp = uses;
             font.clone()
         })
     }
 
-    fn insert(&mut self, canonical: String, font: ResolvedFont) {
+    fn insert(&mut self, key: K, font: ResolvedFont) {
         if self.entries.len() >= RESOLVED_FONT_CACHE_SIZE
-            && !self.entries.contains_key(&canonical)
+            && !self.entries.contains_key(&key)
         {
             self.evict_half();
         }
         self.uses += 1;
-        self.entries.insert(canonical, (font, self.uses));
+        self.entries.insert(key, (font, self.uses));
     }
 
     /// Drops the least recently used half.
@@ -685,6 +707,8 @@ pub struct FontLibrary {
     /// The instances the cached collections were built from, kept longer.
     instances: InstanceCache,
     resolved_fonts: ResolvedFontCache,
+    /// The fonts resolved from a [`Font`] value -- see [`ResolvedFontCache`].
+    fonts_by_value: ResolvedFontCache<FontKey>,
     /// Which of the two kinds of collection this hands out now -- see
     /// [`set_hinting`](Self::set_hinting).
     collection_hinted: bool,
@@ -801,6 +825,7 @@ impl FontLibrary {
             collection_cache: CollectionCache::default(),
             instances: InstanceCache::default(),
             resolved_fonts: ResolvedFontCache::default(),
+            fonts_by_value: ResolvedFontCache::default(),
             collection_hinted: false,
             generics_cache: vec![],
             positions: InstancedPositions::default(),
@@ -1538,6 +1563,26 @@ impl FontLibrary {
         self.resolved_fonts.insert(name, font);
     }
 
+    /// The font `font` resolved to, if it has been resolved since the
+    /// library last changed and its fonts were last released.
+    pub(crate) fn resolved_by_value(
+        &mut self,
+        font: &Font,
+    ) -> Option<ResolvedFont> {
+        self.fonts_by_value.get(font as &dyn FontFields)
+    }
+
+    /// Remembers what `font` resolved to, for [`resolved_by_value`].
+    ///
+    /// [`resolved_by_value`]: Self::resolved_by_value
+    pub(crate) fn remember_by_value(
+        &mut self,
+        font: &Font,
+        resolved: ResolvedFont,
+    ) {
+        self.fonts_by_value.insert(FontKey::new(font), resolved);
+    }
+
     /// Whether a family named `name` exists, compared by [`caseless::eq`]:
     /// one registered here, under its alias or its own name, or one the
     /// system lists among its families.
@@ -1679,14 +1724,14 @@ impl FontLibrary {
     /// next request and the collection cache is answers that may no longer
     /// be right.
     ///
-    /// The resolved fonts mostly survive a change on their own: what a
-    /// layout matches against is the family list, which comes from the CSS
-    /// and not from here, and it re-matches through the current collection
-    /// every time. The typeface held beside the specification is only read
-    /// where that re-match finds nothing. Cleared anyway -- it costs one
-    /// call on a path taken when a program registers a font, and the
-    /// alternative is a cache whose correctness rests on which of two
-    /// lookups happens to win.
+    /// The resolved fonts, by string and by value, mostly survive a change on
+    /// their own: what a layout matches against is the family list, which
+    /// comes from the CSS and not from here, and it re-matches through the
+    /// current collection every time. The typeface held beside the
+    /// specification is only read where that re-match finds nothing.
+    /// Cleared anyway -- it costs one call on a path taken when a program
+    /// registers a font, and the alternative is a cache whose correctness
+    /// rests on which of two lookups happens to win.
     ///
     /// The families and variation axes remembered per face, the matches and
     /// names remembered per family list, and the positions recorded
@@ -1708,6 +1753,7 @@ impl FontLibrary {
         self.collection_cache.clear();
         self.instances.clear();
         self.resolved_fonts.clear();
+        self.fonts_by_value.clear();
         self.positions = InstancedPositions::default();
         self.known_axes.clear();
         self.matches.clear();
@@ -1766,12 +1812,15 @@ impl FontLibrary {
     /// hold ids and bounds rather than faces, and come to about 100 KB at
     /// most. The matches and names remembered per family list go, as answers
     /// that are cheap to work out again and only worth keeping while text is
-    /// being laid out. So do the decorations' kept answers, through
-    /// [`decorate::forget`]: each face's lines and each thickness's stroked
-    /// wave chunk, which are rebuilt on the next decoration that asks.
+    /// being laid out, as do the fonts resolved from a [`Font`] value, each of
+    /// which holds the typeface it matched. So do the decorations' kept
+    /// answers, through [`decorate::forget`]: each face's lines and each
+    /// thickness's stroked wave chunk, which are rebuilt on the next
+    /// decoration that asks.
     #[cfg(any(test, feature = "node-addon"))]
     pub(crate) fn release_caches(&mut self) {
         self.clear_collection_caches();
+        self.fonts_by_value.clear();
         self.positions = InstancedPositions::default();
         self.matches.clear();
         self.engine_names.clear();
