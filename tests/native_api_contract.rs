@@ -281,15 +281,20 @@ fn facade_composites_a_bounded_layer_and_an_erase() -> Result<()> {
         ctx.restore();
     })?;
 
-    // A corner sits under the fill rather than the erased hole. Pinned
-    // exactly: the same draw through a *full*-alpha layer reads
-    // [124, 170, 231], so a layer that dropped its alpha would pass a
-    // "not white any more" check.
+    // A corner sits under the fill rather than the erased hole. Pinned to
+    // the exact value: the same draw through a *full*-alpha layer reads
+    // [124, 170, 231], so through half alpha over white each channel is
+    // halfway to 255, to within the half level a byte rounds by. A layer
+    // that dropped its alpha would pass a "not white any more" check.
     let corner = &pixels[2 * 32 * 4 + 2 * 4..2 * 32 * 4 + 2 * 4 + 4];
-    assert_eq!(
-        corner,
-        [188, 212, 242, 255],
-        "the fill composited through a half-alpha layer",
+    let halfway = [124.0f32, 170.0, 231.0].map(|c| (c + 255.0) / 2.0);
+    assert!(
+        corner[..3]
+            .iter()
+            .zip(halfway)
+            .all(|(got, exact)| (f32::from(*got) - exact).abs() <= 0.5)
+            && corner[3] == 255,
+        "the fill composited through a half-alpha layer: {corner:?}",
     );
 
     // And the erased square is a hole in the layer, not in the page beneath.

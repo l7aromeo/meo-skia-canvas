@@ -6,7 +6,7 @@ use skia_safe::{
     Image, ImageFilter as SkImageFilter, ImageInfo, MaskFilter as SkMaskFilter,
     Paint, PaintStyle, Path, PathBuilder, PathFillType, PathOp, Picture,
     PictureRecorder, Point, Rect, RoundOut, Shader as SkShader, Size, Typeface,
-    canvas::{SaveLayerRec, SrcRectConstraint::Strict},
+    canvas::SrcRectConstraint::Strict,
     dash_path_effect,
     font_style::{FontStyle, Width},
     image_filter::MapDirection,
@@ -16,7 +16,7 @@ use skia_safe::{
     path_utils::fill_path_with_paint,
     textlayout::{StrutStyle, TextStyle},
 };
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 pub mod api;
 pub(crate) mod blur_mask;
@@ -53,8 +53,8 @@ use crate::{
     utils::*,
 };
 use faint::Faint;
-use layer::BlurDraw;
-use page::{ExportOptions, LayerRec, Page, PageRecorder};
+use layer::{BlurDraw, Layer, LayerRec};
+use page::{ExportOptions, Page, PageRecorder};
 use typesetting::{TextSettings, Typesetting, Typography};
 
 const BLACK: Color = Color::BLACK;
@@ -664,13 +664,8 @@ impl Context2D {
             }
         };
 
-        match self.state.global_composite_operation {
-            BlendMode::SrcIn
-            | BlendMode::SrcOut
-            | BlendMode::DstIn
-            | BlendMode::DstOut
-            | BlendMode::DstATop
-            | BlendMode::Src => {
+        match covers_beyond_the_draw(self.state.global_composite_operation) {
+            true => {
                 // for blend modes that affect regions of the canvas outside of
                 // the bounds of the object being drawn, create
                 // an intermediate picture before drawing to the canvas
@@ -706,7 +701,7 @@ impl Context2D {
                     });
                 }
             }
-            _ => {
+            false => {
                 self.append_draw(features, |canvas| {
                     // draw the dropshadow (if applicable)
                     render_shadow(canvas, paint);
@@ -804,16 +799,39 @@ impl Context2D {
             return;
         }
 
-        let faint = self.faint();
-        self.with_canvas(|canvas| {
-            let mut paint = Paint::default();
-            paint.set_alpha_f(alpha);
-            paint.set_blend_mode(blend);
+        let mut paint = Paint::default();
+        paint.set_alpha_f(alpha);
+        paint.set_blend_mode(blend);
+        let paint = self.faint().drawable(&paint).into_owned();
 
-            let paint = faint.drawable(&paint);
-            canvas.save_layer(&SaveLayerRec::default().paint(&paint));
-            f(canvas);
-            canvas.restore();
+        // A group of our own rather than a `saveLayer` recorded around the
+        // draw, so that the alpha composites exactly on pixels and as an
+        // opacity in a document -- see `LayerRec::open_on`. The draw is
+        // recorded under the transform it is made under; the group applies
+        // the clip.
+        let mut recorder = PictureRecorder::new();
+        let canvas = recorder.begin_recording(self.bounds, true);
+        canvas.set_matrix(&self.state.matrix.into());
+        f(canvas);
+        let contents = Arc::new(
+            recorder
+                .finish_recording_as_picture(None)
+                .map(Layer::Picture)
+                .into_iter()
+                .collect(),
+        );
+        self.with_recorder(|mut recorder| {
+            recorder.append_group(
+                LayerRec {
+                    paint: Some(paint),
+                    ..LayerRec::default()
+                },
+                None,
+                Matrix::new_identity(),
+                contents,
+                VectorFeatures::PLAIN,
+                Point::default(),
+            );
         });
     }
 
@@ -1294,7 +1312,7 @@ impl Context2D {
         dst_rect: &Rect,
         source: VectorFeatures,
     ) {
-        self.draw_picture_costing(picture, src_rect, dst_rect, source, 1)
+        self.draw_picture_costing(picture, None, src_rect, dst_rect, source, 1)
     }
 
     /// As [`Self::draw_picture`], charging this page for what replaying the
@@ -1303,9 +1321,15 @@ impl Context2D {
     /// A nested picture is replayed whole every time the page around it is,
     /// so the charge is what makes a page that keeps drawing copies of itself
     /// declare its own cost. See `PageRecorder::replay_cost`.
+    ///
+    /// `entries` is the source page's own list where the picture is a
+    /// canvas's, so that a draw through its paint holds the page as it was
+    /// recorded and each target composites its groups as it needs -- see
+    /// `LayerRec::open_on`. `None` for a picture with no page behind it.
     pub fn draw_picture_costing(
         &mut self,
         picture: &Picture,
+        entries: Option<Arc<Vec<Layer>>>,
         src_rect: &Rect,
         dst_rect: &Rect,
         source: VectorFeatures,
@@ -1337,6 +1361,47 @@ impl Context2D {
             .vector_features(&paint, None)
             .with(source)
             .with(carried);
+
+        // Drawn through its paint as a group of our own, which composites
+        // the alpha exactly on pixels and as an opacity in a document -- see
+        // `LayerRec::open_on` -- wherever the blend composites only where
+        // the source lands, which `render_to_canvas` draws as it is: its
+        // shadow first, as a group of its own offset from it, then the
+        // source.
+        let drawn = self.faint().drawable(&paint).into_owned();
+        if carries(source, &drawn)
+            && !covers_beyond_the_draw(self.state.global_composite_operation)
+        {
+            let contents_matrix = Matrix::concat(&self.state.matrix, &matrix);
+            let contents = entries.unwrap_or_else(|| {
+                Arc::new(vec![Layer::Picture(picture.clone())])
+            });
+            let shadow = self
+                .paint_for_shadow(&paint)
+                .map(|shadow| self.faint().drawable(&shadow).into_owned());
+            let offset = self.state.shadow_offset;
+            self.with_recorder(|mut recorder| {
+                let mut group = |paint: Paint, shift: Point| {
+                    recorder.append_group(
+                        LayerRec {
+                            paint: Some(paint),
+                            ..LayerRec::default()
+                        },
+                        Some(*dst_rect),
+                        contents_matrix,
+                        Arc::clone(&contents),
+                        features,
+                        shift,
+                    );
+                };
+                if let Some(shadow) = shadow {
+                    group(shadow, offset);
+                }
+                group(drawn, Point::default());
+            });
+            return;
+        }
+
         self.render_to_canvas(&paint, features, |canvas, paint| {
             // A paint here makes Skia draw the picture through a temporary
             // layer, which is what keeps the source's own compositing to
@@ -1534,6 +1599,13 @@ impl Context2D {
     /// `source_image` beside this.
     pub fn picture(&self) -> Option<Picture> {
         self.recorder.borrow_mut().page().picture(None)
+    }
+
+    /// The page's own list of entries, for another canvas to draw this one
+    /// through a paint without flattening it -- see
+    /// [`Self::draw_picture_costing`].
+    pub fn entries(&self) -> Arc<Vec<Layer>> {
+        self.recorder.borrow_mut().page().layers
     }
 
     /// The page flattened for another canvas to draw, with what an SVG
@@ -2240,6 +2312,21 @@ impl Dye {
 /// its own, or where the paint says something -- an alpha under one, a blend
 /// mode past source-over, an image filter, a colour filter. See
 /// `Context2D::draw_picture_costing`.
+/// Whether `blend` changes the canvas outside what a draw covers, so that
+/// the draw has to be composited whole, as one picture -- see
+/// `Context2D::render_to_canvas`.
+fn covers_beyond_the_draw(blend: BlendMode) -> bool {
+    matches!(
+        blend,
+        BlendMode::SrcIn
+            | BlendMode::SrcOut
+            | BlendMode::DstIn
+            | BlendMode::DstOut
+            | BlendMode::DstATop
+            | BlendMode::Src
+    )
+}
+
 fn carries(source: VectorFeatures, paint: &Paint) -> bool {
     !matches!(
         (
