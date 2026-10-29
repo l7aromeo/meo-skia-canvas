@@ -2616,9 +2616,11 @@ export class ColorFilter {
   static MakeHSLAMatrix(matrix: ColorMatrix): ColorFilter;
 
   /**
-   * Create lighting effect filter.
-   * @param multiply - multiply color (CSS string)
-   * @param add - add color (CSS string)
+   * Create lighting effect filter: each channel multiplied, then added to.
+   * Each colour's sRGB components are the coefficients, applied as they
+   * are -- `color(srgb 2 1 0.5)` doubles red -- and the result is clamped.
+   * @param multiply - per-channel scale (CSS colour)
+   * @param add - per-channel offset (CSS colour)
    */
   static MakeLighting(multiply: string, add: string): ColorFilter | null;
 

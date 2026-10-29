@@ -77,8 +77,8 @@ an SVG's `currentColor` -- gamut-map a colour outside sRGB into it as CSS
 Color 4 describes, keeping its hue rather than clipping each channel. A text
 decoration and a text shadow, a canvas's or a `Paragraph`'s, and a
 `drop-shadow()` filter's colour, are held as named, as a fill is. `ColorFilter::lighting`'s multiply and add are
-per-channel coefficients rather than colours, and are clamped to `0.0..=1.0`
-channel by channel.
+per-channel coefficients rather than colours: their sRGB components are the
+scale and offset applied to each channel, past one or below zero as they are.
 
 For a colour written the way CSS writes it, `Context2D::set_fill_style_css`,
 `set_stroke_style_css` and `set_shadow_color_css` take the notations the

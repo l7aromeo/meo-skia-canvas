@@ -3,7 +3,7 @@ use neon::prelude::*;
 use skia_safe::{ColorFilter as SkColorFilter, color_filters};
 use std::cell::RefCell;
 
-use crate::utils::*;
+use crate::{filter::lighting_color_filter, utils::*};
 
 pub type BoxedColorFilter = JsBox<RefCell<ColorFilter>>;
 impl Finalize for ColorFilter {}
@@ -144,12 +144,15 @@ pub fn makeHSLAMatrix(mut cx: FunctionContext) -> JsResult<JsValue> {
 
 /// `ColorFilter.MakeLighting(multiply, add)` -- lighting effect.
 pub fn makeLighting(mut cx: FunctionContext) -> JsResult<JsValue> {
-    // Per-channel coefficients rather than colours, and Skia takes them as
-    // 8-bit sRGB, so each channel is clamped on its own.
-    let mul = clamped_color_arg(&mut cx, 1, "multiply")?;
-    let add = clamped_color_arg(&mut cx, 2, "add")?;
+    // Per-channel coefficients rather than colours: each colour's sRGB
+    // components, applied as they are -- see `lighting_color_filter`.
+    let mul = srgb_components_arg(&mut cx, 1, "multiply")?;
+    let add = srgb_components_arg(&mut cx, 2, "add")?;
 
-    wrap_color_filter!(cx, color_filters::lighting(mul, add))
+    wrap_color_filter!(
+        cx,
+        lighting_color_filter([mul.r, mul.g, mul.b], [add.r, add.g, add.b])
+    )
 }
 
 /// `ColorFilter.MakeLumaColorFilter()` -- extract luminance.
