@@ -55,7 +55,10 @@ use crate::{
         completion::{DRAW_ATTEMPTS, discarded, draws_ran},
         owner,
     },
-    node::{canvas::BoxedCanvas, utils::skia_paint_color},
+    node::{
+        canvas::BoxedCanvas,
+        utils::{skia_paint_color, skia_paint_color_onto},
+    },
     pixels::PixelColorSpace,
 };
 
@@ -1488,9 +1491,15 @@ impl Matte {
         )
     }
 
-    /// Covers `canvas` with the matte, replacing what is there.
+    /// Covers `canvas` with the matte, replacing what is there, in the colour
+    /// the canvas's own space needs -- see `skia_paint_color_onto`.
     pub fn paint(&self, canvas: &SkCanvas) {
-        let (color, space) = skia_paint_color(self.color, &self.space);
+        let (color, space) = match canvas.image_info().color_space() {
+            Some(destination) => {
+                skia_paint_color_onto(self.color, &self.space, &destination)
+            }
+            None => skia_paint_color(self.color, &self.space),
+        };
         let mut paint = Paint::default();
         paint
             .set_color4f(color, &space)

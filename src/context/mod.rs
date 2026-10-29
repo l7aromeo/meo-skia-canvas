@@ -1918,6 +1918,7 @@ impl Context2D {
             &mut paint,
             self.state.global_alpha as f32,
             self.state.sampling_filter,
+            &self.canvas_color_space,
         );
         paint.set_style(style);
 
@@ -2028,6 +2029,7 @@ impl Context2D {
             &mut paint,
             self.state.global_alpha as f32,
             self.state.sampling_filter,
+            &self.canvas_color_space,
         );
         paint.set_style(style);
         paint
@@ -2074,8 +2076,11 @@ impl Context2D {
             }
         }
         let mut paint = base_paint.clone();
-        let (mut shadow_color, shadow_space) =
-            skia_paint_color(*shadow_color, shadow_space);
+        let (mut shadow_color, shadow_space) = skia_paint_color_onto(
+            *shadow_color,
+            shadow_space,
+            &self.canvas_color_space,
+        );
         // On float pixels the paint's own alpha moves into the shadow's
         // colour, which the filter applies to the shape in float: the shape
         // is drawn into the filter's layer, and on Skia's raster backend a
@@ -2195,11 +2200,13 @@ impl Dye {
         }
     }
 
+    /// Puts the dye on `paint` at `alpha`, for a page in `destination`.
     pub fn mix_into(
         &self,
         paint: &mut Paint,
         alpha: f32,
         sampling_filter: SamplingFilter,
+        destination: &ColorSpace,
     ) {
         match self {
             Dye::Color(color, cs, _) => {
@@ -2207,10 +2214,11 @@ impl Dye {
                 color.a *= alpha;
                 // Kept in the space it was named in, so what `fillStyle`
                 // reports back echoes that space as a browser's does, and
-                // handed over by the path every tagged reader shares.
+                // handed over as the page it is drawn onto needs.
                 match cs {
                     Some(space) => {
-                        let (color, space) = skia_paint_color(color, space);
+                        let (color, space) =
+                            skia_paint_color_onto(color, space, destination);
                         paint.set_color4f(color, &space)
                     }
                     None => paint.set_color4f(color, None),

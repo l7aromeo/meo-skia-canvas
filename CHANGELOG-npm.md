@@ -415,6 +415,15 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A colour named in another space lands exactly on an sRGB float canvas.**
+  On a canvas made with `colorType: "RGBAF32"` in sRGB, a fill, stroke or
+  matte named in another space -- `color(srgb-linear 0.5 0 0)`, say -- read
+  back as much as 9.6e-5 from its sRGB value: Skia stores a paint's colour
+  in sRGB and converts it through an approximate transfer function as it
+  does. Such a colour is now converted here, in double precision, and reads
+  back as named. A canvas in another space keeps up to about 2e-4 from the
+  conversion Skia makes as it draws, which no colour handed to it avoids.
+
 - **A half-float canvas stores the nearest half on x86.** On an x86
   machine, a canvas made with `colorType: "RGBAF16"` truncated each value it
   stored instead of rounding it, so a pixel could land up to one half-float
