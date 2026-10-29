@@ -44,18 +44,20 @@ and `set_word_spacing` is added after every word separator. On Linux the crate
 no longer sets `FONTCONFIG_PATH`.
 
 Wrong pixels are fixed: a read after an export drew the cached page onto the
-surface again; on the GPU engine a translucent pixel read back up to a level
-low; on the CPU engine a path a clip cut drew differently far from the cut; and
-on Metal a GPU recovery could hand back blank or stale pixels as success, which
-is now drawn again and otherwise an `Error::Render`. Text is drawn as Chrome
-draws it: with Chrome's contrast and gamma, `set_font_hinting` taking effect,
-decorations where the font puts them and beneath the glyphs, a family with no
-italic or bold face slanted or emboldened, `FontSlant::Oblique` as CSS Fonts 4
-matches it, and a variable font at the weight asked and at the optical size of
-its font size. `Image::from_url` and `ImageData::from_url` load over `http` and
-`https` behind an opt-in `fetch` feature, `set_font_kerning`,
-`set_text_rendering`, `color-mix()` and CSS Color 4's system colours are added,
-and the CSS strings read the math functions and every length unit.
+surface again; a read or export inside a `save_layer` ended the layer; on the
+CPU engine a translucent layer composited up to 1.5 levels off; on the GPU
+engine a translucent pixel read back up to a level low; on the CPU engine a path
+a clip cut drew differently far from the cut; and on Metal a GPU recovery could
+hand back blank or stale pixels as success, which is now drawn again and
+otherwise an `Error::Render`. Text is drawn as Chrome draws it: with Chrome's
+contrast and gamma, `set_font_hinting` taking effect, decorations where the font
+puts them and beneath the glyphs, a family with no italic or bold face slanted
+or emboldened, `FontSlant::Oblique` as CSS Fonts 4 matches it, and a variable
+font at the weight asked and at the optical size of its font size.
+`Image::from_url` and `ImageData::from_url` load over `http` and `https` behind
+an opt-in `fetch` feature, `set_font_kerning`, `set_text_rendering`,
+`color-mix()` and CSS Color 4's system colours are added, and the CSS strings
+read the math functions and every length unit.
 
 ### Breaking
 

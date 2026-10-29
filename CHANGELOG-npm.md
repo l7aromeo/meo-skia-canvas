@@ -40,17 +40,18 @@ the fontconfig configuration a Linux machine without one was pointed at through
 `FONTCONFIG_PATH`, which the addon no longer sets.
 
 Wrong pixels are fixed: `getImageData` after an export drew the exported page
-onto the canvas a second time; a translucent pixel read back up to a level low
-on the GPU engine; a GPU recovery could hand back blank or stale pixels as
-success; a path a clip cut drew differently far from the cut on the CPU engine;
-and a context whose canvas had been collected lost it. Text is drawn as Chrome
-draws it: with Chrome's contrast and gamma, `fontHinting` taking effect,
-decorations where the font puts them and beneath the glyphs, a family with no
-italic or bold face slanted or emboldened, `oblique` as CSS Fonts 4 matches it,
-a variable font at the weight asked and at the optical size of its font size,
-and a registered family in any case. `fontKerning`, `textRendering`,
-`color-mix()` and CSS Color 4's system colours are added, and the CSS strings
-read the math functions and every length unit.
+onto the canvas a second time; a read or export inside a `saveLayer` ended the
+layer; a translucent layer composited up to 1.5 levels off on the CPU engine; a
+translucent pixel read back up to a level low on the GPU engine; a GPU recovery
+could hand back blank or stale pixels as success; a path a clip cut drew
+differently far from the cut on the CPU engine; and a context whose canvas had
+been collected lost it. Text is drawn as Chrome draws it: with Chrome's contrast
+and gamma, `fontHinting` taking effect, decorations where the font puts them and
+beneath the glyphs, a family with no italic or bold face slanted or emboldened,
+`oblique` as CSS Fonts 4 matches it, a variable font at the weight asked and at
+the optical size of its font size, and a registered family in any case.
+`fontKerning`, `textRendering`, `color-mix()` and CSS Color 4's system colours
+are added, and the CSS strings read the math functions and every length unit.
 
 ### Breaking
 
