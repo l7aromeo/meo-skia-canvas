@@ -46,12 +46,15 @@ fn alpha(data: &ImageData) -> Vec<u8> {
 const REPLAY_MARGIN: f64 = 2.0;
 
 /// How far blurred text exported at density 2 may be from the same text set
-/// twice as large. The glyphs themselves differ: FreeType rasterizes a
-/// 20px glyph under a doubling transform and a 40px glyph to outlines up to
-/// 255 levels apart, hinted or not, and `blur(4px)` leaves 12 of that. Core
-/// Text gives identical glyphs and 0. A blur left at its density-1 width is
-/// 87 apart on either.
-const TEXT_REPLAY_MARGIN: f64 = 16.0;
+/// twice as large. The glyphs themselves differ, by face: FreeType
+/// rasterizes a 20px glyph under a doubling transform and a 40px glyph to
+/// outlines up to 255 levels apart, hinted or not, and `blur(4px)` leaves 12
+/// of that. Core Text draws Avenir Next and Times identically and Helvetica
+/// and Arial not: their blurred text stands 15 apart on the CPU engine and
+/// 16 to 17 on the GPU, and 12 and 14 unhinted. `sans-serif` is Helvetica on
+/// macOS. A blur left at its density-1 width is 50 to 87 apart, which this
+/// stays clear of.
+const TEXT_REPLAY_MARGIN: f64 = 20.0;
 
 const SIZE: (f32, f32) = (60.0, 44.0);
 const RECT: [f32; 4] = [12.0, 12.25, 36.0, 20.0];

@@ -130,6 +130,92 @@ fn nested_layers_survive_a_read_at_each_depth() {
     }
 }
 
+/// Layers three deep at 0.5 each, a square drawn at each depth and nothing
+/// read until the innermost is open: one read there finds each square still
+/// in the recording of the layer it was drawn in, and the read after it, and
+/// the reads once all three are closed, find the same.
+#[test]
+fn nested_layers_read_from_the_innermost_show_every_depth() {
+    for gpu in ENGINES {
+        let mut canvas = white_page(gpu);
+        for depth in 0..3 {
+            canvas.context().save_layer_with(0.5, None, None);
+            square(canvas.context(), depth);
+        }
+        let all = |canvas: &mut Canvas| {
+            (0..3).map(|n| pixel(canvas, n)).collect::<Vec<_>>()
+        };
+        let inside = all(&mut canvas);
+        assert_eq!(all(&mut canvas), inside, "gpu {gpu}: read again inside");
+        for _ in 0..3 {
+            canvas.context().restore();
+        }
+        let closed = all(&mut canvas);
+        for (n, want) in
+            [HALF_RED, QUARTER_RED, EIGHTH_RED].into_iter().enumerate()
+        {
+            assert!(
+                rounds_to(&closed[n], want),
+                "gpu {gpu}: the square at depth {n} read {:?}",
+                closed[n],
+            );
+        }
+        assert_eq!(inside, closed, "gpu {gpu}: read inside and after");
+    }
+}
+
+/// A shadow and a blur drawn in a layer reach past what casts them, and the
+/// layer keeps what they spread there: the shadow of a square in the first
+/// third lands in the middle one, and a square blurred in the middle third
+/// spreads into the last, each read inside the layer and after it closes.
+#[test]
+fn a_layer_keeps_what_its_shadows_and_blurs_spread() {
+    type Spread = fn(&mut Context2D);
+    let cases: [(&str, Spread, (f32, f32)); 2] = [
+        (
+            "a shadow",
+            |ctx| {
+                ctx.set_shadow_color(RgbaLinear::opaque(0.0, 0.0, 1.0));
+                ctx.set_shadow_offset(20.0, 0.0);
+                ctx.set_shadow_blur(2.0);
+                square(ctx, 0);
+            },
+            (30.0, 10.0),
+        ),
+        (
+            "a blur",
+            |ctx| {
+                ctx.set_filter_css("blur(4px)").expect("a blur");
+                square(ctx, 1);
+            },
+            (41.0, 10.0),
+        ),
+    ];
+    for gpu in ENGINES {
+        for (name, draw, (x, y)) in cases {
+            let mut canvas = white_page(gpu);
+            canvas.context().save_layer_with(0.5, None, None);
+            draw(canvas.context());
+            let read = |canvas: &mut Canvas| {
+                canvas
+                    .context()
+                    .get_image_data(x, y, 1.0, 1.0)
+                    .expect("a pixel")
+                    .pixels()
+                    .to_vec()
+            };
+            let inside = read(&mut canvas);
+            canvas.context().restore();
+            let closed = read(&mut canvas);
+            assert!(
+                closed[..3] != WHITE[..3],
+                "gpu {gpu}: {name} past what cast it read {closed:?}"
+            );
+            assert_eq!(inside, closed, "gpu {gpu}: {name} inside and after");
+        }
+    }
+}
+
 /// A layer opened under a transform and a clip, with bounds of its own, reads
 /// the same inside as after: translated 20 to the right, its bounds cover
 /// the middle and last thirds, and the clip leaves only the middle.
@@ -386,6 +472,11 @@ fn a_layer_composites_at_its_alpha() {
 /// lands on it -- in the eight-bit layer its filter draws in, then on the
 /// page -- so the bound is half a level for the last rounding and the share
 /// `1 - alpha` the red leaves of the shadow's own level.
+///
+/// The second rounding is known, not chosen: Skia's raster backend makes
+/// any layer under an image filter N32 (`SkBitmapDevice::createDevice`), and
+/// a shadow is drawn through one. When the shadow is composited through the
+/// exact result blur instead, rounded once, this bound is half a level.
 #[test]
 fn a_shadowed_canvas_composites_at_its_alpha() {
     let mut wrong = Vec::new();
@@ -423,6 +514,61 @@ fn a_shadowed_canvas_composites_at_its_alpha() {
                 "gpu {gpu}: {} of 254 alphas, first {first}",
                 missed.len()
             ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// A canvas drawn in under a `globalAlpha` with a blend that reaches past
+/// what it covers, at every alpha a byte holds: opaque red over opaque white,
+/// read where the red lands. Each composites to its Porter-Duff value within
+/// half a level, so that a change of route through the picture these take
+/// cannot move them silently.
+#[test]
+fn a_region_blend_composites_at_its_alpha() {
+    type Exact = fn(f32) -> [f32; 4];
+    const BLENDS: [(BlendMode, Exact); 8] = [
+        (BlendMode::SourceIn, |a| [255.0, 0.0, 0.0, 255.0 * a]),
+        (BlendMode::SourceOut, |_| [0.0; 4]),
+        (BlendMode::DestinationIn, |a| {
+            [255.0, 255.0, 255.0, 255.0 * a]
+        }),
+        (BlendMode::DestinationOut, |a| {
+            [255.0, 255.0, 255.0, 255.0 * (1.0 - a)]
+        }),
+        (BlendMode::DestinationAtop, |a| {
+            [255.0, 255.0, 255.0, 255.0 * a]
+        }),
+        (BlendMode::Copy, |a| [255.0, 0.0, 0.0, 255.0 * a]),
+        (BlendMode::Xor, |a| [255.0, 255.0, 255.0, 255.0 * (1.0 - a)]),
+        (BlendMode::Multiply, |a| {
+            [255.0, 255.0 * (1.0 - a), 255.0 * (1.0 - a), 255.0]
+        }),
+    ];
+    let mut wrong = Vec::new();
+    for gpu in ENGINES {
+        for (blend, exact) in BLENDS {
+            let missed: Vec<_> = (1..255u8)
+                .filter_map(|byte| {
+                    let alpha = f32::from(byte) / 255.0;
+                    let mut source = white_page(gpu);
+                    source.context().fill_rect(0.0, 0.0, WIDTH, HEIGHT);
+                    let mut canvas = white_page(gpu);
+                    let ctx = canvas.context();
+                    ctx.set_global_alpha(alpha);
+                    ctx.set_global_composite_operation(blend);
+                    ctx.draw_canvas(&mut source, 0.0, 0.0);
+                    let got = pixel(&mut canvas, 1);
+                    (!rounds_to(&got, exact(alpha)))
+                        .then(|| format!("{byte}/255 read {got:?}"))
+                })
+                .collect();
+            if let Some(first) = missed.first() {
+                wrong.push(format!(
+                    "gpu {gpu}, {blend:?}: {} of 254 alphas, first {first}",
+                    missed.len()
+                ));
+            }
         }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
@@ -609,6 +755,135 @@ fn an_export_taken_inside_a_layer_keeps_the_layer_as_it_stood() {
     }
 }
 
+/// What `canvas` reads at a rectangle, as bytes.
+fn read(
+    canvas: &mut Canvas,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) -> Vec<u8> {
+    canvas
+        .context()
+        .get_image_data(x, y, width, height)
+        .expect("pixels")
+        .pixels()
+        .to_vec()
+}
+
+/// The rows of a page-wide read that a read of `width` by `height` at
+/// (`x`, `y`) covers.
+fn slice(
+    whole: &[u8],
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> Vec<u8> {
+    let row = WIDTH as usize * 4;
+    (y..y + height)
+        .flat_map(|at| &whole[at * row + x * 4..at * row + (x + width) * 4])
+        .copied()
+        .collect()
+}
+
+/// A read inside a layer reads, wherever it falls, what the same read of
+/// the whole page reads there: at the page's corner and far edge, across
+/// the layer's edge, and inside it. With a plain layer, which composes only
+/// the region read; with a blurred fill, whose rectangle Skia blurs from its
+/// geometry; with a shadow, whose filter Skia gives the input it needs past
+/// the read; and with a backdrop, which reads the page beneath past it, and
+/// so composes the page.
+#[test]
+fn a_read_inside_a_layer_reads_what_the_page_does() {
+    for gpu in ENGINES {
+        for content in ["plain", "blurred", "shadowed", "backdrop"] {
+            let mut canvas = white_page(gpu);
+            let ctx = canvas.context();
+            square(ctx, 1);
+            let backdrop = (content == "backdrop").then(|| {
+                ImageFilter::blur(4.0, 4.0, None, None, None).expect("a blur")
+            });
+            ctx.save_layer_with(0.5, None, backdrop.as_ref());
+            match content {
+                "blurred" => ctx.set_filter_css("blur(3px)").expect("a blur"),
+                "shadowed" => {
+                    ctx.set_shadow_color(RgbaLinear::opaque(0.0, 0.0, 1.0));
+                    ctx.set_shadow_blur(6.0);
+                }
+                _ => {}
+            }
+            ctx.fill_rect(15.0, 4.0, 30.0, 12.0);
+            let whole = read(&mut canvas, 0.0, 0.0, WIDTH, HEIGHT);
+            for (x, y, width, height) in [
+                (0, 0, 20, 20),
+                (10, 0, 20, 20),
+                (40, 0, 20, 20),
+                (59, 19, 1, 1),
+                (14, 3, 3, 3),
+            ] {
+                let got = read(
+                    &mut canvas,
+                    x as f32,
+                    y as f32,
+                    width as f32,
+                    height as f32,
+                );
+                assert!(
+                    got == slice(&whole, x, y, width, height),
+                    "gpu {gpu}, {content}: the read at {x},{y} {width}x{height}"
+                );
+            }
+            canvas.context().restore();
+        }
+    }
+}
+
+/// An export inside a layer is the same file however often it is taken --
+/// the second is served from the filed page the first cached -- and an
+/// export after the layer closes is the one a canvas never exported inside
+/// it gives.
+#[test]
+fn an_export_inside_a_layer_is_the_export_it_was() {
+    for gpu in ENGINES {
+        for format in [ImageFormat::Png, ImageFormat::Raw] {
+            let options = EncodeOptions::default();
+            let draw = |canvas: &mut Canvas,
+                        exports: bool|
+             -> (Vec<Vec<u8>>, Vec<u8>) {
+                let ctx = canvas.context();
+                for n in 0..3 {
+                    square(ctx, n);
+                }
+                ctx.save_layer_with(0.5, None, None);
+                ctx.fill_rect(15.0, 4.0, 30.0, 12.0);
+                let inside = match exports {
+                    true => (0..2)
+                        .map(|_| {
+                            canvas
+                                .to_buffer(format, &options)
+                                .expect("an export")
+                        })
+                        .collect(),
+                    false => Vec::new(),
+                };
+                canvas.context().restore();
+                (
+                    inside,
+                    canvas.to_buffer(format, &options).expect("an export"),
+                )
+            };
+            let (inside, closed) = draw(&mut white_page(gpu), true);
+            let (_, never) = draw(&mut white_page(gpu), false);
+            assert!(
+                inside[0] == inside[1],
+                "gpu {gpu}, {format:?}: inside the layer"
+            );
+            assert!(closed == never, "gpu {gpu}, {format:?}: after it closes");
+        }
+    }
+}
+
 fn has(bytes: &[u8], needle: &str) -> bool {
     bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
 }
@@ -689,5 +964,142 @@ fn a_blur_inside_a_layer_is_the_blur_outside_one() {
             .max()
             .expect("pixels");
         assert!(worst <= LAYER_ROUNDING, "gpu {gpu}: {worst} levels apart");
+    }
+}
+
+/// One draw of the scene the raster cases build, and a read after it.
+type Step = fn(&mut Context2D);
+
+/// Draws reaching past their geometry, each in its own colour, put down one
+/// at a time inside layers so that a read after each tops up what the
+/// layers have drawn rather than starting over.
+const STEPS: [Step; 7] = [
+    |ctx| {
+        ctx.set_fill_style(RgbaLinear::opaque(0.9, 0.1, 0.1));
+        ctx.fill_rect(10.3, 7.7, 23.2, 11.9);
+    },
+    |ctx| {
+        ctx.set_stroke_style(RgbaLinear::opaque(0.1, 0.5, 0.9));
+        ctx.set_line_width(0.6);
+        ctx.begin_path();
+        ctx.move_to(4.5, 3.25);
+        ctx.line_to(57.75, 16.5);
+        ctx.stroke();
+    },
+    |ctx| {
+        ctx.set_fill_style(RgbaLinear::opaque(0.2, 0.7, 0.3));
+        ctx.set_font_css("bold 13px sans-serif");
+        ctx.fill_text("Wavy", 21.4, 15.6, None);
+    },
+    |ctx| {
+        ctx.set_filter_css("blur(3px)").expect("a blur");
+        ctx.set_fill_style(RgbaLinear::opaque(0.6, 0.2, 0.8));
+        ctx.fill_rect(30.0, 4.0, 14.0, 9.0);
+        ctx.set_filter_css("none").expect("no filter");
+    },
+    |ctx| {
+        ctx.set_shadow_color(RgbaLinear::opaque(0.0, 0.0, 0.0));
+        ctx.set_shadow_offset(6.0, 3.0);
+        ctx.set_shadow_blur(4.0);
+        ctx.set_fill_style(RgbaLinear::opaque(0.9, 0.8, 0.1));
+        ctx.fill_rect(42.6, 2.2, 8.0, 8.0);
+        ctx.set_shadow_color(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
+    },
+    |ctx| {
+        // Over the fills before it, across the clip's edge.
+        ctx.set_fill_style(RgbaLinear::opaque(0.1, 0.8, 0.8));
+        ctx.fill_rect(5.5, 9.5, 50.0, 6.0);
+    },
+    |ctx| {
+        ctx.set_fill_style(RgbaLinear::opaque(0.95, 0.5, 0.0));
+        ctx.fill_rect(0.0, 0.0, 7.3, 20.0);
+    },
+];
+
+/// What `canvas` reads of all of it, in the page's depth, as bytes.
+fn page_bytes(canvas: &mut Canvas, depth: PixelDepth) -> Vec<u8> {
+    canvas
+        .context()
+        .get_image_data_as(
+            0.0,
+            0.0,
+            WIDTH,
+            HEIGHT,
+            PixelExportOptions {
+                depth,
+                ..PixelExportOptions::default()
+            },
+        )
+        .expect("pixels")
+        .pixels()
+        .to_vec()
+}
+
+/// Reads inside layers read what the layers close to, however many reads
+/// come between the draws: three layers nested, at 0.5, 0.75 and no paint,
+/// the outer two under clips the draws cross -- rectangles on whole pixels,
+/// and circles, whose antialiased edges a raster of the layers would round
+/// otherwise -- with a read of part of the page after every draw, on both
+/// engines, at eight bits and in F16 and F32.
+#[test]
+fn reads_between_draws_read_what_layers_close_to() {
+    for gpu in ENGINES {
+        for depth in [PixelDepth::Uint8, PixelDepth::F16, PixelDepth::F32] {
+            for round in [false, true] {
+                let mut canvas = Canvas::with_options(
+                    WIDTH,
+                    HEIGHT,
+                    CanvasOptions {
+                        gpu,
+                        color_type: depth,
+                        ..CanvasOptions::default()
+                    },
+                )
+                .expect("a canvas");
+                let ctx = canvas.context();
+                ctx.set_fill_style(RgbaLinear::opaque(1.0, 1.0, 1.0));
+                ctx.fill_rect(0.0, 0.0, WIDTH, HEIGHT);
+                for (alpha, clip) in [
+                    (Some(0.5), Some((28.0, 10.0, 17.5))),
+                    (Some(0.75), Some((24.0, 9.0, 13.25))),
+                    (None, None),
+                ] {
+                    let ctx = canvas.context();
+                    if let Some((x, y, r)) = clip {
+                        ctx.begin_path();
+                        match round {
+                            true => ctx
+                                .arc(x, y, r, 0.0, std::f32::consts::TAU, false)
+                                .expect("an arc"),
+                            false => ctx.rect(
+                                (x - r).round(),
+                                0.0,
+                                (2.0 * r).round(),
+                                (y + r).round(),
+                            ),
+                        }
+                        ctx.clip(FillRule::NonZero);
+                    }
+                    match alpha {
+                        Some(alpha) => ctx.save_layer_with(alpha, None, None),
+                        None => ctx.save_layer(),
+                    }
+                }
+                for (at, step) in STEPS.iter().enumerate() {
+                    step(canvas.context());
+                    let x = (at * 7) as f32;
+                    read(&mut canvas, x, 2.0, 13.0, 11.0);
+                }
+                let inside = page_bytes(&mut canvas, depth);
+                for _ in 0..3 {
+                    canvas.context().restore();
+                }
+                let closed = page_bytes(&mut canvas, depth);
+                assert!(
+                    inside == closed,
+                    "gpu {gpu}, {depth:?}, round {round}: inside and after"
+                );
+            }
+        }
     }
 }

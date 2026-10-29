@@ -33,13 +33,13 @@ pub(crate) fn rgba_linear_to_skia_color(color: RgbaLinear) -> SkColor {
     eight_bit(r, g, b, a)
 }
 
-/// Converts an `RgbaLinear` to a Skia `Color` by clamping each channel to
-/// `0.0..=1.0` on its own, for a value that is per-channel coefficients
-/// rather than a colour -- `ColorFilter::lighting`'s multiply and add --
-/// where mapping in a perceptual space would change what each channel does.
-pub(crate) fn rgba_linear_to_clamped_skia_color(color: RgbaLinear) -> SkColor {
-    let (r, g, b, a) = unpremultiplied(color);
-    eight_bit(r, g, b, a)
+/// The gamma-encoded sRGB components of `color`, straight and unclamped,
+/// for a value that is per-channel coefficients rather than a colour --
+/// `ColorFilter::lighting`'s multiply and add -- where gamut mapping would
+/// change what each channel does and clamping what each coefficient does.
+pub(crate) fn rgba_linear_to_srgb_coefficients(color: RgbaLinear) -> [f32; 3] {
+    let (r, g, b, _) = unpremultiplied(color);
+    [r, g, b].map(linear_to_srgb)
 }
 
 /// The straight components of a premultiplied colour, zero where alpha is.

@@ -1,6 +1,7 @@
 use skia_safe::{
-    BlurStyle as SkBlurStyle, Color as SkColor, ColorChannel as SkColorChannel,
-    ColorFilter as SkColorFilter, ImageFilter as SkImageFilter,
+    BlendMode as SkBlendMode, BlurStyle as SkBlurStyle, Color as SkColor,
+    Color4f, ColorChannel as SkColorChannel, ColorFilter as SkColorFilter,
+    ColorMatrix as SkColorMatrix, ImageFilter as SkImageFilter,
     MaskFilter as SkMaskFilter, Point as SkPoint, Point3 as SkPoint3,
     Rect as SkRect, TileMode as SkTileMode, color_filters, image_filters,
     luma_color_filter,
@@ -9,7 +10,7 @@ use skia_safe::{
 use crate::{
     color::{
         RgbaLinear, linear_srgb_color_space, rgba_css,
-        rgba_linear_to_clamped_skia_color, rgba_linear_to_skia_color,
+        rgba_linear_to_skia_color, rgba_linear_to_srgb_coefficients,
         rgba_linear_to_unpremul_color4f,
     },
     context2d::affine_to_matrix,
@@ -19,6 +20,41 @@ use crate::{
     paint::BlendMode,
     pixels::SamplingMode,
 };
+
+/// A filter that scales each colour channel by `multiply` and then adds
+/// `add`, both gamma-encoded sRGB coefficients, leaving alpha alone and
+/// clamping the result: `SkColorFilters::Lighting` in floating point, or
+/// `None` where a coefficient is not finite.
+///
+/// Skia's own filter takes its coefficients as two eight-bit `SkColor`s,
+/// so a coefficient past one or below zero never reached it, and each was
+/// quantized to a 255th. This builds the colour matrix Skia's builds,
+/// with the coefficients as they are, and where nothing is added and the
+/// multiply lies inside `0.0..=1.0`, the modulate blend Skia's builds in
+/// that case: so a coefficient an eight-bit colour can hold draws byte for
+/// byte as Skia's filter drew it. A non-finite entry is refused here
+/// because Skia answers a matrix holding one with a null, which
+/// `skia_safe::color_filters::matrix` unwraps.
+pub(crate) fn lighting_color_filter(
+    multiply: [f32; 3],
+    add: [f32; 3],
+) -> Option<SkColorFilter> {
+    if !multiply.iter().chain(&add).all(|c| c.is_finite()) {
+        return None;
+    }
+    let [r, g, b] = multiply;
+    if add == [0.0; 3] && multiply.iter().all(|c| (0.0..=1.0).contains(c)) {
+        return color_filters::blend_with_color_space(
+            Color4f::new(r, g, b, 1.0),
+            None,
+            SkBlendMode::Modulate,
+        );
+    }
+    let mut matrix = SkColorMatrix::default();
+    matrix.set_scale(r, g, b, 1.0);
+    matrix.post_translate(add[0], add[1], add[2], 0.0);
+    Some(color_filters::matrix(&matrix, None))
+}
 
 /// What a filter does with the area outside its input.
 ///
@@ -1291,29 +1327,26 @@ impl ColorFilter {
     ///
     /// Per channel, which is what makes it a tint plus a lift rather than a
     /// blend: `multiply` scales what is there and `add` raises the floor.
-    /// Each is a set of coefficients rather than a colour, and Skia takes
-    /// them as an eight-bit sRGB `Color`, so each channel is clamped to
-    /// `0.0..=1.0` and quantized to eight bits.
+    /// Each is a set of coefficients rather than a colour, read as its
+    /// gamma-encoded sRGB components and applied to the colour as they are
+    /// -- a component of 2 doubles a channel and a negative one lowers it
+    /// -- with the result clamped to the displayable range. Alpha is left
+    /// alone, and the coefficients' own alphas are not read.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::FilterCreate`] when Skia declines to build it.
+    /// Returns [`Error::FilterCreate`] when a coefficient is not finite.
     pub fn lighting(
         multiply: RgbaLinear,
         add: RgbaLinear,
     ) -> Result<Self, Error> {
-        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
-        // Re-check: grep -n "pub fn lighting" -A4
-        // ~/.cargo/registry/src/*/skia-safe-*/src/core/color_filter.rs
-        // `SkColorFilters::Lighting` takes two `SkColor`s and nothing
-        // wider, so a coefficient above one cannot reach it.
-        color_filters::lighting(
-            rgba_linear_to_clamped_skia_color(multiply),
-            rgba_linear_to_clamped_skia_color(add),
+        lighting_color_filter(
+            rgba_linear_to_srgb_coefficients(multiply),
+            rgba_linear_to_srgb_coefficients(add),
         )
         .map(|inner| Self { inner })
         .ok_or_else(|| Error::FilterCreate {
-            reason: "lighting color filter failed".to_string(),
+            reason: "lighting coefficients must be finite".to_string(),
         })
     }
 
@@ -1843,6 +1876,141 @@ mod color_filter_tests {
         // is applied to all four channels.
         assert_eq!(raw[0], 0, "red inverted");
         assert_eq!(raw[3], 0, "and so did alpha");
+    }
+
+    /// Every input byte, in each channel and at three alphas, drawn through
+    /// `filter` onto a premultiplied eight-bit surface: the bytes it leaves.
+    fn lit_bytes(filter: &SkColorFilter) -> Vec<u8> {
+        use skia_safe::{AlphaType, ColorType, ImageInfo, Paint};
+        const WIDTH: i32 = 256;
+        let alphas = [255u8, 128, 19];
+        let pixels: Vec<u8> = alphas
+            .iter()
+            .flat_map(|&alpha| {
+                (0..WIDTH).flat_map(move |i| {
+                    let i = i as u8;
+                    [i, 255 - i, i.wrapping_mul(37), alpha]
+                })
+            })
+            .collect();
+        let info = ImageInfo::new(
+            (WIDTH, alphas.len() as i32),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            None,
+        );
+        let image = crate::started::raster_from_data(
+            &info,
+            skia_safe::Data::new_copy(&pixels),
+            WIDTH as usize * 4,
+        )
+        .expect("an image");
+        let mut surface =
+            crate::started::raster_n32_premul((WIDTH, alphas.len() as i32))
+                .expect("a surface");
+        let mut paint = Paint::default();
+        paint
+            .set_color_filter(filter.clone())
+            .set_blend_mode(skia_safe::BlendMode::Src);
+        surface.canvas().draw_image(&image, (0, 0), Some(&paint));
+        let out_info =
+            ImageInfo::new_n32_premul((WIDTH, alphas.len() as i32), None);
+        let mut out = vec![0u8; pixels.len()];
+        assert!(surface.read_pixels(
+            &out_info,
+            &mut out,
+            WIDTH as usize * 4,
+            (0, 0)
+        ));
+        out
+    }
+
+    /// The bytes [`lit_bytes`] reads in channel `channel`, BGRA or RGBA as
+    /// the surface's N32 order is, for opaque input `value`.
+    fn lit_channel(bytes: &[u8], channel: usize, value: usize) -> u8 {
+        let rgba = skia_safe::ColorType::N32 == skia_safe::ColorType::RGBA8888;
+        let at = match (channel, rgba) {
+            (0, false) => 2,
+            (2, false) => 0,
+            (other, _) => other,
+        };
+        bytes[value * 4 + at]
+    }
+
+    /// A coefficient outside `0.0..=1.0` is applied as it is, as the
+    /// per-channel scale and offset the filter is: multiplying by 2 doubles
+    /// a channel and adding a negative darkens it, where both were clamped
+    /// into the eight-bit colour Skia's lighting filter takes.
+    #[test]
+    fn a_coefficient_outside_a_colour_is_applied_as_it_is() {
+        let doubled = ColorFilter::lighting(
+            RgbaLinear::from_srgb(2.0, 1.0, 0.5, 1.0),
+            RgbaLinear::from_srgb(0.0, 0.0, 0.0, 1.0),
+        )
+        .expect("lighting");
+        let bytes = lit_bytes(&doubled.inner);
+        // Red input runs 0..=255 along the row: 64 doubles to 128, and 200
+        // to past the top, which the filter clamps.
+        assert_eq!(lit_channel(&bytes, 0, 64), 128, "red doubled");
+        assert_eq!(lit_channel(&bytes, 0, 200), 255, "and clamped");
+        let darkened = ColorFilter::lighting(
+            RgbaLinear::from_srgb(1.0, 1.0, 1.0, 1.0),
+            RgbaLinear::from_srgb(-0.25, 0.0, 0.0, 1.0),
+        )
+        .expect("lighting");
+        let bytes = lit_bytes(&darkened.inner);
+        assert_eq!(lit_channel(&bytes, 0, 128), 64, "red lowered by a quarter");
+        assert_eq!(lit_channel(&bytes, 0, 32), 0, "and floored");
+    }
+
+    /// Coefficients an eight-bit colour can hold are drawn byte for byte as
+    /// Skia's own lighting filter draws them, on both of its paths: a
+    /// colour matrix where something is added, and a modulate blend where
+    /// nothing is. Every input byte at three alphas, for multiplies and adds
+    /// of 0, 255 and bytes between.
+    #[test]
+    fn coefficients_a_colour_holds_light_as_skias_lighting_does() {
+        let colours = [
+            (255, 255, 255),
+            (0, 0, 0),
+            (188, 64, 255),
+            (1, 128, 254),
+            (17, 200, 99),
+        ];
+        let mut compared = 0;
+        for &(mr, mg, mb) in &colours {
+            for &(ar, ag, ab) in &colours {
+                let ours = ColorFilter::lighting(
+                    RgbaLinear::from_srgb8(mr, mg, mb, 1.0),
+                    RgbaLinear::from_srgb8(ar, ag, ab, 1.0),
+                )
+                .expect("lighting");
+                let skias = color_filters::lighting(
+                    SkColor::from_rgb(mr, mg, mb),
+                    SkColor::from_rgb(ar, ag, ab),
+                )
+                .expect("Skia's lighting");
+                assert!(
+                    lit_bytes(&ours.inner) == lit_bytes(&skias),
+                    "multiply {:?} add {:?}",
+                    (mr, mg, mb),
+                    (ar, ag, ab)
+                );
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, colours.len() * colours.len());
+    }
+
+    /// A coefficient that is not a number is refused by name rather than
+    /// handed to Skia, which answers a matrix holding one with a null.
+    #[test]
+    fn a_coefficient_that_is_not_finite_is_refused() {
+        let nan = RgbaLinear::opaque(f32::NAN, 0.0, 0.0);
+        let infinite = RgbaLinear::opaque(0.0, f32::INFINITY, 0.0);
+        let white = RgbaLinear::opaque(1.0, 1.0, 1.0);
+        assert!(ColorFilter::lighting(nan, white).is_err());
+        assert!(ColorFilter::lighting(white, infinite).is_err());
     }
 }
 

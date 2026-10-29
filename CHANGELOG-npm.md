@@ -21,6 +21,23 @@ removed and no signature moves.
 
 ### Breaking
 
+- **`sans-serif` is the face Chrome draws it in, and an SVG naming no family
+  it has is drawn in the standard serif.** The curated `sans-serif` stack put
+  Avenir Next ahead of Helvetica, so on macOS the canvas default font,
+  `10px sans-serif`, measured `"Hamburgefonstiv"` at 78.85 where Chrome 156
+  measures 75.59, and at 40px 315.40 against 302.36. Each stack now opens with
+  the name Chromium gives the generic on the platform,
+  `IDS_SANS_SERIF_FONT_FAMILY` and `IDS_SERIF_FONT_FAMILY` in its
+  `locale_settings_*.grd`: Helvetica and Times on macOS, Arial and Times New
+  Roman on Linux and Windows, which on Linux reach whatever fontconfig
+  substitutes, as they do for Chrome. On macOS `sans-serif` now measures as
+  Chrome's to the float. An SVG `<text>` naming no family, or one the
+  machine does not have, was drawn in the `system-ui` face, Helvetica Neue on
+  macOS, and is now drawn in `serif`, as Chrome draws it in its standard font,
+  Times on macOS, and its `ex` is that face's x-height. Text set in
+  `sans-serif`, in the default font, or in an SVG that names no family it can
+  find measures and draws differently.
+
 - **`FontLibrary.has()` and `FontLibrary.family()` match a family name as a
   font does.** Both compared the name exactly, while drawing matched it in
   any case: after `FontLibrary.use("OswaldX", ...)`, `ctx.font = "16px
@@ -280,6 +297,38 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   hundredth narrower than it, as SkParagraph's line breaker compares the
   line's width floored to hundredths; docs/browser-differences.md has it.
 
+- **`wordSpacing` is added after every word separator.** It was added once
+  per run of spaces and only between words, as SkParagraph adds it, so a
+  leading or trailing space and the second of a doubled one went unspaced,
+  a no-break space was never spaced, and U+3000, which is not a word
+  separator, was. CSS Text 3 section 8.2 spaces every word-separator
+  character, and now so does the canvas: at -100px in 40px Oswald, `"a  b"`
+  measures -146.76 where it measured -46.76, as Chrome 156 measures it, and
+  `"a "` -73.80 where it measured 26.20. The glyphs move with the width.
+  Code that measures or places text drawn with a `wordSpacing` can see it
+  move at those spaces. A `Paragraph`'s `wordSpacing` keeps SkParagraph's
+  rule. Chrome does not space a leading space, and how it spaces one depends
+  on what it measured before; docs/browser-differences.md has both.
+
+- **On Linux the addon no longer sets `FONTCONFIG_PATH`, and `lib/fonts` is
+  gone.** On a machine with no `/etc/fonts/fonts.conf` and neither
+  `FONTCONFIG_PATH` nor `FONTCONFIG_FILE` set, loading the addon pointed
+  `FONTCONFIG_PATH` at a `fonts` directory beside the loaded binary. The one
+  shipped in `lib/fonts` is beside it only for a binary the install script
+  downloaded or a local build, never for a platform package's, so a
+  platform-package install already got fontconfig's built-in configuration
+  and still does. That configuration, in the fontconfig 2.17.1 the released
+  binaries link, reads `/usr/share/fonts`, `/usr/local/share/fonts` and
+  `~/.local/share/fonts`. Affected: a downloaded binary or local build on
+  such a machine no longer finds fonts in `/usr/share/X11/fonts/Type1` or
+  `/usr/share/X11/fonts/TTF`, which only the bundled configuration named,
+  and on any Linux machine without that file a child process no longer
+  inherits a `FONTCONFIG_PATH` the addon set. Set `FONTCONFIG_FILE` to a
+  configuration of your own to restore those directories. The write was
+  unsound -- `std::env::set_var` races a `getenv` on any other thread, and
+  Node's own threads are running before an addon loads -- and nothing in
+  `src` writes the environment now.
+
 ### Security
 
 - **`follow-redirects` is required at `^1.16.1`, up from `^1.15.11`.** It is
@@ -483,6 +532,16 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   layer, at density 1. It is decided where the page is played back, as it
   is outside a layer, and the blur is the exact one.
 
+- **Reading a GPU canvas back keeps nothing per read.** Each whole-page
+  `getImageData()` of a GPU canvas on macOS left about what it read resident
+  until the process ended -- 12.2 MB a read of a 2000x1600 canvas -- so a
+  server reading GPU canvases back grew without bound, by 243 MB for every
+  twenty such reads. The readback's Metal objects are autoreleased, and
+  Node's main thread has no autorelease pool to drain them; the exports ran
+  in one of their own, and the read now does too: five passes of the same
+  twenty reads now end within 13 MB of the first, where they climbed from 434
+  MB to 1435. 6.0.2 has the same unwrapped read, by its source.
+
 - **A colour named in another space lands exactly on an sRGB float canvas.**
   On a canvas made with `colorType: "RGBAF32"` in sRGB, a fill, stroke or
   matte named in another space -- `color(srgb-linear 0.5 0 0)`, say -- read
@@ -522,16 +581,6 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   through one of them. The layer now stays open, and the read or export sees
   it composited as it stands -- the pixels the page reads once it closes.
 
-- **A translucent layer composites at its alpha.** On the CPU engine a layer
-  under `ctx.saveLayer(alpha)`, a canvas drawn in by `ctx.drawCanvas()`
-  under `globalAlpha` -- with or without a shadow -- and either of them
-  inside another layer composited up to 1.5 levels off: red over white
-  through a layer at 0.5 read 126, where the exact value is 127.5. Skia
-  composites such a layer on an eight-bit page by an alpha out of 256 and
-  truncates. Each now reads within half a level of the exact value at every
-  alpha, on both engines -- a shadowed one within the rounding of the shadow
-  beneath it -- and a PDF still writes it as an opacity, in vectors.
-
 - **A paragraph's decoration and text shadow are painted in the colours its
   style names.** SkParagraph holds both as an eight-bit sRGB colour, and
   `ParagraphBuilder` styles drew them in it: on a canvas made with
@@ -541,6 +590,15 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   it is clipped. Both are drawn here rather than by SkParagraph, so they now
   take the colours as named, as the text does; a colour of whole bytes
   draws as it did.
+- **A translucent layer composites at its alpha.** On the CPU engine a layer
+  under `ctx.saveLayer(alpha)`, a canvas drawn in by `ctx.drawCanvas()`
+  under `globalAlpha` -- with or without a shadow -- and either of them
+  inside another layer composited up to 1.5 levels off: red over white
+  through a layer at 0.5 read 126, where the exact value is 127.5. Skia
+  composites such a layer on an eight-bit page by an alpha out of 256 and
+  truncates. Each now reads within half a level of the exact value at every
+  alpha, on both engines -- a shadowed one within the rounding of the shadow
+  beneath it -- and a PDF still writes it as an opacity, in vectors.
 
 - **A text decoration's colour is painted at the precision it names, as a
   fill's is.** The colour in `ctx.textDecoration` was rounded to eight bits
@@ -800,7 +858,17 @@ false` now takes effect, and its default is on, at Slight, as Chrome draws
   reducing its chroma in Oklch at its own lightness and hue. A colour
   inside sRGB gives the bytes it gave. `ColorFilter.MakeLighting`'s
   multiply and add are per-channel coefficients rather than colours, and
-  are still clamped channel by channel.
+  are not mapped -- see the next entry.
+
+- **`ColorFilter.MakeLighting` applies a coefficient past one or below
+  zero as it is.** Its multiply and add reached Skia as eight-bit
+  colours, so each sRGB component was clamped to 0..1 and quantized to a
+  255th: `"color(srgb 2 1 0.5)"` left red as it was, and an add of
+  `"color(srgb 0 -0.25 0)"` left green where it should have lowered it.
+  Each component is now the scale or offset it names, in floating point,
+  with the result clamped to the displayable range as before, and a
+  multiply and add an eight-bit colour can hold draw byte for byte as
+  they did.
 
 - **`letterSpacing` and `wordSpacing` take `"0"`.** CSS Values 4 lets a
   zero length be written without its unit, and `ctx.letterSpacing = "0"`
@@ -1487,6 +1555,23 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   within the hundredth SkParagraph's line breaker floors widths to. The
   values this moves are under Breaking: "Text widths, line metrics, rects
   and hit-testing are no longer rounded to hundredths".
+
+- **Word spacing reaches every space.** A leading or trailing space, the
+  second of a doubled one and a no-break space took none of `wordSpacing`;
+  what the width does now is under Breaking: "`wordSpacing` is added after
+  every word separator".
+
+- **Centred and right-aligned text counts a trailing space.** `"a "` drawn
+  with `textAlign` `"center"` put the "a" where `"a"` alone goes, and
+  `"right"` the same, where Chrome moves it half the space's advance left,
+  or all of it: SkParagraph aligns a line by its width without the
+  whitespace it ends in. The run's whole advance is aligned now, trailing
+  spaces and their spacing included, and `actualBoundingBoxLeft` and
+  `actualBoundingBoxRight` move with it: centred `"a "` at 40px Oswald has
+  its left at 11.42, within 0.005 of Chrome 156, where it was 6.84. Text in
+  a `textWrap` paragraph keeps hanging its trailing spaces, as CSS lines do.
+  Not changed: right-to-left text, for which nothing has been measured in
+  Chrome.
 
 ### Added
 

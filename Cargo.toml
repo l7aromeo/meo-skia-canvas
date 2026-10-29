@@ -308,12 +308,6 @@ allsorts = { version = "0.17", features = [
     "flate2_zlib",
 ], default-features = false }
 
-# Locating the shipped fallback `fonts.conf` needs the path of this dynamic
-# library, and only the Linux path does that -- macOS and Windows resolve fonts
-# through the OS rather than through fontconfig.
-[target.'cfg(target_os = "linux")'.dependencies]
-process_path = "0.1"
-
 [dev-dependencies]
 anyhow = "1"
 # Rewriting a chunk's payload means rewriting its checksum, and the APNG

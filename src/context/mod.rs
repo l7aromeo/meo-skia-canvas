@@ -38,7 +38,7 @@ use crate::{
     export::VectorFeatures,
     font::GenericFamily,
     font_library::{FontLibrary, ResolvedFont, generic_name, text_hinting},
-    gpu::RenderingEngine,
+    gpu::{self, RenderingEngine},
     gradient::{BoxedCanvasGradient, CanvasGradient},
     node::{
         filter::{
@@ -59,7 +59,7 @@ use crate::{
 };
 use chain::Step;
 use faint::Faint;
-use layer::{BlurDraw, Composite, Layer, LayerRec};
+use layer::{BlurDraw, Composite, Layer, LayerRec, reach_the_clip};
 use page::{ExportOptions, Page, PageRecorder};
 use typesetting::{TextSettings, Typesetting, Typography};
 
@@ -1691,13 +1691,23 @@ impl Context2D {
         page.picture(None).map(|picture| (picture, features))
     }
 
+    /// The pixels of `crop`, played back and read for `opts` on `engine`.
+    ///
+    /// In an autorelease pool of its own, as every entry point that touches
+    /// Metal is -- see [`gpu::autorelease`]. Reading a GPU page back makes
+    /// Metal objects that are autoreleased; read from Node's main thread,
+    /// which has no pool, they were never drained, and each whole-page read
+    /// of a 2000 by 1600 canvas kept 12.2 MB, about the size of what it
+    /// read.
     pub fn pixels(
         &mut self,
         crop: IRect,
         opts: ExportOptions,
         engine: RenderingEngine,
     ) -> Result<Vec<u8>, String> {
-        self.recorder.borrow_mut().pixels(crop, opts, engine)
+        gpu::autorelease(|| {
+            self.recorder.borrow_mut().pixels(crop, opts, engine)
+        })
     }
 
     /// As [`Context2D::pixels`], with the destination alpha mode chosen
@@ -1709,9 +1719,11 @@ impl Context2D {
         engine: RenderingEngine,
         alpha_type: AlphaType,
     ) -> Result<Vec<u8>, String> {
-        self.recorder
-            .borrow_mut()
-            .pixels_as(crop, opts, engine, alpha_type)
+        gpu::autorelease(|| {
+            self.recorder
+                .borrow_mut()
+                .pixels_as(crop, opts, engine, alpha_type)
+        })
     }
 
     pub fn blit_pixels(
@@ -1791,6 +1803,16 @@ impl Context2D {
         style.set_typeface(typeface.clone());
         style.set_font_families(&spec.collection_names);
         style.set_font_style(spec.style());
+        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+        // Re-check: "17.3px measures as 17.296875px on FreeType" in
+        // tests/suite/text.test.js, on Linux, goes red once fixed.
+        // Skia's FreeType scaler sets the face's size as 26.6 fixed point
+        // through `SkScalarToFDot6`, a truncation, in `FT_Set_Char_Size`
+        // (`SkFontHost_FreeType.cpp`), and corrects its matrix for the size
+        // chosen only below 1px: on Linux every size is laid out at the 64th
+        // of a pixel below it, while its metrics take the size asked for.
+        // Not worked around, as Chrome on Linux takes its advances from the
+        // same scaler -- see docs/browser-differences.md.
         style.set_font_size(spec.size);
         style.reset_font_features();
         for (feat, val) in &spec.features {
@@ -1942,9 +1964,11 @@ impl Context2D {
                 let draw = |canvas: &SkCanvas, at: Point| {
                     #[cfg(test)]
                     if let Some(layout) = &oracle {
-                        return layout.paragraph.paint(canvas, at);
+                        layout.paragraph.paint(canvas, at);
+                        return reach_the_clip(canvas);
                     }
-                    run.paint(canvas, at, paint, global_alpha, faint)
+                    run.paint(canvas, at, paint, global_alpha, faint);
+                    reach_the_clip(canvas);
                 };
                 match condensation {
                     // Chrome condenses with a plain anisotropic transform
