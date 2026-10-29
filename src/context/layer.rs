@@ -20,10 +20,10 @@ use std::{
 };
 
 use skia_safe::{
-    BlendMode, BlurStyle, Canvas as SkCanvas, ClipOp, Color4f, Data,
-    ImageFilter, MaskFilter, Matrix, Paint, PaintCap, PaintJoin, PaintStyle,
-    Path, PathDirection, Picture, Rect, TileMode, canvas::SaveLayerRec,
-    image_filters,
+    AlphaType, BlendMode, BlurStyle, Canvas as SkCanvas, ClipOp, Color4f,
+    ColorSpace, ColorType, Data, ImageFilter, ImageInfo, MaskFilter, Matrix,
+    Paint, PaintCap, PaintJoin, PaintStyle, Path, PathDirection, Picture, Rect,
+    SamplingOptions, Shader, TileMode, canvas::SaveLayerRec, image_filters,
 };
 
 use crate::{
@@ -32,6 +32,7 @@ use crate::{
         faint::{Faint, composited},
     },
     node::filter::MASK_BLUR_MAX_SIGMA,
+    started,
 };
 
 /// One entry of a page's recording, played back in order.
@@ -50,6 +51,11 @@ pub enum Layer {
     /// paint, composited through that paint -- see [`Group`]. Shared, as a
     /// blur is.
     Group(Arc<Group>),
+    /// The same draws recorded twice, on a page that keeps a recording for
+    /// each kind of target -- see `page::Recording`: a flat colour held
+    /// exactly in the page's own space for pixels, and as a plain colour for
+    /// a document. Shared, so the two pictures are one pointer.
+    Targeted(Arc<(Picture, Picture)>),
 }
 
 impl Layer {
@@ -58,21 +64,29 @@ impl Layer {
     pub fn playback(&self, canvas: &SkCanvas, target: Target) {
         match self {
             Layer::Picture(picture) => picture.playback(canvas),
-            Layer::Blur(op) => op.playback(canvas),
+            Layer::Blur(op) => op.playback(canvas, target),
             Layer::Group(group) => group.playback(canvas, target),
+            Layer::Targeted(pictures) => match target {
+                Target::Pixels => pictures.0.playback(canvas),
+                Target::Document => pictures.1.playback(canvas),
+            },
         }
     }
 
     /// The rectangle this entry can draw in, in the coordinates it is played
-    /// back under: a picture's cull rectangle, which Skia computes from what
-    /// it draws because every recording here is begun with a bounding
-    /// hierarchy, and a group's [`Group::reach`]. `None` where it is not
+    /// back under: a picture's cull rectangle -- a pair's, the one played as
+    /// pixels -- which Skia computes from what it draws because every
+    /// recording here is begun with a bounding hierarchy, and a group's
+    /// [`Group::reach`]. `None` where it is not
     /// known: a blurred draw has no such rectangle to take.
     fn reach(&self) -> Option<Rect> {
         match self {
             Layer::Picture(picture) => Some(picture.cull_rect()),
             Layer::Blur(_) => None,
             Layer::Group(group) => group.reach(),
+            // The pixels' recording: the document's holds the same draws,
+            // and a document is never confined.
+            Layer::Targeted(pictures) => Some(pictures.0.cull_rect()),
         }
     }
 }
@@ -115,6 +129,47 @@ pub(crate) fn reach_of(entries: &[Layer]) -> Option<Rect> {
             all.join(entry.reach()?);
             Some(all)
         })
+}
+
+/// A flat colour held exactly in a page's own space, for the recording a
+/// page plays as pixels: Skia converts a plain paint colour through an
+/// approximation and lands it off -- see `page::Recorders`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExactColour {
+    /// The colour's components in `space`, unpremultiplied, opaque.
+    pub rgb: [f32; 3],
+    /// The page's space.
+    pub space: ColorSpace,
+}
+
+impl ExactColour {
+    /// A shader painting the colour: a 1x1 image in the page's space at
+    /// full float precision, repeated. Drawn onto a page in that space,
+    /// Skia converts it by the identity, so it lands exactly; a paint's
+    /// alpha scales it.
+    pub fn shader(&self) -> Option<Shader> {
+        let info = ImageInfo::new(
+            (1, 1),
+            ColorType::RGBAF32,
+            AlphaType::Premul,
+            Some(self.space.clone()),
+        );
+        let [r, g, b] = self.rgb;
+        let pixel: Vec<u8> = [r, g, b, 1.0]
+            .iter()
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+        started::raster_from_data(
+            &info,
+            Data::new_copy(&pixel),
+            info.min_row_bytes(),
+        )?
+        .to_shader(
+            (TileMode::Repeat, TileMode::Repeat),
+            SamplingOptions::default(),
+            None,
+        )
+    }
 }
 
 /// What a page is played back onto, which decides how a [`Group`]
@@ -360,8 +415,16 @@ impl BlurDraw {
                 dither: paint.is_dither(),
                 sigma,
                 faint,
+                exact: None,
             },
         }
+    }
+
+    /// This draw, painted as pixels in `exact` where it is given -- see
+    /// [`ExactColour`].
+    pub fn exact(mut self, exact: Option<ExactColour>) -> Self {
+        self.paint.exact = exact;
+        self
     }
 }
 
@@ -383,6 +446,9 @@ struct BlurPaint {
     /// What the recording canvas's pixels do with a paint too faint for
     /// eight bits, decided when it was recorded as every other draw's is.
     faint: Faint,
+    /// The colour held exactly in the page's space, on a page that keeps a
+    /// recording for pixels, which the op paints with when played as pixels.
+    exact: Option<ExactColour>,
 }
 
 /// A run of blurred rectangles, or one blurred path, in one flat colour and
@@ -519,7 +585,9 @@ impl BlurOp {
     /// with pixels -- see [`blur_mask`]. Anything else takes the coverage
     /// blur the recording chose wherever it can draw the sigma this comes to
     /// in `canvas`'s device pixels, and the image blur where it cannot.
-    pub fn playback(&self, canvas: &SkCanvas) {
+    /// On pixels, a draw that carries an exact colour paints in it -- see
+    /// [`ExactColour`].
+    pub fn playback(&self, canvas: &SkCanvas, target: Target) {
         let Some(path) = self.geometry.first().path() else {
             return;
         };
@@ -535,13 +603,19 @@ impl BlurOp {
             .map_radius(1.0)
             .filter(|s| s.is_normal() && *s > 0.0)
             .unwrap_or(1.0);
-        if self.draws_exactly(canvas, replay) {
+        if self.draws_exactly(canvas, replay, target) {
             canvas.restore();
             return;
         }
         canvas.concat(&self.matrix);
 
         let mut paint = Paint::new(self.paint.color, None);
+        if target == Target::Pixels
+            && let Some(shader) =
+                self.paint.exact.as_ref().and_then(ExactColour::shader)
+        {
+            paint.set_shader(shader);
+        }
         paint
             .set_anti_alias(self.paint.anti_alias)
             .set_dither(self.paint.dither);
@@ -602,7 +676,12 @@ impl BlurOp {
     /// Dithering is left to the blur that honours it: the exact blur is a
     /// gradient rounded once, and a dither would be noise added on top that
     /// nothing here draws.
-    fn draws_exactly(&self, canvas: &SkCanvas, replay: f32) -> bool {
+    fn draws_exactly(
+        &self,
+        canvas: &SkCanvas,
+        replay: f32,
+        target: Target,
+    ) -> bool {
         let sigma = self.paint.sigma * replay;
         // A sigma that is not a positive length has no Gaussian to be exact
         // to, and keeps the blur the recording chose.
@@ -621,6 +700,13 @@ impl BlurOp {
         {
             return false;
         }
+        // The exact colour only where this plays as pixels, as `playback`
+        // paints with it.
+        let exact = self
+            .paint
+            .exact
+            .as_ref()
+            .filter(|_| target == Target::Pixels);
         canvas.save();
         canvas.reset_matrix();
         self.geometry.iter().for_each(|geometry| {
@@ -630,6 +716,7 @@ impl BlurOp {
                     device.map_rect(rect).0,
                     sigma,
                     self.paint.color,
+                    exact,
                 );
             }
         });

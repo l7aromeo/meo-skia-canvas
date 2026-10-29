@@ -45,6 +45,7 @@ use crate::{
         texture::{BoxedCanvasTexture, CanvasTexture},
         typography::with_style_axes,
     },
+    pixels::PixelColorSpace,
     started,
     typography::{
         Baseline, DecorationStyle, DrawnRun, FontSpec, PendingInk, Spacing,
@@ -53,8 +54,8 @@ use crate::{
     utils::*,
 };
 use faint::Faint;
-use layer::{BlurDraw, Layer, LayerRec, reach_the_clip};
-use page::{ExportOptions, Page, PageRecorder};
+use layer::{BlurDraw, ExactColour, Layer, LayerRec, reach_the_clip};
+use page::{ExportOptions, Page, PageRecorder, Recording};
 use typesetting::{TextSettings, Typesetting, Typography};
 
 const BLACK: Color = Color::BLACK;
@@ -100,6 +101,10 @@ pub struct Context2D {
     /// paint too faint for eight bits, fixed with it.
     faint: Faint,
     recorder: RefCell<PageRecorder>,
+    /// The last exact colour a pixels recording painted with and its shader,
+    /// so that a run of draws in one colour holds one image between them
+    /// rather than one each -- see [`Self::exact_paint`].
+    exact_shader: RefCell<Option<(ExactColour, SkShader)>>,
     pub state: State,
     stack: Vec<State>,
     /// Parallel to `stack`: whether each saved frame opened a Skia layer
@@ -550,13 +555,15 @@ impl Context2D {
         dims: impl Into<Size>,
     ) -> Self {
         let bounds = Rect::from_size(dims);
+        let dual = keeps_two_recordings(&canvas_color_space, canvas_color_type);
 
         Context2D {
             bounds,
             canvas_color_space,
             canvas_color_type,
             faint: Faint::of(canvas_color_type),
-            recorder: RefCell::new(PageRecorder::new(bounds)),
+            recorder: RefCell::new(PageRecorder::recording(bounds, dual)),
+            exact_shader: RefCell::default(),
             path: PathBuilder::new(),
             stack: vec![],
             layers: vec![],
@@ -578,9 +585,11 @@ impl Context2D {
         f(self.recorder.borrow_mut());
     }
 
+    /// Records `f` into every recording the page keeps -- see
+    /// `page::Recording`.
     pub fn with_canvas<F>(&self, f: F)
     where
-        F: FnOnce(&SkCanvas),
+        F: Fn(&SkCanvas, Recording),
     {
         self.with_recorder(|mut recorder| {
             recorder.append(f);
@@ -593,7 +602,7 @@ impl Context2D {
     /// [`PageRecorder::append_isolated`]: page::PageRecorder::append_isolated
     fn append_draw<F>(&self, features: VectorFeatures, f: F)
     where
-        F: FnOnce(&SkCanvas),
+        F: Fn(&SkCanvas, Recording),
     {
         match features.any() {
             false => self.with_canvas(f),
@@ -644,14 +653,73 @@ impl Context2D {
         features
     }
 
+    /// Records the draw `f` makes with `paint`, its shadow beneath it, into
+    /// every recording the page keeps. Where the page keeps one for pixels,
+    /// `exact` is the paint that recording draws with instead -- see
+    /// [`Self::exact_paint`].
+    /// The paint a page's pixels recording draws `paint` with, where the
+    /// page keeps one: the flat colour `style` dyes with, held exactly in the
+    /// page's own space by [`ExactColour::shader`] where Skia's conversion of a
+    /// paint colour would land it off -- see `page::Recorders`. Its alpha
+    /// stays on the paint, which scales the shader's opaque colour.
+    ///
+    /// `None` on a page that keeps one recording, for a dye that is not a
+    /// flat colour, and for a colour this crate cannot convert into the
+    /// page's space exactly.
+    pub fn exact_paint(
+        &self,
+        paint: &Paint,
+        style: PaintStyle,
+    ) -> Option<Paint> {
+        if paint.shader().is_some() {
+            return None;
+        }
+        let exact = self.exact_colour(style)?;
+        let mut held = self.exact_shader.borrow_mut();
+        let shader = match &*held {
+            Some((colour, shader)) if *colour == exact => shader.clone(),
+            _ => {
+                let shader = exact.shader()?;
+                *held = Some((exact, shader.clone()));
+                shader
+            }
+        };
+        let mut paint = paint.clone();
+        paint.set_shader(shader);
+        Some(paint)
+    }
+
+    /// The flat colour `style` dyes with, held exactly in the page's own
+    /// space, on a page that keeps a recording for pixels -- see
+    /// [`Self::exact_paint`].
+    pub fn exact_colour(&self, style: PaintStyle) -> Option<ExactColour> {
+        if !self.recorder.borrow().dual() {
+            return None;
+        }
+        let Dye::Color(color, Some(space), _) = self.state.dye(style) else {
+            return None;
+        };
+        let canvas = PixelColorSpace::matching(&self.canvas_color_space)?;
+        let rgb = color_in_canvas_space(*color, space, canvas)?;
+        Some(ExactColour {
+            rgb: rgb.map(|c| c as f32),
+            space: self.canvas_color_space.clone(),
+        })
+    }
+
     pub fn render_to_canvas<F>(
         &self,
         paint: &Paint,
+        exact: Option<&Paint>,
         features: VectorFeatures,
         f: F,
     ) where
         F: Fn(&SkCanvas, &Paint),
     {
+        let paint_for = |recording: Recording| match (recording, exact) {
+            (Recording::Pixels, Some(exact)) => exact,
+            _ => paint,
+        };
         let render_shadow = |canvas: &SkCanvas, paint: &Paint| {
             if let Some(shadow_paint) = self.paint_for_shadow(paint) {
                 canvas.save();
@@ -668,27 +736,28 @@ impl Context2D {
             true => {
                 // for blend modes that affect regions of the canvas outside of
                 // the bounds of the object being drawn, create
-                // an intermediate picture before drawing to the canvas
-                let mut layer_paint = paint.clone();
-                layer_paint.set_blend_mode(BlendMode::SrcOver);
-                let mut layer_recorder = PictureRecorder::new();
-                layer_recorder.begin_recording(self.bounds, true);
-                if let Some(layer) = layer_recorder.recording_canvas() {
-                    // draw the dropshadow (if applicable)
-                    render_shadow(layer, &layer_paint);
-                    // draw normally
-                    layer.set_matrix(&self.state.matrix.into());
-                    f(layer, &layer_paint);
-                }
+                // an intermediate picture before drawing to the canvas, one
+                // for each recording, each with that recording's paint
+                self.append_draw(features, |canvas, recording| {
+                    let mut layer_paint = paint_for(recording).clone();
+                    layer_paint.set_blend_mode(BlendMode::SrcOver);
+                    let mut layer_recorder = PictureRecorder::new();
+                    layer_recorder.begin_recording(self.bounds, true);
+                    if let Some(layer) = layer_recorder.recording_canvas() {
+                        // draw the dropshadow (if applicable)
+                        render_shadow(layer, &layer_paint);
+                        // draw normally
+                        layer.set_matrix(&self.state.matrix.into());
+                        f(layer, &layer_paint);
+                    }
 
-                // transfer the picture contents to the canvas in a single
-                // operation, applying the blend mode to the
-                // whole canvas (regardless of the bounds of the text/path being
-                // drawn)
-                if let Some(pict) =
-                    layer_recorder.finish_recording_as_picture(None)
-                {
-                    self.append_draw(features, |canvas| {
+                    // transfer the picture contents to the canvas in a
+                    // single operation, applying the blend mode to the
+                    // whole canvas (regardless of the bounds of the
+                    // text/path being drawn)
+                    if let Some(pict) =
+                        layer_recorder.finish_recording_as_picture(None)
+                    {
                         canvas.save();
                         canvas.set_matrix(&Matrix::new_identity().into());
                         let mut blend_paint = Paint::default();
@@ -698,15 +767,15 @@ impl Context2D {
                         );
                         canvas.draw_picture(&pict, None, Some(&blend_paint));
                         canvas.restore();
-                    });
-                }
+                    }
+                });
             }
             false => {
-                self.append_draw(features, |canvas| {
+                self.append_draw(features, |canvas, recording| {
                     // draw the dropshadow (if applicable)
                     render_shadow(canvas, paint);
                     // draw with the normal paint
-                    f(canvas, paint);
+                    f(canvas, paint_for(recording));
                 });
             }
         };
@@ -789,13 +858,13 @@ impl Context2D {
     /// there is nothing to apply, so the common case costs no offscreen.
     pub fn with_composited_canvas<F>(&self, f: F)
     where
-        F: FnOnce(&SkCanvas),
+        F: Fn(&SkCanvas),
     {
         let alpha = self.state.global_alpha as f32;
         let blend = self.state.global_composite_operation;
 
         if alpha == 1.0 && blend == BlendMode::SrcOver {
-            self.with_canvas(f);
+            self.with_canvas(|canvas, _| f(canvas));
             return;
         }
 
@@ -809,17 +878,21 @@ impl Context2D {
         // opacity in a document -- see `LayerRec::open_on`. The draw is
         // recorded under the transform it is made under; the group applies
         // the clip.
-        let mut recorder = PictureRecorder::new();
-        let canvas = recorder.begin_recording(self.bounds, true);
-        canvas.set_matrix(&self.state.matrix.into());
-        f(canvas);
-        let contents = Arc::new(
-            recorder
-                .finish_recording_as_picture(None)
-                .map(Layer::Picture)
-                .into_iter()
-                .collect(),
-        );
+        let record = || {
+            let mut recorder = PictureRecorder::new();
+            let canvas = recorder.begin_recording(self.bounds, true);
+            canvas.set_matrix(&self.state.matrix.into());
+            f(canvas);
+            recorder.finish_recording_as_picture(None)
+        };
+        // Once for each recording the page keeps, as every draw is.
+        let entry = match self.recorder.borrow().dual() {
+            false => record().map(Layer::Picture),
+            true => record()
+                .zip(record())
+                .map(|pictures| Layer::Targeted(Arc::new(pictures))),
+        };
+        let contents = Arc::new(entry.into_iter().collect());
         self.with_recorder(|mut recorder| {
             recorder.append_group(
                 LayerRec {
@@ -1086,7 +1159,8 @@ impl Context2D {
         if let Some(sigma) = blurred.then(|| self.blurs_as_op(style)).flatten()
         {
             let paint = self.paint_for_blur(style);
-            let draw = BlurDraw::of(&path, rect, &paint, sigma, self.faint());
+            let draw = BlurDraw::of(&path, rect, &paint, sigma, self.faint())
+                .exact(self.exact_colour(style));
             let features = self.state.filter.blur_features(coverage);
             let (matrix, clip) = (self.state.matrix, self.state.clip.as_ref());
             self.with_recorder(|mut recorder| {
@@ -1096,106 +1170,117 @@ impl Context2D {
         }
         let paint = self.paint_for_drawing(style, coverage);
         let features = self.vector_features(&paint, Some(style));
-        self.render_to_canvas(&paint, features, |canvas, paint| {
-            if let Some(tile) = self.state.texture(style) {
-                // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
-                // Re-check: mix the PathEffect into the paint and draw
-                // directly; if the filled bounds are right the two-path
-                // intersection below can go.
-                //
-                // Simply mixing the PathEffect into the paint and drawing
-                // totally misjudges the boundaries of the
-                // path being filled/stroked. Instead we'll create a path with
-                // the texture and a path with the
-                // desired outline separately, then draw their overlap
+        let exact = self.exact_paint(&paint, style);
+        self.render_to_canvas(
+            &paint,
+            exact.as_ref(),
+            features,
+            |canvas, paint| {
+                if let Some(tile) = self.state.texture(style) {
+                    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+                    // Re-check: mix the PathEffect into the paint and draw
+                    // directly; if the filled bounds are right the two-path
+                    // intersection below can go.
+                    //
+                    // Simply mixing the PathEffect into the paint and drawing
+                    // totally misjudges the boundaries of the
+                    // path being filled/stroked. Instead we'll create a path
+                    // with the texture and a path with the
+                    // desired outline separately, then draw their overlap
 
-                // outline strokes on user path (if paint style is stroke) so we
-                // can use a fill operation below. As of skia-safe 0.94+,
-                // `fill_path_with_paint` writes into a `PathBuilder`;
-                // detach it back to a `Path` for the downstream
-                // `bounds()` / `op()` / `clip_path()` calls.
-                let mut stencil_builder = PathBuilder::new();
-                fill_path_with_paint(
-                    &path,
-                    paint,
-                    &mut stencil_builder,
-                    None,
-                    None,
-                );
-                let stencil = stencil_builder.detach();
-
-                // The grid has to be resolved against the area it covers, not
-                // against the tile alone: see `texture_lattice`.
-                let (magnify, device_pixel, expanded_bounds) = self
-                    .texture_lattice(
-                        tile.spacing(),
-                        tile.mark(),
-                        *stencil.bounds(),
-                    );
-
-                // paint containing the PathEffect
-                let mut tile_paint = paint.clone();
-                let thinned = tile.mix_into(
-                    &mut tile_paint,
-                    self.state.global_alpha as f32,
-                    magnify,
-                    device_pixel,
-                );
-
-                let enclosing_frame = Path::rect(expanded_bounds, None);
-
-                if tile.use_clip() {
-                    // apply the user path as a clipping mask and fill the whole
-                    // enclosing rect with tile pattern
-                    canvas.save();
-                    canvas.clip_path(
-                        &stencil,
-                        Some(ClipOp::Intersect),
-                        Some(true),
-                    );
-                    canvas.draw_path(
-                        &enclosing_frame,
-                        &self.faint().drawable(&tile_paint),
-                    );
-                    canvas.restore();
-                } else {
-                    // create a path merging the the tile pattern outlines and
-                    // the enclosing rectangle
-                    let mut textured_builder = PathBuilder::new();
+                    // outline strokes on user path (if paint style is stroke)
+                    // so we can use a fill operation below.
+                    // As of skia-safe 0.94+,
+                    // `fill_path_with_paint` writes into a `PathBuilder`;
+                    // detach it back to a `Path` for the downstream
+                    // `bounds()` / `op()` / `clip_path()` calls.
+                    let mut stencil_builder = PathBuilder::new();
                     fill_path_with_paint(
-                        &enclosing_frame,
-                        &tile_paint,
-                        &mut textured_builder,
+                        &path,
+                        paint,
+                        &mut stencil_builder,
                         None,
                         None,
                     );
-                    let textured_frame = textured_builder.detach();
+                    let stencil = stencil_builder.detach();
 
-                    // intersect the rectangular texture with the user path and
-                    // fill with flat color
-                    let mut fill_paint = paint.clone();
-                    fill_paint.set_style(PaintStyle::Fill);
-
-                    // This branch fills geometry traced from `tile_paint`, so
-                    // a mark widened to a pixel there has to be dimmed here
-                    // as well -- the colour comes from `paint`, which never
-                    // saw the widening.
-                    if thinned < 1.0 {
-                        fill_paint.set_alpha_f(fill_paint.alpha_f() * thinned);
-                    }
-                    if let Some(fill_path) =
-                        stencil.op(&textured_frame, PathOp::Intersect)
-                    {
-                        canvas.draw_path(
-                            &fill_path,
-                            &self.faint().drawable(&fill_paint),
+                    // The grid has to be resolved against the area it covers,
+                    // not against the tile alone: see
+                    // `texture_lattice`.
+                    let (magnify, device_pixel, expanded_bounds) = self
+                        .texture_lattice(
+                            tile.spacing(),
+                            tile.mark(),
+                            *stencil.bounds(),
                         );
+
+                    // paint containing the PathEffect
+                    let mut tile_paint = paint.clone();
+                    let thinned = tile.mix_into(
+                        &mut tile_paint,
+                        self.state.global_alpha as f32,
+                        magnify,
+                        device_pixel,
+                    );
+
+                    let enclosing_frame = Path::rect(expanded_bounds, None);
+
+                    if tile.use_clip() {
+                        // apply the user path as a clipping mask and fill the
+                        // whole enclosing rect with
+                        // tile pattern
+                        canvas.save();
+                        canvas.clip_path(
+                            &stencil,
+                            Some(ClipOp::Intersect),
+                            Some(true),
+                        );
+                        canvas.draw_path(
+                            &enclosing_frame,
+                            &self.faint().drawable(&tile_paint),
+                        );
+                        canvas.restore();
+                    } else {
+                        // create a path merging the the tile pattern outlines
+                        // and the enclosing rectangle
+                        let mut textured_builder = PathBuilder::new();
+                        fill_path_with_paint(
+                            &enclosing_frame,
+                            &tile_paint,
+                            &mut textured_builder,
+                            None,
+                            None,
+                        );
+                        let textured_frame = textured_builder.detach();
+
+                        // intersect the rectangular texture with the user path
+                        // and fill with flat color
+                        let mut fill_paint = paint.clone();
+                        fill_paint.set_style(PaintStyle::Fill);
+
+                        // This branch fills geometry traced from `tile_paint`,
+                        // so a mark widened to a pixel
+                        // there has to be dimmed here
+                        // as well -- the colour comes from `paint`, which never
+                        // saw the widening.
+                        if thinned < 1.0 {
+                            fill_paint
+                                .set_alpha_f(fill_paint.alpha_f() * thinned);
+                        }
+                        if let Some(fill_path) =
+                            stencil.op(&textured_frame, PathOp::Intersect)
+                        {
+                            canvas.draw_path(
+                                &fill_path,
+                                &self.faint().drawable(&fill_paint),
+                            );
+                        }
                     }
+                } else {
+                    canvas.draw_path(&path, &self.faint().drawable(paint));
                 }
-            } else {
-                canvas.draw_path(&path, &self.faint().drawable(paint));
-            }
-        });
+            },
+        );
     }
 
     pub fn clip_path(&mut self, path: Option<Path>, rule: PathFillType) {
@@ -1294,14 +1379,16 @@ impl Context2D {
             // `Clear` is a blend mode, and Skia's SVG backend writes none
             // of those, so this lands as an opaque black rectangle unless
             // the draw is kept for rasterizing.
-            false => self.append_draw(VectorFeatures::BLEND_MODE, |canvas| {
-                let mut paint = Paint::default();
-                paint
-                    .set_anti_alias(true)
-                    .set_style(PaintStyle::Fill)
-                    .set_blend_mode(BlendMode::Clear);
-                canvas.draw_rect(rect, &paint);
-            }),
+            false => {
+                self.append_draw(VectorFeatures::BLEND_MODE, |canvas, _| {
+                    let mut paint = Paint::default();
+                    paint
+                        .set_anti_alias(true)
+                        .set_style(PaintStyle::Fill)
+                        .set_blend_mode(BlendMode::Clear);
+                    canvas.draw_rect(rect, &paint);
+                })
+            }
         }
     }
 
@@ -1402,7 +1489,7 @@ impl Context2D {
             return;
         }
 
-        self.render_to_canvas(&paint, features, |canvas, paint| {
+        self.render_to_canvas(&paint, None, features, |canvas, paint| {
             // A paint here makes Skia draw the picture through a temporary
             // layer, which is what keeps the source's own compositing to
             // itself: a `destination-out` inside it used to erase what was
@@ -1541,7 +1628,7 @@ impl Context2D {
         ));
         let paint = self.paint_for_image();
         let features = self.vector_features(&paint, None);
-        self.render_to_canvas(&paint, features, |canvas, paint| {
+        self.render_to_canvas(&paint, None, features, |canvas, paint| {
             let sampling = self.state.sampling_filter.sampling_for(scaling);
             canvas.draw_image_rect_with_sampling_options(
                 image,
@@ -1698,7 +1785,7 @@ impl Context2D {
             started::raster_from_data(&info, buffer, info.min_row_bytes())
         {
             self.push(); // cache matrix & clip in self.state
-            self.with_canvas(|canvas| {
+            self.with_canvas(|canvas, _| {
                 let paint = Paint::default();
                 let mut eraser = Paint::default();
                 canvas.restore_to_count(1); // discard current matrix & clip
@@ -1874,7 +1961,15 @@ impl Context2D {
             let kept = typesetter.laid_out();
             let global_alpha = self.state.global_alpha as f32;
             let faint = self.faint();
-            self.render_to_canvas(&paint, features, |canvas, paint| {
+            // Text paints its plain colour into every recording, so on a page
+            // that keeps one for pixels it lands as far off as Skia's
+            // conversion puts it -- see `page::Recorders`. Not the exact
+            // paint: Skia sets a glyph mask's contrast from the luminance of
+            // the paint's colour, which an image shader does not report, so
+            // text through one is read as mid-grey and drawn with heavier
+            // edges -- 366 pixels of a bold 40px run on a Display P3 F32
+            // page, as much as 0.063 off.
+            self.render_to_canvas(&paint, None, features, |canvas, paint| {
                 // The kept run, or, the first time a run is drawn, the run
                 // laid out for this paint -- see `Typesetter::laid_out`.
                 let run = match &kept {
@@ -1884,8 +1979,9 @@ impl Context2D {
                 let (offset, condensation) = (run.offset(), run.condensation());
                 // In a test, an undecorated run can be laid out for this
                 // paint and drawn by `Paragraph::paint` instead, as the
-                // oracle the kept runs are held to. A decorated one is drawn
-                // from its runs either way, its lines between them.
+                // oracle the kept runs are held to. A decorated one is
+                // drawn from its runs either way, its
+                // lines between them.
                 #[cfg(test)]
                 let oracle = (PAINTER_OVERRIDE.get()
                     == Some(Painter::Paragraph)
@@ -1902,8 +1998,8 @@ impl Context2D {
                 };
                 match condensation {
                     // Chrome condenses with a plain anisotropic transform
-                    // rather than a narrower face, and the pen goes with it:
-                    // at 200px with `lineWidth` 12, a half-width
+                    // rather than a narrower face, and the pen goes with
+                    // it: at 200px with `lineWidth` 12, a half-width
                     // `strokeText("H")` draws its stems 6 pixels wide and
                     // its crossbar still 12. A canvas scale is that, so the
                     // stroke needs no separate handling.
@@ -2336,6 +2432,24 @@ impl Dye {
 /// its own, or where the paint says something -- an alpha under one, a blend
 /// mode past source-over, an image filter, a colour filter. See
 /// `Context2D::draw_picture_costing`.
+/// Whether a canvas in `space` and `color_type` keeps a recording for each
+/// kind of target -- see `page::Recorders`: one whose pixels hold a float
+/// and whose space is one a flat colour can be converted into exactly here,
+/// other than sRGB, onto which Skia lands a paint colour exactly itself.
+fn keeps_two_recordings(space: &ColorSpace, color_type: ColorType) -> bool {
+    Faint::of(color_type) == Faint::Kept
+        && matches!(
+            PixelColorSpace::matching(space),
+            Some(
+                PixelColorSpace::SrgbLinear
+                    | PixelColorSpace::DisplayP3
+                    | PixelColorSpace::DisplayP3Linear
+                    | PixelColorSpace::Rec2020
+                    | PixelColorSpace::Rec2020Linear
+            )
+        )
+}
+
 /// Whether `blend` changes the canvas outside what a draw covers, so that
 /// the draw has to be composited whole, as one picture -- see
 /// `Context2D::render_to_canvas`.
