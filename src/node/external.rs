@@ -40,6 +40,11 @@ static ADJUST: OnceLock<Option<AdjustExternalMemory>> = OnceLock::new();
 /// Neon does not bind the same way. On Windows the host is the executable,
 /// which exports Node-API for addons -- the same handle every Neon call
 /// already goes through; elsewhere it is the process's global symbol scope.
+///
+/// The Windows half is reasoned from Neon's source and has not been run
+/// here. What checks it is the `Run tests` workflow's Windows rebuild,
+/// dispatched before a release: there `dropped-canvas-memory.test.js` fails
+/// if nothing is reported, as it failed on macOS without this module.
 fn adjust() -> Option<AdjustExternalMemory> {
     *ADJUST.get_or_init(|| {
         #[cfg(not(windows))]
