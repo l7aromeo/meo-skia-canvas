@@ -655,14 +655,20 @@ fn a_blurred_rounded_rectangle_on_the_gpu_is_the_exact_gaussian_wherever_it_lies
  {
     // On the GPU a draw rounds by the size of the target as well as by where
     // it lies, and a layer the size of the region drew each of these but the
-    // first otherwise than the page does -- 12, 12, 10 and 8 pixels off the
-    // exact blur. Each window holds the whole rectangle.
+    // first otherwise than the page does -- 12, 12, 10, 8, 2, 2, 2, 5 and 2
+    // pixels off the exact blur. The last two lie on pages 16383 and 16384
+    // pixels long. Each window holds the whole rectangle.
     let rows = [
         ((300.0, 200.0), (41.0, 30.25), (11, 0, 140, 100)),
         ((1536.0, 120.0), (1125.75, 30.25), (1095, 0, 140, 100)),
         ((4000.0, 120.0), (41.75, 30.25), (11, 0, 140, 100)),
         ((160.0, 3000.0), (41.0, 41.0), (0, 11, 160, 100)),
         ((160.0, 3000.0), (41.0, 750.5), (0, 720, 160, 100)),
+        ((2000.0, 120.0), (1500.0, 30.25), (1470, 0, 140, 100)),
+        ((2000.0, 120.0), (1860.0, 30.25), (1830, 0, 140, 100)),
+        ((4000.0, 120.0), (3860.0, 30.25), (3830, 0, 140, 100)),
+        ((16383.0, 120.0), (16289.0, 30.25), (16243, 0, 140, 100)),
+        ((120.0, 16384.0), (20.25, 2.0), (0, 0, 120, 100)),
     ];
     for (size, at, window) in rows {
         let Some(misses) = far_misses(true, size, at, window, 2.0) else {
