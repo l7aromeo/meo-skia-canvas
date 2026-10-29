@@ -17,23 +17,25 @@ sent that way may have reached that host and should be rotated.** `redirect` and
 `integrity`, which were ignored, are honoured, and `follow-redirects` moves past
 three advisories; the Security section has each.
 
-Twenty-seven changes can break working code, each under Breaking with what to
-change. Values that were taken are refused or ignored: a text gamma of 4 or
-above and a contrast or gamma that is not finite; a `ParagraphBuilder` option of
-the wrong kind, a numeric code outside its set, and a `textDirection` or
-`textAlign` it does not name; colour, font, filter and transform strings Chrome
-153 refuses -- a space before `(`, legacy commas CSS Color 4 does not allow,
-`hwba()`, `hsv()` and hex without `#`, whitespace CSS does not define, and an
-enumerated name in another case; `@0x`; a `data:` URL `fetch` rejects; and a
-twenty-first redirect. Values read back differently: `ctx.font`, `ctx.filter`,
-`fillStyle` and the other colours, a `DOMMatrix` read from a string,
-`TextMetrics`, whose values move to its prototype, and `ctx.fontHinting`, which
-reads `true` until it is set. Some values mean something else: a `[r, g, b, a]`
-colour array is sRGB on every canvas, `color(rec2020 ...)` decodes by a 2.4
-gamma, and a quoted generic keyword in `ctx.font` is a family name. And two
-calls do what they say rather than what they happened to do: `FontLibrary.use()`
-registers every font it is given or none, and an `@2x` in a `toFile` name is
-read whatever `format` says.
+Thirty changes can break working code, each under Breaking with what to change.
+Values that were taken are refused or ignored: a text gamma of 4 or above and a
+contrast or gamma that is not finite; a `ParagraphBuilder` option of the wrong
+kind, a numeric code outside its set, and a `textDirection` or `textAlign` it
+does not name; colour, font, filter and transform strings Chrome 153 refuses --
+a space before `(`, legacy commas CSS Color 4 does not allow, `hwba()`, `hsv()`
+and hex without `#`, whitespace CSS does not define, and an enumerated name in
+another case; `@0x`; a `data:` URL `fetch` rejects; and a twenty-first redirect.
+Values read back differently: `ctx.font`, `ctx.filter`, `fillStyle` and the
+other colours, a `DOMMatrix` read from a string, `TextMetrics`, whose values
+move to its prototype, text widths, line metrics and rects, which are no longer
+rounded to hundredths, and `ctx.fontHinting`, which reads `true` until it is
+set. Some values mean something else: a `[r, g, b, a]` colour array is sRGB on
+every canvas, `color(rec2020 ...)` decodes by a 2.4 gamma, a quoted generic
+keyword in `ctx.font` is a family name, `sans-serif` is the face Chrome draws it
+in, and `wordSpacing` is added after every word separator. And two calls do what
+they say rather than what they happened to do: `FontLibrary.use()` registers
+every font it is given or none, and an `@2x` in a `toFile` name is read whatever
+`format` says.
 
 Wrong pixels are fixed: `getImageData` after an export drew the exported page
 onto the canvas a second time; a translucent pixel read back up to a level low
@@ -1787,6 +1789,18 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
   instances stay: the next text drawn lays out again from faces already
   loaded, and draws the same. Nothing the watcher leaves on a thread keeps
   its event loop alive.
+
+### Known, and not fixed here
+
+- **On Linux, text is laid out at its size truncated to a 64th of a pixel.**
+  Skia's FreeType scaler sets a face's size in 26.6 fixed point, truncating,
+  and corrects only sizes below 1px, so widths grow in steps with the font
+  size while the font's metrics take the size asked for. In Oswald,
+  `measureText("Hamburgefonstiv")` at 17.3px measures as at 17.296875px, and
+  of the 100 steps of a hundredth from 17.00px to 18.00px, 36 leave the width
+  as it was; on macOS every step moves it. Chrome on Linux takes its advances
+  from the same scaler and is expected to step alike; it was not measured.
+  docs/browser-differences.md has the measurements.
 
 ## 📦 ⟩ [v6.0.2] (npm) ⟩ September 16, 2026
 

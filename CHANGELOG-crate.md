@@ -19,7 +19,7 @@ independently of the npm package.
 
 ## 📦 ⟩ [v0.17.0] (crate) ⟩ Unreleased
 
-**A breaking release. Twenty-one changes can break working code, each under
+**A breaking release. Twenty-four changes can break working code, each under
 Breaking with what to change.**
 
 Signatures and types change: `FontSlant::Oblique` and `TextSlant::Oblique` carry
@@ -34,10 +34,12 @@ spacing strings Chrome 153 refuses, a space before `(`, legacy commas CSS Color
 4 does not allow and `hwba()`, `hsv()` and hex without `#` among them. Values
 read back differently: `Context2D::font()` as CSSOM serializes a font,
 `filter()` as the chain was written, `fill_style()` and `stroke_style()` as the
-colour that paints, and `font_hinting()`, which is `true` until it is set. And
-some values mean something else: an `RgbaLinear` is linear-light sRGB on every
-canvas, `color(rec2020 ...)` decodes by a 2.4 gamma, and `has_font` and
-`family_details` match a family name in any case.
+colour that paints, text widths, line metrics and rects, which are no longer
+rounded to hundredths, and `font_hinting()`, which is `true` until it is set.
+And some values mean something else: an `RgbaLinear` is linear-light sRGB on
+every canvas, `color(rec2020 ...)` decodes by a 2.4 gamma, `has_font` and
+`family_details` match a family name in any case, `sans-serif` is the face
+Chrome draws it in, and `set_word_spacing` is added after every word separator.
 
 Wrong pixels are fixed: a read after an export drew the cached page onto the
 surface again; on the GPU engine a translucent pixel read back up to a level
@@ -1544,6 +1546,16 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   that limit; a crate build gets whatever Skia skia-bindings provides.
   docs/rust.md, "Metal and skia-bindings' prebuilt Skia", says how to build
   Skia from source with the patch that removes it.
+
+- **On Linux, text is laid out at its size truncated to a 64th of a pixel.**
+  Skia's FreeType scaler sets a face's size in 26.6 fixed point, truncating,
+  and corrects only sizes below 1px, so widths grow in steps with the font
+  size while the font's metrics take the size asked for. In Oswald,
+  `measure_text("Hamburgefonstiv")` at 17.3px measures as at 17.296875px, and
+  of the 100 steps of a hundredth from 17.00px to 18.00px, 36 leave the width
+  as it was; on macOS every step moves it. Chrome on Linux takes its advances
+  from the same scaler and is expected to step alike; it was not measured.
+  docs/browser-differences.md has the measurements.
 
 ## 📦 ⟩ [v0.16.3] (crate) ⟩ September 16, 2026
 
