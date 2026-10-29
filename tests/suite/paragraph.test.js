@@ -423,13 +423,22 @@ describe("a paragraph is laid out at the width it is given", () => {
     },
   );
 
-  // A line exactly as wide as the paragraph fits it, and a thousandth less
-  // does not: the widths are compared as they are.
-  test("a line breaks within a thousandth of the edge", () => {
+  // A line exactly as wide as the paragraph fits it. SkParagraph's line
+  // breaker compares the line's width floored to hundredths, rounding hack
+  // or none, so the line also fits a paragraph down to that hundredth, and
+  // a thousandth below it does not -- docs/browser-differences.md. Where the
+  // width falls just above a hundredth, as in CoreText's 200.52002, the two
+  // edges are one; FreeType's 200.51942 fits down to 200.51.
+  test("a line breaks within a hundredth of the edge", () => {
     const line = "Hamburgefonstiv quick";
     const width = laidOut(STYLE, line, 1e6).getMaxIntrinsicWidth();
-    assert.equal(laidOut(STYLE, line, width).getNumberOfLines(), 1);
-    assert.equal(laidOut(STYLE, line, width - 0.001).getNumberOfLines(), 2);
+    const lines = (at) => laidOut(STYLE, line, at).getNumberOfLines();
+    const floored = Math.floor(width * 100) / 100;
+    assert.equal(lines(width), 1);
+    assert.equal(lines(floored - 0.001), 2, `${floored - 0.001}`);
+    if (floored + 0.0001 < width) {
+      assert.equal(lines(floored + 0.0001), 1, `${floored + 0.0001}`);
+    }
   });
 
   // A run of one digit's box ends at that digit's advance times its

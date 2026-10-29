@@ -148,7 +148,10 @@ window be changed after it opens.** No signature moves and nothing is removed.
   "Hamburgefonstiv quick", 200.52 wide, on its first line, as Chrome does,
   where it wrapped after "Hamburgefonstiv". Code that sizes or compares
   against these values can see them move by up to half a hundredth, and a
-  paragraph at a fractional width can lay out on fewer lines.
+  paragraph at a fractional width can lay out on fewer lines. A line still
+  fits a paragraph up to a hundredth narrower than it, as SkParagraph's
+  line breaker compares the line's width floored to hundredths;
+  docs/browser-differences.md has it.
 
 ### Fixed
 
@@ -868,7 +871,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 - **Text no longer wraps early at a fractional width.** A paragraph laid
   out at 200.7 broke as if it were 200 wide, and line widths were compared
-  rounded to hundredths; text now fits where Chrome fits it. The values this
+  rounded to hundredths; text now fits where Chrome fits it, to within the
+  hundredth SkParagraph's line breaker floors widths to. The values this
   moves are under Breaking: "Text widths, line metrics, rects and
   hit-testing are no longer rounded to hundredths".
 

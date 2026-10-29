@@ -227,6 +227,14 @@ const INTRINSIC_WIDTH_FLOOR: f32 = f32::MIN_POSITIVE;
 /// at the width it is given -- Chrome 156 fits "Hamburgefonstiv quick" in
 /// Oswald 24px, 200.53 wide, at 200.7px, where the floored width does not.
 pub(crate) fn paragraph_style() -> ParagraphStyle {
+    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+    // Re-check: "a line breaks within a hundredth of the edge" in
+    // tests/suite/paragraph.test.js, its last assertion red once fixed.
+    // With the hack off, `LineBreakerWithLittleRounding` in
+    // `TextWrapper.cpp` still floors a line's width to hundredths before
+    // comparing it with the paragraph's, within a quarter pixel of it, so a
+    // line up to a hundredth wider than the paragraph still fits. No width
+    // passed to `layout` undoes a floor applied to the line's side.
     let mut style = ParagraphStyle::new();
     style.set_apply_rounding_hack(false);
     style

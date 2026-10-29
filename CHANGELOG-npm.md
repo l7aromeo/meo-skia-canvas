@@ -276,7 +276,9 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   does, where it wrapped after "Hamburgefonstiv". Code that sizes or
   compares against these values can see them move by up to half a
   hundredth, and a paragraph at a fractional width can lay out on fewer
-  lines and stand shorter.
+  lines and stand shorter. A line still fits a paragraph up to a
+  hundredth narrower than it, as SkParagraph's line breaker compares the
+  line's width floored to hundredths; docs/browser-differences.md has it.
 
 ### Security
 
@@ -1347,7 +1349,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 - **Text no longer wraps early at a fractional width.** A `Paragraph` laid
   out at 200.7px broke as if it were 200px wide, and line widths were
-  compared rounded to hundredths; text now fits where Chrome fits it. The
+  compared rounded to hundredths; text now fits where Chrome fits it, to
+  within the hundredth SkParagraph's line breaker floors widths to. The
   values this moves are under Breaking: "Text widths, line metrics, rects
   and hit-testing are no longer rounded to hundredths".
 
