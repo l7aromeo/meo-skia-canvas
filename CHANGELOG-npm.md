@@ -397,6 +397,18 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A half-float canvas stores the nearest half on x86.** On an x86
+  machine, a canvas made with `colorType: "RGBAF16"` truncated each value it
+  stored instead of rounding it, so a pixel could land up to one half-float
+  step low -- 0.0005 near one half -- and flushed values under 2^-14 to zero,
+  so a faint enough blur or gradient vanished. ARM machines were unaffected.
+  Skia picks the raster stages built for the CPU it runs on only when it is
+  started, and nothing started it; it is now started before anything else
+  reaches it, which rounds to nearest, keeps subnormals, and gives an x86
+  machine with AVX2 the stages built for it. That holds where the CPU has
+  AVX2 and F16C: an older x86 CPU keeps Skia's portable stage, which still
+  truncates. A value written with `putImageData` and read back shows it.
+
 - **An SVG export keeps what a `saveLayer` holds.** Skia's SVG backend has
   no layers and dropped whatever was drawn inside one: a red square in
   `ctx.saveLayer()`, in a translucent or nested layer, or a paragraph drawn
