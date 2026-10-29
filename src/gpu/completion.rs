@@ -200,8 +200,8 @@ pub(crate) mod seam {
 mod tests {
     use super::{DISCARDED, seam};
     use crate::{
-        Canvas, EncodeOptions, Error, ImageFormat, PixelColorSpace, RgbaLinear,
-        canvas::EngineKind,
+        Canvas, Context2D, EncodeOptions, Error, ImageFormat, PixelColorSpace,
+        RgbaLinear, canvas::EngineKind,
     };
 
     /// A canvas with something on it, on the GPU, and the id of its page --
@@ -382,6 +382,49 @@ mod tests {
         };
         let png = canvas.to_buffer(ImageFormat::Png, &options);
         assert_discarded(png, "converting the page to its export colour space");
+    }
+
+    /// `canvas` with a layer at 0.5 open over it, holding a square.
+    fn in_a_layer(canvas: &mut Canvas) -> &mut Context2D {
+        let ctx = canvas.context();
+        ctx.save_layer_with(0.5, None, None);
+        ctx.fill_rect(8.0, 8.0, 32.0, 24.0);
+        ctx
+    }
+
+    #[test]
+    fn a_read_inside_a_layer_whose_overlay_was_discarded_is_drawn_again() {
+        // The page beneath the layer is let through, so that the layer drawn
+        // over it is what the GPU discards.
+        let Some((mut canvas, page)) = drawn(64.0, 48.0) else {
+            return;
+        };
+        let Some((mut reference, _)) = drawn(64.0, 48.0) else {
+            return;
+        };
+        seam::discard_after(Some(page), 1, 1);
+        let data = in_a_layer(&mut canvas)
+            .get_image_data(0.0, 0.0, 64.0, 48.0)
+            .expect("read");
+        assert_eq!(
+            seam::unused(page),
+            0,
+            "the read never asked whether its overlay ran"
+        );
+        let want = in_a_layer(&mut reference)
+            .get_image_data(0.0, 0.0, 64.0, 48.0)
+            .expect("reference");
+        assert_eq!(data.pixels(), want.pixels());
+    }
+
+    #[test]
+    fn a_read_inside_a_layer_discarded_twice_is_an_error() {
+        let Some((mut canvas, page)) = drawn(64.0, 48.0) else {
+            return;
+        };
+        seam::discard_after(Some(page), 1, 2);
+        let read = in_a_layer(&mut canvas).get_image_data(0.0, 0.0, 64.0, 48.0);
+        assert_discarded(read, "drawing the open layers for a read");
     }
 
     #[test]

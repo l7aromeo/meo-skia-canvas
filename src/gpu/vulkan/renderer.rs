@@ -1,6 +1,6 @@
 use super::{VK_FORMATS, skia_max_api_version, to_sk_format};
 use crate::{
-    context::page::Page,
+    context::{layer::Target, page::Page},
     gpu::{RenderCache, RenderState::Resizing},
 };
 use ash::vk::Handle;
@@ -241,7 +241,7 @@ impl VulkanRenderer {
                 for layer in page.layers.iter().skip(self.cache.depth()) {
                     canvas.save();
                     canvas.concat(&matrix);
-                    layer.playback(canvas);
+                    layer.playback(canvas, Target::Pixels);
                     canvas.restore();
                 }
             })
