@@ -4553,6 +4553,9 @@ fn bare_skia_paragraph_at(
     fonts.set_default_font_manager(Some(FontMgr::from(provider)), None);
     let mut paragraph_style = ParagraphStyle::new();
     paragraph_style.turn_hinting_off();
+    // Unrounded, as every paragraph the crate lays out is: with SkParagraph's
+    // rounding hack on, the reference widths came back in hundredths.
+    paragraph_style.set_apply_rounding_hack(false);
     let mut style = TextStyle::new();
     style.set_font_size(size);
     style.set_font_families(&["Bare"]);
@@ -4659,8 +4662,12 @@ fn a_font_weight_on_a_variable_font_matches_the_font_file() {
     ctx.set_font(&Font::new(oswald(), SIZE).weight(400));
     let measured = ctx.measure_text(&"a".repeat(COUNT), None).width;
     let expected = COUNT as f32 * ADVANCE * SIZE / UNITS_PER_EM;
+    // Within what a running `f32` sum of COUNT advances can drift, and no
+    // further: the widths are not rounded to hundredths any more, which put
+    // this one 0.004 off.
+    let drift = COUNT as f32 * expected * f32::EPSILON;
     assert!(
-        (measured - expected).abs() < 0.01,
+        (measured - expected).abs() <= drift,
         "64 a's at weight 400 measured {measured}, where the font says \
          {expected}"
     );
@@ -11852,23 +11859,126 @@ fn css_spacing_reaches_the_layout_it_configures() {
     );
 }
 
+/// How close a width here comes to Chrome's: a tenth of the hundredth
+/// SkParagraph's rounding hack rounded widths to. What is left is the two
+/// engines' sums of the same advances, 0.00014 at most across the cases
+/// measured, against up to 0.005 from the rounding.
+const CHROME_FLOAT: f32 = 0.0005;
+
+/// At sizes whose advances are not whole hundredths, the width is Chrome
+/// 156's to the float. Chrome's widths were measured on macOS, and
+/// FreeType's advances differ from CoreText's in the thousandths, so
+/// elsewhere `a_run_of_one_digit_is_its_width_times_its_length` holds the
+/// property instead.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_width_is_chromes_at_fractional_sizes() {
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    for (size, text, chrome) in [
+        (24.0, "Hamburgefonstiv", 148.175_9),
+        (23.7, "Hambu", 60.529_77),
+        (31.9, "quick brown fox", 182.436),
+        (9.5, "quick brown fox", 54.330_383),
+    ] {
+        ctx.set_font(&Font::new(oswald(), size));
+        let width = ctx.measure_text(text, None).width;
+        assert!(
+            (width - chrome).abs() <= CHROME_FLOAT,
+            "{size}px {text:?}: {width}, Chrome {chrome}"
+        );
+    }
+}
+
+/// On any platform, a run of one digit is that digit's width times its
+/// length, at sizes whose advances are not whole hundredths. Widths rounded
+/// to hundredths broke this, each run rounded on its own.
+#[test]
+fn a_run_of_one_digit_is_its_width_times_its_length() {
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    for size in [9.5, 12.3, 17.7, 23.7, 31.9] {
+        ctx.set_font(&Font::new(oswald(), size));
+        let one = ctx.measure_text("0", None).width;
+        let seven = ctx.measure_text("0000000", None).width;
+        assert!(
+            (seven - 7.0 * one).abs() <= 0.0001,
+            "{size}px: {seven} against 7 x {one}"
+        );
+    }
+}
+
+/// A paragraph from a `TextEngine` wraps at the width it is given: one as
+/// wide as its first two words, a fractional width, holds them on its first
+/// line, where SkParagraph's rounding hack broke at the width floored to a
+/// whole pixel. Chrome 156, on macOS, fits "Hamburgefonstiv quick" in
+/// Oswald 24px, 200.53 wide, on one line at 200.7px and not at 200px.
+#[test]
+fn a_paragraph_wraps_at_its_fractional_width() {
+    let engine = oswald_engine();
+    let style = TextStyle {
+        font_size: 24.0,
+        ..oswald_paragraph(400)
+    };
+    let text = "Hamburgefonstiv quick brown fox jumps over";
+    let lines = |width| engine.layout_text(text, &style, width).line_count();
+    let fits = engine
+        .layout_text("Hamburgefonstiv quick", &style, 1e6)
+        .max_intrinsic_width();
+    assert!(fits.fract() > 0.01, "{fits} is not fractional");
+    assert_eq!(lines(fits), 2);
+    assert_eq!(lines(fits.floor()), 3);
+    if cfg!(target_os = "macos") {
+        assert_eq!(lines(200.7), 2);
+        assert_eq!(lines(200.0), 3);
+    }
+}
+
 #[test]
 fn a_negative_spacing_measures_a_negative_width() {
-    // Chrome 152 at 40px Oswald: the advances with the spacing added,
+    // Chrome 156 at 40px Oswald: the advances with the spacing added,
     // summed and never clamped, trailing spaces included.
     let mut canvas = Canvas::new(10.0, 10.0);
     let ctx = canvas.context();
     ctx.set_font(&Font::parse(&format!("40px {}", oswald())).expect("a font"));
     for (letter, text, chrome) in [
-        ("-23.12px", "abcd", -23.44),
-        ("-50px", "ab ", -105.92),
-        ("-10px", "a ", 6.2),
+        ("-23.12px", "abcd", -23.440_018),
+        ("-50px", "ab ", -105.920_03),
+        ("-10px", "a ", 6.199_982),
     ] {
         ctx.set_letter_spacing_css(letter).expect("a length");
         let width = ctx.measure_text(text, None).width;
         assert!(
-            (width - chrome).abs() <= 0.01,
+            (width - chrome).abs() <= CHROME_FLOAT,
             "{letter} {text:?}: {width}, Chrome {chrome}"
+        );
+    }
+}
+
+/// Word spacing is added after every word-separator character (CSS Text 3
+/// section 8.2), a space or a no-break space, leading, doubled and trailing
+/// ones included, and nowhere else: U+3000 is not one.
+#[test]
+fn word_spacing_is_added_after_every_word_separator() {
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::parse(&format!("40px {}", oswald())).expect("a font"));
+    for (text, separators) in [
+        ("a b", 1.0),
+        ("a  b", 2.0),
+        (" a", 1.0),
+        ("a ", 1.0),
+        (" a b ", 3.0),
+        ("a\u{a0}b", 1.0),
+        ("a\u{3000}b", 0.0),
+    ] {
+        ctx.set_word_spacing_css("0px").expect("a length");
+        let plain = ctx.measure_text(text, None).width;
+        ctx.set_word_spacing_css("-100px").expect("a length");
+        let spaced = ctx.measure_text(text, None).width;
+        assert!(
+            (spaced - (plain - 100.0 * separators)).abs() <= 0.0002,
+            "{text:?}: {spaced}, unspaced {plain}, {separators} separators"
         );
     }
 }

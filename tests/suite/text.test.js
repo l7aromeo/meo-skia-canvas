@@ -944,43 +944,230 @@ describe("a face kerned through its legacy kern table outlines as it draws", () 
   });
 });
 
+/**
+ * How close a width here comes to Chrome's: a tenth of the hundredth
+ * SkParagraph's rounding hack rounded widths to. What is left is the two
+ * engines' sums of the same advances, 0.00014 at most across the cases
+ * measured, against up to 0.005 from the rounding.
+ */
+const CHROME_FLOAT = 0.0005;
+
+/**
+ * Where Chrome's widths were measured: macOS, whose CoreText gives the
+ * advances these tests hold. FreeType's differ in the thousandths, so
+ * elsewhere the widths are held to properties no rounding survives instead.
+ */
+const CHROME_MEASURED_HERE =
+  process.platform === "darwin"
+    ? false
+    : "Chrome 156's widths were measured on macOS, through CoreText";
+
+/**
+ * How far an `f32` sum of advances may drift from the same advances summed
+ * another way: a few units in the last place of widths of a few hundred
+ * pixels, and well under the hundredth that rounding moved them by.
+ */
+const F32_SUM = 0.0002;
+
+/**
+ * The step an ink box moves in: it falls on a grid of 1/64 pixel, measured
+ * as a centred "a " standing 4.578125 left of "a", 293/64, where the run
+ * moved 4.58.
+ */
+const INK_GRID = 1 / 64;
+
+/**
+ * The characters word spacing applies to: CSS Text 3 section 8.2's
+ * word-separator characters. U+3000, the ideographic space, is not one.
+ */
+const WORD_SEPARATORS = new Set([
+  "\u0020",
+  "\u00a0",
+  "\u1361",
+  "\u{10100}",
+  "\u{10101}",
+  "\u{1039f}",
+  "\u{1091f}",
+]);
+
 describe("measureText's width is the run's advance", () => {
   FontLibrary.use("Oswald", [
     "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
   ]);
 
-  // Chrome 152 at 40px Oswald, loaded as a FontFace with its weight range:
-  // the advance of every glyph and space, letter spacing after each and
-  // word spacing between words, summed and never clamped.
+  // On any platform, the width with spacing is the width without it plus the
+  // spacing, never clamped: letter spacing after every character, and word
+  // spacing at every word-separator character (CSS Text 3 section 8.2), a
+  // space or a no-break space, leading, doubled and trailing ones included.
+  // On macOS, also Chrome 156's widths at 40px Oswald to the float, within
+  // CHROME_FLOAT, each measured in a profile of its own: Chrome's spacing of
+  // a space depends on what it measured first, and a leading space it does
+  // not space at all -- see docs/browser-differences.md -- so those rows
+  // carry no Chrome value.
   test("width is the signed advance, trailing spaces included", () => {
     const ctx = new Canvas(10, 10).getContext("2d");
     ctx.font = "40px Oswald";
+    const unspaced = (text) => {
+      ctx.letterSpacing = "0px";
+      ctx.wordSpacing = "0px";
+      return ctx.measureText(text).width;
+    };
     for (const [letter, word, text, chrome] of [
-      ["-23.12px", "0px", "abcd", -23.44],
-      ["-30px", "0px", "ab", -25.08],
-      ["-50px", "0px", "a", -32.96],
-      ["-100px", "0px", "abcd", -330.96],
-      ["0px", "-100px", "a b", -55.92],
-      ["-10px", "0px", " ", -0.84],
-      ["-50px", "0px", "ab ", -105.92],
-      ["-10px", "0px", "a ", 6.2],
-      ["0px", "-100px", " a", 26.2],
-      ["0px", "0px", "a  ", 35.36],
+      ["-23.12px", "0px", "abcd", -23.4400177],
+      ["-30px", "0px", "ab", -25.08001708984375],
+      ["-50px", "0px", "a", -32.96000671386719],
+      ["-100px", "0px", "abcd", -330.96002197265625],
+      ["0px", "-100px", "a b", -55.92002868652344],
+      ["-10px", "0px", " ", -0.8400115966796875],
+      ["-50px", "0px", "ab ", -105.92002868652344],
+      ["-10px", "0px", "a ", 6.199981689453125],
+      ["0px", "0px", "a  ", 35.35997009277344],
+      ["0px", "-100px", "a ", -73.80001831054688],
+      ["0px", "-100px", "a  ", -164.64003],
+      ["0px", "-100px", "a  b", -146.76004],
+      ["0px", "-100px", "a\u00a0b", -55.92002868652344],
+      ["0px", "-100px", "\u00a0a", -73.80001831054688],
+      // Oswald has no U+3000, and the face it falls back to is not Chrome's.
+      ["0px", "-100px", "a\u3000b", null],
+      ["5px", "20px", "a  b", null],
+      ["0px", "-100px", " a", null],
+      ["0px", "-100px", "  a", null],
+      ["0px", "20px", " a b ", null],
     ]) {
+      const plain = unspaced(text);
       ctx.letterSpacing = letter;
       ctx.wordSpacing = word;
       const { width } = ctx.measureText(text);
+      const what = `${letter} ${word} ${JSON.stringify(text)}: ${width}`;
+      const separators = [...text].filter((ch) => WORD_SEPARATORS.has(ch));
+      const spaced =
+        plain +
+        parseFloat(letter) * text.length +
+        parseFloat(word) * separators.length;
       assert.ok(
-        Math.abs(width - chrome) <= 0.01,
-        `${letter} ${word} ${JSON.stringify(text)}: ${width}, Chrome ${chrome}`,
+        Math.abs(width - spaced) <= F32_SUM,
+        `${what}, unspaced ${plain} plus the spacing ${spaced}`,
+      );
+      if (!CHROME_MEASURED_HERE && chrome !== null) {
+        assert.ok(
+          Math.abs(width - chrome) <= CHROME_FLOAT,
+          `${what}, Chrome ${chrome}`,
+        );
+      }
+    }
+  });
+
+  // What is drawn moves with the width: the ink of the last glyph stands
+  // the word spacing further right for every separator before it, a
+  // leading one and a doubled one included.
+  test("word spacing moves the glyphs after each separator", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = "40px Oswald";
+    const right = (text, word) => {
+      ctx.wordSpacing = word;
+      return ctx.measureText(text).actualBoundingBoxRight;
+    };
+    for (const text of ["a b", "a  b", " a", "  a b", "a\u00a0b", "a b "]) {
+      const before = [...text.trimEnd()].filter((ch) =>
+        WORD_SEPARATORS.has(ch),
+      ).length;
+      const moved = right(text, "20px") - right(text, "0px");
+      assert.ok(
+        Math.abs(moved - 20 * before) <= F32_SUM,
+        `${JSON.stringify(text)}: moved ${moved}, ${before} separators`,
       );
     }
   });
 
-  // A letter spacing whose half is not a hundredth: the laid-out boxes are
-  // rounded to hundredths with half the spacing at each end, which lost a
-  // hundredth at 10px. Chrome 152 measures "00" at 5.17px spacing as below,
-  // to the float; SkParagraph keeps hundredths, so within half of one.
+  // A trailing space is part of the run that is aligned, as in Chrome: the
+  // ink of a centred "a " stands half the space's advance left of "a"'s,
+  // and right-aligned the whole of it. On macOS, also Chrome 156's ink box,
+  // each case measured in a profile of its own.
+  test("a trailing space moves aligned text", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = "40px Oswald";
+    for (const [align, share] of [
+      ["left", 0],
+      ["center", 0.5],
+      ["right", 1],
+    ]) {
+      for (const word of ["0px", "20px"]) {
+        ctx.textAlign = align;
+        ctx.wordSpacing = word;
+        const bare = ctx.measureText("a"),
+          spaced = ctx.measureText("a ");
+        const moved = spaced.actualBoundingBoxLeft - bare.actualBoundingBoxLeft;
+        const expected = share * (spaced.width - bare.width);
+        assert.ok(
+          Math.abs(moved - expected) <= INK_GRID,
+          `${align} ${word}: moved ${moved}, expected ${expected}`,
+        );
+      }
+    }
+    if (CHROME_MEASURED_HERE) return;
+    for (const [align, word, left, right] of [
+      ["center", "0px", 11.419990539550781, 2.3800086975097656],
+      ["center", "20px", 21.41999053955078, -7.619991302490234],
+      ["right", "0px", 24.519981384277344, -10.719982147216797],
+      ["right", "20px", 44.519981384277344, -30.719982147216797],
+    ]) {
+      ctx.textAlign = align;
+      ctx.wordSpacing = word;
+      const m = ctx.measureText("a ");
+      assert.ok(
+        Math.abs(m.actualBoundingBoxLeft - left) <= 0.01 &&
+          Math.abs(m.actualBoundingBoxRight - right) <= 0.01,
+        `${align} ${word}: ${m.actualBoundingBoxLeft} ${m.actualBoundingBoxRight}, Chrome ${left} ${right}`,
+      );
+    }
+  });
+
+  // On any platform: a run of one digit is that digit's width times its
+  // length, at sizes whose advances are not whole hundredths. Widths rounded
+  // to hundredths broke this, each run rounded on its own.
+  test("a run of one digit is its width times its length", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    for (const size of [9.5, 12.3, 17.7, 23.7, 31.9]) {
+      ctx.font = `${size}px Oswald`;
+      const one = ctx.measureText("0").width;
+      const seven = ctx.measureText("0000000").width;
+      assert.ok(
+        Math.abs(seven - 7 * one) <= 0.0001,
+        `${size}px: ${seven} against 7 x ${one}`,
+      );
+    }
+  });
+
+  // At sizes whose advances are not whole hundredths, the width is Chrome
+  // 156's to the float.
+  test(
+    "width is Chrome's at fractional sizes",
+    { skip: CHROME_MEASURED_HERE },
+    () => {
+      const ctx = new Canvas(10, 10).getContext("2d");
+      for (const [size, text, chrome] of [
+        [24, "Hamburgefonstiv", 148.1759033203125],
+        [24, "quick brown fox", 137.2559051513672],
+        [23.7, "Hamburgefonstiv", 146.32371520996094],
+        [23.7, "Hambu", 60.52976989746094],
+        [31.9, "Hamburgefonstiv", 196.9504852294922],
+        [31.9, "quick brown fox", 182.43600463867188],
+        [12, "Hamburgefonstiv", 74.08787536621094],
+        [9.5, "quick brown fox", 54.33038330078125],
+      ]) {
+        ctx.font = `${size}px Oswald`;
+        const { width } = ctx.measureText(text);
+        assert.ok(
+          Math.abs(width - chrome) <= CHROME_FLOAT,
+          `${size}px ${JSON.stringify(text)}: ${width}, Chrome ${chrome}`,
+        );
+      }
+    },
+  );
+
+  // A letter spacing whose half is not a hundredth: rounded laid-out boxes
+  // with half the spacing at each end lost a hundredth at 10px. Chrome 152
+  // and 156 on macOS measure "00" at 5.17px spacing as below, to the float.
   test("width keeps the spacing whole at every size", () => {
     const ctx = new Canvas(10, 10).getContext("2d");
     ctx.letterSpacing = "5.17px";
@@ -992,11 +1179,21 @@ describe("measureText's width is the run's advance", () => {
       [100, 113.739990234375],
     ]) {
       ctx.font = `${size}px Oswald`;
+      const one = ctx.measureText("0").width;
+      const seven = ctx.measureText("0000000").width;
       const { width } = ctx.measureText("00");
+      // On any platform: seven spaced digits are seven times one, where each
+      // width rounded to hundredths on its own broke it.
       assert.ok(
-        Math.abs(width - chrome) <= 0.005,
-        `${size}px: ${width}, Chrome ${chrome}`,
+        Math.abs(seven - 7 * one) <= F32_SUM,
+        `${size}px: ${seven} against 7 x ${one}`,
       );
+      if (!CHROME_MEASURED_HERE) {
+        assert.ok(
+          Math.abs(width - chrome) <= CHROME_FLOAT,
+          `${size}px: ${width}, Chrome ${chrome}`,
+        );
+      }
     }
   });
 

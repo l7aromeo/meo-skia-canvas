@@ -889,7 +889,10 @@ mod tests {
     use super::{App, Pass};
     use crate::{
         error::Error,
-        gui::session::{self, Window},
+        gui::{
+            handle,
+            session::{self, Window},
+        },
     };
 
     thread_local!(
@@ -908,6 +911,8 @@ mod tests {
     // handles answering "open" for windows that cannot appear.
     #[test]
     fn a_refused_run_drops_the_windows_queued_before_it() {
+        // `App::run` forgets every window in the process-wide registry.
+        let _serial = handle::tests::serial();
         WITHOUT_DISPLAY.set(true);
         let id = NonZeroU32::new(REFUSED_ID).expect("a nonzero id");
 

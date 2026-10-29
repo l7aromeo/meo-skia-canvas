@@ -5,9 +5,7 @@ use quick_xml::{Reader, events::Event};
 use skia_safe::{
     AlphaType, Color4f, ColorSpace, ColorType, Data, Font, FontHinting,
     FontMgr, FontStyle, FourByteTag, Image as SkImage, ImageInfo,
-    Size as SkSize, Typeface,
-    codec::{self, Codec},
-    images, surfaces,
+    Size as SkSize, Typeface, codec,
     svg::{self, FontSize, Length, LengthUnit, TypedNode},
 };
 
@@ -18,6 +16,7 @@ use crate::{
     error::Error,
     geometry::Size,
     pixels::{ImageData, PixelColorSpace, PixelExportOptions},
+    start_skia, started,
 };
 
 /// The size an SVG with no declared size of its own is laid out against.
@@ -236,7 +235,7 @@ pub(crate) fn frame_delays(data: &Data) -> Vec<u32> {
     if !may_animate(data.as_bytes()) {
         return vec![0];
     }
-    let Some(mut codec) = Codec::from_data(data.clone()) else {
+    let Some(mut codec) = started::codec(data.clone()) else {
         return vec![0];
     };
     let count = codec.get_frame_count();
@@ -278,7 +277,7 @@ pub(crate) fn decode_frame(
         return decoded.map_err(|reason| Error::DecodeImage { reason });
     }
     let mut codec =
-        Codec::from_data(data.clone()).ok_or_else(|| Error::DecodeImage {
+        started::codec(data.clone()).ok_or_else(|| Error::DecodeImage {
             reason: "skia could not reopen the image to reach its frames"
                 .to_string(),
         })?;
@@ -327,6 +326,7 @@ impl Image {
     /// Returns [`Error::DecodeImage`] when the header is unreadable or the
     /// format is not one this build of Skia supports.
     pub fn from_encoded(bytes: &[u8]) -> Result<Self, Error> {
+        start_skia();
         let data = Data::new_copy(bytes);
         let image = decoded(&data, SkiaDecode::Now).ok_or_else(|| {
             Error::DecodeImage {
@@ -387,6 +387,7 @@ impl Image {
         stride: usize,
         options: PixelExportOptions,
     ) -> Result<Self, Error> {
+        start_skia();
         if width == 0 || height == 0 {
             return Err(Error::InvalidDimensions {
                 width: width as f32,
@@ -420,7 +421,7 @@ impl Image {
         );
 
         let data = Data::new_copy(bytes);
-        let image = images::raster_from_data(&info, data, stride).ok_or_else(
+        let image = started::raster_from_data(&info, data, stride).ok_or_else(
             || Error::DecodeImage {
                 reason: format!(
                     "skia could not build image from raw pixels ({options:?})"
@@ -717,6 +718,7 @@ impl Svg {
     ///
     /// Returns [`Error::DecodeImage`] if the XML cannot be parsed.
     pub fn parse(xml: &str) -> Result<Self, Error> {
+        start_skia();
         Ok(Self::from_dom(Self::parse_dom(
             xml.as_bytes(),
             FontMgr::new(),
@@ -948,7 +950,7 @@ impl Svg {
             ColorSpace::new_srgb_linear(),
         );
         let mut surface =
-            surfaces::raster(&info, None, None).ok_or_else(|| {
+            started::raster(&info, None, None).ok_or_else(|| {
                 Error::DecodeImage {
                     reason: format!(
                         "could not allocate {width}x{height} SVG render surface"
@@ -1782,21 +1784,21 @@ fn borrowed_range(haystack: &str, needle: &str) -> Option<Range<usize>> {
 /// absolute unit is the defect this function exists for, and a converted
 /// relative one is a new one.
 ///
-/// `EMS` and `EXS` are left for a different and worse reason. Skia does not
+/// `EMS` and `EXS` are left because they never reach this walk. Skia does not
 /// resolve them at all: `SkSVGLengthContext::resolve` has a case for each
 /// absolute unit and for `kPercentage`, and `kEMS` and `kEXS` fall to a
-/// `default` that returns 0. So `2em` anywhere inside a document is zero
-/// before this walk and zero after it, and rewriting `font-size` does not
-/// change that -- there is no ratio being taken. Converting them here would
-/// need the inherited `font-size` at each node, which this walk does not
-/// track, and would be a new feature rather than this fix.
+/// `default` that returns 0. `text_position_lengths_in_px` rewrites them in
+/// the document source to pixels before Skia parses it, against the
+/// `font-size` each element inherits and the x-height of the face it draws
+/// in -- see [`LENGTH_ATTRIBUTES`] -- so a node reaching this walk carries
+/// none.
 ///
-/// UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
-/// Re-check: render `<rect font-size="16" width="2em" height="2em"/>` and see
-/// whether it paints. It paints nothing today, because
-/// `SkSVGLengthContext::resolve` in skia-bindings'
-/// `skia/modules/svg/src/SkSVGRenderContext.cpp` returns 0 for `kEMS` and
-/// `kEXS`.
+/// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+/// Re-check: "a length in em resolves against its own element's size" in
+/// tests/suite/image.test.js, with `text_position_lengths_in_px` changed to
+/// leave `em` alone; it fails while `SkSVGLengthContext::resolve` in
+/// skia-bindings' `skia/modules/svg/src/SkSVGRenderContext.cpp` returns 0
+/// for `kEMS` and `kEXS`.
 ///
 /// Takes anything that is or converts to `Option<&Length>`, because the
 /// generated accessors return `&Length` for a required attribute and
@@ -2346,7 +2348,7 @@ pub(crate) fn decoded(data: &Data, when: SkiaDecode) -> Option<SkImage> {
     // before the decoder that can read it was ever consulted.
     let skia = match when {
         SkiaDecode::Now => SkImage::from_encoded(data.clone()),
-        SkiaDecode::Deferred => images::deferred_from_encoded_data(data, None),
+        SkiaDecode::Deferred => started::deferred_from_encoded_data(data, None),
     };
     let bytes = data.as_bytes();
     let image = match skia {

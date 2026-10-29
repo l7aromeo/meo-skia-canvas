@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     cell::RefCell,
-    hash::{Hash, Hasher},
+    hash::{BuildHasher, Hash, Hasher},
     iter::once,
     ops::Range,
     rc::Rc,
@@ -30,7 +30,7 @@ use skia_safe::{
 };
 
 use crate::{
-    cache_map::CacheMap,
+    cache_map::{CacheHasher, CacheMap},
     color::{
         RgbaLinear, linear_srgb_color_space, rgba_linear_to_skia_color,
         rgba_linear_to_unpremul_color4f,
@@ -42,14 +42,17 @@ use crate::{
     },
     geometry::Rect,
     image::CSS_INITIAL_FONT_SIZE,
+    memory::note_font_use,
     node::{
         font_library::{
-            FontEpoch, FontLibrary as SharedFontRegistry, forgetful,
+            FontLibrary as SharedFontRegistry, font_generation, forgetful,
         },
         oblique::{
-            ParagraphRecipe, Passes, add_slnt, match_oblique,
+            ParagraphRecipe, Passes, StyleColours, add_slnt, match_oblique,
             without_paragraph_cache,
         },
+        typography::paragraph_style,
+        utils::color4f_to_srgb,
     },
 };
 
@@ -540,7 +543,15 @@ pub struct TextStyle {
     pub line_height_multiplier: f32,
     /// Additional space between glyphs, in pixels.
     pub letter_spacing: f32,
-    /// Additional space at word boundaries, in pixels.
+    /// Additional space between words, in pixels: once for each run of
+    /// breaking spaces with a word on both sides, however many spaces it
+    /// holds, and not before the first word or after the last. A no-break
+    /// space takes none. This is SkParagraph's rule.
+    ///
+    /// A [`Context2D`](crate::context2d::Context2D)'s `set_word_spacing`
+    /// follows CSS instead and spaces every word-separator character, a
+    /// leading, trailing or no-break space and each of a doubled one
+    /// included.
     pub word_spacing: f32,
     /// Underline / overline / line-through bitmask.
     pub decoration: TextDecoration,
@@ -1393,6 +1404,7 @@ impl TextEngine {
                 base_oblique,
                 collection.clone(),
                 None,
+                &style_colours(base_style),
             ),
             collection,
             positions: self.positions.clone(),
@@ -1480,7 +1492,10 @@ impl ParagraphBuilder {
             match_oblique(&mut sk_style, &mut self.collection, degrees)
         });
         match carries_taken(style) {
-            true => self.recipe.push_style(sk_style, oblique),
+            true => {
+                self.recipe
+                    .push_style(sk_style, oblique, &style_colours(style))
+            }
             false => self.recipe.push_style_as_given(sk_style, oblique),
         }
         self
@@ -1855,33 +1870,32 @@ impl<'a> FaceQuery<'a> {
 }
 
 /// A [`FaceQuery`] as an engine remembers the instance it was answered
-/// with: the family list by the names [`collection_names`] handed out for
-/// it, compared by which list they are as [`FaceMatchKey`] compares them,
-/// and the numbers by their bits, so that two keys are equal exactly where
-/// every part of the two queries is.
+/// with: the family list by value and the numbers by their bits, so that a
+/// query matches a key exactly where every part of the two is equal.
 struct InstanceKey {
-    names: Rc<[String]>,
+    families: Box<[FontFamily]>,
     weight: i32,
     width: i32,
     slant: Slant,
     font_size: u32,
-    variations: Vec<(FontAxisTag, u32)>,
+    variations: Box<[(FontAxisTag, u32)]>,
 }
 
 impl InstanceKey {
-    /// The key for `query`, whose families `names` stands for.
-    fn new(names: &Rc<[String]>, query: &FaceQuery) -> Self {
-        // Every field taken apart, so that a part added to the query and
-        // left out of the key is a compile error rather than a reuse of an
-        // instance made for something else.
+    /// The key for `query`.
+    fn new(query: &FaceQuery) -> Self {
+        // Every field taken apart, here and in `matches` and `hash_query`,
+        // so that a part added to the query and left out of the key is a
+        // compile error rather than a reuse of an instance made for
+        // something else.
         let FaceQuery {
-            families: _,
+            families,
             font_style,
             font_size,
             variations,
         } = query;
         Self {
-            names: names.clone(),
+            families: families.to_vec().into_boxed_slice(),
             weight: *font_style.weight(),
             width: *font_style.width(),
             slant: font_style.slant(),
@@ -1892,40 +1906,93 @@ impl InstanceKey {
                 .collect(),
         }
     }
-}
 
-impl PartialEq for InstanceKey {
-    fn eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.names, &other.names)
-            && (
-                self.weight,
-                self.width,
-                self.slant,
-                self.font_size,
-                &self.variations,
-            ) == (
-                other.weight,
-                other.width,
-                other.slant,
-                other.font_size,
-                &other.variations,
+    /// Whether `query` is the query this key was made from.
+    fn matches(&self, query: &FaceQuery) -> bool {
+        let FaceQuery {
+            families,
+            font_style,
+            font_size,
+            variations,
+        } = query;
+        *self.families == **families
+            && self.weight == *font_style.weight()
+            && self.width == *font_style.width()
+            && self.slant == font_style.slant()
+            && self.font_size == font_size.to_bits()
+            && self.variations.len() == variations.len()
+            && self.variations.iter().zip(variations.iter()).all(
+                |(&(axis, bits), variation)| {
+                    axis == variation.axis && bits == variation.value.to_bits()
+                },
             )
     }
 }
 
-impl Eq for InstanceKey {}
+/// `query` hashed as an [`InstanceKey`] made from it is, part for part, so
+/// that a lookup hashes the borrowed query once and copies nothing.
+fn hash_query(hasher: &CacheHasher, query: &FaceQuery) -> u64 {
+    let FaceQuery {
+        families,
+        font_style,
+        font_size,
+        variations,
+    } = query;
+    let mut state = hasher.build_hasher();
+    families.hash(&mut state);
+    (
+        *font_style.weight(),
+        *font_style.width(),
+        font_style.slant(),
+        font_size.to_bits(),
+    )
+        .hash(&mut state);
+    for variation in *variations {
+        (variation.axis, variation.value.to_bits()).hash(&mut state);
+    }
+    state.finish()
+}
 
-impl Hash for InstanceKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        Rc::as_ptr(&self.names).cast::<()>().hash(state);
-        (
-            self.weight,
-            self.width,
-            self.slant,
-            self.font_size,
-            &self.variations,
-        )
-            .hash(state);
+/// The instances an engine remembers, each under its [`InstanceKey`] in a
+/// bucket by the query's hash, looked up by the borrowed query.
+#[derive(Default)]
+struct InstanceMemo {
+    hasher: CacheHasher,
+    buckets: CacheMap<u64, Vec<(InstanceKey, Instance)>>,
+    len: usize,
+}
+
+impl InstanceMemo {
+    /// The instance remembered for `query`, if any.
+    fn get(&self, query: &FaceQuery) -> Option<&Instance> {
+        self.buckets
+            .get(&hash_query(&self.hasher, query))?
+            .iter()
+            .find(|(key, _)| key.matches(query))
+            .map(|(_, instance)| instance)
+    }
+
+    /// Remembers `instance` for `query`, dropping every instance first
+    /// where [`MATCHES_KEPT`] are kept already.
+    fn insert(&mut self, query: &FaceQuery, instance: Instance) {
+        if self.len >= MATCHES_KEPT {
+            self.clear();
+        }
+        self.buckets
+            .entry(hash_query(&self.hasher, query))
+            .or_default()
+            .push((InstanceKey::new(query), instance));
+        self.len += 1;
+    }
+
+    fn clear(&mut self) {
+        self.buckets.clear();
+        self.len = 0;
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.len
     }
 }
 
@@ -1961,6 +2028,11 @@ thread_local! {
     /// the tests that hold it to reusing one it worked out before.
     pub(crate) static INSTANCES: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    /// How many times this thread has asked the font library for a family
+    /// list's names, for the test that holds a remembered instance to
+    /// asking none.
+    pub(crate) static NAME_LOOKUPS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 /// What an engine has learned of its faces: what each family list and
@@ -1977,13 +2049,13 @@ pub(crate) struct FaceRecord {
     /// stale for the reason a match is not: the collection is the engine's
     /// for its life and a face's axes are fixed. Dropped whole at
     /// [`MATCHES_KEPT`] and when the fonts change.
-    instances: CacheMap<InstanceKey, Instance>,
-    /// The epoch of the shared library's fonts the names in `matches` and
-    /// `instances` were spelled under. When the fonts change the library
-    /// spells every family list again as a new list, so nothing kept from
-    /// before could be found again; both are dropped then rather than held
-    /// to [`MATCHES_KEPT`]. A face's axes stay, being fixed.
-    epoch: Option<Rc<FontEpoch>>,
+    instances: InstanceMemo,
+    /// The [`font_generation`] the shared library's fonts were at when
+    /// `matches` and `instances` were filled. When the fonts change the
+    /// library spells every family list again, as a new list and perhaps
+    /// differently, so both are dropped then. A face's axes stay, being
+    /// fixed.
+    generation: Option<u64>,
 }
 
 /// How many family lists and styles an engine remembers the matches of.
@@ -2111,30 +2183,28 @@ fn instance_for(
     if query.families.is_empty() {
         return Instance::default();
     }
-    let (names, epoch) = collection_names_in_epoch(query.families);
-    let key = InstanceKey::new(&names, query);
+    let generation = font_generation();
     // A poisoned record is still a record: the panic that poisoned it was
     // elsewhere, and the worst a stale entry can do is drop the caches early.
     let mut record = record.lock().unwrap_or_else(PoisonError::into_inner);
-    if !record
-        .epoch
-        .as_ref()
-        .is_some_and(|seen| Rc::ptr_eq(seen, &epoch))
-    {
+    if record.generation != Some(generation) {
         record.matches = FaceMatches::default();
         record.instances.clear();
-        record.epoch = Some(epoch);
+        record.generation = Some(generation);
     }
     let remember = !forgetful();
-    let instance = match record.instances.get(&key).filter(|_| remember) {
-        Some(instance) => instance.clone(),
+    let instance = match record.instances.get(query).filter(|_| remember) {
+        Some(instance) => {
+            // As the library lookup a remembered instance skips would have:
+            // text laid out without being drawn holds an idle release off.
+            note_font_use();
+            instance.clone()
+        }
         None => {
+            let names = collection_names(query.families);
             let instance = work_out(collection, &mut record, names, query);
             if remember {
-                if record.instances.len() >= MATCHES_KEPT {
-                    record.instances.clear();
-                }
-                record.instances.insert(key, instance.clone());
+                record.instances.insert(query, instance.clone());
             }
             instance
         }
@@ -2378,13 +2448,10 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
         // which resolves the fallback itself. Setting it explicitly is what
         // makes the documented behaviour true.
         let decoration_color = style.decoration_color.unwrap_or(style.color);
-        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
-        // Re-check: grep -n "fn set_decoration_color\|fn new(color" in
-        // skia-safe's src/modules/paragraph/text_style.rs and text_shadow.rs
-        //
-        // SkParagraph takes a decoration's colour, and a text shadow's, as
-        // an eight-bit sRGB `SkColor` and nothing wider, so a wide colour is
-        // gamut-mapped into sRGB on the way in.
+        // SkParagraph holds a decoration's colour, and a text shadow's, as
+        // an eight-bit sRGB `SkColor`. It draws neither: the recipe takes
+        // both off the style and `node::oblique::Passes` draws them, in the
+        // colours `style_colours` keeps as named.
         sk_style
             .set_decoration_color(rgba_linear_to_skia_color(decoration_color));
         if (style.decoration_thickness - 1.0).abs() > f32::EPSILON {
@@ -2395,8 +2462,8 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
     }
 
     for shadow in &style.shadows {
-        // `TextShadow::new` takes a Skia `Color` (u32 ARGB, sRGB-encoded),
-        // reached the way `decoration_color` is, above.
+        // `TextShadow::new` takes a Skia `Color`, as `decoration_color` is
+        // set above, and for the same reason.
         sk_style.add_shadow(SkTextShadow::new(
             rgba_linear_to_skia_color(shadow.color),
             SkPoint::new(shadow.offset_x, shadow.offset_y),
@@ -2405,6 +2472,26 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
     }
 
     sk_style
+}
+
+/// The colours of `style` that SkParagraph would hold in eight bits, as the
+/// style names them -- see `node::oblique::StyleColours`.
+fn style_colours(style: &TextStyle) -> StyleColours {
+    let srgb = |color: RgbaLinear| {
+        color4f_to_srgb(
+            rgba_linear_to_unpremul_color4f(color),
+            Some(&linear_srgb_color_space()),
+        )
+    };
+    StyleColours {
+        decoration: (style.decoration != TextDecoration::default())
+            .then(|| srgb(style.decoration_color.unwrap_or(style.color))),
+        shadows: style
+            .shadows
+            .iter()
+            .map(|shadow| srgb(shadow.color))
+            .collect(),
+    }
 }
 
 /// The names an engine's font collection is asked for `families` by.
@@ -2425,17 +2512,9 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
 /// Worked out once per family list while the library's fonts stand -- see
 /// `FontLibrary::engine_names`.
 fn collection_names(families: &[FontFamily]) -> Rc<[String]> {
+    #[cfg(test)]
+    NAME_LOOKUPS.set(NAME_LOOKUPS.get() + 1);
     SharedFontRegistry::with_shared(|library| library.engine_names(families))
-}
-
-/// [`collection_names`] for `families`, with the epoch of the fonts the
-/// library spelled them under, in the one visit to the library.
-fn collection_names_in_epoch(
-    families: &[FontFamily],
-) -> (Rc<[String]>, Rc<FontEpoch>) {
-    SharedFontRegistry::with_shared(|library| {
-        (library.engine_names(families), library.epoch())
-    })
 }
 
 /// The families a strut should be measured in.
@@ -2475,7 +2554,7 @@ fn build_paragraph_style(
     base_sk_style: &SkTextStyle,
     strut_families: &[String],
 ) -> SkParagraphStyle {
-    let mut paragraph_style = SkParagraphStyle::new();
+    let mut paragraph_style = paragraph_style();
     paragraph_style.set_text_align(style.align.to_skia());
     paragraph_style.set_text_direction(style.direction.to_skia());
     paragraph_style.set_text_style(base_sk_style);
@@ -2522,22 +2601,20 @@ fn build_paragraph_style(
 #[cfg(test)]
 mod tests {
     use super::{
-        FaceQuery, InstanceKey, SkPaint, TextEngine, TextSlant, TextStyle,
-        instance_for,
+        FaceQuery, SkPaint, TextEngine, TextSlant, TextStyle, instance_for,
     };
     use crate::{
-        cache_map::CacheMap,
         context2d::FontStretch,
         font::{
             FontAxisTag, FontLibrary, FontVariation, INSTANCED_POSITIONS,
             variation_axes,
         },
+        started,
     };
     use skia_safe::{
         Data, FontArguments, FontMgr, FourByteTag,
         font_arguments::{VariationPosition, variation_position::Coordinate},
     };
-    use std::rc::Rc;
 
     /// Whether skia-safe still turns an empty family list into a slice
     /// built from a null pointer, which a debug build aborts on: the defect
@@ -2702,8 +2779,8 @@ mod tests {
         };
         let font = skia_safe::Font::from_typeface(face, size);
         let text = "Hamburgefonstiv quick 0123";
-        let mut surface = skia_safe::surfaces::raster_n32_premul((900, 120))
-            .expect("a surface");
+        let mut surface =
+            started::raster_n32_premul((900, 120)).expect("a surface");
         surface.canvas().clear(skia_safe::Color::WHITE);
         let mut paint = SkPaint::default();
         paint.set_anti_alias(true);
@@ -2807,6 +2884,34 @@ mod tests {
         count
     }
 
+    /// A style instanced before is answered from the engine's memory without
+    /// asking the font library for its family list's names again.
+    #[test]
+    fn a_remembered_instance_asks_for_no_names() {
+        let engine = variable_engine();
+        let style = amstelvar();
+        let query = FaceQuery::of(&style, &[]);
+        let instance = || {
+            instance_for(
+                &mut engine.collection.clone(),
+                &engine.positions,
+                &engine.faces,
+                &query,
+            )
+            .coordinates
+        };
+        let first = instance();
+        let (looked_up, used) =
+            (super::NAME_LOOKUPS.get(), crate::memory::FONT_USES.get());
+        assert_eq!(instance(), first);
+        assert_eq!(super::NAME_LOOKUPS.get() - looked_up, 0);
+        assert_eq!(
+            crate::memory::FONT_USES.get() - used,
+            1,
+            "a use of the fonts noted all the same, for the idle release"
+        );
+    }
+
     /// A style equal to one instanced before in everything `instance_for`
     /// reads is not worked out again.
     #[test]
@@ -2849,59 +2954,87 @@ mod tests {
         assert!(kept <= super::MATCHES_KEPT, "{kept} kept past the bound");
     }
 
-    /// A key holds the names list it compares by address, so the list is
-    /// not freed while the key lives, and no list of other names can be
-    /// given its address and be answered with its instance.
-    ///
-    /// Checked by the list staying alive rather than by waiting for the
-    /// allocator to hand its address out again: macOS's did not within two
-    /// million allocations of the same size, so a check of the reuse
-    /// itself passed even with a key holding a bare address.
-    #[test]
-    fn a_key_keeps_its_names_list_alive() {
-        let style = amstelvar();
-        let query = FaceQuery::of(&style, &[]);
-        let first: Rc<[String]> = Rc::from(vec!["First".to_string()]);
-        let weak = Rc::downgrade(&first);
-        let mut kept = CacheMap::default();
-        kept.insert(InstanceKey::new(&first, &query), ());
-        drop(first);
-        assert!(weak.upgrade().is_some(), "the key keeps its list alive");
-        let other: Rc<[String]> = Rc::from(vec!["Other".to_string()]);
-        assert!(!kept.contains_key(&InstanceKey::new(&other, &query)));
-    }
-
     /// What an engine remembers of its faces is dropped when the shared
-    /// library's fonts change, since every family list is spelled again as
-    /// a new list after it and nothing from before could be found.
+    /// library's fonts change, since a change can spell a family list
+    /// differently: a style met before is worked out again, and in the
+    /// spelling the fonts give it now. Here a family asked for in lower case
+    /// is spelled as asked until a font is registered under it in another
+    /// case.
     #[test]
     fn an_engine_forgets_its_instances_when_the_fonts_change() {
         let engine = variable_engine();
-        let instance = |style: &TextStyle| {
-            instance_for(
+        let style = TextStyle {
+            font_families: vec!["amstelvarrespelled".into()],
+            ..amstelvar()
+        };
+        let names = || {
+            let before = super::INSTANCES.get();
+            let names = instance_for(
                 &mut engine.collection.clone(),
                 &engine.positions,
                 &engine.faces,
-                &FaceQuery::of(style, &[]),
-            );
+                &FaceQuery::of(&style, &[]),
+            )
+            .names
+            .map(|names| names.to_vec());
+            (names, super::INSTANCES.get() - before)
         };
-        let kept = || {
-            engine
-                .faces
-                .lock()
-                .map(|record| record.instances.len())
-                .expect("an unpoisoned record")
-        };
-        instance(&amstelvar());
-        assert_eq!(kept(), 1);
+        let asked = Some(vec!["amstelvarrespelled".to_string()]);
+        assert_eq!(names(), (asked.clone(), 1));
+        assert_eq!(names(), (asked, 0), "remembered while the fonts stand");
         FontLibrary::new()
             .register_font_from_path(
-                "AmstelvarEpoch",
+                "AmstelvarRespelled",
                 "tests/assets/fonts/AmstelvarAlpha-VF.ttf",
             )
             .expect("a bundled variable font registers");
-        instance(&amstelvar());
-        assert_eq!(kept(), 1, "the instance from before the change is gone");
+        assert_eq!(
+            names(),
+            (Some(vec!["AmstelvarRespelled".to_string()]), 1),
+            "worked out again, in the spelling registered"
+        );
+        let kept = engine.faces.lock().map(|record| record.instances.len());
+        assert_eq!(kept.ok(), Some(1), "the instance from before is gone");
+    }
+
+    /// A family of static faces does no instancing work: no coordinates,
+    /// no pinned weight, no position recorded, and its faces' axes asked
+    /// of the platform once, on the style's first use and not again.
+    #[test]
+    fn a_static_face_does_no_instancing_work() {
+        let fonts = FontLibrary::new();
+        fonts
+            .register_font_from_path(
+                "MontserratStatic",
+                "tests/assets/fonts/montserrat-latin/montserrat-v30-latin-regular.woff2",
+            )
+            .expect("a bundled static font registers");
+        let engine = TextEngine::new(&fonts);
+        let style = TextStyle {
+            font_families: vec!["MontserratStatic".into()],
+            ..TextStyle::default()
+        };
+        let asked = || {
+            engine
+                .faces
+                .lock()
+                .map(|record| record.axes.asked)
+                .expect("an unpoisoned record")
+        };
+        let lists = super::COORDINATE_LISTS.get();
+        for use_ in 0..2 {
+            let instance = instance_for(
+                &mut engine.collection.clone(),
+                &engine.positions,
+                &engine.faces,
+                &FaceQuery::of(&style, &[]),
+            );
+            assert!(instance.coordinates.is_empty(), "use {use_}");
+            assert_eq!(instance.weight, None, "use {use_}");
+            assert_eq!(asked(), 1, "axes asked once, use {use_}");
+        }
+        assert_eq!(super::COORDINATE_LISTS.get() - lists, 0);
+        assert_eq!(engine.positions.lock().map(|p| p.len()).ok(), Some(0));
     }
 
     /// The reuse pins, one for each thing `instance_for` reads: a style

@@ -4222,7 +4222,14 @@ export interface CanvasTextDrawingStyles {
   textAlign: CanvasTextAlign;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/textBaseline) */
   textBaseline: CanvasTextBaseline;
-  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/wordSpacing) */
+  /**
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/wordSpacing)
+   *
+   * Added after every word-separator character, as CSS Text 3 section 8.2
+   * has it: a space or a no-break space, leading, doubled and trailing ones
+   * included. A `Paragraph`'s `wordSpacing` follows SkParagraph's rule
+   * instead, once per run of spaces between two words.
+   */
   wordSpacing: string;
 
   /**
@@ -5308,10 +5315,6 @@ export type TextDecorationStyleValue =
  *   one clips. For a color in another space, write the string:
  *   `color(display-p3 1 0 0)`, `color(srgb-linear 0.2 0.5 0.8)`.
  *
- * A paragraph's text decoration and shadow colors are 8-bit sRGB in Skia,
- * so a color outside sRGB, in either form, is gamut-mapped into it as CSS
- * Color 4 describes, keeping its hue.
- *
  * Accepted by:
  * - `CanvasRenderingContext2D.fillStyle` / `strokeStyle`
  * - `CanvasGradient.addColorStop(offset, color)`
@@ -5459,7 +5462,17 @@ export interface TextStyleInput {
   };
   /** Extra space added after each glyph, in pixels. */
   letterSpacing?: number;
-  /** Extra space added at each word boundary, in pixels. */
+  /**
+   * Extra space added between words, in pixels: once for each run of
+   * breaking spaces that has a word on both sides, however many spaces it
+   * holds, and not before the first word or after the last. A no-break
+   * space takes none. This is SkParagraph's rule, as CanvasKit has it.
+   *
+   * `ctx.wordSpacing` follows CSS instead and spaces every word-separator
+   * character, a leading, trailing or no-break space and each of a doubled
+   * one included: at -100px, `"a  b"` takes the spacing once here and
+   * twice on a canvas.
+   */
   wordSpacing?: number;
   /**
    * Vertical offset from the baseline, in pixels -- what a superscript or
