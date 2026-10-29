@@ -5,22 +5,12 @@
 //! averaged over each pixel -- at the scaled geometry, written in these tests
 //! apart from any code that draws a blur.
 
+// Each test file uses part of it.
+#[allow(dead_code)]
 mod exact;
 
-use exact::{erf, gaussian};
+use exact::{gaussian, profile};
 use meo_skia_canvas::prelude::*;
-
-/// The interval `[a, b]` blurred by `sigma`, averaged over each of `n`
-/// pixels from zero.
-fn profile(n: usize, a: f64, b: f64, sigma: f64) -> Vec<f64> {
-    let k = sigma * std::f64::consts::SQRT_2;
-    // An antiderivative of `erf`.
-    let g = |u: f64| u * erf(u) + (-u * u).exp() / std::f64::consts::PI.sqrt();
-    let integral = |x: f64| k / 2.0 * (g((x - a) / k) - g((x - b) / k));
-    (0..n)
-        .map(|i| integral(i as f64 + 1.0) - integral(i as f64))
-        .collect()
-}
 
 /// The largest difference, in levels of an 8-bit alpha, between `alpha`
 /// and the exact blur of `rect` at `sigma` on a `size` canvas.
@@ -135,9 +125,17 @@ fn a_blur_scales_with_the_canvas_it_is_drawn_into() {
             let Some(mut source) = blurred(gpu, sigma) else {
                 continue;
             };
+            // The same canvas drawn into another at its own size: the
+            // baseline the scaled and turned draws are held to. Not the
+            // source read directly, which blurs a rectangle exactly where a
+            // canvas drawn into another, played back as a recording, takes
+            // the blur the recording chose.
             let own = {
-                let data =
-                    source.context().get_image_data(0.0, 0.0, SIZE.0, SIZE.1);
+                let mut target = Canvas::new(SIZE.0, SIZE.1);
+                target.set_gpu(gpu);
+                let ctx = target.context();
+                ctx.draw_canvas(&mut source, 0.0, 0.0);
+                let data = ctx.get_image_data(0.0, 0.0, SIZE.0, SIZE.1);
                 let (size, rect) = scaled(1.0);
                 worst(
                     &alpha(&data.expect("pixels")),
@@ -167,7 +165,7 @@ fn a_blur_scales_with_the_canvas_it_is_drawn_into() {
             assert!(
                 error <= own + REPLAY_MARGIN,
                 "gpu {gpu} sigma {sigma} drawn at twice the size: {error:.1} levels \
-                 against {own:.1} as drawn"
+                 against {own:.1} drawn at its own"
             );
 
             // Turned a quarter: (x, y) lands at (height - y, x).
@@ -187,7 +185,7 @@ fn a_blur_scales_with_the_canvas_it_is_drawn_into() {
             assert!(
                 error <= own + REPLAY_MARGIN,
                 "gpu {gpu} sigma {sigma} turned a quarter: {error:.1} levels \
-                 against {own:.1} as drawn"
+                 against {own:.1} drawn at its own"
             );
         }
     }

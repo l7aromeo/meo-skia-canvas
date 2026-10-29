@@ -3980,7 +3980,7 @@ mod hinting {
     use crate::{
         Canvas, Font as CanvasFont, FontLibrary as Library, RichTextSpan,
         TextEngine, TextRendering, TextStyle as SpanStyle,
-        node::oblique::ParagraphRecipe,
+        node::oblique::{ParagraphRecipe, StyleColours},
     };
     use skia_safe::{FontHinting, Paint, textlayout::ParagraphStyle};
 
@@ -4097,9 +4097,15 @@ mod hinting {
         });
         let mut paragraph_style = ParagraphStyle::new();
         paragraph_style.set_text_style(&style);
-        let mut recipe =
-            ParagraphRecipe::new(paragraph_style, None, collection, None);
-        recipe.push_style(style, None);
+        let none = StyleColours::default();
+        let mut recipe = ParagraphRecipe::new(
+            paragraph_style,
+            None,
+            collection,
+            None,
+            &none,
+        );
+        recipe.push_style(style, None, &none);
         recipe.add_text(TEXT);
         recipe.pop();
         let (mut paragraph, _) = recipe.build();

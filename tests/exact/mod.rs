@@ -64,3 +64,46 @@ pub fn gaussian(image: &[f64], width: usize, sigma: f64) -> Vec<f64> {
     };
     pass(&pass(image, true), false)
 }
+
+/// Past this `sigma * sqrt(2)`, [`profile`] integrates each pixel itself
+/// rather than differencing an antiderivative. The antiderivative's values
+/// at a pixel's two sides differ by about `1 / k` of themselves, so their
+/// difference times `k` carries an error of about `k * 1e-16`, which is
+/// all of a faint blur's value once `k` is large; `erf` at points inside
+/// the pixel has no such cancellation.
+const WIDE: f64 = 1000.0;
+
+/// Three-point Gauss-Legendre on `[-1, 1]`: nodes `0` and `+-sqrt(3 / 5)`,
+/// with their weights. Exact for
+/// polynomials to degree five; on a blur wider than [`WIDE`] the integrand
+/// changes over one pixel by a part in a thousand, so the rule's error is
+/// below any float's precision.
+const GAUSS_LEGENDRE: [(f64, f64); 3] = [
+    (-0.774_596_669_241_483_4, 5.0 / 9.0),
+    (0.0, 8.0 / 9.0),
+    (0.774_596_669_241_483_4, 5.0 / 9.0),
+];
+
+/// The interval `[a, b]` blurred by `sigma`, averaged over each of `n`
+/// pixels from zero.
+pub fn profile(n: usize, a: f64, b: f64, sigma: f64) -> Vec<f64> {
+    let k = sigma * std::f64::consts::SQRT_2;
+    if k > WIDE {
+        let blurred = |x: f64| (erf((x - a) / k) - erf((x - b) / k)) / 2.0;
+        return (0..n)
+            .map(|i| {
+                GAUSS_LEGENDRE
+                    .iter()
+                    .map(|(t, w)| w * blurred(i as f64 + (1.0 + t) / 2.0))
+                    .sum::<f64>()
+                    / 2.0
+            })
+            .collect();
+    }
+    // An antiderivative of `erf`.
+    let g = |u: f64| u * erf(u) + (-u * u).exp() / std::f64::consts::PI.sqrt();
+    let integral = |x: f64| k / 2.0 * (g((x - a) / k) - g((x - b) / k));
+    (0..n)
+        .map(|i| integral(i as f64 + 1.0) - integral(i as f64))
+        .collect()
+}

@@ -80,7 +80,9 @@ use std::{
     time::Duration,
 };
 
-use crate::context::page::release_cached_pages;
+use crate::context::{
+    blur_mask::release_cached_masks, page::release_cached_pages,
+};
 #[cfg(feature = "node-addon")]
 use crate::node::idle::release_font_caches;
 
@@ -123,7 +125,17 @@ pub(crate) fn note_render() {
 /// addon's `Paragraph` reach their fonts through. The release itself does not
 /// pass through it, or it would count as the activity that holds off the next.
 pub(crate) fn note_font_use() {
+    #[cfg(test)]
+    FONT_USES.set(FONT_USES.get() + 1);
     note_render();
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread has noted a use of its fonts, for the
+    /// tests that hold a path skipping the library to noting one anyway.
+    pub(crate) static FONT_USES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 /// The activity count, for the debug addon's `__activity`, which a test reads
@@ -200,6 +212,7 @@ fn reclaim() {
     // Bitmaps first: they are live allocations until they are dropped, and a
     // trim cannot hand back a page something is still using.
     release_cached_pages();
+    release_cached_masks();
     trim();
 }
 

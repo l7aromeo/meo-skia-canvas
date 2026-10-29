@@ -9,8 +9,10 @@
 //! scales with them. How a blur is made does not have to: Skia's coverage
 //! blur stops at a sigma of 128 device pixels, so a choice of it made at
 //! density 1 can ask it for more than it draws at density 4. A [`BlurOp`]
-//! checks that choice when it is played back, against the sigma it has
-//! there.
+//! makes its blur when it is played back, against the sigma it has there: a
+//! rectangle that stays one on the device as its exact blur -- see
+//! [`blur_mask`] -- and anything else with the blur the recording chose,
+//! checked against Skia's cap.
 
 use std::{
     borrow::Cow,
@@ -28,6 +30,7 @@ use skia_safe::{
 
 use crate::{
     context::{
+        blur_mask,
         chain::{self, Depth, Step},
         coverage_of,
         faint::{Faint, composited},
@@ -463,7 +466,9 @@ impl BlurOp {
         }
     }
 
-    /// Draws the blurred geometry onto `canvas` for `target`, with the
+    /// Draws the blurred geometry onto `canvas` for `target`. A run of filled
+    /// rectangles that stay rectangles on the device is drawn exactly, on
+    /// any surface with pixels -- see [`blur_mask`]. Anything else takes the
     /// coverage blur the recording chose wherever it can draw the sigma this
     /// comes to in `canvas`'s device pixels, and the exact blur of the
     /// result where it cannot.
@@ -483,6 +488,10 @@ impl BlurOp {
             .map_radius(1.0)
             .filter(|s| s.is_normal() && *s > 0.0)
             .unwrap_or(1.0);
+        if self.draws_exactly(canvas, replay) {
+            canvas.restore();
+            return;
+        }
 
         let mut paint = Paint::new(self.paint.color, None);
         paint
@@ -575,6 +584,49 @@ impl BlurOp {
             }
             None => bounds,
         }
+    }
+
+    /// Draws the run exactly where it is one [`blur_mask::draw_rect`] takes:
+    /// anti-aliased filled rectangles, undithered, that `canvas`'s transform
+    /// keeps rectangles, on a canvas with pixels. Returns whether it drew;
+    /// `false` leaves `canvas` as it found it.
+    ///
+    /// Dithering is left to the blur that honours it: the exact blur is a
+    /// gradient rounded once, and a dither would be noise added on top that
+    /// nothing here draws.
+    fn draws_exactly(&self, canvas: &SkCanvas, replay: f32) -> bool {
+        let sigma = self.paint.sigma * replay;
+        // A sigma that is not a positive length has no Gaussian to be exact
+        // to, and keeps the blur the recording chose.
+        let plain = self.paint.style == PaintStyle::Fill
+            && self.paint.anti_alias
+            && !self.paint.dither
+            && sigma.is_finite()
+            && sigma > 0.0
+            && matches!(self.geometry.first(), Geometry::Rect(..));
+        let device =
+            Matrix::concat(&canvas.local_to_device_as_3x3(), &self.matrix);
+        if !plain
+            || !device.rect_stays_rect()
+            || device.has_perspective()
+            || !blur_mask::draws_on(canvas)
+        {
+            return false;
+        }
+        canvas.save();
+        canvas.reset_matrix();
+        self.geometry.iter().for_each(|geometry| {
+            if let Geometry::Rect(rect, _) = geometry {
+                blur_mask::draw_rect(
+                    canvas,
+                    device.map_rect(rect).0,
+                    sigma,
+                    self.paint.color,
+                );
+            }
+        });
+        canvas.restore();
+        true
     }
 
     /// The blur itself: on the coverage where `coverage` says so and the
