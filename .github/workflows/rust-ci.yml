@@ -367,12 +367,6 @@ jobs:
           cargo test \
             --no-default-features \
             --features "node-addon,vulkan,window,freetype"
-      # The cfg combination no other step compiles: tests on, debug
-      # assertions off. Here because this job's feature set is the release
-      # addon's, which keeps skia-bindings on the prebuilt Skia it already
-      # resolved, so the step costs a check-mode compile rather than a build.
-      - name: Lint the release test build
-        run: just check-release-tests
       # The step above runs `window_handle` with no display, where it reports
       # a skip. Here it opens a real window: a `WindowHandle` change made on a
       # worker thread has to reach the window system. Required, so a missing
@@ -425,6 +419,50 @@ jobs:
   # The toolchain is read from Cargo.toml rather than pinned here, so the job
   # always checks whatever the crate currently claims: bump `rust-version` and
   # this follows, use a newer feature without bumping and this fails.
+  # The cfg combination no other job compiles: tests on, debug assertions
+  # off. Its own job, with its own cache, because a build script's output
+  # belongs to the profile that ran it: in release, libaom-sys compiles
+  # libaom's C code again, about 18 of the step's 20 minutes on a runner.
+  # Run as a step of `binding`, that build was never cached. The binding key
+  # already existed, and rust-cache does not save over an existing key, so
+  # every run rebuilt it. Here the first run on main saves it and later runs
+  # restore it. The feature set is the release addon's, `CARGO_FEATURES` in
+  # lib/prebuild.mjs, so skia-bindings resolves the prebuilt Skia rather than
+  # building one.
+  release-tests:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    name: release tests (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      # yasm, for the reason the clippy job gives.
+      # UPSTREAM: libaom-sys 0.17.2+libaom.3.11.0 -- njaard/libavif-rs#122 -- worked around
+      # Re-check: grep -A1 '^name = "libaom-sys"' Cargo.lock -- drop yasm once it names libaom 3.13.2 or later
+      - name: Install Skia build dependencies (apt)
+        run: |
+          .github/scripts/apt-install.sh \
+            clang libfontconfig1-dev libssl-dev nasm yasm ninja-build pkg-config \
+            python3 libvulkan-dev
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: release-tests
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Lint the release test build
+        run: just check-release-tests
+
   msrv:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
@@ -685,6 +723,7 @@ jobs:
         clippy,
         test,
         binding,
+        release-tests,
         msrv,
         public-api,
         changelog,
