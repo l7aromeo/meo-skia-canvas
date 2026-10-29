@@ -220,6 +220,11 @@ mod tests {
         started,
     };
 
+    /// Taken by the tests that empty the shared cache and by the test that
+    /// counts on it, so that one emptying it does not make the other run a
+    /// chain twice.
+    static SHARED_CACHE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// A group with nothing in it: the cache files by its identity alone.
     fn group() -> Arc<Group> {
         Arc::new(Group {
@@ -348,6 +353,7 @@ mod tests {
     fn the_idle_release_empties_the_chain_cache() {
         // The shared cache, which other tests fill as they draw; only that a
         // result this test filed is gone afterwards is its to assert.
+        let _shared = SHARED_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         let one = group();
         let key = key(&one, &n32(), &Matrix::new_identity(), clip());
         put(key.clone(), Outcome::blank(8));
@@ -390,6 +396,7 @@ mod tests {
     fn a_canvas_drawn_into_itself_runs_each_rounds_chain_once() {
         // Each round's group holds every earlier round's, so a replay that
         // ran their chains again would run about rounds squared over two.
+        let _shared = SHARED_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         for rounds in [8, 16] {
             let runs = runs_for(rounds);
             assert!(runs <= 2 * rounds, "{rounds} rounds ran {runs} chains");
