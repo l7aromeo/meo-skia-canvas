@@ -317,6 +317,8 @@ impl ParagraphRecipe {
         oblique: Option<f32>,
     ) {
         style.set_font_hinting(text_hinting(true));
+        #[cfg(test)]
+        TAKES.set(TAKES.get() + 1);
         let decoration = StyleDecoration::take(
             &mut style,
             &mut self.collection,
@@ -330,6 +332,37 @@ impl ParagraphRecipe {
             self.epoch.as_ref(),
         )
         .map(Box::new);
+        let taken = Taken {
+            decoration,
+            shadows,
+            background,
+        };
+        self.push(style, oblique, taken);
+    }
+
+    /// Pushes `style`, as [`Self::push_style`] does, where the caller knows
+    /// it has no decoration, shadow or background to take off: built from
+    /// a description that names none, as a crate `TextStyle` is.
+    pub(crate) fn push_style_as_given(
+        &mut self,
+        mut style: TextStyle,
+        oblique: Option<f32>,
+    ) {
+        style.set_font_hinting(text_hinting(true));
+        debug_assert!(
+            as_given(&style),
+            "a style pushed as given has nothing to take off"
+        );
+        let taken = Taken {
+            decoration: None,
+            shadows: Vec::new(),
+            background: None,
+        };
+        self.push(style, oblique, taken);
+    }
+
+    /// Pushes `style`, with `taken` taken off it.
+    fn push(&mut self, style: TextStyle, oblique: Option<f32>, taken: Taken) {
         self.builder.push_style(&style);
         self.oblique |= oblique.is_some();
         self.half_leading |= style.half_leading();
@@ -338,11 +371,7 @@ impl ParagraphRecipe {
             parent: self.top,
             style,
             oblique,
-            taken: Taken {
-                decoration,
-                shadows,
-                background,
-            },
+            taken,
         });
         self.top = self.pushed.len();
     }
@@ -849,6 +878,11 @@ thread_local! {
     /// text back on this thread, for the test that holds a paragraph whose
     /// edges are all ASCII to reading none.
     pub(crate) static TEXT_READS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    /// How many pushed styles [`ParagraphRecipe::push_style`] has taken
+    /// decorations, shadows and backgrounds off on this thread, for the
+    /// tests that hold a plain style to none.
+    pub(crate) static TAKES: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
 }
 

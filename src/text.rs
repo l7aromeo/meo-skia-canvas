@@ -1479,7 +1479,10 @@ impl ParagraphBuilder {
         let oblique = style.slant.oblique_degrees().and_then(|degrees| {
             match_oblique(&mut sk_style, &mut self.collection, degrees)
         });
-        self.recipe.push_style(sk_style, oblique);
+        match carries_taken(style) {
+            true => self.recipe.push_style(sk_style, oblique),
+            false => self.recipe.push_style_as_given(sk_style, oblique),
+        }
         self
     }
 
@@ -2259,6 +2262,17 @@ fn at_default_position(
         })
 }
 
+/// Whether [`build_text_style`] gives `style`'s Skia style a decoration,
+/// shadows or a background, the three things a recipe takes off a style
+/// to draw itself: decided here, from the fields it builds them from, so
+/// that a style with none is pushed without its Skia style being read for
+/// them.
+fn carries_taken(style: &TextStyle) -> bool {
+    style.decoration.to_skia() != SkTextDecoration::NO_DECORATION
+        || !style.shadows.is_empty()
+        || style.background_color.is_some()
+}
+
 /// The Skia text style for `style`, with its variable faces instanced as
 /// `instance` says.
 fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
@@ -2710,6 +2724,45 @@ mod tests {
         };
         assert_eq!(made(400), (0, true), "at Oswald's own 400");
         assert_eq!(made(401), (1, false), "at 401");
+    }
+
+    /// How many times pushing `style` onto a crate builder takes anything
+    /// off it to be drawn by the passes.
+    fn takes_pushing(style: &TextStyle) -> usize {
+        let engine = variable_engine();
+        let mut builder = engine.paragraph_builder(&amstelvar());
+        let before = crate::node::oblique::TAKES.get();
+        builder.push_style(style);
+        crate::node::oblique::TAKES.get() - before
+    }
+
+    /// A style with no decoration, shadow or background is pushed without
+    /// looking for any; one with any of the three is looked over.
+    #[test]
+    fn only_a_style_with_something_to_take_is_looked_over() {
+        assert_eq!(takes_pushing(&amstelvar()), 0, "plain");
+        let decorated = TextStyle {
+            decoration: super::TextDecoration::underline(),
+            ..amstelvar()
+        };
+        assert_eq!(takes_pushing(&decorated), 1, "decorated");
+        let shadowed = TextStyle {
+            shadows: vec![super::TextShadow {
+                color: crate::color::RgbaLinear::from_srgb8(0, 0, 0, 1.0),
+                offset_x: 2.0,
+                offset_y: 2.0,
+                blur_sigma: 0.0,
+            }],
+            ..amstelvar()
+        };
+        assert_eq!(takes_pushing(&shadowed), 1, "shadowed");
+        let backed = TextStyle {
+            background_color: Some(crate::color::RgbaLinear::from_srgb8(
+                0, 0, 255, 1.0,
+            )),
+            ..amstelvar()
+        };
+        assert_eq!(takes_pushing(&backed), 1, "backed");
     }
 
     /// The style each of the reuse pins starts from: Amstelvar, whose `wght`
