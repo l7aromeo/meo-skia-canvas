@@ -1418,6 +1418,18 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   what the width does now is under Breaking: "`wordSpacing` is added after
   every word separator".
 
+- **Centred and right-aligned text counts a trailing space.** `"a "` drawn
+  with `textAlign` `"center"` put the "a" where `"a"` alone goes, and
+  `"right"` the same, where Chrome moves it half the space's advance left,
+  or all of it: SkParagraph aligns a line by its width without the
+  whitespace it ends in. The run's whole advance is aligned now, trailing
+  spaces and their spacing included, and `actualBoundingBoxLeft` and
+  `actualBoundingBoxRight` move with it: centred `"a "` at 40px Oswald has
+  its left at 11.42, within 0.005 of Chrome 156, where it was 6.84. Text in
+  a `textWrap` paragraph keeps hanging its trailing spaces, as CSS lines do.
+  Not changed: right-to-left text, for which nothing has been measured in
+  Chrome.
+
 ### Added
 
 - **CSS Color 4's system colours**, in any case, wherever a colour string

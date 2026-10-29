@@ -1634,7 +1634,7 @@ impl<'a> Typesetter<'a> {
         let (paragraph, restyled) = self.restyled(&self.layout_style(paint));
 
         let offset = Point::new(
-            self.alignment_offset(),
+            self.alignment_offset() + self.trailing_space_shift(&paragraph),
             -paragraph.alphabetic_baseline(),
         );
 
@@ -2231,6 +2231,37 @@ impl<'a> Typesetter<'a> {
         };
 
         alignment_factor * self.width + spacing_step * self.leading_spacing()
+    }
+
+    /// How far a centred or right-aligned run moves for the whitespace it
+    /// ends in, which SkParagraph leaves out of the line it aligns.
+    ///
+    /// The canvas aligns the whole run, its advance with every trailing
+    /// space and that space's spacing, as Chrome does: a centred `"a "`
+    /// stands half a space left of `"a"`. SkParagraph aligns a line by its
+    /// width without the whitespace it ends in, which hangs, so the run is
+    /// moved by the share of the difference its alignment takes. A wrapped
+    /// run's lines hang their trailing spaces as CSS lines do, and keep
+    /// SkParagraph's alignment. Left to right only: a right-to-left run's
+    /// trailing space is at its visual start, and no browser measurement
+    /// says where Chrome puts it.
+    fn trailing_space_shift(&self, paragraph: &Paragraph) -> f32 {
+        let share = match self.gravity() {
+            TextAlign::Center => 0.5,
+            TextAlign::Right => 1.0,
+            _ => return 0.0,
+        };
+        let applies = !self.text_wrap
+            && self.graf_style().text_direction() == TextDirection::LTR
+            && self.text.ends_with(char::is_whitespace);
+        match applies {
+            true => {
+                -share
+                    * (self.signed_advance(paragraph)
+                        - paragraph.longest_line())
+            }
+            false => 0.0,
+        }
     }
 
     /// The letter spacing of the line's first character on the left, of

@@ -970,6 +970,13 @@ const CHROME_MEASURED_HERE =
 const F32_SUM = 0.0002;
 
 /**
+ * The step an ink box moves in: it falls on a grid of 1/64 pixel, measured
+ * as a centred "a " standing 4.578125 left of "a", 293/64, where the run
+ * moved 4.58.
+ */
+const INK_GRID = 1 / 64;
+
+/**
  * The characters word spacing applies to: CSS Text 3 section 8.2's
  * word-separator characters. U+3000, the ideographic space, is not one.
  */
@@ -1068,6 +1075,49 @@ describe("measureText's width is the run's advance", () => {
       assert.ok(
         Math.abs(moved - 20 * before) <= F32_SUM,
         `${JSON.stringify(text)}: moved ${moved}, ${before} separators`,
+      );
+    }
+  });
+
+  // A trailing space is part of the run that is aligned, as in Chrome: the
+  // ink of a centred "a " stands half the space's advance left of "a"'s,
+  // and right-aligned the whole of it. On macOS, also Chrome 156's ink box,
+  // each case measured in a profile of its own.
+  test("a trailing space moves aligned text", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = "40px Oswald";
+    for (const [align, share] of [
+      ["left", 0],
+      ["center", 0.5],
+      ["right", 1],
+    ]) {
+      for (const word of ["0px", "20px"]) {
+        ctx.textAlign = align;
+        ctx.wordSpacing = word;
+        const bare = ctx.measureText("a"),
+          spaced = ctx.measureText("a ");
+        const moved = spaced.actualBoundingBoxLeft - bare.actualBoundingBoxLeft;
+        const expected = share * (spaced.width - bare.width);
+        assert.ok(
+          Math.abs(moved - expected) <= INK_GRID,
+          `${align} ${word}: moved ${moved}, expected ${expected}`,
+        );
+      }
+    }
+    if (CHROME_MEASURED_HERE) return;
+    for (const [align, word, left, right] of [
+      ["center", "0px", 11.419990539550781, 2.3800086975097656],
+      ["center", "20px", 21.41999053955078, -7.619991302490234],
+      ["right", "0px", 24.519981384277344, -10.719982147216797],
+      ["right", "20px", 44.519981384277344, -30.719982147216797],
+    ]) {
+      ctx.textAlign = align;
+      ctx.wordSpacing = word;
+      const m = ctx.measureText("a ");
+      assert.ok(
+        Math.abs(m.actualBoundingBoxLeft - left) <= 0.01 &&
+          Math.abs(m.actualBoundingBoxRight - right) <= 0.01,
+        `${align} ${word}: ${m.actualBoundingBoxLeft} ${m.actualBoundingBoxRight}, Chrome ${left} ${right}`,
       );
     }
   });
