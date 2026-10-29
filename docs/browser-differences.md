@@ -44,6 +44,26 @@ hundredth, and the two edges coincide. No width given to `layout` undoes a
 floor taken on the line's side. The `UPSTREAM` note at `paragraph_style`
 carries the re-check.
 
+**Text set at 17.3px is laid out at 17.3px; Chrome 156 lays it out at
+17.29px.** Measured on macOS in Oswald, `measureText("Hamburgefonstiv")` at
+17.3px is 0.062 narrower in Chrome than here, and narrower by the same at
+16.3, 16.8, 17.8, 18.3, 18.8, 19.3, 19.8 and 20.3px. Of the 201 sizes from
+12px to 32px in steps of a tenth, those nine are the only ones that differ,
+and they are the nine at which the size times 100, multiplied in `f32`, falls
+just short of a whole number -- 17.3 × 100 is 1729.9999 -- so that truncating
+it gives a hundredth less. The rule `int(f32(size) × 100) / 100` predicts all
+nine, and Chrome's widths at the sizes it predicts are this library's widths
+scaled to them within 0.0002. Blink's `FontCacheKey`
+(`third_party/blink/renderer/platform/fonts/font_cache_key.h`) truncates the
+size this way, through an unsigned integer of hundredths, but
+`FontPlatformDataCache` creates the font from the untruncated size, so where
+Blink applies the truncated size to layout is not identified. It is not
+the order in which sizes are asked for: 17.3px measured first in a fresh
+profile is already 17.29px's width, and DOM text at 17.3px is too, so it is
+not canvas alone. A size names a length; laying text out a hundredth smaller
+than asked for is a defect in Chrome, not a rule, and the test "17.3px is a
+hundredth wider than 17.29px" holds this library to the size it is given.
+
 `actualBoundingBoxAscent` and `actualBoundingBoxDescent` differ from Chrome
 because `SkParagraph` snaps a run's baseline to a whole pixel and Chrome does
 not. **The reported box is the box that is painted**, which is why it is not
