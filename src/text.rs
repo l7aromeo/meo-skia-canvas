@@ -1389,7 +1389,8 @@ impl TextEngine {
         if let TextSlant::Oblique(angle) = base_style.slant {
             add_slnt(&mut instance.coordinates, angle.degrees());
         }
-        let mut base_sk_style = build_text_style(base_style, &instance);
+        let mut base_sk_style = SkTextStyle::new();
+        fill_text_style(&mut base_sk_style, base_style, &instance);
         let base_oblique =
             base_style.slant.oblique_degrees().and_then(|degrees| {
                 match_oblique(&mut base_sk_style, &mut collection, degrees)
@@ -1487,7 +1488,8 @@ impl ParagraphBuilder {
         if let TextSlant::Oblique(angle) = style.slant {
             add_slnt(&mut instance.coordinates, angle.degrees());
         }
-        let mut sk_style = build_text_style(style, &instance);
+        let mut sk_style = SkTextStyle::new();
+        fill_text_style(&mut sk_style, style, &instance);
         let oblique = style.slant.oblique_degrees().and_then(|degrees| {
             match_oblique(&mut sk_style, &mut self.collection, degrees)
         });
@@ -2332,7 +2334,7 @@ fn at_default_position(
         })
 }
 
-/// Whether [`build_text_style`] gives `style`'s Skia style a decoration,
+/// Whether [`fill_text_style`] gives `style`'s Skia style a decoration,
 /// shadows or a background, the three things a recipe takes off a style
 /// to draw itself: decided here, from the fields it builds them from, so
 /// that a style with none is pushed without its Skia style being read for
@@ -2343,11 +2345,17 @@ fn carries_taken(style: &TextStyle) -> bool {
         || style.background_color.is_some()
 }
 
-/// The Skia text style for `style`, with its variable faces instanced as
-/// `instance` says.
-fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
-    let mut sk_style = SkTextStyle::new();
-
+/// Sets `sk_style`, a new Skia text style, to `style`, with its variable
+/// faces instanced as `instance` says.
+///
+/// Filled where the caller made it rather than made here and handed back:
+/// a Skia `TextStyle` is 432 bytes, and handing one back by value cost a
+/// copy of it for every style a paragraph is built in.
+fn fill_text_style(
+    sk_style: &mut SkTextStyle,
+    style: &TextStyle,
+    instance: &Instance,
+) {
     let mut paint = SkPaint::default();
     let cs = linear_srgb_color_space();
     // `foreground_color` wins where it is set, which is what makes it an
@@ -2470,8 +2478,6 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
             shadow.blur_sigma as f64,
         ));
     }
-
-    sk_style
 }
 
 /// The colours of `style` that SkParagraph would hold in eight bits, as the
