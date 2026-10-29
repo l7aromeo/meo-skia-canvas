@@ -877,6 +877,7 @@ fn draw_on_gpu(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::start_skia;
 
     /// The profile against the blurred interval integrated over each pixel
     /// numerically: the midpoint rule over `erf`, with no antiderivative.
@@ -968,6 +969,9 @@ mod tests {
         down: [f32; 2],
         k: f64,
     ) -> Vec<f32> {
+        // A raster surface made here reaches Skia without a canvas, so
+        // nothing else has started it: see `start_skia`.
+        start_skia();
         let effect = RuntimeEffect::make_for_shader(RECT_BLUR_SKSL, None)
             .expect("the shader compiles");
         let uniforms: Vec<u8> =
@@ -1183,6 +1187,7 @@ mod tests {
 
     #[test]
     fn a_trimmed_bake_is_the_whole_product() {
+        start_skia();
         // The frame leaves out the columns and rows that round to zero and
         // fills the interior where it rounds as the middle does. Drawn, it
         // is every byte of the outer product baked whole, worked out here a
@@ -1247,6 +1252,7 @@ mod tests {
 
     #[test]
     fn a_bake_for_float_pixels_draws_the_whole_outer_product() {
+        start_skia();
         // On F16 pixels nothing is trimmed and the interior is the run that
         // is level to 1e-7; drawn, the bake is the outer product to the
         // precision of a half float.
