@@ -32,6 +32,7 @@ use crate::{
 /// | image filter, shadow           | dropped  | fine  |
 /// | mask filter                    | dropped  | fine  |
 /// | blend mode past source-over    | dropped  | wrong |
+/// | canvas drawn in through a paint| dropped  | fine  |
 ///
 /// A draw carrying something its backend cannot take is recorded in a layer
 /// of its own and rasterized into the document at export time, so the file
@@ -58,6 +59,10 @@ impl VectorFeatures {
     /// pixel-identical to the raster export, and a `multiply` moves a fifth
     /// of the page.
     pub(crate) const PDF_CANNOT: Self = Self::BLEND_MODE;
+    /// A canvas drawn into another through a paint -- a global alpha, a
+    /// blend mode or a colour filter -- which reaches its picture through a
+    /// layer. The SVG backend has no layers and drops the picture whole.
+    pub(crate) const PICTURE_PAINT: Self = Self(1 << 4);
     /// Nothing a backend could object to.
     pub(crate) const PLAIN: Self = Self(0);
     /// Everything the SVG backend drops.
@@ -65,7 +70,8 @@ impl VectorFeatures {
         Self::EXOTIC_SHADER.0
             | Self::IMAGE_FILTER.0
             | Self::MASK_FILTER.0
-            | Self::BLEND_MODE.0,
+            | Self::BLEND_MODE.0
+            | Self::PICTURE_PAINT.0,
     );
 
     pub(crate) fn with(self, other: Self) -> Self {

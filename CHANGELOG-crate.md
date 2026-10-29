@@ -137,6 +137,21 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A canvas drawn into another takes the context's colour filter.**
+  `Context2D::draw_canvas` under `Context2D::set_color_filter`, at full
+  global alpha and in `SourceOver`, drew a canvas of plain drawing
+  unfiltered: a red canvas under `ColorFilter::luma` came out red, where a
+  red fill under the same filter reads alpha 54. It is now filtered as a
+  fill of the same pixels is.
+
+- **An SVG export keeps a canvas drawn into another under a global alpha or
+  a colour filter.** `Context2D::draw_canvas` under a global alpha below 1
+  left the `ImageFormat::Svg` export without the canvas at all: Skia's SVG
+  backend draws such a picture through a layer, which it does not have, and
+  dropped it whole. The draw is now rasterized into the SVG, as a shadow or
+  a filter already is, and a canvas drawn with nothing to carry stays
+  vector. PDF drew all of these correctly and is unchanged.
+
 - **A large blur exported at a high density keeps its width.** A
   `blur()` on a flat-colour shape is drawn by Skia's coverage blur up to a
   sigma chosen at density 1, and that blur stops at 128 output pixels: a
