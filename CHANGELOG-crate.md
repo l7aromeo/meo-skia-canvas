@@ -358,6 +358,18 @@ and the CSS strings read the math functions and every length unit.
   spaces one depends on what it measured before;
   docs/browser-differences.md has both.
 
+- **On Linux the crate no longer sets `FONTCONFIG_PATH`.** The first font
+  lookup in a process, on a machine with no `/etc/fonts/fonts.conf` and
+  neither `FONTCONFIG_PATH` nor `FONTCONFIG_FILE` set, pointed
+  `FONTCONFIG_PATH` at a `fonts` directory beside the executable or library
+  holding the crate, which the crate never shipped. Nothing sets it now, so
+  such a process no longer reads a `fonts/fonts.conf` placed there and its
+  children no longer inherit the variable; fontconfig's own fallback
+  configuration applies, as it already did wherever that directory was
+  absent. The write was unsound -- `std::env::set_var` races a `getenv` on
+  any other thread -- and the `process_path` dependency, which only located
+  that directory, is gone with it.
+
 ### Fixed
 
 - **A colour lands exactly on an sRGB float canvas.** On a canvas made with

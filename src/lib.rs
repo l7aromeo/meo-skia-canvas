@@ -447,8 +447,6 @@ pub(crate) fn start_skia() {
 #[cfg(feature = "node-addon")]
 use context::api as ctx;
 #[cfg(feature = "node-addon")]
-use node::font_library::install_fontconfig_fallback;
-#[cfg(feature = "node-addon")]
 use {css::parse_transform_list, std::iter};
 
 /// Module-level function to get backend status without creating a canvas.
@@ -622,11 +620,6 @@ fn transform_list(mut cx: FunctionContext) -> JsResult<JsValue> {
 #[neon::main]
 fn main(mut cx: ModuleContext) -> NeonResult<()> {
     start_skia();
-
-    // Before the thread pool below, and before anything else this module does:
-    // it writes to the environment, and the narrowest window available is the
-    // one with none of this addon's threads in it yet.
-    install_fontconfig_fallback();
 
     // Once per JavaScript thread, as this runs on each that loads the addon:
     // the channel the idle watcher empties this thread's font caches through.
