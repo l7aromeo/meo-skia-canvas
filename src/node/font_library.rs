@@ -47,67 +47,6 @@ use allsorts::{
     woff::WoffFont, woff2::Woff2Font,
 };
 
-#[cfg(target_os = "linux")]
-use std::sync::Once;
-
-/// Guards [`install_fontconfig_fallback`], so the process writes at most once.
-#[cfg(target_os = "linux")]
-static FONTCONFIG_FALLBACK: Once = Once::new();
-
-/// Points fontconfig at the bundled `fonts.conf` where the machine has none.
-///
-/// A minimal Linux image often ships no `/etc/fonts/fonts.conf`. With no
-/// config fontconfig sees only the directories its own built-in fallback
-/// names, so a font installed anywhere else is invisible. This points it at
-/// the `fonts` directory shipped beside the binary, which names several more.
-///
-/// `FONTCONFIG_PATH` is the only lever there is. Skia builds its font manager
-/// with `SkFontMgr_New_FontConfig(nullptr, ...)`, and the null does not ask
-/// for the current `FcConfig`: `SkFontMgr_fontconfig.cpp:707` reads
-/// `fFC(config ? config : FcInitLoadConfigAndFonts())`, which loads a fresh
-/// default config from the file list `FONTCONFIG_PATH` and `FONTCONFIG_FILE`
-/// steer. A config installed with `FcConfigSetCurrent` is therefore never
-/// read. That was tried and measured on a Linux build: with the fonts in a
-/// directory only the bundled config names, the environment variable found
-/// them and `FcConfigSetCurrent` found nothing.
-///
-/// UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
-/// Re-check: a `FontMgr` constructor taking an `FcConfig`. At 0.153.3
-/// `FontMgr::new()` passes null and `grep -rn fontconfig skia-safe/src` finds
-/// nothing, so a config cannot be handed to Skia from Rust at all.
-///
-/// **The write is unsound, and calling it once is the most that can be done
-/// about that.** `std::env::set_var` races any concurrent `getenv`, including
-/// one inside a C library on another thread, and nothing here can rule that
-/// out. The `Once` holds it to a single write per process, where the
-/// `thread_local` initializer this used to sit in ran it once per thread; and
-/// the Neon entry point calls it before building the rayon pool, so this
-/// addon's own threads start after the write rather than around it. Neither
-/// of those makes it safe.
-pub(crate) fn install_fontconfig_fallback() {
-    #[cfg(target_os = "linux")]
-    FONTCONFIG_FALLBACK.call_once(|| {
-        let configured = fs::exists(Path::new("/etc/fonts/fonts.conf"))
-            .unwrap_or(false)
-            || std::env::var_os("FONTCONFIG_PATH").is_some()
-            || std::env::var_os("FONTCONFIG_FILE").is_some();
-        if configured {
-            return;
-        }
-
-        let Some(mut bundled) = process_path::get_dylib_path() else {
-            return;
-        };
-        bundled.set_file_name("fonts");
-
-        // SAFETY: nothing here makes this sound, and the note above says why
-        // it stays. `Once` holds it to the one write this process performs,
-        // and the Neon entry point calls it before starting any thread of
-        // ours, which is as narrow as the window gets.
-        unsafe { std::env::set_var("FONTCONFIG_PATH", bundled) };
-    });
-}
-
 /// The CSS `font-stretch` percentage an OpenType `usWidthClass` names.
 ///
 /// The nine classes of the OS/2 table, which CSS Fonts 4 defines the
@@ -291,6 +230,29 @@ pub(crate) fn instance_coordinates(
         })
         .collect()
 }
+
+/// The family Chrome draws `sans-serif` in on this platform, which leads
+/// the curated `sans-serif` stack: `IDS_SANS_SERIF_FONT_FAMILY` in
+/// Chromium's `chrome/app/resources/locale_settings_mac.grd`, `_linux.grd`
+/// and `_win.grd`, Helvetica on macOS and Arial elsewhere. On Linux Chrome
+/// asks fontconfig for the name and draws what it substitutes; asking the
+/// system manager for it here does the same.
+#[cfg(target_os = "macos")]
+const CHROME_SANS_SERIF: &str = "Helvetica";
+/// See the macOS definition.
+#[cfg(not(target_os = "macos"))]
+const CHROME_SANS_SERIF: &str = "Arial";
+
+/// The family Chrome draws `serif` in on this platform, and its standard
+/// font -- what text naming no available family is drawn in: on macOS
+/// `IDS_SERIF_FONT_FAMILY` and `IDS_STANDARD_FONT_FAMILY` are Times, on
+/// Linux and Windows Times New Roman, in the same files as
+/// [`CHROME_SANS_SERIF`].
+#[cfg(target_os = "macos")]
+const CHROME_SERIF: &str = "Times";
+/// See the macOS definition.
+#[cfg(not(target_os = "macos"))]
+const CHROME_SERIF: &str = "Times New Roman";
 
 /// How many instanced collections are kept.
 ///
@@ -893,14 +855,8 @@ impl FontLibrary {
     {
         note_font_use();
         LIBRARY.with(|lib_lock| {
-            let shared_lib = lib_lock.get_or_init(|| {
-                // Covers the crate channel, which has no entry point to run
-                // this from, and any thread reaching a font before the Neon
-                // one has. Idempotent, so the ordinary case pays a `Once`.
-                install_fontconfig_fallback();
-
-                RefCell::new(FontLibrary::with_fonts(vec![]))
-            });
+            let shared_lib = lib_lock
+                .get_or_init(|| RefCell::new(FontLibrary::with_fonts(vec![])));
 
             f(&mut shared_lib.borrow_mut())
         })
@@ -1078,6 +1034,7 @@ impl FontLibrary {
             font_stacks.insert(
                 "serif",
                 vec![
+                    CHROME_SERIF,
                     "Times",
                     "Nimbus Roman",
                     "Times New Roman",
@@ -1091,6 +1048,7 @@ impl FontLibrary {
             font_stacks.insert(
                 "sans-serif",
                 vec![
+                    CHROME_SANS_SERIF,
                     "Avenir Next",
                     "Avenir",
                     "Helvetica Neue",
@@ -1242,14 +1200,16 @@ impl FontLibrary {
         // collect non-system fonts in a provider
         let mut dyn_mgr = TypefaceFontProvider::new();
 
-        // A fallback first, so the family a null name resolves to is a
-        // sensible one rather than whatever sorts first. It is also the face
-        // `ex` is measured against for a document naming no family at all,
-        // which is why the second arm matters: with nothing registered the
+        // A fallback first, so the family a null name resolves to is the
+        // standard font, serif first, as Chrome draws a document naming no
+        // family it has -- see `CHROME_SERIF` -- rather than whatever sorts
+        // first. Chrome 156 on macOS draws such SVG text in Times. It is also
+        // the face `ex` is measured against for a document naming no family at
+        // all, which is why the second arm matters: with nothing registered the
         // provider answers nothing, `ex_ratio_for` falls back to a constant
         // half an em, and `4ex` renders as `2em`. That is what `an ex is the
-        // drawn face's x-height, not half an em` reported on Windows, where
-        // the exact 0.5 says the constant was reached.
+        // drawn face's x-height, not half an em` reported on Windows, where the
+        // exact 0.5 says the constant was reached.
         //
         // Which of the two ways it was reached is not established: the curated
         // stack may resolve to nothing there, or it may resolve to a face
@@ -1291,9 +1251,9 @@ impl FontLibrary {
             .face_collection()
             .find_typefaces(
                 &[
-                    GenericFamily::SystemUi,
-                    GenericFamily::SansSerif,
                     GenericFamily::Serif,
+                    GenericFamily::SansSerif,
+                    GenericFamily::SystemUi,
                 ]
                 .map(generic_name),
                 FontStyle::normal(),

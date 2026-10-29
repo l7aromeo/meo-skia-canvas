@@ -1721,6 +1721,16 @@ impl Context2D {
         style.set_typeface(typeface.clone());
         style.set_font_families(&spec.collection_names);
         style.set_font_style(spec.style());
+        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+        // Re-check: "17.3px measures as 17.296875px on FreeType" in
+        // tests/suite/text.test.js, on Linux, goes red once fixed.
+        // Skia's FreeType scaler sets the face's size as 26.6 fixed point
+        // through `SkScalarToFDot6`, a truncation, in `FT_Set_Char_Size`
+        // (`SkFontHost_FreeType.cpp`), and corrects its matrix for the size
+        // chosen only below 1px: on Linux every size is laid out at the 64th
+        // of a pixel below it, while its metrics take the size asked for.
+        // Not worked around, as Chrome on Linux takes its advances from the
+        // same scaler -- see docs/browser-differences.md.
         style.set_font_size(spec.size);
         style.reset_font_features();
         for (feat, val) in &spec.features {

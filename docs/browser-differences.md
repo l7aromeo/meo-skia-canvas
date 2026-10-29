@@ -33,6 +33,23 @@ Chrome on Linux was not measured. `ch` and `ic` take the advance from the
 face's tables and are the interpolation's on every platform. The `UPSTREAM`
 note at the width in `Typesetter::measure` carries the re-check.
 
+On Linux a font size is laid out at the 64th of a pixel at or below it. Skia's
+FreeType scaler hands the size to `FT_Set_Char_Size` in 26.6 fixed point
+through `SkScalarToFDot6`, which truncates (`SkFontHost_FreeType.cpp`), and
+corrects its matrix for the size FreeType chose only below 1px, so advances and
+outlines come from the truncated size while the font's metrics take the one
+asked for. In Oswald, `measureText("Hamburgefonstiv")` at each hundredth from
+17.00px to 18.00px steps by 0 at 36 of the 100 and by 0.0956 to 0.0973 at the
+rest, where on macOS every step is 0.0617 or 0.0618, and each width is within
+0.0005 of macOS's at `floor(size × 64) / 64`, the rest being FreeType's
+advances against CoreText's: 17.29px measures 106.69469 on Linux and 17.28125px
+106.69444 on macOS; 17.30px measures 106.79041 on Linux and 17.296875px
+106.79089 on macOS. Hinting on and off measure alike. Chrome on Linux takes its
+glyph advances from the same scaler -- Blink's `SkFontGetGlyphWidthForHarfBuzz`
+in `skia_text_metrics.cc` reads them from the Skia strike -- so it is expected
+to step the same way; Chrome on Linux was not measured. The `UPSTREAM` note at
+the size in `Context2D::set_font` carries the re-check.
+
 A line fits a paragraph up to a hundredth narrower than it. With
 SkParagraph's rounding hack off, as every paragraph here is,
 `LineBreakerWithLittleRounding` in `TextWrapper.cpp` still floors a line's
@@ -43,6 +60,29 @@ breaking below its own width; on macOS its width is 200.52002, just above the
 hundredth, and the two edges coincide. No width given to `layout` undoes a
 floor taken on the line's side. The `UPSTREAM` note at `paragraph_style`
 carries the re-check.
+
+**Text set at 17.3px is laid out at 17.3px; Chrome 156 lays it out at
+17.29px.** Measured on macOS in Oswald, `measureText("Hamburgefonstiv")` at
+17.3px is 0.062 narrower in Chrome than here, and narrower by the same at
+16.3, 16.8, 17.8, 18.3, 18.8, 19.3, 19.8 and 20.3px. Of the 201 sizes from
+12px to 32px in steps of a tenth, those nine are the only ones that differ,
+and they are the nine at which the size times 100, multiplied in `f32`, falls
+just short of a whole number -- 17.3 × 100 is 1729.9999 -- so that truncating
+it gives a hundredth less. The rule `int(f32(size) × 100) / 100` predicts all
+nine, and Chrome's widths at the sizes it predicts are this library's widths
+scaled to them within 0.0002. Blink's `FontCacheKey`
+(`third_party/blink/renderer/platform/fonts/font_cache_key.h`) truncates the
+size this way, through an unsigned integer of hundredths, but
+`FontPlatformDataCache` creates the font from the untruncated size, so where
+Blink applies the truncated size to layout is not identified. It is not
+the order in which sizes are asked for: 17.3px measured first in a fresh
+profile is already 17.29px's width, and DOM text at 17.3px is too, so it is
+not canvas alone. A size names a length; laying text out a hundredth smaller
+than asked for is a defect in Chrome, not a rule, and the test "17.3px is a
+hundredth wider than 17.29px" holds this library to the size it is given.
+On Linux that size is itself laid out at the 64th of a pixel below it,
+17.296875px for 17.3px, as the FreeType entry above records, where Chrome
+truncates to 17.29px first.
 
 `actualBoundingBoxAscent` and `actualBoundingBoxDescent` differ from Chrome
 because `SkParagraph` snaps a run's baseline to a whole pixel and Chrome does
@@ -75,6 +115,20 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
 
 **Deliberate, and worth keeping.**
 
+- _Word spacing is added after every word separator, a leading space
+  included._ CSS Text 3 section 8.2 applies `word-spacing` to each
+  word-separator character, and the canvas keeps every space, so `" a"` at
+  -100px word spacing in 40px Oswald measures -73.80. Chrome 156 measures
+  26.20 there: it does not space a leading U+0020, though it spaces a leading
+  no-break space (-73.80), a trailing space (`"a "` -73.80) and each of a
+  doubled one (`"a  b"` -146.76). What it does with a space also depends on
+  what it measured before, in one profile: once a text that does not space a
+  space has been measured, every later U+0020, in that text and the next,
+  goes unspaced -- `" a b "` measures 62.40, unspaced throughout, and
+  `"a b"` measured after `" a"` is 44.08 where alone it is -55.92 -- while
+  `" a"` measured after `"a b"` is -73.80. Its widths in the tests here are
+  each measured alone in a fresh profile, and the leading-space rows carry
+  none.
 - _A negative advance's ink box is the ink._ With a letter or word spacing
   that makes a run's advance negative, Chrome's `actualBoundingBoxLeft`
   reaches back to where the advance ends: Blink's `plain_text_node.cc` moves
@@ -144,9 +198,19 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   default font, `10px sans-serif`, names this one. Chrome 152 on macOS
   measures `Hamburgefonstiv` in `16px NoSuchFamilyAnywhere` at 111.70, as in
   `16px Times` and `16px serif`, in a canvas and in an `OffscreenCanvas`
-  alike; here it measures 126.16, as in `16px sans-serif`. A quoted
+  alike; here it measures 120.95, as in `16px sans-serif`. A quoted
   `"serif"` with no family of that name is such a list. `new_font_collection`
-  in `src/node/font_library.rs` sets the default.
+  in `src/node/font_library.rs` sets the default. On Linux a family the
+  machine lacks but fontconfig binds strongly or as "same" -- Times New Roman
+  to Liberation Serif or Tinos, by its metric aliases -- resolves to that
+  substitute, and one it binds only weakly, through the generic defaults,
+  does not: Skia's fontconfig `matchFamilyStyle` drops weak bindings before
+  matching, so in a container holding only DejaVu, `16px Times New Roman`
+  draws in this library's `sans-serif` rather than the DejaVu Serif `fc-match`
+  names. Chrome on Linux resolves families through the same call and, as
+  `FontCache::GetLastResortFallbackFont` in `font_cache_skia.cc` walks its
+  list, is expected to land on a sans face there too; that is inferred from
+  the code, and Chrome on Linux was not run.
 - _A family name matches by Unicode's full case folding, and Chrome folds one
   character to one._ CSS Fonts 4 section 5.1 matches family names by the
   Default Caseless Matching of The Unicode Standard section 3.13, "using the

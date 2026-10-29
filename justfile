@@ -691,11 +691,12 @@ licenses:
     #!/usr/bin/env bash
     set -euo pipefail
     # The union across every shipped target, not the host's tree. A crate can
-    # link on one platform and not another -- `allsorts` is Windows-only and
-    # `process_path` Linux-only, both by `cfg` -- so counting the host wrote
-    # macOS's answer into a file that ships to everyone: 168 here against 201
-    # on Linux, understating a notices file by thirty-three crates. Over-listing
-    # is harmless where under-listing is the thing this file exists to prevent.
+    # link on one platform and not another -- `allsorts` is Windows-only by
+    # `cfg`, and `rustix` and `linux-raw-sys` Linux-only -- so counting the
+    # host wrote macOS's answer into a file that ships to everyone: 168 here
+    # against 201 on Linux, understating a notices file by thirty-three crates.
+    # Over-listing is harmless where under-listing is the thing this file
+    # exists to prevent.
     #
     # Triples are derived from `lib/targets.json`, which is the one source for
     # what ships; a second list here is what drifts. Measured, so the derivation
