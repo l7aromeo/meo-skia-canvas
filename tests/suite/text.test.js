@@ -969,19 +969,41 @@ const CHROME_MEASURED_HERE =
  */
 const F32_SUM = 0.0002;
 
+/**
+ * The step an ink box moves in: it falls on a grid of 1/64 pixel, measured
+ * as a centred "a " standing 4.578125 left of "a", 293/64, where the run
+ * moved 4.58.
+ */
+const INK_GRID = 1 / 64;
+
+/**
+ * The characters word spacing applies to: CSS Text 3 section 8.2's
+ * word-separator characters. U+3000, the ideographic space, is not one.
+ */
+const WORD_SEPARATORS = new Set([
+  "\u0020",
+  "\u00a0",
+  "\u1361",
+  "\u{10100}",
+  "\u{10101}",
+  "\u{1039f}",
+  "\u{1091f}",
+]);
+
 describe("measureText's width is the run's advance", () => {
   FontLibrary.use("Oswald", [
     "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
   ]);
 
-  // Chrome 152 at 40px Oswald, loaded as a FontFace with its weight range:
-  // the advance of every glyph and space, letter spacing after each and
-  // word spacing between words, summed and never clamped.
   // On any platform, the width with spacing is the width without it plus the
-  // spacing: letter spacing after every character, word spacing at each
-  // space between words, never clamped. On macOS, also Chrome 156's widths
-  // to the float, within CHROME_FLOAT, where SkParagraph's rounding to
-  // hundredths put the width as much as half of one away.
+  // spacing, never clamped: letter spacing after every character, and word
+  // spacing at every word-separator character (CSS Text 3 section 8.2), a
+  // space or a no-break space, leading, doubled and trailing ones included.
+  // On macOS, also Chrome 156's widths at 40px Oswald to the float, within
+  // CHROME_FLOAT, each measured in a profile of its own: Chrome's spacing of
+  // a space depends on what it measured first, and a leading space it does
+  // not space at all -- see docs/browser-differences.md -- so those rows
+  // carry no Chrome value.
   test("width is the signed advance, trailing spaces included", () => {
     const ctx = new Canvas(10, 10).getContext("2d");
     ctx.font = "40px Oswald";
@@ -1000,25 +1022,103 @@ describe("measureText's width is the run's advance", () => {
       ["-50px", "0px", "ab ", -105.92002868652344],
       ["-10px", "0px", "a ", 6.199981689453125],
       ["0px", "0px", "a  ", 35.35997009277344],
+      ["0px", "-100px", "a ", -73.80001831054688],
+      ["0px", "-100px", "a  ", -164.64003],
+      ["0px", "-100px", "a  b", -146.76004],
+      ["0px", "-100px", "a\u00a0b", -55.92002868652344],
+      ["0px", "-100px", "\u00a0a", -73.80001831054688],
+      // Oswald has no U+3000, and the face it falls back to is not Chrome's.
+      ["0px", "-100px", "a\u3000b", null],
+      ["5px", "20px", "a  b", null],
+      ["0px", "-100px", " a", null],
+      ["0px", "-100px", "  a", null],
+      ["0px", "20px", " a b ", null],
     ]) {
       const plain = unspaced(text);
       ctx.letterSpacing = letter;
       ctx.wordSpacing = word;
       const { width } = ctx.measureText(text);
       const what = `${letter} ${word} ${JSON.stringify(text)}: ${width}`;
-      const between = text.trim().split(" ").length - 1;
+      const separators = [...text].filter((ch) => WORD_SEPARATORS.has(ch));
       const spaced =
-        plain + parseFloat(letter) * text.length + parseFloat(word) * between;
+        plain +
+        parseFloat(letter) * text.length +
+        parseFloat(word) * separators.length;
       assert.ok(
         Math.abs(width - spaced) <= F32_SUM,
         `${what}, unspaced ${plain} plus the spacing ${spaced}`,
       );
-      if (!CHROME_MEASURED_HERE) {
+      if (!CHROME_MEASURED_HERE && chrome !== null) {
         assert.ok(
           Math.abs(width - chrome) <= CHROME_FLOAT,
           `${what}, Chrome ${chrome}`,
         );
       }
+    }
+  });
+
+  // What is drawn moves with the width: the ink of the last glyph stands
+  // the word spacing further right for every separator before it, a
+  // leading one and a doubled one included.
+  test("word spacing moves the glyphs after each separator", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = "40px Oswald";
+    const right = (text, word) => {
+      ctx.wordSpacing = word;
+      return ctx.measureText(text).actualBoundingBoxRight;
+    };
+    for (const text of ["a b", "a  b", " a", "  a b", "a\u00a0b", "a b "]) {
+      const before = [...text.trimEnd()].filter((ch) =>
+        WORD_SEPARATORS.has(ch),
+      ).length;
+      const moved = right(text, "20px") - right(text, "0px");
+      assert.ok(
+        Math.abs(moved - 20 * before) <= F32_SUM,
+        `${JSON.stringify(text)}: moved ${moved}, ${before} separators`,
+      );
+    }
+  });
+
+  // A trailing space is part of the run that is aligned, as in Chrome: the
+  // ink of a centred "a " stands half the space's advance left of "a"'s,
+  // and right-aligned the whole of it. On macOS, also Chrome 156's ink box,
+  // each case measured in a profile of its own.
+  test("a trailing space moves aligned text", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = "40px Oswald";
+    for (const [align, share] of [
+      ["left", 0],
+      ["center", 0.5],
+      ["right", 1],
+    ]) {
+      for (const word of ["0px", "20px"]) {
+        ctx.textAlign = align;
+        ctx.wordSpacing = word;
+        const bare = ctx.measureText("a"),
+          spaced = ctx.measureText("a ");
+        const moved = spaced.actualBoundingBoxLeft - bare.actualBoundingBoxLeft;
+        const expected = share * (spaced.width - bare.width);
+        assert.ok(
+          Math.abs(moved - expected) <= INK_GRID,
+          `${align} ${word}: moved ${moved}, expected ${expected}`,
+        );
+      }
+    }
+    if (CHROME_MEASURED_HERE) return;
+    for (const [align, word, left, right] of [
+      ["center", "0px", 11.419990539550781, 2.3800086975097656],
+      ["center", "20px", 21.41999053955078, -7.619991302490234],
+      ["right", "0px", 24.519981384277344, -10.719982147216797],
+      ["right", "20px", 44.519981384277344, -30.719982147216797],
+    ]) {
+      ctx.textAlign = align;
+      ctx.wordSpacing = word;
+      const m = ctx.measureText("a ");
+      assert.ok(
+        Math.abs(m.actualBoundingBoxLeft - left) <= 0.01 &&
+          Math.abs(m.actualBoundingBoxRight - right) <= 0.01,
+        `${align} ${word}: ${m.actualBoundingBoxLeft} ${m.actualBoundingBoxRight}, Chrome ${left} ${right}`,
+      );
     }
   });
 

@@ -280,6 +280,19 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   hundredth narrower than it, as SkParagraph's line breaker compares the
   line's width floored to hundredths; docs/browser-differences.md has it.
 
+- **`wordSpacing` is added after every word separator.** It was added once
+  per run of spaces and only between words, as SkParagraph adds it, so a
+  leading or trailing space and the second of a doubled one went unspaced,
+  a no-break space was never spaced, and U+3000, which is not a word
+  separator, was. CSS Text 3 section 8.2 spaces every word-separator
+  character, and now so does the canvas: at -100px in 40px Oswald, `"a  b"`
+  measures -146.76 where it measured -46.76, as Chrome 156 measures it, and
+  `"a "` -73.80 where it measured 26.20. The glyphs move with the width.
+  Code that measures or places text drawn with a `wordSpacing` can see it
+  move at those spaces. A `Paragraph`'s `wordSpacing` keeps SkParagraph's
+  rule. Chrome does not space a leading space, and how it spaces one depends
+  on what it measured before; docs/browser-differences.md has both.
+
 ### Security
 
 - **`follow-redirects` is required at `^1.16.1`, up from `^1.15.11`.** It is
@@ -1399,6 +1412,23 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   within the hundredth SkParagraph's line breaker floors widths to. The
   values this moves are under Breaking: "Text widths, line metrics, rects
   and hit-testing are no longer rounded to hundredths".
+
+- **Word spacing reaches every space.** A leading or trailing space, the
+  second of a doubled one and a no-break space took none of `wordSpacing`;
+  what the width does now is under Breaking: "`wordSpacing` is added after
+  every word separator".
+
+- **Centred and right-aligned text counts a trailing space.** `"a "` drawn
+  with `textAlign` `"center"` put the "a" where `"a"` alone goes, and
+  `"right"` the same, where Chrome moves it half the space's advance left,
+  or all of it: SkParagraph aligns a line by its width without the
+  whitespace it ends in. The run's whole advance is aligned now, trailing
+  spaces and their spacing included, and `actualBoundingBoxLeft` and
+  `actualBoundingBoxRight` move with it: centred `"a "` at 40px Oswald has
+  its left at 11.42, within 0.005 of Chrome 156, where it was 6.84. Text in
+  a `textWrap` paragraph keeps hanging its trailing spaces, as CSS lines do.
+  Not changed: right-to-left text, for which nothing has been measured in
+  Chrome.
 
 ### Added
 

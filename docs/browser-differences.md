@@ -95,6 +95,20 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
 
 **Deliberate, and worth keeping.**
 
+- _Word spacing is added after every word separator, a leading space
+  included._ CSS Text 3 section 8.2 applies `word-spacing` to each
+  word-separator character, and the canvas keeps every space, so `" a"` at
+  -100px word spacing in 40px Oswald measures -73.80. Chrome 156 measures
+  26.20 there: it does not space a leading U+0020, though it spaces a leading
+  no-break space (-73.80), a trailing space (`"a "` -73.80) and each of a
+  doubled one (`"a  b"` -146.76). What it does with a space also depends on
+  what it measured before, in one profile: once a text that does not space a
+  space has been measured, every later U+0020, in that text and the next,
+  goes unspaced -- `" a b "` measures 62.40, unspaced throughout, and
+  `"a b"` measured after `" a"` is 44.08 where alone it is -55.92 -- while
+  `" a"` measured after `"a b"` is -73.80. Its widths in the tests here are
+  each measured alone in a fresh profile, and the leading-space rows carry
+  none.
 - _A negative advance's ink box is the ink._ With a letter or word spacing
   that makes a run's advance negative, Chrome's `actualBoundingBoxLeft`
   reaches back to where the advance ends: Blink's `plain_text_node.cc` moves

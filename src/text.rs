@@ -543,7 +543,15 @@ pub struct TextStyle {
     pub line_height_multiplier: f32,
     /// Additional space between glyphs, in pixels.
     pub letter_spacing: f32,
-    /// Additional space at word boundaries, in pixels.
+    /// Additional space between words, in pixels: once for each run of
+    /// breaking spaces with a word on both sides, however many spaces it
+    /// holds, and not before the first word or after the last. A no-break
+    /// space takes none. This is SkParagraph's rule.
+    ///
+    /// A [`Context2D`](crate::context2d::Context2D)'s `set_word_spacing`
+    /// follows CSS instead and spaces every word-separator character, a
+    /// leading, trailing or no-break space and each of a doubled one
+    /// included.
     pub word_spacing: f32,
     /// Underline / overline / line-through bitmask.
     pub decoration: TextDecoration,
