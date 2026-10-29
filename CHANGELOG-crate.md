@@ -671,6 +671,21 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `set_font_variation_settings` with `wght` 400 and a weight of 400 now name
   one instance rather than two.
 
+- **A fractional font weight is drawn at its fraction.**
+  `Context2D::set_font_css("512.5 1000px Oswald")` drew and measured the
+  face at 512: the fraction was dropped when the shorthand was read. CSS
+  Fonts 4 makes the weight a number from 1 to 1000, so a variable face is
+  now instanced at 512.5 -- its "0" at 1000px measures 535.15 on macOS, as
+  in Chrome, where 512 measures 535.11 -- and `1ch` follows it on every
+  platform. `Context2D::font()` reads the weight back as written,
+  `512.5 1000px "Oswald"`, where it read `512`. A `Font` holds a whole
+  weight, so
+  `Font::parse` and `Font::from_css` keep the whole part, as they did, and
+  a `TextStyle::font_weight` is whole as it was. Chrome reads the weight
+  back as `512` and draws it at the quarter below, and on Linux FreeType
+  rounds a variable face's advances to whole font units;
+  docs/browser-differences.md has both.
+
 - **A paragraph's `font_weight` reaches a variable font.** `TextEngine`
   instanced a variable typeface only when `TextStyle::font_variations` was
   non-empty, so a style setting just `font_weight` laid out the font's
