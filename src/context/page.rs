@@ -358,9 +358,9 @@ pub struct PageRecorder {
     /// Counts changes to `matrix` and `clip`, so that a draw can tell the
     /// frame is the one an earlier draw was made under.
     frame: u64,
-    /// The frame the last layer, a [`BlurOp`], was opened in while it can
-    /// still be joined; `None` once anything could have seen it -- a flush,
-    /// which every export goes through, records it for good.
+    /// The frame the last entry filed, a [`BlurOp`], was opened in while it
+    /// can still be joined; `None` once anything could have seen it -- a
+    /// flush, which every export goes through, records it for good.
     blur_run: Option<u64>,
     /// How many times one replay of this page walks a nested picture.
     ///
@@ -1014,16 +1014,14 @@ impl PageRecorder {
 
     /// Records `draw` as a [`BlurOp`], so that its blur is made where the
     /// page is played back, under `matrix` and `clip` -- the frame the
-    /// recorder holds.
+    /// recorder holds -- and filed as [`Self::file_current`] files: among
+    /// the page's layers, or the contents of the innermost open `saveLayer`,
+    /// which asks for its features.
     ///
     /// A draw straight after a `BlurOp` it can join -- nothing recorded
-    /// between them, the frame unchanged since, and the same `features` --
-    /// joins it rather than opening an op of its own: see
-    /// [`BlurOp::extend`].
-    ///
-    /// Inside an open `saveLayer` the draw is played into the layer's
-    /// contents at once, which makes its blur at the recording's scale, and
-    /// the layer asks for its features -- see [`Self::append_isolated`].
+    /// between them, the frame and the layer it is filed in unchanged since,
+    /// and on the page the same `features` -- joins it rather than opening
+    /// an op of its own: see [`BlurOp::extend`].
     pub fn append_blur(
         &mut self,
         draw: BlurDraw,
@@ -1033,40 +1031,37 @@ impl PageRecorder {
     ) {
         if let Some(layer) = self.open.last_mut() {
             layer.features = layer.features.with(features);
-            let op = BlurOp::start(draw, matrix, clip);
-            // The op carries its own frame; the contents are recorded under
-            // the identity.
-            self.append(|canvas| {
-                canvas.save();
-                canvas.reset_matrix();
-                op.playback(canvas);
-                canvas.restore();
-            });
-            return;
         }
         let mut draw = draw;
-        let open = self.blur_run == Some(self.frame) && !self.changed;
         // An op a page snapshot also holds is not grown, so that the
         // snapshot keeps what it was given: the draw opens an op of its own
         // instead. `flush` seals a run before any page is taken, so this is
         // a guard rather than a path a run takes.
-        if open
-            && let (Some(Layer::Blur(op)), Some(last)) = (
-                Arc::make_mut(&mut self.layers).last_mut(),
-                self.features.last(),
-            )
-            && *last == features
-            && let Some(op) = Arc::get_mut(op)
-        {
-            match op.extend(draw) {
-                Ok(()) => return,
-                Err(back) => draw = back,
+        if self.blur_run == Some(self.frame) && !self.changed {
+            let (entries, last_features) = match self.open.last_mut() {
+                Some(layer) => (&mut layer.entries, None),
+                None => (Arc::make_mut(&mut self.layers), self.features.last()),
+            };
+            if let Some(Layer::Blur(op)) = entries.last_mut()
+                && last_features.is_none_or(|last| *last == features)
+                && let Some(op) = Arc::get_mut(op)
+            {
+                match op.extend(draw) {
+                    Ok(()) => return,
+                    Err(back) => draw = back,
+                }
             }
         }
-        self.flush();
-        Arc::make_mut(&mut self.layers)
-            .push(Layer::Blur(Arc::new(BlurOp::start(draw, matrix, clip))));
-        Arc::make_mut(&mut self.features).push(features);
+        let op = Layer::Blur(Arc::new(BlurOp::start(draw, matrix, clip)));
+        // Filed after what is current, which filing closes no layer to do.
+        self.file_current();
+        match self.open.last_mut() {
+            Some(layer) => layer.entries.push(op),
+            None => {
+                Arc::make_mut(&mut self.layers).push(op);
+                Arc::make_mut(&mut self.features).push(features);
+            }
+        }
         self.blur_run = Some(self.frame);
     }
 
@@ -6151,6 +6146,48 @@ mod tests {
         let mut paint = Paint::default();
         paint.set_color(Color::BLACK);
         BlurDraw::of(&path, path.is_rect(), &paint, 4.0, Faint::Dropped)
+    }
+
+    /// Blurred squares inside an open `saveLayer` are filed among its
+    /// contents as ops, so that their blur is made where the page is played
+    /// back, and join a run there as they do on the page; a plain draw
+    /// between two ends the run.
+    #[test]
+    fn a_blur_op_in_a_layer_is_filed_among_its_contents() {
+        let features = VectorFeatures::default();
+        let entries = |between: bool| {
+            let mut recorder = PageRecorder::new(Rect::from_wh(100.0, 100.0));
+            recorder.open_layer(LayerRec::default());
+            for at in [0.0, 20.0] {
+                recorder.append_blur(
+                    blurred_square(at),
+                    Matrix::new_identity(),
+                    None,
+                    features,
+                );
+                if between {
+                    recorder.append(|canvas| {
+                        canvas.draw_rect(
+                            Rect::from_xywh(50.0, 50.0, 5.0, 5.0),
+                            &Paint::default(),
+                        );
+                    });
+                }
+            }
+            recorder.file_current();
+            let kinds: Vec<&str> = recorder.open[0]
+                .entries
+                .iter()
+                .map(|entry| match entry {
+                    Layer::Picture(_) => "picture",
+                    Layer::Blur(_) => "blur",
+                    Layer::Group(_) => "group",
+                })
+                .collect();
+            kinds.join(" ")
+        };
+        assert_eq!(entries(false), "blur", "the run is joined");
+        assert_eq!(entries(true), "blur picture blur picture");
     }
 
     /// How many layers `recorder` holds after two blurred squares in one
