@@ -137,6 +137,15 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A colour lands exactly on an sRGB float canvas.** On a canvas made with
+  `PixelDepth::F32` in `PixelColorSpace::Srgb`, a fill, stroke or matte in
+  an `RgbaLinear` -- or in a CSS colour named in another space -- read back
+  as much as 9.6e-5 from its sRGB encoding: Skia stores a paint's colour in
+  sRGB and converts it through an approximate transfer function as it does.
+  Such a colour is now converted here, in double precision, and reads back
+  as named. A canvas in another space keeps up to about 2e-4 from the
+  conversion Skia makes as it draws, which no colour handed to it avoids.
+
 - **A half-float canvas stores the nearest half on x86.** On an x86
   machine, a canvas made with `PixelDepth::F16` as its `color_type` truncated each value it
   stored instead of rounding it, so a pixel could land up to one half-float
