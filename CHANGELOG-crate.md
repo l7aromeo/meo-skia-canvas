@@ -137,6 +137,13 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A rectangle the closed-form blur cannot take is blurred exactly.** A
+  stroked rectangle -- `Context2D::stroke_rect` -- or a dithered one or one played into a
+  pattern, blurred by up to 40px, took Skia's coverage blur: a 6px stroke
+  blurred by 2px read 10.5 levels off the exact blur on the CPU engine and
+  by 8px 5.4. It is blurred on its result now, by the exact Gaussian, as a
+  blurred path is.
+
 - **A blurred rounded rectangle or oval is its exact Gaussian blur.** A
   flat-colour rounded rectangle or oval, such as `Context2D::round_rect`
   draws, blurred by up to 10px took Skia's coverage blur, which approximates

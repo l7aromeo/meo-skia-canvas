@@ -563,3 +563,49 @@ fn a_blurred_rounded_rectangle_is_the_exact_gaussian_of_what_it_draws() {
         }
     }
 }
+
+/// A canvas on `gpu`'s engine with a rectangle stroked 6px wide in flat
+/// black through `filter`, or `None` where that engine is not available.
+fn stroked(gpu: bool, filter: &str) -> Option<Canvas> {
+    let mut canvas = Canvas::new(SIZE.0, SIZE.1);
+    canvas.set_gpu(gpu);
+    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+        return None;
+    }
+    let ctx = canvas.context();
+    ctx.set_stroke_style_css("black").expect("a colour");
+    ctx.set_line_width(6.0);
+    ctx.set_filter_css(filter).expect("a filter");
+    ctx.stroke_rect(40.0, 30.25, 80.0, 40.0);
+    Some(canvas)
+}
+
+#[test]
+fn a_blurred_stroked_rectangle_is_the_exact_gaussian_of_what_it_draws() {
+    // A rectangle the closed-form blur does not take, a stroked one, is
+    // blurred on its result: Skia's coverage blur, which took it up to a
+    // sigma of 40, approximates the Gaussian.
+    for gpu in [false, true] {
+        for sigma in [2.0f32, 8.0] {
+            let filter = format!("blur({sigma}px)");
+            let (Some(mut drawn), Some(mut blurred)) =
+                (stroked(gpu, "none"), stroked(gpu, &filter))
+            else {
+                continue;
+            };
+            let drawn: Vec<f64> = alpha(&mut drawn)
+                .into_iter()
+                .map(|a| f64::from(a) / 255.0)
+                .collect();
+            let reference = sampled(&drawn, SIZE.0 as usize, f64::from(sigma));
+            let misses = misses(&alpha(&mut blurred), &reference);
+            assert!(
+                misses.is_empty(),
+                "gpu {gpu} sigma {sigma}: {} pixels off the exact blur, \
+                 first {:?}",
+                misses.len(),
+                &misses[..misses.len().min(4)],
+            );
+        }
+    }
+}

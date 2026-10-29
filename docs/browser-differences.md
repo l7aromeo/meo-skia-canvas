@@ -780,6 +780,8 @@ sums to the exact values, and `tests/blur_rect.rs` the pixels. Copying Chrome
 would mean choosing between two approximations that differ from each other by
 more than either differs from the definition.
 
-A rectangle in a canvas drawn into another is replayed as a recording, where
-there are no pixels to draw the blur in, and takes Skia's: its coverage blur
-up to a sigma of 40 and its image blur past it.
+A rectangle in a canvas drawn into another is played onto the page with the
+rest of that canvas, and is drawn in closed form there too: within half a
+level at densities 1 and 2. One played into a picture -- a canvas used as a
+pattern -- has no pixels for the closed form, and is blurred on its result,
+by the exact Gaussian of the entry above.

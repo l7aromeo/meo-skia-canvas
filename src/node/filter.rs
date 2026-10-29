@@ -119,27 +119,11 @@ fn faded_toward_identity(rows: &[[f32; 3]; 3], amount: f32) -> [f32; 20] {
     matrix
 }
 
-/// The largest blur, as a standard deviation in device pixels, that a
-/// rectangle's coverage blur agrees with Chrome as closely as the image
-/// blur does.
-///
-/// Measured against Chrome 152 on a blurred square at 100, 200 and 400
-/// pixels a side, along its middle row: up to 40 the coverage blur is
-/// within 5 levels of Chrome's alpha and no further off than the image
-/// blur, which strays as far at 20 and 40 itself; from 50 the image blur
-/// is within a level and the coverage blur up to 5 off -- and past
-/// Skia's own cap, [`MASK_BLUR_MAX_SIGMA`], it stops spreading at all.
-const RECT_COVERAGE_BLUR_MAX_SIGMA: f32 = 40.0;
-
 /// The largest sigma Skia's coverage blur takes: `SkBlurMaskFilterImpl::
 /// computeXformedSigma` holds it to `kMaxBlurSigma`, 128, so a larger one
 /// draws exactly as 128 -- `blur(1000px)` on a 100 pixel square kept an
 /// alpha of 9 where Chrome's is gone.
 pub(crate) const MASK_BLUR_MAX_SIGMA: f32 = 128.0;
-
-// Every coverage blur stays under Skia's cap, so none draws as a smaller
-// blur than it names.
-const _: () = assert!(RECT_COVERAGE_BLUR_MAX_SIGMA <= MASK_BLUR_MAX_SIGMA);
 
 /// What a draw covers, as far as choosing how to blur it goes.
 #[derive(Clone, Copy, Debug)]
@@ -154,28 +138,24 @@ pub enum Coverage {
 
 impl Coverage {
     /// Whether a blur of `sigma` device pixels is better made on this
-    /// coverage than on the drawn result: where it matches Chrome as
-    /// closely and costs less. Other paths are blurred as a result at
-    /// every sigma: a circle took 145 microseconds a draw through its
-    /// coverage at a sigma of 2 against 82, and a star no less.
+    /// coverage than on the drawn result. Never, now: the coverage blur is
+    /// Skia's mask filter, which approximates the Gaussian, and the result
+    /// is blurred by the exact one -- see `context::chain`. A rectangle that
+    /// stays one on the device is drawn exactly before this is asked -- see
+    /// `context::blur_mask` -- and what that cannot take, a dithered or
+    /// stroked rectangle or one played into a picture, is blurred on its
+    /// result. A class takes its coverage again only once a coverage blur of
+    /// its own is exact.
     ///
-    /// A rounded rectangle or an oval is blurred as a result too. Its
-    /// coverage blur is Skia's, which approximates the Gaussian, and the
-    /// result's blur is the exact one; it takes its coverage again only
-    /// once a coverage blur of its own is exact.
-    ///
-    /// Text is too, because Skia's coverage blur of text is not the blur of
-    /// the text: `SkScalerContext` blurs each glyph's mask on its own and
-    /// the glyphs are then drawn over one another, so where their blurs
-    /// overlap they combine as `1 - (1 - a)(1 - b)` rather than adding.
-    /// 16px Oswald blurred by 20 kept 65% of its ink that way and 48px
-    /// blurred by 24 kept 91%, and at every size and sigma measured on the
-    /// CPU engine it was two to seven times further from the exact Gaussian
-    /// than the blurred result.
-    pub(crate) fn blurs_alike(self, sigma: f32) -> bool {
+    /// Text would not be the blur of the text through Skia's mask even
+    /// then: `SkScalerContext` blurs each glyph's mask on its own and the
+    /// glyphs are then drawn over one another, so where their blurs overlap
+    /// they combine as `1 - (1 - a)(1 - b)` rather than adding. 16px Oswald
+    /// blurred by 20 kept 65% of its ink that way and 48px blurred by 24
+    /// kept 91%.
+    pub(crate) fn blurs_alike(self, _sigma: f32) -> bool {
         match self {
-            Coverage::Rect => sigma <= RECT_COVERAGE_BLUR_MAX_SIGMA,
-            Coverage::Rounded | Coverage::Path => false,
+            Coverage::Rect | Coverage::Rounded | Coverage::Path => false,
         }
     }
 }
@@ -935,13 +915,13 @@ mod tests {
     }
 
     #[test]
-    fn a_rectangle_takes_the_coverage_blur_up_to_its_limit() {
-        assert!(Coverage::Rect.blurs_alike(RECT_COVERAGE_BLUR_MAX_SIGMA));
-        assert!(
-            !Coverage::Rect.blurs_alike(RECT_COVERAGE_BLUR_MAX_SIGMA + 1.0)
-        );
-        // Neither has an exact coverage blur, so both blur their result.
-        assert!(!Coverage::Rounded.blurs_alike(1.0));
-        assert!(!Coverage::Path.blurs_alike(1.0));
+    fn no_coverage_takes_skias_mask_blur_at_any_sigma() {
+        // No class has an exact coverage blur of its own, so every one is
+        // blurred on its result, at any sigma.
+        for sigma in [1.0, 40.0, 1000.0] {
+            assert!(!Coverage::Rect.blurs_alike(sigma));
+            assert!(!Coverage::Rounded.blurs_alike(sigma));
+            assert!(!Coverage::Path.blurs_alike(sigma));
+        }
     }
 }
