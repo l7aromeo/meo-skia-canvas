@@ -133,7 +133,7 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   default font, `10px sans-serif`, names this one. Chrome 152 on macOS
   measures `Hamburgefonstiv` in `16px NoSuchFamilyAnywhere` at 111.70, as in
   `16px Times` and `16px serif`, in a canvas and in an `OffscreenCanvas`
-  alike; here it measures 126.16, as in `16px sans-serif`. A quoted
+  alike; here it measures 120.95, as in `16px sans-serif`. A quoted
   `"serif"` with no family of that name is such a list. `new_font_collection`
   in `src/node/font_library.rs` sets the default.
 - _A family name matches by Unicode's full case folding, and Chrome folds one

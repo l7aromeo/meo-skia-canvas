@@ -1340,6 +1340,65 @@ describe("`oblique` is not a spelling of italic", () => {
   });
 });
 
+describe("a generic family is the face Chrome's default names", () => {
+  // Chromium's default for each generic, in
+  // chrome/app/resources/locale_settings_{mac,linux,win}.grd: on macOS
+  // IDS_SANS_SERIF_FONT_FAMILY is Helvetica and IDS_SERIF_FONT_FAMILY
+  // Times, on Linux and Windows Arial and Times New Roman. On Linux Chrome
+  // asks fontconfig for those names and draws what it substitutes, and the
+  // generic here does the same, so on every platform the generic is the
+  // face its Chrome default resolves to here.
+  const CHROME_DEFAULT = {
+    darwin: { "sans-serif": "Helvetica", serif: "Times" },
+    linux: { "sans-serif": "Arial", serif: "Times New Roman" },
+    win32: { "sans-serif": "Arial", serif: "Times New Roman" },
+  }[process.platform];
+  const family = (font) => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = font;
+    return ctx.measureText("Hamburgefonstiv").lines[0].runs[0].family;
+  };
+
+  test(
+    "sans-serif is Chrome's default sans-serif",
+    { skip: CHROME_DEFAULT ? false : "no Chrome default known here" },
+    () => {
+      assert.equal(
+        family("40px sans-serif"),
+        family(`40px ${CHROME_DEFAULT["sans-serif"]}`),
+      );
+    },
+  );
+
+  // Chrome 156 on macOS, each measured in a profile of its own: the canvas
+  // default font and sans-serif at two more sizes, which are its Helvetica.
+  test(
+    "sans-serif measures as Chrome's",
+    {
+      skip:
+        process.platform === "darwin"
+          ? false
+          : "Chrome 156's widths were measured on macOS",
+    },
+    () => {
+      const ctx = new Canvas(10, 10).getContext("2d");
+      assert.equal(ctx.font, "10px sans-serif");
+      for (const [font, chrome] of [
+        [null, 75.5908203125],
+        ["16px sans-serif", 120.9453125],
+        ["40px sans-serif", 302.36328125],
+      ]) {
+        if (font) ctx.font = font;
+        const { width } = ctx.measureText("Hamburgefonstiv");
+        assert.ok(
+          Math.abs(width - chrome) <= 0.01,
+          `${font ?? "the default font"}: ${width}, Chrome ${chrome}`,
+        );
+      }
+    },
+  );
+});
+
 describe("a registration claims the generic family it names", () => {
   const { createHash } = require("crypto"),
     FACE = "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
