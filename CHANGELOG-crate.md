@@ -870,7 +870,11 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `set_word_spacing_css` and a `set_text_decoration_css` thickness.** `ex`,
   `ch`, `cap` and `ic` are measured on the face the context font resolves to
   -- for a variable font, the instance at its weight and axes, so `1ch` of
-  bold Oswald is 22px, as in Chrome. In the spacing setters they stay
+  bold Oswald is 22px, as in Chrome. `ch` and `ic` are the advances the
+  face's own tables give, unrounded, so they are the same on every platform
+  -- measured through FreeType they were a few millionths of an em short --
+  and a faked bold leaves them where the face puts them, as Chrome 152
+  does. In the spacing setters they stay
   relative and follow the font at layout, as `em` already did, and in a
   decoration thickness they and `em` now do too: `"underline 0.25em"` set
   under a 12px font and drawn under a 24px one is 6px thick, where it was

@@ -1227,6 +1227,7 @@ dependencies = [
  "skia-safe",
  "spin_sleep",
  "tiff",
+ "ttf-parser",
  "unicode-segmentation",
  "ureq",
  "vulkano",

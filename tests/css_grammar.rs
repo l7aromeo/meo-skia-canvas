@@ -86,6 +86,26 @@ fn set_filter_css_answers_the_math_table() {
     );
 }
 
+/// A faked bold leaves `ch` where the face puts it. Chrome 152 measures the
+/// same `ch` at `bold 40px` as at `40px` for every face it emboldens --
+/// Chalkduster's 27.5359px, Zapfino's 43.9 and Papyrus's 26.5234 -- so a
+/// filter in `ch` blurs a single-weight face's bold text exactly as its
+/// regular.
+#[test]
+fn a_faked_bold_measures_the_ch_its_face_does() {
+    let bytes = fs::read("tests/assets/fonts/Monoton-Regular.woff")
+        .expect("the Monoton test font is readable");
+    FontLibrary::new()
+        .register_font_from_data("Monoton", &bytes)
+        .expect("Monoton registers");
+    let blur = |font: &str| filtered(Some(font), "blur(1ch)").expect("a blur");
+    assert!(blur("bold 40px Monoton") == blur("40px Monoton"));
+    // And `ch` is Monoton's own, not the half em it falls back to.
+    assert!(
+        blur("40px Monoton") != filtered(None, "blur(20px)").expect("a blur")
+    );
+}
+
 /// `Affine` holds `f32`; the table holds what Chrome computed in `f64`. Eight
 /// `f32` ulps at the largest magnitude in the table, about 35.
 const TOLERANCE: f64 = 3e-5;
