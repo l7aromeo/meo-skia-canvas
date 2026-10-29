@@ -830,3 +830,39 @@ more than either differs from the definition.
 A rectangle in a canvas drawn into another is replayed as a recording, where
 there are no pixels to draw the blur in, and takes Skia's: its coverage blur
 up to a sigma of 40 and its image blur past it.
+
+**A fill or stroke the page's edge cuts is drawn differently far inside the
+page on the CPU engine.** The page's edge cuts a path as a clip does: Skia's
+analytic anti-aliasing builds a path's edges against the raster's bounds where
+they do not contain it (`SkScan_AAAPath.cpp` lines 1615 and 1729, given the
+bounds at `SkScan_AntiPath.cpp` line 130), and the edges it adds at the page's
+edge re-slice the rows they span. A triangle from (-30, 80) through
+(60, 15.25) to (140.5, 95) on a 200 by 120 page differs from the same triangle
+drawn on a larger canvas, over the page, in 223 pixels at density 1, as far as
+138 pixels from the edge -- the whole width the triangle spans -- and in 411
+and 439 at densities 2 and 3. Over twelve shapes -- a triangle, a curved fill
+and a stroke crossing each of the four edges -- up to 354 pixels moved by up
+to 52 levels at density 1, and up to 720 by up to 65 at density 2. Chrome's
+CPU canvas rasterizes through the same Skia code; it was not measured at the
+page's edge.
+
+The draw on a raster that holds the whole shape is the only construction found
+exact. Three cheaper ones were measured against it, over the twelve shapes,
+and none is:
+
+- Cutting the path to the page before filling it -- a stroke by its outline
+  -- gives Skia's pixels for 5 of the 12 at density 1, fewer moved for 3 and
+  more for 4: a triangle crossing the left edge moved 241 pixels cut first
+  and 142 drawn as it is. The new edge lies on the page's pixel boundary, but
+  it is still an edge, and it changes how the rows it spans are split.
+- A raster wider than the page by 16, 64 or 256 device pixels, with the shapes
+  stretched to reach 600 units past the edge, lowers the largest error but not
+  how far in it reaches: the left triangle's worst pixel fell from 23 levels
+  at 16 to 5 at 256, while the pixels moved fell only from 149 to 132, as deep
+  in the page. A 256-pixel band left one shape of the twelve unmoved, at both
+  densities. The raster is 1.5, 3.4 and 18.7 times the page's at density 1.
+- No other converter is reachable. `SkDraw.cpp` line 932 sends every
+  anti-aliased fill to `SkScan::AntiFillPath`, whose one anti-aliased route is
+  `SkScan::AAAFillPath` (`SkScan_AntiPath.cpp` line 130); its other branch, at
+  lines 87 and 88, fills a path too large for anti-aliasing without it. This
+  Skia has no supersampling converter and no setting that selects one.
