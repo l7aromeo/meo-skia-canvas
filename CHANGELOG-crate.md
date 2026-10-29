@@ -402,8 +402,11 @@ read the math functions and every length unit.
   levels. Such a draw is now played back on a CPU raster through a clip shader
   of the clip, at the density of the read or export, so inside the clip it is
   the unclipped draw byte for byte and at the clip's edge the triangle's mean
-  error from its exact coverage is 1.55 levels where it was 4.60. The GPU
-  engine and PDF and SVG exports clip as before. A draw inside an open
+  error from its exact coverage is 1.55 levels where it was 4.60. That holds
+  for a draw the page's edge does not also cut: Skia rasterizes against the
+  page's bounds as against a clip, so a draw crossing the page's edge still
+  moves inside the clip as it does with no clip. The GPU engine and PDF and
+  SVG exports clip as before. A draw inside an open
   `save_layer`, and a canvas drawn into another or used as a pattern, are
   still clipped as Skia clips them -- see docs/browser-differences.md.
 
