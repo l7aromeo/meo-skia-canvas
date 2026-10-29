@@ -25,6 +25,23 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Breaking
 
+- **`sans-serif` is the face Chrome draws it in, and an SVG naming no family
+  it has is drawn in the standard serif.** The curated `sans-serif` stack put
+  Avenir Next ahead of Helvetica, so on macOS a `Context2D`'s default font,
+  `10px sans-serif`, measured `"Hamburgefonstiv"` at 78.85 where Chrome 156
+  measures 75.59, and at 40px 315.40 against 302.36. Each stack now opens with
+  the name Chromium gives the generic on the platform,
+  `IDS_SANS_SERIF_FONT_FAMILY` and `IDS_SERIF_FONT_FAMILY` in its
+  `locale_settings_*.grd`: Helvetica and Times on macOS, Arial and Times New
+  Roman on Linux and Windows, which on Linux reach whatever fontconfig
+  substitutes, as they do for Chrome. On macOS `sans-serif` now measures as
+  Chrome's to the float. An SVG `<text>` naming no family, or one the
+  machine does not have, was drawn in the `system-ui` face, Helvetica Neue on
+  macOS, and is now drawn in `serif`, as Chrome draws it in its standard font,
+  Times on macOS, and its `ex` is that face's x-height. Text set in
+  `sans-serif`, in the default font, or in an SVG that names no family it can
+  find measures and draws differently.
+
 - **`FontLibrary::has_font` and `FontLibrary::family_details` match a family
   name as a font does.** `has_font` compared the alias exactly and
   `family_details` asked Skia, which matches a registered alias exactly,
