@@ -137,6 +137,15 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **An SVG export keeps what a `saveLayer` holds.** Skia's SVG backend has
+  no layers and dropped whatever was drawn inside one: a red square in
+  `Context2D::save_layer` or `save_layer_with`, in a nested layer, or a
+  `Paragraph` drawn in one, exported to `ImageFormat::Svg` as a page without
+  it. A page with a draw inside a layer is now rasterized into the SVG, as
+  one with a filtered draw inside a layer already was; a layer that holds
+  nothing leaves it vector. PDF drew all of these correctly and stays
+  vector.
+
 - **A draw too faint for eight bits draws on a float canvas.** On a canvas
   made with `PixelDepth::F16` or `PixelDepth::F32` as its `color_type`, a
   fill under `set_global_alpha(0.001)`, or in a colour of alpha 0.001, drew

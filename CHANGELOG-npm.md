@@ -397,6 +397,14 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **An SVG export keeps what a `saveLayer` holds.** Skia's SVG backend has
+  no layers and dropped whatever was drawn inside one: a red square in
+  `ctx.saveLayer()`, in a translucent or nested layer, or a paragraph drawn
+  in one, exported as a page without it. A page with a draw inside a layer
+  is now rasterized into the SVG, as one with a filtered draw inside a
+  layer already was; a layer that holds nothing leaves it vector. PDF drew
+  all of these correctly and stays vector.
+
 - **A draw too faint for eight bits draws on a float canvas.** On a canvas
   made with `colorType: "RGBAF16"` or `"RGBAF32"`, a fill under
   `globalAlpha` 0.001, or in `rgba(0, 0, 0, 0.001)`, drew nothing, and so
