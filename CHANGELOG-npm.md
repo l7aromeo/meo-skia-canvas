@@ -1438,7 +1438,11 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
   `wordSpacing`.** `ex`, `ch`, `cap` and `ic` are measured on the face the
   context font resolves to -- for a variable font, the instance at its
   weight and axes, so `1ch` of bold Oswald is 22px, as in Chrome, and not
-  the 20.68px of its default instance. `rem` and the other root forms
+  the 20.68px of its default instance. `ch` and `ic` are the advances the
+  face's own tables give, unrounded, so they are the same on every
+  platform -- measured through FreeType they were a few millionths of an em
+  short -- and a faked bold leaves them where the face puts them, as Chrome
+  152 does. `rem` and the other root forms
   follow the context font in the spacing properties and a 16px root in
   `ctx.filter`, as Chrome resolves each -- so `blur(1rem)`, which was the
   context font's size, is now 16px whatever the font. `lh`, `rlh`, the viewport units and
