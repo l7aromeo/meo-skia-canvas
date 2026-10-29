@@ -1110,19 +1110,23 @@ describe("a fractional size is laid out at that size", () => {
   ]);
 
   // Chrome 156 lays 17.3px text out at 17.29px, a hundredth narrower: the
-  // size times 100 in f32 is 1729.9999, truncated. This library lays it out
-  // at 17.3px, as docs/browser-differences.md records. So 17.3px stands a
-  // hundredth above 17.29px as 17.29px stands above 17.28px.
+  // size times 100 in f32 is 1729.9999, truncated, so the two sizes measure
+  // the same there. This library lays it out at 17.3px, as
+  // docs/browser-differences.md records, so 17.3px must stand above 17.29px
+  // by most of a hundredth's share of the width. The share is the slope
+  // over a fifth of a pixel rather than one step, so that widths that move
+  // in coarser steps than the slope, as rounded or quantised advances do,
+  // still pass where they are laid out at their size.
   test("17.3px is a hundredth wider than 17.29px", () => {
     const ctx = new Canvas(10, 10).getContext("2d");
     const width = (size) => {
       ctx.font = `${size}px Oswald`;
       return ctx.measureText("Hamburgefonstiv").width;
     };
-    const step = width(17.29) - width(17.28);
+    const hundredth = (width(17.4) - width(17.2)) / 20;
     const last = width(17.3) - width(17.29);
-    assert.ok(step > 0.05, `a hundredth adds ${step}`);
-    assert.ok(Math.abs(last - step) <= 0.001, `${last} against ${step}`);
+    assert.ok(hundredth > 0.05, `a hundredth adds ${hundredth}`);
+    assert.ok(last > hundredth / 2, `${last} against ${hundredth}`);
   });
 });
 
