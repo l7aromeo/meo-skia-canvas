@@ -371,7 +371,23 @@ and the CSS strings read the math functions and every length unit.
   any other thread -- and the `process_path` dependency, which only located
   that directory, is gone with it.
 
+- **`ColorFilter::lighting` refuses a coefficient that is not finite.** A
+  NaN component of `multiply` or `add` was drawn as zero and an infinite
+  one as one, through the eight-bit colours Skia's lighting filter took.
+  The coefficients now reach Skia as they are, and Skia answers a colour
+  matrix holding one that is not finite with no filter, so the call now
+  returns `Error::FilterCreate`, as `ColorFilter::matrix` does for such
+  an entry. Check a computed coefficient with `f32::is_finite` before
+  passing it.
+
 ### Fixed
+
+- **Reading a GPU canvas back drains its own autorelease pool.** On macOS,
+  `Context2D::get_image_data` and its variants on a GPU canvas make Metal
+  objects that are autoreleased. Read from a Node addon's main thread, which
+  has no pool, each whole-page read of a 2000x1600 canvas left 12.2 MB
+  resident until the process ended. The read now runs in a pool of its own,
+  as an export does.
 
 - **A colour lands exactly on an sRGB float canvas.** On a canvas made with
   `PixelDepth::F32` in `PixelColorSpace::Srgb`, a fill, stroke or matte in
@@ -679,8 +695,17 @@ and the CSS strings read the math functions and every length unit.
   in Oklch at its own lightness and hue until clipping costs less than a
   just-noticeable difference. A colour inside sRGB gives the bytes it gave.
   `ColorFilter::lighting`'s multiply and add are per-channel coefficients
-  rather than colours, and are still clamped channel by channel, as its
-  documentation now says.
+  rather than colours, and are not mapped -- see the next entry.
+
+- **`ColorFilter::lighting` applies a coefficient past one or below zero
+  as it is.** Its multiply and add reached Skia as eight-bit colours, so
+  each sRGB component was clamped to `0..=1` and quantized to a 255th: a
+  multiply of `RgbaLinear::from_srgb(2.0, 1.0, 0.5, 1.0)` left red as it
+  was, and a negative add component was taken as zero. Each component is now the scale or offset it names, in
+  floating point, with the result clamped to the displayable range as
+  before, and a multiply and add an eight-bit colour can hold draw byte
+  for byte as they did. A coefficient that is not finite is refused --
+  see Breaking.
 
 - **`outline_text` and the ink box put every glyph where `fill_text` draws
   it.** A glyph the shaper moves off its advance -- a mark stacked over

@@ -594,6 +594,30 @@ describe("factory-backed classes", () => {
       assert.notDeepStrictEqual([r, g, b], [255, 0, 0], "filter was ignored");
     });
 
+    // MakeLighting's multiply and add are per-channel coefficients, read as
+    // a colour's sRGB components and applied as they are, so a component
+    // past one or below zero means what it says rather than being clamped
+    // into a colour first.
+    test("a lighting coefficient outside a colour is applied as it is", () => {
+      let lit = (multiply, add) => {
+        let ctx = new Canvas(4, 4).getContext("2d");
+        ctx.colorFilter = ColorFilter.MakeLighting(multiply, add);
+        ctx.fillStyle = "rgb(64 128 200)";
+        ctx.fillRect(0, 0, 4, 4);
+        return [...ctx.getImageData(1, 1, 1, 1).data.slice(0, 3)];
+      };
+      assert.deepStrictEqual(lit("white", "black"), [64, 128, 200]);
+      // Red doubled and blue halved; green lowered by a quarter.
+      assert.deepStrictEqual(
+        lit("color(srgb 2 1 0.5)", "black"),
+        [128, 128, 100],
+      );
+      assert.deepStrictEqual(
+        lit("white", "color(srgb 0 -0.25 0)"),
+        [64, 64, 200],
+      );
+    });
+
     test("ParagraphBuilder builds a paragraph that lays out and draws", () => {
       let para = new ParagraphBuilder({ textStyle: { fontSize: 16 } })
         .addText("hello")

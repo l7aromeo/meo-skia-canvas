@@ -3585,18 +3585,6 @@ pub fn css_to_color(css: &str) -> Option<Color> {
     css_to_color4f(css).map(srgb_to_skia_color)
 }
 
-/// Parses a CSS color into 8-bit sRGB, clamping each channel on its own.
-///
-/// For a colour that is per-channel coefficients rather than a colour --
-/// `ColorFilter.MakeLighting`'s multiply and add -- where mapping in a
-/// perceptual space would change what each channel does.
-pub fn css_to_clamped_color(css: &str) -> Option<Color> {
-    css_to_color4f(css).map(|c| {
-        let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-        Color::from_argb(byte(c.a), byte(c.r), byte(c.g), byte(c.b))
-    })
-}
-
 /// An extended-sRGB colour, straight alpha, as an 8-bit `SkColor`.
 ///
 /// A colour inside sRGB is quantised as it is, so its bytes are the ones the
@@ -5599,18 +5587,19 @@ pub fn declared_color_arg(
     })
 }
 
-/// [`color_arg`] for per-channel coefficients, clamped rather than
-/// gamut-mapped -- see [`css_to_clamped_color`].
+/// [`color_arg`] as its extended-sRGB components, unclamped and not
+/// gamut-mapped -- see [`css_to_color4f`] -- for per-channel coefficients
+/// rather than a colour, `ColorFilter.MakeLighting`'s multiply and add.
 ///
 /// # Errors
 ///
 /// As [`color_arg`].
-pub fn clamped_color_arg(
+pub fn srgb_components_arg(
     cx: &mut FunctionContext,
     idx: usize,
     attr: &str,
-) -> NeonResult<Color> {
-    parsed_color_arg(cx, idx, attr, css_to_clamped_color)
+) -> NeonResult<Color4f> {
+    parsed_color_arg(cx, idx, attr, css_to_color4f)
 }
 
 /// [`color_arg`] kept in floating point, with the space the colour was named
@@ -5874,9 +5863,6 @@ mod tests {
         // Outside it, the mapped colour rather than the clipped one: P3 red
         // clips to sRGB red, and maps to a red that keeps its hue.
         let mapped = css_to_color("color(display-p3 1 0 0)").expect("a colour");
-        let clipped =
-            css_to_clamped_color("color(display-p3 1 0 0)").expect("a colour");
-        assert_eq!(clipped, Color::from_argb(255, 255, 0, 0));
         let expected = gamut_map_srgb(p3([1.0, 0.0, 0.0])).map(linear_to_srgb);
         let byte = |v: f32| (v * 255.0).round() as u8;
         assert_eq!(
@@ -5888,7 +5874,7 @@ mod tests {
                 byte(expected[2])
             )
         );
-        assert_ne!(mapped, clipped);
+        assert_ne!(mapped, Color::from_argb(255, 255, 0, 0), "not clipped");
     }
 
     #[test]
