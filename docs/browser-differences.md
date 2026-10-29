@@ -33,6 +33,23 @@ Chrome on Linux was not measured. `ch` and `ic` take the advance from the
 face's tables and are the interpolation's on every platform. The `UPSTREAM`
 note at the width in `Typesetter::measure` carries the re-check.
 
+On Linux a font size is laid out at the 64th of a pixel at or below it. Skia's
+FreeType scaler hands the size to `FT_Set_Char_Size` in 26.6 fixed point
+through `SkScalarToFDot6`, which truncates (`SkFontHost_FreeType.cpp`), and
+corrects its matrix for the size FreeType chose only below 1px, so advances and
+outlines come from the truncated size while the font's metrics take the one
+asked for. In Oswald, `measureText("Hamburgefonstiv")` at each hundredth from
+17.00px to 18.00px steps by 0 at 36 of the 100 and by 0.0956 to 0.0973 at the
+rest, where on macOS every step is 0.0617 or 0.0618, and each width is within
+0.0005 of macOS's at `floor(size × 64) / 64`, the rest being FreeType's
+advances against CoreText's: 17.29px measures 106.69469 on Linux and 17.28125px
+106.69444 on macOS; 17.30px measures 106.79041 on Linux and 17.296875px
+106.79089 on macOS. Hinting on and off measure alike. Chrome on Linux takes its
+glyph advances from the same scaler -- Blink's `SkFontGetGlyphWidthForHarfBuzz`
+in `skia_text_metrics.cc` reads them from the Skia strike -- so it is expected
+to step the same way; Chrome on Linux was not measured. The `UPSTREAM` note at
+the size in `Context2D::set_font` carries the re-check.
+
 **Text set at 17.3px is laid out at 17.3px; Chrome 156 lays it out at
 17.29px.** Measured on macOS in Oswald, `measureText("Hamburgefonstiv")` at
 17.3px is 0.062 narrower in Chrome than here, and narrower by the same at
@@ -52,6 +69,9 @@ profile is already 17.29px's width, and DOM text at 17.3px is too, so it is
 not canvas alone. A size names a length; laying text out a hundredth smaller
 than asked for is a defect in Chrome, not a rule, and the test "17.3px is a
 hundredth wider than 17.29px" holds this library to the size it is given.
+On Linux that size is itself laid out at the 64th of a pixel below it,
+17.296875px for 17.3px, as the FreeType entry above records, where Chrome
+truncates to 17.29px first.
 
 `actualBoundingBoxAscent` and `actualBoundingBoxDescent` differ from Chrome
 because `SkParagraph` snaps a run's baseline to a whole pixel and Chrome does
