@@ -397,6 +397,14 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A blurred rounded rectangle or oval is its exact Gaussian blur.** A
+  flat-colour rounded rectangle or oval, such as `ctx.roundRect()` draws,
+  blurred by up to 10px took Skia's coverage blur, which approximates the
+  Gaussian: a rounded rectangle blurred by 2px read 7.0 levels off it on the
+  CPU engine and 13.6 on the GPU, and by 8px 6.2 and 3.6. It is blurred on
+  its result now, by the exact Gaussian, and reads within half a level on
+  either engine.
+
 - **An image drawn under a blur is its exact Gaussian blur.** An image or a
   canvas drawn with `ctx.drawImage()` under a `ctx.filter` of blurs and
   colour functions was blurred by Skia's image filter, as Chrome's is: a

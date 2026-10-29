@@ -726,8 +726,8 @@ standard deviation is the length given. A rasterised pixel is already its
 shape averaged over the pixel's box, so the blur of what a draw paints is
 those pixels convolved with the Gaussian sampled at whole-pixel offsets, and
 a flat-colour path the coverage blur does not take -- any shape but a
-rectangle or a rounded rectangle, and those past the sigma their coverage
-blur is chosen for -- is drawn here as exactly that, rounded once: within half
+rectangle, and a rectangle past the sigma its coverage blur is chosen for
+-- is drawn here as exactly that, rounded once: within half
 a level on 8-bit pixels on either engine, and on F16 and F32 to the surface's
 precision, as measured on the CPU engine, where a float canvas made for the
 GPU on macOS is drawn. Chrome 156.0.8078.4 headless approximates it, on both of its

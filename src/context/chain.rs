@@ -21,7 +21,8 @@ use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, Color, Color4f, ColorFilter,
     ColorType, Data, FilterMode, IRect, Image, ImageInfo, Matrix, MipmapMode,
     Paint, Rect, RoundOut, SamplingOptions, Surface, Vector, color_filters,
-    image::CachingHint, image_filters, images, surfaces,
+    image::{CachingHint, RequiredProperties},
+    image_filters, images, surfaces,
 };
 
 #[cfg(any(feature = "metal", feature = "vulkan"))]
@@ -80,7 +81,9 @@ pub(crate) fn apply(
     let Some(region) = region(canvas, steps, content, &layer, &rest) else {
         return;
     };
-    let info = layer_info(canvas, depth, region);
+    let on_gpu = is_on_gpu(canvas);
+    let (region, drawn) = placed(canvas, region, rest.is_identity(), on_gpu);
+    let info = layer_info(canvas, depth, drawn);
     // A surface the canvas's own device makes, so that the draw lands as
     // it would on the page: on the GPU at the page's sample count. A layer
     // without the page's samples drew edges another way, and left a path's
@@ -94,11 +97,27 @@ pub(crate) fn apply(
     };
     let mut context = gpu_of(&mut surface);
     let offscreen = surface.canvas();
+    // Only what the chain reads is cleared: the columns the CPU's layer
+    // starts at the page's origin with lie before it and are never read.
+    let read = region.with_offset((-drawn.left, -drawn.top));
+    offscreen.save();
+    offscreen.clip_irect(read, None);
     offscreen.clear(Color::TRANSPARENT);
-    let origin = Matrix::translate((-region.left as f32, -region.top as f32));
+    offscreen.restore();
+    let origin = Matrix::translate((-drawn.left as f32, -drawn.top as f32));
     offscreen.set_matrix(&Matrix::concat(&origin, &layer).into());
     draw(offscreen);
-    let mut image = surface.image_snapshot();
+    let snapshot = surface.image_snapshot();
+    let Some(mut image) = (match read == IRect::from_size(drawn.size()) {
+        true => Some(snapshot),
+        false => snapshot.make_subset(
+            None,
+            read,
+            RequiredProperties { mipmapped: false },
+        ),
+    }) else {
+        return;
+    };
 
     let scale = (layer.scale_x().abs(), layer.scale_y().abs());
     let last = steps.len().saturating_sub(1);
@@ -163,6 +182,47 @@ fn split(base: &Matrix) -> Option<(Matrix, Matrix)> {
         // Perspective: blurred at the canvas's own resolution.
         None => base.invert().map(|_| (Matrix::new_identity(), *base)),
     }
+}
+
+/// Where the layer lies, given the `region` a chain needs: the region it
+/// reads and writes, and the larger one it is drawn into. A layer that is
+/// the device's own pixels is placed so that Skia draws into it as it draws
+/// onto the page, which depends on where the layer's origin falls.
+///
+/// - On the CPU the anti-aliasing of an edge moves with the surface's x origin,
+///   with no period: a rounded rectangle's corners came out alike with its left
+///   edge 48, 42, 40, 38, 33 or 13 pixels into the layer and up to 8 levels
+///   apart with it 56, 49, 44, 41, 39, 36, 32, 24 or 8 in. Its y origin and its
+///   size moved nothing. So the layer is drawn from the page's own left edge,
+///   or the region's where that lies further left, and the chain runs on the
+///   region alone.
+/// - On the GPU, Metal with multisampling and its surfaces' origin at the
+///   bottom, an edge comes out as the page draws it wherever the layer's left
+///   edge and its bottom are an even number of pixels from the page's; an odd
+///   one moved a rounded rectangle's corners by up to 7 levels. So the region
+///   is widened by a pixel on either side that needs it.
+///
+/// A layer the rest of the transform maps onto the device is not in its
+/// pixels, and is left where the region puts it.
+fn placed(
+    canvas: &SkCanvas,
+    region: IRect,
+    on_device: bool,
+    on_gpu: bool,
+) -> (IRect, IRect) {
+    if !on_device {
+        return (region, region);
+    }
+    if on_gpu {
+        let height = canvas.base_layer_size().height;
+        let mut region = region;
+        region.left -= region.left.rem_euclid(2);
+        region.bottom += (region.bottom - height).rem_euclid(2);
+        return (region, region);
+    }
+    let mut drawn = region;
+    drawn.left = region.left.min(0);
+    (region, drawn)
 }
 
 /// The layer's bounds, in its own pixels: the pixels a visible result is
@@ -274,6 +334,18 @@ type Gpu = gpu::RecordingContext;
 /// No GPU: a build without a GPU backend has none to be on.
 #[cfg(not(any(feature = "metal", feature = "vulkan")))]
 enum Gpu {}
+
+/// Whether `canvas` draws on the GPU.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+fn is_on_gpu(canvas: &SkCanvas) -> bool {
+    canvas.recording_context().is_some()
+}
+
+/// Whether `canvas` draws on the GPU: never, in a build without a backend.
+#[cfg(not(any(feature = "metal", feature = "vulkan")))]
+fn is_on_gpu(_: &SkCanvas) -> bool {
+    false
+}
 
 /// The GPU `surface` is on, if it is on one.
 #[cfg(any(feature = "metal", feature = "vulkan"))]

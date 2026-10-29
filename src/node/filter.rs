@@ -131,13 +131,6 @@ fn faded_toward_identity(rows: &[[f32; 3]; 3], amount: f32) -> [f32; 20] {
 /// Skia's own cap, [`MASK_BLUR_MAX_SIGMA`], it stops spreading at all.
 const RECT_COVERAGE_BLUR_MAX_SIGMA: f32 = 40.0;
 
-/// The largest blur a rounded rectangle's or an oval's coverage blur is
-/// cheaper at than the image blur: 11 and 58 microseconds a draw at a
-/// sigma of 2 against 156 and 166, about the same as the image blur from
-/// 20, in a release build. A rectangle's stays nearly free at every sigma
-/// measured, Skia caching its blurred mask.
-const ROUNDED_COVERAGE_BLUR_MAX_SIGMA: f32 = 10.0;
-
 /// The largest sigma Skia's coverage blur takes: `SkBlurMaskFilterImpl::
 /// computeXformedSigma` holds it to `kMaxBlurSigma`, 128, so a larger one
 /// draws exactly as 128 -- `blur(1000px)` on a 100 pixel square kept an
@@ -146,10 +139,7 @@ pub(crate) const MASK_BLUR_MAX_SIGMA: f32 = 128.0;
 
 // Every coverage blur stays under Skia's cap, so none draws as a smaller
 // blur than it names.
-const _: () = assert!(
-    RECT_COVERAGE_BLUR_MAX_SIGMA <= MASK_BLUR_MAX_SIGMA
-        && ROUNDED_COVERAGE_BLUR_MAX_SIGMA <= MASK_BLUR_MAX_SIGMA
-);
+const _: () = assert!(RECT_COVERAGE_BLUR_MAX_SIGMA <= MASK_BLUR_MAX_SIGMA);
 
 /// What a draw covers, as far as choosing how to blur it goes.
 #[derive(Clone, Copy, Debug)]
@@ -169,6 +159,11 @@ impl Coverage {
     /// every sigma: a circle took 145 microseconds a draw through its
     /// coverage at a sigma of 2 against 82, and a star no less.
     ///
+    /// A rounded rectangle or an oval is blurred as a result too. Its
+    /// coverage blur is Skia's, which approximates the Gaussian, and the
+    /// result's blur is the exact one; it takes its coverage again only
+    /// once a coverage blur of its own is exact.
+    ///
     /// Text is too, because Skia's coverage blur of text is not the blur of
     /// the text: `SkScalerContext` blurs each glyph's mask on its own and
     /// the glyphs are then drawn over one another, so where their blurs
@@ -180,8 +175,7 @@ impl Coverage {
     pub(crate) fn blurs_alike(self, sigma: f32) -> bool {
         match self {
             Coverage::Rect => sigma <= RECT_COVERAGE_BLUR_MAX_SIGMA,
-            Coverage::Rounded => sigma <= ROUNDED_COVERAGE_BLUR_MAX_SIGMA,
-            Coverage::Path => false,
+            Coverage::Rounded | Coverage::Path => false,
         }
     }
 }
@@ -946,11 +940,8 @@ mod tests {
         assert!(
             !Coverage::Rect.blurs_alike(RECT_COVERAGE_BLUR_MAX_SIGMA + 1.0)
         );
-        assert!(Coverage::Rounded.blurs_alike(ROUNDED_COVERAGE_BLUR_MAX_SIGMA));
-        assert!(
-            !Coverage::Rounded
-                .blurs_alike(ROUNDED_COVERAGE_BLUR_MAX_SIGMA + 1.0)
-        );
+        // Neither has an exact coverage blur, so both blur their result.
+        assert!(!Coverage::Rounded.blurs_alike(1.0));
         assert!(!Coverage::Path.blurs_alike(1.0));
     }
 }

@@ -195,7 +195,7 @@ fn a_blur_scales_with_the_canvas_it_is_drawn_into() {
 
 #[test]
 fn a_rounded_rect_or_text_blurs_at_density_two_as_drawn_twice_as_large() {
-    // The same coverage blur reaches rounded rectangles and text, for which
+    // Rounded rectangles and text are blurred on their result, for which
     // there is no closed form to compare with: exported at density 2, the
     // drawing is the one drawn at twice the size, blur and all -- within
     // what the glyphs themselves differ by, for text. With the blur fixed

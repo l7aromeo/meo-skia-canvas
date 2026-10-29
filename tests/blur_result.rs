@@ -504,3 +504,62 @@ fn a_blurred_image_is_the_exact_gaussian_of_what_it_draws() {
         }
     }
 }
+
+/// A canvas on `gpu`'s engine with a rounded rectangle filled in flat black
+/// at `x` through `filter`, or `None` where that engine is not available.
+fn rounded(gpu: bool, filter: &str, x: f32) -> Option<Canvas> {
+    let mut canvas = Canvas::new(SIZE.0, SIZE.1);
+    canvas.set_gpu(gpu);
+    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+        return None;
+    }
+    let ctx = canvas.context();
+    ctx.set_fill_style_css("black").expect("a colour");
+    ctx.set_filter_css(filter).expect("a filter");
+    ctx.begin_path();
+    ctx.round_rect(x, 30.25, 80.0, 40.0, [12.0; 4])
+        .expect("a rounded rectangle");
+    ctx.fill(FillRule::NonZero);
+    Some(canvas)
+}
+
+/// Where [`rounded`] draws its rectangle across the rows of a test: the
+/// middle, and left edges that put the layer's origin where Skia drew the
+/// corners otherwise than the page did, before the layer was placed as the
+/// page is -- some on the CPU, every odd one on the GPU.
+const ROUNDED_AT: [f32; 9] =
+    [40.0, 33.0, 41.0, 44.0, 47.0, 49.0, 52.0, 56.0, 57.0];
+
+#[test]
+fn a_blurred_rounded_rectangle_is_the_exact_gaussian_of_what_it_draws() {
+    // Skia's coverage blur of a rounded rectangle approximates the
+    // Gaussian, so a rounded rectangle is blurred on its result at every
+    // sigma, as a triangle is.
+    for gpu in [false, true] {
+        for (sigma, at) in [2.0f32, 8.0]
+            .into_iter()
+            .flat_map(|sigma| ROUNDED_AT.map(|x| (sigma, x)))
+            .chain([(30.0, 40.0)])
+        {
+            let filter = format!("blur({sigma}px)");
+            let (Some(mut drawn), Some(mut blurred)) =
+                (rounded(gpu, "none", at), rounded(gpu, &filter, at))
+            else {
+                continue;
+            };
+            let drawn: Vec<f64> = alpha(&mut drawn)
+                .into_iter()
+                .map(|a| f64::from(a) / 255.0)
+                .collect();
+            let reference = sampled(&drawn, SIZE.0 as usize, f64::from(sigma));
+            let misses = misses(&alpha(&mut blurred), &reference);
+            assert!(
+                misses.is_empty(),
+                "gpu {gpu} sigma {sigma} at {at}: {} pixels off the exact \
+                 blur, first {:?}",
+                misses.len(),
+                &misses[..misses.len().min(4)],
+            );
+        }
+    }
+}

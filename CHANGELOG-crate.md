@@ -137,6 +137,14 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A blurred rounded rectangle or oval is its exact Gaussian blur.** A
+  flat-colour rounded rectangle or oval, such as `Context2D::round_rect`
+  draws, blurred by up to 10px took Skia's coverage blur, which approximates
+  the Gaussian: a rounded rectangle blurred by 2px read 7.0 levels off it on
+  the CPU engine and 13.6 on the GPU, and by 8px 6.2 and 3.6. It is blurred
+  on its result now, by the exact Gaussian, and reads within half a level on
+  either engine.
+
 - **An image drawn under a blur is its exact Gaussian blur.** An image
   drawn with `Context2D::draw_image`, `draw_image_sized` or
   `draw_image_region` under a filter of blurs and colour functions was
