@@ -565,17 +565,21 @@ fn a_blurred_rounded_rectangle_is_the_exact_gaussian_of_what_it_draws() {
 }
 
 /// The alpha of `window`, (left, top, width, height), of a canvas `size`
-/// large on the CPU with [`rounded`]'s rectangle at `at` filled through
-/// `filter`, read as a whole: a read of part of a canvas plays it from that
-/// part's origin.
+/// large on `gpu`'s engine with [`rounded`]'s rectangle at `at` filled
+/// through `filter`, read as a whole: a read of part of a canvas plays it
+/// from that part's origin. `None` where the engine is not available.
 fn far(
+    gpu: bool,
     size: (f32, f32),
     at: (f32, f32),
     filter: &str,
     window: (usize, usize, usize, usize),
-) -> Vec<u8> {
+) -> Option<Vec<u8>> {
     let mut canvas = Canvas::new(size.0, size.1);
-    canvas.set_gpu(false);
+    canvas.set_gpu(gpu);
+    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+        return None;
+    }
     let ctx = canvas.context();
     ctx.set_fill_style_css("black").expect("a colour");
     ctx.set_filter_css(filter).expect("a filter");
@@ -588,12 +592,33 @@ fn far(
         .expect("image data");
     let (left, top, width, height) = window;
     let pixels = data.pixels();
-    (top..top + height)
-        .flat_map(|row| {
-            let start = (row * size.0 as usize + left) * 4;
-            pixels[start..start + width * 4].chunks(4).map(|p| p[3])
-        })
-        .collect()
+    Some(
+        (top..top + height)
+            .flat_map(|row| {
+                let start = (row * size.0 as usize + left) * 4;
+                pixels[start..start + width * 4].chunks(4).map(|p| p[3])
+            })
+            .collect(),
+    )
+}
+
+/// Whether `window` of [`far`]'s canvas, blurred by `sigma`, is the exact
+/// blur of what the canvas draws there unfiltered; `None` where the engine
+/// is not available.
+fn far_misses(
+    gpu: bool,
+    size: (f32, f32),
+    at: (f32, f32),
+    window: (usize, usize, usize, usize),
+    sigma: f32,
+) -> Option<Vec<(usize, u8, f64)>> {
+    let drawn: Vec<f64> = far(gpu, size, at, "none", window)?
+        .into_iter()
+        .map(|a| f64::from(a) / 255.0)
+        .collect();
+    let reference = sampled(&drawn, window.2, f64::from(sigma));
+    let blurred = far(gpu, size, at, &format!("blur({sigma}px)"), window)?;
+    Some(misses(&blurred, &reference))
 }
 
 #[test]
@@ -605,22 +630,15 @@ fn a_blurred_rounded_rectangle_far_into_the_page_is_the_exact_gaussian_of_what_i
     // one 7000.7 pixels down off the exact blur by 7 pixels. Each window
     // holds the whole rectangle, and beyond it the canvas's edge or nothing.
     //
-    // The CPU alone: on the GPU a page this large draws its edges otherwise
-    // than a layer smaller than it does, as `placed` in
-    // `src/context/chain.rs` says.
+    // The CPU's; the GPU's are below, as what moves its edges is not this.
     let rows = [
         ((160.0, 7100.0), (41.0, 7000.7), (0, 6960, 160, 120)),
         ((8000.0, 120.0), (7900.0, 30.25), (7860, 0, 140, 120)),
     ];
     for (size, at, window) in rows {
         for sigma in [2.0f32, 8.0] {
-            let drawn: Vec<f64> = far(size, at, "none", window)
-                .into_iter()
-                .map(|a| f64::from(a) / 255.0)
-                .collect();
-            let reference = sampled(&drawn, window.2, f64::from(sigma));
-            let blurred = far(size, at, &format!("blur({sigma}px)"), window);
-            let misses = misses(&blurred, &reference);
+            let misses = far_misses(false, size, at, window, sigma)
+                .expect("the CPU is always there");
             assert!(
                 misses.is_empty(),
                 "sigma {sigma} at {at:?}: {} pixels off the exact blur, \
@@ -629,6 +647,33 @@ fn a_blurred_rounded_rectangle_far_into_the_page_is_the_exact_gaussian_of_what_i
                 &misses[..misses.len().min(4)],
             );
         }
+    }
+}
+
+#[test]
+fn a_blurred_rounded_rectangle_on_the_gpu_is_the_exact_gaussian_wherever_it_lies()
+ {
+    // On the GPU a draw rounds by the size of the target as well as by where
+    // it lies, and a layer the size of the region drew each of these but the
+    // first otherwise than the page does -- 12, 12, 10 and 8 pixels off the
+    // exact blur. Each window holds the whole rectangle.
+    let rows = [
+        ((300.0, 200.0), (41.0, 30.25), (11, 0, 140, 100)),
+        ((1536.0, 120.0), (1125.75, 30.25), (1095, 0, 140, 100)),
+        ((4000.0, 120.0), (41.75, 30.25), (11, 0, 140, 100)),
+        ((160.0, 3000.0), (41.0, 41.0), (0, 11, 160, 100)),
+        ((160.0, 3000.0), (41.0, 750.5), (0, 720, 160, 100)),
+    ];
+    for (size, at, window) in rows {
+        let Some(misses) = far_misses(true, size, at, window, 2.0) else {
+            return;
+        };
+        assert!(
+            misses.is_empty(),
+            "at {at:?} on {size:?}: {} pixels off the exact blur, first {:?}",
+            misses.len(),
+            &misses[..misses.len().min(4)],
+        );
     }
 }
 

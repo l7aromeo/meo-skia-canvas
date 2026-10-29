@@ -464,6 +464,17 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   the Gaussian sampled at whole-pixel offsets and rounded once, on either
   engine, on an eight-bit or a float canvas, and at any export density.
 
+- **On the GPU, an exact blur draws into a second target the page's size.**
+  To draw what it blurs exactly as the page draws it, the GPU engine
+  draws it into a layer the page's size, at the page's sample count: a
+  multisampled target of about 17 MB for a 1200x900 canvas at four samples
+  and 384 MB for 6000x4000. Skia keeps it for the next blurred draw while
+  its GPU cache is within budget, and lets it go once the draw's GPU work
+  has run where it is not. A blurred draw takes about 0.15 ms longer at
+  1200x900 and 1.5 ms at 6000x4000 than in a layer the size of the blur,
+  which drew edges otherwise -- up to 0.13 of a level past a tie -- at some
+  positions on pages from 1408 pixels wide or 3000 tall.
+
 - **A large blur inside a `saveLayer` keeps its width at a high density.** A
   `blur(40px)` rectangle drawn in `ctx.saveLayer()` and exported at
   `density: 4` took Skia's coverage blur, which stops at 128 output pixels

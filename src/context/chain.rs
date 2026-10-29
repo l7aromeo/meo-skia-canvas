@@ -26,7 +26,7 @@ use skia_safe::{
 };
 
 #[cfg(any(feature = "metal", feature = "vulkan"))]
-use skia_safe::gpu;
+use skia_safe::{Recorder, gpu};
 
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 use crate::context::exact_blur_gpu;
@@ -162,11 +162,7 @@ pub(crate) fn run(
     let snapshot = surface.image_snapshot();
     let mut image = match read == IRect::from_size(drawn.size()) {
         true => Some(snapshot),
-        false => snapshot.make_subset(
-            None,
-            read,
-            RequiredProperties { mipmapped: false },
-        ),
+        false => subset(&snapshot, context.as_mut(), read),
     }?;
 
     let scale = (layer.scale_x().abs(), layer.scale_y().abs());
@@ -265,19 +261,28 @@ fn split(base: &Matrix) -> Option<(Matrix, Matrix)> {
 ///   page draws it. No shift short of the whole keeps the rounding: shifting
 ///   that rounded rectangle by multiples of 2^4 drew it as the page does at 106
 ///   of 493 shifts, and by multiples of 2^11 at 1 of 3.
-/// - On the GPU, Metal with multisampling and its surfaces' origin at the
-///   bottom, an edge comes out as the page draws it wherever the layer's left
-///   edge and its bottom are an even number of pixels from the page's; an odd
-///   one moved a rounded rectangle's corners by up to 7 levels. So the region
-///   is widened by a pixel on either side that needs it.
-/// - That is not all the GPU's edges depend on: the page's own edges move with
-///   its size. The same rounded rectangle drawn on pages 4000, 4096, 4097, 4500
-///   and 8192 pixels wide came out alike, and on pages 5000, 6000 and 8193 wide
-///   11 of its pixels were a level apart from those; a page 4000 to 8193 pixels
-///   tall moved them as well. A layer smaller than such a page then blurs edges
-///   the page does not draw, by up to 12 pixels a rounded rectangle and 0.13 of
-///   a level past a tie. A layer as wide as the page drew it as the page does
-///   at every width tried. This is not worked around.
+/// - On the GPU an edge depends on the size of what it is drawn onto as well as
+///   on where: the vertex shader maps device coordinates to clip space by 2
+///   over the target's width and height (`GetRTAdjustVector`), so the same
+///   position rounds otherwise on another size of target. A layer the size of
+///   the region drew a rounded rectangle as a 2000-pixel page does at some
+///   positions and not at others past x 1022, and as a page 4000 to 8193 wide
+///   or 3000 to 8193 tall at fewer still -- up to 108 pixels over 20 positions,
+///   each up to 0.13 of a level past a tie -- with no size below which it
+///   always matched: 1408 and 1536 wide missed where 1472 and 1600 did not. So
+///   the layer is the page's own size, or the page and the region together
+///   where the region runs past it, and it drew as the page does at all 520
+///   positions and sizes tried from 500 to 8193 on either axis. A layer that
+///   runs past the page is no longer the page's size, though, and a draw
+///   reaching 3 pixels past the left edge of a 5000 by 4100 page came out 2
+///   pixels off; on either engine such a draw is also cut otherwise than the
+///   page cuts it, as [`region`] notes.
+/// - That layer costs a second target the page's size, at the page's sample
+///   count, for as long as [`layer_surface`] says Skia keeps it.
+/// - Where Skia refuses one, the layer is the region alone, widened to an even
+///   left edge and a bottom an even number of pixels from the page's: Metal's
+///   surfaces have their origin at the bottom, and an odd offset either way
+///   moved a rounded rectangle's corners by up to 7 levels.
 ///
 /// A layer the rest of the transform maps onto the device is not in its
 /// pixels, and is left where the region puts it.
@@ -291,11 +296,17 @@ fn placed(
         return (region, region);
     }
     if on_gpu {
-        let height = canvas.base_layer_size().height;
+        let page = canvas.base_layer_size();
         let mut region = region;
         region.left -= region.left.rem_euclid(2);
-        region.bottom += (region.bottom - height).rem_euclid(2);
-        return (region, region);
+        region.bottom += (region.bottom - page.height).rem_euclid(2);
+        let drawn = IRect::from_ltrb(
+            region.left.min(0),
+            region.top.min(0),
+            region.right.max(page.width),
+            region.bottom.max(page.height),
+        );
+        return (region, drawn);
     }
     let drawn = IRect::from_ltrb(
         region.left.min(0),
@@ -312,6 +323,16 @@ fn placed(
 /// another way, and left a path's blur by 2 up to 3.7 levels off the blur of
 /// what the page draws. A canvas recording a picture has no device to ask,
 /// and gets memory. `None` where neither makes one.
+///
+/// A GPU layer the page's size is Skia's scratch target once let go. While
+/// the GPU still runs the commands that read it, the command buffer holds
+/// its four-sample attachment (`GrMtlGpu::resolve` files it there); once
+/// they have run, Skia drops it at once where its cache is past its budget
+/// -- a 6000 by 4000 page alone is -- and otherwise keeps it for the next
+/// layer of that size until a purge or the idle release frees it. On a
+/// 1200 by 900 page at four samples the cache held 55.5 MB against 35.4 MB
+/// for region-sized layers, and both came back to the page's 21.6 MB when
+/// purged.
 fn layer_surface(
     canvas: &SkCanvas,
     depth: Depth,
@@ -422,6 +443,25 @@ fn layer_info(canvas: &SkCanvas, depth: Depth, region: IRect) -> ImageInfo {
         AlphaType::Premul,
         own.color_space(),
     )
+}
+
+/// The part `read` of `image`, copied: on `context`'s GPU where it is on one,
+/// which a texture's subset needs.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+fn subset(
+    image: &Image,
+    context: Option<&mut Gpu>,
+    read: IRect,
+) -> Option<Image> {
+    let recorder =
+        context.map(|context| context.as_recorder() as &mut dyn Recorder);
+    image.make_subset(recorder, read, RequiredProperties { mipmapped: false })
+}
+
+/// The part `read` of `image`, copied.
+#[cfg(not(any(feature = "metal", feature = "vulkan")))]
+fn subset(image: &Image, _: Option<&mut Gpu>, read: IRect) -> Option<Image> {
+    image.make_subset(None, read, RequiredProperties { mipmapped: false })
 }
 
 /// The GPU a chain's layers live on.
