@@ -293,6 +293,25 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   rule. Chrome does not space a leading space, and how it spaces one depends
   on what it measured before; docs/browser-differences.md has both.
 
+- **On Linux the addon no longer sets `FONTCONFIG_PATH`, and `lib/fonts` is
+  gone.** On a machine with no `/etc/fonts/fonts.conf` and neither
+  `FONTCONFIG_PATH` nor `FONTCONFIG_FILE` set, loading the addon pointed
+  `FONTCONFIG_PATH` at a `fonts` directory beside the loaded binary. The one
+  shipped in `lib/fonts` is beside it only for a binary the install script
+  downloaded or a local build, never for a platform package's, so a
+  platform-package install already got fontconfig's built-in configuration
+  and still does. That configuration, in the fontconfig 2.17.1 the released
+  binaries link, reads `/usr/share/fonts`, `/usr/local/share/fonts` and
+  `~/.local/share/fonts`. Affected: a downloaded binary or local build on
+  such a machine no longer finds fonts in `/usr/share/X11/fonts/Type1` or
+  `/usr/share/X11/fonts/TTF`, which only the bundled configuration named,
+  and on any Linux machine without that file a child process no longer
+  inherits a `FONTCONFIG_PATH` the addon set. Set `FONTCONFIG_FILE` to a
+  configuration of your own to restore those directories. The write was
+  unsound -- `std::env::set_var` races a `getenv` on any other thread, and
+  Node's own threads are running before an addon loads -- and nothing in
+  `src` writes the environment now.
+
 ### Security
 
 - **`follow-redirects` is required at `^1.16.1`, up from `^1.15.11`.** It is

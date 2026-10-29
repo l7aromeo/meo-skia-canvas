@@ -73,7 +73,6 @@
     "lib/*js",
     "lib/*ts",
     "lib/classes/*js",
-    "lib/fonts",
     "lib/*.json",
     "CHANGELOG.md"
   ],
