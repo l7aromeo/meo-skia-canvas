@@ -219,6 +219,9 @@ pub(crate) struct ParagraphRecipe {
     /// The slot of the style text is added in now: 0 for the paragraph's
     /// own, and a pushed style's index plus 1.
     top: usize,
+    /// Whether the caller vouches that every style paints its glyphs as
+    /// the paragraph's own style does -- see [`Self::new`].
+    one_paint: bool,
     /// Whether [`ascii_boundary`] holds at every text step's start, judged
     /// as the bytes either side of it are added rather than by reading the
     /// builder's text back -- see [`Self::meet`].
@@ -245,12 +248,21 @@ impl ParagraphRecipe {
     /// copied, hinted and has those taken off it here, so a caller that
     /// hands in an unhinted style still draws hinted. Each pushed style is
     /// hinted in [`Self::push_style`].
+    ///
+    /// `one_paint` vouches that every style the paragraph is filled in
+    /// paints its glyphs as its own style does, until [`Self::paints_differ`]
+    /// says otherwise: for a caller that knows what each glyph paint is
+    /// built from, as the crate's `ParagraphBuilder` does. A paragraph in one
+    /// paint whose edges all lie between grapheme clusters has no edge for a
+    /// ligature to straddle in two paints, and none that moves, so
+    /// [`Self::build`] walks none of them.
     pub(crate) fn new(
         mut style: ParagraphStyle,
         base_oblique: Option<f32>,
         mut collection: FontCollection,
         epoch: Option<Rc<FontEpoch>>,
         colours: &StyleColours,
+        one_paint: bool,
     ) -> Self {
         let half_leading = style.text_style().half_leading();
         let (decoration, shadows, background) =
@@ -312,6 +324,7 @@ impl ParagraphRecipe {
             oblique: base_oblique.is_some(),
             half_leading,
             top: 0,
+            one_paint,
             ascii_edges: true,
             last_byte: None,
             edge_waiting: false,
@@ -435,6 +448,12 @@ impl ParagraphRecipe {
         self.last_byte = Some(last);
     }
 
+    /// Withdraws the `one_paint` [`Self::new`] was given: a style has been
+    /// pushed whose glyph paint may differ from the paragraph's own.
+    pub(crate) fn paints_differ(&mut self) {
+        self.one_paint = false;
+    }
+
     /// The collection whose paragraph cache this paragraph's layouts have to
     /// go without, where a style splits its leading -- see
     /// [`without_paragraph_cache`].
@@ -447,21 +466,34 @@ impl ParagraphRecipe {
     /// change that a layout may find inside a ligature -- see [`Passes`]. A
     /// paragraph with none of these is painted by `Paragraph::paint` alone.
     pub(crate) fn build(mut self) -> (Paragraph, Option<Passes>) {
-        let (boxes, box_slots) = self.boxes();
-        let shadowed = self.taken().any(|taken| !taken.shadows.is_empty());
-        let backed = self.taken().any(|taken| taken.background.is_some());
-        let drawn = self.oblique || !boxes.is_empty() || shadowed || backed;
+        // Asked of what was taken off rather than of the boxes, which are
+        // collected only for a paragraph that has passes to hand them to.
+        let drawn = self.oblique
+            || self.taken().any(|taken| {
+                taken.decoration.is_some()
+                    || !taken.shadows.is_empty()
+                    || taken.background.is_some()
+            });
         // With one style there is no edge to fall inside a cluster.
         if !drawn && self.pushed.is_empty() {
+            return (self.builder.build(), None);
+        }
+        #[cfg(test)]
+        let full = FULL_GRAPHEMES.get();
+        #[cfg(not(test))]
+        let full = false;
+        #[cfg(test)]
+        let one_paint = self.one_paint && !IGNORE_ONE_PAINT.get();
+        #[cfg(not(test))]
+        let one_paint = self.one_paint;
+        // In one paint, with every edge between two clusters, nothing moves
+        // and no edge is a paint edge -- see `Self::new`.
+        if !drawn && one_paint && self.ascii_edges && !full {
             return (self.builder.build(), None);
         }
         // Read back and copied only where an edge may fall inside a
         // grapheme cluster, the one thing the text is read for here -- see
         // `ascii_boundary`, judged as the text was added.
-        #[cfg(test)]
-        let full = FULL_GRAPHEMES.get();
-        #[cfg(not(test))]
-        let full = false;
         let text = (full || !self.ascii_edges).then(|| {
             #[cfg(test)]
             TEXT_READS.set(TEXT_READS.get() + 1);
@@ -479,6 +511,7 @@ impl ParagraphRecipe {
         if !drawn && edges.is_empty() {
             return (paragraph, None);
         }
+        let (boxes, box_slots) = self.boxes();
         let slots = self.slot_ranges();
         let style_edges = slots
             .windows(2)
@@ -578,6 +611,8 @@ impl ParagraphRecipe {
     /// Each decorated style's decoration, by slot, and which box each slot
     /// is: `None` for one with no decoration.
     fn boxes(&self) -> (Vec<StyleDecoration>, Vec<Option<usize>>) {
+        #[cfg(test)]
+        BOXES_MADE.set(BOXES_MADE.get() + 1);
         let mut boxes = Vec::new();
         let slots = self
             .taken()
@@ -747,6 +782,8 @@ impl ParagraphRecipe {
     /// ligature can straddle in two paints: the two shaped as one, with
     /// glyph paints that differ.
     fn paint_edge(&self, left: usize, right: usize) -> bool {
+        #[cfg(test)]
+        PAINT_COMPARISONS.set(PAINT_COMPARISONS.get() + 1);
         self.shaped_as_one(left, right)
             && foreground(self.text_style(left))
                 != foreground(self.text_style(right))
@@ -896,6 +933,21 @@ thread_local! {
     /// tests that hold a plain style to none.
     pub(crate) static TAKES: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    /// How many times [`ParagraphRecipe::boxes`] has collected a recipe's
+    /// decorations on this thread, for the test that holds a paragraph
+    /// [`Passes`] has nothing to draw for to collecting none.
+    pub(crate) static BOXES_MADE: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    /// How many times the edge walk has compared two styles' glyph paints
+    /// on this thread, for the test that holds a crate paragraph in one
+    /// paint to none.
+    pub(crate) static PAINT_COMPARISONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    /// Whether [`ParagraphRecipe::build`] walks the edges of a paragraph
+    /// vouched to be in one paint as it walks any other's: the reference
+    /// the vouching is held to.
+    pub(crate) static IGNORE_ONE_PAINT: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 /// Whether a grapheme cluster boundary lies at byte `at` of `text`, judged
@@ -1413,6 +1465,13 @@ fn records(paragraph: &mut Paragraph) -> Vec<GlyphRun> {
 }
 
 impl Passes {
+    /// The edges between styles shaped as one with different paints, for a
+    /// paragraph here only for them -- see [`Self::ligature_edges`].
+    #[cfg(test)]
+    pub(crate) fn ligature_edges_for_test(&self) -> Option<&[usize]> {
+        self.ligature_edges.as_deref()
+    }
+
     /// Notes that the paragraph has been laid out again, at `_width`, so that
     /// the next paint follows it afresh -- see [`Self::follow`] -- and lets
     /// go of what the last layout drew.
@@ -1818,8 +1877,8 @@ fn shadow_paint(shadow: &Shadow, canvas: &Canvas) -> Option<Paint> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FULL_GRAPHEMES, ParagraphRecipe, Piece, Step, StyleColours, TEXT_READS,
-        add_slnt, ascii_boundary, match_oblique, set_coordinates,
+        BOXES_MADE, FULL_GRAPHEMES, ParagraphRecipe, Piece, Step, StyleColours,
+        TEXT_READS, add_slnt, ascii_boundary, match_oblique, set_coordinates,
         whole_graphemes,
     };
     use crate::{
@@ -1987,6 +2046,7 @@ mod tests {
             collection,
             None,
             &none,
+            false,
         );
         for (text, color) in pieces {
             recipe.push_style(style(*color), None, &none);
@@ -2230,6 +2290,7 @@ mod tests {
             collection.clone(),
             None,
             &StyleColours::default(),
+            false,
         );
         let mut builder =
             ParagraphBuilder::new(&paragraph_style, collection.clone());
@@ -2472,6 +2533,7 @@ mod tests {
             collection.clone(),
             None,
             &StyleColours::default(),
+            false,
         );
         for op in &generated.0 {
             match *op {
@@ -2658,6 +2720,7 @@ mod tests {
             collection,
             None,
             &StyleColours::default(),
+            false,
         );
         for (text, style) in pieces {
             recipe.push_style(style.clone(), None, &StyleColours::default());
@@ -2981,6 +3044,7 @@ mod tests {
             raleway(),
             None,
             &StyleColours::default(),
+            false,
         );
         assert_eq!(super::style_copies() - before, 1, "copied");
         recipe.add_text("Hamburgefonstiv");
@@ -3067,6 +3131,7 @@ mod tests {
                 raleway(),
                 None,
                 &StyleColours::default(),
+                false,
             );
             for (text, color) in [(left, Color::RED), (right, Color::BLUE)] {
                 recipe.push_style(
@@ -3152,6 +3217,7 @@ mod tests {
             raleway(),
             None,
             &StyleColours::default(),
+            false,
         );
         let placeholder = PlaceholderStyle::new(
             SIZE * 0.75,
@@ -3326,6 +3392,53 @@ mod tests {
         assert!(words <= 5, "{words} words");
     }
 
+    /// A paragraph [`super::Passes`] has nothing to draw for is built
+    /// without its decorations collected: one style, a second that is
+    /// never shaped with it, a second in the same paint, and text in the
+    /// paragraph's own style either side of a push. A decorated style and a
+    /// colour change between two styles shaped as one are collected, so the
+    /// count can move.
+    #[test]
+    fn a_paragraph_with_nothing_to_draw_collects_no_decorations() {
+        let made = |ops: &[EdgeOp]| {
+            let before = BOXES_MADE.get();
+            let (_, passes) = edge_recipe(ops).build();
+            (BOXES_MADE.get() - before, passes.is_some())
+        };
+        for ops in [
+            &[EdgeOp::Text("Hamburgefonstiv")][..],
+            &[
+                EdgeOp::Text("Hamburgefonstiv "),
+                EdgeOp::Push(3),
+                EdgeOp::Text("quick"),
+                EdgeOp::Pop,
+            ],
+            &[
+                EdgeOp::Text("Hamburgefonstiv "),
+                EdgeOp::Push(0),
+                EdgeOp::Text("quick"),
+                EdgeOp::Pop,
+                EdgeOp::Text(" brown"),
+            ],
+        ] {
+            assert_eq!(made(ops), (0, false), "{} ops", ops.len());
+        }
+        for ops in [
+            &[
+                EdgeOp::Text("Hamburgefonstiv "),
+                EdgeOp::Push(4),
+                EdgeOp::Text("quick"),
+            ][..],
+            &[
+                EdgeOp::Text("Hamburgefonstiv "),
+                EdgeOp::Push(1),
+                EdgeOp::Text("quick"),
+            ],
+        ] {
+            assert_eq!(made(ops), (1, true), "{} ops", ops.len());
+        }
+    }
+
     /// A paragraph in two styles whose edges are all ASCII is built without
     /// its text read back.
     #[test]
@@ -3477,6 +3590,7 @@ mod tests {
             raleway(),
             None,
             &StyleColours::default(),
+            false,
         );
         recipe.add_text("Hamburgefonstiv ");
         assert_eq!(recipe.pushed.capacity(), 0, "nothing pushed");
