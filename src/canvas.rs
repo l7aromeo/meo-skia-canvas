@@ -1145,9 +1145,9 @@ mod backend_info_tests {
 
 #[cfg(test)]
 mod pages_tests {
-    use crate::prelude::*;
+    use crate::{prelude::*, started};
     use skia_safe::{
-        AlphaType, ColorType, Data, ImageInfo, image::CachingHint, images,
+        AlphaType, ColorType, Data, ImageInfo, image::CachingHint,
     };
 
     /// An export decoded to its size and unpremultiplied RGBA pixels, or
@@ -1156,7 +1156,7 @@ mod pages_tests {
 
     fn decoded(encoded: &[u8]) -> Decoded {
         let image =
-            images::deferred_from_encoded_data(Data::new_copy(encoded), None)?;
+            started::deferred_from_encoded_data(Data::new_copy(encoded), None)?;
         let info = ImageInfo::new(
             image.dimensions(),
             ColorType::RGBA8888,

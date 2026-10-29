@@ -1777,13 +1777,13 @@ mod tests {
         font::ObliqueAngle,
         font_library::text_hinting,
         node::typography::glyph_runs,
+        started,
         text::{TextShadow as SpanShadow, TextSlant, TextStyle as SpanStyle},
     };
     use skia_safe::{
         Color, Data, FontHinting, FontMgr, FontStyle, GlyphId, ImageInfo,
         Point,
         font_style::{Slant, Weight, Width},
-        surfaces,
         textlayout::{
             FontCollection, ParagraphBuilder, ParagraphStyle,
             PlaceholderAlignment, PlaceholderStyle, TextBaseline, TextStyle,
@@ -2242,7 +2242,7 @@ mod tests {
             (paragraph.height() + 2.0 * MARGIN).ceil() as i32,
         );
         let mut surface =
-            surfaces::raster_n32_premul(size).expect("a raster surface");
+            started::raster_n32_premul(size).expect("a raster surface");
         let origin = Point::new(MARGIN, MARGIN);
         match &mut sheared {
             Some(sheared) => {
@@ -2607,7 +2607,7 @@ mod tests {
             (paragraph.height() + 2.0 * MARGIN) as i32,
         );
         let mut surface =
-            surfaces::raster_n32_premul((w, h)).expect("a surface");
+            started::raster_n32_premul((w, h)).expect("a surface");
         surface.canvas().clear(Color::WHITE);
         passes.paint(
             &mut paragraph,
@@ -3168,7 +3168,7 @@ mod tests {
             (paragraph.height() + 2.0 * MARGIN) as i32,
         );
         let mut surface =
-            surfaces::raster_n32_premul((w, h)).expect("a surface");
+            started::raster_n32_premul((w, h)).expect("a surface");
         surface.canvas().clear(Color::WHITE);
         let origin = Point::new(MARGIN, MARGIN);
         match passes {
