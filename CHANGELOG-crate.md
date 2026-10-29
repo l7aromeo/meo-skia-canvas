@@ -1356,8 +1356,10 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
     longer copied to set its hinting [RE-TIME vs 0.16.3].
   - A `TextEngine` paragraph is built with fewer lookups, walks and
     allocations, taking the font library's lock once, asking the platform
-    for a face's variation axes once, and leaving a face drawn at its own
-    position uninstanced. Its builds still cost more than 0.16.3's
+    for a face's variation axes once, leaving a face drawn at its own
+    position uninstanced, and answering a style it has instanced before
+    with one hash of the style rather than through the font library. Its
+    builds still cost more than 0.16.3's
     [RE-TIME vs 0.16.3], for work 0.16.3 did not do: the recipe each
     paragraph keeps so that its decorations, shadows, backgrounds and
     oblique ranges are drawn as CSS places them, and a variable face
@@ -1369,7 +1371,9 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
     [RE-TIME vs 0.16.3]. A blurred flat-colour draw is recorded without
     the filter paint it never uses, and consecutive rectangles blurred
     alike in one frame are kept as one operation, each still drawn on its
-    own.
+    own. A flat-colour rectangle under a `blur()` filter is drawn as its
+    exact blur in [RE-TIME vs 0.16.3] of the time 0.16.3 took to draw
+    Skia's.
   - Every `Context2D::get_image_data`, export and window frame takes a
     snapshot of the page, and the snapshot no longer copies the list of
     what the page has recorded, so a canvas read again and again without

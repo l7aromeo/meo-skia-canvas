@@ -1601,13 +1601,23 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
     crossing an edge between them only where the bytes either side of the
     edge do not rule one out, and a style in the paragraph's own text
     style is no longer copied to set its hinting [RE-TIME vs 6.0.2].
+  - A `Paragraph` keeps what it is built from with fewer walks and
+    allocations, and asks the platform for a face's variation axes once
+    [RE-TIME vs 6.0.2].
   - A page of cards, each drawn over its own shadow blurred through
     `ctx.filter`, records about 31% faster on either engine and exports
     about 5% faster on the GPU, and a page of blurred rectangles alone
     records as fast as before and exports about 3.5% faster on the CPU
     [RE-TIME vs 6.0.2]. A blurred flat-colour draw is recorded without the
     filter paint it never uses, and consecutive rectangles blurred alike
-    in one frame are kept as one operation, each still drawn on its own.
+    in one frame are kept as one operation, each still drawn on its own. A
+    flat-colour rectangle under `blur()` past a sigma of 39 draws and reads
+    back in 0.42 to 0.64 of 6.0.2's time at 200 pixels and 0.25 at 600 by
+    400 blurred by 100, and its draw alone takes 0.44 to 0.70 of 6.0.2's
+    for any colour but opaque black; an opaque black rectangle at a sigma
+    of 10 or less draws 1.3 to 1.4 times as long as in 6.0.2, since Skia
+    blends black through a blitter of its own whose rounding is up to a
+    level off, where this one is within half [RE-TIME vs 6.0.2].
   - Every `getImageData`, export and window frame takes a snapshot of the
     page, and the snapshot no longer copies the list of what the page has
     recorded, so a canvas read again and again without being cleared no
