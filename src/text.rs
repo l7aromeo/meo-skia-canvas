@@ -47,9 +47,10 @@ use crate::{
             FontEpoch, FontLibrary as SharedFontRegistry, forgetful,
         },
         oblique::{
-            ParagraphRecipe, Passes, add_slnt, match_oblique,
+            ParagraphRecipe, Passes, StyleColours, add_slnt, match_oblique,
             without_paragraph_cache,
         },
+        utils::color4f_to_srgb,
     },
 };
 
@@ -1393,6 +1394,7 @@ impl TextEngine {
                 base_oblique,
                 collection.clone(),
                 None,
+                &style_colours(base_style),
             ),
             collection,
             positions: self.positions.clone(),
@@ -1480,7 +1482,10 @@ impl ParagraphBuilder {
             match_oblique(&mut sk_style, &mut self.collection, degrees)
         });
         match carries_taken(style) {
-            true => self.recipe.push_style(sk_style, oblique),
+            true => {
+                self.recipe
+                    .push_style(sk_style, oblique, &style_colours(style))
+            }
             false => self.recipe.push_style_as_given(sk_style, oblique),
         }
         self
@@ -2378,13 +2383,10 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
         // which resolves the fallback itself. Setting it explicitly is what
         // makes the documented behaviour true.
         let decoration_color = style.decoration_color.unwrap_or(style.color);
-        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
-        // Re-check: grep -n "fn set_decoration_color\|fn new(color" in
-        // skia-safe's src/modules/paragraph/text_style.rs and text_shadow.rs
-        //
-        // SkParagraph takes a decoration's colour, and a text shadow's, as
-        // an eight-bit sRGB `SkColor` and nothing wider, so a wide colour is
-        // gamut-mapped into sRGB on the way in.
+        // SkParagraph holds a decoration's colour, and a text shadow's, as
+        // an eight-bit sRGB `SkColor`. It draws neither: the recipe takes
+        // both off the style and `node::oblique::Passes` draws them, in the
+        // colours `style_colours` keeps as named.
         sk_style
             .set_decoration_color(rgba_linear_to_skia_color(decoration_color));
         if (style.decoration_thickness - 1.0).abs() > f32::EPSILON {
@@ -2395,8 +2397,8 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
     }
 
     for shadow in &style.shadows {
-        // `TextShadow::new` takes a Skia `Color` (u32 ARGB, sRGB-encoded),
-        // reached the way `decoration_color` is, above.
+        // `TextShadow::new` takes a Skia `Color`, as `decoration_color` is
+        // set above, and for the same reason.
         sk_style.add_shadow(SkTextShadow::new(
             rgba_linear_to_skia_color(shadow.color),
             SkPoint::new(shadow.offset_x, shadow.offset_y),
@@ -2405,6 +2407,26 @@ fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
     }
 
     sk_style
+}
+
+/// The colours of `style` that SkParagraph would hold in eight bits, as the
+/// style names them -- see `node::oblique::StyleColours`.
+fn style_colours(style: &TextStyle) -> StyleColours {
+    let srgb = |color: RgbaLinear| {
+        color4f_to_srgb(
+            rgba_linear_to_unpremul_color4f(color),
+            Some(&linear_srgb_color_space()),
+        )
+    };
+    StyleColours {
+        decoration: (style.decoration != TextDecoration::default())
+            .then(|| srgb(style.decoration_color.unwrap_or(style.color))),
+        shadows: style
+            .shadows
+            .iter()
+            .map(|shadow| srgb(shadow.color))
+            .collect(),
+    }
 }
 
 /// The names an engine's font collection is asked for `families` by.
