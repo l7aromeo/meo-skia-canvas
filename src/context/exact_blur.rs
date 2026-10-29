@@ -16,6 +16,10 @@
 //! apart. A pass is direct -- the taps summed -- below [`FFT_FROM_SIGMA`],
 //! and an FFT convolution from there, which costs the same whatever the
 //! sigma.
+//!
+//! A pass works each line in place, from a copy of it its worker keeps, so
+//! the image and its transpose are the only buffers of its size alive at
+//! once: 32 bytes a pixel in floats.
 
 use rayon::prelude::*;
 use rustfft::{Fft, FftPlanner, num_complex::Complex};
@@ -85,30 +89,32 @@ pub(crate) fn gaussian_sum(sigma: f64) -> f64 {
 
 /// Blurs `pixels`, premultiplied RGBA floats `width` by `height`, by
 /// `sigma_x` along rows and `sigma_y` along columns, reading outside the
-/// image as transparent. Returns the blurred floats, unrounded.
+/// image as transparent. Returns the blurred floats, unrounded, in the
+/// buffer `pixels` came in.
 ///
 /// A sigma that is zero, negative or not a number leaves that axis alone,
 /// and an infinite one spreads it to nothing.
 pub(crate) fn blur(
-    pixels: &[f32],
+    mut pixels: Vec<f32>,
     width: usize,
     height: usize,
     sigma_x: f32,
     sigma_y: f32,
 ) -> Vec<f32> {
-    let mut rows = pass(pixels, width, height, sigma_x);
-    let mut columns = vec![0.0; rows.len()];
-    transpose(&rows, &mut columns, width, height);
-    let columns = pass(&columns, height, width, sigma_y);
-    transpose(&columns, &mut rows, height, width);
-    rows
+    pass(&mut pixels, width, height, sigma_x);
+    let mut columns = vec![0.0; pixels.len()];
+    transpose(&pixels, &mut columns, width, height);
+    pass(&mut columns, height, width, sigma_y);
+    transpose(&columns, &mut pixels, height, width);
+    pixels
 }
 
 /// Blurs `pixels`, premultiplied RGBA bytes, as [`blur`] does, scales the
 /// result by `gain` and rounds once at the end: a blurred draw composited
 /// at an alpha takes its alpha here, so that it is not rounded twice.
+/// `pixels` is let go as soon as it is in floats.
 pub(crate) fn blur_bytes(
-    pixels: &[u8],
+    pixels: Vec<u8>,
     width: usize,
     height: usize,
     sigma_x: f32,
@@ -116,7 +122,8 @@ pub(crate) fn blur_bytes(
     gain: f32,
 ) -> Vec<u8> {
     let floats: Vec<f32> = pixels.par_iter().map(|&b| f32::from(b)).collect();
-    blur(&floats, width, height, sigma_x, sigma_y)
+    drop(pixels);
+    blur(floats, width, height, sigma_x, sigma_y)
         .into_par_iter()
         // Each value is a weighted mean of bytes times a gain in [0, 1], so
         // it lies in [0, 255] up to float noise; the cast saturates what
@@ -126,22 +133,21 @@ pub(crate) fn blur_bytes(
 }
 
 /// One axis: convolves each of `lines` lines of `n` RGBA pixels, laid end
-/// to end in `input`, with the kernel for `sigma`.
-fn pass(input: &[f32], n: usize, lines: usize, sigma: f32) -> Vec<f32> {
+/// to end in `pixels`, with the kernel for `sigma`, in place.
+fn pass(pixels: &mut [f32], n: usize, lines: usize, sigma: f32) {
     if sigma == f32::INFINITY {
         // Spread over an infinite reach, every value comes to nothing.
-        return vec![0.0; input.len()];
+        pixels.fill(0.0);
+        return;
     }
     if !(sigma.is_finite() && sigma > 0.0) || n == 0 || lines == 0 {
-        return input.to_vec();
+        return;
     }
     let k = half_kernel(sigma, n - 1);
-    let mut output = vec![0.0; input.len()];
     match method(sigma) {
-        Method::Direct => direct(input, &mut output, n, &k),
-        Method::Fourier => fourier(input, &mut output, n, &k),
+        Method::Direct => direct(pixels, n, &k),
+        Method::Fourier => fourier(pixels, n, &k),
     }
-    output
 }
 
 /// How an axis is convolved.
@@ -162,30 +168,29 @@ fn method(sigma: f32) -> Method {
 }
 
 /// Each line tap by tap: `out[x] = k0 in[x] + sum_d k_d (in[x-d] + in[x+d])`,
-/// over a copy of the line padded with zeros so no tap leaves it. Each tap is
-/// one pass over the whole line, which the compiler vectorises.
-fn direct(input: &[f32], output: &mut [f32], n: usize, k: &[f64]) {
+/// over a copy of the line padded with zeros so no tap leaves it, written
+/// back over the line. Each tap is one pass over the whole line, which the
+/// compiler vectorises.
+fn direct(pixels: &mut [f32], n: usize, k: &[f64]) {
     let k: Vec<f32> = k.iter().map(|&w| w as f32).collect();
     let r = k.len() - 1;
     let (stride, pad) = (n * 4, r * 4);
-    output
-        .par_chunks_mut(stride)
-        .zip(input.par_chunks(stride))
-        .for_each_init(
-            || vec![0f32; stride + 2 * pad],
-            |padded, (out, line)| {
-                padded[pad..pad + stride].copy_from_slice(line);
-                let padded = &*padded;
-                out.iter_mut().zip(line).for_each(|(o, &v)| *o = k[0] * v);
-                for (d, &w) in k.iter().enumerate().skip(1) {
-                    let left = &padded[pad - d * 4..][..stride];
-                    let right = &padded[pad + d * 4..][..stride];
-                    out.iter_mut()
-                        .zip(left.iter().zip(right))
-                        .for_each(|(o, (&a, &b))| *o += w * (a + b));
-                }
-            },
-        );
+    pixels.par_chunks_mut(stride).for_each_init(
+        || vec![0f32; stride + 2 * pad],
+        |padded, out| {
+            padded[pad..pad + stride].copy_from_slice(out);
+            let padded = &*padded;
+            let line = &padded[pad..pad + stride];
+            out.iter_mut().zip(line).for_each(|(o, &v)| *o = k[0] * v);
+            for (d, &w) in k.iter().enumerate().skip(1) {
+                let left = &padded[pad - d * 4..][..stride];
+                let right = &padded[pad + d * 4..][..stride];
+                out.iter_mut()
+                    .zip(left.iter().zip(right))
+                    .for_each(|(o, (&a, &b))| *o += w * (a + b));
+            }
+        },
+    );
 }
 
 /// A length rustfft transforms quickly: the next 2^a 3^b 5^c 7^d at or above
@@ -233,52 +238,47 @@ fn plans(len: usize) -> Plans {
 /// convolution lands outside `[0, n)` and the result is the linear
 /// convolution, with transparent outside. The kernel is real and symmetric,
 /// so its spectrum is real, and two real channels share one complex
-/// transform: red with green, blue with alpha.
-fn fourier(input: &[f32], output: &mut [f32], n: usize, k: &[f64]) {
+/// transform: red with green, blue with alpha. The whole line is read into
+/// those transforms before any of it is written back, so it is worked in
+/// place.
+fn fourier(pixels: &mut [f32], n: usize, k: &[f64]) {
     let r = k.len() - 1;
     let len = fast_len(n + r);
     let spectrum = spectrum(k, len);
     let zero = Complex::new(0.0f32, 0.0);
-    output
-        .par_chunks_mut(n * 4)
-        .zip(input.par_chunks(n * 4))
-        .for_each_init(
-            || {
-                let (forward, inverse) = plans(len);
-                let scratch = forward
-                    .get_inplace_scratch_len()
-                    .max(inverse.get_inplace_scratch_len());
-                (
-                    forward,
-                    inverse,
-                    vec![zero; len],
-                    vec![zero; len],
-                    vec![zero; scratch],
-                )
-            },
-            |(forward, inverse, a, b, scratch), (out, line)| {
-                for (i, [r, g, bl, al]) in
-                    line.as_chunks::<4>().0.iter().enumerate()
-                {
-                    a[i] = Complex::new(*r, *g);
-                    b[i] = Complex::new(*bl, *al);
-                }
-                a[n..].fill(zero);
-                b[n..].fill(zero);
-                for buffer in [&mut *a, &mut *b] {
-                    forward.process_with_scratch(buffer, scratch);
-                    buffer
-                        .iter_mut()
-                        .zip(&spectrum)
-                        .for_each(|(c, &s)| *c *= s);
-                    inverse.process_with_scratch(buffer, scratch);
-                }
-                for (i, px) in out.as_chunks_mut::<4>().0.iter_mut().enumerate()
-                {
-                    *px = [a[i].re, a[i].im, b[i].re, b[i].im];
-                }
-            },
-        );
+    pixels.par_chunks_mut(n * 4).for_each_init(
+        || {
+            let (forward, inverse) = plans(len);
+            let scratch = forward
+                .get_inplace_scratch_len()
+                .max(inverse.get_inplace_scratch_len());
+            (
+                forward,
+                inverse,
+                vec![zero; len],
+                vec![zero; len],
+                vec![zero; scratch],
+            )
+        },
+        |(forward, inverse, a, b, scratch), line| {
+            for (i, [r, g, bl, al]) in
+                line.as_chunks::<4>().0.iter().enumerate()
+            {
+                a[i] = Complex::new(*r, *g);
+                b[i] = Complex::new(*bl, *al);
+            }
+            a[n..].fill(zero);
+            b[n..].fill(zero);
+            for buffer in [&mut *a, &mut *b] {
+                forward.process_with_scratch(buffer, scratch);
+                buffer.iter_mut().zip(&spectrum).for_each(|(c, &s)| *c *= s);
+                inverse.process_with_scratch(buffer, scratch);
+            }
+            for (i, px) in line.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                *px = [a[i].re, a[i].im, b[i].re, b[i].im];
+            }
+        },
+    );
 }
 
 /// The kernel's spectrum at length `len`, real since the kernel is
@@ -436,7 +436,7 @@ mod tests {
             (7, 130),
         ] {
             for src in scenes(w, h) {
-                let got = blur_bytes(&src, w, h, sx, sy, 1.0);
+                let got = blur_bytes(src.clone(), w, h, sx, sy, 1.0);
                 let want = reference(&src, w, h, sx, sy);
                 for (&g, &e) in got.iter().zip(&want) {
                     if f64::from(g) != (e + 0.5).floor() {
@@ -490,8 +490,8 @@ mod tests {
     #[test]
     fn a_sigma_of_nothing_leaves_its_axis_alone() {
         let src: Vec<u8> = (0..20 * 4).map(|i| (i * 7 % 256) as u8).collect();
-        assert_eq!(blur_bytes(&src, 20, 1, 0.0, 0.0, 1.0), src);
-        assert_eq!(blur_bytes(&src, 20, 1, f32::NAN, -1.0, 1.0), src);
+        assert_eq!(blur_bytes(src.clone(), 20, 1, 0.0, 0.0, 1.0), src);
+        assert_eq!(blur_bytes(src.clone(), 20, 1, f32::NAN, -1.0, 1.0), src);
     }
 
     #[test]
@@ -553,7 +553,7 @@ mod tests {
         let pixels = vec![255u8; w * h * 4];
         // `blur(calc(1px * infinity))`, and an infinite sigma.
         for sigma in [f32::MAX, f32::INFINITY] {
-            let out = blur_bytes(&pixels, w, h, sigma, sigma, 1.0);
+            let out = blur_bytes(pixels.clone(), w, h, sigma, sigma, 1.0);
             assert!(out.iter().all(|&v| v == 0), "{sigma}");
         }
     }

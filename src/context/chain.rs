@@ -495,7 +495,7 @@ fn blurred_on_cpu(
             }
             (
                 info,
-                exact_blur::blur_bytes(&pixels, w, h, sigma_x, sigma_y, gain),
+                exact_blur::blur_bytes(pixels, w, h, sigma_x, sigma_y, gain),
             )
         }
         false => {
@@ -516,8 +516,9 @@ fn blurred_on_cpu(
             ) {
                 return None;
             }
-            let blurred = exact_blur::blur(&pixels, w, h, sigma_x, sigma_y);
-            let bytes = blurred
+            // The floats are let go once they are bytes, before Skia copies
+            // the bytes: two buffers this size alive at once, never three.
+            let bytes = exact_blur::blur(pixels, w, h, sigma_x, sigma_y)
                 .iter()
                 .flat_map(|v| (v * gain).to_ne_bytes())
                 .collect::<Vec<u8>>();
