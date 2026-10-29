@@ -1786,21 +1786,21 @@ fn borrowed_range(haystack: &str, needle: &str) -> Option<Range<usize>> {
 /// absolute unit is the defect this function exists for, and a converted
 /// relative one is a new one.
 ///
-/// `EMS` and `EXS` are left for a different and worse reason. Skia does not
+/// `EMS` and `EXS` are left because they never reach this walk. Skia does not
 /// resolve them at all: `SkSVGLengthContext::resolve` has a case for each
 /// absolute unit and for `kPercentage`, and `kEMS` and `kEXS` fall to a
-/// `default` that returns 0. So `2em` anywhere inside a document is zero
-/// before this walk and zero after it, and rewriting `font-size` does not
-/// change that -- there is no ratio being taken. Converting them here would
-/// need the inherited `font-size` at each node, which this walk does not
-/// track, and would be a new feature rather than this fix.
+/// `default` that returns 0. `text_position_lengths_in_px` rewrites them in
+/// the document source to pixels before Skia parses it, against the
+/// `font-size` each element inherits and the x-height of the face it draws
+/// in -- see [`LENGTH_ATTRIBUTES`] -- so a node reaching this walk carries
+/// none.
 ///
-/// UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
-/// Re-check: render `<rect font-size="16" width="2em" height="2em"/>` and see
-/// whether it paints. It paints nothing today, because
-/// `SkSVGLengthContext::resolve` in skia-bindings'
-/// `skia/modules/svg/src/SkSVGRenderContext.cpp` returns 0 for `kEMS` and
-/// `kEXS`.
+/// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+/// Re-check: "a length in em resolves against its own element's size" in
+/// tests/suite/image.test.js, with `text_position_lengths_in_px` changed to
+/// leave `em` alone; it fails while `SkSVGLengthContext::resolve` in
+/// skia-bindings' `skia/modules/svg/src/SkSVGRenderContext.cpp` returns 0
+/// for `kEMS` and `kEXS`.
 ///
 /// Takes anything that is or converts to `Option<&Length>`, because the
 /// generated accessors return `&Length` for a required attribute and
