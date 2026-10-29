@@ -1444,7 +1444,7 @@ pub(crate) fn box_at(
 #[cfg(test)]
 mod tests {
     use super::{Decoration, FaceLines, Layer, Span, Thickness, paint, wave};
-    use crate::context::faint::Faint;
+    use crate::{context::faint::Faint, started};
     use skia_safe::{
         Color, Color4f, Paint, PictureRecorder, Point, Rect,
         textlayout::{TextDecoration, TextDecorationStyle},
@@ -1553,7 +1553,7 @@ mod tests {
     fn coverage(path: &skia_safe::Path, scale: f32) -> Vec<u8> {
         let (w, h) = (200, 80);
         let mut surface =
-            skia_safe::surfaces::raster_n32_premul((w, h)).expect("a surface");
+            started::raster_n32_premul((w, h)).expect("a surface");
         let canvas = surface.canvas();
         canvas.scale((scale, scale));
         let mut paint = Paint::default();
@@ -1774,9 +1774,8 @@ mod tests {
         const SAMPLES: usize = 8;
         let (w, h) = (200, 80);
         let (sw, sh) = (w * SAMPLES, h * SAMPLES);
-        let mut surface =
-            skia_safe::surfaces::raster_n32_premul((sw as i32, sh as i32))
-                .expect("a surface");
+        let mut surface = started::raster_n32_premul((sw as i32, sh as i32))
+            .expect("a surface");
         let canvas = surface.canvas();
         canvas.scale((SAMPLES as f32, SAMPLES as f32));
         if let Some(clip) = clip {
