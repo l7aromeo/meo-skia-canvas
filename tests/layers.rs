@@ -297,6 +297,135 @@ fn an_export_taken_inside_a_layer_keeps_the_layer_as_it_stood() {
     }
 }
 
+/// What `canvas` reads at a rectangle, as bytes.
+fn read(
+    canvas: &mut Canvas,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) -> Vec<u8> {
+    canvas
+        .context()
+        .get_image_data(x, y, width, height)
+        .expect("pixels")
+        .pixels()
+        .to_vec()
+}
+
+/// The rows of a page-wide read that a read of `width` by `height` at
+/// (`x`, `y`) covers.
+fn slice(
+    whole: &[u8],
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> Vec<u8> {
+    let row = WIDTH as usize * 4;
+    (y..y + height)
+        .flat_map(|at| &whole[at * row + x * 4..at * row + (x + width) * 4])
+        .copied()
+        .collect()
+}
+
+/// A read inside a layer reads, wherever it falls, what the same read of
+/// the whole page reads there: at the page's corner and far edge, across
+/// the layer's edge, and inside it. With a plain layer, which composes only
+/// the region read; with a blurred fill, whose rectangle Skia blurs from its
+/// geometry; with a shadow, whose filter Skia gives the input it needs past
+/// the read; and with a backdrop, which reads the page beneath past it, and
+/// so composes the page.
+#[test]
+fn a_read_inside_a_layer_reads_what_the_page_does() {
+    for gpu in ENGINES {
+        for content in ["plain", "blurred", "shadowed", "backdrop"] {
+            let mut canvas = white_page(gpu);
+            let ctx = canvas.context();
+            square(ctx, 1);
+            let backdrop = (content == "backdrop").then(|| {
+                ImageFilter::blur(4.0, 4.0, None, None, None).expect("a blur")
+            });
+            ctx.save_layer_with(0.5, None, backdrop.as_ref());
+            match content {
+                "blurred" => ctx.set_filter_css("blur(3px)").expect("a blur"),
+                "shadowed" => {
+                    ctx.set_shadow_color(RgbaLinear::opaque(0.0, 0.0, 1.0));
+                    ctx.set_shadow_blur(6.0);
+                }
+                _ => {}
+            }
+            ctx.fill_rect(15.0, 4.0, 30.0, 12.0);
+            let whole = read(&mut canvas, 0.0, 0.0, WIDTH, HEIGHT);
+            for (x, y, width, height) in [
+                (0, 0, 20, 20),
+                (10, 0, 20, 20),
+                (40, 0, 20, 20),
+                (59, 19, 1, 1),
+                (14, 3, 3, 3),
+            ] {
+                let got = read(
+                    &mut canvas,
+                    x as f32,
+                    y as f32,
+                    width as f32,
+                    height as f32,
+                );
+                assert!(
+                    got == slice(&whole, x, y, width, height),
+                    "gpu {gpu}, {content}: the read at {x},{y} {width}x{height}"
+                );
+            }
+            canvas.context().restore();
+        }
+    }
+}
+
+/// An export inside a layer is the same file however often it is taken --
+/// the second is served from the filed page the first cached -- and an
+/// export after the layer closes is the one a canvas never exported inside
+/// it gives.
+#[test]
+fn an_export_inside_a_layer_is_the_export_it_was() {
+    for gpu in ENGINES {
+        for format in [ImageFormat::Png, ImageFormat::Raw] {
+            let options = EncodeOptions::default();
+            let draw = |canvas: &mut Canvas,
+                        exports: bool|
+             -> (Vec<Vec<u8>>, Vec<u8>) {
+                let ctx = canvas.context();
+                for n in 0..3 {
+                    square(ctx, n);
+                }
+                ctx.save_layer_with(0.5, None, None);
+                ctx.fill_rect(15.0, 4.0, 30.0, 12.0);
+                let inside = match exports {
+                    true => (0..2)
+                        .map(|_| {
+                            canvas
+                                .to_buffer(format, &options)
+                                .expect("an export")
+                        })
+                        .collect(),
+                    false => Vec::new(),
+                };
+                canvas.context().restore();
+                (
+                    inside,
+                    canvas.to_buffer(format, &options).expect("an export"),
+                )
+            };
+            let (inside, closed) = draw(&mut white_page(gpu), true);
+            let (_, never) = draw(&mut white_page(gpu), false);
+            assert!(
+                inside[0] == inside[1],
+                "gpu {gpu}, {format:?}: inside the layer"
+            );
+            assert!(closed == never, "gpu {gpu}, {format:?}: after it closes");
+        }
+    }
+}
+
 fn has(bytes: &[u8], needle: &str) -> bool {
     bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
 }

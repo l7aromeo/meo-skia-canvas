@@ -915,18 +915,35 @@ impl PageRecorder {
         dst_info: &ImageInfo,
     ) -> Result<Vec<u8>, String> {
         let filed = self.filed_page();
+        let whole = self.open_layers_reach_past_a_read();
         let drawn = self.open_layers_drawn();
         self.surface.confirmed_update(&filed, opts, engine)?;
         let mut pixels = vec![0; checked_byte_size(dst_info)?];
+        let read = Read {
+            info: dst_info,
+            origin: (crop.x(), crop.y()),
+            whole,
+        };
         self.surface.read_overlaid(
             drawn.as_ref(),
             opts.density,
             filed.id,
-            dst_info,
-            (crop.x(), crop.y()),
+            read,
             &mut pixels,
         )?;
         Ok(pixels)
+    }
+
+    /// Whether what the open layers draw at a pixel can depend on the page
+    /// outside a read around it, which only a backdrop does: it filters what
+    /// lies beneath the layer, and composed on a surface the size of the read
+    /// it would find nothing past the read's edge. A filter on what a layer
+    /// draws needs no such page -- Skia gives a filtered draw the input it
+    /// reaches for, measured identical at a read's edge for a blur and a
+    /// shadow. Where none has one, a read inside a layer composes only the
+    /// region it reads -- see [`RecordingSurface::read_overlaid`].
+    fn open_layers_reach_past_a_read(&self) -> bool {
+        self.open.iter().any(|layer| layer.rec.backdrop.is_some())
     }
 
     /// Closes the open recording and files it as a layer.
@@ -1119,7 +1136,11 @@ impl PageRecorder {
             features: Arc::new(features),
             bounds: self.bounds,
             id: id.0,
-            starts_from: Some((filed.id, filed.depth())),
+            starts_from: Some(FiledPrefix {
+                id: filed.id,
+                depth: filed.depth(),
+                owner: filed.owner.clone(),
+            }),
             owner: Arc::downgrade(&id),
         }
     }
@@ -1703,6 +1724,17 @@ fn clear_to(canvas: &SkCanvas, matte: Option<&Matte>) {
     }
 }
 
+/// The pixels a read inside a layer asks for -- see
+/// [`RecordingSurface::read_overlaid`].
+pub struct Read<'a> {
+    /// The layout and size of the pixels returned.
+    pub info: &'a ImageInfo,
+    /// Where on the page, in device pixels, the read's top-left corner lies.
+    pub origin: (i32, i32),
+    /// Whether the page is composed whole rather than at the read's size.
+    pub whole: bool,
+}
+
 pub struct RecordingSurface {
     surface: Option<Surface>,
     /// The page in squares, for reads too small to be worth compositing it
@@ -2214,6 +2246,14 @@ impl RecordingSurface {
     /// `density`, leaving what the surface holds untouched. `page` is the
     /// identity of the page the surface holds.
     ///
+    /// Composed on a surface the size of `read`, translated to its origin,
+    /// so that its cost follows the read rather than the page, which a 1x1
+    /// hit test inside a layer otherwise pays for whole. The translation is
+    /// by whole pixels, so each pixel is rasterized as it is on the page.
+    /// `read.whole` composes the page instead, for an `over` that can draw at
+    /// a pixel what lies outside the read -- see
+    /// `PageRecorder::open_layers_reach_past_a_read`.
+    ///
     /// `over` is drawn on a surface made like this one, so on the GPU it is
     /// composited on the GPU, as it would be once filed: composited on the
     /// CPU instead, a layer at alpha 0.5 read one level away from the same
@@ -2224,19 +2264,30 @@ impl RecordingSurface {
         over: Option<&Picture>,
         density: f32,
         page: usize,
-        dst_info: &ImageInfo,
-        origin: (i32, i32),
+        read: Read<'_>,
         pixels: &mut [u8],
     ) -> Result<(), String> {
+        let Read {
+            info: dst_info,
+            origin,
+            whole,
+        } = read;
         let unreadable = || "Could not read the page beneath an open layer";
         let surface = self.surface.as_mut().ok_or_else(unreadable)?;
         let mut copy = Paint::default();
         copy.set_blend_mode(BlendMode::Src);
+        let page_info = surface.image_info();
+        let (info, at) = match whole {
+            true => (page_info, origin),
+            false => (page_info.with_dimensions(dst_info.dimensions()), (0, 0)),
+        };
         for _ in 0..DRAW_ATTEMPTS {
-            let mut composed = surface
-                .new_surface(&surface.image_info())
-                .ok_or_else(unreadable)?;
+            let mut composed =
+                surface.new_surface(&info).ok_or_else(unreadable)?;
             let canvas = composed.canvas();
+            if !whole {
+                canvas.translate((-origin.0 as f32, -origin.1 as f32));
+            }
             canvas.draw_image(surface.image_snapshot(), (0, 0), Some(&copy));
             if let Some(over) = over {
                 canvas.scale((density, density));
@@ -2251,7 +2302,7 @@ impl RecordingSurface {
                 dst_info,
                 pixels,
                 row_bytes,
-                origin,
+                at,
             ) {
                 true => Ok(()),
                 false => Err(format!(
@@ -2345,10 +2396,10 @@ impl RecordingSurface {
 pub struct Page {
     pub id: usize,
     /// For a page taken while a `saveLayer` is open, the filed page it holds
-    /// the open layers over, as its id and depth: the cached bitmap it may
-    /// start from, and how deep that bitmap may be. `None` for any other
+    /// the open layers over: the cached bitmap it may start from, how deep
+    /// that bitmap may be, and whose it is to file. `None` for any other
     /// page, which starts from its own. See [`Page::cache_key`].
-    pub(crate) starts_from: Option<(usize, usize)>,
+    pub(crate) starts_from: Option<FiledPrefix>,
     /// A weak reference to the generation this page was taken from, held so
     /// a store can tell whether that generation still exists. See
     /// [`PageId`].
@@ -2360,6 +2411,22 @@ pub struct Page {
     pub layers: Arc<Vec<Layer>>,
     /// Index-aligned with `layers`; see [`PageRecorder::append_isolated`].
     pub(crate) features: Arc<Vec<VectorFeatures>>,
+}
+
+/// The filed page a page taken inside a `saveLayer` holds the open layers
+/// over: the first `depth` of its layers are that page's, under that page's
+/// identity.
+///
+/// A composite of such a page files that prefix under `owner` as it passes
+/// it -- see `Page::composited_surface` -- so that the next export, inside
+/// the layer or after it closes, starts from it rather than from nothing.
+/// The entry is the filed page's own, and goes with that page's generation
+/// as any of its entries does.
+#[derive(Debug, Clone)]
+pub(crate) struct FiledPrefix {
+    id: usize,
+    depth: usize,
+    owner: Weak<PageId>,
 }
 
 impl PartialEq for Page {
@@ -2448,7 +2515,9 @@ impl Page {
     /// bitmap cached as that closes is the finished layer, not the one this
     /// page holds part way.
     fn cache_key(&self) -> (usize, usize) {
-        self.starts_from.unwrap_or((self.id, self.depth()))
+        self.starts_from
+            .as_ref()
+            .map_or((self.id, self.depth()), |filed| (filed.id, filed.depth))
     }
 
     pub fn scaled_dimensions(&self, density: f32) -> ISize {
@@ -2720,9 +2789,27 @@ impl Page {
             matte.paint(canvas);
         }
 
-        // draw newly added layers
+        // draw newly added layers, filing the filed page beneath any open
+        // layers as it is passed -- see `FiledPrefix`
         canvas.set_matrix(&img_scale);
-        for pict in self.layers.iter().skip(cache_depth) {
+        let prefix = self
+            .starts_from
+            .as_ref()
+            .filter(|filed| filed.depth > cache_depth && !options.single_use);
+        let split = prefix.map_or(cache_depth, |filed| filed.depth);
+        for pict in self.layers.iter().take(split).skip(cache_depth) {
+            pict.playback(canvas);
+        }
+        if let Some(filed) = prefix {
+            // A snapshot, which Skia keeps as it stood while the open layers
+            // draw over the surface next: an entry holding them would show
+            // a layer still being drawn as though it were filed.
+            let image = surface.image_snapshot();
+            let image = self.cacheable(&mut surface, image, options, engine)?;
+            PageCache::set(&filed.owner, image, options, filed.depth);
+        }
+        let canvas = surface.canvas();
+        for pict in self.layers.iter().skip(split.max(cache_depth)) {
             pict.playback(canvas);
         }
 
@@ -2744,11 +2831,28 @@ impl Page {
         engine: RenderingEngine,
         cache_depth: usize,
     ) -> Result<SkImage, String> {
-        let img_dims = self.scaled_dimensions(options.density);
-
         let image = surface
             .make_temporary_image()
             .unwrap_or_else(|| surface.image_snapshot());
+        let image = self.cacheable(surface, image, options, engine)?;
+
+        if self.depth() > cache_depth && !options.single_use {
+            PageCache::set(&self.owner, image.clone(), options, self.depth());
+        }
+
+        Ok(image)
+    }
+
+    /// `image`, taken off a compositing surface, as the page cache and an
+    /// encoder take it: in the requested space, and in main memory.
+    fn cacheable(
+        &self,
+        surface: &mut Surface,
+        image: SkImage,
+        options: &ExportOptions,
+        engine: RenderingEngine,
+    ) -> Result<SkImage, String> {
+        let img_dims = self.scaled_dimensions(options.density);
 
         // The surface holds the canvas's space; an encoder tags with whatever
         // the image carries. Converting here is what makes a requested output
@@ -2802,10 +2906,6 @@ impl Page {
                 )?
             }
         };
-
-        if self.depth() > cache_depth && !options.single_use {
-            PageCache::set(&self.owner, image.clone(), options, self.depth());
-        }
 
         Ok(image)
     }
@@ -5688,6 +5788,78 @@ mod tests {
             recorder.surface.depth > committed.0,
             "the closed layer is filed and read"
         );
+    }
+
+    #[test]
+    fn a_page_inside_a_layer_files_the_page_beneath_it() {
+        let _shared = SHARED_CACHE.lock();
+        // An export inside a layer files the page beneath the layer, at its
+        // depth, under its identity -- not the page it was taken as, which
+        // nothing keeps -- and the entry goes when the canvas does, as every
+        // entry of its generation does.
+        let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
+        let square = |canvas: &SkCanvas| {
+            canvas.draw_rect(Rect::from_wh(4.0, 4.0), &Paint::default());
+        };
+        recorder.append(square);
+        let filed = recorder.page();
+        let (id, depth) = (filed.id, filed.depth());
+        recorder.open_layer(LayerRec::default());
+        // Translucent and beside the square, so that drawing it twice shows.
+        recorder.append(|canvas| {
+            let mut half = Paint::default();
+            half.set_alpha_f(0.5);
+            canvas.draw_rect(Rect::from_xywh(2.0, 2.0, 6.0, 6.0), &half);
+        });
+        let page = recorder.page();
+        let opts = ExportOptions {
+            format: ImageFormat::Png,
+            ..ExportOptions::default()
+        };
+        let first = page
+            .composite(&opts, RenderingEngine::CPU)
+            .expect("a raster composite of an eight-pixel page");
+        // The next composite starts from that entry, and comes out as the
+        // first did: an entry that changed as the open layer drew over it
+        // would hold the layer twice.
+        let again = recorder.page();
+        let (_, started) = again
+            .composited_surface(&opts, RenderingEngine::CPU)
+            .expect("a raster composite of an eight-pixel page");
+        assert_eq!(
+            started, depth,
+            "the next page inside the layer starts from it"
+        );
+        let second = again
+            .composite(&opts, RenderingEngine::CPU)
+            .expect("a raster composite of an eight-pixel page");
+        let bytes = |image: &SkImage| {
+            let info = image.image_info();
+            let mut pixels = vec![0; info.compute_min_byte_size()];
+            assert!(image.read_pixels(
+                info,
+                &mut pixels,
+                info.min_row_bytes(),
+                (0, 0),
+                CachingHint::Disallow,
+            ));
+            pixels
+        };
+        assert!(bytes(&first) == bytes(&second), "both composites alike");
+        let held = |id: usize| {
+            PageCache::shared()
+                .get(&id)
+                .map(|entry| (entry.image.is_some(), entry.depth))
+        };
+        assert_eq!(held(id), Some((true, depth)), "the page beneath is cached");
+        assert_eq!(
+            held(page.id),
+            None,
+            "the page inside the layer files nothing"
+        );
+
+        drop((page, again, filed, recorder));
+        assert_eq!(held(id), None, "the entry goes with the canvas");
     }
 
     /// A JPEG with `segments` before the compressed data, each a marker and
