@@ -260,13 +260,15 @@ impl ParagraphRecipe {
                         &mut base,
                         &mut collection,
                         epoch.as_ref(),
-                    );
+                    )
+                    .map(Box::new);
                     let shadows = take_shadows(&mut base);
                     let background = StyleBackground::take(
                         &mut base,
                         &mut collection,
                         epoch.as_ref(),
-                    );
+                    )
+                    .map(Box::new);
                     style.set_text_style(&base);
                     (decoration, shadows, background)
                 }
@@ -319,13 +321,15 @@ impl ParagraphRecipe {
             &mut style,
             &mut self.collection,
             self.epoch.as_ref(),
-        );
+        )
+        .map(Box::new);
         let shadows = take_shadows(&mut style);
         let background = StyleBackground::take(
             &mut style,
             &mut self.collection,
             self.epoch.as_ref(),
-        );
+        )
+        .map(Box::new);
         self.builder.push_style(&style);
         self.oblique |= oblique.is_some();
         self.half_leading |= style.half_leading();
@@ -453,7 +457,7 @@ impl ParagraphRecipe {
         for taken in self.taken() {
             background_slots.push(taken.background.as_ref().map(
                 |background| {
-                    backgrounds.push(background.clone());
+                    backgrounds.push(StyleBackground::clone(background));
                     backgrounds.len() - 1
                 },
             ));
@@ -538,7 +542,7 @@ impl ParagraphRecipe {
             .taken()
             .map(|taken| {
                 taken.decoration.as_ref().map(|decoration| {
-                    boxes.push(decoration.clone());
+                    boxes.push(StyleDecoration::clone(decoration));
                     boxes.len() - 1
                 })
             })
@@ -815,10 +819,14 @@ struct Pushed {
 
 /// What was taken off a style to be drawn here rather than by SkParagraph
 /// -- see [`Passes`]: its decoration, its shadows and its background.
+///
+/// The decoration and the background each behind a pointer, made only for
+/// a style that has one: a recipe moves one of these for its own style and
+/// keeps one for each style pushed, and most styles have neither.
 struct Taken {
-    decoration: Option<StyleDecoration>,
+    decoration: Option<Box<StyleDecoration>>,
     shadows: Vec<TextShadow>,
-    background: Option<StyleBackground>,
+    background: Option<Box<StyleBackground>>,
 }
 
 /// One piece of a paragraph's text: the step that adds it, its bytes,
@@ -3170,6 +3178,18 @@ mod tests {
         let next = edge_recipe(&[]);
         assert!(next.steps.capacity() <= super::KEPT_LIST_CAPACITY);
         assert!(next.pushed.capacity() <= super::KEPT_LIST_CAPACITY);
+    }
+
+    /// What is taken off a style is a few words, its decoration and its
+    /// background each behind a pointer: every recipe moves one for its own
+    /// style and keeps one for each style pushed, and most styles have
+    /// neither, so their size was copied with every move of a builder for
+    /// nothing.
+    #[test]
+    fn what_is_taken_off_a_style_is_a_few_words() {
+        let words =
+            std::mem::size_of::<super::Taken>() / std::mem::size_of::<usize>();
+        assert!(words <= 5, "{words} words");
     }
 
     /// A paragraph in two styles whose edges are all ASCII is built without
