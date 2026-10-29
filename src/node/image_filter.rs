@@ -407,10 +407,18 @@ fn parse_color_channel(
     enum_arg_or(cx, idx, attr, COLOR_CHANNELS, ColorChannel::Red)
 }
 
-/// Parses a `Color` from the argument (CSS string) -> `skia_safe::Color`,
-/// 32-bit.
+/// Parses a lighting filter's light colour from the argument (CSS string)
+/// into the eight-bit sRGB `skia_safe::Color` the six lit filters take,
+/// gamut-mapped rather than clipped -- see `css_to_color`.
 macro_rules! parse_color {
     ($cx:expr, $idx:expr, $default:expr) => {
+        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+        // Re-check: grep -n "light_color: impl Into"
+        // ~/.cargo/registry/src/*/skia-safe-*/src/effects/image_filters.rs
+        // Every lighting image filter takes its light colour as an
+        // `SkColor`, as `SkImageFilters`' own lit constructors do, so a light
+        // keeps eight bits a channel and a wide one is brought inside sRGB by
+        // gamut mapping on the way in, as `filter::lit` does for the crate.
         match $cx.argument_opt($idx) {
             Some(arg) if arg.is_a::<JsString, _>($cx) => {
                 let color_str =
