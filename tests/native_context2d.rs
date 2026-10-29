@@ -11866,8 +11866,12 @@ fn css_spacing_reaches_the_layout_it_configures() {
 const CHROME_FLOAT: f32 = 0.0005;
 
 /// At sizes whose advances are not whole hundredths, the width is Chrome
-/// 156's to the float.
+/// 156's to the float. Chrome's widths were measured on macOS, and
+/// FreeType's advances differ from CoreText's in the thousandths, so
+/// elsewhere `a_run_of_one_digit_is_its_width_times_its_length` holds the
+/// property instead.
 #[test]
+#[cfg(target_os = "macos")]
 fn a_width_is_chromes_at_fractional_sizes() {
     let mut canvas = Canvas::new(10.0, 10.0);
     let ctx = canvas.context();
@@ -11886,10 +11890,29 @@ fn a_width_is_chromes_at_fractional_sizes() {
     }
 }
 
-/// A paragraph from a `TextEngine` wraps at the width it is given: Chrome
-/// 156 fits "Hamburgefonstiv quick" in Oswald 24px, 200.53 wide, on one
-/// line at 200.7px and not at 200px, where SkParagraph's rounding hack
-/// broke at the width floored to 200.
+/// On any platform, a run of one digit is that digit's width times its
+/// length, at sizes whose advances are not whole hundredths. Widths rounded
+/// to hundredths broke this, each run rounded on its own.
+#[test]
+fn a_run_of_one_digit_is_its_width_times_its_length() {
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    for size in [9.5, 12.3, 17.7, 23.7, 31.9] {
+        ctx.set_font(&Font::new(oswald(), size));
+        let one = ctx.measure_text("0", None).width;
+        let seven = ctx.measure_text("0000000", None).width;
+        assert!(
+            (seven - 7.0 * one).abs() <= 0.0001,
+            "{size}px: {seven} against 7 x {one}"
+        );
+    }
+}
+
+/// A paragraph from a `TextEngine` wraps at the width it is given: one as
+/// wide as its first two words, a fractional width, holds them on its first
+/// line, where SkParagraph's rounding hack broke at the width floored to a
+/// whole pixel. Chrome 156, on macOS, fits "Hamburgefonstiv quick" in
+/// Oswald 24px, 200.53 wide, on one line at 200.7px and not at 200px.
 #[test]
 fn a_paragraph_wraps_at_its_fractional_width() {
     let engine = oswald_engine();
@@ -11899,8 +11922,16 @@ fn a_paragraph_wraps_at_its_fractional_width() {
     };
     let text = "Hamburgefonstiv quick brown fox jumps over";
     let lines = |width| engine.layout_text(text, &style, width).line_count();
-    assert_eq!(lines(200.7), 2);
-    assert_eq!(lines(200.0), 3);
+    let fits = engine
+        .layout_text("Hamburgefonstiv quick", &style, 1e6)
+        .max_intrinsic_width();
+    assert!(fits.fract() > 0.01, "{fits} is not fractional");
+    assert_eq!(lines(fits), 2);
+    assert_eq!(lines(fits.floor()), 3);
+    if cfg!(target_os = "macos") {
+        assert_eq!(lines(200.7), 2);
+        assert_eq!(lines(200.0), 3);
+    }
 }
 
 #[test]

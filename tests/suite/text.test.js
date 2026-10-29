@@ -952,6 +952,25 @@ describe("a face kerned through its legacy kern table outlines as it draws", () 
  */
 const CHROME_FLOAT = 0.0005;
 
+/**
+ * Where Chrome's widths were measured: macOS, whose CoreText gives the
+ * advances these tests hold. FreeType's differ in the thousandths, so
+ * elsewhere the widths are held to properties no rounding survives instead.
+ */
+const CHROME_MEASURED_HERE =
+  process.platform === "darwin"
+    ? false
+    : "Chrome 156's widths were measured on macOS, through CoreText";
+
+/**
+ * How close a width comes to Chrome 156's here: CHROME_FLOAT on macOS, and
+ * elsewhere `elsewhere`, the bound the test held before widths stopped being
+ * rounded, as FreeType's advances sit further than CHROME_FLOAT from
+ * CoreText's.
+ */
+const chromeBound = (elsewhere) =>
+  CHROME_MEASURED_HERE ? elsewhere : CHROME_FLOAT;
+
 describe("measureText's width is the run's advance", () => {
   FontLibrary.use("Oswald", [
     "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
@@ -981,34 +1000,54 @@ describe("measureText's width is the run's advance", () => {
       ctx.wordSpacing = word;
       const { width } = ctx.measureText(text);
       assert.ok(
-        Math.abs(width - chrome) <= CHROME_FLOAT,
+        Math.abs(width - chrome) <= chromeBound(0.01),
         `${letter} ${word} ${JSON.stringify(text)}: ${width}, Chrome ${chrome}`,
+      );
+    }
+  });
+
+  // On any platform: a run of one digit is that digit's width times its
+  // length, at sizes whose advances are not whole hundredths. Widths rounded
+  // to hundredths broke this, each run rounded on its own.
+  test("a run of one digit is its width times its length", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    for (const size of [9.5, 12.3, 17.7, 23.7, 31.9]) {
+      ctx.font = `${size}px Oswald`;
+      const one = ctx.measureText("0").width;
+      const seven = ctx.measureText("0000000").width;
+      assert.ok(
+        Math.abs(seven - 7 * one) <= 0.0001,
+        `${size}px: ${seven} against 7 x ${one}`,
       );
     }
   });
 
   // At sizes whose advances are not whole hundredths, the width is Chrome
   // 156's to the float.
-  test("width is Chrome's at fractional sizes", () => {
-    const ctx = new Canvas(10, 10).getContext("2d");
-    for (const [size, text, chrome] of [
-      [24, "Hamburgefonstiv", 148.1759033203125],
-      [24, "quick brown fox", 137.2559051513672],
-      [23.7, "Hamburgefonstiv", 146.32371520996094],
-      [23.7, "Hambu", 60.52976989746094],
-      [31.9, "Hamburgefonstiv", 196.9504852294922],
-      [31.9, "quick brown fox", 182.43600463867188],
-      [12, "Hamburgefonstiv", 74.08787536621094],
-      [9.5, "quick brown fox", 54.33038330078125],
-    ]) {
-      ctx.font = `${size}px Oswald`;
-      const { width } = ctx.measureText(text);
-      assert.ok(
-        Math.abs(width - chrome) <= CHROME_FLOAT,
-        `${size}px ${JSON.stringify(text)}: ${width}, Chrome ${chrome}`,
-      );
-    }
-  });
+  test(
+    "width is Chrome's at fractional sizes",
+    { skip: CHROME_MEASURED_HERE },
+    () => {
+      const ctx = new Canvas(10, 10).getContext("2d");
+      for (const [size, text, chrome] of [
+        [24, "Hamburgefonstiv", 148.1759033203125],
+        [24, "quick brown fox", 137.2559051513672],
+        [23.7, "Hamburgefonstiv", 146.32371520996094],
+        [23.7, "Hambu", 60.52976989746094],
+        [31.9, "Hamburgefonstiv", 196.9504852294922],
+        [31.9, "quick brown fox", 182.43600463867188],
+        [12, "Hamburgefonstiv", 74.08787536621094],
+        [9.5, "quick brown fox", 54.33038330078125],
+      ]) {
+        ctx.font = `${size}px Oswald`;
+        const { width } = ctx.measureText(text);
+        assert.ok(
+          Math.abs(width - chrome) <= CHROME_FLOAT,
+          `${size}px ${JSON.stringify(text)}: ${width}, Chrome ${chrome}`,
+        );
+      }
+    },
+  );
 
   // A letter spacing whose half is not a hundredth: rounded laid-out boxes
   // with half the spacing at each end lost a hundredth at 10px. Chrome 152
@@ -1026,7 +1065,7 @@ describe("measureText's width is the run's advance", () => {
       ctx.font = `${size}px Oswald`;
       const { width } = ctx.measureText("00");
       assert.ok(
-        Math.abs(width - chrome) <= CHROME_FLOAT,
+        Math.abs(width - chrome) <= chromeBound(0.005),
         `${size}px: ${width}, Chrome ${chrome}`,
       );
     }

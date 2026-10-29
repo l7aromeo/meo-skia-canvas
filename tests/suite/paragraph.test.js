@@ -382,19 +382,46 @@ describe("a paragraph is laid out at the width it is given", () => {
     },
   };
 
+  // Where Chrome's widths were measured: macOS, whose CoreText gives the
+  // advances the Chrome values below hold. FreeType's differ in the
+  // thousandths, so elsewhere only the properties are held.
+  const CHROME_MEASURED_HERE =
+    process.platform === "darwin"
+      ? false
+      : "Chrome 156's widths were measured on macOS, through CoreText";
+
+  // A paragraph as wide as its first two words, a fractional width, holds
+  // them on its first line; one floored to the whole pixel does not.
+  test("a fractional width holds a line that fits it", () => {
+    const text = "Hamburgefonstiv quick brown fox jumps over";
+    const width = laidOut(
+      STYLE,
+      "Hamburgefonstiv quick",
+      1e6,
+    ).getMaxIntrinsicWidth();
+    assert.ok(width % 1 > 0.01, `${width} is not fractional`);
+    const lines = (at) => laidOut(STYLE, text, at).getNumberOfLines();
+    assert.equal(lines(width), 2);
+    assert.equal(lines(Math.floor(width)), 3);
+  });
+
   // Chrome fits "Hamburgefonstiv quick", 200.53 wide, on one line at 200.7px
   // and not at 200px.
-  test("a fractional width wraps where Chrome wraps", () => {
-    const text = "Hamburgefonstiv quick brown fox jumps over";
-    const at = (width) =>
-      laidOut(STYLE, text, width)
-        .getLineMetrics()
-        .map((line) => line.width);
-    const [first, ...rest] = at(200.7);
-    assert.equal(rest.length, 1, `${[first, ...rest]}`);
-    assert.ok(Math.abs(first - 200.52) < 0.01, `${first}`);
-    assert.equal(at(200).length, 3);
-  });
+  test(
+    "a fractional width wraps where Chrome wraps",
+    { skip: CHROME_MEASURED_HERE },
+    () => {
+      const text = "Hamburgefonstiv quick brown fox jumps over";
+      const at = (width) =>
+        laidOut(STYLE, text, width)
+          .getLineMetrics()
+          .map((line) => line.width);
+      const [first, ...rest] = at(200.7);
+      assert.equal(rest.length, 1, `${[first, ...rest]}`);
+      assert.ok(Math.abs(first - 200.52) < 0.01, `${first}`);
+      assert.equal(at(200).length, 3);
+    },
+  );
 
   // A line exactly as wide as the paragraph fits it, and a thousandth less
   // does not: the widths are compared as they are.
@@ -405,18 +432,45 @@ describe("a paragraph is laid out at the width it is given", () => {
     assert.equal(laidOut(STYLE, line, width - 0.001).getNumberOfLines(), 2);
   });
 
+  // A run of one digit's box ends at that digit's advance times its
+  // length, at sizes whose advances are not whole hundredths. Boxes rounded
+  // to hundredths broke this, each rounded on its own.
+  test("a range's rect ends at the advance, unrounded", () => {
+    const end = (size, text) => {
+      const style = { textStyle: { ...STYLE.textStyle, fontSize: size } };
+      return laidOut(style, text, 1e6).getRectsForRange(
+        0,
+        text.length,
+        "tight",
+        "tight",
+      )[0].rect[2];
+    };
+    for (const size of [9.5, 12.3, 17.7, 23.7, 31.9]) {
+      const one = end(size, "0"),
+        seven = end(size, "0000000");
+      assert.ok(
+        Math.abs(seven - 7 * one) <= 0.0001,
+        `${size}px: ${seven} against 7 x ${one}`,
+      );
+    }
+  });
+
   // The box of "Hambu" ends where Chrome's measureText puts its advance,
   // 61.29597, not at the hundredth above it.
-  test("a range's rect ends at the advance, unrounded", () => {
-    const [box] = laidOut(STYLE, "Hamburgefonstiv", 1e6).getRectsForRange(
-      0,
-      5,
-      "tight",
-      "tight",
-    );
-    const right = box.rect[2];
-    assert.ok(Math.abs(right - 61.29597473144531) <= 0.0005, `${right}`);
-  });
+  test(
+    "a range's rect ends at Chrome's advance",
+    { skip: CHROME_MEASURED_HERE },
+    () => {
+      const [box] = laidOut(STYLE, "Hamburgefonstiv", 1e6).getRectsForRange(
+        0,
+        5,
+        "tight",
+        "tight",
+      );
+      const right = box.rect[2];
+      assert.ok(Math.abs(right - 61.29597473144531) <= 0.0005, `${right}`);
+    },
+  );
 
   // A point decides between the positions either side of a glyph at the
   // glyph's middle. The "u" of "Hamburgefonstiv" spans the advances of
