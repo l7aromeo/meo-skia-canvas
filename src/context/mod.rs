@@ -14,7 +14,7 @@ use skia_safe::{
     matrix::{Matrix, TypeMask},
     path_1d_path_effect,
     path_utils::fill_path_with_paint,
-    textlayout::{ParagraphStyle, StrutStyle, TextStyle},
+    textlayout::{StrutStyle, TextStyle},
 };
 use std::{cell::RefCell, rc::Rc};
 
@@ -47,7 +47,7 @@ use crate::{
     },
     typography::{
         Baseline, DecorationStyle, DrawnRun, FontSpec, PendingInk, Spacing,
-        TextExtents, TypesetInputs, Typesetter,
+        TextExtents, TypesetInputs, Typesetter, paragraph_style,
     },
     utils::*,
 };
@@ -251,7 +251,7 @@ impl Default for State {
             .set_stroke_width(1.0)
             .set_style(PaintStyle::Fill);
 
-        let graf_style = ParagraphStyle::new();
+        let graf_style = paragraph_style();
         let mut char_style = TextStyle::new();
         char_style.set_font_size(DEFAULT_FONT_SIZE);
 

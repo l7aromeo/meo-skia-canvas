@@ -51,6 +51,7 @@ use crate::{
             ParagraphRecipe, Passes, StyleColours, add_slnt, match_oblique,
             without_paragraph_cache,
         },
+        typography::paragraph_style,
         utils::color4f_to_srgb,
     },
 };
@@ -2545,7 +2546,7 @@ fn build_paragraph_style(
     base_sk_style: &SkTextStyle,
     strut_families: &[String],
 ) -> SkParagraphStyle {
-    let mut paragraph_style = SkParagraphStyle::new();
+    let mut paragraph_style = paragraph_style();
     paragraph_style.set_text_align(style.align.to_skia());
     paragraph_style.set_text_direction(style.direction.to_skia());
     paragraph_style.set_text_style(base_sk_style);
