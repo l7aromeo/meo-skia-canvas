@@ -34,6 +34,7 @@ use crate::{
     export::{EncodeOptions, ImageFormat, Pages},
     gpu::RenderingEngine,
     pixels::{ImageData, ImageDataExport, PixelColorSpace, PixelDepth},
+    start_skia,
 };
 
 /// What this build renders through, and what it found to render with.
@@ -332,6 +333,7 @@ impl Canvas {
         height: f32,
         options: CanvasOptions,
     ) -> Result<Self, Error> {
+        start_skia();
         if !text_contrast_in_range(options.text_contrast) {
             return Err(Error::InvalidCanvasOption {
                 option: "text_contrast",

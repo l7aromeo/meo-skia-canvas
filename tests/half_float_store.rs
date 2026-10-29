@@ -7,9 +7,36 @@
 //! truncates and flushes subnormal halves to zero. Which one an x86 machine
 //! runs is chosen by `SkGraphics::Init`, so these values tell the two apart:
 //! a tie, a value three quarters of the way to the next half, and a
-//! subnormal.
+//! subnormal. An x86 CPU without AVX2 and F16C keeps the portable stage even
+//! then, and the half-float test skips there, saying why.
 
 use meo_skia_canvas::prelude::*;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use std::arch::is_x86_feature_detected;
+
+/// Whether Skia has a stage on this CPU that rounds a half to nearest: on
+/// x86 the AVX2 one, which needs AVX2 and F16C. NEON always does.
+///
+/// Detected, not assumed: an x86 machine without both keeps the portable
+/// stage even once Skia is started, and the tests skip there rather than
+/// pass, saying why. libtest has no skip, so it is a message and an early
+/// return.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn has_rounding_stage() -> bool {
+    is_x86_feature_detected!("avx2") && is_x86_feature_detected!("f16c")
+}
+
+/// Whether Skia has a stage on this CPU that rounds a half to nearest; on
+/// ARM, NEON's, always.
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+fn has_rounding_stage() -> bool {
+    true
+}
+
+/// Why a test skipped on a CPU without [`has_rounding_stage`].
+const NO_ROUNDING_STAGE: &str = "skipped: this x86 CPU lacks AVX2 or F16C, so Skia keeps \
+     its portable half-float stage, which truncates (see the UPSTREAM note on \
+     `start_skia`)";
 
 /// Three quarters of a unit in the last place above one half. The nearest
 /// half is the next one up, `0.5 + 2^-11`; truncation keeps `0.5`.
@@ -78,6 +105,10 @@ fn a_float_canvas_holds_the_values_it_was_given() -> Result<(), Error> {
 
 #[test]
 fn a_half_float_canvas_stores_the_nearest_half() -> Result<(), Error> {
+    if !has_rounding_stage() {
+        eprintln!("{NO_ROUNDING_STAGE}");
+        return Ok(());
+    }
     assert_eq!(
         stored(PixelDepth::F16)?,
         [TIE_AS_HALF, SUBNORMAL, ABOVE_HALF_AS_HALF, 1.0],
