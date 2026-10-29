@@ -409,20 +409,28 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `# Panics` section now names the one case that panics: a first `run` off
   the main thread on macOS.
 
-- **A large blur in `set_filter_css` draws as Chrome's.** A flat-colour shape
+- **A large blur in `set_filter_css` keeps spreading.** A flat-colour shape
   or text was blurred on its coverage, which Skia holds to a sigma of 128, so
-  `blur(200px)`, `blur(500px)` and `blur(1000px)` drew alike. A draw is now
-  blurred on its result wherever that is nearer Chrome or cheaper, and text
-  always: Skia's coverage blur of text blurs each glyph on its own and draws
-  the glyphs over one another, so where their blurs overlapped the text lost
-  ink -- 16px Oswald blurred by 20px kept 58% of it and 48px blurred by 40px
-  75% -- and at every size measured it was two to seven times further from
-  the exact Gaussian than the blurred text now is. Blurred text costs what
-  any blurred path does. Chrome's own canvas blurs a large radius differently
-  on its GPU and on its CPU, and each engine here now matches Chrome's same
-  engine: a square sums to within half a percent of Chrome's GPU canvas from
-  50 to 1000px on the GPU engine, and to Chrome's CPU canvas exactly on the
-  CPU engine at every radius measured but 200px, which is 0.9% off.
+  `blur(200px)`, `blur(500px)` and `blur(1000px)` drew alike. A rectangle is
+  now drawn as its exact blur at every radius -- see the next entry -- and
+  any other draw is blurred on its result wherever that is nearer the
+  Gaussian or cheaper, and text always: Skia's coverage blur of text blurs
+  each glyph on its own and draws the glyphs over one another, so where their
+  blurs overlapped the text lost ink -- 16px Oswald blurred by 20px kept 58%
+  of it and 48px blurred by 40px 75% -- and at every size measured it was two
+  to seven times further from the exact Gaussian than the blurred text now
+  is. Blurred text costs what any blurred path does.
+
+- **A blurred rectangle is its exact Gaussian blur.** A flat-colour rectangle
+  under a `blur()` filter, whatever its radius, is drawn as the Gaussian blur
+  of the rectangle averaged over each pixel: within half a level of it on the
+  CPU engine and within 0.56 of one on the GPU engine, and to the surface's
+  precision on F16 and F32, where 0.16.3 drew Skia's blur: on the CPU engine
+  26 levels off at a sigma of 2 and 181 at 0.5, where so small a blur moved
+  the rectangle's edge by a pixel, and on the GPU engine 12.5 at 0.5. Chrome
+  152 is up to 3.3 levels off on its GPU canvas and 10.6 on its CPU canvas,
+  and docs/browser-differences.md has the figures. A rectangle in a canvas
+  drawn into another still takes Skia's blur.
 
 - **`measure_text`'s width is the same whatever the text alignment, and
   keeps a letter spacing whole.** It was read from the laid-out boxes, whose

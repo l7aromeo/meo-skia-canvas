@@ -3519,19 +3519,51 @@ describe("Context2D", () => {
     });
   });
 
-  describe("a blur draws as Chrome's at every radius", () => {
+  describe("a blurred square is its exact blur at every radius", () => {
     // A red square over the middle 60% of a canvas, blurred, its alpha
     // summed. Skia's coverage blur is held to a sigma of 128, so a
     // flat-colour square stopped spreading there: 1000, 500 and 200px all
-    // drew as 128 did, on either engine.
+    // drew as 128 did, on either engine. A rectangle that stays one is now
+    // drawn as its exact Gaussian blur at every radius, which the sums are
+    // held to here: the product of the blurred side across and the blurred
+    // side down, each averaged over a pixel, rounded a pixel at a time.
     //
-    // Chrome's canvas blurs a large radius differently on the GPU and on the
-    // CPU, so each engine is held to Chrome's same engine. The CPU rows are
-    // Chrome 152's CPU canvas, which `willReadFrequently` selects, and read
-    // the same on macOS and on Linux (Chrome 156); this engine matches them
-    // exactly but at 200px, 0.92% off. The GPU rows are Chrome 152's GPU
-    // canvas on a Mac and run only there: another GPU's blur rounds its own
-    // way -- Mesa's lavapipe sums 50000 at 200px.
+    // Chrome 152 is not exact here, and its two engines differ from each
+    // other: its CPU canvas sums 37296 at 200px and its GPU canvas 49252,
+    // against 38600 exactly; docs/browser-differences.md has the table.
+    const erf = (x) => {
+      const a = Math.abs(x);
+      let v;
+      if (a < 3) {
+        let term = 1,
+          sum = 1,
+          n = 0;
+        while (term > sum * 1e-17) {
+          n++;
+          term *= (2 * a * a) / (2 * n + 1);
+          sum += term;
+        }
+        v = ((2 * a) / Math.sqrt(Math.PI)) * Math.exp(-a * a) * sum;
+      } else {
+        let tail = 0;
+        for (let k = 80; k >= 1; k--) tail = k / 2 / (a + tail);
+        v = 1 - Math.exp(-a * a) / Math.sqrt(Math.PI) / (a + tail);
+      }
+      return x < 0 ? -v : v;
+    };
+    // The interval [a, b] blurred by sigma, averaged over each of n pixels.
+    const profile = (n, a, b, sigma) => {
+      const k = sigma * Math.SQRT2;
+      const g = (u) => u * erf(u) + Math.exp(-u * u) / Math.sqrt(Math.PI);
+      const at = (x) => (k / 2) * (g((x - a) / k) - g((x - b) / k));
+      return Array.from({ length: n }, (_, i) => at(i + 1) - at(i));
+    };
+    const exact = (side, blur) => {
+      const p = profile(side, side * 0.2, side * 0.8, blur);
+      let sum = 0;
+      for (const q of p) for (const r of p) sum += Math.round(255 * q * r);
+      return { sum, centre: Math.round(255 * p[side / 2] ** 2) };
+    };
     const blurred = (side, blur, gpu) => {
       const canvas = new Canvas(side, side);
       canvas.gpu = gpu;
@@ -3546,51 +3578,31 @@ describe("Context2D", () => {
       return { sum, centre: data[centre] };
     };
 
+    // The CPU engine rounds each pixel where the exact value does. The GPU
+    // engine works the blur per fragment and hands it on as a half float,
+    // which moves a pixel a level where the exact value lies within a
+    // sixteenth of a half: measured within 0.14% of the exact sums.
     const engines = [
-      {
-        gpu: false,
-        tolerance: 0.01,
-        centre: 8,
-        rows: [
-          [1000, 10000],
-          [500, 10000],
-          [200, 37296],
-          [100, 133468],
-          [50, 407096],
-        ],
-      },
-      ...(process.platform === "darwin"
-        ? [
-            {
-              gpu: true,
-              tolerance: 0.005,
-              centre: 9,
-              rows: [
-                [1000, 0],
-                [500, 10000],
-                [200, 49252],
-                [100, 109412],
-                [50, 403200],
-              ],
-            },
-          ]
-        : []),
+      { gpu: false, tolerance: 0 },
+      { gpu: true, tolerance: 0.002 },
     ];
 
     test("a square blurred past Skia's mask cap keeps spreading", () => {
-      for (const { gpu, tolerance, centre, rows } of engines) {
+      for (const { gpu, tolerance } of engines) {
         const engine = gpu ? "GPU" : "CPU";
-        for (const [blur, chrome] of rows) {
+        for (const blur of [1000, 500, 200, 100, 50]) {
           const { sum } = blurred(100, blur, gpu);
+          const want = exact(100, blur).sum;
           assert.ok(
-            Math.abs(sum - chrome) <= chrome * tolerance,
-            `${engine} blur(${blur}px): ${sum}, Chrome ${chrome}`,
+            Math.abs(sum - want) <= want * tolerance,
+            `${engine} blur(${blur}px): ${sum}, exactly ${want}`,
           );
         }
         const wide = blurred(400, 1000, gpu);
+        const want = exact(400, 1000).centre;
         assert.ok(
-          Math.abs(wide.centre - centre) <= 1,
-          `${engine} 400px canvas, blur(1000px): centre ${wide.centre}, Chrome ${centre}`,
+          Math.abs(wide.centre - want) <= 1,
+          `${engine} 400px canvas, blur(1000px): centre ${wide.centre}, exactly ${want}`,
         );
       }
     });
@@ -3967,8 +3979,8 @@ describe("a CSS blur is the same width whatever it is drawing", () => {
   //
   // Measured as the width of the blurred edge rather than by comparing
   // pixels, because the two draws do not produce identical rasters even when
-  // they agree -- one is a coverage mask and the other a filtered bitmap.
-  // Spread is what the bug moved, and by a factor of two.
+  // they agree -- one is the rectangle's exact blur and the other a filtered
+  // bitmap. Spread is what the bug moved, and by a factor of two.
   const W = 240,
     H = 40;
 
@@ -3987,15 +3999,16 @@ describe("a CSS blur is the same width whatever it is drawing", () => {
     return first < 0 ? 0 : last - first + 1;
   }
 
-  // Within a pixel of each other. The two draws do not rasterize identically
-  // even when they agree on the radius -- one blurs a coverage mask, the other
-  // a bitmap -- and the edge lands a pixel apart at some radii: 51 against 52
-  // at 6px. The defect this guards moved the spread by a factor of two, 46
-  // against 52 and 52 against 63, so a pixel of slack costs nothing and
-  // asserting equality only produces a test that fails for the wrong reason.
+  // Within two pixels of each other. The rectangle is the exact Gaussian;
+  // an image or a pattern takes Skia's image blur, whose tail falls short of
+  // it, and the edge lands up to two pixels inside: 62 against the exact 64
+  // at 12px. The defect this guards moved the spread by a factor of two, 46
+  // against 52 and 52 against 63, so two pixels of slack still catch it, and
+  // asserting equality would fail on the image blur's shortfall rather than
+  // on the radius.
   function assertSpread(actual, expected, message) {
     assert.ok(
-      Math.abs(actual - expected) <= 1,
+      Math.abs(actual - expected) <= 2,
       `${message}: ${actual} against ${expected}`,
     );
   }
@@ -4149,7 +4162,7 @@ describe("a CSS blur is the same width whatever it is drawing", () => {
     test(`a ${repeat} pattern spreads as far as a solid fill`, () => {
       // A coverage blur can only spread a fill where its shader paints, and
       // neither of these paints outside the source horizontally -- so the fill
-      // kept a hard edge at 40 pixels whatever the radius, against 62 for the
+      // kept a hard edge at 40 pixels whatever the radius, against 64 for the
       // same shape filled with a colour. `repeat-x` did not, which is what
       // identified the cause.
       let { off } = square(0);

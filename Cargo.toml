@@ -175,6 +175,9 @@ dashmap = "6"
 # The hasher of the font, face and collection caches -- see `cache_map`.
 # Already in the tree by way of `serde_json`, so this adds no build.
 foldhash = "0.2"
+# The error function behind a rectangle's exact blur -- see `blur_mask`.
+# Already in the tree by way of `quantette`, so this adds no build.
+libm = "0.2"
 # A face's advances as its tables give them, for the font-relative units --
 # see `css::design_advance`. Skia's own measure goes through the platform's
 # scaler, and FreeType's is a few millionths off. Locked already by way of
