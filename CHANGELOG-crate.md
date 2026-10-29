@@ -19,7 +19,7 @@ independently of the npm package.
 
 ## 📦 ⟩ [v0.17.0] (crate) ⟩ Unreleased
 
-**A breaking release. Twenty-five changes can break working code, each under
+**A breaking release. Twenty-six changes can break working code, each under
 Breaking with what to change.**
 
 Signatures and types change: `FontSlant::Oblique` and `TextSlant::Oblique` carry
@@ -28,30 +28,32 @@ keyword is a family name, and the details `family_details` returns are
 `FontFamilyDetails`; `TextStyle::font_variations` is a `FontVariationSettings`;
 `UiEvent::Input` carries a `TextInputType`; and `Error` is `#[non_exhaustive]`.
 Values that were taken are refused: a text contrast or gamma outside Skia's
-range, from `Canvas::with_options`; a blank string in `set_filter_css`, which
-cleared the filter; a number ending in a point; and colour, font, filter and
-spacing strings Chrome 153 refuses, a space before `(`, legacy commas CSS Color
-4 does not allow and `hwba()`, `hsv()` and hex without `#` among them. Values
-read back differently: `Context2D::font()` as CSSOM serializes a font,
-`filter()` as the chain was written, `fill_style()` and `stroke_style()` as the
-colour that paints, text widths, line metrics and rects, which are no longer
-rounded to hundredths, and `font_hinting()`, which is `true` until it is set.
-And some values mean something else: an `RgbaLinear` is linear-light sRGB on
-every canvas, `color(rec2020 ...)` decodes by a 2.4 gamma, `has_font` and
-`family_details` match a family name in any case, `sans-serif` is the face
-Chrome draws it in, and `set_word_spacing` is added after every word separator.
-On Linux the crate no longer sets `FONTCONFIG_PATH`.
+range, from `Canvas::with_options`; a `ColorFilter::lighting` coefficient that
+is not finite; a blank string in `set_filter_css`, which cleared the filter; a
+number ending in a point; and colour, font, filter and spacing strings Chrome
+153 refuses, a space before `(`, legacy commas CSS Color 4 does not allow and
+`hwba()`, `hsv()` and hex without `#` among them. Values read back differently:
+`Context2D::font()` as CSSOM serializes a font, `filter()` as the chain was
+written, `fill_style()` and `stroke_style()` as the colour that paints, text
+widths, line metrics and rects, which are no longer rounded to hundredths, and
+`font_hinting()`, which is `true` until it is set. And some values mean
+something else: an `RgbaLinear` is linear-light sRGB on every canvas,
+`color(rec2020 ...)` decodes by a 2.4 gamma, `has_font` and `family_details`
+match a family name in any case, `sans-serif` is the face Chrome draws it in,
+and `set_word_spacing` is added after every word separator. On Linux the crate
+no longer sets `FONTCONFIG_PATH`.
 
 Wrong pixels are fixed: a read after an export drew the cached page onto the
 surface again; on the GPU engine a translucent pixel read back up to a level
-low; and on Metal a GPU recovery could hand back blank or stale pixels as
-success, which is now drawn again and otherwise an `Error::Render`. Text is
-drawn as Chrome draws it: with Chrome's contrast and gamma, `set_font_hinting`
-taking effect, decorations where the font puts them and beneath the glyphs, a
-family with no italic or bold face slanted or emboldened, `FontSlant::Oblique`
-as CSS Fonts 4 matches it, and a variable font at the weight asked and at the
-optical size of its font size. `Image::from_url` and `ImageData::from_url` load
-over `http` and `https` behind an opt-in `fetch` feature, `set_font_kerning`,
+low; on the CPU engine a path a clip cut drew differently far from the cut; and
+on Metal a GPU recovery could hand back blank or stale pixels as success, which
+is now drawn again and otherwise an `Error::Render`. Text is drawn as Chrome
+draws it: with Chrome's contrast and gamma, `set_font_hinting` taking effect,
+decorations where the font puts them and beneath the glyphs, a family with no
+italic or bold face slanted or emboldened, `FontSlant::Oblique` as CSS Fonts 4
+matches it, and a variable font at the weight asked and at the optical size of
+its font size. `Image::from_url` and `ImageData::from_url` load over `http` and
+`https` behind an opt-in `fetch` feature, `set_font_kerning`,
 `set_text_rendering`, `color-mix()` and CSS Color 4's system colours are added,
 and the CSS strings read the math functions and every length unit.
 
@@ -389,6 +391,20 @@ and the CSS strings read the math functions and every length unit.
   resident until the process ended. The read now runs in a pool of its own,
   as an export does.
 
+- **A fill or stroke a clip cuts is drawn whole on the CPU engine, and the
+  clip multiplies it.** Where a clip covered part of a path, Skia rasterized
+  the path against the clip, and the edges that added at the cut changed
+  pixels far from it: a triangle clipped at x 82 drew 60 pixels more than two
+  inside the clip unlike the same triangle unclipped, by up to 17 levels, and
+  across fills, strokes and dashed strokes up to 273 pixels moved, by up to 92
+  levels. Such a draw is now played back on a CPU raster through a clip shader
+  of the clip, at the density of the read or export, so inside the clip it is
+  the unclipped draw byte for byte and at the clip's edge the triangle's mean
+  error from its exact coverage is 1.55 levels where it was 4.60. The GPU
+  engine and PDF and SVG exports clip as before. A draw inside an open
+  `save_layer`, and a canvas drawn into another or used as a pattern, are
+  still clipped as Skia clips them -- see docs/browser-differences.md.
+
 - **A colour lands exactly on an sRGB float canvas.** On a canvas made with
   `PixelDepth::F32` in `PixelColorSpace::Srgb`, a fill, stroke or matte in
   an `RgbaLinear` -- or in a CSS colour named in another space -- read back
@@ -701,11 +717,11 @@ and the CSS strings read the math functions and every length unit.
   as it is.** Its multiply and add reached Skia as eight-bit colours, so
   each sRGB component was clamped to `0..=1` and quantized to a 255th: a
   multiply of `RgbaLinear::from_srgb(2.0, 1.0, 0.5, 1.0)` left red as it
-  was, and a negative add component was taken as zero. Each component is now the scale or offset it names, in
-  floating point, with the result clamped to the displayable range as
-  before, and a multiply and add an eight-bit colour can hold draw byte
-  for byte as they did. A coefficient that is not finite is refused --
-  see Breaking.
+  was, and a negative add component was taken as zero. Each component is
+  now the scale or offset it names, in floating point, with the result
+  clamped to the displayable range as before, and a multiply and add an
+  eight-bit colour can hold draw byte for byte as they did. A coefficient
+  that is not finite is refused -- see Breaking.
 
 - **`outline_text` and the ink box put every glyph where `fill_text` draws
   it.** A glyph the shaper moves off its advance -- a mark stacked over

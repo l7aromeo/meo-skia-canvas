@@ -42,8 +42,9 @@ the fontconfig configuration a Linux machine without one was pointed at through
 Wrong pixels are fixed: `getImageData` after an export drew the exported page
 onto the canvas a second time; a translucent pixel read back up to a level low
 on the GPU engine; a GPU recovery could hand back blank or stale pixels as
-success; and a context whose canvas had been collected lost it. Text is drawn as
-Chrome draws it: with Chrome's contrast and gamma, `fontHinting` taking effect,
+success; a path a clip cut drew differently far from the cut on the CPU engine;
+and a context whose canvas had been collected lost it. Text is drawn as Chrome
+draws it: with Chrome's contrast and gamma, `fontHinting` taking effect,
 decorations where the font puts them and beneath the glyphs, a family with no
 italic or bold face slanted or emboldened, `oblique` as CSS Fonts 4 matches it,
 a variable font at the weight asked and at the optical size of its font size,
@@ -736,6 +737,21 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   in one of their own, and the read now does too: five passes of the same
   twenty reads now end within 13 MB of the first, where they climbed from 434
   MB to 1435. 6.0.2 has the same unwrapped read, by its source.
+
+- **A fill or stroke a clip cuts is drawn whole on the CPU engine, and the
+  clip multiplies it.** Where a clip covered part of a path, Skia rasterized
+  the path against the clip, and the edges that added at the cut changed
+  pixels far from it: a triangle clipped at x 82 drew 60 pixels more than two
+  inside the clip unlike the same triangle unclipped, by up to 17 levels, and
+  across fills, strokes and dashed strokes up to 273 pixels moved, by up to 92
+  levels. Chrome's CPU canvas draws it as Skia does. Such a draw is now played
+  back on a CPU raster through a clip shader of the clip, at the density of
+  the read or export, so inside the clip it is the unclipped draw byte for
+  byte and at the clip's edge the triangle's mean error from its exact
+  coverage is 1.55 levels where it was 4.60. The GPU engine and PDF and SVG
+  exports clip as before. A draw inside an open `saveLayer()`, and a canvas
+  drawn into another or used as a pattern, are still clipped as Skia clips
+  them -- see docs/browser-differences.md.
 
 - **A colour named in another space lands exactly on an sRGB float canvas.**
   On a canvas made with `colorType: "RGBAF32"` in sRGB, a fill, stroke or
