@@ -1309,8 +1309,17 @@ impl Context2D {
         // The picture carries the source canvas's own features: a conic
         // gradient drawn on one canvas and replayed into another is still a
         // conic gradient when a backend comes to write it out, and a
-        // `destination-out` inside it is still a blend mode.
-        let features = self.vector_features(&paint, None).with(source);
+        // `destination-out` inside it is still a blend mode. And where it is
+        // drawn through its paint, it is drawn through a layer -- see
+        // `carries` below -- which a backend may not have.
+        let carried = match carries(source, &paint) {
+            true => VectorFeatures::PICTURE_PAINT,
+            false => VectorFeatures::PLAIN,
+        };
+        let features = self
+            .vector_features(&paint, None)
+            .with(source)
+            .with(carried);
         self.render_to_canvas(&paint, features, |canvas, paint| {
             // A paint here makes Skia draw the picture through a temporary
             // layer, which is what keeps the source's own compositing to
@@ -1318,23 +1327,16 @@ impl Context2D {
             // already on this canvas, where drawing the source's pixels --
             // which is what the Canvas API says this does -- leaves them
             // alone. Only where the source needs it, because the SVG
-            // backend omits a picture drawn with a paint altogether, and a
+            // backend omits a picture drawn with a paint altogether -- so
+            // such a draw is `PICTURE_PAINT` and rasterized there -- and a
             // source with nothing but source-over in it has nothing to
             // leak. An explicit `save_layer` will not do: Skia's recording
             // optimizer folds one wrapping a single draw back into the
             // draw, layer and all.
             //
             // Past that, the paint is only worth carrying if it says
-            // something -- alpha, a blend mode, a filter.
-            let paint = match (
-                source.any(),
-                paint.as_blend_mode(),
-                paint.alpha(),
-                paint.image_filter(),
-            ) {
-                (false, Some(BlendMode::SrcOver), 255, None) => None,
-                _ => Some(paint),
-            };
+            // something -- alpha, a blend mode, a filter, a colour filter.
+            let paint = carries(source, paint).then_some(paint);
             canvas.save();
             canvas.clip_rect(dst_rect, ClipOp::Intersect, true);
             canvas.draw_picture(picture, Some(&matrix), paint);
@@ -2182,6 +2184,24 @@ impl Dye {
             }
         };
     }
+}
+
+/// Whether a canvas's picture, carrying `source`'s features, is drawn with
+/// `paint` rather than without one: where the source composites in a mode of
+/// its own, or where the paint says something -- an alpha under one, a blend
+/// mode past source-over, an image filter, a colour filter. See
+/// `Context2D::draw_picture_costing`.
+fn carries(source: VectorFeatures, paint: &Paint) -> bool {
+    !matches!(
+        (
+            source.any(),
+            paint.as_blend_mode(),
+            paint.alpha(),
+            paint.image_filter(),
+            paint.color_filter(),
+        ),
+        (false, Some(BlendMode::SrcOver), 255, None, None)
+    )
 }
 
 /// What `path` covers once `matrix` puts it on the device, for choosing how

@@ -7247,6 +7247,77 @@ fn color_and_image_filters_change_the_drawing() {
     );
 }
 
+/// A canvas drawn into another under a colour filter is filtered as a fill
+/// of the same pixels is.
+#[test]
+fn a_color_filter_reaches_a_canvas_drawn_into_another() {
+    let luma = ColorFilter::luma();
+    let mut filled = Canvas::new(20.0, 20.0);
+    {
+        let ctx = filled.context();
+        ctx.set_color_filter(Some(&luma));
+        ctx.set_fill_style(red());
+        ctx.fill_rect(0.0, 0.0, 20.0, 20.0);
+    }
+    let mut source = Canvas::new(20.0, 20.0);
+    {
+        let ctx = source.context();
+        ctx.set_fill_style(red());
+        ctx.fill_rect(0.0, 0.0, 20.0, 20.0);
+    }
+    let mut drawn = Canvas::new(20.0, 20.0);
+    {
+        let ctx = drawn.context();
+        ctx.set_color_filter(Some(&luma));
+        ctx.draw_canvas(&mut source, 0.0, 0.0);
+    }
+    assert_eq!(pixels(&mut drawn), pixels(&mut filled));
+}
+
+/// An SVG export of a canvas drawn into another through a paint -- a
+/// colour filter, a global alpha -- carries what it drew. The SVG backend
+/// draws a picture with a paint through a layer it does not have and
+/// dropped it whole, leaving the page without the canvas; such a draw is
+/// rasterized into the document instead, and one with nothing to carry
+/// stays vector.
+#[test]
+fn an_svg_keeps_a_canvas_drawn_into_another_through_a_paint() {
+    let svg = |set: &dyn Fn(&mut Context2D)| {
+        let mut source = Canvas::new(20.0, 20.0);
+        {
+            let ctx = source.context();
+            ctx.set_fill_style(red());
+            ctx.fill_rect(0.0, 0.0, 20.0, 20.0);
+        }
+        let mut canvas = Canvas::new(40.0, 40.0);
+        {
+            let ctx = canvas.context();
+            set(ctx);
+            ctx.draw_canvas(&mut source, 10.0, 10.0);
+        }
+        String::from_utf8(
+            canvas
+                .to_buffer(ImageFormat::Svg, &EncodeOptions::default())
+                .expect("an svg"),
+        )
+        .expect("utf-8")
+    };
+    let luma = ColorFilter::luma();
+    assert!(
+        !svg(&|_| {}).contains("<image"),
+        "a canvas drawn with nothing to carry stays vector",
+    );
+    for (what, drawn) in [
+        (
+            "a colour filter",
+            svg(&|ctx| ctx.set_color_filter(Some(&luma))),
+        ),
+        ("a global alpha", svg(&|ctx| ctx.set_global_alpha(0.5))),
+    ] {
+        assert!(drawn.contains("<image"), "the canvas under {what} is gone");
+    }
+}
+
 #[test]
 fn word_spacing_widens_the_gaps_between_words() {
     let mut canvas = Canvas::new(10.0, 10.0);

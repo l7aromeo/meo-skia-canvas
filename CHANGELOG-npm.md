@@ -397,6 +397,21 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A canvas drawn into another takes the context's `colorFilter`.**
+  `ctx.drawImage(canvas, ...)` under `ctx.colorFilter`, at full
+  `globalAlpha` and in `source-over`, drew a canvas of plain drawing
+  unfiltered: a red canvas under a luma filter came out red, where a red
+  fill under the same filter reads alpha 54. It is now filtered as a fill of
+  the same pixels is.
+
+- **An SVG export keeps a canvas drawn into another under `globalAlpha` or
+  `colorFilter`.** `ctx.drawImage(canvas, ...)` under a `globalAlpha` below
+  1 left the SVG without the canvas at all: Skia's SVG backend draws such a
+  picture through a layer, which it does not have, and dropped it whole.
+  The draw is now rasterized into the SVG, as a shadow or a filter already
+  is, and a canvas drawn with nothing to carry stays vector. PDF drew all
+  of these correctly and is unchanged.
+
 - **A large blur exported at a high density keeps its width.** A
   `blur()` on a flat-colour shape is drawn by Skia's coverage blur up to a
   sigma it chose at density 1, and that blur stops at 128 output pixels: a
