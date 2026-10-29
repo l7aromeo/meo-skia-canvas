@@ -310,6 +310,78 @@ and the CSS strings read the math functions and every length unit.
 
 ### Fixed
 
+- **A half-float canvas stores the nearest half on x86.** On an x86
+  machine, a canvas made with `PixelDepth::F16` as its `color_type` truncated each value it
+  stored instead of rounding it, so a pixel could land up to one half-float
+  step low -- 0.0005 near one half -- and flushed values under 2^-14 to zero,
+  so a faint enough blur or gradient vanished. ARM machines were unaffected.
+  Skia picks the raster stages built for the CPU it runs on only when it is
+  started, and nothing started it; it is now started before anything else
+  reaches it, which rounds to nearest, keeps subnormals, and gives an x86
+  machine with AVX2 the stages built for it. That holds where the CPU has
+  AVX2 and F16C: an older x86 CPU keeps Skia's portable stage, which still
+  truncates. A value written with `Context2D::put_image_data` and read back
+  shows it.
+
+- **An SVG export keeps what a `saveLayer` holds.** Skia's SVG backend has
+  no layers and dropped whatever was drawn inside one: a red square in
+  `Context2D::save_layer` or `save_layer_with`, in a nested layer, or a
+  `Paragraph` drawn in one, exported to `ImageFormat::Svg` as a page without
+  it. A page with a draw inside a layer is now rasterized into the SVG, as
+  one with a filtered draw inside a layer already was; a layer that holds
+  nothing leaves it vector. PDF drew all of these correctly and stays
+  vector.
+
+- **A paragraph's decoration and text shadow are painted in the colours its
+  style names.** SkParagraph holds both as an eight-bit sRGB colour, and a
+  `Paragraph` drew them in it: on a canvas made with `PixelDepth::F16` or
+  `PixelDepth::F32`, a `TextStyle::decoration_color` or a `TextShadow`
+  colour in alpha 0.3 came out at 77/255 beside text at 0.3, and on an
+  eight-bit canvas a colour outside sRGB was gamut-mapped where a fill of
+  it is clipped. Both are drawn here rather than by SkParagraph, so they now
+  take the colours as named, as the text does; a colour of whole bytes
+  draws as it did.
+
+- **A text decoration's colour is painted at the precision it names, as a
+  fill's is.** The colour named in `Context2D::set_text_decoration_css` or
+  `set_text_decoration` was rounded to eight bits of sRGB when it was set.
+  On a canvas made with `PixelDepth::F16` or `PixelDepth::F32`, a line in
+  alpha 0.3 drew at 77/255 beside text drawn at 0.3, and a colour under half
+  of one 255th not at all. On an eight-bit canvas a colour outside sRGB was
+  gamut-mapped where a fill of it is clipped: `color(display-p3 0 1 0)` drew
+  its line at `0,251,41` beside a fill at `0,255,0`. The line now draws the
+  bytes a fill draws, on every canvas; a colour of whole bytes draws as it
+  did. The colour of a `drop-shadow()` read by `Context2D::set_filter_css`,
+  and its `FilterOp::DropShadow`, is kept as named too, which changes no
+  pixel yet: Skia's raster backend resolves the shadow on an eight-bit layer
+  either way.
+
+- **A draw too faint for eight bits draws on a float canvas.** On a canvas
+  made with `PixelDepth::F16` or `PixelDepth::F32` as its `color_type`, a
+  fill under `set_global_alpha(0.001)`, or in a colour of alpha 0.001, drew
+  nothing, and so did a stroke, text, an image, a pattern, a gradient, a
+  texture, a layer or a shadow under half of one 255th: Skia drops a draw
+  whose alpha rounds to zero in eight bits, whatever the canvas holds. Each
+  now leaves the alpha it was drawn with, 0.001 read back in float. A
+  shadow on a float canvas also takes the global alpha exactly, where under
+  0.5 it came back 128/255. An eight-bit canvas draws as it did. Still
+  drawn as nothing: a `Paragraph` whose `TextStyle::color` is that faint.
+
+- **A canvas drawn into another takes the context's colour filter.**
+  `Context2D::draw_canvas` under `Context2D::set_color_filter`, at full
+  global alpha and in `SourceOver`, drew a canvas of plain drawing
+  unfiltered: a red canvas under `ColorFilter::luma` came out red, where a
+  red fill under the same filter reads alpha 54. It is now filtered as a
+  fill of the same pixels is.
+
+- **An SVG export keeps a canvas drawn into another under a global alpha or
+  a colour filter.** `Context2D::draw_canvas` under a global alpha below 1
+  left the `ImageFormat::Svg` export without the canvas at all: Skia's SVG
+  backend draws such a picture through a layer, which it does not have, and
+  dropped it whole. The draw is now rasterized into the SVG, as a shadow or
+  a filter already is, and a canvas drawn with nothing to carry stays
+  vector. PDF drew all of these correctly and is unchanged.
+
 - **A large blur exported at a high density keeps its width.** A
   `blur()` on a flat-colour shape is drawn by Skia's coverage blur up to a
   sigma chosen at density 1, and that blur stops at 128 output pixels: a
@@ -785,6 +857,21 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `set_font_variation_settings` with `wght` 400 and a weight of 400 now name
   one instance rather than two.
 
+- **A fractional font weight is drawn at its fraction.**
+  `Context2D::set_font_css("512.5 1000px Oswald")` drew and measured the
+  face at 512: the fraction was dropped when the shorthand was read. CSS
+  Fonts 4 makes the weight a number from 1 to 1000, so a variable face is
+  now instanced at 512.5 -- its "0" at 1000px measures 535.15 on macOS, as
+  in Chrome, where 512 measures 535.11 -- and `1ch` follows it on every
+  platform. `Context2D::font()` reads the weight back as written,
+  `512.5 1000px "Oswald"`, where it read `512`. A `Font` holds a whole
+  weight, so
+  `Font::parse` and `Font::from_css` keep the whole part, as they did, and
+  a `TextStyle::font_weight` is whole as it was. Chrome reads the weight
+  back as `512` and draws it at the quarter below, and on Linux FreeType
+  rounds a variable face's advances to whole font units;
+  docs/browser-differences.md has both.
+
 - **A paragraph's `font_weight` reaches a variable font.** `TextEngine`
   instanced a variable typeface only when `TextStyle::font_variations` was
   non-empty, so a style setting just `font_weight` laid out the font's
@@ -966,7 +1053,11 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `set_word_spacing_css` and a `set_text_decoration_css` thickness.** `ex`,
   `ch`, `cap` and `ic` are measured on the face the context font resolves to
   -- for a variable font, the instance at its weight and axes, so `1ch` of
-  bold Oswald is 22px, as in Chrome. In the spacing setters they stay
+  bold Oswald is 22px, as in Chrome. `ch` and `ic` are the advances the
+  face's own tables give, unrounded, so they are the same on every platform
+  -- measured through FreeType they were a few millionths of an em short --
+  and a faked bold leaves them where the face puts them, as Chrome 152
+  does. In the spacing setters they stay
   relative and follow the font at layout, as `em` already did, and in a
   decoration thickness they and `em` now do too: `"underline 0.25em"` set
   under a 12px font and drawn under a 24px one is 6px thick, where it was

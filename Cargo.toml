@@ -175,6 +175,15 @@ dashmap = "6"
 # The hasher of the font, face and collection caches -- see `cache_map`.
 # Already in the tree by way of `serde_json`, so this adds no build.
 foldhash = "0.2"
+# A face's advances as its tables give them, for the font-relative units --
+# see `css::design_advance`. Skia's own measure goes through the platform's
+# scaler, and FreeType's is a few millionths off. Locked already by way of
+# winit's Wayland decorations; built here for every target, without its
+# layout and glyph-name tables.
+ttf-parser = { version = "0.25", default-features = false, features = [
+    "std",
+    "variable-fonts",
+] }
 
 # The formats Skia has no encoder for. Skia's encoder list is three modules
 # -- JPEG, PNG and WebP -- so anything else is encoded here,

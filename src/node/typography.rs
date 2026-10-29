@@ -4,7 +4,7 @@
 use crate::context::typesetting::BUILDS;
 use crate::{
     cache_map::{CacheMap, CacheSet},
-    context::{State, typesetting::Typography},
+    context::{State, faint::Faint, typesetting::Typography},
     css::{FontUnits, is_font_relative, parse_length, without_comments},
     font::{FontFamily, ObliqueAngle, leans_as_asked, variation_axes},
     font_library::{FontEpoch, FontLibrary, base_face},
@@ -20,7 +20,7 @@ use crate::{
 };
 use neon::prelude::*;
 use skia_safe::{
-    Canvas, Color, Font, FontMetrics, FourByteTag, GlyphId, Matrix, Paint,
+    Canvas, Color4f, Font, FontMetrics, FourByteTag, GlyphId, Matrix, Paint,
     Path as SkPath, PathBuilder as SkPathBuilder, Point, Rect, TextBlob,
     TextBlobBuilder, Typeface,
     font_style::{FontStyle, Slant, Weight, Width},
@@ -37,7 +37,7 @@ use std::{
     collections::VecDeque,
     fmt,
     hash::{BuildHasher, RandomState},
-    iter::{once, successors, zip},
+    iter::{successors, zip},
     ops::Range,
     rc::Rc,
 };
@@ -498,7 +498,8 @@ impl LaidOut {
             .collect()
     }
 
-    /// Draws the runs in `range` from `blobs`, the blobs of every run.
+    /// Draws the runs in `range` from `blobs`, the blobs of every run, onto
+    /// pixels that do with a faint paint what `faint` says.
     fn draw_runs(
         &self,
         canvas: &Canvas,
@@ -506,11 +507,13 @@ impl LaidOut {
         paint: &Paint,
         range: Range<usize>,
         blobs: &[Option<TextBlob>],
+        faint: Faint,
     ) {
+        let paint = faint.drawable(paint);
         let runs = zip(&self.runs[range.clone()], &blobs[range]);
         for (run, blob) in runs {
             if let Some(blob) = blob {
-                canvas.draw_text_blob(blob, origin + run.origin, paint);
+                canvas.draw_text_blob(blob, origin + run.origin, &paint);
             }
         }
     }
@@ -529,7 +532,8 @@ impl LaidOut {
 
     /// Paints the run with its anchor at `origin` in `paint`, a named line
     /// colour's alpha multiplied by `global_alpha`, as
-    /// [`Typesetter::decoration`] takes it.
+    /// [`Typesetter::decoration`] takes it, onto pixels that do with a faint
+    /// paint what `faint` says.
     ///
     /// A decorated run is drawn a line at a time, in the order CSS 2.1
     /// Appendix E paints a line box: underlines and overlines beneath the
@@ -542,6 +546,7 @@ impl LaidOut {
         origin: Point,
         paint: &Paint,
         global_alpha: f32,
+        faint: Faint,
     ) {
         let built;
         let kept = self.kept_blobs(paint);
@@ -553,7 +558,8 @@ impl LaidOut {
             }
         };
         let Some(decoration) = &self.decoration else {
-            self.draw_runs(canvas, origin, paint, 0..self.runs.len(), blobs);
+            let all = 0..self.runs.len();
+            self.draw_runs(canvas, origin, paint, all, blobs, faint);
             return;
         };
         let boxes = [decorate::Decoration {
@@ -571,9 +577,18 @@ impl LaidOut {
                 origin,
                 Layer::Beneath,
                 paint,
+                faint,
             );
-            self.draw_runs(canvas, origin, paint, start..end, blobs);
-            decorate::paint(canvas, spans, &boxes, origin, Layer::Over, paint);
+            self.draw_runs(canvas, origin, paint, start..end, blobs, faint);
+            decorate::paint(
+                canvas,
+                spans,
+                &boxes,
+                origin,
+                Layer::Over,
+                paint,
+                faint,
+            );
         }
     }
 }
@@ -611,21 +626,24 @@ impl DrawnRun {
     }
 
     /// Paints the run with its anchor at `origin` in `paint` -- see
-    /// [`LaidOut::paint`].
+    /// [`LaidOut::paint`]. A run laid out for one draw paints in the paint
+    /// it was laid out for, so a caller drawing onto pixels that keep a
+    /// faint paint lays it out for `faint.drawable(paint)`.
     pub fn paint(
         &self,
         canvas: &Canvas,
         origin: Point,
         paint: &Paint,
         global_alpha: f32,
+        faint: Faint,
     ) {
         match self {
             Self::Kept(laid_out) => {
-                laid_out.paint(canvas, origin, paint, global_alpha)
+                laid_out.paint(canvas, origin, paint, global_alpha, faint)
             }
             Self::Plain(layout) => layout.paragraph.paint(canvas, origin),
             Self::Runs(laid_out) => {
-                laid_out.paint(canvas, origin, paint, global_alpha)
+                laid_out.paint(canvas, origin, paint, global_alpha, faint)
             }
         }
     }
@@ -1309,9 +1327,13 @@ fn resolve_for_oblique(
 pub(crate) const SLNT: FourByteTag =
     FourByteTag::from_chars('s', 'l', 'n', 't');
 
-/// `variations` with an `oblique` angle's `slnt` ahead of them, so that a
-/// face with that axis is instanced at it and an explicit `slnt` in
-/// `variations` still wins.
+/// The OpenType `wght` axis tag.
+pub(crate) const WGHT: FourByteTag =
+    FourByteTag::from_chars('w', 'g', 'h', 't');
+
+/// `variations` with an `oblique` angle's `slnt` and a fractional weight's
+/// `wght` ahead of them, so that a face with those axes is instanced at
+/// them and an explicit `slnt` or `wght` in `variations` still wins.
 ///
 /// CSS Fonts 4, section 5.2: "For variable fonts with a slnt axis, a match is
 /// created by setting the slnt value with the specified oblique value."
@@ -1323,14 +1345,24 @@ pub(crate) const SLNT: FourByteTag =
 /// -0.2499, from -14 to -15. An angle of the sign
 /// the axis does not reach clamps to upright, and that run is sheared
 /// instead -- see [`run_shear`].
-pub(crate) fn with_oblique_slnt(
+///
+/// `font-weight` is a <number>, and OpenType defines `wght` on its scale, so
+/// `512.5` is instanced at 512.5. A whole weight needs nothing here: the
+/// instance takes `wght` from the matched style's weight, which a fraction
+/// does not survive -- Skia's `FontStyle` holds an integer -- and the
+/// fraction alone is carried to this point beside it.
+pub(crate) fn with_style_axes(
     variations: &[(FourByteTag, f32)],
     angle: Option<f32>,
+    weight: Option<f32>,
 ) -> Cow<'_, [(FourByteTag, f32)]> {
-    match angle {
-        None => Cow::Borrowed(variations),
-        Some(angle) => Cow::Owned(
-            once((SLNT, -angle))
+    match (angle, weight) {
+        (None, None) => Cow::Borrowed(variations),
+        _ => Cow::Owned(
+            angle
+                .map(|angle| (SLNT, -angle))
+                .into_iter()
+                .chain(weight.map(|weight| (WGHT, weight)))
                 .chain(variations.iter().copied())
                 .collect(),
         ),
@@ -1394,6 +1426,7 @@ impl<'a> Typesetter<'a> {
             &state.text.variations,
             decoration_thickness(state),
             state.text.oblique_angle,
+            state.text.weight,
             text,
             width,
         )
@@ -1407,6 +1440,7 @@ impl<'a> Typesetter<'a> {
         variations: &[(FourByteTag, f32)],
         decoration_thickness: Option<f32>,
         oblique: Option<f32>,
+        weight: Option<f32>,
         text: &'a str,
         width: Option<f32>,
     ) -> Self {
@@ -1416,7 +1450,7 @@ impl<'a> Typesetter<'a> {
         let kept = typography.clone();
         let mut typography = typography;
         let hinting = typography.1.hinting_is_on();
-        let variations = with_oblique_slnt(variations, oblique);
+        let variations = with_style_axes(variations, oblique, weight);
         let resolve = |style: &TextStyle| {
             FontLibrary::with_shared(|lib| {
                 lib.set_hinting(hinting).fonts_for_style(style, &variations)
@@ -1923,6 +1957,21 @@ impl<'a> Typesetter<'a> {
                 (norm - ascent, descent - norm)
             });
 
+        // UPSTREAM: FreeType 2.14.2 -- unfiled -- not worked around
+        // Re-check: bun run test:suite --test-name-pattern fraction
+        //
+        // The FreeType skia-bindings 0.153.3 embeds rounds each `HVAR`
+        // advance delta to a whole font unit: `tt_var_get_item_delta` in
+        // src/truetype/ttgxvar.c returns `ft_round_and_shift16`, `(value +
+        // 0x8000) >> 16`, which `tt_hvadvance_adjust` adds to an integer
+        // advance. So on Linux a variable face's advances move in whole
+        // units between its masters -- Oswald's "0" at weight 450 is 526 at
+        // 1000px, where its interpolation and CoreText give 525.52. OpenType
+        // 1.9.1 rounds only the normalised coordinate and recommends "that
+        // any rounding be done at the last point before a value is used".
+        // No load flag avoids it, and neither Skia's scaler nor its HarfBuzz
+        // font functions take an advance from anywhere else.
+        //
         // An unwrapped run measures its advance, every glyph and space with
         // its spacing, signed -- what Chrome reports. Not the laid-out boxes:
         // those are sorted rectangles, so never negative; they leave out a
@@ -2239,6 +2288,10 @@ pub struct FontSpec {
     /// initial values and the line height left out, as the Canvas API
     /// requires. Never a cache key -- two line heights serialize alike.
     pub serialized: String,
+    /// The weight as written where it is not a whole number, which
+    /// [`FontSpec::weight`] cannot hold, or `None`. The face is matched by
+    /// the whole weight and instanced at this -- see [`with_style_axes`].
+    pub fractional_weight: Option<f32>,
 }
 
 impl FontSpec {
@@ -2514,7 +2567,9 @@ pub struct DecorationStyle {
     pub css: String,
     pub decoration: Decoration,
     pub size: Option<Spacing>,
-    pub color: Option<Color>,
+    /// The lines' own colour as named, in extended sRGB, unpremultiplied,
+    /// or `None` for the text's.
+    pub color: Option<Color4f>,
 }
 
 impl Default for DecorationStyle {
@@ -3113,6 +3168,9 @@ pub struct TypesetInputs {
     decoration_thickness: Option<f32>,
     /// The angle an `oblique` font is drawn at -- see [`run_shear`].
     oblique: Option<f32>,
+    /// A fractional weight the font is instanced at -- see
+    /// [`with_style_axes`].
+    weight: Option<f32>,
     text: String,
     width: Option<f32>,
     /// The fonts registered when the run was measured, so that laying it
@@ -3130,8 +3188,11 @@ impl TypesetInputs {
         let mut typography = state.typography();
         if let Some(angle) = state.text.oblique_angle {
             let hinting = typography.1.hinting_is_on();
-            let variations =
-                with_oblique_slnt(&state.text.variations, Some(angle));
+            let variations = with_style_axes(
+                &state.text.variations,
+                Some(angle),
+                state.text.weight,
+            );
             let style = &mut Rc::make_mut(&mut typography).0;
             resolve_for_oblique(style, Some(angle), |style| {
                 FontLibrary::with_shared(|lib| {
@@ -3144,6 +3205,7 @@ impl TypesetInputs {
             variations: state.text.variations.clone(),
             decoration_thickness: decoration_thickness(state),
             oblique: state.text.oblique_angle,
+            weight: state.text.weight,
             text: text.to_string(),
             width,
             fonts: FontLibrary::with_shared(|lib| lib.epoch()),
@@ -3157,7 +3219,7 @@ impl TypesetInputs {
             &self.fonts,
             self.typography.1.hinting_is_on(),
             &self.typography.0,
-            &with_oblique_slnt(&self.variations, self.oblique),
+            &with_style_axes(&self.variations, self.oblique, self.weight),
         );
         Typesetter::from_resolved(
             (self.typography.clone(), self.typography.clone()),
@@ -3918,7 +3980,7 @@ mod hinting {
     use crate::{
         Canvas, Font as CanvasFont, FontLibrary as Library, RichTextSpan,
         TextEngine, TextRendering, TextStyle as SpanStyle,
-        node::oblique::ParagraphRecipe,
+        node::oblique::{ParagraphRecipe, StyleColours},
     };
     use skia_safe::{FontHinting, Paint, textlayout::ParagraphStyle};
 
@@ -4035,9 +4097,15 @@ mod hinting {
         });
         let mut paragraph_style = ParagraphStyle::new();
         paragraph_style.set_text_style(&style);
-        let mut recipe =
-            ParagraphRecipe::new(paragraph_style, None, collection, None);
-        recipe.push_style(style, None);
+        let none = StyleColours::default();
+        let mut recipe = ParagraphRecipe::new(
+            paragraph_style,
+            None,
+            collection,
+            None,
+            &none,
+        );
+        recipe.push_style(style, None, &none);
         recipe.add_text(TEXT);
         recipe.pop();
         let (mut paragraph, _) = recipe.build();

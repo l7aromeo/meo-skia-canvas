@@ -22,10 +22,11 @@ use std::{
 };
 
 use skia_safe::{
-    Data, FourByteTag, IRect, ImageInfo as SkImageInfo, Matrix as SkMatrix,
-    Paint as SkPaint, PaintStyle as SkPaintStyle, Path as SkPath,
-    PathBuilder as SkPathBuilder, PathDirection, Picture as SkPicture,
-    Point as SkPoint, RRect, Rect as SkRect, Size as SkSize,
+    Color4f, Data, FourByteTag, IRect, ImageInfo as SkImageInfo,
+    Matrix as SkMatrix, Paint as SkPaint, PaintStyle as SkPaintStyle,
+    Path as SkPath, PathBuilder as SkPathBuilder, PathDirection,
+    Picture as SkPicture, Point as SkPoint, RRect, Rect as SkRect,
+    Size as SkSize,
     font_style::{Slant, Weight, Width},
     path::AddPathMode,
     path_1d_path_effect,
@@ -39,8 +40,7 @@ use crate::{
     canvas::{Canvas, CanvasOptions},
     color::{
         RgbaLinear, linear_srgb_color_space, rgba_css,
-        rgba_linear_to_skia_color, rgba_linear_to_unpremul_color4f,
-        unpremul_color4f_to_rgba_linear,
+        rgba_linear_to_unpremul_color4f, unpremul_color4f_to_rgba_linear,
     },
     context::{
         Context2D as Inner, Dye, initial_root_face,
@@ -66,7 +66,10 @@ use crate::{
         path::{Path2D as NodePath2D, conic_or_line},
         pattern::CanvasPattern,
         typography::{Baseline, DecorationStyle, FontSpec, Spacing},
-        utils::{Declaration, color4f_to_rgba_linear, css_to_declared},
+        utils::{
+            Declaration, color4f_to_rgba_linear, color4f_to_srgb,
+            css_to_declared,
+        },
     },
     paint::{BlendMode, StrokeCap, StrokeJoin},
     path::{FillRule, Path2D},
@@ -638,7 +641,9 @@ pub struct Font {
     /// CSS numeric weight, `1` to `1000`. `400` is regular, `700` bold.
     ///
     /// Set through [`Font::weight`], which clamps; assigning the field
-    /// directly does not.
+    /// directly does not. A whole number: [`Font::parse`] keeps the whole
+    /// part of a fractional weight such as `512.5`, and
+    /// [`Context2D::set_font_css`] draws the fraction as well.
     pub weight: u16,
     /// Which slant of a face to select.
     ///
@@ -794,7 +799,7 @@ impl Font {
 
     /// Lowers this selection onto the internal font spec.
     fn to_spec(&self) -> FontSpec {
-        self.to_spec_with(false)
+        self.to_spec_with(false, None)
     }
 
     /// Every field the specification is lowered from, floats by their bits,
@@ -812,9 +817,14 @@ impl Font {
         }
     }
 
-    /// As [`Font::to_spec`], with small caps on when `small_caps` is, as a
-    /// font shorthand can ask and a [`Font`] cannot carry.
-    fn to_spec_with(&self, small_caps: bool) -> FontSpec {
+    /// As [`Font::to_spec`], with small caps on when `small_caps` is, and at
+    /// the fractional weight `fraction` where it is one, as a font shorthand
+    /// can ask and a [`Font`] cannot carry: its weight is a whole number.
+    fn to_spec_with(
+        &self,
+        small_caps: bool,
+        fraction: Option<f32>,
+    ) -> FontSpec {
         #[cfg(test)]
         SPECS_LOWERED.set(SPECS_LOWERED.get() + 1);
         // Every name quoted and every generic bare, as the getter writes
@@ -841,7 +851,7 @@ impl Font {
         if self.slant != FontSlant::Normal || small_caps {
             canonical.push(variant.to_string());
         }
-        canonical.push(self.weight.to_string());
+        canonical.push(self.weight_css(fraction));
         if self.stretch != FontStretch::Normal {
             canonical.push(self.stretch.to_css().to_string());
         }
@@ -871,7 +881,8 @@ impl Font {
             },
             variant: variant.to_string(),
             canonical,
-            serialized: self.serialized(small_caps),
+            serialized: self.serialized(small_caps, fraction),
+            fractional_weight: fraction,
         }
     }
 
@@ -910,7 +921,7 @@ impl Font {
     /// out, reads `oblique` as `italic`, writes `small-caps` after the
     /// weight, keeps six significant digits and quotes a name only where it
     /// has to -- and docs/browser-differences.md lists them.
-    fn serialized(&self, small_caps: bool) -> String {
+    fn serialized(&self, small_caps: bool, fraction: Option<f32>) -> String {
         let families = self
             .families
             .iter()
@@ -920,7 +931,8 @@ impl Font {
         [
             self.slant.to_css(),
             small_caps.then(|| "small-caps".to_string()),
-            (self.weight != NORMAL_WEIGHT).then(|| self.weight.to_string()),
+            (fraction.is_some() || self.weight != NORMAL_WEIGHT)
+                .then(|| self.weight_css(fraction)),
             (self.stretch != FontStretch::Normal)
                 .then(|| self.stretch.to_css().to_string()),
             Some(format!("{}px", css_number(self.size))),
@@ -940,6 +952,14 @@ impl Font {
 /// so it reads `75.59055px`, the same whether the font came from a string or
 /// a [`Font`]. `smaller` reads `8.333333px`. Zero is `0` whatever its sign,
 /// as is anything that rounds to it, since `0` is the shorter form.
+impl Font {
+    /// The weight as CSS writes it: `fraction` where a shorthand gave one,
+    /// as its shortest number, and the whole weight otherwise.
+    fn weight_css(&self, fraction: Option<f32>) -> String {
+        fraction.map_or_else(|| self.weight.to_string(), css_number)
+    }
+}
+
 fn css_number(value: f32) -> String {
     if !value.is_finite() {
         return format!("{value}");
@@ -995,11 +1015,14 @@ const BOLD_WEIGHT: u16 = 700;
 const BOLDER_FROM_NORMAL: u16 = 700;
 const LIGHTER_FROM_NORMAL: u16 = 100;
 
-/// A font shorthand read in full: the [`Font`], and the small-caps flag that
-/// the shorthand also sets but a [`Font`] has no field for.
+/// A font shorthand read in full: the [`Font`], and what the shorthand also
+/// sets but a [`Font`] has no field for -- the small-caps flag, and a weight
+/// with a fraction, whose whole part is the [`Font`]'s.
 struct FontShorthand {
     font: Font,
     small_caps: bool,
+    /// The weight as written where it is not a whole number, or `None`.
+    fraction: Option<f32>,
 }
 
 /// The specification a Canvas `font` shorthand names, or `None` where Chrome
@@ -1014,7 +1037,7 @@ pub(crate) fn font_spec_from_css(css: &str) -> Option<FontSpec> {
 impl FontShorthand {
     /// The specification the shorthand names.
     fn to_spec(&self) -> FontSpec {
-        self.font.to_spec_with(self.small_caps)
+        self.font.to_spec_with(self.small_caps, self.fraction)
     }
 }
 
@@ -1278,17 +1301,17 @@ fn css_string(text: &str, quote: char) -> Option<(String, &str)> {
 const MIN_WEIGHT: u16 = 1;
 const MAX_WEIGHT: u16 = 1000;
 
-/// A weight written as a number: 1 to 1000, any CSS number, with the
-/// fraction dropped -- Chrome reads `550.7` as 550 and refuses `0.9` -- or
-/// a math function of one, held to that range.
-fn font_weight(text: &str) -> Option<u16> {
+/// A weight written as a number: 1 to 1000, any CSS number -- CSS Fonts 4
+/// makes `font-weight` a <number>, so `550.7` is 550.7, and `0.9` is
+/// refused -- or a math function of one, held to that range.
+fn font_weight(text: &str) -> Option<f32> {
     if is_math(text) {
         return computed_weight(text);
     }
     let (weight, unit) = split_number(text)?;
     (unit.is_empty()
         && (f32::from(MIN_WEIGHT)..=f32::from(MAX_WEIGHT)).contains(&weight))
-    .then(|| weight.trunc() as u16)
+    .then_some(weight)
 }
 
 /// Where the token opening `text` ends: at the first character `stop`
@@ -1323,7 +1346,7 @@ fn past_closing_paren(text: &str) -> Option<usize> {
 
 /// A weight written as a math function, held to 1 to 1000 as Chrome holds
 /// it: `calc(950 + 100)` reads back as 1000 and `sin(30deg)` as 1.
-fn computed_weight(text: &str) -> Option<u16> {
+fn computed_weight(text: &str) -> Option<f32> {
     let units = parent_units();
     let expect = Expect {
         percent: Percent::Refused,
@@ -1335,7 +1358,7 @@ fn computed_weight(text: &str) -> Option<u16> {
     Some(
         quantity
             .finished()
-            .clamp(f64::from(MIN_WEIGHT), f64::from(MAX_WEIGHT)) as u16,
+            .clamp(f64::from(MIN_WEIGHT), f64::from(MAX_WEIGHT)) as f32,
     )
 }
 
@@ -1376,6 +1399,7 @@ fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
     let text = uncommented.trim_ascii();
     let mut font = Font::new(FontFamily::Named("".into()), 0.0);
     let mut small_caps = false;
+    let mut fraction = None;
     let (mut style, mut variant, mut weight, mut stretch) =
         (false, false, false, false);
     let mut prefix_tokens = 0;
@@ -1443,7 +1467,12 @@ fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
             }
             number if !weight && font_weight(number).is_some() => {
                 weight = true;
-                font.weight = font_weight(number).unwrap_or(NORMAL_WEIGHT);
+                let exact =
+                    font_weight(number).unwrap_or(f32::from(NORMAL_WEIGHT));
+                // The whole weight the face is matched by, and the fraction
+                // apart, for the instance it is drawn at.
+                font.weight = exact.trunc() as u16;
+                fraction = (exact.fract() != 0.0).then_some(exact);
                 true
             }
             keyword if !stretch && FontStretch::from_css(keyword).is_some() => {
@@ -1479,7 +1508,11 @@ fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
 
     font.families = font_families(rest)
         .ok_or_else(|| format!("no font family in {shorthand:?}"))?;
-    Ok(FontShorthand { font, small_caps })
+    Ok(FontShorthand {
+        font,
+        small_caps,
+        fraction,
+    })
 }
 
 /// The drawing surface of a [`Canvas`] page.
@@ -1925,7 +1958,8 @@ impl Context2D {
     /// [`FontVariantCaps::SmallCaps`] when the shorthand says `small-caps`,
     /// [`FontVariantCaps::Normal`] otherwise -- and
     /// [`Context2D::font_stretch`], both reset as Chrome resets them on every
-    /// assignment.
+    /// assignment. A fractional weight is drawn at its fraction and read back
+    /// as written, where a [`Font`] holds only its whole part.
     ///
     /// Returns `false`, changing nothing, for a shorthand Chrome ignores,
     /// which is what the Canvas `font` setter does with one. [`Font::from_css`]
@@ -2393,6 +2427,12 @@ impl Context2D {
         let css = decoration_css(lines, style, color, thickness);
         let size =
             thickness.and_then(|px| Spacing::parse(px, "px".to_string(), px));
+        let color = color.map(|color| {
+            color4f_to_srgb(
+                rgba_linear_to_unpremul_color4f(color),
+                Some(&linear_srgb_color_space()),
+            )
+        });
         let decoration = decoration_style(lines, style, color, size, css);
         self.inner
             .state
@@ -4419,10 +4459,15 @@ pub(crate) fn decoration_from_css(css: &str) -> Option<DecorationStyle> {
 
 /// The decoration state for these lines, or the cleared one -- which reads
 /// back as `"none"` -- where there are none.
+///
+/// `color` is the lines' own, as named, in extended sRGB: painted at the
+/// precision it names on every canvas, as a fill is, and drawn by
+/// `node::decorate` rather than by SkParagraph, whose decoration colour is
+/// eight-bit.
 fn decoration_style(
     lines: TextDecoration,
     style: TextDecorationStyle,
-    color: Option<RgbaLinear>,
+    color: Option<Color4f>,
     size: Option<Spacing>,
     css: String,
 ) -> DecorationStyle {
@@ -4440,13 +4485,7 @@ fn decoration_style(
             ..Decoration::default()
         },
         size,
-        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
-        // Re-check: grep -n "pub color" in skia-safe's
-        // src/modules/paragraph/text_style.rs
-        //
-        // SkParagraph's `Decoration` holds an eight-bit sRGB `SkColor`, so
-        // a wide decoration colour is gamut-mapped into sRGB.
-        color: color.map(rgba_linear_to_skia_color),
+        color,
     }
 }
 

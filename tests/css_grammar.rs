@@ -86,6 +86,64 @@ fn set_filter_css_answers_the_math_table() {
     );
 }
 
+/// A faked bold leaves `ch` where the face puts it. Chrome 152 measures the
+/// same `ch` at `bold 40px` as at `40px` for every face it emboldens --
+/// Chalkduster's 27.5359px, Zapfino's 43.9 and Papyrus's 26.5234 -- so a
+/// filter in `ch` blurs a single-weight face's bold text exactly as its
+/// regular.
+#[test]
+fn a_faked_bold_measures_the_ch_its_face_does() {
+    let bytes = fs::read("tests/assets/fonts/Monoton-Regular.woff")
+        .expect("the Monoton test font is readable");
+    FontLibrary::new()
+        .register_font_from_data("Monoton", &bytes)
+        .expect("Monoton registers");
+    let blur = |font: &str| filtered(Some(font), "blur(1ch)").expect("a blur");
+    assert!(blur("bold 40px Monoton") == blur("40px Monoton"));
+    // And `ch` is Monoton's own, not the half em it falls back to.
+    assert!(
+        blur("40px Monoton") != filtered(None, "blur(20px)").expect("a blur")
+    );
+}
+
+/// A fractional weight is a weight: CSS Fonts 4 makes `font-weight` a
+/// <number> from 1 to 1000. It reads back as written, as CSSOM serialises a
+/// number, and the face is instanced at it: `1ch` of 1000px Oswald follows
+/// the fraction as Chrome 156 measures it, which holds a weight to quarters
+/// and so draws these as written -- 535.105 at 512 and 535.194 at 513.
+#[test]
+fn a_fractional_weight_reads_back_and_instances_at_its_fraction() {
+    oswald();
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    for (set, back) in [
+        ("512.5 16px serif", "512.5 16px serif"),
+        ("calc(512.5) 16px serif", "512.5 16px serif"),
+        ("512 16px serif", "512 16px serif"),
+    ] {
+        assert!(ctx.set_font_css(set), "{set}");
+        assert_eq!(ctx.font(), back, "{set}");
+    }
+    for (weight, chrome) in [
+        (450.0, 525.515_869_f64),
+        (512.25, 535.127_441),
+        (512.5, 535.149_597),
+        (512.75, 535.171_753),
+    ] {
+        assert!(ctx.set_font_css(&format!("{weight} 1000px Oswald")));
+        ctx.set_letter_spacing_css("0px").expect("a spacing");
+        let plain = ctx.measure_text("00", None).width;
+        ctx.set_letter_spacing_css("1ch").expect("a spacing");
+        let ch = f64::from(ctx.measure_text("00", None).width - plain) / 2.0;
+        // Within the 2.14 coordinate the tables quantise to, 0.003 here, and
+        // the hundredth SkParagraph holds each width to.
+        assert!(
+            (ch - chrome).abs() <= 0.01,
+            "{weight}: 1ch {ch}, Chrome {chrome}"
+        );
+    }
+}
+
 /// `Affine` holds `f32`; the table holds what Chrome computed in `f64`. Eight
 /// `f32` ulps at the largest magnitude in the table, about 35.
 const TOLERANCE: f64 = 3e-5;

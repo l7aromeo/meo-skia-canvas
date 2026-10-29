@@ -656,6 +656,75 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A half-float canvas stores the nearest half on x86.** On an x86
+  machine, a canvas made with `colorType: "RGBAF16"` truncated each value it
+  stored instead of rounding it, so a pixel could land up to one half-float
+  step low -- 0.0005 near one half -- and flushed values under 2^-14 to zero,
+  so a faint enough blur or gradient vanished. ARM machines were unaffected.
+  Skia picks the raster stages built for the CPU it runs on only when it is
+  started, and nothing started it; it is now started before anything else
+  reaches it, which rounds to nearest, keeps subnormals, and gives an x86
+  machine with AVX2 the stages built for it. That holds where the CPU has
+  AVX2 and F16C: an older x86 CPU keeps Skia's portable stage, which still
+  truncates. A value written with `putImageData` and read back shows it.
+
+- **An SVG export keeps what a `saveLayer` holds.** Skia's SVG backend has
+  no layers and dropped whatever was drawn inside one: a red square in
+  `ctx.saveLayer()`, in a translucent or nested layer, or a paragraph drawn
+  in one, exported as a page without it. A page with a draw inside a layer
+  is now rasterized into the SVG, as one with a filtered draw inside a
+  layer already was; a layer that holds nothing leaves it vector. PDF drew
+  all of these correctly and stays vector.
+
+- **A paragraph's decoration and text shadow are painted in the colours its
+  style names.** SkParagraph holds both as an eight-bit sRGB colour, and
+  `ParagraphBuilder` styles drew them in it: on a canvas made with
+  `colorType: "RGBAF16"` or `"RGBAF32"`, a `decorationColor` or a shadow
+  `color` in alpha 0.3 came out at 77/255 beside text at 0.3, and on an
+  eight-bit canvas a colour outside sRGB was gamut-mapped where a fill of
+  it is clipped. Both are drawn here rather than by SkParagraph, so they now
+  take the colours as named, as the text does; a colour of whole bytes
+  draws as it did.
+
+- **A text decoration's colour is painted at the precision it names, as a
+  fill's is.** The colour in `ctx.textDecoration` was rounded to eight bits
+  of sRGB when it was set. On a canvas made with `colorType: "RGBAF16"` or
+  `"RGBAF32"`, `underline rgb(0 0 0 / 0.3)` drew its line at 77/255 beside
+  text drawn at 0.3, and a colour under half of one 255th drew no line at
+  all. On an eight-bit canvas a colour outside sRGB was gamut-mapped where
+  a fill of it is clipped: `color(display-p3 0 1 0)` drew its line at
+  `0,251,41` beside a fill at `0,255,0`. The line now draws the bytes a fill
+  draws, on every canvas; a colour of whole bytes draws as it did. The
+  colour of a `drop-shadow()` in `ctx.filter` is kept as named too, which
+  changes no pixel yet: Skia's raster backend resolves the shadow on an
+  eight-bit layer either way.
+
+- **A draw too faint for eight bits draws on a float canvas.** On a canvas
+  made with `colorType: "RGBAF16"` or `"RGBAF32"`, a fill under
+  `globalAlpha` 0.001, or in `rgba(0, 0, 0, 0.001)`, drew nothing, and so
+  did a stroke, text, an image, a pattern, a gradient, a texture, a layer or
+  a shadow under half of one 255th: Skia drops a draw whose alpha rounds to
+  zero in eight bits, whatever the canvas holds. Each now leaves the alpha
+  it was drawn with, 0.001 read back in float. A shadow on a float canvas
+  also takes `globalAlpha` exactly, where under 0.5 it came back 128/255.
+  An eight-bit canvas draws as it did. Still drawn as nothing: a
+  `ParagraphBuilder` style whose own colour is that faint.
+
+- **A canvas drawn into another takes the context's `colorFilter`.**
+  `ctx.drawImage(canvas, ...)` under `ctx.colorFilter`, at full
+  `globalAlpha` and in `source-over`, drew a canvas of plain drawing
+  unfiltered: a red canvas under a luma filter came out red, where a red
+  fill under the same filter reads alpha 54. It is now filtered as a fill of
+  the same pixels is.
+
+- **An SVG export keeps a canvas drawn into another under `globalAlpha` or
+  `colorFilter`.** `ctx.drawImage(canvas, ...)` under a `globalAlpha` below
+  1 left the SVG without the canvas at all: Skia's SVG backend draws such a
+  picture through a layer, which it does not have, and dropped it whole.
+  The draw is now rasterized into the SVG, as a shadow or a filter already
+  is, and a canvas drawn with nothing to carry stays vector. PDF drew all
+  of these correctly and is unchanged.
+
 - **A large blur exported at a high density keeps its width.** A
   `blur()` on a flat-colour shape is drawn by Skia's coverage blur up to a
   sigma it chose at density 1, and that blur stops at 128 output pixels: a
@@ -1226,6 +1295,18 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `font-weight: 400` and `fontVariationSettings = '"wght" 400'` now name one
   instance rather than two.
 
+- **A fractional font weight is drawn at its fraction.**
+  `ctx.font = "512.5 1000px Oswald"` drew and measured the face at 512, and a
+  `ParagraphBuilder`'s `fontStyle: { weight: 512.5 }` the same: the
+  fraction was dropped when the shorthand was read. CSS Fonts 4 makes the
+  weight a number from 1 to 1000, so a variable face is now instanced at
+  512.5 -- its "0" at 1000px measures 535.15 on macOS, as in Chrome, where
+  512 measures 535.11 -- and `1ch` follows it on every platform. `ctx.font`
+  reads the weight back as written, `512.5 1000px "Oswald"`, where it read
+  `512`. Chrome reads it back as `512` and draws a weight at the quarter
+  below it, and on Linux FreeType rounds a variable face's advances to
+  whole font units; docs/browser-differences.md has both.
+
 - **A colour outside sRGB named in `oklab()`, `oklch()` or an `xyz` space
   paints as itself on a wide canvas.** A negative channel was
   encoded on the sRGB curve's linear segment instead of the curve mirrored
@@ -1435,7 +1516,11 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
   `wordSpacing`.** `ex`, `ch`, `cap` and `ic` are measured on the face the
   context font resolves to -- for a variable font, the instance at its
   weight and axes, so `1ch` of bold Oswald is 22px, as in Chrome, and not
-  the 20.68px of its default instance. `rem` and the other root forms
+  the 20.68px of its default instance. `ch` and `ic` are the advances the
+  face's own tables give, unrounded, so they are the same on every
+  platform -- measured through FreeType they were a few millionths of an em
+  short -- and a faked bold leaves them where the face puts them, as Chrome
+  152 does. `rem` and the other root forms
   follow the context font in the spacing properties and a 16px root in
   `ctx.filter`, as Chrome resolves each -- so `blur(1rem)`, which was the
   context font's size, is now 16px whatever the font. `lh`, `rlh`, the viewport units and

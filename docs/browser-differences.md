@@ -16,6 +16,23 @@ differently: `color(display-p3 1 0 0 / 0.5)` stores red 128 and reads back as
 against 26 and 245, 0, 0, 26. The read itself converts exactly on both
 engines; the step is in what was drawn.
 
+On Linux a variable face's advances move in whole font units between its
+masters, where on macOS they follow the interpolation as Chrome on macOS
+does. The FreeType that skia-bindings 0.153.3 embeds, 2.14.2, rounds each
+`HVAR` advance delta to a whole unit: `tt_var_get_item_delta` in
+`src/truetype/ttgxvar.c` returns `ft_round_and_shift16`, which is
+`(value + 0x8000) >> 16`, and `tt_hvadvance_adjust` adds it to an integer
+advance before any scaling. No load flag or linear advance avoids it, and
+neither Skia's scaler nor its HarfBuzz font functions take an advance from
+anywhere else. OpenType 1.9.1 rounds the normalised coordinate to 2.14 and
+nothing after: "It is recommended that at least 16 fractional bits of
+precision be maintained, and that any rounding be done at the last point
+before a value is used." So Oswald's "0" at weight 450 and 1000px measures
+526 on Linux and 525.52 on macOS, where Chrome 156 on macOS measures 525.516;
+Chrome on Linux was not measured. `ch` and `ic` take the advance from the
+face's tables and are the interpolation's on every platform. The `UPSTREAM`
+note at the width in `Typesetter::measure` carries the re-check.
+
 `actualBoundingBoxAscent` and `actualBoundingBoxDescent` differ from Chrome
 because `SkParagraph` snaps a run's baseline to a whole pixel and Chrome does
 not. **The reported box is the box that is painted**, which is why it is not
@@ -363,6 +380,19 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   `italic 300 small-caps 16px Arial` in Chrome and
   `italic small-caps 300 condensed 16px "Arial"` here.
   `tests/assets/cases/css-fonts.json` holds both, the specification's form as `font` and Chrome's as `chrome`.
+- _A fractional `font-weight` is drawn and read back as written, and Chrome
+  holds it to quarters for drawing and to a whole number for reading back._
+  CSS Fonts 4 makes the weight a `<number>` from 1 to 1000, and OpenType
+  defines `wght` on the same scale, so `512.5 1000px Oswald` instances the
+  face at 512.5 and `ctx.font` reads back `512.5 1000px "Oswald"`, a number
+  in its shortest form as CSSOM writes one. Chrome 156 draws a weight at the
+  quarter below it -- `550.7` draws, and `getComputedStyle` reads, as
+  `550.5`, and `999.9` as `999.75` -- and its canvas getter truncates:
+  `512.5` reads back `512`, `550.7` `550`. At a quarter the two draw alike:
+  Oswald's "0" at 1000px is 535.127 at 512.25 and 535.150 at 512.5 in both,
+  against 535.105 at 512. A `Font` holds a whole weight, so `Font::parse` and
+  `Font::from_css` keep the whole part and `set_font_css` the fraction too.
+  `tests/assets/cases/css-fonts.json` has Chrome's read-back beside ours.
 - _A family name, and every other CSS identifier, holds only the code points
   CSS Syntax 3 lists._ Section 4.2 makes a name of ASCII letters, digits,
   `_`, `-` and the "non-ASCII ident code points", a list that leaves out
@@ -565,6 +595,37 @@ spellings take its 8-bit path, case included, and a colour whose bytes
 depend on how its function name is cased is not one CSS describes. The
 difference is a level at most where Chrome rounds, and more where its 8-bit
 path clips an `hsl()` outside sRGB that this library keeps.
+
+A text decoration's own colour, and a `drop-shadow()` filter's, are held
+the same way, at the precision they name. A decoration draws the bytes a
+fill of its colour draws, which Chrome's canvas cannot be compared on: it
+has no `textDecoration`. `tests/named_colour_precision.rs` holds the line to
+the fill's bytes on an eight-bit canvas and to the alpha it names on
+`RGBAF16` and `RGBAF32`, and the drop-shadow to the fill's bytes on an
+eight-bit canvas.
+
+**A draw too faint for eight bits draws on a float canvas, and Chrome drops
+it. Ours is the arithmetic's answer.** Skia skips a source-over draw whose
+paint alpha rounds to zero as a byte -- `SkPaint::nothingToDraw` tests
+`getAlpha()` -- whatever the pixels it would land in, and Chrome draws
+through it. On a `float16` canvas, which holds 0.001 to within a
+two-thousandth, Chrome 152 (152.0.7977.167) reads back:
+
+        draw                                      Chrome        here
+        fillRect in rgba(0, 0, 0, 0.001)          0             0.001
+        fillRect under globalAlpha 0.001          0             0.001
+        a shadow under globalAlpha 0.001          0.000999      0.001
+        a shadow under globalAlpha 0.5            0.5           0.5
+
+So Chrome keeps a faint shadow and drops the faint fill casting it. Nothing
+in the Canvas standard lets an alpha below a byte's resolution be treated
+as zero on a canvas that stores more than a byte, and every draw here --
+fills, strokes, text, images, patterns, gradients, textures, layers and
+shadows -- keeps it: `Faint::drawable` hands Skia such a paint opaque with
+its alpha in a colour filter, and a shadow takes the paint's alpha in its
+colour. An eight-bit canvas keeps Skia's skip and draws what Chrome does.
+`tests/faint_alpha.rs` pins each draw on `RGBAF16` and `RGBAF32`, and the
+eight-bit canvas to the bytes it drew before.
 
 **A colour reads back in the function it was declared in, with the figures
 the colour holds. Chrome writes eight bits and six figures.** CSS Color 4

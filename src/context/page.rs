@@ -462,6 +462,13 @@ impl PageRecorder {
         if self.isolated.is_some() {
             self.flush();
         }
+        // A draw inside an open layer is one the SVG backend drops with the
+        // layer, which has no layers; and a layer cannot be split out of the
+        // page any more than a draw inside one can -- see `append_isolated`
+        // -- so the page is what that backend rasterizes.
+        if !self.layer_floors.is_empty() {
+            self.page_features = self.page_features.with(VectorFeatures::LAYER);
+        }
         self.settle();
         if let Some(canvas) = self.current.recording_canvas() {
             f(canvas);
@@ -603,6 +610,10 @@ impl PageRecorder {
     /// `f` performs the `save_layer` itself. It runs with the current clip and
     /// matrix already applied, so the layer inherits them, and a fresh frame is
     /// opened inside the layer afterwards for its contents.
+    ///
+    /// The page is marked [`VectorFeatures::LAYER`] by the first draw inside
+    /// the layer -- see [`Self::append`] -- not here, so that a layer that
+    /// holds nothing leaves the page vector.
     pub fn open_layer<F>(&mut self, f: F)
     where
         F: FnOnce(&SkCanvas),
@@ -4397,6 +4408,7 @@ mod unpremultiply_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::faint::Faint;
     use parking_lot::Mutex;
     use std::ptr;
 
@@ -5580,7 +5592,7 @@ mod tests {
         let path = Path::rect(Rect::from_xywh(x, 0.0, 10.0, 10.0), None);
         let mut paint = Paint::default();
         paint.set_color(Color::BLACK);
-        BlurDraw::of(&path, path.is_rect(), &paint, 4.0)
+        BlurDraw::of(&path, path.is_rect(), &paint, 4.0, Faint::Dropped)
     }
 
     /// How many layers `recorder` holds after two blurred squares in one

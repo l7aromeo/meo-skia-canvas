@@ -30,14 +30,15 @@
 
 use crate::{
     cache_map::CacheMap,
+    context::faint::Faint,
     node::{
         font_library::FontEpoch,
         typography::{GlyphRun, GlyphRunRef},
     },
 };
 use skia_safe::{
-    Canvas, Color, Color4f, Font, FontStyle, Paint, Path, PathBuilder,
-    PathFillType, PathVerb, Point, Rect,
+    Canvas, Color4f, Font, FontStyle, Paint, Path, PathBuilder, PathFillType,
+    PathVerb, Point, Rect,
     paint::{Cap, Style},
     path_utils::fill_path_with_paint,
     textlayout::{
@@ -336,7 +337,8 @@ pub(crate) struct Decoration {
     /// The lines' colour where one was named, or `None` for the colour of
     /// the paint the text is drawn with -- CSS's `currentcolor`, kept as the
     /// paint holds it, wide-gamut and with any global alpha already in it.
-    pub(crate) color: Option<Color>,
+    /// In extended sRGB, unpremultiplied.
+    pub(crate) color: Option<Color4f>,
     /// What a named colour's alpha is multiplied by: a canvas's global
     /// alpha, which the text's own paint carries and a named colour does
     /// not. 1 where the paint is composited through a layer that applies it.
@@ -492,7 +494,7 @@ pub(crate) fn spans(
 /// the glyphs' paint, so that a canvas's compositing, filter and shadow
 /// reach the lines as they reach the text -- in the box's named colour, its
 /// alpha times the box's `opacity`, or in `base`'s own colour where none was
-/// named.
+/// named -- onto pixels that do with a faint paint what `faint` says.
 pub(crate) fn paint(
     canvas: &Canvas,
     spans: &[Span],
@@ -500,23 +502,24 @@ pub(crate) fn paint(
     origin: Point,
     layer: Layer,
     base: &Paint,
+    faint: Faint,
 ) {
     for span in spans {
         let decoration = &boxes[span.box_index];
         for kind in layer.kinds() {
             if decoration.lines.contains(*kind) {
+                let color = decoration.color.map(|mut color| {
+                    color.a *= decoration.opacity;
+                    color
+                });
                 draw_line(
                     canvas,
                     decoration,
                     *kind,
                     span,
                     origin,
-                    base,
-                    decoration.color.map(|color| {
-                        let mut color = Color4f::from(color);
-                        color.a *= decoration.opacity;
-                        color
-                    }),
+                    &line_paint(base, color),
+                    faint,
                 );
             }
         }
@@ -526,7 +529,8 @@ pub(crate) fn paint(
 /// Paints every line of box `box_index`'s spans in `shadow`, a text
 /// shadow's paint, as is -- its colour, not the line's. CSS Text Decoration
 /// 4, text-shadow: "Each layer shadows the element's text and all its text
-/// decorations (composited together)".
+/// decorations (composited together)". Onto pixels that do with a faint
+/// paint what `faint` says.
 pub(crate) fn paint_shadow(
     canvas: &Canvas,
     spans: &[Span],
@@ -534,6 +538,7 @@ pub(crate) fn paint_shadow(
     box_index: usize,
     origin: Point,
     shadow: &Paint,
+    faint: Faint,
 ) {
     let decoration = &boxes[box_index];
     for span in spans.iter().filter(|span| span.box_index == box_index) {
@@ -543,7 +548,15 @@ pub(crate) fn paint_shadow(
             TextDecoration::LINE_THROUGH,
         ] {
             if decoration.lines.contains(kind) {
-                draw_line(canvas, decoration, kind, span, origin, shadow, None);
+                draw_line(
+                    canvas,
+                    decoration,
+                    kind,
+                    span,
+                    origin,
+                    &line_paint(shadow, None),
+                    faint,
+                );
             }
         }
     }
@@ -567,19 +580,10 @@ fn band(decoration: &Decoration, kind: TextDecoration) -> (f32, f32, f32) {
     }
 }
 
-fn draw_line(
-    canvas: &Canvas,
-    decoration: &Decoration,
-    kind: TextDecoration,
-    span: &Span,
-    origin: Point,
-    base: &Paint,
-    color: Option<Color4f>,
-) {
-    let (top, t, out) = band(decoration, kind);
-    if t.is_nan() || t <= 0.0 || span.right <= span.left {
-        return;
-    }
+/// The paint a line is drawn in: `base`, the glyphs' paint or a text
+/// shadow's, as an antialiased fill with no shader, in `color` where the box
+/// names one.
+fn line_paint(base: &Paint, color: Option<Color4f>) -> Paint {
     let mut paint = base.clone();
     paint
         .set_shader(None)
@@ -588,6 +592,25 @@ fn draw_line(
     if let Some(color) = color {
         paint.set_color4f(color, None);
     }
+    paint
+}
+
+/// Draws one line of `span` in `line`, its paint from [`line_paint`], onto
+/// pixels that do with a faint paint what `faint` says.
+fn draw_line(
+    canvas: &Canvas,
+    decoration: &Decoration,
+    kind: TextDecoration,
+    span: &Span,
+    origin: Point,
+    line: &Paint,
+    faint: Faint,
+) {
+    let (top, t, out) = band(decoration, kind);
+    if t.is_nan() || t <= 0.0 || span.right <= span.left {
+        return;
+    }
+    let paint = faint.drawable(line);
     let left = origin.x + span.left;
     let right = origin.x + span.right;
     let top = origin.y + span.y + top;
@@ -611,9 +634,10 @@ fn draw_line(
                 _ => (DASH_ON, DASH_PERIOD),
             };
             if period * t * device < MIN_DEVICE_PERIOD {
-                let mut share = paint.clone();
-                share.set_alpha_f(paint.alpha_f() * on / period);
-                canvas.draw_rect(rect(left, right, top), &share);
+                let mut share = line.clone();
+                share.set_alpha_f(line.alpha_f() * on / period);
+                canvas
+                    .draw_rect(rect(left, right, top), &faint.drawable(&share));
                 return;
             }
             let mut x = left;
@@ -1420,8 +1444,9 @@ pub(crate) fn box_at(
 #[cfg(test)]
 mod tests {
     use super::{Decoration, FaceLines, Layer, Span, Thickness, paint, wave};
+    use crate::context::faint::Faint;
     use skia_safe::{
-        Color, Paint, PictureRecorder, Point, Rect,
+        Color, Color4f, Paint, PictureRecorder, Point, Rect,
         textlayout::{TextDecoration, TextDecorationStyle},
     };
 
@@ -1440,7 +1465,7 @@ mod tests {
             lines: TextDecoration::UNDERLINE,
             style,
             thickness: Thickness::Pixels(t),
-            color: Some(Color::BLACK),
+            color: Some(Color4f::from(Color::BLACK)),
             opacity: 1.0,
             face,
         }];
@@ -1462,6 +1487,7 @@ mod tests {
             Point::new(0.0, 0.0),
             Layer::Beneath,
             &Paint::default(),
+            Faint::Dropped,
         );
         recorder
             .finish_recording_as_picture(None)

@@ -24,19 +24,20 @@ mod math;
 
 use std::{borrow::Cow, cell::OnceCell};
 
-use skia_safe::{Font as SkFont, FontHinting, Typeface};
+use skia_safe::{Color4f, Font as SkFont, FontHinting, GlyphId, Typeface};
+use ttf_parser::{Face as TtfFace, GlyphId as TtfGlyphId, RawFaceTables, Tag};
 
 pub(crate) use math::{
     Dimension, Expect, Percent, Quantity, evaluate, is_math, literal,
 };
 
 use crate::{
-    color::{RgbaLinear, skia_color_to_rgba_linear},
+    color::RgbaLinear,
     error::Error,
     filter::FilterOp,
     geometry::Affine,
     image::{EX_PER_EM, x_height_ratio},
-    node::utils::{css_to_color, css_to_color4f},
+    node::utils::css_to_color4f,
     text::{TextDecoration, TextDecorationStyle},
 };
 
@@ -343,6 +344,75 @@ const IC_GLYPH: char = '\u{6C34}';
 /// so a ratio belongs to the face and not to one size of it.
 const MEASURE_SIZE: f32 = 100.0;
 
+/// The advance of `glyph` in `typeface`, as a fraction of an em, as the
+/// face's tables give it at the instance `typeface` is: the `hmtx` advance
+/// and its variation, from `HVAR` or, in a TrueType face without one, as the
+/// distance between the two horizontal phantom points `gvar` moves -- each
+/// as the OpenType specification defines it, and none of it rounded.
+/// `None` where the tables cannot be read.
+fn design_advance(typeface: &Typeface, glyph: GlyphId) -> Option<f32> {
+    let table =
+        |tag: &[u8; 4]| typeface.copy_table_data(u32::from_be_bytes(*tag));
+    let (head, hhea, maxp, hmtx) = (
+        table(b"head")?,
+        table(b"hhea")?,
+        table(b"maxp")?,
+        table(b"hmtx")?,
+    );
+    let (fvar, avar, hvar) = (table(b"fvar"), table(b"avar"), table(b"HVAR"));
+    // The outlines are only read for a variable face with no `HVAR`, the one
+    // case whose advances move with them.
+    let outlines = (fvar.is_some() && hvar.is_none())
+        .then(|| (table(b"glyf"), table(b"loca"), table(b"gvar")));
+    let (glyf, loca, gvar) = outlines.unwrap_or_default();
+    let tables = RawFaceTables {
+        head: head.as_bytes(),
+        hhea: hhea.as_bytes(),
+        maxp: maxp.as_bytes(),
+        hmtx: Some(hmtx.as_bytes()),
+        fvar: fvar.as_deref(),
+        avar: avar.as_deref(),
+        hvar: hvar.as_deref(),
+        glyf: glyf.as_deref(),
+        loca: loca.as_deref(),
+        gvar: gvar.as_deref(),
+        ..RawFaceTables::default()
+    };
+    let position = typeface.variation_design_position().unwrap_or_default();
+    let position = position.iter().map(|coordinate| {
+        let axis = coordinate.axis;
+        (
+            Tag::from_bytes(&[axis.a(), axis.b(), axis.c(), axis.d()]),
+            coordinate.value,
+        )
+    });
+    table_advance(tables, position, glyph)
+}
+
+/// [`design_advance`] from the tables themselves, at the design `position`
+/// given axis by axis.
+fn table_advance(
+    tables: RawFaceTables<'_>,
+    position: impl IntoIterator<Item = (Tag, f32)>,
+    glyph: GlyphId,
+) -> Option<f32> {
+    let mut face = TtfFace::from_raw_tables(tables).ok()?;
+    position.into_iter().for_each(|(axis, value)| {
+        face.set_variation(axis, value);
+    });
+    let id = TtfGlyphId(glyph);
+    let advance = f32::from(face.tables().hmtx?.advance(id)?);
+    let coords = face.variation_coordinates();
+    let variation = match (face.is_variable(), face.tables().hvar) {
+        (false, _) => 0.0,
+        (true, Some(hvar)) => hvar.advance_offset(id, coords).unwrap_or(0.0),
+        (true, None) => face
+            .glyph_phantom_points(id)
+            .map_or(0.0, |points| points.right.x - points.left.x),
+    };
+    Some((advance + variation) / f32::from(face.units_per_em()))
+}
+
 impl FaceRatios {
     /// What CSS Values 4 says to assume when there is no face to measure.
     ///
@@ -374,7 +444,13 @@ impl FaceRatios {
         let advance = |glyph: char| {
             let id = font.unichar_to_glyph(glyph as i32);
             (id != 0).then(|| {
-                font.measure_str(glyph.to_string(), None).0 / MEASURE_SIZE
+                // Skia's measure only where the face's tables cannot be
+                // read: it comes through the platform's scaler, which on
+                // FreeType put Oswald's `0` at 0.5169995 em, where its table
+                // says 517/1000.
+                design_advance(&typeface, id).unwrap_or_else(|| {
+                    font.measure_str(glyph.to_string(), None).0 / MEASURE_SIZE
+                })
             })
         };
         let (_, metrics) = font.metrics();
@@ -382,14 +458,15 @@ impl FaceRatios {
             height if height.is_finite() && height > 0.0 => height,
             _ => -metrics.ascent,
         } / MEASURE_SIZE;
+        let (ch, ic) = (advance('0'), advance(IC_GLYPH));
         Self {
             ex: x_height_ratio(typeface).unwrap_or(EX_PER_EM),
-            ch: advance('0').unwrap_or(CH_PER_EM),
+            ch: ch.unwrap_or(CH_PER_EM),
             cap: match cap.is_finite() && cap > 0.0 {
                 true => cap,
                 false => Self::ASSUMED.cap,
             },
-            ic: advance(IC_GLYPH).unwrap_or(IC_PER_EM),
+            ic: ic.unwrap_or(IC_PER_EM),
         }
     }
 }
@@ -664,8 +741,9 @@ pub(crate) struct Decoration {
     pub lines: TextDecoration,
     /// How the line is drawn.
     pub style: TextDecorationStyle,
-    /// The line's colour, or `None` to follow the fill.
-    pub color: Option<RgbaLinear>,
+    /// The line's colour as named, in extended sRGB, unpremultiplied, or
+    /// `None` to follow the fill.
+    pub color: Option<Color4f>,
     /// The line's thickness as written, or `None` for the font's own. A
     /// font-relative one is carried rather than resolved, so it follows the
     /// font the text is laid out in, as a spacing does.
@@ -727,7 +805,7 @@ pub(crate) fn parse_decoration(text: &str) -> Option<Decoration> {
                 Some(thickness) => parsed.thickness = Some(thickness),
                 // Anything left has to be a colour, and a token that is not
                 // one is a token nobody can act on.
-                None => parsed.color = Some(eight_bit_colour(token)?),
+                None => parsed.color = Some(css_to_color4f(token)?),
             },
         }
     }
@@ -969,28 +1047,6 @@ fn held(quantity: Quantity, low: f32) -> f32 {
         .clamp(f64::from(low), f64::from(f32::MAX)) as f32
 }
 
-/// A CSS colour for a filter shadow or a text decoration: quantised to
-/// eight bits in sRGB, where Chrome quantises it, when it lies inside sRGB,
-/// and carried as an [`RgbaLinear`] that converts back to the same bytes
-/// exactly. A colour outside sRGB is kept as it is, unquantised, so a wide
-/// canvas draws it -- eight bits of sRGB cannot hold it at all.
-///
-/// Through [`RgbaLinear::from_css`] alone, `rgb(10.5 20.4 30.6)` lost its
-/// half step in the `f32` round trip through linear light and drew red 10,
-/// where Chrome draws 11 for the shadow and the fill alike. The parser is
-/// the one `set_fill_style_css` uses, so a colour that works in one place
-/// works in the other.
-fn eight_bit_colour(css: &str) -> Option<RgbaLinear> {
-    let srgb = css_to_color4f(css)?;
-    let inside = [srgb.r, srgb.g, srgb.b]
-        .iter()
-        .all(|channel| (0.0..=1.0).contains(channel));
-    match inside {
-        true => css_to_color(css).map(skia_color_to_rgba_linear),
-        false => Some(RgbaLinear::from_srgb(srgb.r, srgb.g, srgb.b, srgb.a)),
-    }
-}
-
 /// The lengths and optional colour a `drop-shadow` carries.
 ///
 /// Filter Effects 1 gives the grammar as `<color>? && <length>{2,3}`: two
@@ -1055,7 +1111,7 @@ fn drop_shadow(args: &str, units: &FontUnits) -> Option<FilterOp> {
             // to the fill; black is what this crate has always used and what
             // the typed `FilterOp::DropShadow` carries when none is given.
             true => RgbaLinear::opaque(0.0, 0.0, 0.0),
-            false => match eight_bit_colour(&rest) {
+            false => match RgbaLinear::from_css(&rest) {
                 Some(color) => color,
                 None => continue,
             },
@@ -1075,7 +1131,139 @@ fn drop_shadow(args: &str, units: &FontUnits) -> Option<FilterOp> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::color::rgba_linear_to_skia_color;
+
+    /// Oswald, the variable face the font-relative rows were measured on, at
+    /// the weight `weight`.
+    fn oswald(weight: f32) -> Typeface {
+        use skia_safe::{
+            Data, FontMgr, FourByteTag,
+            font_arguments::{
+                FontArguments, VariationPosition,
+                variation_position::Coordinate,
+            },
+        };
+        let file = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"),
+        )
+        .expect("the Oswald test font");
+        let face = FontMgr::new()
+            .new_from_data(Data::new_copy(&file), None)
+            .expect("Oswald loads");
+        let weight = [Coordinate {
+            axis: FourByteTag::from_chars('w', 'g', 'h', 't'),
+            value: weight,
+        }];
+        face.clone_with_arguments(
+            &FontArguments::new().set_variation_design_position(
+                VariationPosition {
+                    coordinates: &weight,
+                },
+            ),
+        )
+        .expect("an instance")
+    }
+
+    /// Oswald's `ch` as its tables give it, 517 of its 1000 units at its
+    /// default weight and 550 bold -- 22px at 40px, as Chrome measures it --
+    /// to the last bit, on every font backend. FreeType's scaler put the
+    /// first at 0.5169995 em.
+    #[test]
+    fn a_face_measures_its_zero_as_its_tables_give_it() {
+        assert_eq!(FaceRatios::of(oswald(400.0)).ch, 517.0 / 1000.0);
+        assert_eq!(FaceRatios::of(oswald(700.0)).ch * 40.0, 22.0);
+    }
+
+    /// A face with no `0` takes the half em CSS Values 4 assumes, whatever
+    /// its tables hold: Recursive's subset holds an `H` and nothing else.
+    #[test]
+    fn a_face_without_a_zero_assumes_half_an_em() {
+        use skia_safe::{Data, FontMgr};
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                "tests/assets/fonts/Recursive/Recursive-upright-H-subset.ttf",
+            ),
+        )
+        .expect("the Recursive subset");
+        let face = FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("the subset loads");
+        assert_eq!(face.unichar_to_glyph('0' as i32), 0);
+        assert_eq!(FaceRatios::of(face).ch, CH_PER_EM);
+    }
+
+    /// At weights between Oswald's masters, where `HVAR` interpolates an
+    /// advance that is no whole number of units, the tables give what
+    /// CoreText measures, which works in floats and is exact to them.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_interpolated_advance_is_what_core_text_measures() {
+        // Weights whose normalised coordinates a 2.14 fixed-point number
+        // holds exactly, as OpenType stores them: Oswald's axis runs 200 to
+        // 700 about 400, and it has no `avar`. Between them the tables'
+        // quantised coordinate and CoreText's unquantised one part by up to
+        // 2e-6 em.
+        let mut fractional = 0;
+        for weight in [250.0, 300.0, 512.5, 550.0, 625.0] {
+            let face = oswald(weight);
+            let id = face.unichar_to_glyph('0' as i32);
+            let mut font = SkFont::from_typeface(face.clone(), 1000.0);
+            font.set_hinting(FontHinting::None);
+            let measured = font.measure_str("0", None).0 / 1000.0;
+            let tables = design_advance(&face, id).expect("Oswald's tables");
+            assert!(
+                (tables - measured).abs() < 1e-6,
+                "weight {weight}: {tables} against {measured}"
+            );
+            fractional += usize::from((tables * 1000.0).fract() != 0.0);
+        }
+        assert!(fractional >= 3, "{fractional} advances between whole units");
+    }
+
+    /// A variable TrueType face whose advances vary through `gvar` alone
+    /// takes them from the phantom points: Oswald's tables without its
+    /// `HVAR`, whose `gvar` moves the same advances, measure what they
+    /// measure with it.
+    #[test]
+    fn a_face_without_hvar_takes_its_advance_from_the_phantom_points() {
+        use ttf_parser::RawFace;
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"),
+        )
+        .expect("the Oswald test font");
+        let raw = RawFace::parse(&bytes, 0).expect("Oswald parses");
+        let table = |tag: &[u8; 4]| raw.table(Tag::from_bytes(tag));
+        let tables = |hvar: bool| RawFaceTables {
+            head: table(b"head").expect("a head"),
+            hhea: table(b"hhea").expect("an hhea"),
+            maxp: table(b"maxp").expect("a maxp"),
+            hmtx: table(b"hmtx"),
+            fvar: table(b"fvar"),
+            hvar: table(b"HVAR").filter(|_| hvar),
+            glyf: table(b"glyf"),
+            loca: table(b"loca"),
+            gvar: table(b"gvar"),
+            ..RawFaceTables::default()
+        };
+        let zero = oswald(400.0).unichar_to_glyph('0' as i32);
+        let wght = Tag::from_bytes(b"wght");
+        for weight in [200.0, 333.0, 650.0, 700.0] {
+            let at = || [(wght, weight)];
+            let (with, without) = (
+                table_advance(tables(true), at(), zero).expect("with HVAR"),
+                table_advance(tables(false), at(), zero).expect("without"),
+            );
+            assert!(
+                (with - without).abs() < 1e-6,
+                "weight {weight}: {with} against {without}"
+            );
+        }
+        // And the phantom points move it: at the boldest weight Oswald's `0`
+        // is 550 units, not the default's 517.
+        let bold = table_advance(tables(false), [(wght, 700.0)], zero);
+        assert_eq!(bold, Some(550.0 / 1000.0));
+    }
 
     #[test]
     fn an_identifier_holds_the_code_points_css_syntax_lists() {
@@ -1323,6 +1511,27 @@ mod tests {
     /// fixed offset, so it accepted exactly one of these five. A refused
     /// step rejects the whole chain, so the other four were errors here and
     /// pictures in Chrome.
+    /// A drop-shadow's colour is kept as it was named, as a fill's is: an
+    /// alpha between bytes, and a colour outside sRGB. Both were rounded to
+    /// eight bits of sRGB, the alpha of 0.3 to 77/255 and the green
+    /// gamut-mapped into sRGB.
+    #[test]
+    fn a_drop_shadow_s_colour_is_the_colour_css_names() {
+        let colour = |css: &str| match parse_filter(
+            &format!("drop-shadow(1px 2px {css})"),
+            &em(),
+        )
+        .expect("a filter")
+        .first()
+        {
+            Some(&FilterOp::DropShadow { color, .. }) => color,
+            other => panic!("not a drop-shadow: {other:?}"),
+        };
+        assert_eq!(colour("rgb(0 0 0 / 0.3)").a, 0.3);
+        let green = colour("color(display-p3 0 1 0)");
+        assert!(green.r < 0.0, "kept outside sRGB: {green:?}");
+    }
+
     #[test]
     fn a_drop_shadow_takes_its_colour_from_either_end() {
         let shadow = |css: &str| match parse_filter(css, &em()) {
@@ -1843,20 +2052,25 @@ mod tests {
 
     #[test]
     fn a_decoration_colour_is_the_colour_css_names() {
-        // Decoded from sRGB rather than read as linear: the bytes that come
-        // back are the bytes CSS names.
-        for (css, bytes) in [
-            ("rebeccapurple", [102, 51, 153]),
-            ("#742", [119, 68, 34]),
-            ("hsl(120 50% 50%)", [64, 191, 64]),
-            // A half step rounds up at parse, as Chrome rounds it.
-            ("rgb(10.5 20.4 30.6)", [11, 20, 31]),
+        // Decoded from sRGB rather than read as linear, and kept as named:
+        // the channels that come back are the ones CSS names, a half step
+        // included, as a fill's are.
+        for (css, channels) in [
+            ("rebeccapurple", [102.0, 51.0, 153.0]),
+            ("#742", [119.0, 68.0, 34.0]),
+            ("hsl(120 50% 50%)", [63.75, 191.25, 63.75]),
+            ("rgb(10.5 20.4 30.6)", [10.5, 20.4, 30.6]),
         ] {
             let parsed = parse_decoration(&format!("underline {css}"))
                 .expect("a decoration");
-            let color =
-                rgba_linear_to_skia_color(parsed.color.expect("a colour"));
-            assert_eq!([color.r(), color.g(), color.b()], bytes, "{css}");
+            let color = parsed.color.expect("a colour");
+            let got = [color.r, color.g, color.b].map(|c| c * 255.0);
+            assert!(
+                got.iter()
+                    .zip(channels)
+                    .all(|(got, want)| (got - want).abs() < 1e-3),
+                "{css}: {got:?}",
+            );
         }
     }
 
