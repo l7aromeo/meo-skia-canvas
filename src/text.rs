@@ -1399,14 +1399,19 @@ impl TextEngine {
             build_paragraph_style(base_style, &base_sk_style, &strut);
         ParagraphBuilder {
             // The engine's collection is built over a library of its own,
-            // which has no epoch to key a face by.
+            // which has no epoch to key a face by. Every style is built
+            // here, from what `PaintKey` reads, so one paint is vouched for
+            // until a push says otherwise.
             recipe: ParagraphRecipe::new(
                 paragraph_style,
                 base_oblique,
                 collection.clone(),
                 None,
                 &style_colours(base_style),
+                true,
             ),
+            base_fill: base_style.foreground_color.unwrap_or(base_style.color),
+            base_stroke: base_style.stroke_width,
             collection,
             positions: self.positions.clone(),
             faces: self.faces.clone(),
@@ -1455,6 +1460,13 @@ pub struct TextPosition {
 pub struct ParagraphBuilder {
     /// The steps the paragraph is built from.
     recipe: ParagraphRecipe,
+    /// The base style's fill colour, `foreground_color` where it is set:
+    /// with [`Self::base_stroke`], what its glyph paint is built from, kept
+    /// as it is and made a [`PaintKey`] only when a style is pushed, since a
+    /// paragraph in one style never compares paints.
+    base_fill: RgbaLinear,
+    /// The base style's stroke width -- see [`Self::base_fill`].
+    base_stroke: Option<f32>,
     /// What a pushed style resolves its faces against, to decide whether
     /// they are variable and whether one leans for an oblique.
     collection: FontCollection,
@@ -1493,6 +1505,11 @@ impl ParagraphBuilder {
         let oblique = style.slant.oblique_degrees().and_then(|degrees| {
             match_oblique(&mut sk_style, &mut self.collection, degrees)
         });
+        if PaintKey::of(style)
+            != PaintKey::new(self.base_fill, self.base_stroke)
+        {
+            self.recipe.paints_differ();
+        }
         match carries_taken(style) {
             true => {
                 self.recipe
@@ -2334,6 +2351,37 @@ fn at_default_position(
         })
 }
 
+/// What [`fill_text_style`] builds a style's glyph paint from, by the bits
+/// of each number: its fill colour, `foreground_color` where it is set, and
+/// the width of its stroke where it is positive. It builds the paint from
+/// these and nothing else, so two styles with equal keys paint their glyphs
+/// alike; two whose numbers differ only in their bits, `0.0` and `-0.0`,
+/// are keyed apart, which costs nothing but the walk a key could skip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PaintKey {
+    fill: [u32; 4],
+    stroke: Option<u32>,
+}
+
+impl PaintKey {
+    /// The key of `style`'s glyph paint.
+    fn of(style: &TextStyle) -> Self {
+        Self::new(
+            style.foreground_color.unwrap_or(style.color),
+            style.stroke_width,
+        )
+    }
+
+    /// The key of a glyph paint filled with `fill` and stroked at `stroke`,
+    /// a stroke that is not positive being none.
+    fn new(fill: RgbaLinear, stroke: Option<f32>) -> Self {
+        Self {
+            fill: [fill.r, fill.g, fill.b, fill.a].map(f32::to_bits),
+            stroke: stroke.filter(|width| *width > 0.0).map(f32::to_bits),
+        }
+    }
+}
+
 /// Whether [`fill_text_style`] gives `style`'s Skia style a decoration,
 /// shadows or a background, the three things a recipe takes off a style
 /// to draw itself: decided here, from the fields it builds them from, so
@@ -2610,11 +2658,13 @@ mod tests {
         FaceQuery, SkPaint, TextEngine, TextSlant, TextStyle, instance_for,
     };
     use crate::{
+        color::RgbaLinear,
         context2d::FontStretch,
         font::{
             FontAxisTag, FontLibrary, FontVariation, INSTANCED_POSITIONS,
             variation_axes,
         },
+        node::oblique::{IGNORE_ONE_PAINT, PAINT_COMPARISONS},
         started,
     };
     use skia_safe::{
@@ -2848,6 +2898,170 @@ mod tests {
             ..amstelvar()
         };
         assert_eq!(takes_pushing(&backed), 1, "backed");
+    }
+
+    /// A crate paragraph in `base` and `spans`, each span pushed over
+    /// `base` and popped where it has a style and added in `base` where it
+    /// has none, built at `width`: its ligature edges, where it has passes
+    /// for nothing else, and its pixels, painted.
+    fn spans_paragraph(
+        engine: &TextEngine,
+        base: &TextStyle,
+        spans: &[(&str, Option<TextStyle>)],
+        width: f32,
+    ) -> (Option<Vec<usize>>, Vec<u8>) {
+        let mut builder = engine.paragraph_builder(base);
+        for (text, style) in spans {
+            match style {
+                Some(style) => {
+                    builder.push_style(style);
+                    builder.add_text(text);
+                    builder.pop();
+                }
+                None => {
+                    builder.add_text(text);
+                }
+            }
+        }
+        let paragraph = builder.build(width);
+        let edges = paragraph.passes.borrow().as_ref().and_then(|passes| {
+            passes.ligature_edges_for_test().map(<[usize]>::to_vec)
+        });
+        let (w, h) = (width as i32 + 40, paragraph.height().ceil() as i32 + 40);
+        let mut surface =
+            started::raster_n32_premul((w, h)).expect("a surface");
+        surface.canvas().clear(skia_safe::Color::WHITE);
+        paragraph.paint(surface.canvas(), skia_safe::Point::new(20.0, 20.0));
+        let info = skia_safe::ImageInfo::new_n32_premul((w, h), None);
+        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        assert!(surface.read_pixels(
+            &info,
+            &mut pixels,
+            (w * 4) as usize,
+            (0, 0)
+        ));
+        (edges, pixels)
+    }
+
+    /// Spans in the paragraph's own paint, and text in its own style beside
+    /// them, are built without a paint compared: with one paint there is no
+    /// edge for a ligature to straddle in two. A span in another colour is
+    /// compared, so the count can move.
+    #[test]
+    fn spans_in_one_paint_compare_no_paints() {
+        let engine = variable_engine();
+        let base = TextStyle {
+            font_families: vec!["OswaldDefault".into()],
+            font_size: 32.0,
+            ..TextStyle::default()
+        };
+        let compared = |span: &TextStyle| {
+            let before = PAINT_COMPARISONS.get();
+            spans_paragraph(
+                &engine,
+                &base,
+                &[
+                    ("Hamburgefonstiv ", Some(span.clone())),
+                    ("quick ", Some(span.clone())),
+                    ("brown", None),
+                ],
+                560.0,
+            );
+            PAINT_COMPARISONS.get() - before
+        };
+        assert_eq!(compared(&base), 0, "one paint");
+        let red = TextStyle {
+            color: RgbaLinear::from_srgb8(200, 30, 30, 1.0),
+            ..base.clone()
+        };
+        assert!(compared(&red) > 0, "two paints");
+    }
+
+    /// Vouching for one paint changes nothing a paragraph finds or draws:
+    /// over generated crate paragraphs of ligatures and plain text across
+    /// span edges, some in the paragraph's own style, in two colours, a
+    /// colour given as `foreground_color` rather than `color`, over a
+    /// `color` that agrees with the fill or with another style's `color`, a
+    /// stroke, letter spacing and a larger size, with a combining mark that
+    /// can open a span, for
+    /// the paragraph's own style as for a span, at two widths, the edges and
+    /// the pixels are those found with every edge walked. Some paragraphs
+    /// have edges and some are vouched for.
+    #[test]
+    fn one_paint_finds_what_the_walk_finds() {
+        let engine = variable_engine();
+        let red = RgbaLinear::from_srgb8(200, 30, 30, 1.0);
+        let blue = RgbaLinear::from_srgb8(30, 30, 200, 1.0);
+        let styled = |pick: u64| {
+            let mut style = TextStyle {
+                font_families: vec!["OswaldDefault".into()],
+                font_size: 32.0,
+                color: red,
+                ..TextStyle::default()
+            };
+            match pick % 9 {
+                0 | 1 => {}
+                2 => style.color = blue,
+                3 => style.foreground_color = Some(red),
+                4 => {
+                    style.color = blue;
+                    style.foreground_color = Some(red);
+                }
+                5 => style.foreground_color = Some(blue),
+                6 => style.stroke_width = Some(1.5),
+                7 => style.letter_spacing = 6.0,
+                _ => style.font_size = 40.0,
+            }
+            style
+        };
+        let pieces = [
+            "fi",
+            "f",
+            "i",
+            "ffl",
+            "ab ",
+            "Hamburgefonstiv",
+            "fl",
+            " ",
+            "e",
+            "\u{301}e",
+        ];
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let (mut with_edges, mut vouched, mut cases) = (0, 0, 0);
+        for _ in 0..60 {
+            let base = styled(next());
+            let spans: Vec<(&str, Option<TextStyle>)> = (0..2 + next() % 4)
+                .map(|_| {
+                    let text = pieces[(next() % pieces.len() as u64) as usize];
+                    (text, (next() % 3 != 0).then(|| styled(next())))
+                })
+                .collect();
+            let width = [600.0, 90.0][(next() % 2) as usize];
+            IGNORE_ONE_PAINT.set(true);
+            let walked = spans_paragraph(&engine, &base, &spans, width);
+            IGNORE_ONE_PAINT.set(false);
+            let before = PAINT_COMPARISONS.get();
+            let found = spans_paragraph(&engine, &base, &spans, width);
+            let pushed = spans.iter().any(|span| span.1.is_some());
+            vouched += usize::from(pushed && PAINT_COMPARISONS.get() == before);
+            let texts: Vec<&str> = spans.iter().map(|span| span.0).collect();
+            assert_eq!(found.0, walked.0, "edges {texts:?}");
+            assert!(found.1 == walked.1, "pixels {texts:?}");
+            with_edges +=
+                usize::from(walked.0.as_ref().is_some_and(|e| !e.is_empty()));
+            cases += 1;
+        }
+        assert!(
+            with_edges > cases / 10,
+            "{with_edges} of {cases} with edges"
+        );
+        assert!(vouched > cases / 10, "{vouched} of {cases} vouched for");
     }
 
     /// The style each of the reuse pins starts from: Amstelvar, whose `wght`

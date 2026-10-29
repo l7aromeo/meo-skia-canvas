@@ -4243,6 +4243,7 @@ mod hinting {
             collection,
             None,
             &none,
+            false,
         );
         recipe.push_style(style, None, &none);
         recipe.add_text(TEXT);

@@ -1254,6 +1254,7 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
             collection.clone(),
             Some(epoch),
             &colours,
+            false,
         )),
         collection,
         variations,
