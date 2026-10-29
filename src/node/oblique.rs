@@ -41,8 +41,8 @@ use crate::{
     },
 };
 use skia_safe::{
-    BlurStyle, Canvas, FontArguments, FontStyle, MaskFilter, Paint, Point,
-    Rect, TextBlob,
+    BlurStyle, Canvas, Color4f, FontArguments, FontStyle, MaskFilter, Paint,
+    Point, Rect, TextBlob,
     font_arguments::{VariationPosition, variation_position::Coordinate},
     font_style::Slant,
     textlayout::{
@@ -1152,7 +1152,7 @@ impl StyleDecoration {
                 thickness: Thickness::Times(
                     style.decoration_thickness_multiplier(),
                 ),
-                color: Some(style.decoration_color()),
+                color: Some(Color4f::from(style.decoration_color())),
                 // `drawParagraph` applies a canvas's global alpha to the
                 // whole paragraph through a layer.
                 opacity: 1.0,

@@ -5308,9 +5308,9 @@ export type TextDecorationStyleValue =
  *   one clips. For a color in another space, write the string:
  *   `color(display-p3 1 0 0)`, `color(srgb-linear 0.2 0.5 0.8)`.
  *
- * Text decoration and shadow colors are 8-bit sRGB in Skia, so a color
- * outside sRGB, in either form, is gamut-mapped into it as CSS Color 4
- * describes, keeping its hue.
+ * A paragraph's text decoration and shadow colors are 8-bit sRGB in Skia,
+ * so a color outside sRGB, in either form, is gamut-mapped into it as CSS
+ * Color 4 describes, keeping its hue.
  *
  * Accepted by:
  * - `CanvasRenderingContext2D.fillStyle` / `strokeStyle`

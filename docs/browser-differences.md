@@ -596,6 +596,14 @@ depend on how its function name is cased is not one CSS describes. The
 difference is a level at most where Chrome rounds, and more where its 8-bit
 path clips an `hsl()` outside sRGB that this library keeps.
 
+A text decoration's own colour, and a `drop-shadow()` filter's, are held
+the same way, at the precision they name. A decoration draws the bytes a
+fill of its colour draws, which Chrome's canvas cannot be compared on: it
+has no `textDecoration`. `tests/named_colour_precision.rs` holds the line to
+the fill's bytes on an eight-bit canvas and to the alpha it names on
+`RGBAF16` and `RGBAF32`, and the drop-shadow to the fill's bytes on an
+eight-bit canvas.
+
 **A draw too faint for eight bits draws on a float canvas, and Chrome drops
 it. Ours is the arithmetic's answer.** Skia skips a source-over draw whose
 paint alpha rounds to zero as a byte -- `SkPaint::nothingToDraw` tests

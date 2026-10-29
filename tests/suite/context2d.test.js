@@ -2907,6 +2907,31 @@ describe("Context2D", () => {
       return null;
     };
 
+    // The line's own colour was held in a byte, so on a float canvas an
+    // alpha of 0.3 drew at 77/255 while the text beside it kept 0.3.
+    test("a line's own colour keeps a float canvas's precision", () => {
+      for (const colorType of ["RGBAF16", "RGBAF32"]) {
+        const c = new Canvas(32, 32, { colorType }).getContext("2d");
+        c.font = "28px DecorationOswald";
+        c.textDecoration = "underline rgb(0 0 0 / 0.3) 6px";
+        c.fillText("H", 0, 12);
+        // Rows 14 to 20 hold the line and none of the glyph.
+        const { data } = c.getImageData(0, 14, 32, 7, { colorType: "RGBAF32" });
+        const floats = new Float32Array(
+          data.buffer,
+          data.byteOffset,
+          data.length / 4,
+        );
+        let alpha = 0;
+        for (let i = 3; i < floats.length; i += 4)
+          alpha = Math.max(alpha, floats[i]);
+        assert.ok(
+          Math.abs(alpha - 0.3) < 0.3 * 0.002,
+          `${colorType}: ${alpha}`,
+        );
+      }
+    });
+
     // CSS 2.1 Appendix E paints a line box at a time, and a wrapped line's
     // overline goes beneath its own glyphs but over the line above's, which
     // were painted before it, as in Chrome 156. 48px Oswald's wrapped lines are 71px apart and
