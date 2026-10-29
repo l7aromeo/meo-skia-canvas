@@ -144,6 +144,10 @@ pub(crate) fn run(
     let (mut surface, drawn) = std::iter::once(drawn)
         .chain((drawn != region).then_some(region))
         .find_map(|drawn| {
+            #[cfg(test)]
+            if drawn != region && REFUSE_PLACED.with(std::cell::Cell::get) {
+                return None;
+            }
             layer_surface(canvas, depth, drawn).map(|surface| (surface, drawn))
         })?;
     let mut context = gpu_of(&mut surface);
@@ -215,6 +219,11 @@ thread_local! {
     /// How many chains [`run`] has run on this thread that had a region to
     /// work on, which the tests of a replayed group count by.
     pub(crate) static RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+
+    /// Whether [`run`] refuses the layer [`placed`] asks for first, as Skia
+    /// refuses one too large, so that a test can reach the region-sized
+    /// fallback on a page small enough to compare against.
+    pub(crate) static REFUSE_PLACED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// `base` as `rest * layer`: `layer` the scale from canvas pixels to the
@@ -282,7 +291,9 @@ fn split(base: &Matrix) -> Option<(Matrix, Matrix)> {
 /// - Where Skia refuses one, the layer is the region alone, widened to an even
 ///   left edge and a bottom an even number of pixels from the page's: Metal's
 ///   surfaces have their origin at the bottom, and an odd offset either way
-///   moved a rounded rectangle's corners by up to 7 levels.
+///   moved a rounded rectangle's corners by up to 7 levels. Blurred by 2px it
+///   moved 80 to 132 pixels of one; the region-sized layer at even edges moved
+///   none.
 ///
 /// A layer the rest of the transform maps onto the device is not in its
 /// pixels, and is left where the region puts it.
@@ -659,8 +670,8 @@ mod tests {
         Surface,
     };
 
-    use super::{Depth, Step, apply};
-    use crate::started;
+    use super::{Depth, REFUSE_PLACED, Step, apply};
+    use crate::{prelude::*, started};
 
     /// A side whose square of F32 pixels passes the `i32::MAX` bytes Skia
     /// allows a raster surface, so that no layer from the origin of a
@@ -769,5 +780,62 @@ mod tests {
             .max()
             .unwrap_or(0);
         assert!(worst > 1, "the left edge moved by {worst} levels");
+    }
+
+    /// The alpha of a rounded rectangle blurred by 2px `at` on a GPU page
+    /// `size` large, with the page-sized layer refused where `refuse` says
+    /// so, or `None` where there is no GPU.
+    fn on_the_gpu(
+        size: (f32, f32),
+        at: (f32, f32),
+        refuse: bool,
+    ) -> Option<Vec<u8>> {
+        let mut canvas = Canvas::new(size.0, size.1);
+        canvas.set_gpu(true);
+        if canvas.engine_kind() != EngineKind::Gpu {
+            return None;
+        }
+        let ctx = canvas.context();
+        ctx.set_fill_style_css("black").expect("a colour");
+        ctx.set_filter_css("blur(2px)").expect("a filter");
+        ctx.begin_path();
+        ctx.round_rect(at.0, at.1, 80.0, 40.0, [12.0; 4])
+            .expect("a rounded rectangle");
+        ctx.fill(FillRule::NonZero);
+        REFUSE_PLACED.with(|refused| refused.set(refuse));
+        let data = ctx.get_image_data(0.0, 0.0, size.0, size.1);
+        REFUSE_PLACED.with(|refused| refused.set(false));
+        Some(
+            data.expect("image data")
+                .pixels()
+                .chunks(4)
+                .map(|p| p[3])
+                .collect(),
+        )
+    }
+
+    /// Where the GPU refuses the page-sized layer, the region alone is drawn
+    /// as the page draws it -- at an odd left edge and an odd distance from
+    /// the page's bottom, which the fallback widens to even ones. Without
+    /// that, these differed from the page in 132, 102 and 80 pixels.
+    #[test]
+    fn a_refused_gpu_layer_is_the_region_at_even_edges() {
+        for (size, at) in [
+            ((300.0, 200.0), (42.0, 30.25)),
+            ((300.0, 201.0), (41.0, 30.25)),
+            ((301.0, 200.0), (40.25, 30.75)),
+        ] {
+            let Some(page) = on_the_gpu(size, at, false) else {
+                return;
+            };
+            let fallback = on_the_gpu(size, at, true).expect("a GPU");
+            let off =
+                page.iter().zip(&fallback).filter(|(a, b)| a != b).count();
+            assert_eq!(
+                off, 0,
+                "{off} pixels off the page at {at:?} on {size:?}"
+            );
+            assert!(page.iter().any(|a| *a > 0), "the blur drew nothing");
+        }
     }
 }
