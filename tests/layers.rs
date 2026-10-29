@@ -420,6 +420,11 @@ fn a_layer_composites_at_its_alpha() {
 /// lands on it -- in the eight-bit layer its filter draws in, then on the
 /// page -- so the bound is half a level for the last rounding and the share
 /// `1 - alpha` the red leaves of the shadow's own level.
+///
+/// The second rounding is known, not chosen: Skia's raster backend makes
+/// any layer under an image filter N32 (`SkBitmapDevice::createDevice`), and
+/// a shadow is drawn through one. When the shadow is composited through the
+/// exact result blur instead, rounded once, this bound is half a level.
 #[test]
 fn a_shadowed_canvas_composites_at_its_alpha() {
     let mut wrong = Vec::new();
@@ -457,6 +462,61 @@ fn a_shadowed_canvas_composites_at_its_alpha() {
                 "gpu {gpu}: {} of 254 alphas, first {first}",
                 missed.len()
             ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// A canvas drawn in under a `globalAlpha` with a blend that reaches past
+/// what it covers, at every alpha a byte holds: opaque red over opaque white,
+/// read where the red lands. Each composites to its Porter-Duff value within
+/// half a level, so that a change of route through the picture these take
+/// cannot move them silently.
+#[test]
+fn a_region_blend_composites_at_its_alpha() {
+    type Exact = fn(f32) -> [f32; 4];
+    const BLENDS: [(BlendMode, Exact); 8] = [
+        (BlendMode::SourceIn, |a| [255.0, 0.0, 0.0, 255.0 * a]),
+        (BlendMode::SourceOut, |_| [0.0; 4]),
+        (BlendMode::DestinationIn, |a| {
+            [255.0, 255.0, 255.0, 255.0 * a]
+        }),
+        (BlendMode::DestinationOut, |a| {
+            [255.0, 255.0, 255.0, 255.0 * (1.0 - a)]
+        }),
+        (BlendMode::DestinationAtop, |a| {
+            [255.0, 255.0, 255.0, 255.0 * a]
+        }),
+        (BlendMode::Copy, |a| [255.0, 0.0, 0.0, 255.0 * a]),
+        (BlendMode::Xor, |a| [255.0, 255.0, 255.0, 255.0 * (1.0 - a)]),
+        (BlendMode::Multiply, |a| {
+            [255.0, 255.0 * (1.0 - a), 255.0 * (1.0 - a), 255.0]
+        }),
+    ];
+    let mut wrong = Vec::new();
+    for gpu in ENGINES {
+        for (blend, exact) in BLENDS {
+            let missed: Vec<_> = (1..255u8)
+                .filter_map(|byte| {
+                    let alpha = f32::from(byte) / 255.0;
+                    let mut source = white_page(gpu);
+                    source.context().fill_rect(0.0, 0.0, WIDTH, HEIGHT);
+                    let mut canvas = white_page(gpu);
+                    let ctx = canvas.context();
+                    ctx.set_global_alpha(alpha);
+                    ctx.set_global_composite_operation(blend);
+                    ctx.draw_canvas(&mut source, 0.0, 0.0);
+                    let got = pixel(&mut canvas, 1);
+                    (!rounds_to(&got, exact(alpha)))
+                        .then(|| format!("{byte}/255 read {got:?}"))
+                })
+                .collect();
+            if let Some(first) = missed.first() {
+                wrong.push(format!(
+                    "gpu {gpu}, {blend:?}: {} of 254 alphas, first {first}",
+                    missed.len()
+                ));
+            }
         }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
