@@ -43,7 +43,9 @@ use crate::{
     geometry::Rect,
     image::CSS_INITIAL_FONT_SIZE,
     node::{
-        font_library::{FontLibrary as SharedFontRegistry, forgetful},
+        font_library::{
+            FontEpoch, FontLibrary as SharedFontRegistry, forgetful,
+        },
         oblique::{
             ParagraphRecipe, Passes, add_slnt, match_oblique,
             without_paragraph_cache,
@@ -1368,8 +1370,10 @@ impl TextEngine {
             &mut collection.clone(),
             &self.positions,
             &self.faces,
-            base_style,
-            &oblique_variations(base_style, base_variations),
+            &FaceQuery::of(
+                base_style,
+                &oblique_variations(base_style, base_variations),
+            ),
         );
         if let TextSlant::Oblique(angle) = base_style.slant {
             add_slnt(&mut instance.coordinates, angle.degrees());
@@ -1466,8 +1470,7 @@ impl ParagraphBuilder {
             &mut self.collection.clone(),
             &self.positions,
             &self.faces,
-            style,
-            &oblique_variations(style, variations),
+            &FaceQuery::of(style, &oblique_variations(style, variations)),
         );
         if let TextSlant::Oblique(angle) = style.slant {
             add_slnt(&mut instance.coordinates, angle.degrees());
@@ -1822,8 +1825,109 @@ fn oblique_variations<'a>(
     }
 }
 
+/// What [`instance_for`] is asked about a style, and everything it reads of
+/// it: the style's families, the weight, width and slant it matches faces
+/// by, its size, and the variation axes it is instanced at.
+///
+/// A query rather than the style, so that [`InstanceKey`], built from all
+/// of a query, is all an instance depends on.
+struct FaceQuery<'a> {
+    families: &'a [FontFamily],
+    font_style: FontStyle,
+    font_size: f32,
+    variations: &'a [FontVariation],
+}
+
+impl<'a> FaceQuery<'a> {
+    /// `style` instanced at `variations`, the axes its
+    /// [`font_variations`](TextStyle::font_variations) resolve to.
+    fn of(style: &'a TextStyle, variations: &'a [FontVariation]) -> Self {
+        Self {
+            families: &style.font_families,
+            font_style: font_style_for(style),
+            font_size: style.font_size,
+            variations,
+        }
+    }
+}
+
+/// A [`FaceQuery`] as an engine remembers the instance it was answered
+/// with: the family list by the names [`collection_names`] handed out for
+/// it, compared by which list they are as [`FaceMatchKey`] compares them,
+/// and the numbers by their bits, so that two keys are equal exactly where
+/// every part of the two queries is.
+struct InstanceKey {
+    names: Rc<[String]>,
+    weight: i32,
+    width: i32,
+    slant: Slant,
+    font_size: u32,
+    variations: Vec<(FontAxisTag, u32)>,
+}
+
+impl InstanceKey {
+    /// The key for `query`, whose families `names` stands for.
+    fn new(names: &Rc<[String]>, query: &FaceQuery) -> Self {
+        // Every field taken apart, so that a part added to the query and
+        // left out of the key is a compile error rather than a reuse of an
+        // instance made for something else.
+        let FaceQuery {
+            families: _,
+            font_style,
+            font_size,
+            variations,
+        } = query;
+        Self {
+            names: names.clone(),
+            weight: *font_style.weight(),
+            width: *font_style.width(),
+            slant: font_style.slant(),
+            font_size: font_size.to_bits(),
+            variations: variations
+                .iter()
+                .map(|variation| (variation.axis, variation.value.to_bits()))
+                .collect(),
+        }
+    }
+}
+
+impl PartialEq for InstanceKey {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.names, &other.names)
+            && (
+                self.weight,
+                self.width,
+                self.slant,
+                self.font_size,
+                &self.variations,
+            ) == (
+                other.weight,
+                other.width,
+                other.slant,
+                other.font_size,
+                &other.variations,
+            )
+    }
+}
+
+impl Eq for InstanceKey {}
+
+impl Hash for InstanceKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Rc::as_ptr(&self.names).cast::<()>().hash(state);
+        (
+            self.weight,
+            self.width,
+            self.slant,
+            self.font_size,
+            &self.variations,
+        )
+            .hash(state);
+    }
+}
+
 /// How a style's variable faces are instanced.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Instance {
     /// The axis positions, handed to Skia as the text style's
     /// `FontArguments`.
@@ -1850,16 +1954,33 @@ thread_local! {
     /// its faces' own position.
     pub(crate) static COORDINATE_LISTS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    /// How many styles [`instance_for`] has worked out on this thread, for
+    /// the tests that hold it to reusing one it worked out before.
+    pub(crate) static INSTANCES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 /// What an engine has learned of its faces: what each family list and
-/// style matched, and each face's axes. One record behind one lock, taken
-/// once a style rather than once for the match and again for each face's
-/// axes.
+/// style matched, each face's axes, and the instance each query was
+/// answered with. One record behind one lock, taken once a style rather
+/// than once for the match and again for each face's axes.
 #[derive(Default)]
 pub(crate) struct FaceRecord {
     matches: FaceMatches,
     axes: KnownAxes,
+    /// The instance each [`FaceQuery`] was answered with, so that a style
+    /// met before -- a span pushed in the paragraph's own font, or any
+    /// style a caller lays out again -- is not worked out again. Never
+    /// stale for the reason a match is not: the collection is the engine's
+    /// for its life and a face's axes are fixed. Dropped whole at
+    /// [`MATCHES_KEPT`] and when the fonts change.
+    instances: CacheMap<InstanceKey, Instance>,
+    /// The epoch of the shared library's fonts the names in `matches` and
+    /// `instances` were spelled under. When the fonts change the library
+    /// spells every family list again as a new list, so nothing kept from
+    /// before could be found again; both are dropped then rather than held
+    /// to [`MATCHES_KEPT`]. A face's axes stay, being fixed.
+    epoch: Option<Rc<FontEpoch>>,
 }
 
 /// How many family lists and styles an engine remembers the matches of.
@@ -1874,7 +1995,8 @@ const MATCHES_KEPT: usize = 256;
 ///
 /// The collection is the engine's for its life, built over a snapshot of
 /// its library, so a search of it answers the same every time: an entry is
-/// never stale, and goes only at [`MATCHES_KEPT`] or with the engine. The
+/// never stale, and goes at [`MATCHES_KEPT`], when the shared library's
+/// fonts change -- see [`FaceRecord::epoch`] -- or with the engine. The
 /// search was most of what instancing a style for its variable faces cost
 /// on a style met before.
 #[derive(Default)]
@@ -1952,8 +2074,8 @@ impl FaceMatches {
     }
 }
 
-/// How `style`'s variable faces are instanced: at the explicit
-/// `variations`, at `wght` from `style`'s own weight unless they name it,
+/// How the style `query` describes has its variable faces instanced: at the
+/// explicit variations, at `wght` from its own weight unless they name it,
 /// and at `opsz` from its font size unless they name that.
 ///
 /// OpenType defines `wght` on the CSS `font-weight` scale, so the weight is
@@ -1964,53 +2086,108 @@ impl FaceMatches {
 /// lacks. The `opsz` position is [`optical_size`]'s, per style, so a span
 /// sized apart from its paragraph is drawn at its own size's design.
 ///
-/// The position is recorded in `positions` before it is handed back, and
-/// where it is one past
+/// Worked out once for each query the engine meets and then remembered in
+/// `record` -- see [`FaceRecord::instances`]. Every time, remembered or
+/// not, an instanced position is recorded in `positions` before it is
+/// handed back, and where it is one past
 /// [`INSTANCED_POSITIONS`](crate::font::INSTANCED_POSITIONS) `collection`'s
-/// caches are dropped first, since Skia keeps every typeface it instances for
-/// one.
+/// caches are dropped first, since Skia keeps every typeface it instances
+/// for one.
 ///
-/// Nothing unless one of the families `style` names resolves to a variable
-/// face in `collection`. Instancing clones the typeface, and a clone of a
-/// face with no axes is a new typeface with its own glyph cache that draws
-/// nothing different. A style naming no family is left to the platform's
-/// default, which the matcher already resolves by weight.
+/// Nothing unless one of the families the query names resolves to a
+/// variable face in `collection`. Instancing clones the typeface, and a
+/// clone of a face with no axes is a new typeface with its own glyph cache
+/// that draws nothing different. A style naming no family is left to the
+/// platform's default, which the matcher already resolves by weight.
 fn instance_for(
     collection: &mut FontCollection,
     positions: &Mutex<InstancedPositions>,
     record: &Mutex<FaceRecord>,
-    style: &TextStyle,
-    variations: &[FontVariation],
+    query: &FaceQuery,
 ) -> Instance {
-    if style.font_families.is_empty() {
+    if query.families.is_empty() {
         return Instance::default();
     }
-    let names = collection_names(&style.font_families);
+    let (names, epoch) = collection_names_in_epoch(query.families);
+    let key = InstanceKey::new(&names, query);
+    // A poisoned record is still a record: the panic that poisoned it was
+    // elsewhere, and the worst a stale entry can do is drop the caches early.
     let mut record = record.lock().unwrap_or_else(PoisonError::into_inner);
+    if !record
+        .epoch
+        .as_ref()
+        .is_some_and(|seen| Rc::ptr_eq(seen, &epoch))
+    {
+        record.matches = FaceMatches::default();
+        record.instances.clear();
+        record.epoch = Some(epoch);
+    }
+    let remember = !forgetful();
+    let instance = match record.instances.get(&key).filter(|_| remember) {
+        Some(instance) => instance.clone(),
+        None => {
+            let instance = work_out(collection, &mut record, names, query);
+            if remember {
+                if record.instances.len() >= MATCHES_KEPT {
+                    record.instances.clear();
+                }
+                record.instances.insert(key, instance.clone());
+            }
+            instance
+        }
+    };
+    drop(record);
+    if !instance.coordinates.is_empty()
+        && let Some(names) = &instance.names
+    {
+        let families: Vec<&str> = names.iter().map(String::as_str).collect();
+        if positions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .admit(&families, &instance.coordinates)
+        {
+            collection.clear_caches();
+        }
+    }
+    instance
+}
+
+/// The instance for `query`, whose families `names` stands for, worked out
+/// from the faces they match in `collection` -- see [`instance_for`].
+fn work_out(
+    collection: &mut FontCollection,
+    record: &mut FaceRecord,
+    names: Rc<[String]>,
+    query: &FaceQuery,
+) -> Instance {
+    #[cfg(test)]
+    INSTANCES.set(INSTANCES.get() + 1);
     let FaceRecord {
         matches,
         axes: known,
-    } = &mut *record;
-    let faces = matches.of(collection, &names, font_style_for(style));
+        ..
+    } = record;
+    let faces = matches.of(collection, &names, query.font_style);
     let Some(axes) = faces.iter().find_map(|face| known.of(face)) else {
         return Instance {
             names: Some(names),
             ..Instance::default()
         };
     };
+    let variations = query.variations;
     let wght_tag = u32::from_be_bytes(*FontAxisTag::WGHT.as_bytes());
     let explicit_wght = variations
         .iter()
         .find(|variation| variation.axis == FontAxisTag::WGHT)
         .map(|variation| variation.value);
     // `SkFontStyle` has already pinned the weight to `0..=1000`.
-    let wght = explicit_wght.unwrap_or(*font_style_for(style).weight() as f32);
+    let wght = explicit_wght.unwrap_or(*query.font_style.weight() as f32);
     let explicit_opsz = variations
         .iter()
         .any(|variation| variation.axis == FontAxisTag::OPSZ);
     let opsz = match explicit_opsz {
         true => None,
-        false => optical_size(&axes, style.font_size),
+        false => optical_size(&axes, query.font_size),
     };
     // Walked rather than collected until an instance is made: a style at
     // its faces' own position, the common case, makes none.
@@ -2045,7 +2222,6 @@ fn instance_for(
             .of(face)
             .is_none_or(|axes| at_default_position(&axes, coordinates()))
     });
-    drop(record);
     if at_default {
         return Instance {
             coordinates: Vec::new(),
@@ -2053,21 +2229,10 @@ fn instance_for(
             names: Some(names),
         };
     }
-    let coordinates: Vec<Coordinate> = coordinates().collect();
     #[cfg(test)]
     COORDINATE_LISTS.set(COORDINATE_LISTS.get() + 1);
-    // A poisoned record is still a record: the panic that poisoned it was
-    // elsewhere, and the worst a stale entry can do is drop the caches early.
-    let families: Vec<&str> = names.iter().map(String::as_str).collect();
-    if positions
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .admit(&families, &coordinates)
-    {
-        collection.clear_caches();
-    }
     Instance {
-        coordinates,
+        coordinates: coordinates().collect(),
         weight,
         names: Some(names),
     }
@@ -2249,6 +2414,16 @@ fn collection_names(families: &[FontFamily]) -> Rc<[String]> {
     SharedFontRegistry::with_shared(|library| library.engine_names(families))
 }
 
+/// [`collection_names`] for `families`, with the epoch of the fonts the
+/// library spelled them under, in the one visit to the library.
+fn collection_names_in_epoch(
+    families: &[FontFamily],
+) -> (Rc<[String]>, Rc<FontEpoch>) {
+    SharedFontRegistry::with_shared(|library| {
+        (library.engine_names(families), library.epoch())
+    })
+}
+
 /// The families a strut should be measured in.
 ///
 /// A strut whose family cannot be resolved does not fall back the way a text
@@ -2332,14 +2507,23 @@ fn build_paragraph_style(
 
 #[cfg(test)]
 mod tests {
-    use super::{SkPaint, SkTextStyle, TextEngine, TextStyle, instance_for};
-    use crate::font::{
-        FontAxisTag, FontLibrary, INSTANCED_POSITIONS, variation_axes,
+    use super::{
+        FaceQuery, InstanceKey, SkPaint, SkTextStyle, TextEngine, TextSlant,
+        TextStyle, instance_for,
+    };
+    use crate::{
+        cache_map::CacheMap,
+        context2d::FontStretch,
+        font::{
+            FontAxisTag, FontLibrary, FontVariation, INSTANCED_POSITIONS,
+            variation_axes,
+        },
     };
     use skia_safe::{
         Data, FontArguments, FontMgr, FourByteTag,
         font_arguments::{VariationPosition, variation_position::Coordinate},
     };
+    use std::rc::Rc;
 
     /// Whether skia-safe still turns an empty family list into a slice
     /// built from a null pointer, which a debug build aborts on: the defect
@@ -2421,6 +2605,16 @@ mod tests {
             cached()
         );
         assert_eq!(engine.positions.lock().map(|p| p.len()).ok(), Some(1));
+
+        // A size from before the drop is an instance the engine remembers,
+        // and a position recorded again all the same: the drop forgot it,
+        // and Skia makes its typeface again on the next layout.
+        lay_out(0);
+        assert_eq!(
+            engine.positions.lock().map(|p| p.len()).ok(),
+            Some(2),
+            "a remembered instance is recorded as a position again"
+        );
     }
 
     /// The engine over the bundled Oswald, Raleway and Amstelvar, each its
@@ -2468,8 +2662,7 @@ mod tests {
             &mut engine.collection.clone(),
             &engine.positions,
             &engine.faces,
-            &style,
-            &[],
+            &FaceQuery::of(&style, &[]),
         )
         .coordinates
     }
@@ -2517,6 +2710,197 @@ mod tests {
         };
         assert_eq!(made(400), (0, true), "at Oswald's own 400");
         assert_eq!(made(401), (1, false), "at 401");
+    }
+
+    /// The style each of the reuse pins starts from: Amstelvar, whose `wght`
+    /// and `opsz` axes make its instance follow both weight and size.
+    fn amstelvar() -> TextStyle {
+        TextStyle {
+            font_families: vec!["AmstelvarDefault".into()],
+            font_weight: 400,
+            font_size: 24.0,
+            ..TextStyle::default()
+        }
+    }
+
+    /// How many times `instance_for` works a style out over `first` and
+    /// then `second` on one engine, and `second`'s coordinates, which must
+    /// be what a fresh engine makes of it whether or not it was reused.
+    fn worked_out(
+        first: (&TextStyle, &[FontVariation]),
+        second: (&TextStyle, &[FontVariation]),
+    ) -> usize {
+        let instance = |engine: &TextEngine, (style, variations)| {
+            instance_for(
+                &mut engine.collection.clone(),
+                &engine.positions,
+                &engine.faces,
+                &FaceQuery::of(style, variations),
+            )
+            .coordinates
+        };
+        let engine = variable_engine();
+        let before = super::INSTANCES.get();
+        instance(&engine, first);
+        let reused = instance(&engine, second);
+        let count = super::INSTANCES.get() - before;
+        assert_eq!(
+            reused,
+            instance(&variable_engine(), second),
+            "the second style's instance is the one a fresh engine makes"
+        );
+        count
+    }
+
+    /// A style equal to one instanced before in everything `instance_for`
+    /// reads is not worked out again.
+    #[test]
+    fn a_style_instanced_before_is_reused() {
+        let style = amstelvar();
+        assert_eq!(worked_out((&style, &[]), (&style, &[])), 1);
+        let coloured = TextStyle {
+            color: crate::color::RgbaLinear::from_srgb8(255, 0, 0, 1.0),
+            ..amstelvar()
+        };
+        assert_eq!(
+            worked_out((&style, &[]), (&coloured, &[])),
+            1,
+            "a colour is not a part of the instance"
+        );
+    }
+
+    /// An engine remembers at most `MATCHES_KEPT` instances: a weight that
+    /// animates is a new query every frame.
+    #[test]
+    fn an_engine_remembers_a_bounded_number_of_instances() {
+        let engine = variable_engine();
+        for weight in 100..100 + super::MATCHES_KEPT as i32 + 1 {
+            let style = TextStyle {
+                font_weight: weight,
+                ..amstelvar()
+            };
+            instance_for(
+                &mut engine.collection.clone(),
+                &engine.positions,
+                &engine.faces,
+                &FaceQuery::of(&style, &[]),
+            );
+        }
+        let kept = engine
+            .faces
+            .lock()
+            .map(|record| record.instances.len())
+            .expect("an unpoisoned record");
+        assert!(kept <= super::MATCHES_KEPT, "{kept} kept past the bound");
+    }
+
+    /// A key holds the names list it compares by address, so the list is
+    /// not freed while the key lives, and no list of other names can be
+    /// given its address and be answered with its instance.
+    ///
+    /// Checked by the list staying alive rather than by waiting for the
+    /// allocator to hand its address out again: macOS's did not within two
+    /// million allocations of the same size, so a check of the reuse
+    /// itself passed even with a key holding a bare address.
+    #[test]
+    fn a_key_keeps_its_names_list_alive() {
+        let style = amstelvar();
+        let query = FaceQuery::of(&style, &[]);
+        let first: Rc<[String]> = Rc::from(vec!["First".to_string()]);
+        let weak = Rc::downgrade(&first);
+        let mut kept = CacheMap::default();
+        kept.insert(InstanceKey::new(&first, &query), ());
+        drop(first);
+        assert!(weak.upgrade().is_some(), "the key keeps its list alive");
+        let other: Rc<[String]> = Rc::from(vec!["Other".to_string()]);
+        assert!(!kept.contains_key(&InstanceKey::new(&other, &query)));
+    }
+
+    /// What an engine remembers of its faces is dropped when the shared
+    /// library's fonts change, since every family list is spelled again as
+    /// a new list after it and nothing from before could be found.
+    #[test]
+    fn an_engine_forgets_its_instances_when_the_fonts_change() {
+        let engine = variable_engine();
+        let instance = |style: &TextStyle| {
+            instance_for(
+                &mut engine.collection.clone(),
+                &engine.positions,
+                &engine.faces,
+                &FaceQuery::of(style, &[]),
+            );
+        };
+        let kept = || {
+            engine
+                .faces
+                .lock()
+                .map(|record| record.instances.len())
+                .expect("an unpoisoned record")
+        };
+        instance(&amstelvar());
+        assert_eq!(kept(), 1);
+        FontLibrary::new()
+            .register_font_from_path(
+                "AmstelvarEpoch",
+                "tests/assets/fonts/AmstelvarAlpha-VF.ttf",
+            )
+            .expect("a bundled variable font registers");
+        instance(&amstelvar());
+        assert_eq!(kept(), 1, "the instance from before the change is gone");
+    }
+
+    /// The reuse pins, one for each thing `instance_for` reads: a style
+    /// differing from the one before in that alone is worked out apart.
+    #[test]
+    fn a_style_in_other_families_is_instanced_apart() {
+        let other = TextStyle {
+            font_families: vec!["OswaldDefault".into()],
+            ..amstelvar()
+        };
+        assert_eq!(worked_out((&amstelvar(), &[]), (&other, &[])), 2);
+    }
+
+    #[test]
+    fn a_style_of_another_weight_is_instanced_apart() {
+        let other = TextStyle {
+            font_weight: 700,
+            ..amstelvar()
+        };
+        assert_eq!(worked_out((&amstelvar(), &[]), (&other, &[])), 2);
+    }
+
+    #[test]
+    fn a_style_of_another_width_is_instanced_apart() {
+        let other = TextStyle {
+            stretch: FontStretch::Condensed,
+            ..amstelvar()
+        };
+        assert_eq!(worked_out((&amstelvar(), &[]), (&other, &[])), 2);
+    }
+
+    #[test]
+    fn a_style_of_another_slant_is_instanced_apart() {
+        let other = TextStyle {
+            slant: TextSlant::Italic,
+            ..amstelvar()
+        };
+        assert_eq!(worked_out((&amstelvar(), &[]), (&other, &[])), 2);
+    }
+
+    #[test]
+    fn a_style_of_another_size_is_instanced_apart() {
+        let other = TextStyle {
+            font_size: 48.0,
+            ..amstelvar()
+        };
+        assert_eq!(worked_out((&amstelvar(), &[]), (&other, &[])), 2);
+    }
+
+    #[test]
+    fn a_style_at_other_variations_is_instanced_apart() {
+        let wider = [FontVariation::new(FontAxisTag::WDTH, 60.0)];
+        let style = amstelvar();
+        assert_eq!(worked_out((&style, &[]), (&style, &wider)), 2);
     }
 
     /// A style at its faces' own position is not instanced, and drawn so it
