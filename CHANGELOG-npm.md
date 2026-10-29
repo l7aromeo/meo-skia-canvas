@@ -1708,7 +1708,9 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
     style is no longer copied to set its hinting [RE-TIME vs 6.0.2].
   - A `Paragraph` keeps what it is built from with fewer walks and
     allocations, and asks the platform for a face's variation axes once
-    [RE-TIME vs 6.0.2].
+    [RE-TIME vs 6.0.2]. One with no decoration, shadow, background or
+    oblique range no longer collects its styles' decorations to find that
+    out [RE-TIME vs 6.0.2].
   - A page of cards, each drawn over its own shadow blurred through
     `ctx.filter`, records about 31% faster on either engine and exports
     about 5% faster on the GPU, and a page of blurred rectangles alone

@@ -1454,13 +1454,17 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   - A `TextEngine` paragraph is built with fewer lookups, walks and
     allocations, taking the font library's lock once, asking the platform
     for a face's variation axes once, leaving a face drawn at its own
-    position uninstanced, and answering a style it has instanced before
-    with one hash of the style rather than through the font library. Its
-    builds still cost more than 0.16.3's
-    [RE-TIME vs 0.16.3], for work 0.16.3 did not do: the recipe each
-    paragraph keeps so that its decorations, shadows, backgrounds and
-    oblique ranges are drawn as CSS places them, and a variable face
-    instanced at each style's own axes.
+    position uninstanced, and answering a style it has instanced before with
+    one hash of the style rather than through the font library. One with
+    nothing to draw of its own no longer collects its styles' decorations to
+    find that out, a style's Skia text style is filled where it is kept
+    rather than copied there, and one whose spans are all in its own paint
+    is built without walking the edges between them for a ligature in two
+    paints. A paragraph in one style builds as fast as 0.16.3's [RE-TIME vs
+    0.16.3]; one with spans still costs more [RE-TIME vs 0.16.3], for work
+    0.16.3 did not do: the recipe each paragraph keeps so that its
+    decorations, shadows, backgrounds and oblique ranges are drawn as CSS
+    places them, and a variable face instanced at each style's own axes.
   - A page of cards, each drawn over its own shadow blurred through a
     `blur()` filter, records about 31% faster on either engine and exports
     about 5% faster on the GPU, and a page of blurred rectangles alone
