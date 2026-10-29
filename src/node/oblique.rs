@@ -49,13 +49,31 @@ use skia_safe::{
         PlaceholderStyle, StyleType, TextDecoration, TextShadow, TextStyle,
     },
 };
-use std::{borrow::Cow, iter::once, ops::Range, rc::Rc};
+use std::{borrow::Cow, cell::RefCell, iter::once, mem, ops::Range, rc::Rc};
 use unicode_segmentation::GraphemeCursor;
 
 /// The character SkParagraph adds to a paragraph's text for each
 /// placeholder, U+FFFC OBJECT REPLACEMENT CHARACTER, whose UTF-8 length
 /// moves every later text offset.
 const PLACEHOLDER_CHARACTER: char = '\u{FFFC}';
+
+/// The most entries a list a [`ParagraphRecipe`] hands back may hold room
+/// for and still be kept for the next recipe on the thread.
+///
+/// A kept list keeps its capacity for as long as the thread lives, so one
+/// paragraph of thousands of styles would otherwise pin room for thousands
+/// on every thread that ever built it. A list past this is dropped and the
+/// next recipe allocates its own. Every paragraph of up to this many
+/// styles, steps or both reuses what the last left, which is the paragraph
+/// a caller builds again and again.
+const KEPT_LIST_CAPACITY: usize = 64;
+
+thread_local! {
+    /// The lists the last [`ParagraphRecipe`] on this thread handed back,
+    /// emptied, for the next one to fill -- see [`KEPT_LIST_CAPACITY`].
+    static SPARE_LISTS: RefCell<(Vec<Step>, Vec<Pushed>)> =
+        const { RefCell::new((Vec::new(), Vec::new())) };
+}
 
 /// The slant a style asking for `font_style`, an oblique of `degrees`, is
 /// laid out in, or `None` where it does not ask for oblique.
@@ -172,12 +190,14 @@ pub(crate) struct ParagraphRecipe {
     /// shared library's, so that a decoration's or background's face is
     /// found once a epoch -- see [`FaceLines::first_available`].
     epoch: Option<Rc<FontEpoch>>,
+    /// How the paragraph was filled in, in order.
     steps: Vec<Step>,
     /// What was taken off the paragraph style's own text style, its slot 0.
     base_taken: Taken,
     /// Each style pushed, in slot 1 and on, at its index plus 1: one list
-    /// rather than one for each thing kept of it, and none at all until a
-    /// style is pushed, since every paragraph is built through here.
+    /// rather than one for each thing kept of it. Taken, with `steps`, from
+    /// what the last recipe on the thread handed back, since every
+    /// paragraph is built through here -- see [`SPARE_LISTS`].
     pushed: Vec<Pushed>,
     /// The length of the builder's text, in UTF-8 bytes.
     length: usize,
@@ -251,18 +271,31 @@ impl ParagraphRecipe {
                     (decoration, shadows, background)
                 }
             };
+        // The lists the last recipe on this thread left, or new ones where
+        // another recipe holds them or none has been made.
+        let (mut steps, pushed) = SPARE_LISTS
+            .try_with(|spare| {
+                spare
+                    .try_borrow_mut()
+                    .map(|mut spare| mem::take(&mut *spare))
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        if steps.capacity() == 0 {
+            steps.reserve(8);
+        }
         Self {
             builder: ParagraphBuilder::new(&style, &collection),
             style,
             collection,
             epoch,
-            steps: Vec::with_capacity(8),
+            steps,
             base_taken: Taken {
                 decoration,
                 shadows,
                 background,
             },
-            pushed: Vec::new(),
+            pushed,
             length: 0,
             base_oblique,
             oblique: base_oblique.is_some(),
@@ -437,9 +470,11 @@ impl ParagraphRecipe {
             slots,
             paints,
             sheared,
-            shadows: once(self.base_taken.shadows)
+            shadows: once(mem::take(&mut self.base_taken.shadows))
                 .chain(
-                    self.pushed.into_iter().map(|pushed| pushed.taken.shadows),
+                    self.pushed
+                        .iter_mut()
+                        .map(|pushed| mem::take(&mut pushed.taken.shadows)),
                 )
                 .collect(),
             boxes,
@@ -736,6 +771,34 @@ impl ParagraphRecipe {
             }
         }
         builder
+    }
+}
+
+impl Drop for ParagraphRecipe {
+    /// Hands the recipe's lists back, emptied, for the next recipe on the
+    /// thread, where they are no longer than [`KEPT_LIST_CAPACITY`] and
+    /// longer than what is kept already.
+    fn drop(&mut self) {
+        let mut steps = mem::take(&mut self.steps);
+        let mut pushed = mem::take(&mut self.pushed);
+        steps.clear();
+        pushed.clear();
+        // Nothing to hand back to once the thread's storage is gone, nor
+        // while something else on the thread holds it.
+        let _ = SPARE_LISTS.try_with(|spare| {
+            if let Ok(mut spare) = spare.try_borrow_mut() {
+                if steps.capacity() <= KEPT_LIST_CAPACITY
+                    && steps.capacity() > spare.0.capacity()
+                {
+                    spare.0 = steps;
+                }
+                if pushed.capacity() <= KEPT_LIST_CAPACITY
+                    && pushed.capacity() > spare.1.capacity()
+                {
+                    spare.1 = pushed;
+                }
+            }
+        });
     }
 }
 
@@ -3070,6 +3133,43 @@ mod tests {
             (0, 0)
         ));
         pixels
+    }
+
+    /// A paragraph of `styles` pushed styles, each over a little text.
+    fn styled(styles: usize) -> Vec<EdgeOp> {
+        (0..styles)
+            .flat_map(|_| [EdgeOp::Push(1), EdgeOp::Text("ab")])
+            .collect()
+    }
+
+    /// A recipe starts with the lists the one before it on the thread
+    /// handed back, whether that one was built or dropped unbuilt, so a
+    /// caller building paragraph after paragraph allocates neither.
+    #[test]
+    fn a_recipe_takes_the_lists_the_last_one_left() {
+        let ops = styled(20);
+        drop(edge_recipe(&ops).build());
+        let next = edge_recipe(&[]);
+        assert!(next.steps.capacity() >= 40, "{}", next.steps.capacity());
+        assert!(next.pushed.capacity() >= 20, "{}", next.pushed.capacity());
+        drop(next);
+        drop(edge_recipe(&styled(30)));
+        let next = edge_recipe(&[]);
+        assert!(
+            next.pushed.capacity() >= 30,
+            "kept from one dropped unbuilt"
+        );
+        assert!(next.steps.is_empty() && next.pushed.is_empty());
+    }
+
+    /// A list longer than the cap is not handed back, so one paragraph of
+    /// many styles leaves its capacity behind on no thread.
+    #[test]
+    fn a_recipe_keeps_no_list_past_the_cap() {
+        drop(edge_recipe(&styled(super::KEPT_LIST_CAPACITY + 1)).build());
+        let next = edge_recipe(&[]);
+        assert!(next.steps.capacity() <= super::KEPT_LIST_CAPACITY);
+        assert!(next.pushed.capacity() <= super::KEPT_LIST_CAPACITY);
     }
 
     /// A paragraph in two styles whose edges are all ASCII is built without
