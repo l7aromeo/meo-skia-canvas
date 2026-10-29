@@ -54,6 +54,23 @@ and the CSS strings read the math functions and every length unit.
 
 ### Breaking
 
+- **`sans-serif` is the face Chrome draws it in, and an SVG naming no family
+  it has is drawn in the standard serif.** The curated `sans-serif` stack put
+  Avenir Next ahead of Helvetica, so on macOS a `Context2D`'s default font,
+  `10px sans-serif`, measured `"Hamburgefonstiv"` at 78.85 where Chrome 156
+  measures 75.59, and at 40px 315.40 against 302.36. Each stack now opens with
+  the name Chromium gives the generic on the platform,
+  `IDS_SANS_SERIF_FONT_FAMILY` and `IDS_SERIF_FONT_FAMILY` in its
+  `locale_settings_*.grd`: Helvetica and Times on macOS, Arial and Times New
+  Roman on Linux and Windows, which on Linux reach whatever fontconfig
+  substitutes, as they do for Chrome. On macOS `sans-serif` now measures as
+  Chrome's to the float. An SVG `<text>` naming no family, or one the
+  machine does not have, was drawn in the `system-ui` face, Helvetica Neue on
+  macOS, and is now drawn in `serif`, as Chrome draws it in its standard font,
+  Times on macOS, and its `ex` is that face's x-height. Text set in
+  `sans-serif`, in the default font, or in an SVG that names no family it can
+  find measures and draws differently.
+
 - **`FontLibrary::has_font` and `FontLibrary::family_details` match a family
   name as a font does.** `has_font` compared the alias exactly and
   `family_details` asked Skia, which matches a registered alias exactly,
@@ -325,6 +342,19 @@ and the CSS strings read the math functions and every length unit.
   fits a paragraph up to a hundredth narrower than it, as SkParagraph's
   line breaker compares the line's width floored to hundredths;
   docs/browser-differences.md has it.
+
+- **`set_word_spacing` is added after every word separator.** It was added
+  once per run of spaces and only between words, as SkParagraph adds it, so
+  a leading or trailing space and the second of a doubled one went
+  unspaced, a no-break space was never spaced, and U+3000, which is not a
+  word separator, was. CSS Text 3 section 8.2 spaces every word-separator
+  character, and now so does a `Context2D`: at -100 in 40px Oswald,
+  `measure_text("a  b")` is -146.76 where it was -46.76, as Chrome 156
+  measures it, and `"a "` -73.80 where it was 26.20. The glyphs move with
+  the width. A `TextEngine` paragraph's `TextStyle::word_spacing` keeps
+  SkParagraph's rule. Chrome does not space a leading space, and how it
+  spaces one depends on what it measured before;
+  docs/browser-differences.md has both.
 
 ### Fixed
 
@@ -1024,6 +1054,23 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   hundredth SkParagraph's line breaker floors widths to. The values this
   moves are under Breaking: "Text widths, line metrics, rects and
   hit-testing are no longer rounded to hundredths".
+
+- **Word spacing reaches every space.** A leading or trailing space, the
+  second of a doubled one and a no-break space took none of
+  `set_word_spacing`; what the width does now is under Breaking:
+  "`set_word_spacing` is added after every word separator".
+
+- **Centred and right-aligned text counts a trailing space.** `"a "` drawn
+  under `TextAlign::Center` put the "a" where `"a"` alone goes, and
+  `TextAlign::Right` the same, where Chrome moves it half the space's
+  advance left, or all of it: SkParagraph aligns a line by its width
+  without the whitespace it ends in. The run's whole advance is aligned
+  now, trailing spaces and their spacing included, and `measure_text`'s ink
+  box moves with it: centred `"a "` at 40px Oswald has its left at 11.42,
+  within 0.005 of Chrome 156, where it was 6.84. Text laid out with
+  `set_text_wrap(true)` keeps hanging its trailing spaces, as CSS lines do.
+  Not changed: right-to-left text, for which nothing has been measured in
+  Chrome.
 
 ### Added
 

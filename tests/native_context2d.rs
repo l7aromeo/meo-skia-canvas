@@ -11955,6 +11955,34 @@ fn a_negative_spacing_measures_a_negative_width() {
     }
 }
 
+/// Word spacing is added after every word-separator character (CSS Text 3
+/// section 8.2), a space or a no-break space, leading, doubled and trailing
+/// ones included, and nowhere else: U+3000 is not one.
+#[test]
+fn word_spacing_is_added_after_every_word_separator() {
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::parse(&format!("40px {}", oswald())).expect("a font"));
+    for (text, separators) in [
+        ("a b", 1.0),
+        ("a  b", 2.0),
+        (" a", 1.0),
+        ("a ", 1.0),
+        (" a b ", 3.0),
+        ("a\u{a0}b", 1.0),
+        ("a\u{3000}b", 0.0),
+    ] {
+        ctx.set_word_spacing_css("0px").expect("a length");
+        let plain = ctx.measure_text(text, None).width;
+        ctx.set_word_spacing_css("-100px").expect("a length");
+        let spaced = ctx.measure_text(text, None).width;
+        assert!(
+            (spaced - (plain - 100.0 * separators)).abs() <= 0.0002,
+            "{text:?}: {spaced}, unspaced {plain}, {separators} separators"
+        );
+    }
+}
+
 #[test]
 fn a_css_length_that_is_not_one_is_refused_by_name() {
     let mut canvas = Canvas::new(64.0, 64.0);

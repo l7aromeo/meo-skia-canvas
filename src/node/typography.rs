@@ -361,6 +361,27 @@ fn is_word_separator(ch: char) -> bool {
     ch == ' ' || HARD_BREAKS.contains(&ch)
 }
 
+/// `style` with kerning turned off, for a run of word separators -- see
+/// [`Typesetter::paragraph_with`].
+fn without_kerning(style: &TextStyle) -> TextStyle {
+    let mut unkerned = style.clone();
+    unkerned.add_font_feature("kern", 0);
+    unkerned
+}
+
+/// The characters word spacing is added after: CSS Text 3 section 8.2's
+/// word-separator characters, fixed by the specification. U+3000, the
+/// ideographic space, is not one, though SkParagraph spaces it.
+const WORD_SEPARATORS: [char; 7] = [
+    '\u{20}',    // SPACE
+    '\u{a0}',    // NO-BREAK SPACE
+    '\u{1361}',  // ETHIOPIC WORDSPACE
+    '\u{10100}', // AEGEAN WORD SEPARATOR LINE
+    '\u{10101}', // AEGEAN WORD SEPARATOR DOT
+    '\u{1039f}', // UGARITIC WORD DIVIDER
+    '\u{1091f}', // PHOENICIAN WORD SEPARATOR
+];
+
 /// Replaces every hard break in `text` with a space.
 ///
 /// Borrows where there is nothing to replace, which is the overwhelmingly
@@ -1613,7 +1634,7 @@ impl<'a> Typesetter<'a> {
         let (paragraph, restyled) = self.restyled(&self.layout_style(paint));
 
         let offset = Point::new(
-            self.alignment_offset(),
+            self.alignment_offset() + self.trailing_space_shift(&paragraph),
             -paragraph.alphabetic_baseline(),
         );
 
@@ -1726,11 +1747,11 @@ impl<'a> Typesetter<'a> {
     }
 
     /// The run's advance -- every glyph and space, with the letter spacing
-    /// after each and the word spacing between words -- signed, as Chrome
-    /// reports it for `measureText().width`. The rule is Blink's, from
-    /// `text_metrics.cc`, which adds up the runs' advances into the width and
-    /// does not clamp the sum; what follows is how it is reached through
-    /// SkParagraph, which does.
+    /// after each and the word spacing after each word separator -- signed,
+    /// as Chrome reports it for `measureText().width`. The rule is Blink's,
+    /// from `text_metrics.cc`, which adds up the runs' advances into the
+    /// width and does not clamp the sum; what follows is how it is reached
+    /// through SkParagraph, which does.
     ///
     /// `max_intrinsic_width` is that advance wherever it is positive,
     /// trailing spaces included, which the line's own width leaves out. One
@@ -1831,8 +1852,40 @@ impl<'a> Typesetter<'a> {
     ) -> Paragraph {
         let mut paragraph_builder =
             ParagraphBuilder::new(self.graf_style(), &self.typefaces);
-        let mut unkerned = char_style.clone();
-        unkerned.add_font_feature("kern", 0);
+
+        // Word spacing is added after every word-separator character, as CSS
+        // Text 3 section 8.2 says, leading, doubled and trailing ones
+        // included. SkParagraph's own adds it once per run of spaces and
+        // only between words, so it is given none, and each separator is laid
+        // out in a piece of its own with the word spacing added to its letter
+        // spacing. Nothing else moves: spaced text measures its unspaced width
+        // plus the spacing, which "width is the signed advance" in
+        // `tests/suite/text.test.js` holds, a no-break space inside a word
+        // included.
+        //
+        // With no word spacing there is nothing to add or to take off, and no
+        // style is made for it.
+        let word = char_style.word_spacing();
+        let unspaced_style;
+        let char_style = match word == 0.0 {
+            true => char_style,
+            false => {
+                let mut style = char_style.clone();
+                style.set_word_spacing(0.0);
+                unspaced_style = style;
+                &unspaced_style
+            }
+        };
+        let unkerned = without_kerning(char_style);
+        // The separators' styles, in words and between them.
+        let spaced = (word != 0.0).then(|| {
+            let mut style = char_style.clone();
+            style.set_letter_spacing(char_style.letter_spacing() + word);
+            let unkerned = without_kerning(&style);
+            (style, unkerned)
+        });
+        let takes_word_spacing =
+            |ch: char| spaced.is_some() && WORD_SEPARATORS.contains(&ch);
 
         // Kerning stops at a word boundary. Skia does not do that on its own
         // and a browser does it without exception -- Chrome's `"A V"` is
@@ -1862,8 +1915,12 @@ impl<'a> Typesetter<'a> {
         let mut at = 0;
         while at < text.len() {
             let separating = text[at..].starts_with(is_word_separator);
+            let spacing = text[at..].starts_with(takes_word_spacing);
             let mut end = text[at..]
-                .find(|ch| is_word_separator(ch) != separating)
+                .find(|ch| {
+                    is_word_separator(ch) != separating
+                        || takes_word_spacing(ch) != spacing
+                })
                 .map_or(text.len(), |offset| at + offset);
             let style = restyled
                 .iter()
@@ -1880,9 +1937,11 @@ impl<'a> Typesetter<'a> {
             {
                 end = end.min(next);
             }
-            let mut piece_style = match separating {
-                true => unkerned.clone(),
-                false => char_style.clone(),
+            let mut piece_style = match spaced.as_ref().filter(|_| spacing) {
+                Some((_, unkerned)) if separating => unkerned.clone(),
+                Some((spaced, _)) => spaced.clone(),
+                None if separating => unkerned.clone(),
+                None => char_style.clone(),
             };
             if let Some(style) = style {
                 piece_style.set_font_style(style);
@@ -2171,8 +2230,55 @@ impl<'a> Typesetter<'a> {
             _ => (0.0, 0.0), // start & end have already been remapped
         };
 
-        alignment_factor * self.width
-            + spacing_step * self.char_style().letter_spacing()
+        alignment_factor * self.width + spacing_step * self.leading_spacing()
+    }
+
+    /// How far a centred or right-aligned run moves for the whitespace it
+    /// ends in, which SkParagraph leaves out of the line it aligns.
+    ///
+    /// The canvas aligns the whole run, its advance with every trailing
+    /// space and that space's spacing, as Chrome does: a centred `"a "`
+    /// stands half a space left of `"a"`. SkParagraph aligns a line by its
+    /// width without the whitespace it ends in, which hangs, so the run is
+    /// moved by the share of the difference its alignment takes. A wrapped
+    /// run's lines hang their trailing spaces as CSS lines do, and keep
+    /// SkParagraph's alignment. Left to right only: a right-to-left run's
+    /// trailing space is at its visual start, and no browser measurement
+    /// says where Chrome puts it.
+    fn trailing_space_shift(&self, paragraph: &Paragraph) -> f32 {
+        let share = match self.gravity() {
+            TextAlign::Center => 0.5,
+            TextAlign::Right => 1.0,
+            _ => return 0.0,
+        };
+        let applies = !self.text_wrap
+            && self.graf_style().text_direction() == TextDirection::LTR
+            && self.text.ends_with(char::is_whitespace);
+        match applies {
+            true => {
+                -share
+                    * (self.signed_advance(paragraph)
+                        - paragraph.longest_line())
+            }
+            false => 0.0,
+        }
+    }
+
+    /// The letter spacing of the line's first character on the left, of
+    /// which Skia puts half before it: the run's own, and the word spacing
+    /// on top where that character is a word separator -- see
+    /// [`Typesetter::paragraph_with`].
+    fn leading_spacing(&self) -> f32 {
+        let letter = self.char_style().letter_spacing();
+        let word = self.char_style().word_spacing();
+        let leftmost = match self.graf_style().text_direction() {
+            TextDirection::LTR => self.text.chars().next(),
+            TextDirection::RTL => self.text.chars().next_back(),
+        };
+        match leftmost.is_some_and(|ch| WORD_SEPARATORS.contains(&ch)) {
+            true => letter + word,
+            false => letter,
+        }
     }
 }
 

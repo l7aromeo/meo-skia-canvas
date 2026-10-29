@@ -292,6 +292,29 @@ pub(crate) fn instance_coordinates(
         .collect()
 }
 
+/// The family Chrome draws `sans-serif` in on this platform, which leads
+/// the curated `sans-serif` stack: `IDS_SANS_SERIF_FONT_FAMILY` in
+/// Chromium's `chrome/app/resources/locale_settings_mac.grd`, `_linux.grd`
+/// and `_win.grd`, Helvetica on macOS and Arial elsewhere. On Linux Chrome
+/// asks fontconfig for the name and draws what it substitutes; asking the
+/// system manager for it here does the same.
+#[cfg(target_os = "macos")]
+const CHROME_SANS_SERIF: &str = "Helvetica";
+/// See the macOS definition.
+#[cfg(not(target_os = "macos"))]
+const CHROME_SANS_SERIF: &str = "Arial";
+
+/// The family Chrome draws `serif` in on this platform, and its standard
+/// font -- what text naming no available family is drawn in: on macOS
+/// `IDS_SERIF_FONT_FAMILY` and `IDS_STANDARD_FONT_FAMILY` are Times, on
+/// Linux and Windows Times New Roman, in the same files as
+/// [`CHROME_SANS_SERIF`].
+#[cfg(target_os = "macos")]
+const CHROME_SERIF: &str = "Times";
+/// See the macOS definition.
+#[cfg(not(target_os = "macos"))]
+const CHROME_SERIF: &str = "Times New Roman";
+
 /// How many instanced collections are kept.
 ///
 /// Each entry holds a `FontCollection` with a `TypefaceFontProvider` and the
@@ -1078,6 +1101,7 @@ impl FontLibrary {
             font_stacks.insert(
                 "serif",
                 vec![
+                    CHROME_SERIF,
                     "Times",
                     "Nimbus Roman",
                     "Times New Roman",
@@ -1091,6 +1115,7 @@ impl FontLibrary {
             font_stacks.insert(
                 "sans-serif",
                 vec![
+                    CHROME_SANS_SERIF,
                     "Avenir Next",
                     "Avenir",
                     "Helvetica Neue",
@@ -1242,14 +1267,16 @@ impl FontLibrary {
         // collect non-system fonts in a provider
         let mut dyn_mgr = TypefaceFontProvider::new();
 
-        // A fallback first, so the family a null name resolves to is a
-        // sensible one rather than whatever sorts first. It is also the face
-        // `ex` is measured against for a document naming no family at all,
-        // which is why the second arm matters: with nothing registered the
+        // A fallback first, so the family a null name resolves to is the
+        // standard font, serif first, as Chrome draws a document naming no
+        // family it has -- see `CHROME_SERIF` -- rather than whatever sorts
+        // first. Chrome 156 on macOS draws such SVG text in Times. It is also
+        // the face `ex` is measured against for a document naming no family at
+        // all, which is why the second arm matters: with nothing registered the
         // provider answers nothing, `ex_ratio_for` falls back to a constant
         // half an em, and `4ex` renders as `2em`. That is what `an ex is the
-        // drawn face's x-height, not half an em` reported on Windows, where
-        // the exact 0.5 says the constant was reached.
+        // drawn face's x-height, not half an em` reported on Windows, where the
+        // exact 0.5 says the constant was reached.
         //
         // Which of the two ways it was reached is not established: the curated
         // stack may resolve to nothing there, or it may resolve to a face
@@ -1291,9 +1318,9 @@ impl FontLibrary {
             .face_collection()
             .find_typefaces(
                 &[
-                    GenericFamily::SystemUi,
-                    GenericFamily::SansSerif,
                     GenericFamily::Serif,
+                    GenericFamily::SansSerif,
+                    GenericFamily::SystemUi,
                 ]
                 .map(generic_name),
                 FontStyle::normal(),

@@ -456,6 +456,25 @@ describe("an SVG's font-relative lengths", () => {
     );
   });
 
+  // A document naming no family, or one the machine does not have, draws in
+  // the standard font, which is serif: Chrome 156 on macOS draws such text
+  // in Times, as it does `font-family="serif"`, and its 40px "Hamburg" set at
+  // x = 5 inks out to x = 155.
+  test("text naming no usable family is drawn in the serif", async () => {
+    const hamburg = (attrs) =>
+      `<text x="5" y="60" font-size="40" ${attrs} fill="#000">Hamburg</text>`;
+    const serif = await rendering(hamburg(`font-family="serif"`));
+    assert.equal(await rendering(hamburg("")), serif, "no family");
+    assert.equal(
+      await rendering(hamburg(`font-family="NoSuchFamilyAnywhere"`)),
+      serif,
+      "a family the machine does not have",
+    );
+    if (process.platform === "darwin") {
+      assert.equal(await inkedWidth(hamburg("")), 155 - 5, "Chrome 156's ink");
+    }
+  });
+
   test("an ex is the drawn face's x-height, not half an em", async () => {
     // Two faces rather than one number. The defect is `ex` taken as a
     // constant half an em instead of the face's x-height, and the property
