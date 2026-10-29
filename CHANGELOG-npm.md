@@ -397,6 +397,17 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A canvas drawn in under a filter spreads past where it is drawn.** A
+  canvas drawn into another with `ctx.drawCanvas()` under `ctx.filter` was
+  cut at its destination rectangle: a 40px square blurred by 8px read alpha
+  0 five pixels outside it, where Chrome's `drawImage` of the same canvas
+  reads 72, and a `drop-shadow()` cast past the square was not drawn at
+  all. The rectangle now bounds what is drawn and not what the filter makes
+  of it. A `blur()` and the colour functions are run on the drawn canvas's
+  pixels by the exact Gaussian, as a blurred path is, on either engine; a
+  `drop-shadow()` is still Skia's, and so is the blur of a canvas drawn with
+  `drawImage`, which already spread.
+
 - **A blurred path is the exact Gaussian blur of what it draws.** A
   flat-colour shape that `ctx.filter = "blur(...)"` blurs on its result --
   any path but a rectangle or a rounded rectangle, and those past the sigma

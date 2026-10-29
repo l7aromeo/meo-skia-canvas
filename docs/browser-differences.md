@@ -739,8 +739,12 @@ the exact blur of Chrome's own unblurred triangle:
         Chrome   11.01   6.24   5.56
 
 Chrome's figures are the ones Skia's image blur gave this library before, to
-the hundredth. `tests/blur_result.rs` holds the pixels, at a density and
-inside a `saveLayer` too. A draw that its clip cuts is the exception, and
+the hundredth. A canvas drawn into another by `drawCanvas` through a
+`blur()`, or a chain of blurs and colour functions, is blurred the same way:
+a 40px red square blurred by 8px reads alpha 72 and 30 five and ten pixels
+outside it here, where Chrome's `drawImage` of it reads 72 and 28. A canvas
+drawn by `drawImage`, like an image, is still blurred by Skia's filter. `tests/blur_result.rs`
+holds the pixels, at a density and inside a `saveLayer` too. A draw that its clip cuts is the exception, and
 the same one any clipped draw is: Skia anti-aliases a path its clip does not
 contain by another route, whose edges move by up to 15 levels, and the blur
 is exact on what that route draws.

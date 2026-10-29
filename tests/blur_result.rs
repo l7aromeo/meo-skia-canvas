@@ -346,3 +346,86 @@ fn a_blurred_path_exported_at_a_density_is_the_exact_gaussian_there() {
         }
     }
 }
+
+/// A canvas on `gpu`'s engine with a 40px red square canvas drawn into it
+/// at (60, 30) through `filter`, at its own size or `sized` to it, or `None`
+/// where that engine is not available.
+fn drawn_canvas(gpu: bool, filter: &str, sized: bool) -> Option<Canvas> {
+    let mut source = Canvas::new(40.0, 40.0);
+    source.set_gpu(gpu);
+    source
+        .context()
+        .set_fill_style_css("red")
+        .expect("a colour");
+    source.context().fill_rect(0.0, 0.0, 40.0, 40.0);
+    let mut canvas = Canvas::new(SIZE.0, SIZE.1);
+    canvas.set_gpu(gpu);
+    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+        return None;
+    }
+    let ctx = canvas.context();
+    ctx.set_filter_css(filter).expect("a filter");
+    match sized {
+        true => ctx.draw_canvas_sized(&mut source, 60.0, 30.0, 40.0, 40.0),
+        false => ctx.draw_canvas(&mut source, 60.0, 30.0),
+    }
+    Some(canvas)
+}
+
+#[test]
+fn a_blurred_canvas_drawn_in_spreads_past_where_it_is_drawn() {
+    // The destination rectangle bounds what is drawn, not its blur: Chrome
+    // 156 reads alpha 72 five pixels outside a red square blurred by 8px and
+    // 28 ten pixels out, where this read 0 at both.
+    for gpu in [false, true] {
+        for sized in [false, true] {
+            for sigma in [2.0f32, 8.0] {
+                let (Some(mut drawn), Some(mut blurred)) = (
+                    drawn_canvas(gpu, "none", sized),
+                    drawn_canvas(gpu, &format!("blur({sigma}px)"), sized),
+                ) else {
+                    continue;
+                };
+                let drawn: Vec<f64> = alpha(&mut drawn)
+                    .into_iter()
+                    .map(|a| f64::from(a) / 255.0)
+                    .collect();
+                let reference =
+                    sampled(&drawn, SIZE.0 as usize, f64::from(sigma));
+                let got = alpha(&mut blurred);
+                let misses = misses(&got, &reference);
+                assert!(
+                    misses.is_empty(),
+                    "gpu {gpu} sized {sized} sigma {sigma}: {} pixels off \
+                     the exact blur, first {:?}",
+                    misses.len(),
+                    &misses[..misses.len().min(4)],
+                );
+                // And so it reaches past the square, as Chrome's does.
+                let row = 50 * SIZE.0 as usize;
+                assert!(got[row + 55] > 0, "gpu {gpu} sigma {sigma}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_canvas_drawn_in_casts_its_drop_shadow_past_where_it_is_drawn() {
+    // A `drop-shadow()` is still Skia's filter, through a layer; the
+    // destination rectangle confines what is drawn into that layer, and the
+    // shadow, thirty pixels to the right of the square, lands outside it.
+    for gpu in [false, true] {
+        let Some(mut canvas) =
+            drawn_canvas(gpu, "drop-shadow(30px 0px 0px blue)", false)
+        else {
+            continue;
+        };
+        let data = canvas
+            .context()
+            .get_image_data(0.0, 50.0, SIZE.0, 1.0)
+            .expect("pixels");
+        let pixel = |x: usize| &data.pixels()[x * 4..x * 4 + 4];
+        assert_eq!(pixel(115), [0, 0, 255, 255], "gpu {gpu}: the shadow");
+        assert_eq!(pixel(80), [255, 0, 0, 255], "gpu {gpu}: the square");
+    }
+}

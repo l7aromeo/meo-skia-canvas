@@ -3,14 +3,14 @@
 #![allow(unused_variables)]
 #![allow(dead_code)]
 use skia_safe::{
-    BlurStyle, Color, Color4f, ColorSpace, CubicResampler, FilterMode,
-    ImageFilter as SkImageFilter, MaskFilter, Matrix, MipmapMode, Paint, Point,
-    SamplingOptions, TileMode, color_filters, image_filters,
+    BlurStyle, Color, Color4f, ColorFilter, ColorSpace, CubicResampler,
+    FilterMode, ImageFilter as SkImageFilter, MaskFilter, Matrix, MipmapMode,
+    Paint, Point, SamplingOptions, TileMode, color_filters, image_filters,
     table_color_filter,
 };
 use std::fmt;
 
-use crate::{export::VectorFeatures, utils::*};
+use crate::{context::chain::Step, export::VectorFeatures, utils::*};
 
 /// The luminance coefficients CSS Filter Effects Level 1 uses for
 /// `grayscale()` and `saturate()`.
@@ -257,6 +257,33 @@ impl Filter {
         self.specs.is_empty()
     }
 
+    /// This filter as steps the crate runs on pixels itself -- see
+    /// [`chain`](crate::context::chain) -- in the order CSS applies them: a
+    /// `blur()` as the exact Gaussian, a colour function through Skia's
+    /// colour filter, which is the same at any scale. `None` for no filter,
+    /// and for one holding a `drop-shadow()`, which Skia still draws.
+    pub(crate) fn steps(&self) -> Option<Vec<Step>> {
+        if self.specs.is_empty() {
+            return None;
+        }
+        self.specs
+            .iter()
+            .map(|spec| match spec {
+                FilterSpec::Plain { name, value } if name == "blur" => {
+                    Some(Step::Blur(*value))
+                }
+                FilterSpec::Plain { name, value } => {
+                    colour_function(name, *value)
+                        .and_then(|filter| {
+                            image_filters::color_filter(filter, None, None)
+                        })
+                        .map(Step::Skia)
+                }
+                FilterSpec::Shadow { .. } => None,
+            })
+            .collect()
+    }
+
     /// The standard deviation, in canvas pixels, of a filter that is one
     /// `blur()` and nothing else; `None` for any other filter.
     pub fn sole_blur(&self) -> Option<f32> {
@@ -435,173 +462,14 @@ impl Filter {
                                     }
                                 }
 
-                                //
-                                // matrices and formulæ taken from: https://www.w3.org/TR/filter-effects-1/
-                                "brightness" => {
-                                    let amt = value.max(0.0);
-                                    let color_matrix =
-                                        color_filters::matrix_row_major(
-                                            &[
-                                                amt, 0.0, 0.0, 0.0, 0.0, 0.0,
-                                                amt, 0.0, 0.0, 0.0, 0.0, 0.0,
-                                                amt, 0.0, 0.0, 0.0, 0.0, 0.0,
-                                                1.0, 0.0,
-                                            ],
-                                            None,
-                                        );
-                                    image_filters::color_filter(
-                                        color_matrix,
-                                        chain,
-                                        None,
-                                    )
-                                }
-                                "contrast" => {
-                                    let amt = value.max(0.0);
-                                    let mut ramp = [0u8; 256];
-                                    for (i, val) in
-                                        ramp.iter_mut().take(256).enumerate()
-                                    {
-                                        let orig = i as f32;
-                                        // Rounded, not truncated: this
-                                        // builds a lookup table, and
-                                        // truncating biases every entry
-                                        // down by up to a level on top of
-                                        // whatever the pivot does.
-                                        // Truncated, not rounded, which is
-                                        // what a browser does: Chrome
-                                        // returns 127 for `contrast(0)`,
-                                        // and a rounded 127.5 would be 128.
-                                        // Rounding looked like the obvious
-                                        // improvement to make alongside the
-                                        // pivot; measured against Chrome it
-                                        // moved every entry of the ramp a
-                                        // level away from the answer.
-                                        *val = (CONTRAST_PIVOT + amt * orig
-                                            - CONTRAST_PIVOT * amt)
-                                            .clamp(0.0, 255.0)
-                                            as u8;
-                                    }
-                                    let table = Some(&ramp);
-                                    if let Some(color_table) =
-                                        color_filters::table_argb(
-                                            None, table, table, table,
-                                        )
-                                    {
+                                name => match colour_function(name, *value) {
+                                    Some(filter) => {
                                         image_filters::color_filter(
-                                            color_table,
-                                            chain,
-                                            None,
+                                            filter, chain, None,
                                         )
-                                    } else {
-                                        chain
                                     }
-                                }
-                                "grayscale" => {
-                                    let amt = 1.0 - value.clamp(0.0, 1.0);
-                                    let color_matrix =
-                                        color_filters::matrix_row_major(
-                                            &faded_toward_identity(
-                                                &[LUMA, LUMA, LUMA],
-                                                amt,
-                                            ),
-                                            None,
-                                        );
-                                    image_filters::color_filter(
-                                        color_matrix,
-                                        chain,
-                                        None,
-                                    )
-                                }
-                                "invert" => {
-                                    let amt = value.clamp(0.0, 1.0);
-                                    let mut ramp = [0u8; 256];
-                                    for (i, val) in ramp
-                                        .iter_mut()
-                                        .take(256)
-                                        .enumerate()
-                                        .map(|(i, v)| (i as f32, v))
-                                    {
-                                        let (orig, inv) = (i, 255.0 - i);
-                                        *val = (orig * (1.0 - amt) + inv * amt)
-                                            as u8;
-                                    }
-                                    let table = Some(&ramp);
-                                    if let Some(color_table) =
-                                        color_filters::table_argb(
-                                            None, table, table, table,
-                                        )
-                                    {
-                                        image_filters::color_filter(
-                                            color_table,
-                                            chain,
-                                            None,
-                                        )
-                                    } else {
-                                        chain
-                                    }
-                                }
-                                "opacity" => {
-                                    let amt = value.clamp(0.0, 1.0);
-                                    let color_matrix =
-                                        color_filters::matrix_row_major(
-                                            &[
-                                                1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                                                1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                                                1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                                                amt, 0.0,
-                                            ],
-                                            None,
-                                        );
-                                    image_filters::color_filter(
-                                        color_matrix,
-                                        chain,
-                                        None,
-                                    )
-                                }
-                                "saturate" => {
-                                    let amt = value.max(0.0);
-                                    let color_matrix =
-                                        color_filters::matrix_row_major(
-                                            &faded_toward_identity(
-                                                &[LUMA, LUMA, LUMA],
-                                                amt,
-                                            ),
-                                            None,
-                                        );
-                                    image_filters::color_filter(
-                                        color_matrix,
-                                        chain,
-                                        None,
-                                    )
-                                }
-                                "sepia" => {
-                                    let amt = 1.0 - value.clamp(0.0, 1.0);
-                                    let color_matrix =
-                                        color_filters::matrix_row_major(
-                                            &faded_toward_identity(&SEPIA, amt),
-                                            None,
-                                        );
-                                    image_filters::color_filter(
-                                        color_matrix,
-                                        chain,
-                                        None,
-                                    )
-                                }
-                                "hue-rotate" => {
-                                    let cos = value.to_radians().cos();
-                                    let sin = value.to_radians().sin();
-                                    let color_matrix =
-                                        color_filters::matrix_row_major(
-                                            &hue_rotated(cos, sin),
-                                            None,
-                                        );
-                                    image_filters::color_filter(
-                                        color_matrix,
-                                        chain,
-                                        None,
-                                    )
-                                }
-                                _ => chain,
+                                    None => chain,
+                                },
                             },
                         }
                     });
@@ -621,6 +489,110 @@ impl Filter {
             // SAFETY: The `or_else` closure always returns `Some(LastFilter {
             // ... })`.
             .expect("Could not create filter")
+    }
+}
+
+/// The colour filter that the CSS filter function `name` makes at `value`:
+/// `None` for a function that is not a colour function -- `blur()`, or one
+/// this does not know -- or a table Skia cannot make.
+pub(crate) fn colour_function(name: &str, value: f32) -> Option<ColorFilter> {
+    match name {
+        //
+        // matrices and formulæ taken from: https://www.w3.org/TR/filter-effects-1/
+        "brightness" => {
+            let amt = value.max(0.0);
+            let color_matrix = color_filters::matrix_row_major(
+                &[
+                    amt, 0.0, 0.0, 0.0, 0.0, 0.0, amt, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    amt, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+                ],
+                None,
+            );
+            Some(color_matrix)
+        }
+        "contrast" => {
+            let amt = value.max(0.0);
+            let mut ramp = [0u8; 256];
+            for (i, val) in ramp.iter_mut().take(256).enumerate() {
+                let orig = i as f32;
+                // Rounded, not truncated: this
+                // builds a lookup table, and
+                // truncating biases every entry
+                // down by up to a level on top of
+                // whatever the pivot does.
+                // Truncated, not rounded, which is
+                // what a browser does: Chrome
+                // returns 127 for `contrast(0)`,
+                // and a rounded 127.5 would be 128.
+                // Rounding looked like the obvious
+                // improvement to make alongside the
+                // pivot; measured against Chrome it
+                // moved every entry of the ramp a
+                // level away from the answer.
+                *val = (CONTRAST_PIVOT + amt * orig - CONTRAST_PIVOT * amt)
+                    .clamp(0.0, 255.0) as u8;
+            }
+            let table = Some(&ramp);
+            color_filters::table_argb(None, table, table, table)
+        }
+        "grayscale" => {
+            let amt = 1.0 - value.clamp(0.0, 1.0);
+            let color_matrix = color_filters::matrix_row_major(
+                &faded_toward_identity(&[LUMA, LUMA, LUMA], amt),
+                None,
+            );
+            Some(color_matrix)
+        }
+        "invert" => {
+            let amt = value.clamp(0.0, 1.0);
+            let mut ramp = [0u8; 256];
+            for (i, val) in ramp
+                .iter_mut()
+                .take(256)
+                .enumerate()
+                .map(|(i, v)| (i as f32, v))
+            {
+                let (orig, inv) = (i, 255.0 - i);
+                *val = (orig * (1.0 - amt) + inv * amt) as u8;
+            }
+            let table = Some(&ramp);
+            color_filters::table_argb(None, table, table, table)
+        }
+        "opacity" => {
+            let amt = value.clamp(0.0, 1.0);
+            let color_matrix = color_filters::matrix_row_major(
+                &[
+                    1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    1.0, 0.0, 0.0, 0.0, 0.0, 0.0, amt, 0.0,
+                ],
+                None,
+            );
+            Some(color_matrix)
+        }
+        "saturate" => {
+            let amt = value.max(0.0);
+            let color_matrix = color_filters::matrix_row_major(
+                &faded_toward_identity(&[LUMA, LUMA, LUMA], amt),
+                None,
+            );
+            Some(color_matrix)
+        }
+        "sepia" => {
+            let amt = 1.0 - value.clamp(0.0, 1.0);
+            let color_matrix = color_filters::matrix_row_major(
+                &faded_toward_identity(&SEPIA, amt),
+                None,
+            );
+            Some(color_matrix)
+        }
+        "hue-rotate" => {
+            let cos = value.to_radians().cos();
+            let sin = value.to_radians().sin();
+            let color_matrix =
+                color_filters::matrix_row_major(&hue_rotated(cos, sin), None);
+            Some(color_matrix)
+        }
+        _ => None,
     }
 }
 

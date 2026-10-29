@@ -54,8 +54,9 @@ use crate::{
     },
     utils::*,
 };
+use chain::Step;
 use faint::Faint;
-use layer::{BlurDraw, Layer, LayerRec};
+use layer::{BlurDraw, Composite, Layer, LayerRec};
 use page::{ExportOptions, Page, PageRecorder};
 use typesetting::{TextSettings, Typesetting, Typography};
 
@@ -824,10 +825,10 @@ impl Context2D {
         );
         self.with_recorder(|mut recorder| {
             recorder.append_group(
-                LayerRec {
+                Composite::Layer(LayerRec {
                     paint: Some(paint),
                     ..LayerRec::default()
-                },
+                }),
                 None,
                 Matrix::new_identity(),
                 contents,
@@ -1382,13 +1383,28 @@ impl Context2D {
                 .paint_for_shadow(&paint)
                 .map(|shadow| self.faint().drawable(&shadow).into_owned());
             let offset = self.state.shadow_offset;
+            // A filter the crate can run itself is run on the group's
+            // pixels, exactly; Skia's own image filter, set beside it,
+            // would have to run after it, and keeps the whole filter Skia's.
+            let steps = self
+                .state
+                .skia_image_filter
+                .is_none()
+                .then(|| self.state.filter.steps())
+                .flatten()
+                .map(Arc::<[Step]>::from);
             self.with_recorder(|mut recorder| {
-                let mut group = |paint: Paint, shift: Point| {
+                let mut group = |paint: Paint, shift: Point, own: bool| {
+                    let rec = LayerRec {
+                        paint: Some(paint),
+                        ..LayerRec::default()
+                    };
+                    let composite = match steps.clone().filter(|_| own) {
+                        Some(steps) => Composite::Chain { steps, rec },
+                        None => Composite::Layer(rec),
+                    };
                     recorder.append_group(
-                        LayerRec {
-                            paint: Some(paint),
-                            ..LayerRec::default()
-                        },
+                        composite,
                         Some(*dst_rect),
                         contents_matrix,
                         Arc::clone(&contents),
@@ -1397,9 +1413,9 @@ impl Context2D {
                     );
                 };
                 if let Some(shadow) = shadow {
-                    group(shadow, offset);
+                    group(shadow, offset, false);
                 }
-                group(drawn, Point::default());
+                group(drawn, Point::default(), true);
             });
             return;
         }

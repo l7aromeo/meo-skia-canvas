@@ -137,6 +137,16 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A canvas drawn in under a filter spreads past where it is drawn.** A
+  canvas drawn into another with `Context2D::draw_canvas` or
+  `draw_canvas_sized` under `Context2D::set_filter_css` was cut at its
+  destination rectangle: a 40px square blurred by 8px read alpha 0 five
+  pixels outside it, where Chrome reads 72, and a `drop-shadow()` cast past
+  the square was not drawn at all. The rectangle now bounds what is drawn
+  and not what the filter makes of it. A `blur()` and the colour functions
+  are run on the drawn canvas's pixels by the exact Gaussian, as a blurred
+  path is, on either engine; a `drop-shadow()` is still Skia's.
+
 - **A blurred path is the exact Gaussian blur of what it draws.** A
   flat-colour shape that `Context2D::set_filter_css("blur(...)")` blurs on
   its result -- any path but a rectangle or a rounded rectangle, and those

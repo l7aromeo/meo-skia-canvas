@@ -36,7 +36,7 @@ use crate::{
     },
     context::{
         BoxedContext2D,
-        layer::{BlurDraw, BlurOp, Group, Layer, LayerRec, Target},
+        layer::{BlurDraw, BlurOp, Composite, Group, Layer, LayerRec, Target},
     },
     encode::{
         self, Frame, FrameDepth, Pixels, SequenceSpec, Sink,
@@ -664,7 +664,7 @@ impl PageRecorder {
         };
         if !layer.entries.is_empty() || layer.rec.marks_when_empty() {
             let group = Group {
-                rec: layer.rec,
+                composite: Composite::Layer(layer.rec),
                 matrix: layer.matrix,
                 clip: layer.clip.as_ref().map(Path::serialize),
                 within: None,
@@ -676,7 +676,7 @@ impl PageRecorder {
         self.restore();
     }
 
-    /// Files `contents` as a [`Group`] composited through `rec`, under the
+    /// Files `contents` as a [`Group`] composited by `composite`, under the
     /// transform and clip the recorder holds and inside `within` under that
     /// transform, its entries played under `contents_matrix`; asking
     /// `features` of a vector backend for it. Filed where the recording
@@ -687,7 +687,7 @@ impl PageRecorder {
     /// a shadow is offset from what casts it.
     pub fn append_group(
         &mut self,
-        rec: LayerRec,
+        composite: Composite,
         within: Option<Rect>,
         contents_matrix: Matrix,
         contents: Arc<Vec<Layer>>,
@@ -697,7 +697,7 @@ impl PageRecorder {
         self.file_current();
         let shift = Matrix::translate(shift);
         let group = Group {
-            rec,
+            composite,
             matrix: Matrix::concat(&shift, &self.matrix),
             clip: self.clip.as_ref().map(Path::serialize),
             within,
@@ -773,7 +773,7 @@ impl PageRecorder {
                 }
                 contents.extend(inner);
                 Some(Layer::Group(Arc::new(Group {
-                    rec: layer.rec.clone(),
+                    composite: Composite::Layer(layer.rec.clone()),
                     matrix: layer.matrix,
                     clip: layer.clip.as_ref().map(Path::serialize),
                     within: None,

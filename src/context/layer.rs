@@ -91,8 +91,15 @@ impl LayerRec {
     /// carries, compositing as `target` needs: on pixels through the paint
     /// [`composited`] hands over, which keeps the alpha exact; in a
     /// document through the paint as it is, which the backend writes as an
-    /// opacity and keeps vector.
-    fn open_on(&self, canvas: &SkCanvas, target: Target) {
+    /// opacity and keeps vector. `within` bounds what is drawn into it where
+    /// its own bounds do not, so that a layer without a filter is no larger
+    /// than that.
+    fn open_on(
+        &self,
+        canvas: &SkCanvas,
+        target: Target,
+        within: Option<&Rect>,
+    ) {
         let paint = match (&self.paint, target) {
             (Some(paint), Target::Pixels) => Some(composited(paint)),
             (Some(paint), Target::Document) => Some(Cow::Borrowed(paint)),
@@ -102,7 +109,14 @@ impl LayerRec {
         if let Some(paint) = &paint {
             rec = rec.paint(paint);
         }
-        if let Some(bounds) = &self.bounds {
+        // Not for a paint with a filter: Skia confines what the filter makes
+        // to the layer's bounds as well, and a blur would stop at them.
+        let filtered = self
+            .paint
+            .as_ref()
+            .is_some_and(|paint| paint.image_filter().is_some());
+        let within = within.filter(|_| !filtered);
+        if let Some(bounds) = self.bounds.as_ref().or(within) {
             rec = rec.bounds(bounds);
         }
         if let Some(backdrop) = &self.backdrop {
@@ -121,6 +135,27 @@ impl LayerRec {
     }
 }
 
+/// How a [`Group`] composites onto what lies beneath it.
+#[derive(Clone, Debug)]
+pub enum Composite {
+    /// Through a `saveLayer` opened with this.
+    Layer(LayerRec),
+    /// Through a filter chain the crate runs on the group's pixels itself
+    /// -- see [`chain`] -- and `rec`'s paint, less its image filter, which
+    /// is the chain as Skia would run it. A document opens `rec` as a layer,
+    /// filter and all.
+    Chain { steps: Arc<[Step]>, rec: LayerRec },
+}
+
+impl Composite {
+    /// What the group opens as a layer where it opens one.
+    fn rec(&self) -> &LayerRec {
+        match self {
+            Composite::Layer(rec) | Composite::Chain { rec, .. } => rec,
+        }
+    }
+}
+
 /// Entries composited as one through a paint: what a `saveLayer` held when
 /// it closed, or a canvas drawn into another through a paint.
 ///
@@ -130,15 +165,17 @@ impl LayerRec {
 #[derive(Clone, Debug)]
 pub struct Group {
     /// How the group composites onto what lies beneath it.
-    pub rec: LayerRec,
+    pub composite: Composite,
     /// The transform and the clip the group composites under, in page
     /// coordinates; the clip is in device space, as the recorder holds it,
     /// and serialized, as a [`BlurOp`]'s is, so that a page can be sent to
     /// another thread.
     pub matrix: Matrix,
     pub clip: Option<Data>,
-    /// A rectangle under `matrix` the group is confined to: the destination
-    /// a canvas is drawn into.
+    /// A rectangle under `matrix` that what the group draws is confined to:
+    /// the destination a canvas is drawn into. It bounds what is drawn and
+    /// not what a filter makes of it, which spreads past it as a blur of
+    /// any other draw spreads past the draw.
     pub within: Option<Rect>,
     /// The transform the entries are played under: the identity for what a
     /// layer held, recorded in page coordinates; for a canvas drawn in, the
@@ -160,16 +197,57 @@ impl Group {
         if let Some(clip) = self.clip.as_ref().and_then(Path::deserialize) {
             canvas.clip_path(&clip, ClipOp::Intersect, true);
         }
-        canvas.set_matrix(&Matrix::concat(&base, &self.matrix).into());
-        if let Some(within) = &self.within {
-            canvas.clip_rect(within, ClipOp::Intersect, true);
+        match (&self.composite, target) {
+            (Composite::Chain { steps, rec }, Target::Pixels) => {
+                let mut paint = rec.paint.clone().unwrap_or_default();
+                paint.set_image_filter(None);
+                // The chain's lengths are in the pixels of the canvas the
+                // group was drawn on, which `base` maps to the device.
+                let content =
+                    self.within.map(|within| self.matrix.map_rect(within).0);
+                chain::apply(
+                    canvas,
+                    steps,
+                    content,
+                    Depth::Floats,
+                    &composited(&paint),
+                    |layer| {
+                        let to_layer = layer.local_to_device_as_3x3();
+                        layer.set_matrix(
+                            &Matrix::concat(&to_layer, &self.matrix).into(),
+                        );
+                        if let Some(within) = &self.within {
+                            layer.clip_rect(within, ClipOp::Intersect, true);
+                        }
+                        layer.set_matrix(
+                            &Matrix::concat(&to_layer, &self.contents_matrix)
+                                .into(),
+                        );
+                        for entry in self.contents.iter() {
+                            entry.playback(layer, Target::Pixels);
+                        }
+                    },
+                );
+            }
+            (composite, target) => {
+                canvas.set_matrix(&Matrix::concat(&base, &self.matrix).into());
+                composite
+                    .rec()
+                    .open_on(canvas, target, self.within.as_ref());
+                // Inside the layer, so that it confines what is drawn and
+                // not what the layer's filter makes of it.
+                if let Some(within) = &self.within {
+                    canvas.clip_rect(within, ClipOp::Intersect, true);
+                }
+                canvas.set_matrix(
+                    &Matrix::concat(&base, &self.contents_matrix).into(),
+                );
+                for entry in self.contents.iter() {
+                    entry.playback(canvas, target);
+                }
+                canvas.restore();
+            }
         }
-        self.rec.open_on(canvas, target);
-        canvas.set_matrix(&Matrix::concat(&base, &self.contents_matrix).into());
-        for entry in self.contents.iter() {
-            entry.playback(canvas, target);
-        }
-        canvas.restore();
         canvas.restore();
     }
 }
