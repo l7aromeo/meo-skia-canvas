@@ -33,6 +33,7 @@ use crate::{
 /// | mask filter                    | dropped  | fine  |
 /// | blend mode past source-over    | dropped  | wrong |
 /// | canvas drawn in through a paint| dropped  | fine  |
+/// | anything drawn in a `saveLayer`| dropped  | fine  |
 ///
 /// A draw carrying something its backend cannot take is recorded in a layer
 /// of its own and rasterized into the document at export time, so the file
@@ -52,6 +53,10 @@ impl VectorFeatures {
     pub(crate) const EXOTIC_SHADER: Self = Self(1 << 0);
     /// An image filter, which is also how a shadow is drawn here.
     pub(crate) const IMAGE_FILTER: Self = Self(1 << 1);
+    /// A draw inside a layer opened with `saveLayer`, which the SVG backend
+    /// has none of: it drops whatever is drawn inside one, plain,
+    /// translucent or nested.
+    pub(crate) const LAYER: Self = Self(1 << 5);
     /// A mask filter.
     pub(crate) const MASK_FILTER: Self = Self(1 << 2);
     /// What the PDF backend gets wrong, which is blend modes and nothing
@@ -71,7 +76,8 @@ impl VectorFeatures {
             | Self::IMAGE_FILTER.0
             | Self::MASK_FILTER.0
             | Self::BLEND_MODE.0
-            | Self::PICTURE_PAINT.0,
+            | Self::PICTURE_PAINT.0
+            | Self::LAYER.0,
     );
 
     pub(crate) fn with(self, other: Self) -> Self {

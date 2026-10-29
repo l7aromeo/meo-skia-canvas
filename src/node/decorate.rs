@@ -37,8 +37,8 @@ use crate::{
     },
 };
 use skia_safe::{
-    Canvas, Color, Color4f, Font, FontStyle, Paint, Path, PathBuilder,
-    PathFillType, PathVerb, Point, Rect,
+    Canvas, Color4f, Font, FontStyle, Paint, Path, PathBuilder, PathFillType,
+    PathVerb, Point, Rect,
     paint::{Cap, Style},
     path_utils::fill_path_with_paint,
     textlayout::{
@@ -337,7 +337,8 @@ pub(crate) struct Decoration {
     /// The lines' colour where one was named, or `None` for the colour of
     /// the paint the text is drawn with -- CSS's `currentcolor`, kept as the
     /// paint holds it, wide-gamut and with any global alpha already in it.
-    pub(crate) color: Option<Color>,
+    /// In extended sRGB, unpremultiplied.
+    pub(crate) color: Option<Color4f>,
     /// What a named colour's alpha is multiplied by: a canvas's global
     /// alpha, which the text's own paint carries and a named colour does
     /// not. 1 where the paint is composited through a layer that applies it.
@@ -507,8 +508,7 @@ pub(crate) fn paint(
         let decoration = &boxes[span.box_index];
         for kind in layer.kinds() {
             if decoration.lines.contains(*kind) {
-                let color = decoration.color.map(|color| {
-                    let mut color = Color4f::from(color);
+                let color = decoration.color.map(|mut color| {
                     color.a *= decoration.opacity;
                     color
                 });
@@ -1446,7 +1446,7 @@ mod tests {
     use super::{Decoration, FaceLines, Layer, Span, Thickness, paint, wave};
     use crate::context::faint::Faint;
     use skia_safe::{
-        Color, Paint, PictureRecorder, Point, Rect,
+        Color, Color4f, Paint, PictureRecorder, Point, Rect,
         textlayout::{TextDecoration, TextDecorationStyle},
     };
 
@@ -1465,7 +1465,7 @@ mod tests {
             lines: TextDecoration::UNDERLINE,
             style,
             thickness: Thickness::Pixels(t),
-            color: Some(Color::BLACK),
+            color: Some(Color4f::from(Color::BLACK)),
             opacity: 1.0,
             face,
         }];

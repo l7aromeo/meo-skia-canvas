@@ -18,6 +18,7 @@ use crate::{
     error::Error,
     geometry::Size,
     pixels::{ImageData, PixelColorSpace, PixelExportOptions},
+    start_skia,
 };
 
 /// The size an SVG with no declared size of its own is laid out against.
@@ -327,6 +328,7 @@ impl Image {
     /// Returns [`Error::DecodeImage`] when the header is unreadable or the
     /// format is not one this build of Skia supports.
     pub fn from_encoded(bytes: &[u8]) -> Result<Self, Error> {
+        start_skia();
         let data = Data::new_copy(bytes);
         let image = decoded(&data, SkiaDecode::Now).ok_or_else(|| {
             Error::DecodeImage {
@@ -387,6 +389,7 @@ impl Image {
         stride: usize,
         options: PixelExportOptions,
     ) -> Result<Self, Error> {
+        start_skia();
         if width == 0 || height == 0 {
             return Err(Error::InvalidDimensions {
                 width: width as f32,
@@ -717,6 +720,7 @@ impl Svg {
     ///
     /// Returns [`Error::DecodeImage`] if the XML cannot be parsed.
     pub fn parse(xml: &str) -> Result<Self, Error> {
+        start_skia();
         Ok(Self::from_dom(Self::parse_dom(
             xml.as_bytes(),
             FontMgr::new(),

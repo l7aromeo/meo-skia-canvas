@@ -2522,8 +2522,8 @@ fn build_paragraph_style(
 #[cfg(test)]
 mod tests {
     use super::{
-        FaceQuery, InstanceKey, SkPaint, SkTextStyle, TextEngine, TextSlant,
-        TextStyle, instance_for,
+        FaceQuery, InstanceKey, SkPaint, TextEngine, TextSlant, TextStyle,
+        instance_for,
     };
     use crate::{
         cache_map::CacheMap,
@@ -2548,6 +2548,8 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn an_empty_family_list_is_a_null_slice_in_skia_safe() {
+        use super::SkTextStyle;
+
         /// Set for the child, which makes the call the parent watches.
         const CHILD: &str = "MEO_SKIA_CANVAS_EMPTY_FAMILY_CHILD";
         if std::env::var_os(CHILD).is_some() {

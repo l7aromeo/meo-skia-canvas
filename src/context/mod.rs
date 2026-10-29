@@ -43,6 +43,7 @@ use crate::{
         pattern::{BoxedCanvasPattern, CanvasPattern},
         shader::BoxedShader,
         texture::{BoxedCanvasTexture, CanvasTexture},
+        typography::with_style_axes,
     },
     typography::{
         Baseline, DecorationStyle, DrawnRun, FontSpec, PendingInk, Spacing,
@@ -313,6 +314,7 @@ impl Default for State {
                 text_rendering: TextRendering::default(),
                 variations: vec![],
                 oblique_angle: None,
+                weight: None,
             }),
             font_variation_settings: "normal".to_string(),
         }
@@ -363,9 +365,15 @@ impl State {
     /// `None` only when nothing at all resolves.
     pub fn primary_face(&self) -> Option<Typeface> {
         FontLibrary::with_shared(|library| {
-            let (mut collection, _) = library
-                .set_hinting(self.hinted())
-                .fonts_for_style(&self.text.char_style, &self.text.variations);
+            let (mut collection, _) =
+                library.set_hinting(self.hinted()).fonts_for_style(
+                    &self.text.char_style,
+                    &with_style_axes(
+                        &self.text.variations,
+                        None,
+                        self.text.weight,
+                    ),
+                );
             let families = self.text.char_style.font_families();
             let families: Vec<&str> = families.iter().collect();
             collection
@@ -1673,6 +1681,7 @@ impl Context2D {
         let text = &self.state.text;
         if text.line_height == spec.line_height
             && text.oblique_angle == spec.oblique_angle()
+            && text.weight == spec.fractional_weight
             && text.char_style == style
         {
             return;
@@ -1680,6 +1689,7 @@ impl Context2D {
         self.state.text.edit().char_style = style;
         self.state.text.edit().line_height = spec.line_height;
         self.state.text.edit().oblique_angle = spec.oblique_angle();
+        self.state.text.edit().weight = spec.fractional_weight;
     }
 
     /// Applies the font a CSS `font` shorthand names, answering whether it
