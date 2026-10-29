@@ -106,12 +106,16 @@ pub(crate) fn draws_ran(_surface: &mut Surface, _page: usize) -> bool {
 /// A way for tests to make [`draws_ran`] answer no, since a real discard needs
 /// a GPU fault that no test can cause safely.
 ///
-/// Compiled into debug builds with a GPU backend only. Release builds --
-/// every published binary, and any crate build made with `--release` -- get
-/// the stub below, which always answers no discard, so nothing outside a test
-/// can arm it. Without a GPU backend there are no draws to discard and no
-/// seam at all.
-#[cfg(all(debug_assertions, any(feature = "metal", feature = "vulkan")))]
+/// Compiled, with a GPU backend, into debug builds and into test builds of
+/// either profile, so the tests below run under `--release` too. Every other
+/// release build -- each published binary among them -- gets the stub below,
+/// which always answers no discard, so nothing outside a test or a debug
+/// build can arm it. Without a GPU backend there are no draws to discard and
+/// no seam at all.
+#[cfg(all(
+    any(test, debug_assertions),
+    any(feature = "metal", feature = "vulkan")
+))]
 pub(crate) mod seam {
     use parking_lot::Mutex;
 
@@ -180,7 +184,10 @@ pub(crate) mod seam {
     }
 }
 
-#[cfg(all(not(debug_assertions), any(feature = "metal", feature = "vulkan")))]
+#[cfg(all(
+    not(any(test, debug_assertions)),
+    any(feature = "metal", feature = "vulkan")
+))]
 pub(crate) mod seam {
     /// No seam in a release build: a draw is discarded only if the GPU says so.
     #[inline]

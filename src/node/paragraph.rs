@@ -22,8 +22,8 @@ use crate::{
     font_library::{FontLibrary, instance_coordinates},
     node::{
         oblique::{
-            ParagraphRecipe, Passes, add_slnt, match_oblique, set_coordinates,
-            without_paragraph_cache,
+            ParagraphRecipe, Passes, StyleColours, add_slnt, match_oblique,
+            set_coordinates, without_paragraph_cache,
         },
         typography::{paragraph_style, with_style_axes},
     },
@@ -648,20 +648,25 @@ fn collection_names(families: &[String]) -> Vec<String> {
 }
 
 /// A text style from `obj`, which sits at `prefix` among the options --
-/// `textStyle.` for a paragraph's, nothing for a pushed style -- and the
-/// angle of the oblique it asks for, if any: Skia's font style has no field
-/// for one.
+/// `textStyle.` for a paragraph's, nothing for a pushed style -- with what
+/// Skia's text style has no field for: the angle of the oblique it asks for,
+/// the weight it names where that has a fraction, and its decoration's and
+/// shadows' colours as named -- see `StyleColours`.
 fn parse_text_style<'a>(
     cx: &mut FunctionContext<'a>,
     obj: &Handle<'a, JsObject>,
     prefix: &str,
-) -> NeonResult<(TextStyle, Option<f32>, Option<f32>)> {
+) -> NeonResult<(TextStyle, Option<f32>, Option<f32>, StyleColours)> {
     // Black where no colour is named, as CSS's initial `color` is and as
     // the declarations promise; SkParagraph's own default is white.
     let mut style = TextStyle::new();
     style.set_color(Color::BLACK);
     let mut oblique = None;
     let mut fraction = None;
+    // The decoration's and the shadows' colours as named, which the style
+    // can only hold in eight bits -- see `StyleColours`.
+    let mut colours = StyleColours::default();
+    let mut text_srgb = None;
 
     refuse_unknown_keys(cx, obj, TEXT_STYLE_KEYS, "text style")?;
 
@@ -691,6 +696,7 @@ fn parse_text_style<'a>(
         paint.set_color4f(paint_color, Some(&paint_space));
         style.set_foreground_paint(&paint);
         text_color = Some(color4f_to_skia_color(color4f, &cs));
+        text_srgb = Some(color4f_to_srgb(color4f, Some(&cs)));
     }
     if let Some((color4f, cs)) =
         colour_option(cx, obj, prefix, "foregroundColor")?
@@ -700,6 +706,7 @@ fn parse_text_style<'a>(
         paint.set_color4f(paint_color, Some(&paint_space));
         style.set_foreground_paint(&paint);
         text_color = Some(color4f_to_skia_color(color4f, &cs));
+        text_srgb = Some(color4f_to_srgb(color4f, Some(&cs)));
     }
 
     // backgroundColor
@@ -822,16 +829,20 @@ fn parse_text_style<'a>(
     // Re-check: grep -n "fn set_decoration_color\|fn new(color"
     // ~/.cargo/registry/src/*/skia-safe-*/src/modules/paragraph/text_style.rs
     // ~/.cargo/registry/src/*/skia-safe-*/src/modules/paragraph/text_shadow.rs
-    // SkParagraph takes a decoration's colour, and a text shadow's, as an
-    // eight-bit sRGB `SkColor` and nothing wider, so `color4f_to_skia_color`
-    // converts from the space `colour_option` tagged and gamut-maps a wide
-    // colour into sRGB on the way in.
+    // SkParagraph holds a decoration's colour, and a text shadow's, as an
+    // eight-bit sRGB `SkColor`. It draws neither -- the recipe takes both off
+    // the style and `node::oblique::Passes` draws them -- so the colours as
+    // named go beside the style in `colours`, and the style's are only
+    // what `color4f_to_skia_color` makes of them.
     let mut decoration_color = None;
+    let mut decoration_srgb = None;
     if let Some((color4f, cs)) =
         colour_option(cx, obj, prefix, "decorationColor")?
     {
         decoration_color = Some(color4f_to_skia_color(color4f, &cs));
+        decoration_srgb = Some(color4f_to_srgb(color4f, Some(&cs)));
     }
+    colours.decoration = decoration_srgb.or(text_srgb);
     // Fall back to the text color, as CSS's `currentcolor` does and as the
     // native TextStyle documents, and to the style's own colour where none
     // was named at all, which is the black the text is drawn in. Skia
@@ -865,14 +876,16 @@ fn parse_text_style<'a>(
             let shadow_obj = to_dictionary(cx, shadow_val, prefix, &key)?;
             let inner = format!("{prefix}{key}.");
             let mut color = Color::BLACK;
+            let mut srgb = Color4f::from(Color::BLACK);
             let mut offset = Point::new(0.0, 0.0);
             let mut blur = 0.0;
             if let Some(shadow_obj) = shadow_obj {
-                // Eight-bit, as decorationColor is and for the same reason.
+                // Kept as named beside the style, as decorationColor is.
                 if let Some((c, cs)) =
                     colour_option(cx, &shadow_obj, &inner, "color")?
                 {
                     color = color4f_to_skia_color(c, &cs);
+                    srgb = color4f_to_srgb(c, Some(&cs));
                 }
 
                 if let Some(offset_val) =
@@ -902,6 +915,7 @@ fn parse_text_style<'a>(
             }
 
             style.add_shadow(TextShadow::new(color, offset, blur as f64));
+            colours.shadows.push(srgb);
         }
     }
 
@@ -977,7 +991,7 @@ fn parse_text_style<'a>(
         style.set_half_leading(half);
     }
 
-    Ok((style, oblique, fraction))
+    Ok((style, oblique, fraction, colours))
 }
 
 /// `fontStyle.obliqueAngle` in degrees, `None` where it is not given.
@@ -1017,15 +1031,16 @@ fn oblique_angle_for_key<'a>(
     }
 }
 
-/// A paragraph style, and the angle of the oblique its text style asks for,
-/// if any.
+/// A paragraph style, with what [`parse_text_style`] reads beside its text
+/// style: the oblique's angle, the fractional weight and the colours.
 fn parse_paragraph_style<'a>(
     cx: &mut FunctionContext<'a>,
     obj: &Handle<'a, JsObject>,
-) -> NeonResult<(ParagraphStyle, Option<f32>, Option<f32>)> {
+) -> NeonResult<(ParagraphStyle, Option<f32>, Option<f32>, StyleColours)> {
     let mut style = paragraph_style();
     let mut oblique = None;
     let mut fraction = None;
+    let mut colours = StyleColours::default();
 
     refuse_unknown_keys(cx, obj, PARAGRAPH_STYLE_KEYS, "paragraph style")?;
 
@@ -1085,11 +1100,12 @@ fn parse_paragraph_style<'a>(
 
     // textStyle (default text style for the paragraph)
     if let Some(ts_obj) = object_option(cx, obj, "", "textStyle")? {
-        let (text_style, asked, weight) =
+        let (text_style, asked, weight, named) =
             parse_text_style(cx, &ts_obj, "textStyle.")?;
         style.set_text_style(&text_style);
         oblique = asked;
         fraction = weight;
+        colours = named;
     }
 
     // textHeightBehavior: 0 = All, 1 = DisableFirstAscent,
@@ -1138,7 +1154,7 @@ fn parse_paragraph_style<'a>(
         style.set_strut_style(strut);
     }
 
-    Ok((style, oblique, fraction))
+    Ok((style, oblique, fraction, colours))
 }
 
 /// Parses the `textStyle.fontVariations` array from a
@@ -1192,7 +1208,7 @@ pub fn paragraphFollows(mut cx: FunctionContext) -> JsResult<JsValue> {
 
 pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
     let style_arg = cx.argument::<JsObject>(1)?;
-    let (para_style, asked, weight) =
+    let (para_style, asked, weight, colours) =
         parse_paragraph_style(&mut cx, &style_arg)?;
     let variations = parse_paragraph_font_variations(&mut cx, &style_arg)?;
 
@@ -1237,6 +1253,7 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
             base_oblique,
             collection.clone(),
             Some(epoch),
+            &colours,
         )),
         collection,
         variations,
@@ -1246,7 +1263,7 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
 pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedParagraphBuilder>(0)?;
     let style_obj = cx.argument::<JsObject>(1)?;
-    let (mut text_style, asked, weight) =
+    let (mut text_style, asked, weight, colours) =
         parse_text_style(&mut cx, &style_obj, "")?;
     let own = parse_font_variations(&mut cx, &style_obj, "")?;
 
@@ -1296,7 +1313,7 @@ pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     }
     set_coordinates(&mut text_style, &coordinates);
     if let Some(recipe) = recipe.as_mut() {
-        recipe.push_style(text_style, oblique);
+        recipe.push_style(text_style, oblique, &colours);
     }
     Ok(cx.undefined())
 }

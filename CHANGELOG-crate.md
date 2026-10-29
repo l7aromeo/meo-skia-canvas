@@ -155,6 +155,19 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A half-float canvas stores the nearest half on x86.** On an x86
+  machine, a canvas made with `PixelDepth::F16` as its `color_type` truncated each value it
+  stored instead of rounding it, so a pixel could land up to one half-float
+  step low -- 0.0005 near one half -- and flushed values under 2^-14 to zero,
+  so a faint enough blur or gradient vanished. ARM machines were unaffected.
+  Skia picks the raster stages built for the CPU it runs on only when it is
+  started, and nothing started it; it is now started before anything else
+  reaches it, which rounds to nearest, keeps subnormals, and gives an x86
+  machine with AVX2 the stages built for it. That holds where the CPU has
+  AVX2 and F16C: an older x86 CPU keeps Skia's portable stage, which still
+  truncates. A value written with `Context2D::put_image_data` and read back
+  shows it.
+
 - **An SVG export keeps what a `saveLayer` holds.** Skia's SVG backend has
   no layers and dropped whatever was drawn inside one: a red square in
   `Context2D::save_layer` or `save_layer_with`, in a nested layer, or a
@@ -163,6 +176,30 @@ window be changed after it opens.** No signature moves and nothing is removed.
   one with a filtered draw inside a layer already was; a layer that holds
   nothing leaves it vector. PDF drew all of these correctly and stays
   vector.
+
+- **A paragraph's decoration and text shadow are painted in the colours its
+  style names.** SkParagraph holds both as an eight-bit sRGB colour, and a
+  `Paragraph` drew them in it: on a canvas made with `PixelDepth::F16` or
+  `PixelDepth::F32`, a `TextStyle::decoration_color` or a `TextShadow`
+  colour in alpha 0.3 came out at 77/255 beside text at 0.3, and on an
+  eight-bit canvas a colour outside sRGB was gamut-mapped where a fill of
+  it is clipped. Both are drawn here rather than by SkParagraph, so they now
+  take the colours as named, as the text does; a colour of whole bytes
+  draws as it did.
+
+- **A text decoration's colour is painted at the precision it names, as a
+  fill's is.** The colour named in `Context2D::set_text_decoration_css` or
+  `set_text_decoration` was rounded to eight bits of sRGB when it was set.
+  On a canvas made with `PixelDepth::F16` or `PixelDepth::F32`, a line in
+  alpha 0.3 drew at 77/255 beside text drawn at 0.3, and a colour under half
+  of one 255th not at all. On an eight-bit canvas a colour outside sRGB was
+  gamut-mapped where a fill of it is clipped: `color(display-p3 0 1 0)` drew
+  its line at `0,251,41` beside a fill at `0,255,0`. The line now draws the
+  bytes a fill draws, on every canvas; a colour of whole bytes draws as it
+  did. The colour of a `drop-shadow()` read by `Context2D::set_filter_css`,
+  and its `FilterOp::DropShadow`, is kept as named too, which changes no
+  pixel yet: Skia's raster backend resolves the shadow on an eight-bit layer
+  either way.
 
 - **A draw too faint for eight bits draws on a float canvas.** On a canvas
   made with `PixelDepth::F16` or `PixelDepth::F32` as its `color_type`, a
@@ -173,8 +210,7 @@ window be changed after it opens.** No signature moves and nothing is removed.
   now leaves the alpha it was drawn with, 0.001 read back in float. A
   shadow on a float canvas also takes the global alpha exactly, where under
   0.5 it came back 128/255. An eight-bit canvas draws as it did. Still
-  drawn as nothing: a `Paragraph` whose `TextStyle::color` is that faint,
-  and a text decoration colour that faint, which is kept in eight bits.
+  drawn as nothing: a `Paragraph` whose `TextStyle::color` is that faint.
 
 - **A canvas drawn into another takes the context's colour filter.**
   `Context2D::draw_canvas` under `Context2D::set_color_filter`, at full
@@ -436,20 +472,28 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `# Panics` section now names the one case that panics: a first `run` off
   the main thread on macOS.
 
-- **A large blur in `set_filter_css` draws as Chrome's.** A flat-colour shape
+- **A large blur in `set_filter_css` keeps spreading.** A flat-colour shape
   or text was blurred on its coverage, which Skia holds to a sigma of 128, so
-  `blur(200px)`, `blur(500px)` and `blur(1000px)` drew alike. A draw is now
-  blurred on its result wherever that is nearer Chrome or cheaper, and text
-  always: Skia's coverage blur of text blurs each glyph on its own and draws
-  the glyphs over one another, so where their blurs overlapped the text lost
-  ink -- 16px Oswald blurred by 20px kept 58% of it and 48px blurred by 40px
-  75% -- and at every size measured it was two to seven times further from
-  the exact Gaussian than the blurred text now is. Blurred text costs what
-  any blurred path does. Chrome's own canvas blurs a large radius differently
-  on its GPU and on its CPU, and each engine here now matches Chrome's same
-  engine: a square sums to within half a percent of Chrome's GPU canvas from
-  50 to 1000px on the GPU engine, and to Chrome's CPU canvas exactly on the
-  CPU engine at every radius measured but 200px, which is 0.9% off.
+  `blur(200px)`, `blur(500px)` and `blur(1000px)` drew alike. A rectangle is
+  now drawn as its exact blur at every radius -- see the next entry -- and
+  any other draw is blurred on its result wherever that is nearer the
+  Gaussian or cheaper, and text always: Skia's coverage blur of text blurs
+  each glyph on its own and draws the glyphs over one another, so where their
+  blurs overlapped the text lost ink -- 16px Oswald blurred by 20px kept 58%
+  of it and 48px blurred by 40px 75% -- and at every size measured it was two
+  to seven times further from the exact Gaussian than the blurred text now
+  is. Blurred text costs what any blurred path does.
+
+- **A blurred rectangle is its exact Gaussian blur.** A flat-colour rectangle
+  under a `blur()` filter, whatever its radius, is drawn as the Gaussian blur
+  of the rectangle averaged over each pixel: within half a level of it on the
+  CPU engine and within 0.56 of one on the GPU engine, and to the surface's
+  precision on F16 and F32, where 0.16.3 drew Skia's blur: on the CPU engine
+  26 levels off at a sigma of 2 and 181 at 0.5, where so small a blur moved
+  the rectangle's edge by a pixel, and on the GPU engine 12.5 at 0.5. Chrome
+  152 is up to 3.3 levels off on its GPU canvas and 10.6 on its CPU canvas,
+  and docs/browser-differences.md has the figures. A rectangle in a canvas
+  drawn into another still takes Skia's blur.
 
 - **`measure_text`'s width is the same whatever the text alignment, and
   keeps a letter spacing whole.** It was read from the laid-out boxes, whose

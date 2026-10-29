@@ -619,6 +619,20 @@ test-js: ensure-binary
 test-rust: ensure-deps
     node scripts/gpu-events.mjs --run -- cargo test --features "{{ if os() == "macos" { "metal,window,freetype" } else { linux_features } }},fetch"
 
+# Every target, tests included, linted as a release build compiles it.
+#
+# A test build in the release profile is a cfg combination nothing else
+# compiles: `test` is on and `debug_assertions` is off. A test reaching for a
+# debug-only helper, or an import only a debug-only test uses, breaks it while
+# every other gate stays green, and `cargo test --release` failed on main that
+# way. The feature set is `CARGO_FEATURES` in lib/prebuild.mjs, read from there
+# rather than copied, so that after `just build-release` this reuses the Skia
+# that build made; any other set is a release Skia build of its own. Not part
+# of `ci` for that reason: CI's `release-tests` job runs it on a prebuilt Skia.
+[doc("Lint every target, tests included, as a release build compiles it.")]
+check-release-tests: ensure-deps
+    cargo clippy --release --features "$(node --input-type=module -e 'import { CARGO_FEATURES } from "./lib/prebuild.mjs"; console.log(CARGO_FEATURES)')" --all-targets -- -D warnings
+
 # Run the JavaScript suite in watch mode.
 test-watch: ensure-binary
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node --test --watch

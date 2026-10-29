@@ -20,7 +20,7 @@ use crate::{
 };
 use neon::prelude::*;
 use skia_safe::{
-    Canvas, Color, Font, FontMetrics, FourByteTag, GlyphId, Matrix, Paint,
+    Canvas, Color4f, Font, FontMetrics, FourByteTag, GlyphId, Matrix, Paint,
     Path as SkPath, PathBuilder as SkPathBuilder, Point, Rect, TextBlob,
     TextBlobBuilder, Typeface,
     font_style::{FontStyle, Slant, Weight, Width},
@@ -2594,7 +2594,9 @@ pub struct DecorationStyle {
     pub css: String,
     pub decoration: Decoration,
     pub size: Option<Spacing>,
-    pub color: Option<Color>,
+    /// The lines' own colour as named, in extended sRGB, unpremultiplied,
+    /// or `None` for the text's.
+    pub color: Option<Color4f>,
 }
 
 impl Default for DecorationStyle {
@@ -4005,7 +4007,7 @@ mod hinting {
     use crate::{
         Canvas, Font as CanvasFont, FontLibrary as Library, RichTextSpan,
         TextEngine, TextRendering, TextStyle as SpanStyle,
-        node::oblique::ParagraphRecipe,
+        node::oblique::{ParagraphRecipe, StyleColours},
     };
     use skia_safe::{FontHinting, Paint, textlayout::ParagraphStyle};
 
@@ -4122,9 +4124,15 @@ mod hinting {
         });
         let mut paragraph_style = ParagraphStyle::new();
         paragraph_style.set_text_style(&style);
-        let mut recipe =
-            ParagraphRecipe::new(paragraph_style, None, collection, None);
-        recipe.push_style(style, None);
+        let none = StyleColours::default();
+        let mut recipe = ParagraphRecipe::new(
+            paragraph_style,
+            None,
+            collection,
+            None,
+            &none,
+        );
+        recipe.push_style(style, None, &none);
         recipe.add_text(TEXT);
         recipe.pop();
         let (mut paragraph, _) = recipe.build();

@@ -607,6 +607,14 @@ depend on how its function name is cased is not one CSS describes. The
 difference is a level at most where Chrome rounds, and more where its 8-bit
 path clips an `hsl()` outside sRGB that this library keeps.
 
+A text decoration's own colour, and a `drop-shadow()` filter's, are held
+the same way, at the precision they name. A decoration draws the bytes a
+fill of its colour draws, which Chrome's canvas cannot be compared on: it
+has no `textDecoration`. `tests/named_colour_precision.rs` holds the line to
+the fill's bytes on an eight-bit canvas and to the alpha it names on
+`RGBAF16` and `RGBAF32`, and the drop-shadow to the fill's bytes on an
+eight-bit canvas.
+
 **A draw too faint for eight bits draws on a float canvas, and Chrome drops
 it. Ours is the arithmetic's answer.** Skia skips a source-over draw whose
 paint alpha rounds to zero as a byte -- `SkPaint::nothingToDraw` tests
@@ -722,3 +730,39 @@ in a screenshot from Chrome 156.0.8078.49 headless with
 full progress bar fill with `#0075ff`, and the checkbox's mark is white. The
 other system colours read as Chrome reads them on a canvas, in its light scheme
 on macOS; `tests/assets/cases/css-system-colors.json` has every row.
+
+**A blurred rectangle is its exact Gaussian blur, and Chrome's is not.**
+Filter Effects Module Level 1 defines `blur()` as a Gaussian blur whose
+standard deviation is the length given. Blurring a rectangle by it gives the
+product of the blurred interval across and the blurred interval down, which
+has a closed form, and a flat-colour rectangle that stays one on the device is
+drawn here as exactly that, averaged over each pixel: within half a level on
+8-bit pixels on the CPU engine, within 0.56 of one on the GPU engine, whose
+fragments hand the value on as a half float, and to the surface's precision on
+F16 and F32. Chrome 152 approximates it, and its two canvases approximate it
+differently. A black 60 by 40 rectangle at a fractional position, worst levels
+from the exact blur:
+
+        sigma                    2      12     40     41    100
+        Chrome GPU canvas     1.70    3.25   1.67   1.69   1.11
+        Chrome CPU canvas    10.57    6.10   2.72   2.51   0.97
+
+The CPU canvas is the one `willReadFrequently` selects. At a sigma of 100
+Chrome keeps 97.3% of the rectangle's ink on its GPU canvas and 97.9% on its
+CPU one, where a Gaussian keeps all of it. A red square over the middle 60% of
+a 100 pixel canvas sums, across its alpha:
+
+        blur        1000     500     200      100       50
+        exact          0   10000   38600   131204   393512
+        Chrome GPU     0   10000   49252   109412   403200
+        Chrome CPU 10000   10000   37296   133468   407096
+
+and on a 400 pixel canvas blurred by 1000px its centre is 2 here and 8 and 9
+on Chrome's CPU and GPU canvases. `tests/suite/context2d.test.js` holds the
+sums to the exact values, and `tests/blur_rect.rs` the pixels. Copying Chrome
+would mean choosing between two approximations that differ from each other by
+more than either differs from the definition.
+
+A rectangle in a canvas drawn into another is replayed as a recording, where
+there are no pixels to draw the blur in, and takes Skia's: its coverage blur
+up to a sigma of 40 and its image blur past it.

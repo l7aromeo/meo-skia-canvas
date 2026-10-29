@@ -41,8 +41,8 @@ use crate::{
     },
 };
 use skia_safe::{
-    BlurStyle, Canvas, FontArguments, FontStyle, MaskFilter, Paint, Point,
-    Rect, TextBlob,
+    BlurStyle, Canvas, Color4f, FontArguments, FontStyle, MaskFilter, Paint,
+    Point, Rect, TextBlob,
     font_arguments::{VariationPosition, variation_position::Coordinate},
     font_style::Slant,
     textlayout::{
@@ -250,6 +250,7 @@ impl ParagraphRecipe {
         base_oblique: Option<f32>,
         mut collection: FontCollection,
         epoch: Option<Rc<FontEpoch>>,
+        colours: &StyleColours,
     ) -> Self {
         let half_leading = style.text_style().half_leading();
         let (decoration, shadows, background) =
@@ -267,9 +268,10 @@ impl ParagraphRecipe {
                         &mut base,
                         &mut collection,
                         epoch.as_ref(),
+                        colours,
                     )
                     .map(Box::new);
-                    let shadows = take_shadows(&mut base);
+                    let shadows = take_shadows(&mut base, colours);
                     let background = StyleBackground::take(
                         &mut base,
                         &mut collection,
@@ -317,11 +319,13 @@ impl ParagraphRecipe {
     }
 
     /// Pushes `style`, which asks for an oblique of the angle `oblique`
-    /// gives, if any, hinted -- see [`Self::new`].
+    /// gives, if any, hinted -- see [`Self::new`] -- and whose decoration
+    /// and shadows are in `colours`.
     pub(crate) fn push_style(
         &mut self,
         mut style: TextStyle,
         oblique: Option<f32>,
+        colours: &StyleColours,
     ) {
         style.set_font_hinting(text_hinting(true));
         #[cfg(test)]
@@ -330,9 +334,10 @@ impl ParagraphRecipe {
             &mut style,
             &mut self.collection,
             self.epoch.as_ref(),
+            colours,
         )
         .map(Box::new);
-        let shadows = take_shadows(&mut style);
+        let shadows = take_shadows(&mut style, colours);
         let background = StyleBackground::take(
             &mut style,
             &mut self.collection,
@@ -861,7 +866,7 @@ struct Pushed {
 /// keeps one for each style pushed, and most styles have neither.
 struct Taken {
     decoration: Option<Box<StyleDecoration>>,
-    shadows: Vec<TextShadow>,
+    shadows: Vec<Shadow>,
     background: Option<Box<StyleBackground>>,
 }
 
@@ -1033,25 +1038,64 @@ pub(crate) fn style_copies() -> usize {
 }
 
 /// Takes `style`'s text shadows off it, for [`Passes`] to draw.
-fn take_shadows(style: &mut TextStyle) -> Vec<TextShadow> {
-    let shadows = style.shadows().to_vec();
+fn take_shadows(style: &mut TextStyle, colours: &StyleColours) -> Vec<Shadow> {
+    let shadows = Shadow::of(style, colours);
     if !shadows.is_empty() {
         style.reset_shadows();
     }
     shadows
 }
 
+/// A text shadow as SkParagraph holds it, and its colour as the style named
+/// it: SkParagraph's is an eight-bit `SkColor`, and [`Passes`] draws every
+/// shadow itself, so it draws them in this one.
+#[derive(Clone)]
+pub(crate) struct Shadow {
+    shadow: TextShadow,
+    /// In extended sRGB, unpremultiplied.
+    color: Color4f,
+}
+
+impl Shadow {
+    /// `style`'s shadows, each in its colour from `colours` where that
+    /// names one, and in SkParagraph's otherwise.
+    fn of(style: &TextStyle, colours: &StyleColours) -> Vec<Self> {
+        style
+            .shadows()
+            .iter()
+            .enumerate()
+            .map(|(at, shadow)| Self {
+                shadow: *shadow,
+                color: colours
+                    .shadows
+                    .get(at)
+                    .copied()
+                    .unwrap_or_else(|| Color4f::from(shadow.color)),
+            })
+            .collect()
+    }
+}
+
+/// The colours of a style that SkParagraph holds in eight bits -- its
+/// decoration's and its text shadows' -- as the style named them, in
+/// extended sRGB, unpremultiplied. [`Passes`] draws both itself, in these.
+/// Empty where the caller has none to give, which leaves SkParagraph's.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct StyleColours {
+    /// The decoration's colour.
+    pub(crate) decoration: Option<Color4f>,
+    /// One for each of the style's text shadows, in its order.
+    pub(crate) shadows: Vec<Color4f>,
+}
+
 /// `style` with `shadows` given back, where it has any.
-fn restore_shadows(
-    style: &TextStyle,
-    shadows: &[TextShadow],
-) -> Option<TextStyle> {
+fn restore_shadows(style: &TextStyle, shadows: &[Shadow]) -> Option<TextStyle> {
     if shadows.is_empty() {
         return None;
     }
     let mut style = style.clone();
     for shadow in shadows {
-        style.add_shadow(*shadow);
+        style.add_shadow(shadow.shadow);
     }
     Some(style)
 }
@@ -1114,21 +1158,22 @@ impl StyleBackground {
 #[derive(Clone)]
 struct StyleDecoration {
     decoration: Decoration,
-    shadows: Vec<TextShadow>,
+    shadows: Vec<Shadow>,
 }
 
 impl StyleDecoration {
     /// Takes `style`'s decoration off it, placed by the style's first
     /// available font in `collection` -- see [`FaceLines::first_available`].
     ///
-    /// The colour is the style's decoration colour as it stands: both
-    /// callers set it to the text's colour where none was asked for, since
-    /// the text's goes in as a foreground paint that a style's own colour
-    /// does not report.
+    /// The colour is `colours`' decoration colour where it names one, and
+    /// the style's as it stands otherwise: both callers set that to the
+    /// text's colour where none was asked for, since the text's goes in as
+    /// a foreground paint that a style's own colour does not report.
     fn take(
         style: &mut TextStyle,
         collection: &mut FontCollection,
         epoch: Option<&Rc<FontEpoch>>,
+        colours: &StyleColours,
     ) -> Option<Self> {
         let lines = style.decoration_type();
         if lines == TextDecoration::NO_DECORATION {
@@ -1152,13 +1197,15 @@ impl StyleDecoration {
                 thickness: Thickness::Times(
                     style.decoration_thickness_multiplier(),
                 ),
-                color: Some(style.decoration_color()),
+                color: Some(colours.decoration.unwrap_or_else(|| {
+                    Color4f::from(style.decoration_color())
+                })),
                 // `drawParagraph` applies a canvas's global alpha to the
                 // whole paragraph through a layer.
                 opacity: 1.0,
                 face,
             },
-            shadows: style.shadows().to_vec(),
+            shadows: Shadow::of(style, colours),
         })
     }
 }
@@ -1221,11 +1268,11 @@ pub(crate) struct Passes {
     /// shadows.
     paints: Vec<Paint>,
     sheared: Vec<Option<f32>>,
-    shadows: Vec<Vec<TextShadow>>,
+    shadows: Vec<Vec<Shadow>>,
     /// Each decorated style's decoration, by box, its text shadows, and the
     /// text each box decorates -- see `decorate::box_at`.
     boxes: Vec<Decoration>,
-    box_shadows: Vec<Vec<TextShadow>>,
+    box_shadows: Vec<Vec<Shadow>>,
     box_ranges: Vec<(Range<usize>, usize)>,
     /// Each style's background, by box, and the text each covers.
     backgrounds: Vec<StyleBackground>,
@@ -1656,7 +1703,7 @@ impl Passes {
             for run in runs_on(line) {
                 for shadow in &self.shadows[run.slot] {
                     if let Some(paint) = shadow_paint(shadow, canvas) {
-                        run.draw(canvas, origin + shadow.offset, &paint);
+                        run.draw(canvas, origin + shadow.shadow.offset, &paint);
                     }
                 }
             }
@@ -1668,7 +1715,7 @@ impl Passes {
                             spans,
                             &self.boxes,
                             index,
-                            origin + shadow.offset,
+                            origin + shadow.shadow.offset,
                             &paint,
                             PARAGRAPH_FAINT,
                         );
@@ -1732,7 +1779,8 @@ impl PaintedRun {
     }
 }
 
-/// The paint a text shadow is drawn with on `canvas`: the shadow's colour,
+/// The paint a text shadow is drawn with on `canvas`: the shadow's colour
+/// as its style named it,
 /// blurred by its sigma where it has one. `None` for a shadow that casts
 /// nothing.
 ///
@@ -1744,12 +1792,13 @@ impl PaintedRun {
 /// text. SkParagraph's own fixes it in device pixels, which kept a shadow as
 /// wide in pixels at density 2 as at 1 while its text doubled. A transform
 /// that maps no length to a positive one keeps the device sigma.
-fn shadow_paint(shadow: &TextShadow, canvas: &Canvas) -> Option<Paint> {
+fn shadow_paint(shadow: &Shadow, canvas: &Canvas) -> Option<Paint> {
+    let Shadow { shadow, color } = shadow;
     if !shadow.has_shadow() {
         return None;
     }
     let mut paint = Paint::default();
-    paint.set_color(shadow.color);
+    paint.set_color4f(*color, None);
     if shadow.blur_sigma != 0.0 {
         let sigma = shadow.blur_sigma as f32;
         let scale = canvas
@@ -1769,8 +1818,9 @@ fn shadow_paint(shadow: &TextShadow, canvas: &Canvas) -> Option<Paint> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FULL_GRAPHEMES, ParagraphRecipe, Piece, Step, TEXT_READS, add_slnt,
-        ascii_boundary, match_oblique, set_coordinates, whole_graphemes,
+        FULL_GRAPHEMES, ParagraphRecipe, Piece, Step, StyleColours, TEXT_READS,
+        add_slnt, ascii_boundary, match_oblique, set_coordinates,
+        whole_graphemes,
     };
     use crate::{
         color::RgbaLinear,
@@ -1930,10 +1980,16 @@ mod tests {
         };
         let mut paragraph_style = ParagraphStyle::new();
         paragraph_style.set_text_style(&style(Color::BLACK));
-        let mut recipe =
-            ParagraphRecipe::new(paragraph_style, None, collection, None);
+        let none = StyleColours::default();
+        let mut recipe = ParagraphRecipe::new(
+            paragraph_style,
+            None,
+            collection,
+            None,
+            &none,
+        );
         for (text, color) in pieces {
-            recipe.push_style(style(*color), None);
+            recipe.push_style(style(*color), None, &none);
             recipe.add_text(text);
             recipe.pop();
         }
@@ -2173,6 +2229,7 @@ mod tests {
             base_flag,
             collection.clone(),
             None,
+            &StyleColours::default(),
         );
         let mut builder =
             ParagraphBuilder::new(&paragraph_style, collection.clone());
@@ -2190,7 +2247,11 @@ mod tests {
                 Op::Push { oblique } => {
                     pushed += 1;
                     let (style, flag) = style(collection, oblique, pushed);
-                    recipe.push_style(style.clone(), flag);
+                    recipe.push_style(
+                        style.clone(),
+                        flag,
+                        &StyleColours::default(),
+                    );
                     builder.push_style(&style);
                 }
                 Op::Pop => {
@@ -2410,13 +2471,14 @@ mod tests {
             generated.1.then_some(ObliqueAngle::DEFAULT.degrees()),
             collection.clone(),
             None,
+            &StyleColours::default(),
         );
         for op in &generated.0 {
             match *op {
                 Op::Push { oblique } => {
                     let (style, oblique) =
                         generated_style(collection, oblique, true);
-                    recipe.push_style(style, oblique);
+                    recipe.push_style(style, oblique, &StyleColours::default());
                 }
                 Op::Pop => recipe.pop(),
                 Op::Text(text) => recipe.add_text(text),
@@ -2590,10 +2652,15 @@ mod tests {
         base.set_font_families(&[RALEWAY]).set_font_size(SIZE);
         let mut paragraph_style = ParagraphStyle::new();
         paragraph_style.set_text_style(&base);
-        let mut recipe =
-            ParagraphRecipe::new(paragraph_style, None, collection, None);
+        let mut recipe = ParagraphRecipe::new(
+            paragraph_style,
+            None,
+            collection,
+            None,
+            &StyleColours::default(),
+        );
         for (text, style) in pieces {
-            recipe.push_style(style.clone(), None);
+            recipe.push_style(style.clone(), None, &StyleColours::default());
             recipe.add_text(text);
             recipe.pop();
         }
@@ -2908,8 +2975,13 @@ mod tests {
         let mut paragraph_style = ParagraphStyle::new();
         paragraph_style.set_text_style(&base);
         let before = super::style_copies();
-        let mut recipe =
-            ParagraphRecipe::new(paragraph_style, None, raleway(), None);
+        let mut recipe = ParagraphRecipe::new(
+            paragraph_style,
+            None,
+            raleway(),
+            None,
+            &StyleColours::default(),
+        );
         assert_eq!(super::style_copies() - before, 1, "copied");
         recipe.add_text("Hamburgefonstiv");
         let (mut paragraph, _) = recipe.build();
@@ -2989,10 +3061,19 @@ mod tests {
             base.set_font_families(&[RALEWAY]).set_font_size(SIZE);
             let mut paragraph_style = ParagraphStyle::new();
             paragraph_style.set_text_style(&base);
-            let mut recipe =
-                ParagraphRecipe::new(paragraph_style, None, raleway(), None);
+            let mut recipe = ParagraphRecipe::new(
+                paragraph_style,
+                None,
+                raleway(),
+                None,
+                &StyleColours::default(),
+            );
             for (text, color) in [(left, Color::RED), (right, Color::BLUE)] {
-                recipe.push_style(colored(color), None);
+                recipe.push_style(
+                    colored(color),
+                    None,
+                    &StyleColours::default(),
+                );
                 recipe.add_text(text);
                 recipe.pop();
             }
@@ -3065,8 +3146,13 @@ mod tests {
         let styles = edge_styles();
         let mut paragraph_style = ParagraphStyle::new();
         paragraph_style.set_text_style(&styles[0]);
-        let mut recipe =
-            ParagraphRecipe::new(paragraph_style, None, raleway(), None);
+        let mut recipe = ParagraphRecipe::new(
+            paragraph_style,
+            None,
+            raleway(),
+            None,
+            &StyleColours::default(),
+        );
         let placeholder = PlaceholderStyle::new(
             SIZE * 0.75,
             SIZE * 0.75,
@@ -3076,9 +3162,11 @@ mod tests {
         );
         for op in ops {
             match *op {
-                EdgeOp::Push(style) => {
-                    recipe.push_style(styles[style].clone(), None)
-                }
+                EdgeOp::Push(style) => recipe.push_style(
+                    styles[style].clone(),
+                    None,
+                    &StyleColours::default(),
+                ),
                 EdgeOp::Pop => recipe.pop(),
                 EdgeOp::Text(text) => recipe.add_text(text),
                 EdgeOp::Placeholder => recipe.add_placeholder(&placeholder),
@@ -3383,11 +3471,16 @@ mod tests {
         style.set_font_families(&[RALEWAY]).set_font_size(SIZE);
         let mut paragraph_style = ParagraphStyle::new();
         paragraph_style.set_text_style(&style);
-        let mut recipe =
-            ParagraphRecipe::new(paragraph_style, None, raleway(), None);
+        let mut recipe = ParagraphRecipe::new(
+            paragraph_style,
+            None,
+            raleway(),
+            None,
+            &StyleColours::default(),
+        );
         recipe.add_text("Hamburgefonstiv ");
         assert_eq!(recipe.pushed.capacity(), 0, "nothing pushed");
-        recipe.push_style(style, None);
+        recipe.push_style(style, None, &StyleColours::default());
         recipe.add_text("quick");
         recipe.pop();
         assert_eq!(recipe.pushed.len(), 1, "one style pushed");
