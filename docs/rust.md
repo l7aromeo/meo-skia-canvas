@@ -72,10 +72,10 @@ filter, a gradient stop, a texture, a matte. `RgbaLinear::opaque(1.0, 0.0, 0.0)`
 is sRGB red whatever space the canvas was built in, and a colour outside sRGB
 is reached with components below zero or above one --
 `RgbaLinear::from_css("color(display-p3 1 0 0)")` is Display P3 red. The few
-readers Skia gives only an 8-bit sRGB colour -- the lighting filters' light, a
-`Paragraph`'s text decoration and text shadow, an SVG's `currentColor` --
-gamut-map a colour outside sRGB into it as CSS Color 4 describes, keeping its
-hue rather than clipping each channel. A canvas's own text decoration, and a
+readers Skia gives only an 8-bit sRGB colour -- the lighting filters' light,
+an SVG's `currentColor` -- gamut-map a colour outside sRGB into it as CSS
+Color 4 describes, keeping its hue rather than clipping each channel. A text
+decoration and a text shadow, a canvas's or a `Paragraph`'s, and a
 `drop-shadow()` filter's colour, are held as named, as a fill is. `ColorFilter::lighting`'s multiply and add are
 per-channel coefficients rather than colours, and are clamped to `0.0..=1.0`
 channel by channel.

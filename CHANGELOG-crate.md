@@ -159,6 +159,16 @@ window be changed after it opens.** No signature moves and nothing is removed.
   nothing leaves it vector. PDF drew all of these correctly and stays
   vector.
 
+- **A paragraph's decoration and text shadow are painted in the colours its
+  style names.** SkParagraph holds both as an eight-bit sRGB colour, and a
+  `Paragraph` drew them in it: on a canvas made with `PixelDepth::F16` or
+  `PixelDepth::F32`, a `TextStyle::decoration_color` or a `TextShadow`
+  colour in alpha 0.3 came out at 77/255 beside text at 0.3, and on an
+  eight-bit canvas a colour outside sRGB was gamut-mapped where a fill of
+  it is clipped. Both are drawn here rather than by SkParagraph, so they now
+  take the colours as named, as the text does; a colour of whole bytes
+  draws as it did.
+
 - **A text decoration's colour is painted at the precision it names, as a
   fill's is.** The colour named in `Context2D::set_text_decoration_css` or
   `set_text_decoration` was rounded to eight bits of sRGB when it was set.
