@@ -5,9 +5,7 @@ use quick_xml::{Reader, events::Event};
 use skia_safe::{
     AlphaType, Color4f, ColorSpace, ColorType, Data, Font, FontHinting,
     FontMgr, FontStyle, FourByteTag, Image as SkImage, ImageInfo,
-    Size as SkSize, Typeface,
-    codec::{self, Codec},
-    images, surfaces,
+    Size as SkSize, Typeface, codec,
     svg::{self, FontSize, Length, LengthUnit, TypedNode},
 };
 
@@ -18,7 +16,7 @@ use crate::{
     error::Error,
     geometry::Size,
     pixels::{ImageData, PixelColorSpace, PixelExportOptions},
-    start_skia,
+    start_skia, started,
 };
 
 /// The size an SVG with no declared size of its own is laid out against.
@@ -237,7 +235,7 @@ pub(crate) fn frame_delays(data: &Data) -> Vec<u32> {
     if !may_animate(data.as_bytes()) {
         return vec![0];
     }
-    let Some(mut codec) = Codec::from_data(data.clone()) else {
+    let Some(mut codec) = started::codec(data.clone()) else {
         return vec![0];
     };
     let count = codec.get_frame_count();
@@ -279,7 +277,7 @@ pub(crate) fn decode_frame(
         return decoded.map_err(|reason| Error::DecodeImage { reason });
     }
     let mut codec =
-        Codec::from_data(data.clone()).ok_or_else(|| Error::DecodeImage {
+        started::codec(data.clone()).ok_or_else(|| Error::DecodeImage {
             reason: "skia could not reopen the image to reach its frames"
                 .to_string(),
         })?;
@@ -423,7 +421,7 @@ impl Image {
         );
 
         let data = Data::new_copy(bytes);
-        let image = images::raster_from_data(&info, data, stride).ok_or_else(
+        let image = started::raster_from_data(&info, data, stride).ok_or_else(
             || Error::DecodeImage {
                 reason: format!(
                     "skia could not build image from raw pixels ({options:?})"
@@ -952,7 +950,7 @@ impl Svg {
             ColorSpace::new_srgb_linear(),
         );
         let mut surface =
-            surfaces::raster(&info, None, None).ok_or_else(|| {
+            started::raster(&info, None, None).ok_or_else(|| {
                 Error::DecodeImage {
                     reason: format!(
                         "could not allocate {width}x{height} SVG render surface"
@@ -2350,7 +2348,7 @@ pub(crate) fn decoded(data: &Data, when: SkiaDecode) -> Option<SkImage> {
     // before the decoder that can read it was ever consulted.
     let skia = match when {
         SkiaDecode::Now => SkImage::from_encoded(data.clone()),
-        SkiaDecode::Deferred => images::deferred_from_encoded_data(data, None),
+        SkiaDecode::Deferred => started::deferred_from_encoded_data(data, None),
     };
     let bytes = data.as_bytes();
     let image = match skia {

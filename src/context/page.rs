@@ -13,7 +13,7 @@ use skia_safe::{
     Rect, Size, Surface, SurfaceProps, SurfacePropsFlags, XYZD50Hash,
     canvas::SrcRectConstraint,
     image::{BitDepth, CachingHint},
-    images, jpeg_encoder, pdf, png_encoder, surfaces,
+    jpeg_encoder, pdf, png_encoder,
     svg::{self, canvas::Flags},
     webp_encoder,
 };
@@ -60,6 +60,7 @@ use crate::{
         utils::{skia_paint_color, skia_paint_color_onto},
     },
     pixels::PixelColorSpace,
+    started,
 };
 
 /// The PDF `Producer` field: per the spec, "the product that is converting
@@ -1007,7 +1008,7 @@ impl PageRecorder {
     ) -> Option<SkImage> {
         let size = self.bounds.size().to_floor();
         let deferred = self.page().picture(None).and_then(|pict| {
-            images::deferred_from_picture(
+            started::deferred_from_picture(
                 pict,
                 size,
                 None,
@@ -2319,7 +2320,7 @@ impl Page {
             AlphaType::Premul,
             Some(ColorSpace::new_srgb()),
         );
-        let mut surface = surfaces::raster(&info, None, None)
+        let mut surface = started::raster(&info, None, None)
             .ok_or("Could not allocate a surface for the SVG fallback")?;
 
         let raster = surface.canvas();
@@ -4473,7 +4474,7 @@ mod tests {
                 });
             }
         }
-        images::raster_from_data(
+        started::raster_from_data(
             &info,
             skia_safe::Data::new_copy(&bytes),
             row_bytes,
@@ -4491,7 +4492,7 @@ mod tests {
 
     /// A raster surface to draw a corpus page on.
     fn corpus_surface() -> Surface {
-        surfaces::raster_n32_premul(PAGE)
+        started::raster_n32_premul(PAGE)
             .expect("a raster surface for a corpus page")
     }
 
@@ -4520,7 +4521,7 @@ mod tests {
     fn photograph_page() -> SkImage {
         let bytes = fs::read("tests/assets/images/globe.jpg")
             .expect("the globe photograph out of tests/assets");
-        let photo = images::deferred_from_encoded_data(
+        let photo = started::deferred_from_encoded_data(
             skia_safe::Data::new_copy(&bytes),
             None,
         )
@@ -4742,7 +4743,7 @@ mod tests {
         // point of this page is that its halves are genuinely unalike.
         let bytes = fs::read("tests/assets/images/globe.jpg")
             .expect("the globe photograph out of tests/assets");
-        let photo = images::deferred_from_encoded_data(
+        let photo = started::deferred_from_encoded_data(
             skia_safe::Data::new_copy(&bytes),
             None,
         )
@@ -4992,7 +4993,7 @@ mod tests {
                 ]);
             }
         }
-        images::raster_from_data(
+        started::raster_from_data(
             &info,
             skia_safe::Data::new_copy(&bytes),
             row_bytes,
@@ -5072,7 +5073,7 @@ mod tests {
         };
         let used = |id| PageCache::shared().get(&id).map(|entry| entry.used);
 
-        let mut surface = surfaces::raster_n32_premul((4, 4)).unwrap();
+        let mut surface = started::raster_n32_premul((4, 4)).unwrap();
         PageCache::set(&weak, surface.image_snapshot(), &opts, 8);
         let stored = used(id).expect("the entry was just written");
 

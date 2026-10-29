@@ -10,7 +10,7 @@ use skia_safe::{
     dash_path_effect,
     font_style::{FontStyle, Width},
     image_filter::MapDirection,
-    image_filters, images,
+    image_filters,
     matrix::{Matrix, TypeMask},
     path_1d_path_effect,
     path_utils::fill_path_with_paint,
@@ -45,6 +45,7 @@ use crate::{
         texture::{BoxedCanvasTexture, CanvasTexture},
         typography::with_style_axes,
     },
+    started,
     typography::{
         Baseline, DecorationStyle, DrawnRun, FontSpec, PendingInk, Spacing,
         TextExtents, TypesetInputs, Typesetter, paragraph_style,
@@ -160,7 +161,7 @@ fn rasterize_region(
     region: IRect,
 ) -> Option<Image> {
     let info = image.image_info().with_dimensions(region.size());
-    let mut surface = skia_safe::surfaces::raster(&info, None, None)?;
+    let mut surface = started::raster(&info, None, None)?;
 
     match picture {
         Some(pict) => {
@@ -1619,7 +1620,7 @@ impl Context2D {
         // dst_rect and then draws without clips, transforms, alpha,
         // blend, or shadows
         if let Some(bitmap) =
-            images::raster_from_data(&info, buffer, info.min_row_bytes())
+            started::raster_from_data(&info, buffer, info.min_row_bytes())
         {
             self.push(); // cache matrix & clip in self.state
             self.with_canvas(|canvas| {

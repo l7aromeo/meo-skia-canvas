@@ -33,12 +33,13 @@
 use super::aom::{DEEP_SAMPLE_BYTES, Decoder};
 use skia_safe::{
     AlphaType, ColorSpace, ColorType as SkColorType, Data, Image as SkImage,
-    ImageInfo, images,
+    ImageInfo,
 };
 
 use crate::{
     encode::{narrow_to_eight, widen_to_sixteen},
     pixels::PixelColorSpace,
+    started,
 };
 
 /// Channels in the composed buffer.
@@ -1966,7 +1967,7 @@ fn raster(
         AlphaType::Unpremul,
         space,
     );
-    images::raster_from_data(
+    started::raster_from_data(
         &info,
         Data::new_copy(&bytes),
         info.min_row_bytes(),

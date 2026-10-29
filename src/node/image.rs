@@ -5,6 +5,7 @@ use crate::{
     context::{BoxedContext2D, Context2D},
     font_library::FontLibrary,
     image::{Svg, decode_frame, families_named, frame_delays},
+    started,
     utils::*,
 };
 use neon::{prelude::*, types::buffer::TypedArray};
@@ -209,7 +210,7 @@ impl Content {
 
     pub fn from_image_data(image_data: ImageData) -> Self {
         let info = image_data.image_info();
-        images::raster_from_data(
+        started::raster_from_data(
             &info,
             &image_data.buffer,
             info.min_row_bytes(),
@@ -477,7 +478,7 @@ pub fn set_data<'a>(
     if let Some(raw_info) = opt_image_info_arg(&mut cx, 2)? {
         // First, check for an optional dims argument and interpret the buffer
         // as raw rgba if present
-        this.content = match images::raster_from_data(
+        this.content = match started::raster_from_data(
             &raw_info,
             data,
             raw_info.min_row_bytes(),

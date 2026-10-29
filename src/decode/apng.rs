@@ -36,12 +36,12 @@ use std::io::{BufRead, Cursor, Seek};
 use png::{BlendOp, ColorType, Decoder, DisposeOp, Reader, Transformations};
 use skia_safe::{
     AlphaType, ColorType as SkColorType, Data, Image as SkImage, ImageInfo,
-    images,
 };
 
 use crate::{
     encode::{narrow_to_eight, widen_to_sixteen},
     pixels::PixelColorSpace,
+    started,
 };
 
 /// The signature every PNG begins with.
@@ -755,7 +755,7 @@ fn raster(
         AlphaType::Unpremul,
         color_space,
     );
-    images::raster_from_data(
+    started::raster_from_data(
         &info,
         Data::new_copy(&bytes),
         info.min_row_bytes(),
