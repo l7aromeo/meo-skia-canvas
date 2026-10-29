@@ -366,6 +366,137 @@ describe("ParagraphBuilder", () => {
   });
 });
 
+// Measured in Chrome 156 with Oswald loaded through @font-face. SkParagraph
+// laid a paragraph out at its width floored to a whole pixel, compared line
+// widths rounded to hundredths, and reported widths, rects and the glyph
+// ends hit-testing reads to hundredths; none of it is done here now.
+describe("a paragraph is laid out at the width it is given", () => {
+  FontLibrary.use("RoundingOswald", [
+    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+  ]);
+  const STYLE = {
+    textStyle: {
+      fontFamilies: ["RoundingOswald"],
+      fontSize: 24,
+      color: [0, 0, 0, 1],
+    },
+  };
+
+  // Where Chrome's widths were measured: macOS, whose CoreText gives the
+  // advances the Chrome values below hold. FreeType's differ in the
+  // thousandths, so elsewhere only the properties are held.
+  const CHROME_MEASURED_HERE =
+    process.platform === "darwin"
+      ? false
+      : "Chrome 156's widths were measured on macOS, through CoreText";
+
+  // A paragraph as wide as its first two words, a fractional width, holds
+  // them on its first line; one floored to the whole pixel does not.
+  test("a fractional width holds a line that fits it", () => {
+    const text = "Hamburgefonstiv quick brown fox jumps over";
+    const width = laidOut(
+      STYLE,
+      "Hamburgefonstiv quick",
+      1e6,
+    ).getMaxIntrinsicWidth();
+    assert.ok(width % 1 > 0.01, `${width} is not fractional`);
+    const lines = (at) => laidOut(STYLE, text, at).getNumberOfLines();
+    assert.equal(lines(width), 2);
+    assert.equal(lines(Math.floor(width)), 3);
+  });
+
+  // Chrome fits "Hamburgefonstiv quick", 200.53 wide, on one line at 200.7px
+  // and not at 200px.
+  test(
+    "a fractional width wraps where Chrome wraps",
+    { skip: CHROME_MEASURED_HERE },
+    () => {
+      const text = "Hamburgefonstiv quick brown fox jumps over";
+      const at = (width) =>
+        laidOut(STYLE, text, width)
+          .getLineMetrics()
+          .map((line) => line.width);
+      const [first, ...rest] = at(200.7);
+      assert.equal(rest.length, 1, `${[first, ...rest]}`);
+      assert.ok(Math.abs(first - 200.52) < 0.01, `${first}`);
+      assert.equal(at(200).length, 3);
+    },
+  );
+
+  // A line exactly as wide as the paragraph fits it. SkParagraph's line
+  // breaker compares the line's width floored to hundredths, rounding hack
+  // or none, so the line also fits a paragraph down to that hundredth, and
+  // a thousandth below it does not -- docs/browser-differences.md. Where the
+  // width falls just above a hundredth, as in CoreText's 200.52002, the two
+  // edges are one; FreeType's 200.51942 fits down to 200.51.
+  test("a line breaks within a hundredth of the edge", () => {
+    const line = "Hamburgefonstiv quick";
+    const width = laidOut(STYLE, line, 1e6).getMaxIntrinsicWidth();
+    const lines = (at) => laidOut(STYLE, line, at).getNumberOfLines();
+    const floored = Math.floor(width * 100) / 100;
+    assert.equal(lines(width), 1);
+    assert.equal(lines(floored - 0.001), 2, `${floored - 0.001}`);
+    if (floored + 0.0001 < width) {
+      assert.equal(lines(floored + 0.0001), 1, `${floored + 0.0001}`);
+    }
+  });
+
+  // A run of one digit's box ends at that digit's advance times its
+  // length, at sizes whose advances are not whole hundredths. Boxes rounded
+  // to hundredths broke this, each rounded on its own.
+  test("a range's rect ends at the advance, unrounded", () => {
+    const end = (size, text) => {
+      const style = { textStyle: { ...STYLE.textStyle, fontSize: size } };
+      return laidOut(style, text, 1e6).getRectsForRange(
+        0,
+        text.length,
+        "tight",
+        "tight",
+      )[0].rect[2];
+    };
+    for (const size of [9.5, 12.3, 17.7, 23.7, 31.9]) {
+      const one = end(size, "0"),
+        seven = end(size, "0000000");
+      assert.ok(
+        Math.abs(seven - 7 * one) <= 0.0001,
+        `${size}px: ${seven} against 7 x ${one}`,
+      );
+    }
+  });
+
+  // The box of "Hambu" ends where Chrome's measureText puts its advance,
+  // 61.29597, not at the hundredth above it.
+  test(
+    "a range's rect ends at Chrome's advance",
+    { skip: CHROME_MEASURED_HERE },
+    () => {
+      const [box] = laidOut(STYLE, "Hamburgefonstiv", 1e6).getRectsForRange(
+        0,
+        5,
+        "tight",
+        "tight",
+      );
+      const right = box.rect[2];
+      assert.ok(Math.abs(right - 61.29597473144531) <= 0.0005, `${right}`);
+    },
+  );
+
+  // A point decides between the positions either side of a glyph at the
+  // glyph's middle. The "u" of "Hamburgefonstiv" spans the advances of
+  // "Ham" and "Hambu"; its middle rounded to hundredths moved four
+  // thousandths, so two thousandths past the true middle was still before
+  // it.
+  test("hit-testing splits a glyph at its true middle", () => {
+    const paragraph = laidOut(STYLE, "Hamburgefonstiv", 1e6);
+    const end = (length) =>
+      paragraph.getRectsForRange(0, length, "tight", "tight").at(-1).rect[2];
+    const middle = (end(4) + end(5)) / 2;
+    const at = (x) => paragraph.getGlyphPositionAtCoordinate(x, 10).pos;
+    assert.equal(at(middle - 0.002), 4);
+    assert.equal(at(middle + 0.002), 5);
+  });
+});
+
 describe("A paragraph's own style", () => {
   const { TextDecoration } = require("../../lib"),
     { skiaNode } = require("../../lib/classes/neon");

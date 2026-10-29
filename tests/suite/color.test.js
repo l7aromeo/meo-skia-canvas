@@ -258,8 +258,7 @@ describe("a [r, g, b, a] float array", () => {
   });
 
   test("decorates and shadows text as the same string does", () => {
-    // Skia takes these two as eight-bit sRGB, so a colour outside it is
-    // gamut-mapped -- by one mapping, whichever form named the colour.
+    // Drawn in the colour as named, whichever form named it.
     let pixels = (colour) => {
       let canvas = new Canvas(200, 80);
       canvas.gpu = false;
@@ -289,6 +288,51 @@ describe("a [r, g, b, a] float array", () => {
     // both forms share.
     let grey = 128 / 255;
     assert.deepEqual(pixels([grey, grey, grey, 1]), pixels("#808080"));
+  });
+
+  // SkParagraph holds these two in eight bits, and they were drawn in that:
+  // on a float canvas an alpha of 0.3 came out at 77/255.
+  test("decorates and shadows text at the precision the style names", () => {
+    let strongest = (textStyle, x) => {
+      let canvas = new Canvas(64, 64, { colorType: "RGBAF32" });
+      let ctx = canvas.getContext("2d");
+      let pb = ParagraphBuilder.Make({ textStyle });
+      pb.addText("HH");
+      let built = pb.build();
+      built.layout(400);
+      ctx.drawParagraph(built, x, 0);
+      let { data } = ctx.getImageData(0, 0, 64, 64, { colorType: "RGBAF32" });
+      let floats = new Float32Array(
+        data.buffer,
+        data.byteOffset,
+        data.length / 4,
+      );
+      let alpha = 0;
+      for (let i = 3; i < floats.length; i += 4)
+        alpha = Math.max(alpha, floats[i]);
+      return alpha;
+    };
+    let faint = "rgb(0 0 0 / 0.3)";
+    let base = { fontSize: 40, color: "transparent" };
+    let line = strongest(
+      {
+        ...base,
+        decoration: 1,
+        decorationColor: faint,
+        decorationThickness: 4,
+      },
+      0,
+    );
+    let shadow = strongest(
+      { ...base, shadows: [{ color: faint, offset: [200, 0] }] },
+      -200,
+    );
+    for (let [what, alpha] of [
+      ["line", line],
+      ["shadow", shadow],
+    ]) {
+      assert.ok(Math.abs(alpha - 0.3) < 1e-4, `the ${what} at ${alpha}`);
+    }
   });
 });
 

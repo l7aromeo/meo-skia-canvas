@@ -262,6 +262,24 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   that is not whole bytes, or against a three-place alpha, compares against
   the new string, or compares pixels.
 
+- **Text widths, line metrics, rects and hit-testing are no longer rounded
+  to hundredths, and a `Paragraph` wraps at the width it is given rather
+  than at that width floored to a whole pixel.** SkParagraph's rounding hack
+  was on for every paragraph, canvas text included: it rounded
+  `measureText().width` and a `Paragraph`'s widths, line metrics,
+  `getRectsForRange` boxes and the glyph edges `getGlyphPositionAtCoordinate`
+  splits at to hundredths, compared line widths rounded when it broke lines,
+  and broke a paragraph laid out at 200.7px as if it were 200px wide. It is
+  off: `measureText("Hamburgefonstiv")` in 24px Oswald is 148.17601 where it
+  was 148.18 and Chrome 156 measures 148.17590, and a paragraph at 200.7px
+  fits "Hamburgefonstiv quick", 200.52 wide, on its first line, as Chrome
+  does, where it wrapped after "Hamburgefonstiv". Code that sizes or
+  compares against these values can see them move by up to half a
+  hundredth, and a paragraph at a fractional width can lay out on fewer
+  lines and stand shorter. A line still fits a paragraph up to a
+  hundredth narrower than it, as SkParagraph's line breaker compares the
+  line's width floored to hundredths; docs/browser-differences.md has it.
+
 ### Security
 
 - **`follow-redirects` is required at `^1.16.1`, up from `^1.15.11`.** It is
@@ -397,6 +415,27 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A colour named in another space lands exactly on an sRGB float canvas.**
+  On a canvas made with `colorType: "RGBAF32"` in sRGB, a fill, stroke or
+  matte named in another space -- `color(srgb-linear 0.5 0 0)`, say -- read
+  back as much as 9.6e-5 from its sRGB value: Skia stores a paint's colour
+  in sRGB and converts it through an approximate transfer function as it
+  does. Such a colour is now converted here, in double precision, and reads
+  back as named. A canvas in another space keeps up to about 2e-4 from the
+  conversion Skia makes as it draws, which no colour handed to it avoids.
+
+- **A half-float canvas stores the nearest half on x86.** On an x86
+  machine, a canvas made with `colorType: "RGBAF16"` truncated each value it
+  stored instead of rounding it, so a pixel could land up to one half-float
+  step low -- 0.0005 near one half -- and flushed values under 2^-14 to zero,
+  so a faint enough blur or gradient vanished. ARM machines were unaffected.
+  Skia picks the raster stages built for the CPU it runs on only when it is
+  started, and nothing started it; it is now started before anything else
+  reaches it, which rounds to nearest, keeps subnormals, and gives an x86
+  machine with AVX2 the stages built for it. That holds where the CPU has
+  AVX2 and F16C: an older x86 CPU keeps Skia's portable stage, which still
+  truncates. A value written with `putImageData` and read back shows it.
+
 - **An SVG export keeps what a `saveLayer` holds.** Skia's SVG backend has
   no layers and dropped whatever was drawn inside one: a red square in
   `ctx.saveLayer()`, in a translucent or nested layer, or a paragraph drawn
@@ -414,6 +453,16 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   composited at half, and three nested layers at 0.5 composited every square
   through one of them. The layer now stays open, and the read or export sees
   it composited as it stands -- the pixels the page reads once it closes.
+
+- **A paragraph's decoration and text shadow are painted in the colours its
+  style names.** SkParagraph holds both as an eight-bit sRGB colour, and
+  `ParagraphBuilder` styles drew them in it: on a canvas made with
+  `colorType: "RGBAF16"` or `"RGBAF32"`, a `decorationColor` or a shadow
+  `color` in alpha 0.3 came out at 77/255 beside text at 0.3, and on an
+  eight-bit canvas a colour outside sRGB was gamut-mapped where a fill of
+  it is clipped. Both are drawn here rather than by SkParagraph, so they now
+  take the colours as named, as the text does; a colour of whole bytes
+  draws as it did.
 
 - **A text decoration's colour is painted at the precision it names, as a
   fill's is.** The colour in `ctx.textDecoration` was rounded to eight bits
@@ -753,28 +802,31 @@ false` now takes effect, and its default is on, at Slight, as Chrome draws
   loop after it has begun" for the rest of the process. The app is now marked
   started only once the native side has accepted the launch.
 
-- **A large `blur()` in `ctx.filter` draws as Chrome's.** A flat-colour shape
+- **A large `blur()` in `ctx.filter` keeps spreading.** A flat-colour shape
   or text was blurred on its coverage, which Skia holds to a sigma of 128, so
   a larger blur drew as 128 did: on a 100 pixel canvas a square blurred by
-  200, 500 and 1000px all summed to the same alpha, where Chrome's GPU canvas
-  fades to nothing at 1000px, and on a 400 pixel one `blur(1000px)` left a
-  centre alpha of 108 where Chrome's is 9. A draw is now blurred on its
-  result wherever that is nearer Chrome or cheaper -- a rectangle above 40px,
-  a rounded rectangle or an oval above 10px, other paths and text always.
-  Skia's coverage blur of text blurs each glyph on its own and draws the
-  glyphs over one another, so where their blurs overlapped the text lost ink
-  -- 16px Oswald blurred by 20px kept 58% of it and 48px blurred by 40px 75%
-  -- and at every size measured it was two to seven times further from the
-  exact Gaussian than the blurred text now is. Chrome blurs a large radius
-  differently on its GPU canvas and on its CPU one -- the CPU canvas, which
-  `willReadFrequently` selects, leaves an alpha of 1 at 1000px rather than
-  nothing -- and each engine here now matches Chrome's same engine: the
-  square sums to within half a percent of Chrome's GPU canvas at 50, 100,
-  200, 500 and 1000px on the GPU engine, and to its CPU canvas exactly on the
-  CPU engine at all of them but 200px, 0.9% off. Blurred text costs what any
-  blurred path does, and a rectangle blurred by more than 40px about 200
-  microseconds a draw where it cost almost nothing: the price of Chrome's
-  picture.
+  200, 500 and 1000px all summed to the same alpha, and on a 400 pixel one
+  `blur(1000px)` left a centre alpha of 108 where the Gaussian leaves 2. A
+  rectangle is now drawn as its exact blur at every radius -- see the next
+  entry -- and any other draw is blurred on its result wherever that is
+  nearer the Gaussian or cheaper: a rounded rectangle or an oval above 10px,
+  other paths and text always. Skia's coverage blur of text blurs each glyph
+  on its own and draws the glyphs over one another, so where their blurs
+  overlapped the text lost ink -- 16px Oswald blurred by 20px kept 58% of it
+  and 48px blurred by 40px 75% -- and at every size measured it was two to
+  seven times further from the exact Gaussian than the blurred text now is.
+  Blurred text costs what any blurred path does.
+
+- **A blurred rectangle is its exact Gaussian blur.** A flat-colour rectangle
+  under `blur()`, whatever its radius, is drawn as the Gaussian blur of the
+  rectangle averaged over each pixel: within half a level of it on the CPU
+  engine and within 0.56 of one on the GPU engine, where 6.0.2 drew Skia's
+  blur: on the CPU engine 26 levels off at a sigma of 2 and 181 at 0.5, where
+  so small a blur moved the rectangle's edge by a pixel, and on the GPU
+  engine 12.5 at 0.5. Chrome 152 is up to 3.3 levels off on its GPU canvas
+  and 10.6 on its CPU canvas, and docs/browser-differences.md has the
+  figures. A rectangle in a canvas drawn into another still takes Skia's
+  blur.
 
 - **`measureText().width` is the same whatever the text alignment, and
   keeps a letter spacing whole.** The width came from the laid-out boxes,
@@ -783,9 +835,10 @@ false` now takes effect, and its default is on, at Slight, as Chrome draws
   `"1234.5"` 17.4766 centred -- and 5.17px of spacing at 10px Oswald
   measured `"00"` 20.67 where Chrome measures 20.68. The width is now the
   run's advance at every alignment. Over 3,850 cases across seven families,
-  five sizes and five spacings it moved by at most 0.014, and in nine
-  measured in Chrome it is within 0.005 of Chrome's width, where the old
-  one was off by as much as 0.009. A wrapped run (`textWrap`) is unchanged.
+  five sizes and five spacings it moved by at most 0.014, and in every case
+  measured in Chrome 156 it is within 0.0005 of Chrome's width, where the
+  old one was off by as much as 0.009 -- the widths are no longer rounded to
+  hundredths, under Breaking. A wrapped run (`textWrap`) is unchanged.
 
 - **`measureText().width` is negative where the spacing makes the advance
   negative, and counts a trailing space's spacing, as Chrome does.** At 40px
@@ -1349,6 +1402,13 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   of 0.0015 or less (0.000004 for OkLCh). Chrome reads a hue of about
   356.6 or 23.7 degrees off its own rounding instead.
   `docs/browser-differences.md` has the measurements.
+
+- **Text no longer wraps early at a fractional width.** A `Paragraph` laid
+  out at 200.7px broke as if it were 200px wide, and line widths were
+  compared rounded to hundredths; text now fits where Chrome fits it, to
+  within the hundredth SkParagraph's line breaker floors widths to. The
+  values this moves are under Breaking: "Text widths, line metrics, rects
+  and hit-testing are no longer rounded to hundredths".
 
 ### Added
 
