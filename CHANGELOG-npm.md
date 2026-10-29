@@ -415,6 +415,16 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   through one of them. The layer now stays open, and the read or export sees
   it composited as it stands -- the pixels the page reads once it closes.
 
+- **A translucent layer composites at its alpha.** On the CPU engine a layer
+  under `ctx.saveLayer(alpha)`, a canvas drawn in by `ctx.drawCanvas()`
+  under `globalAlpha` -- with or without a shadow -- and either of them
+  inside another layer composited up to 1.5 levels off: red over white
+  through a layer at 0.5 read 126, where the exact value is 127.5. Skia
+  composites such a layer on an eight-bit page by an alpha out of 256 and
+  truncates. Each now reads within half a level of the exact value at every
+  alpha, on both engines -- a shadowed one within the rounding of the shadow
+  beneath it -- and a PDF still writes it as an opacity, in vectors.
+
 - **A text decoration's colour is painted at the precision it names, as a
   fill's is.** The colour in `ctx.textDecoration` was rounded to eight bits
   of sRGB when it was set. On a canvas made with `colorType: "RGBAF16"` or

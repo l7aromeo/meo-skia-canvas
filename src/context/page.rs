@@ -8,11 +8,10 @@ use parking_lot::RwLock;
 use rayon::prelude::*;
 use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
-    ColorSpace, ColorType, Document, IRect, ISize, Image as SkImage,
-    ImageFilter, ImageInfo, M44, Matrix, Paint, Path, Picture, PictureRecorder,
-    PixelGeometry, Pixmap, Rect, Size, Surface, SurfaceProps,
-    SurfacePropsFlags, XYZD50Hash,
-    canvas::{SaveLayerRec, SrcRectConstraint},
+    ColorSpace, ColorType, Document, IRect, ISize, Image as SkImage, ImageInfo,
+    M44, Matrix, Paint, Path, Picture, PictureRecorder, PixelGeometry, Pixmap,
+    Point, Rect, Size, Surface, SurfaceProps, SurfacePropsFlags, XYZD50Hash,
+    canvas::SrcRectConstraint,
     image::{BitDepth, CachingHint},
     images, jpeg_encoder, pdf, png_encoder, surfaces,
     svg::{self, canvas::Flags},
@@ -22,7 +21,6 @@ use std::{
     collections::HashMap,
     fs,
     io::{BufWriter, Cursor, Write},
-    mem,
     path::Path as FilePath,
     sync::{
         Arc, OnceLock, Weak,
@@ -38,7 +36,7 @@ use crate::{
     },
     context::{
         BoxedContext2D,
-        layer::{BlurDraw, BlurOp, Layer},
+        layer::{BlurDraw, BlurOp, Group, Layer, LayerRec, Target},
     },
     encode::{
         self, Frame, FrameDepth, Pixels, SequenceSpec, Sink,
@@ -384,63 +382,26 @@ pub struct PageRecorder {
     replay_cost: usize,
     id: Arc<PageId>,
     /// The `saveLayer`s open on the page, outermost first. While one is
-    /// open `current` records its contents, and the recording it was opened
-    /// inside waits in its [`OpenLayer`] -- see [`PageRecorder::open_layer`].
+    /// open `current` records the innermost one's contents, and what each
+    /// holds besides is filed in its [`OpenLayer`] -- see
+    /// [`PageRecorder::open_layer`].
     open: Vec<OpenLayer>,
-}
-
-/// What a `saveLayer` is opened with: the paint it composites through, the
-/// bounds it is confined to, and the filter it applies to what lies beneath.
-#[derive(Clone, Default)]
-pub struct LayerRec {
-    pub paint: Option<Paint>,
-    pub bounds: Option<Rect>,
-    pub backdrop: Option<ImageFilter>,
-}
-
-impl LayerRec {
-    /// Opens the layer on `canvas`, under whatever transform and clip it
-    /// carries.
-    fn open_on(&self, canvas: &SkCanvas) {
-        let mut rec = SaveLayerRec::default();
-        if let Some(paint) = &self.paint {
-            rec = rec.paint(paint);
-        }
-        if let Some(bounds) = &self.bounds {
-            rec = rec.bounds(bounds);
-        }
-        if let Some(backdrop) = &self.backdrop {
-            rec = rec.backdrop(backdrop);
-        }
-        canvas.save_layer(&rec);
-    }
-
-    /// Whether a layer holding nothing still changes the page: through a
-    /// filter over what lies beneath it, or a blend mode that replaces what
-    /// it covers with the nothing it holds.
-    fn marks_when_empty(&self) -> bool {
-        let blend = self.paint.as_ref().and_then(Paint::as_blend_mode);
-        self.backdrop.is_some()
-            || !matches!(blend, None | Some(BlendMode::SrcOver))
-    }
 }
 
 /// A `saveLayer` open on a [`PageRecorder`].
 ///
-/// The layer's contents are recorded into a picture of their own, and the
-/// layer is drawn -- opened, the contents drawn into it, closed -- only once
-/// it closes. A recording that a read or an export has to finish part way
-/// therefore never holds a layer open: what it holds of an open layer is a
-/// copy of the contents so far, composited through a copy of the layer for
-/// that read alone, while the contents go on recording into the one layer
-/// they belong to.
+/// The layer is drawn -- opened, its contents drawn into it, closed -- only
+/// once it closes, as a [`Group`] filed where it was opened: on the page, or
+/// among the contents of the layer around it. A recording that a read or an
+/// export has to finish part way therefore never holds a layer open: what
+/// it holds of an open layer is a copy of the contents so far, composited
+/// through a copy of the group for that read alone, while the contents go
+/// on recording into the one layer they belong to.
 struct OpenLayer {
-    /// The recording the layer was opened inside -- the page's, or the
-    /// contents of the layer around it -- set aside while `current` records
-    /// this one's.
-    outer: PictureRecorder,
-    /// Whether `outer` has recorded anything since it was last filed.
-    outer_changed: bool,
+    /// What the layer holds, filed in order: what `current` recorded before
+    /// a group was filed among it, and the groups -- a layer opened inside
+    /// this one, a canvas drawn in through a paint.
+    entries: Vec<Layer>,
     rec: LayerRec,
     /// The transform and clip the layer was opened under.
     matrix: Matrix,
@@ -465,11 +426,6 @@ fn source_bit_depth(color_type: ColorType) -> BitDepth {
         }
         _ => BitDepth::U8,
     }
-}
-
-/// What `recorder` recorded, its recording finished.
-fn finish(mut recorder: PictureRecorder) -> Option<Picture> {
-    recorder.finish_recording_as_picture(None)
 }
 
 /// What `recorder` has recorded so far, with the recording begun again at
@@ -673,21 +629,15 @@ impl PageRecorder {
     /// holds now.
     ///
     /// Nothing of the layer is drawn yet. What is drawn until
-    /// [`Self::close_layer`] is recorded into a picture of the layer's own,
-    /// and the layer is drawn around it once it closes -- see [`OpenLayer`].
-    /// The page's recording so far is filed first where this is the
-    /// outermost layer, so that a read taken while it is open finds the page
-    /// beneath it already filed.
+    /// [`Self::close_layer`] is filed as the layer's contents, and the layer
+    /// is drawn around them once it closes -- see [`OpenLayer`]. What was
+    /// recorded before it is filed first, where the layer is opened, so that
+    /// a read taken while it is open finds the page beneath it already
+    /// filed.
     pub fn open_layer(&mut self, rec: LayerRec) {
-        if self.open.is_empty() {
-            self.flush();
-        }
-        let mut contents = PictureRecorder::new();
-        contents.begin_recording(self.bounds, true).save();
-        let outer = mem::replace(&mut self.current, contents);
+        self.file_current();
         self.open.push(OpenLayer {
-            outer,
-            outer_changed: mem::replace(&mut self.changed, false),
+            entries: Vec::new(),
             rec,
             matrix: self.matrix,
             clip: self.clip.clone(),
@@ -696,101 +646,145 @@ impl PageRecorder {
         self.restore();
     }
 
-    /// Closes the innermost layer [`Self::open_layer`] opened: draws it
-    /// around what it recorded, into the recording it was opened inside.
+    /// Closes the innermost layer [`Self::open_layer`] opened, filing it as
+    /// a [`Group`] where it was opened: on the page, or among the contents
+    /// of the layer around it.
     ///
-    /// The outermost layer is filed as a layer of the page of its own,
-    /// marked [`VectorFeatures::LAYER`] and whatever its contents asked of a
-    /// vector backend, so that an SVG export rasterizes the layer and leaves
-    /// the rest of the page vector. One holding nothing that would change
-    /// nothing is dropped.
+    /// The group asks a vector backend for [`VectorFeatures::LAYER`] and
+    /// whatever its contents asked, so that an SVG export rasterizes the
+    /// layer and leaves the rest of the page vector. One holding nothing
+    /// that would change nothing is dropped.
     pub fn close_layer(&mut self) {
+        if self.open.is_empty() {
+            return;
+        }
+        self.file_current();
         let Some(layer) = self.open.pop() else {
             return;
         };
-        let drew = self.changed;
-        let contents = mem::replace(&mut self.current, layer.outer);
-        let contents = finish(contents);
-        self.changed = layer.outer_changed;
-        if drew || layer.rec.marks_when_empty() {
-            let features = layer.features.with(VectorFeatures::LAYER);
-            // The layer is drawn under the frame it was opened in, whatever
-            // the state has moved to inside it.
-            let state = (
-                mem::replace(&mut self.matrix, layer.matrix),
-                mem::replace(&mut self.clip, layer.clip),
-            );
-            self.restore();
-            let rec = layer.rec;
-            let draw = |canvas: &SkCanvas| {
-                rec.open_on(canvas);
-                // The contents were recorded in page coordinates.
-                canvas.reset_matrix();
-                if let Some(contents) = &contents {
-                    canvas.draw_picture(contents, None, None);
-                }
-                canvas.restore();
+        if !layer.entries.is_empty() || layer.rec.marks_when_empty() {
+            let group = Group {
+                rec: layer.rec,
+                matrix: layer.matrix,
+                clip: layer.clip.as_ref().map(Path::serialize),
+                within: None,
+                contents_matrix: Matrix::new_identity(),
+                contents: Arc::new(layer.entries),
             };
-            match self.open.last_mut() {
-                Some(parent) => {
-                    parent.features = parent.features.with(features);
-                    self.append(draw);
-                }
-                None => self.append_isolated(features, draw),
-            }
-            (self.matrix, self.clip) = state;
+            self.file_group(group, layer.features.with(VectorFeatures::LAYER));
         }
         self.restore();
     }
 
-    /// The layers open on the page drawn as they stand, each around what it
-    /// has recorded so far, as one picture over the filed page: what a read
-    /// taken while they are open sees. `None` where none is open.
+    /// Files `contents` as a [`Group`] composited through `rec`, under the
+    /// transform and clip the recorder holds and inside `within` under that
+    /// transform, its entries played under `contents_matrix`; asking
+    /// `features` of a vector backend for it. Filed where the recording
+    /// stands: on the page, or among the contents of the innermost open
+    /// layer.
     ///
-    /// Each open recording is finished and begun again with what it held,
-    /// so the layers stay open for what is drawn next and are drawn once,
-    /// whole, when they close. What this replays is the open layers' own
-    /// contents and nothing of the page beneath them.
-    fn open_layers_drawn(&mut self) -> Option<Picture> {
+    /// `shift` moves the group in device space, both transforms with it, as
+    /// a shadow is offset from what casts it.
+    pub fn append_group(
+        &mut self,
+        rec: LayerRec,
+        within: Option<Rect>,
+        contents_matrix: Matrix,
+        contents: Arc<Vec<Layer>>,
+        features: VectorFeatures,
+        shift: Point,
+    ) {
+        self.file_current();
+        let shift = Matrix::translate(shift);
+        let group = Group {
+            rec,
+            matrix: Matrix::concat(&shift, &self.matrix),
+            clip: self.clip.as_ref().map(Path::serialize),
+            within,
+            contents_matrix: Matrix::concat(&shift, &contents_matrix),
+            contents,
+        };
+        self.file_group(group, features);
+        self.restore();
+    }
+
+    /// Files `group` after what [`Self::file_current`] has filed.
+    fn file_group(&mut self, group: Group, features: VectorFeatures) {
+        let entry = Layer::Group(Arc::new(group));
+        match self.open.last_mut() {
+            Some(parent) => {
+                parent.entries.push(entry);
+                parent.features = parent.features.with(features);
+            }
+            None => {
+                Arc::make_mut(&mut self.layers).push(entry);
+                Arc::make_mut(&mut self.features).push(features);
+            }
+        }
+    }
+
+    /// Files what `current` has recorded: as a layer of the page where no
+    /// `saveLayer` is open -- see [`Self::flush`] -- and otherwise among the
+    /// contents of the innermost one.
+    fn file_current(&mut self) {
+        let Some(layer) = self.open.last_mut() else {
+            self.flush();
+            return;
+        };
+        if !self.changed {
+            return;
+        }
+        if let Some(picture) = self.current.finish_recording_as_picture(None) {
+            layer.entries.push(Layer::Picture(picture));
+        }
+        self.current.begin_recording(self.bounds, true);
+        self.changed = false;
+        self.restore();
+    }
+
+    /// The layers open on the page as they stand, as one [`Group`] over the
+    /// filed page: what a read taken while they are open sees. `None` where
+    /// none is open.
+    ///
+    /// The innermost layer's recording is finished and begun again with what
+    /// it held, so the layers stay open for what is drawn next and are filed
+    /// once, whole, when they close. What this replays is the open layers'
+    /// own contents and nothing of the page beneath them.
+    fn open_layers_entry(&mut self) -> Option<Layer> {
         if self.open.is_empty() {
             return None;
         }
-        let bounds = self.bounds;
-        // Innermost first: `current` holds the innermost layer's contents,
-        // and each layer's `outer` the contents of the layer around it.
-        let mut contents = Vec::with_capacity(self.open.len());
-        contents.push(snapshot(&mut self.current, bounds));
-        for layer in self.open.iter_mut().skip(1).rev() {
-            contents.push(snapshot(&mut layer.outer, bounds));
-        }
-        contents.reverse();
+        let recorded = match self.changed {
+            true => snapshot(&mut self.current, self.bounds),
+            false => None,
+        };
         self.restore();
-
-        let mut drawn = PictureRecorder::new();
-        let canvas = drawn.begin_recording(bounds, true);
-        for (layer, contents) in self.open.iter().zip(&contents) {
-            canvas.save();
-            canvas.reset_matrix();
-            if let Some(clip) = &layer.clip {
-                canvas.clip_path(clip, ClipOp::Intersect, true);
-            }
-            canvas.set_matrix(&layer.matrix.into());
-            layer.rec.open_on(canvas);
-            canvas.reset_matrix();
-            if let Some(contents) = contents {
-                canvas.draw_picture(contents, None, None);
-            }
-        }
-        // Each layer is closed after the ones inside it, two saves apiece.
-        for _ in 0..self.open.len() {
-            canvas.restore();
-            canvas.restore();
-        }
-        drawn.finish_recording_as_picture(None)
+        let innermost = self.open.len() - 1;
+        self.open
+            .iter()
+            .enumerate()
+            .rev()
+            .fold(None, |inner, (at, layer)| {
+                let mut contents = layer.entries.clone();
+                if at == innermost
+                    && let Some(picture) = &recorded
+                {
+                    contents.push(Layer::Picture(picture.clone()));
+                }
+                contents.extend(inner);
+                Some(Layer::Group(Arc::new(Group {
+                    rec: layer.rec.clone(),
+                    matrix: layer.matrix,
+                    clip: layer.clip.as_ref().map(Path::serialize),
+                    within: None,
+                    contents_matrix: Matrix::new_identity(),
+                    contents: Arc::new(contents),
+                })))
+            })
     }
 
     /// What the open layers ask of a vector backend, as the page they are
-    /// drawn into by [`Self::open_layers_drawn`] has to.
+    /// drawn into by [`Self::open_layers_entry`] has to.
     fn open_layer_features(&self) -> VectorFeatures {
         self.open
             .iter()
@@ -902,7 +896,7 @@ impl PageRecorder {
 
     /// [`Self::pixels_as`] while a `saveLayer` is open: the filed page from
     /// the surface, as any read takes it, with the open layers drawn over a
-    /// copy of it for this read alone -- see [`Self::open_layers_drawn`] and
+    /// copy of it for this read alone -- see [`Self::open_layers_entry`] and
     /// [`RecordingSurface::read_overlaid`]. The surface and the caches are
     /// only ever given the filed page, so nothing keeps a layer as it stood
     /// part way. What the read replays beyond an ordinary one is the open
@@ -915,7 +909,7 @@ impl PageRecorder {
         dst_info: &ImageInfo,
     ) -> Result<Vec<u8>, String> {
         let filed = self.filed_page();
-        let drawn = self.open_layers_drawn();
+        let drawn = self.open_layers_entry();
         self.surface.confirmed_update(&filed, opts, engine)?;
         let mut pixels = vec![0; checked_byte_size(dst_info)?];
         self.surface.read_overlaid(
@@ -1099,18 +1093,18 @@ impl PageRecorder {
     /// frame it is drawing; a read that has finished holds nothing.
     ///
     /// While a `saveLayer` is open the page also holds the open layers as
-    /// they stand -- see [`Self::open_layers_drawn`] -- under an identity of
+    /// they stand -- see [`Self::open_layers_entry`] -- under an identity of
     /// its own that nothing keeps, so that no cache files a layer that is
     /// still being drawn as though it were finished. It starts from the
     /// filed page's cached bitmap where there is one, so that compositing it
     /// replays the open layers and nothing filed -- see [`Page::cache_key`].
     pub fn page(&mut self) -> Page {
         let filed = self.filed_page();
-        let Some(drawn) = self.open_layers_drawn() else {
+        let Some(drawn) = self.open_layers_entry() else {
             return filed;
         };
         let mut layers = Vec::clone(&filed.layers);
-        layers.push(Layer::Picture(drawn));
+        layers.push(drawn);
         let mut features = Vec::clone(&filed.features);
         features.push(self.open_layer_features());
         let id = Self::mint_id();
@@ -1868,7 +1862,7 @@ impl RecordingSurface {
             canvas.translate((-origin.0 as f32, -origin.1 as f32));
             canvas.scale((self.density, self.density));
             for pict in page.layers.iter().skip(played) {
-                pict.playback(canvas);
+                pict.playback(canvas, Target::Pixels);
             }
             canvas.restore();
             tile.depth = Some(target);
@@ -2156,7 +2150,7 @@ impl RecordingSurface {
             canvas.save();
             canvas.scale((self.density, self.density));
             for pict in page.layers.iter().skip(self.depth) {
-                pict.playback(canvas);
+                pict.playback(canvas, Target::Pixels);
             }
             canvas.restore();
             self.depth = page.layers.len();
@@ -2215,13 +2209,14 @@ impl RecordingSurface {
     /// identity of the page the surface holds.
     ///
     /// `over` is drawn on a surface made like this one, so on the GPU it is
-    /// composited on the GPU, as it would be once filed: composited on the
-    /// CPU instead, a layer at alpha 0.5 read one level away from the same
-    /// layer read after it closed. Retried as [`Self::confirmed_update`] is,
+    /// composited on the GPU, as it would be once filed: the engines round a
+    /// composite differently, and composited on the CPU instead a GPU
+    /// canvas read a layer at another level from the same layer read after
+    /// it closed. Retried as [`Self::confirmed_update`] is,
     /// since the GPU can discard these draws as it can those.
     pub fn read_overlaid(
         &mut self,
-        over: Option<&Picture>,
+        over: Option<&Layer>,
         density: f32,
         page: usize,
         dst_info: &ImageInfo,
@@ -2240,7 +2235,7 @@ impl RecordingSurface {
             canvas.draw_image(surface.image_snapshot(), (0, 0), Some(&copy));
             if let Some(over) = over {
                 canvas.scale((density, density));
-                over.playback(canvas);
+                over.playback(canvas, Target::Pixels);
             }
             if !draws_ran(&mut composed, page) {
                 continue;
@@ -2531,7 +2526,7 @@ impl Page {
 
         while index < self.layers.len() {
             if !refused(index) {
-                self.layers[index].playback(canvas);
+                self.layers[index].playback(canvas, Target::Document);
                 index += 1;
                 continue;
             }
@@ -2569,7 +2564,7 @@ impl Page {
         let raster = surface.canvas();
         raster.scale((density, density));
         for layer in layers {
-            layer.playback(raster);
+            layer.playback(raster, Target::Pixels);
         }
 
         let image = surface.image_snapshot();
@@ -2637,7 +2632,13 @@ impl Page {
         if let Some(matte) = matte {
             matte.paint(output);
         }
-        self.layers.iter().for_each(|pict| pict.playback(output));
+        // Pixels: Skia draws this picture itself, as a pattern's or an
+        // image's, and draws that as pixels. Its PDF backend writes such a
+        // pattern as an image whichever form the picture holds: the same
+        // file either way, measured.
+        self.layers
+            .iter()
+            .for_each(|entry| entry.playback(output, Target::Pixels));
         compositor.finish_recording_as_picture(None)
     }
 
@@ -2723,7 +2724,7 @@ impl Page {
         // draw newly added layers
         canvas.set_matrix(&img_scale);
         for pict in self.layers.iter().skip(cache_depth) {
-            pict.playback(canvas);
+            pict.playback(canvas, Target::Pixels);
         }
 
         Ok((surface, cache_depth))
@@ -2974,7 +2975,7 @@ impl Page {
             }
             canvas.set_matrix(&img_scale);
             for pict in self.layers.iter() {
-                pict.playback(canvas);
+                pict.playback(canvas, Target::Pixels);
             }
             Ok(surface)
         };

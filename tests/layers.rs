@@ -18,28 +18,29 @@ const RED: [u8; 4] = [255, 0, 0, 255];
 /// Nothing at all, as `copy` leaves where an empty layer covers.
 const CLEAR: [u8; 4] = [0; 4];
 
-/// Red on white through a layer at alpha 0.5.
-const HALF_RED: [u8; 4] = [255, 127, 127, 255];
+/// Red on white through a layer at alpha 0.5, exactly: green and blue are
+/// half of 255.
+const HALF_RED: [f32; 4] = [255.0, 127.5, 127.5, 255.0];
 
 /// Red on white through two layers at 0.5, a quarter of the red.
-const QUARTER_RED: [u8; 4] = [255, 191, 191, 255];
+const QUARTER_RED: [f32; 4] = [255.0, 191.25, 191.25, 255.0];
 
 /// Red on white through three layers at 0.5, an eighth of the red.
-const EIGHTH_RED: [u8; 4] = [255, 223, 223, 255];
+const EIGHTH_RED: [f32; 4] = [255.0, 223.125, 223.125, 255.0];
 
-/// Both engines, held each to itself: red through a layer at 0.5 reads
-/// `127` on the GPU and `126` on the CPU, which a plain fill at
-/// `globalAlpha` 0.5 reads as `127` on both.
+/// Both engines, each held to the exact value.
 const ENGINES: [bool; 2] = [false, true];
 
-/// How far a layer's composite may be from the exact value: the CPU's is a
-/// level below the GPU's at 0.5.
-const ENGINE_ROUNDING: u8 = 1;
+/// How far a pixel may be from the exact value it stands for: half a level,
+/// the most that rounding to a byte can account for. At 127.5 both 127 and
+/// 128 are within it.
+const HALF_A_LEVEL: f32 = 0.5;
 
-fn near(got: &[u8], want: [u8; 4]) -> bool {
+/// Whether `got` is what rounding `exact` to bytes could give.
+fn rounds_to(got: &[u8], exact: [f32; 4]) -> bool {
     got.iter()
-        .zip(want)
-        .all(|(a, b)| a.abs_diff(b) <= ENGINE_ROUNDING)
+        .zip(exact)
+        .all(|(a, b)| (f32::from(*a) - b).abs() <= HALF_A_LEVEL)
 }
 
 fn white_page(gpu: bool) -> Canvas {
@@ -87,7 +88,7 @@ fn a_read_inside_a_layer_leaves_it_open() {
         ctx.restore();
         let first = pixel(&mut canvas, 0);
         assert!(
-            near(&first, HALF_RED),
+            rounds_to(&first, HALF_RED),
             "gpu {gpu}: the first square {first:?}"
         );
         assert_eq!(inside, first, "gpu {gpu}: the square read in the layer");
@@ -120,7 +121,7 @@ fn nested_layers_survive_a_read_at_each_depth() {
             [HALF_RED, QUARTER_RED, EIGHTH_RED].into_iter().enumerate()
         {
             assert!(
-                near(&closed[n], want),
+                rounds_to(&closed[n], want),
                 "gpu {gpu}: the square at depth {n} read {:?}",
                 closed[n],
             );
@@ -152,7 +153,11 @@ fn a_read_inside_a_layer_keeps_its_transform_clip_and_bounds() {
         canvas.context().restore();
         let closed: Vec<_> = (0..3).map(|n| pixel(&mut canvas, n)).collect();
         assert_eq!(closed[0], WHITE, "gpu {gpu}: outside the bounds");
-        assert!(near(&closed[1], HALF_RED), "gpu {gpu}: {:?}", closed[1]);
+        assert!(
+            rounds_to(&closed[1], HALF_RED),
+            "gpu {gpu}: {:?}",
+            closed[1]
+        );
         assert_eq!(closed[2], WHITE, "gpu {gpu}: outside the clip");
         assert_eq!(inside, closed, "gpu {gpu}: read inside and after");
     }
@@ -257,6 +262,310 @@ fn a_canvas_drawn_in_while_its_layer_is_open_brings_it_composited() {
     }
 }
 
+const OSWALD: &str = "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf";
+
+/// Fills the page white inside a layer, so that what is composited in it
+/// next lands on white there, as it would on the page: on a layer's own
+/// transparent pixels a composite rounds differently.
+fn on_white(ctx: &mut Context2D) {
+    ctx.set_fill_style(RgbaLinear::opaque(1.0, 1.0, 1.0));
+    ctx.fill_rect(0.0, 0.0, WIDTH, HEIGHT);
+    ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.0, 0.0));
+}
+
+/// Red composited on white at `alpha` by `draw`, which leaves its darkest
+/// pixel where green is `255 * (1 - alpha)`, read as that pixel.
+type Composite = fn(&mut Canvas, f32) -> Vec<u8>;
+
+/// The ways a group is composited through a paint, each drawing red over
+/// white at an alpha: a layer, one nested in a plain layer, a canvas drawn
+/// in, one drawn in inside a layer, and a paragraph under `globalAlpha`.
+const COMPOSITES: [(&str, Composite); 5] = [
+    ("a layer", |canvas, alpha| {
+        let ctx = canvas.context();
+        ctx.save_layer_with(alpha, None, None);
+        square(ctx, 0);
+        ctx.restore();
+        pixel(canvas, 0)
+    }),
+    ("a layer nested in a plain one", |canvas, alpha| {
+        let ctx = canvas.context();
+        ctx.save_layer();
+        on_white(ctx);
+        ctx.save_layer_with(alpha, None, None);
+        square(ctx, 0);
+        ctx.restore();
+        ctx.restore();
+        pixel(canvas, 0)
+    }),
+    ("a canvas drawn in", |canvas, alpha| {
+        let mut source = white_page(canvas.gpu());
+        square(source.context(), 0);
+        canvas.context().set_global_alpha(alpha);
+        canvas.context().draw_canvas(&mut source, 0.0, 0.0);
+        pixel(canvas, 0)
+    }),
+    ("a canvas drawn in inside a layer", |canvas, alpha| {
+        let mut source = white_page(canvas.gpu());
+        square(source.context(), 0);
+        let ctx = canvas.context();
+        ctx.save_layer();
+        on_white(ctx);
+        ctx.set_global_alpha(alpha);
+        ctx.draw_canvas(&mut source, 0.0, 0.0);
+        ctx.restore();
+        pixel(canvas, 0)
+    }),
+    ("a paragraph", |canvas, alpha| {
+        let library = FontLibrary::new();
+        library
+            .use_paths(Some("LayersOswald"), [OSWALD])
+            .expect("Oswald");
+        let paragraph = TextEngine::new(&library).layout_text(
+            "H",
+            &TextStyle {
+                font_families: vec!["LayersOswald".into()],
+                font_size: 40.0,
+                color: RgbaLinear::opaque(1.0, 0.0, 0.0),
+                ..TextStyle::default()
+            },
+            WIDTH,
+        );
+        canvas.context().set_global_alpha(alpha);
+        canvas.context().draw_paragraph(&paragraph, 0.0, -10.0);
+        let pixels = canvas
+            .context()
+            .get_image_data(0.0, 0.0, WIDTH, HEIGHT)
+            .expect("pixels");
+        // The middle of a stem, which the glyph covers whole.
+        pixels
+            .pixels()
+            .chunks(4)
+            .min_by_key(|pixel| pixel[1])
+            .expect("a pixel")
+            .to_vec()
+    }),
+];
+
+/// Every way a group is composited, at every alpha a byte holds, on both
+/// engines: green is `255 * (1 - alpha)` to within half a level.
+///
+/// Skia's raster backend composites a layer on an eight-bit page through
+/// its sprite blitter, which blends with an alpha out of 256 and truncates:
+/// at 0.5 it gave 126 of an exact 127.5, and the error reached 1.5 levels.
+#[test]
+fn a_layer_composites_at_its_alpha() {
+    let mut wrong = Vec::new();
+    for gpu in ENGINES {
+        for (name, composite) in COMPOSITES {
+            let missed: Vec<_> = (1..255u8)
+                .filter_map(|byte| {
+                    let alpha = f32::from(byte) / 255.0;
+                    let green = 255.0 * (1.0 - alpha);
+                    let got = composite(&mut white_page(gpu), alpha);
+                    (!rounds_to(&got, [255.0, green, green, 255.0]))
+                        .then(|| format!("{byte}/255 read {}", got[1]))
+                })
+                .collect();
+            if let Some(first) = missed.first() {
+                wrong.push(format!(
+                    "gpu {gpu}, {name}: {} of 254 alphas, first {first}",
+                    missed.len()
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// A canvas drawn in under a `globalAlpha` with a shadow, at every alpha a
+/// byte holds: an opaque blue shadow one pixel to the right, beneath the red
+/// it casts from, on white.
+///
+/// Two composites, and the shadow is rounded to bytes twice before the red
+/// lands on it -- in the eight-bit layer its filter draws in, then on the
+/// page -- so the bound is half a level for the last rounding and the share
+/// `1 - alpha` the red leaves of the shadow's own level.
+#[test]
+fn a_shadowed_canvas_composites_at_its_alpha() {
+    let mut wrong = Vec::new();
+    for gpu in ENGINES {
+        let missed: Vec<_> = (1..255u8)
+            .filter_map(|byte| {
+                let alpha = f32::from(byte) / 255.0;
+                let left = 1.0 - alpha;
+                let mut source = white_page(gpu);
+                source.context().fill_rect(0.0, 0.0, WIDTH, HEIGHT);
+                let mut canvas = white_page(gpu);
+                let ctx = canvas.context();
+                ctx.set_shadow_color(RgbaLinear::opaque(0.0, 0.0, 1.0));
+                ctx.set_shadow_offset(1.0, 0.0);
+                ctx.set_global_alpha(alpha);
+                ctx.draw_canvas(&mut source, 0.0, 0.0);
+                let got = pixel(&mut canvas, 1);
+                let exact = [
+                    255.0 * (alpha + left * left),
+                    255.0 * left * left,
+                    255.0 * left,
+                    255.0,
+                ];
+                let bound = HALF_A_LEVEL + left;
+                let off = got
+                    .iter()
+                    .zip(exact)
+                    .map(|(a, b)| (f32::from(*a) - b).abs())
+                    .fold(0.0, f32::max);
+                (off > bound).then(|| format!("{byte}/255 off by {off}"))
+            })
+            .collect();
+        if let Some(first) = missed.first() {
+            wrong.push(format!(
+                "gpu {gpu}: {} of 254 alphas, first {first}",
+                missed.len()
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// A PDF keeps a translucent group vector: a layer, a layer nested in
+/// another, and a canvas drawn in under a `globalAlpha`. It writes the
+/// alpha as an opacity, where a raster composites it exactly -- see
+/// [`a_layer_composites_at_its_alpha`].
+#[test]
+fn a_pdf_keeps_a_translucent_group_vector() {
+    for (name, composite) in COMPOSITES.into_iter().take(4) {
+        let mut canvas = white_page(false);
+        let _ = composite(&mut canvas, 0.5);
+        let pdf = canvas
+            .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
+            .expect("a pdf");
+        assert!(!has(&pdf, "/Subtype /Image"), "{name} is vector");
+    }
+}
+
+/// A pattern made of a canvas holding a translucent layer composites the
+/// layer exactly on pixels: Skia draws a pattern's picture itself, so the
+/// picture holds the form for pixels -- see `Page::picture`.
+#[test]
+fn a_pattern_of_a_translucent_layer_composites_at_its_alpha() {
+    for gpu in ENGINES {
+        let mut source = white_page(gpu);
+        let ctx = source.context();
+        ctx.save_layer_with(0.5, None, None);
+        ctx.fill_rect(0.0, 0.0, WIDTH, HEIGHT);
+        ctx.restore();
+        let mut canvas = white_page(gpu);
+        let ctx = canvas.context();
+        let pattern =
+            ctx.create_pattern_from_canvas(&mut source, PatternRepeat::Repeat);
+        ctx.set_fill_pattern(&pattern);
+        ctx.fill_rect(0.0, 0.0, WIDTH, HEIGHT);
+        let got = pixel(&mut canvas, 1);
+        assert!(rounds_to(&got, HALF_RED), "gpu {gpu}: {got:?}");
+    }
+}
+
+/// A group is played back under the transform the page is: a layer lands
+/// where it was drawn in an export at a density, and in a read served by a
+/// tile away from the page's origin.
+#[test]
+fn a_group_lands_where_it_was_drawn() {
+    for gpu in ENGINES {
+        let mut canvas = white_page(gpu);
+        let ctx = canvas.context();
+        ctx.save_layer_with(0.5, None, None);
+        square(ctx, 1);
+        ctx.restore();
+        let png = canvas
+            .to_buffer(
+                ImageFormat::Png,
+                &EncodeOptions {
+                    density: 2.0,
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("a png");
+        let decoded = Image::from_encoded(&png).expect("a decoded png");
+        let mut copy = Canvas::with_options(
+            WIDTH * 2.0,
+            HEIGHT * 2.0,
+            CanvasOptions {
+                gpu,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas");
+        copy.context().draw_image(&decoded, 0.0, 0.0);
+        let at = |copy: &mut Canvas, x: f32| {
+            copy.context()
+                .get_image_data(x, HEIGHT, 1.0, 1.0)
+                .expect("a pixel")
+                .pixels()
+                .to_vec()
+        };
+        assert_eq!(at(&mut copy, 20.0), WHITE, "gpu {gpu}: beside it");
+        let got = at(&mut copy, 60.0);
+        assert!(rounds_to(&got, HALF_RED), "gpu {gpu}: at 2x {got:?}");
+
+        // Far enough from the origin that a small read is served by a tile
+        // of its own.
+        let side = 1024.0;
+        let mut canvas = Canvas::with_options(
+            side,
+            side,
+            CanvasOptions {
+                gpu,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas");
+        let ctx = canvas.context();
+        ctx.set_fill_style(RgbaLinear::opaque(1.0, 1.0, 1.0));
+        ctx.fill_rect(0.0, 0.0, side, side);
+        ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.0, 0.0));
+        ctx.save_layer_with(0.5, None, None);
+        ctx.fill_rect(600.0, 600.0, 20.0, 20.0);
+        ctx.restore();
+        let got = canvas
+            .context()
+            .get_image_data(610.0, 610.0, 1.0, 1.0)
+            .expect("a pixel")
+            .pixels()
+            .to_vec();
+        assert!(rounds_to(&got, HALF_RED), "gpu {gpu}: on a tile {got:?}");
+    }
+}
+
+/// A canvas drawn in through a paint shows only the region asked for, in
+/// the destination asked for.
+#[test]
+fn a_canvas_drawn_in_shows_only_its_region() {
+    for gpu in ENGINES {
+        let mut source = white_page(gpu);
+        let ctx = source.context();
+        ctx.fill_rect(0.0, 0.0, WIDTH, HEIGHT);
+        let mut canvas = white_page(gpu);
+        let ctx = canvas.context();
+        ctx.set_global_alpha(0.5);
+        ctx.draw_canvas_region(
+            &mut source,
+            0.0,
+            0.0,
+            20.0,
+            HEIGHT,
+            20.0,
+            0.0,
+            20.0,
+            HEIGHT,
+        );
+        assert_eq!(pixel(&mut canvas, 0), WHITE, "gpu {gpu}: before it");
+        let got = pixel(&mut canvas, 1);
+        assert!(rounds_to(&got, HALF_RED), "gpu {gpu}: {got:?}");
+        assert_eq!(pixel(&mut canvas, 2), WHITE, "gpu {gpu}: after it");
+    }
+}
+
 /// What a PNG holds at the middle of the `n`th third of the page.
 fn png_pixel(png: &[u8], gpu: bool, n: usize) -> Vec<u8> {
     let decoded = Image::from_encoded(png).expect("a decoded png");
@@ -286,7 +595,10 @@ fn an_export_taken_inside_a_layer_keeps_the_layer_as_it_stood() {
         ctx.restore();
         let closed =
             canvas.to_buffer(ImageFormat::Png, &options).expect("a png");
-        assert!(near(&png_pixel(&closed, gpu, 1), HALF_RED), "gpu {gpu}");
+        assert!(
+            rounds_to(&png_pixel(&closed, gpu, 1), HALF_RED),
+            "gpu {gpu}"
+        );
         let taken = taken.encode().expect("a png");
         assert_eq!(png_pixel(&taken, gpu, 1), WHITE, "gpu {gpu}: drawn after");
         assert_eq!(
@@ -337,7 +649,7 @@ fn a_layer_of_one_draw_composites_as_a_layer() {
         square(ctx, 0);
         ctx.restore();
         let got = pixel(&mut canvas, 0);
-        assert!(near(&got, HALF_RED), "gpu {gpu}: {got:?}");
+        assert!(rounds_to(&got, HALF_RED), "gpu {gpu}: {got:?}");
     }
 }
 

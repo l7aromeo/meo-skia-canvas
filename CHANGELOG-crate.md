@@ -155,6 +155,17 @@ window be changed after it opens.** No signature moves and nothing is removed.
   through one of them. The layer now stays open, and the read or export sees
   it composited as it stands -- the pixels the page reads once it closes.
 
+- **A translucent layer composites at its alpha.** On the CPU engine a layer
+  under `Context2D::save_layer_with`, a canvas drawn in by
+  `Context2D::draw_canvas` under `set_global_alpha` -- with or without a
+  shadow -- and either of them inside another layer composited up to 1.5
+  levels off: red over white through a layer at 0.5 read 126, where the
+  exact value is 127.5. Skia composites such a layer on an eight-bit page by
+  an alpha out of 256 and truncates. Each now reads within half a level of
+  the exact value at every alpha, on both engines -- a shadowed one within
+  the rounding of the shadow beneath it -- and a PDF still writes it as an
+  opacity, in vectors.
+
 - **A text decoration's colour is painted at the precision it names, as a
   fill's is.** The colour named in `Context2D::set_text_decoration_css` or
   `set_text_decoration` was rounded to eight bits of sRGB when it was set.

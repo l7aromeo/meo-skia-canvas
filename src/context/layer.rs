@@ -1,5 +1,7 @@
-//! One entry of a page's recording: a Skia picture, or a blurred draw kept as
-//! ours so that its blur is made where the page is played back.
+//! One entry of a page's recording: a Skia picture, a blurred draw kept as
+//! ours so that its blur is made where the page is played back, or a group
+//! composited through a paint, kept as ours so that how it composites is
+//! chosen for the target it is played back onto.
 //!
 //! A picture fixes everything about a draw when it is recorded, and a page is
 //! played back under transforms the draw never saw: an export at a density,
@@ -10,16 +12,23 @@
 //! checks that choice when it is played back, against the sigma it has
 //! there.
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    borrow::Cow,
+    sync::{Arc, OnceLock},
+};
 
 use skia_safe::{
-    BlurStyle, Canvas as SkCanvas, ClipOp, Color4f, Data, ImageFilter,
-    MaskFilter, Matrix, Paint, PaintCap, PaintJoin, PaintStyle, Path,
-    PathDirection, Picture, Rect, TileMode, image_filters,
+    BlendMode, BlurStyle, Canvas as SkCanvas, ClipOp, Color4f, Data,
+    ImageFilter, MaskFilter, Matrix, Paint, PaintCap, PaintJoin, PaintStyle,
+    Path, PathDirection, Picture, Rect, TileMode, canvas::SaveLayerRec,
+    image_filters,
 };
 
 use crate::{
-    context::{coverage_of, faint::Faint},
+    context::{
+        coverage_of,
+        faint::{Faint, composited},
+    },
     node::filter::MASK_BLUR_MAX_SIGMA,
 };
 
@@ -35,16 +44,130 @@ pub enum Layer {
     /// snapshot copies a pointer for it rather than the op, and every
     /// snapshot of the page draws from the one blur the op makes.
     Blur(Arc<BlurOp>),
+    /// What a `saveLayer` holds, or a canvas drawn into another through a
+    /// paint, composited through that paint -- see [`Group`]. Shared, as a
+    /// blur is.
+    Group(Arc<Group>),
 }
 
 impl Layer {
-    /// Draws this entry onto `canvas`, under whatever transform and clip
-    /// the canvas already carries.
-    pub fn playback(&self, canvas: &SkCanvas) {
+    /// Draws this entry onto `canvas` for `target`, under whatever transform
+    /// and clip the canvas already carries.
+    pub fn playback(&self, canvas: &SkCanvas, target: Target) {
         match self {
             Layer::Picture(picture) => picture.playback(canvas),
             Layer::Blur(op) => op.playback(canvas),
+            Layer::Group(group) => group.playback(canvas, target),
         }
+    }
+}
+
+/// What a page is played back onto, which decides how a [`Group`]
+/// composites.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// Pixels: a raster or GPU surface, or a picture Skia itself will draw
+    /// as pixels -- a pattern's or an image's.
+    Pixels,
+    /// A document backend writing vectors: PDF, and SVG for what it does not
+    /// rasterize.
+    Document,
+}
+
+/// What a `saveLayer` is opened with: the paint it composites through, the
+/// bounds it is confined to, and the filter it applies to what lies beneath.
+#[derive(Clone, Debug, Default)]
+pub struct LayerRec {
+    pub paint: Option<Paint>,
+    pub bounds: Option<Rect>,
+    pub backdrop: Option<ImageFilter>,
+}
+
+impl LayerRec {
+    /// Opens the layer on `canvas`, under whatever transform and clip it
+    /// carries, compositing as `target` needs: on pixels through the paint
+    /// [`composited`] hands over, which keeps the alpha exact; in a
+    /// document through the paint as it is, which the backend writes as an
+    /// opacity and keeps vector.
+    fn open_on(&self, canvas: &SkCanvas, target: Target) {
+        let paint = match (&self.paint, target) {
+            (Some(paint), Target::Pixels) => Some(composited(paint)),
+            (Some(paint), Target::Document) => Some(Cow::Borrowed(paint)),
+            (None, _) => None,
+        };
+        let mut rec = SaveLayerRec::default();
+        if let Some(paint) = &paint {
+            rec = rec.paint(paint);
+        }
+        if let Some(bounds) = &self.bounds {
+            rec = rec.bounds(bounds);
+        }
+        if let Some(backdrop) = &self.backdrop {
+            rec = rec.backdrop(backdrop);
+        }
+        canvas.save_layer(&rec);
+    }
+
+    /// Whether a layer holding nothing still changes the page: through a
+    /// filter over what lies beneath it, or a blend mode that replaces what
+    /// it covers with the nothing it holds.
+    pub fn marks_when_empty(&self) -> bool {
+        let blend = self.paint.as_ref().and_then(Paint::as_blend_mode);
+        self.backdrop.is_some()
+            || !matches!(blend, None | Some(BlendMode::SrcOver))
+    }
+}
+
+/// Entries composited as one through a paint: what a `saveLayer` held when
+/// it closed, or a canvas drawn into another through a paint.
+///
+/// Kept as ours rather than recorded into a picture, because how the group
+/// composites depends on where it is played back -- see
+/// [`LayerRec::open_on`] -- and once in a picture only Skia plays it.
+#[derive(Clone, Debug)]
+pub struct Group {
+    /// How the group composites onto what lies beneath it.
+    pub rec: LayerRec,
+    /// The transform and the clip the group composites under, in page
+    /// coordinates; the clip is in device space, as the recorder holds it,
+    /// and serialized, as a [`BlurOp`]'s is, so that a page can be sent to
+    /// another thread.
+    pub matrix: Matrix,
+    pub clip: Option<Data>,
+    /// A rectangle under `matrix` the group is confined to: the destination
+    /// a canvas is drawn into.
+    pub within: Option<Rect>,
+    /// The transform the entries are played under: the identity for what a
+    /// layer held, recorded in page coordinates; for a canvas drawn in, the
+    /// mapping from its page onto this one.
+    pub contents_matrix: Matrix,
+    /// Shared, so that a canvas drawn in brings its page's list without
+    /// copying it.
+    pub contents: Arc<Vec<Layer>>,
+}
+
+impl Group {
+    /// Draws the group onto `canvas` for `target`, its transforms composed
+    /// with the one the canvas carries: a recorded picture replays its
+    /// matrices relative to the canvas it is played onto, and these have to
+    /// as well, or a density or a tile's origin would be lost.
+    pub fn playback(&self, canvas: &SkCanvas, target: Target) {
+        let base = canvas.local_to_device_as_3x3();
+        canvas.save();
+        if let Some(clip) = self.clip.as_ref().and_then(Path::deserialize) {
+            canvas.clip_path(&clip, ClipOp::Intersect, true);
+        }
+        canvas.set_matrix(&Matrix::concat(&base, &self.matrix).into());
+        if let Some(within) = &self.within {
+            canvas.clip_rect(within, ClipOp::Intersect, true);
+        }
+        self.rec.open_on(canvas, target);
+        canvas.set_matrix(&Matrix::concat(&base, &self.contents_matrix).into());
+        for entry in self.contents.iter() {
+            entry.playback(canvas, target);
+        }
+        canvas.restore();
+        canvas.restore();
     }
 }
 
