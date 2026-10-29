@@ -475,8 +475,9 @@ mod tests {
     use crate::{
         context::{exact_blur::reference, page::ExportOptions},
         gpu::RenderingEngine,
+        started,
     };
-    use skia_safe::{Surface, images};
+    use skia_safe::Surface;
 
     /// Float noise moves a value by well under this; a byte that differs
     /// from the reference further from a half-level than this is wrong.
@@ -524,7 +525,7 @@ mod tests {
             ColorSpace::new_srgb(),
         );
         let raster =
-            images::raster_from_data(&info, Data::new_copy(src), w * 4)?;
+            started::raster_from_data(&info, Data::new_copy(src), w * 4)?;
         let mut up = surface(w, h, ColorType::RGBA8888)?;
         let mut paint = Paint::default();
         paint.set_blend_mode(BlendMode::Src);

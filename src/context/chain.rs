@@ -22,15 +22,18 @@ use skia_safe::{
     ColorType, Data, FilterMode, IRect, Image, ImageInfo, Matrix, MipmapMode,
     Paint, Rect, RoundOut, SamplingOptions, Surface, Vector, color_filters,
     image::{CachingHint, RequiredProperties},
-    image_filters, images, surfaces,
+    image_filters,
 };
 
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 use skia_safe::gpu;
 
-use crate::context::exact_blur::{self, REACH_SIGMAS};
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 use crate::context::exact_blur_gpu;
+use crate::{
+    context::exact_blur::{self, REACH_SIGMAS},
+    started,
+};
 
 /// One step of a chain, applied in order to what the step before it left.
 #[derive(Clone, Debug)]
@@ -91,7 +94,7 @@ pub(crate) fn apply(
     // canvas recording a picture has no device to ask, and gets memory.
     let Some(mut surface) = canvas
         .new_surface(&info, None)
-        .or_else(|| surfaces::raster(&info, None, None))
+        .or_else(|| started::raster(&info, None, None))
     else {
         return;
     };
@@ -379,7 +382,7 @@ fn make_surface(
         ),
         #[cfg(not(any(feature = "metal", feature = "vulkan")))]
         Some(never) => match *never {},
-        None => surfaces::raster(info, None, None),
+        None => started::raster(info, None, None),
     }
 }
 
@@ -483,7 +486,7 @@ fn blurred_on_cpu(
         }
     };
     let row_bytes = info.min_row_bytes();
-    images::raster_from_data(&info, Data::new_copy(&pixels), row_bytes)
+    started::raster_from_data(&info, Data::new_copy(&pixels), row_bytes)
 }
 
 /// `image` drawn through `filter` and then scaled by `gain`, as one colour
@@ -516,9 +519,9 @@ fn filtered(
 
 #[cfg(test)]
 mod tests {
-    use skia_safe::{
-        Color, ImageInfo, Paint, PathBuilder, Rect, Surface, surfaces,
-    };
+    use skia_safe::{Color, ImageInfo, Paint, PathBuilder, Rect, Surface};
+
+    use crate::started;
 
     /// The surface's width, and where [`cut`] clips the triangle: through
     /// it, 60 pixels right of the edge measured.
@@ -530,7 +533,7 @@ mod tests {
     fn triangle(clip: Option<f32>) -> Vec<u8> {
         let info = ImageInfo::new_n32_premul((WIDTH, 120), None);
         let mut surface: Surface =
-            surfaces::raster(&info, None, None).expect("a surface");
+            started::raster(&info, None, None).expect("a surface");
         let canvas = surface.canvas();
         canvas.clear(Color::TRANSPARENT);
         if let Some(x) = clip {
