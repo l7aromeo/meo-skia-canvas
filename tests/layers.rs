@@ -129,6 +129,40 @@ fn nested_layers_survive_a_read_at_each_depth() {
     }
 }
 
+/// Layers three deep at 0.5 each, a square drawn at each depth and nothing
+/// read until the innermost is open: one read there finds each square still
+/// in the recording of the layer it was drawn in, and the read after it, and
+/// the reads once all three are closed, find the same.
+#[test]
+fn nested_layers_read_from_the_innermost_show_every_depth() {
+    for gpu in ENGINES {
+        let mut canvas = white_page(gpu);
+        for depth in 0..3 {
+            canvas.context().save_layer_with(0.5, None, None);
+            square(canvas.context(), depth);
+        }
+        let all = |canvas: &mut Canvas| {
+            (0..3).map(|n| pixel(canvas, n)).collect::<Vec<_>>()
+        };
+        let inside = all(&mut canvas);
+        assert_eq!(all(&mut canvas), inside, "gpu {gpu}: read again inside");
+        for _ in 0..3 {
+            canvas.context().restore();
+        }
+        let closed = all(&mut canvas);
+        for (n, want) in
+            [HALF_RED, QUARTER_RED, EIGHTH_RED].into_iter().enumerate()
+        {
+            assert!(
+                near(&closed[n], want),
+                "gpu {gpu}: the square at depth {n} read {:?}",
+                closed[n],
+            );
+        }
+        assert_eq!(inside, closed, "gpu {gpu}: read inside and after");
+    }
+}
+
 /// A layer opened under a transform and a clip, with bounds of its own, reads
 /// the same inside as after: translated 20 to the right, its bounds cover
 /// the middle and last thirds, and the clip leaves only the middle.

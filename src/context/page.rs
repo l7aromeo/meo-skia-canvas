@@ -427,7 +427,7 @@ impl LayerRec {
 
 /// A `saveLayer` open on a [`PageRecorder`].
 ///
-/// The layer's contents are recorded into a picture of their own, and the
+/// The layer's contents are recorded into pictures of their own, and the
 /// layer is drawn -- opened, the contents drawn into it, closed -- only once
 /// it closes. A recording that a read or an export has to finish part way
 /// therefore never holds a layer open: what it holds of an open layer is a
@@ -435,6 +435,15 @@ impl LayerRec {
 /// that read alone, while the contents go on recording into the one layer
 /// they belong to.
 struct OpenLayer {
+    /// What the layer's contents recorded before the reads taken inside it
+    /// finished their recording, in order. What follows the last of them is
+    /// in `current`, or in the `outer` of the layer opened inside this one.
+    ///
+    /// Kept side by side rather than each drawn into the recording begun
+    /// after it, which nested the contents one picture deeper per read and
+    /// made playing them back recurse as deep: thousands of reads inside a
+    /// layer overran the stack.
+    recorded: Vec<Picture>,
     /// The recording the layer was opened inside -- the page's, or the
     /// contents of the layer around it -- set aside while `current` records
     /// this one's.
@@ -472,17 +481,23 @@ fn finish(mut recorder: PictureRecorder) -> Option<Picture> {
     recorder.finish_recording_as_picture(None)
 }
 
-/// What `recorder` has recorded so far, with the recording begun again at
-/// `bounds` holding it, so that what is drawn next follows it. The frame is
-/// rebuilt by the next draw -- see `PageRecorder::settle`.
-fn snapshot(recorder: &mut PictureRecorder, bounds: Rect) -> Option<Picture> {
-    let picture = recorder.finish_recording_as_picture(None);
-    let canvas = recorder.begin_recording(bounds, true);
-    if let Some(picture) = &picture {
-        canvas.draw_picture(picture, None, None);
-    }
-    canvas.save();
-    picture
+/// Finishes what `recorder` has recorded so far onto the end of `recorded`,
+/// and begins the recording again at `bounds`, empty, for what is drawn next.
+/// A picture that recorded nothing is dropped rather than kept: Skia counts
+/// no operation in one, and repeated reads with nothing drawn between them
+/// would otherwise grow `recorded` without bound. The frame is rebuilt by
+/// the next draw -- see `PageRecorder::settle`.
+fn file_recording(
+    recorder: &mut PictureRecorder,
+    bounds: Rect,
+    recorded: &mut Vec<Picture>,
+) {
+    recorded.extend(
+        recorder
+            .finish_recording_as_picture(None)
+            .filter(|picture| picture.approximate_op_count() > 0),
+    );
+    recorder.begin_recording(bounds, true).save();
 }
 
 impl PageRecorder {
@@ -673,8 +688,9 @@ impl PageRecorder {
     /// holds now.
     ///
     /// Nothing of the layer is drawn yet. What is drawn until
-    /// [`Self::close_layer`] is recorded into a picture of the layer's own,
-    /// and the layer is drawn around it once it closes -- see [`OpenLayer`].
+    /// [`Self::close_layer`] is recorded into pictures of the layer's own,
+    /// and the layer is drawn around them once it closes -- see
+    /// [`OpenLayer`].
     /// The page's recording so far is filed first where this is the
     /// outermost layer, so that a read taken while it is open finds the page
     /// beneath it already filed.
@@ -686,6 +702,7 @@ impl PageRecorder {
         contents.begin_recording(self.bounds, true).save();
         let outer = mem::replace(&mut self.current, contents);
         self.open.push(OpenLayer {
+            recorded: Vec::new(),
             outer,
             outer_changed: mem::replace(&mut self.changed, false),
             rec,
@@ -709,8 +726,8 @@ impl PageRecorder {
             return;
         };
         let drew = self.changed;
-        let contents = mem::replace(&mut self.current, layer.outer);
-        let contents = finish(contents);
+        let mut contents = layer.recorded;
+        contents.extend(finish(mem::replace(&mut self.current, layer.outer)));
         self.changed = layer.outer_changed;
         if drew || layer.rec.marks_when_empty() {
             let features = layer.features.with(VectorFeatures::LAYER);
@@ -726,8 +743,8 @@ impl PageRecorder {
                 rec.open_on(canvas);
                 // The contents were recorded in page coordinates.
                 canvas.reset_matrix();
-                if let Some(contents) = &contents {
-                    canvas.draw_picture(contents, None, None);
+                for picture in &contents {
+                    canvas.draw_picture(picture, None, None);
                 }
                 canvas.restore();
             };
@@ -747,28 +764,35 @@ impl PageRecorder {
     /// has recorded so far, as one picture over the filed page: what a read
     /// taken while they are open sees. `None` where none is open.
     ///
-    /// Each open recording is finished and begun again with what it held,
-    /// so the layers stay open for what is drawn next and are drawn once,
-    /// whole, when they close. What this replays is the open layers' own
-    /// contents and nothing of the page beneath them.
+    /// Each open recording is finished onto what its layer has recorded and
+    /// begun again, so the layers stay open for what is drawn next and are
+    /// drawn once, whole, when they close -- see [`OpenLayer::recorded`].
+    /// What this replays is the open layers' own contents and nothing of the
+    /// page beneath them.
     fn open_layers_drawn(&mut self) -> Option<Picture> {
         if self.open.is_empty() {
             return None;
         }
         let bounds = self.bounds;
-        // Innermost first: `current` holds the innermost layer's contents,
-        // and each layer's `outer` the contents of the layer around it.
-        let mut contents = Vec::with_capacity(self.open.len());
-        contents.push(snapshot(&mut self.current, bounds));
-        for layer in self.open.iter_mut().skip(1).rev() {
-            contents.push(snapshot(&mut layer.outer, bounds));
+        // `current` holds what the innermost layer has recorded since it was
+        // last filed, and each layer's `outer` that of the layer around it.
+        let open = &mut self.open;
+        if let Some(innermost) = open.last_mut() {
+            file_recording(&mut self.current, bounds, &mut innermost.recorded);
         }
-        contents.reverse();
+        for i in 1..open.len() {
+            let (around, inside) = open.split_at_mut(i);
+            file_recording(
+                &mut inside[0].outer,
+                bounds,
+                &mut around[i - 1].recorded,
+            );
+        }
         self.restore();
 
         let mut drawn = PictureRecorder::new();
         let canvas = drawn.begin_recording(bounds, true);
-        for (layer, contents) in self.open.iter().zip(&contents) {
+        for layer in &self.open {
             canvas.save();
             canvas.reset_matrix();
             if let Some(clip) = &layer.clip {
@@ -777,8 +801,8 @@ impl PageRecorder {
             canvas.set_matrix(&layer.matrix.into());
             layer.rec.open_on(canvas);
             canvas.reset_matrix();
-            if let Some(contents) = contents {
-                canvas.draw_picture(contents, None, None);
+            for picture in &layer.recorded {
+                canvas.draw_picture(picture, None, None);
             }
         }
         // Each layer is closed after the ones inside it, two saves apiece.
@@ -4764,7 +4788,7 @@ mod tests {
     use super::*;
     use crate::context::faint::Faint;
     use parking_lot::Mutex;
-    use std::ptr;
+    use std::{ptr, thread};
 
     /// Serialises the tests that assert on the process-wide page cache.
     ///
@@ -5732,6 +5756,92 @@ mod tests {
             PageCache::shared().get(&page.id).is_none(),
             "an export that outlived its generation files nothing"
         );
+    }
+
+    /// Reads inside one open layer leave its recording no deeper than one
+    /// read does. Each read finishes what the layer has recorded; drawing
+    /// that picture into the recording begun after it nested the layer one
+    /// level per read, and playing it back recursed once per level -- 4,000
+    /// reads in a layer overran a 1 MB stack. On a thread with too little
+    /// stack for that, the reads and the read after the layer closes all
+    /// return.
+    #[test]
+    fn reads_inside_a_layer_keep_its_recording_flat() {
+        /// Small enough that a recursion of [`READS`] levels overruns it,
+        /// and enough for one read of a flat recording.
+        const STACK: usize = 256 * 1024;
+        /// Far more reads than [`STACK`] holds levels of playback.
+        const READS: usize = 1500;
+        let pixel = thread::Builder::new()
+            .stack_size(STACK)
+            .spawn(|| {
+                let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
+                let crop = IRect::from_xywh(0, 0, 1, 1);
+                let read = |recorder: &mut PageRecorder| {
+                    recorder
+                        .pixels(
+                            crop,
+                            ExportOptions::default(),
+                            RenderingEngine::CPU,
+                        )
+                        .expect("a read of the page")
+                };
+                let mut half = Paint::default();
+                half.set_alpha_f(0.5);
+                recorder.open_layer(LayerRec {
+                    paint: Some(half),
+                    ..LayerRec::default()
+                });
+                for _ in 0..READS {
+                    recorder.append(|canvas| {
+                        canvas.draw_rect(
+                            Rect::from_wh(1.0, 1.0),
+                            &Paint::default(),
+                        );
+                    });
+                    read(&mut recorder);
+                }
+                recorder.close_layer();
+                read(&mut recorder)
+            })
+            .expect("a thread")
+            .join()
+            .expect("the reads return");
+        assert_eq!(pixel[3], 128, "the layer composites at its alpha");
+    }
+
+    /// Reads inside a layer with nothing drawn between them keep nothing
+    /// more of it: a read files what the layer recorded since the last one,
+    /// and an empty recording is not kept.
+    #[test]
+    fn reads_with_nothing_drawn_between_add_nothing_to_a_layer() {
+        let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
+        let crop = IRect::from_xywh(0, 0, 1, 1);
+        let read = |recorder: &mut PageRecorder| {
+            recorder
+                .pixels(crop, ExportOptions::default(), RenderingEngine::CPU)
+                .expect("a read of the page");
+        };
+        recorder.open_layer(LayerRec::default());
+        recorder.append(|canvas| {
+            canvas.draw_rect(Rect::from_wh(1.0, 1.0), &Paint::default());
+        });
+        // A layer inside, so that the recording around it is filed too.
+        recorder.open_layer(LayerRec::default());
+        read(&mut recorder);
+        let kept = |recorder: &PageRecorder| {
+            recorder
+                .open
+                .iter()
+                .map(|layer| layer.recorded.len())
+                .collect::<Vec<_>>()
+        };
+        let once = kept(&recorder);
+        for _ in 0..3 {
+            read(&mut recorder);
+        }
+        assert_eq!(kept(&recorder), once);
+        assert_eq!(once, [1, 0], "the outer layer's fill is kept once");
     }
 
     #[test]
