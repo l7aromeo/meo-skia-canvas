@@ -141,10 +141,19 @@ window be changed after it opens.** No signature moves and nothing is removed.
   no layers and dropped whatever was drawn inside one: a red square in
   `Context2D::save_layer` or `save_layer_with`, in a nested layer, or a
   `Paragraph` drawn in one, exported to `ImageFormat::Svg` as a page without
-  it. A page with a draw inside a layer is now rasterized into the SVG, as
-  one with a filtered draw inside a layer already was; a layer that holds
-  nothing leaves it vector. PDF drew all of these correctly and stays
-  vector.
+  it. A layer holding a draw is now rasterized into the SVG on its own and
+  the rest of the page stays vector; a filtered draw inside a layer, which
+  rasterized the whole page, now rasterizes only its layer as well, and a
+  layer that holds nothing leaves the page vector. PDF drew all of these
+  correctly and stays vector.
+
+- **A read inside a `saveLayer` no longer ends it.** `get_image_data`, or an
+  export, taken while a layer was open closed the layer at that point, and
+  whatever was drawn after it landed outside: a second red square in
+  `save_layer_with(0.5, None, None)` on white read opaque red beside a first
+  composited at half, and three nested layers at 0.5 composited every square
+  through one of them. The layer now stays open, and the read or export sees
+  it composited as it stands -- the pixels the page reads once it closes.
 
 - **A text decoration's colour is painted at the precision it names, as a
   fill's is.** The colour named in `Context2D::set_text_decoration_css` or

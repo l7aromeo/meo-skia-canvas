@@ -8,10 +8,11 @@ use parking_lot::RwLock;
 use rayon::prelude::*;
 use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
-    ColorSpace, ColorType, Document, IRect, ISize, Image as SkImage, ImageInfo,
-    M44, Matrix, Paint, Path, Picture, PictureRecorder, PixelGeometry, Pixmap,
-    Rect, Size, Surface, SurfaceProps, SurfacePropsFlags, XYZD50Hash,
-    canvas::SrcRectConstraint,
+    ColorSpace, ColorType, Document, IRect, ISize, Image as SkImage,
+    ImageFilter, ImageInfo, M44, Matrix, Paint, Path, Picture, PictureRecorder,
+    PixelGeometry, Pixmap, Rect, Size, Surface, SurfaceProps,
+    SurfacePropsFlags, XYZD50Hash,
+    canvas::{SaveLayerRec, SrcRectConstraint},
     image::{BitDepth, CachingHint},
     images, jpeg_encoder, pdf, png_encoder, surfaces,
     svg::{self, canvas::Flags},
@@ -21,6 +22,7 @@ use std::{
     collections::HashMap,
     fs,
     io::{BufWriter, Cursor, Write},
+    mem,
     path::Path as FilePath,
     sync::{
         Arc, OnceLock, Weak,
@@ -338,10 +340,6 @@ pub struct PageRecorder {
     /// vector backend. Empty for the ordinary ones. See
     /// [`PageRecorder::append_isolated`]. Shared as `layers` is.
     features: Arc<Vec<VectorFeatures>>,
-    /// What appeared inside an open `saveLayer`, where a draw cannot be
-    /// split into a layer of its own. A backend that refuses any of it
-    /// rasterizes the whole page.
-    page_features: VectorFeatures,
     bounds: Rect,
     matrix: Matrix,
     clip: Option<Path>,
@@ -385,12 +383,71 @@ pub struct PageRecorder {
     /// measurement in that function is about.
     replay_cost: usize,
     id: Arc<PageId>,
-    /// Save-stack depth that `restore()` rebuilds from. Normally 1, the
-    /// recording canvas's own base. Each open `saveLayer` raises it so the
-    /// layer frame survives a matrix or clip change; `layer_floors` holds the
-    /// values to fall back to as those layers close.
-    base_depth: usize,
-    layer_floors: Vec<usize>,
+    /// The `saveLayer`s open on the page, outermost first. While one is
+    /// open `current` records its contents, and the recording it was opened
+    /// inside waits in its [`OpenLayer`] -- see [`PageRecorder::open_layer`].
+    open: Vec<OpenLayer>,
+}
+
+/// What a `saveLayer` is opened with: the paint it composites through, the
+/// bounds it is confined to, and the filter it applies to what lies beneath.
+#[derive(Clone, Default)]
+pub struct LayerRec {
+    pub paint: Option<Paint>,
+    pub bounds: Option<Rect>,
+    pub backdrop: Option<ImageFilter>,
+}
+
+impl LayerRec {
+    /// Opens the layer on `canvas`, under whatever transform and clip it
+    /// carries.
+    fn open_on(&self, canvas: &SkCanvas) {
+        let mut rec = SaveLayerRec::default();
+        if let Some(paint) = &self.paint {
+            rec = rec.paint(paint);
+        }
+        if let Some(bounds) = &self.bounds {
+            rec = rec.bounds(bounds);
+        }
+        if let Some(backdrop) = &self.backdrop {
+            rec = rec.backdrop(backdrop);
+        }
+        canvas.save_layer(&rec);
+    }
+
+    /// Whether a layer holding nothing still changes the page: through a
+    /// filter over what lies beneath it, or a blend mode that replaces what
+    /// it covers with the nothing it holds.
+    fn marks_when_empty(&self) -> bool {
+        let blend = self.paint.as_ref().and_then(Paint::as_blend_mode);
+        self.backdrop.is_some()
+            || !matches!(blend, None | Some(BlendMode::SrcOver))
+    }
+}
+
+/// A `saveLayer` open on a [`PageRecorder`].
+///
+/// The layer's contents are recorded into a picture of their own, and the
+/// layer is drawn -- opened, the contents drawn into it, closed -- only once
+/// it closes. A recording that a read or an export has to finish part way
+/// therefore never holds a layer open: what it holds of an open layer is a
+/// copy of the contents so far, composited through a copy of the layer for
+/// that read alone, while the contents go on recording into the one layer
+/// they belong to.
+struct OpenLayer {
+    /// The recording the layer was opened inside -- the page's, or the
+    /// contents of the layer around it -- set aside while `current` records
+    /// this one's.
+    outer: PictureRecorder,
+    /// Whether `outer` has recorded anything since it was last filed.
+    outer_changed: bool,
+    rec: LayerRec,
+    /// The transform and clip the layer was opened under.
+    matrix: Matrix,
+    clip: Option<Path>,
+    /// What the layer's contents asked of a vector backend, which the layer
+    /// asks of it in turn.
+    features: VectorFeatures,
 }
 
 /// The depth a deferred picture image can carry for a canvas of `color_type`.
@@ -408,6 +465,24 @@ fn source_bit_depth(color_type: ColorType) -> BitDepth {
         }
         _ => BitDepth::U8,
     }
+}
+
+/// What `recorder` recorded, its recording finished.
+fn finish(mut recorder: PictureRecorder) -> Option<Picture> {
+    recorder.finish_recording_as_picture(None)
+}
+
+/// What `recorder` has recorded so far, with the recording begun again at
+/// `bounds` holding it, so that what is drawn next follows it. The frame is
+/// rebuilt by the next draw -- see `PageRecorder::settle`.
+fn snapshot(recorder: &mut PictureRecorder, bounds: Rect) -> Option<Picture> {
+    let picture = recorder.finish_recording_as_picture(None);
+    let canvas = recorder.begin_recording(bounds, true);
+    if let Some(picture) = &picture {
+        canvas.draw_picture(picture, None, None);
+    }
+    canvas.save();
+    picture
 }
 
 impl PageRecorder {
@@ -435,7 +510,6 @@ impl PageRecorder {
             current: rec,
             layers: Arc::default(),
             features: Arc::default(),
-            page_features: VectorFeatures::PLAIN,
             changed: false,
             isolated: None,
             state_dirty: false,
@@ -446,9 +520,8 @@ impl PageRecorder {
             bounds,
             id,
             surface: RecordingSurface::default(),
-            base_depth: 1,
             replay_cost: 0,
-            layer_floors: vec![],
+            open: Vec::new(),
         }
     }
 
@@ -461,13 +534,6 @@ impl PageRecorder {
         // it. Close it first so this draw stays a vector.
         if self.isolated.is_some() {
             self.flush();
-        }
-        // A draw inside an open layer is one the SVG backend drops with the
-        // layer, which has no layers; and a layer cannot be split out of the
-        // page any more than a draw inside one can -- see `append_isolated`
-        // -- so the page is what that backend rasterizes.
-        if !self.layer_floors.is_empty() {
-            self.page_features = self.page_features.with(VectorFeatures::LAYER);
         }
         self.settle();
         if let Some(canvas) = self.current.recording_canvas() {
@@ -518,15 +584,15 @@ impl PageRecorder {
         // what it was given.
         self.layers = Arc::default();
         self.features = Arc::default();
-        self.page_features = VectorFeatures::PLAIN;
         self.changed = false;
         self.isolated = None;
         self.state_dirty = false;
         self.matrix = Matrix::default();
         self.clip = None;
         self.surface = RecordingSurface::default();
-        self.base_depth = 1;
-        self.layer_floors.clear();
+        // The layers open on the erased content go with it, and so do the
+        // recordings they were opened inside.
+        self.open.clear();
     }
 
     pub fn update_bounds(&mut self, bounds: Rect) {
@@ -589,9 +655,8 @@ impl PageRecorder {
     }
 
     fn rebuild_frame(&mut self) {
-        let base_depth = self.base_depth;
         if let Some(canvas) = self.current.recording_canvas() {
-            canvas.restore_to_count(base_depth);
+            canvas.restore_to_count(1);
             canvas.save();
             if let Some(clip) = &self.clip {
                 canvas.clip_path(
@@ -604,68 +669,132 @@ impl PageRecorder {
         }
     }
 
-    /// Open a Skia layer, raising the floor `restore()` rebuilds from so the
-    /// layer frame is not torn down by the next transform or clip.
+    /// Opens a `saveLayer` with `rec`, under the transform and clip the page
+    /// holds now.
     ///
-    /// `f` performs the `save_layer` itself. It runs with the current clip and
-    /// matrix already applied, so the layer inherits them, and a fresh frame is
-    /// opened inside the layer afterwards for its contents.
-    ///
-    /// The page is marked [`VectorFeatures::LAYER`] by the first draw inside
-    /// the layer -- see [`Self::append`] -- not here, so that a layer that
-    /// holds nothing leaves the page vector.
-    pub fn open_layer<F>(&mut self, f: F)
-    where
-        F: FnOnce(&SkCanvas),
-    {
-        let base_depth = self.base_depth;
-        let clip = self.clip.clone();
-        let matrix = self.matrix;
-        let mut opened = None;
-
-        if let Some(canvas) = self.current.recording_canvas() {
-            canvas.restore_to_count(base_depth);
-            canvas.save();
-            if let Some(clip) = &clip {
-                canvas.clip_path(clip, ClipOp::Intersect, true);
-            }
-            canvas.set_matrix(&matrix.into());
-            f(canvas);
-            // The floor has to carry an identity matrix. A clip is stored in
-            // device space -- `Context2D::clip_path` transforms it by the CTM
-            // when it is set -- so both readers of this depth apply one before
-            // setting a matrix of their own: `rebuild_frame` below, and the
-            // inherited clip a few lines up when this layer is nested inside
-            // another. Leaving the layer's own CTM live here transformed that
-            // clip a second time, which put a clip meant to end at 100 device
-            // pixels at 200 under `scale(2)` and 450 under `scale(3)` -- the
-            // square of the scale, and invisible at `scale(1)`.
-            canvas.reset_matrix();
-            opened = Some(canvas.save_count());
-            self.changed = true;
+    /// Nothing of the layer is drawn yet. What is drawn until
+    /// [`Self::close_layer`] is recorded into a picture of the layer's own,
+    /// and the layer is drawn around it once it closes -- see [`OpenLayer`].
+    /// The page's recording so far is filed first where this is the
+    /// outermost layer, so that a read taken while it is open finds the page
+    /// beneath it already filed.
+    pub fn open_layer(&mut self, rec: LayerRec) {
+        if self.open.is_empty() {
+            self.flush();
         }
-
-        if let Some(depth) = opened {
-            self.layer_floors.push(base_depth);
-            self.base_depth = depth;
-            self.restore();
-        }
+        let mut contents = PictureRecorder::new();
+        contents.begin_recording(self.bounds, true).save();
+        let outer = mem::replace(&mut self.current, contents);
+        self.open.push(OpenLayer {
+            outer,
+            outer_changed: mem::replace(&mut self.changed, false),
+            rec,
+            matrix: self.matrix,
+            clip: self.clip.clone(),
+            features: VectorFeatures::PLAIN,
+        });
+        self.restore();
     }
 
-    /// Close the innermost layer opened by [`open_layer`], compositing it onto
-    /// what is behind it, and drop the floor back to where it was.
+    /// Closes the innermost layer [`Self::open_layer`] opened: draws it
+    /// around what it recorded, into the recording it was opened inside.
+    ///
+    /// The outermost layer is filed as a layer of the page of its own,
+    /// marked [`VectorFeatures::LAYER`] and whatever its contents asked of a
+    /// vector backend, so that an SVG export rasterizes the layer and leaves
+    /// the rest of the page vector. One holding nothing that would change
+    /// nothing is dropped.
     pub fn close_layer(&mut self) {
-        let Some(previous) = self.layer_floors.pop() else {
+        let Some(layer) = self.open.pop() else {
             return;
         };
-        let base_depth = self.base_depth;
-        if let Some(canvas) = self.current.recording_canvas() {
-            canvas.restore_to_count(base_depth);
-            canvas.restore(); // pops the layer frame, compositing it
-            self.changed = true;
+        let drew = self.changed;
+        let contents = mem::replace(&mut self.current, layer.outer);
+        let contents = finish(contents);
+        self.changed = layer.outer_changed;
+        if drew || layer.rec.marks_when_empty() {
+            let features = layer.features.with(VectorFeatures::LAYER);
+            // The layer is drawn under the frame it was opened in, whatever
+            // the state has moved to inside it.
+            let state = (
+                mem::replace(&mut self.matrix, layer.matrix),
+                mem::replace(&mut self.clip, layer.clip),
+            );
+            self.restore();
+            let rec = layer.rec;
+            let draw = |canvas: &SkCanvas| {
+                rec.open_on(canvas);
+                // The contents were recorded in page coordinates.
+                canvas.reset_matrix();
+                if let Some(contents) = &contents {
+                    canvas.draw_picture(contents, None, None);
+                }
+                canvas.restore();
+            };
+            match self.open.last_mut() {
+                Some(parent) => {
+                    parent.features = parent.features.with(features);
+                    self.append(draw);
+                }
+                None => self.append_isolated(features, draw),
+            }
+            (self.matrix, self.clip) = state;
         }
-        self.base_depth = previous;
         self.restore();
+    }
+
+    /// The layers open on the page drawn as they stand, each around what it
+    /// has recorded so far, as one picture over the filed page: what a read
+    /// taken while they are open sees. `None` where none is open.
+    ///
+    /// Each open recording is finished and begun again with what it held,
+    /// so the layers stay open for what is drawn next and are drawn once,
+    /// whole, when they close. What this replays is the open layers' own
+    /// contents and nothing of the page beneath them.
+    fn open_layers_drawn(&mut self) -> Option<Picture> {
+        if self.open.is_empty() {
+            return None;
+        }
+        let bounds = self.bounds;
+        // Innermost first: `current` holds the innermost layer's contents,
+        // and each layer's `outer` the contents of the layer around it.
+        let mut contents = Vec::with_capacity(self.open.len());
+        contents.push(snapshot(&mut self.current, bounds));
+        for layer in self.open.iter_mut().skip(1).rev() {
+            contents.push(snapshot(&mut layer.outer, bounds));
+        }
+        contents.reverse();
+        self.restore();
+
+        let mut drawn = PictureRecorder::new();
+        let canvas = drawn.begin_recording(bounds, true);
+        for (layer, contents) in self.open.iter().zip(&contents) {
+            canvas.save();
+            canvas.reset_matrix();
+            if let Some(clip) = &layer.clip {
+                canvas.clip_path(clip, ClipOp::Intersect, true);
+            }
+            canvas.set_matrix(&layer.matrix.into());
+            layer.rec.open_on(canvas);
+            canvas.reset_matrix();
+            if let Some(contents) = contents {
+                canvas.draw_picture(contents, None, None);
+            }
+        }
+        // Each layer is closed after the ones inside it, two saves apiece.
+        for _ in 0..self.open.len() {
+            canvas.restore();
+            canvas.restore();
+        }
+        drawn.finish_recording_as_picture(None)
+    }
+
+    /// What the open layers ask of a vector backend, as the page they are
+    /// drawn into by [`Self::open_layers_drawn`] has to.
+    fn open_layer_features(&self) -> VectorFeatures {
+        self.open
+            .iter()
+            .fold(VectorFeatures::LAYER, |all, layer| all.with(layer.features))
     }
 
     pub fn pixels(
@@ -732,6 +861,10 @@ impl PageRecorder {
             return Ok(dst_buffer);
         }
 
+        if !self.open.is_empty() {
+            return self.pixels_in_layer(crop, &opts, &engine, &dst_info);
+        }
+
         let page = self.page();
         let page_size = page.scaled_dimensions(opts.density);
 
@@ -765,6 +898,35 @@ impl PageRecorder {
                 dst_info.color_type()
             )),
         }
+    }
+
+    /// [`Self::pixels_as`] while a `saveLayer` is open: the filed page from
+    /// the surface, as any read takes it, with the open layers drawn over a
+    /// copy of it for this read alone -- see [`Self::open_layers_drawn`] and
+    /// [`RecordingSurface::read_overlaid`]. The surface and the caches are
+    /// only ever given the filed page, so nothing keeps a layer as it stood
+    /// part way. What the read replays beyond an ordinary one is the open
+    /// layers' contents, and a copy of the page on its own engine.
+    fn pixels_in_layer(
+        &mut self,
+        crop: IRect,
+        opts: &ExportOptions,
+        engine: &RenderingEngine,
+        dst_info: &ImageInfo,
+    ) -> Result<Vec<u8>, String> {
+        let filed = self.filed_page();
+        let drawn = self.open_layers_drawn();
+        self.surface.confirmed_update(&filed, opts, engine)?;
+        let mut pixels = vec![0; checked_byte_size(dst_info)?];
+        self.surface.read_overlaid(
+            drawn.as_ref(),
+            opts.density,
+            filed.id,
+            dst_info,
+            (crop.x(), crop.y()),
+            &mut pixels,
+        )?;
+        Ok(pixels)
     }
 
     /// Closes the open recording and files it as a layer.
@@ -813,16 +975,15 @@ impl PageRecorder {
     /// painted over finished vector output would double-composite anything
     /// translucent underneath it.
     ///
-    /// A draw inside an open `saveLayer` cannot be split out: closing the
-    /// recording would composite the half-finished layer early, and the paint
-    /// it was opened with is gone by then. Those mark the whole page instead,
-    /// and the export rasterizes all of it.
+    /// A draw inside an open `saveLayer` is recorded with the layer's
+    /// contents, and the layer asks the backend for its features when it is
+    /// filed -- see [`Self::close_layer`].
     pub fn append_isolated<F>(&mut self, features: VectorFeatures, f: F)
     where
         F: FnOnce(&SkCanvas),
     {
-        if !self.layer_floors.is_empty() {
-            self.page_features = self.page_features.with(features);
+        if let Some(layer) = self.open.last_mut() {
+            layer.features = layer.features.with(features);
             self.append(f);
             return;
         }
@@ -866,9 +1027,9 @@ impl PageRecorder {
     /// joins it rather than opening an op of its own: see
     /// [`BlurOp::extend`].
     ///
-    /// Inside an open `saveLayer` the draw cannot be split out, for the
-    /// reason [`Self::append_isolated`] gives; there it is played into the
-    /// recording at once, which makes its blur at the recording's scale.
+    /// Inside an open `saveLayer` the draw is played into the layer's
+    /// contents at once, which makes its blur at the recording's scale, and
+    /// the layer asks for its features -- see [`Self::append_isolated`].
     pub fn append_blur(
         &mut self,
         draw: BlurDraw,
@@ -876,10 +1037,11 @@ impl PageRecorder {
         clip: Option<&Path>,
         features: VectorFeatures,
     ) {
-        if !self.layer_floors.is_empty() {
-            self.page_features = self.page_features.with(features);
+        if let Some(layer) = self.open.last_mut() {
+            layer.features = layer.features.with(features);
             let op = BlurOp::start(draw, matrix, clip);
-            // The op carries its own frame; the layer's floor is identity.
+            // The op carries its own frame; the contents are recorded under
+            // the identity.
             self.append(|canvas| {
                 canvas.save();
                 canvas.reset_matrix();
@@ -935,16 +1097,47 @@ impl PageRecorder {
     /// the canvas takes one. The next draw copies the lists only if a page
     /// taken before is still held then, as a window's renderer holds the
     /// frame it is drawing; a read that has finished holds nothing.
+    ///
+    /// While a `saveLayer` is open the page also holds the open layers as
+    /// they stand -- see [`Self::open_layers_drawn`] -- under an identity of
+    /// its own that nothing keeps, so that no cache files a layer that is
+    /// still being drawn as though it were finished. It starts from the
+    /// filed page's cached bitmap where there is one, so that compositing it
+    /// replays the open layers and nothing filed -- see [`Page::cache_key`].
     pub fn page(&mut self) -> Page {
-        self.settle();
-        self.flush();
+        let filed = self.filed_page();
+        let Some(drawn) = self.open_layers_drawn() else {
+            return filed;
+        };
+        let mut layers = Vec::clone(&filed.layers);
+        layers.push(Layer::Picture(drawn));
+        let mut features = Vec::clone(&filed.features);
+        features.push(self.open_layer_features());
+        let id = Self::mint_id();
+        Page {
+            layers: Arc::new(layers),
+            features: Arc::new(features),
+            bounds: self.bounds,
+            id: id.0,
+            starts_from: Some((filed.id, filed.depth())),
+            owner: Arc::downgrade(&id),
+        }
+    }
 
+    /// The page as filed: everything but the layers still open. The
+    /// recording in progress is filed first where no layer is open; while
+    /// one is, everything before the outermost was filed when it opened.
+    fn filed_page(&mut self) -> Page {
+        if self.open.is_empty() {
+            self.settle();
+            self.flush();
+        }
         Page {
             layers: Arc::clone(&self.layers),
             features: Arc::clone(&self.features),
-            page_features: self.page_features,
             bounds: self.bounds,
             id: self.id.0,
+            starts_from: None,
             owner: Arc::downgrade(&self.id),
         }
     }
@@ -955,15 +1148,16 @@ impl PageRecorder {
         engine: &RenderingEngine,
     ) -> Page {
         // update the PageCache with the surface bitmap (if it's valid for this
-        // export)
-        let page = self.page();
+        // export). The surface only ever holds the filed page, which is what a
+        // page taken inside a layer starts from.
+        let filed = self.filed_page();
         if opts.is_raster()
             && let Some(image) =
-                self.surface.snapshot_if_valid(&page, opts, engine)
+                self.surface.snapshot_if_valid(&filed, opts, engine)
         {
-            PageCache::set(&page.owner, image, opts, self.surface.depth);
+            PageCache::set(&filed.owner, image, opts, self.surface.depth);
         }
-        page
+        self.page()
     }
 
     pub fn image(
@@ -2016,6 +2210,59 @@ impl RecordingSurface {
         })
     }
 
+    /// Reads the page as composited, with `over` drawn on top of it at
+    /// `density`, leaving what the surface holds untouched. `page` is the
+    /// identity of the page the surface holds.
+    ///
+    /// `over` is drawn on a surface made like this one, so on the GPU it is
+    /// composited on the GPU, as it would be once filed: composited on the
+    /// CPU instead, a layer at alpha 0.5 read one level away from the same
+    /// layer read after it closed. Retried as [`Self::confirmed_update`] is,
+    /// since the GPU can discard these draws as it can those.
+    pub fn read_overlaid(
+        &mut self,
+        over: Option<&Picture>,
+        density: f32,
+        page: usize,
+        dst_info: &ImageInfo,
+        origin: (i32, i32),
+        pixels: &mut [u8],
+    ) -> Result<(), String> {
+        let unreadable = || "Could not read the page beneath an open layer";
+        let surface = self.surface.as_mut().ok_or_else(unreadable)?;
+        let mut copy = Paint::default();
+        copy.set_blend_mode(BlendMode::Src);
+        for _ in 0..DRAW_ATTEMPTS {
+            let mut composed = surface
+                .new_surface(&surface.image_info())
+                .ok_or_else(unreadable)?;
+            let canvas = composed.canvas();
+            canvas.draw_image(surface.image_snapshot(), (0, 0), Some(&copy));
+            if let Some(over) = over {
+                canvas.scale((density, density));
+                over.playback(canvas);
+            }
+            if !draws_ran(&mut composed, page) {
+                continue;
+            }
+            let row_bytes = dst_info.min_row_bytes();
+            return match read_converted_on_cpu(
+                &mut composed,
+                dst_info,
+                pixels,
+                row_bytes,
+                origin,
+            ) {
+                true => Ok(()),
+                false => Err(format!(
+                    "Could not get image data (format: {:?})",
+                    dst_info.color_type()
+                )),
+            };
+        }
+        Err(discarded("drawing the open layers for a read"))
+    }
+
     pub fn copy_pixels(
         &mut self,
         dst_info: &ImageInfo,
@@ -2097,6 +2344,11 @@ impl RecordingSurface {
 #[derive(Debug, Clone)]
 pub struct Page {
     pub id: usize,
+    /// For a page taken while a `saveLayer` is open, the filed page it holds
+    /// the open layers over, as its id and depth: the cached bitmap it may
+    /// start from, and how deep that bitmap may be. `None` for any other
+    /// page, which starts from its own. See [`Page::cache_key`].
+    pub(crate) starts_from: Option<(usize, usize)>,
     /// A weak reference to the generation this page was taken from, held so
     /// a store can tell whether that generation still exists. See
     /// [`PageId`].
@@ -2108,9 +2360,6 @@ pub struct Page {
     pub layers: Arc<Vec<Layer>>,
     /// Index-aligned with `layers`; see [`PageRecorder::append_isolated`].
     pub(crate) features: Arc<Vec<VectorFeatures>>,
-    /// What a draw inside an open `saveLayer` asked for, which cannot be
-    /// isolated and so speaks for the whole page.
-    pub(crate) page_features: VectorFeatures,
 }
 
 impl PartialEq for Page {
@@ -2123,11 +2372,11 @@ impl Default for Page {
     fn default() -> Self {
         Self {
             id: 0,
+            starts_from: None,
             owner: Weak::new(),
             bounds: skia_safe::Rect::new_empty(),
             layers: Arc::default(),
             features: Arc::default(),
-            page_features: VectorFeatures::PLAIN,
         }
     }
 }
@@ -2184,11 +2433,22 @@ impl Page {
     pub(crate) fn vector_features(&self) -> VectorFeatures {
         self.features
             .iter()
-            .fold(self.page_features, |all, layer| all.with(*layer))
+            .fold(VectorFeatures::PLAIN, |all, layer| all.with(*layer))
     }
 
     pub fn depth(&self) -> usize {
         self.layers.len()
+    }
+
+    /// The page whose cached bitmap this one may start from, and the
+    /// deepest that bitmap may be.
+    ///
+    /// Capped at the filed depth for a page taken inside a layer: the layer
+    /// closes into the filed page at the depth this one holds it at, so a
+    /// bitmap cached as that closes is the finished layer, not the one this
+    /// page holds part way.
+    fn cache_key(&self) -> (usize, usize) {
+        self.starts_from.unwrap_or((self.id, self.depth()))
     }
 
     pub fn scaled_dimensions(&self, density: f32) -> ISize {
@@ -2224,13 +2484,6 @@ impl Page {
     ) -> Result<(), String> {
         if let Some(matte) = matte {
             matte.paint(canvas);
-        }
-
-        // Something was drawn inside an open `saveLayer`, where it could not
-        // be split into a layer of its own, and this backend refuses it. The
-        // whole page goes in as pixels.
-        if self.page_features.refused_by(backend) {
-            return self.embed_raster(canvas, &self.layers, density);
         }
 
         // Consecutive refused layers go in as one image rather than one
@@ -2451,7 +2704,8 @@ impl Page {
         let multisampled = matches!(engine, RenderingEngine::GPU)
             && !matches!(options.msaa, Some(0 | 1));
         let (cache_image, cache_depth) = {
-            let (image, depth) = PageCache::get(self.id, options, self.depth());
+            let (id, depth) = self.cache_key();
+            let (image, depth) = PageCache::get(id, options, depth);
             match multisampled && depth != self.depth() {
                 true => (None, 0),
                 false => (image, depth),
@@ -5377,6 +5631,62 @@ mod tests {
         assert!(
             PageCache::shared().get(&page.id).is_none(),
             "an export that outlived its generation files nothing"
+        );
+    }
+
+    #[test]
+    fn a_read_inside_a_layer_commits_nothing() {
+        let _shared = SHARED_CACHE.lock();
+        // What the surface and the page cache hold is the filed page and
+        // nothing of a layer still open: a read or an export inside one
+        // composites the layer over a copy, and neither moves the depth
+        // either has committed to. Closing the layer is what files it.
+        // Wider than one tile, so that a read is served by the whole page.
+        let mut recorder = PageRecorder::new(Rect::from_wh(600.0, 300.0));
+        let square = |canvas: &SkCanvas| {
+            canvas.draw_rect(Rect::from_wh(4.0, 4.0), &Paint::default());
+        };
+        recorder.append(square);
+        let opts = ExportOptions::default();
+        let crop = IRect::from_xywh(0, 0, 600, 300);
+        let read = |recorder: &mut PageRecorder| {
+            recorder
+                .pixels(crop, opts.clone(), RenderingEngine::CPU)
+                .expect("a read of the page");
+        };
+        // The depth the page cache holds for the page, after an export has
+        // offered it what the surface holds.
+        let cached = |recorder: &mut PageRecorder| {
+            recorder.page_for_export(&opts, &RenderingEngine::CPU);
+            PageCache::shared()
+                .get(&recorder.id.0)
+                .map(|entry| entry.depth)
+        };
+        read(&mut recorder);
+        let committed = (recorder.surface.depth, cached(&mut recorder));
+        assert_eq!(committed, (1, Some(1)), "the filed page is committed");
+
+        let mut half = Paint::default();
+        half.set_alpha_f(0.5);
+        recorder.open_layer(LayerRec {
+            paint: Some(half),
+            ..LayerRec::default()
+        });
+        for _ in 0..2 {
+            recorder.append(square);
+            read(&mut recorder);
+            assert_eq!(
+                (recorder.surface.depth, cached(&mut recorder)),
+                committed,
+                "a read and an export inside the layer"
+            );
+        }
+
+        recorder.close_layer();
+        read(&mut recorder);
+        assert!(
+            recorder.surface.depth > committed.0,
+            "the closed layer is filed and read"
         );
     }
 

@@ -52,7 +52,7 @@ use crate::{
 };
 use faint::Faint;
 use layer::BlurDraw;
-use page::{ExportOptions, Page, PageRecorder};
+use page::{ExportOptions, LayerRec, Page, PageRecorder};
 use typesetting::{TextSettings, Typesetting, Typography};
 
 const BLACK: Color = Color::BLACK;
@@ -830,22 +830,13 @@ impl Context2D {
     ) {
         let paint =
             paint.map(|paint| self.faint().drawable(&paint).into_owned());
-        // open_layer, not with_canvas: the layer frame has to be recorded on
-        // the recorder's save stack, or the next transform or clip
-        // tears it down.
+        // open_layer, not with_canvas: the recorder draws the layer around
+        // its contents once it closes -- see `PageRecorder::open_layer`.
         self.with_recorder(|mut recorder| {
-            recorder.open_layer(|canvas| {
-                let mut rec = SaveLayerRec::default();
-                if let Some(p) = paint.as_ref() {
-                    rec = rec.paint(p);
-                }
-                if let Some(b) = bounds.as_ref() {
-                    rec = rec.bounds(b);
-                }
-                if let Some(bd) = backdrop.as_ref() {
-                    rec = rec.backdrop(bd);
-                }
-                canvas.save_layer(&rec);
+            recorder.open_layer(LayerRec {
+                paint,
+                bounds,
+                backdrop,
             });
         });
         let new_state = self.state.clone();

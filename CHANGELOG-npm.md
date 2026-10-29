@@ -400,10 +400,20 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 - **An SVG export keeps what a `saveLayer` holds.** Skia's SVG backend has
   no layers and dropped whatever was drawn inside one: a red square in
   `ctx.saveLayer()`, in a translucent or nested layer, or a paragraph drawn
-  in one, exported as a page without it. A page with a draw inside a layer
-  is now rasterized into the SVG, as one with a filtered draw inside a
-  layer already was; a layer that holds nothing leaves it vector. PDF drew
-  all of these correctly and stays vector.
+  in one, exported as a page without it. A layer holding a draw is now
+  rasterized into the SVG on its own and the rest of the page stays
+  vector; a filtered draw inside a layer, which rasterized the whole page,
+  now rasterizes only its layer as well, and a layer that holds nothing
+  leaves the page vector. PDF drew all of these correctly and stays
+  vector.
+
+- **A read inside a `saveLayer` no longer ends it.** `getImageData()`,
+  `toBuffer()` or any export taken while a layer was open closed the layer
+  at that point, and whatever was drawn after it landed outside: a second
+  red square in `ctx.saveLayer(0.5)` on white read opaque red beside a first
+  composited at half, and three nested layers at 0.5 composited every square
+  through one of them. The layer now stays open, and the read or export sees
+  it composited as it stands -- the pixels the page reads once it closes.
 
 - **A text decoration's colour is painted at the precision it names, as a
   fill's is.** The colour in `ctx.textDecoration` was rounded to eight bits
