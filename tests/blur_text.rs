@@ -7,6 +7,8 @@
 //! overlap they combine as `1 - (1 - a)(1 - b)` rather than adding -- on
 //! the CPU engine the cases below lost up to 35% of their ink that way.
 
+// Each test file uses part of it.
+#[allow(dead_code)]
 mod exact;
 
 use exact::gaussian;

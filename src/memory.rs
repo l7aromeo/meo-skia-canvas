@@ -80,7 +80,9 @@ use std::{
     time::Duration,
 };
 
-use crate::context::page::release_cached_pages;
+use crate::context::{
+    blur_mask::release_cached_masks, page::release_cached_pages,
+};
 #[cfg(feature = "node-addon")]
 use crate::node::idle::release_font_caches;
 
@@ -200,6 +202,7 @@ fn reclaim() {
     // Bitmaps first: they are live allocations until they are dropped, and a
     // trim cannot hand back a page something is still using.
     release_cached_pages();
+    release_cached_masks();
     trim();
 }
 
