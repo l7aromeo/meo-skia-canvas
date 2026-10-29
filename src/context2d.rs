@@ -2127,7 +2127,9 @@ impl Context2D {
         }
     }
 
-    /// Sets extra space added between words, in pixels.
+    /// Sets extra space added after every word-separator character, in
+    /// pixels: a space or a no-break space, as CSS Text 3 section 8.2 names
+    /// them, leading, doubled and trailing ones included.
     ///
     /// A `NaN` is ignored and the previous spacing stands, as for
     /// [`Context2D::set_letter_spacing`].
@@ -3870,10 +3872,11 @@ impl Context2D {
         Ok(())
     }
 
-    /// Sets the spacing added at word boundaries from a CSS length.
+    /// Sets the spacing added after every word-separator character from a
+    /// CSS length -- see [`set_word_spacing`](Self::set_word_spacing).
     ///
     /// As [`set_letter_spacing_css`](Self::set_letter_spacing_css), applied
-    /// between words rather than between characters.
+    /// at word separators rather than after every character.
     ///
     /// # Errors
     ///

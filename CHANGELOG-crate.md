@@ -153,6 +153,19 @@ window be changed after it opens.** No signature moves and nothing is removed.
   line breaker compares the line's width floored to hundredths;
   docs/browser-differences.md has it.
 
+- **`set_word_spacing` is added after every word separator.** It was added
+  once per run of spaces and only between words, as SkParagraph adds it, so
+  a leading or trailing space and the second of a doubled one went
+  unspaced, a no-break space was never spaced, and U+3000, which is not a
+  word separator, was. CSS Text 3 section 8.2 spaces every word-separator
+  character, and now so does a `Context2D`: at -100 in 40px Oswald,
+  `measure_text("a  b")` is -146.76 where it was -46.76, as Chrome 156
+  measures it, and `"a "` -73.80 where it was 26.20. The glyphs move with
+  the width. A `TextEngine` paragraph's `TextStyle::word_spacing` keeps
+  SkParagraph's rule. Chrome does not space a leading space, and how it
+  spaces one depends on what it measured before;
+  docs/browser-differences.md has both.
+
 ### Fixed
 
 - **A colour lands exactly on an sRGB float canvas.** On a canvas made with
@@ -928,6 +941,11 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   hundredth SkParagraph's line breaker floors widths to. The values this
   moves are under Breaking: "Text widths, line metrics, rects and
   hit-testing are no longer rounded to hundredths".
+
+- **Word spacing reaches every space.** A leading or trailing space, the
+  second of a doubled one and a no-break space took none of
+  `set_word_spacing`; what the width does now is under Breaking:
+  "`set_word_spacing` is added after every word separator".
 
 ### Added
 
