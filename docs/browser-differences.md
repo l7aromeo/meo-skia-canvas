@@ -900,24 +900,49 @@ Chrome was measured at density 1 under the cut at x 82 only. Here the draw is
 recorded as a `CutOp` and played back on a CPU raster under the clip as a clip
 shader -- a picture of the clip filled, rasterized at the density it is
 played at -- so the path is drawn unclipped and the clip multiplies its
-coverage. More than two pixels inside the clip the pixels are the unclipped
+coverage. More than two pixels inside the clip the coverage is the unclipped
 draw's, byte for byte, at every density, for fills, strokes, dashed strokes
-and marker strokes alike, where Skia moved up to 273 of them by up to 92
-levels; at the clip's edge the error left is the clip's own rasterization and
+and marker strokes alike, in a layer or not, where Skia moved up to 273 of
+them by up to 92 levels -- for a draw the page's edge does not also cut, as
+below; at the clip's edge the error left is the clip's own rasterization and
 the product of the two coverages where both edges cross a pixel.
 `tests/clip_cut.rs` holds both. The GPU engine is unchanged: its multisampled
 coverage is not moved by the clip, and the clip shader would move 50 bytes of
 a circle-clipped draw there. A PDF or SVG export is unchanged too, clipped by
 the clip's path as before.
 
+The blend is not always the unclipped draw's bytes. A draw under a clip shader
+is blended by another route through Skia's raster pipeline, so a coloured or
+translucent fill, or one over earlier content, differs from the unclipped draw
+by a level in a premultiplied channel along its edges, and a translucent fill
+over translucent content inside them as well: 2009 pixels of a triangle at
+0.33 black over `rgba(200 40 90 / 0.6)`, by up to 3 levels read back
+unpremultiplied. That route is the nearer of the two to exact source-over, a
+mean of 0.294 levels a channel against 0.344 over the triangle's interior.
+
 A draw goes this way only when the clip cuts it: one wholly inside or outside
-the clip, an axis-aligned rectangle filled, text, an image, a texture fill, a
-draw with a shadow, a filter or a blend that reaches past it, and anything
-drawn inside an open `saveLayer` are clipped as Skia clips them. A draw inside
-a layer is recorded into the layer's own picture, where the clip is already
-applied and cannot be lifted. A canvas drawn into another, or used as a
-pattern, is replayed as a recording, where there are no pixels to choose the
-clip shader for, and is clipped as Skia clips it.
+the clip, an axis-aligned rectangle filled, text, an image, a texture fill,
+and a draw with a shadow, a filter or a blend that reaches past it are clipped
+as Skia clips them. One inside a `saveLayer` goes this way among the layer's
+entries. The layer is made to hold what the draw paints before the clip, and on
+a CPU raster is opened under its own clip as a clip shader too, since a layer
+opened under a clip path is no larger than the clip's bounds: Skia's
+anti-aliasing builds edges against the layer's bounds as against a clip, and
+either way a triangle cut at x 82 moved 57 pixels inside the clip. A canvas
+drawn into another, or used as a pattern, is replayed into a recording, where
+there are no pixels to choose the clip shader for; recording the shader instead
+would carry it into every place that recording is played, the GPU engine and
+PDF and SVG exports among them, where the path is what clips correctly. So it
+is clipped as Skia clips it.
+
+A draw the page's edge also cuts is not exact here either. The route plays the
+draw back on a raster of the page, whose edge cuts it as the next entry
+describes: a triangle from (-30, 80) through (60, 15.25) to (140.5, 95) under a
+clip at x 82 moved 158, 315 and 266 pixels inside the clip at densities 1, 2
+and 3, as far as 79 pixels from the edge.
+`the_page_edge_moves_pixels_far_inside_the_page` in `tests/clip_cut.rs` holds
+it with the unclipped draw beside it, and goes red when Skia draws a path the
+page cuts as it draws one the page contains.
 
 **A fill or stroke the page's edge cuts is drawn differently far inside the
 page on the CPU engine.** The page's edge cuts a path as a clip does: Skia's

@@ -1377,6 +1377,15 @@ impl Context2D {
         if !plain {
             return None;
         }
+        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+        // Re-check: cargo test the_page_edge_moves_pixels_far_inside_the_page
+        // The page's own edge cuts a draw as a clip does -- Skia's analytic
+        // anti-aliasing builds the path's edges against the device bounds
+        // where they do not contain it -- and the op plays the draw back on
+        // a raster of the page, so a draw the page also cuts moves inside
+        // the clip as it does with no clip. Neither cutting the path to the
+        // page first nor a raster wider than the page is exact; the
+        // measurements are in docs/browser-differences.md.
         let cuts = |drawn: Rect| {
             !clip.conservatively_contains_rect(drawn)
                 && clip.bounds().intersects(drawn)

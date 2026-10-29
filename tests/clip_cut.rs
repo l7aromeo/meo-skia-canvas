@@ -1,6 +1,10 @@
-//! A fill or stroke its clip cuts, on the CPU engine: drawn as the unclipped
-//! draw is wherever the clip lets it through, and as near the exact coverage
-//! of the shape within the clip as the unclipped draw is to the shape.
+//! A fill or stroke its clip cuts, on the CPU engine: its coverage the
+//! unclipped draw's wherever the clip lets it through, and as near the exact
+//! coverage of the shape within the clip as the unclipped draw is to the
+//! shape -- where the page's edge does not also cut it, which moves pixels as
+//! a clip does. The draws are opaque black on transparent, so that what is
+//! compared is coverage alone: a colour, or content beneath, is blended by
+//! another route under the clip and can land a level away.
 //!
 //! Skia's analytic anti-aliasing builds a path's edges against the clip
 //! where the clip does not contain the path, and the edges it adds at the
@@ -150,11 +154,24 @@ fn alpha(
     clip: Option<Clip>,
     density: u32,
 ) -> Vec<u8> {
-    let mut canvas = Canvas::new(W, H);
+    framed(draw, clip, density, 0.0)
+}
+
+/// As `alpha`, on a canvas `margin` units larger on every side and
+/// translated by it, read back over the `W` by `H` page alone: the draw
+/// as it is where the page's edge does not cut it.
+fn framed(
+    draw: fn(&mut Context2D),
+    clip: Option<Clip>,
+    density: u32,
+    margin: f32,
+) -> Vec<u8> {
+    let mut canvas = Canvas::new(W + 2.0 * margin, H + 2.0 * margin);
     canvas.set_gpu(false);
     assert_eq!(canvas.engine_kind(), EngineKind::Cpu, "a CPU canvas");
     {
         let ctx = canvas.context();
+        ctx.translate(margin, margin);
         if let Some(clip) = clip {
             clip.apply(ctx);
         }
@@ -166,8 +183,20 @@ fn alpha(
         density,
         ..ImageDataExport::default()
     };
+    // The whole canvas is read and cropped here: a read of the page's
+    // rectangle alone could rasterize only that rectangle, and cut the draw
+    // at its edge again.
     let data = canvas.to_image_data(None, &export).expect("pixels");
-    data.pixels().chunks(4).map(|p| p[3]).collect()
+    let stride = data.width() as usize;
+    let (inset, w, h) = (
+        (margin * density as f32) as usize,
+        (W * density as f32) as usize,
+        (H * density as f32) as usize,
+    );
+    (0..h)
+        .flat_map(|y| (0..w).map(move |x| (y + inset) * stride + x + inset))
+        .map(|i| data.pixels()[i * 4 + 3])
+        .collect()
 }
 
 /// Sutherland-Hodgman of `subject` against the convex `window`.
@@ -280,7 +309,8 @@ fn deep_inside(clip: Clip, density: u32, i: usize) -> bool {
 }
 
 /// Inside every clip, more than two pixels from its edge, a cut fill or
-/// stroke is the unclipped one byte for byte, at densities 1, 2 and 3: the
+/// stroke covers what the unclipped one does byte for byte, in a layer or
+/// not, at densities 1, 2 and 3: the
 /// clip decides only where the draw is let through, not how its edges are
 /// laid down. Under Skia's clipped rasterization the cut moved pixels far
 /// from it.
@@ -344,6 +374,57 @@ fn a_cut_triangle_meets_its_exact_coverage_at_every_density() {
             assert!(
                 mean <= limit,
                 "{label} x{density}: mean {mean:.3} levels, over {limit}"
+            );
+        }
+    }
+}
+
+/// Room past the page on every side of the larger canvas the page-edge pin
+/// draws on: more than the 30 units `past_the_edge` reaches past the page.
+const MARGIN: f32 = 60.0;
+
+/// How far into the page, in canvas units, a moved pixel shows the page's
+/// edge reaching past its own pixels.
+const FAR: usize = 20;
+
+/// A triangle the page's left edge cuts.
+fn past_the_edge(ctx: &mut Context2D) {
+    ctx.begin_path();
+    ctx.move_to(-30.0, 80.0);
+    ctx.line_to(60.0, 15.25);
+    ctx.line_to(140.5, 95.0);
+    ctx.close_path();
+    ctx.fill(FillRule::NonZero);
+}
+
+/// The page's own edge cuts a path as a clip does, and nothing here routes
+/// it: the triangle crossing the left edge differs, far inside the page,
+/// from the same triangle drawn on a larger canvas, and so does the cut
+/// draw under a clip at x 82, inside the clip, where the cut alone leaves
+/// the unclipped draw's pixels. Skia rasterizes against the device bounds
+/// as against any clip that does not contain the path.
+///
+/// This holds a defect and goes red when Skia draws a path the page cuts as
+/// it draws one the page contains.
+#[test]
+fn the_page_edge_moves_pixels_far_inside_the_page() {
+    let clip = Clip::Rect(-100.0, -100.0, 82.0, 300.0);
+    for density in [1u32, 2, 3] {
+        let w = (W * density as f32) as usize;
+        for (label, clip) in [("no clip", None), ("clip at x 82", Some(clip))] {
+            let page = alpha(past_the_edge, clip, density);
+            let whole = framed(past_the_edge, clip, density, MARGIN);
+            let far = (0..page.len())
+                .filter(|&i| {
+                    clip.is_none_or(|c| deep_inside(c, density, i))
+                        && page[i] != whole[i]
+                })
+                .map(|i| i % w)
+                .max();
+            let far = far.unwrap_or(0) / density as usize;
+            assert!(
+                far > FAR,
+                "{label} x{density}: the page edge moved nothing past {far} px",
             );
         }
     }
