@@ -761,7 +761,17 @@ false` now takes effect, and its default is on, at Slight, as Chrome draws
   reducing its chroma in Oklch at its own lightness and hue. A colour
   inside sRGB gives the bytes it gave. `ColorFilter.MakeLighting`'s
   multiply and add are per-channel coefficients rather than colours, and
-  are still clamped channel by channel.
+  are not mapped -- see the next entry.
+
+- **`ColorFilter.MakeLighting` applies a coefficient past one or below
+  zero as it is.** Its multiply and add reached Skia as eight-bit
+  colours, so each sRGB component was clamped to 0..1 and quantized to a
+  255th: `"color(srgb 2 1 0.5)"` left red as it was, and an add of
+  `"color(srgb 0 -0.25 0)"` left green where it should have lowered it.
+  Each component is now the scale or offset it names, in floating point,
+  with the result clamped to the displayable range as before, and a
+  multiply and add an eight-bit colour can hold draw byte for byte as
+  they did.
 
 - **`letterSpacing` and `wordSpacing` take `"0"`.** CSS Values 4 lets a
   zero length be written without its unit, and `ctx.letterSpacing = "0"`
