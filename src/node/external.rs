@@ -13,13 +13,15 @@
 //! per isolate -- a worker thread's canvases count against that worker.
 
 use std::sync::OnceLock;
+#[cfg(debug_assertions)]
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use neon::{
     context::Context,
     sys::bindings::{Env, Status},
 };
 #[cfg(debug_assertions)]
-use neon::{context::FunctionContext, result::JsResult, types::JsValue};
+use neon::{context::FunctionContext, result::JsResult, types::JsNumber};
 
 /// `napi_adjust_external_memory`, as `node_api.h` declares it: the engine, the
 /// change in bytes, and where to write the new total.
@@ -29,6 +31,11 @@ type AdjustExternalMemory = unsafe extern "C" fn(Env, i64, *mut i64) -> Status;
 /// does not export it -- a runtime with partial Node-API coverage -- in which
 /// case nothing is reported.
 static ADJUST: OnceLock<Option<AdjustExternalMemory>> = OnceLock::new();
+
+/// Test-only: the bytes this addon has reported and the engine accepted,
+/// summed over every object on every thread. See [`reported_memory`].
+#[cfg(debug_assertions)]
+static REPORTED: AtomicI64 = AtomicI64::new(0);
 
 // UPSTREAM: neon 1.1.2 -- unfiled -- worked around
 // Re-check: grep -rn adjust_external_memory in an upgraded neon's src
@@ -94,6 +101,8 @@ impl External {
         let status = unsafe { adjust(cx.to_raw(), change, &mut total) };
         if status == Status::Ok {
             self.reported = bytes;
+            #[cfg(debug_assertions)]
+            REPORTED.fetch_add(change, Ordering::Relaxed);
         }
     }
 
@@ -103,26 +112,19 @@ impl External {
     }
 }
 
-/// Test-only: the engine's total of memory reported through Node-API, read
-/// by adjusting it by nothing, or `null` where the host has no such function.
+/// Test-only: the bytes this addon's objects hold as the engine was told of
+/// them, summed over every thread -- what the engine accepted and nothing
+/// else.
 ///
-/// Read here rather than from `process.memoryUsage().external`, which on
-/// Node 26 counts the engine's own external allocations -- array buffers --
-/// and not what an addon reports: a page reported here moved this total by
-/// its 3.2 MB and that figure by nothing.
+/// Read here rather than from the total `napi_adjust_external_memory`
+/// returns, which also counts every live array buffer in the process: a
+/// 146,209-byte `Buffer` held across two reads moved it by exactly that on
+/// Node 22, 24 and 26, so whatever else the process holds lands in a figure
+/// read from it. Nor from `process.memoryUsage().external`, which on Node 26
+/// did not move when a page was reported.
 ///
 /// Exported by debug builds only, as `__cachedParagraphs` is.
 #[cfg(debug_assertions)]
-pub fn external_memory(mut cx: FunctionContext) -> JsResult<JsValue> {
-    let Some(adjust) = adjust() else {
-        return Ok(cx.null().upcast());
-    };
-    let mut total = 0;
-    // SAFETY: as in `External::hold`: a live context, on its own thread, and
-    // a valid place for the result. A change of zero moves nothing.
-    let status = unsafe { adjust(cx.to_raw(), 0, &mut total) };
-    match status == Status::Ok {
-        true => Ok(cx.number(total as f64).upcast()),
-        false => Ok(cx.null().upcast()),
-    }
+pub fn reported_memory(mut cx: FunctionContext) -> JsResult<JsNumber> {
+    Ok(cx.number(REPORTED.load(Ordering::Relaxed) as f64))
 }
