@@ -14,6 +14,8 @@
 
 use std::{
     borrow::Cow,
+    f32::consts::SQRT_2,
+    iter,
     sync::{Arc, OnceLock},
 };
 
@@ -26,6 +28,7 @@ use skia_safe::{
 
 use crate::{
     context::{
+        chain::{self, Depth, Step},
         coverage_of,
         faint::{Faint, composited},
     },
@@ -56,7 +59,7 @@ impl Layer {
     pub fn playback(&self, canvas: &SkCanvas, target: Target) {
         match self {
             Layer::Picture(picture) => picture.playback(canvas),
-            Layer::Blur(op) => op.playback(canvas),
+            Layer::Blur(op) => op.playback(canvas, target),
             Layer::Group(group) => group.playback(canvas, target),
         }
     }
@@ -329,7 +332,8 @@ impl Geometry {
     }
 }
 
-/// The blur a playback made: on the coverage or on the result.
+/// The blur a playback made: on the coverage, or on the result -- with
+/// Skia's filter for a document, which [`chain`] replaces on pixels.
 #[derive(Clone, Debug)]
 enum Made {
     Coverage(Option<MaskFilter>),
@@ -374,10 +378,11 @@ impl BlurOp {
         }
     }
 
-    /// Draws the blurred geometry onto `canvas`, with the coverage blur the
-    /// recording chose wherever it can draw the sigma this comes to in
-    /// `canvas`'s device pixels, and the image blur where it cannot.
-    pub fn playback(&self, canvas: &SkCanvas) {
+    /// Draws the blurred geometry onto `canvas` for `target`, with the
+    /// coverage blur the recording chose wherever it can draw the sigma this
+    /// comes to in `canvas`'s device pixels, and the exact blur of the
+    /// result where it cannot.
+    pub fn playback(&self, canvas: &SkCanvas, target: Target) {
         let Some(path) = self.geometry.first().path() else {
             return;
         };
@@ -393,7 +398,6 @@ impl BlurOp {
             .map_radius(1.0)
             .filter(|s| s.is_normal() && *s > 0.0)
             .unwrap_or(1.0);
-        canvas.concat(&self.matrix);
 
         let mut paint = Paint::new(self.paint.color, None);
         paint
@@ -412,10 +416,7 @@ impl BlurOp {
         // sigma it comes to here is one it can draw: past
         // `MASK_BLUR_MAX_SIGMA` device pixels it draws the cap instead, so
         // `blur(40px)` exported at density 4 came out a blur of 128 pixels
-        // where 160 were asked for. Below the cap the recording's choice
-        // stands, since on the GPU the coverage blur of a rectangle is
-        // nearer the exact Gaussian than the image blur is, 1.5 levels
-        // against 2.6 at a sigma of 80.
+        // where 160 were asked for, and the result is blurred instead.
         // One choice for the run: its rectangles share a coverage class.
         let device_sigma = self.paint.sigma * replay;
         let key = device_sigma.to_bits();
@@ -431,25 +432,70 @@ impl BlurOp {
                 blur
             }
         };
-        match made {
-            Made::Coverage(filter) => paint.set_mask_filter(filter),
-            Made::Result(filter) => paint.set_image_filter(filter),
+        let paths = || {
+            iter::once(path.clone())
+                .chain(self.geometry.iter().skip(1).filter_map(Geometry::path))
         };
-        let paint = self.paint.faint.drawable(&paint);
-        canvas.draw_path(&path, &paint);
-        // The rest of a run, each drawn on its own as it was recorded.
-        self.geometry
-            .iter()
-            .skip(1)
-            .filter_map(Geometry::path)
-            .for_each(|path| {
-                canvas.draw_path(&path, &paint);
-            });
+        match (made, target) {
+            // On pixels the result is blurred by `chain`, exactly, each
+            // geometry of a run in a layer of its own, as separate draws
+            // composite.
+            (Made::Result(_), Target::Pixels) => {
+                let paint = self.paint.faint.drawable(&paint);
+                let steps = [Step::Blur(self.paint.sigma)];
+                let depth = match self.paint.faint {
+                    Faint::Dropped => Depth::Bytes,
+                    Faint::Kept => Depth::Floats,
+                };
+                for path in paths() {
+                    let content = self.matrix.map_rect(self.painted(&path)).0;
+                    chain::apply(
+                        canvas,
+                        &steps,
+                        Some(content),
+                        depth,
+                        &Paint::default(),
+                        |layer| {
+                            layer.concat(&self.matrix);
+                            layer.draw_path(&path, &paint);
+                        },
+                    );
+                }
+            }
+            (made, _) => {
+                canvas.concat(&self.matrix);
+                match made {
+                    Made::Coverage(filter) => paint.set_mask_filter(filter),
+                    Made::Result(filter) => paint.set_image_filter(filter),
+                };
+                let paint = self.paint.faint.drawable(&paint);
+                // Each of a run drawn on its own as it was recorded.
+                for path in paths() {
+                    canvas.draw_path(&path, &paint);
+                }
+            }
+        }
         canvas.restore();
+    }
+
+    /// What drawing `path` paints, in its own units, before any blur: its
+    /// bounds, widened for a stroke by as far as its outline can reach -- a
+    /// miter join `miter` half-widths out, a square cap's corner `sqrt(2)`.
+    fn painted(&self, path: &Path) -> Rect {
+        let bounds = *path.bounds();
+        match self.paint.stroke {
+            Some(stroke) => {
+                let reach = stroke.width / 2.0 * stroke.miter.max(SQRT_2);
+                bounds.with_outset((reach, reach))
+            }
+            None => bounds,
+        }
     }
 
     /// The blur itself: on the coverage where `coverage` says so and the
     /// transform maps a length to a positive one, on the result otherwise.
+    /// A result blur played back onto pixels is the exact one [`chain`]
+    /// makes; the Skia filter made here is what a document draws.
     fn make(&self, coverage: bool) -> Made {
         // The sigma in the path's own units, which Skia maps back through
         // the canvas: `respect_ctm` for the mask filter, and an image

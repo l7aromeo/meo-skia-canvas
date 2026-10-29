@@ -290,6 +290,7 @@ libaom-sys = { version = "0.17.2", features = [
     "av1_decoder",
     "av1_encoder",
 ] }
+rustfft = "6.4.1"
 
 # Both crates below are reachable on one platform each, so they are declared
 # per-target rather than unconditionally: an unconditional entry is fetched,

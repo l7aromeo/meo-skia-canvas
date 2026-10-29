@@ -719,3 +719,28 @@ in a screenshot from Chrome 156.0.8078.49 headless with
 full progress bar fill with `#0075ff`, and the checkbox's mark is white. The
 other system colours read as Chrome reads them on a canvas, in its light scheme
 on macOS; `tests/assets/cases/css-system-colors.json` has every row.
+
+**A blurred path is the exact Gaussian blur of what it draws, and Chrome's is
+not.** Filter Effects Module Level 1 defines `blur()` as a Gaussian blur whose
+standard deviation is the length given. A rasterised pixel is already its
+shape averaged over the pixel's box, so the blur of what a draw paints is
+those pixels convolved with the Gaussian sampled at whole-pixel offsets, and
+a flat-colour path the coverage blur does not take -- any shape but a
+rectangle or a rounded rectangle, and those past the sigma their coverage
+blur is chosen for -- is drawn here as exactly that, rounded once: within half
+a level on 8-bit pixels on either engine, and on F16 and F32 to the surface's
+precision, as measured on the CPU engine, where a float canvas made for the
+GPU on macOS is drawn. Chrome 156.0.8078.4 headless approximates it, on both of its
+canvases alike. A black triangle on a 160 by 100 canvas, worst levels from
+the exact blur of Chrome's own unblurred triangle:
+
+        sigma        2      8     30
+        here      0.50   0.50   0.50
+        Chrome   11.01   6.24   5.56
+
+Chrome's figures are the ones Skia's image blur gave this library before, to
+the hundredth. `tests/blur_result.rs` holds the pixels, at a density and
+inside a `saveLayer` too. A draw that its clip cuts is the exception, and
+the same one any clipped draw is: Skia anti-aliases a path its clip does not
+contain by another route, whose edges move by up to 15 levels, and the blur
+is exact on what that route draws.

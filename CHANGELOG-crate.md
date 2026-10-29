@@ -137,6 +137,24 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A blurred path is the exact Gaussian blur of what it draws.** A
+  flat-colour shape that `Context2D::set_filter_css("blur(...)")` blurs on
+  its result -- any path but a rectangle or a rounded rectangle, and those
+  past the sigma their coverage blur is used for -- went through Skia's image
+  blur, which approximates the Gaussian: a triangle blurred by 2px read 11
+  levels off it on the CPU engine and 1 on the GPU, as Chrome's does. It is
+  now blurred by the Gaussian sampled at whole-pixel offsets and rounded
+  once, on either engine, on an eight-bit or a float canvas, and at any
+  export density.
+
+- **A large blur inside a `saveLayer` keeps its width at a high density.** A
+  `blur(40px)` rectangle drawn in `Context2D::save_layer` and exported with
+  `ImageDataExport { density: 4, .. }` took Skia's coverage blur, which stops
+  at 128 output pixels where 160 were asked for, and read 48.7 levels off on
+  the CPU and 40.9 on the GPU: which blur it took was decided when it was
+  recorded into the layer, at density 1. It is decided where the page is
+  played back, as it is outside a layer, and the blur is the exact one.
+
 - **An SVG export keeps what a `saveLayer` holds.** Skia's SVG backend has
   no layers and dropped whatever was drawn inside one: a red square in
   `Context2D::save_layer` or `save_layer_with`, in a nested layer, or a
