@@ -46,7 +46,7 @@ The underlying Rust library uses [N-API][node_napi] v8, so it runs on every [cur
 
 ### Linux
 
-The library is compatible with Linux systems using [glibc](https://www.gnu.org/software/libc/) 2.28 or later as well as Alpine Linux and the [musl](https://musl.libc.org) C library it favors. It will make use of the system’s `fontconfig` settings in `/etc/fonts` if they exist but will otherwise fall back to using a [placeholder configuration](https://github.com/l7aromeo/meo-skia-canvas/blob/main/lib/fonts/fonts.conf), looking for installed fonts at commonly used Linux paths.
+The library is compatible with Linux systems using [glibc](https://www.gnu.org/software/libc/) 2.28 or later as well as Alpine Linux and the [musl](https://musl.libc.org) C library it favors. It will make use of the system’s `fontconfig` settings in `/etc/fonts` if they exist, or those `FONTCONFIG_FILE` and `FONTCONFIG_PATH` name; with neither, fontconfig falls back to its built-in configuration, which looks for fonts in `/usr/share/fonts`, `/usr/local/share/fonts` and `~/.local/share/fonts`.
 
 > **What glibc 2.28 covers.** RHEL/Rocky/Alma 8+, Ubuntu 20.04+, Debian 11+, Amazon Linux 2023,
 > and AWS Lambda. Below 2.28 the binary fails to load rather than degrading — use the musl build on
