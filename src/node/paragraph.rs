@@ -25,7 +25,7 @@ use crate::{
             ParagraphRecipe, Passes, add_slnt, match_oblique, set_coordinates,
             without_paragraph_cache,
         },
-        typography::with_style_axes,
+        typography::{paragraph_style, with_style_axes},
     },
     text::{
         PlaceholderAlignment as CratePlaceholderAlignment, PlaceholderBaseline,
@@ -1023,7 +1023,7 @@ fn parse_paragraph_style<'a>(
     cx: &mut FunctionContext<'a>,
     obj: &Handle<'a, JsObject>,
 ) -> NeonResult<(ParagraphStyle, Option<f32>, Option<f32>)> {
-    let mut style = ParagraphStyle::new();
+    let mut style = paragraph_style();
     let mut oblique = None;
     let mut fraction = None;
 

@@ -4553,6 +4553,9 @@ fn bare_skia_paragraph_at(
     fonts.set_default_font_manager(Some(FontMgr::from(provider)), None);
     let mut paragraph_style = ParagraphStyle::new();
     paragraph_style.turn_hinting_off();
+    // Unrounded, as every paragraph the crate lays out is: with SkParagraph's
+    // rounding hack on, the reference widths came back in hundredths.
+    paragraph_style.set_apply_rounding_hack(false);
     let mut style = TextStyle::new();
     style.set_font_size(size);
     style.set_font_families(&["Bare"]);
@@ -4659,8 +4662,12 @@ fn a_font_weight_on_a_variable_font_matches_the_font_file() {
     ctx.set_font(&Font::new(oswald(), SIZE).weight(400));
     let measured = ctx.measure_text(&"a".repeat(COUNT), None).width;
     let expected = COUNT as f32 * ADVANCE * SIZE / UNITS_PER_EM;
+    // Within what a running `f32` sum of COUNT advances can drift, and no
+    // further: the widths are not rounded to hundredths any more, which put
+    // this one 0.004 off.
+    let drift = COUNT as f32 * expected * f32::EPSILON;
     assert!(
-        (measured - expected).abs() < 0.01,
+        (measured - expected).abs() <= drift,
         "64 a's at weight 400 measured {measured}, where the font says \
          {expected}"
     );
@@ -11852,22 +11859,66 @@ fn css_spacing_reaches_the_layout_it_configures() {
     );
 }
 
+/// How close a width here comes to Chrome's: a tenth of the hundredth
+/// SkParagraph's rounding hack rounded widths to. What is left is the two
+/// engines' sums of the same advances, 0.00014 at most across the cases
+/// measured, against up to 0.005 from the rounding.
+const CHROME_FLOAT: f32 = 0.0005;
+
+/// At sizes whose advances are not whole hundredths, the width is Chrome
+/// 156's to the float.
+#[test]
+fn a_width_is_chromes_at_fractional_sizes() {
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    for (size, text, chrome) in [
+        (24.0, "Hamburgefonstiv", 148.175_9),
+        (23.7, "Hambu", 60.529_77),
+        (31.9, "quick brown fox", 182.436),
+        (9.5, "quick brown fox", 54.330_383),
+    ] {
+        ctx.set_font(&Font::new(oswald(), size));
+        let width = ctx.measure_text(text, None).width;
+        assert!(
+            (width - chrome).abs() <= CHROME_FLOAT,
+            "{size}px {text:?}: {width}, Chrome {chrome}"
+        );
+    }
+}
+
+/// A paragraph from a `TextEngine` wraps at the width it is given: Chrome
+/// 156 fits "Hamburgefonstiv quick" in Oswald 24px, 200.53 wide, on one
+/// line at 200.7px and not at 200px, where SkParagraph's rounding hack
+/// broke at the width floored to 200.
+#[test]
+fn a_paragraph_wraps_at_its_fractional_width() {
+    let engine = oswald_engine();
+    let style = TextStyle {
+        font_size: 24.0,
+        ..oswald_paragraph(400)
+    };
+    let text = "Hamburgefonstiv quick brown fox jumps over";
+    let lines = |width| engine.layout_text(text, &style, width).line_count();
+    assert_eq!(lines(200.7), 2);
+    assert_eq!(lines(200.0), 3);
+}
+
 #[test]
 fn a_negative_spacing_measures_a_negative_width() {
-    // Chrome 152 at 40px Oswald: the advances with the spacing added,
+    // Chrome 156 at 40px Oswald: the advances with the spacing added,
     // summed and never clamped, trailing spaces included.
     let mut canvas = Canvas::new(10.0, 10.0);
     let ctx = canvas.context();
     ctx.set_font(&Font::parse(&format!("40px {}", oswald())).expect("a font"));
     for (letter, text, chrome) in [
-        ("-23.12px", "abcd", -23.44),
-        ("-50px", "ab ", -105.92),
-        ("-10px", "a ", 6.2),
+        ("-23.12px", "abcd", -23.440_018),
+        ("-50px", "ab ", -105.920_03),
+        ("-10px", "a ", 6.199_982),
     ] {
         ctx.set_letter_spacing_css(letter).expect("a length");
         let width = ctx.measure_text(text, None).width;
         assert!(
-            (width - chrome).abs() <= 0.01,
+            (width - chrome).abs() <= CHROME_FLOAT,
             "{letter} {text:?}: {width}, Chrome {chrome}"
         );
     }

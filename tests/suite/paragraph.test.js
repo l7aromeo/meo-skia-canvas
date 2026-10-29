@@ -366,6 +366,74 @@ describe("ParagraphBuilder", () => {
   });
 });
 
+// Measured in Chrome 156 with Oswald loaded through @font-face. SkParagraph
+// laid a paragraph out at its width floored to a whole pixel, compared line
+// widths rounded to hundredths, and reported widths, rects and the glyph
+// ends hit-testing reads to hundredths; none of it is done here now.
+describe("a paragraph is laid out at the width it is given", () => {
+  FontLibrary.use("RoundingOswald", [
+    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+  ]);
+  const STYLE = {
+    textStyle: {
+      fontFamilies: ["RoundingOswald"],
+      fontSize: 24,
+      color: [0, 0, 0, 1],
+    },
+  };
+
+  // Chrome fits "Hamburgefonstiv quick", 200.53 wide, on one line at 200.7px
+  // and not at 200px.
+  test("a fractional width wraps where Chrome wraps", () => {
+    const text = "Hamburgefonstiv quick brown fox jumps over";
+    const at = (width) =>
+      laidOut(STYLE, text, width)
+        .getLineMetrics()
+        .map((line) => line.width);
+    const [first, ...rest] = at(200.7);
+    assert.equal(rest.length, 1, `${[first, ...rest]}`);
+    assert.ok(Math.abs(first - 200.52) < 0.01, `${first}`);
+    assert.equal(at(200).length, 3);
+  });
+
+  // A line exactly as wide as the paragraph fits it, and a thousandth less
+  // does not: the widths are compared as they are.
+  test("a line breaks within a thousandth of the edge", () => {
+    const line = "Hamburgefonstiv quick";
+    const width = laidOut(STYLE, line, 1e6).getMaxIntrinsicWidth();
+    assert.equal(laidOut(STYLE, line, width).getNumberOfLines(), 1);
+    assert.equal(laidOut(STYLE, line, width - 0.001).getNumberOfLines(), 2);
+  });
+
+  // The box of "Hambu" ends where Chrome's measureText puts its advance,
+  // 61.29597, not at the hundredth above it.
+  test("a range's rect ends at the advance, unrounded", () => {
+    const [box] = laidOut(STYLE, "Hamburgefonstiv", 1e6).getRectsForRange(
+      0,
+      5,
+      "tight",
+      "tight",
+    );
+    const right = box.rect[2];
+    assert.ok(Math.abs(right - 61.29597473144531) <= 0.0005, `${right}`);
+  });
+
+  // A point decides between the positions either side of a glyph at the
+  // glyph's middle. The "u" of "Hamburgefonstiv" spans the advances of
+  // "Ham" and "Hambu"; its middle rounded to hundredths moved four
+  // thousandths, so two thousandths past the true middle was still before
+  // it.
+  test("hit-testing splits a glyph at its true middle", () => {
+    const paragraph = laidOut(STYLE, "Hamburgefonstiv", 1e6);
+    const end = (length) =>
+      paragraph.getRectsForRange(0, length, "tight", "tight").at(-1).rect[2];
+    const middle = (end(4) + end(5)) / 2;
+    const at = (x) => paragraph.getGlyphPositionAtCoordinate(x, 10).pos;
+    assert.equal(at(middle - 0.002), 4);
+    assert.equal(at(middle + 0.002), 5);
+  });
+});
+
 describe("A paragraph's own style", () => {
   const { TextDecoration } = require("../../lib"),
     { skiaNode } = require("../../lib/classes/neon");

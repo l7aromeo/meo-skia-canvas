@@ -262,6 +262,22 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   that is not whole bytes, or against a three-place alpha, compares against
   the new string, or compares pixels.
 
+- **Text widths, line metrics, rects and hit-testing are no longer rounded
+  to hundredths, and a `Paragraph` wraps at the width it is given rather
+  than at that width floored to a whole pixel.** SkParagraph's rounding hack
+  was on for every paragraph, canvas text included: it rounded
+  `measureText().width` and a `Paragraph`'s widths, line metrics,
+  `getRectsForRange` boxes and the glyph edges `getGlyphPositionAtCoordinate`
+  splits at to hundredths, compared line widths rounded when it broke lines,
+  and broke a paragraph laid out at 200.7px as if it were 200px wide. It is
+  off: `measureText("Hamburgefonstiv")` in 24px Oswald is 148.17601 where it
+  was 148.18 and Chrome 156 measures 148.17590, and a paragraph at 200.7px
+  fits "Hamburgefonstiv quick", 200.52 wide, on its first line, as Chrome
+  does, where it wrapped after "Hamburgefonstiv". Code that sizes or
+  compares against these values can see them move by up to half a
+  hundredth, and a paragraph at a fractional width can lay out on fewer
+  lines and stand shorter.
+
 ### Security
 
 - **`follow-redirects` is required at `^1.16.1`, up from `^1.15.11`.** It is
@@ -761,9 +777,10 @@ false` now takes effect, and its default is on, at Slight, as Chrome draws
   `"1234.5"` 17.4766 centred -- and 5.17px of spacing at 10px Oswald
   measured `"00"` 20.67 where Chrome measures 20.68. The width is now the
   run's advance at every alignment. Over 3,850 cases across seven families,
-  five sizes and five spacings it moved by at most 0.014, and in nine
-  measured in Chrome it is within 0.005 of Chrome's width, where the old
-  one was off by as much as 0.009. A wrapped run (`textWrap`) is unchanged.
+  five sizes and five spacings it moved by at most 0.014, and in every case
+  measured in Chrome 156 it is within 0.0005 of Chrome's width, where the
+  old one was off by as much as 0.009 -- the widths are no longer rounded to
+  hundredths, under Breaking. A wrapped run (`textWrap`) is unchanged.
 
 - **`measureText().width` is negative where the spacing makes the advance
   negative, and counts a trailing space's spacing, as Chrome does.** At 40px
@@ -1327,6 +1344,12 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   of 0.0015 or less (0.000004 for OkLCh). Chrome reads a hue of about
   356.6 or 23.7 degrees off its own rounding instead.
   `docs/browser-differences.md` has the measurements.
+
+- **Text no longer wraps early at a fractional width.** A `Paragraph` laid
+  out at 200.7px broke as if it were 200px wide, and line widths were
+  compared rounded to hundredths; text now fits where Chrome fits it. The
+  values this moves are under Breaking: "Text widths, line metrics, rects
+  and hit-testing are no longer rounded to hundredths".
 
 ### Added
 
