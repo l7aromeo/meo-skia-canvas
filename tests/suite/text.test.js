@@ -1327,6 +1327,44 @@ describe("a fractional size is laid out at that size", () => {
   });
 });
 
+describe("FreeType lays a size out at its 64th of a pixel", () => {
+  FontLibrary.use("Oswald", [
+    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+  ]);
+
+  // Skia's FreeType scaler sets the face's size in 26.6 fixed point,
+  // truncated, so on Linux 17.3px is laid out at 17.296875px, the 64th
+  // below it -- docs/browser-differences.md. This holds the truncation as
+  // it stands, so that the day Skia lays the size out as asked, 17.3px
+  // measures about 0.019 wider than 17.296875px and this goes red. macOS
+  // and Windows lay text out through their own scalers, at the size asked.
+  test(
+    "17.3px measures as 17.296875px on FreeType",
+    {
+      skip:
+        process.platform === "linux"
+          ? false
+          : "only Linux lays text out through FreeType",
+    },
+    () => {
+      const ctx = new Canvas(10, 10).getContext("2d");
+      const width = (size) => {
+        ctx.font = `${size}px Oswald`;
+        return ctx.measureText("Hamburgefonstiv").width;
+      };
+      const below = width(17.296875);
+      assert.ok(
+        below - width(17.28125) > 0.05,
+        "a 64th of a pixel is laid out",
+      );
+      assert.ok(
+        Math.abs(width(17.3) - below) <= 0.0001,
+        `${width(17.3)} against ${below} at 17.296875px`,
+      );
+    },
+  );
+});
+
 describe("a fractional font-weight is drawn at its fraction", () => {
   FontLibrary.use("FractionOswald", [
     "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
