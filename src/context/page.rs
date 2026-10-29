@@ -13,7 +13,7 @@ use skia_safe::{
     Rect, Size, Surface, SurfaceProps, SurfacePropsFlags, XYZD50Hash,
     canvas::SrcRectConstraint,
     image::{BitDepth, CachingHint},
-    images, jpeg_encoder, pdf, png_encoder,
+    jpeg_encoder, pdf, png_encoder,
     svg::{self, canvas::Flags},
     webp_encoder,
 };
@@ -1005,7 +1005,7 @@ impl PageRecorder {
     ) -> Option<SkImage> {
         let size = self.bounds.size().to_floor();
         let deferred = self.page().picture(None).and_then(|pict| {
-            images::deferred_from_picture(
+            started::deferred_from_picture(
                 pict,
                 size,
                 None,

@@ -27,13 +27,15 @@ const RAW_CALLS = [
   "surfaces::wrap_pixels(",
   "images::raster_from_data(",
   "images::raster_from_pixmap(",
+  "images::raster_from_bitmap(",
+  "images::deferred_from_picture(",
   "images::deferred_from_encoded_data(",
   "Codec::from_data(",
 ];
 
 /** An import of one of them by its bare name, which the calls above miss. */
 const RAW_IMPORT =
-  /use skia_safe::.*(?:surfaces|images)::\{?[^;]*\b(?:raster|raster_n32_premul|wrap_pixels|raster_from_data|raster_from_pixmap|deferred_from_encoded_data)\b/;
+  /use skia_safe::.*(?:surfaces|images)::\{?[^;]*\b(?:raster|raster_n32_premul|wrap_pixels|raster_from_data|raster_from_pixmap|raster_from_bitmap|deferred_from_picture|deferred_from_encoded_data)\b/;
 
 /** Each line of `text` that makes a Skia surface, image or codec raw. */
 function rawLines(text) {
@@ -66,6 +68,8 @@ describe("Skia is started before anything reaches it", () => {
       "    let s = surfaces::raster(&info, None, None);",
       "    let s = skia_safe::surfaces::raster_n32_premul((1, 1));",
       "    let i = images::raster_from_data(&info, data, 4);",
+      "    images::raster_from_bitmap(&bitmap)",
+      "        images::deferred_from_picture(",
       "    let c = Codec::from_data(data);",
       "use skia_safe::images::raster_from_data;",
       "use skia_safe::surfaces::{raster, wrap_pixels};",

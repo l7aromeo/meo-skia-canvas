@@ -12,10 +12,9 @@
 //! Each takes what its skia-safe namesake takes and returns what it returns.
 
 use crate::start_skia;
-#[cfg(test)]
-use skia_safe::ISize;
 use skia_safe::{
-    AlphaType, Codec, Data, Image, ImageInfo, Surface, SurfaceProps, images,
+    AlphaType, Bitmap, Codec, ColorSpace, Data, ISize, Image, ImageInfo,
+    Matrix, Paint, Picture, Surface, SurfaceProps, image::BitDepth, images,
     surfaces,
 };
 
@@ -45,6 +44,36 @@ pub(crate) fn raster_from_data(
 ) -> Option<Image> {
     start_skia();
     images::raster_from_data(info, pixels, row_bytes)
+}
+
+/// [`images::raster_from_bitmap`], once Skia is started.
+pub(crate) fn raster_from_bitmap(bitmap: &Bitmap) -> Option<Image> {
+    start_skia();
+    images::raster_from_bitmap(bitmap)
+}
+
+/// [`images::deferred_from_picture`], once Skia is started: the picture is
+/// played into pixels wherever the image is first read, which may be no
+/// canvas at all.
+pub(crate) fn deferred_from_picture(
+    picture: impl Into<Picture>,
+    dimensions: impl Into<ISize>,
+    matrix: Option<&Matrix>,
+    paint: Option<&Paint>,
+    bit_depth: BitDepth,
+    color_space: impl Into<Option<ColorSpace>>,
+    props: impl Into<Option<SurfaceProps>>,
+) -> Option<Image> {
+    start_skia();
+    images::deferred_from_picture(
+        picture,
+        dimensions,
+        matrix,
+        paint,
+        bit_depth,
+        color_space,
+        props,
+    )
 }
 
 /// [`images::deferred_from_encoded_data`], once Skia is started.
