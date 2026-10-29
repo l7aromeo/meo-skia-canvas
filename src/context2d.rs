@@ -22,10 +22,11 @@ use std::{
 };
 
 use skia_safe::{
-    Data, FourByteTag, IRect, ImageInfo as SkImageInfo, Matrix as SkMatrix,
-    Paint as SkPaint, PaintStyle as SkPaintStyle, Path as SkPath,
-    PathBuilder as SkPathBuilder, PathDirection, Picture as SkPicture,
-    Point as SkPoint, RRect, Rect as SkRect, Size as SkSize,
+    Color4f, Data, FourByteTag, IRect, ImageInfo as SkImageInfo,
+    Matrix as SkMatrix, Paint as SkPaint, PaintStyle as SkPaintStyle,
+    Path as SkPath, PathBuilder as SkPathBuilder, PathDirection,
+    Picture as SkPicture, Point as SkPoint, RRect, Rect as SkRect,
+    Size as SkSize,
     font_style::{Slant, Weight, Width},
     path::AddPathMode,
     path_1d_path_effect,
@@ -39,8 +40,7 @@ use crate::{
     canvas::{Canvas, CanvasOptions},
     color::{
         RgbaLinear, linear_srgb_color_space, rgba_css,
-        rgba_linear_to_skia_color, rgba_linear_to_unpremul_color4f,
-        unpremul_color4f_to_rgba_linear,
+        rgba_linear_to_unpremul_color4f, unpremul_color4f_to_rgba_linear,
     },
     context::{
         Context2D as Inner, Dye, initial_root_face,
@@ -66,7 +66,10 @@ use crate::{
         path::{Path2D as NodePath2D, conic_or_line},
         pattern::CanvasPattern,
         typography::{Baseline, DecorationStyle, FontSpec, Spacing},
-        utils::{Declaration, color4f_to_rgba_linear, css_to_declared},
+        utils::{
+            Declaration, color4f_to_rgba_linear, color4f_to_srgb,
+            css_to_declared,
+        },
     },
     paint::{BlendMode, StrokeCap, StrokeJoin},
     path::{FillRule, Path2D},
@@ -2393,6 +2396,12 @@ impl Context2D {
         let css = decoration_css(lines, style, color, thickness);
         let size =
             thickness.and_then(|px| Spacing::parse(px, "px".to_string(), px));
+        let color = color.map(|color| {
+            color4f_to_srgb(
+                rgba_linear_to_unpremul_color4f(color),
+                Some(&linear_srgb_color_space()),
+            )
+        });
         let decoration = decoration_style(lines, style, color, size, css);
         self.inner
             .state
@@ -4419,10 +4428,15 @@ pub(crate) fn decoration_from_css(css: &str) -> Option<DecorationStyle> {
 
 /// The decoration state for these lines, or the cleared one -- which reads
 /// back as `"none"` -- where there are none.
+///
+/// `color` is the lines' own, as named, in extended sRGB: painted at the
+/// precision it names on every canvas, as a fill is, and drawn by
+/// `node::decorate` rather than by SkParagraph, whose decoration colour is
+/// eight-bit.
 fn decoration_style(
     lines: TextDecoration,
     style: TextDecorationStyle,
-    color: Option<RgbaLinear>,
+    color: Option<Color4f>,
     size: Option<Spacing>,
     css: String,
 ) -> DecorationStyle {
@@ -4440,13 +4454,7 @@ fn decoration_style(
             ..Decoration::default()
         },
         size,
-        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
-        // Re-check: grep -n "pub color" in skia-safe's
-        // src/modules/paragraph/text_style.rs
-        //
-        // SkParagraph's `Decoration` holds an eight-bit sRGB `SkColor`, so
-        // a wide decoration colour is gamut-mapped into sRGB.
-        color: color.map(rgba_linear_to_skia_color),
+        color,
     }
 }
 

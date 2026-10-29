@@ -24,7 +24,7 @@ mod math;
 
 use std::{borrow::Cow, cell::OnceCell};
 
-use skia_safe::{Font as SkFont, FontHinting, GlyphId, Typeface};
+use skia_safe::{Color4f, Font as SkFont, FontHinting, GlyphId, Typeface};
 use ttf_parser::{Face as TtfFace, GlyphId as TtfGlyphId, RawFaceTables, Tag};
 
 pub(crate) use math::{
@@ -32,12 +32,12 @@ pub(crate) use math::{
 };
 
 use crate::{
-    color::{RgbaLinear, skia_color_to_rgba_linear},
+    color::RgbaLinear,
     error::Error,
     filter::FilterOp,
     geometry::Affine,
     image::{EX_PER_EM, x_height_ratio},
-    node::utils::{css_to_color, css_to_color4f},
+    node::utils::css_to_color4f,
     text::{TextDecoration, TextDecorationStyle},
 };
 
@@ -741,8 +741,9 @@ pub(crate) struct Decoration {
     pub lines: TextDecoration,
     /// How the line is drawn.
     pub style: TextDecorationStyle,
-    /// The line's colour, or `None` to follow the fill.
-    pub color: Option<RgbaLinear>,
+    /// The line's colour as named, in extended sRGB, unpremultiplied, or
+    /// `None` to follow the fill.
+    pub color: Option<Color4f>,
     /// The line's thickness as written, or `None` for the font's own. A
     /// font-relative one is carried rather than resolved, so it follows the
     /// font the text is laid out in, as a spacing does.
@@ -804,7 +805,7 @@ pub(crate) fn parse_decoration(text: &str) -> Option<Decoration> {
                 Some(thickness) => parsed.thickness = Some(thickness),
                 // Anything left has to be a colour, and a token that is not
                 // one is a token nobody can act on.
-                None => parsed.color = Some(eight_bit_colour(token)?),
+                None => parsed.color = Some(css_to_color4f(token)?),
             },
         }
     }
@@ -1046,28 +1047,6 @@ fn held(quantity: Quantity, low: f32) -> f32 {
         .clamp(f64::from(low), f64::from(f32::MAX)) as f32
 }
 
-/// A CSS colour for a filter shadow or a text decoration: quantised to
-/// eight bits in sRGB, where Chrome quantises it, when it lies inside sRGB,
-/// and carried as an [`RgbaLinear`] that converts back to the same bytes
-/// exactly. A colour outside sRGB is kept as it is, unquantised, so a wide
-/// canvas draws it -- eight bits of sRGB cannot hold it at all.
-///
-/// Through [`RgbaLinear::from_css`] alone, `rgb(10.5 20.4 30.6)` lost its
-/// half step in the `f32` round trip through linear light and drew red 10,
-/// where Chrome draws 11 for the shadow and the fill alike. The parser is
-/// the one `set_fill_style_css` uses, so a colour that works in one place
-/// works in the other.
-fn eight_bit_colour(css: &str) -> Option<RgbaLinear> {
-    let srgb = css_to_color4f(css)?;
-    let inside = [srgb.r, srgb.g, srgb.b]
-        .iter()
-        .all(|channel| (0.0..=1.0).contains(channel));
-    match inside {
-        true => css_to_color(css).map(skia_color_to_rgba_linear),
-        false => Some(RgbaLinear::from_srgb(srgb.r, srgb.g, srgb.b, srgb.a)),
-    }
-}
-
 /// The lengths and optional colour a `drop-shadow` carries.
 ///
 /// Filter Effects 1 gives the grammar as `<color>? && <length>{2,3}`: two
@@ -1132,7 +1111,7 @@ fn drop_shadow(args: &str, units: &FontUnits) -> Option<FilterOp> {
             // to the fill; black is what this crate has always used and what
             // the typed `FilterOp::DropShadow` carries when none is given.
             true => RgbaLinear::opaque(0.0, 0.0, 0.0),
-            false => match eight_bit_colour(&rest) {
+            false => match RgbaLinear::from_css(&rest) {
                 Some(color) => color,
                 None => continue,
             },
@@ -1152,7 +1131,6 @@ fn drop_shadow(args: &str, units: &FontUnits) -> Option<FilterOp> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::color::rgba_linear_to_skia_color;
 
     /// Oswald, the variable face the font-relative rows were measured on, at
     /// the weight `weight`.
@@ -1533,6 +1511,27 @@ mod tests {
     /// fixed offset, so it accepted exactly one of these five. A refused
     /// step rejects the whole chain, so the other four were errors here and
     /// pictures in Chrome.
+    /// A drop-shadow's colour is kept as it was named, as a fill's is: an
+    /// alpha between bytes, and a colour outside sRGB. Both were rounded to
+    /// eight bits of sRGB, the alpha of 0.3 to 77/255 and the green
+    /// gamut-mapped into sRGB.
+    #[test]
+    fn a_drop_shadow_s_colour_is_the_colour_css_names() {
+        let colour = |css: &str| match parse_filter(
+            &format!("drop-shadow(1px 2px {css})"),
+            &em(),
+        )
+        .expect("a filter")
+        .first()
+        {
+            Some(&FilterOp::DropShadow { color, .. }) => color,
+            other => panic!("not a drop-shadow: {other:?}"),
+        };
+        assert_eq!(colour("rgb(0 0 0 / 0.3)").a, 0.3);
+        let green = colour("color(display-p3 0 1 0)");
+        assert!(green.r < 0.0, "kept outside sRGB: {green:?}");
+    }
+
     #[test]
     fn a_drop_shadow_takes_its_colour_from_either_end() {
         let shadow = |css: &str| match parse_filter(css, &em()) {
@@ -2053,20 +2052,25 @@ mod tests {
 
     #[test]
     fn a_decoration_colour_is_the_colour_css_names() {
-        // Decoded from sRGB rather than read as linear: the bytes that come
-        // back are the bytes CSS names.
-        for (css, bytes) in [
-            ("rebeccapurple", [102, 51, 153]),
-            ("#742", [119, 68, 34]),
-            ("hsl(120 50% 50%)", [64, 191, 64]),
-            // A half step rounds up at parse, as Chrome rounds it.
-            ("rgb(10.5 20.4 30.6)", [11, 20, 31]),
+        // Decoded from sRGB rather than read as linear, and kept as named:
+        // the channels that come back are the ones CSS names, a half step
+        // included, as a fill's are.
+        for (css, channels) in [
+            ("rebeccapurple", [102.0, 51.0, 153.0]),
+            ("#742", [119.0, 68.0, 34.0]),
+            ("hsl(120 50% 50%)", [63.75, 191.25, 63.75]),
+            ("rgb(10.5 20.4 30.6)", [10.5, 20.4, 30.6]),
         ] {
             let parsed = parse_decoration(&format!("underline {css}"))
                 .expect("a decoration");
-            let color =
-                rgba_linear_to_skia_color(parsed.color.expect("a colour"));
-            assert_eq!([color.r(), color.g(), color.b()], bytes, "{css}");
+            let color = parsed.color.expect("a colour");
+            let got = [color.r, color.g, color.b].map(|c| c * 255.0);
+            assert!(
+                got.iter()
+                    .zip(channels)
+                    .all(|(got, want)| (got - want).abs() < 1e-3),
+                "{css}: {got:?}",
+            );
         }
     }
 
