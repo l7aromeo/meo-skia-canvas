@@ -1104,6 +1104,113 @@ describe("measureText's width is the run's advance", () => {
   });
 });
 
+describe("a fractional font-weight is drawn at its fraction", () => {
+  FontLibrary.use("FractionOswald", [
+    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+  ]);
+  const FONT = (weight) => `${weight} 1000px FractionOswald`;
+  const ctx = () => new Canvas(10, 10).getContext("2d");
+
+  // CSS Fonts 4 makes `font-weight` a <number> from 1 to 1000. Chrome 156
+  // (chrome-headless-shell 156.0.8078.4, macOS) instances Oswald at each of
+  // these, which it holds to a quarter and so draws as written: the "0"
+  // measures as below at 1000px, where 512 measures 535.105 and 513
+  // 535.194.
+  const CHROME = [
+    [450, 525.515869140625],
+    [512.25, 535.12744140625],
+    [512.5, 535.1495971679688],
+    [512.75, 535.1717529296875],
+  ];
+
+  test("ctx.font reads the weight back as written", () => {
+    // CSSOM serialises the weight as its number, shortest form. Chrome's
+    // canvas getter truncates it -- "512.5" reads back "512" --
+    // docs/browser-differences.md says so.
+    for (const [set, expected] of [
+      ["512.5 16px serif", "512.5 16px serif"],
+      ["550.7 16px serif", "550.7 16px serif"],
+      ["999.9 16px serif", "999.9 16px serif"],
+      ["calc(512.5) 16px serif", "512.5 16px serif"],
+      ["512 16px serif", "512 16px serif"],
+    ]) {
+      const c = ctx();
+      c.font = set;
+      assert.equal(c.font, expected, set);
+    }
+  });
+
+  test("`ch` follows the fraction, as the face's tables give it", () => {
+    // One `ch` of letter spacing after each of two zeros, so the spacing's
+    // share of the width is two `ch`. The tables quantise the weight's
+    // normalised coordinate to 2.14 as OpenType requires, where Chrome's
+    // CoreText does not: within 0.003 here. Each width is held to a
+    // hundredth by SkParagraph, so half of one in the difference.
+    const c = ctx();
+    for (const [weight, chrome] of CHROME) {
+      c.font = FONT(weight);
+      c.letterSpacing = "0px";
+      const plain = c.measureText("00").width;
+      c.letterSpacing = "1ch";
+      const ch = (c.measureText("00").width - plain) / 2;
+      assert.ok(
+        Math.abs(ch - chrome) <= 0.01,
+        `${weight}: 1ch ${ch}, Chrome ${chrome}`,
+      );
+    }
+  });
+
+  test("the run is laid out at the fraction", () => {
+    // FreeType rounds each `HVAR` advance delta to a whole font unit, so on
+    // Linux the "0" advances by whole units at every weight, where CoreText
+    // follows the interpolation as Chrome does -- see the UPSTREAM note at
+    // the width in `Typesetter::measure`. `ch` above takes its advance from
+    // the tables and is exact on both. Other platforms are not measured.
+    const c = ctx();
+    for (const [weight, chrome] of CHROME) {
+      c.font = FONT(weight);
+      const { width } = c.measureText("0");
+      const expected = {
+        darwin: chrome,
+        linux: Math.round(chrome),
+      }[process.platform];
+      if (expected === undefined) continue;
+      assert.ok(
+        Math.abs(width - expected) <= 0.005,
+        `${process.platform} ${weight}: ${width}, expected ${expected}`,
+      );
+    }
+  });
+
+  test("a paragraph's fontStyle weight keeps its fraction", () => {
+    const laidOut = (weight) => {
+      const pb = ParagraphBuilder.Make({
+        textStyle: {
+          fontSize: 1000,
+          fontFamilies: ["FractionOswald"],
+          fontStyle: { weight },
+        },
+      });
+      pb.addText("0");
+      const paragraph = pb.build();
+      paragraph.layout(10000);
+      return paragraph.getMaxIntrinsicWidth();
+    };
+    for (const [weight, chrome] of CHROME) {
+      const expected = {
+        darwin: chrome,
+        linux: Math.round(chrome),
+      }[process.platform];
+      if (expected === undefined) continue;
+      const width = laidOut(weight);
+      assert.ok(
+        Math.abs(width - expected) <= 0.005,
+        `${process.platform} ${weight}: ${width}, expected ${expected}`,
+      );
+    }
+  });
+});
+
 describe("measureText reports the laid-out height", () => {
   // `lines[].height` is the ink join of one line, so summing it does not
   // give the laid-out box -- which is the reason `height` is reported
