@@ -33,7 +33,7 @@ use crate::{
     export::VectorFeatures,
     font::GenericFamily,
     font_library::{FontLibrary, ResolvedFont, generic_name, text_hinting},
-    gpu::RenderingEngine,
+    gpu::{self, RenderingEngine},
     gradient::{BoxedCanvasGradient, CanvasGradient},
     node::{
         filter::{
@@ -1558,13 +1558,23 @@ impl Context2D {
         page.picture(None).map(|picture| (picture, features))
     }
 
+    /// The pixels of `crop`, played back and read for `opts` on `engine`.
+    ///
+    /// In an autorelease pool of its own, as every entry point that touches
+    /// Metal is -- see [`gpu::autorelease`]. Reading a GPU page back makes
+    /// Metal objects that are autoreleased; read from Node's main thread,
+    /// which has no pool, they were never drained, and each whole-page read
+    /// of a 2000 by 1600 canvas kept 12.2 MB, about the size of what it
+    /// read.
     pub fn pixels(
         &mut self,
         crop: IRect,
         opts: ExportOptions,
         engine: RenderingEngine,
     ) -> Result<Vec<u8>, String> {
-        self.recorder.borrow_mut().pixels(crop, opts, engine)
+        gpu::autorelease(|| {
+            self.recorder.borrow_mut().pixels(crop, opts, engine)
+        })
     }
 
     /// As [`Context2D::pixels`], with the destination alpha mode chosen
@@ -1576,9 +1586,11 @@ impl Context2D {
         engine: RenderingEngine,
         alpha_type: AlphaType,
     ) -> Result<Vec<u8>, String> {
-        self.recorder
-            .borrow_mut()
-            .pixels_as(crop, opts, engine, alpha_type)
+        gpu::autorelease(|| {
+            self.recorder
+                .borrow_mut()
+                .pixels_as(crop, opts, engine, alpha_type)
+        })
     }
 
     pub fn blit_pixels(
