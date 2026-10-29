@@ -15,20 +15,22 @@
 //! `submit(SyncCpu::Yes)`, whose answer is the status of the buffer it waited
 //! on. A draw that did not run is drawn once more on a fresh surface, and a
 //! second failure is reported with [`discarded`] rather than handed on as
-//! pixels.
+//! pixels. A read served by tiles nothing has been drawn into since their last
+//! confirmation goes without one, since it would wait on nothing of theirs.
 //!
 //! What this cannot see is the readback's own buffer: Skia waits on it and
 //! drops the answer -- see the `UPSTREAM:` note at the readbacks in
 //! `context::page`.
 //!
-//! **The check costs one GPU round trip per readback.** The readback already
-//! waits for the GPU once; this adds a second wait in front of it. Measured on
-//! a release build, Apple M4 Pro: a 64x48 PNG export goes from about 380 to
-//! 500 microseconds, a raw export from 240 to 350, a `getImageData` from 220
-//! to 300 -- 30 to 45 percent. On a 2048x1536 page the difference is inside
-//! the noise of a 4.6 to 51 ms operation, and the first operation of a process
-//! is unchanged within its spread. Flushing and submitting without waiting
-//! costs nothing measurable, which is what pins the cost on the wait.
+//! **The check costs one GPU round trip per readback after a draw.** The
+//! readback already waits for the GPU once; this adds a second wait in front of
+//! it. Measured on a release build, Apple M4 Pro: a 64x48 PNG export goes from
+//! about 380 to 500 microseconds, a raw export from 240 to 350, a
+//! `getImageData` from 220 to 300 -- 30 to 45 percent. On a 2048x1536 page the
+//! difference is inside the noise of a 4.6 to 51 ms operation, and the first
+//! operation of a process is unchanged within its spread. Flushing and
+//! submitting without waiting costs nothing measurable, which is what pins the
+//! cost on the wait.
 //!
 //! It is paid because the alternative is pixels that are wrong with no error.
 //! It stays until Skia reports a failed draw as well as a failed copy: its
@@ -336,6 +338,25 @@ mod tests {
         };
         seam::discard(Some(page), 2);
         let read = canvas.context().get_image_data(0.0, 0.0, 8.0, 8.0);
+        assert_discarded(read, "drawing tiles for a read");
+    }
+
+    #[test]
+    fn a_tile_drawn_into_after_its_confirmation_is_confirmed_again() {
+        let Some((mut canvas, page)) = drawn(1024.0, 1024.0) else {
+            return;
+        };
+        let ctx = canvas.context();
+        let first = ctx.get_image_data(0.0, 0.0, 8.0, 8.0).expect("read");
+        // Nothing drawn since that read confirmed the tile, so the next read
+        // goes without asking -- and an armed discard stays unused.
+        seam::discard(Some(page), 2);
+        let again = ctx.get_image_data(0.0, 0.0, 8.0, 8.0).expect("read");
+        assert_eq!(again.pixels(), first.pixels());
+        assert_eq!(seam::unused(page), 2, "an unchanged tile went unconfirmed");
+        // A draw into the tile re-arms the check, which the discards refuse.
+        ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+        let read = ctx.get_image_data(0.0, 0.0, 8.0, 8.0);
         assert_discarded(read, "drawing tiles for a read");
     }
 
