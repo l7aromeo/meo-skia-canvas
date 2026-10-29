@@ -256,6 +256,10 @@ fn a_blurred_path_on_float_pixels_is_the_exact_gaussian_unrounded() {
         (PixelDepth::F16, F16_ROUNDING),
         (PixelDepth::F32, F32_ROUNDING),
     ] {
+        // The GPU half is skipped on Metal and Vulkan, where
+        // `RenderingEngine::can_composite` refuses float pages and the canvas
+        // is drawn on the CPU; it runs where a backend composites
+        // float.
         for gpu in [false, true] {
             for sigma in [2.0f32, 8.0, 30.0] {
                 let filter = format!("blur({sigma}px)");
@@ -889,6 +893,43 @@ fn a_blurred_rounded_rectangle_past_the_page_is_the_exact_gaussian_of_the_whole_
                 "sigma {sigma}, at {at:?} on {size:?}: {worst:.2} levels off"
             );
         }
+    }
+    // Past the blur's reach the layer cuts the draw where the page's edge
+    // would, and on the CPU Skia then rasterises it by another route -- see
+    // `region` in `src/context/chain.rs`. On the GPU, and past the bottom
+    // edge, it is exact; past the right edge blurred by 2px it is 15
+    // pixels off, under a level each, and blurred by 8px exact.
+    let beyond = [
+        (true, (260.0, 30.25), (160, 0, 140, 100), 2.0f32, 0),
+        (true, (260.0, 30.25), (160, 0, 140, 100), 8.0, 0),
+        (true, (30.25, 185.0), (0, 100, 140, 100), 2.0, 0),
+        (true, (30.25, 185.0), (0, 100, 140, 100), 8.0, 0),
+        (false, (30.25, 185.0), (0, 100, 140, 100), 2.0, 0),
+        (false, (30.25, 185.0), (0, 100, 140, 100), 8.0, 0),
+        (false, (260.0, 30.25), (160, 0, 140, 100), 2.0, 15),
+        (false, (260.0, 30.25), (160, 0, 140, 100), 8.0, 0),
+    ];
+    for (gpu, at, window, sigma, off) in beyond {
+        let Some(misses) = far_misses_past(
+            gpu,
+            (300.0, 200.0),
+            at,
+            window,
+            sigma,
+            PAST_THE_PAGE,
+        ) else {
+            continue;
+        };
+        let worst = misses
+            .iter()
+            .map(|(_, got, exact)| (f64::from(*got) - exact).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            misses.len() <= off && worst < 1.0,
+            "gpu {gpu}, sigma {sigma}, at {at:?}: {} pixels off the exact \
+             blur, at most {worst:.2} levels",
+            misses.len(),
+        );
     }
 }
 

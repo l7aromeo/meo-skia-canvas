@@ -386,6 +386,16 @@ fn region(
     // are, at the clip widened by the reach, so a draw this cuts is
     // rasterised as any draw the page's clip cuts is; drawing it whole
     // instead would cost a layer the size of the draw.
+    //
+    // On the CPU engine that includes a draw running past the page's edge
+    // by more than the reach: an 80 by 40 rounded rectangle 40 pixels past
+    // the right edge of a 300 by 200 page reads 15 pixels off the exact
+    // blur of the whole draw blurred by 2px, by at most 0.85 of a level,
+    // and none off blurred by 8px; 25 pixels past the bottom edge it is
+    // exact at both. The page's edge cuts an unblurred draw the same way,
+    // and docs/browser-differences.md lists that as "a fill or stroke the
+    // page's edge cuts". The GPU engine's coverage is not moved by its
+    // clip, and there the same draws are exact.
     let reach = reach(steps, layer);
     let clip = Rect::from(canvas.device_clip_bounds()?);
     let clip = match rest.is_identity() {

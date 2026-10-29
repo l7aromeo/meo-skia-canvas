@@ -821,7 +821,14 @@ inside it here, where Chrome's `drawImage` of it reads 72, 28 and 233. `tests/bl
 holds the pixels, at a density and inside a `saveLayer` too. A draw that its clip cuts is the exception, and
 the same one any clipped draw is: Skia anti-aliases a path its clip does not
 contain by another route, whose edges move by up to 15 levels, and the blur
-is exact on what that route draws.
+is exact on what that route draws. On the CPU engine the page's edge is such
+a clip for a draw past it by more than the blur's reach: an 80 by 40 rounded
+rectangle 40 pixels past the right edge of a 300 by 200 page reads 15 pixels
+off the exact blur of the whole draw blurred by 2px, by at most 0.85 of a
+level, and none off blurred by 8px. The cause is the one in the entry on a
+fill or stroke the page's edge cuts, and it is not worked around for the
+same reason. Within the reach, and on the GPU engine, a blur of a draw past
+the page is the exact blur of all of it.
 
 **A blurred rectangle is its exact Gaussian blur, and Chrome's is not.**
 Filter Effects Module Level 1 defines `blur()` as a Gaussian blur whose
