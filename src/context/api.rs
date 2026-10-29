@@ -633,7 +633,9 @@ pub fn resetSize(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let parent = cx.argument::<BoxedCanvas>(1)?;
     let parent = parent.borrow();
 
-    this.borrow_mut().reset_size((parent.width, parent.height));
+    let mut this = this.borrow_mut();
+    this.reset_size((parent.width, parent.height));
+    this.report_resident(&mut cx);
     Ok(cx.undefined())
 }
 
@@ -1465,10 +1467,11 @@ pub fn getImageData(mut cx: FunctionContext) -> JsResult<JsBuffer> {
         IRect::new(ox as i32, oy as i32, (ox + dw) as i32, (oy + dh) as i32);
     let engine = canvas.engine();
 
+    let mut this = this.borrow_mut();
     let data = this
-        .borrow_mut()
         .pixels(crop, opts, engine)
         .or_else(|e| cx.throw_error(e))?;
+    this.report_resident(&mut cx);
     let buffer = JsBuffer::from_slice(&mut cx, &data)?;
 
     Ok(buffer)

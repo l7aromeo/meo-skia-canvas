@@ -415,6 +415,12 @@ fn source_bit_depth(color_type: ColorType) -> BitDepth {
 }
 
 impl PageRecorder {
+    /// The bytes this page holds in pixels. See
+    /// [`RecordingSurface::resident_bytes`].
+    pub fn resident_bytes(&self) -> usize {
+        self.surface.resident_bytes()
+    }
+
     /// Mints a page identity and registers it with the cache.
     ///
     /// A generation, not a handle: content that has been erased gets a new
@@ -1575,6 +1581,25 @@ impl Default for RecordingSurface {
 }
 
 impl RecordingSurface {
+    /// The bytes this holds in pixels: the page surface, its CPU copy and
+    /// every tile.
+    ///
+    /// What the surfaces' own pixels take, which on the GPU leaves out a
+    /// multisampled attachment Skia keeps beside the target and does not
+    /// expose.
+    pub fn resident_bytes(&self) -> usize {
+        let surfaces = self
+            .surface
+            .iter()
+            .chain(self.tiles.values().map(|tile| &tile.surface))
+            .map(|surface| surface.image_info().compute_min_byte_size());
+        let raster = self
+            .raster
+            .iter()
+            .map(|image| image.image_info().compute_min_byte_size());
+        surfaces.chain(raster).sum()
+    }
+
     /// The tile origins a page-space rectangle covers.
     ///
     /// Clamped to the page, so a read that runs past the edge asks for no

@@ -1020,6 +1020,8 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     #[cfg(debug_assertions)]
     cx.export_function("__cachedParagraphs", font_library::cachedParagraphs)?;
     #[cfg(debug_assertions)]
+    cx.export_function("__externalMemory", node::external::external_memory)?;
+    #[cfg(debug_assertions)]
     cx.export_function(
         "__paragraphStyleCopies",
         paragraph::paragraphStyleCopies,

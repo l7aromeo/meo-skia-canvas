@@ -5,6 +5,7 @@ use crate::{
     context::{BoxedContext2D, Context2D},
     font_library::FontLibrary,
     image::{Svg, decode_frame, families_named, frame_delays},
+    node::external::External,
     started,
     utils::*,
 };
@@ -18,7 +19,12 @@ use skia_safe::{
 use std::cell::RefCell;
 
 pub type BoxedImage = JsBox<RefCell<Image>>;
-impl Finalize for Image {}
+impl Finalize for Image {
+    /// Releases what this image told the engine it holds.
+    fn finalize<'a, C: Context<'a>>(mut self, cx: &mut C) {
+        self.external.release(cx);
+    }
+}
 
 pub struct Image {
     src: String,
@@ -62,6 +68,42 @@ pub struct Image {
     /// one library answering two different strings for one colour is worse
     /// than either string.
     current_color: Option<(Color, Declaration)>,
+    /// What the JavaScript engine has been told this image holds. See
+    /// [`Image::report_resident`].
+    external: External,
+}
+
+impl Image {
+    /// The bytes this image keeps natively.
+    ///
+    /// A bitmap decoded on demand keeps its encoded bytes and nothing else:
+    /// the decoded pixels live in Skia's own bounded cache, shared by every
+    /// image, and are not this one's to report. A bitmap held decoded keeps
+    /// its pixels, a recorded SVG its display list, and the sources kept
+    /// beside them -- an animation's encoded frames and an SVG's XML -- are
+    /// counted as well.
+    fn resident_bytes(&self) -> usize {
+        let content = match &self.content {
+            Content::Bitmap(image) => match image.encoded_data() {
+                Some(data) if image.is_lazy_generated() => data.size(),
+                _ => image.image_info().compute_min_byte_size(),
+            },
+            Content::Vector(picture, _) => picture.approximate_bytes_used(),
+            Content::Loading | Content::Broken => 0,
+        };
+        let sources = [&self.encoded, &self.svg_source]
+            .into_iter()
+            .flatten()
+            .map(|data| data.size());
+        content + sources.sum::<usize>()
+    }
+
+    /// Tells the JavaScript engine what this image keeps natively now, after
+    /// anything that replaces its content, and released in the finalizer.
+    fn report_resident<'a, C: Context<'a>>(&mut self, cx: &mut C) {
+        let bytes = self.resident_bytes();
+        self.external.hold(cx, bytes);
+    }
 }
 
 impl Default for Image {
@@ -75,6 +117,7 @@ impl Default for Image {
             playback: None,
             svg_source: None,
             current_color: None,
+            external: External::default(),
         }
     }
 }
@@ -452,6 +495,7 @@ pub fn set_current_color(mut cx: FunctionContext) -> JsResult<JsUndefined> {
                 this.current_color = Some(color);
                 this.content = content;
                 this.autosized = autosized;
+                this.report_resident(&mut cx);
             }
             // Bytes that parsed once and no longer do. Thrown rather than
             // ignored: the alternative is an assignment that reports success
@@ -508,6 +552,7 @@ pub fn set_data<'a>(
     } else {
         this.content = Content::Broken
     }
+    this.report_resident(&mut cx);
 
     Ok(cx.boolean(this.content.is_drawable()))
 }
@@ -609,6 +654,7 @@ pub fn take_frame(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     this.content = content;
     this.delays = delays;
     this.encoded = encoded;
+    this.report_resident(&mut cx);
     Ok(cx.undefined())
 }
 
