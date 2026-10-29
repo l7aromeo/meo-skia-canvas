@@ -1401,11 +1401,9 @@ fn color_function_to_srgb_f64(space: &str, components: [f64; 3]) -> [f64; 3] {
 ///
 /// For the callers that need a colour in sRGB rather than tagged with its
 /// space: a gradient stop, an 8-bit `SkColor`, a getter's report,
-/// `RgbaLinear::from_css`, and a colour in a space no canvas holds, `xyz`
-/// among them. A paint keeps the colour in the space it was named
-/// in, so a P3 colour on a P3 canvas needs no conversion at all, and a round
-/// trip through sRGB would cost it about a level of the eight the readback
-/// quantises to. Computed in `f64` and rounded to `f32` once.
+/// `RgbaLinear::from_css`, a paint drawn onto an sRGB page -- see
+/// [`skia_paint_color_onto`] -- and a colour in a space no canvas holds,
+/// `xyz` among them. Computed in `f64` and rounded to `f32` once.
 fn color_function_to_srgb(color: Color4f, space: &str) -> Color4f {
     let wide = [color.r, color.g, color.b].map(f64::from);
     let [r, g, b] = color_function_to_srgb_f64(space, wide).map(|c| c as f32);
@@ -3541,6 +3539,40 @@ pub fn skia_paint_color(
     space: &ColorSpace,
 ) -> (Color4f, ColorSpace) {
     (color, space.clone())
+}
+
+/// `color` in `space` as Skia is handed it for a paint drawn onto a page in
+/// `destination`.
+///
+/// Skia stores a paint's colour in sRGB, converting it when it is set, and
+/// converts sRGB into the page's space at the draw, both through skcms's
+/// approximate transfer function. Onto an sRGB page the second conversion is
+/// the identity, so a colour in a space this crate names is encoded into
+/// sRGB here, in `f64`, and handed over as sRGB: it lands as named. Onto any
+/// other page the draw approximates whatever it is handed, and the colour
+/// goes as [`skia_paint_color`] gives it, which measured closer there -- a
+/// mean error of 5.0e-5 against 7.7e-5 over a sweep of reds on a linear F32
+/// page.
+pub fn skia_paint_color_onto(
+    color: Color4f,
+    space: &ColorSpace,
+    destination: &ColorSpace,
+) -> (Color4f, ColorSpace) {
+    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+    // Re-check: cargo test an_srgb_float_fill_reads_back_as_its_encoding with
+    // this returning `skia_paint_color(color, space)`.
+    //
+    // `SkPaint::setColor(SkColor4f, SkColorSpace*)` (SkPaint.cpp) converts
+    // through `skcms_TransferFunction_eval`, whose `exp2f_` builds its result
+    // from a float near 2^30: what it gives is on a grid 64 ulps wide, and a
+    // linear colour on an sRGB F32 page read back up to 9.6e-5 from its
+    // encoding. On a page in another space the draw-time conversion has the
+    // same grid, which no colour handed over can avoid: worked around for
+    // sRGB pages only.
+    match destination.is_srgb() && color_space_name(space).is_some() {
+        true => (color4f_to_srgb(color, Some(space)), ColorSpace::new_srgb()),
+        false => skia_paint_color(color, space),
+    }
 }
 
 /// Parses a CSS color into 8-bit sRGB, gamut-mapped.

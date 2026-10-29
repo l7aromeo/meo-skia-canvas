@@ -521,6 +521,24 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   space between them, as `blur(2px)brightness(2)`, which read as the blur
   alone.
 
+- **Text widths, line metrics, rects and hit-testing are no longer rounded
+  to hundredths, and a `Paragraph` wraps at the width it is given rather
+  than at that width floored to a whole pixel.** SkParagraph's rounding hack
+  was on for every paragraph, canvas text included: it rounded
+  `measureText().width` and a `Paragraph`'s widths, line metrics,
+  `getRectsForRange` boxes and the glyph edges `getGlyphPositionAtCoordinate`
+  splits at to hundredths, compared line widths rounded when it broke lines,
+  and broke a paragraph laid out at 200.7px as if it were 200px wide. It is
+  off: `measureText("Hamburgefonstiv")` in 24px Oswald is 148.17601 where it
+  was 148.18 and Chrome 156 measures 148.17590, and a paragraph at 200.7px
+  fits "Hamburgefonstiv quick", 200.52 wide, on its first line, as Chrome
+  does, where it wrapped after "Hamburgefonstiv". Code that sizes or
+  compares against these values can see them move by up to half a
+  hundredth, and a paragraph at a fractional width can lay out on fewer
+  lines and stand shorter. A line still fits a paragraph up to a
+  hundredth narrower than it, as SkParagraph's line breaker compares the
+  line's width floored to hundredths; docs/browser-differences.md has it.
+
 ### Security
 
 - **`follow-redirects` is required at `^1.16.1`, up from `^1.15.11`.** It is
@@ -655,6 +673,15 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   already rejected or fired `error`.
 
 ### Fixed
+
+- **A colour named in another space lands exactly on an sRGB float canvas.**
+  On a canvas made with `colorType: "RGBAF32"` in sRGB, a fill, stroke or
+  matte named in another space -- `color(srgb-linear 0.5 0 0)`, say -- read
+  back as much as 9.6e-5 from its sRGB value: Skia stores a paint's colour
+  in sRGB and converts it through an approximate transfer function as it
+  does. Such a colour is now converted here, in double precision, and reads
+  back as named. A canvas in another space keeps up to about 2e-4 from the
+  conversion Skia makes as it draws, which no colour handed to it avoids.
 
 - **A half-float canvas stores the nearest half on x86.** On an x86
   machine, a canvas made with `colorType: "RGBAF16"` truncated each value it
@@ -992,9 +1019,10 @@ false` now takes effect, and its default is on, at Slight, as Chrome draws
   `"1234.5"` 17.4766 centred -- and 5.17px of spacing at 10px Oswald
   measured `"00"` 20.67 where Chrome measures 20.68. The width is now the
   run's advance at every alignment. Over 3,850 cases across seven families,
-  five sizes and five spacings it moved by at most 0.014, and in nine
-  measured in Chrome it is within 0.005 of Chrome's width, where the old
-  one was off by as much as 0.009. A wrapped run (`textWrap`) is unchanged.
+  five sizes and five spacings it moved by at most 0.014, and in every case
+  measured in Chrome 156 it is within 0.0005 of Chrome's width, where the
+  old one was off by as much as 0.009 -- the widths are no longer rounded to
+  hundredths, under Breaking. A wrapped run (`textWrap`) is unchanged.
 
 - **`measureText().width` is negative where the spacing makes the advance
   negative, and counts a trailing space's spacing, as Chrome does.** At 40px
@@ -1388,6 +1416,13 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   of 0.0015 or less (0.000004 for OkLCh). Chrome reads a hue of about
   356.6 or 23.7 degrees off its own rounding instead.
   `docs/browser-differences.md` has the measurements.
+
+- **Text no longer wraps early at a fractional width.** A `Paragraph` laid
+  out at 200.7px broke as if it were 200px wide, and line widths were
+  compared rounded to hundredths; text now fits where Chrome fits it, to
+  within the hundredth SkParagraph's line breaker floors widths to. The
+  values this moves are under Breaking: "Text widths, line metrics, rects
+  and hit-testing are no longer rounded to hundredths".
 
 ### Added
 

@@ -51,6 +51,7 @@ use crate::{
             ParagraphRecipe, Passes, StyleColours, add_slnt, match_oblique,
             without_paragraph_cache,
         },
+        typography::paragraph_style,
         utils::color4f_to_srgb,
     },
 };
@@ -2545,7 +2546,7 @@ fn build_paragraph_style(
     base_sk_style: &SkTextStyle,
     strut_families: &[String],
 ) -> SkParagraphStyle {
-    let mut paragraph_style = SkParagraphStyle::new();
+    let mut paragraph_style = paragraph_style();
     paragraph_style.set_text_align(style.align.to_skia());
     paragraph_style.set_text_direction(style.direction.to_skia());
     paragraph_style.set_text_style(base_sk_style);
@@ -2600,6 +2601,7 @@ mod tests {
             FontAxisTag, FontLibrary, FontVariation, INSTANCED_POSITIONS,
             variation_axes,
         },
+        started,
     };
     use skia_safe::{
         Data, FontArguments, FontMgr, FourByteTag,
@@ -2769,8 +2771,8 @@ mod tests {
         };
         let font = skia_safe::Font::from_typeface(face, size);
         let text = "Hamburgefonstiv quick 0123";
-        let mut surface = skia_safe::surfaces::raster_n32_premul((900, 120))
-            .expect("a surface");
+        let mut surface =
+            started::raster_n32_premul((900, 120)).expect("a surface");
         surface.canvas().clear(skia_safe::Color::WHITE);
         let mut paint = SkPaint::default();
         paint.set_anti_alias(true);
