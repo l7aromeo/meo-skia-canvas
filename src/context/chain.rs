@@ -77,25 +77,75 @@ pub(crate) fn apply(
     paint: &Paint,
     draw: impl FnOnce(&SkCanvas),
 ) {
+    if let Some(outcome) = run(canvas, steps, content, depth, paint, draw) {
+        outcome.composite(canvas, paint);
+    }
+}
+
+/// What a chain leaves, before it is composited: the image its last step
+/// made, the device region the image covers under `rest`, and `rest`, the
+/// part of the canvas's transform the layer was not drawn in.
+#[derive(Clone)]
+pub(crate) struct Outcome {
+    image: Image,
+    region: IRect,
+    rest: Matrix,
+}
+
+impl Outcome {
+    /// Draws the image back onto `canvas` at its place, through `paint` less
+    /// its alpha, which the last step already took: unresampled where the
+    /// rest of the transform is the identity, which every
+    /// scale-and-translate playback leaves it. `canvas`'s clip, not the
+    /// chain's, decides what of it shows.
+    pub(crate) fn composite(&self, canvas: &SkCanvas, paint: &Paint) {
+        let sampling = match self.rest.is_identity() {
+            true => SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
+            false => SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
+        };
+        let mut paint = paint.clone();
+        paint.set_alpha_f(1.0);
+        canvas.save();
+        canvas.set_matrix(&self.rest.into());
+        canvas.draw_image_with_sampling_options(
+            &self.image,
+            (self.region.left as f32, self.region.top as f32),
+            sampling,
+            Some(&paint),
+        );
+        canvas.restore();
+    }
+
+    /// The bytes the image holds.
+    pub(crate) fn bytes(&self) -> usize {
+        self.image.image_info().compute_min_byte_size()
+    }
+}
+
+/// Runs the chain [`apply`] does, up to the composite. `None` where nothing
+/// would show or no layer could be made.
+pub(crate) fn run(
+    canvas: &SkCanvas,
+    steps: &[Step],
+    content: Option<Rect>,
+    depth: Depth,
+    paint: &Paint,
+    draw: impl FnOnce(&SkCanvas),
+) -> Option<Outcome> {
     let base = canvas.local_to_device_as_3x3();
-    let Some((layer, rest)) = split(&base) else {
-        return;
-    };
-    let Some(region) = region(canvas, steps, content, &layer, &rest) else {
-        return;
-    };
+    let (layer, rest) = split(&base)?;
+    let region = region(canvas, steps, content, &layer, &rest)?;
+    #[cfg(test)]
+    RUNS.with(|runs| runs.set(runs.get() + 1));
     let on_gpu = is_on_gpu(canvas);
     let (region, drawn) = placed(canvas, region, rest.is_identity(), on_gpu);
     // The region alone where Skia refuses a layer from the device's origin,
     // as `placed` says.
-    let Some((mut surface, drawn)) = std::iter::once(drawn)
+    let (mut surface, drawn) = std::iter::once(drawn)
         .chain((drawn != region).then_some(region))
         .find_map(|drawn| {
             layer_surface(canvas, depth, drawn).map(|surface| (surface, drawn))
-        })
-    else {
-        return;
-    };
+        })?;
     let mut context = gpu_of(&mut surface);
     let offscreen = surface.canvas();
     // Only what the chain reads is cleared: the rows and columns the CPU's
@@ -110,16 +160,14 @@ pub(crate) fn apply(
     offscreen.set_matrix(&Matrix::concat(&origin, &layer).into());
     draw(offscreen);
     let snapshot = surface.image_snapshot();
-    let Some(mut image) = (match read == IRect::from_size(drawn.size()) {
+    let mut image = match read == IRect::from_size(drawn.size()) {
         true => Some(snapshot),
         false => snapshot.make_subset(
             None,
             read,
             RequiredProperties { mipmapped: false },
         ),
-    }) else {
-        return;
-    };
+    }?;
 
     let scale = (layer.scale_x().abs(), layer.scale_y().abs());
     let last = steps.len().saturating_sub(1);
@@ -140,30 +188,37 @@ pub(crate) fn apply(
                 filtered(context.as_mut(), &image, filter, gain)
             }
         };
-        let Some(next) = next else {
-            return;
-        };
-        image = next;
+        image = next?;
     }
+    Some(Outcome {
+        image,
+        region,
+        rest,
+    })
+}
 
-    // Back onto the page at the layer's place: unresampled where the rest
-    // of the transform is the identity, which every scale-and-translate
-    // playback leaves it.
-    let sampling = match rest.is_identity() {
-        true => SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
-        false => SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
-    };
-    let mut paint = paint.clone();
-    paint.set_alpha_f(1.0);
-    canvas.save();
-    canvas.set_matrix(&rest.into());
-    canvas.draw_image_with_sampling_options(
-        &image,
-        (region.left as f32, region.top as f32),
-        sampling,
-        Some(&paint),
-    );
-    canvas.restore();
+#[cfg(test)]
+impl Outcome {
+    /// A transparent result `side` pixels square at the origin, for the
+    /// tests of what keeps results.
+    pub(crate) fn blank(side: i32) -> Self {
+        let info = ImageInfo::new_n32_premul((side, side), None);
+        let image = started::raster(&info, None, None)
+            .expect("a surface")
+            .image_snapshot();
+        Self {
+            image,
+            region: IRect::from_wh(side, side),
+            rest: Matrix::new_identity(),
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many chains [`run`] has run on this thread that had a region to
+    /// work on, which the tests of a replayed group count by.
+    pub(crate) static RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// `base` as `rest * layer`: `layer` the scale from canvas pixels to the
@@ -379,13 +434,13 @@ enum Gpu {}
 
 /// Whether `canvas` draws on the GPU.
 #[cfg(any(feature = "metal", feature = "vulkan"))]
-fn is_on_gpu(canvas: &SkCanvas) -> bool {
+pub(crate) fn is_on_gpu(canvas: &SkCanvas) -> bool {
     canvas.recording_context().is_some()
 }
 
 /// Whether `canvas` draws on the GPU: never, in a build without a backend.
 #[cfg(not(any(feature = "metal", feature = "vulkan")))]
-fn is_on_gpu(_: &SkCanvas) -> bool {
+pub(crate) fn is_on_gpu(_: &SkCanvas) -> bool {
     false
 }
 

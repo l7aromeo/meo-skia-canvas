@@ -32,7 +32,7 @@ use crate::{
     context::{
         blur_mask,
         chain::{self, Depth, Step},
-        coverage_of,
+        chain_cache, coverage_of,
         faint::{Faint, composited},
     },
     node::filter::MASK_BLUR_MAX_SIGMA,
@@ -194,7 +194,7 @@ impl Group {
     /// with the one the canvas carries: a recorded picture replays its
     /// matrices relative to the canvas it is played onto, and these have to
     /// as well, or a density or a tile's origin would be lost.
-    pub fn playback(&self, canvas: &SkCanvas, target: Target) {
+    pub fn playback(self: &Arc<Self>, canvas: &SkCanvas, target: Target) {
         let base = canvas.local_to_device_as_3x3();
         canvas.save();
         if let Some(clip) = self.clip.as_ref().and_then(Path::deserialize) {
@@ -215,7 +215,16 @@ impl Group {
                     ),
                     (None, _) => None,
                 };
-                chain::apply(
+                // A group a canvas drawn into another brings with it is played
+                // once for each time that canvas is, and its chain is run the
+                // first of those -- see `chain_cache`.
+                let key = chain_cache::Key::of(self, canvas);
+                if let Some(outcome) = key.as_ref().and_then(chain_cache::get) {
+                    outcome.composite(canvas, &paint);
+                    canvas.restore();
+                    return;
+                }
+                let outcome = chain::run(
                     canvas,
                     steps,
                     content,
@@ -238,6 +247,12 @@ impl Group {
                         }
                     },
                 );
+                if let Some(outcome) = outcome {
+                    outcome.composite(canvas, &paint);
+                    if let Some(key) = key {
+                        chain_cache::put(key, outcome);
+                    }
+                }
             }
             (composite, target) => {
                 canvas.set_matrix(&Matrix::concat(&base, &self.matrix).into());

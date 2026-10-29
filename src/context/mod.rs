@@ -21,6 +21,7 @@ use std::{cell::RefCell, rc::Rc, sync::Arc};
 pub mod api;
 pub(crate) mod blur_mask;
 pub(crate) mod chain;
+pub(crate) mod chain_cache;
 pub(crate) mod exact_blur;
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 pub(crate) mod exact_blur_gpu;
