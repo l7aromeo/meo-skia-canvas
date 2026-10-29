@@ -430,6 +430,109 @@ fn a_canvas_drawn_in_casts_its_drop_shadow_past_where_it_is_drawn() {
     }
 }
 
+#[test]
+fn a_drop_shadow_past_a_canvas_drawn_in_survives_the_layer_around_it() {
+    // A read inside an open layer replays the group the drawn canvas makes,
+    // and a plain layer around it is confined to what its contents reach:
+    // the shadow lies outside the destination, so a group reporting the
+    // destination as its reach would have the parent layer cut it off.
+    for gpu in [false, true] {
+        let mut source = Canvas::new(40.0, 40.0);
+        source.set_gpu(gpu);
+        source
+            .context()
+            .set_fill_style_css("red")
+            .expect("a colour");
+        source.context().fill_rect(0.0, 0.0, 40.0, 40.0);
+        let mut canvas = Canvas::new(SIZE.0, SIZE.1);
+        canvas.set_gpu(gpu);
+        if gpu && canvas.engine_kind() != EngineKind::Gpu {
+            continue;
+        }
+        let ctx = canvas.context();
+        ctx.save_layer_with(0.5, None, None);
+        ctx.set_filter_css("drop-shadow(30px 0px 0px blue)")
+            .expect("a filter");
+        ctx.draw_canvas(&mut source, 60.0, 30.0);
+        for open in [true, false] {
+            if !open {
+                ctx.restore();
+            }
+            let data =
+                ctx.get_image_data(0.0, 50.0, SIZE.0, 1.0).expect("pixels");
+            let pixel = |x: usize| &data.pixels()[x * 4..x * 4 + 4];
+            let (shadow, square) = (pixel(115), pixel(80));
+            assert!(
+                shadow[2] == 255
+                    && shadow[0] == 0
+                    && (127..=128).contains(&shadow[3]),
+                "gpu {gpu}, layer open {open}: the shadow reads {shadow:?}"
+            );
+            assert!(
+                square[0] == 255
+                    && square[2] == 0
+                    && (127..=128).contains(&square[3]),
+                "gpu {gpu}, layer open {open}: the square reads {square:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_flood_through_a_canvas_drawn_in_covers_the_page_as_chrome_does() {
+    // Chrome 156 floods the whole canvas when an SVG `feFlood` filter draws
+    // a canvas in: on a 300 by 200 page, blue 50 pixels right of the
+    // destination and 80 below it, whatever the filter region. An image filter
+    // that paints transparent pixels is this library's way to the same
+    // draw, and the destination bounds what is drawn, not what the filter
+    // paints -- inside an open layer as well as on the page.
+    let flood = ImageFilter::from_color_filter(
+        ColorFilter::blend(
+            RgbaLinear::from_srgb8(0, 0, 255, 1.0),
+            BlendMode::Copy,
+        )
+        .expect("a blend"),
+        None,
+        None,
+    )
+    .expect("a flood");
+    for gpu in [false, true] {
+        for in_layer in [false, true] {
+            let mut source = Canvas::new(40.0, 40.0);
+            source.set_gpu(gpu);
+            source
+                .context()
+                .set_fill_style_css("red")
+                .expect("a colour");
+            source.context().fill_rect(0.0, 0.0, 40.0, 40.0);
+            let mut canvas = Canvas::new(SIZE.0, SIZE.1);
+            canvas.set_gpu(gpu);
+            if gpu && canvas.engine_kind() != EngineKind::Gpu {
+                continue;
+            }
+            let ctx = canvas.context();
+            if in_layer {
+                ctx.save_layer();
+            }
+            ctx.set_image_filter(Some(&flood));
+            ctx.draw_canvas(&mut source, 60.0, 30.0);
+            if in_layer {
+                ctx.restore();
+            }
+            for (x, y) in
+                [(80.0, 50.0), (150.0, 50.0), (80.0, 90.0), (2.0, 2.0)]
+            {
+                let data = ctx.get_image_data(x, y, 1.0, 1.0).expect("a pixel");
+                assert_eq!(
+                    data.pixels(),
+                    [0, 0, 255, 255],
+                    "gpu {gpu}, in a layer {in_layer}: ({x}, {y})"
+                );
+            }
+        }
+    }
+}
+
 /// A 40px image whose alpha varies across it, so a blur has structure to
 /// spread and not only an edge.
 fn varied_image() -> Image {
@@ -612,13 +715,181 @@ fn far_misses(
     window: (usize, usize, usize, usize),
     sigma: f32,
 ) -> Option<Vec<(usize, u8, f64)>> {
-    let drawn: Vec<f64> = far(gpu, size, at, "none", window)?
-        .into_iter()
-        .map(|a| f64::from(a) / 255.0)
+    far_misses_past(gpu, size, at, window, sigma, (0, 0))
+}
+
+/// [`far_misses`], with the unfiltered draw the reference is blurred from
+/// made on a canvas larger by `pad.0` pixels before the page on both axes,
+/// the draw moved in by as much, and `pad.1` after it, so that what it
+/// draws past the page is there to blur -- the blur of a draw reaching off
+/// the page includes that part, and the page itself cannot hold it.
+/// Compared inside `window`, on the page.
+fn far_misses_past(
+    gpu: bool,
+    size: (f32, f32),
+    at: (f32, f32),
+    window: (usize, usize, usize, usize),
+    sigma: f32,
+    pad: (usize, usize),
+) -> Option<Vec<(usize, u8, f64)>> {
+    let (left, top, width, height) = window;
+    let (before, after) = pad;
+    let wide = (left, top, width + before + after, height + before + after);
+    let (shift, grow) = (before as f32, (before + after) as f32);
+    let drawn: Vec<f64> = far(
+        gpu,
+        (size.0 + grow, size.1 + grow),
+        (at.0 + shift, at.1 + shift),
+        "none",
+        wide,
+    )?
+    .into_iter()
+    .map(|a| f64::from(a) / 255.0)
+    .collect();
+    let blurred_wide = sampled(&drawn, wide.2, f64::from(sigma));
+    let reference: Vec<f64> = (before..before + height)
+        .flat_map(|row| {
+            let start = row * wide.2 + before;
+            blurred_wide[start..start + width].iter().copied()
+        })
         .collect();
-    let reference = sampled(&drawn, window.2, f64::from(sigma));
     let blurred = far(gpu, size, at, &format!("blur({sigma}px)"), window)?;
     Some(misses(&blurred, &reference))
+}
+
+/// The reference a page's right or bottom edge is measured against: the
+/// unfiltered draw on a canvas 40 pixels larger after the page, so the part
+/// past the edge is drawn and nothing moves.
+const PAST_THE_PAGE: (usize, usize) = (0, 40);
+
+/// The reference a page's left or top edge is measured against: the draw
+/// moved 64 pixels in, onto a canvas that much larger before the page. A
+/// draw starting off the page has no reference that does not move it, and
+/// the CPU's anti-aliasing depends on where a draw lies, so on the CPU the
+/// two meet only to within a level: a draw wholly inside the page, exact
+/// against itself unmoved, is 32 pixels off this reference and 17 off one
+/// moved 40.
+const BEFORE_THE_PAGE: (usize, usize) = (64, 0);
+
+#[test]
+fn a_blurred_rounded_rectangle_past_the_page_is_the_exact_gaussian_of_the_whole_draw()
+ {
+    // The blur of a draw reaching off the page includes the part off it, as
+    // a draw cut at the page would not: against a reference made on the
+    // page, these read 92 levels off. The CPU's past the right and bottom
+    // edges, and the GPU's past every edge, are exact.
+    let exact = [
+        (
+            true,
+            (300.0, 200.0),
+            (-3.0, 30.25),
+            (0, 0, 140, 100),
+            BEFORE_THE_PAGE,
+        ),
+        (
+            true,
+            (300.0, 200.0),
+            (30.25, -3.0),
+            (0, 0, 140, 100),
+            BEFORE_THE_PAGE,
+        ),
+        (
+            true,
+            (300.0, 200.0),
+            (223.0, 30.25),
+            (160, 0, 140, 100),
+            PAST_THE_PAGE,
+        ),
+        (
+            true,
+            (300.0, 200.0),
+            (30.25, 163.0),
+            (0, 100, 140, 100),
+            PAST_THE_PAGE,
+        ),
+        (
+            false,
+            (300.0, 200.0),
+            (223.0, 30.25),
+            (160, 0, 140, 100),
+            PAST_THE_PAGE,
+        ),
+        (
+            false,
+            (300.0, 200.0),
+            (30.25, 163.0),
+            (0, 100, 140, 100),
+            PAST_THE_PAGE,
+        ),
+        (
+            false,
+            (300.0, 200.0),
+            (222.75, 165.5),
+            (160, 100, 140, 100),
+            PAST_THE_PAGE,
+        ),
+        (
+            false,
+            (16384.0, 120.0),
+            (16290.0, 30.25),
+            (16244, 0, 140, 100),
+            PAST_THE_PAGE,
+        ),
+        (
+            false,
+            (120.0, 16384.0),
+            (20.25, 16330.5),
+            (0, 16284, 120, 100),
+            PAST_THE_PAGE,
+        ),
+    ];
+    for (gpu, size, at, window, pad) in exact {
+        for sigma in [2.0f32, 8.0] {
+            let Some(misses) =
+                far_misses_past(gpu, size, at, window, sigma, pad)
+            else {
+                continue;
+            };
+            assert!(
+                misses.is_empty(),
+                "gpu {gpu}, sigma {sigma}, at {at:?} on {size:?}: {} pixels \
+                 off the exact blur, first {:?}",
+                misses.len(),
+                &misses[..misses.len().min(4)],
+            );
+        }
+    }
+    // The CPU's past the left and top edges, within a level of the draw
+    // moved in -- see [`BEFORE_THE_PAGE`].
+    let near = [
+        ((300.0, 200.0), (-3.0, 30.25), (0, 0, 140, 100)),
+        ((300.0, 200.0), (30.25, -3.0), (0, 0, 140, 100)),
+        ((300.0, 200.0), (-3.0, -3.0), (0, 0, 140, 100)),
+        ((300.0, 200.0), (-5.5, 30.25), (0, 0, 140, 100)),
+        ((16384.0, 120.0), (-3.0, 30.25), (0, 0, 140, 100)),
+        ((120.0, 16384.0), (20.25, -3.0), (0, 0, 120, 100)),
+    ];
+    for (size, at, window) in near {
+        for sigma in [2.0f32, 8.0] {
+            let misses = far_misses_past(
+                false,
+                size,
+                at,
+                window,
+                sigma,
+                BEFORE_THE_PAGE,
+            )
+            .expect("the CPU is always there");
+            let worst = misses
+                .iter()
+                .map(|(_, got, exact)| (f64::from(*got) - exact).abs())
+                .fold(0.0, f64::max);
+            assert!(
+                worst < 1.0,
+                "sigma {sigma}, at {at:?} on {size:?}: {worst:.2} levels off"
+            );
+        }
+    }
 }
 
 #[test]
