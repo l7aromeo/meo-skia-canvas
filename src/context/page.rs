@@ -3659,10 +3659,9 @@ impl Page {
         // Pixels: Skia draws this picture itself, as a pattern's or an
         // image's, and draws that as pixels. Its PDF backend writes such a
         // pattern as an image whichever form the picture holds: the same
-        // file either way, measured.
-        self.layers
-            .iter()
-            .for_each(|entry| entry.playback(output, Target::Pixels));
+        // file either way, measured. A run's pieces share their clip here --
+        // see `play_entries`.
+        play_entries(&self.layers, output, Target::Pixels);
         compositor.finish_recording_as_picture(None)
     }
 

@@ -3305,6 +3305,99 @@ mod tests {
         }
     }
 
+    /// How many clip groups the picture of a page -- what a canvas drawn
+    /// into another, or used as a pattern, is replayed into -- writes when it
+    /// is played into an SVG, which writes one for each clip applied.
+    fn picture_clips(canvas: &mut crate::canvas::Canvas) -> usize {
+        let page = canvas.page(0).expect("a page").inner.page();
+        let picture = page.picture(None).expect("a picture");
+        // The size `program` draws at.
+        let svg =
+            skia_safe::svg::Canvas::new(Rect::from_wh(200.0, 120.0), None);
+        svg.draw_picture(&picture, None, None);
+        let text = svg.end();
+        text.as_bytes()
+            .windows(b"<clipPath".len())
+            .filter(|w| *w == b"<clipPath")
+            .count()
+    }
+
+    /// The picture a page is replayed into for a canvas drawn into another,
+    /// or used as a pattern, applies each frame's clip once, whether or not
+    /// the page was read between its draws. A read splits a run into pieces,
+    /// and each piece applied the clip again: on a raster that rebuilds
+    /// Skia's anti-aliased clip mask for every piece, which a page of cut
+    /// draws drawn into another paid for four milliseconds of in each copy.
+    #[test]
+    fn a_page_drawn_into_another_applies_a_frames_clip_once() {
+        let plain = picture_clips(&mut program(&CLIPPED, false, true).canvas);
+        assert!(plain > 0, "the page applies its clips");
+        for steps in with_each(Step::Read) {
+            let clips = picture_clips(&mut program(&steps, false, true).canvas);
+            assert_eq!(clips, plain, "clips in the picture of {steps:?}");
+        }
+    }
+
+    /// The pixels, at density 2, of a page used as a pattern filling another
+    /// canvas -- what Skia makes of the picture the page is replayed into,
+    /// which a canvas drawn in through `drawImage` takes as well -- and of
+    /// the page drawn into another with `draw_canvas`, which carries the
+    /// page's entries into the destination and plays them there.
+    fn drawn_in(
+        steps: &[Step],
+        runs: bool,
+        routed: bool,
+    ) -> (Vec<u8>, Vec<u8>) {
+        page::KEEPS_RUNS.set(runs);
+        let mut source = program(steps, false, routed).canvas;
+        page::KEEPS_RUNS.set(true);
+        let pixels = |canvas: &mut crate::canvas::Canvas| {
+            canvas
+                .to_image_data(
+                    None,
+                    &crate::pixels::ImageDataExport {
+                        density: 2,
+                        ..Default::default()
+                    },
+                )
+                .expect("pixels")
+                .pixels()
+                .to_vec()
+        };
+        let mut filled = crate::canvas::Canvas::new(200.0, 120.0);
+        filled.set_gpu(false);
+        let pattern = filled.context().create_pattern_from_canvas(
+            &mut source,
+            crate::pattern::PatternRepeat::Repeat,
+        );
+        filled.context().set_fill_pattern(&pattern);
+        filled.context().fill_rect(0.0, 0.0, 200.0, 120.0);
+        let mut into = crate::canvas::Canvas::new(200.0, 120.0);
+        into.set_gpu(false);
+        into.context().draw_canvas(&mut source, 0.0, 0.0);
+        (pixels(&mut filled), pixels(&mut into))
+    }
+
+    /// A page used as a pattern draws the pixels it did before runs and the
+    /// cut route, read part way or not: its runs' pieces and cut draws share
+    /// their clip in the picture it is replayed into, and a cut draw clips
+    /// by the path there, so one clip around them applies the clip each
+    /// would. A page drawn in with `draw_canvas` plays its entries on the
+    /// destination, where a cut draw takes the route, so it is held to the
+    /// same page drawn without runs.
+    #[test]
+    fn a_page_drawn_into_another_draws_what_it_did() {
+        let mut programs = vec![CLIPPED.to_vec()];
+        programs.extend(with_each(Step::Read));
+        for steps in &programs {
+            let now = drawn_in(steps, true, true);
+            let before = drawn_in(steps, false, false);
+            let unrun = drawn_in(steps, false, true);
+            assert!(now.0 == before.0, "as a pattern: {steps:?}");
+            assert!(now.1 == unrun.1, "drawn in: {steps:?}");
+        }
+    }
+
     /// How many clips a PDF's content streams set: the `W n` and `W* n`
     /// operators, in every stream inflated.
     fn pdf_clips(pdf: &[u8]) -> usize {

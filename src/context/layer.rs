@@ -686,12 +686,12 @@ impl Group {
 /// these. A read, an export or a draw the clip cuts files what the run has
 /// so far as a piece, and the rest of the run follows as more pieces. Played
 /// as pixels each piece is clipped by itself, as the page's recording clips
-/// a frame; a document plays a run's consecutive pieces under the clip
-/// once, so that it writes the clip once, as for a run nothing split -- see
-/// [`play_entries`]. A clip applied again for each piece is a clip of its
-/// own to a PDF or SVG device, which keys a clip group by the clip's
-/// generation, and the document came out with the clip written once per
-/// piece.
+/// a frame; a document, and a recording a canvas drawn into another is
+/// replayed into, play a run's consecutive pieces under the clip once, as
+/// for a run nothing split -- see [`play_entries`]. A clip applied again for
+/// each piece is a clip of its own to a PDF or SVG device, which keys a clip
+/// group by the clip's generation, and the document came out with the clip
+/// written once per piece.
 #[derive(Debug)]
 pub struct Clipped {
     /// The run the piece belongs to, unique for the process.
@@ -783,18 +783,28 @@ impl Clipped {
 }
 
 /// Plays `entries` onto `canvas` for `target`, in order: each as
-/// [`Layer::playback`] plays it, but for a document's consecutive pieces of
-/// one run, which it plays under their clip once -- see [`Clipped`].
+/// [`Layer::playback`] plays it, but for consecutive pieces of one run
+/// played into a document or a recording, which it plays under their clip
+/// once -- see [`Clipped`].
+///
+/// A recording is what a canvas drawn into another, or used as a pattern,
+/// is replayed into, and Skia rasterizes it later, where every clip applied
+/// rebuilds its anti-aliased clip mask: one for each piece, where the page
+/// applied one for the frame. Its cut draws clip by the path there anyway --
+/// see [`CutOp::playback`] -- so one clip around the run's pieces is the
+/// clip each would apply. A raster or GPU canvas plays each piece under its
+/// own clip, where a cut draw applies its clip as coverage instead.
 pub(crate) fn play_entries(
     entries: &[Layer],
     canvas: &SkCanvas,
     target: Target,
 ) {
+    let grouped = target == Target::Document || !blur_mask::draws_on(canvas);
     let mut at = 0;
     while at < entries.len() {
-        let run = match (&entries[at], target) {
-            (Layer::Clipped(piece), Target::Document) => piece.run,
-            (entry, _) => {
+        let run = match &entries[at] {
+            Layer::Clipped(piece) if grouped => piece.run,
+            entry => {
                 entry.playback(canvas, target);
                 at += 1;
                 continue;
@@ -836,8 +846,8 @@ pub(crate) fn play_entries(
 /// the GPU, whose multisampled coverage the clip does not move, a vector
 /// document, a recording -- it clips as the page always has. A run of cut
 /// draws shares one op. Under a page's clip the op is a piece of the frame's
-/// run -- see [`Clipped`] -- and a document plays its draws under the run's
-/// clip with the draws around them.
+/// run -- see [`Clipped`] -- and a document or a recording plays its draws
+/// under the run's clip with the draws around them.
 #[derive(Clone, Debug)]
 pub struct CutOp {
     /// The draws, in order, each under the transform it was drawn with: the
