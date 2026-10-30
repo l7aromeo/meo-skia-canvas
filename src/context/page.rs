@@ -532,11 +532,16 @@ struct Recorders {
 
 impl Recorders {
     fn new(bounds: Rect, dual: bool) -> Self {
+        Self::new_with(bounds, dual, true)
+    }
+
+    /// As [`Self::new`], with a bounding hierarchy where `bbh` asks for one.
+    fn new_with(bounds: Rect, dual: bool, bbh: bool) -> Self {
         let mut recorders = Recorders {
             pixels: PictureRecorder::new(),
             document: dual.then(PictureRecorder::new),
         };
-        recorders.begin(bounds);
+        recorders.begin_with(bounds, bbh);
         recorders.each(|canvas, _| {
             canvas.save(); // start at depth 2
         });
@@ -565,9 +570,15 @@ impl Recorders {
     }
 
     fn begin(&mut self, bounds: Rect) {
-        self.pixels.begin_recording(bounds, true);
+        self.begin_with(bounds, true);
+    }
+
+    /// Begins every recording in `bounds`, with a bounding hierarchy where
+    /// `bbh` asks for one.
+    fn begin_with(&mut self, bounds: Rect, bbh: bool) {
+        self.pixels.begin_recording(bounds, bbh);
         if let Some(document) = &mut self.document {
-            document.begin_recording(bounds, true);
+            document.begin_recording(bounds, bbh);
         }
     }
 
@@ -642,6 +653,12 @@ struct Run {
 }
 
 impl Run {
+    /// Whether a run records with a bounding hierarchy. Without one a run's
+    /// picture is bounded by the page, and so by the clip's bounds where it
+    /// is played under the clip, rather than by what it draws: finishing it
+    /// skips computing the bounds of every operation.
+    const BBH: bool = false;
+
     /// A run of the frame `frame`, recording into `spare`'s recorders --
     /// recording already, as a run closing hands them back.
     fn open(frame: u64, clip: &Path, matrix: Matrix, spare: Spare) -> Self {
@@ -679,7 +696,7 @@ impl Run {
         let entry = self
             .recorders
             .finish(|recorder| recorder.finish_recording_as_picture(None));
-        self.recorders.begin(bounds);
+        self.recorders.begin_with(bounds, Run::BBH);
         self.recorders.each(|canvas, _| {
             canvas.save(); // start at depth 2
         });
@@ -1021,7 +1038,11 @@ impl PageRecorder {
             && self.run.is_none()
         {
             let spare = self.spare.take().unwrap_or_else(|| Spare {
-                recorders: Recorders::new(self.bounds, self.current.dual()),
+                recorders: Recorders::new_with(
+                    self.bounds,
+                    self.current.dual(),
+                    Run::BBH,
+                ),
                 idle: 0,
             });
             self.run = Some(Run::open(self.frame, clip, matrix, spare));
@@ -1063,7 +1084,7 @@ impl PageRecorder {
                 let _ = recorders.finish(|recorder| {
                     recorder.finish_recording_as_picture(None)
                 });
-                recorders.begin(self.bounds);
+                recorders.begin_with(self.bounds, Run::BBH);
                 recorders.each(|canvas, _| {
                     canvas.save(); // start at depth 2
                 });
