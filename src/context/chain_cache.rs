@@ -33,6 +33,8 @@ use std::{
 };
 
 use parking_lot::Mutex;
+#[cfg(test)]
+use parking_lot::MutexGuard;
 use skia_safe::{Canvas as SkCanvas, IRect};
 
 use crate::{
@@ -137,6 +139,21 @@ pub(crate) struct ChainCache {
 /// workers.
 static CHAINS: LazyLock<Mutex<ChainCache>> = LazyLock::new(Mutex::default);
 
+/// Taken by [`release_cached_chains`] for the release alone, and by
+/// whatever has to keep the results it files for a while -- see
+/// `hold_chain_release`. The memory watcher releases from a thread of its
+/// own whenever rendering has been idle, so nothing else would keep it off.
+static RELEASE: Mutex<()> = Mutex::new(());
+
+/// Holds every release of the cache off for as long as the guard lives:
+/// for a test that counts the chains it runs, which a release in the middle
+/// of it would make it run again. Emptied once mid-test, a page drawn into
+/// itself sixteen times ran 31 to 36 chains where 26 run.
+#[cfg(test)]
+pub(crate) fn hold_chain_release() -> MutexGuard<'static, ()> {
+    RELEASE.lock()
+}
+
 /// Ticks once per use, to order entries for eviction.
 static CHAIN_USES: AtomicU64 = AtomicU64::new(0);
 
@@ -153,6 +170,7 @@ pub(crate) fn put(key: Key, outcome: Outcome) {
 /// Drops every result. Called with the page cache's release, when rendering
 /// has been idle.
 pub(crate) fn release_cached_chains() {
+    let _release = RELEASE.lock();
     let mut cache = CHAINS.lock();
     cache.entries.clear();
     cache.bytes = 0;
@@ -221,11 +239,6 @@ mod tests {
         path::FillRule,
         started,
     };
-
-    /// Taken by the tests that empty the shared cache and by the test that
-    /// counts on it, so that one emptying it does not make the other run a
-    /// chain twice.
-    static SHARED_CACHE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// A group with nothing in it: the cache files by its identity alone.
     fn group() -> Arc<Group> {
@@ -355,7 +368,6 @@ mod tests {
     fn the_idle_release_empties_the_chain_cache() {
         // The shared cache, which other tests fill as they draw; only that a
         // result this test filed is gone afterwards is its to assert.
-        let _shared = SHARED_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         let one = group();
         let key = key(&one, &n32(), &Matrix::new_identity(), clip());
         put(key.clone(), Outcome::blank(8));
@@ -398,10 +410,34 @@ mod tests {
     fn a_canvas_drawn_into_itself_runs_each_rounds_chain_once() {
         // Each round's group holds every earlier round's, so a replay that
         // ran their chains again would run about rounds squared over two.
-        let _shared = SHARED_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let held = hold_chain_release();
         for rounds in [8, 16] {
             let runs = runs_for(rounds);
             assert!(runs <= 2 * rounds, "{rounds} rounds ran {runs} chains");
         }
+        drop(held);
+    }
+
+    #[test]
+    fn a_held_release_waits_for_a_test_that_counts_its_chains() {
+        // What the memory watcher's idle release does from its own thread,
+        // over and over, while a test holding the release off counts its
+        // chains: unheld, a page drawn into itself sixteen times ran 245.
+        let held = hold_chain_release();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let releasing = Arc::clone(&stop);
+        let releaser = std::thread::spawn(move || {
+            while !releasing.load(Ordering::Relaxed) {
+                release_cached_chains();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+        let runs = runs_for(16);
+        stop.store(true, Ordering::Relaxed);
+        // Let go before waiting for the releaser, which may be waiting for
+        // the release this holds.
+        drop(held);
+        releaser.join().expect("the releasing thread");
+        assert!(runs <= 32, "16 rounds ran {runs} chains");
     }
 }

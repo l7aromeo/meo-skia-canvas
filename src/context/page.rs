@@ -3027,7 +3027,7 @@ impl Page {
         let raster = surface.canvas();
         raster.scale((density, density));
         for layer in layers {
-            layer.playback(raster, Target::Pixels);
+            layer.playback(raster, Target::Embedded);
         }
 
         let image = surface.image_snapshot();
