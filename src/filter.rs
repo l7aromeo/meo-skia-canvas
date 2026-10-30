@@ -427,7 +427,7 @@ impl MaskFilter {
 /// `Color`, gamut-mapped into sRGB rather than clipped -- see
 /// `rgba_linear_to_skia_color`.
 fn lit(color: RgbaLinear) -> SkColor {
-    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
     // Re-check: grep -n "light_color: impl Into"
     // ~/.cargo/registry/src/*/skia-safe-*/src/effects/image_filters.rs
     // Every lighting image filter takes its light colour as an `SkColor`, so

@@ -243,7 +243,7 @@ Swap `metal` for `vulkan` on Linux and Windows.
 
 ### Metal and skia-bindings' prebuilt Skia
 
-On macOS, the Skia that skia-bindings 0.153.3 downloads waits at most one second for each Metal shader and pipeline it compiles, then drops the draw. On a loaded machine a process's first image draw, blend mode or gradient can come back missing, with only a line on stderr ("Compilation took longer than 1000 ms"). The npm package's macOS binary is built without that limit, but a crate build uses whatever Skia skia-bindings gives it.
+On macOS, the Skia that skia-bindings 0.156.0 downloads waits at most one second for each Metal shader and pipeline it compiles, then drops the draw. On a loaded machine a process's first image draw, blend mode or gradient can come back missing, with only a line on stderr ("Compilation took longer than 1000 ms"). The npm package's macOS binary is built without that limit, but a crate build uses whatever Skia skia-bindings gives it.
 
 To build without it, compile Skia from source with this repository's patch, `containers/skia-metal-untimed-compile.patch`. `node scripts/skia-source.mjs prepare`, run in a checkout of this repository, fetches rust-skia at the matching tag, applies the patch and prints the directory to set as `SKIA_SOURCE_DIR` for your build. It is about 1 GB, and the build compiles Skia, which takes a few minutes.
 

@@ -1460,7 +1460,7 @@ impl Context2D {
             features,
             |canvas, paint| {
                 if let Some(tile) = self.state.texture(style) {
-                    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+                    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
                     // Re-check: mix the PathEffect into the paint and draw
                     // directly; if the filled bounds are right the two-path
                     // intersection below can go.
@@ -2167,7 +2167,7 @@ impl Context2D {
         style.set_typeface(typeface.clone());
         style.set_font_families(&spec.collection_names);
         style.set_font_style(spec.style());
-        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+        // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
         // Re-check: "17.3px measures as 17.296875px on FreeType" in
         // tests/suite/text.test.js, on Linux, goes red once fixed.
         // Skia's FreeType scaler sets the face's size as 26.6 fixed point
@@ -2322,7 +2322,9 @@ impl Context2D {
                 // laid out for this paint -- see `Typesetter::laid_out`.
                 let run = match &kept {
                     Some(kept) => DrawnRun::Kept(kept.clone()),
-                    None => typesetter.drawn_once(&faint.drawable(paint)),
+                    None => {
+                        typesetter.drawn_once(&faint.drawable(paint), canvas)
+                    }
                 };
                 let (offset, condensation) = (run.offset(), run.condensation());
                 // In a test, an undecorated run can be laid out for this

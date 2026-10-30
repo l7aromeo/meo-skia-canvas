@@ -414,24 +414,26 @@ impl VulkanBackend {
         // make sure the framebuffers match the current window size
         self.prepare_swapchain(self.swapchain.image_extent().into());
 
-        self.get_next_frame().map(|(image_index, acquire_future)| {
-            // pull the appropriate framebuffer and create a skia Surface that
-            // renders to it
-            let framebuffer = self.framebuffers[image_index as usize].clone();
-            let mut surface =
-                self.surface_for_framebuffer(framebuffer.clone(), props);
+        self.get_next_frame()
+            .and_then(|(image_index, acquire_future)| {
+                // pull the appropriate framebuffer and create a skia Surface
+                // that renders to it
+                let framebuffer =
+                    self.framebuffers[image_index as usize].clone();
+                let mut surface =
+                    self.surface_for_framebuffer(framebuffer.clone(), props);
 
-            // pass the suface's canvas to the user-provided callback
-            f(surface.canvas());
+                // pass the suface's canvas to the user-provided callback
+                f(surface.canvas());
 
-            // save a copy of the bitmap for the cache
-            let image = surface.image_snapshot();
+                // save a copy of the bitmap for the cache
+                let image = surface.image_snapshot();
 
-            // display the result
-            self.flush_framebuffer(window, image_index, acquire_future);
-
-            image
-        })
+                // display the result, and hand back the frame only if its draws
+                // reached the GPU
+                self.flush_framebuffer(window, image_index, acquire_future)
+                    .then_some(image)
+            })
     }
 
     fn get_next_frame(&mut self) -> Option<(u32, SwapchainAcquireFuture)> {
@@ -520,14 +522,18 @@ impl VulkanBackend {
         .expect("Vulkan: failed to create render target surface")
     }
 
+    /// Flushes the canvas's contents to the framebuffer and presents it.
+    /// Returns whether the flush succeeded: the framebuffer is presented
+    /// either way, so the swapchain moves on, but a failed flush left the
+    /// frame's draws behind.
     fn flush_framebuffer(
         &mut self,
         window: &Window,
         image_index: u32,
         acquire_future: SwapchainAcquireFuture,
-    ) {
+    ) -> bool {
         // flush the canvas's contents to the framebuffer
-        self.skia_ctx.flush_and_submit();
+        let flushed = self.skia_ctx.flush_and_submit().is_ok();
         self.skia_ctx.free_gpu_resources();
 
         // reclaim leftover resources from the last frame
@@ -540,7 +546,7 @@ impl VulkanBackend {
 
         // send the framebuffer to the gpu and display it on screen
         let Some(last_render) = self.last_render.take() else {
-            return;
+            return flushed;
         };
         let future = last_render
             .join(acquire_future)
@@ -566,6 +572,7 @@ impl VulkanBackend {
                 panic!("Vulkan: swapchain flush failed: {e}");
             }
         };
+        flushed
     }
 }
 

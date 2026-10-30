@@ -733,7 +733,7 @@ fn private_alias(claimed: &str) -> String {
 /// string -- `matchFamily(familyName.c_str())` and
 /// `matchFamilyStyle(familyName.c_str(), ...)` in
 /// skparagraph/src/FontCollection.cpp, lines 187 and 266 at skia-safe
-/// 0.153.3 -- so the name would arrive empty. The prefix's collision
+/// 0.156.0 -- so the name would arrive empty. The prefix's collision
 /// stance is [`private_alias`]'s.
 pub(crate) fn generic_name(generic: GenericFamily) -> String {
     private_alias(generic.to_css())
@@ -1355,7 +1355,7 @@ impl FontLibrary {
             }
         }
 
-        // UPSTREAM: skia-safe 0.153.3 -- #210 -- worked around
+        // UPSTREAM: skia-safe 0.156.0 -- #210 -- worked around
         // Re-check: cargo test the_provider_alone_answers_a_null_family
         // with the two managers composed again -- an `OrderedFontMgr` holding
         // `system` and then this provider. It dies rather than fails while
@@ -1864,7 +1864,7 @@ impl FontLibrary {
     /// styles without comparing their hinting. Kept apart, text of each
     /// hinting keeps every cache of its own, and choosing between them
     /// drops nothing.
-    // UPSTREAM: skia-safe 0.153.3 -- https://github.com/google/skia/commit/e0d79efbf171fdd78063f7673d517491154c9a7a -- worked around
+    // UPSTREAM: skia-safe 0.156.0 -- https://github.com/google/skia/commit/e0d79efbf171fdd78063f7673d517491154c9a7a -- worked around
     // Re-check: cargo test hinted_and_unhinted_text_keep_their_own_hinting
     pub fn set_hinting(&mut self, hinting: bool) -> &mut Self {
         self.collection_hinted = hinting;

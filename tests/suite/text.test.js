@@ -2549,6 +2549,148 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
     }
   });
 
+  test("glyphs sheared past FreeType's limit are drawn sheared", () => {
+    // FreeType draws a glyph unsheared once its transform is sheared past
+    // about 79.65deg, so on Linux such runs are drawn from their outlines.
+    // Each draw here inks the columns its outline covers, which is sheared
+    // everywhere; drawn upright, it would ink a strip a fraction as wide.
+    const EDGE = 2,
+      STEEP = 5.6;
+    const columns = (ctx) => {
+      const { width, height } = ctx.canvas,
+        data = ctx.getImageData(0, 0, width, height).data;
+      let left = width,
+        right = -1;
+      for (let i = 3; i < data.length; i += 4)
+        if (data[i]) {
+          const x = ((i - 3) / 4) % width;
+          left = Math.min(left, x);
+          right = Math.max(right, x + 1);
+        }
+      return [left, right];
+    };
+    const near = (name, [left, right], [from, to]) =>
+      assert.ok(
+        Math.abs(left - from) <= EDGE && Math.abs(right - to) <= EDGE,
+        `${name}: inks ${left}..${right}, its outline ${from.toFixed(1)}..${to.toFixed(1)}`,
+      );
+    const outline = (font) => {
+      const ctx = new Canvas(1, 1).getContext("2d");
+      ctx.font = font;
+      return ctx.outlineText("IH").bounds;
+    };
+
+    // `oblique` canvas text, filled and stroked, at a size drawn from
+    // glyph masks and one drawn from paths.
+    for (const size of [40, 200]) {
+      const font = `oblique 85deg ${size}px Oswald`,
+        box = outline(font);
+      for (const stroked of [false, true]) {
+        const ctx = new Canvas(
+          Math.ceil(box.right - box.left + 40),
+          Math.ceil(box.bottom - box.top + 40),
+        ).getContext("2d");
+        ctx.font = font;
+        ctx.lineWidth = 1;
+        const [x, y] = [20 - box.left, 20 - box.top];
+        stroked ? ctx.strokeText("IH", x, y) : ctx.fillText("IH", x, y);
+        near(`${font}, stroked ${stroked}`, columns(ctx), [
+          x + box.left,
+          x + box.right,
+        ]);
+      }
+    }
+
+    // Under a canvas transform sheared as far, as canvas text and as a
+    // Paragraph in one style and in two colours. Each spans its width and
+    // the shear of its height.
+    const box = outline("20px Oswald"),
+      spans = box.right - box.left + STEEP * (box.bottom - box.top),
+      height = 100;
+    const sheared = (draw) => {
+      const ctx = new Canvas(
+        Math.ceil(STEEP * height + 100),
+        height,
+      ).getContext("2d");
+      ctx.setTransform(1, 0, -STEEP, 1, STEEP * height, 0);
+      draw(ctx);
+      return ctx;
+    };
+    const style = (color) => ({
+      fontSize: 20,
+      fontFamilies: ["Oswald"],
+      color,
+    });
+    const paragraph = (colours) => {
+      const pb = ParagraphBuilder.Make({ textStyle: style(colours[0]) });
+      pb.addText("I");
+      if (colours[1]) pb.pushStyle(style(colours[1]));
+      pb.addText("H");
+      const built = pb.build();
+      built.layout(1000);
+      return built;
+    };
+    const cases = [
+      [
+        "canvas text",
+        (ctx) => {
+          ctx.font = "20px Oswald";
+          ctx.fillText("IH", 0, 60);
+        },
+      ],
+      [
+        "a paragraph in one style",
+        (ctx) => ctx.drawParagraph(paragraph(["red"]), 0, 40),
+      ],
+      [
+        "a paragraph in two colours",
+        (ctx) => ctx.drawParagraph(paragraph(["red", "blue"]), 0, 40),
+      ],
+    ];
+    for (const [name, draw] of cases) {
+      const ctx = sheared(draw),
+        [left, right] = columns(ctx);
+      assert.ok(
+        Math.abs(right - left - spans) <= 2 * EDGE,
+        `${name} under a shear of ${STEEP} inks ${right - left} columns, sheared ${spans.toFixed(1)}`,
+      );
+      const { width } = ctx.canvas,
+        data = ctx.getImageData(0, 0, width, height).data;
+      let blue = 0;
+      for (let i = 0; i < data.length; i += 4)
+        if (data[i + 3] && data[i + 2] > data[i]) blue++;
+      assert.equal(
+        blue > 0,
+        name === "a paragraph in two colours",
+        `${name}: ${blue} pixels in the second style's blue`,
+      );
+    }
+
+    // A Paragraph whose style is `oblique` at the same angle.
+    const oblique = outline("oblique 85deg 40px Oswald"),
+      pb = ParagraphBuilder.Make({
+        textStyle: {
+          fontSize: 40,
+          fontFamilies: ["Oswald"],
+          color: "black",
+          fontStyle: { slant: 2, obliqueAngle: 85 },
+        },
+      });
+    pb.addText("IH");
+    const built = pb.build();
+    built.layout(1000);
+    const ctx = new Canvas(
+      Math.ceil(oblique.right - oblique.left + 140),
+      120,
+    ).getContext("2d");
+    ctx.drawParagraph(built, 20, 20);
+    const [left, right] = columns(ctx);
+    assert.ok(
+      Math.abs(right - left - (oblique.right - oblique.left)) <= 2 * EDGE,
+      `an oblique 85deg Paragraph inks ${right - left} columns, its outline ${(oblique.right - oblique.left).toFixed(1)}`,
+    );
+  });
+
   // The slope of the `index`th stem, from the left, over the rows of
   // `ctx` that cross exactly `count` stems.
   const nthStemSlope = (ctx, count, index) => {

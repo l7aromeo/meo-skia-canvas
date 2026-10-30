@@ -18,7 +18,7 @@ engines; the step is in what was drawn.
 
 On Linux a variable face's advances move in whole font units between its
 masters, where on macOS they follow the interpolation as Chrome on macOS
-does. The FreeType that skia-bindings 0.153.3 embeds, 2.14.2, rounds each
+does. The FreeType that skia-bindings 0.156.0 embeds, 2.14.3, rounds each
 `HVAR` advance delta to a whole unit: `tt_var_get_item_delta` in
 `src/truetype/ttgxvar.c` returns `ft_round_and_shift16`, which is
 `(value + 0x8000) >> 16`, and `tt_hvadvance_adjust` adds it to an integer
@@ -61,6 +61,28 @@ hundredth, and the two edges coincide. No width given to `layout` undoes a
 floor taken on the line's side. The `UPSTREAM` note at `paragraph_style`
 carries the re-check.
 
+On Linux a glyph sheared past about 80 degrees is drawn sheared, where Chrome
+on Linux is expected to draw it upright. FreeType 2.14.3, which skia-bindings
+0.156.0 embeds, has `FT_Set_Transform` replace with the identity any matrix
+`FT_Matrix_Check` refuses (`src/base/ftobjs.c`, FreeType's f4e40ad03e), and
+that refuses one whose `32 |det|` is no more than the sum of its squares. Skia
+hands FreeType a run's transform with its scale divided out, so a shear `k`
+between the run's axes is refused once `k^2 + 2 >= 32`, about 79.65 degrees:
+`oblique 85deg`, or upright text under `setTransform(1, 0, -5.6, 1, 0, 0)`,
+came out upright, through glyph masks and through the paths Skia draws large
+and stroked text from alike. Here a run sheared past `k^2 = 28`, a little
+inside that, is drawn from its outlines, sheared as `outlineText` shears them.
+Its shape is the sheared glyph's; its edges are a filled path's rather than a
+glyph mask's. Against the masks FreeType 2.14.2 drew -- measured on Linux
+arm64, an `I` and an `H` in Oswald -- that moves edge pixels by up to 18
+levels at 200px and up to about 100 at 12 to 40px, and adds up to 2% to the
+ink, 13% at 12px and 89 degrees. Chrome on Linux draws text through the same
+Skia and FreeType, so from FreeType 2.14.3 it is expected to draw these runs
+upright; that is inferred, and Chrome on Linux was not measured. macOS and
+Windows draw text with CoreText and DirectWrite rather than FreeType, and are
+unchanged; macOS draws 85 degrees sheared through its glyph masks. The
+`UPSTREAM` note at `past_freetype_shear` carries the re-check.
+
 **Text set at 17.3px is laid out at 17.3px; Chrome 156 lays it out at
 17.29px.** Measured on macOS in Oswald, `measureText("Hamburgefonstiv")` at
 17.3px is 0.062 narrower in Chrome than here, and narrower by the same at
@@ -100,7 +122,7 @@ At 200px and below both baselines rasterise identically, so a test at those
 sizes cannot tell the two apart and is not evidence either way.
 
 The rounding is `SkParagraph`'s and happens before any binding code runs: at
-0.153.3 both `Paragraph::alphabetic_baseline` and `Paragraph::origin` return a
+0.156.0 both `Paragraph::alphabetic_baseline` and `Paragraph::origin` return a
 C++ struct field and do no arithmetic. **The property to hold on to is that
 `alphabetic_baseline` is linear in the font size, at 0.770020 per pixel, while
 the origin it is compared against is not.** No single residue describes it --

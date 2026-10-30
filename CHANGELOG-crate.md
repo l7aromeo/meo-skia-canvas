@@ -1663,6 +1663,29 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   at idle by the npm addon alone, which can post the release to the
   JavaScript thread that owns them; a Rust program's are kept as before.
 
+- **Skia M153 to M156**, by way of `skia-safe` 0.156.0. Every workaround for
+  a Skia defect was re-checked against it and is still needed, but for two
+  that this release had no way to re-check: a half-float stage on x86
+  machines without AVX2 or F16C, and the cost of a text run's bounds under
+  `Paragraph::visit`, which needs a profile. One drawing changes, on Linux
+  alone: the FreeType M156 brings, 2.14.3, refuses a glyph transform sheared
+  past about 79.65 degrees and draws the glyph upright instead, so text
+  sheared past about 79.3 degrees -- by `FontSlant::Oblique`,
+  `TextSlant::Oblique` or the context's transform -- is now drawn as paths
+  from the glyphs' outlines, sheared here. Its shape is right; against M153's
+  anti-aliased glyphs, its edge pixels differ by about 100 levels at 12 to
+  40px and up to 18 at 200px, and it carries up to 2% more ink, 13% for 12px
+  text at 89 degrees. Below that shear nothing moved: 270 scenes and the
+  gallery's images are identical on Linux and macOS, and its animations on
+  Linux, where their encoding repeats run to run.
+
+  Building on Linux with the `freetype` feature now compiles two of brotli's
+  decoder sources, which M156's Skia build leaves out and FreeType's WOFF2
+  support needs, from the Skia tree skia-bindings built. The build finds that
+  tree from `SKIA_SOURCE_DIR`, a `[patch]` path or the registry copy
+  `Cargo.lock` names, and stops with a message naming `SKIA_SOURCE_DIR` where
+  it cannot.
+
 ### Known, and not fixed here
 
 - **On macOS a GPU draw can be dropped when the shader compiler is slow, in

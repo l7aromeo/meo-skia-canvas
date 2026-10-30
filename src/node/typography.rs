@@ -23,6 +23,7 @@ use skia_safe::{
     Canvas, Color4f, Font, FontMetrics, FourByteTag, GlyphId, Matrix, Paint,
     Path as SkPath, PathBuilder as SkPathBuilder, Point, Rect, TextBlob,
     TextBlobBuilder, Typeface,
+    font::Edging,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
         Decoration, FontCollection, Paragraph, ParagraphBuilder,
@@ -227,7 +228,7 @@ const INTRINSIC_WIDTH_FLOOR: f32 = f32::MIN_POSITIVE;
 /// at the width it is given -- Chrome 156 fits "Hamburgefonstiv quick" in
 /// Oswald 24px, 200.53 wide, at 200.7px, where the floored width does not.
 pub(crate) fn paragraph_style() -> ParagraphStyle {
-    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
     // Re-check: "a line breaks within a hundredth of the edge" in
     // tests/suite/paragraph.test.js, its last assertion red once fixed.
     // With the hack off, `LineBreakerWithLittleRounding::breakLine` in
@@ -434,25 +435,6 @@ pub enum Painter {
     Runs,
 }
 
-impl TextLayout {
-    /// `run`, a glyph run of this layout, as a text blob in its own font,
-    /// to draw at the run's origin, or `None` where it draws nothing.
-    ///
-    /// A run at a time rather than through `Paragraph::paint`, so that a run
-    /// can be drawn sheared or not on its own -- see [`sheared_blob`] -- and
-    /// in any paint once laid out. The pixels of a run drawn as it stands
-    /// are `Paragraph::paint`'s: each run's `Font` already carries what
-    /// SkParagraph synthesised for it -- an embolden, a skew -- and the run's
-    /// origin is the one `Paragraph::paint` draws from, its baseline snapped
-    /// to a whole pixel (#142). A plain run is about 1.5% slower to draw
-    /// this way than by `Paragraph::paint`, which a kept run cannot use: it
-    /// was laid out with no paint.
-    pub(crate) fn run_blob(&self, run: &GlyphRun) -> Option<TextBlob> {
-        let shear = run_shear(&run.font.typeface(), self.oblique);
-        sheared_blob(&run.font, &run.glyphs, &run.positions, shear)
-    }
-}
-
 /// A run laid out once, and painted from then on with whatever paint a draw
 /// brings: its glyph runs, read off the paragraph when it was laid out, and
 /// the spans and box its decoration lines are drawn from.
@@ -461,9 +443,10 @@ impl TextLayout {
 /// goes depends on the paint: a draw in another colour, a gradient or
 /// another alpha paints the same runs and the same lines, which is what lets
 /// a run be kept across them. The glyphs are drawn as the blobs
-/// [`TextLayout::run_blob`] builds, whose pixels are `Paragraph::paint`'s,
-/// and the lines by [`decorate::paint`] in the colour the draw's paint
-/// gives them.
+/// [`Self::built_blobs`] builds, whose pixels are `Paragraph::paint`'s --
+/// or, sheared past what FreeType draws, from their outlines -- see
+/// [`drawn_as_outlines`] -- and the lines by [`decorate::paint`] in the
+/// colour the draw's paint gives them.
 ///
 /// Keeping the layout is the point: building the paragraph and laying it out
 /// was 55% of the samples under `fillText` in a release build, and reading
@@ -472,6 +455,8 @@ pub struct LaidOut {
     layout: TextLayout,
     /// The glyph runs, read off the paragraph once.
     runs: Vec<GlyphRun>,
+    /// The shear each run is drawn under -- see [`run_shear`].
+    shears: Vec<Shear>,
     /// The runs' blobs, kept by the paint they were built for, at most
     /// [`BLOB_PAINTS`] paints' worth, the most recently built last.
     ///
@@ -485,7 +470,7 @@ pub struct LaidOut {
     /// is not settled: of seven opaque colours only those two did, and a
     /// translucent pink parted from `green` as `#c03010` did.
     ///
-    /// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+    /// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
     /// Re-check: cargo test a_run_drawn_again_on_the_gpu_draws_as_a_fresh_one
     /// with `PaintedBlobs::matches` answering `true` for every paint
     blobs: RefCell<Vec<PaintedBlobs>>,
@@ -506,6 +491,10 @@ impl LaidOut {
         decoration: Option<decorate::Decoration>,
     ) -> Self {
         let runs = glyph_runs(&mut layout.paragraph);
+        let shears = runs
+            .iter()
+            .map(|run| run_shear(&run.font.typeface(), layout.oblique))
+            .collect();
         // The run is one decorating box: every run of it is the box's,
         // whatever face draws it.
         let spans = match decoration {
@@ -517,6 +506,7 @@ impl LaidOut {
         Self {
             layout,
             runs,
+            shears,
             blobs: RefCell::new(Vec::new()),
             decoration,
             spans,
@@ -550,10 +540,23 @@ impl LaidOut {
         Some(RefMut::map(kept, |kept| kept[at].blobs.as_mut_slice()))
     }
 
+    /// Each run as a text blob in its own font, sheared as `shears`
+    /// says, to draw at the run's origin, or `None` where it draws nothing.
+    ///
+    /// A run at a time rather than through `Paragraph::paint`, so that a run
+    /// can be drawn sheared or not on its own -- see [`sheared_blob`] -- and
+    /// in any paint once laid out. The pixels of a run drawn as it stands
+    /// are `Paragraph::paint`'s: each run's `Font` already carries what
+    /// SkParagraph synthesised for it -- an embolden, a skew -- and the run's
+    /// origin is the one `Paragraph::paint` draws from, its baseline snapped
+    /// to a whole pixel (#142). A plain run is about 1.5% slower to draw
+    /// this way than by `Paragraph::paint`, which a kept run cannot use: it
+    /// was laid out with no paint.
     fn built_blobs(&self) -> Vec<Option<TextBlob>> {
-        self.runs
-            .iter()
-            .map(|run| self.layout.run_blob(run))
+        zip(&self.runs, &self.shears)
+            .map(|(run, &shear)| {
+                sheared_blob(&run.font, &run.glyphs, &run.positions, shear)
+            })
             .collect()
     }
 
@@ -569,10 +572,28 @@ impl LaidOut {
         faint: Faint,
     ) {
         let paint = faint.drawable(paint);
-        let runs = zip(&self.runs[range.clone()], &blobs[range]);
-        for (run, blob) in runs {
-            if let Some(blob) = blob {
-                canvas.draw_text_blob(blob, origin + run.origin, &paint);
+        let runs = zip(
+            zip(&self.runs[range.clone()], &self.shears[range.clone()]),
+            &blobs[range],
+        );
+        for ((run, shear), blob) in runs {
+            let Some(blob) = blob else {
+                continue;
+            };
+            let at = origin + run.origin;
+            match drawn_as_outlines(canvas, &run.font, shear) {
+                true => draw_outlines(
+                    canvas,
+                    &run.font,
+                    &run.glyphs,
+                    &run.positions,
+                    shear,
+                    at,
+                    &paint,
+                ),
+                false => {
+                    canvas.draw_text_blob(blob, at, &paint);
+                }
             }
         }
     }
@@ -1265,28 +1286,253 @@ pub(crate) enum Shear {
 /// per cent of an oblique `fillText` -- 1.9 per cent of the samples of 24px
 /// Oswald drawn and read back -- which is less than a rectangle that has to
 /// be padded for the ink outside each outline, in device pixels, is worth.
+///
+/// But not where the skew is past what FreeType shears -- see
+/// [`past_freetype_shear`]: Skia measures the glyphs in the font's own
+/// matrix, which FreeType then takes as upright, so the bounds it works out
+/// are the upright glyphs'. There the bounds are the glyphs' unsheared ones,
+/// which FreeType measures as asked, mapped through the shear, which holds
+/// the sheared outline of each.
 pub(crate) fn sheared_blob(
     font: &Font,
     glyphs: &[GlyphId],
     positions: &[Point],
     shear: Shear,
 ) -> Option<TextBlob> {
-    let (font, positions) = match shear {
-        Shear::None => (Cow::Borrowed(font), Cow::Borrowed(positions)),
+    let (sheared, moved, bounds) = match shear {
+        Shear::None => (Cow::Borrowed(font), Cow::Borrowed(positions), None),
         Shear::By(shear) => {
             let mut sheared = font.clone();
             sheared.set_skew_x(font.skew_x() + shear.skew_x());
             let moved = positions.iter().map(|&at| map_affine(&shear, at));
-            (Cow::Owned(sheared), Cow::Owned(moved.collect()))
+            let bounds = (FREETYPE
+                && past_freetype_shear(
+                    &Matrix::new_identity(),
+                    sheared.skew_x(),
+                ))
+            .then(|| sheared_bounds(font, glyphs, positions, &shear));
+            (Cow::Owned(sheared), Cow::Owned(moved.collect()), bounds)
         }
         Shear::Flat => return None,
     };
     let mut builder = TextBlobBuilder::new();
     let (into_glyphs, into_positions) =
-        builder.alloc_run_pos(&font, glyphs.len(), None);
+        builder.alloc_run_pos(&sheared, glyphs.len(), bounds.as_ref());
     into_glyphs.copy_from_slice(glyphs);
-    into_positions.copy_from_slice(&positions);
+    into_positions.copy_from_slice(&moved);
     builder.make()
+}
+
+/// The bounds of `glyphs` in `font` at `positions`, sheared by `shear` about
+/// their baseline: each glyph's box in the unsheared font, placed and mapped
+/// through the shear, which takes the box's corners to a parallelogram that
+/// holds the sheared glyph, and the box around them all.
+fn sheared_bounds(
+    font: &Font,
+    glyphs: &[GlyphId],
+    positions: &[Point],
+    shear: &Matrix,
+) -> Rect {
+    let mut boxes = vec![Rect::new_empty(); glyphs.len()];
+    font.get_bounds(glyphs, &mut boxes, None);
+    zip(boxes, positions)
+        .filter(|(glyph, _)| !glyph.is_empty())
+        .map(|(glyph, &at)| shear.map_rect(glyph.with_offset(at)).0)
+        .reduce(|mut all, glyph| {
+            all.join(glyph);
+            all
+        })
+        .unwrap_or_default()
+}
+
+/// The skew SkParagraph gives a run it fakes an italic for, `-1/4`: in
+/// `OneLineShaper.cpp`, `font.setSkewX(fakeItalic ? -SK_Scalar1 / 4 : 0)`.
+/// It is the most a run is skewed in a paragraph with no `oblique` style.
+pub(crate) const FAKE_ITALIC_SKEW: f32 = -0.25;
+
+/// The square of the shear, between the text's own axes, from which a run's
+/// glyphs are drawn from their outlines rather than handed to FreeType -- see
+/// [`past_freetype_shear`]. Chosen a little inside the 30 at which FreeType
+/// stops shearing, so that the rounding in its fixed-point check cannot leave
+/// a run on the side of the limit this did not expect.
+const OUTLINED_SHEAR_SQUARED: f64 = 28.0;
+
+// UPSTREAM: FreeType 2.14.3 -- unfiled -- worked around
+// Re-check: cargo test a_shear_past_freetypes_limit_draws_sheared_glyphs on
+// Linux, with `drawn_as_outlines` and `may_draw_outlines` answering `false`
+//
+// FreeType's `FT_Set_Transform` replaces a matrix that `FT_Matrix_Check`
+// refuses with the identity, so the glyphs it loads come out unsheared, and
+// it refuses any matrix with `32 |det| <= xx^2 + xy^2 + yx^2 + yy^2` --
+// "extreme shear or extreme scaling", by a heuristic 32. FreeType's f4e40ad03e
+// ("Validate matrix") added the check; skia-bindings 0.156.0 builds 2.14.3,
+// which has it, where 0.153.3 built 2.14.2, which does not. Skia hands FreeType
+// a run's whole transform with its scale divided out, which leaves a
+// determinant of one, so FreeType draws the run upright once its shear `k` has
+// `k^2 + 2 >= 32`: an `oblique` angle past atan(sqrt(30)), about 79.65 degrees,
+// or a canvas transform as steep. Every route Skia takes there does it -- a
+// glyph mask, and the path it draws a large or stroked run from, which it also
+// asks of FreeType under the font's skew.
+/// Whether a run in `font` skewed by a further `skew`, drawn under `matrix`,
+/// is sheared past what FreeType draws -- see [`OUTLINED_SHEAR_SQUARED`].
+///
+/// The shear is between the run's axes as `matrix` carries them, `a` the
+/// image of its baseline and `b` of its vertical: `k = a . b / det`, which
+/// neither a rotation nor a scale of the whole changes. With `c1` and `c2`
+/// the columns of `matrix` and `t` the run's total skew, `a = c1` and
+/// `b = t c1 + c2`, so `k det = t |c1|^2 + c1 . c2` -- a width the font
+/// scales by does not enter. Under perspective Skia draws text from paths
+/// FreeType makes in the font's own matrix, so only the skew counts there.
+pub(crate) fn past_freetype_shear(matrix: &Matrix, skew: f32) -> bool {
+    let matrix = match matrix.has_perspective() {
+        true => Matrix::new_identity(),
+        false => *matrix,
+    };
+    let (c1, c2) = (
+        (f64::from(matrix.scale_x()), f64::from(matrix.skew_y())),
+        (f64::from(matrix.skew_x()), f64::from(matrix.scale_y())),
+    );
+    let along = f64::from(skew) * (c1.0 * c1.0 + c1.1 * c1.1)
+        + (c1.0 * c2.0 + c1.1 * c2.1);
+    let det = c1.0 * c2.1 - c2.0 * c1.1;
+    along * along >= OUTLINED_SHEAR_SQUARED * det * det
+}
+
+/// Whether FreeType draws this build's text: everywhere but macOS, which
+/// draws with CoreText, and Windows, with DirectWrite.
+const FREETYPE: bool =
+    cfg!(not(any(target_os = "macos", target_os = "windows")));
+
+/// Whether a run in `font`, sheared by `shear`, is drawn on `canvas` from
+/// its outlines -- see [`past_freetype_shear`]. Never where text is not
+/// drawn by FreeType, whose glyphs alone are not sheared past its limit.
+pub(crate) fn drawn_as_outlines(
+    canvas: &Canvas,
+    font: &Font,
+    shear: &Shear,
+) -> bool {
+    let further = match shear {
+        Shear::By(shear) => shear.skew_x(),
+        Shear::None | Shear::Flat => 0.0,
+    };
+    FREETYPE
+        && past_freetype_shear(
+            &canvas.local_to_device_as_3x3(),
+            font.skew_x() + further,
+        )
+}
+
+/// Whether any run skewed by up to `skew` either way, drawn on `canvas`,
+/// may be past FreeType's shear -- a test for a whole paragraph before its
+/// runs are read: `k` is linear in the skew, so its largest magnitude is at
+/// one end, and a run squeezed along x by a factor of at most one, as a
+/// condensed run is, only shrinks the skew's part.
+pub(crate) fn may_draw_outlines(canvas: &Canvas, skew: f32) -> bool {
+    let matrix = canvas.local_to_device_as_3x3();
+    FREETYPE
+        && (past_freetype_shear(&matrix, skew)
+            || past_freetype_shear(&matrix, -skew))
+}
+
+/// Adds the outlines of `glyphs` in `font`, at `positions` from `origin`,
+/// to `builder`, sheared by `shear` about their baseline as
+/// [`sheared_blob`] shears the glyphs it draws, and returns where in
+/// `glyphs` those with no outline are -- a bitmap or colour emoji -- which
+/// add nothing.
+pub(crate) fn add_outlines(
+    builder: &mut SkPathBuilder,
+    font: &Font,
+    glyphs: &[GlyphId],
+    positions: &[Point],
+    shear: &Shear,
+    origin: Point,
+) -> Vec<usize> {
+    let mut bare = Vec::new();
+    if *shear == Shear::Flat {
+        return bare;
+    }
+    for (index, (&glyph, &at)) in zip(glyphs, positions).enumerate() {
+        let Some(outline) = font.get_path(glyph) else {
+            bare.push(index);
+            continue;
+        };
+        // Added where it goes, under its shear, in one call each: a sheared
+        // copy and then a moved one were two paths made and dropped for
+        // every glyph.
+        match shear {
+            Shear::By(shear) => {
+                let to = map_affine(shear, at) + origin;
+                let placed = Matrix::from_affine(&[
+                    shear.scale_x(),
+                    shear.skew_y(),
+                    shear.skew_x(),
+                    shear.scale_y(),
+                    to.x,
+                    to.y,
+                ]);
+                builder.add_path_with_transform(&outline, &placed, None);
+            }
+            Shear::None | Shear::Flat => {
+                builder.add_path_with_offset(&outline, at + origin, None);
+            }
+        }
+    }
+    bare
+}
+
+/// Draws `glyphs` in `font` at `positions` from `origin`, sheared by
+/// `shear`, as one path of their outlines in `paint` -- the shape
+/// [`sheared_blob`]'s glyphs have, where FreeType would draw them unsheared
+/// -- see [`drawn_as_outlines`]. Antialiased as the font's edging says,
+/// which is what decides it for glyphs.
+///
+/// A glyph with no outline is drawn as a glyph, as it is otherwise, since
+/// it has no shape to shear here.
+pub(crate) fn draw_outlines(
+    canvas: &Canvas,
+    font: &Font,
+    glyphs: &[GlyphId],
+    positions: &[Point],
+    shear: &Shear,
+    origin: Point,
+    paint: &Paint,
+) {
+    let mut builder = SkPathBuilder::new();
+    let bare =
+        add_outlines(&mut builder, font, glyphs, positions, shear, origin);
+    let mut outlined = paint.clone();
+    outlined.set_anti_alias(font.edging() != Edging::Alias);
+    canvas.draw_path(&builder.detach(), &outlined);
+    if bare.is_empty() {
+        return;
+    }
+    let (glyphs, positions): (Vec<GlyphId>, Vec<Point>) = bare
+        .iter()
+        .map(|&index| (glyphs[index], positions[index]))
+        .unzip();
+    if let Some(blob) = sheared_blob(font, &glyphs, &positions, *shear) {
+        canvas.draw_text_blob(&blob, origin, paint);
+    }
+}
+
+/// Draws `glyphs` in `font` at `positions` from `origin`, sheared by
+/// `shear`, in `paint`: as [`sheared_blob`]'s glyphs, or from their outlines
+/// where `canvas` shears them past what FreeType draws -- see
+/// [`drawn_as_outlines`].
+pub(crate) fn draw_glyphs(
+    canvas: &Canvas,
+    font: &Font,
+    glyphs: &[GlyphId],
+    positions: &[Point],
+    shear: &Shear,
+    origin: Point,
+    paint: &Paint,
+) {
+    if drawn_as_outlines(canvas, font, shear) {
+        draw_outlines(canvas, font, glyphs, positions, shear, origin, paint);
+    } else if let Some(blob) = sheared_blob(font, glyphs, positions, *shear) {
+        canvas.draw_text_blob(&blob, origin, paint);
+    }
 }
 
 /// The angle at which a shear lays a glyph along its baseline, where its
@@ -1734,14 +1980,16 @@ impl<'a> Typesetter<'a> {
         }
     }
 
-    /// The run laid out for one draw in `paint` and not kept, as a run is
-    /// drawn the first time: by `Paragraph::paint` where nothing needs its
-    /// runs, and from its runs, lines between them, where it is decorated
-    /// or `oblique`.
-    pub fn drawn_once(&self, paint: &Paint) -> DrawnRun {
+    /// The run laid out for one draw in `paint` on `canvas` and not kept, as
+    /// a run is drawn the first time: by `Paragraph::paint` where nothing
+    /// needs its runs, and from its runs, lines between them, where it is
+    /// decorated or `oblique`, or where `canvas` may shear a run past what
+    /// FreeType draws -- see [`may_draw_outlines`].
+    pub fn drawn_once(&self, paint: &Paint, canvas: &Canvas) -> DrawnRun {
         let layout = self.layout(paint);
+        let plain = !may_draw_outlines(canvas, FAKE_ITALIC_SKEW);
         match (self.decoration(1.0), self.oblique) {
-            (None, None) => DrawnRun::Plain(layout),
+            (None, None) if plain => DrawnRun::Plain(layout),
             (decoration, _) => DrawnRun::Runs(LaidOut::new(layout, decoration)),
         }
     }
@@ -2052,10 +2300,10 @@ impl<'a> Typesetter<'a> {
                 (norm - ascent, descent - norm)
             });
 
-        // UPSTREAM: FreeType 2.14.2 -- unfiled -- not worked around
+        // UPSTREAM: FreeType 2.14.3 -- unfiled -- not worked around
         // Re-check: bun run test:suite --test-name-pattern fraction
         //
-        // The FreeType skia-bindings 0.153.3 embeds rounds each `HVAR`
+        // The FreeType skia-bindings 0.156.0 embeds rounds each `HVAR`
         // advance delta to a whole font unit: `tt_var_get_item_delta` in
         // src/truetype/ttgxvar.c returns `ft_round_and_shift16`, `(value +
         // 0x8000) >> 16`, which `tt_hvadvance_adjust` adds to an integer
@@ -2139,40 +2387,14 @@ impl<'a> Typesetter<'a> {
             // outline in its own em box, where the baseline is y = 0, and to
             // its position, as `sheared_blob` applies it.
             let shear = run_shear(&run.font.typeface(), self.oblique);
-            if shear == Shear::Flat {
-                continue;
-            }
-            for (glyph, at) in zip(run.glyphs, run.positions) {
-                if let Some(outline) = run.font.get_path(glyph) {
-                    // Added where it goes, under its shear, in one call each:
-                    // a sheared copy and then a moved one were two paths
-                    // made and dropped for every glyph.
-                    match &shear {
-                        Shear::By(shear) => {
-                            let to =
-                                map_affine(shear, at) + run.origin + origin;
-                            let placed = Matrix::from_affine(&[
-                                shear.scale_x(),
-                                shear.skew_y(),
-                                shear.skew_x(),
-                                shear.scale_y(),
-                                to.x,
-                                to.y,
-                            ]);
-                            builder.add_path_with_transform(
-                                &outline, &placed, None,
-                            );
-                        }
-                        Shear::None | Shear::Flat => {
-                            builder.add_path_with_offset(
-                                &outline,
-                                at + run.origin + origin,
-                                None,
-                            );
-                        }
-                    }
-                }
-            }
+            add_outlines(
+                &mut builder,
+                &run.font,
+                &run.glyphs,
+                &run.positions,
+                &shear,
+                run.origin + origin,
+            );
         }
         let path = builder.detach();
 
@@ -3596,7 +3818,124 @@ mod utf16_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cow, normalize_to_one_line};
+    use super::{
+        Cow, Shear, SkPathBuilder, add_outlines, normalize_to_one_line,
+        past_freetype_shear, sheared_blob,
+    };
+    use skia_safe::{Data, Font, FontMgr, Matrix, Point};
+
+    #[test]
+    fn a_blob_sheared_past_freetypes_limit_holds_its_outlines() {
+        // Skia measures a blob's glyphs in the font's own matrix, which
+        // FreeType takes as upright past its limit, so a blob left to work
+        // out its bounds there holds the upright glyphs. Its bounds cull its
+        // draw and confine a paragraph shadow's blur, so they have to hold
+        // the sheared outline at any angle.
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"
+        ))
+        .expect("bundled Oswald is readable");
+        let typeface = FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("Oswald parses");
+        let font = Font::from_typeface(typeface, 40.0);
+        let glyphs = font.str_to_glyphs_vec("IH");
+        let mut widths = vec![0.0; glyphs.len()];
+        font.get_widths(&glyphs, &mut widths);
+        let positions: Vec<Point> = widths
+            .iter()
+            .scan(0.0, |x, width| {
+                let at = Point::new(*x, 0.0);
+                *x += width;
+                Some(at)
+            })
+            .collect();
+        for degrees in [30.0f32, 85.0] {
+            let shear =
+                Shear::By(Matrix::skew((-degrees.to_radians().tan(), 0.0)));
+            let blob = sheared_blob(&font, &glyphs, &positions, shear)
+                .expect("a blob");
+            let mut builder = SkPathBuilder::new();
+            add_outlines(
+                &mut builder,
+                &font,
+                &glyphs,
+                &positions,
+                &shear,
+                Point::default(),
+            );
+            let outline = *builder.detach().bounds();
+            // A pixel either way for the rounding of either measure.
+            let held = blob.bounds().with_outset((1.0, 1.0));
+            let holds = held.left <= outline.left
+                && held.top <= outline.top
+                && held.right >= outline.right
+                && held.bottom >= outline.bottom;
+            assert!(
+                holds,
+                "{degrees}deg: the blob's bounds {:?} do not hold its \
+                 outline {outline:?}",
+                blob.bounds(),
+            );
+        }
+    }
+
+    #[test]
+    fn freetypes_shear_limit_is_where_outlines_begin() {
+        // FreeType's `FT_Matrix_Check` refuses a matrix with
+        // `32 |det| <= xx^2 + xy^2 + yx^2 + yy^2`, and Skia hands it the
+        // run's transform with its scale divided out: for a shear `k`
+        // alone, [[1, k], [0, 1]]. Every shear FreeType refuses is drawn
+        // from outlines, and none more than a little inside its limit.
+        let refused = |k: f64| 32.0 <= 2.0 + k * k;
+        for hundredths in 7000..9000 {
+            let degrees = f64::from(hundredths) / 100.0;
+            let k = degrees.to_radians().tan();
+            let outlined =
+                past_freetype_shear(&Matrix::new_identity(), k as f32);
+            if refused(k) {
+                assert!(outlined, "{degrees}deg is refused and not outlined");
+            }
+            if outlined {
+                assert!(
+                    degrees > 79.0,
+                    "{degrees}deg is outlined, well inside FreeType's limit"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_shear_between_a_runs_axes_is_what_counts() {
+        // A canvas shear alone, the same shear under a turn and a scale,
+        // and a turned squeeze, which shears a run's axes with no shear of
+        // its own -- and a turn of a squeeze, which does not.
+        let shear = |k: f32| Matrix::skew((k, 0.0));
+        let squeeze = |x: f32| Matrix::scale((x, 1.0));
+        let turn = Matrix::rotate_deg(30.0);
+        let steep = 5.6;
+        assert!(past_freetype_shear(&shear(steep), 0.0));
+        assert!(!past_freetype_shear(&shear(5.0), 0.0));
+        assert!(past_freetype_shear(
+            &(turn * shear(steep) * squeeze(3.0)),
+            0.0
+        ));
+        assert!(!past_freetype_shear(&(turn * squeeze(3.0)), 0.0));
+        assert!(past_freetype_shear(
+            &(squeeze(0.05) * Matrix::rotate_deg(45.0)),
+            0.0
+        ));
+        // A run's own skew adds to the canvas's along the same axis.
+        assert!(past_freetype_shear(&shear(5.0), 0.5));
+        assert!(!past_freetype_shear(&shear(5.0), -0.5));
+        // Under perspective, Skia draws from paths made in the font's own
+        // matrix, so only the run's skew counts.
+        let mut perspective = shear(steep);
+        perspective.set_persp_x(0.001);
+        assert!(!past_freetype_shear(&perspective, 0.0));
+        assert!(past_freetype_shear(&perspective, steep));
+    }
 
     /// The borrow is the point, so it is asserted rather than assumed.
     ///

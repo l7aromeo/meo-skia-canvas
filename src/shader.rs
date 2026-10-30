@@ -200,10 +200,10 @@ impl GradientColorSpace {
         self,
         shader: SkShader,
     ) -> Result<SkShader, Error> {
-        // UPSTREAM: skia-bindings 0.153.3 -- unfiled -- worked around
+        // UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
         // Re-check: cargo test a_rec2020_gradient_mixes_by_the_css_gamma
         //
-        // Skia m153 lists its interpolation spaces under CSS Color 4's
+        // Skia m156 lists its interpolation spaces under CSS Color 4's
         // interpolation-space section (`SkGradient.h`), but builds `Rec2020`
         // with `SkNamedTransferFn::kRec2020`, BT.2020's piecewise curve
         // (`SkGradientBaseShader.cpp`). CSS Color 4 defines `rec2020` with a
@@ -528,13 +528,8 @@ impl Shader {
         let interpolation = interpolation.into();
         let (colors, positions, interp) =
             Self::prepare_stops(stops, interpolation)?;
-        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
-        // Re-check: cargo test a_tagged_stop_is_one_colour_in_every_space
-        //
-        // Tagged stops are said to have crashed Skia's OKLCH interpolation
-        // in an earlier build, which kept them untagged and so read in the
-        // destination's space. Tagging no longer crashes in any of the
-        // sixteen interpolation spaces, on the CPU or the GPU engine.
+        // The stops are tagged linear sRGB: untagged, Skia reads them as
+        // already in the destination's space.
         let stop_colors = GradientColors::new(
             &colors,
             Some(positions.as_slice()),

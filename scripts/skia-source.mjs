@@ -1,20 +1,24 @@
 #!/usr/bin/env node
-// The Skia source tree macOS builds compile from, with
-// `containers/skia-metal-untimed-compile.patch` applied.
+// The Skia source tree macOS and Linux builds compile from, with this
+// platform's patches from `PATCHES` applied.
 //
-//   node scripts/skia-source.mjs env       `SKIA_SOURCE_DIR=<dir>` on macOS, nothing elsewhere
+//   node scripts/skia-source.mjs env       `SKIA_SOURCE_DIR=<dir>` on a platform with patches, nothing elsewhere
 //   node scripts/skia-source.mjs dir       the directory, prepared or not
 //   node scripts/skia-source.mjs prepare   fetch, sync and patch it once; print the directory
 //
-// `env` is the justfile's `dotenv-command`, so every recipe on macOS builds
-// skia-bindings offline from this tree and none elsewhere. It only names the
-// directory -- it runs on every `just` invocation, `just --list` included, so it
-// must never download. `prepare` is what downloads, and `ensure-deps` runs it.
+// Against a local rust-skia checkout (`just use-local-skia`) both `env` and
+// `prepare` do nothing: skia-bindings builds the checkout's own Skia.
+//
+// `env` is the justfile's `dotenv-command`, so every recipe on macOS and Linux
+// builds skia-bindings offline from this tree, and on Windows, which has no
+// patches, as skia-bindings always has. It only names the directory -- it runs
+// on every `just` invocation, `just --list` included, so it must never
+// download. `prepare` is what downloads, and `ensure-deps` runs it.
 //
 // The tree is rust-skia at the tag of the skia-bindings version in Cargo.lock,
 // whose Skia submodule is pinned by that tag, with Skia's own DEPS synced and gn
 // fetched at the revision `bin/fetch-gn` names. It lives once per version and
-// patch under `$XDG_CACHE_HOME/meo-skia-canvas`, so a new version or a changed
+// patch list under `$XDG_CACHE_HOME/meo-skia-canvas`, so a new version or a changed
 // patch gets a new directory and a stale one cannot be reused. Once a new one
 // is ready, the others are removed unless a worktree of this repository still
 // builds from one -- the cache is shared by every worktree on the machine.
@@ -34,8 +38,43 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-/** The patch applied to the tree, relative to a checkout of this repository. */
-const PATCH = join("containers", "skia-metal-untimed-compile.patch");
+/**
+ * The patches applied to the tree, by `process.platform`, in order and
+ * relative to a checkout of this repository. A platform with none builds
+ * skia-bindings as it always has, and `env` names no tree there.
+ */
+export const PATCHES = {
+  // The Metal compile timeout -- see the UPSTREAM note in the justfile.
+  darwin: [join("containers", "skia-metal-untimed-compile.patch")],
+  // UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
+  // Re-check: link a Linux build with `freetype` from a tree prepared without this patch, with build.rs's shim returning at once; it fails on undefined `kCmdLut` and `BrotliDecoderEnsureStaticInit`
+  //
+  // Skia's `third_party/brotli/BUILD.gn` leaves out `c/dec/prefix.c` and
+  // `c/dec/static_init.c`, which define `kCmdLut` and
+  // `BrotliDecoderEnsureStaticInit` since the brotli roll in M156's DEPS. Only
+  // `freetype-woff2` links brotli and skia-bindings drops it on macOS, so the
+  // patch is Linux's alone. build.rs carries the same fix for builds that do
+  // not come through here, and stands aside where this patch has applied.
+  linux: [join("containers", "skia-brotli-sources.patch")],
+};
+
+/** This platform's patches, or none. */
+function patches(platform = process.platform) {
+  return PATCHES[platform] ?? [];
+}
+
+/**
+ * Whether the Cargo.toml at `root` builds skia-bindings from a local rust-skia
+ * checkout, as `just use-local-skia` makes it. skia-bindings then builds that
+ * checkout's own Skia, syncing its DEPS itself, and this script neither
+ * prepares nor names a tree: one named here would be built offline in its
+ * place.
+ */
+export function usesLocalSkia(root = ROOT) {
+  return /^skia-bindings\s*=\s*\{\s*path\s*=/m.test(
+    readFileSync(join(root, "Cargo.toml"), "utf8"),
+  );
+}
 const RUST_SKIA = "https://github.com/rust-skia/rust-skia.git";
 /// Written last, so a directory without it is a preparation that did not finish.
 const READY = ".ready";
@@ -67,12 +106,15 @@ function cacheRoot() {
   return join(base, "meo-skia-canvas");
 }
 
-/** The cache directory name of the tree a checkout at `root` builds from. */
+/**
+ * The cache directory name of the tree a checkout at `root` builds from: the
+ * locked version and a digest of this platform's patches, in order. A list of
+ * one hashes as that patch alone did.
+ */
 function treeName(root = ROOT) {
-  const digest = createHash("sha256")
-    .update(readFileSync(join(root, PATCH)))
-    .digest("hex")
-    .slice(0, PATCH_DIGEST_LENGTH);
+  const hash = createHash("sha256");
+  for (const patch of patches()) hash.update(readFileSync(join(root, patch)));
+  const digest = hash.digest("hex").slice(0, PATCH_DIGEST_LENGTH);
   return `skia-${lockedVersion(root)}-${digest}`;
 }
 
@@ -215,6 +257,7 @@ export function retry(
 }
 
 function prepare() {
+  if (usesLocalSkia()) return null;
   const tree = treeDir();
   if (existsSync(join(tree, READY))) return sourceDir(tree);
 
@@ -257,7 +300,8 @@ function prepare() {
   );
   // `-F0`: a hunk that no longer matches fails here rather than being placed
   // by guesswork.
-  run("patch", ["-p1", "-F0", "-d", checkout, "-i", join(ROOT, PATCH)]);
+  for (const patch of patches())
+    run("patch", ["-p1", "-F0", "-d", checkout, "-i", join(ROOT, patch)]);
   writeFileSync(join(partial, READY), `${lockedVersion()}\n`);
   renameSync(partial, tree);
 
@@ -287,12 +331,13 @@ if (
 
   const command = process.argv[2];
   if (command === "env") {
-    if (process.platform === "darwin")
+    if (patches().length > 0 && !usesLocalSkia())
       console.log(`SKIA_SOURCE_DIR=${sourceDir()}`);
   } else if (command === "dir") {
     console.log(sourceDir());
   } else if (command === "prepare") {
-    console.log(prepare());
+    const dir = prepare();
+    if (dir !== null) console.log(dir);
   } else {
     console.error("usage: node scripts/skia-source.mjs env|dir|prepare");
     process.exit(2);

@@ -196,8 +196,8 @@ fn contrast_bucket(rgb: [f32; 3]) -> [u8; 3] {
 /// colour shader in place of the paint's colour, which runs the filter as
 /// pipeline stages instead, parted in 5520 of them.
 fn luminance_colour(filter: &ColorFilter, plain: Color4f) -> Option<[f32; 3]> {
-    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
-    // Re-check: cargo test a_float_page_covers_text_as_srgb_does with
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+    // Re-check: cargo test a_filters_luminance_colour_is_its_output with
     // this returning `ColorFilter::filter_color4f(plain, None, None)`.
     //
     // `filter_color4f` declares Skia's `SkColor4f` return as four `u32`s,
@@ -332,7 +332,7 @@ impl ExactColour {
             (effect.uniform_size() == uniforms.len()).then_some(())?;
             effect.make_color_filter(Data::new_copy(&uniforms), None)
         })?;
-        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+        // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
         // Re-check: cargo test a_float_page_covers_text_as_srgb_does with
         // this returning `Some(replacement)`.
         //
@@ -1106,5 +1106,33 @@ impl BlurOp {
                 None,
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::luminance_colour;
+    use skia_safe::{BlendMode, Color, Color4f, color_filters};
+    use std::iter::zip;
+
+    #[test]
+    fn a_filters_luminance_colour_is_its_output() {
+        // What a colour filter makes of a colour, read against a filter
+        // whose output is known: one that puts a constant colour in place
+        // of every other. skia-safe's `filter_color4f` would answer the same
+        // and returns unrelated numbers instead -- see the note in
+        // `luminance_colour`.
+        let filter = color_filters::blend(
+            Color::from_argb(255, 10, 200, 30),
+            BlendMode::Src,
+        )
+        .expect("a filter");
+        let got = luminance_colour(&filter, Color4f::new(0.5, 0.5, 0.5, 1.0))
+            .expect("a reading");
+        let want = [10.0f32, 200.0, 30.0].map(|c| c / 255.0);
+        assert!(
+            zip(got, want).all(|(got, want)| (got - want).abs() < 1e-3),
+            "{got:?}, where the filter's colour is {want:?}"
+        );
     }
 }

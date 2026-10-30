@@ -427,7 +427,7 @@ fn region(
     layer: &Matrix,
     rest: &Matrix,
 ) -> Option<IRect> {
-    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
     // Re-check: cargo test skia_rasterises_a_path_its_clip_cuts_another_way
     //
     // Skia's analytic anti-aliasing takes another route for a path its clip

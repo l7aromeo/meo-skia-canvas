@@ -49,8 +49,9 @@ use crate::{
             FontLibrary as SharedFontRegistry, font_generation, forgetful,
         },
         oblique::{
-            ParagraphRecipe, Passes, StyleColours, add_slnt, draw_shadowed,
-            match_oblique, without_paragraph_cache,
+            GlyphPaints, ParagraphRecipe, Passes, StyleColours, add_slnt,
+            draw_shadowed, match_oblique, paint_glyphs,
+            without_paragraph_cache,
         },
         typography::paragraph_style,
         utils::color4f_to_srgb,
@@ -1625,7 +1626,9 @@ impl Paragraph {
 
     /// Paints the paragraph with its top-left corner at `origin`: through
     /// `Paragraph::paint`, with its oblique ranges sheared, its shadows and
-    /// its decorations drawn where it has any -- see `node::oblique`.
+    /// its decorations drawn where it has any, and its glyphs drawn from
+    /// their outlines where the canvas shears them past what FreeType draws
+    /// -- see `node::oblique`.
     pub(crate) fn paint(&self, canvas: &SkCanvas, origin: SkPoint) {
         let mut passes = self.passes.borrow_mut();
         #[cfg(test)]
@@ -1639,7 +1642,12 @@ impl Paragraph {
         let mut paragraph = self.paragraph.borrow_mut();
         match passes.as_mut() {
             Some(passes) => passes.paint(&mut paragraph, canvas, origin),
-            None => paragraph.paint(canvas, origin),
+            None => paint_glyphs(
+                &mut paragraph,
+                canvas,
+                origin,
+                GlyphPaints::Styles,
+            ),
         }
     }
 
