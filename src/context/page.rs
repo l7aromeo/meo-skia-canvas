@@ -39,6 +39,7 @@ use crate::{
         faint::composited,
         layer::{
             BlurDraw, BlurOp, Composite, CutOp, Group, Layer, LayerRec, Target,
+            holds_a_cut,
         },
     },
     encode::{
@@ -430,11 +431,11 @@ impl OpenLayer {
     /// composite it as the layer would -- see
     /// [`RecordingSurface::read_rastered`]: a layer that composites
     /// source-over through nothing but an alpha, onto nothing it filters,
-    /// confined to nothing of its own, and opened under a clip that covers
-    /// each pixel of `density`'s device whole or not at all. Its device then
-    /// starts transparent, holds what is drawn in it and nothing else, and
-    /// on closing is drawn through its paint, which a raster drawn the same
-    /// way reproduces. Any other is replayed.
+    /// confined to nothing of its own, opened under a clip that covers each
+    /// pixel of `density`'s device whole or not at all, and holding no draw
+    /// the clip cuts. Its device then starts transparent, holds what is drawn
+    /// in it and nothing else, and on closing is drawn through its paint,
+    /// which a raster drawn the same way reproduces. Any other is replayed.
     ///
     /// The clip, because Skia clips an antialiased edge as it blends each
     /// draw, at eight bits: a raster of the draws clipped afterwards rounds
@@ -442,6 +443,12 @@ impl OpenLayer {
     /// is composited rounds it twice. A layer opened under a round clip read
     /// from a raster came out up to 12 levels from the layer closed at its
     /// edge, either way. A clip on whole pixels clips nothing by part.
+    ///
+    /// A cut draw, because a layer holding one is closed under its clip as
+    /// a clip shader -- see `Group::playback_within` -- which Skia blends
+    /// through its raster pipeline, where a raster composited under the clip
+    /// path takes the legacy blitter on an eight-bit sRGB page, and the two
+    /// round apart.
     fn rasters(&self, density: f32) -> bool {
         let whole_pixels = |clip: &Path| {
             !clip.is_inverse_fill_type()
@@ -456,6 +463,7 @@ impl OpenLayer {
         self.rec.bounds.is_none()
             && self.rec.footprint(Some(Rect::new_empty())).is_some()
             && self.clip.as_ref().is_none_or(whole_pixels)
+            && !holds_a_cut(&self.entries)
     }
 }
 

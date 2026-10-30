@@ -584,7 +584,7 @@ impl Coverage {
 }
 
 /// Whether `entries`, or a group among them, hold a [`CutOp`].
-fn holds_a_cut(entries: &[Layer]) -> bool {
+pub(crate) fn holds_a_cut(entries: &[Layer]) -> bool {
     entries.iter().any(|entry| match entry {
         Layer::Cut(_) => true,
         Layer::Group(group) => holds_a_cut(&group.contents),
