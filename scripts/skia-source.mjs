@@ -15,8 +15,9 @@
 // whose Skia submodule is pinned by that tag, with Skia's own DEPS synced and gn
 // fetched at the revision `bin/fetch-gn` names. It lives once per version and
 // patch under `$XDG_CACHE_HOME/meo-skia-canvas`, so a new version or a changed
-// patch gets a new directory and a stale one cannot be reused; the superseded
-// ones are removed after a new one is ready.
+// patch gets a new directory and a stale one cannot be reused. Once a new one
+// is ready, the others are removed unless a worktree of this repository still
+// builds from one -- the cache is shared by every worktree on the machine.
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
@@ -33,7 +34,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const PATCH = join(ROOT, "containers", "skia-metal-untimed-compile.patch");
+/** The patch applied to the tree, relative to a checkout of this repository. */
+const PATCH = join("containers", "skia-metal-untimed-compile.patch");
 const RUST_SKIA = "https://github.com/rust-skia/rust-skia.git";
 /// Written last, so a directory without it is a preparation that did not finish.
 const READY = ".ready";
@@ -47,9 +49,12 @@ const PATCH_DIGEST_LENGTH = 12;
 /// so the last try is nearly two minutes after the first.
 const RETRY_DELAYS_SECONDS = [15, 30, 60];
 
-/** The skia-bindings version Cargo.lock resolves, which is the tag to fetch. */
-function lockedVersion() {
-  const lock = readFileSync(join(ROOT, "Cargo.lock"), "utf8");
+/**
+ * The skia-bindings version `root`'s Cargo.lock resolves, which is the tag to
+ * fetch.
+ */
+function lockedVersion(root = ROOT) {
+  const lock = readFileSync(join(root, "Cargo.lock"), "utf8");
   const found = lock.match(
     /\[\[package\]\]\nname = "skia-bindings"\nversion = "([^"]+)"/,
   );
@@ -62,12 +67,48 @@ function cacheRoot() {
   return join(base, "meo-skia-canvas");
 }
 
-function treeDir() {
+/** The cache directory name of the tree a checkout at `root` builds from. */
+function treeName(root = ROOT) {
   const digest = createHash("sha256")
-    .update(readFileSync(PATCH))
+    .update(readFileSync(join(root, PATCH)))
     .digest("hex")
     .slice(0, PATCH_DIGEST_LENGTH);
-  return join(cacheRoot(), `skia-${lockedVersion()}-${digest}`);
+  return `skia-${lockedVersion(root)}-${digest}`;
+}
+
+function treeDir() {
+  return join(cacheRoot(), treeName());
+}
+
+/**
+ * The names of git's variables that tie a command to one repository, as git
+ * itself lists them: the ones it clears before running a command inside a
+ * submodule.
+ */
+let repositoryVariables;
+
+/**
+ * This process's environment, less the variables that tie git to one
+ * repository, for every tool `prepare` runs.
+ *
+ * `git commit` runs its hooks with `GIT_DIR` and `GIT_INDEX_FILE` naming the
+ * repository being committed to, and git honours them over the directory a
+ * command runs in. `just precommit` runs `prepare`, so without this the clone
+ * and git-sync-deps' `remote set-url`, `fetch` and `checkout` act on that
+ * repository rather than on the checkout -- its index, origin and object
+ * store, not Skia's.
+ */
+function childEnv() {
+  repositoryVariables ??= new Set(
+    execFileSync("git", ["rev-parse", "--local-env-vars"], {
+      encoding: "utf8",
+    }).split("\n"),
+  );
+  return Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([name]) => !repositoryVariables.has(name),
+    ),
+  );
 }
 
 /** The directory `SKIA_SOURCE_DIR` names: Skia itself, inside the checkout. */
@@ -76,12 +117,65 @@ function sourceDir(tree = treeDir()) {
 }
 
 // The tools' output goes to stderr, so the directory is the only thing
-// `prepare` prints to stdout and a caller can take it whole.
-function run(command, args, options = {}) {
+// `prepare` prints to stdout and a caller can take it whole. `env` is added to
+// `childEnv()`, never a replacement for it.
+export function run(command, args, { env = {}, ...options } = {}) {
   execFileSync(command, args, {
     stdio: ["ignore", process.stderr.fd, "inherit"],
     ...options,
+    env: { ...childEnv(), ...env },
   });
+}
+
+/**
+ * The names of the trees some worktree of the repository at `root` builds
+ * from, or null when its worktrees cannot be listed. A worktree whose checkout
+ * is gone, or that has no lock or patch to name a tree by, names none.
+ */
+export function treesInUse(root = ROOT) {
+  let listing;
+  try {
+    listing = execFileSync("git", ["worktree", "list", "--porcelain"], {
+      cwd: root,
+      env: childEnv(),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    return null;
+  }
+  const prefix = "worktree ";
+  return new Set(
+    listing
+      .split("\n")
+      .filter((line) => line.startsWith(prefix))
+      .flatMap((line) => {
+        try {
+          return [treeName(line.slice(prefix.length))];
+        } catch {
+          return [];
+        }
+      }),
+  );
+}
+
+/**
+ * Removes every tree under `cache` that `inUse` does not name, and the partial
+ * preparation of each. Nothing is removed when `inUse` is null: a tree left
+ * behind costs disk, one removed from under a worktree costs it a fresh fetch.
+ */
+export function removeSuperseded(cache, inUse) {
+  if (inUse === null) {
+    console.error(
+      "skia-source: this repository's worktrees could not be listed, so no " +
+        `superseded tree under ${cache} was removed`,
+    );
+    return;
+  }
+  for (const name of readdirSync(cache)) {
+    if (name.startsWith("skia-") && !inUse.has(name.replace(/\.partial$/, "")))
+      rmSync(join(cache, name), { recursive: true, force: true });
+  }
 }
 
 /** Blocks the thread for `seconds`: the script is synchronous throughout. */
@@ -153,7 +247,6 @@ function prepare() {
     run("python3", ["skia/tools/git-sync-deps"], {
       cwd: join(checkout, "skia-bindings"),
       env: {
-        ...process.env,
         GIT_SYNC_DEPS_PATH: "skia/DEPS",
         GIT_SYNC_DEPS_SKIP_EMSDK: "1",
       },
@@ -164,15 +257,12 @@ function prepare() {
   );
   // `-F0`: a hunk that no longer matches fails here rather than being placed
   // by guesswork.
-  run("patch", ["-p1", "-F0", "-d", checkout, "-i", PATCH]);
+  run("patch", ["-p1", "-F0", "-d", checkout, "-i", join(ROOT, PATCH)]);
   writeFileSync(join(partial, READY), `${lockedVersion()}\n`);
   renameSync(partial, tree);
 
-  for (const name of readdirSync(cacheRoot())) {
-    const other = join(cacheRoot(), name);
-    if (name.startsWith("skia-") && other !== tree)
-      rmSync(other, { recursive: true, force: true });
-  }
+  // This checkout is one of the worktrees, so the new tree is kept with them.
+  removeSuperseded(cacheRoot(), treesInUse());
   return sourceDir(tree);
 }
 
