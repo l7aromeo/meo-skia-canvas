@@ -2129,7 +2129,9 @@ impl Context2D {
                 // laid out for this paint -- see `Typesetter::laid_out`.
                 let run = match &kept {
                     Some(kept) => DrawnRun::Kept(kept.clone()),
-                    None => typesetter.drawn_once(&faint.drawable(paint)),
+                    None => {
+                        typesetter.drawn_once(&faint.drawable(paint), canvas)
+                    }
                 };
                 let (offset, condensation) = (run.offset(), run.condensation());
                 // In a test, an undecorated run can be laid out for this

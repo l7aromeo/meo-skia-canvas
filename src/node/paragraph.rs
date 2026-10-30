@@ -23,8 +23,9 @@ use crate::{
     font_library::{FontLibrary, instance_coordinates},
     node::{
         oblique::{
-            ParagraphRecipe, Passes, StyleColours, add_slnt, match_oblique,
-            set_coordinates, without_paragraph_cache,
+            GlyphPaints, ParagraphRecipe, Passes, StyleColours, add_slnt,
+            match_oblique, paint_glyphs, set_coordinates,
+            without_paragraph_cache,
         },
         typography::{paragraph_style, with_style_axes},
     },
@@ -1678,7 +1679,7 @@ pub fn drawParagraph(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         let (paragraph, passes) = &mut *held.borrow_mut();
         match passes {
             Some(passes) => passes.paint(paragraph, canvas, at),
-            None => paragraph.paint(canvas, at),
+            None => paint_glyphs(paragraph, canvas, at, GlyphPaints::Styles),
         }
         reach_the_clip(canvas);
     });
