@@ -923,9 +923,15 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   space; and as a plain colour for a PDF or SVG of it, which still write it as
   one. Its pixels hold the colour as named, to the precision of the half float
   on `"RGBAF16"`. Text keeps the edges the plain colour gives it, which Skia
-  weighs by the luminance of the paint's colour. The cost is memory: about
-  1.35x an sRGB canvas's recording for a run of fills in one colour, 2.4x for
-  fills each in a colour of its own. Not yet exact there: a shadow, which Skia
+  weighs by the luminance of the paint's colour. The cost is memory, and time
+  for text and blurred draws. The recording takes about 1.35x an sRGB
+  canvas's for a run of fills in one colour, 2.4x for fills each in a colour
+  of its own. `fillText` takes about 1.35 times as long as on an sRGB canvas
+  with its colour kept, and 1.55 times with the colour changing on every call
+  [RE-TIME vs 6.0.2]. The CPU engine blurs the pixels of every float canvas,
+  sRGB included, in `f64` so that a blurred colour lands exactly, which costs
+  a blurred draw there [RE-TIME vs 6.0.2]; an eight-bit canvas's blur is
+  unaffected. Not yet exact there: a shadow, which Skia
   draws through an eight-bit layer, a `Paragraph`'s own colours, the colours
   in a filter, a colour filter or a texture, and the `"rec2020-pq"` and
   `"rec2020-hlg"` spaces.
