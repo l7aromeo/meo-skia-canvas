@@ -902,15 +902,17 @@ impl Context2D {
     }
 
     /// Files a draw under a `drop-shadow()` the crate runs itself -- see
-    /// [`Filter::steps`] -- as a group of its own: the draw recorded
-    /// without its filter, under the transform it is made under and once
-    /// for each recording the page keeps, run through the chain on pixels.
-    /// Through Skia's layer the shadow's blur is not the exact Gaussian,
-    /// and under a turn or a skew the draw itself is resampled. In a
-    /// document the group composites through the paint as it is, which
-    /// Skia draws as it draws the filtered draw itself. `false`, filing
-    /// nothing, for any other draw, and for one casting a shadow or under
-    /// a blend that covers beyond it, which stay Skia's.
+    /// [`Filter::steps`] -- or under a Skia image filter on a page that
+    /// composites in floats -- see [`Self::exact_steps`] -- as a group of
+    /// its own: the draw recorded without its filter, under the transform
+    /// it is made under and once for each recording the page keeps, run
+    /// through the chain on pixels. Through Skia's layer the shadow's blur
+    /// is not the exact Gaussian, under a turn or a skew the draw itself is
+    /// resampled, and a float page's layer is eight bits. In a document the
+    /// group composites through the paint as it is, which Skia draws as it
+    /// draws the filtered draw itself. `false`, filing nothing, for any
+    /// other draw, and for one casting a shadow or under a blend that
+    /// covers beyond it, which stay Skia's.
     fn files_through_chain<F>(
         &self,
         paint: &Paint,
@@ -921,8 +923,7 @@ impl Context2D {
     where
         F: Fn(&SkCanvas, &Paint),
     {
-        if !self.state.filter.casts_drop_shadow()
-            || covers_beyond_the_draw(self.state.global_composite_operation)
+        if covers_beyond_the_draw(self.state.global_composite_operation)
             || self.casts_shadow()
         {
             return false;
@@ -930,10 +931,20 @@ impl Context2D {
         let Some(steps) = self.exact_steps() else {
             return false;
         };
+        // A chain of blurs and colour functions alone keeps the route its
+        // draw takes now: a `BlurOp`, or Skia's filter.
+        let chained = steps.iter().any(|step| {
+            matches!(step, Step::Shadow { .. }) || step.runs_in_local_space()
+        });
+        if !chained {
+            return false;
+        }
         // Recorded over the page and as far again as the chain reaches: a
         // picture keeps nothing of a draw past its bounds, and a draw off
         // the page can cast its shadow onto it.
-        let bounds = self.bounds.with_outset(canvas_reach(&steps));
+        let bounds = self
+            .bounds
+            .with_outset(canvas_reach(&steps, &self.state.matrix));
         // The draw keeps its alpha, the colour's and the global one, as it
         // does through Skia's layer; the group composites it at one,
         // through the blend.
@@ -2558,16 +2569,31 @@ impl Context2D {
 
     /// The filter as steps the crate runs on a draw's pixels exactly -- see
     /// [`Filter::steps`] -- or `None` where Skia's filter draws it: no
-    /// filter, one Skia has to run itself, or one beside a Skia image
-    /// filter, which would have to run after it and keeps the whole filter
-    /// Skia's.
+    /// filter, or one Skia has to run itself.
+    ///
+    /// A Skia image filter is one Skia runs, and on a page that composites
+    /// in floats the crate runs it on a float layer of its own, as the one
+    /// step of its chain -- see [`Step::Image`]; Skia's own layer for it
+    /// would be eight bits. Beside a CSS filter it keeps Skia's layer on any
+    /// page: the two would run in different spaces, the CSS filter's lengths
+    /// in canvas pixels and the image filter's in the draw's own units.
     fn exact_steps(&self) -> Option<Arc<[Step]>> {
-        self.state
-            .skia_image_filter
-            .is_none()
-            .then(|| self.state.filter.steps())
-            .flatten()
-            .map(Arc::<[Step]>::from)
+        match &self.state.skia_image_filter {
+            None => self.state.filter.steps().map(Arc::<[Step]>::from),
+            Some(filter) => (self.composites_in_floats()
+                && self.state.filter.is_none())
+            .then(|| Arc::from([Step::Image(filter.clone())])),
+        }
+    }
+
+    /// Whether the page composites in floats, `F16` or `F32`: a page whose
+    /// Skia image filters the crate runs itself, as Skia's layer would
+    /// round them to eight bits -- see [`Step::Image`].
+    fn composites_in_floats(&self) -> bool {
+        matches!(
+            self.canvas_color_type,
+            ColorType::RGBAF16 | ColorType::RGBAF16Norm | ColorType::RGBAF32
+        )
     }
 
     /// Whether a draw now casts a shadow: what `paint_for_shadow` answers
