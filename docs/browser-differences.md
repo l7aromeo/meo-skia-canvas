@@ -869,6 +869,28 @@ level at densities 1 and 2. One played into a picture -- a canvas used as a
 pattern -- has no pixels for the closed form, and is blurred on its result,
 by the exact Gaussian of the entry above.
 
+**A draw through a `drop-shadow()` under a turn or a skew is resampled, and
+Chrome's is not.** Its lengths land where Chrome's do: `drop-shadow(12px 4px
+0 red)` lies 12 pixels right of what casts it and 4 down under a scale, a
+rotation or a skew, as `shadowOffsetX` and `shadowOffsetY` do, and its blur
+keeps its length under a rotation. But Skia draws a filtered draw into a
+layer at the transform's scale and turns the layer onto the page, so the
+draw itself is resampled. Chrome 153.0.8010.12 headless draws a 30-pixel
+blue square through `drop-shadow(80px 0 0 red)` exactly as it draws the
+square unfiltered, on both its canvases, under `rotate(30deg)` and under a
+`0.5` skew. Here, worst levels of alpha from the square drawn unfiltered:
+
+                 rotate(30deg)   skew
+        CPU           16          65
+        GPU           40          80
+
+The ink is the same to a hundredth of a pixel, so the edge is moved and
+softened rather than lost. Under a skew the blur is the one Skia makes at
+that scale, which is not round on the page. A Skia `ImageFilter` is drawn
+through the same layer; its lengths are in local units, and turn and stretch
+with the transform as CanvasKit's do. `tests/filter_transform.rs` holds the
+offsets and the blur lengths.
+
 **A fill or stroke the page's edge cuts is drawn differently far inside the
 page on the CPU engine.** The page's edge cuts a path as a clip does: Skia's
 analytic anti-aliasing builds a path's edges against the raster's bounds where
