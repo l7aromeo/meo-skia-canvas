@@ -19,7 +19,7 @@ independently of the npm package.
 
 ## 📦 ⟩ [v0.17.0] (crate) ⟩ Unreleased
 
-**A breaking release. Twenty-six changes can break working code, each under
+**A breaking release. Twenty-seven changes can break working code, each under
 Breaking with what to change.**
 
 Signatures and types change: `FontSlant::Oblique` and `TextSlant::Oblique` carry
@@ -40,7 +40,8 @@ widths, line metrics and rects, which are no longer rounded to hundredths, and
 something else: an `RgbaLinear` is linear-light sRGB on every canvas,
 `color(rec2020 ...)` decodes by a 2.4 gamma, `has_font` and `family_details`
 match a family name in any case, `sans-serif` is the face Chrome draws it in,
-and `set_word_spacing` is added after every word separator. On Linux the crate
+`set_word_spacing` is added after every word separator, and a `TextStyle`'s
+text shadows paint the first listed on top. On Linux the crate
 no longer sets `FONTCONFIG_PATH`.
 
 Wrong pixels are fixed: a read after an export drew the cached page onto the
