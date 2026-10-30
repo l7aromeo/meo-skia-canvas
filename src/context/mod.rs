@@ -60,7 +60,7 @@ use crate::{
     },
     utils::*,
 };
-use chain::Step;
+use chain::{Step, canvas_reach};
 use faint::Faint;
 use layer::{
     BlurDraw, Composite, ExactColour, Layer, LayerRec, reach_the_clip,
@@ -806,6 +806,9 @@ impl Context2D {
     ) where
         F: Fn(&SkCanvas, &Paint),
     {
+        if self.files_through_chain(paint, exact, features, &f) {
+            return;
+        }
         let paint_for = |recording: Recording| match (recording, exact) {
             (Recording::Pixels, Some(exact)) => exact,
             _ => paint,
@@ -869,6 +872,83 @@ impl Context2D {
                 });
             }
         };
+    }
+
+    /// Files a draw under a `drop-shadow()` the crate runs itself -- see
+    /// [`Filter::steps`] -- as a group of its own: the draw recorded
+    /// without its filter, under the transform it is made under and once
+    /// for each recording the page keeps, run through the chain on pixels.
+    /// Through Skia's layer the shadow's blur is not the exact Gaussian,
+    /// and under a turn or a skew the draw itself is resampled. In a
+    /// document the group composites through the paint as it is, which
+    /// Skia draws as it draws the filtered draw itself. `false`, filing
+    /// nothing, for any other draw, and for one casting a shadow or under
+    /// a blend that covers beyond it, which stay Skia's.
+    fn files_through_chain<F>(
+        &self,
+        paint: &Paint,
+        exact: Option<&Paint>,
+        features: VectorFeatures,
+        f: &F,
+    ) -> bool
+    where
+        F: Fn(&SkCanvas, &Paint),
+    {
+        if !self.state.filter.casts_drop_shadow()
+            || covers_beyond_the_draw(self.state.global_composite_operation)
+            || self.casts_shadow()
+        {
+            return false;
+        }
+        let Some(steps) = self.exact_steps() else {
+            return false;
+        };
+        // Recorded over the page and as far again as the chain reaches: a
+        // picture keeps nothing of a draw past its bounds, and a draw off
+        // the page can cast its shadow onto it.
+        let bounds = self.bounds.with_outset(canvas_reach(&steps));
+        // The draw keeps its alpha, the colour's and the global one, as it
+        // does through Skia's layer; the group composites it at one,
+        // through the blend.
+        let record = |paint: &Paint| {
+            let mut paint = paint.clone();
+            paint
+                .set_image_filter(None)
+                .set_blend_mode(BlendMode::SrcOver);
+            let mut recorder = PictureRecorder::new();
+            let canvas = recorder.begin_recording(bounds, true);
+            canvas.set_matrix(&self.state.matrix.into());
+            f(canvas, &paint);
+            recorder.finish_recording_as_picture(None)
+        };
+        let entry = match self.recorder.borrow().dual() {
+            false => record(paint).map(Layer::Picture),
+            true => record(exact.unwrap_or(paint))
+                .zip(record(paint))
+                .map(|pictures| Layer::Targeted(Arc::new(pictures))),
+        };
+        let mut through = Paint::default();
+        through
+            .set_blend_mode(self.state.global_composite_operation)
+            .set_image_filter(paint.image_filter());
+        let contents = Arc::new(entry.into_iter().collect());
+        self.with_recorder(|mut recorder| {
+            recorder.append_group(
+                Composite::Chain {
+                    steps,
+                    rec: LayerRec {
+                        paint: Some(through),
+                        ..LayerRec::default()
+                    },
+                },
+                None,
+                Matrix::new_identity(),
+                contents,
+                features,
+                Point::default(),
+            );
+        });
+        true
     }
 
     pub fn map_points(&self, coords: &[f32]) -> Vec<Point> {

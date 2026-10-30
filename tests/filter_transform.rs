@@ -341,3 +341,119 @@ fn a_blur_skia_draws_keeps_its_length_under_a_quarter_turn() {
         );
     }
 }
+
+#[test]
+fn a_drop_shadow_is_cast_into_a_clip_from_outside_it() {
+    // The square lies wholly outside the clip and its shadow wholly inside:
+    // what the shadow is made from has to be read from past the clip by
+    // as far as the shadow moves.
+    for depth in [PixelDepth::Uint8, PixelDepth::F32] {
+        for gpu in [false, true] {
+            let Some(mut canvas) = canvas(depth, gpu) else {
+                continue;
+            };
+            let ctx = canvas.context();
+            ctx.begin_path();
+            ctx.rect(CENTRE, 0.0, CENTRE, SIDE as f32);
+            ctx.clip(FillRule::NonZero);
+            ctx.set_filter_css("drop-shadow(100px 0 0 red)")
+                .expect("a filter");
+            ctx.set_fill_style_css("blue").expect("a colour");
+            ctx.fill_rect(20.0, 90.0, 20.0, 20.0);
+            let pixels = pixels(&mut canvas);
+            let (shadow, square) =
+                (pixels[100 * SIDE + 130], pixels[100 * SIDE + 30]);
+            assert!(
+                shadow == [1.0, 0.0, 0.0, 1.0] && square == [0.0; 4],
+                "{depth:?}, gpu {gpu}: the shadow reads {shadow:?} and the \
+                 square {square:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_drop_shadow_lands_a_fraction_of_a_pixel_where_it_is_asked_to() {
+    // Resampled bilinearly, which keeps the centroid. Chrome lands
+    // `4.25px` at 4.5 unblurred and at 4.32 blurred by 2px.
+    for depth in [PixelDepth::Uint8, PixelDepth::F32] {
+        for gpu in [false, true] {
+            for blur in [0.0, 2.0] {
+                let filter = format!("drop-shadow(12.5px 4.25px {blur}px red)");
+                let Some(pixels) = square(depth, gpu, TRANSFORMS[0].1, |c| {
+                    c.set_filter_css(&filter).expect("a filter")
+                }) else {
+                    continue;
+                };
+                let (x, y) = red_from_blue(&pixels);
+                assert!(
+                    (x - 12.5).abs() < 0.01 && (y - 4.25).abs() < 0.01,
+                    "{depth:?}, gpu {gpu}, {filter}: the shadow lies {x:.3}, \
+                     {y:.3} from the square"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_canvas_drawn_in_at_twice_its_size_casts_its_shadow_twice_as_far() {
+    // Chrome: 24, 8. The shadow's lengths are the source canvas's pixels,
+    // which the drawing scales.
+    for gpu in [false, true] {
+        let Some(mut canvas) = canvas(PixelDepth::Uint8, gpu) else {
+            continue;
+        };
+        let mut source = Canvas::new(SIDE as f32 / 2.0, SIDE as f32 / 2.0);
+        source.set_gpu(gpu);
+        let ctx = source.context();
+        ctx.set_filter_css("drop-shadow(12px 4px 0 red)")
+            .expect("a filter");
+        ctx.set_fill_style_css("blue").expect("a colour");
+        ctx.fill_rect(CENTRE / 2.0 - 3.0, CENTRE / 2.0 - 3.0, 6.0, 6.0);
+        canvas.context().draw_canvas_sized(
+            &mut source,
+            0.0,
+            0.0,
+            SIDE as f32,
+            SIDE as f32,
+        );
+        let (x, y) = red_from_blue(&pixels(&mut canvas));
+        assert!(
+            (x - 24.0).abs() < CENTROID && (y - 8.0).abs() < CENTROID,
+            "gpu {gpu}: the shadow lies {x:.2}, {y:.2} from the square"
+        );
+    }
+}
+
+#[test]
+fn text_under_a_drop_shadow_is_drawn_as_it_is_unfiltered_under_a_turn() {
+    // Through Skia's filter layer a turned draw was made unturned and turned
+    // onto the page, and the glyphs' edges moved by up to 16 levels.
+    for gpu in [false, true] {
+        let drawn = |filter: &str| {
+            let mut canvas = canvas(PixelDepth::Uint8, gpu)?;
+            let ctx = canvas.context();
+            TRANSFORMS[3].1(ctx);
+            ctx.set_filter_css(filter).expect("a filter");
+            ctx.set_font_css("bold 32px sans-serif");
+            ctx.set_fill_style_css("blue").expect("a colour");
+            ctx.fill_text("Wg", 70.0, 110.0, None);
+            Some(pixels(&mut canvas))
+        };
+        let (Some(filtered), Some(plain)) =
+            (drawn("drop-shadow(0 80px 0 red)"), drawn("none"))
+        else {
+            continue;
+        };
+        // Above the shadow, which lies 80 pixels below the text.
+        let rows = 70 * SIDE..120 * SIDE;
+        let parted = rows.clone().filter(|&i| filtered[i] != plain[i]).count();
+        let inked = rows.filter(|&i| plain[i][3] > 0.0).count();
+        assert!(
+            parted == 0 && inked > 100,
+            "gpu {gpu}: {parted} of the text's pixels differ from it drawn \
+             unfiltered ({inked} inked)"
+        );
+    }
+}

@@ -869,27 +869,44 @@ level at densities 1 and 2. One played into a picture -- a canvas used as a
 pattern -- has no pixels for the closed form, and is blurred on its result,
 by the exact Gaussian of the entry above.
 
-**A draw through a `drop-shadow()` under a turn or a skew is resampled, and
-Chrome's is not.** Its lengths land where Chrome's do: `drop-shadow(12px 4px
-0 red)` lies 12 pixels right of what casts it and 4 down under a scale, a
-rotation or a skew, as `shadowOffsetX` and `shadowOffsetY` do, and its blur
-keeps its length under a rotation. But Skia draws a filtered draw into a
-layer at the transform's scale and turns the layer onto the page, so the
-draw itself is resampled. Chrome 153.0.8010.12 headless draws a 30-pixel
-blue square through `drop-shadow(80px 0 0 red)` exactly as it draws the
-square unfiltered, on both its canvases, under `rotate(30deg)` and under a
-`0.5` skew. Here, worst levels of alpha from the square drawn unfiltered:
+**A `drop-shadow()` is the exact Gaussian blur of what casts it, and
+Chrome's is not.** Filter Effects Module Level 1 defines the shadow as the
+draw's alpha in the shadow's colour, blurred by a Gaussian whose standard
+deviation is the length given and moved by the offset, with the draw over
+it. Here it is exactly that, made from the draw's own pixels and rounded
+once: within half a level on 8-bit pixels on either engine, and on F16 and
+F32 to the surface's precision. Chrome 153.0.8010.12 headless approximates the
+blur, on both its canvases alike. A black triangle on a 160 by 100 canvas,
+worst levels from the exact shadow of Chrome's own unshadowed triangle:
 
-                 rotate(30deg)   skew
-        CPU           16          65
-        GPU           40          80
+        drop-shadow     0 0 2px   3px 2px 2px   3px 2px 8px
+        here              0.50        0.50          0.50
+        Chrome            6.85       10.75          3.77
 
-The ink is the same to a hundredth of a pixel, so the edge is moved and
-softened rather than lost. Under a skew the blur is the one Skia makes at
-that scale, which is not round on the page. A Skia `ImageFilter` is drawn
-through the same layer; its lengths are in local units, and turn and stretch
-with the transform as CanvasKit's do. `tests/filter_transform.rs` holds the
-offsets and the blur lengths.
+Its lengths land where Chrome's do: `drop-shadow(12px 4px 0 red)` lies 12
+pixels right of what casts it and 4 down under a scale, a rotation or a
+skew, as `shadowOffsetX` and `shadowOffsetY` do, and a canvas drawn into
+another at twice its size casts it twice as far, 24 and 8. The draw is made
+on the page's own pixels whatever the transform, as Chrome makes it: a
+30-pixel square drawn through `drop-shadow(80px 0 0 red)` under
+`rotate(30deg)` or a skew is the square drawn unfiltered, to the level. An
+offset that is not whole pixels moves the shadow bilinearly, which keeps
+where it lies: `drop-shadow(12.5px 4.25px 0 red)` lies 12.5 and 4.25 from
+what casts it here, and 12.5 and 4.5 in Chrome, which puts it at 4.32 when
+it is blurred by 2px. `tests/blur_result.rs` holds the shadow to the exact
+one and `tests/filter_transform.rs` the offsets.
+
+A draw that casts a `shadowColor` shadow as well, or is drawn under a
+`globalCompositeOperation` that composites the whole canvas, is drawn
+through Skia's filter layer instead. There the offset and the blur's length
+are Chrome's, but the blur is Skia's approximation, and under a turn or a
+skew Skia draws the filtered draw at the transform's scale and turns it onto
+the page, which resamples the draw itself: a 30-pixel square read up to 16
+levels from the square drawn unfiltered under `rotate(30deg)` on the CPU
+engine and 40 on the GPU, and 65 and 80 under a `0.5` skew. A Skia
+`ImageFilter` is drawn through that layer too, and resampled the same way;
+its lengths are in local units, and turn and stretch with the transform as
+CanvasKit's do.
 
 **A fill or stroke the page's edge cuts is drawn differently far inside the
 page on the CPU engine.** The page's edge cuts a path as a clip does: Skia's
