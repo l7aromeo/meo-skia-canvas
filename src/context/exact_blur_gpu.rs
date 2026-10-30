@@ -72,6 +72,8 @@ pub(crate) fn factor(sigma: f32) -> Option<usize> {
 /// `part` says what to write: 1 and 2, the value and its remainder in
 /// levels; 0, the value rounded to a level, for an 8-bit target; 3, the
 /// value unrounded, for a float one. Outside a texture, decal reads zero.
+///
+/// The constants it names are declared ahead of it by [`source`].
 const PASS: &str = r#"
 uniform shader hi;
 uniform shader lo;
@@ -86,10 +88,10 @@ uniform float part;
 uniform float source;
 float4 snap(float4 x) {
     float4 a = abs(x);
-    float4 e = floor(log2(max(a, 6.103515625e-05)));
+    float4 e = floor(log2(max(a, HALF_MIN_NORMAL)));
     e += step(exp2(e + 1), a);
-    e -= 1 - step(exp2(e), max(a, 6.103515625e-05));
-    float4 ulp = exp2(e - 10);
+    e -= 1 - step(exp2(e), max(a, HALF_MIN_NORMAL));
+    float4 ulp = exp2(e - HALF_MANTISSA_BITS);
     return sign(x) * floor(a / ulp + 0.5) * ulp;
 }
 float4 at(float2 q) {
@@ -104,14 +106,14 @@ float4 main(float2 p) {
     float4 acc = float4(0);
     if (mode < 2) {
         float centre = mode == 0 ? origin + o * spacing : o;
-        for (int i = 0; i < 16384; i++) {
+        for (int i = 0; i < MAX_TAPS; i++) {
             float d = float(i) - reach;
             if (d > reach) { break; }
             acc += exp(-d * d * c) * at(across + dir * (centre - d + 0.5));
         }
     } else {
         float j = ceil((o - reach - origin) / spacing);
-        for (int i = 0; i < 16384; i++) {
+        for (int i = 0; i < MAX_TAPS; i++) {
             float d = o - (origin + j * spacing);
             if (d < -reach) { break; }
             acc += exp(-d * d * c) * at(across + dir * (j + 0.5));
@@ -126,9 +128,40 @@ float4 main(float2 p) {
 }
 "#;
 
+/// The most taps one pass reads for a sample. SkSL needs a loop's bound to
+/// be a constant, so [`PASS`]'s loops stop here whatever the pass asks for,
+/// and a pass that needs more is not made: [`Gpu::pass`] refuses it and the
+/// CPU blurs the image. The first pass of a decimated axis is the widest, at
+/// `2 * ceil(6 s) + 1` taps for a factor `s`, which passes this from a sigma
+/// of about 3924, on a line at least one and a half times that long:
+/// [`REACH_PER_LINE`] leaves a shorter line's blur to the CPU already.
+const MAX_TAPS: usize = 1 << 14;
+
+/// A half float's exponent bias, from IEEE 754's binary16 format.
+const HALF_EXPONENT_BIAS: u32 = 15;
+
+/// The smallest positive normal half float, `2^(1 - bias)`: below it a
+/// half's spacing stops shrinking, so [`PASS`]'s snap takes its spacing
+/// there.
+const HALF_MIN_NORMAL: f64 = 1.0 / (1u32 << (HALF_EXPONENT_BIAS - 1)) as f64;
+
+/// The bits of a half float's mantissa, from binary16: a half's spacing is
+/// `2^(e - HALF_MANTISSA_BITS)` for a value of exponent `e`.
+const HALF_MANTISSA_BITS: u32 = 10;
+
+/// [`PASS`] behind the constants it names.
+fn source() -> String {
+    format!(
+        "const int MAX_TAPS = {MAX_TAPS};\n\
+         const float HALF_MIN_NORMAL = {HALF_MIN_NORMAL:?};\n\
+         const float HALF_MANTISSA_BITS = {HALF_MANTISSA_BITS}.0;\n\
+         {PASS}"
+    )
+}
+
 thread_local! {
     /// [`PASS`], compiled once per thread.
-    static EFFECT: Option<RuntimeEffect> = RuntimeEffect::make_for_shader(PASS, None).ok();
+    static EFFECT: Option<RuntimeEffect> = RuntimeEffect::make_for_shader(source(), None).ok();
 }
 
 /// What a pass's children hold, as [`PASS`]'s `source` uniform reads it.
@@ -159,6 +192,17 @@ struct Taps {
     norm: f64,
 }
 
+impl Taps {
+    /// How many taps [`PASS`] reads for one sample: every input within
+    /// `reach` of it, or in mode 2 every coarse sample within `reach`.
+    fn count(&self) -> usize {
+        match self.mode == 2.0 {
+            true => (2 * self.reach) / self.spacing as usize + 1,
+            false => 2 * self.reach + 1,
+        }
+    }
+}
+
 /// How many times its line's length a blur's reach may be on the GPU.
 ///
 /// The passes' taps and the coarse grid's margins grow with the sigma
@@ -180,9 +224,10 @@ fn norm_of(sigma: f64) -> f64 {
 /// `out_type` pixels: rounded to a level for an 8-bit type, unrounded for a
 /// float one. The gain is the last pass's, so that a blurred draw composited
 /// at an alpha is rounded once.
-/// `None` where the effect does not compile or a target cannot be made, and
-/// for a blur that reaches past the image along either axis by more than
-/// [`REACH_PER_LINE`] times its length, which the CPU blur takes.
+/// `None` where the effect does not compile or a target cannot be made, for
+/// a blur that reaches past the image along either axis by more than
+/// [`REACH_PER_LINE`] times its length, and for one with a pass of more than
+/// [`MAX_TAPS`] taps, all of which the CPU blur takes.
 pub(crate) fn blur(
     context: &mut RecordingContext,
     image: &Image,
@@ -283,7 +328,8 @@ impl Gpu<'_> {
     }
 
     /// One pass: `children` read as `input`, along `dir`, into a `w` x `h`
-    /// target of `ct`, writing `part`.
+    /// target of `ct`, writing `part`. `None` for a pass of more taps than
+    /// [`PASS`]'s loops take.
     #[allow(clippy::too_many_arguments)]
     fn pass(
         &mut self,
@@ -295,6 +341,9 @@ impl Gpu<'_> {
         (w, h): (usize, usize),
         ct: ColorType,
     ) -> Option<Image> {
+        if taps.count() > MAX_TAPS {
+            return None;
+        }
         let info = self.info(w, h, ct);
         let mut surface = surfaces::render_target(
             self.context,
@@ -518,7 +567,7 @@ mod tests {
         assert!(
             EFFECT.with(Option::is_some),
             "{:?}",
-            RuntimeEffect::make_for_shader(PASS, None).err()
+            RuntimeEffect::make_for_shader(source(), None).err()
         );
     }
 
@@ -612,6 +661,49 @@ mod tests {
                 "({sx}, {sy}): {n} bytes off, one {far} from a tie"
             );
         }
+    }
+
+    #[test]
+    fn a_pass_past_the_shaders_loop_is_left_to_the_cpu() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        // Factors 1357 and 1392, so the first pass takes 16285 taps, within
+        // the loop, and 16705, past it. Both reach past the line by less
+        // than `REACH_PER_LINE` times its length.
+        let (fits, past) = (3900.0f32, 4000.0f32);
+        let w = 6000;
+        let src: Vec<u8> = [255u8, 0, 0, 255].repeat(w);
+        let got = on_gpu(&src, w, 1, fits, 0.0)
+            .expect("a GPU blur where a GPU is selectable");
+        // The line is uniform, so each pixel's blur is the share of the
+        // sampled Gaussian over the line: a difference of its running sum,
+        // where `reference` would take the taps one by one.
+        let sigma = f64::from(fits);
+        let r = (8.0 * sigma).ceil() as i64;
+        let mut running = vec![0f64];
+        for d in -r..=r {
+            let weight = (-((d * d) as f64) / (2.0 * sigma * sigma)).exp();
+            running.push(running[running.len() - 1] + weight);
+        }
+        let total = running[running.len() - 1];
+        let upto = |d: i64| running[(d.clamp(-r - 1, r) + r + 1) as usize];
+        let want: Vec<f64> = (0..w as i64)
+            .flat_map(|x| {
+                let v = 255.0 * (upto(x) - upto(x - w as i64)) / total;
+                [v, 0.0, 0.0, v]
+            })
+            .collect();
+        let (n, far) = off(&got, &want);
+        assert!(
+            far < TIE,
+            "sigma {fits}: {n} bytes off, one {far} from a tie"
+        );
+        assert!(
+            on_gpu(&src, w, 1, past, 0.0).is_none(),
+            "a pass past the loop was made on the GPU"
+        );
     }
 
     #[test]

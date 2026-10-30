@@ -568,8 +568,9 @@ fn blurred(
             if on_gpu.is_some() {
                 return on_gpu;
             }
-            // A target the GPU cannot make -- Metal has no F32 one -- is
-            // blurred on the CPU, which every type reaches.
+            // A blur the GPU's passes cannot make -- onto a target Metal
+            // has none of, F32, or with a pass longer than their loop -- is
+            // blurred on the CPU, which every type and sigma reaches.
             let mut direct = context.as_direct_context();
             image.make_raster_image(direct.as_mut(), CachingHint::Disallow)?
         }
