@@ -728,11 +728,13 @@ impl Context2D {
 
     /// The paint a page's pixels recording draws text in `paint` with, where
     /// the page keeps one: `paint` over a colour shader of its own colour,
-    /// opaque, with [`ExactColour::dye`] replacing that colour before any
-    /// colour filter `paint` already carries. Without a shader Skia folds a
-    /// colour filter into the paint's colour, through the conversion the
-    /// dye exists to avoid; and a colour shader answers the luminance Skia
-    /// sets a glyph mask's contrast from, which an image shader does not.
+    /// opaque, with [`ExactColour::dye`] replacing that colour -- or, before
+    /// a colour filter `paint` already carries,
+    /// [`ExactColour::dye_keeping_plain_luminance`]. Without a shader Skia
+    /// folds a colour filter into the paint's colour, through the
+    /// conversion the dye exists to avoid; and a colour shader answers the
+    /// luminance Skia sets a glyph mask's contrast from, which an image
+    /// shader does not.
     pub fn exact_text_paint(
         &self,
         paint: &Paint,
@@ -744,22 +746,29 @@ impl Context2D {
         let exact = self.exact_colour(style)?;
         let mut opaque = paint.color4f();
         opaque.a = 1.0;
-        let mut held = self.exact_dye.borrow_mut();
-        let dye = match &*held {
-            Some((colour, plain, dye))
-                if *colour == exact && *plain == opaque =>
-            {
-                dye.clone()
-            }
-            _ => {
-                let dye = exact.dye(opaque)?;
-                *held = Some((exact, opaque, dye.clone()));
-                dye
-            }
-        };
         let dye = match paint.color_filter() {
-            Some(theirs) => color_filters::compose(&theirs, &dye)?,
-            None => dye,
+            // Their filter follows the dye and could move its glyph
+            // contrast into another bucket from the plain colour's, so the
+            // dye is the one that keeps the plain colour's whatever it is.
+            Some(theirs) => color_filters::compose(
+                &theirs,
+                &exact.dye_keeping_plain_luminance(opaque)?,
+            )?,
+            None => {
+                let mut held = self.exact_dye.borrow_mut();
+                match &*held {
+                    Some((colour, plain, dye))
+                        if *colour == exact && *plain == opaque =>
+                    {
+                        dye.clone()
+                    }
+                    _ => {
+                        let dye = exact.dye(opaque)?;
+                        *held = Some((exact, opaque, dye.clone()));
+                        dye
+                    }
+                }
+            }
         };
         let mut paint = paint.clone();
         paint.set_shader(shaders::color_in_space(

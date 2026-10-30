@@ -49,7 +49,9 @@ version at run time instead, which is what upstream Skia's check does.
 and on no other platform, and `ensure-deps` prepares the tree it names: rust-skia
 at the Cargo.lock tag, Skia's DEPS and gn, the patch applied with `-F0`. It is
 fetched once, about 1 GB, into `$XDG_CACHE_HOME/meo-skia-canvas`, under a name
-that carries the version and the patch's digest. A bare `cargo build` or
+that carries the version and the patch's digest. Once a new tree is ready the
+others are removed, except any a worktree of the repository still locks: the
+cache is shared by every worktree on the machine. A bare `cargo build` or
 `bun run build` outside `just` sets nothing, downloads the prebuilt, and builds
 a binary with the timeout in it.
 
