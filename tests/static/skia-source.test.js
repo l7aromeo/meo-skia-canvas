@@ -133,6 +133,11 @@ const NO_LINE_ENDING_CONVERSION = ["-c", "core.autocrlf=false"];
 /**
  * Runs git for a test's own setup, clear of any repository the environment
  * names, so the suite behaves the same when `just ci` runs from a hook.
+ *
+ * Without automatic maintenance: a commit otherwise starts `git maintenance
+ * run --auto` detached, which takes `objects/maintenance.lock` in the
+ * repository just committed to while the test goes on, so a snapshot of that
+ * repository holds the lock or not by timing alone.
  */
 function git(cwd, ...args) {
   const env = Object.fromEntries(
@@ -149,6 +154,8 @@ function git(cwd, ...args) {
       "commit.gpgsign=false",
       "-c",
       "init.defaultBranch=main",
+      "-c",
+      "maintenance.auto=false",
       ...NO_LINE_ENDING_CONVERSION,
       ...args,
     ],
