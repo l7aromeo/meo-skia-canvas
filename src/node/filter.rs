@@ -190,14 +190,82 @@ pub struct LastFilter {
 }
 
 impl LastFilter {
-    fn match_scale(&self, matrix: Matrix) -> Option<Self> {
-        if self.matrix.scale_x() == matrix.scale_x()
-            && self.matrix.scale_y() == matrix.scale_y()
-        {
-            Some(self.clone())
-        } else {
-            None
+    /// This filter where it was built for a transform that maps lengths as
+    /// `matrix` does: the filter's lengths depend on the transform's linear
+    /// part and not on where it moves the origin.
+    fn match_linear(&self, matrix: Matrix) -> Option<Self> {
+        (linear(&self.matrix) == linear(&matrix)).then(|| self.clone())
+    }
+}
+
+/// `matrix` less its translation: what it does to an offset or a length.
+fn linear(matrix: &Matrix) -> Matrix {
+    Matrix::new_all(
+        matrix.scale_x(),
+        matrix.skew_x(),
+        0.0,
+        matrix.skew_y(),
+        matrix.scale_y(),
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    )
+}
+
+/// How lengths in canvas pixels become the local units of a filter on a
+/// paint drawn under a transform.
+///
+/// Filter Effects lengths are in the canvas's pixels and on its axes,
+/// whatever the transform: Chrome draws `drop-shadow(12px 4px 0 red)` 12
+/// pixels right and 4 down under a scale, a rotation or a skew, as it draws
+/// `shadowOffsetX` and `shadowOffsetY`, and a `blur(4px)` edge to the same
+/// standard deviation under each. Skia maps a paint's filter lengths
+/// through the transform instead, so they are handed to it in local units:
+/// an offset through the inverse of the transform's linear part, which
+/// lands it on the canvas's axes under any transform, and a standard
+/// deviation divided by the scale Skia evaluates the filter at --
+/// `Matrix::decompose_scale`, as Skia's own layer takes it -- which leaves
+/// it the canvas's length wherever the rest of the transform is a rotation.
+/// Under a skew no axis-aligned local blur is isotropic on the canvas, and
+/// the blur is the one Skia makes at that scale.
+#[derive(Clone, Copy, Debug)]
+struct LocalLengths {
+    inverse: Matrix,
+    scale: (f32, f32),
+}
+
+impl LocalLengths {
+    /// The local units of `matrix`; the canvas's own where it has none --
+    /// one that maps no length to a positive one draws nothing, and a
+    /// perspective has no one scale to take.
+    fn of(matrix: &Matrix) -> Self {
+        let linear = linear(matrix);
+        let local = linear.invert().zip(linear.decompose_scale(None));
+        match local {
+            Some((inverse, scale))
+                if scale.width > 0.0 && scale.height > 0.0 =>
+            {
+                Self {
+                    inverse,
+                    scale: (scale.width, scale.height),
+                }
+            }
+            _ => Self {
+                inverse: Matrix::new_identity(),
+                scale: (1.0, 1.0),
+            },
         }
+    }
+
+    /// An offset on the canvas's axes, in local units.
+    fn offset(&self, offset: Point) -> Point {
+        self.inverse.map_vector(offset)
+    }
+
+    /// A standard deviation along each of the canvas's axes, in local units.
+    fn sigma(&self, sigma: f32) -> (f32, f32) {
+        (sigma / self.scale.0, sigma / self.scale.1)
     }
 }
 
@@ -231,11 +299,19 @@ impl Filter {
         self.specs.is_empty()
     }
 
+    /// Whether this filter holds a `drop-shadow()`.
+    pub fn casts_drop_shadow(&self) -> bool {
+        self.specs
+            .iter()
+            .any(|spec| matches!(spec, FilterSpec::Shadow { .. }))
+    }
+
     /// This filter as steps the crate runs on pixels itself -- see
     /// [`chain`](crate::context::chain) -- in the order CSS applies them: a
     /// `blur()` as the exact Gaussian, a colour function as Skia's colour
-    /// filter, which is the same at any scale. `None` for no filter,
-    /// and for one holding a `drop-shadow()`, which Skia still draws.
+    /// filter, which is the same at any scale, and a `drop-shadow()` as the
+    /// draw over its alpha blurred by the exact Gaussian. `None` for no
+    /// filter, and for one holding a function the crate does not run.
     pub(crate) fn steps(&self) -> Option<Vec<Step>> {
         if self.specs.is_empty() {
             return None;
@@ -249,7 +325,19 @@ impl Filter {
                 FilterSpec::Plain { name, value } => {
                     colour_function(name, *value).map(Step::Colour)
                 }
-                FilterSpec::Shadow { .. } => None,
+                FilterSpec::Shadow {
+                    offset,
+                    blur,
+                    color,
+                } => {
+                    let (colour, space) = skia_paint_color(color.0, &color.1);
+                    Some(Step::Shadow {
+                        offset: *offset,
+                        sigma: *blur,
+                        colour,
+                        space,
+                    })
+                }
             })
             .collect()
     }
@@ -317,7 +405,8 @@ impl Filter {
             .set_mask_filter(filters.mask)
     }
 
-    /// The filters for this draw, built once per transform scale and kept.
+    /// The filters for this draw, built once per transform -- once per
+    /// linear part, which is all their lengths depend on -- and kept.
     ///
     /// A blur becomes one of two different Skia objects. Blurring the drawn
     /// result needs an image filter; blurring a shape's coverage is a mask
@@ -338,7 +427,7 @@ impl Filter {
     fn filters_for(&mut self, matrix: Matrix, rendered: bool) -> LastFilter {
         let cached = match (rendered, &self._raster, &self._vector) {
             (true, Some(cached), _) | (false, _, Some(cached)) => {
-                cached.match_scale(matrix)
+                cached.match_linear(matrix)
             }
             _ => None,
         };
@@ -346,6 +435,7 @@ impl Filter {
         cached
             .or_else(|| {
                 let mut mask_filter = None;
+                let local = LocalLengths::of(&matrix);
                 let image_filter =
                     self.specs.iter().fold(None, |chain, next_filter| {
                         match next_filter {
@@ -354,17 +444,15 @@ impl Filter {
                                 blur,
                                 color,
                             } => {
-                                let scale = Point {
-                                    x: matrix.scale_x(),
-                                    y: matrix.scale_y(),
-                                };
-                                let point =
-                                    (offset.x / scale.x, offset.y / scale.y);
-                                let sigma = (blur / scale.x, blur / scale.y);
                                 let (color, space) =
                                     skia_paint_color(color.0, &color.1);
                                 image_filters::drop_shadow(
-                                    point, sigma, color, space, chain, None,
+                                    local.offset(*offset),
+                                    local.sigma(*blur),
+                                    color,
+                                    space,
+                                    chain,
+                                    None,
                                 )
                             }
                             FilterSpec::Plain { name, value } => match name
@@ -384,16 +472,15 @@ impl Filter {
                                         // applies it. An image drew at half
                                         // the radius it was asked for.
                                         //
-                                        // Divided by the scale so the sigma
-                                        // is the length in device pixels
-                                        // under the recording's transform,
-                                        // as the mask filter's is below, and
-                                        // scales with any transform the
-                                        // draw is replayed under.
-                                        let sigma_x = value / matrix.scale_x();
-                                        let sigma_y = value / matrix.scale_y();
+                                        // In local units -- see
+                                        // `LocalLengths` -- so the sigma is
+                                        // the length in device pixels under
+                                        // the recording's transform, as the
+                                        // mask filter's is below, and scales
+                                        // with any transform the draw is
+                                        // replayed under.
                                         image_filters::blur(
-                                            (sigma_x, sigma_y),
+                                            local.sigma(*value),
                                             TileMode::Decal,
                                             chain,
                                             None,

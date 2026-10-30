@@ -35,6 +35,7 @@ use crate::{
         RgbaLinear, linear_srgb_color_space, rgba_linear_to_skia_color,
         rgba_linear_to_unpremul_color4f,
     },
+    context::Context2D as Inner,
     context2d::{FontStretch, TextDirection},
     font::{
         FontAxisTag, FontFamily, FontLibrary, FontVariation,
@@ -49,7 +50,8 @@ use crate::{
         },
         oblique::{
             GlyphPaints, ParagraphRecipe, Passes, StyleColours, add_slnt,
-            match_oblique, paint_glyphs, without_paragraph_cache,
+            draw_shadowed, match_oblique, paint_glyphs,
+            without_paragraph_cache,
         },
         typography::paragraph_style,
         utils::color4f_to_srgb,
@@ -794,8 +796,10 @@ impl TextDecorationStyle {
     }
 }
 
-/// Drop shadow applied behind glyphs. Multiple shadows on a single
-/// `TextStyle` stack additively.
+/// A shadow cast behind a style's text. A `TextStyle`'s shadows are painted
+/// with the first listed on top, each composited over the ones beneath it,
+/// as CSS paints `text-shadow`; each run of the style's text on a line casts
+/// a shadow as one, blurred whole.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextShadow {
     /// Shadow color.
@@ -804,7 +808,9 @@ pub struct TextShadow {
     pub offset_x: f32,
     /// Vertical offset from the glyphs, in pixels.
     pub offset_y: f32,
-    /// Gaussian blur sigma. `0.0` gives a hard-edged shadow.
+    /// The blur's standard deviation, in pixels of the canvas whatever its
+    /// transform, scaled with an export's density. `0.0` gives a
+    /// hard-edged shadow.
     pub blur_sigma: f32,
 }
 
@@ -1643,6 +1649,38 @@ impl Paragraph {
                 GlyphPaints::Styles,
             ),
         }
+    }
+
+    /// Draws the paragraph onto `context` with its top-left corner at
+    /// `origin` where it casts a text shadow, each run's shadow the exact
+    /// blur of the whole run -- see `node::oblique::draw_shadowed`. Returns
+    /// whether it drew.
+    pub(crate) fn draw_shadowed(
+        &self,
+        context: &Inner,
+        origin: SkPoint,
+    ) -> bool {
+        #[cfg(test)]
+        if PAINT_AS_ASKED.get() {
+            return false;
+        }
+        let mut passes = self.passes.borrow_mut();
+        let Some(passes) = passes.as_mut() else {
+            return false;
+        };
+        draw_shadowed(context, &mut self.paragraph.borrow_mut(), passes, origin)
+    }
+
+    /// How many glyph runs each shadow the paragraph casts is drawn from, in
+    /// the order they are painted, once a paint has followed its layout.
+    #[cfg(test)]
+    pub(crate) fn cast_runs(&self) -> Vec<usize> {
+        self.passes
+            .borrow()
+            .as_ref()
+            .map_or_else(Vec::new, |passes| {
+                passes.casts().iter().map(|cast| cast.runs()).collect()
+            })
     }
 
     /// How many times this paragraph's layouts have been followed for

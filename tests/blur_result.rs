@@ -324,6 +324,139 @@ const F32_ROUNDING: f64 = 0.0;
 /// hundreds of times it.
 const F32_NOISE: f64 = 1e-6;
 
+/// What a draw of `alpha`, `width` pixels wide, casts and is drawn over
+/// through `drop-shadow(dx dy sigma)` in its own colour: its alpha blurred
+/// by the exact Gaussian and moved by whole pixels, with the draw over it.
+fn over_its_shadow(
+    alpha: &[f64],
+    width: usize,
+    (dx, dy): (i64, i64),
+    sigma: f64,
+) -> Vec<f64> {
+    let blurred = sampled(alpha, width, sigma);
+    let height = alpha.len() / width;
+    (0..alpha.len())
+        .map(|i| {
+            let (x, y) = ((i % width) as i64 - dx, (i / width) as i64 - dy);
+            let inside = (0..width as i64).contains(&x)
+                && (0..height as i64).contains(&y);
+            let shadow = match inside {
+                true => blurred[(y * width as i64 + x) as usize],
+                false => 0.0,
+            };
+            alpha[i] + shadow * (1.0 - alpha[i])
+        })
+        .collect()
+}
+
+#[test]
+fn a_drop_shadow_is_the_exact_gaussian_of_what_casts_it() {
+    // Through Skia's layer the shadow was Skia's blur, which approximates
+    // the Gaussian; it is made from the draw's own pixels now, blurred
+    // exactly and composited under it in floats, and rounded once.
+    for gpu in [false, true] {
+        for (offset, sigma) in [((0, 0), 2.0f32), ((3, 2), 2.0), ((3, 2), 8.0)]
+        {
+            let filter = format!(
+                "drop-shadow({}px {}px {sigma}px black)",
+                offset.0, offset.1
+            );
+            let (Some(mut drawn), Some(mut shadowed)) = (
+                triangle(gpu, WIDE, "none", None),
+                triangle(gpu, WIDE, &filter, None),
+            ) else {
+                continue;
+            };
+            let drawn: Vec<f64> = alpha(&mut drawn)
+                .into_iter()
+                .map(|a| f64::from(a) / 255.0)
+                .collect();
+            let reference = over_its_shadow(
+                &drawn,
+                SIZE.0 as usize,
+                offset,
+                f64::from(sigma),
+            );
+            let misses = misses(&alpha(&mut shadowed), &reference);
+            assert!(
+                misses.is_empty(),
+                "gpu {gpu}, {filter}: {} pixels off the exact shadow, first \
+                 {:?}",
+                misses.len(),
+                &misses[..misses.len().min(4)],
+            );
+        }
+    }
+}
+
+#[test]
+fn a_drop_shadowed_image_at_an_alpha_is_rounded_once() {
+    // The alpha applies after the filter, to the image and its shadow
+    // together, as it does to a blurred image.
+    for gpu in [false, true] {
+        let (Some(mut drawn), Some(mut shadowed)) = (
+            drawn_image(gpu, "none", 1.0),
+            drawn_image(gpu, "drop-shadow(3px 2px 2px black)", 0.5),
+        ) else {
+            continue;
+        };
+        let drawn: Vec<f64> = alpha(&mut drawn)
+            .into_iter()
+            .map(|a| f64::from(a) / 255.0)
+            .collect();
+        let reference: Vec<f64> =
+            over_its_shadow(&drawn, SIZE.0 as usize, (3, 2), 2.0)
+                .into_iter()
+                .map(|a| a * 0.5)
+                .collect();
+        let misses = misses(&alpha(&mut shadowed), &reference);
+        assert!(
+            misses.is_empty(),
+            "gpu {gpu}: {} pixels off the exact shadow at half alpha, first \
+             {:?}",
+            misses.len(),
+            &misses[..misses.len().min(4)],
+        );
+    }
+}
+
+#[test]
+fn a_drop_shadow_on_float_pixels_is_the_exact_gaussian_unrounded() {
+    for (depth, rounding) in [
+        (PixelDepth::F16, F16_ROUNDING),
+        (PixelDepth::F32, F32_ROUNDING),
+    ] {
+        for gpu in [false, true] {
+            for sigma in [2.0f32, 8.0] {
+                let filter = format!("drop-shadow(3px 2px {sigma}px black)");
+                let (Some(mut drawn), Some(mut shadowed)) = (
+                    triangle_in(depth, gpu, WIDE, "none", None, false),
+                    triangle_in(depth, gpu, WIDE, &filter, None, false),
+                ) else {
+                    continue;
+                };
+                let reference = over_its_shadow(
+                    &float_alpha(&mut drawn),
+                    SIZE.0 as usize,
+                    (3, 2),
+                    f64::from(sigma),
+                );
+                let got = float_alpha(&mut shadowed);
+                let worst = got
+                    .iter()
+                    .zip(&reference)
+                    .map(|(g, r)| (g - r).abs() / (r * rounding + F32_NOISE))
+                    .fold(0.0, f64::max);
+                assert!(
+                    worst <= 1.0,
+                    "{depth:?} gpu {gpu}, {filter}: {worst:.2} times as far \
+                     off the exact shadow as allowed"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn a_blurred_path_on_float_pixels_is_the_exact_gaussian_unrounded() {
     for (depth, rounding) in [
@@ -489,9 +622,8 @@ fn a_blurred_canvas_drawn_in_spreads_past_where_it_is_drawn() {
 
 #[test]
 fn a_canvas_drawn_in_casts_its_drop_shadow_past_where_it_is_drawn() {
-    // A `drop-shadow()` is still Skia's filter, through a layer; the
-    // destination rectangle confines what is drawn into that layer, and the
-    // shadow, thirty pixels to the right of the square, lands outside it.
+    // The destination rectangle confines what is drawn and not the shadow,
+    // which lands thirty pixels to the right of the square, outside it.
     for gpu in [false, true] {
         let Some(mut canvas) =
             drawn_canvas(gpu, "drop-shadow(30px 0px 0px blue)", false)

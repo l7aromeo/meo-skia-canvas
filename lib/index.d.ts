@@ -5508,8 +5508,10 @@ export interface TextStyleInput {
   /** Line thickness as a multiple of the font's own decoration thickness. */
   decorationThickness?: number;
   /**
-   * Shadows painted under the run, in the order given -- several are
-   * allowed, unlike the context's single `shadowColor`.
+   * Shadows painted under the text, the first listed on top, as CSS paints
+   * `text-shadow` -- several are allowed, unlike the context's single
+   * `shadowColor`. Each run of this style's text on a line casts each
+   * shadow as one, the exact Gaussian blur of the whole run.
    */
   shadows?: TextShadowInput[];
   /**
