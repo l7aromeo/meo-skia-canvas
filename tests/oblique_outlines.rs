@@ -248,3 +248,49 @@ fn a_paragraph_sheared_past_freetypes_limit_draws_sheared_glyphs() {
         );
     }
 }
+
+#[test]
+fn a_paragraph_shadow_sheared_past_freetypes_limit_spans_its_run() {
+    // A blurred text shadow is blurred within its run's bounds, which have
+    // to hold the sheared run, not the upright one FreeType measures past its
+    // limit: the shadow of an 85deg run spans the run's outline and the
+    // blur's reach either side, not a strip at its foot.
+    let library = FontLibrary::new();
+    library
+        .use_paths(Some(FAMILY), [OSWALD])
+        .expect("bundled Oswald registers");
+    let engine = TextEngine::new(&library);
+    let sigma = 2.0;
+    let style = TextStyle {
+        font_families: vec![FAMILY.into()],
+        font_size: 40.0,
+        slant: TextSlant::Oblique(ObliqueAngle::new(85.0).expect("angle")),
+        // The text itself transparent, so only its shadow is drawn.
+        color: RgbaLinear::from_srgb8(0, 0, 0, 0.0),
+        shadows: vec![TextShadow {
+            color: RgbaLinear::from_srgb8(0, 0, 255, 1.0),
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur_sigma: sigma,
+        }],
+        ..TextStyle::default()
+    };
+    let mut probe = Canvas::new(1.0, 1.0);
+    let ctx = probe.context();
+    assert!(ctx.set_font_css(&format!("oblique 85deg 40px {FAMILY}")));
+    let outline = ctx.outline_text(TEXT, None).bounds();
+    let layout = engine.layout_text(TEXT, &style, 1.0e6);
+    let mut canvas = Canvas::new(
+        (outline.right - outline.left + 2.0 * MARGIN).ceil() + 100.0,
+        200.0,
+    );
+    canvas.context().draw_paragraph(&layout, MARGIN, MARGIN);
+    let (left, right) = inked_columns(&mut canvas).expect("a shadow");
+    assert!(
+        right - left >= outline.right - outline.left - 2.0 * EDGE,
+        "an oblique 85deg paragraph's shadow inks {} columns, its run's \
+         outline {:.1}",
+        right - left,
+        outline.right - outline.left,
+    );
+}

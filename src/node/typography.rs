@@ -3783,8 +3783,68 @@ mod utf16_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cow, normalize_to_one_line, past_freetype_shear};
-    use skia_safe::Matrix;
+    use super::{
+        Cow, Shear, SkPathBuilder, add_outlines, normalize_to_one_line,
+        past_freetype_shear, sheared_blob,
+    };
+    use skia_safe::{Data, Font, FontMgr, Matrix, Point};
+
+    #[test]
+    fn a_blob_sheared_past_freetypes_limit_holds_its_outlines() {
+        // Skia measures a blob's glyphs in the font's own matrix, which
+        // FreeType takes as upright past its limit, so a blob left to work
+        // out its bounds there holds the upright glyphs. Its bounds cull its
+        // draw and confine a paragraph shadow's blur, so they have to hold
+        // the sheared outline at any angle.
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"
+        ))
+        .expect("bundled Oswald is readable");
+        let typeface = FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("Oswald parses");
+        let font = Font::from_typeface(typeface, 40.0);
+        let glyphs = font.str_to_glyphs_vec("IH");
+        let mut widths = vec![0.0; glyphs.len()];
+        font.get_widths(&glyphs, &mut widths);
+        let positions: Vec<Point> = widths
+            .iter()
+            .scan(0.0, |x, width| {
+                let at = Point::new(*x, 0.0);
+                *x += width;
+                Some(at)
+            })
+            .collect();
+        for degrees in [30.0f32, 85.0] {
+            let shear =
+                Shear::By(Matrix::skew((-degrees.to_radians().tan(), 0.0)));
+            let blob = sheared_blob(&font, &glyphs, &positions, shear)
+                .expect("a blob");
+            let mut builder = SkPathBuilder::new();
+            add_outlines(
+                &mut builder,
+                &font,
+                &glyphs,
+                &positions,
+                &shear,
+                Point::default(),
+            );
+            let outline = *builder.detach().bounds();
+            // A pixel either way for the rounding of either measure.
+            let held = blob.bounds().with_outset((1.0, 1.0));
+            let holds = held.left <= outline.left
+                && held.top <= outline.top
+                && held.right >= outline.right
+                && held.bottom >= outline.bottom;
+            assert!(
+                holds,
+                "{degrees}deg: the blob's bounds {:?} do not hold its \
+                 outline {outline:?}",
+                blob.bounds(),
+            );
+        }
+    }
 
     #[test]
     fn freetypes_shear_limit_is_where_outlines_begin() {
