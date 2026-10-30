@@ -44,20 +44,20 @@ fn canvas(space: PixelColorSpace, depth: PixelDepth, gpu: bool) -> Canvas {
     .expect("a canvas")
 }
 
-/// The pixel at (`x`, `y`), premultiplied F32 in the canvas's own space.
-fn pixel(
-    canvas: &mut Canvas,
-    space: PixelColorSpace,
-    x: f32,
-    y: f32,
-) -> [f32; 4] {
+/// Every pixel of `canvas` its draws covered whole, premultiplied F32 in
+/// the canvas's own space: those with an alpha of one.
+///
+/// Every pixel, rather than one known spot: where a glyph's ink falls
+/// depends on the face a family resolves to, and a 96px bold "M" in the
+/// face a Linux runner gives `sans-serif` leaves the canvas's middle bare.
+fn covered(canvas: &mut Canvas, space: PixelColorSpace) -> Vec<[f32; 4]> {
     let data = canvas
         .context()
         .get_image_data_as(
-            x,
-            y,
-            1.0,
-            1.0,
+            0.0,
+            0.0,
+            SIDE,
+            SIDE,
             PixelExportOptions {
                 depth: PixelDepth::F32,
                 color_space: space,
@@ -65,16 +65,23 @@ fn pixel(
                 ..PixelExportOptions::default()
             },
         )
-        .expect("a pixel");
-    let bytes = data.pixels();
-    [0, 1, 2, 3].map(|c| {
-        f32::from_le_bytes([
-            bytes[c * 4],
-            bytes[c * 4 + 1],
-            bytes[c * 4 + 2],
-            bytes[c * 4 + 3],
-        ])
-    })
+        .expect("pixels");
+    data.pixels()
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .map(|px| {
+            [0, 1, 2, 3].map(|c| {
+                f32::from_le_bytes([
+                    px[c * 4],
+                    px[c * 4 + 1],
+                    px[c * 4 + 2],
+                    px[c * 4 + 3],
+                ])
+            })
+        })
+        .filter(|px| px[3] == 1.0)
+        .collect()
 }
 
 /// Whether `got` is `exact` as `depth` holds it: the same value in F32,
@@ -88,8 +95,7 @@ fn holds(got: [f32; 4], exact: [f32; 4], depth: PixelDepth) -> bool {
     })
 }
 
-/// The ways a flat colour is drawn, each leaving the middle of the canvas
-/// covered whole.
+/// The ways a flat colour is drawn, each covering some of the canvas whole.
 type Draw = fn(&mut Context2D);
 
 const DRAWS: [(&str, Draw); 5] = [
@@ -117,8 +123,8 @@ const DRAWS: [(&str, Draw); 5] = [
 ];
 
 /// Every way a flat colour is drawn, on every space, depth and engine, reads
-/// back as the colour named, at every one of 401 values of its first
-/// component from -0.1 to 1.1.
+/// back as the colour named in every pixel it covers whole, at every one of
+/// 401 values of its first component from -0.1 to 1.1.
 #[test]
 fn a_flat_colour_lands_exactly_on_a_float_page() {
     let mut wrong = Vec::new();
@@ -147,14 +153,16 @@ fn a_flat_colour_lands_exactly_on_a_float_page() {
                             ))
                             .expect("a colour");
                             draw(ctx);
-                            let got = pixel(
-                                &mut canvas,
-                                space,
-                                SIDE / 2.0,
-                                SIDE / 2.0,
-                            );
-                            (!holds(got, [v, 0.25, 0.75, 1.0], depth))
-                                .then(|| format!("{v}: {got:?}"))
+                            let got = covered(&mut canvas, space);
+                            match got.iter().find(|px| {
+                                !holds(**px, [v, 0.25, 0.75, 1.0], depth)
+                            }) {
+                                _ if got.is_empty() => {
+                                    Some(format!("{v}: nothing covered"))
+                                }
+                                Some(px) => Some(format!("{v}: {px:?}")),
+                                None => None,
+                            }
                         })
                         .collect();
                     if let Some(first) = missed.first() {
@@ -330,8 +338,11 @@ fn a_colour_filter_applies_to_text_on_a_float_page() {
             ctx.set_fill_style_css(&format!("color({function} 0.2 0.25 0.75)"))
                 .expect("a colour");
             draw(ctx);
-            let got = pixel(&mut canvas, space, SIDE / 2.0, SIDE / 2.0);
-            assert_eq!(got, [0.75, 0.25, 0.2, 1.0], "{space:?}, {name}");
+            let got = covered(&mut canvas, space);
+            assert!(!got.is_empty(), "{space:?}, {name}: nothing covered");
+            for px in got {
+                assert_eq!(px, [0.75, 0.25, 0.2, 1.0], "{space:?}, {name}");
+            }
         }
     }
 }
@@ -371,16 +382,20 @@ fn a_float_page_drawn_into_another_paints_its_text_as_its_fill() {
                 draw(ctx);
                 let mut target = canvas(into, PixelDepth::F32, false);
                 target.context().draw_canvas(&mut source, 0.0, 0.0);
-                pixel(&mut target, into, SIDE / 2.0, SIDE / 2.0)
+                covered(&mut target, into)
             });
-            let off = fill
+            let (Some(fill), false) = (fill.first(), text.is_empty()) else {
+                wrong.push(format!("{space:?} into {into:?}: nothing covered"));
+                continue;
+            };
+            let off = text
                 .iter()
-                .zip(text)
-                .map(|(f, t)| (f - t).abs())
+                .flat_map(|px| px.iter().zip(fill).map(|(t, f)| (t - f).abs()))
                 .fold(0.0, f32::max);
             if off > 1e-3 {
                 wrong.push(format!(
-                    "{space:?} into {into:?}: text {text:?}, fill {fill:?}"
+                    "{space:?} into {into:?}: text {off} off, first {:?}, fill {fill:?}",
+                    text[0]
                 ));
             }
         }
