@@ -3282,37 +3282,46 @@ mod tests {
     /// what it records, which the layer is confined to.
     #[test]
     fn a_layer_of_clipped_draws_reaches_what_they_draw() {
-        let mut canvas = crate::canvas::Canvas::new(400.0, 400.0);
-        canvas.set_gpu(false);
-        {
-            let ctx = canvas.context();
-            ctx.begin_path();
-            ctx.arc(200.0, 200.0, 180.3, 0.0, std::f32::consts::TAU, false)
-                .expect("a positive radius");
-            ctx.clip(crate::path::FillRule::NonZero);
-            ctx.save_layer_with(0.5, None, None);
-            ctx.begin_path();
-            ctx.move_to(190.0, 190.0);
-            ctx.line_to(215.5, 199.25);
-            ctx.line_to(197.0, 207.5);
-            ctx.close_path();
-            ctx.fill(crate::path::FillRule::NonZero);
-            ctx.restore();
+        // A triangle the clip contains, and one it cuts, which is recorded
+        // as a cut op.
+        for (cx, r) in [(200.0, 180.3), (210.0, 12.3)] {
+            let mut canvas = crate::canvas::Canvas::new(400.0, 400.0);
+            canvas.set_gpu(false);
+            {
+                let ctx = canvas.context();
+                ctx.begin_path();
+                ctx.arc(cx, 200.0, r, 0.0, std::f32::consts::TAU, false)
+                    .expect("a positive radius");
+                ctx.clip(crate::path::FillRule::NonZero);
+                ctx.save_layer_with(0.5, None, None);
+                ctx.begin_path();
+                ctx.move_to(190.0, 190.0);
+                ctx.line_to(215.5, 199.25);
+                ctx.line_to(197.0, 207.5);
+                ctx.close_path();
+                ctx.fill(crate::path::FillRule::NonZero);
+                ctx.restore();
+            }
+            let page = canvas.page(0).expect("a page").inner.page();
+            let group = page
+                .layers
+                .iter()
+                .find_map(|layer| match layer {
+                    layer::Layer::Group(group) => Some(group.clone()),
+                    _ => None,
+                })
+                .expect("the layer");
+            assert_eq!(
+                cut_ops(&group.contents),
+                usize::from(r < 100.0),
+                "radius {r}: cut ops in the layer"
+            );
+            let reach = group.reach().expect("a reach");
+            assert!(
+                reach.width() < 40.0 && reach.height() < 40.0,
+                "radius {r}: the layer reaches {reach:?}, past the triangle"
+            );
         }
-        let page = canvas.page(0).expect("a page").inner.page();
-        let reach = page
-            .layers
-            .iter()
-            .find_map(|layer| match layer {
-                layer::Layer::Group(group) => Some(group.reach()),
-                _ => None,
-            })
-            .expect("the layer")
-            .expect("a reach");
-        assert!(
-            reach.width() < 40.0 && reach.height() < 40.0,
-            "the layer reaches {reach:?}, past the triangle"
-        );
     }
 
     /// The cut draws of one run share one coverage picture of its clip, made

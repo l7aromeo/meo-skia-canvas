@@ -375,6 +375,9 @@ pub struct PageRecorder {
     /// The recorders the last run closed with, for the next -- see
     /// [`Spare`].
     spare: Option<Spare>,
+    /// The recorders the last cut draw was recorded with, for the next --
+    /// see [`Self::record_cut`].
+    cut_spare: Option<Spare>,
     /// How many times one replay of this page walks a nested picture.
     ///
     /// Zero for a page that has only been drawn on directly, however much has
@@ -808,6 +811,7 @@ impl PageRecorder {
             cut_run: None,
             run: None,
             spare: None,
+            cut_spare: None,
             matrix: Matrix::default(),
             clip: None,
             bounds,
@@ -923,6 +927,7 @@ impl PageRecorder {
         }
         // Begun at the old bounds.
         self.spare = None;
+        self.cut_spare = None;
 
         self.bounds = bounds;
         self.current.begin(bounds);
@@ -948,6 +953,7 @@ impl PageRecorder {
         self.bounds = bounds; // non-destructively update the size
         // A spare recording was begun at the old bounds.
         self.spare = None;
+        self.cut_spare = None;
     }
 
     pub fn set_matrix(&mut self, matrix: Matrix) {
@@ -1690,6 +1696,9 @@ impl PageRecorder {
             self.flush();
         }
         self.settle();
+        let Some(drawn) = self.record_cut(&matrix, draw) else {
+            return;
+        };
         // An op a page snapshot also holds is not grown, as with a run of
         // blurs in `append_blur`.
         if self.cut_run == Some(self.frame) && !self.pending() {
@@ -1714,14 +1723,13 @@ impl PageRecorder {
                 && last_features.is_none_or(|last| *last == features)
                 && let Some(op) = Arc::get_mut(op)
             {
-                op.extend(&matrix, self.bounds, draw);
+                op.extend(drawn);
                 if let Some(layer) = self.open.last_mut() {
                     layer.features = layer.features.with(features);
                 }
                 return;
             }
         }
-        let dual = self.dual();
         // One serialized clip and one coverage picture for the run, shared
         // by each of its cut draws.
         let (shape, coverage) = match self.run.as_mut() {
@@ -1731,9 +1739,7 @@ impl PageRecorder {
         let Some(coverage) = coverage else {
             return;
         };
-        let Some(op) =
-            CutOp::new(&shape, coverage, &matrix, self.bounds, dual, draw)
-        else {
+        let Some(op) = CutOp::new(&shape, coverage, drawn) else {
             return;
         };
         let op = Layer::Cut(Arc::new(op));
@@ -1751,6 +1757,44 @@ impl PageRecorder {
         };
         self.file_entry(entry, features);
         self.cut_run = Some(self.frame);
+    }
+
+    /// The draw `draw` makes under `matrix`, recorded on its own for a
+    /// [`CutOp`] -- into a recording for each kind of target the page keeps
+    /// -- reusing the recorders the last cut draw finished with, as a run
+    /// reuses its own -- see [`Spare`]. Inside an open `saveLayer` with a
+    /// bounding hierarchy, which the layer is confined by -- see
+    /// [`Run::bbh`] -- and on the page without one.
+    fn record_cut<F>(&mut self, matrix: &Matrix, draw: F) -> Option<Layer>
+    where
+        F: Fn(&SkCanvas, Recording),
+    {
+        let bbh = !self.open.is_empty();
+        let (bounds, dual) = (self.bounds, self.dual());
+        let mut recorders = self
+            .cut_spare
+            .take()
+            .filter(|spare| spare.bbh == bbh)
+            .map(|spare| spare.recorders)
+            .unwrap_or_else(|| Recorders::new_with(bounds, dual, bbh));
+        recorders.each(|canvas, recording| {
+            canvas.restore_to_count(1);
+            canvas.save();
+            canvas.set_matrix(&(*matrix).into());
+            draw(canvas, recording);
+        });
+        let drawn = recorders
+            .finish(|recorder| recorder.finish_recording_as_picture(None));
+        recorders.begin_with(bounds, bbh);
+        recorders.each(|canvas, _| {
+            canvas.save(); // start at depth 2
+        });
+        self.cut_spare = Some(Spare {
+            recorders,
+            idle: 0,
+            bbh,
+        });
+        drawn
     }
 
     /// What one replay of this page costs; see the field.

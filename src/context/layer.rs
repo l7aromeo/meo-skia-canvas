@@ -39,7 +39,6 @@ use crate::{
         chain::{self, Depth, Step},
         chain_cache, coverage_of,
         faint::{Faint, composited},
-        page::Recording,
     },
     node::filter::MASK_BLUR_MAX_SIGMA,
     started,
@@ -736,67 +735,50 @@ pub(crate) fn holds_a_cut(entries: &[Layer]) -> bool {
 }
 
 impl CutOp {
-    /// The draw `draw` records, under `clip`, in device pixels of the
-    /// recording, and `matrix`, into one recording or, with `dual`, one for
-    /// each kind of target; `None` where a picture could not be made.
+    /// The draw `drawn` holds, under `clip`, in device pixels of the
+    /// recording, played as pixels through `coverage`: a picture, or on a
+    /// page that keeps a recording for each kind of target a pair of them;
+    /// `None` for anything else.
     pub fn new(
         clip: &ClipData,
         coverage: Arc<Coverage>,
-        matrix: &Matrix,
-        bounds: Rect,
-        dual: bool,
-        draw: impl Fn(&SkCanvas, Recording),
+        drawn: Layer,
     ) -> Option<Self> {
-        let (pixels, document) = match dual {
-            false => (Recording::Shared, None),
-            true => (Recording::Pixels, Some(Recording::Document)),
-        };
-        let documents = match document {
-            Some(document) => {
-                Some(vec![Self::record(matrix, bounds, document, &draw)?])
+        let (draws, documents) = match drawn {
+            Layer::Picture(picture) => (vec![picture], None),
+            Layer::Targeted(pair) => {
+                (vec![pair.0.clone()], Some(vec![pair.1.clone()]))
             }
-            None => None,
+            _ => return None,
         };
         Some(CutOp {
-            draws: vec![Self::record(matrix, bounds, pixels, &draw)?],
+            draws,
             documents,
             clip: clip.data.clone(),
             coverage,
         })
     }
 
-    /// Adds the draw `draw` records under `matrix` to the run, under the
-    /// op's clip, into each recording the op keeps, unless a picture could
-    /// not be made of it -- which drops it, as [`CutOp::new`] does.
-    pub fn extend(
-        &mut self,
-        matrix: &Matrix,
-        bounds: Rect,
-        draw: impl Fn(&SkCanvas, Recording),
-    ) {
-        let Some(documents) = &mut self.documents else {
-            self.draws.extend(Self::record(
-                matrix,
-                bounds,
-                Recording::Shared,
-                &draw,
-            ));
-            return;
-        };
-        // Both or neither, so that the two recordings hold the same draws.
-        if let (Some(pixels), Some(document)) = (
-            Self::record(matrix, bounds, Recording::Pixels, &draw),
-            Self::record(matrix, bounds, Recording::Document, &draw),
-        ) {
-            self.draws.push(pixels);
-            documents.push(document);
+    /// Adds the draw `drawn` holds to the run, under the op's clip, into each
+    /// recording the op keeps. A draw that holds other than the recordings
+    /// the op keeps is dropped, so that the two hold the same draws.
+    pub fn extend(&mut self, drawn: Layer) {
+        match (drawn, &mut self.documents) {
+            (Layer::Picture(picture), None) => self.draws.push(picture),
+            (Layer::Targeted(pair), Some(documents)) => {
+                self.draws.push(pair.0.clone());
+                documents.push(pair.1.clone());
+            }
+            _ => {}
         }
     }
 
     /// What the draws paint before the clip applies, in device pixels of
     /// the recording: the rectangle a layer holding the op is confined to.
     /// The recording played as pixels, as for a pair -- a document is never
-    /// confined.
+    /// confined. Recorded inside a `saveLayer` the draws keep a bounding
+    /// hierarchy, so this is what they draw; on the page they do not, and it
+    /// is the page.
     ///
     /// Not the clip's bounds, though nothing the op draws shows outside
     /// them: a layer confined to the clip has its edge there, Skia's
@@ -808,22 +790,6 @@ impl CutOp {
             all.join(draw.cull_rect());
             all
         })
-    }
-
-    /// The draw `draw` makes into `recording` under `matrix`, recorded in
-    /// `bounds` with a bounding hierarchy, so that its cull rectangle is
-    /// what it draws -- see [`CutOp::reach`].
-    fn record(
-        matrix: &Matrix,
-        bounds: Rect,
-        recording: Recording,
-        draw: &impl Fn(&SkCanvas, Recording),
-    ) -> Option<Picture> {
-        let mut recorder = PictureRecorder::new();
-        let canvas = recorder.begin_recording(bounds, true);
-        canvas.concat(matrix);
-        draw(canvas, recording);
-        recorder.finish_recording_as_picture(None)
     }
 
     /// Whether this op and `other` share one coverage picture, as the cut
