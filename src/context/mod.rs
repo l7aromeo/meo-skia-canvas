@@ -7,13 +7,14 @@ use skia_safe::{
     Paint, PaintStyle, Path, PathBuilder, PathFillType, PathOp, Picture,
     PictureRecorder, Point, Rect, RoundOut, Shader as SkShader, Size, Typeface,
     canvas::SrcRectConstraint::Strict,
-    dash_path_effect,
+    color_filters, dash_path_effect,
     font_style::{FontStyle, Width},
     image_filter::MapDirection,
     image_filters,
     matrix::{Matrix, TypeMask},
     path_1d_path_effect,
     path_utils::fill_path_with_paint,
+    shaders,
     textlayout::{StrutStyle, TextStyle},
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc};
@@ -111,6 +112,9 @@ pub struct Context2D {
     /// so that a run of draws in one colour holds one image between them
     /// rather than one each -- see [`Self::exact_paint`].
     exact_shader: RefCell<Option<(ExactColour, SkShader)>>,
+    /// The same for text: the last exact colour, the plain colour beside
+    /// it and their dye -- see [`Self::exact_text_paint`].
+    exact_dye: RefCell<Option<(ExactColour, Color4f, SkColorFilter)>>,
     pub state: State,
     stack: Vec<State>,
     /// Parallel to `stack`: whether each saved frame opened a Skia layer
@@ -573,6 +577,7 @@ impl Context2D {
             faint: Faint::of(canvas_color_type),
             recorder: RefCell::new(PageRecorder::recording(bounds, dual)),
             exact_shader: RefCell::default(),
+            exact_dye: RefCell::default(),
             path: PathBuilder::new(),
             stack: vec![],
             layers: vec![],
@@ -710,6 +715,50 @@ impl Context2D {
         };
         let mut paint = paint.clone();
         paint.set_shader(shader);
+        Some(paint)
+    }
+
+    /// The paint a page's pixels recording draws text in `paint` with, where
+    /// the page keeps one: `paint` over a colour shader of its own colour,
+    /// opaque, with [`ExactColour::dye`] replacing that colour before any
+    /// colour filter `paint` already carries. Without a shader Skia folds a
+    /// colour filter into the paint's colour, through the conversion the
+    /// dye exists to avoid; and a colour shader answers the luminance Skia
+    /// sets a glyph mask's contrast from, which an image shader does not.
+    pub fn exact_text_paint(
+        &self,
+        paint: &Paint,
+        style: PaintStyle,
+    ) -> Option<Paint> {
+        if paint.shader().is_some() {
+            return None;
+        }
+        let exact = self.exact_colour(style)?;
+        let mut opaque = paint.color4f();
+        opaque.a = 1.0;
+        let mut held = self.exact_dye.borrow_mut();
+        let dye = match &*held {
+            Some((colour, plain, dye))
+                if *colour == exact && *plain == opaque =>
+            {
+                dye.clone()
+            }
+            _ => {
+                let dye = exact.dye(opaque)?;
+                *held = Some((exact, opaque, dye.clone()));
+                dye
+            }
+        };
+        let dye = match paint.color_filter() {
+            Some(theirs) => color_filters::compose(&theirs, &dye)?,
+            None => dye,
+        };
+        let mut paint = paint.clone();
+        paint.set_shader(shaders::color_in_space(
+            opaque,
+            ColorSpace::new_srgb(),
+        ));
+        paint.set_color_filter(dye);
         Some(paint)
     }
 
@@ -1985,15 +2034,16 @@ impl Context2D {
             let kept = typesetter.laid_out();
             let global_alpha = self.state.global_alpha as f32;
             let faint = self.faint();
-            // Text paints its plain colour into every recording, so on a page
-            // that keeps one for pixels it lands as far off as Skia's
-            // conversion puts it -- see `page::Recorders`. Not the exact
-            // paint: Skia sets a glyph mask's contrast from the luminance of
-            // the paint's colour, which an image shader does not report, so
-            // text through one is read as mid-grey and drawn with heavier
-            // edges -- 366 pixels of a bold 40px run on a Display P3 F32
-            // page, as much as 0.063 off.
-            self.render_to_canvas(&paint, None, features, |canvas, paint| {
+            // On a page that keeps a recording for pixels, text there takes
+            // its colour exactly through a dye -- see `exact_text_paint` --
+            // rather than the image shader a fill takes: Skia sets a glyph
+            // mask's contrast from the luminance of the paint's colour,
+            // which an image shader does not report, so text through one is
+            // read as mid-grey and drawn with heavier edges -- 360 pixels of
+            // a bold 40px run on a Display P3 F32 page.
+            let dyed = self.exact_text_paint(&paint, style);
+            let dyed = dyed.as_ref();
+            self.render_to_canvas(&paint, dyed, features, |canvas, paint| {
                 // The kept run, or, the first time a run is drawn, the run
                 // laid out for this paint -- see `Typesetter::laid_out`.
                 let run = match &kept {

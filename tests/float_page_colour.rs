@@ -7,9 +7,8 @@
 //! output lies on a grid 64 ulps wide, so no plain colour lands exactly
 //! there. Such a canvas records each draw twice -- see
 //! `page::Recorders` -- once for pixels, painting a flat colour through a
-//! shader that holds it in the canvas's own space, and once for documents,
-//! painting it plain. Text paints plain in both, and so is not exact: see
-//! `a_float_page_covers_text_as_srgb_does`.
+//! shader that holds it in the canvas's own space, or text through a colour
+//! filter that does, and once for documents, painting it plain.
 
 use meo_skia_canvas::prelude::*;
 
@@ -93,8 +92,17 @@ fn holds(got: [f32; 4], exact: [f32; 4], depth: PixelDepth) -> bool {
 /// covered whole.
 type Draw = fn(&mut Context2D);
 
-const DRAWS: [(&str, Draw); 3] = [
+const DRAWS: [(&str, Draw); 5] = [
     ("a fill", |ctx| ctx.fill_rect(0.0, 0.0, SIDE, SIDE)),
+    ("text", |ctx| {
+        ctx.set_font_css("bold 96px sans-serif");
+        ctx.fill_text("M", -16.0, 64.0, None);
+    }),
+    ("stroked text", |ctx| {
+        ctx.set_font_css("bold 96px sans-serif");
+        ctx.set_line_width(SIDE);
+        ctx.stroke_text("M", -16.0, 64.0, None);
+    }),
     ("a stroke", |ctx| {
         ctx.set_line_width(SIDE);
         ctx.begin_path();
@@ -118,8 +126,8 @@ fn a_flat_colour_lands_exactly_on_a_float_page() {
         for (space, function) in SPACES {
             for depth in [PixelDepth::F32, PixelDepth::F16] {
                 for (name, draw) in DRAWS {
-                    // Blurs are swept more thinly: a blur costs more to lay
-                    // down than a rectangle.
+                    // Text and blurs are swept more thinly: each costs more
+                    // to lay down than a rectangle.
                     let step = match name {
                         "a fill" | "a stroke" => 1,
                         _ => 20,
@@ -220,21 +228,37 @@ fn alphas(canvas: &mut Canvas, space: PixelColorSpace) -> Vec<f32> {
 /// The canvas the text pin draws on, wide enough for its run.
 const TEXT_SIZE: (f32, f32) = (96.0, 64.0);
 
-/// A run of text drawn in a flat colour.
-fn text_on(space: PixelColorSpace, gpu: bool) -> Canvas {
+/// The colours the text pin draws in: one named in whole bytes, and one
+/// whose green lies 2e-5 short of 63.5 / 255, where Skia's rounding of the
+/// colour to bytes crosses into the next contrast bucket. Skia sets a glyph
+/// mask's contrast from the colour the paint's colour filter makes, read as
+/// sRGB, and this colour held in the canvas's space and converted back to
+/// sRGB by Skia lands past that edge, so text through a filter that hands
+/// it back so is covered unlike the plain paint's text. Not an edge at
+/// 31.5 / 255: CoreText's scaler halves the bucketed colour and buckets it
+/// again, which merges that edge's two buckets into one.
+const TEXT_COLOURS: [&str; 2] = ["#3366b3", "color(srgb 0.85 0.249 0.85)"];
+
+/// A run of text drawn in `css`.
+fn text_on(
+    space: PixelColorSpace,
+    depth: PixelDepth,
+    css: &str,
+    gpu: bool,
+) -> Canvas {
     let mut canvas = Canvas::with_options(
         TEXT_SIZE.0,
         TEXT_SIZE.1,
         CanvasOptions {
             color_space: space,
-            color_type: PixelDepth::F32,
+            color_type: depth,
             gpu,
             ..CanvasOptions::default()
         },
     )
     .expect("a canvas");
     let ctx = canvas.context();
-    ctx.set_fill_style_css("#3366b3").expect("a colour");
+    ctx.set_fill_style_css(css).expect("a colour");
     ctx.set_font_css("bold 40px sans-serif");
     ctx.fill_text("Wg", 4.0, 48.0, None);
     canvas
@@ -252,31 +276,121 @@ fn text_on(space: PixelColorSpace, gpu: bool) -> Canvas {
 /// sRGB by design.
 #[test]
 fn a_float_page_covers_text_as_srgb_does() {
+    let mut wrong = Vec::new();
     for gpu in ENGINES {
         for space in [PixelColorSpace::DisplayP3, PixelColorSpace::Rec2020] {
-            // The first draw of the run on this thread lays it out; the
-            // second draws it from the run kept.
-            let first = alphas(&mut text_on(space, gpu), space);
-            let srgb = alphas(
-                &mut text_on(PixelColorSpace::Srgb, gpu),
-                PixelColorSpace::Srgb,
-            );
-            let kept = alphas(&mut text_on(space, gpu), space);
-            for (draw, alphas) in [("first", first), ("kept", kept)] {
-                let parted =
-                    alphas.iter().zip(&srgb).filter(|(a, b)| a != b).count();
-                assert_eq!(
-                    parted, 0,
-                    "gpu {gpu}, {space:?}, {draw} draw: {parted} pixels covered unlike sRGB"
-                );
+            for depth in [PixelDepth::F32, PixelDepth::F16] {
+                for css in TEXT_COLOURS {
+                    let on = |space| text_on(space, depth, css, gpu);
+                    // The first draw of the run on this thread lays it out;
+                    // the second draws it from the run kept.
+                    let first = alphas(&mut on(space), space);
+                    let srgb = alphas(
+                        &mut on(PixelColorSpace::Srgb),
+                        PixelColorSpace::Srgb,
+                    );
+                    let kept = alphas(&mut on(space), space);
+                    for (draw, alphas) in [("first", first), ("kept", kept)] {
+                        let parted = alphas
+                            .iter()
+                            .zip(&srgb)
+                            .filter(|(a, b)| a != b)
+                            .count();
+                        if parted > 0 {
+                            wrong.push(format!(
+                                "gpu {gpu}, {space:?} {depth:?}, {css}, {draw} draw: {parted} pixels covered unlike sRGB"
+                            ));
+                        }
+                    }
+                }
             }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// A colour filter on the context applies to text's exact colour as to a
+/// fill's: the filter's own output, not the colour it was handed.
+#[test]
+fn a_colour_filter_applies_to_text_on_a_float_page() {
+    // Red and blue exchanged.
+    #[rustfmt::skip]
+    let swap = ColorFilter::matrix([
+        0.0, 0.0, 1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0, 0.0,
+        1.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 1.0, 0.0,
+    ])
+    .expect("a matrix");
+    for (space, function) in SPACES {
+        for (name, draw) in &DRAWS[..2] {
+            let mut canvas = canvas(space, PixelDepth::F32, false);
+            let ctx = canvas.context();
+            ctx.set_color_filter(Some(&swap));
+            ctx.set_fill_style_css(&format!("color({function} 0.2 0.25 0.75)"))
+                .expect("a colour");
+            draw(ctx);
+            let got = pixel(&mut canvas, space, SIDE / 2.0, SIDE / 2.0);
+            assert_eq!(got, [0.75, 0.25, 0.2, 1.0], "{space:?}, {name}");
         }
     }
 }
 
+/// Every canvas space a page can be drawn into.
+const ALL_SPACES: [PixelColorSpace; 8] = [
+    PixelColorSpace::Srgb,
+    PixelColorSpace::SrgbLinear,
+    PixelColorSpace::DisplayP3,
+    PixelColorSpace::DisplayP3Linear,
+    PixelColorSpace::Rec2020,
+    PixelColorSpace::Rec2020Linear,
+    PixelColorSpace::Rec2020Pq,
+    PixelColorSpace::Rec2020Hlg,
+];
+
+/// Such a canvas drawn into another canvas, of any space, paints its text
+/// in the colour its fill takes there, to within the rounding of the two
+/// conversions Skia makes into that space.
+///
+/// Onto sRGB, and only there, text paints the colour as the plain paint
+/// holds it: see `ExactColour::dye`. A filter that took any other space
+/// for sRGB would paint those sRGB numbers there as they stand, as much as
+/// 0.61 off a Rec. 2020 canvas's own colour drawn into another.
+#[test]
+fn a_float_page_drawn_into_another_paints_its_text_as_its_fill() {
+    let mut wrong = Vec::new();
+    for (space, function) in SPACES {
+        for into in ALL_SPACES {
+            let [fill, text] = [&DRAWS[0], &DRAWS[1]].map(|(_, draw)| {
+                let mut source = canvas(space, PixelDepth::F32, false);
+                let ctx = source.context();
+                ctx.set_fill_style_css(&format!(
+                    "color({function} 0.2 0.6 0.35)"
+                ))
+                .expect("a colour");
+                draw(ctx);
+                let mut target = canvas(into, PixelDepth::F32, false);
+                target.context().draw_canvas(&mut source, 0.0, 0.0);
+                pixel(&mut target, into, SIDE / 2.0, SIDE / 2.0)
+            });
+            let off = fill
+                .iter()
+                .zip(text)
+                .map(|(f, t)| (f - t).abs())
+                .fold(0.0, f32::max);
+            if off > 1e-3 {
+                wrong.push(format!(
+                    "{space:?} into {into:?}: text {text:?}, fill {fill:?}"
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 /// The images an SVG of a page embeds, as the base64 text it writes them
-/// in: here, a fill and a blurred fill inside a translucent layer, which
-/// the SVG backend draws as an image.
+/// in: here, a fill, text and a blurred fill inside a translucent layer,
+/// which the SVG backend draws as an image.
 fn embedded(
     space: PixelColorSpace,
     depth: PixelDepth,
@@ -296,6 +410,8 @@ fn embedded(
     ctx.save_layer_with(0.5, None, None);
     ctx.set_fill_style_css(css).expect("a colour");
     ctx.fill_rect(2.0, 2.0, 12.0, 12.0);
+    ctx.set_font_css("bold 16px sans-serif");
+    ctx.fill_text("Wg", 1.0, 30.0, None);
     ctx.set_filter_css("blur(1px)").expect("a blur");
     ctx.fill_rect(18.0, 18.0, 12.0, 12.0);
     ctx.restore();

@@ -21,9 +21,10 @@ use std::{
 
 use skia_safe::{
     AlphaType, BlendMode, BlurStyle, Canvas as SkCanvas, ClipOp, Color4f,
-    ColorSpace, ColorType, Data, ImageFilter, ImageInfo, MaskFilter, Matrix,
-    Paint, PaintCap, PaintJoin, PaintStyle, Path, PathDirection, Picture, Rect,
-    SamplingOptions, Shader, TileMode, canvas::SaveLayerRec, image_filters,
+    ColorFilter, ColorSpace, ColorType, Data, ImageFilter, ImageInfo,
+    MaskFilter, Matrix, Paint, PaintCap, PaintJoin, PaintStyle, Path,
+    PathDirection, Picture, Rect, RuntimeEffect, SamplingOptions, Shader,
+    TileMode, canvas::SaveLayerRec, color_filters, image_filters,
 };
 
 use crate::{
@@ -68,7 +69,9 @@ impl Layer {
             Layer::Group(group) => group.playback(canvas, target),
             Layer::Targeted(pictures) => match target {
                 Target::Pixels => pictures.0.playback(canvas),
-                Target::Document => pictures.1.playback(canvas),
+                Target::Embedded | Target::Document => {
+                    pictures.1.playback(canvas)
+                }
             },
         }
     }
@@ -142,6 +145,37 @@ pub struct ExactColour {
     pub space: ColorSpace,
 }
 
+/// The SkSL of [`ExactColour::dye`]: the uniform colour at the source's
+/// alpha, premultiplied as a colour filter's output is.
+const EXACT_DYE_SKSL: &str = "uniform float3 rgb; \
+    float4 main(float4 c) { return float4(rgb * c.a, c.a); }";
+
+/// The SkSL of the step [`ExactColour::dye`] ends with: `plain` at the
+/// source's alpha where Skia left `probe` as it was handed over, and the
+/// source unchanged where it converted it. Skia converts a `layout(color)`
+/// uniform from sRGB into the space it draws in, and leaves it alone when
+/// that is sRGB or when there is none -- which is how Skia asks a paint's
+/// colour filter for the colour a glyph mask's contrast is set from.
+const PLAIN_UNCONVERTED_SKSL: &str = "layout(color) uniform float3 probe; \
+    uniform float3 given; uniform float3 plain; \
+    float4 main(float4 c) { \
+        return probe == given ? float4(plain * c.a, c.a) : c; }";
+
+/// What [`PLAIN_UNCONVERTED_SKSL`] hands Skia as `probe` and `given`: a
+/// colour with every component strictly inside (0, 1), so that converting
+/// it from sRGB into any space whose primaries or transfer function differ
+/// moves it -- as it does into each space a canvas takes.
+const UNCONVERTED_PROBE: [f32; 3] = [0.5, 0.25, 0.75];
+
+thread_local! {
+    /// [`EXACT_DYE_SKSL`] compiled, once per thread rather than per draw.
+    static EXACT_DYE: Option<RuntimeEffect> =
+        RuntimeEffect::make_for_color_filter(EXACT_DYE_SKSL, None).ok();
+    /// [`PLAIN_UNCONVERTED_SKSL`] compiled, once per thread.
+    static PLAIN_UNCONVERTED: Option<RuntimeEffect> =
+        RuntimeEffect::make_for_color_filter(PLAIN_UNCONVERTED_SKSL, None).ok();
+}
+
 impl ExactColour {
     /// A shader painting the colour: a 1x1 image in the page's space at
     /// full float precision, repeated. Drawn onto a page in that space,
@@ -170,6 +204,59 @@ impl ExactColour {
             None,
         )
     }
+
+    /// A colour filter replacing a draw's colour with this one, its alpha
+    /// kept, for text: worked in the page's space, so on a surface in that
+    /// space Skia converts its output by the identity, and onto any other
+    /// through the colour space transform -- except onto sRGB, and where
+    /// there is no surface at all, where it paints `plain`, the colour as
+    /// a plain paint holds it.
+    ///
+    /// The exception is for the glyph mask. Skia sets its contrast from
+    /// the colour the paint's colour filter makes, asked for with no space
+    /// and read as sRGB, and the page-space colour converted back to sRGB
+    /// by Skia lands off `plain` -- 8.1e-4 off a green of 0.1235 named in
+    /// sRGB on a Display P3 page -- which puts a colour named near the edge
+    /// of a contrast bucket in the next one, and its text's edges on a
+    /// different curve from the plain paint's. On an sRGB surface `plain`
+    /// is also what the plain paint paints.
+    pub fn dye(&self, plain: Color4f) -> Option<ColorFilter> {
+        let bytes = |colours: &[[f32; 3]]| -> Vec<u8> {
+            colours
+                .iter()
+                .flatten()
+                .flat_map(|c| c.to_le_bytes())
+                .collect()
+        };
+        let dye = EXACT_DYE
+            .with(|effect| {
+                effect.as_ref()?.make_color_filter(
+                    Data::new_copy(&bytes(&[self.rgb])),
+                    None,
+                )
+            })?
+            .with_working_color_space(&self.space)?;
+        let uniforms = bytes(&[
+            UNCONVERTED_PROBE,
+            UNCONVERTED_PROBE,
+            [plain.r, plain.g, plain.b],
+        ]);
+        let unconverted = PLAIN_UNCONVERTED.with(|effect| {
+            let effect = effect.as_ref()?;
+            // The three `float3`s are packed, as `bytes` writes them.
+            (effect.uniform_size() == uniforms.len()).then_some(())?;
+            effect.make_color_filter(Data::new_copy(&uniforms), None)
+        })?;
+        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+        // Re-check: cargo test a_float_page_covers_text_as_srgb_does with
+        // this returning `Some(dye)`.
+        //
+        // `just_a_color` (SkPaintPriv.cpp) runs the paint's colour filter
+        // with no colour space, under a TODO calling that space
+        // meaningless, so the glyph contrast of a filter worked in another
+        // space is set from its output converted back to sRGB.
+        color_filters::compose(&unconverted, &dye)
+    }
 }
 
 /// What a page is played back onto, which decides how a [`Group`]
@@ -179,6 +266,12 @@ pub enum Target {
     /// Pixels: a raster or GPU surface, or a picture Skia itself will draw
     /// as pixels -- a pattern's or an image's.
     Pixels,
+    /// Pixels a document embeds for what it cannot write as vectors: an
+    /// eight-bit sRGB raster, composited as pixels are, in the colours the
+    /// document holds. Played from a pair's document recording: from its
+    /// pixels recording, with text drawn through its dye, the raster an SVG
+    /// embeds parted from an eight-bit page's in all 41 colours swept.
+    Embedded,
     /// A document backend writing vectors: PDF, and SVG for what it does not
     /// rasterize.
     Document,
@@ -202,7 +295,9 @@ impl LayerRec {
     /// a rectangle in device pixels -- see [`Self::footprint`].
     fn open_on(&self, canvas: &SkCanvas, target: Target, within: Option<Rect>) {
         let paint = match (&self.paint, target) {
-            (Some(paint), Target::Pixels) => Some(composited(paint)),
+            (Some(paint), Target::Pixels | Target::Embedded) => {
+                Some(composited(paint))
+            }
             (Some(paint), Target::Document) => Some(Cow::Borrowed(paint)),
             (None, _) => None,
         };
@@ -322,7 +417,7 @@ impl Group {
     /// cannot see. Not in a document either, which keeps its groups as they
     /// were.
     pub fn playback(&self, canvas: &SkCanvas, target: Target) {
-        let pixels = target == Target::Pixels && blur_mask::draws_on(canvas);
+        let pixels = target != Target::Document && blur_mask::draws_on(canvas);
         let within =
             pixels.then(|| self.rec.footprint(reach_of(&self.contents)));
         self.playback_within(canvas, target, within.flatten());
