@@ -1286,28 +1286,63 @@ pub(crate) enum Shear {
 /// per cent of an oblique `fillText` -- 1.9 per cent of the samples of 24px
 /// Oswald drawn and read back -- which is less than a rectangle that has to
 /// be padded for the ink outside each outline, in device pixels, is worth.
+///
+/// But not where the skew is past what FreeType shears -- see
+/// [`past_freetype_shear`]: Skia measures the glyphs in the font's own
+/// matrix, which FreeType then takes as upright, so the bounds it works out
+/// are the upright glyphs'. There the bounds are the glyphs' unsheared ones,
+/// which FreeType measures as asked, mapped through the shear, which holds
+/// the sheared outline of each.
 pub(crate) fn sheared_blob(
     font: &Font,
     glyphs: &[GlyphId],
     positions: &[Point],
     shear: Shear,
 ) -> Option<TextBlob> {
-    let (font, positions) = match shear {
-        Shear::None => (Cow::Borrowed(font), Cow::Borrowed(positions)),
+    let (sheared, moved, bounds) = match shear {
+        Shear::None => (Cow::Borrowed(font), Cow::Borrowed(positions), None),
         Shear::By(shear) => {
             let mut sheared = font.clone();
             sheared.set_skew_x(font.skew_x() + shear.skew_x());
             let moved = positions.iter().map(|&at| map_affine(&shear, at));
-            (Cow::Owned(sheared), Cow::Owned(moved.collect()))
+            let bounds = (FREETYPE
+                && past_freetype_shear(
+                    &Matrix::new_identity(),
+                    sheared.skew_x(),
+                ))
+            .then(|| sheared_bounds(font, glyphs, positions, &shear));
+            (Cow::Owned(sheared), Cow::Owned(moved.collect()), bounds)
         }
         Shear::Flat => return None,
     };
     let mut builder = TextBlobBuilder::new();
     let (into_glyphs, into_positions) =
-        builder.alloc_run_pos(&font, glyphs.len(), None);
+        builder.alloc_run_pos(&sheared, glyphs.len(), bounds.as_ref());
     into_glyphs.copy_from_slice(glyphs);
-    into_positions.copy_from_slice(&positions);
+    into_positions.copy_from_slice(&moved);
     builder.make()
+}
+
+/// The bounds of `glyphs` in `font` at `positions`, sheared by `shear` about
+/// their baseline: each glyph's box in the unsheared font, placed and mapped
+/// through the shear, which takes the box's corners to a parallelogram that
+/// holds the sheared glyph, and the box around them all.
+fn sheared_bounds(
+    font: &Font,
+    glyphs: &[GlyphId],
+    positions: &[Point],
+    shear: &Matrix,
+) -> Rect {
+    let mut boxes = vec![Rect::new_empty(); glyphs.len()];
+    font.get_bounds(glyphs, &mut boxes, None);
+    zip(boxes, positions)
+        .filter(|(glyph, _)| !glyph.is_empty())
+        .map(|(glyph, &at)| shear.map_rect(glyph.with_offset(at)).0)
+        .reduce(|mut all, glyph| {
+            all.join(glyph);
+            all
+        })
+        .unwrap_or_default()
 }
 
 /// The skew SkParagraph gives a run it fakes an italic for, `-1/4`: in
