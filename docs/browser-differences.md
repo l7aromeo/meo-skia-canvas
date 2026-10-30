@@ -369,6 +369,29 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   Pinned in tests/suite/paragraph.test.js, "a text shadow's stack level" and
   "a wrapped line's shadow".
 
+- _A `Paragraph` style's shadows paint the first listed on top, where
+  CanvasKit paints them in the order given, the first lowest._ CSS Text
+  Decoration 3 section 4 paints a list of text shadows as CSS Backgrounds 3
+  paints `box-shadow`, front to back. SkParagraph, which CanvasKit's
+  paragraph is, draws a style's shadows in list order. The paragraph is this
+  library's extension and follows CSS here. Pinned in
+  tests/paragraph_shadow.rs, `a_styles_first_listed_shadow_lies_on_top`.
+
+- _A style's run of text on a line casts its shadow as one, the exact
+  Gaussian blur of the whole run, where SkParagraph blurs each glyph with a
+  mask filter._ A mask filter draws a glyph heavier than the glyph itself on
+  macOS -- a 16px word drawn through one at a sigma of 0.001 held 1.23 times
+  the ink of the word -- and blurs drawn a glyph at a time lose ink where
+  they overlap: the same word blurred by 20px kept 0.54 of its sharp
+  shadow's ink on the CPU engine. Each run is one element, as CSS Text
+  Decoration 3 casts `text-shadow` for each fragment of an element; Chrome
+  156 draws an inline span's shadow wrapped onto two lines exactly as it
+  draws two blocks of one line each. A style set in two faces, its own and a
+  fallback's, is one run. The shadows composite source-over in document
+  order, beneath all the text. On pixels the blur is
+  `context::exact_blur`'s; a PDF or SVG keeps Skia's mask filter, which its
+  backends hold as vectors. Pinned in tests/paragraph_shadow.rs.
+
 - _A wavy line keeps Chrome's proportions without its pixel constants, and
   hangs from the font's top._ Chrome 153's wave on a 96px Oswald underline,
   read at four times the size in quarter pixels -- the period from the
