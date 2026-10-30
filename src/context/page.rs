@@ -37,7 +37,10 @@ use crate::{
     context::{
         BoxedContext2D,
         faint::composited,
-        layer::{BlurDraw, BlurOp, Composite, Group, Layer, LayerRec, Target},
+        layer::{
+            BlurDraw, BlurOp, Composite, Entries, Group, Layer, LayerRec,
+            Target,
+        },
     },
     encode::{
         self, Frame, FrameDepth, Pixels, SequenceSpec, Sink,
@@ -411,6 +414,11 @@ struct OpenLayer {
     /// a group was filed among it, and the groups -- a layer opened inside
     /// this one, a canvas drawn in through a paint.
     entries: Vec<Layer>,
+    /// What each of `entries` asks of a vector backend, in the same order.
+    entry_features: Vec<VectorFeatures>,
+    /// What the draws `current` holds for this layer ask of a vector
+    /// backend: the entry they are filed as asks it in turn.
+    current_features: VectorFeatures,
     rec: LayerRec,
     /// The transform and clip the layer was opened under.
     matrix: Matrix,
@@ -636,6 +644,16 @@ impl PageRecorder {
         if self.isolated.is_some() {
             self.flush();
         }
+        // Nor can it join draws an open layer holds that ask for something:
+        // filing them first keeps this one an entry asking for nothing.
+        if self.changed
+            && self
+                .open
+                .last()
+                .is_some_and(|layer| layer.current_features.any())
+        {
+            self.file_current();
+        }
         self.settle();
         self.current.each(f);
         self.changed = true;
@@ -795,6 +813,8 @@ impl PageRecorder {
         self.open.push(OpenLayer {
             id: LAYERS.fetch_add(1, Ordering::Relaxed),
             entries: Vec::new(),
+            entry_features: Vec::new(),
+            current_features: VectorFeatures::PLAIN,
             rec,
             matrix: self.matrix,
             clip: self.clip.clone(),
@@ -827,7 +847,7 @@ impl PageRecorder {
                 clip: layer.clip.as_ref().map(Path::serialize),
                 within: None,
                 contents_matrix: Matrix::new_identity(),
-                contents: Arc::new(layer.entries),
+                contents: Entries::new(layer.entries, layer.entry_features),
             };
             self.file_group(group, layer.features.with(VectorFeatures::LAYER));
         }
@@ -837,18 +857,19 @@ impl PageRecorder {
     /// Files `contents` as a [`Group`] composited by `composite`, under the
     /// transform and clip the recorder holds and inside `within` under that
     /// transform, its entries played under `contents_matrix`; asking
-    /// `features` of a vector backend for it. Filed where the recording
+    /// `features` of a vector backend for the group as a whole, beside what
+    /// each of its entries asks. Filed where the recording
     /// stands: on the page, or among the contents of the innermost open
     /// layer.
     ///
     /// `shift` moves the group in device space, both transforms with it, as
     /// a shadow is offset from what casts it.
-    pub fn append_group(
+    pub(crate) fn append_group(
         &mut self,
         composite: Composite,
         within: Option<Rect>,
         contents_matrix: Matrix,
-        contents: Arc<Vec<Layer>>,
+        contents: Entries,
         features: VectorFeatures,
         shift: Point,
     ) {
@@ -890,6 +911,7 @@ impl PageRecorder {
         match self.open.last_mut() {
             Some(parent) => {
                 parent.entries.push(entry);
+                parent.entry_features.push(features);
                 parent.features = parent.features.with(features);
             }
             None => {
@@ -915,7 +937,9 @@ impl PageRecorder {
             .finish(|recorder| recorder.finish_recording_as_picture(None))
         {
             layer.entries.push(entry);
+            layer.entry_features.push(layer.current_features);
         }
+        layer.current_features = VectorFeatures::PLAIN;
         self.current.begin(self.bounds);
         self.changed = false;
         self.restore();
@@ -940,18 +964,29 @@ impl PageRecorder {
         }
         self.file_current();
         self.restore();
-        self.open.iter().rev().fold(None, |inner, layer| {
-            let mut contents = layer.entries.clone();
-            contents.extend(inner);
-            Some(Layer::Group(Arc::new(Group {
-                composite: Composite::Layer(layer.rec.clone()),
-                matrix: layer.matrix,
-                clip: layer.clip.as_ref().map(Path::serialize),
-                within: None,
-                contents_matrix: Matrix::new_identity(),
-                contents: Arc::new(contents),
-            })))
-        })
+        // Each layer holds the one inside it as it would be filed on
+        // closing: asking for a layer and for what it holds.
+        self.open
+            .iter()
+            .rev()
+            .fold(None, |inner: Option<(Layer, VectorFeatures)>, layer| {
+                let mut contents = layer.entries.clone();
+                let mut features = layer.entry_features.clone();
+                if let Some((entry, asks)) = inner {
+                    contents.push(entry);
+                    features.push(asks);
+                }
+                let group = Layer::Group(Arc::new(Group {
+                    composite: Composite::Layer(layer.rec.clone()),
+                    matrix: layer.matrix,
+                    clip: layer.clip.as_ref().map(Path::serialize),
+                    within: None,
+                    contents_matrix: Matrix::new_identity(),
+                    contents: Entries::new(contents, features),
+                }));
+                Some((group, layer.features.with(VectorFeatures::LAYER)))
+            })
+            .map(|(group, _)| group)
     }
 
     /// What the open layers ask of a vector backend, as the page they are
@@ -1179,9 +1214,21 @@ impl PageRecorder {
     where
         F: Fn(&SkCanvas, Recording),
     {
+        // Inside a layer a run of draws asking for the same features is one
+        // of its entries, as on the page, and one asking for others is
+        // filed apart.
+        if let Some(layer) = self.open.last()
+            && self.changed
+            && layer.current_features != features
+        {
+            self.file_current();
+        }
         if let Some(layer) = self.open.last_mut() {
             layer.features = layer.features.with(features);
-            self.append(f);
+            layer.current_features = features;
+            self.settle();
+            self.current.each(f);
+            self.changed = true;
             return;
         }
 
@@ -1240,7 +1287,9 @@ impl PageRecorder {
         // a guard rather than a path a run takes.
         if self.blur_run == Some(self.frame) && !self.changed {
             let (entries, last_features) = match self.open.last_mut() {
-                Some(layer) => (&mut layer.entries, None),
+                Some(layer) => {
+                    (&mut layer.entries, layer.entry_features.last())
+                }
                 None => (Arc::make_mut(&mut self.layers), self.features.last()),
             };
             if let Some(Layer::Blur(op)) = entries.last_mut()
@@ -1257,7 +1306,10 @@ impl PageRecorder {
         // Filed after what is current, which filing closes no layer to do.
         self.file_current();
         match self.open.last_mut() {
-            Some(layer) => layer.entries.push(op),
+            Some(layer) => {
+                layer.entries.push(op);
+                layer.entry_features.push(features);
+            }
             None => {
                 Arc::make_mut(&mut self.layers).push(op);
                 Arc::make_mut(&mut self.features).push(features);
@@ -6427,7 +6479,7 @@ mod tests {
             clip: clip.map(Path::serialize),
             within: None,
             contents_matrix: Matrix::new_identity(),
-            contents: Arc::new(vec![Layer::Picture(contents.clone())]),
+            contents: Entries::plain(vec![Layer::Picture(contents.clone())]),
         });
         let size = CONFINED_PAGE.size() * density;
         let info = ImageInfo::new_n32_premul(
@@ -6662,7 +6714,7 @@ mod tests {
                 clip: None,
                 within: None,
                 contents_matrix: Matrix::new_identity(),
-                contents: Arc::new(vec![Layer::Picture(contents)]),
+                contents: Entries::plain(vec![Layer::Picture(contents)]),
             });
             let mut recorder = PictureRecorder::new();
             group.playback(
@@ -6714,7 +6766,7 @@ mod tests {
             clip: None,
             within: None,
             contents_matrix: Matrix::new_identity(),
-            contents: Arc::new(vec![Layer::Picture(
+            contents: Entries::plain(vec![Layer::Picture(
                 recorder
                     .finish_recording_as_picture(None)
                     .expect("a picture of the square"),
@@ -6831,7 +6883,7 @@ mod tests {
                 clip: None,
                 within: None,
                 contents_matrix,
-                contents: Arc::new(contents),
+                contents: Entries::plain(contents),
             }))
         };
         let (a, b) = (
@@ -6861,6 +6913,109 @@ mod tests {
         };
         let covering = group(copy, Matrix::new_identity(), vec![picture(a)]);
         assert_eq!(reach_of(&[picture(b), covering]), None, "a backdrop");
+    }
+
+    /// A layer closes into a group that keeps what each of its entries asks
+    /// of a vector backend: a run of draws asking for nothing, a run asking
+    /// for the same features joined into one entry, and a layer closed
+    /// inside it asking for a layer.
+    #[test]
+    fn a_closed_layer_keeps_each_entry_s_features() {
+        let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
+        let draw = |canvas: &SkCanvas, _: Recording| {
+            canvas.draw_rect(Rect::from_wh(1.0, 1.0), &Paint::default());
+        };
+        recorder.open_layer(LayerRec::default());
+        recorder.append(draw);
+        recorder.append_isolated(VectorFeatures::IMAGE_FILTER, draw);
+        recorder.append_isolated(VectorFeatures::IMAGE_FILTER, draw);
+        recorder.append(draw);
+        recorder.open_layer(LayerRec::default());
+        recorder.append(draw);
+        recorder.close_layer();
+        recorder.close_layer();
+        let Some(Layer::Group(group)) = recorder.layers.last() else {
+            panic!("the layer is filed as a group");
+        };
+        assert_eq!(group.contents.layers.len(), group.contents.features.len());
+        assert_eq!(
+            *group.contents.features,
+            [
+                VectorFeatures::PLAIN,
+                VectorFeatures::IMAGE_FILTER,
+                VectorFeatures::PLAIN,
+                VectorFeatures::LAYER,
+            ],
+        );
+        assert_eq!(
+            recorder.features.last(),
+            Some(&VectorFeatures::IMAGE_FILTER.with(VectorFeatures::LAYER)),
+            "the page's entry asks for all of it",
+        );
+    }
+
+    /// The layers open on a page, as a read sees them, keep what each of
+    /// their entries asks of a vector backend as closing them would: a
+    /// blurred draw its features, and the layer open inside a layer.
+    #[test]
+    fn open_layers_keep_each_entry_s_features() {
+        let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
+        recorder.open_layer(LayerRec::default());
+        recorder.append_blur(
+            blurred_square(0.0),
+            Matrix::new_identity(),
+            None,
+            VectorFeatures::MASK_FILTER,
+        );
+        recorder.open_layer(LayerRec::default());
+        recorder.append_isolated(VectorFeatures::EXOTIC_SHADER, |canvas, _| {
+            canvas.draw_rect(Rect::from_wh(1.0, 1.0), &Paint::default());
+        });
+        let Some(Layer::Group(outer)) = recorder.open_layers_entry() else {
+            panic!("the open layers are a group");
+        };
+        assert_eq!(
+            *outer.contents.features,
+            [
+                VectorFeatures::MASK_FILTER,
+                VectorFeatures::EXOTIC_SHADER.with(VectorFeatures::LAYER)
+            ],
+        );
+        let Some(Layer::Group(inner)) = outer.contents.layers.last() else {
+            panic!("the inner layer is a group in the outer one");
+        };
+        assert_eq!(*inner.contents.features, [VectorFeatures::EXOTIC_SHADER]);
+    }
+
+    /// A blurred draw inside a layer joins the op before it only where the
+    /// two ask for the same features, as on the page.
+    #[test]
+    fn a_blur_op_in_a_layer_keeps_apart_from_one_asking_otherwise() {
+        let mut recorder = PageRecorder::new(Rect::from_wh(100.0, 100.0));
+        recorder.open_layer(LayerRec::default());
+        for (at, features) in [
+            (0.0, VectorFeatures::MASK_FILTER),
+            (
+                20.0,
+                VectorFeatures::MASK_FILTER.with(VectorFeatures::BLEND_MODE),
+            ),
+        ] {
+            recorder.append_blur(
+                blurred_square(at),
+                Matrix::new_identity(),
+                None,
+                features,
+            );
+        }
+        let layer = &recorder.open[0];
+        assert_eq!(layer.entries.len(), 2, "two ops");
+        assert_eq!(
+            layer.entry_features,
+            [
+                VectorFeatures::MASK_FILTER,
+                VectorFeatures::MASK_FILTER.with(VectorFeatures::BLEND_MODE),
+            ],
+        );
     }
 
     /// Ten thousand reads inside one layer, each after a draw, leave the

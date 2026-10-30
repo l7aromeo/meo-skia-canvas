@@ -85,6 +85,11 @@ impl VectorFeatures {
         Self(self.0 | other.0)
     }
 
+    /// This, less what `other` names.
+    pub(crate) fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+
     pub(crate) fn any(self) -> bool {
         self.0 != 0
     }

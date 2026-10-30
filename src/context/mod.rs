@@ -63,7 +63,8 @@ use crate::{
 use chain::{Step, canvas_reach};
 use faint::Faint;
 use layer::{
-    BlurDraw, Composite, ExactColour, Group, Layer, LayerRec, reach_the_clip,
+    BlurDraw, Composite, Entries, ExactColour, Group, Layer, LayerRec,
+    reach_the_clip,
 };
 use page::{ExportOptions, Page, PageRecorder, Recording};
 use typesetting::{TextSettings, Typesetting, Typography};
@@ -977,7 +978,12 @@ impl Context2D {
         through
             .set_blend_mode(self.state.global_composite_operation)
             .set_image_filter(paint.image_filter());
-        let contents = Arc::new(entry.into_iter().collect());
+        // The draw inside asks for what its paint does, less the filter and
+        // the blend, which the group composites through.
+        let drawn = features.without(
+            VectorFeatures::IMAGE_FILTER.with(VectorFeatures::BLEND_MODE),
+        );
+        let contents = entry.map(|entry| (entry, drawn)).into_iter().collect();
         self.with_recorder(|mut recorder| {
             recorder.append_group(
                 Composite::Chain {
@@ -1108,7 +1114,8 @@ impl Context2D {
                 .zip(record())
                 .map(|pictures| Layer::Targeted(Arc::new(pictures))),
         };
-        let contents = Arc::new(entry.into_iter().collect());
+        // What it draws with its own paints, which ask for nothing.
+        let contents = Entries::plain(entry.into_iter().collect());
         self.with_recorder(|mut recorder| {
             recorder.append_group(
                 Composite::Layer(LayerRec {
@@ -1188,18 +1195,26 @@ impl Context2D {
                 .zip(record(part))
                 .map(|pictures| Layer::Targeted(Arc::new(pictures))),
         };
-        let mut contents: Vec<Layer> = Vec::with_capacity(casts.len() + 2);
-        contents.extend(entry(ShadowPart::Beneath));
+        // The parts drawn sharp ask for nothing, and a blurred shadow for
+        // its filter, as each does filed on the page.
+        let plain = |part| entry(part).map(|e| (e, VectorFeatures::PLAIN));
+        let mut contents: Vec<(Layer, VectorFeatures)> =
+            Vec::with_capacity(casts.len() + 2);
+        contents.extend(plain(ShadowPart::Beneath));
         for (index, cast) in casts.iter().enumerate() {
             match cast.blurs() {
-                false => contents.extend(entry(ShadowPart::Sharp(index))),
+                false => contents.extend(plain(ShadowPart::Sharp(index))),
                 true => contents.extend(
-                    self.shadow_group(cast, index, &draw)
-                        .map(|group| Layer::Group(Arc::new(group))),
+                    self.shadow_group(cast, index, &draw).map(|group| {
+                        (
+                            Layer::Group(Arc::new(group)),
+                            VectorFeatures::IMAGE_FILTER,
+                        )
+                    }),
                 ),
             }
         }
-        contents.extend(entry(ShadowPart::Over));
+        contents.extend(plain(ShadowPart::Over));
         self.with_recorder(|mut recorder| {
             recorder.append_group(
                 Composite::Layer(LayerRec {
@@ -1208,7 +1223,7 @@ impl Context2D {
                 }),
                 None,
                 Matrix::new_identity(),
-                Arc::new(contents),
+                contents.into_iter().collect(),
                 self.composited_features(),
                 Point::default(),
             );
@@ -1256,7 +1271,12 @@ impl Context2D {
             clip: None,
             within: Some(self.state.matrix.map_rect(cast.bounds).0),
             contents_matrix: Matrix::new_identity(),
-            contents: Arc::new(vec![Layer::Targeted(Arc::new(drawn))]),
+            // What a document plays of it is the shadow Skia's mask filter
+            // draws.
+            contents: Entries::new(
+                vec![Layer::Targeted(Arc::new(drawn))],
+                vec![VectorFeatures::MASK_FILTER],
+            ),
         })
     }
 
@@ -1762,13 +1782,15 @@ impl Context2D {
     /// declare its own cost. See `PageRecorder::replay_cost`.
     ///
     /// `entries` is the source page's own list where the picture is a
-    /// canvas's, so that a draw through its paint holds the page as it was
-    /// recorded and each target composites its groups as it needs -- see
-    /// `LayerRec::open_on`. `None` for a picture with no page behind it.
-    pub fn draw_picture_costing(
+    /// canvas's, each entry with what it asks of a vector backend, so that a
+    /// draw through its paint holds the page as it was recorded and each
+    /// target composites its groups as it needs -- see `LayerRec::open_on`.
+    /// `None` for a picture with no page behind it, which is then one entry
+    /// asking for what `source` names.
+    pub(crate) fn draw_picture_costing(
         &mut self,
         picture: &Picture,
-        entries: Option<Arc<Vec<Layer>>>,
+        entries: Option<Entries>,
         src_rect: &Rect,
         dst_rect: &Rect,
         source: VectorFeatures,
@@ -1813,7 +1835,10 @@ impl Context2D {
         {
             let contents_matrix = Matrix::concat(&self.state.matrix, &matrix);
             let contents = entries.unwrap_or_else(|| {
-                Arc::new(vec![Layer::Picture(picture.clone())])
+                Entries::new(
+                    vec![Layer::Picture(picture.clone())],
+                    vec![source],
+                )
             });
             let shadow = self
                 .paint_for_shadow(&paint)
@@ -1834,7 +1859,7 @@ impl Context2D {
                         composite,
                         Some(*dst_rect),
                         contents_matrix,
-                        Arc::clone(&contents),
+                        contents.clone(),
                         features,
                         shift,
                     );
@@ -2009,13 +2034,13 @@ impl Context2D {
                 sampling,
                 &drawn,
             );
-            let contents = Arc::new(
-                recorder
-                    .finish_recording_as_picture(None)
-                    .map(Layer::Picture)
-                    .into_iter()
-                    .collect(),
-            );
+            // The image drawn inside asks for nothing: its filter and its
+            // blend are the group's.
+            let contents = recorder
+                .finish_recording_as_picture(None)
+                .map(|picture| (Layer::Picture(picture), VectorFeatures::PLAIN))
+                .into_iter()
+                .collect();
             let mut through = Paint::default();
             through
                 .set_alpha_f(paint.alpha_f())
@@ -2107,8 +2132,9 @@ impl Context2D {
     /// The page's own list of entries, for another canvas to draw this one
     /// through a paint without flattening it -- see
     /// [`Self::draw_picture_costing`].
-    pub fn entries(&self) -> Arc<Vec<Layer>> {
-        self.recorder.borrow_mut().page().layers
+    pub(crate) fn entries(&self) -> Entries {
+        let page = self.recorder.borrow_mut().page();
+        Entries::shared(page.layers, page.features)
     }
 
     /// The page flattened for another canvas to draw, with what an SVG

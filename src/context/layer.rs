@@ -36,6 +36,7 @@ use crate::{
         chain_cache, coverage_of,
         faint::{Faint, composited},
     },
+    export::VectorFeatures,
     node::filter::MASK_BLUR_MAX_SIGMA,
     started,
 };
@@ -507,9 +508,70 @@ pub struct Group {
     /// layer held, recorded in page coordinates; for a canvas drawn in, the
     /// mapping from its page onto this one.
     pub contents_matrix: Matrix,
-    /// Shared, so that a canvas drawn in brings its page's list without
-    /// copying it.
-    pub contents: Arc<Vec<Layer>>,
+    /// What the group holds, each entry with what it asks of a vector
+    /// backend.
+    pub(crate) contents: Entries,
+}
+
+/// Entries played in order, each with what it asks of a vector backend: the
+/// page's own, or a [`Group`]'s, which a document can then take entry by
+/// entry rather than as the group as a whole.
+///
+/// Shared, so that a canvas drawn in brings its page's lists without copying
+/// them.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Entries {
+    pub(crate) layers: Arc<Vec<Layer>>,
+    /// One for each of `layers`, in the same order.
+    pub(crate) features: Arc<Vec<VectorFeatures>>,
+}
+
+impl FromIterator<(Layer, VectorFeatures)> for Entries {
+    fn from_iter<I: IntoIterator<Item = (Layer, VectorFeatures)>>(
+        entries: I,
+    ) -> Self {
+        let (layers, features) = entries.into_iter().unzip();
+        Self::new(layers, features)
+    }
+}
+
+impl Entries {
+    /// `layers`, each asking for `features` at the same index.
+    pub(crate) fn new(
+        layers: Vec<Layer>,
+        features: Vec<VectorFeatures>,
+    ) -> Self {
+        Self::shared(Arc::new(layers), Arc::new(features))
+    }
+
+    /// [`Self::new`] for lists already shared.
+    pub(crate) fn shared(
+        layers: Arc<Vec<Layer>>,
+        features: Arc<Vec<VectorFeatures>>,
+    ) -> Self {
+        debug_assert_eq!(layers.len(), features.len(), "a feature per entry");
+        Self { layers, features }
+    }
+
+    /// `layers` asking nothing of a vector backend.
+    pub(crate) fn plain(layers: Vec<Layer>) -> Self {
+        let features = vec![VectorFeatures::PLAIN; layers.len()];
+        Self::new(layers, features)
+    }
+
+    /// Every entry, each with what it asks of a vector backend.
+    pub(crate) fn iter(
+        &self,
+    ) -> impl Iterator<Item = (&Layer, VectorFeatures)> {
+        self.layers.iter().zip(self.features.iter().copied())
+    }
+
+    /// Everything the entries ask of a vector backend, together.
+    pub(crate) fn all_features(&self) -> VectorFeatures {
+        self.features
+            .iter()
+            .fold(VectorFeatures::PLAIN, |all, features| all.with(*features))
+    }
 }
 
 impl Group {
@@ -526,8 +588,11 @@ impl Group {
     /// were.
     pub fn playback(self: &Arc<Self>, canvas: &SkCanvas, target: Target) {
         let pixels = target != Target::Document && blur_mask::draws_on(canvas);
-        let within = pixels
-            .then(|| self.composite.rec().footprint(reach_of(&self.contents)));
+        let within = pixels.then(|| {
+            self.composite
+                .rec()
+                .footprint(reach_of(&self.contents.layers))
+        });
         self.playback_within(canvas, target, within.flatten());
     }
 
@@ -536,7 +601,10 @@ impl Group {
     /// they are played under, where the layer can be confined to it. `None`
     /// where it covers what the clip allows.
     pub fn reach(&self) -> Option<Rect> {
-        let drawn = self.composite.rec().footprint(reach_of(&self.contents))?;
+        let drawn = self
+            .composite
+            .rec()
+            .footprint(reach_of(&self.contents.layers))?;
         Some(self.contents_matrix.map_rect(drawn).0)
     }
 
@@ -587,17 +655,18 @@ impl Group {
                 // What is drawn is bounded by `within`, or for a single
                 // picture by what it was recorded within.
                 let to_space = |matrix: &Matrix| Matrix::concat(&back, matrix);
-                let content = match (&self.within, self.contents.as_slice()) {
-                    (Some(within), _) => {
-                        Some(to_space(&self.matrix).map_rect(within).0)
-                    }
-                    (None, [Layer::Picture(picture)]) => Some(
-                        to_space(&self.contents_matrix)
-                            .map_rect(picture.cull_rect())
-                            .0,
-                    ),
-                    (None, _) => None,
-                };
+                let content =
+                    match (&self.within, self.contents.layers.as_slice()) {
+                        (Some(within), _) => {
+                            Some(to_space(&self.matrix).map_rect(within).0)
+                        }
+                        (None, [Layer::Picture(picture)]) => Some(
+                            to_space(&self.contents_matrix)
+                                .map_rect(picture.cull_rect())
+                                .0,
+                        ),
+                        (None, _) => None,
+                    };
                 // A group a canvas drawn into another brings with it is played
                 // once for each time that canvas is, and its chain is run the
                 // first of those -- see `chain_cache`.
@@ -629,7 +698,7 @@ impl Group {
                             )
                             .into(),
                         );
-                        for entry in self.contents.iter() {
+                        for entry in self.contents.layers.iter() {
                             entry.playback(layer, target);
                         }
                     },
@@ -664,7 +733,7 @@ impl Group {
                     clip_within(canvas);
                 }
                 canvas.set_matrix(&entries.into());
-                for entry in self.contents.iter() {
+                for entry in self.contents.layers.iter() {
                     entry.playback(canvas, target);
                 }
                 canvas.restore();
