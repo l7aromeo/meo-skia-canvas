@@ -351,23 +351,47 @@ fn neighbouring_spans_blur_apart_and_composite_in_order() {
 /// The most one rounding to the nearest level moves a value, in levels.
 const ROUNDING: f64 = 0.5;
 
+/// `255 * 256`: the CPU engine's x86 source-over scales by `256 - s` and
+/// shifts right by 8 where the exact blend scales by `255 - s` and divides
+/// by 255, and this is the denominator of the difference.
+const TRUNCATED_SCALE: f64 = 255.0 * 256.0;
+
+/// The most the blend of a second shadow stored at level `s` over a first
+/// stored at `d` moves the drawn level off the exact `s + d (255 - s) / 255`,
+/// on `gpu`'s engine.
+///
+/// The CPU engine places a blurred shadow's image with Skia's sprite blitter
+/// -- an N32 image drawn source-over at a whole-pixel offset, with no colour
+/// filter, colour-space conversion or alpha -- whose row blend is
+/// `blit_row_s32a_opaque` (SkBlitRow_opts.h), not the raster pipeline's.
+/// On NEON it is `s + SkMulDiv255Round(d, 255 - s)`, rounded to the nearest
+/// level. On SSE2 and AVX2, and in its scalar `SkPMSrcOver`, it is
+/// `s + (d (256 - s) >> 8)`, truncated: that is the exact blend plus
+/// `delta = d s / (255 * 256)` with the fraction cut off, so it lies in
+/// `(delta - 1, delta]`. The GPU engine blends in floats and rounds once on
+/// storing.
+fn blend_rounding(gpu: bool, d: u8, s: u8) -> f64 {
+    if gpu || cfg!(target_arch = "aarch64") {
+        return ROUNDING;
+    }
+    let delta = f64::from(d) * f64::from(s) / TRUNCATED_SCALE;
+    delta.max(1.0 - delta)
+}
+
 #[test]
 fn neighbouring_spans_composite_within_three_eight_bit_roundings() {
     // On an eight-bit page each span's blurred shadow is stored at a level
-    // before the next is composited over it, and Skia's lowp source-over is
-    // `s + div255_accurate(d * (255 - s))` (SkRasterPipeline_opts.h; the
-    // inaccurate `div255` is used only under SK_USE_INACCURATE_DIV255_IN_BLEND,
-    // which no build of ours defines), itself rounded to the nearest level.
-    // With `s` and `d` the second and first span's stored levels, off their
-    // exact blurs `255 B` and `255 A` by `e_s` and `e_d`, and `r` the blend's
-    // rounding, the drawn level misses the exact `255 (B + A (1 - B))` by
+    // before the next is composited over it. With `s` and `d` the second
+    // and first span's stored levels, off their exact blurs `255 B` and
+    // `255 A` by `e_s` and `e_d`, and `r` the blend's own rounding, the
+    // drawn level misses the exact `255 (B + A (1 - B))` by
     //
     //     e_s (1 - A) + e_d (1 - s / 255) + r,
     //
-    // so by at most half a level for each rounding, weighted as above: under
-    // 1.5 levels, and less wherever either shadow is strong. The float page
-    // has none of these roundings and is held to the exact composite in the
-    // test above.
+    // the stored levels each rounded to the nearest, so `e_s` and `e_d` at
+    // most half a level, and `r` the blend's own, which differs by engine
+    // and processor -- see `blend_rounding`. The float page has none of
+    // these roundings and is held to the exact composite in the test above.
     let sigma = 4.0f32;
     let spans = |first: Vec<TextShadow>, second: Vec<TextShadow>| {
         paragraph(&[("Hm", style(24.0, first)), ("Hm", style(24.0, second))])
@@ -390,6 +414,9 @@ fn neighbouring_spans_composite_within_three_eight_bit_roundings() {
         let blur =
             |alpha: &[f64]| sampled(alpha, SIZE.0 as usize, f64::from(sigma));
         let (a, b) = (blur(&alpha(&first)), blur(&alpha(&second)));
+        let first_alone =
+            drawn(gpu, &spans(vec![shadow(RED, 1.0, 0.0, sigma)], vec![]))
+                .expect("pixels");
         let second_alone =
             drawn(gpu, &spans(vec![], vec![shadow(BLUE, 1.0, 0.0, sigma)]))
                 .expect("pixels");
@@ -403,14 +430,15 @@ fn neighbouring_spans_composite_within_three_eight_bit_roundings() {
         .expect("pixels");
         let off: Vec<_> = got
             .iter()
-            .zip(&second_alone)
+            .zip(first_alone.iter().zip(&second_alone))
             .zip(a.iter().zip(&b))
             .enumerate()
-            .filter_map(|(i, ((g, s), (a, b)))| {
+            .filter_map(|(i, ((g, (d, s)), (a, b)))| {
                 let exact = (b + a * (1.0 - b)) * 255.0;
                 let stored = f64::from(s[3]) / 255.0;
-                let bound =
-                    ROUNDING * (1.0 - a) + ROUNDING * (1.0 - stored) + ROUNDING;
+                let bound = ROUNDING * (1.0 - a)
+                    + ROUNDING * (1.0 - stored)
+                    + blend_rounding(gpu, d[3], s[3]);
                 let miss = (f64::from(g[3]) - exact).abs();
                 (miss > bound + TIE).then_some((i, g[3], exact, bound))
             })
