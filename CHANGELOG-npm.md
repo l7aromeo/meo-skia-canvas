@@ -903,8 +903,19 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   Skia's raster pipeline, so a coloured or translucent fill lands within a
   level of a premultiplied channel of the unclipped one. The GPU engine and PDF
   and SVG exports clip as before. A draw inside an open `saveLayer()` takes the
-  same route; a canvas drawn into another or used as a pattern is still clipped
-  as Skia clips it -- see docs/browser-differences.md.
+  same route, and so does one in a canvas drawn into another with
+  `ctx.drawCanvas()` or `ctx.drawImage()` or used as a pattern: exact there at
+  any density for `drawCanvas()` and a pattern, and at density 1 for an image,
+  which is that canvas's pixels. On the GPU engine an image or a pattern of such
+  a canvas is clipped by the same coverage, which moves 50 pixels of a
+  circle-clipped triangle and stroke there -- see docs/browser-differences.md.
+  What it costs [RE-TIME vs 6.0.2], against the same code without it: a frame
+  drawn under a clip costs 1.20 times as much, 0.20 µs, and a draw the clip
+  cuts 0.50 µs more to record. Rasterizing costs less than it did: 60px
+  triangles under a clip that cuts half of them in 0.45 of the time, and a
+  canvas holding cut draws drawn into another in 0.57 of it with
+  `drawCanvas()`, 0.84 with `drawImage()` and 0.98 as a pattern. Draws the clip
+  does not cut cost what they did.
 
 - **A PDF or SVG writes a clip once for the draws under it, whatever is read or
   exported between them.** A `getImageData()` or an export between two draws
