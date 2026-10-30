@@ -98,7 +98,7 @@ fn holds(got: [f32; 4], exact: [f32; 4], depth: PixelDepth) -> bool {
 /// The ways a flat colour is drawn, each covering some of the canvas whole.
 type Draw = fn(&mut Context2D);
 
-const DRAWS: [(&str, Draw); 5] = [
+const DRAWS: [(&str, Draw); 6] = [
     ("a fill", |ctx| ctx.fill_rect(0.0, 0.0, SIDE, SIDE)),
     ("text", |ctx| {
         ctx.set_font_css("bold 96px sans-serif");
@@ -119,6 +119,15 @@ const DRAWS: [(&str, Draw); 5] = [
     ("a blurred fill", |ctx| {
         ctx.set_filter_css("blur(1px)").expect("a blur");
         ctx.fill_rect(-SIDE, -SIDE, SIDE * 3.0, SIDE * 3.0);
+    }),
+    // A path, which the blur takes on its result, through `context::chain`.
+    ("a blurred stroke", |ctx| {
+        ctx.set_filter_css("blur(1px)").expect("a blur");
+        ctx.set_line_width(SIDE * 3.0);
+        ctx.begin_path();
+        ctx.move_to(-SIDE, SIDE / 2.0);
+        ctx.line_to(SIDE * 2.0, SIDE / 2.0);
+        ctx.stroke();
     }),
 ];
 
@@ -404,8 +413,9 @@ fn a_float_page_drawn_into_another_paints_its_text_as_its_fill() {
 }
 
 /// The images an SVG of a page embeds, as the base64 text it writes them
-/// in: here, a fill, text and a blurred fill inside a translucent layer,
-/// which the SVG backend draws as an image.
+/// in: here, a fill, text, a blurred fill, a blurred stroke and a canvas
+/// drawn in under the blur, inside a translucent layer, which the SVG
+/// backend draws as an image.
 fn embedded(
     space: PixelColorSpace,
     depth: PixelDepth,
@@ -429,6 +439,29 @@ fn embedded(
     ctx.fill_text("Wg", 1.0, 30.0, None);
     ctx.set_filter_css("blur(1px)").expect("a blur");
     ctx.fill_rect(18.0, 18.0, 12.0, 12.0);
+    // A path's blur is taken on its result, and a canvas drawn in under a
+    // filter composites through a chain -- see `context::chain`.
+    ctx.set_stroke_style_css(css).expect("a colour");
+    ctx.set_line_width(3.0);
+    ctx.begin_path();
+    ctx.move_to(2.0, 20.0);
+    ctx.line_to(14.0, 28.0);
+    ctx.stroke();
+    let mut inner = Canvas::with_options(
+        8.0,
+        8.0,
+        CanvasOptions {
+            color_space: space,
+            color_type: depth,
+            ..CanvasOptions::default()
+        },
+    )
+    .expect("a canvas");
+    inner.context().set_fill_style_css(css).expect("a colour");
+    inner.context().fill_rect(0.0, 0.0, 8.0, 4.0);
+    inner.context().set_font_css("bold 8px sans-serif");
+    inner.context().fill_text("Wg", 0.0, 8.0, None);
+    ctx.draw_canvas(&mut inner, 20.0, 4.0);
     ctx.restore();
     let svg = canvas
         .to_buffer(ImageFormat::Svg, &EncodeOptions::default())

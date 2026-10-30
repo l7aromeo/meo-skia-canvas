@@ -16,6 +16,8 @@
 
 use std::{
     borrow::Cow,
+    f32::consts::SQRT_2,
+    iter,
     sync::{Arc, OnceLock},
 };
 
@@ -29,7 +31,9 @@ use skia_safe::{
 
 use crate::{
     context::{
-        blur_mask, coverage_of,
+        blur_mask,
+        chain::{self, Depth, Step},
+        chain_cache, coverage_of,
         faint::{Faint, composited},
     },
     node::filter::MASK_BLUR_MAX_SIGMA,
@@ -376,6 +380,27 @@ impl LayerRec {
     }
 }
 
+/// How a [`Group`] composites onto what lies beneath it.
+#[derive(Clone, Debug)]
+pub enum Composite {
+    /// Through a `saveLayer` opened with this.
+    Layer(LayerRec),
+    /// Through a filter chain the crate runs on the group's pixels itself
+    /// -- see [`chain`] -- and `rec`'s paint, less its image filter, which
+    /// is the chain as Skia would run it. A document opens `rec` as a layer,
+    /// filter and all.
+    Chain { steps: Arc<[Step]>, rec: LayerRec },
+}
+
+impl Composite {
+    /// What the group opens as a layer where it opens one.
+    fn rec(&self) -> &LayerRec {
+        match self {
+            Composite::Layer(rec) | Composite::Chain { rec, .. } => rec,
+        }
+    }
+}
+
 /// Entries composited as one through a paint: what a `saveLayer` held when
 /// it closed, or a canvas drawn into another through a paint.
 ///
@@ -385,15 +410,17 @@ impl LayerRec {
 #[derive(Clone, Debug)]
 pub struct Group {
     /// How the group composites onto what lies beneath it.
-    pub rec: LayerRec,
+    pub composite: Composite,
     /// The transform and the clip the group composites under, in page
     /// coordinates; the clip is in device space, as the recorder holds it,
     /// and serialized, as a [`BlurOp`]'s is, so that a page can be sent to
     /// another thread.
     pub matrix: Matrix,
     pub clip: Option<Data>,
-    /// A rectangle under `matrix` the group is confined to: the destination
-    /// a canvas is drawn into.
+    /// A rectangle under `matrix` that what the group draws is confined to:
+    /// the destination a canvas is drawn into. It bounds what is drawn and
+    /// not what a filter makes of it, which spreads past it as a blur of
+    /// any other draw spreads past the draw.
     pub within: Option<Rect>,
     /// The transform the entries are played under: the identity for what a
     /// layer held, recorded in page coordinates; for a canvas drawn in, the
@@ -416,10 +443,10 @@ impl Group {
     /// it is drawn under, and a recording is drawn later under one this
     /// cannot see. Not in a document either, which keeps its groups as they
     /// were.
-    pub fn playback(&self, canvas: &SkCanvas, target: Target) {
+    pub fn playback(self: &Arc<Self>, canvas: &SkCanvas, target: Target) {
         let pixels = target != Target::Document && blur_mask::draws_on(canvas);
-        let within =
-            pixels.then(|| self.rec.footprint(reach_of(&self.contents)));
+        let within = pixels
+            .then(|| self.composite.rec().footprint(reach_of(&self.contents)));
         self.playback_within(canvas, target, within.flatten());
     }
 
@@ -428,14 +455,14 @@ impl Group {
     /// they are played under, where the layer can be confined to it. `None`
     /// where it covers what the clip allows.
     pub fn reach(&self) -> Option<Rect> {
-        let drawn = self.rec.footprint(reach_of(&self.contents))?;
+        let drawn = self.composite.rec().footprint(reach_of(&self.contents))?;
         Some(self.contents_matrix.map_rect(drawn).0)
     }
 
     /// [`Self::playback`], the layer confined to `within`, a rectangle in
     /// the coordinates the entries are played under, where it is `Some`.
     pub(crate) fn playback_within(
-        &self,
+        self: &Arc<Self>,
         canvas: &SkCanvas,
         target: Target,
         within: Option<Rect>,
@@ -447,16 +474,92 @@ impl Group {
         if let Some(clip) = self.clip.as_ref().and_then(Path::deserialize) {
             canvas.clip_path(&clip, ClipOp::Intersect, true);
         }
-        canvas.set_matrix(&Matrix::concat(&base, &self.matrix).into());
-        if let Some(within) = &self.within {
-            canvas.clip_rect(within, ClipOp::Intersect, true);
+        match (&self.composite, target) {
+            (
+                Composite::Chain { steps, rec },
+                Target::Pixels | Target::Embedded,
+            ) => {
+                let mut paint = rec.paint.clone().unwrap_or_default();
+                paint.set_image_filter(None);
+                // The chain's lengths are in the pixels of the canvas the
+                // group was drawn on, which `base` maps to the device.
+                // What is drawn is bounded by `within`, or for a single
+                // picture by what it was recorded within.
+                let content = match (&self.within, self.contents.as_slice()) {
+                    (Some(within), _) => Some(self.matrix.map_rect(within).0),
+                    (None, [Layer::Picture(picture)]) => Some(
+                        self.contents_matrix.map_rect(picture.cull_rect()).0,
+                    ),
+                    (None, _) => None,
+                };
+                // A group a canvas drawn into another brings with it is played
+                // once for each time that canvas is, and its chain is run the
+                // first of those -- see `chain_cache`.
+                let key = chain_cache::Key::of(self, canvas);
+                if let Some(outcome) = key.as_ref().and_then(chain_cache::get) {
+                    outcome.composite(canvas, &paint);
+                    canvas.restore();
+                    return;
+                }
+                let outcome = chain::run(
+                    canvas,
+                    steps,
+                    content,
+                    Depth::Floats,
+                    &paint,
+                    |layer| {
+                        let to_layer = layer.local_to_device_as_3x3();
+                        layer.set_matrix(
+                            &Matrix::concat(&to_layer, &self.matrix).into(),
+                        );
+                        if let Some(within) = &self.within {
+                            layer.clip_rect(within, ClipOp::Intersect, true);
+                        }
+                        layer.set_matrix(
+                            &Matrix::concat(&to_layer, &self.contents_matrix)
+                                .into(),
+                        );
+                        for entry in self.contents.iter() {
+                            entry.playback(layer, target);
+                        }
+                    },
+                );
+                if let Some(outcome) = outcome {
+                    outcome.composite(canvas, &paint);
+                    if let Some(key) = key {
+                        chain_cache::put(key, outcome);
+                    }
+                }
+            }
+            (composite, target) => {
+                let rec = composite.rec();
+                canvas.set_matrix(&Matrix::concat(&base, &self.matrix).into());
+                // The destination confines what is drawn and not what the
+                // layer's filter makes of it, so under a filter it is a clip
+                // inside the layer, where a shadow can still be cast past it.
+                let filtered = rec
+                    .paint
+                    .as_ref()
+                    .is_some_and(|paint| paint.image_filter().is_some());
+                let clip_within = |canvas: &SkCanvas| {
+                    if let Some(within) = &self.within {
+                        canvas.clip_rect(within, ClipOp::Intersect, true);
+                    }
+                };
+                if !filtered {
+                    clip_within(canvas);
+                }
+                rec.open_on(canvas, target, within);
+                if filtered {
+                    clip_within(canvas);
+                }
+                canvas.set_matrix(&entries.into());
+                for entry in self.contents.iter() {
+                    entry.playback(canvas, target);
+                }
+                canvas.restore();
+            }
         }
-        self.rec.open_on(canvas, target, within);
-        canvas.set_matrix(&entries.into());
-        for entry in self.contents.iter() {
-            entry.playback(canvas, target);
-        }
-        canvas.restore();
         canvas.restore();
     }
 }
@@ -630,7 +733,8 @@ impl Geometry {
     }
 }
 
-/// The blur a playback made: on the coverage or on the result.
+/// The blur a playback made: on the coverage, or on the result -- with
+/// Skia's filter for a document, which [`chain`] replaces on pixels.
 #[derive(Clone, Debug)]
 enum Made {
     Coverage(Option<MaskFilter>),
@@ -675,13 +779,13 @@ impl BlurOp {
         }
     }
 
-    /// Draws the blurred geometry onto `canvas`. A run of filled rectangles
-    /// that stay rectangles on the device is drawn exactly, on any surface
-    /// with pixels -- see [`blur_mask`]. Anything else takes the coverage
-    /// blur the recording chose wherever it can draw the sigma this comes to
-    /// in `canvas`'s device pixels, and the image blur where it cannot.
-    /// On pixels, a draw that carries an exact colour paints in it -- see
-    /// [`ExactColour`].
+    /// Draws the blurred geometry onto `canvas` for `target`. A run of filled
+    /// rectangles that stay rectangles on the device is drawn exactly, on
+    /// any surface with pixels -- see [`blur_mask`]. Anything else takes the
+    /// coverage blur the recording chose wherever it can draw the sigma this
+    /// comes to in `canvas`'s device pixels, and the exact blur of the
+    /// result where it cannot. On pixels, a draw that carries an exact colour
+    /// paints in it -- see [`ExactColour`].
     pub fn playback(&self, canvas: &SkCanvas, target: Target) {
         let Some(path) = self.geometry.first().path() else {
             return;
@@ -702,7 +806,6 @@ impl BlurOp {
             canvas.restore();
             return;
         }
-        canvas.concat(&self.matrix);
 
         let mut paint = Paint::new(self.paint.color, None);
         if target == Target::Pixels
@@ -727,10 +830,7 @@ impl BlurOp {
         // sigma it comes to here is one it can draw: past
         // `MASK_BLUR_MAX_SIGMA` device pixels it draws the cap instead, so
         // `blur(40px)` exported at density 4 came out a blur of 128 pixels
-        // where 160 were asked for. Below the cap the recording's choice
-        // stands, since on the GPU the coverage blur of a rectangle is
-        // nearer the exact Gaussian than the image blur is, 1.5 levels
-        // against 2.6 at a sigma of 80.
+        // where 160 were asked for, and the result is blurred instead.
         // One choice for the run: its rectangles share a coverage class.
         let device_sigma = self.paint.sigma * replay;
         let key = device_sigma.to_bits();
@@ -746,21 +846,69 @@ impl BlurOp {
                 blur
             }
         };
-        match made {
-            Made::Coverage(filter) => paint.set_mask_filter(filter),
-            Made::Result(filter) => paint.set_image_filter(filter),
+        let paths = || {
+            iter::once(path.clone())
+                .chain(self.geometry.iter().skip(1).filter_map(Geometry::path))
         };
-        let paint = self.paint.faint.drawable(&paint);
-        canvas.draw_path(&path, &paint);
-        // The rest of a run, each drawn on its own as it was recorded.
-        self.geometry
-            .iter()
-            .skip(1)
-            .filter_map(Geometry::path)
-            .for_each(|path| {
-                canvas.draw_path(&path, &paint);
-            });
+        match (made, target) {
+            // On pixels the result is blurred by `chain`, exactly, each
+            // geometry of a run in a layer of its own, as separate draws
+            // composite. The path is drawn opaque in its colour and the
+            // colour's alpha, the global alpha in it, is the chain's gain,
+            // so that the blur is rounded once and not once more where the
+            // draw is.
+            (Made::Result(_), Target::Pixels | Target::Embedded) => {
+                paint.set_alpha_f(1.0);
+                let mut gain = Paint::default();
+                gain.set_alpha_f(self.paint.color.a);
+                let steps = [Step::Blur(self.paint.sigma)];
+                let depth = match self.paint.faint {
+                    Faint::Dropped => Depth::Bytes,
+                    Faint::Kept => Depth::Floats,
+                };
+                for path in paths() {
+                    let content = self.matrix.map_rect(self.painted(&path)).0;
+                    chain::apply(
+                        canvas,
+                        &steps,
+                        Some(content),
+                        depth,
+                        &gain,
+                        |layer| {
+                            layer.concat(&self.matrix);
+                            layer.draw_path(&path, &paint);
+                        },
+                    );
+                }
+            }
+            (made, _) => {
+                canvas.concat(&self.matrix);
+                match made {
+                    Made::Coverage(filter) => paint.set_mask_filter(filter),
+                    Made::Result(filter) => paint.set_image_filter(filter),
+                };
+                let paint = self.paint.faint.drawable(&paint);
+                // Each of a run drawn on its own as it was recorded.
+                for path in paths() {
+                    canvas.draw_path(&path, &paint);
+                }
+            }
+        }
         canvas.restore();
+    }
+
+    /// What drawing `path` paints, in its own units, before any blur: its
+    /// bounds, widened for a stroke by as far as its outline can reach -- a
+    /// miter join `miter` half-widths out, a square cap's corner `sqrt(2)`.
+    fn painted(&self, path: &Path) -> Rect {
+        let bounds = *path.bounds();
+        match self.paint.stroke {
+            Some(stroke) => {
+                let reach = stroke.width / 2.0 * stroke.miter.max(SQRT_2);
+                bounds.with_outset((reach, reach))
+            }
+            None => bounds,
+        }
     }
 
     /// Draws the run exactly where it is one [`blur_mask::draw_rect`] takes:
@@ -821,6 +969,8 @@ impl BlurOp {
 
     /// The blur itself: on the coverage where `coverage` says so and the
     /// transform maps a length to a positive one, on the result otherwise.
+    /// A result blur played back onto pixels is the exact one [`chain`]
+    /// makes; the Skia filter made here is what a document draws.
     fn make(&self, coverage: bool) -> Made {
         // The sigma in the path's own units, which Skia maps back through
         // the canvas: `respect_ctm` for the mask filter, and an image
