@@ -777,6 +777,83 @@ describe("Canvas", () => {
       );
     });
 
+    test("a cut draw drawn into another canvas is exact only as its own group", () => {
+      // A fill a clip cuts is drawn whole on a CPU canvas and multiplied by
+      // the clip; Skia rasterizes it against the clip instead, which moves
+      // pixels along the fill's own edges, far from the cut. Drawn into
+      // another canvas, the source's drawing takes the exact route only
+      // where `drawCanvas` replays it as a group of its own on the
+      // destination's pixels -- a paint with something to say, here `xor`
+      // over nothing. A plain `drawCanvas`, `drawImage`, a pattern and a
+      // source that has itself drawn a canvas all draw the source's
+      // picture, which Skia rasterizes against the clip.
+      let page = (drawFirst) => {
+        let canvas = new Canvas(200, 120);
+        canvas.gpu = false;
+        let ctx = canvas.getContext("2d");
+        if (drawFirst) {
+          let inner = new Canvas(4, 4);
+          inner.getContext("2d").fillRect(0, 0, 4, 4);
+          ctx.drawCanvas(inner, 196, 116);
+        }
+        ctx.beginPath();
+        ctx.arc(90.3, 60.2, 45.3, 0, 2 * Math.PI);
+        ctx.clip();
+        ctx.fillStyle = "rgb(200 40 90)";
+        ctx.beginPath();
+        ctx.moveTo(20, 80);
+        ctx.lineTo(80, 15.25);
+        ctx.lineTo(140.5, 85);
+        ctx.closePath();
+        ctx.fill();
+        return canvas;
+      };
+      let pixels = (canvas) =>
+        canvas.getContext("2d").getImageData(0, 0, 200, 120).data;
+      let into = (source, verb, op = "source-over") => {
+        let canvas = new Canvas(200, 120);
+        canvas.gpu = false;
+        let ctx = canvas.getContext("2d");
+        ctx.globalCompositeOperation = op;
+        if (verb == "pattern") {
+          ctx.fillStyle = ctx.createPattern(source, "no-repeat");
+          ctx.fillRect(0, 0, 200, 120);
+        } else ctx[verb](source, 0, 0);
+        return pixels(canvas);
+      };
+      let differing = (a, b) => {
+        let count = 0;
+        for (let i = 0; i < a.length; i += 4)
+          if (a.slice(i, i + 4).some((v, k) => v !== b[i + k])) count++;
+        return count;
+      };
+
+      let source = page(false);
+      let direct = pixels(source);
+      assert.equal(differing(pixels(page(false)), direct), 0, "a control");
+      assert.equal(
+        differing(into(source, "drawCanvas", "xor"), direct),
+        0,
+        "drawCanvas as a group draws the cut exactly as the source does",
+      );
+      for (let [verb, op] of [
+        ["drawCanvas", "source-over"],
+        ["drawImage", "source-over"],
+        ["drawImage", "xor"],
+        ["pattern", "source-over"],
+      ])
+        assert.ok(
+          differing(into(source, verb, op), direct) > 0,
+          `${verb} under ${op} draws the picture, clipped as Skia clips`,
+        );
+
+      let nesting = page(true);
+      assert.ok(
+        differing(into(nesting, "drawCanvas", "xor"), pixels(nesting)) > 0,
+        "a source that drew a canvas is drawn from its picture",
+      );
+    });
+
     test("a clipped nested draw costs the region, not the page", () => {
       // Rasterizing the visible region drew the source's deferred image into
       // a region-sized surface, and Skia answers that by materializing the
