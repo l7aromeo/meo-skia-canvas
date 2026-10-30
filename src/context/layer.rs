@@ -460,6 +460,22 @@ impl LayerRec {
         self.backdrop.is_some()
             || !matches!(blend, None | Some(BlendMode::SrcOver))
     }
+
+    /// Whether the layer composites what it holds as it stands: over no
+    /// backdrop, through no paint or one that changes nothing -- an alpha
+    /// of 1 under `source-over`, with no shader or filter. Its bounds still
+    /// confine what it holds.
+    pub(crate) fn changes_nothing(&self) -> bool {
+        self.backdrop.is_none()
+            && self.paint.as_ref().is_none_or(|paint| {
+                paint.alpha_f() == 1.0
+                    && paint.as_blend_mode() == Some(BlendMode::SrcOver)
+                    && paint.shader().is_none()
+                    && paint.color_filter().is_none()
+                    && paint.image_filter().is_none()
+                    && paint.mask_filter().is_none()
+            })
+    }
 }
 
 /// How a [`Group`] composites onto what lies beneath it.
@@ -499,6 +515,12 @@ pub struct Group {
     /// another thread.
     pub matrix: Matrix,
     pub clip: Option<Data>,
+    /// Whether every entry was recorded under `clip` already, as what a
+    /// layer holds is. A document opening the group -- see
+    /// [`Self::open_in_a_document`] -- clips by it only where not: clipped
+    /// twice by one path, an SVG writes two clip paths, and a renderer
+    /// takes their edges' coverage twice.
+    pub entries_clipped: bool,
     /// A rectangle under `matrix` that what the group draws is confined to:
     /// the destination a canvas is drawn into. It bounds what is drawn and
     /// not what a filter makes of it, which spreads past it as a blur of
@@ -575,6 +597,47 @@ impl Entries {
 }
 
 impl Group {
+    /// Whether a document can take the group entry by entry, writing what
+    /// it can of them and embedding the rest as pixels, rather than whole:
+    /// where its layer composites what it holds as it stands.
+    ///
+    /// A layer keeps what it holds from blending with what lies beneath it,
+    /// so a blend inside one has to be composited in it. A document never
+    /// asks this of a group holding one: it embeds every entry up to the
+    /// last that blends, with what lies beneath it, first.
+    pub(crate) fn opens_in_a_document(&self) -> bool {
+        matches!(&self.composite, Composite::Layer(rec) if rec.changes_nothing())
+    }
+
+    /// Plays the group onto `canvas` as a document does a group it opens --
+    /// see [`Self::opens_in_a_document`]: under its clip, its `within` and
+    /// its layer's bounds, its transforms composed as [`Self::playback`]
+    /// composes them, with no layer around what `entries` plays of its
+    /// contents.
+    pub(crate) fn open_in_a_document(
+        &self,
+        canvas: &SkCanvas,
+        entries: impl FnOnce(&SkCanvas, &Entries),
+    ) {
+        let base = canvas.local_to_device_as_3x3();
+        canvas.save();
+        if !self.entries_clipped
+            && let Some(clip) = self.clip.as_ref().and_then(Path::deserialize)
+        {
+            canvas.clip_path(&clip, ClipOp::Intersect, true);
+        }
+        canvas.set_matrix(&Matrix::concat(&base, &self.matrix).into());
+        if let Some(within) = &self.within {
+            canvas.clip_rect(within, ClipOp::Intersect, true);
+        }
+        if let Some(bounds) = &self.composite.rec().bounds {
+            canvas.clip_rect(bounds, ClipOp::Intersect, true);
+        }
+        canvas.set_matrix(&Matrix::concat(&base, &self.contents_matrix).into());
+        entries(canvas, &self.contents);
+        canvas.restore();
+    }
+
     /// Draws the group onto `canvas` for `target`, its transforms composed
     /// with the one the canvas carries: a recorded picture replays its
     /// matrices relative to the canvas it is played onto, and these have to

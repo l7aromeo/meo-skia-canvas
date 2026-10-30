@@ -8,9 +8,13 @@ use quick_xml::{Reader, events::Event};
 const WIDTH: f32 = 80.0;
 const HEIGHT: f32 = 40.0;
 
-/// The elements of a parsed document, each with its attributes, in order.
+/// The elements of a parsed document, each with its attributes, in order,
+/// and whether it is drawn: not one inside a `<clipPath>`, which only
+/// shapes a clip. Skia's writer puts an embedded image in `<defs>` and draws
+/// it through a `<use>`, so one there counts.
 struct Document {
     elements: Vec<(String, Vec<(String, String)>)>,
+    drawn: Vec<bool>,
 }
 
 impl Document {
@@ -31,15 +35,19 @@ fn parse(svg: &[u8]) -> Document {
     let mut reader = Reader::from_str(&text);
     reader.config_mut().check_end_names = true;
     let mut elements = Vec::new();
-    let mut depth = 0usize;
+    let mut drawn = Vec::new();
+    // The open elements, outermost first.
+    let mut open: Vec<String> = Vec::new();
     loop {
         let event = reader
             .read_event()
             .unwrap_or_else(|e| panic!("not well-formed XML ({e}): {text}"));
         match event {
             Event::Start(ref tag) | Event::Empty(ref tag) => {
+                let name = tag.name().into_inner().to_owned();
+                drawn.push(!open.iter().any(|e| e == "clipPath"));
                 if matches!(event, Event::Start(_)) {
-                    depth += 1;
+                    open.push(name.clone());
                 }
                 let attributes = tag
                     .attributes()
@@ -54,15 +62,17 @@ fn parse(svg: &[u8]) -> Document {
                         )
                     })
                     .collect();
-                elements.push((tag.name().into_inner().to_owned(), attributes));
+                elements.push((name, attributes));
             }
-            Event::End(_) => depth -= 1,
+            Event::End(_) => {
+                open.pop();
+            }
             Event::Eof => break,
             _ => {}
         }
     }
-    assert_eq!(depth, 0, "an element left open: {text}");
-    Document { elements }
+    assert!(open.is_empty(), "an element left open: {text}");
+    Document { elements, drawn }
 }
 
 fn svg_of(canvas: &mut Canvas) -> Vec<u8> {
@@ -102,12 +112,13 @@ fn a_drawn_page_exports_its_view_box() {
     assert!(document.first("path").is_some(), "the rectangle is drawn");
 }
 
-/// The number of elements named `name`.
+/// The number of elements named `name` drawn, outside a clip's shape.
 fn count(document: &Document, name: &str) -> usize {
     document
         .elements
         .iter()
-        .filter(|(element, _)| element == name)
+        .zip(&document.drawn)
+        .filter(|((element, _), drawn)| element == name && **drawn)
         .count()
 }
 
@@ -234,4 +245,197 @@ fn a_canvas_drawn_in_under_alpha_reaches_the_svg() {
     ctx.draw_canvas(&mut source, 10.0, 10.0);
     let svg = parse(&svg_of(&mut canvas));
     assert!(count(&svg, "image") + count(&svg, "path") > 0);
+}
+
+/// `canvas`'s own pixels, RGBA.
+fn pixels(canvas: &mut Canvas) -> Vec<[u8; 4]> {
+    let data = canvas
+        .context()
+        .get_image_data(0.0, 0.0, WIDTH, HEIGHT)
+        .expect("pixels");
+    data.pixels()
+        .chunks(4)
+        .map(|p| [p[0], p[1], p[2], p[3]])
+        .collect()
+}
+
+/// `svg` rendered at the page's size by Skia's SVG renderer, as `pixels`
+/// reads a canvas.
+fn rendered(svg: &[u8]) -> Vec<[u8; 4]> {
+    let image = Svg::parse(&String::from_utf8_lossy(svg))
+        .expect("parses")
+        .rasterize(WIDTH as u32, HEIGHT as u32)
+        .expect("rasterizes");
+    let mut back = Canvas::new(WIDTH, HEIGHT);
+    back.set_gpu(false);
+    back.context().draw_image(&image, 0.0, 0.0);
+    pixels(&mut back)
+}
+
+/// How many pixels of `a` and `b` part by more than `levels` in a channel,
+/// and the most any pixel parts by.
+fn parted(a: &[[u8; 4]], b: &[[u8; 4]], levels: u8) -> (usize, u8) {
+    a.iter().zip(b).fold((0, 0), |(count, most), (a, b)| {
+        let d = (0..4).map(|i| a[i].abs_diff(b[i])).max().unwrap_or(0);
+        (count + usize::from(d > levels), most.max(d))
+    })
+}
+
+fn shadowed_square(ctx: &mut Context2D, x: f32) {
+    ctx.set_shadow_color(RgbaLinear::from_srgb8(255, 0, 0, 1.0));
+    ctx.set_shadow_offset(3.0, 2.0);
+    ctx.set_shadow_blur(2.0);
+    ctx.fill_rect(x, 5.0, 12.0, 10.0);
+    ctx.set_shadow_color(RgbaLinear::from_srgb8(0, 0, 0, 0.0));
+}
+
+/// How far a pixel of an export, rendered by Skia's SVG renderer, may part
+/// from the canvas's own: the vector draws and the embedded pixels both
+/// land within it, under a turn as well.
+const RENDERED: u8 = 2;
+
+/// `draw` on a page, exported to SVG: the document, and how many pixels of
+/// it rendered part from the canvas's own by more than [`RENDERED`].
+fn exported_svg(draw: impl Fn(&mut Context2D)) -> (Document, usize) {
+    let mut canvas = Canvas::new(WIDTH, HEIGHT);
+    canvas.set_gpu(false);
+    draw(canvas.context());
+    let svg = svg_of(&mut canvas);
+    let document = parse(&svg);
+    let (count, _) = parted(&pixels(&mut canvas), &rendered(&svg), RENDERED);
+    (document, count)
+}
+
+/// A layer that composites what it holds as it stands is taken entry by
+/// entry: its plain draw stays a vector, and only the shadowed draw an SVG
+/// cannot write is embedded as pixels.
+#[test]
+fn an_unpainted_layer_keeps_what_it_can_write_vector() {
+    let (svg, parted) = exported_svg(|ctx| {
+        ctx.save_layer();
+        ctx.fill_rect(5.0, 20.0, 20.0, 12.0);
+        shadowed_square(ctx, 40.0);
+        ctx.restore();
+    });
+    assert_eq!(count(&svg, "path"), 1, "the plain draw");
+    assert_eq!(count(&svg, "image"), 1, "the shadowed draw");
+    assert_eq!(parted, 0);
+}
+
+/// A layer holding a blend is one image: what it holds blends with the
+/// layer, not with the page beneath it.
+#[test]
+fn a_layer_holding_a_blend_is_one_image() {
+    let (svg, parted) = exported_svg(|ctx| {
+        ctx.save_layer();
+        ctx.fill_rect(5.0, 20.0, 20.0, 12.0);
+        ctx.set_global_composite_operation(BlendMode::Multiply);
+        ctx.fill_rect(10.0, 10.0, 30.0, 15.0);
+        ctx.restore();
+    });
+    assert_eq!(count(&svg, "path"), 0);
+    assert_eq!(count(&svg, "image"), 1);
+    assert_eq!(parted, 0);
+}
+
+/// Nested layers under a turn are taken entry by entry too, and what is
+/// embedded of them lands where the canvas draws it.
+#[test]
+fn nested_layers_under_a_turn_embed_in_place() {
+    let (svg, parted) = exported_svg(|ctx| {
+        ctx.translate(40.0, 20.0);
+        ctx.rotate(0.4);
+        ctx.save_layer();
+        ctx.save_layer();
+        ctx.fill_rect(-30.0, -10.0, 15.0, 10.0);
+        ctx.set_filter_css("blur(1.5px)").expect("blur");
+        ctx.fill_rect(0.0, -8.0, 18.0, 12.0);
+        ctx.restore();
+        ctx.restore();
+    });
+    assert_eq!(count(&svg, "path"), 1, "the plain draw");
+    assert_eq!(count(&svg, "image"), 1, "the blurred draw");
+    assert_eq!(parted, 0);
+}
+
+/// A layer's bounds confine what it holds in an SVG as on the canvas.
+#[test]
+fn an_unpainted_layer_keeps_to_its_bounds() {
+    let (svg, parted) = exported_svg(|ctx| {
+        let bounds = Rect {
+            left: 10.0,
+            top: 10.0,
+            right: 40.0,
+            bottom: 30.0,
+        };
+        ctx.save_layer_with(1.0, Some(bounds), None);
+        ctx.fill_rect(0.0, 0.0, 60.0, 40.0);
+        shadowed_square(ctx, 50.0);
+        ctx.restore();
+    });
+    assert_eq!(count(&svg, "path"), 1);
+    assert_eq!(parted, 0);
+}
+
+/// The clip a layer is opened under confines what it holds in an SVG once,
+/// as it confines the same draws without the layer: an SVG renderer takes a
+/// clip's edge its own way, so the reference is the page drawn without the
+/// layer and rendered the same way. Clipped again by the layer's clip, the
+/// edges' coverage was taken twice, 64 levels off at the arc.
+#[test]
+fn an_unpainted_layer_keeps_to_its_clip_once() {
+    let svg = |layer: bool| {
+        let mut canvas = Canvas::new(WIDTH, HEIGHT);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        ctx.begin_path();
+        ctx.arc(30.0, 20.0, 15.0, 0.0, std::f32::consts::TAU, false)
+            .expect("arc");
+        ctx.clip(FillRule::NonZero);
+        if layer {
+            ctx.save_layer();
+        }
+        ctx.fill_rect(0.0, 0.0, 30.0, 40.0);
+        shadowed_square(ctx, 30.0);
+        if layer {
+            ctx.restore();
+        }
+        svg_of(&mut canvas)
+    };
+    let (with, without) = (svg(true), svg(false));
+    let document = parse(&with);
+    assert_eq!(count(&document, "path"), 1, "the plain draw");
+    assert_eq!(count(&document, "image"), 1, "the shadowed draw");
+    assert_eq!(parted(&rendered(&with), &rendered(&without), RENDERED).0, 0);
+}
+
+/// A layer that composites as it stands keeps its draws vector even right
+/// after a draw an SVG embeds: the run of what is embedded ends at it.
+#[test]
+fn an_unpainted_layer_after_an_embedded_draw_stays_vector() {
+    let (svg, parted) = exported_svg(|ctx| {
+        shadowed_square(ctx, 40.0);
+        ctx.save_layer();
+        ctx.fill_rect(5.0, 20.0, 20.0, 12.0);
+        ctx.restore();
+    });
+    assert_eq!(count(&svg, "path"), 1, "the layer's draw");
+    assert_eq!(count(&svg, "image"), 1, "the shadowed draw");
+    assert_eq!(parted, 0);
+}
+
+/// A layer filtering what lies beneath it is no layer that composites what
+/// it holds as it stands, and is embedded whole.
+#[test]
+fn a_layer_over_a_backdrop_filter_is_one_image() {
+    let (svg, _) = exported_svg(|ctx| {
+        ctx.fill_rect(0.0, 0.0, 40.0, 40.0);
+        let offset =
+            ImageFilter::offset(2.0, 0.0, None, None).expect("a filter");
+        ctx.save_layer_with(1.0, None, Some(&offset));
+        ctx.fill_rect(45.0, 5.0, 20.0, 12.0);
+        ctx.restore();
+    });
+    assert_eq!(count(&svg, "path"), 1, "only the page's own square");
+    assert_eq!(count(&svg, "image"), 1, "the layer");
 }

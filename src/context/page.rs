@@ -829,8 +829,10 @@ impl PageRecorder {
     ///
     /// The group asks a vector backend for [`VectorFeatures::LAYER`] and
     /// whatever its contents asked, so that an SVG export rasterizes the
-    /// layer and leaves the rest of the page vector. One holding nothing
-    /// that would change nothing is dropped.
+    /// layer and leaves the rest of the page vector -- or, for a layer that
+    /// composites what it holds as it stands, takes it entry by entry: see
+    /// [`Group::opens_in_a_document`]. One holding nothing that would change
+    /// nothing is dropped.
     pub fn close_layer(&mut self) {
         if self.open.is_empty() {
             return;
@@ -845,6 +847,7 @@ impl PageRecorder {
                 composite: Composite::Layer(layer.rec),
                 matrix: layer.matrix,
                 clip: layer.clip.as_ref().map(Path::serialize),
+                entries_clipped: true,
                 within: None,
                 contents_matrix: Matrix::new_identity(),
                 contents: Entries::new(layer.entries, layer.entry_features),
@@ -879,6 +882,8 @@ impl PageRecorder {
             composite,
             matrix: Matrix::concat(&shift, &self.matrix),
             clip: self.clip.as_ref().map(Path::serialize),
+            // Recorded by the caller under no clip of this page's.
+            entries_clipped: false,
             within,
             contents_matrix: Matrix::concat(&shift, &contents_matrix),
             contents,
@@ -980,6 +985,7 @@ impl PageRecorder {
                     composite: Composite::Layer(layer.rec.clone()),
                     matrix: layer.matrix,
                     clip: layer.clip.as_ref().map(Path::serialize),
+                    entries_clipped: true,
                     within: None,
                     contents_matrix: Matrix::new_identity(),
                     contents: Entries::new(contents, features),
@@ -3020,20 +3026,6 @@ impl Page {
             matte.paint(canvas);
         }
 
-        // Consecutive refused layers go in as one image rather than one
-        // each. Every embedded image costs a page-sized surface, a playback
-        // and a scan for its bounds, and a scene draws these in runs --
-        // sixty shadowed panels in a row are sixty layers with nothing
-        // vector between them. Rasterizing them separately took 1.1 seconds
-        // where the same page without shadows took 8 milliseconds; as one
-        // run it is a single image and the cost stops scaling with the
-        // count.
-        let refused = |index: usize| {
-            self.features
-                .get(index)
-                .is_some_and(|features| features.refused_by(backend))
-        };
-
         // A blend mode is the one refusal that cannot be rasterized on its
         // own. The others -- an exotic shader, an image filter, a mask filter
         // -- describe how a draw paints itself, so rendering that draw alone
@@ -3062,19 +3054,77 @@ impl Page {
             self.embed_raster(canvas, &self.layers[..=last], density)?;
             index = last + 1;
         }
+        self.play_as_document(
+            canvas,
+            &self.layers[index..],
+            &self.features[index..],
+            backend,
+            density,
+        )
+    }
 
-        while index < self.layers.len() {
+    /// Plays `layers`, each asking for `features` at the same index, onto
+    /// `canvas` for a document backend refusing `backend`: each the backend
+    /// can write as it is, each group it can take entry by entry -- see
+    /// [`Group::opens_in_a_document`] -- entry by entry, and each run of
+    /// what it refuses as one image.
+    ///
+    /// Nothing in `layers` blends: [`Self::draw_as_document`] embeds every
+    /// entry up to the last that does, with what lies beneath it, first. A
+    /// group opened here plays its entries under the transform the page's
+    /// own are recorded under, as what a layer holds is, so what is embedded
+    /// of them lands on the page where the page's own embedded draws do.
+    fn play_as_document(
+        &self,
+        canvas: &SkCanvas,
+        layers: &[Layer],
+        features: &[VectorFeatures],
+        backend: VectorFeatures,
+        density: f32,
+    ) -> Result<(), String> {
+        let refused = |index: usize| features[index].refused_by(backend);
+        let opens = |index: usize| match &layers[index] {
+            Layer::Group(group) => group.opens_in_a_document(),
+            _ => false,
+        };
+        // Consecutive refused layers go in as one image rather than one
+        // each. Every embedded image costs a page-sized surface, a playback
+        // and a scan for its bounds, and a scene draws these in runs --
+        // sixty shadowed panels in a row are sixty layers with nothing
+        // vector between them. Rasterizing them separately took 1.1 seconds
+        // where the same page without shadows took 8 milliseconds; as one
+        // run it is a single image and the cost stops scaling with the
+        // count.
+        let mut index = 0;
+        while index < layers.len() {
             if !refused(index) {
-                self.layers[index].playback(canvas, Target::Document);
+                layers[index].playback(canvas, Target::Document);
+                index += 1;
+                continue;
+            }
+            if let Layer::Group(group) = &layers[index]
+                && opens(index)
+            {
+                let mut played = Ok(());
+                group.open_in_a_document(canvas, |canvas, entries| {
+                    played = self.play_as_document(
+                        canvas,
+                        &entries.layers,
+                        &entries.features,
+                        backend,
+                        density,
+                    );
+                });
+                played?;
                 index += 1;
                 continue;
             }
 
             let start = index;
-            while index < self.layers.len() && refused(index) {
+            while index < layers.len() && refused(index) && !opens(index) {
                 index += 1;
             }
-            self.embed_raster(canvas, &self.layers[start..index], density)?;
+            self.embed_raster(canvas, &layers[start..index], density)?;
         }
         Ok(())
     }
@@ -6477,6 +6527,7 @@ mod tests {
             composite: Composite::Layer(rec.clone()),
             matrix: *matrix,
             clip: clip.map(Path::serialize),
+            entries_clipped: false,
             within: None,
             contents_matrix: Matrix::new_identity(),
             contents: Entries::plain(vec![Layer::Picture(contents.clone())]),
@@ -6712,6 +6763,7 @@ mod tests {
                 }),
                 matrix: Matrix::new_identity(),
                 clip: None,
+                entries_clipped: false,
                 within: None,
                 contents_matrix: Matrix::new_identity(),
                 contents: Entries::plain(vec![Layer::Picture(contents)]),
@@ -6764,6 +6816,7 @@ mod tests {
             }),
             matrix: Matrix::new_identity(),
             clip: None,
+            entries_clipped: false,
             within: None,
             contents_matrix: Matrix::new_identity(),
             contents: Entries::plain(vec![Layer::Picture(
@@ -6881,6 +6934,7 @@ mod tests {
                 composite: Composite::Layer(rec),
                 matrix: Matrix::new_identity(),
                 clip: None,
+                entries_clipped: false,
                 within: None,
                 contents_matrix,
                 contents: Entries::plain(contents),

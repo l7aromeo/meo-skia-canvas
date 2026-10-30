@@ -7328,9 +7328,11 @@ fn an_svg_keeps_a_canvas_drawn_into_another_through_a_paint() {
 /// An SVG export keeps what a `saveLayer` holds. The SVG backend has no
 /// layers and dropped their contents whole -- a plain layer, a translucent
 /// one, one nested in another and one holding a paragraph all exported as
-/// a page without them -- so a page with a draw inside a layer is
-/// rasterized into the SVG, and one whose layer holds nothing is not. A
-/// PDF draws layers itself, as the raster export does, and stays vector.
+/// a page without them. A layer that composites what it holds as it stands
+/// is taken entry by entry, its square and its paragraph written as
+/// vectors; a translucent one is rasterized into the SVG; one that holds
+/// nothing leaves the page vector. A PDF draws layers itself, as the raster
+/// export does, and stays vector.
 #[test]
 fn an_export_keeps_what_a_layer_holds() {
     let library = FontLibrary::new();
@@ -7380,33 +7382,34 @@ fn an_export_keeps_what_a_layer_holds() {
         "a page whose layer holds nothing stays vector",
     );
     type Draw<'a> = &'a dyn Fn(&mut Context2D);
-    let layered: [(&str, Draw); 4] = [
-        ("a plain layer", &|ctx| {
+    // Each case with what its SVG holds the layer's contents as.
+    let layered: [(&str, &str, Draw); 4] = [
+        ("a plain layer", "<path", &|ctx| {
             ctx.save_layer();
             square(ctx);
             ctx.restore();
         }),
-        ("a translucent layer", &|ctx| {
+        ("a translucent layer", "<image", &|ctx| {
             ctx.save_layer_with(0.5, None, None);
             square(ctx);
             ctx.restore();
         }),
-        ("a nested layer", &|ctx| {
+        ("a nested layer", "<image", &|ctx| {
             ctx.save_layer_with(0.5, None, None);
             ctx.save_layer();
             square(ctx);
             ctx.restore();
             ctx.restore();
         }),
-        ("a layer holding a paragraph", &|ctx| {
+        ("a layer holding a paragraph", "<text", &|ctx| {
             ctx.save_layer();
             ctx.draw_paragraph(&paragraph, 8.0, -4.0);
             ctx.restore();
         }),
     ];
-    for (what, draw) in layered {
+    for (what, held, draw) in layered {
         assert!(
-            has(&export(ImageFormat::Svg, draw), "<image"),
+            has(&export(ImageFormat::Svg, draw), held),
             "the SVG of {what} lost it",
         );
         assert!(

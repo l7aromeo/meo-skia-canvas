@@ -246,6 +246,7 @@ mod tests {
             composite: Composite::Layer(LayerRec::default()),
             matrix: Matrix::new_identity(),
             clip: None,
+            entries_clipped: false,
             within: None,
             contents_matrix: Matrix::new_identity(),
             contents: Entries::default(),

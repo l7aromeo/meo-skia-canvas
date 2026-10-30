@@ -1269,6 +1269,7 @@ impl Context2D {
             },
             matrix: Matrix::new_identity(),
             clip: None,
+            entries_clipped: false,
             within: Some(self.state.matrix.map_rect(cast.bounds).0),
             contents_matrix: Matrix::new_identity(),
             // What a document plays of it is the shadow Skia's mask filter
