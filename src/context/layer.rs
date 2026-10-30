@@ -149,12 +149,7 @@ pub struct ExactColour {
     pub space: ColorSpace,
 }
 
-/// The SkSL of [`ExactColour::dye`]: the uniform colour at the source's
-/// alpha, premultiplied as a colour filter's output is.
-const EXACT_DYE_SKSL: &str = "uniform float3 rgb; \
-    float4 main(float4 c) { return float4(rgb * c.a, c.a); }";
-
-/// The SkSL of the step [`ExactColour::dye`] ends with: `plain` at the
+/// The SkSL of the step [`ExactColour::dye`] can end with: `plain` at the
 /// source's alpha where Skia left `probe` as it was handed over, and the
 /// source unchanged where it converted it. Skia converts a `layout(color)`
 /// uniform from sRGB into the space it draws in, and leaves it alone when
@@ -171,10 +166,59 @@ const PLAIN_UNCONVERTED_SKSL: &str = "layout(color) uniform float3 probe; \
 /// moves it -- as it does into each space a canvas takes.
 const UNCONVERTED_PROBE: [f32; 3] = [0.5, 0.25, 0.75];
 
+/// The bits of each channel Skia keeps of the colour it sets a glyph
+/// mask's contrast from: `SkMaskGamma` is `SkTMaskGamma<3, 3, 3>`
+/// (SkScalerContext.h), whose `CanonicalColor` keeps the top three bits of
+/// each byte, and nothing after it reads more.
+const CONTRAST_BITS: u32 = 3;
+
+/// The contrast bucket Skia files `rgb` under: each channel rounded to a
+/// byte as `SkColor4f::toSkColor` rounds it -- `x * 255 + 0.5`, pinned to
+/// the byte's range and truncated (`Sk4f_toL32`) -- and kept to its top
+/// [`CONTRAST_BITS`]. Two colours in one bucket give a glyph mask the same
+/// contrast on every platform.
+fn contrast_bucket(rgb: [f32; 3]) -> [u8; 3] {
+    rgb.map(|c| {
+        ((c * 255.0 + 0.5).clamp(0.0, 255.0) as u8) >> (8 - CONTRAST_BITS)
+    })
+}
+
+/// The colour Skia sets a glyph mask's contrast from, for a paint in
+/// `plain` whose colour filter is `filter`: `filterColor4f(plain, nullptr,
+/// nullptr)`, as `SkPaintPriv::ComputeLuminanceColor` asks it.
+///
+/// Read by drawing, as skia-safe's `filter_color4f` cannot give it: a
+/// paint with no shader has its colour filter folded into its colour by
+/// `SkPaintPriv::RemoveColorFilter` before it draws, through
+/// `filterColor4f(colour, sRGB, destination)`, and a destination with no
+/// colour space leaves that the same call. Over 34440 colours at the
+/// edges of contrast buckets it read the same bits as the call itself; a
+/// colour shader in place of the paint's colour, which runs the filter as
+/// pipeline stages instead, parted in 5520 of them.
+fn luminance_colour(filter: &ColorFilter, plain: Color4f) -> Option<[f32; 3]> {
+    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+    // Re-check: cargo test a_float_page_covers_text_as_srgb_does with
+    // this returning `ColorFilter::filter_color4f(plain, None, None)`.
+    //
+    // `filter_color4f` declares Skia's `SkColor4f` return as four `u32`s,
+    // which aarch64 and x86-64 hand back in other registers than four
+    // floats, so it returns unrelated numbers.
+    let info =
+        ImageInfo::new((1, 1), ColorType::RGBAF32, AlphaType::Premul, None);
+    let mut surface = started::raster(&info, None, None)?;
+    let mut paint = Paint::default();
+    paint.set_color4f(Color4f { a: 1.0, ..plain }, &ColorSpace::new_srgb());
+    paint.set_color_filter(filter.clone());
+    surface.canvas().draw_paint(&paint);
+    let mut pixel = [0u8; 16];
+    surface
+        .read_pixels(&info, &mut pixel, info.min_row_bytes(), (0, 0))
+        .then_some(())?;
+    let (channels, _) = pixel.as_chunks::<4>();
+    Some([0, 1, 2].map(|c| f32::from_le_bytes(channels[c])))
+}
+
 thread_local! {
-    /// [`EXACT_DYE_SKSL`] compiled, once per thread rather than per draw.
-    static EXACT_DYE: Option<RuntimeEffect> =
-        RuntimeEffect::make_for_color_filter(EXACT_DYE_SKSL, None).ok();
     /// [`PLAIN_UNCONVERTED_SKSL`] compiled, once per thread.
     static PLAIN_UNCONVERTED: Option<RuntimeEffect> =
         RuntimeEffect::make_for_color_filter(PLAIN_UNCONVERTED_SKSL, None).ok();
@@ -210,56 +254,93 @@ impl ExactColour {
     }
 
     /// A colour filter replacing a draw's colour with this one, its alpha
-    /// kept, for text: worked in the page's space, so on a surface in that
-    /// space Skia converts its output by the identity, and onto any other
-    /// through the colour space transform -- except onto sRGB, and where
-    /// there is no surface at all, where it paints `plain`, the colour as
-    /// a plain paint holds it.
+    /// kept, for text: a colour matrix worked in the page's space, so on a
+    /// surface in that space Skia converts its output by the identity, and
+    /// onto any other through the colour space transform. Its weights are
+    /// zero and its offset the colour, so `matrix_4x5` sums to the colour
+    /// exactly, and Skia premultiplies it; unclamped, so a colour outside
+    /// the page's gamut stays where it is.
     ///
-    /// The exception is for the glyph mask. Skia sets its contrast from
-    /// the colour the paint's colour filter makes, asked for with no space
-    /// and read as sRGB, and the page-space colour converted back to sRGB
-    /// by Skia lands off `plain` -- 8.1e-4 off a green of 0.1235 named in
-    /// sRGB on a Display P3 page -- which puts a colour named near the edge
-    /// of a contrast bucket in the next one, and its text's edges on a
-    /// different curve from the plain paint's. On an sRGB surface `plain`
-    /// is also what the plain paint paints.
+    /// Where Skia would read the glyph contrast from it in another bucket
+    /// from `plain`'s, it ends in [`Self::keeping_plain_luminance`] -- see
+    /// [`luminance_colour`] for how that is read, once per colour.
     pub fn dye(&self, plain: Color4f) -> Option<ColorFilter> {
-        let bytes = |colours: &[[f32; 3]]| -> Vec<u8> {
-            colours
-                .iter()
-                .flatten()
-                .flat_map(|c| c.to_le_bytes())
-                .collect()
-        };
-        let dye = EXACT_DYE
-            .with(|effect| {
-                effect.as_ref()?.make_color_filter(
-                    Data::new_copy(&bytes(&[self.rgb])),
-                    None,
-                )
-            })?
-            .with_working_color_space(&self.space)?;
-        let uniforms = bytes(&[
+        let replacement = self.replacement()?;
+        match luminance_colour(&replacement, plain) {
+            Some(lands)
+                if contrast_bucket(lands)
+                    == contrast_bucket([plain.r, plain.g, plain.b]) =>
+            {
+                Some(replacement)
+            }
+            _ => self.keeping_plain_luminance(replacement, plain),
+        }
+    }
+
+    /// [`Self::dye`] with the plain colour's glyph contrast whatever bucket
+    /// the replacement's would fall in, for a paint whose own colour filter
+    /// follows it and could move either.
+    pub fn dye_keeping_plain_luminance(
+        &self,
+        plain: Color4f,
+    ) -> Option<ColorFilter> {
+        self.keeping_plain_luminance(self.replacement()?, plain)
+    }
+
+    /// The colour as a colour filter: see [`Self::dye`].
+    fn replacement(&self) -> Option<ColorFilter> {
+        let [r, g, b] = self.rgb;
+        #[rustfmt::skip]
+        let replace = [
+            0.0, 0.0, 0.0, 0.0, r,
+            0.0, 0.0, 0.0, 0.0, g,
+            0.0, 0.0, 0.0, 0.0, b,
+            0.0, 0.0, 0.0, 1.0, 0.0,
+        ];
+        color_filters::matrix_row_major(&replace, color_filters::Clamp::No)
+            .with_working_color_space(&self.space)
+    }
+
+    /// `replacement` followed by a step painting `plain` wherever Skia
+    /// leaves a `layout(color)` uniform unconverted -- onto sRGB, and where
+    /// there is no surface at all -- and passing `replacement` through
+    /// everywhere else. Skia sets a glyph mask's contrast from the colour
+    /// the paint's colour filter makes, asked for with no space and read as
+    /// sRGB, and the page-space colour converted back to sRGB by Skia lands
+    /// off `plain` -- 8.1e-4 off a green of 0.1235 named in sRGB on a
+    /// Display P3 page -- which puts a colour named near the edge of a
+    /// contrast bucket in the next one, and its text's edges on a different
+    /// curve from the plain paint's. On an sRGB surface `plain` is also
+    /// what the plain paint paints.
+    fn keeping_plain_luminance(
+        &self,
+        replacement: ColorFilter,
+        plain: Color4f,
+    ) -> Option<ColorFilter> {
+        let uniforms: Vec<u8> = [
             UNCONVERTED_PROBE,
             UNCONVERTED_PROBE,
             [plain.r, plain.g, plain.b],
-        ]);
+        ]
+        .iter()
+        .flatten()
+        .flat_map(|c| c.to_le_bytes())
+        .collect();
         let unconverted = PLAIN_UNCONVERTED.with(|effect| {
             let effect = effect.as_ref()?;
-            // The three `float3`s are packed, as `bytes` writes them.
+            // The three `float3`s are packed, as they are written above.
             (effect.uniform_size() == uniforms.len()).then_some(())?;
             effect.make_color_filter(Data::new_copy(&uniforms), None)
         })?;
         // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
         // Re-check: cargo test a_float_page_covers_text_as_srgb_does with
-        // this returning `Some(dye)`.
+        // this returning `Some(replacement)`.
         //
         // `just_a_color` (SkPaintPriv.cpp) runs the paint's colour filter
         // with no colour space, under a TODO calling that space
         // meaningless, so the glyph contrast of a filter worked in another
         // space is set from its output converted back to sRGB.
-        color_filters::compose(&unconverted, &dye)
+        color_filters::compose(&unconverted, &replacement)
     }
 }
 
