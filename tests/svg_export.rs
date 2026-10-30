@@ -709,3 +709,120 @@ fn a_paragraph_under_alpha_is_clipped_once() {
     assert_eq!(clips(0.5), clips(1.0));
     assert!(clips(1.0) > 0);
 }
+
+/// Half a level above one 255th. Nothing these pages draw is as faint, and
+/// the mark an export holds a group's place with, at no opacity, and the
+/// paint it draws before the mark, at one 255th, are both fainter.
+const FAINT: f32 = 1.5 / 255.0;
+
+/// How many elements `document` draws at an opacity under [`FAINT`].
+fn faint(document: &Document) -> usize {
+    document
+        .elements
+        .iter()
+        .zip(&document.drawn)
+        .filter(|((_, attributes), drawn)| {
+            **drawn
+                && attributes.iter().any(|(key, value)| {
+                    matches!(
+                        key.as_str(),
+                        "opacity" | "fill-opacity" | "stroke-opacity"
+                    ) && value.parse::<f32>().is_ok_and(|v| v < FAINT)
+                })
+        })
+        .count()
+}
+
+/// How many alphas above 0 and under [`FAINT`] `pdf`'s graphics states set:
+/// Skia's PDF backend writes a translucent paint's alpha as a graphics
+/// state's `/ca` and `/CA` (ISO 32000-1, table 58), outside any compressed
+/// stream. An alpha of 0 is not counted: the backend sets one for a
+/// paragraph's blurred shadow at any global alpha, in a page with no group.
+fn faint_in_pdf(pdf: &[u8]) -> usize {
+    let text = String::from_utf8_lossy(pdf);
+    ["/ca ", "/CA "]
+        .iter()
+        .flat_map(|key| text.match_indices(key))
+        .filter(|(at, key)| {
+            text[at + key.len()..]
+                .split(|c: char| c != '.' && !c.is_ascii_digit())
+                .next()
+                .and_then(|value| value.parse::<f32>().ok())
+                .is_some_and(|value| value > 0.0 && value < FAINT)
+        })
+        .count()
+}
+
+/// A page a test draws: what it holds, and how it is drawn.
+type NamedDraw<'a> = (&'a str, &'a dyn Fn(&mut Context2D));
+
+/// Nothing of a group's mark, or of the paint an export draws before it,
+/// is left in any export of a page holding groups: no element as faint as
+/// either in the SVG, and no alpha that faint in the PDF. A fill at one
+/// 255th, exported the same way, is found by both checks.
+#[test]
+fn no_trace_of_a_group_s_mark_is_left_in_an_export() {
+    let export = |draw: &dyn Fn(&mut Context2D)| {
+        let mut canvas = Canvas::new(WIDTH, HEIGHT);
+        canvas.set_gpu(false);
+        draw(canvas.context());
+        let svg = parse(&svg_of(&mut canvas));
+        let pdf = canvas
+            .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
+            .expect("a PDF");
+        (svg, pdf)
+    };
+    let (svg, pdf) = export(&|ctx| {
+        ctx.set_fill_style(RgbaLinear::from_srgb8(200, 40, 120, 1.0 / 255.0));
+        ctx.fill_rect(5.0, 5.0, 20.0, 20.0);
+    });
+    assert_eq!(faint(&svg), 1, "the SVG check finds a faint fill");
+    assert!(faint_in_pdf(&pdf) > 0, "the PDF check finds a faint fill");
+
+    let pages: [NamedDraw; 5] = [
+        ("a paragraph under alpha in a clip", &|ctx| {
+            ctx.begin_path();
+            ctx.rect(4.0, 4.0, 40.0, 30.0);
+            ctx.clip(FillRule::NonZero);
+            ctx.set_global_alpha(0.25);
+            ctx.draw_paragraph(&paragraph(vec![]), 5.0, 5.0);
+        }),
+        ("a shadowed paragraph under alpha", &|ctx| {
+            ctx.set_global_alpha(0.6);
+            ctx.draw_paragraph(&paragraph(vec![shadow(2.0)]), 5.0, 5.0);
+        }),
+        ("nested translucent layers", &|ctx| {
+            ctx.save_layer_with(0.8, None, None);
+            ctx.set_fill_shader(&ramp(WIDTH));
+            ctx.fill_rect(5.0, 5.0, 30.0, 20.0);
+            ctx.save_layer_with(0.5, None, None);
+            ctx.fill_rect(20.0, 15.0, 30.0, 20.0);
+            ctx.restore();
+            ctx.restore();
+        }),
+        ("groups in clips side by side", &|ctx| {
+            for x in [2.0, 28.0, 54.0] {
+                ctx.save();
+                ctx.begin_path();
+                ctx.rect(x, 4.0, 22.0, 30.0);
+                ctx.clip(FillRule::NonZero);
+                ctx.save_layer_with(0.5, None, None);
+                ctx.fill_rect(0.0, 0.0, WIDTH, HEIGHT);
+                ctx.restore();
+                ctx.restore();
+            }
+        }),
+        ("a canvas drawn in under alpha", &|ctx| {
+            let mut source = Canvas::new(40.0, 20.0);
+            shadowed_square(source.context(), 4.0);
+            ctx.set_global_alpha(0.5);
+            ctx.draw_canvas(&mut source, 10.0, 10.0);
+        }),
+    ];
+    for (name, draw) in pages {
+        let (svg, pdf) = export(draw);
+        assert!(!opacities(&svg).is_empty(), "{name}: a group is spliced");
+        assert_eq!(faint(&svg), 0, "{name}: a faint element in the SVG");
+        assert_eq!(faint_in_pdf(&pdf), 0, "{name}: a faint alpha in the PDF");
+    }
+}

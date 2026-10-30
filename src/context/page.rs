@@ -2954,31 +2954,37 @@ impl Splices<'_> {
     /// before it, replaced by its group. A mark it did not write -- a group
     /// drawn wholly outside the clip -- leaves nothing to replace.
     fn apply(&self, mut written: String) -> String {
-        let fill = splice_sync_fill();
         for (mark, group) in &self.made {
-            let Some(at) = written.find(&format!("<a xlink:href=\"{mark}\""))
-            else {
+            let Some(at) = mark_at(&written, mark) else {
                 continue;
             };
             let Some(end) = written[at..].find("</a>").map(|end| at + end + 4)
             else {
                 continue;
             };
-            // The paint is the element before the mark, with nothing but
-            // the device's indentation between them.
-            let start = written[..at]
-                .rfind("<rect")
-                .filter(|&rect| {
-                    let paint = &written[rect..at];
-                    paint.contains(&fill)
-                        && paint.trim_end().ends_with("/>")
-                        && paint.matches('<').count() == 1
-                })
-                .unwrap_or(at);
+            let start = mark_paint(&written, at).unwrap_or(at);
             written.replace_range(start..end, group);
         }
         written
     }
+}
+
+/// Where the device wrote `mark` in `written`: the start of its `<a>`.
+fn mark_at(written: &str, mark: &str) -> Option<usize> {
+    written.find(&format!("<a xlink:href=\"{mark}\""))
+}
+
+/// Where the paint drawn before the mark starting at `at` in `written`
+/// starts: the element before the mark, with nothing but the device's
+/// indentation between them.
+fn mark_paint(written: &str, at: usize) -> Option<usize> {
+    let fill = splice_sync_fill();
+    written[..at].rfind("<rect").filter(|&rect| {
+        let paint = &written[rect..at];
+        paint.contains(&fill)
+            && paint.trim_end().ends_with("/>")
+            && paint.matches('<').count() == 1
+    })
 }
 
 /// What the root of `svg` holds: none of it where the root is self-closed.
@@ -3290,6 +3296,8 @@ impl Page {
         url.push(0);
         canvas.save();
         canvas.reset_matrix();
+        // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+        // Re-check: cargo test an_svg_annotation_lands_in_the_clip_left_open
         // The device writes an annotation inside whatever clip the draw
         // before it left open, which can be narrower than this group's. A
         // paint, which it writes under the clip the canvas holds now, closes
@@ -8000,5 +8008,66 @@ mod tests {
         let next = recorder.page();
         assert!(Arc::ptr_eq(&next.layers, &recorder.layers), "N + 1 shares");
         assert_eq!(Arc::strong_count(&recorder.layers), 2, "and no other");
+    }
+
+    /// An SVG document holding a draw clipped to the left half, then a mark
+    /// drawn under a clip to the right half, with [`SPLICE_SYNC`] painted
+    /// before it where `synced`; and where in the document the draw and the
+    /// mark start.
+    fn annotated(synced: bool) -> (String, usize, usize) {
+        let document = svg::Canvas::new(Rect::from_wh(40.0, 20.0), None);
+        let left = Rect::from_xywh(0.0, 0.0, 20.0, 20.0);
+        let right = Rect::from_xywh(20.0, 0.0, 20.0, 20.0);
+        document.save();
+        document.clip_rect(left, None, None);
+        document.draw_rect(left, &Paint::default());
+        document.restore();
+        document.save();
+        document.clip_rect(right, None, None);
+        if synced {
+            let mut sync = Paint::default();
+            sync.set_color(SPLICE_SYNC);
+            document.draw_paint(&sync);
+        }
+        let mark = format!("{SPLICE_MARK}0");
+        let url = [mark.as_bytes(), b"\0"].concat();
+        annotate::rect_with_url(&document, right, &Data::new_copy(&url));
+        document.restore();
+        let written: String =
+            String::from_utf8_lossy(document.end().as_bytes()).into();
+        let drawn = written.find("<rect").expect("the draw");
+        let at = mark_at(&written, &mark).expect("the mark");
+        (written, drawn, at)
+    }
+
+    /// The defect [`Page::splice_group`] works around: Skia's SVG device
+    /// writes an annotation inside the clip group the draw before it left
+    /// open, rather than under the clip the canvas holds, so a mark lands
+    /// under the left half's clip with no group closed before it. Fails
+    /// once the device writes an annotation under the canvas's clip, when
+    /// the paint drawn before each mark can go.
+    #[test]
+    fn an_svg_annotation_lands_in_the_clip_left_open() {
+        let (written, drawn, at) = annotated(false);
+        assert!(
+            !written[drawn..at].contains("</g>"),
+            "the mark is written under the canvas's clip: {written}"
+        );
+    }
+
+    /// What the workaround relies on: the paint drawn before a mark closes
+    /// the group the draw before it left open, and is written as the
+    /// element just before the mark, where [`mark_paint`] finds it to
+    /// remove with the mark.
+    #[test]
+    fn a_paint_before_an_svg_annotation_writes_it_under_the_canvas_s_clip() {
+        let (written, drawn, at) = annotated(true);
+        let paint = mark_paint(&written, at).unwrap_or_else(|| {
+            panic!("no paint just before the mark: {written}")
+        });
+        assert!(
+            written[drawn..paint].contains("</g>"),
+            "the left half's clip left open: {written}"
+        );
     }
 }
