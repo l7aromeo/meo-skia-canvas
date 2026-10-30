@@ -64,7 +64,8 @@ use crate::{
 use chain::Step;
 use faint::Faint;
 use layer::{
-    BlurDraw, Composite, ExactColour, Layer, LayerRec, reach_the_clip,
+    BlurDraw, Composite, ExactColour, Layer, LayerRec, holds_a_cut,
+    reach_the_clip,
 };
 use page::{ExportOptions, Page, PageRecorder, Recording};
 use typesetting::{TextSettings, Typesetting, Typography};
@@ -1633,9 +1634,16 @@ impl Context2D {
         // `LayerRec::open_on` -- wherever the blend composites only where
         // the source lands, which `render_to_canvas` draws as it is: its
         // shadow first, as a group of its own offset from it, then the
-        // source.
+        // source. A source holding a cut draw is drawn as its entries where
+        // the paint has nothing to say, through no layer, so that each target
+        // clips the draw its own way -- see `Composite::Plain` -- where the
+        // picture `render_to_canvas` draws holds one way for all.
         let drawn = self.faint().drawable(&paint).into_owned();
-        if carries(source, &drawn)
+        let through_paint = carries(source, &drawn);
+        let cut = entries
+            .as_deref()
+            .is_some_and(|entries| holds_a_cut(entries));
+        if (through_paint || cut)
             && !covers_beyond_the_draw(self.state.global_composite_operation)
         {
             let contents_matrix = Matrix::concat(&self.state.matrix, &matrix);
@@ -1655,6 +1663,7 @@ impl Context2D {
                     };
                     let composite = match steps.clone().filter(|_| own) {
                         Some(steps) => Composite::Chain { steps, rec },
+                        None if own && !through_paint => Composite::Plain,
                         None => Composite::Layer(rec),
                     };
                     recorder.append_group(
@@ -3323,11 +3332,13 @@ mod tests {
     }
 
     /// The picture a page is replayed into for a canvas drawn into another,
-    /// or used as a pattern, applies each frame's clip once, whether or not
-    /// the page was read between its draws. A read splits a run into pieces,
-    /// and each piece applied the clip again: on a raster that rebuilds
-    /// Skia's anti-aliased clip mask for every piece, which a page of cut
-    /// draws drawn into another paid for four milliseconds of in each copy.
+    /// or used as a pattern, applies a frame's clip as often whether or not
+    /// the page was read between its draws: once around the draws between
+    /// its cut draws, which clip by coverage. A read splits a run into
+    /// pieces, and each piece applied the clip again: on a raster that
+    /// rebuilds Skia's anti-aliased clip mask for every piece, which a page
+    /// of cut draws drawn into another paid for four milliseconds of in each
+    /// copy.
     #[test]
     fn a_page_drawn_into_another_applies_a_frames_clip_once() {
         let plain = picture_clips(&mut program(&CLIPPED, false, true).canvas);
@@ -3338,64 +3349,220 @@ mod tests {
         }
     }
 
-    /// The pixels, at density 2, of a page used as a pattern filling another
-    /// canvas -- what Skia makes of the picture the page is replayed into,
-    /// which a canvas drawn in through `drawImage` takes as well -- and of
-    /// the page drawn into another with `draw_canvas`, which carries the
-    /// page's entries into the destination and plays them there.
+    /// The pixels of `canvas`, read at `density`.
+    fn pixels_at(canvas: &mut crate::canvas::Canvas, density: u32) -> Vec<u8> {
+        canvas
+            .to_image_data(
+                None,
+                &crate::pixels::ImageDataExport {
+                    density,
+                    ..Default::default()
+                },
+            )
+            .expect("pixels")
+            .pixels()
+            .to_vec()
+    }
+
+    /// The pixels, at `density`, of `source` used as a pattern filling
+    /// another CPU canvas, and of `source` drawn into one with
+    /// `draw_canvas`.
     fn drawn_in(
-        steps: &[Step],
-        runs: bool,
-        routed: bool,
+        source: &mut crate::canvas::Canvas,
+        density: u32,
     ) -> (Vec<u8>, Vec<u8>) {
-        page::KEEPS_RUNS.set(runs);
-        let mut source = program(steps, false, routed).canvas;
-        page::KEEPS_RUNS.set(true);
-        let pixels = |canvas: &mut crate::canvas::Canvas| {
-            canvas
-                .to_image_data(
-                    None,
-                    &crate::pixels::ImageDataExport {
-                        density: 2,
-                        ..Default::default()
-                    },
-                )
-                .expect("pixels")
-                .pixels()
-                .to_vec()
-        };
         let mut filled = crate::canvas::Canvas::new(200.0, 120.0);
         filled.set_gpu(false);
         let pattern = filled.context().create_pattern_from_canvas(
-            &mut source,
+            source,
             crate::pattern::PatternRepeat::Repeat,
         );
         filled.context().set_fill_pattern(&pattern);
         filled.context().fill_rect(0.0, 0.0, 200.0, 120.0);
         let mut into = crate::canvas::Canvas::new(200.0, 120.0);
         into.set_gpu(false);
-        into.context().draw_canvas(&mut source, 0.0, 0.0);
-        (pixels(&mut filled), pixels(&mut into))
+        into.context().draw_canvas(source, 0.0, 0.0);
+        (
+            pixels_at(&mut filled, density),
+            pixels_at(&mut into, density),
+        )
     }
 
-    /// A page used as a pattern draws the pixels it did before runs and the
-    /// cut route, read part way or not: its runs' pieces and cut draws share
-    /// their clip in the picture it is replayed into, and a cut draw clips
-    /// by the path there, so one clip around them applies the clip each
-    /// would. A page drawn in with `draw_canvas` plays its entries on the
-    /// destination, where a cut draw takes the route, so it is held to the
-    /// same page drawn without runs.
+    /// `steps` without their blurs: a page a document draws as vectors, and
+    /// a pattern draws as the page does.
+    fn unblurred(steps: Vec<Step>) -> Vec<Step> {
+        steps
+            .into_iter()
+            .filter(|step| !matches!(step, Step::Blur | Step::BlurPath(_)))
+            .collect()
+    }
+
+    /// A page drawn into another canvas -- with `draw_canvas`, or as a
+    /// pattern -- draws there what it draws itself, at densities 1 to 3,
+    /// read part way or not: a draw its clip cuts is as exact in the picture
+    /// another canvas replays as it is on the page. With its blurs the page
+    /// carries features that send `draw_canvas` through a group of its
+    /// entries whatever the paint; without them a plain paint takes the
+    /// route for a page holding a cut draw, and both are held here. A
+    /// pattern is held to it only without the blurs, which a pattern draws
+    /// other than the page does, cut draw or none.
     #[test]
-    fn a_page_drawn_into_another_draws_what_it_did() {
+    fn a_page_drawn_into_another_draws_as_it_does_itself() {
         let mut programs = vec![CLIPPED.to_vec()];
         programs.extend(with_each(Step::Read));
-        for steps in &programs {
-            let now = drawn_in(steps, true, true);
-            let before = drawn_in(steps, false, false);
-            let unrun = drawn_in(steps, false, true);
-            assert!(now.0 == before.0, "as a pattern: {steps:?}");
-            assert!(now.1 == unrun.1, "drawn in: {steps:?}");
+        for steps in programs {
+            for density in 1..=3 {
+                let mut source = program(&steps, false, true).canvas;
+                let direct = pixels_at(&mut source, density);
+                let (_, drawn) = drawn_in(&mut source, density);
+                assert!(drawn == direct, "drawn in, {density}x: {steps:?}");
+
+                let steps = unblurred(steps.clone());
+                let mut source = program(&steps, false, true).canvas;
+                let direct = pixels_at(&mut source, density);
+                let (pattern, drawn) = drawn_in(&mut source, density);
+                assert!(drawn == direct, "unblurred, {density}x: {steps:?}");
+                assert!(pattern == direct, "a pattern, {density}x: {steps:?}");
+            }
         }
+    }
+
+    /// A page that has itself drawn a canvas is drawn into another as
+    /// pixels, made from its picture, and a draw its clip cuts is as exact
+    /// there as on the page: at density 1, where those pixels are the
+    /// page's own, as a pattern and with `draw_canvas` through a plain paint
+    /// and through `xor`, which draws through a group over nothing as
+    /// source-over does.
+    #[test]
+    fn a_page_that_drew_a_canvas_draws_its_cut_draws_exact_in_another() {
+        let mut source = clipped_canvas(true, false, circle, |ctx| {
+            let mut inner = crate::canvas::Canvas::new(4.0, 4.0);
+            inner.context().fill_rect(0.0, 0.0, 4.0, 4.0);
+            ctx.draw_canvas(&mut inner, 100.0, 60.0);
+            cut_triangle(ctx);
+        });
+        let direct = pixels_at(&mut source, 1);
+        let (pattern, drawn) = drawn_in(&mut source, 1);
+        assert!(pattern == direct, "as a pattern");
+        assert!(drawn == direct, "drawn in");
+        let mut into = crate::canvas::Canvas::new(200.0, 120.0);
+        into.set_gpu(false);
+        into.context()
+            .set_global_composite_operation(crate::paint::BlendMode::Xor);
+        into.context().draw_canvas(&mut source, 0.0, 0.0);
+        assert!(pixels_at(&mut into, 1) == direct, "drawn in through xor");
+    }
+
+    /// A cut draw inside a `saveLayer` opened under the clip is as exact in
+    /// a page drawn into another as on the page, at densities 1 to 3: the
+    /// layer applies the clip by coverage in the picture another canvas
+    /// replays, as on the page, rather than being made no larger than it.
+    #[test]
+    fn a_cut_draw_in_a_layer_is_exact_in_a_page_drawn_into_another() {
+        for density in 1..=3 {
+            let mut source = clipped_canvas(true, false, circle, |ctx| {
+                ctx.save_layer();
+                cut_triangle(ctx);
+                ctx.restore();
+            });
+            let direct = pixels_at(&mut source, density);
+            let (pattern, drawn) = drawn_in(&mut source, density);
+            assert!(pattern == direct, "as a pattern, {density}x");
+            assert!(drawn == direct, "drawn in, {density}x");
+        }
+    }
+
+    /// A region of a page drawn into another in place draws the page's own
+    /// pixels inside the region, its cut draws exact, and nothing outside
+    /// it. The region holds the whole of the cut path: one that cuts a path
+    /// moves its edges as a clip does, a defect of its own.
+    #[test]
+    fn a_region_of_a_page_drawn_into_another_draws_the_region_alone() {
+        let mut source = crate::canvas::Canvas::new(200.0, 120.0);
+        source.set_gpu(false);
+        {
+            let ctx = source.context();
+            ctx.fill_rect(165.0, 30.0, 20.0, 20.0);
+            ctx.begin_path();
+            circle(ctx);
+            ctx.clip(crate::path::FillRule::NonZero);
+            cut_triangle(ctx);
+        }
+        let direct = pixels_at(&mut source, 1);
+        let mut into = crate::canvas::Canvas::new(200.0, 120.0);
+        into.set_gpu(false);
+        let (x, y, width, height) = (10.0, 10.0, 140.0, 100.0);
+        into.context().draw_canvas_region(
+            &mut source,
+            x,
+            y,
+            width,
+            height,
+            x,
+            y,
+            width,
+            height,
+        );
+        let drawn = pixels_at(&mut into, 1);
+        let inside = |at: usize| {
+            let (px, py) = ((at % 200) as f32, (at / 200) as f32);
+            (x..x + width).contains(&px) && (y..y + height).contains(&py)
+        };
+        assert!(
+            direct
+                .chunks(4)
+                .enumerate()
+                .any(|(at, px)| { !inside(at) && px[3] > 0 })
+        );
+        for (at, (drawn, direct)) in
+            drawn.chunks(4).zip(direct.chunks(4)).enumerate()
+        {
+            match inside(at) {
+                true => assert_eq!(drawn, direct, "pixel {at}"),
+                false => assert_eq!(drawn, [0; 4], "pixel {at}"),
+            }
+        }
+    }
+
+    /// A page drawn into another with `draw_canvas` writes into a PDF or SVG
+    /// what it wrote before its cut draws took the route, read part way or
+    /// not: a document clips a cut draw by the path, and has no way to write
+    /// a clip by coverage at all -- Skia's SVG device writes one as an empty
+    /// `clipPath`, which hides what it clips. Without the page's blurs,
+    /// which a document draws as pixels, so that both documents hold the
+    /// draws as vectors.
+    #[test]
+    fn a_page_drawn_into_another_exports_as_it_did() {
+        let mut programs = vec![unblurred(CLIPPED.to_vec())];
+        programs.extend(with_each(Step::Read).into_iter().map(unblurred));
+        for steps in &programs {
+            let export = |routed| {
+                let mut source = program(steps, false, routed).canvas;
+                let mut into = crate::canvas::Canvas::new(200.0, 120.0);
+                into.set_gpu(false);
+                into.context().draw_canvas(&mut source, 0.0, 0.0);
+                documents(&mut into)
+            };
+            let (now, before) = (export(true), export(false));
+            assert!(now.0 == before.0, "SVG of {steps:?}");
+            assert!(now.1 == before.1, "PDF of {steps:?}");
+        }
+    }
+
+    /// A page drawn into a GPU canvas with `draw_canvas` draws there what it
+    /// draws on the GPU itself: the GPU clips a cut draw by the path, as it
+    /// always has. Runs where a GPU does.
+    #[test]
+    fn a_page_drawn_into_a_gpu_canvas_draws_as_the_gpu_does() {
+        let mut source = program(&CLIPPED, true, true).canvas;
+        if source.engine_kind() != crate::canvas::EngineKind::Gpu {
+            return;
+        }
+        let direct = pixels_at(&mut source, 2);
+        let mut into = crate::canvas::Canvas::new(200.0, 120.0);
+        into.set_gpu(true);
+        into.context().draw_canvas(&mut source, 0.0, 0.0);
+        assert!(pixels_at(&mut into, 2) == direct);
     }
 
     /// A piece of a clip run records its transform and its draws and

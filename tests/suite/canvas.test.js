@@ -777,16 +777,13 @@ describe("Canvas", () => {
       );
     });
 
-    test("a cut draw drawn into another canvas is exact only as its own group", () => {
+    test("a cut draw drawn into another canvas is exact by every route", () => {
       // A fill a clip cuts is drawn whole on a CPU canvas and multiplied by
       // the clip; Skia rasterizes it against the clip instead, which moves
       // pixels along the fill's own edges, far from the cut. Drawn into
-      // another canvas, the source's drawing takes the exact route only
-      // where `drawCanvas` replays it as a group of its own on the
-      // destination's pixels -- a paint with something to say, here `xor`
-      // over nothing. A plain `drawCanvas`, `drawImage`, a pattern and a
-      // source that has itself drawn a canvas all draw the source's
-      // picture, which Skia rasterizes against the clip.
+      // another canvas -- by `drawCanvas` through any paint, by `drawImage`,
+      // as a pattern, or from a source that has itself drawn a canvas -- it
+      // is drawn as the source draws it.
       let page = (drawFirst) => {
         let canvas = new Canvas(200, 120);
         canvas.gpu = false;
@@ -808,8 +805,8 @@ describe("Canvas", () => {
         ctx.fill();
         return canvas;
       };
-      let pixels = (canvas) =>
-        canvas.getContext("2d").getImageData(0, 0, 200, 120).data;
+      let pixels = (canvas, density = 1) =>
+        canvas.getContext("2d").getImageData(0, 0, 200, 120, { density }).data;
       let into = (source, verb, op = "source-over") => {
         let canvas = new Canvas(200, 120);
         canvas.gpu = false;
@@ -819,7 +816,7 @@ describe("Canvas", () => {
           ctx.fillStyle = ctx.createPattern(source, "no-repeat");
           ctx.fillRect(0, 0, 200, 120);
         } else ctx[verb](source, 0, 0);
-        return pixels(canvas);
+        return canvas;
       };
       let differing = (a, b) => {
         let count = 0;
@@ -828,30 +825,36 @@ describe("Canvas", () => {
         return count;
       };
 
-      let source = page(false);
-      let direct = pixels(source);
-      assert.equal(differing(pixels(page(false)), direct), 0, "a control");
-      assert.equal(
-        differing(into(source, "drawCanvas", "xor"), direct),
-        0,
-        "drawCanvas as a group draws the cut exactly as the source does",
-      );
-      for (let [verb, op] of [
-        ["drawCanvas", "source-over"],
-        ["drawImage", "source-over"],
-        ["drawImage", "xor"],
-        ["pattern", "source-over"],
-      ])
-        assert.ok(
-          differing(into(source, verb, op), direct) > 0,
-          `${verb} under ${op} draws the picture, clipped as Skia clips`,
-        );
+      for (let drawFirst of [false, true]) {
+        let source = page(drawFirst);
+        let direct = pixels(source);
+        for (let [verb, op] of [
+          ["drawCanvas", "source-over"],
+          ["drawCanvas", "xor"],
+          ["drawImage", "source-over"],
+          ["drawImage", "xor"],
+          ["pattern", "source-over"],
+        ])
+          assert.equal(
+            differing(pixels(into(source, verb, op)), direct),
+            0,
+            `${verb} under ${op}${drawFirst ? ", a source that drew a canvas" : ""}`,
+          );
+      }
 
-      let nesting = page(true);
-      assert.ok(
-        differing(into(nesting, "drawCanvas", "xor"), pixels(nesting)) > 0,
-        "a source that drew a canvas is drawn from its picture",
-      );
+      // A vector source keeps its vectors at any density; an image is its
+      // source's pixels at density 1, and is held to them there alone.
+      let source = page(false);
+      for (let density of [2, 3])
+        for (let verb of ["drawCanvas", "pattern"])
+          assert.equal(
+            differing(
+              pixels(into(source, verb), density),
+              pixels(source, density),
+            ),
+            0,
+            `${verb} at density ${density}`,
+          );
     });
 
     test("a clipped nested draw costs the region, not the page", () => {

@@ -3656,10 +3656,13 @@ impl Page {
             matte.paint(output);
         }
         // Pixels: Skia draws this picture itself, as a pattern's or an
-        // image's, and draws that as pixels. Its PDF backend writes such a
+        // image's, and draws that as pixels, so a cut draw in it clips by
+        // coverage. A document walks it as vectors only for a canvas drawn
+        // in with `draw_canvas` that holds no cut draw -- see
+        // `Context2D::draw_picture_costing`. Its PDF backend writes such a
         // pattern as an image whichever form the picture holds: the same
-        // file either way, measured. A run's pieces share their clip here --
-        // see `play_entries`.
+        // file either way, measured. A run's pieces between its cut draws
+        // share their clip here -- see `play_entries`.
         play_entries(&self.layers, output, Target::Pixels);
         compositor.finish_recording_as_picture(None)
     }

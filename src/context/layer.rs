@@ -482,6 +482,12 @@ impl LayerRec {
 /// How a [`Group`] composites onto what lies beneath it.
 #[derive(Clone, Debug)]
 pub enum Composite {
+    /// Through no layer: the entries played as they are, under the group's
+    /// transform and clip. A canvas drawn into another through a plain
+    /// paint, kept as its entries because they hold a cut draw, which each
+    /// target clips its own way -- see [`CutOp::playback`] -- where the
+    /// picture they would otherwise be replayed into fixes one way for all.
+    Plain,
     /// Through a `saveLayer` opened with this.
     Layer(LayerRec),
     /// Through a filter chain the crate runs on the group's pixels itself
@@ -492,10 +498,15 @@ pub enum Composite {
 }
 
 impl Composite {
-    /// What the group opens as a layer where it opens one.
-    fn rec(&self) -> &LayerRec {
+    /// The rectangle the group can be confined to -- see
+    /// [`LayerRec::footprint`] -- or for a group that opens no layer, the
+    /// rectangle its entries draw in.
+    fn footprint(&self, drawn: Option<Rect>) -> Option<Rect> {
         match self {
-            Composite::Layer(rec) | Composite::Chain { rec, .. } => rec,
+            Composite::Plain => drawn,
+            Composite::Layer(rec) | Composite::Chain { rec, .. } => {
+                rec.footprint(drawn)
+            }
         }
     }
 }
@@ -544,8 +555,8 @@ impl Group {
     /// were.
     pub fn playback(self: &Arc<Self>, canvas: &SkCanvas, target: Target) {
         let pixels = target != Target::Document && blur_mask::draws_on(canvas);
-        let within = pixels
-            .then(|| self.composite.rec().footprint(reach_of(&self.contents)));
+        let within =
+            pixels.then(|| self.composite.footprint(reach_of(&self.contents)));
         self.playback_within(canvas, target, within.flatten());
     }
 
@@ -554,7 +565,7 @@ impl Group {
     /// they are played under, where the layer can be confined to it. `None`
     /// where it covers what the clip allows.
     pub fn reach(&self) -> Option<Rect> {
-        let drawn = self.composite.rec().footprint(reach_of(&self.contents))?;
+        let drawn = self.composite.footprint(reach_of(&self.contents))?;
         Some(self.contents_matrix.map_rect(drawn).0)
     }
 
@@ -578,7 +589,7 @@ impl Group {
             // A clip shader leaves the layer's bounds alone and multiplies
             // what the layer composites, as the cut draw's own clip does.
             let coverage = (target == Target::Pixels
-                && blur_mask::draws_on_cpu(canvas)
+                && clips_by_coverage(canvas, target)
                 && holds_a_cut(&self.contents))
             .then(|| Coverage::of(&clip))
             .flatten();
@@ -646,8 +657,15 @@ impl Group {
                     }
                 }
             }
-            (composite, target) => {
-                let rec = composite.rec();
+            (Composite::Plain, target) => {
+                canvas.set_matrix(&Matrix::concat(&base, &self.matrix).into());
+                if let Some(within) = &self.within {
+                    canvas.clip_rect(within, ClipOp::Intersect, true);
+                }
+                canvas.set_matrix(&entries.into());
+                play_entries(&self.contents, canvas, target);
+            }
+            (Composite::Layer(rec) | Composite::Chain { rec, .. }, target) => {
                 canvas.set_matrix(&Matrix::concat(&base, &self.matrix).into());
                 // The destination confines what is drawn and not what the
                 // layer's filter makes of it, so under a filter it is a clip
@@ -688,7 +706,8 @@ impl Group {
 /// as pixels each piece is clipped by itself, as the page's recording clips
 /// a frame; a document, and a recording a canvas drawn into another is
 /// replayed into, play a run's consecutive pieces under the clip once, as
-/// for a run nothing split -- see [`play_entries`]. A clip applied again for
+/// for a run nothing split, a recording's cut draws apart -- see
+/// [`play_entries`]. A clip applied again for
 /// each piece is a clip of its own to a PDF or SVG device, which keys a clip
 /// group by the clip's generation, and the document came out with the clip
 /// written once per piece.
@@ -785,25 +804,30 @@ impl Clipped {
 /// Plays `entries` onto `canvas` for `target`, in order: each as
 /// [`Layer::playback`] plays it, but for consecutive pieces of one run
 /// played into a document or a recording, which it plays under their clip
-/// once -- see [`Clipped`].
+/// once -- see [`Clipped`] -- all but a recording's cut draws.
 ///
 /// A recording is what a canvas drawn into another, or used as a pattern,
 /// is replayed into, and Skia rasterizes it later, where every clip applied
 /// rebuilds its anti-aliased clip mask: one for each piece, where the page
-/// applied one for the frame. Its cut draws clip by the path there anyway --
-/// see [`CutOp::playback`] -- so one clip around the run's pieces is the
-/// clip each would apply. A raster or GPU canvas plays each piece under its
-/// own clip, where a cut draw applies its clip as coverage instead.
+/// applied one for the frame. A cut draw there clips by coverage, alone --
+/// see [`CutOp::playback`] -- and the pieces between cut draws share one
+/// clip. A document clips a cut draw by the path, among the run's pieces
+/// under their one clip. A raster or GPU canvas plays each piece under its
+/// own clip.
 pub(crate) fn play_entries(
     entries: &[Layer],
     canvas: &SkCanvas,
     target: Target,
 ) {
     let grouped = target == Target::Document || !blur_mask::draws_on(canvas);
+    let coverage = clips_by_coverage(canvas, target);
+    let shares_the_clip = |piece: &Clipped| {
+        grouped && !(coverage && matches!(piece.entry, Layer::Cut(_)))
+    };
     let mut at = 0;
     while at < entries.len() {
         let run = match &entries[at] {
-            Layer::Clipped(piece) if grouped => piece.run,
+            Layer::Clipped(piece) if shares_the_clip(piece) => piece.run,
             entry => {
                 entry.playback(canvas, target);
                 at += 1;
@@ -813,7 +837,11 @@ pub(crate) fn play_entries(
         let pieces: Vec<&Clipped> = entries[at..]
             .iter()
             .map_while(|entry| match entry {
-                Layer::Clipped(piece) if piece.run == run => Some(&**piece),
+                Layer::Clipped(piece)
+                    if piece.run == run && shares_the_clip(piece) =>
+                {
+                    Some(&**piece)
+                }
                 _ => None,
             })
             .collect();
@@ -842,12 +870,14 @@ pub(crate) fn play_entries(
 /// at its edge it is the draw's times the clip's. The blend can land a level
 /// away on an eight-bit sRGB page, where the clip shader takes the draw off
 /// Skia's legacy blitter onto its raster pipeline -- see
-/// docs/browser-differences.md. Anywhere else --
-/// the GPU, whose multisampled coverage the clip does not move, a vector
-/// document, a recording -- it clips as the page always has. A run of cut
-/// draws shares one op. Under a page's clip the op is a piece of the frame's
-/// run -- see [`Clipped`] -- and a document or a recording plays its draws
-/// under the run's clip with the draws around them.
+/// docs/browser-differences.md. A recording bound for pixels -- what a
+/// canvas drawn into another, or used as a pattern, is replayed into --
+/// applies the clip the same way, so the draw is as exact wherever Skia
+/// rasterizes it. Anywhere else -- the GPU, whose multisampled coverage the
+/// clip does not move, a vector document -- it clips as the page always
+/// has. A run of cut draws shares one op. Under a page's clip the op is a
+/// piece of the frame's run -- see [`Clipped`] -- and a document plays its
+/// draws under the run's clip with the draws around them.
 #[derive(Clone, Debug)]
 pub struct CutOp {
     /// The draws, in order, each under the transform it was drawn with: the
@@ -911,6 +941,19 @@ impl Coverage {
         );
         canvas.clip_shader(shader, ClipOp::Intersect);
     }
+}
+
+/// Whether a cut draw played onto `canvas` for `target` applies its clip as
+/// coverage -- see [`CutOp`]: on a raster surface on the CPU, and in a
+/// recording bound for pixels, which Skia rasterizes later as an image's,
+/// a pattern's or a canvas's drawn into another, on whichever surface that
+/// is drawn on. Not on a GPU surface, and not in a document, which has no
+/// way to write a clip by coverage: Skia's SVG device writes one as an
+/// empty `clipPath`, hiding what it clips (`SkSVGDevice.cpp`,
+/// `DeviceSpaceType::kShader`).
+fn clips_by_coverage(canvas: &SkCanvas, target: Target) -> bool {
+    blur_mask::draws_on_cpu(canvas)
+        || (target == Target::Pixels && !blur_mask::draws_on(canvas))
 }
 
 /// Whether `entries`, or a group among them, hold a [`CutOp`].
@@ -1006,11 +1049,13 @@ impl CutOp {
     }
 
     /// Draws the cut draws for `target` onto `canvas`, under whatever
-    /// transform and clip the canvas already carries.
+    /// transform and clip the canvas already carries, the op's clip applied
+    /// as coverage where [`clips_by_coverage`] says so and by the path
+    /// elsewhere.
     pub fn playback(&self, canvas: &SkCanvas, target: Target) {
         let draws = self.draws_for(target);
         canvas.save();
-        if blur_mask::draws_on_cpu(canvas) {
+        if clips_by_coverage(canvas, target) {
             self.coverage.clip(canvas);
         } else if let Some(clip) = Path::deserialize(&self.clip) {
             canvas.clip_path(&clip, ClipOp::Intersect, true);
