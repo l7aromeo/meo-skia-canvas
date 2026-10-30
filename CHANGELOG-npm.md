@@ -739,23 +739,25 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   twenty reads now end within 13 MB of the first, where they climbed from 434
   MB to 1435. 6.0.2 has the same unwrapped read, by its source.
 
-- **A fill or stroke a clip cuts is drawn whole on the CPU engine, and the
-  clip multiplies it.** Where a clip covered part of a path, Skia rasterized
-  the path against the clip, and the edges that added at the cut changed
-  pixels far from it: a triangle clipped at x 82 drew 60 pixels more than two
-  inside the clip unlike the same triangle unclipped, by up to 17 levels, and
-  across fills, strokes and dashed strokes up to 273 pixels moved, by up to 92
-  levels. Chrome's CPU canvas draws it as Skia does. Such a draw is now played
-  back on a CPU raster through a clip shader of the clip, at the density of
-  the read or export, so inside the clip it is the unclipped draw byte for
-  byte and at the clip's edge the triangle's mean error from its exact
-  coverage is 1.55 levels where it was 4.60. That holds for a draw the page's
-  edge does not also cut: Skia rasterizes against the page's bounds as against
-  a clip, so a draw crossing the page's edge still moves inside the clip as
-  it does with no clip. The GPU engine and PDF and SVG exports clip as
-  before. A draw inside an open `saveLayer()`, and a canvas
-  drawn into another or used as a pattern, are still clipped as Skia clips
-  them -- see docs/browser-differences.md.
+- **A fill or stroke a clip cuts is drawn whole on the CPU engine, and the clip
+  multiplies it.** Where a clip covered part of a path, Skia rasterized the
+  path against the clip, and the edges that added at the cut changed pixels far
+  from it: a triangle clipped at x 82 drew 60 pixels more than two inside the
+  clip unlike the same triangle unclipped, by up to 17 levels, and across
+  fills, strokes and dashed strokes up to 273 pixels moved, by up to 92 levels.
+  Chrome's CPU canvas draws it as Skia does. Such a draw is now played back on
+  a CPU raster through a clip shader of the clip, at the density of the read or
+  export, so inside the clip its coverage is the unclipped draw's byte for byte
+  and at the clip's edge the triangle's mean error from its exact coverage is
+  1.55 levels where it was 4.60. That holds for a draw the page's edge does not
+  also cut: Skia rasterizes against the page's bounds as against a clip, so a
+  draw crossing the page's edge still moves inside the clip as it does with no
+  clip. On an eight-bit sRGB canvas the clip shader also takes the blend onto
+  Skia's raster pipeline, so a coloured or translucent fill lands within a
+  level of a premultiplied channel of the unclipped one. The GPU engine and PDF
+  and SVG exports clip as before. A draw inside an open `saveLayer()` takes the
+  same route; a canvas drawn into another or used as a pattern is still clipped
+  as Skia clips it -- see docs/browser-differences.md.
 
 - **A colour named in another space lands exactly on an sRGB float canvas.**
   On a canvas made with `colorType: "RGBAF32"` in sRGB, a fill, stroke or
