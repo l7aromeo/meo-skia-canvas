@@ -471,6 +471,13 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **An SVG of a page with nothing on it is well-formed XML.**
+  `toBuffer("svg")` wrote an empty page's root as
+  `<svg ... height="40"/ viewBox="0 0 80 40">`: Skia writes an empty
+  document's root self-closed, and the `viewBox` this library adds went in
+  after its `/`, so no XML parser read the file. The `viewBox` goes before
+  the `/>` now.
+
 - **A `drop-shadow()` in `ctx.filter` lands in its colour exactly on a float
   canvas.** On a canvas made with `colorType: "RGBAF16"` or `"RGBAF32"`, a
   shadow was tinted through Skia's blend filter, which converts its colour

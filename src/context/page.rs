@@ -2837,7 +2837,9 @@ impl Default for Page {
     }
 }
 
-/// Adds the `viewBox` Skia does not write.
+/// Adds the `viewBox` Skia does not write, among the root's attributes:
+/// before the `/>` of a root Skia writes self-closed, as it does a document
+/// with nothing in it, and before the `>` of any other.
 ///
 /// Skia's SVG writer gives the root a `width` and a `height` and nothing
 /// else. Without a `viewBox` the file has no intrinsic ratio to scale by, so
@@ -2873,10 +2875,14 @@ fn with_view_box(svg: &[u8], size: Size) -> Vec<u8> {
         number(size.height)
     );
 
+    let at = match text[..end].ends_with('/') {
+        true => end - 1,
+        false => end,
+    };
     let mut out = Vec::with_capacity(svg.len() + attribute.len());
-    out.extend_from_slice(&svg[..end]);
+    out.extend_from_slice(&svg[..at]);
     out.extend_from_slice(attribute.as_bytes());
-    out.extend_from_slice(&svg[end..]);
+    out.extend_from_slice(&svg[at..]);
     out
 }
 
