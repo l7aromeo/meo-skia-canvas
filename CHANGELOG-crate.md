@@ -229,6 +229,14 @@ window be changed after it opens.** No signature moves and nothing is removed.
   after its `/`, so no XML parser read the file. The `viewBox` goes before
   the `/>` now.
 
+- **An SVG export comes out the same each time.**
+  `Canvas::to_buffer` with `ImageFormat::Svg` named each clip path after a
+  counter Skia's SVG writer shares across the whole process, so the same
+  canvas exported twice, with any other export between, came out under other
+  clip ids, and a file kept under version control or compared by hash
+  changed with nothing in the drawing changed. Clip paths are numbered in
+  the order the document declares them now, from `cl_0`.
+
 - **A `drop-shadow()` set by `Context2D::set_filter_css` lands in its colour
   exactly on a float canvas.** On a canvas made with `PixelDepth::F16` or
   `PixelDepth::F32`, a shadow was tinted through Skia's blend filter, which

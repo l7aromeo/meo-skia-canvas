@@ -20,7 +20,7 @@ use skia_safe::{
 };
 use std::{
     cell::Cell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::{BufWriter, Cursor, Write},
     path::Path as FilePath,
@@ -3002,30 +3002,98 @@ fn svg_body(svg: &str) -> &str {
     svg.get(open + 1..close).unwrap_or("")
 }
 
+/// How the device writes an id where it declares one, and where it refers
+/// to one: what precedes the id, and the character that ends it.
+const ID_SITES: [(&str, char); 3] =
+    [(" id=\"", '"'), ("url(#", ')'), ("href=\"#", '"')];
+
+/// The ids `svg` declares, in the order it declares them.
+fn declared_ids(svg: &str) -> impl Iterator<Item = &str> {
+    let (opener, close) = ID_SITES[0];
+    svg.match_indices(opener).filter_map(move |(at, _)| {
+        let from = at + opener.len();
+        svg[from..].find(close).map(|len| &svg[from..from + len])
+    })
+}
+
+/// `svg` with every id it declares or refers to replaced by what `rename`
+/// gives it, in one pass, so that no new name is itself renamed. An id
+/// `rename` gives nothing for is kept.
+fn with_ids_renamed(
+    svg: &str,
+    rename: impl Fn(&str) -> Option<String>,
+) -> String {
+    let find = |site: usize, from: usize| {
+        svg[from..].find(ID_SITES[site].0).map(|at| from + at)
+    };
+    let mut next = [0, 1, 2].map(|site| find(site, 0));
+    let mut out = String::with_capacity(svg.len());
+    let mut copied = 0;
+    while let Some((site, at)) = next
+        .iter()
+        .enumerate()
+        .filter_map(|(site, at)| at.map(|at| (site, at)))
+        .min_by_key(|&(_, at)| at)
+    {
+        let (opener, close) = ID_SITES[site];
+        let from = at + opener.len();
+        let end = svg[from..].find(close).map_or(svg.len(), |len| from + len);
+        let id = &svg[from..end];
+        out.push_str(&svg[copied..from]);
+        out.push_str(rename(id).as_deref().unwrap_or(id));
+        copied = end;
+        for (site, at) in next.iter_mut().enumerate() {
+            if at.is_some_and(|at| at < end) {
+                *at = find(site, end);
+            }
+        }
+    }
+    out.push_str(&svg[copied..]);
+    out
+}
+
 /// `body` with every id it declares, and every reference to one --
 /// `url(#id)` or `href="#id"` -- prefixed with `prefix`, so that it can be
 /// placed in a document declaring ids of its own.
 fn renamed(body: &str, prefix: &str) -> String {
-    let mut ids: Vec<&str> = body
-        .match_indices(" id=\"")
-        .filter_map(|(at, _)| {
-            let from = at + " id=\"".len();
-            body[from..].find('"').map(|len| &body[from..from + len])
-        })
-        .collect();
-    ids.sort_unstable();
-    ids.dedup();
-    let mut body = body.to_owned();
-    for id in ids {
-        for (old, new) in [
-            (format!(" id=\"{id}\""), format!(" id=\"{prefix}{id}\"")),
-            (format!("url(#{id})"), format!("url(#{prefix}{id})")),
-            (format!("href=\"#{id}\""), format!("href=\"#{prefix}{id}\"")),
-        ] {
-            body = body.replace(&old, &new);
+    let declared: HashSet<&str> = declared_ids(body).collect();
+    with_ids_renamed(body, |id| {
+        declared.contains(id).then(|| format!("{prefix}{id}"))
+    })
+}
+
+/// What Skia's SVG device names a clip path with, ahead of a number in
+/// hexadecimal it takes from a counter the whole process shares.
+const DEVICE_CLIP_ID: &str = "cl_";
+
+/// `svg` with each clip path the device named numbered in the order the
+/// document declares them, from 0, keeping the prefix [`renamed`] gave
+/// it. The device's own numbers depend on what the process drew before,
+/// so the same page exported twice, with another export between, would
+/// otherwise come out under other names.
+fn with_clips_numbered(svg: &str) -> String {
+    let mut numbered: HashMap<&str, String> = HashMap::new();
+    for id in declared_ids(svg) {
+        if let Some(prefix) = device_clip_prefix(id) {
+            let number = numbered.len();
+            numbered
+                .entry(id)
+                .or_insert_with(|| format!("{prefix}{DEVICE_CLIP_ID}{number}"));
         }
     }
-    body
+    with_ids_renamed(svg, |id| numbered.get(id).cloned())
+}
+
+/// The prefix [`renamed`] gave `id`, where `id` names a clip path as the
+/// device does: [`DEVICE_CLIP_ID`] and a number, after nothing or a prefix.
+fn device_clip_prefix(id: &str) -> Option<&str> {
+    id.rsplit_once(DEVICE_CLIP_ID)
+        .filter(|(prefix, number)| {
+            (prefix.is_empty() || prefix.ends_with('-'))
+                && !number.is_empty()
+                && number.bytes().all(|b| b.is_ascii_hexdigit())
+        })
+        .map(|(prefix, _)| prefix)
 }
 
 /// Adds the `viewBox` Skia does not write, among the root's attributes:
@@ -3979,6 +4047,9 @@ impl Page {
                 let written = splices.apply(
                     String::from_utf8_lossy(canvas.end().as_bytes()).into(),
                 );
+                // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+                // Re-check: cargo test svg_clip_ids_count_across_documents
+                let written = with_clips_numbered(&written);
                 Ok(with_view_box(written.as_bytes(), size))
             }
 
@@ -8068,6 +8139,75 @@ mod tests {
         assert!(
             written[drawn..paint].contains("</g>"),
             "the left half's clip left open: {written}"
+        );
+    }
+
+    /// The id of the clip path in an SVG document holding one clipped draw.
+    fn clip_id() -> String {
+        let document = svg::Canvas::new(Rect::from_wh(40.0, 20.0), None);
+        let half = Rect::from_xywh(0.0, 0.0, 20.0, 20.0);
+        document.clip_rect(half, None, None);
+        document.draw_rect(half, &Paint::default());
+        let written: String =
+            String::from_utf8_lossy(document.end().as_bytes()).into();
+        declared_ids(&written)
+            .next()
+            .expect("a clip path")
+            .to_owned()
+    }
+
+    /// The defect [`with_clips_numbered`] works around: Skia's SVG device
+    /// numbers clip paths from a counter the process shares, so the same
+    /// drawing in a second document names its clip otherwise. Fails once
+    /// the device numbers each document's clips from its own start.
+    #[test]
+    fn svg_clip_ids_count_across_documents() {
+        let (first, second) = (clip_id(), clip_id());
+        assert!(first.starts_with(DEVICE_CLIP_ID), "{first}");
+        assert_ne!(first, second, "each document numbers its own clips");
+    }
+
+    /// Clip ids are numbered in the order they are declared, at every site
+    /// that names them and in one pass, so a clip renumbered to a name
+    /// another clip held is not renumbered again. A group's prefix is kept,
+    /// and an id the device did not number as a clip is left alone.
+    #[test]
+    fn clips_are_numbered_in_document_order() {
+        let svg = concat!(
+            r##"<clipPath id="cl_1a"/><clipPath id="cl_0"/>"##,
+            r##"<g clip-path="url(#cl_1a)"><g clip-path="url(#cl_0)"/></g>"##,
+            r##"<clipPath id="meo0-cl_7"/><use xlink:href="#meo0-cl_7"/>"##,
+            r##"<clipPath id="cl_x"/><clipPath id="meo0cl_2"/>"##,
+            r##"<linearGradient id="gradient_0"/><g fill="url(#gradient_0)"/>"##,
+        );
+        assert_eq!(
+            with_clips_numbered(svg),
+            concat!(
+                r##"<clipPath id="cl_0"/><clipPath id="cl_1"/>"##,
+                r##"<g clip-path="url(#cl_0)"><g clip-path="url(#cl_1)"/></g>"##,
+                r##"<clipPath id="meo0-cl_2"/><use xlink:href="#meo0-cl_2"/>"##,
+                r##"<clipPath id="cl_x"/><clipPath id="meo0cl_2"/>"##,
+                r##"<linearGradient id="gradient_0"/><g fill="url(#gradient_0)"/>"##,
+            )
+        );
+    }
+
+    /// A group's ids are prefixed where they are declared and wherever they
+    /// are named, and a name the group does not declare is left alone.
+    #[test]
+    fn a_group_s_ids_take_its_prefix() {
+        let body = concat!(
+            r##"<clipPath id="cl_3"/><g clip-path="url(#cl_3)">"##,
+            r##"<use xlink:href="#img_0"/><image id="img_0"/>"##,
+            r##"<rect fill="url(#elsewhere)"/></g>"##,
+        );
+        assert_eq!(
+            renamed(body, "meo1-"),
+            concat!(
+                r##"<clipPath id="meo1-cl_3"/><g clip-path="url(#meo1-cl_3)">"##,
+                r##"<use xlink:href="#meo1-img_0"/><image id="meo1-img_0"/>"##,
+                r##"<rect fill="url(#elsewhere)"/></g>"##,
+            )
         );
     }
 }

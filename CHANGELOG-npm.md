@@ -486,6 +486,14 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   after its `/`, so no XML parser read the file. The `viewBox` goes before
   the `/>` now.
 
+- **An SVG export comes out the same each time.**
+  `toBuffer("svg")` named each clip path after a counter Skia's SVG writer
+  shares across the whole process, so the same canvas exported twice, with
+  any other export between, came out under other clip ids, and a file kept
+  under version control or compared by hash changed with nothing in the
+  drawing changed. Clip paths are numbered in the order the document
+  declares them now, from `cl_0`.
+
 - **A `drop-shadow()` in `ctx.filter` lands in its colour exactly on a float
   canvas.** On a canvas made with `colorType: "RGBAF16"` or `"RGBAF32"`, a
   shadow was tinted through Skia's blend filter, which converts its colour

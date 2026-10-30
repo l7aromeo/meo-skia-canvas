@@ -826,3 +826,43 @@ fn no_trace_of_a_group_s_mark_is_left_in_an_export() {
         assert_eq!(faint_in_pdf(&pdf), 0, "{name}: a faint alpha in the PDF");
     }
 }
+
+/// The same canvas exported to SVG twice, with another export between,
+/// comes out byte for byte the same: its clips, and those of a group in
+/// it, are numbered by the document rather than by what the process
+/// drew before.
+#[test]
+fn an_svg_export_does_not_depend_on_what_was_exported_before() {
+    let page = |x: f32| {
+        let mut canvas = Canvas::new(WIDTH, HEIGHT);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        ctx.save();
+        ctx.begin_path();
+        ctx.rect(x, 4.0, 30.0, 30.0);
+        ctx.clip(FillRule::NonZero);
+        ctx.fill_rect(0.0, 0.0, WIDTH, HEIGHT);
+        ctx.restore();
+        ctx.save_layer_with(0.5, None, None);
+        ctx.begin_path();
+        ctx.rect(x + 10.0, 10.0, 20.0, 20.0);
+        ctx.clip(FillRule::NonZero);
+        ctx.fill_rect(0.0, 0.0, WIDTH, HEIGHT);
+        ctx.restore();
+        canvas
+    };
+    let mut first = page(2.0);
+    let before = svg_of(&mut first);
+    let document = parse(&before);
+    assert_eq!(
+        count(&document, "clipPath"),
+        2,
+        "the page's and the group's"
+    );
+    assert_eq!(opacities(&document), ["0.5"]);
+    parse(&svg_of(&mut page(30.0)));
+    assert_eq!(
+        String::from_utf8_lossy(&svg_of(&mut first)),
+        String::from_utf8_lossy(&before)
+    );
+}
