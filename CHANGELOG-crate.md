@@ -413,6 +413,18 @@ read the math functions and every length unit.
   another or used as a pattern is still clipped as Skia clips it -- see
   docs/browser-differences.md.
 
+- **A PDF or SVG writes a clip once for the draws under it, whatever is read or
+  exported between them.** A `Context2D::get_image_data` or an export between
+  two draws under one clip, or a draw the clip cuts, made a PDF or SVG of the
+  page write the clip again for the draws after it: one clipped frame of three
+  fills and a run of text came out at 10900 bytes of SVG with two clip paths
+  where it was 5740 with one, and at 16121 with three with a cut draw among
+  them. What is drawn under a clip is now recorded without it while the clip
+  and the transform last, and the clip is applied around it once, so the
+  document is the one the page makes with nothing read. A blurred draw under a
+  clip no longer splits it either. A `save_layer`, and a draw an SVG rasterizes
+  on its own, still do, as before.
+
 - **A colour lands exactly on an sRGB float canvas.** On a canvas made with
   `PixelDepth::F32` in `PixelColorSpace::Srgb`, a fill, stroke or matte in
   an `RgbaLinear` -- or in a CSS colour named in another space -- read back

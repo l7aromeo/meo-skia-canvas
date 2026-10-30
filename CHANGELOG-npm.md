@@ -772,6 +772,18 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   same route; a canvas drawn into another or used as a pattern is still clipped
   as Skia clips it -- see docs/browser-differences.md.
 
+- **A PDF or SVG writes a clip once for the draws under it, whatever is read or
+  exported between them.** A `getImageData()` or an export between two draws
+  under one clip, or a draw the clip cuts, made a PDF or SVG of the page write
+  the clip again for the draws after it: one clipped frame of three fills and a
+  run of text came out at 10900 bytes of SVG with two clip paths where it was
+  5740 with one, and at 16121 with three with a cut draw among them. What is
+  drawn under a clip is now recorded without it while the clip and the
+  transform last, and the clip is applied around it once, so the document is
+  the one the page makes with nothing read. A blurred draw under a clip no
+  longer splits it either. A `saveLayer()`, and a draw an SVG rasterizes on its
+  own, still do, as before.
+
 - **A colour named in another space lands exactly on an sRGB float canvas.**
   On a canvas made with `colorType: "RGBAF32"` in sRGB, a fill, stroke or
   matte named in another space -- `color(srgb-linear 0.5 0 0)`, say -- read
