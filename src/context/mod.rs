@@ -3277,6 +3277,44 @@ mod tests {
         clips
     }
 
+    /// A layer around a small draw under a large clip reaches what the draw
+    /// does, not the clip: a run inside a `saveLayer` keeps the bounds of
+    /// what it records, which the layer is confined to.
+    #[test]
+    fn a_layer_of_clipped_draws_reaches_what_they_draw() {
+        let mut canvas = crate::canvas::Canvas::new(400.0, 400.0);
+        canvas.set_gpu(false);
+        {
+            let ctx = canvas.context();
+            ctx.begin_path();
+            ctx.arc(200.0, 200.0, 180.3, 0.0, std::f32::consts::TAU, false)
+                .expect("a positive radius");
+            ctx.clip(crate::path::FillRule::NonZero);
+            ctx.save_layer_with(0.5, None, None);
+            ctx.begin_path();
+            ctx.move_to(190.0, 190.0);
+            ctx.line_to(215.5, 199.25);
+            ctx.line_to(197.0, 207.5);
+            ctx.close_path();
+            ctx.fill(crate::path::FillRule::NonZero);
+            ctx.restore();
+        }
+        let page = canvas.page(0).expect("a page").inner.page();
+        let reach = page
+            .layers
+            .iter()
+            .find_map(|layer| match layer {
+                layer::Layer::Group(group) => Some(group.reach()),
+                _ => None,
+            })
+            .expect("the layer")
+            .expect("a reach");
+        assert!(
+            reach.width() < 40.0 && reach.height() < 40.0,
+            "the layer reaches {reach:?}, past the triangle"
+        );
+    }
+
     /// The cut draws of one run share one coverage picture of its clip, made
     /// once for the run, rather than one each.
     #[test]

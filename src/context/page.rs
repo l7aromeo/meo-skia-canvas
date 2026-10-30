@@ -650,21 +650,25 @@ struct Run {
     shape: Option<ClipData>,
     /// The clip as coverage, made once, where the run holds a cut draw.
     coverage: Option<Arc<Coverage>>,
+    /// Whether the run records with a bounding hierarchy, which it does
+    /// inside an open `saveLayer`. Without one its picture is bounded by the
+    /// page, and so by the clip's bounds where it is played under the clip,
+    /// rather than by what it draws, and finishing it skips computing the
+    /// bounds of every operation. Inside a layer those bounds are what the
+    /// layer is confined to -- see [`LayerRec::footprint`] -- and a layer the
+    /// size of the clip around one small draw cost a page of translucent
+    /// layers under a large clip some fifteen times what it did.
+    bbh: bool,
 }
 
 impl Run {
-    /// Whether a run records with a bounding hierarchy. Without one a run's
-    /// picture is bounded by the page, and so by the clip's bounds where it
-    /// is played under the clip, rather than by what it draws: finishing it
-    /// skips computing the bounds of every operation.
-    const BBH: bool = false;
-
     /// A run of the frame `frame`, recording into `spare`'s recorders --
     /// recording already, as a run closing hands them back.
     fn open(frame: u64, clip: &Path, matrix: Matrix, spare: Spare) -> Self {
         let Spare {
             mut recorders,
             idle,
+            bbh,
         } = spare;
         static RUNS: AtomicU64 = AtomicU64::new(0);
         recorders.each(|canvas, _| {
@@ -683,6 +687,7 @@ impl Run {
             idle,
             shape: None,
             coverage: None,
+            bbh,
         }
     }
 
@@ -696,7 +701,7 @@ impl Run {
         let entry = self
             .recorders
             .finish(|recorder| recorder.finish_recording_as_picture(None));
-        self.recorders.begin_with(bounds, Run::BBH);
+        self.recorders.begin_with(bounds, self.bbh);
         self.recorders.each(|canvas, _| {
             canvas.save(); // start at depth 2
         });
@@ -748,6 +753,9 @@ struct Spare {
     /// How many runs have recorded nothing into the recording since it was
     /// begun.
     idle: u32,
+    /// Whether the recording keeps a bounding hierarchy -- see [`Run::bbh`].
+    /// A run takes the spare only where it wants the same.
+    bbh: bool,
 }
 
 impl Spare {
@@ -1037,14 +1045,18 @@ impl PageRecorder {
         if let Some(clip) = run
             && self.run.is_none()
         {
-            let spare = self.spare.take().unwrap_or_else(|| Spare {
-                recorders: Recorders::new_with(
-                    self.bounds,
-                    self.current.dual(),
-                    Run::BBH,
-                ),
-                idle: 0,
-            });
+            let bbh = !self.open.is_empty();
+            let dual = self.current.dual();
+            let bounds = self.bounds;
+            let spare = self
+                .spare
+                .take()
+                .filter(|spare| spare.bbh == bbh)
+                .unwrap_or_else(|| Spare {
+                    recorders: Recorders::new_with(bounds, dual, bbh),
+                    idle: 0,
+                    bbh,
+                });
             self.run = Some(Run::open(self.frame, clip, matrix, spare));
         }
     }
@@ -1078,13 +1090,14 @@ impl PageRecorder {
             None => run.idle + 1,
         };
         let shape = run.split.then(|| run.shape());
+        let bbh = run.bbh;
         let mut recorders = run.recorders;
         let idle = match idle > Spare::IDLE_FRAMES {
             true => {
                 let _ = recorders.finish(|recorder| {
                     recorder.finish_recording_as_picture(None)
                 });
-                recorders.begin_with(self.bounds, Run::BBH);
+                recorders.begin_with(self.bounds, bbh);
                 recorders.each(|canvas, _| {
                     canvas.save(); // start at depth 2
                 });
@@ -1092,7 +1105,11 @@ impl PageRecorder {
             }
             false => idle,
         };
-        self.spare = Some(Spare { recorders, idle });
+        self.spare = Some(Spare {
+            recorders,
+            idle,
+            bbh,
+        });
         let Some(entry) = entry else {
             return;
         };
