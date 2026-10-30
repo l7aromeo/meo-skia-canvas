@@ -8521,10 +8521,9 @@ fn an_rgba_linear_is_one_colour_in_every_reader_on_every_canvas() {
 
 /// A gradient stop is the colour it names on every canvas, interpolated in
 /// any space: two equal stops of a P3 colour paint that colour on a P3
-/// canvas whichever of the sixteen interpolation spaces carries them. Tagged
-/// stops once crashed Skia's OKLCH interpolation, and untagged ones were read
-/// as already in the canvas's space -- the UPSTREAM note on
-/// `Shader::linear_gradient` re-checks the first by this test.
+/// canvas whichever of the sixteen interpolation spaces carries them. An
+/// untagged stop is read as already in the canvas's space, which is why
+/// `Shader::linear_gradient` tags them.
 #[test]
 fn a_tagged_stop_is_one_colour_in_every_space() {
     let colour = RgbaLinear::from_css("color(display-p3 0.8 0.3 0.2)")

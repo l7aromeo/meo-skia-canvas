@@ -20,7 +20,7 @@
 //! decorating box". Underlines and overlines are painted beneath the glyphs
 //! and line-through over them, section 5.1's order after CSS 2 Appendix E.
 //!
-//! UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+//! UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
 //! Re-check: cargo test a_decoration_sits_where_its_font_says
 //! with SkParagraph's own decorations painted in place of these.
 //! SkParagraph's `Decorations::paint` centres each line on the position

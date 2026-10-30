@@ -15,7 +15,7 @@
 //! there in C++, unreachable from Rust, and the container is small enough to
 //! write.
 //!
-//! UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+//! UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
 //! Re-check: look for `EncodeAnimated` in skia-safe's
 //! `src/encode_/webp_encoder.rs`. While the `TODO` is still the end of that
 //! module the binding does not exist and this module has to stay.

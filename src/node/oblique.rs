@@ -23,7 +23,9 @@
 //! font -- see [`whole_graphemes`] -- and the paragraph is built again from
 //! its steps. A colour change left inside a ligature has [`Passes`] draw
 //! the paragraph too, the ligature whole. Any other paragraph is built once,
-//! as it is filled in, and painted by `Paragraph::paint` alone.
+//! as it is filled in, and painted by `Paragraph::paint` alone, but on a
+//! canvas that shears its glyphs past what FreeType draws -- see
+//! [`paint_glyphs`].
 
 use crate::{
     context::{
@@ -37,14 +39,15 @@ use crate::{
         },
         font_library::FontEpoch,
         typography::{
-            GlyphRun, GlyphRunRef, SLNT, Shear, glyph_runs, run_shear,
-            sheared_blob, visit_glyph_runs,
+            FAKE_ITALIC_SKEW, GlyphRun, GlyphRunRef, SLNT, Shear, draw_glyphs,
+            draw_outlines, drawn_as_outlines, glyph_runs, may_draw_outlines,
+            run_shear, sheared_blob, visit_glyph_runs,
         },
     },
 };
 use skia_safe::{
-    BlurStyle, Canvas, Color4f, FontArguments, FontStyle, MaskFilter, Paint,
-    PictureRecorder, Point, Rect, TextBlob,
+    BlurStyle, Canvas, Color4f, Font, FontArguments, FontStyle, GlyphId,
+    MaskFilter, Paint, PictureRecorder, Point, Rect, TextBlob,
     font_arguments::{VariationPosition, variation_position::Coordinate},
     font_style::Slant,
     textlayout::{
@@ -466,7 +469,9 @@ impl ParagraphRecipe {
     /// The paragraph, not yet laid out, and what paints it where it has an
     /// oblique range, a decoration, a shadow or a background, or a colour
     /// change that a layout may find inside a ligature -- see [`Passes`]. A
-    /// paragraph with none of these is painted by `Paragraph::paint` alone.
+    /// paragraph with none of these is painted by [`paint_glyphs`], which is
+    /// `Paragraph::paint` but on a canvas that shears it past what FreeType
+    /// draws.
     pub(crate) fn build(mut self) -> (Paragraph, Option<Passes>) {
         // Asked of what was taken off rather than of the boxes, which are
         // collected only for a paragraph that has passes to hand them to.
@@ -1283,7 +1288,7 @@ impl StyleDecoration {
 /// has its own `FontLibrary`, and `TextEngine` cannot leave its thread.
 /// `Paragraph::layout` runs to the end without calling back into this
 /// crate, so nothing on that thread lays out between the switches either.
-// UPSTREAM: skia-safe 0.153.3 -- https://github.com/google/skia/commit/e0d79efbf171fdd78063f7673d517491154c9a7a -- worked around
+// UPSTREAM: skia-safe 0.156.0 -- https://github.com/google/skia/commit/e0d79efbf171fdd78063f7673d517491154c9a7a -- worked around
 // Re-check: cargo test a_half_leading_paragraph_is_not_laid_out_as_another_was
 pub(crate) fn without_paragraph_cache<T>(
     collection: Option<&FontCollection>,
@@ -1313,7 +1318,8 @@ pub(crate) fn without_paragraph_cache<T>(
 ///
 /// Where that order changes nothing, the glyphs are `Paragraph::paint`'s,
 /// between the lines beneath them and the lines over them -- see
-/// [`Self::skia_glyphs`].
+/// [`Self::skia_glyphs`] -- but on a canvas that shears them past what
+/// FreeType draws, where [`paint_glyphs`] draws them.
 pub(crate) struct Passes {
     /// The text each style covers, in UTF-8 offsets into the paragraph's
     /// text, in order, with its slot -- see [`ParagraphRecipe::shadows`].
@@ -1384,12 +1390,15 @@ struct PaintedRun {
     slot: usize,
     /// Whether the glyphs are in an oblique style.
     sheared: bool,
-    /// The glyphs and their positions before any shear, for the tests to
-    /// hold against SkParagraph's runs.
-    #[cfg(test)]
-    glyphs: Vec<skia_safe::GlyphId>,
-    #[cfg(test)]
+    /// The run's font, glyphs and their positions before any shear, and the
+    /// shear: the blob's makings, for a canvas that shears the run past what
+    /// FreeType draws to draw it from its outlines instead -- see
+    /// [`drawn_as_outlines`] -- and for the tests to hold against
+    /// SkParagraph's runs.
+    font: Font,
+    glyphs: Vec<GlyphId>,
     positions: Vec<Point>,
+    shear: Shear,
 }
 
 /// How near two reports of a glyph's place are the same place, in pixels: a
@@ -1512,7 +1521,7 @@ impl Passes {
     ///
     /// A paragraph here only for [`Self::ligature_edges`] is followed only
     /// where one of them falls inside a glyph cluster: a lookup for each
-    /// edge, and otherwise `Paragraph::paint` draws it.
+    /// edge, and otherwise [`paint_glyphs`] draws it.
     pub(crate) fn follow(&mut self, paragraph: &mut Paragraph) {
         if self.followed {
             return;
@@ -1682,10 +1691,10 @@ impl Passes {
             line: run.line,
             slot,
             sheared,
-            #[cfg(test)]
+            font: run.font.clone(),
             glyphs: run.glyphs[at.clone()].to_vec(),
-            #[cfg(test)]
             positions: run.positions[at].to_vec(),
+            shear,
         });
     }
 
@@ -1706,16 +1715,17 @@ impl Passes {
     /// line at a time -- see [`Passes`] -- each glyph drawn here with the
     /// paint SkParagraph would have used. Where the layout was found to be
     /// one whose order of lines changes nothing, the glyphs are
-    /// `Paragraph::paint`'s instead, between every line's lines beneath and
+    /// [`paint_glyphs`]'s instead, between every line's lines beneath and
     /// over them -- see [`Self::skia_glyphs`].
     fn paint_followed(
         &self,
-        paragraph: &Paragraph,
+        paragraph: &mut Paragraph,
         canvas: &Canvas,
         origin: Point,
     ) {
+        let glyphs = GlyphPaints::Slots(&self.slots, &self.paints);
         if !self.drawn {
-            paragraph.paint(canvas, origin);
+            paint_glyphs(paragraph, canvas, origin, glyphs);
             return;
         }
         let base = Paint::default();
@@ -1733,7 +1743,7 @@ impl Passes {
                     PARAGRAPH_FAINT,
                 );
             }
-            paragraph.paint(canvas, origin);
+            paint_glyphs(paragraph, canvas, origin, glyphs);
             for line in 0..self.lines {
                 let spans = decorate::on_line(&self.spans, line);
                 decorate::paint(
@@ -1810,6 +1820,94 @@ impl Passes {
                     &background.paint,
                 );
             }
+        }
+    }
+}
+
+/// What paints each glyph [`paint_glyphs`] draws.
+#[derive(Clone, Copy)]
+pub(crate) enum GlyphPaints<'a> {
+    /// The paint of the slot whose text the glyph is from, or of the glyph
+    /// before on its line where it is from none -- as [`Passes::painted`]
+    /// paints a glyph.
+    Slots(&'a [(Range<usize>, usize)], &'a [Paint]),
+    /// The paint of the style SkParagraph reports the glyph's text in on its
+    /// line, for a paragraph built without [`Passes`].
+    Styles,
+}
+
+/// Paints `paragraph`, whose styles draw nothing but glyphs, at `origin` on
+/// `canvas` as `Paragraph::paint` paints it, but for any run `canvas` shears
+/// past what FreeType draws, which is drawn from its outlines -- see
+/// [`drawn_as_outlines`] -- in the paint `paints` gives each glyph.
+///
+/// `Paragraph::paint` itself wherever no run can be past that, which is
+/// every canvas whose transform is not steeply sheared: SkParagraph hands
+/// FreeType each run's whole transform, and takes it to be drawn.
+pub(crate) fn paint_glyphs(
+    paragraph: &mut Paragraph,
+    canvas: &Canvas,
+    origin: Point,
+    paints: GlyphPaints<'_>,
+) {
+    if !may_draw_outlines(canvas, FAKE_ITALIC_SKEW) {
+        paragraph.paint(canvas, origin);
+        return;
+    }
+    // Each line's styles, by the UTF-8 offset each starts at, read before
+    // the runs are, since both borrow the paragraph.
+    let styles: Vec<Vec<(usize, Paint)>> = match paints {
+        GlyphPaints::Slots(..) => Vec::new(),
+        GlyphPaints::Styles => paragraph
+            .get_line_metrics()
+            .iter()
+            .map(|line| {
+                line.get_style_metrics(0..usize::MAX)
+                    .into_iter()
+                    .map(|(at, metrics)| (at, foreground(metrics.text_style)))
+                    .collect()
+            })
+            .collect(),
+    };
+    let unstyled = Paint::default();
+    // The slot the last glyph took, and the line it is on.
+    let mut last = (usize::MAX, 0);
+    for run in glyph_runs(paragraph) {
+        let glyph_paints: Vec<&Paint> = run
+            .starts
+            .iter()
+            .map(|&start| match paints {
+                GlyphPaints::Slots(slots, paints) => {
+                    if last.0 != run.line {
+                        last = (run.line, 0);
+                    }
+                    last.1 = decorate::box_at(slots, start as usize)
+                        .unwrap_or(last.1);
+                    &paints[last.1]
+                }
+                GlyphPaints::Styles => {
+                    let line =
+                        styles.get(run.line).map_or(&[][..], Vec::as_slice);
+                    let after =
+                        line.partition_point(|(at, _)| *at <= start as usize);
+                    line.get(after.saturating_sub(1))
+                        .map_or(&unstyled, |(_, paint)| paint)
+                }
+            })
+            .collect();
+        let mut from = 0;
+        for piece in glyph_paints.chunk_by(|a, b| a == b) {
+            let to = from + piece.len();
+            draw_glyphs(
+                canvas,
+                &run.font,
+                &run.glyphs[from..to],
+                &run.positions[from..to],
+                &Shear::None,
+                origin + run.origin,
+                piece[0],
+            );
+            from = to;
         }
     }
 }
@@ -2046,9 +2144,24 @@ impl Cast<'_> {
 }
 
 impl PaintedRun {
-    /// Draws the run with the paragraph's origin at `origin`.
+    /// Draws the run with the paragraph's origin at `origin`: its blob, or
+    /// its outlines where `canvas` shears it past what FreeType draws.
     fn draw(&self, canvas: &Canvas, origin: Point, paint: &Paint) {
-        canvas.draw_text_blob(&self.blob, origin + self.origin, paint);
+        let at = origin + self.origin;
+        match drawn_as_outlines(canvas, &self.font, &self.shear) {
+            true => draw_outlines(
+                canvas,
+                &self.font,
+                &self.glyphs,
+                &self.positions,
+                &self.shear,
+                at,
+                paint,
+            ),
+            false => {
+                canvas.draw_text_blob(&self.blob, at, paint);
+            }
+        }
     }
 }
 

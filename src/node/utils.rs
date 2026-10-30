@@ -3623,7 +3623,7 @@ pub fn skia_paint_color_onto(
     space: &ColorSpace,
     destination: &ColorSpace,
 ) -> (Color4f, ColorSpace) {
-    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
     // Re-check: cargo test an_srgb_float_fill_reads_back_as_its_encoding with
     // this returning `skia_paint_color(color, space)`.
     //

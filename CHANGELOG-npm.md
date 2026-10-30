@@ -737,6 +737,26 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A `drop-shadow()` in `ctx.filter` lands in its colour exactly on a float
+  canvas.** On a canvas made with `colorType: "RGBAF16"` or `"RGBAF32"`, a
+  shadow was tinted through Skia's blend filter, which converts its colour
+  through an approximate transfer function: `color(srgb-linear 0.5 0.5 0.5)`
+  landed 6.29e-5 from its encoding on an sRGB F32 canvas, and a shadow parted
+  from a fill of its colour by up to 2.6e-4 on a Display P3 one, and by a
+  whole half-float step on F16. The colour is converted on this side now and
+  handed to Skia where nothing converts it again, so a shadow is its fill to
+  the bit, in sRGB, `srgb-linear`, Display P3 and Rec. 2020 canvases alike.
+
+- **A filter set through `ctx.imageFilter` keeps a float canvas's floats.** On
+  a canvas made with `colorType: "RGBAF16"` or `"RGBAF32"`, a draw through a
+  CanvasKit image filter came back in eight bits: Skia draws a filtered draw
+  through a layer of its own, and on the CPU makes that layer eight bits a
+  channel whatever the canvas, so a fill in `rgb(0 0 255 / 0.003)` through an
+  unmoving offset read 1/255. It is run on a layer of the canvas's own floats
+  now, and reads 0.003, for a path, text, an image and a canvas drawn in. Its
+  lengths stay in the draw's own units, turning and stretching with the
+  transform as before. Beside a `ctx.filter` it keeps Skia's layer.
+
 - **A `Paragraph`'s blurred text shadow is the exact blur of its text.** A
   shadow was blurred a glyph at a time by Skia's mask filter, which on macOS
   draws a glyph heavier than the glyph itself -- a 16px word through one at
@@ -982,16 +1002,17 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   `"rec2020-hlg"` spaces.
 
 - **A text decoration's colour is painted at the precision it names, as a
-  fill's is.** The colour in `ctx.textDecoration` was rounded to eight bits
-  of sRGB when it was set. On a canvas made with `colorType: "RGBAF16"` or
+  fill's is.** The colour in `ctx.textDecoration` was rounded to eight bits of
+  sRGB when it was set. On a canvas made with `colorType: "RGBAF16"` or
   `"RGBAF32"`, `underline rgb(0 0 0 / 0.3)` drew its line at 77/255 beside
-  text drawn at 0.3, and a colour under half of one 255th drew no line at
-  all. On an eight-bit canvas a colour outside sRGB was gamut-mapped where
-  a fill of it is clipped: `color(display-p3 0 1 0)` drew its line at
-  `0,251,41` beside a fill at `0,255,0`. The line now draws the bytes a fill
-  draws, on every canvas; a colour of whole bytes draws as it did. The
-  colour of a `drop-shadow()` in `ctx.filter` is kept as named too, and is
-  the colour the exact drop-shadow is tinted with.
+  text drawn at 0.3, and a colour under half of one 255th drew no line at all.
+  On an eight-bit canvas a colour outside sRGB was gamut-mapped where a fill
+  of it is clipped: `color(display-p3 0 1 0)` drew its line at `0,251,41`
+  beside a fill at `0,255,0`. The line now draws the bytes a fill draws, on
+  every canvas; a colour of whole bytes draws as it did. The colour of a
+  `drop-shadow()` in `ctx.filter` is kept as named too: on an eight-bit sRGB
+  canvas the shadow draws the bytes a fill of its colour draws, and on a float
+  canvas the colour a fill of it paints.
 
 - **A draw too faint for eight bits draws on a float canvas.** On a canvas
   made with `colorType: "RGBAF16"` or `"RGBAF32"`, a fill under
@@ -2048,9 +2069,20 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
   loaded, and draws the same. Nothing the watcher leaves on a thread keeps
   its event loop alive.
 
-- **Skia M153 to M156**, by way of `skia-safe` 0.156.0. No expected pixel
-  moved in either suite; every workaround for a Skia defect was re-checked and
-  is still needed.
+- **Skia M153 to M156**, by way of `skia-safe` 0.156.0. Every workaround for
+  a Skia defect was re-checked against it and is still needed, but for two
+  that this release had no way to re-check: a half-float stage on x86
+  machines without AVX2 or F16C, and what it costs to measure a text run's
+  bounds, which needs a profile. One drawing changes, on Linux alone: the
+  FreeType M156 brings, 2.14.3, refuses a glyph transform sheared past about
+  79.65 degrees and draws the glyph upright instead, so text sheared past
+  about 79.3 degrees -- by an `oblique` angle or by the canvas's transform --
+  is now drawn as paths from the glyphs' outlines, sheared here. Its shape is
+  right; against M153's anti-aliased glyphs, its edge pixels differ by about
+  100 levels at 12 to 40px and up to 18 at 200px, and it carries up to 2% more
+  ink, 13% for 12px text at 89 degrees. Below that shear nothing moved: 270
+  scenes and the gallery's images are identical on Linux and macOS, and its
+  animations on Linux, where their encoding repeats run to run.
 
 ### Known, and not fixed here
 

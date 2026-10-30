@@ -380,7 +380,7 @@ impl Baked {
         if let Some((rect, coverage)) = self.interior {
             let fill =
                 Color4f::new(color.r, color.g, color.b, color.a * coverage);
-            // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+            // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
             // Re-check: cargo test a_trimmed_bake_is_the_whole_product
             // with the fill given as the paint's colour.
             //

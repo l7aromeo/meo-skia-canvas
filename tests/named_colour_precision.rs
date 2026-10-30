@@ -219,11 +219,16 @@ const MIDDLE: f32 = SIDE / 2.0;
 /// colour draws.
 #[test]
 fn an_eight_bit_drop_shadow_draws_the_fill_s_bytes() {
+    // A translucent colour whose premultiplied channel falls on a tie at
+    // the rounded alpha: a fill paints green at 39, 0.5 of 77, and the exact
+    // 0.5 of 0.3, 38.25 levels, rounds to 38.
     for css in [
         "rgb(10.5 20.4 30.6)",
         "rgb(10.5 20.4 30.6 / 0.3)",
         "color(display-p3 0 1 0)",
         "#336699",
+        "color(srgb 0.25 0.5 0.75 / 0.3)",
+        "rgb(255 128 1 / 0.5)",
     ] {
         let mut shadow = shadowed(PixelDepth::Uint8, css);
         let mut fill = canvas(PixelDepth::Uint8);
@@ -238,5 +243,41 @@ fn an_eight_bit_drop_shadow_draws_the_fill_s_bytes() {
                 .to_vec()
         };
         assert_eq!(at(&mut shadow), at(&mut fill), "{css}");
+    }
+}
+
+/// A float canvas draws a drop-shadow in the alpha its colour names, a
+/// faint one included: the shadow is tinted on a layer of the canvas's own
+/// floats, where Skia's layer for it was eight bits and drew 77/255 for 0.3
+/// and nothing for 0.001.
+#[test]
+fn a_float_drop_shadow_keeps_its_colour_s_alpha() {
+    for depth in [PixelDepth::F16, PixelDepth::F32] {
+        for alpha in [0.3f32, 0.001] {
+            let css = format!("rgb(10 20 30 / {alpha})");
+            let got = shadowed(depth, &css)
+                .context()
+                .get_image_data_as(
+                    MIDDLE,
+                    MIDDLE,
+                    1.0,
+                    1.0,
+                    PixelExportOptions {
+                        depth: PixelDepth::F32,
+                        premultiplied: true,
+                        ..PixelExportOptions::default()
+                    },
+                )
+                .expect("a pixel")
+                .pixels()[12..16]
+                .try_into()
+                .map(f32::from_le_bytes)
+                .expect("an alpha");
+            assert!(
+                (got - alpha).abs() <= alpha * TOLERANCE,
+                "on an {depth:?} canvas {css} should cast a shadow of alpha \
+                 {alpha}, got {got}",
+            );
+        }
     }
 }

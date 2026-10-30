@@ -51,7 +51,7 @@ use crate::{
     css::{
         Dimension, Expect, FontUnits, Percent, ROOT_FONT_PX, evaluate,
         is_ident_code_point, is_math, parse_angle, parse_decoration,
-        parse_filter, split_number, without_comments, would_start_ident,
+        parse_filter_named, split_number, without_comments, would_start_ident,
         written_zero,
     },
     error::Error,
@@ -1896,8 +1896,15 @@ impl Context2D {
     /// # Ok::<(), meo_skia_canvas::error::Error>(())
     /// ```
     pub fn set_filter_css(&mut self, css: &str) -> Result<(), Error> {
-        let ops = parse_filter(css, &self.inner.state.filter_units())?;
-        self.set_filter(&ops)?;
+        let parsed = parse_filter_named(css, &self.inner.state.filter_units())?;
+        for (op, _) in &parsed {
+            op.validate()?;
+        }
+        let specs: Vec<_> = parsed
+            .into_iter()
+            .map(|(op, named)| op.to_spec_named(named))
+            .collect();
+        self.inner.state.filter = Filter::new(css, &specs);
         // Echo the caller's own text, exactly -- case, spacing and spelling,
         // `"  NONE "` included -- as Chrome and the JavaScript `filter`
         // getter read it back, rather than what `set_filter` derived from
@@ -2723,7 +2730,7 @@ impl Context2D {
             for (i, slot) in values.iter_mut().enumerate() {
                 *slot = matrix[i];
             }
-            // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+            // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
             // Re-check: replace the `is_finite` filter below with a bare
             // `Some(Projection { values })`, then cargo test
             // a_projection_that_cannot_be_solved_is_none. The test passes
