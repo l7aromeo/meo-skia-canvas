@@ -290,17 +290,7 @@ jobs:
           cd skia-canvas
           git submodule update --init --depth 1 vendor/freetype vendor/zlib
 
-      # `-F0`, so a hunk that no longer matches fails the build instead of being
-      # placed by guesswork. The patch stops `skia-bindings` linking freetype and
-      # fontconfig as shared libraries and links a static fontconfig instead, and
-      # both hunks match the pinned `skia-safe` exactly today -- so the fuzz that
-      # used to be allowed here bought nothing and hid the case it was there for.
-      #
-      # A misapplied hunk is invisible to everything downstream. The binary comes
-      # out linking fontconfig dynamically, and the ABI assertions below read
-      # symbol versions rather than `NEEDED`, so they pass. The first report would
-      # be an install failing on a machine without the right libfontconfig.
-      - name: Checkout rust-skia and apply static deps patch
+      - name: Checkout rust-skia
         run: |
           # Assigned and exported separately: `export VAR=$(cmd)` takes its
           # status from `export`, so a failing `just skia-version` would go
@@ -308,13 +298,6 @@ jobs:
           TAG=$(cd skia-canvas && just skia-version)
           export TAG
           git clone --depth 1 --branch "$TAG" --recurse-submodules -j8 https://github.com/rust-skia/rust-skia.git
-          # UPSTREAM: skia-safe 0.153.3 -- #59 -- worked around
-          # Re-check: `gh api repos/rust-skia/rust-skia/tags` for a release
-          # after 0.153.3, then confirm the EMBED_FREETYPE gate from
-          # rust-skia#1326 is in that tag's
-          # skia-bindings/build_support/platform/linux.rs. #59 carries the
-          # replacement for both hunks and what to verify afterwards.
-          patch -d rust-skia -p1 -F0 < ./skia-canvas/containers/use-static-fontconfig.patch
 
       - name: Vendor Skia dependencies
         run: |
@@ -322,9 +305,32 @@ jobs:
           ln -s "$GITHUB_WORKSPACE/skia-canvas/vendor/freetype" rust-skia/skia-bindings/skia/third_party/externals/freetype
           ln -s "$GITHUB_WORKSPACE/skia-canvas/vendor/zlib" rust-skia/skia-bindings/skia/third_party/externals/zlib
 
+      # fontconfig is linked statically from the image's /opt/skia-static-libs,
+      # whose `libfontconfig.a` a `-L native=` path on RUSTFLAGS puts ahead of the
+      # system directories: it outranks the build script's own link search, so
+      # pkg-config's `-lfontconfig` resolves to the static library. Appended, not
+      # set: the image's RUSTFLAGS carry the linker and `-static-libstdc++` (glibc)
+      # or `-crt-static` (musl). freetype is Skia's own, embedded, which
+      # skia-bindings no longer links from the system under `embed-freetype`
+      # (rust-skia#1326, in 0.156.0). `src/bdf_stub.c` answers the BDF calls the
+      # static fontconfig makes.
       - name: Build module
         run: |
+          export RUSTFLAGS="${RUSTFLAGS:-} -L native=/opt/skia-static-libs"
           cd skia-canvas && just use-local-skia && just build-release
+
+      # A link that missed the static library does not fail: it links the
+      # shared one, and the ABI checks below read symbol versions, not NEEDED.
+      - name: fontconfig and freetype are linked statically
+        run: |
+          # The glibc image is AlmaLinux (dnf), the musl one Alpine (apk).
+          command -v objdump >/dev/null || dnf -y install binutils || apk add --no-cache binutils
+          needed=$(objdump -p skia-canvas/lib/skia.node | awk '$1 == "NEEDED" { print $2 }')
+          echo "$needed"
+          if echo "$needed" | grep -E '^lib(fontconfig|freetype)\.'; then
+            echo "::error::lib/skia.node needs a shared fontconfig or freetype; the static link from /opt/skia-static-libs did not take. See #59."
+            exit 1
+          fi
 
       # 2.34 is a support commitment, not a measurement. It is the glibc of the two platforms this
       # project has to clear, both supported for years yet frozen by design:
