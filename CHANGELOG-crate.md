@@ -213,6 +213,19 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A `drop-shadow()` set by `Context2D::set_filter_css` lands in its colour
+  exactly on a float canvas.** On a canvas made with `PixelDepth::F16` or
+  `PixelDepth::F32`, a shadow was tinted through Skia's blend filter, which
+  converts its colour through an approximate transfer function:
+  `color(srgb-linear 0.5 0.5 0.5)` landed 6.29e-5 from its encoding on an sRGB
+  F32 canvas, and a shadow parted from a fill of its colour by up to 2.6e-4 on
+  a Display P3 one, and by a whole half-float step on F16. The colour is
+  converted on this side now and handed to Skia where nothing converts it
+  again, so a shadow is its fill to the bit, in sRGB, `srgb-linear`, Display
+  P3 and Rec. 2020 canvases alike. A colour given through the typed
+  `FilterOp::DropShadow` is held in an `RgbaLinear`, whose linear-light `f32`
+  lands it within a unit in the last place.
+
 - **A filter set by `Context2D::set_image_filter` keeps a float canvas's
   floats.** On a canvas made with `PixelDepth::F16` or `PixelDepth::F32`, a
   draw through an `ImageFilter` came back in eight bits: Skia draws a filtered
@@ -431,7 +444,7 @@ window be changed after it opens.** No signature moves and nothing is removed.
   did. The colour of a `drop-shadow()` read by `Context2D::set_filter_css`,
   and its `FilterOp::DropShadow`, is kept as named too: on an eight-bit sRGB
   canvas the shadow draws the bytes a fill of its colour draws, and on a float
-  canvas its alpha as named and its colour within 1.1e-4 of a fill's.
+  canvas the colour a fill of it paints.
 
 - **A draw too faint for eight bits draws on a float canvas.** On a canvas
   made with `PixelDepth::F16` or `PixelDepth::F32` as its `color_type`, a

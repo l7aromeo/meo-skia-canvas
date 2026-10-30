@@ -34,6 +34,8 @@ use skia_safe::{Recorder, gpu};
 use crate::context::exact_blur_gpu;
 use crate::{
     context::exact_blur::{self, REACH_SIGMAS},
+    node::utils::color_in_canvas_space,
+    pixels::PixelColorSpace,
     started,
 };
 
@@ -836,7 +838,9 @@ fn shadowed(
 /// a shadow's bytes are a fill's: Skia rounds a fill's colour to the layer's
 /// bytes and premultiplies by the rounded alpha, and
 /// `color(srgb 0.25 0.5 0.75 / 0.3)` fills green at 39 of 255 where 0.5 of
-/// 0.3 is 38.25. A float layer takes the colour as named.
+/// 0.3 is 38.25. A float layer takes the colour as named, converted
+/// exactly by [`exact_tint`] where the layer is in a space this crate
+/// converts, and through Skia's blend otherwise.
 fn tint(
     colour: Color4f,
     space: &ColorSpace,
@@ -847,11 +851,13 @@ fn tint(
         ColorType::RGBA8888 | ColorType::BGRA8888
     );
     if !bytes {
-        return color_filters::blend_with_color_space(
-            colour,
-            Some(space.clone()),
-            BlendMode::SrcIn,
-        );
+        return exact_tint(colour, space, layer).or_else(|| {
+            color_filters::blend_with_color_space(
+                colour,
+                Some(space.clone()),
+                BlendMode::SrcIn,
+            )
+        });
     }
     let pixel = layer.with_dimensions((1, 1));
     let mut surface = started::raster(&pixel, None, None)?;
@@ -884,6 +890,38 @@ fn tint(
         layer.color_space(),
         BlendMode::SrcIn,
     )
+}
+
+/// [`tint`] on a float layer in a space this crate converts: the colour
+/// converted to the layer's space in `f64` on this side, and handed to Skia
+/// as the offsets of a colour matrix worked in that space, its alpha the
+/// colour's alpha of what it tints. Skia converts a colour a blend filter
+/// holds through skcms's approximate transfer function, whatever space it
+/// is tagged with: a shadow in `color(srgb-linear 0.5 0.5 0.5)` landed
+/// 6.29e-5 from its encoding on an sRGB F32 page, and pre-encoded to
+/// `color(srgb ...)` it landed the same. A matrix's offsets are not
+/// converted. `None` where the layer has no space or one this crate does
+/// not convert.
+fn exact_tint(
+    colour: Color4f,
+    space: &ColorSpace,
+    layer: &ImageInfo,
+) -> Option<ColorFilter> {
+    let working = layer.color_space()?;
+    let canvas = PixelColorSpace::matching(&working)?;
+    let [r, g, b] =
+        color_in_canvas_space(colour, space, canvas)?.map(|c| c as f32);
+    #[rustfmt::skip]
+    let matrix = [
+        0.0, 0.0, 0.0, 0.0, r,
+        0.0, 0.0, 0.0, 0.0, g,
+        0.0, 0.0, 0.0, 0.0, b,
+        0.0, 0.0, 0.0, colour.a, 0.0,
+    ];
+    Some(color_filters::matrix_row_major(
+        &matrix,
+        color_filters::Clamp::No,
+    ))
 }
 
 /// `floats`, an F32 image, scaled by `gain` into `info`'s type in memory:
