@@ -3,8 +3,9 @@
 // themselves contradict.
 //
 // The unreleased sections open with a paragraph that counts what follows --
-// "Seven entries below break", and in the npm file a cross-reference reading
-// "five of that file's seven breaking entries". Both are claims about a list
+// "Seven entries below break", "Thirty-two changes can break working code",
+// and in the npm file a cross-reference reading "five of that file's seven
+// breaking entries". Each is a claim about a list
 // that grows underneath them, and both went stale three times in one day:
 // "three of the entries below break the crate's public API" survived a split
 // that moved those entries into another file; "the crate breaks in three
@@ -31,6 +32,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
+/** The number words up to nineteen; the tens and their compounds follow. */
 const WORDS = {
   one: 1,
   two: 2,
@@ -51,18 +53,53 @@ const WORDS = {
   seventeen: 17,
   eighteen: 18,
   nineteen: 19,
+};
+
+/** "twenty" to "ninety", which take a unit after a hyphen: "thirty-two". */
+const TENS = {
   twenty: 20,
+  thirty: 30,
+  forty: 40,
+  fifty: 50,
+  sixty: 60,
+  seventy: 70,
+  eighty: 80,
+  ninety: 90,
 };
 
+const UNITS = Object.keys(WORDS).slice(0, 9);
+
+/** A count as a digit string or a number word up to ninety-nine, or `null`. */
 const numeral = (token) => {
-  const word = WORDS[token.toLowerCase()];
-  return word ?? (/^\d+$/.test(token) ? Number(token) : null);
+  if (/^\d+$/.test(token)) return Number(token);
+  const word = token.toLowerCase();
+  if (word in WORDS) return WORDS[word];
+  const [tens, unit, extra] = word.split("-");
+  if (extra !== undefined || !(tens in TENS)) return null;
+  if (unit === undefined) return TENS[tens];
+  return UNITS.includes(unit) ? TENS[tens] + WORDS[unit] : null;
 };
 
-/** The UNRELEASED block of a changelog, or "" when it has none. */
+/**
+ * Anything that reads as a count: a digit string, or a number word up to
+ * ninety-nine. Used to find counts no claim pattern recognised.
+ */
+const COUNT = new RegExp(
+  `\\b(?:\\d+|(?:${Object.keys(TENS).join("|")})(?:-(?:${UNITS.join("|")}))?|` +
+    `${Object.keys(WORDS).join("|")})\\b`,
+  "gi",
+);
+
+/**
+ * The unreleased block of a changelog, or "" when it has none. The heading
+ * is matched without regard to case: `[UNRELEASED]` and `⟩ Unreleased` are
+ * both in use, and matching only the first made every claim under the second
+ * invisible -- "Ten changes can break working code" against 32 entries
+ * passed.
+ */
 function unreleased(text) {
   const lines = text.split("\n");
-  const start = lines.findIndex((l) => /^## .*UNRELEASED/.test(l));
+  const start = lines.findIndex((l) => /^## .*unreleased/i.test(l));
   if (start === -1) return "";
   const rest = lines.slice(start + 1).findIndex((l) => /^## /.test(l));
   return lines
@@ -82,9 +119,14 @@ function entriesUnder(block, section) {
 }
 
 // The prose is free-form, so each pattern is anchored on wording specific
-// enough that a match is certainly a claim about a count. A sentence no
-// pattern matches is not checked: the gate catches drift in the claims it
-// knows, and does not constrain how prose may be phrased.
+// enough that a match is certainly a claim about a count.
+//
+// A COUNT NO PATTERN RECOGNISES IS REFUSED, NOT SKIPPED. This used to check
+// only the claims it knew and let any other sentence through, and the intros
+// were reworded from "N entries below break" to "N changes can break working
+// code" with nothing reading the new shape: a stale count passed. So two
+// further rules make wording drift fail rather than go quiet -- see
+// `unrecognisedCounts` and the check that a Breaking list has a claim at all.
 //
 // ONCE A PATTERN MATCHES, THOUGH, THE CLAIM IS CHECKED OR THE RUN FAILS.
 // Those are different situations and used to share an outcome. An unmatched
@@ -92,7 +134,8 @@ function entriesUnder(block, section) {
 // cannot be read is a claim that has been recognised as a claim, and letting
 // it through leaves a sentence that looks checked, is not, and reports green.
 // "Ten" against eleven entries failed and "Ninety" passed, purely because the
-// table below stops at twenty.
+// number words then stopped at twenty. They reach ninety-nine now, and a word
+// past them is refused by the same rule.
 const CLAIMS = [
   {
     // "Seven entries below break", and "six of the entries below break" --
@@ -101,7 +144,13 @@ const CLAIMS = [
     // number, and the claim went to the branch that used to skip silently.
     // The npm file has been phrased that way and unchecked for as long as
     // this file has existed.
-    pattern: /(\w+)(?: of the)? entries below break/gi,
+    pattern: /([\w-]+)(?: of the)? entries below break/gi,
+    subject: "self",
+  },
+  {
+    // "Thirty-two changes can break working code" -- the intros' wording
+    // since the 7.0 restructure, unread until this pattern was added.
+    pattern: /([\w-]+) changes can break/gi,
     subject: "self",
   },
   {
@@ -109,7 +158,7 @@ const CLAIMS = [
     // *other* file's Breaking list, which is the half that drifts; the first
     // is a subset of it, checked as far as arithmetic reaches -- see
     // `checkSubset`.
-    pattern: /(\w+) of that file's (\w+) breaking entries/gi,
+    pattern: /([\w-]+) of that file's ([\w-]+) breaking entries/gi,
     subject: "other",
   },
 ];
@@ -146,6 +195,38 @@ function checkSubset(name, quoted, token, actual, target) {
   return [];
 }
 
+/**
+ * The intro: the block's prose after its own heading and before its first
+ * `###`. The heading is left out because its version -- `[v0.17.0]` -- ends
+ * in a digit that would pair with the "breaking" of a bold first sentence.
+ */
+const introOf = (block) => block.split(/^### /m)[0].replace(/^## .*\n/, "");
+
+// A COUNT BESIDE "BREAK" THAT NO CLAIM PATTERN READ. The shape is a count
+// followed, in the same clause, by a form of "break" -- "Ten changes may break
+// code", "eleven things break". Clauses end at `.`, `;` and `:` so that a
+// count in one does not pair with "break" in the next, and the recognised
+// claims are blanked out first so that the counts they hold are not reported
+// twice. What this cannot see is a count phrased with no "break" near it; the
+// rule below, that a Breaking list must have a claim, is what covers that.
+// A digit after a `.` is part of a version or a decimal -- `M156`, `0.17.0`,
+// `1.5 levels` -- and not a count, so the lookbehind keeps it out.
+const UNRECOGNISED = new RegExp(
+  `(?<![.\\d])(${COUNT.source})[^.;:]{0,60}?\\bbreak`,
+  "gi",
+);
+
+function unrecognisedCounts(name, intro) {
+  let rest = intro.replace(/\s+/g, " ");
+  for (const claim of CLAIMS) rest = rest.replace(claim.pattern, " ");
+  return [...rest.matchAll(UNRECOGNISED)].map(
+    (m) =>
+      `${name}: "${m[0].trim()}" reads as a count of breaking changes in a ` +
+      `shape no claim pattern here recognises, so it goes unchecked -- ` +
+      `phrase it as a CLAIMS pattern reads, or add the pattern`,
+  );
+}
+
 function check(files) {
   const problems = [];
   const blocks = new Map();
@@ -155,6 +236,7 @@ function check(files) {
     // Prose wraps at ~78 columns, so a claim is regularly split across two
     // lines. Fold before matching or every multi-line claim reads as absent.
     const folded = block.replace(/\s+/g, " ");
+    let claims = 0;
     // Two files, so "the other" is unambiguous. A third would make this
     // pick whichever came first; the caller passes only the channel files.
     const other = [...blocks.keys()].find((k) => k !== name);
@@ -163,6 +245,7 @@ function check(files) {
       for (const found of folded.matchAll(claim.pattern)) {
         const target = claim.subject === "self" ? name : other;
         if (!target) continue;
+        claims += 1;
         const quoted = `"${found[0].trim()}"`;
         const actual = entriesUnder(blocks.get(target), "Breaking");
         const token = claim.subject === "self" ? found[1] : found[2];
@@ -178,7 +261,7 @@ function check(files) {
           problems.push(
             `${name}: ${quoted} states "${token}", which is not a number ` +
               `this reads, so the claim goes unchecked. Use a digit or a ` +
-              `number word up to twenty.`,
+              `number word up to ninety-nine.`,
           );
         } else if (stated !== actual) {
           problems.push(
@@ -191,6 +274,20 @@ function check(files) {
           problems.push(...checkSubset(name, quoted, found[1], actual, target));
         }
       }
+    }
+
+    problems.push(...unrecognisedCounts(name, introOf(block)));
+
+    // A Breaking list with no claim about any count at all. Rewording every
+    // claim into a shape nothing reads would otherwise leave this whole check
+    // silent, which is how the intros went unread.
+    const own = entriesUnder(block, "Breaking");
+    if (own > 0 && claims === 0) {
+      problems.push(
+        `${name}: the unreleased block has ${own} entries under Breaking and ` +
+          `no count this recognises, so nothing checks that the intro agrees ` +
+          `with them`,
+      );
     }
   }
   return problems;
@@ -559,8 +656,93 @@ Two are ours; ${sub} of that file's ${total} breaking entries are shared.
 
 - **Only one here.** Body.
 `;
+  // The intros' wording since the 7.0 restructure, under the heading shape
+  // that restructure uses. Both were invisible: the heading did not match
+  // `UNRELEASED`, so the block was empty and no claim in it was read.
+  const restructured = (claim, entries) => `## 📦 ⟩ [v7.0.0] (npm) ⟩ Unreleased
+
+**A breaking release.** ${claim}
+
+### Breaking
+
+${Array.from({ length: entries }, (_, i) => `- **Entry ${i}.** Body.`).join("\n")}
+`;
   const cases = [
     ["a correct count passes", [["a.md", withCount("Two")]], 0],
+    [
+      "'N changes can break' under an Unreleased heading is read",
+      [
+        [
+          "a.md",
+          restructured("Thirty-two changes can break working code.", 32),
+        ],
+      ],
+      0,
+    ],
+    [
+      "and is checked: Ten against 32 fails",
+      [["a.md", restructured("Ten changes can break working code.", 32)]],
+      1,
+      "has 32 entries",
+    ],
+    [
+      "a compound number word one off fails",
+      [
+        [
+          "a.md",
+          restructured("Thirty-one changes can break working code.", 32),
+        ],
+      ],
+      1,
+      "has 32 entries",
+    ],
+    [
+      "a count in a shape no pattern reads is refused",
+      [["a.md", restructured("Thirty-two changes may break your code.", 32)]],
+      2,
+      "no claim pattern here recognises",
+    ],
+    [
+      "a Breaking list with no count at all is refused",
+      [["a.md", restructured("Some changes are not compatible.", 3)]],
+      1,
+      "no count this recognises",
+    ],
+    [
+      "no Breaking entries and no count is fine",
+      [["a.md", restructured("Nothing breaks.", 0)]],
+      0,
+    ],
+    // Two things that look like counts and are not, each beside a "break".
+    // The heading's own number, which would pair with a bold "breaking" in
+    // the first sentence -- `[v0.17.0]` did, on the crate file:
+    [
+      "the heading is not part of the intro",
+      [
+        [
+          "a.md",
+          restructured("Two changes can break working code.", 2).replace(
+            "## 📦 ⟩ [v7.0.0] (npm) ⟩ Unreleased",
+            "## Release 7 ⟩ Unreleased",
+          ),
+        ],
+      ],
+      0,
+    ],
+    // and a digit after a dot, which is a version or a decimal:
+    [
+      "a digit after a dot is not a count",
+      [
+        [
+          "a.md",
+          restructured(
+            "Two changes can break working code. On M0.156, nothing else can break.",
+            2,
+          ),
+        ],
+      ],
+      0,
+    ],
     ["a stale count fails", [["a.md", withCount("Six")]], 1],
     ["a digit works too", [["a.md", withCount("2")]], 0],
     [
@@ -591,14 +773,15 @@ Two are ours; ${sub} of that file's ${total} breaking entries are shared.
     ],
     // The case this gate was blind to. `Ten` against two entries already
     // failed; `Ninety` passed, because the recogniser had no entry for it and
-    // an unreadable claim was skipped rather than refused. The fourth field
-    // is what separates the two outcomes: both produce one problem, and only
-    // one of them names the word.
+    // an unreadable claim was skipped rather than refused. `Ninety` is read
+    // now, so the word here is one no table holds. The fourth field is what
+    // separates the two outcomes: both produce one problem, and only one of
+    // them names the word.
     [
       "a number word the recogniser does not know is refused",
-      [["a.md", withCount("Ninety")]],
+      [["a.md", withCount("Umpteen")]],
       1,
-      "Ninety",
+      "Umpteen",
     ],
     // "six of the entries below break" is how the npm file has always been
     // phrased. The capture group took `the`, which is not a number, so the
@@ -626,11 +809,11 @@ Two are ours; ${sub} of that file's ${total} breaking entries are shared.
     [
       "an unreadable subset word is refused too",
       [
-        ["a.md", referring("Two", "Ninety")],
+        ["a.md", referring("Two", "Umpteen")],
         ["b.md", withCount("Two")],
       ],
       1,
-      "Ninety",
+      "Umpteen",
     ],
   ];
 
@@ -884,7 +1067,8 @@ Two are ours; ${sub} of that file's ${total} breaking entries are shared.
     `self-test: ${cases.length + indexCases.length + tagCases.length} cases, a ` +
       `stale count is caught in the direct, the cross-referencing and the ` +
       `index-table form, an unreadable number word is refused rather than ` +
-      `skipped, a shipped tag with no section is named under every tag ` +
+      `skipped, so is a count in a shape no pattern reads and a Breaking ` +
+      `list with no count at all, a shipped tag with no section is named under every tag ` +
       `scheme, and a tag matching no scheme at all is named too`,
   );
 }
