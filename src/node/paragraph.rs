@@ -23,8 +23,9 @@ use crate::{
     font_library::{FontLibrary, instance_coordinates},
     node::{
         oblique::{
-            ParagraphRecipe, Passes, StyleColours, add_slnt, match_oblique,
-            set_coordinates, without_paragraph_cache,
+            GlyphPaints, ParagraphRecipe, Passes, StyleColours, add_slnt,
+            draw_shadowed, match_oblique, paint_glyphs, set_coordinates,
+            without_paragraph_cache,
         },
         typography::{paragraph_style, with_style_axes},
     },
@@ -621,7 +622,7 @@ fn font_families<'a>(
     else {
         return Ok(None);
     };
-    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
     // Re-check: cargo test an_empty_family_list_is_a_null_slice_in_skia_safe
     // `NativeSliceAccess::native` makes a slice from the first element's
     // pointer, null for an empty list, and `set_font_families` hands it one:
@@ -826,7 +827,7 @@ fn parse_text_style<'a>(
         style.set_decoration_style(style_code.to_skia());
     }
 
-    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
     // Re-check: grep -n "fn set_decoration_color\|fn new(color"
     // ~/.cargo/registry/src/*/skia-safe-*/src/modules/paragraph/text_style.rs
     // ~/.cargo/registry/src/*/skia-safe-*/src/modules/paragraph/text_shadow.rs
@@ -1666,6 +1667,11 @@ pub fn drawParagraph(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         paragraph, passes, ..
     } = &mut *para;
     let ctx = ctx.borrow();
+    if let Some(passes) = passes.as_mut()
+        && draw_shadowed(&ctx, paragraph, passes, Point::new(x, y))
+    {
+        return Ok(cx.undefined());
+    }
 
     // Composited, not bare: `Paragraph::paint` uses the text styles' own
     // paints, so the context's globalAlpha and globalCompositeOperation have
@@ -1678,7 +1684,7 @@ pub fn drawParagraph(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         let (paragraph, passes) = &mut *held.borrow_mut();
         match passes {
             Some(passes) => passes.paint(paragraph, canvas, at),
-            None => paragraph.paint(canvas, at),
+            None => paint_glyphs(paragraph, canvas, at, GlyphPaints::Styles),
         }
         reach_the_clip(canvas);
     });

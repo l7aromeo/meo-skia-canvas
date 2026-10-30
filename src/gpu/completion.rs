@@ -91,9 +91,10 @@ pub(crate) fn draws_ran(surface: &mut Surface, page: usize) -> bool {
     let Some(mut context) = surface.direct_context() else {
         return true;
     };
-    context.flush(None);
+    // A flush that failed left the draws unrun, whatever the submit says.
+    let flushed = context.flush(None).is_ok();
     let ran = context.submit(SyncCpu::Yes);
-    ran && !seam::discards(page)
+    flushed && ran && !seam::discards(page)
 }
 
 /// With no GPU backend compiled in every surface is raster, so there is no

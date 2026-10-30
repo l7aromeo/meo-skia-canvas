@@ -509,7 +509,9 @@ impl MetalBackend {
         // pass the suface's canvas to the user-provided callback
         f(surface.canvas());
 
-        self.skia_ctx.flush_and_submit();
+        self.skia_ctx
+            .flush_and_submit()
+            .map_err(|error| format!("MetalBackend: {error}"))?;
         self.skia_ctx.free_gpu_resources();
 
         window.pre_present_notify();

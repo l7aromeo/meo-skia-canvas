@@ -133,6 +133,11 @@ const NO_LINE_ENDING_CONVERSION = ["-c", "core.autocrlf=false"];
 /**
  * Runs git for a test's own setup, clear of any repository the environment
  * names, so the suite behaves the same when `just ci` runs from a hook.
+ *
+ * Without automatic maintenance: a commit otherwise starts `git maintenance
+ * run --auto` detached, which takes `objects/maintenance.lock` in the
+ * repository just committed to while the test goes on, so a snapshot of that
+ * repository holds the lock or not by timing alone.
  */
 function git(cwd, ...args) {
   const env = Object.fromEntries(
@@ -149,6 +154,8 @@ function git(cwd, ...args) {
       "commit.gpgsign=false",
       "-c",
       "init.defaultBranch=main",
+      "-c",
+      "maintenance.auto=false",
       ...NO_LINE_ENDING_CONVERSION,
       ...args,
     ],
@@ -256,10 +263,14 @@ describe("skia-source's git acts on its own checkout inside a hook", () => {
   });
 });
 
-/** The cache name `prepare` gives the tree for `version` and `patch`. */
-function treeName(version, patch) {
-  const digest = createHash("sha256").update(patch).digest("hex").slice(0, 12);
-  return `skia-${version}-${digest}`;
+/**
+ * The cache name `prepare` gives the tree for `version` and this platform's
+ * patches holding `contents`, in order.
+ */
+function treeName(version, contents) {
+  const hash = createHash("sha256");
+  for (const content of contents) hash.update(content);
+  return `skia-${version}-${hash.digest("hex").slice(0, 12)}`;
 }
 
 /** A Cargo.lock that resolves skia-bindings to `version`. */
@@ -267,7 +278,19 @@ function lock(version) {
   return `[[package]]\nname = "skia-bindings"\nversion = "${version}"\n`;
 }
 
-const PATCH_PATH = "containers/skia-metal-untimed-compile.patch";
+/**
+ * This platform's patch files, each holding its own name after `label`, so
+ * two labels give two different trees. Returns the files and their contents.
+ */
+function patchFiles(patches, label) {
+  const files = Object.fromEntries(
+    (patches[process.platform] ?? []).map((path) => [
+      path,
+      `${label} ${path}\n`,
+    ]),
+  );
+  return { files, contents: Object.values(files) };
+}
 
 // `prepare` removes the trees a new one supersedes, and the cache is shared by
 // every worktree: one moving to a new Skia removed the tree every other
@@ -276,40 +299,51 @@ const PATCH_PATH = "containers/skia-metal-untimed-compile.patch";
 describe("skia-source keeps the trees a worktree builds from", () => {
   let treesInUse;
   let removeSuperseded;
+  let PATCHES;
   beforeEach(async () => {
-    ({ treesInUse, removeSuperseded } = await import(
+    ({ treesInUse, removeSuperseded, PATCHES } = await import(
       pathToFileURL(SCRIPT).href
     ));
     mock.method(console, "error", () => {});
   });
   afterEach(() => mock.restoreAll());
 
-  test("each worktree names the tree its lock and patch select", (t) => {
+  test("each worktree names the tree its lock and patches select", (t) => {
     const dir = scratch(t);
+    const first = patchFiles(PATCHES, "first");
+    const second = patchFiles(PATCHES, "second");
     const root = repository(join(dir, "root"), {
       "Cargo.lock": lock("0.1.0"),
-      [PATCH_PATH]: "first\n",
+      ...first.files,
     });
     git(root, "worktree", "add", "--quiet", "-b", "next", join(dir, "next"));
     writeFileSync(join(dir, "next", "Cargo.lock"), lock("0.2.0"));
-    writeFileSync(join(dir, "next", PATCH_PATH), "second\n");
+    for (const [path, content] of Object.entries(second.files))
+      writeFileSync(join(dir, "next", path), content);
 
     assert.deepEqual(
       treesInUse(root),
-      new Set([treeName("0.1.0", "first\n"), treeName("0.2.0", "second\n")]),
+      new Set([
+        treeName("0.1.0", first.contents),
+        treeName("0.2.0", second.contents),
+      ]),
     );
   });
 
   test("a worktree whose checkout is gone names nothing", (t) => {
     const dir = scratch(t);
+    const first = patchFiles(PATCHES, "first");
     const root = repository(join(dir, "root"), {
       "Cargo.lock": lock("0.1.0"),
-      [PATCH_PATH]: "first\n",
+      ...first.files,
     });
     git(root, "worktree", "add", "--quiet", "-b", "gone", join(dir, "gone"));
     rmSync(join(dir, "gone"), { recursive: true });
 
-    assert.deepEqual(treesInUse(root), new Set([treeName("0.1.0", "first\n")]));
+    assert.deepEqual(
+      treesInUse(root),
+      new Set([treeName("0.1.0", first.contents)]),
+    );
   });
 
   test("outside a repository the trees in use are unknown", (t) => {
@@ -343,5 +377,45 @@ describe("skia-source keeps the trees a worktree builds from", () => {
     removeSuperseded(cache, null);
 
     assert.ok(existsSync(join(cache, "skia-old")));
+  });
+});
+
+// `just use-local-skia` points skia-bindings at a rust-skia checkout, which
+// skia-bindings then builds itself, DEPS and all. A tree named or prepared
+// here would be built offline in its place -- unsynced, in the release
+// containers that use a checkout.
+describe("skia-source stands aside for a local rust-skia checkout", () => {
+  let usesLocalSkia;
+  beforeEach(async () => {
+    ({ usesLocalSkia } = await import(pathToFileURL(SCRIPT).href));
+  });
+
+  /** The skia-bindings line `use-local-skia` appends, read from the justfile. */
+  const localLine = () => {
+    const justfile = readFileSync(
+      join(__dirname, "..", "..", "justfile"),
+      "utf8",
+    );
+    const found = justfile.match(/echo '(skia-bindings = \{ path = [^']+)'/);
+    assert.ok(found, "use-local-skia still writes a skia-bindings path");
+    return found[1];
+  };
+
+  test("the line use-local-skia writes is recognised", (t) => {
+    const root = scratch(t);
+    writeFileSync(
+      join(root, "Cargo.toml"),
+      `[dependencies]\nskia-safe = "0.156.0"\n\n[patch.crates-io]\n${localLine()}\n`,
+    );
+    assert.equal(usesLocalSkia(root), true);
+  });
+
+  test("a version from crates.io is not", (t) => {
+    const root = scratch(t);
+    writeFileSync(
+      join(root, "Cargo.toml"),
+      '[dependencies]\nskia-safe = "0.156.0"\nskia-bindings = "0.156.0"\n',
+    );
+    assert.equal(usesLocalSkia(root), false);
   });
 });

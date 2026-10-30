@@ -257,7 +257,7 @@ packages that actually link — which is the set this file describes, and not wh
 `cargo metadata` returns.
 
 The difference matters. `cargo metadata --all-features` reports every package Cargo knows about,
-including build and dev dependencies and every platform's targets, which is **363** against the
+including build and dev dependencies and every platform's targets, which is **361** against the
 **242** that link. Either number is defensible; quoting one and computing the other is how the count
 in this file went stale without anyone noticing. `just licenses` now reads both numbers back out of
 this file and fails when what it counted disagrees, so the two cannot drift apart again silently.

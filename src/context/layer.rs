@@ -215,8 +215,8 @@ fn contrast_bucket(rgb: [f32; 3]) -> [u8; 3] {
 /// colour shader in place of the paint's colour, which runs the filter as
 /// pipeline stages instead, parted in 5520 of them.
 fn luminance_colour(filter: &ColorFilter, plain: Color4f) -> Option<[f32; 3]> {
-    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
-    // Re-check: cargo test a_float_page_covers_text_as_srgb_does with
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+    // Re-check: cargo test a_filters_luminance_colour_is_its_output with
     // this returning `ColorFilter::filter_color4f(plain, None, None)`.
     //
     // `filter_color4f` declares Skia's `SkColor4f` return as four `u32`s,
@@ -351,7 +351,7 @@ impl ExactColour {
             (effect.uniform_size() == uniforms.len()).then_some(())?;
             effect.make_color_filter(Data::new_copy(&uniforms), None)
         })?;
-        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+        // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
         // Re-check: cargo test a_float_page_covers_text_as_srgb_does with
         // this returning `Some(replacement)`.
         //
@@ -609,13 +609,38 @@ impl Group {
                 let mut paint = rec.paint.clone().unwrap_or_default();
                 paint.set_image_filter(None);
                 // The chain's lengths are in the pixels of the canvas the
-                // group was drawn on, which `base` maps to the device.
+                // group was drawn on, which `base` maps to the device -- or,
+                // for a chain holding a Skia image filter, in the units of
+                // the transform the draw was made under, `self.matrix`, as
+                // on the layer Skia opens for it: the chain runs in that
+                // space, and draws what it filters back through its
+                // inverse, which a transform that maps the canvas to
+                // nothing has none of and draws nothing through.
+                let local = steps.iter().any(Step::runs_in_local_space);
+                let back = match local {
+                    true => match self.matrix.invert() {
+                        Some(inverse) => {
+                            canvas.concat(&self.matrix);
+                            inverse
+                        }
+                        None => {
+                            canvas.restore();
+                            return;
+                        }
+                    },
+                    false => Matrix::new_identity(),
+                };
                 // What is drawn is bounded by `within`, or for a single
                 // picture by what it was recorded within.
+                let to_space = |matrix: &Matrix| Matrix::concat(&back, matrix);
                 let content = match (&self.within, self.contents.as_slice()) {
-                    (Some(within), _) => Some(self.matrix.map_rect(within).0),
+                    (Some(within), _) => {
+                        Some(to_space(&self.matrix).map_rect(within).0)
+                    }
                     (None, [Layer::Picture(picture)]) => Some(
-                        self.contents_matrix.map_rect(picture.cull_rect()).0,
+                        to_space(&self.contents_matrix)
+                            .map_rect(picture.cull_rect())
+                            .0,
                     ),
                     (None, _) => None,
                 };
@@ -637,14 +662,18 @@ impl Group {
                     |layer| {
                         let to_layer = layer.local_to_device_as_3x3();
                         layer.set_matrix(
-                            &Matrix::concat(&to_layer, &self.matrix).into(),
+                            &Matrix::concat(&to_layer, &to_space(&self.matrix))
+                                .into(),
                         );
                         if let Some(within) = &self.within {
                             layer.clip_rect(within, ClipOp::Intersect, true);
                         }
                         layer.set_matrix(
-                            &Matrix::concat(&to_layer, &self.contents_matrix)
-                                .into(),
+                            &Matrix::concat(
+                                &to_layer,
+                                &to_space(&self.contents_matrix),
+                            )
+                            .into(),
                         );
                         for entry in self.contents.iter() {
                             entry.playback(layer, target);
@@ -1640,5 +1669,33 @@ impl BlurOp {
                 None,
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::luminance_colour;
+    use skia_safe::{BlendMode, Color, Color4f, color_filters};
+    use std::iter::zip;
+
+    #[test]
+    fn a_filters_luminance_colour_is_its_output() {
+        // What a colour filter makes of a colour, read against a filter
+        // whose output is known: one that puts a constant colour in place
+        // of every other. skia-safe's `filter_color4f` would answer the same
+        // and returns unrelated numbers instead -- see the note in
+        // `luminance_colour`.
+        let filter = color_filters::blend(
+            Color::from_argb(255, 10, 200, 30),
+            BlendMode::Src,
+        )
+        .expect("a filter");
+        let got = luminance_colour(&filter, Color4f::new(0.5, 0.5, 0.5, 1.0))
+            .expect("a reading");
+        let want = [10.0f32, 200.0, 30.0].map(|c| c / 255.0);
+        assert!(
+            zip(got, want).all(|(got, want)| (got - want).abs() < 1e-3),
+            "{got:?}, where the filter's colour is {want:?}"
+        );
     }
 }

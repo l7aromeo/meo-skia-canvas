@@ -25,6 +25,13 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Breaking
 
+- **A paragraph style's text shadows paint the first listed on top.** A
+  `TextStyle`'s `shadows` were painted in the order given, the first lowest,
+  as CanvasKit paints them. They are now painted as CSS paints
+  `text-shadow`, the first on top of the rest, so a style with two shadows
+  that overlap shows the other one where they meet. Reverse the list to keep
+  a drawing as it was.
+
 - **`sans-serif` is the face Chrome draws it in, and an SVG naming no family
   it has is drawn in the standard serif.** The curated `sans-serif` stack put
   Avenir Next ahead of Helvetica, so on macOS a `Context2D`'s default font,
@@ -206,6 +213,69 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A `drop-shadow()` set by `Context2D::set_filter_css` lands in its colour
+  exactly on a float canvas.** On a canvas made with `PixelDepth::F16` or
+  `PixelDepth::F32`, a shadow was tinted through Skia's blend filter, which
+  converts its colour through an approximate transfer function:
+  `color(srgb-linear 0.5 0.5 0.5)` landed 6.29e-5 from its encoding on an sRGB
+  F32 canvas, and a shadow parted from a fill of its colour by up to 2.6e-4 on
+  a Display P3 one, and by a whole half-float step on F16. The colour is
+  converted on this side now and handed to Skia where nothing converts it
+  again, so a shadow is its fill to the bit, in sRGB, `srgb-linear`, Display
+  P3 and Rec. 2020 canvases alike. A colour given through the typed
+  `FilterOp::DropShadow` is held in an `RgbaLinear`, whose linear-light `f32`
+  lands it within a unit in the last place.
+
+- **A filter set by `Context2D::set_image_filter` keeps a float canvas's
+  floats.** On a canvas made with `PixelDepth::F16` or `PixelDepth::F32`, a
+  draw through an `ImageFilter` came back in eight bits: Skia draws a filtered
+  draw through a layer of its own, and on the CPU makes that layer eight bits
+  a channel whatever the canvas, so a fill in `rgb(0 0 255 / 0.003)` through
+  `ImageFilter::offset(0.0, 0.0, None, None)` read 1/255. It is run on a layer
+  of the canvas's own floats now, and reads 0.003, for a path, text, an image
+  and a canvas drawn in. Its lengths stay in the draw's own units, turning and
+  stretching with the transform as before. Beside a filter set by
+  `set_filter_css` it keeps Skia's layer.
+
+- **A `Paragraph`'s blurred text shadow is the exact blur of its text.** A
+  shadow was blurred a glyph at a time by Skia's mask filter, which on macOS
+  draws a glyph heavier than the glyph itself -- a 16px word through one at
+  a sigma of 0.001 held 1.23 times the word's ink -- and loses ink where two
+  glyphs' blurs overlap: the same word blurred by 20px kept 0.54 of its
+  sharp shadow's ink on macOS's CPU engine. A 24px word blurred by 2px read
+  2515 pixels off the exact blur of its sharp shadow on the CPU engine. Each
+  style's run of text on a line now casts its shadow as one, blurred whole
+  by the exact Gaussian on either engine, the runs' shadows composited in
+  document order beneath all the text. A PDF or SVG keeps the mask filter.
+
+- **A `drop-shadow()` is the exact Gaussian blur of what casts it.** A draw
+  under a filter holding a `drop-shadow()`, set by
+  `Context2D::set_filter_css`, went through Skia's filter layer, whose blur
+  approximates the Gaussian: a triangle under `drop-shadow(0 0 2px black)`
+  read 6.85 levels off the exact shadow on the CPU engine, as Chrome's does.
+  Under a turn or a skew the layer also resampled the draw itself, by up to 16
+  levels at a square's edge under a 30-degree turn on the CPU engine and 80
+  under a skew on the GPU. The shadow is made from the draw's own pixels now,
+  blurred by the exact Gaussian, composited under it and rounded once, within
+  half a level on either engine and unrounded on F16 and F32 canvases, and the
+  draw is the draw unfiltered to the level. A path, text, an image and a
+  canvas drawn in all take it. An offset that is not whole pixels lands where
+  it is asked to, where Chrome moves `4.25px` to 4.5. A draw casting a shadow
+  set by `set_shadow_color` too, or under a composite operation that
+  composites the whole canvas, keeps Skia's layer.
+
+- **A `drop-shadow()` lands where Chrome puts it under a turned or skewed
+  transform.** `Context2D::set_filter_css`'s shadow offset and blur were
+  divided by the transform's diagonal, which is its scale only while it
+  neither turns nor skews. `drop-shadow(12px 4px 0 red)` under a 30-degree
+  `rotate` landed 9.69 pixels right and 10.93 down, where Chrome draws it 12
+  right and 4 down under any transform, as it draws a shadow set by
+  `set_shadow_offset`; under a quarter turn the diagonal is 0 and no shadow
+  was drawn at all. A `blur()` beside an `ImageFilter` set by
+  `set_image_filter`, which Skia draws whole, was not blurred under a quarter
+  turn for the same reason. Both keep their lengths on the canvas's axes now;
+  an `ImageFilter`'s own lengths stay in local units.
+
 - **A rectangle the closed-form blur cannot take is blurred exactly.** A
   stroked rectangle -- `Context2D::stroke_rect` -- or a dithered one or one played into a
   pattern, blurred by up to 40px, took Skia's coverage blur: a 6px stroke
@@ -230,14 +300,14 @@ window be changed after it opens.** No signature moves and nothing is removed.
   It is blurred by the exact Gaussian now, and reads within half a level on
   either engine.
 
-- **An image drawn under a blur is its exact Gaussian blur.** An image
-  drawn with `Context2D::draw_image`, `draw_image_sized` or
-  `draw_image_region` under a filter of blurs and colour functions was
-  blurred by Skia's image filter, as Chrome's is: a 40px red square drawn in
-  and blurred by 8px read 233 ten pixels inside its edge where the exact blur
-  is 228. It is now blurred by the exact Gaussian on either engine, as a
-  blurred path is. A `drop-shadow()`, a shadow, or a composite operation
-  that composites the whole canvas keeps Skia's filter.
+- **An image drawn under a blur is its exact Gaussian blur.** An image drawn
+  with `Context2D::draw_image`, `draw_image_sized` or `draw_image_region`
+  under a filter of blurs and colour functions was blurred by Skia's image
+  filter, as Chrome's is: a 40px red square drawn in and blurred by 8px read
+  233 ten pixels inside its edge where the exact blur is 228. It is now
+  blurred by the exact Gaussian on either engine, as a blurred path is. A
+  shadow, or a composite operation that composites the whole canvas, keeps
+  Skia's filter.
 
 - **A blurred path, image or canvas drawn at an alpha is rounded once.** On
   an eight-bit canvas the blur of an image or a canvas drawn at a global
@@ -252,12 +322,12 @@ window be changed after it opens.** No signature moves and nothing is removed.
 - **A canvas drawn in under a filter spreads past where it is drawn.** A
   canvas drawn into another with `Context2D::draw_canvas` or
   `draw_canvas_sized` under `Context2D::set_filter_css` was cut at its
-  destination rectangle: a 40px square blurred by 8px read alpha 0 five
-  pixels outside it, where Chrome reads 72, and a `drop-shadow()` cast past
-  the square was not drawn at all. The rectangle now bounds what is drawn
-  and not what the filter makes of it. A `blur()` and the colour functions
-  are run on the drawn canvas's pixels by the exact Gaussian, as a blurred
-  path is, on either engine; a `drop-shadow()` is still Skia's.
+  destination rectangle: a 40px square blurred by 8px read alpha 0 five pixels
+  outside it, where Chrome reads 72, and a `drop-shadow()` cast past the
+  square was not drawn at all. The rectangle now bounds what is drawn and not
+  what the filter makes of it. A `blur()` and the colour functions are run on
+  the drawn canvas's pixels by the exact Gaussian, as a blurred path is, on
+  either engine, and so is a `drop-shadow()`.
 
 - **A blurred path is the exact Gaussian blur of what it draws.** A
   flat-colour shape that `Context2D::set_filter_css("blur(...)")` blurs on
@@ -364,17 +434,17 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 - **A text decoration's colour is painted at the precision it names, as a
   fill's is.** The colour named in `Context2D::set_text_decoration_css` or
-  `set_text_decoration` was rounded to eight bits of sRGB when it was set.
-  On a canvas made with `PixelDepth::F16` or `PixelDepth::F32`, a line in
-  alpha 0.3 drew at 77/255 beside text drawn at 0.3, and a colour under half
-  of one 255th not at all. On an eight-bit canvas a colour outside sRGB was
+  `set_text_decoration` was rounded to eight bits of sRGB when it was set. On
+  a canvas made with `PixelDepth::F16` or `PixelDepth::F32`, a line in alpha
+  0.3 drew at 77/255 beside text drawn at 0.3, and a colour under half of one
+  255th not at all. On an eight-bit canvas a colour outside sRGB was
   gamut-mapped where a fill of it is clipped: `color(display-p3 0 1 0)` drew
   its line at `0,251,41` beside a fill at `0,255,0`. The line now draws the
   bytes a fill draws, on every canvas; a colour of whole bytes draws as it
   did. The colour of a `drop-shadow()` read by `Context2D::set_filter_css`,
-  and its `FilterOp::DropShadow`, is kept as named too, which changes no
-  pixel yet: Skia's raster backend resolves the shadow on an eight-bit layer
-  either way.
+  and its `FilterOp::DropShadow`, is kept as named too: on an eight-bit sRGB
+  canvas the shadow draws the bytes a fill of its colour draws, and on a float
+  canvas the colour a fill of it paints.
 
 - **A draw too faint for eight bits draws on a float canvas.** On a canvas
   made with `PixelDepth::F16` or `PixelDepth::F32` as its `color_type`, a
@@ -1592,6 +1662,29 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   keeps fonts of its own, does not. The font caches themselves are emptied
   at idle by the npm addon alone, which can post the release to the
   JavaScript thread that owns them; a Rust program's are kept as before.
+
+- **Skia M153 to M156**, by way of `skia-safe` 0.156.0. Every workaround for
+  a Skia defect was re-checked against it and is still needed, but for two
+  that this release had no way to re-check: a half-float stage on x86
+  machines without AVX2 or F16C, and the cost of a text run's bounds under
+  `Paragraph::visit`, which needs a profile. One drawing changes, on Linux
+  alone: the FreeType M156 brings, 2.14.3, refuses a glyph transform sheared
+  past about 79.65 degrees and draws the glyph upright instead, so text
+  sheared past about 79.3 degrees -- by `FontSlant::Oblique`,
+  `TextSlant::Oblique` or the context's transform -- is now drawn as paths
+  from the glyphs' outlines, sheared here. Its shape is right; against M153's
+  anti-aliased glyphs, its edge pixels differ by about 100 levels at 12 to
+  40px and up to 18 at 200px, and it carries up to 2% more ink, 13% for 12px
+  text at 89 degrees. Below that shear nothing moved: 270 scenes and the
+  gallery's images are identical on Linux and macOS, and its animations on
+  Linux, where their encoding repeats run to run.
+
+  Building on Linux with the `freetype` feature now compiles two of brotli's
+  decoder sources, which M156's Skia build leaves out and FreeType's WOFF2
+  support needs, from the Skia tree skia-bindings built. The build finds that
+  tree from `SKIA_SOURCE_DIR`, a `[patch]` path or the registry copy
+  `Cargo.lock` names, and stops with a message naming `SKIA_SOURCE_DIR` where
+  it cannot.
 
 ### Known, and not fixed here
 

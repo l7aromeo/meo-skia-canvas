@@ -23,10 +23,14 @@
 //! font -- see [`whole_graphemes`] -- and the paragraph is built again from
 //! its steps. A colour change left inside a ligature has [`Passes`] draw
 //! the paragraph too, the ligature whole. Any other paragraph is built once,
-//! as it is filled in, and painted by `Paragraph::paint` alone.
+//! as it is filled in, and painted by `Paragraph::paint` alone, but on a
+//! canvas that shears its glyphs past what FreeType draws -- see
+//! [`paint_glyphs`].
 
 use crate::{
-    context::faint::Faint,
+    context::{
+        Context2D, ShadowCast, ShadowPart, faint::Faint, layer::reach_the_clip,
+    },
     font::leans_as_asked,
     font_library::text_hinting,
     node::{
@@ -35,14 +39,15 @@ use crate::{
         },
         font_library::FontEpoch,
         typography::{
-            GlyphRun, GlyphRunRef, SLNT, Shear, glyph_runs, run_shear,
-            sheared_blob, visit_glyph_runs,
+            FAKE_ITALIC_SKEW, GlyphRun, GlyphRunRef, SLNT, Shear, draw_glyphs,
+            draw_outlines, drawn_as_outlines, glyph_runs, may_draw_outlines,
+            run_shear, sheared_blob, visit_glyph_runs,
         },
     },
 };
 use skia_safe::{
-    BlurStyle, Canvas, Color4f, FontArguments, FontStyle, MaskFilter, Paint,
-    Point, Rect, TextBlob,
+    BlurStyle, Canvas, Color4f, Font, FontArguments, FontStyle, GlyphId,
+    MaskFilter, Paint, PictureRecorder, Point, Rect, TextBlob,
     font_arguments::{VariationPosition, variation_position::Coordinate},
     font_style::Slant,
     textlayout::{
@@ -464,7 +469,9 @@ impl ParagraphRecipe {
     /// The paragraph, not yet laid out, and what paints it where it has an
     /// oblique range, a decoration, a shadow or a background, or a colour
     /// change that a layout may find inside a ligature -- see [`Passes`]. A
-    /// paragraph with none of these is painted by `Paragraph::paint` alone.
+    /// paragraph with none of these is painted by [`paint_glyphs`], which is
+    /// `Paragraph::paint` but on a canvas that shears it past what FreeType
+    /// draws.
     pub(crate) fn build(mut self) -> (Paragraph, Option<Passes>) {
         // Asked of what was taken off rather than of the boxes, which are
         // collected only for a paragraph that has passes to hand them to.
@@ -536,14 +543,15 @@ impl ParagraphRecipe {
                 },
             ));
         }
-        let (boxes, box_shadows) = boxes
+        let boxes = boxes
             .into_iter()
-            .map(|decorated| (decorated.decoration, decorated.shadows))
-            .unzip();
+            .map(|decorated| decorated.decoration)
+            .collect();
         let passes = Passes {
             #[cfg(test)]
             as_asked: self.as_asked(&asked_text),
             box_ranges: remap(&slots, &box_slots),
+            box_of_slot: box_slots,
             background_ranges: remap(&slots, &background_slots),
             slots,
             paints,
@@ -556,7 +564,6 @@ impl ParagraphRecipe {
                 )
                 .collect(),
             boxes,
-            box_shadows,
             backgrounds,
             runs: Vec::new(),
             spans: Vec::new(),
@@ -1281,7 +1288,7 @@ impl StyleDecoration {
 /// has its own `FontLibrary`, and `TextEngine` cannot leave its thread.
 /// `Paragraph::layout` runs to the end without calling back into this
 /// crate, so nothing on that thread lays out between the switches either.
-// UPSTREAM: skia-safe 0.153.3 -- https://github.com/google/skia/commit/e0d79efbf171fdd78063f7673d517491154c9a7a -- worked around
+// UPSTREAM: skia-safe 0.156.0 -- https://github.com/google/skia/commit/e0d79efbf171fdd78063f7673d517491154c9a7a -- worked around
 // Re-check: cargo test a_half_leading_paragraph_is_not_laid_out_as_another_was
 pub(crate) fn without_paragraph_cache<T>(
     collection: Option<&FontCollection>,
@@ -1311,7 +1318,8 @@ pub(crate) fn without_paragraph_cache<T>(
 ///
 /// Where that order changes nothing, the glyphs are `Paragraph::paint`'s,
 /// between the lines beneath them and the lines over them -- see
-/// [`Self::skia_glyphs`].
+/// [`Self::skia_glyphs`] -- but on a canvas that shears them past what
+/// FreeType draws, where [`paint_glyphs`] draws them.
 pub(crate) struct Passes {
     /// The text each style covers, in UTF-8 offsets into the paragraph's
     /// text, in order, with its slot -- see [`ParagraphRecipe::shadows`].
@@ -1321,11 +1329,13 @@ pub(crate) struct Passes {
     paints: Vec<Paint>,
     sheared: Vec<Option<f32>>,
     shadows: Vec<Vec<Shadow>>,
-    /// Each decorated style's decoration, by box, its text shadows, and the
-    /// text each box decorates -- see `decorate::box_at`.
+    /// Each decorated style's decoration, by box, and the text each box
+    /// decorates -- see `decorate::box_at`. A box casts its style's shadows,
+    /// with its style's glyphs -- see [`Self::casts`].
     boxes: Vec<Decoration>,
-    box_shadows: Vec<Vec<Shadow>>,
     box_ranges: Vec<(Range<usize>, usize)>,
+    /// The box each slot's decoration is drawn as, where it has one.
+    box_of_slot: Vec<Option<usize>>,
     /// Each style's background, by box, and the text each covers.
     backgrounds: Vec<StyleBackground>,
     background_ranges: Vec<(Range<usize>, usize)>,
@@ -1380,12 +1390,15 @@ struct PaintedRun {
     slot: usize,
     /// Whether the glyphs are in an oblique style.
     sheared: bool,
-    /// The glyphs and their positions before any shear, for the tests to
-    /// hold against SkParagraph's runs.
-    #[cfg(test)]
-    glyphs: Vec<skia_safe::GlyphId>,
-    #[cfg(test)]
+    /// The run's font, glyphs and their positions before any shear, and the
+    /// shear: the blob's makings, for a canvas that shears the run past what
+    /// FreeType draws to draw it from its outlines instead -- see
+    /// [`drawn_as_outlines`] -- and for the tests to hold against
+    /// SkParagraph's runs.
+    font: Font,
+    glyphs: Vec<GlyphId>,
     positions: Vec<Point>,
+    shear: Shear,
 }
 
 /// How near two reports of a glyph's place are the same place, in pixels: a
@@ -1508,7 +1521,7 @@ impl Passes {
     ///
     /// A paragraph here only for [`Self::ligature_edges`] is followed only
     /// where one of them falls inside a glyph cluster: a lookup for each
-    /// edge, and otherwise `Paragraph::paint` draws it.
+    /// edge, and otherwise [`paint_glyphs`] draws it.
     pub(crate) fn follow(&mut self, paragraph: &mut Paragraph) {
         if self.followed {
             return;
@@ -1678,10 +1691,10 @@ impl Passes {
             line: run.line,
             slot,
             sheared,
-            #[cfg(test)]
+            font: run.font.clone(),
             glyphs: run.glyphs[at.clone()].to_vec(),
-            #[cfg(test)]
             positions: run.positions[at].to_vec(),
+            shear,
         });
     }
 
@@ -1702,16 +1715,17 @@ impl Passes {
     /// line at a time -- see [`Passes`] -- each glyph drawn here with the
     /// paint SkParagraph would have used. Where the layout was found to be
     /// one whose order of lines changes nothing, the glyphs are
-    /// `Paragraph::paint`'s instead, between every line's lines beneath and
+    /// [`paint_glyphs`]'s instead, between every line's lines beneath and
     /// over them -- see [`Self::skia_glyphs`].
     fn paint_followed(
         &self,
-        paragraph: &Paragraph,
+        paragraph: &mut Paragraph,
         canvas: &Canvas,
         origin: Point,
     ) {
+        let glyphs = GlyphPaints::Slots(&self.slots, &self.paints);
         if !self.drawn {
-            paragraph.paint(canvas, origin);
+            paint_glyphs(paragraph, canvas, origin, glyphs);
             return;
         }
         let base = Paint::default();
@@ -1729,7 +1743,7 @@ impl Passes {
                     PARAGRAPH_FAINT,
                 );
             }
-            paragraph.paint(canvas, origin);
+            paint_glyphs(paragraph, canvas, origin, glyphs);
             for line in 0..self.lines {
                 let spans = decorate::on_line(&self.spans, line);
                 decorate::paint(
@@ -1744,44 +1758,23 @@ impl Passes {
             }
             return;
         }
-        let runs_on = |line: usize| {
-            let start = self.runs.partition_point(|run| run.line < line);
-            let end = self.runs.partition_point(|run| run.line <= line);
-            &self.runs[start..end]
-        };
         self.paint_backgrounds(canvas, origin);
-        // Every line's shadows before any line's glyphs: CSS Text Decoration
-        // 3 section 4 says shadows "never overlay the text itself" and that
-        // UAs "should avoid painting text shadows over text in adjacent
-        // elements", so a shadow stays beneath the glyphs of its own span,
-        // of the spans before it on its line, and of the lines above.
-        // Chrome paints each span's shadow with its text instead, which puts
-        // a later shadow over earlier glyphs -- docs/browser-differences.md.
-        for line in 0..self.lines {
-            let spans = decorate::on_line(&self.spans, line);
-            for run in runs_on(line) {
-                for shadow in &self.shadows[run.slot] {
-                    if let Some(paint) = shadow_paint(shadow, canvas) {
-                        run.draw(canvas, origin + shadow.shadow.offset, &paint);
-                    }
-                }
-            }
-            for (index, shadows) in self.box_shadows.iter().enumerate() {
-                for shadow in shadows {
-                    if let Some(paint) = shadow_paint(shadow, canvas) {
-                        decorate::paint_shadow(
-                            canvas,
-                            spans,
-                            &self.boxes,
-                            index,
-                            origin + shadow.shadow.offset,
-                            &paint,
-                            PARAGRAPH_FAINT,
-                        );
-                    }
-                }
+        // Every shadow before any glyph, each style's run on a line casting
+        // its own -- see `Self::casts`. Here, on a canvas this does not
+        // record, each glyph is blurred by a mask filter; a context draws
+        // each cast as one element -- see `draw_shadowed`.
+        for cast in self.casts() {
+            if let Some(paint) = shadow_paint(cast.shadow, canvas) {
+                cast.draw(self, canvas, origin, &paint);
             }
         }
+        self.paint_over(canvas, origin);
+    }
+
+    /// Every line's glyphs and decorations, in CSS 2.1 Appendix E's order
+    /// for a line box -- see [`Passes`].
+    fn paint_over(&self, canvas: &Canvas, origin: Point) {
+        let base = Paint::default();
         for line in 0..self.lines {
             let spans = decorate::on_line(&self.spans, line);
             decorate::paint(
@@ -1793,7 +1786,7 @@ impl Passes {
                 &base,
                 PARAGRAPH_FAINT,
             );
-            for run in runs_on(line) {
+            for run in self.runs_on(line) {
                 run.draw(canvas, origin, &self.paints[run.slot]);
             }
             decorate::paint(
@@ -1831,10 +1824,344 @@ impl Passes {
     }
 }
 
+/// What paints each glyph [`paint_glyphs`] draws.
+#[derive(Clone, Copy)]
+pub(crate) enum GlyphPaints<'a> {
+    /// The paint of the slot whose text the glyph is from, or of the glyph
+    /// before on its line where it is from none -- as [`Passes::painted`]
+    /// paints a glyph.
+    Slots(&'a [(Range<usize>, usize)], &'a [Paint]),
+    /// The paint of the style SkParagraph reports the glyph's text in on its
+    /// line, for a paragraph built without [`Passes`].
+    Styles,
+}
+
+/// Paints `paragraph`, whose styles draw nothing but glyphs, at `origin` on
+/// `canvas` as `Paragraph::paint` paints it, but for any run `canvas` shears
+/// past what FreeType draws, which is drawn from its outlines -- see
+/// [`drawn_as_outlines`] -- in the paint `paints` gives each glyph.
+///
+/// `Paragraph::paint` itself wherever no run can be past that, which is
+/// every canvas whose transform is not steeply sheared: SkParagraph hands
+/// FreeType each run's whole transform, and takes it to be drawn.
+pub(crate) fn paint_glyphs(
+    paragraph: &mut Paragraph,
+    canvas: &Canvas,
+    origin: Point,
+    paints: GlyphPaints<'_>,
+) {
+    if !may_draw_outlines(canvas, FAKE_ITALIC_SKEW) {
+        paragraph.paint(canvas, origin);
+        return;
+    }
+    // Each line's styles, by the UTF-8 offset each starts at, read before
+    // the runs are, since both borrow the paragraph.
+    let styles: Vec<Vec<(usize, Paint)>> = match paints {
+        GlyphPaints::Slots(..) => Vec::new(),
+        GlyphPaints::Styles => paragraph
+            .get_line_metrics()
+            .iter()
+            .map(|line| {
+                line.get_style_metrics(0..usize::MAX)
+                    .into_iter()
+                    .map(|(at, metrics)| (at, foreground(metrics.text_style)))
+                    .collect()
+            })
+            .collect(),
+    };
+    let unstyled = Paint::default();
+    // The slot the last glyph took, and the line it is on.
+    let mut last = (usize::MAX, 0);
+    for run in glyph_runs(paragraph) {
+        let glyph_paints: Vec<&Paint> = run
+            .starts
+            .iter()
+            .map(|&start| match paints {
+                GlyphPaints::Slots(slots, paints) => {
+                    if last.0 != run.line {
+                        last = (run.line, 0);
+                    }
+                    last.1 = decorate::box_at(slots, start as usize)
+                        .unwrap_or(last.1);
+                    &paints[last.1]
+                }
+                GlyphPaints::Styles => {
+                    let line =
+                        styles.get(run.line).map_or(&[][..], Vec::as_slice);
+                    let after =
+                        line.partition_point(|(at, _)| *at <= start as usize);
+                    line.get(after.saturating_sub(1))
+                        .map_or(&unstyled, |(_, paint)| paint)
+                }
+            })
+            .collect();
+        let mut from = 0;
+        for piece in glyph_paints.chunk_by(|a, b| a == b) {
+            let to = from + piece.len();
+            draw_glyphs(
+                canvas,
+                &run.font,
+                &run.glyphs[from..to],
+                &run.positions[from..to],
+                &Shear::None,
+                origin + run.origin,
+                piece[0],
+            );
+            from = to;
+        }
+    }
+}
+
+impl Passes {
+    /// The glyph runs on `line`.
+    fn runs_on(&self, line: usize) -> &[PaintedRun] {
+        let start = self.runs.partition_point(|run| run.line < line);
+        let end = self.runs.partition_point(|run| run.line <= line);
+        &self.runs[start..end]
+    }
+
+    /// Whether the layout this has followed casts a shadow.
+    pub(crate) fn casts_shadows(&self) -> bool {
+        self.drawn && self.shadows.iter().any(|shadows| !shadows.is_empty())
+    }
+
+    /// Every shadow the layout casts, in the order they are painted: by
+    /// line, and along each line by run, each style's run of text on a line
+    /// casting its shadows as one element, as CSS Text Decoration 3 section
+    /// 4 casts `text-shadow` for each fragment of an element. A run is the
+    /// glyphs of one slot that follow one another on the line -- a style's
+    /// text set in two faces, its fallback's and its own, is one -- with the
+    /// spans of its decoration that lie across them. A style's shadows are
+    /// painted last first, so that the first listed lies on top, as CSS
+    /// Backgrounds 3 paints a list of shadows.
+    pub(crate) fn casts(&self) -> Vec<Cast<'_>> {
+        let mut casts = Vec::new();
+        for line in 0..self.lines {
+            let runs = self.runs_on(line);
+            let spans = decorate::on_line(&self.spans, line);
+            let mut start = 0;
+            while start < runs.len() {
+                let slot = runs[start].slot;
+                let end = start
+                    + runs[start..]
+                        .iter()
+                        .take_while(|run| run.slot == slot)
+                        .count();
+                let element = &runs[start..end];
+                start = end;
+                let shadows = &self.shadows[slot];
+                if shadows.is_empty() {
+                    continue;
+                }
+                let bounds = element
+                    .iter()
+                    .map(|run| run.blob.bounds().with_offset(run.origin))
+                    .reduce(|mut all, run| {
+                        all.join(run);
+                        all
+                    })
+                    .unwrap_or_default();
+                let box_index = self.box_of_slot[slot];
+                let decorated: Vec<Span> = spans
+                    .iter()
+                    .filter(|span| {
+                        Some(span.box_index) == box_index
+                            && span.right > bounds.left
+                            && span.left < bounds.right
+                    })
+                    .copied()
+                    .collect();
+                for shadow in shadows.iter().rev() {
+                    casts.push(Cast {
+                        shadow,
+                        runs: element,
+                        spans: decorated.clone(),
+                        box_index,
+                        bounds,
+                    });
+                }
+            }
+        }
+        casts
+    }
+
+    /// Paints the layout's backgrounds, with the paragraph's top-left
+    /// corner at `origin`: what lies beneath its shadows.
+    pub(crate) fn paint_beneath(&self, canvas: &Canvas, origin: Point) {
+        self.paint_backgrounds(canvas, origin);
+    }
+
+    /// Paints the layout's glyphs and decorations, without its shadows or
+    /// its backgrounds: what lies over its shadows.
+    pub(crate) fn paint_text(&self, canvas: &Canvas, origin: Point) {
+        self.paint_over(canvas, origin);
+    }
+}
+
+/// Draws `paragraph`, laid out with `passes`, onto `context` with its
+/// top-left corner at `at`, where it casts a text shadow: each run's shadow
+/// the exact blur of the whole run, on pixels -- see
+/// [`Context2D::draw_with_shadows`]. Returns whether it drew; a paragraph
+/// that casts none is left to the caller, which draws it as any other.
+pub(crate) fn draw_shadowed(
+    context: &Context2D,
+    paragraph: &mut Paragraph,
+    passes: &mut Passes,
+    at: Point,
+) -> bool {
+    passes.follow(paragraph);
+    if !passes.casts_shadows() {
+        return false;
+    }
+    let passes = &*passes;
+    let casts: Vec<Cast<'_>> =
+        passes.casts().into_iter().filter(Cast::casts).collect();
+    let shadows: Vec<ShadowCast> = casts
+        .iter()
+        .map(|cast| ShadowCast {
+            sigma: cast.sigma(),
+            bounds: cast.bounds(passes, at),
+        })
+        .collect();
+    context.draw_with_shadows(&shadows, |canvas, part| match part {
+        ShadowPart::Beneath => passes.paint_beneath(canvas, at),
+        ShadowPart::Sharp(index) => {
+            let mut paint = Paint::default();
+            paint.set_color4f(casts[index].color(), None);
+            casts[index].draw(passes, canvas, at, &paint);
+        }
+        ShadowPart::Masked(index) => {
+            if let Some(paint) = shadow_paint(casts[index].shadow, canvas) {
+                casts[index].draw(passes, canvas, at, &paint);
+            }
+        }
+        ShadowPart::Over => {
+            passes.paint_text(canvas, at);
+            reach_the_clip(canvas);
+        }
+    });
+    true
+}
+
+/// One shadow of one style's run of text on one line -- see
+/// [`Passes::casts`].
+pub(crate) struct Cast<'a> {
+    shadow: &'a Shadow,
+    runs: &'a [PaintedRun],
+    /// The spans of the style's decoration across the run, and its box.
+    spans: Vec<Span>,
+    box_index: Option<usize>,
+    /// The run's glyphs' bounds, in the paragraph's coordinates: each blob's
+    /// conservative bounds, from its faces' boxes, which hold the ink
+    /// whatever the scale the glyphs are hinted at.
+    bounds: Rect,
+}
+
+impl Cast<'_> {
+    /// The shadow's blur, in pixels of the canvas whatever its transform.
+    pub(crate) fn sigma(&self) -> f32 {
+        self.shadow.shadow.blur_sigma as f32
+    }
+
+    /// How many glyph runs the cast is drawn from: one for each face its
+    /// style's text on the line is set in.
+    #[cfg(test)]
+    pub(crate) fn runs(&self) -> usize {
+        self.runs.len()
+    }
+
+    /// The shadow's colour as its style named it, in extended sRGB,
+    /// unpremultiplied.
+    pub(crate) fn color(&self) -> Color4f {
+        self.shadow.color
+    }
+
+    /// Whether the shadow casts anything: SkParagraph's rule, a colour with
+    /// an offset or a blur.
+    pub(crate) fn casts(&self) -> bool {
+        self.shadow.shadow.has_shadow()
+    }
+
+    /// Draws the run's glyphs and decoration with `paint`, offset by the
+    /// shadow's offset, with the paragraph's top-left corner at `origin`:
+    /// the shadow, sharp, where `paint` has no blur.
+    pub(crate) fn draw(
+        &self,
+        passes: &Passes,
+        canvas: &Canvas,
+        origin: Point,
+        paint: &Paint,
+    ) {
+        let at = origin + self.shadow.shadow.offset;
+        for run in self.runs {
+            run.draw(canvas, at, paint);
+        }
+        if let Some(index) = self.box_index {
+            decorate::paint_shadow(
+                canvas,
+                &self.spans,
+                &passes.boxes,
+                index,
+                at,
+                paint,
+                PARAGRAPH_FAINT,
+            );
+        }
+    }
+
+    /// What the sharp shadow can draw in, with the paragraph's top-left
+    /// corner at `origin`: the run's glyphs' bounds and its decoration's,
+    /// offset by the shadow's offset. The decoration is measured by
+    /// recording it, since its lines are drawn by `decorate` from the box's
+    /// face and thickness.
+    pub(crate) fn bounds(&self, passes: &Passes, origin: Point) -> Rect {
+        let at = origin + self.shadow.shadow.offset;
+        let mut bounds = self.bounds.with_offset(at);
+        if self.box_index.is_some() && !self.spans.is_empty() {
+            let mut recorder = PictureRecorder::new();
+            let canvas = recorder.begin_recording(Rect::new_empty(), true);
+            self.draw_decoration(passes, canvas, at);
+            if let Some(picture) = recorder.finish_recording_as_picture(None) {
+                bounds.join(picture.cull_rect());
+            }
+        }
+        bounds
+    }
+
+    fn draw_decoration(&self, passes: &Passes, canvas: &Canvas, at: Point) {
+        if let Some(index) = self.box_index {
+            decorate::paint_shadow(
+                canvas,
+                &self.spans,
+                &passes.boxes,
+                index,
+                at,
+                &Paint::default(),
+                PARAGRAPH_FAINT,
+            );
+        }
+    }
+}
+
 impl PaintedRun {
-    /// Draws the run with the paragraph's origin at `origin`.
+    /// Draws the run with the paragraph's origin at `origin`: its blob, or
+    /// its outlines where `canvas` shears it past what FreeType draws.
     fn draw(&self, canvas: &Canvas, origin: Point, paint: &Paint) {
-        canvas.draw_text_blob(&self.blob, origin + self.origin, paint);
+        let at = origin + self.origin;
+        match drawn_as_outlines(canvas, &self.font, &self.shear) {
+            true => draw_outlines(
+                canvas,
+                &self.font,
+                &self.glyphs,
+                &self.positions,
+                &self.shear,
+                at,
+                paint,
+            ),
+            false => {
+                canvas.draw_text_blob(&self.blob, at, paint);
+            }
+        }
     }
 }
 

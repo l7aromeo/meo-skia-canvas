@@ -3042,7 +3042,7 @@ impl RecordingSurface {
     ) -> Result<bool, String> {
         let unreadable = || "Could not read the page beneath an open layer";
         let surface = self.surface.as_mut().ok_or_else(unreadable)?;
-        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+        // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
         // Re-check: cargo test reads_between_draws_read_what_layers_close_to
         // with `metal` and this return dropped. On the GPU Skia draws a
         // layer into a texture it sizes up to a bucket of the surface's, and
@@ -3207,7 +3207,7 @@ impl RecordingSurface {
         let mut copy = Paint::default();
         copy.set_blend_mode(BlendMode::Src);
         let page_info = surface.image_info();
-        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+        // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
         // Re-check: cargo test a_read_inside_a_layer_reads_what_the_page_does
         // with `metal` and the `||` below dropped. On the GPU Skia draws
         // a layer into a texture it sizes up to a bucket of the surface's,
@@ -3833,10 +3833,10 @@ impl Page {
         let image = match image.is_texture_backed() {
             false => image,
             true => {
-                // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+                // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
                 // Re-check: GrMtlGpu::onReadPixels checks its submit
                 //
-                // Skia M153's `GrMtlGpu::onReadPixels`, in
+                // Skia M156's `GrMtlGpu::onReadPixels`, in
                 // `skia/src/gpu/ganesh/mtl/GrMtlGpu.mm` under the
                 // skia-bindings crate, waits on the command buffer that
                 // copies the texture out with
@@ -5371,7 +5371,7 @@ impl Default for ExportOptions {
 
 impl ExportOptions {
     pub fn surface_props(&self) -> SurfaceProps {
-        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+        // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
         // Re-check: cargo test hinted_macos_text_ignores_contrast
         // The contrast reaches only unhinted text on macOS: Skia's CoreText
         // scaler sets a hinted glyph's contrast to 0, leaving its weight to

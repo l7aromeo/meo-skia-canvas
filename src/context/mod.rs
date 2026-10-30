@@ -61,14 +61,41 @@ use crate::{
     },
     utils::*,
 };
-use chain::Step;
+use chain::{Step, canvas_reach};
 use faint::Faint;
 use layer::{
-    BlurDraw, Composite, ExactColour, Layer, LayerRec, holds_a_cut,
+    BlurDraw, Composite, ExactColour, Group, Layer, LayerRec, holds_a_cut,
     reach_the_clip,
 };
 use page::{ExportOptions, Page, PageRecorder, Recording};
 use typesetting::{TextSettings, Typesetting, Typography};
+
+/// A shadow cast by one run of a paragraph's text -- see
+/// [`Context2D::draw_with_shadows`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ShadowCast {
+    /// Its blur, in pixels of the canvas whatever its transform, as a
+    /// filter's length is.
+    pub(crate) sigma: f32,
+    /// What its sharp shadow draws in, in the coordinates the paragraph is
+    /// drawn in.
+    pub(crate) bounds: Rect,
+}
+
+/// The part of a paragraph [`Context2D::draw_with_shadows`] asks a draw
+/// for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShadowPart {
+    /// What lies beneath every shadow: the backgrounds.
+    Beneath,
+    /// The cast at this index, sharp.
+    Sharp(usize),
+    /// The cast at this index, blurred by Skia's mask filter, glyph by
+    /// glyph: what a document draws.
+    Masked(usize),
+    /// What lies over every shadow: the glyphs and their decorations.
+    Over,
+}
 
 const BLACK: Color = Color::BLACK;
 const TRANSPARENT: Color = Color::TRANSPARENT;
@@ -808,6 +835,9 @@ impl Context2D {
     ) where
         F: Fn(&SkCanvas, &Paint),
     {
+        if self.files_through_chain(paint, exact, features, &f) {
+            return;
+        }
         let paint_for = |recording: Recording| match (recording, exact) {
             (Recording::Pixels, Some(exact)) => exact,
             _ => paint,
@@ -871,6 +901,94 @@ impl Context2D {
                 });
             }
         };
+    }
+
+    /// Files a draw under a `drop-shadow()` the crate runs itself -- see
+    /// [`Filter::steps`] -- or under a Skia image filter on a page that
+    /// composites in floats -- see [`Self::exact_steps`] -- as a group of
+    /// its own: the draw recorded without its filter, under the transform
+    /// it is made under and once for each recording the page keeps, run
+    /// through the chain on pixels. Through Skia's layer the shadow's blur
+    /// is not the exact Gaussian, under a turn or a skew the draw itself is
+    /// resampled, and a float page's layer is eight bits. In a document the
+    /// group composites through the paint as it is, which Skia draws as it
+    /// draws the filtered draw itself. `false`, filing nothing, for any
+    /// other draw, and for one casting a shadow or under a blend that
+    /// covers beyond it, which stay Skia's.
+    fn files_through_chain<F>(
+        &self,
+        paint: &Paint,
+        exact: Option<&Paint>,
+        features: VectorFeatures,
+        f: &F,
+    ) -> bool
+    where
+        F: Fn(&SkCanvas, &Paint),
+    {
+        if covers_beyond_the_draw(self.state.global_composite_operation)
+            || self.casts_shadow()
+        {
+            return false;
+        }
+        let Some(steps) = self.exact_steps() else {
+            return false;
+        };
+        // A chain of blurs and colour functions alone keeps the route its
+        // draw takes now: a `BlurOp`, or Skia's filter.
+        let chained = steps.iter().any(|step| {
+            matches!(step, Step::Shadow { .. }) || step.runs_in_local_space()
+        });
+        if !chained {
+            return false;
+        }
+        // Recorded over the page and as far again as the chain reaches: a
+        // picture keeps nothing of a draw past its bounds, and a draw off
+        // the page can cast its shadow onto it.
+        let bounds = self
+            .bounds
+            .with_outset(canvas_reach(&steps, &self.state.matrix));
+        // The draw keeps its alpha, the colour's and the global one, as it
+        // does through Skia's layer; the group composites it at one,
+        // through the blend.
+        let record = |paint: &Paint| {
+            let mut paint = paint.clone();
+            paint
+                .set_image_filter(None)
+                .set_blend_mode(BlendMode::SrcOver);
+            let mut recorder = PictureRecorder::new();
+            let canvas = recorder.begin_recording(bounds, true);
+            canvas.set_matrix(&self.state.matrix.into());
+            f(canvas, &paint);
+            recorder.finish_recording_as_picture(None)
+        };
+        let entry = match self.recorder.borrow().dual() {
+            false => record(paint).map(Layer::Picture),
+            true => record(exact.unwrap_or(paint))
+                .zip(record(paint))
+                .map(|pictures| Layer::Targeted(Arc::new(pictures))),
+        };
+        let mut through = Paint::default();
+        through
+            .set_blend_mode(self.state.global_composite_operation)
+            .set_image_filter(paint.image_filter());
+        let contents = Arc::new(entry.into_iter().collect());
+        self.with_recorder(|mut recorder| {
+            recorder.append_group(
+                Composite::Chain {
+                    steps,
+                    rec: LayerRec {
+                        paint: Some(through),
+                        ..LayerRec::default()
+                    },
+                },
+                None,
+                Matrix::new_identity(),
+                contents,
+                features,
+                Point::default(),
+            );
+        });
+        true
     }
 
     pub fn map_points(&self, coords: &[f32]) -> Vec<Point> {
@@ -994,6 +1112,81 @@ impl Context2D {
                 None,
                 Matrix::new_identity(),
                 contents,
+                VectorFeatures::PLAIN,
+                Point::default(),
+            );
+        });
+    }
+
+    /// Records a paragraph that casts text shadows: what lies beneath them,
+    /// each shadow, and the text over them, as one group composited through
+    /// the context's alpha and blend, as [`Self::with_composited_canvas`]
+    /// composites any paragraph. `draw` draws the part it is handed.
+    ///
+    /// A blurred shadow is its own group, whose chain blurs the shadow drawn
+    /// sharp on pixels by the exact Gaussian -- see `context::chain` -- so
+    /// that a run of text casts the blur of the whole run. What it blurs is
+    /// confined to its cast's `bounds`, which the blur spreads past. A
+    /// document draws the shadow as Skia's mask filter draws it, glyph by
+    /// glyph, which its backends keep as vectors. An unblurred shadow is
+    /// drawn sharp on both.
+    pub(crate) fn draw_with_shadows<F>(&self, casts: &[ShadowCast], draw: F)
+    where
+        F: Fn(&SkCanvas, ShadowPart),
+    {
+        let mut paint = Paint::default();
+        paint.set_alpha_f(self.state.global_alpha as f32);
+        paint.set_blend_mode(self.state.global_composite_operation);
+        let paint = self.faint().drawable(&paint).into_owned();
+        let record = |part: ShadowPart| {
+            let mut recorder = PictureRecorder::new();
+            let canvas = recorder.begin_recording(self.bounds, true);
+            canvas.set_matrix(&self.state.matrix.into());
+            draw(canvas, part);
+            recorder.finish_recording_as_picture(None)
+        };
+        // Once for each recording the page keeps, as every draw is.
+        let entry = |part: ShadowPart| match self.recorder.borrow().dual() {
+            false => record(part).map(Layer::Picture),
+            true => record(part)
+                .zip(record(part))
+                .map(|pictures| Layer::Targeted(Arc::new(pictures))),
+        };
+        let mut contents: Vec<Layer> = Vec::with_capacity(casts.len() + 2);
+        contents.extend(entry(ShadowPart::Beneath));
+        for (index, cast) in casts.iter().enumerate() {
+            if !(cast.sigma.is_finite() && cast.sigma > 0.0) {
+                contents.extend(entry(ShadowPart::Sharp(index)));
+                continue;
+            }
+            let Some(drawn) = record(ShadowPart::Sharp(index))
+                .zip(record(ShadowPart::Masked(index)))
+            else {
+                continue;
+            };
+            let within = self.state.matrix.map_rect(cast.bounds).0;
+            contents.push(Layer::Group(Arc::new(Group {
+                composite: Composite::Chain {
+                    steps: Arc::from([Step::Blur(cast.sigma)]),
+                    rec: LayerRec::default(),
+                },
+                matrix: Matrix::new_identity(),
+                clip: None,
+                within: Some(within),
+                contents_matrix: Matrix::new_identity(),
+                contents: Arc::new(vec![Layer::Targeted(Arc::new(drawn))]),
+            })));
+        }
+        contents.extend(entry(ShadowPart::Over));
+        self.with_recorder(|mut recorder| {
+            recorder.append_group(
+                Composite::Layer(LayerRec {
+                    paint: Some(paint),
+                    ..LayerRec::default()
+                }),
+                None,
+                Matrix::new_identity(),
+                Arc::new(contents),
                 VectorFeatures::PLAIN,
                 Point::default(),
             );
@@ -1287,7 +1480,7 @@ impl Context2D {
             features,
             |canvas, paint| {
                 if let Some(tile) = self.state.texture(style) {
-                    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+                    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
                     // Re-check: mix the PathEffect into the paint and draw
                     // directly; if the filled bounds are right the two-path
                     // intersection below can go.
@@ -2073,7 +2266,7 @@ impl Context2D {
         style.set_typeface(typeface.clone());
         style.set_font_families(&spec.collection_names);
         style.set_font_style(spec.style());
-        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+        // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
         // Re-check: "17.3px measures as 17.296875px on FreeType" in
         // tests/suite/text.test.js, on Linux, goes red once fixed.
         // Skia's FreeType scaler sets the face's size as 26.6 fixed point
@@ -2228,7 +2421,9 @@ impl Context2D {
                 // laid out for this paint -- see `Typesetter::laid_out`.
                 let run = match &kept {
                     Some(kept) => DrawnRun::Kept(kept.clone()),
-                    None => typesetter.drawn_once(&faint.drawable(paint)),
+                    None => {
+                        typesetter.drawn_once(&faint.drawable(paint), canvas)
+                    }
                 };
                 let (offset, condensation) = (run.offset(), run.condensation());
                 // In a test, an undecorated run can be laid out for this
@@ -2475,16 +2670,31 @@ impl Context2D {
 
     /// The filter as steps the crate runs on a draw's pixels exactly -- see
     /// [`Filter::steps`] -- or `None` where Skia's filter draws it: no
-    /// filter, one Skia has to run itself, or one beside a Skia image
-    /// filter, which would have to run after it and keeps the whole filter
-    /// Skia's.
+    /// filter, or one Skia has to run itself.
+    ///
+    /// A Skia image filter is one Skia runs, and on a page that composites
+    /// in floats the crate runs it on a float layer of its own, as the one
+    /// step of its chain -- see [`Step::Image`]; Skia's own layer for it
+    /// would be eight bits. Beside a CSS filter it keeps Skia's layer on any
+    /// page: the two would run in different spaces, the CSS filter's lengths
+    /// in canvas pixels and the image filter's in the draw's own units.
     fn exact_steps(&self) -> Option<Arc<[Step]>> {
-        self.state
-            .skia_image_filter
-            .is_none()
-            .then(|| self.state.filter.steps())
-            .flatten()
-            .map(Arc::<[Step]>::from)
+        match &self.state.skia_image_filter {
+            None => self.state.filter.steps().map(Arc::<[Step]>::from),
+            Some(filter) => (self.composites_in_floats()
+                && self.state.filter.is_none())
+            .then(|| Arc::from([Step::Image(filter.clone())])),
+        }
+    }
+
+    /// Whether the page composites in floats, `F16` or `F32`: a page whose
+    /// Skia image filters the crate runs itself, as Skia's layer would
+    /// round them to eight bits -- see [`Step::Image`].
+    fn composites_in_floats(&self) -> bool {
+        matches!(
+            self.canvas_color_type,
+            ColorType::RGBAF16 | ColorType::RGBAF16Norm | ColorType::RGBAF32
+        )
     }
 
     /// Whether a draw now casts a shadow: what `paint_for_shadow` answers

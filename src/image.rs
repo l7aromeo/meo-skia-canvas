@@ -884,7 +884,7 @@ impl Svg {
     /// SVG takes the colour as eight-bit sRGB, so a colour outside sRGB is
     /// gamut-mapped into it, as CSS Color 4 maps one, rather than clipped.
     pub fn set_current_color(&mut self, color: RgbaLinear) {
-        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+        // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
         // Re-check: grep -n "color?: Color"
         // ~/.cargo/registry/src/*/skia-safe-*/src/modules/svg/node.rs
         // An SVG node's `color` is an `SkColor` and nothing wider.
@@ -1793,7 +1793,7 @@ fn borrowed_range(haystack: &str, needle: &str) -> Option<Range<usize>> {
 /// in -- see [`LENGTH_ATTRIBUTES`] -- so a node reaching this walk carries
 /// none.
 ///
-/// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+/// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
 /// Re-check: "a length in em resolves against its own element's size" in
 /// tests/suite/image.test.js, with `text_position_lengths_in_px` changed to
 /// leave `em` alone; it fails while `SkSVGLengthContext::resolve` in
@@ -1873,7 +1873,7 @@ macro_rules! absolute_lengths_to_px {
 /// before Skia parses it. That is a workaround for this gap and exists only
 /// because of it.
 ///
-/// UPSTREAM: skia-safe 0.153.3 -- #179 -- worked around
+/// UPSTREAM: skia-safe 0.156.0 -- #179 -- worked around
 /// Re-check: grep for `C_SkSVGTextContainer_setX` in skia-bindings. When it
 /// is there, `text_position_lengths_in_px` and its tests can be deleted and
 /// these four attributes handled in the match below like every other length.
@@ -2112,7 +2112,7 @@ fn fe_subregion_to_px(node: &svg::fe::Fe) {
 /// on every variant except the six `Shape` subtypes, `Use` and `TextLiteral`,
 /// and SVG's own content model gives none of those eight element children.
 ///
-/// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+/// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
 /// Re-check: cargo test every_element_kind_survives_the_length_rewrite with
 /// the `Image`, `Text` and `TSpan` arms of `normalize_absolute_lengths`
 /// changed to call `descend`. Running it unchanged passes whatever skia-safe
@@ -2369,7 +2369,7 @@ pub(crate) fn decoded(data: &Data, when: SkiaDecode) -> Option<SkImage> {
 /// then passed through as though they already were sRGB. PNG, WebP and AVIF
 /// of the same canvas all round-trip; BMP was the one that did not.
 ///
-/// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+/// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
 /// Re-check: cargo test a_bmp_decodes_in_the_space_its_header_names
 ///
 /// Relabelled rather than converted. The pixels Skia returned are the bytes

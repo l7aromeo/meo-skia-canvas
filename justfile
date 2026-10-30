@@ -1,14 +1,17 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-# On macOS every recipe builds skia-bindings from a patched Skia source tree:
-# this prints `SKIA_SOURCE_DIR=<dir>` there and nothing elsewhere, and just
-# loads it into every recipe's environment, shebang recipes included. An
-# exported variable cannot be left unset on Linux, and skia-bindings reads an
-# empty `SKIA_SOURCE_DIR` as a source directory. The tree itself is prepared by
-# `ensure-skia-source`, because this runs on every invocation and must not
-# download. A variable already set in the environment wins.
+# On macOS and Linux every recipe builds skia-bindings from a patched Skia
+# source tree: this prints `SKIA_SOURCE_DIR=<dir>` there and nothing on
+# Windows, and just loads it into every recipe's environment, shebang recipes
+# included. An exported variable cannot be left unset on Windows, and
+# skia-bindings reads an empty `SKIA_SOURCE_DIR` as a source directory. The
+# tree itself is prepared by `ensure-skia-source`, because this runs on every
+# invocation and must not download. A variable already set in the environment
+# wins. Which patches each platform's tree carries is `PATCHES` in
+# scripts/skia-source.mjs; macOS's is the one below, Linux's the brotli
+# build-list fix noted there.
 #
-# UPSTREAM: skia-bindings 0.153.3 -- unfiled -- worked around
+# UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
 # Re-check: node --test tests/suite/metal-compile.test.js, against a binary built without SKIA_SOURCE_DIR
 #
 # skia-bindings replaces Skia's two `@available(macOS 10.15, *)` checks with
@@ -94,10 +97,11 @@ ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards ch
 # a rebase or merge can move under a warm worktree. scripts/install-deps.mjs
 # says how it tells, and why it is not a `test -d`.
 # The patched Skia tree `dotenv-command` names, fetched once into the cache on
-# macOS. Nothing elsewhere, where skia-bindings builds as it always has.
+# macOS and Linux. Nothing on Windows, where skia-bindings builds as it always
+# has.
 [private]
 ensure-skia-source:
-    @{{ if os() == "macos" { "node scripts/skia-source.mjs prepare >/dev/null" } else { "true" } }}
+    @{{ if os() == "windows" { "true" } else { "node scripts/skia-source.mjs prepare >/dev/null" } }}
 
 [private]
 ensure-deps: ensure-skia-source

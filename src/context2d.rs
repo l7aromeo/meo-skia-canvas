@@ -51,7 +51,7 @@ use crate::{
     css::{
         Dimension, Expect, FontUnits, Percent, ROOT_FONT_PX, evaluate,
         is_ident_code_point, is_math, parse_angle, parse_decoration,
-        parse_filter, split_number, without_comments, would_start_ident,
+        parse_filter_named, split_number, without_comments, would_start_ident,
         written_zero,
     },
     error::Error,
@@ -1896,8 +1896,15 @@ impl Context2D {
     /// # Ok::<(), meo_skia_canvas::error::Error>(())
     /// ```
     pub fn set_filter_css(&mut self, css: &str) -> Result<(), Error> {
-        let ops = parse_filter(css, &self.inner.state.filter_units())?;
-        self.set_filter(&ops)?;
+        let parsed = parse_filter_named(css, &self.inner.state.filter_units())?;
+        for (op, _) in &parsed {
+            op.validate()?;
+        }
+        let specs: Vec<_> = parsed
+            .into_iter()
+            .map(|(op, named)| op.to_spec_named(named))
+            .collect();
+        self.inner.state.filter = Filter::new(css, &specs);
         // Echo the caller's own text, exactly -- case, spacing and spelling,
         // `"  NONE "` included -- as Chrome and the JavaScript `filter`
         // getter read it back, rather than what `set_filter` derived from
@@ -2723,7 +2730,7 @@ impl Context2D {
             for (i, slot) in values.iter_mut().enumerate() {
                 *slot = matrix[i];
             }
-            // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+            // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
             // Re-check: replace the `is_finite` filter below with a bare
             // `Some(Projection { values })`, then cargo test
             // a_projection_that_cannot_be_solved_is_none. The test passes
@@ -3232,6 +3239,9 @@ impl Context2D {
     ///
     /// Not in the Canvas standard.
     pub fn draw_paragraph(&mut self, layout: &Paragraph, x: f32, y: f32) {
+        if layout.draw_shadowed(&self.inner, SkPoint::new(x, y)) {
+            return;
+        }
         // Composited, not bare: the paragraph carries its own paints, so
         // without this wrapper the context's alpha and blend mode would be
         // silently dropped.
@@ -5339,12 +5349,22 @@ mod paragraph_shadow_tests {
         }
     }
 
-    fn laid_out(base: &TextStyle, spans: &Spans, width: f32) -> Paragraph {
+    /// `spans` laid out in `base` at `width`, each style's shadows passed
+    /// through `shadows` first.
+    fn laid_out(
+        base: &TextStyle,
+        spans: &Spans,
+        width: f32,
+        shadows: fn(&mut [TextShadow]),
+    ) -> Paragraph {
         let engine = engine();
-        let mut builder = engine.paragraph_builder(base);
+        let mut base = base.clone();
+        shadows(&mut base.shadows);
+        let mut builder = engine.paragraph_builder(&base);
         for (text, style) in spans {
             let mut pushed = base.clone();
             style(&mut pushed);
+            shadows(&mut pushed.shadows);
             builder.push_style(&pushed);
             builder.add_text(text);
             builder.pop();
@@ -5500,11 +5520,51 @@ mod paragraph_shadow_tests {
         ]
     }
 
-    /// The paragraph's shadows, drawn by `Passes` from the glyph runs
-    /// `Paragraph::visit` reports, are SkParagraph's own to the byte, on
-    /// both engines, wherever no line's shadow reaches another's glyphs.
     #[test]
-    fn a_paragraphs_shadows_are_drawn_as_skparagraph_draws_them() {
+    fn a_style_set_in_two_faces_casts_one_shadow() {
+        // Oswald has no omega and Raleway, next in the families, has: three
+        // glyph runs of one style, one element, one shadow. Both faces are
+        // bundled, so the split is the same wherever the test runs. `tests/
+        // paragraph_shadow.rs` holds its blur to the blur of the whole run.
+        let spans: Spans = vec![("AbΩΩCd", |s| {
+            s.font_families =
+                vec!["ShadowOswald".into(), "ShadowRaleway".into()];
+            s.shadows = vec![shadow((200, 0, 0, 1.0), (1.0, 0.0), 4.0)]
+        })];
+        let paragraph = laid_out(&base(), &spans, W, |_| {});
+        painted(false, &paragraph, false);
+        assert_eq!(paragraph.cast_runs().len(), 1, "one shadow cast");
+        assert!(
+            paragraph.cast_runs()[0] >= 2,
+            "drawn from {:?} runs",
+            paragraph.cast_runs()
+        );
+    }
+
+    /// Every shadow sharp: a blurred one is the exact blur of its run, which
+    /// SkParagraph's per-glyph mask filter is not -- `tests/
+    /// paragraph_shadow.rs` holds that.
+    fn sharp(shadows: &mut [TextShadow]) {
+        shadows
+            .iter_mut()
+            .for_each(|shadow| shadow.blur_sigma = 0.0);
+    }
+
+    /// [`sharp`], in the reverse order: SkParagraph paints a style's
+    /// shadows in the order given, the first lowest, and `Passes` the first
+    /// on top, as CSS does.
+    fn sharp_reversed(shadows: &mut [TextShadow]) {
+        sharp(shadows);
+        shadows.reverse();
+    }
+
+    /// The paragraph's shadows, drawn sharp by `Passes` from the glyph runs
+    /// `Paragraph::visit` reports, are SkParagraph's own to the byte, given
+    /// each style's list in the reverse order, on both engines, wherever no
+    /// line's shadow reaches another's glyphs: the same glyphs, in the same
+    /// places, in the order CSS paints them.
+    #[test]
+    fn a_paragraphs_sharp_shadows_are_drawn_as_skparagraph_draws_them() {
         let mut differing = vec![];
         let legs: &[bool] = match gpu_reachable() {
             true => &[false, true],
@@ -5515,9 +5575,13 @@ mod paragraph_shadow_tests {
         };
         for &gpu in legs {
             for (name, base, spans, width) in corpus() {
-                let paragraph = laid_out(&base, &spans, width);
-                let ours = painted(gpu, &paragraph, false);
-                let theirs = painted(gpu, &paragraph, true);
+                let ours =
+                    painted(gpu, &laid_out(&base, &spans, width, sharp), false);
+                let theirs = painted(
+                    gpu,
+                    &laid_out(&base, &spans, width, sharp_reversed),
+                    true,
+                );
                 assert!(
                     theirs.iter().any(|&b| b != 0),
                     "{name}: the scene draws something"

@@ -19,9 +19,11 @@
 
 use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, Color, Color4f, ColorFilter,
-    ColorType, Data, FilterMode, IRect, Image, ImageInfo, Matrix, MipmapMode,
-    Paint, Rect, RoundOut, SamplingOptions, Surface, Vector, color_filters,
+    ColorSpace, ColorType, Data, FilterMode, IRect, Image, ImageFilter,
+    ImageInfo, Matrix, MipmapMode, Paint, Rect, RoundOut, SamplingOptions,
+    Surface, Vector, color_filters,
     image::{CachingHint, RequiredProperties},
+    image_filter::MapDirection,
     image_filters,
 };
 
@@ -32,6 +34,8 @@ use skia_safe::{Recorder, gpu};
 use crate::context::exact_blur_gpu;
 use crate::{
     context::exact_blur::{self, REACH_SIGMAS},
+    node::utils::color_in_canvas_space,
+    pixels::PixelColorSpace,
     started,
 };
 
@@ -42,6 +46,35 @@ pub enum Step {
     Blur(f32),
     /// A colour filter, which is the same at any scale.
     Colour(ColorFilter),
+    /// A `drop-shadow()`: what the step before left, over its own alpha in
+    /// `colour` blurred by the exact Gaussian of `sigma` and moved by
+    /// `offset`, both in canvas pixels. `colour` is unpremultiplied, in
+    /// `space`.
+    Shadow {
+        offset: Vector,
+        sigma: f32,
+        colour: Color4f,
+        space: ColorSpace,
+    },
+    /// A Skia image filter, its lengths in the local units of the draw it
+    /// filters, as on the layer Skia opens for it: run by drawing the step
+    /// before's image through it, which Skia filters in that image's own
+    /// colour type. On the CPU Skia's layer for it would be eight bits a
+    /// channel whatever the page -- `SkBitmapDevice::createDevice` makes any
+    /// layer whose paint carries an image filter `kN32`. A chain holding one
+    /// is run in the space of the transform the draw was made under -- see
+    /// [`Step::runs_in_local_space`].
+    Image(ImageFilter),
+}
+
+impl Step {
+    /// Whether a chain holding this step is run in the space of the
+    /// transform its draw was made under, rather than in canvas pixels: a
+    /// Skia image filter's lengths turn and stretch with that transform,
+    /// and only a layer in its space keeps them so.
+    pub(crate) fn runs_in_local_space(&self) -> bool {
+        matches!(self, Step::Image(_))
+    }
 }
 
 /// How the chain's pixels are kept where the canvas it is played onto has
@@ -186,6 +219,22 @@ pub(crate) fn run(
             ),
             Step::Colour(filter) => {
                 filtered(context.as_mut(), &image, filter, gain)
+            }
+            Step::Shadow {
+                offset,
+                sigma,
+                colour,
+                space,
+            } => shadowed(
+                context.as_ref(),
+                &image,
+                Vector::new(offset.x * scale.0, offset.y * scale.1),
+                (sigma * scale.0, sigma * scale.1),
+                (*colour, space),
+                gain,
+            ),
+            Step::Image(filter) => {
+                imaged(context.as_mut(), &image, filter, &layer, gain)
             }
         };
         image = next?;
@@ -378,7 +427,7 @@ fn region(
     layer: &Matrix,
     rest: &Matrix,
 ) -> Option<IRect> {
-    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
     // Re-check: cargo test skia_rasterises_a_path_its_clip_cuts_another_way
     //
     // Skia's analytic anti-aliasing takes another route for a path its clip
@@ -413,6 +462,8 @@ fn region(
             image_filters::color_filter(filter.clone(), None, None)
                 .is_some_and(|filter| filter.can_compute_fast_bounds())
         }
+        Step::Shadow { .. } => true,
+        Step::Image(filter) => filter.can_compute_fast_bounds(),
     });
     let region = match content.filter(|_| bounded) {
         Some(content) => {
@@ -435,21 +486,73 @@ fn region(
     (!region.is_empty()).then_some(region)
 }
 
-/// How far, in layer pixels along each axis, the chain's blurs together
-/// carry a pixel.
+/// How far, in canvas pixels along each axis, the chain's steps together
+/// carry a pixel of a draw made under `drawn_under`: what lies farther than
+/// this outside what is shown cannot reach it. A chain run in the draw's
+/// own space -- see [`Step::runs_in_local_space`] -- reaches as far as its
+/// lengths are stretched by the larger of the scales `drawn_under` makes,
+/// which bounds them along any axis it turns them to.
+pub(crate) fn canvas_reach(steps: &[Step], drawn_under: &Matrix) -> Vector {
+    let local = steps.iter().any(Step::runs_in_local_space);
+    let stretch = drawn_under
+        .decompose_scale(None)
+        .filter(|_| local)
+        .map_or(1.0, |scale| scale.width.max(scale.height));
+    reach(steps, &Matrix::scale((stretch, stretch)))
+}
+
+/// How far, in layer pixels along each axis, the chain's blurs and
+/// shadows together carry a pixel: its blurs' reach, and as far again as
+/// each shadow moves along that axis.
 fn reach(steps: &[Step], layer: &Matrix) -> Vector {
     let (sx, sy) = (layer.scale_x().abs(), layer.scale_y().abs());
     let sigma = steps
         .iter()
         .filter_map(|step| match step {
-            Step::Blur(sigma) => Some(*sigma),
-            Step::Colour(_) => None,
+            Step::Blur(sigma) | Step::Shadow { sigma, .. } => Some(*sigma),
+            Step::Colour(_) | Step::Image(_) => None,
         })
         .filter(|sigma| sigma.is_finite() && *sigma > 0.0)
         .fold(0.0, |sum, sigma| sum + sigma);
+    let (moved_x, moved_y) = steps
+        .iter()
+        .filter_map(|step| match step {
+            Step::Shadow { offset, .. } => Some(*offset),
+            Step::Blur(_) | Step::Colour(_) | Step::Image(_) => None,
+        })
+        .fold((0.0, 0.0), |(x, y), offset| {
+            (x + offset.x.abs(), y + offset.y.abs())
+        });
+    let imaged = steps
+        .iter()
+        .filter_map(|step| match step {
+            Step::Image(filter) => Some(image_reach(filter, layer)),
+            Step::Blur(_) | Step::Colour(_) | Step::Shadow { .. } => None,
+        })
+        .fold(Vector::default(), |sum, reach| sum + reach);
     let taps = |sigma: f32| (REACH_SIGMAS * f64::from(sigma)).ceil() as f32;
-    Vector::new(taps(sigma * sx), taps(sigma * sy))
+    Vector::new(
+        taps(sigma * sx) + (moved_x * sx).ceil() + imaged.x,
+        taps(sigma * sy) + (moved_y * sy).ceil() + imaged.y,
+    )
 }
+
+/// How far, in layer pixels along each axis, `filter` carries a pixel at
+/// the layer's scale: how far past a square of [`PROBE_SIDE`] pixels its
+/// output reaches, as Skia bounds it.
+fn image_reach(filter: &ImageFilter, layer: &Matrix) -> Vector {
+    let square = IRect::from_wh(PROBE_SIDE, PROBE_SIDE);
+    let scale = Matrix::scale((layer.scale_x().abs(), layer.scale_y().abs()));
+    let out = filter.filter_bounds(square, &scale, MapDirection::Forward, None);
+    let x = (-out.left).max(out.right - PROBE_SIDE).max(0);
+    let y = (-out.top).max(out.bottom - PROBE_SIDE).max(0);
+    Vector::new(x as f32, y as f32)
+}
+
+/// The side of the square [`image_reach`] asks Skia to bound: any square
+/// does for a filter whose reach does not depend on what it is handed, and
+/// one larger than the reach keeps an offset from reading as a shrink.
+const PROBE_SIDE: i32 = 1024;
 
 /// The layer's pixels: the canvas's own colour type and space, or for a
 /// canvas with none, `depth`'s type in no space at all, which is what a
@@ -675,6 +778,237 @@ fn filtered(
     canvas.clear(Color::TRANSPARENT);
     canvas.draw_image(image, (0, 0), Some(&paint));
     Some(surface.image_snapshot())
+}
+
+/// `image` over its shadow, scaled by `gain`, in `image`'s own pixel type:
+/// its alpha in `colour`, blurred by the exact Gaussian of `sigma` along
+/// rows and columns and moved by `offset`, all in layer pixels.
+///
+/// Made in floats on the CPU -- the tint, the blur and the two composited
+/// -- and rounded once into `image`'s type, by [`rounded_once`]: an
+/// eight-bit tint rounded before the blur, or a blurred shadow rounded
+/// before the image is drawn over it, would be rounded again on the way.
+/// The shadow is moved unresampled where the offset is whole pixels, and
+/// bilinearly otherwise.
+fn shadowed(
+    context: Option<&Gpu>,
+    image: &Image,
+    offset: Vector,
+    sigma: (f32, f32),
+    (colour, space): (Color4f, &ColorSpace),
+    gain: f32,
+) -> Option<Image> {
+    let raster = to_raster(context, image)?;
+    let floats = raster.image_info().with_color_type(ColorType::RGBAF32);
+    let on_floats = |draw: &dyn Fn(&SkCanvas)| {
+        let mut surface = started::raster(&floats, None, None)?;
+        surface.canvas().clear(Color::TRANSPARENT);
+        draw(surface.canvas());
+        Some(surface.image_snapshot())
+    };
+    let source = on_floats(&|canvas| {
+        canvas.draw_image(&raster, (0, 0), None);
+    })?;
+    let tint = tint(colour, space, raster.image_info())?;
+    let tinted = filtered(None, &source, &tint, 1.0)?;
+    let shadow = match sigma.0 > 0.0 || sigma.1 > 0.0 {
+        true => blurred_on_cpu(&tinted, sigma.0, sigma.1, 1.0)?,
+        false => tinted,
+    };
+    let sampling = match offset.x.fract() == 0.0 && offset.y.fract() == 0.0 {
+        true => SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
+        false => SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
+    };
+    let composed = on_floats(&|canvas| {
+        canvas.draw_image_with_sampling_options(
+            &shadow,
+            (offset.x, offset.y),
+            sampling,
+            None,
+        );
+        canvas.draw_image(&source, (0, 0), None);
+    })?;
+    rounded_once(&composed, image.image_info(), gain)
+}
+
+/// The colour filter a shadow in `colour`, unpremultiplied in `space`, is
+/// tinted through onto a layer like `layer`: the colour, in the alpha of
+/// what it is tinting. On a layer of eight bits a channel it is the colour a
+/// fill of it paints there, read back from a pixel filled with it, so that
+/// a shadow's bytes are a fill's: Skia rounds a fill's colour to the layer's
+/// bytes and premultiplies by the rounded alpha, and
+/// `color(srgb 0.25 0.5 0.75 / 0.3)` fills green at 39 of 255 where 0.5 of
+/// 0.3 is 38.25. A float layer takes the colour as named, converted
+/// exactly by [`exact_tint`] where the layer is in a space this crate
+/// converts, and through Skia's blend otherwise.
+fn tint(
+    colour: Color4f,
+    space: &ColorSpace,
+    layer: &ImageInfo,
+) -> Option<ColorFilter> {
+    let bytes = matches!(
+        layer.color_type(),
+        ColorType::RGBA8888 | ColorType::BGRA8888
+    );
+    if !bytes {
+        return exact_tint(colour, space, layer).or_else(|| {
+            color_filters::blend_with_color_space(
+                colour,
+                Some(space.clone()),
+                BlendMode::SrcIn,
+            )
+        });
+    }
+    let pixel = layer.with_dimensions((1, 1));
+    let mut surface = started::raster(&pixel, None, None)?;
+    surface.canvas().clear(Color::TRANSPARENT);
+    surface
+        .canvas()
+        .draw_paint(&Paint::new(colour, Some(space)));
+    // Read back unpremultiplied, in floats, in the layer's own space: the
+    // filled bytes divided out exactly enough that the tint multiplies them
+    // back to the same bytes.
+    let read = ImageInfo::new(
+        (1, 1),
+        ColorType::RGBAF32,
+        AlphaType::Unpremul,
+        layer.color_space(),
+    );
+    let mut filled = [0f32; 4];
+    if !surface.image_snapshot().read_pixels(
+        &read,
+        &mut filled,
+        4 * size_of::<f32>(),
+        (0, 0),
+        CachingHint::Disallow,
+    ) {
+        return None;
+    }
+    let [r, g, b, a] = filled;
+    color_filters::blend_with_color_space(
+        Color4f::new(r, g, b, a),
+        layer.color_space(),
+        BlendMode::SrcIn,
+    )
+}
+
+/// [`tint`] on a float layer in a space this crate converts: the colour
+/// converted to the layer's space in `f64` on this side, and handed to Skia
+/// as the offsets of a colour matrix worked in that space, its alpha the
+/// colour's alpha of what it tints. Skia converts a colour a blend filter
+/// holds through skcms's approximate transfer function, whatever space it
+/// is tagged with: a shadow in `color(srgb-linear 0.5 0.5 0.5)` landed
+/// 6.29e-5 from its encoding on an sRGB F32 page, and pre-encoded to
+/// `color(srgb ...)` it landed the same. A matrix's offsets are not
+/// converted. `None` where the layer has no space or one this crate does
+/// not convert.
+fn exact_tint(
+    colour: Color4f,
+    space: &ColorSpace,
+    layer: &ImageInfo,
+) -> Option<ColorFilter> {
+    let working = layer.color_space()?;
+    let canvas = PixelColorSpace::matching(&working)?;
+    let [r, g, b] =
+        color_in_canvas_space(colour, space, canvas)?.map(|c| c as f32);
+    #[rustfmt::skip]
+    let matrix = [
+        0.0, 0.0, 0.0, 0.0, r,
+        0.0, 0.0, 0.0, 0.0, g,
+        0.0, 0.0, 0.0, 0.0, b,
+        0.0, 0.0, 0.0, colour.a, 0.0,
+    ];
+    Some(color_filters::matrix_row_major(
+        &matrix,
+        color_filters::Clamp::No,
+    ))
+}
+
+/// `floats`, an F32 image, scaled by `gain` into `info`'s type in memory:
+/// rounded once, by the rule [`exact_blur::blur_bytes`] rounds by, where
+/// that is eight bits a channel, and kept as floats otherwise.
+///
+/// Converted here rather than drawn: Skia draws a float image onto an
+/// eight-bit surface through fewer bits than a float, and a shadow at an
+/// alpha of 0.3 -- 76.500003 levels -- came out 76 where a fill of the
+/// colour is 77. Onto a GPU target the floats went through a narrower
+/// texture first, and an image at half alpha read a level high at 807
+/// pixels of a shadow.
+fn rounded_once(floats: &Image, info: &ImageInfo, gain: f32) -> Option<Image> {
+    let (w, h) = (floats.width() as usize, floats.height() as usize);
+    let float_info = floats.image_info().with_alpha_type(AlphaType::Premul);
+    let mut pixels = vec![0f32; w * h * 4];
+    let row_bytes = w * 4 * size_of::<f32>();
+    if !floats.read_pixels(
+        &float_info,
+        &mut pixels,
+        row_bytes,
+        (0, 0),
+        CachingHint::Disallow,
+    ) {
+        return None;
+    }
+    let (info, bytes) = match info.color_type() {
+        ColorType::RGBA8888 | ColorType::BGRA8888 => {
+            let swap = info.color_type() == ColorType::BGRA8888;
+            let level = |v: f32| (v * 255.0 * gain + 0.5) as u8;
+            let bytes = pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|&[r, g, b, a]| match swap {
+                    true => [level(b), level(g), level(r), level(a)],
+                    false => [level(r), level(g), level(b), level(a)],
+                })
+                .collect::<Vec<u8>>();
+            (info.with_alpha_type(AlphaType::Premul), bytes)
+        }
+        _ => {
+            let bytes = pixels
+                .iter()
+                .flat_map(|v| (v * gain).to_ne_bytes())
+                .collect::<Vec<u8>>();
+            (float_info, bytes)
+        }
+    };
+    let row_bytes = info.min_row_bytes();
+    started::raster_from_data(&info, Data::new_copy(&bytes), row_bytes)
+}
+
+/// `image` drawn through `filter`, given the layer's scale as its local
+/// matrix so its lengths are the draw's own units, and scaled by `gain`,
+/// onto a layer of its size and type: on its GPU where it lives on one, in
+/// its own colour type, which keeps a float image float.
+fn imaged(
+    context: Option<&mut Gpu>,
+    image: &Image,
+    filter: &ImageFilter,
+    layer: &Matrix,
+    gain: f32,
+) -> Option<Image> {
+    let scale = Matrix::scale((layer.scale_x().abs(), layer.scale_y().abs()));
+    let filter = filter.with_local_matrix(&scale)?;
+    let mut surface = make_surface(context, image.image_info())?;
+    let mut paint = Paint::default();
+    paint.set_image_filter(filter).set_alpha_f(gain);
+    let canvas = surface.canvas();
+    canvas.clear(Color::TRANSPARENT);
+    canvas.draw_image(image, (0, 0), Some(&paint));
+    Some(surface.image_snapshot())
+}
+
+/// `image` in memory: read back from the GPU where it lives on one.
+fn to_raster(context: Option<&Gpu>, image: &Image) -> Option<Image> {
+    match context {
+        #[cfg(any(feature = "metal", feature = "vulkan"))]
+        Some(context) => {
+            let mut direct = context.clone().as_direct_context();
+            image.make_raster_image(direct.as_mut(), CachingHint::Disallow)
+        }
+        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
+        Some(never) => match *never {},
+        None => Some(image.clone()),
+    }
 }
 
 #[cfg(test)]

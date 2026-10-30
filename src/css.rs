@@ -24,7 +24,9 @@ mod math;
 
 use std::{borrow::Cow, cell::OnceCell};
 
-use skia_safe::{Color4f, Font as SkFont, FontHinting, GlyphId, Typeface};
+use skia_safe::{
+    Color4f, ColorSpace, Font as SkFont, FontHinting, GlyphId, Typeface,
+};
 use ttf_parser::{Face as TtfFace, GlyphId as TtfGlyphId, RawFaceTables, Tag};
 
 pub(crate) use math::{
@@ -37,7 +39,7 @@ use crate::{
     filter::FilterOp,
     geometry::Affine,
     image::{EX_PER_EM, x_height_ratio},
-    node::utils::css_to_color4f,
+    node::utils::{css_to_color4f, css_to_color4f_in_space},
     text::{TextDecoration, TextDecorationStyle},
 };
 
@@ -870,6 +872,11 @@ fn close_open_blocks(text: &str) -> Cow<'_, str> {
     }
 }
 
+/// A `drop-shadow()`'s colour as it was named: its components in the space
+/// it was named in, unpremultiplied -- see
+/// [`FilterOp::to_spec_named`](crate::filter::FilterOp::to_spec_named).
+pub(crate) type NamedColour = (Color4f, ColorSpace);
+
 /// A CSS `filter` value as the chain [`Context2D::set_filter`] takes.
 ///
 /// `"none"` is an empty chain, which is how the property spells "no
@@ -886,10 +893,15 @@ fn close_open_blocks(text: &str) -> Cow<'_, str> {
 /// blank string is refused too: HTML's `filter` setter parses the value as
 /// a `<filter-value-list>`, which an empty one is not, and leaves the
 /// filter as it was, as Chrome does.
-pub(crate) fn parse_filter(
+///
+/// Each operation comes with the colour a `drop-shadow()` named beside it,
+/// which `FilterOp::DropShadow`'s premultiplied linear-light `f32` holds
+/// to within a unit in the last place: encoded back, a shadow in
+/// `color(srgb -0.1 0.25 0.75)` landed at 0.75000006.
+pub(crate) fn parse_filter_named(
     text: &str,
     units: &FontUnits,
-) -> Result<Vec<FilterOp>, Error> {
+) -> Result<Vec<(FilterOp, Option<NamedColour>)>, Error> {
     let uncommented =
         without_comments(text).ok_or_else(|| Error::InvalidFilter {
             reason: format!("a sign stands alone in the filter {text:?}"),
@@ -910,7 +922,7 @@ pub(crate) fn parse_filter(
     let closed = close_open_blocks(trimmed);
     let trimmed = closed.as_ref();
 
-    let mut ops = Vec::new();
+    let mut ops: Vec<(FilterOp, Option<NamedColour>)> = Vec::new();
     for part in split_functions(trimmed) {
         let (name, argument) = part
             .split_once('(')
@@ -945,52 +957,56 @@ pub(crate) fn parse_filter(
             }
             .ok_or_else(|| refuse(part))
         };
-        ops.push(match name.as_str() {
-            // Its arguments are themselves space-separated, so it is the one
-            // function that cannot share the shape below.
-            "drop-shadow" => {
-                drop_shadow(argument, units).ok_or_else(|| refuse(part))?
-            }
-            "blur" => FilterOp::Blur(
-                match omitted {
-                    true => Some(0.0),
-                    false => math(
-                        argument,
-                        Percent::Refused,
-                        units,
-                        &[Dimension::LENGTH],
-                        0.0,
-                    )
-                    .unwrap_or_else(|| {
-                        parse_size(argument, units)
-                            .filter(|&radius| radius >= 0.0)
-                    }),
-                }
-                .ok_or_else(|| refuse(part))?,
-            ),
-            "hue-rotate" => FilterOp::HueRotate(
-                match omitted {
-                    true => Some(0.0),
-                    false => math(
-                        argument,
-                        Percent::Refused,
-                        units,
-                        &[Dimension::ANGLE],
-                        f32::MIN,
-                    )
-                    .unwrap_or_else(|| parse_angle(argument)),
-                }
-                .ok_or_else(|| refuse(part))?,
-            ),
-            "brightness" => FilterOp::Brightness(percent()?),
-            "contrast" => FilterOp::Contrast(percent()?),
-            "grayscale" => FilterOp::Grayscale(percent()?),
-            "invert" => FilterOp::Invert(percent()?),
-            "opacity" => FilterOp::Opacity(percent()?),
-            "saturate" => FilterOp::Saturate(percent()?),
-            "sepia" => FilterOp::Sepia(percent()?),
-            _ => return Err(refuse(part)),
-        });
+        // Its arguments are themselves space-separated, so it is the one
+        // function that cannot share the shape below.
+        if name == "drop-shadow" {
+            ops.push(drop_shadow(argument, units).ok_or_else(|| refuse(part))?);
+            continue;
+        }
+        ops.push((
+            match name.as_str() {
+                "blur" => FilterOp::Blur(
+                    match omitted {
+                        true => Some(0.0),
+                        false => math(
+                            argument,
+                            Percent::Refused,
+                            units,
+                            &[Dimension::LENGTH],
+                            0.0,
+                        )
+                        .unwrap_or_else(|| {
+                            parse_size(argument, units)
+                                .filter(|&radius| radius >= 0.0)
+                        }),
+                    }
+                    .ok_or_else(|| refuse(part))?,
+                ),
+                "hue-rotate" => FilterOp::HueRotate(
+                    match omitted {
+                        true => Some(0.0),
+                        false => math(
+                            argument,
+                            Percent::Refused,
+                            units,
+                            &[Dimension::ANGLE],
+                            f32::MIN,
+                        )
+                        .unwrap_or_else(|| parse_angle(argument)),
+                    }
+                    .ok_or_else(|| refuse(part))?,
+                ),
+                "brightness" => FilterOp::Brightness(percent()?),
+                "contrast" => FilterOp::Contrast(percent()?),
+                "grayscale" => FilterOp::Grayscale(percent()?),
+                "invert" => FilterOp::Invert(percent()?),
+                "opacity" => FilterOp::Opacity(percent()?),
+                "saturate" => FilterOp::Saturate(percent()?),
+                "sepia" => FilterOp::Sepia(percent()?),
+                _ => return Err(refuse(part)),
+            },
+            None,
+        ));
     }
     Ok(ops)
 }
@@ -1058,7 +1074,10 @@ fn held(quantity: Quantity, low: f32) -> f32 {
 /// after them. `drop-shadow(red 2px 2px 4px)` and `drop-shadow(2px 4px red)`
 /// were both refused -- and refusing one step rejects the whole chain, so a
 /// filter Chrome draws became an error here.
-fn drop_shadow(args: &str, units: &FontUnits) -> Option<FilterOp> {
+fn drop_shadow(
+    args: &str,
+    units: &FontUnits,
+) -> Option<(FilterOp, Option<NamedColour>)> {
     // Split where `split_functions` splits, so a math function or a colour
     // function stays one word whatever spaces it holds.
     let words = split_functions(args.trim_ascii());
@@ -1116,14 +1135,20 @@ fn drop_shadow(args: &str, units: &FontUnits) -> Option<FilterOp> {
                 None => continue,
             },
         };
-        return Some(FilterOp::DropShadow {
-            offset_x: lengths[0].0,
-            offset_y: lengths[1].0,
-            // The blur radius is the optional one, and its initial value is
-            // zero -- a hard-edged shadow.
-            blur: radius,
-            color,
-        });
+        let named = (!rest.is_empty())
+            .then(|| css_to_color4f_in_space(&rest))
+            .flatten();
+        return Some((
+            FilterOp::DropShadow {
+                offset_x: lengths[0].0,
+                offset_y: lengths[1].0,
+                // The blur radius is the optional one, and its initial value
+                // is zero -- a hard-edged shadow.
+                blur: radius,
+                color,
+            },
+            named,
+        ));
     }
     None
 }
@@ -1131,6 +1156,17 @@ fn drop_shadow(args: &str, units: &FontUnits) -> Option<FilterOp> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The operations [`parse_filter_named`] reads, without the colours.
+    fn parse_filter(
+        text: &str,
+        units: &FontUnits,
+    ) -> Result<Vec<FilterOp>, Error> {
+        Ok(parse_filter_named(text, units)?
+            .into_iter()
+            .map(|(op, _)| op)
+            .collect())
+    }
 
     /// Oswald, the variable face the font-relative rows were measured on, at
     /// the weight `weight`.

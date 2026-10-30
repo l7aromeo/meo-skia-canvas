@@ -18,7 +18,7 @@ engines; the step is in what was drawn.
 
 On Linux a variable face's advances move in whole font units between its
 masters, where on macOS they follow the interpolation as Chrome on macOS
-does. The FreeType that skia-bindings 0.153.3 embeds, 2.14.2, rounds each
+does. The FreeType that skia-bindings 0.156.0 embeds, 2.14.3, rounds each
 `HVAR` advance delta to a whole unit: `tt_var_get_item_delta` in
 `src/truetype/ttgxvar.c` returns `ft_round_and_shift16`, which is
 `(value + 0x8000) >> 16`, and `tt_hvadvance_adjust` adds it to an integer
@@ -61,6 +61,28 @@ hundredth, and the two edges coincide. No width given to `layout` undoes a
 floor taken on the line's side. The `UPSTREAM` note at `paragraph_style`
 carries the re-check.
 
+On Linux a glyph sheared past about 80 degrees is drawn sheared, where Chrome
+on Linux is expected to draw it upright. FreeType 2.14.3, which skia-bindings
+0.156.0 embeds, has `FT_Set_Transform` replace with the identity any matrix
+`FT_Matrix_Check` refuses (`src/base/ftobjs.c`, FreeType's f4e40ad03e), and
+that refuses one whose `32 |det|` is no more than the sum of its squares. Skia
+hands FreeType a run's transform with its scale divided out, so a shear `k`
+between the run's axes is refused once `k^2 + 2 >= 32`, about 79.65 degrees:
+`oblique 85deg`, or upright text under `setTransform(1, 0, -5.6, 1, 0, 0)`,
+came out upright, through glyph masks and through the paths Skia draws large
+and stroked text from alike. Here a run sheared past `k^2 = 28`, a little
+inside that, is drawn from its outlines, sheared as `outlineText` shears them.
+Its shape is the sheared glyph's; its edges are a filled path's rather than a
+glyph mask's. Against the masks FreeType 2.14.2 drew -- measured on Linux
+arm64, an `I` and an `H` in Oswald -- that moves edge pixels by up to 18
+levels at 200px and up to about 100 at 12 to 40px, and adds up to 2% to the
+ink, 13% at 12px and 89 degrees. Chrome on Linux draws text through the same
+Skia and FreeType, so from FreeType 2.14.3 it is expected to draw these runs
+upright; that is inferred, and Chrome on Linux was not measured. macOS and
+Windows draw text with CoreText and DirectWrite rather than FreeType, and are
+unchanged; macOS draws 85 degrees sheared through its glyph masks. The
+`UPSTREAM` note at `past_freetype_shear` carries the re-check.
+
 **Text set at 17.3px is laid out at 17.3px; Chrome 156 lays it out at
 17.29px.** Measured on macOS in Oswald, `measureText("Hamburgefonstiv")` at
 17.3px is 0.062 narrower in Chrome than here, and narrower by the same at
@@ -100,7 +122,7 @@ At 200px and below both baselines rasterise identically, so a test at those
 sizes cannot tell the two apart and is not evidence either way.
 
 The rounding is `SkParagraph`'s and happens before any binding code runs: at
-0.153.3 both `Paragraph::alphabetic_baseline` and `Paragraph::origin` return a
+0.156.0 both `Paragraph::alphabetic_baseline` and `Paragraph::origin` return a
 C++ struct field and do no arithmetic. **The property to hold on to is that
 `alphabetic_baseline` is linear in the font size, at 0.770020 per pixel, while
 the origin it is compared against is not.** No single residue describes it --
@@ -368,6 +390,29 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   line above, as in Chrome; only the shadows are taken out of that order.
   Pinned in tests/suite/paragraph.test.js, "a text shadow's stack level" and
   "a wrapped line's shadow".
+
+- _A `Paragraph` style's shadows paint the first listed on top, where
+  CanvasKit paints them in the order given, the first lowest._ CSS Text
+  Decoration 3 section 4 paints a list of text shadows as CSS Backgrounds 3
+  paints `box-shadow`, front to back. SkParagraph, which CanvasKit's
+  paragraph is, draws a style's shadows in list order. The paragraph is this
+  library's extension and follows CSS here. Pinned in
+  tests/paragraph_shadow.rs, `a_styles_first_listed_shadow_lies_on_top`.
+
+- _A style's run of text on a line casts its shadow as one, the exact
+  Gaussian blur of the whole run, where SkParagraph blurs each glyph with a
+  mask filter._ A mask filter draws a glyph heavier than the glyph itself on
+  macOS -- a 16px word drawn through one at a sigma of 0.001 held 1.23 times
+  the ink of the word -- and blurs drawn a glyph at a time lose ink where
+  they overlap: the same word blurred by 20px kept 0.54 of its sharp
+  shadow's ink on the CPU engine. Each run is one element, as CSS Text
+  Decoration 3 casts `text-shadow` for each fragment of an element; Chrome
+  156 draws an inline span's shadow wrapped onto two lines exactly as it
+  draws two blocks of one line each. A style set in two faces, its own and a
+  fallback's, is one run. The shadows composite source-over in document
+  order, beneath all the text. On pixels the blur is
+  `context::exact_blur`'s; a PDF or SVG keeps Skia's mask filter, which its
+  backends hold as vectors. Pinned in tests/paragraph_shadow.rs.
 
 - _A wavy line keeps Chrome's proportions without its pixel constants, and
   hangs from the font's top._ Chrome 153's wave on a 96px Oswald underline,
@@ -970,6 +1015,47 @@ and 3, as far as 79 pixels from the edge.
 `the_page_edge_moves_pixels_far_inside_the_page` in `tests/clip_cut.rs` holds
 it with the unclipped draw beside it, and goes red when Skia draws a path the
 page cuts as it draws one the page contains.
+
+**A `drop-shadow()` is the exact Gaussian blur of what casts it, and
+Chrome's is not.** Filter Effects Module Level 1 defines the shadow as the
+draw's alpha in the shadow's colour, blurred by a Gaussian whose standard
+deviation is the length given and moved by the offset, with the draw over
+it. Here it is exactly that, made from the draw's own pixels and rounded
+once: within half a level on 8-bit pixels on either engine, and on F16 and
+F32 to the surface's precision. Chrome 153.0.8010.12 headless approximates the
+blur, on both its canvases alike. A black triangle on a 160 by 100 canvas,
+worst levels from the exact shadow of Chrome's own unshadowed triangle:
+
+        drop-shadow     0 0 2px   3px 2px 2px   3px 2px 8px
+        here              0.50        0.50          0.50
+        Chrome            6.85       10.75          3.77
+
+Its lengths land where Chrome's do: `drop-shadow(12px 4px 0 red)` lies 12
+pixels right of what casts it and 4 down under a scale, a rotation or a
+skew, as `shadowOffsetX` and `shadowOffsetY` do, and a canvas drawn into
+another at twice its size casts it twice as far, 24 and 8. The draw is made
+on the page's own pixels whatever the transform, as Chrome makes it: a
+30-pixel square drawn through `drop-shadow(80px 0 0 red)` under
+`rotate(30deg)` or a skew is the square drawn unfiltered, to the level. An
+offset that is not whole pixels moves the shadow bilinearly, which keeps
+where it lies: `drop-shadow(12.5px 4.25px 0 red)` lies 12.5 and 4.25 from
+what casts it here, and 12.5 and 4.5 in Chrome, which puts it at 4.32 when
+it is blurred by 2px. `tests/blur_result.rs` holds the shadow to the exact
+one and `tests/filter_transform.rs` the offsets.
+
+A draw that casts a `shadowColor` shadow as well, or is drawn under a
+`globalCompositeOperation` that composites the whole canvas, is drawn
+through Skia's filter layer instead. There the offset and the blur's length
+are Chrome's, but the blur is Skia's approximation, and under a turn or a
+skew Skia draws the filtered draw at the transform's scale and turns it onto
+the page, which resamples the draw itself: a 30-pixel square read up to 16
+levels from the square drawn unfiltered under `rotate(30deg)` on the CPU
+engine and 40 on the GPU, and 65 and 80 under a `0.5` skew. A Skia
+`ImageFilter` is drawn the same way: its lengths are in local units, and
+turn and stretch with the transform as CanvasKit's do, so it is made at the
+transform's scale and the filtered draw is turned onto the page. On an F16
+or F32 page that is a layer of the page's own floats, where Skia's would be
+eight bits a channel; beside a CSS filter it is Skia's layer on any page.
 
 **A fill or stroke the page's edge cuts is drawn differently far inside the
 page on the CPU engine.** The page's edge cuts a path as a clip does: Skia's

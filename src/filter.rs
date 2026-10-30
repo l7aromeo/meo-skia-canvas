@@ -14,6 +14,7 @@ use crate::{
         rgba_linear_to_unpremul_color4f,
     },
     context2d::affine_to_matrix,
+    css::NamedColour,
     error::Error,
     geometry::{Affine, Rect},
     node::filter::FilterSpec,
@@ -426,7 +427,7 @@ impl MaskFilter {
 /// `Color`, gamut-mapped into sRGB rather than clipped -- see
 /// `rgba_linear_to_skia_color`.
 fn lit(color: RgbaLinear) -> SkColor {
-    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
     // Re-check: grep -n "light_color: impl Into"
     // ~/.cargo/registry/src/*/skia-safe-*/src/effects/image_filters.rs
     // Every lighting image filter takes its light colour as an `SkColor`, so
@@ -1607,6 +1608,27 @@ impl FilterOp {
                     linear_srgb_color_space(),
                 ),
             },
+        }
+    }
+
+    /// [`Self::to_spec`], a `drop-shadow()`'s colour taken as it was named
+    /// where it was parsed from CSS -- see
+    /// [`parse_filter_named`](crate::css::parse_filter_named): the
+    /// premultiplied linear-light `f32` this holds it in moves it by a unit
+    /// in the last place.
+    pub(crate) fn to_spec_named(
+        self,
+        named: Option<NamedColour>,
+    ) -> FilterSpec {
+        match (self.to_spec(), named) {
+            (FilterSpec::Shadow { offset, blur, .. }, Some(color)) => {
+                FilterSpec::Shadow {
+                    offset,
+                    blur,
+                    color,
+                }
+            }
+            (spec, _) => spec,
         }
     }
 }

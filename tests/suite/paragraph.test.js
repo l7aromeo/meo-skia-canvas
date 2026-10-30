@@ -2766,7 +2766,7 @@ describe("halfLeading", () => {
 
 describe("an empty fontFamilies list", () => {
   // No family names the default list, as the option left out does. It
-  // aborted the process in a debug build: skia-safe 0.153.3 builds a slice
+  // aborted the process in a debug build: skia-safe 0.156.0 builds a slice
   // from a null pointer for an empty list -- see the UPSTREAM marker in
   // src/node/paragraph.rs.
   test("lays out in the default families", () => {
