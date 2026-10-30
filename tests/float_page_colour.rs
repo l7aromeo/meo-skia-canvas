@@ -245,16 +245,24 @@ fn alphas(canvas: &mut Canvas, space: PixelColorSpace) -> Vec<f32> {
 /// The canvas the text pin draws on, wide enough for its run.
 const TEXT_SIZE: (f32, f32) = (96.0, 64.0);
 
-/// The colours the text pin draws in: one named in whole bytes, and one
-/// whose green lies 2e-5 short of 63.5 / 255, where Skia's rounding of the
-/// colour to bytes crosses into the next contrast bucket. Skia sets a glyph
-/// mask's contrast from the colour the paint's colour filter makes, read as
-/// sRGB, and this colour held in the canvas's space and converted back to
-/// sRGB by Skia lands past that edge, so text through a filter that hands
-/// it back so is covered unlike the plain paint's text. Not an edge at
-/// 31.5 / 255: CoreText's scaler halves the bucketed colour and buckets it
-/// again, which merges that edge's two buckets into one.
-const TEXT_COLOURS: [&str; 2] = ["#3366b3", "color(srgb 0.85 0.249 0.85)"];
+/// The colours the text pin draws in: one named in whole bytes, and two at
+/// the edge of a contrast bucket, where Skia's rounding of the colour to
+/// bytes crosses into the next. Skia sets a glyph mask's contrast from the
+/// colour the paint's colour filter makes, read as sRGB, and each of these
+/// held in the canvas's space and converted back to sRGB by Skia lands past
+/// its edge, so text through a filter that hands it back so is covered
+/// unlike the plain paint's. The first sits 2e-5 short of 63.5 / 255 in
+/// green on either page. The second is one of three such colours on a
+/// Rec. 2020 page that `ExactColour::dye` finds only if it reads Skia's
+/// colour as Skia computes it: read through a colour shader instead, the
+/// filter's stages round it into plain's bucket. Neither sits at 31.5 / 255:
+/// CoreText's scaler halves the bucketed colour and buckets it again, which
+/// merges that edge's two buckets into one.
+const TEXT_COLOURS: [&str; 3] = [
+    "#3366b3",
+    "color(srgb 0.85 0.249 0.85)",
+    "color(srgb 0.45 0.24897961 0.45)",
+];
 
 /// A run of text drawn in `css`.
 fn text_on(
@@ -324,6 +332,57 @@ fn a_float_page_covers_text_as_srgb_does() {
         }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// Text under a colour filter on such a canvas lays down the coverage it
+/// does on an sRGB one. The filter here doubles the colour, which moves the
+/// contrast-bucket edge at 63.5 / 255 down to a green of about 0.1245: one
+/// the colour the dye makes would cross after the filter, though it sits in
+/// plain's bucket before it, so a dye chosen by its own luminance alone
+/// covered 352 pixels of this run unlike the plain paint.
+#[test]
+fn a_colour_filter_keeps_text_covered_as_srgb_does() {
+    #[rustfmt::skip]
+    let double = ColorFilter::matrix([
+        2.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 2.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 2.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 1.0, 0.0,
+    ])
+    .expect("a matrix");
+    let css = "color(srgb 0.85 0.12445 0.85)";
+    let on = |space, depth| {
+        let mut canvas = Canvas::with_options(
+            TEXT_SIZE.0,
+            TEXT_SIZE.1,
+            CanvasOptions {
+                color_space: space,
+                color_type: depth,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas");
+        let ctx = canvas.context();
+        ctx.set_color_filter(Some(&double));
+        ctx.set_fill_style_css(css).expect("a colour");
+        ctx.set_font_css("bold 40px sans-serif");
+        ctx.fill_text("Wg", 4.0, 48.0, None);
+        alphas(&mut canvas, space)
+    };
+    for depth in [PixelDepth::F32, PixelDepth::F16] {
+        let srgb = on(PixelColorSpace::Srgb, depth);
+        for space in [PixelColorSpace::DisplayP3, PixelColorSpace::Rec2020] {
+            let parted = on(space, depth)
+                .iter()
+                .zip(&srgb)
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(
+                parted, 0,
+                "{space:?} {depth:?}: {parted} pixels covered unlike sRGB"
+            );
+        }
+    }
 }
 
 /// A colour filter on the context applies to text's exact colour as to a
