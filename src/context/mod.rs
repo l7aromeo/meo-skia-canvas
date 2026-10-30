@@ -2918,7 +2918,7 @@ mod tests {
             .map(|layer| match layer {
                 layer::Layer::Cut(..) => 1,
                 layer::Layer::Clipped(piece) => {
-                    cut_ops(std::slice::from_ref(&piece.entry))
+                    cut_ops(std::slice::from_ref(piece.entry()))
                 }
                 layer::Layer::Group(group) => cut_ops(&group.contents),
                 _ => 0,
@@ -3549,6 +3549,47 @@ mod tests {
         }
     }
 
+    /// A page holding no cut draw, drawn into another with `draw_canvas`,
+    /// writes the same PDF and SVG with its pieces' clip bounded or not: a
+    /// document walks the picture of such a page as vectors and would write
+    /// the bound as a clip of its own, so the bound is kept to pages holding
+    /// a cut draw. The pieces a read files are each bounded otherwise.
+    #[test]
+    fn a_page_drawn_into_another_writes_no_bound_into_a_document() {
+        let programs = [
+            vec![
+                Step::Clip,
+                Step::Fill(40.0),
+                Step::Read,
+                Step::Fill(50.0),
+                Step::Restore,
+            ],
+            vec![
+                Step::Clip,
+                Step::Fill(40.0),
+                Step::Read,
+                Step::Rect,
+                Step::Fill(50.0),
+                Step::Restore,
+            ],
+        ];
+        for steps in &programs {
+            let export = |bounded| {
+                layer::BOUNDS_PIECES.set(bounded);
+                let mut source = program(steps, false, true).canvas;
+                let mut into = crate::canvas::Canvas::new(200.0, 120.0);
+                into.set_gpu(false);
+                into.context().draw_canvas(&mut source, 0.0, 0.0);
+                let documents = documents(&mut into);
+                layer::BOUNDS_PIECES.set(true);
+                documents
+            };
+            let (now, unbounded) = (export(true), export(false));
+            assert!(now.0 == unbounded.0, "SVG of {steps:?}");
+            assert!(now.1 == unbounded.1, "PDF of {steps:?}");
+        }
+    }
+
     /// A page drawn into a GPU canvas with `draw_canvas` draws there what it
     /// draws on the GPU itself: the GPU clips a cut draw by the path, as it
     /// always has. Runs where a GPU does.
@@ -3563,6 +3604,346 @@ mod tests {
         into.set_gpu(true);
         into.context().draw_canvas(&mut source, 0.0, 0.0);
         assert!(pixels_at(&mut into, 2) == direct);
+    }
+
+    /// A piece of a clip run is bounded by what it draws, not by the clip:
+    /// a small triangle under a large circle, filed as a piece by a read,
+    /// reaches the triangle's rows and not the circle's.
+    #[test]
+    fn a_run_piece_is_bounded_by_what_it_draws() {
+        let steps = [Step::Clip, Step::Fill(40.0), Step::Read, Step::Restore];
+        let mut canvas = program(&steps, false, true).canvas;
+        let page = canvas.page(0).expect("a page").inner.page();
+        let piece = page
+            .layers
+            .iter()
+            .find_map(|layer| match layer {
+                layer::Layer::Clipped(piece) => Some(piece.clone()),
+                _ => None,
+            })
+            .expect("a piece");
+        let drawn = piece.drawn().expect("a bound");
+        let clip = piece.clip_bounds();
+        assert!(clip.contains(drawn), "{drawn:?} within {clip:?}");
+        assert!(
+            drawn.height() < clip.height() / 2.0,
+            "{drawn:?} against {clip:?}"
+        );
+    }
+
+    /// A kind of draw `bounded_kinds` lists: its name, whether its stretch
+    /// is bounded, and the draw.
+    type BoundedKind =
+        (&'static str, bool, fn(&mut crate::context2d::Context2D));
+
+    /// One kind of draw a bound must hold whole, placed at fractional
+    /// coordinates: where it inks is where its piece's bound is drawn. Each
+    /// with whether its stretch of the run is bounded: a draw with a shadow
+    /// or a filter is a group or a blur of its own, which has no rectangle
+    /// to bound by, and a draw whose ink crosses the clip's edge is left
+    /// unbounded -- see `Clipped::play_run`.
+    fn bounded_kinds() -> Vec<BoundedKind> {
+        use crate::paint::{StrokeCap, StrokeJoin};
+        vec![
+            ("an anti-aliased fill", true, |ctx| {
+                ctx.begin_path();
+                ctx.move_to(70.3, 40.6);
+                ctx.line_to(98.7, 52.35);
+                ctx.line_to(77.15, 71.9);
+                ctx.close_path();
+                ctx.fill(crate::path::FillRule::NonZero);
+            }),
+            // Joined at 53 degrees, mitred under a limit of 4, which Skia
+            // bounds by the stroke's radius times the limit.
+            ("a mitred spike", true, |ctx| {
+                ctx.set_line_width(3.3);
+                ctx.set_line_join(StrokeJoin::Miter);
+                ctx.set_miter_limit(4.0);
+                ctx.begin_path();
+                ctx.move_to(80.35, 67.6);
+                ctx.line_to(90.55, 47.15);
+                ctx.line_to(100.65, 67.9);
+                ctx.stroke();
+            }),
+            // Joined round: Skia bounds a stroke with mitred joins by its
+            // radius times the miter limit, which no clip here contains.
+            ("square and round caps", true, |ctx| {
+                ctx.set_line_width(5.7);
+                ctx.set_line_join(StrokeJoin::Round);
+                ctx.set_line_cap(StrokeCap::Square);
+                ctx.begin_path();
+                ctx.move_to(70.25, 45.5);
+                ctx.line_to(104.75, 49.25);
+                ctx.stroke();
+                ctx.set_line_cap(StrokeCap::Round);
+                ctx.begin_path();
+                ctx.move_to(72.6, 75.35);
+                ctx.line_to(101.4, 69.8);
+                ctx.stroke();
+            }),
+            ("a shadow, offset and blurred", false, |ctx| {
+                ctx.set_shadow_color_css("rgb(20 140 60)")
+                    .expect("a colour");
+                ctx.set_shadow_offset(6.5, 4.25);
+                ctx.set_shadow_blur(5.0);
+                ctx.fill_rect(70.4, 45.6, 18.3, 12.7);
+            }),
+            ("a shadow offset, unblurred", false, |ctx| {
+                ctx.set_shadow_color_css("rgb(20 140 60)")
+                    .expect("a colour");
+                ctx.set_shadow_offset(7.5, 5.25);
+                ctx.begin_path();
+                ctx.move_to(70.3, 44.6);
+                ctx.line_to(92.7, 52.35);
+                ctx.line_to(77.15, 66.9);
+                ctx.close_path();
+                ctx.fill(crate::path::FillRule::NonZero);
+            }),
+            ("a drop-shadow filter, unblurred", false, |ctx| {
+                ctx.set_filter_css(
+                    "drop-shadow(6.5px 4.25px 0 rgb(40 60 200))",
+                )
+                .expect("a filter");
+                ctx.fill_rect(70.4, 45.6, 18.3, 12.7);
+            }),
+            ("a drop-shadow filter", false, |ctx| {
+                ctx.set_filter_css(
+                    "drop-shadow(5.5px 3.25px 2px rgb(40 60 200))",
+                )
+                .expect("a filter");
+                ctx.begin_path();
+                ctx.move_to(70.3, 44.6);
+                ctx.line_to(95.7, 52.35);
+                ctx.line_to(77.15, 69.9);
+                ctx.close_path();
+                ctx.fill(crate::path::FillRule::NonZero);
+            }),
+            ("an image drawn smoothed at a fraction", true, |ctx| {
+                let pixels: Vec<u8> = (0..8 * 8)
+                    .flat_map(|i| {
+                        [(i * 29 % 256) as u8, 90, (i * 7 % 256) as u8, 255]
+                    })
+                    .collect();
+                let image = crate::image::Image::from_pixels(
+                    &pixels,
+                    8,
+                    8,
+                    32,
+                    Default::default(),
+                )
+                .expect("an image");
+                ctx.set_image_smoothing_enabled(true);
+                ctx.draw_image_sized(&image, 72.35, 44.6, 21.3, 17.85);
+            }),
+            ("a shadowed triangle the clip cuts", false, |ctx| {
+                ctx.set_shadow_color_css("rgb(20 140 60)")
+                    .expect("a colour");
+                ctx.set_shadow_offset(3.5, 2.25);
+                ctx.set_shadow_blur(2.0);
+                ctx.begin_path();
+                ctx.move_to(118.3, 40.6);
+                ctx.line_to(146.7, 52.35);
+                ctx.line_to(125.15, 71.9);
+                ctx.close_path();
+                ctx.fill(crate::path::FillRule::NonZero);
+            }),
+        ]
+    }
+
+    /// A page clipped to `circle` with `kind` drawn, a cut triangle, and
+    /// `kind` drawn again moved down, so that the run splits on the cut
+    /// draw into pieces either side of it -- drawn into another canvas as a
+    /// pattern and with `draw_canvas`, read at `density`, its pieces' clip
+    /// bounded or not.
+    fn bounded_in(
+        kind: fn(&mut crate::context2d::Context2D),
+        density: u32,
+        bounded: bool,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let mut source = crate::canvas::Canvas::new(200.0, 120.0);
+        source.set_gpu(false);
+        {
+            let ctx = source.context();
+            ctx.begin_path();
+            circle(ctx);
+            ctx.clip(crate::path::FillRule::NonZero);
+            ctx.save();
+            kind(ctx);
+            ctx.restore();
+            ctx.set_fill_style_css("rgb(200 40 90)").expect("a colour");
+            cut_triangle(ctx);
+            ctx.translate(0.5, 21.25);
+            kind(ctx);
+        }
+        layer::BOUNDS_PIECES.set(bounded);
+        let drawn = drawn_in(&mut source, density);
+        layer::BOUNDS_PIECES.set(true);
+        drawn
+    }
+
+    /// How many times drawing `kind` in as [`bounded_in`] does bounded a
+    /// run's clip.
+    fn bounds_applied(kind: fn(&mut crate::context2d::Context2D)) -> usize {
+        layer::BOUNDED.take();
+        bounded_in(kind, 1, true);
+        layer::BOUNDED.take().len()
+    }
+
+    /// The source of the timing rows that draw a clipped canvas into
+    /// another: 50 small fills in a band 37 pixels tall under a circle of
+    /// radius 450.3, the fills at its edge cut draws by their bounds, read
+    /// once part way.
+    fn row_source() -> crate::canvas::Canvas {
+        let mut source = crate::canvas::Canvas::new(1000.0, 1000.0);
+        source.set_gpu(false);
+        let ctx = source.context();
+        ctx.set_fill_style_css("rgba(30 60 200 / 0.7)")
+            .expect("a colour");
+        ctx.begin_path();
+        ctx.arc(500.0, 500.0, 450.3, 0.0, std::f32::consts::TAU, false)
+            .expect("a positive radius");
+        ctx.clip(crate::path::FillRule::NonZero);
+        for i in 0..50 {
+            let (x, y) =
+                ((i % 40 * 20 + 200) as f32, (i / 40 * 20 + 400) as f32);
+            if i == 25 {
+                ctx.get_image_data(0.0, 0.0, 1.0, 1.0).expect("pixels");
+            }
+            ctx.begin_path();
+            ctx.move_to(x + 2.0, y + 3.0);
+            ctx.line_to(x + 17.5, y + 8.25);
+            ctx.line_to(x + 6.0, y + 17.0);
+            ctx.close_path();
+            ctx.fill(crate::path::FillRule::NonZero);
+        }
+        source
+    }
+
+    /// Used as a pattern, the timing rows' source bounds its clip by the
+    /// band its fills occupy, not by the circle's 900 rows: the mask Skia
+    /// builds is the band's. Every rectangle the clip is bounded by is at
+    /// most the band's 37 rows and a row of rounding either side.
+    #[test]
+    fn a_drawn_in_run_bounds_its_clip_by_the_band_it_draws() {
+        let mut source = row_source();
+        let mut into = crate::canvas::Canvas::new(1000.0, 1000.0);
+        into.set_gpu(false);
+        layer::BOUNDED.take();
+        let pattern = into.context().create_pattern_from_canvas(
+            &mut source,
+            crate::pattern::PatternRepeat::NoRepeat,
+        );
+        into.context().set_fill_pattern(&pattern);
+        into.context().fill_rect(0.0, 0.0, 1000.0, 1000.0);
+        pixels_at(&mut into, 1);
+        let bounded = layer::BOUNDED.take();
+        assert!(!bounded.is_empty(), "the clip is bounded");
+        for mask in bounded {
+            assert!(mask.height() <= 39, "{mask:?}");
+            assert!(mask.top >= 400 && mask.bottom <= 438, "{mask:?}");
+        }
+    }
+
+    /// A piece whose paint Skia cannot bound -- an image filter that turns
+    /// transparent black into a colour, which
+    /// `SkImageFilter::canComputeFastBounds` refuses -- reaches the clip's
+    /// bounds, which no clip contains, so its stretch is not bounded; the
+    /// same draw through a plain paint reaches only what it draws.
+    #[test]
+    fn a_piece_skia_cannot_bound_reaches_the_clip() {
+        let piece = |filtered: bool| {
+            let mut recorder = skia_safe::PictureRecorder::new();
+            let canvas =
+                recorder.begin_recording(Rect::from_wh(200.0, 120.0), false);
+            let mut paint = Paint::default();
+            if filtered {
+                let flood = skia_safe::color_filters::blend(
+                    Color::from_rgb(200, 40, 90),
+                    BlendMode::SrcOver,
+                )
+                .expect("a colour filter");
+                let filter =
+                    skia_safe::image_filters::color_filter(flood, None, None)
+                        .expect("an image filter");
+                assert!(!filter.can_compute_fast_bounds(), "the control");
+                paint.set_image_filter(filter);
+            }
+            canvas.draw_rect(Rect::from_xywh(80.5, 50.25, 10.0, 8.0), &paint);
+            let picture = recorder
+                .finish_recording_as_picture(None)
+                .expect("a picture");
+            let clip =
+                Path::rect(Rect::from_xywh(40.0, 20.0, 100.0, 80.0), None);
+            layer::Clipped::new(
+                7,
+                &layer::ClipData::of(&clip),
+                layer::Layer::Picture(picture),
+            )
+        };
+        let clip = Rect::from_xywh(40.0, 20.0, 100.0, 80.0);
+        assert_eq!(piece(true).drawn(), Some(clip));
+        let plain = piece(false).drawn().expect("a bound");
+        assert!(plain.height() < 10.0, "{plain:?}");
+    }
+
+    /// A piece grown by the next draw of its run forgets what it was found
+    /// to draw, and finds it again from what it now draws.
+    #[test]
+    fn a_grown_piece_finds_again_what_it_draws() {
+        let picture = |height: f32| {
+            let mut recorder = skia_safe::PictureRecorder::new();
+            let canvas =
+                recorder.begin_recording(Rect::from_wh(200.0, 120.0), false);
+            canvas.draw_rect(
+                Rect::from_xywh(60.0, 30.0, 20.0, height),
+                &Paint::default(),
+            );
+            recorder
+                .finish_recording_as_picture(None)
+                .expect("a picture")
+        };
+        let clip = Path::rect(Rect::from_xywh(40.0, 20.0, 100.0, 80.0), None);
+        let mut piece = layer::Clipped::new(
+            7,
+            &layer::ClipData::of(&clip),
+            layer::Layer::Picture(picture(10.0)),
+        );
+        assert_eq!(piece.drawn().map(|drawn| drawn.height()), Some(10.0));
+        *piece.entry_mut() = layer::Layer::Picture(picture(40.0));
+        assert_eq!(piece.drawn().map(|drawn| drawn.height()), Some(40.0));
+    }
+
+    /// Every kind of draw a piece holds -- its anti-aliased fringe, a
+    /// mitred spike, caps, a shadow's offset and blur, a filter's reach and
+    /// an image's smoothed footprint, and a draw the clip cuts that is not
+    /// routed -- is drawn byte for byte as it is with the pieces' clip
+    /// unbounded, at densities 1 to 3, as a pattern and with `draw_canvas`.
+    /// Each is bounded or not as `bounded_kinds` says, so that a kind cannot
+    /// pass by never being bounded at all.
+    #[test]
+    fn a_bounded_piece_draws_what_an_unbounded_one_does() {
+        for (name, bounded, kind) in bounded_kinds() {
+            assert_eq!(bounds_applied(kind) > 0, bounded, "{name} bounded");
+        }
+        for (name, _, kind) in bounded_kinds() {
+            for density in 1..=3 {
+                let (pattern, drawn) = bounded_in(kind, density, true);
+                let (pattern_unbounded, drawn_unbounded) =
+                    bounded_in(kind, density, false);
+                assert!(
+                    pattern.iter().any(|&v| v != 0),
+                    "{name} draws something"
+                );
+                assert!(
+                    pattern == pattern_unbounded,
+                    "{name} as a pattern, {density}x"
+                );
+                assert!(
+                    drawn == drawn_unbounded,
+                    "{name} drawn in, {density}x"
+                );
+            }
+        }
     }
 
     /// A piece of a clip run records its transform and its draws and
@@ -3584,7 +3965,7 @@ mod tests {
             .layers
             .iter()
             .filter_map(|layer| match layer {
-                layer::Layer::Clipped(piece) => match &piece.entry {
+                layer::Layer::Clipped(piece) => match piece.entry() {
                     layer::Layer::Picture(picture) => {
                         Some(picture.approximate_op_count())
                     }
@@ -3693,7 +4074,7 @@ mod tests {
             .layers
             .iter()
             .filter_map(|layer| match layer {
-                layer::Layer::Clipped(piece) => match &piece.entry {
+                layer::Layer::Clipped(piece) => match piece.entry() {
                     layer::Layer::Cut(op) => Some(op.clone()),
                     _ => None,
                 },

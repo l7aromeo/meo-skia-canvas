@@ -97,8 +97,9 @@ impl Layer {
 
     /// The rectangle this entry can draw in, in the coordinates it is played
     /// back under: a picture's cull rectangle -- a pair's, the one played as
-    /// pixels -- which Skia computes from what it draws because every
-    /// recording here is begun with a bounding hierarchy, a group's
+    /// pixels -- which Skia trims to what it draws where the recording was
+    /// begun with a bounding hierarchy, and which is the recording's bounds
+    /// where it was not, as for a clip run outside a layer, a group's
     /// [`Group::reach`], and what a cut draw paints before its clip applies
     /// -- see [`CutOp::reach`]. `None` where it is not known: a blurred draw
     /// has no such rectangle to take.
@@ -722,8 +723,22 @@ pub struct Clipped {
     /// What the piece draws: a picture, or a pair of them on a page that
     /// keeps a recording for each kind of target, or a [`BlurOp`], each
     /// recorded without the clip; or a [`CutOp`], which applies the clip
-    /// itself as pixels.
-    pub entry: Layer,
+    /// itself as pixels. Read through [`Clipped::entry`], and changed only
+    /// through [`Clipped::entry_mut`], which forgets `drawn`.
+    entry: Layer,
+    /// What the entry draws, found the first time it is asked for -- see
+    /// [`Clipped::drawn`].
+    drawn: OnceLock<Option<Rect>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether a run's pieces played into a recording bound for pixels have
+    /// their clip bounded by what they draw on this thread: off, the clip
+    /// covers its own bounds, the reference a bounded clip is held to.
+    pub(crate) static BOUNDS_PIECES: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// Every rectangle a run's clip has been bounded by on this thread.
+    pub(crate) static BOUNDED: std::cell::RefCell<Vec<IRect>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// A clip as the entries played under it keep it: serialized, and its
@@ -753,7 +768,48 @@ impl Clipped {
             clip: clip.data.clone(),
             bounds: clip.bounds,
             entry,
+            drawn: OnceLock::new(),
         }
+    }
+
+    /// What the piece draws.
+    pub(crate) fn entry(&self) -> &Layer {
+        &self.entry
+    }
+
+    /// What the piece draws, to grow: a run of blurs or of cut draws takes
+    /// the next draw into the piece holding the last. What the piece was
+    /// found to draw is forgotten, to be found again from what it now does.
+    pub(crate) fn entry_mut(&mut self) -> &mut Layer {
+        self.drawn = OnceLock::new();
+        &mut self.entry
+    }
+
+    /// The bounds of the clip the piece is drawn under.
+    #[cfg(test)]
+    pub(crate) fn clip_bounds(&self) -> Rect {
+        self.bounds
+    }
+
+    /// What the piece draws, within the clip's bounds, as Skia bounds each
+    /// draw -- its stroke, its join and caps, a shadow's offset and blur, a
+    /// filter's reach. A run is recorded without a bounding hierarchy, so a
+    /// piece's picture culls to the page; its draws are replayed once into a
+    /// recording with one, which Skia trims to what they draw, and the
+    /// rectangle kept. `None` where a draw has no rectangle to take -- see
+    /// [`Layer::reach`].
+    pub(crate) fn drawn(&self) -> Option<Rect> {
+        *self.drawn.get_or_init(|| {
+            let mut within = match &self.entry {
+                Layer::Picture(picture) => drawn_by(picture),
+                Layer::Targeted(pictures) => drawn_by(&pictures.0),
+                entry => entry.reach(),
+            }?;
+            if !within.intersect(self.bounds) {
+                return Some(Rect::new_empty());
+            }
+            Some(within)
+        })
     }
 
     /// Draws the piece onto `canvas` for `target` under its clip.
@@ -762,19 +818,55 @@ impl Clipped {
             op.playback(canvas, target);
             return;
         }
-        Self::play_run(std::slice::from_ref(self), &self.clip, canvas, target);
+        Self::play_run(
+            std::slice::from_ref(self),
+            &self.clip,
+            canvas,
+            target,
+            false,
+        );
     }
 
     /// Draws `pieces`, of one run, onto `canvas` for `target` under `clip`,
-    /// applied once.
+    /// applied once -- and where `bounded`, applied only over what the
+    /// pieces draw.
+    ///
+    /// Skia builds a mask of an anti-aliased clip over the clip's bounds,
+    /// whatever is drawn under it, and builds it again each time the clip is
+    /// applied: a run whose cut draws split it applies the clip once for
+    /// each stretch between them. A rectangle on whole pixels around what
+    /// the stretch draws bounds the mask to those rows and columns, where
+    /// the clip contains the rectangle: the mask is then whole over every
+    /// pixel the stretch inks, as it is unbounded. Where the rectangle cuts
+    /// the clip's path, Skia rasterizes the mask's edge against it as it
+    /// does a path against a clip, and the edge comes out other than it does
+    /// over the clip's bounds -- 26 pixels of a rectangle drawn across a
+    /// circle's edge changed -- so the stretch is left unbounded.
     fn play_run(
         pieces: &[impl std::borrow::Borrow<Clipped>],
         clip: &Data,
         canvas: &SkCanvas,
         target: Target,
+        bounded: bool,
     ) {
         canvas.save();
+        let drawn = bounded
+            .then(|| {
+                pieces.iter().try_fold(Rect::new_empty(), |mut all, piece| {
+                    all.join(piece.borrow().drawn()?);
+                    Some(all)
+                })
+            })
+            .flatten();
         if let Some(clip) = Path::deserialize(clip) {
+            if let Some(drawn) = drawn {
+                let mask: IRect = drawn.round_out();
+                if clip.conservatively_contains_rect(Rect::from_irect(mask)) {
+                    canvas.clip_irect(mask, ClipOp::Intersect);
+                    #[cfg(test)]
+                    BOUNDED.with_borrow_mut(|bounded| bounded.push(mask));
+                }
+            }
             canvas.clip_path(&clip, ClipOp::Intersect, true);
         }
         for piece in pieces {
@@ -821,6 +913,13 @@ pub(crate) fn play_entries(
 ) {
     let grouped = target == Target::Document || !blur_mask::draws_on(canvas);
     let coverage = clips_by_coverage(canvas, target);
+    // Only on a page holding a cut draw: a document walks the picture of a
+    // page holding none as vectors -- see `Page::picture` -- and would write
+    // the bound as a clip of its own.
+    let bounded = target == Target::Pixels
+        && !blur_mask::draws_on(canvas)
+        && holds_a_cut(entries)
+        && bounds_pieces();
     let shares_the_clip = |piece: &Clipped| {
         grouped && !(coverage && matches!(piece.entry, Layer::Cut(_)))
     };
@@ -846,7 +945,7 @@ pub(crate) fn play_entries(
             })
             .collect();
         at += pieces.len();
-        Clipped::play_run(&pieces, &pieces[0].clip, canvas, target);
+        Clipped::play_run(&pieces, &pieces[0].clip, canvas, target, bounded);
     }
 }
 
@@ -954,6 +1053,27 @@ impl Coverage {
 fn clips_by_coverage(canvas: &SkCanvas, target: Target) -> bool {
     blur_mask::draws_on_cpu(canvas)
         || (target == Target::Pixels && !blur_mask::draws_on(canvas))
+}
+
+/// What `picture`'s draws reach, as Skia bounds them: the cull rectangle a
+/// recording begun with a bounding hierarchy is trimmed to when it finishes
+/// (`SkPictureRecorder::finishRecordingAsPicture`), the draws replayed into
+/// one. A picture drawn inside it is bounded by its own cull rectangle.
+fn drawn_by(picture: &Picture) -> Option<Rect> {
+    let mut recorder = PictureRecorder::new();
+    let canvas = recorder.begin_recording(picture.cull_rect(), true);
+    picture.playback(canvas);
+    Some(recorder.finish_recording_as_picture(None)?.cull_rect())
+}
+
+/// Whether a run's pieces are bounded -- see [`Clipped::play_run`]: always,
+/// but off on a thread a test has turned it off on.
+fn bounds_pieces() -> bool {
+    #[cfg(test)]
+    if !BOUNDS_PIECES.get() {
+        return false;
+    }
+    true
 }
 
 /// Whether `entries`, or a group among them, hold a [`CutOp`].

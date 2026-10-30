@@ -1628,7 +1628,7 @@ impl PageRecorder {
                 Some(Layer::Blur(op)) if run.is_none() => Some(op),
                 Some(Layer::Clipped(piece)) if Some(piece.run) == run => {
                     Arc::get_mut(piece).and_then(|piece| {
-                        match &mut piece.entry {
+                        match piece.entry_mut() {
                             Layer::Blur(op) => Some(op),
                             _ => None,
                         }
@@ -1710,7 +1710,7 @@ impl PageRecorder {
                 Some(Layer::Cut(op)) if run.is_none() => Some(op),
                 Some(Layer::Clipped(piece)) if Some(piece.run) == run => {
                     Arc::get_mut(piece).and_then(|piece| {
-                        match &mut piece.entry {
+                        match piece.entry_mut() {
                             Layer::Cut(op) => Some(op),
                             _ => None,
                         }
