@@ -18,7 +18,7 @@ engines; the step is in what was drawn.
 
 On Linux a variable face's advances move in whole font units between its
 masters, where on macOS they follow the interpolation as Chrome on macOS
-does. The FreeType that skia-bindings 0.153.3 embeds, 2.14.2, rounds each
+does. The FreeType that skia-bindings 0.156.0 embeds, 2.14.3, rounds each
 `HVAR` advance delta to a whole unit: `tt_var_get_item_delta` in
 `src/truetype/ttgxvar.c` returns `ft_round_and_shift16`, which is
 `(value + 0x8000) >> 16`, and `tt_hvadvance_adjust` adds it to an integer
@@ -100,7 +100,7 @@ At 200px and below both baselines rasterise identically, so a test at those
 sizes cannot tell the two apart and is not evidence either way.
 
 The rounding is `SkParagraph`'s and happens before any binding code runs: at
-0.153.3 both `Paragraph::alphabetic_baseline` and `Paragraph::origin` return a
+0.156.0 both `Paragraph::alphabetic_baseline` and `Paragraph::origin` return a
 C++ struct field and do no arithmetic. **The property to hold on to is that
 `alphabetic_baseline` is linear in the font size, at 0.770020 per pixel, while
 the origin it is compared against is not.** No single residue describes it --

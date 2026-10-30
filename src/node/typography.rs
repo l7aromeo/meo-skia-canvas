@@ -227,7 +227,7 @@ const INTRINSIC_WIDTH_FLOOR: f32 = f32::MIN_POSITIVE;
 /// at the width it is given -- Chrome 156 fits "Hamburgefonstiv quick" in
 /// Oswald 24px, 200.53 wide, at 200.7px, where the floored width does not.
 pub(crate) fn paragraph_style() -> ParagraphStyle {
-    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
     // Re-check: "a line breaks within a hundredth of the edge" in
     // tests/suite/paragraph.test.js, its last assertion red once fixed.
     // With the hack off, `LineBreakerWithLittleRounding::breakLine` in
@@ -485,7 +485,7 @@ pub struct LaidOut {
     /// is not settled: of seven opaque colours only those two did, and a
     /// translucent pink parted from `green` as `#c03010` did.
     ///
-    /// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+    /// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
     /// Re-check: cargo test a_run_drawn_again_on_the_gpu_draws_as_a_fresh_one
     /// with `PaintedBlobs::matches` answering `true` for every paint
     blobs: RefCell<Vec<PaintedBlobs>>,
@@ -2052,10 +2052,10 @@ impl<'a> Typesetter<'a> {
                 (norm - ascent, descent - norm)
             });
 
-        // UPSTREAM: FreeType 2.14.2 -- unfiled -- not worked around
+        // UPSTREAM: FreeType 2.14.3 -- unfiled -- not worked around
         // Re-check: bun run test:suite --test-name-pattern fraction
         //
-        // The FreeType skia-bindings 0.153.3 embeds rounds each `HVAR`
+        // The FreeType skia-bindings 0.156.0 embeds rounds each `HVAR`
         // advance delta to a whole font unit: `tt_var_get_item_delta` in
         // src/truetype/ttgxvar.c returns `ft_round_and_shift16`, `(value +
         // 0x8000) >> 16`, which `tt_hvadvance_adjust` adds to an integer

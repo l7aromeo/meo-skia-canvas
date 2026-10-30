@@ -8,7 +8,7 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 # `ensure-skia-source`, because this runs on every invocation and must not
 # download. A variable already set in the environment wins.
 #
-# UPSTREAM: skia-bindings 0.153.3 -- unfiled -- worked around
+# UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
 # Re-check: node --test tests/suite/metal-compile.test.js, against a binary built without SKIA_SOURCE_DIR
 #
 # skia-bindings replaces Skia's two `@available(macOS 10.15, *)` checks with

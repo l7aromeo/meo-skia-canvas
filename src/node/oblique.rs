@@ -1281,7 +1281,7 @@ impl StyleDecoration {
 /// has its own `FontLibrary`, and `TextEngine` cannot leave its thread.
 /// `Paragraph::layout` runs to the end without calling back into this
 /// crate, so nothing on that thread lays out between the switches either.
-// UPSTREAM: skia-safe 0.153.3 -- https://github.com/google/skia/commit/e0d79efbf171fdd78063f7673d517491154c9a7a -- worked around
+// UPSTREAM: skia-safe 0.156.0 -- https://github.com/google/skia/commit/e0d79efbf171fdd78063f7673d517491154c9a7a -- worked around
 // Re-check: cargo test a_half_leading_paragraph_is_not_laid_out_as_another_was
 pub(crate) fn without_paragraph_cache<T>(
     collection: Option<&FontCollection>,

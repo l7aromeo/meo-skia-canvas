@@ -68,7 +68,7 @@ impl Faint {
     /// engine at least, but not for an extended one, whose faint draw moves
     /// a level.
     pub fn drawable(self, paint: &Paint) -> Cow<'_, Paint> {
-        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+        // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
         // Re-check: cargo test a_faint_colour_fills with `drawable` returning
         // the paint as it is.
         //
@@ -97,7 +97,7 @@ impl Faint {
 /// rasterizes a layer whose paint carries a colour filter, where it writes
 /// a plain alpha as an opacity.
 pub fn composited(paint: &Paint) -> Cow<'_, Paint> {
-    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
     // Re-check: cargo test a_layer_composites_at_its_alpha with `composited`
     // returning the paint as it is.
     //

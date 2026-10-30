@@ -621,7 +621,7 @@ fn font_families<'a>(
     else {
         return Ok(None);
     };
-    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
     // Re-check: cargo test an_empty_family_list_is_a_null_slice_in_skia_safe
     // `NativeSliceAccess::native` makes a slice from the first element's
     // pointer, null for an empty list, and `set_font_families` hands it one:
@@ -826,7 +826,7 @@ fn parse_text_style<'a>(
         style.set_decoration_style(style_code.to_skia());
     }
 
-    // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
     // Re-check: grep -n "fn set_decoration_color\|fn new(color"
     // ~/.cargo/registry/src/*/skia-safe-*/src/modules/paragraph/text_style.rs
     // ~/.cargo/registry/src/*/skia-safe-*/src/modules/paragraph/text_shadow.rs
