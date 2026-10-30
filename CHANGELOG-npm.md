@@ -479,6 +479,15 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   its result now, by the exact Gaussian, and reads within half a level on
   either engine.
 
+- **A rounded rectangle or oval blurred past 10px is its exact Gaussian
+  blur.** Past 10px a flat-colour rounded rectangle or oval that
+  `ctx.roundRect()` draws was blurred on its result by Skia's image blur,
+  which approximates the Gaussian: an 80 by 40 rounded rectangle blurred by
+  12px read 5.2 levels off it on the CPU engine and 5.4 on the GPU, and by
+  30px 4.4 and 4.1; a 40px circle 5.0 and 2.1, and 2.3 and 1.8. It is
+  blurred by the exact Gaussian now, and reads within half a level on
+  either engine.
+
 - **An image drawn under a blur is its exact Gaussian blur.** An image or a
   canvas drawn with `ctx.drawImage()` under a `ctx.filter` of blurs and
   colour functions was blurred by Skia's image filter, as Chrome's is: a
@@ -515,17 +524,6 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   on the CPU engine and 1 on the GPU, as Chrome's does. It is now blurred by
   the Gaussian sampled at whole-pixel offsets and rounded once, on either
   engine, on an eight-bit or a float canvas, and at any export density.
-
-- **On the GPU, an exact blur draws into a second target the page's size.**
-  To draw what it blurs exactly as the page draws it, the GPU engine
-  draws it into a layer the page's size, at the page's sample count: a
-  multisampled target of about 17 MB for a 1200x900 canvas at four samples
-  and 384 MB for 6000x4000. Skia keeps it for the next blurred draw while
-  its GPU cache is within budget, and lets it go once the draw's GPU work
-  has run where it is not. A blurred draw takes about 0.15 ms longer at
-  1200x900 and 1.5 ms at 6000x4000 than in a layer the size of the blur,
-  which drew edges otherwise -- up to 0.13 of a level past a tie -- at some
-  positions on pages from 1408 pixels wide or 3000 tall.
 
 - **A large blur inside a `saveLayer` keeps its width at a high density.** A
   `blur(40px)` rectangle drawn in `ctx.saveLayer()` and exported at
@@ -1761,6 +1759,17 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
   channel with zero, and is therefore black.
 
 ### Changed
+
+- **On the GPU, an exact blur draws into a second target the page's size.**
+  To draw what it blurs exactly as the page draws it, the GPU engine
+  draws it into a layer the page's size, at the page's sample count: a
+  multisampled target of about 17 MB for a 1200x900 canvas at four samples
+  and 384 MB for 6000x4000. Skia keeps it for the next blurred draw while
+  its GPU cache is within budget, and lets it go once the draw's GPU work
+  has run where it is not. A blurred draw takes about 0.15 ms longer at
+  1200x900 and 1.5 ms at 6000x4000 than in a layer the size of the blur,
+  which drew edges otherwise -- up to 0.13 of a level past a tie -- at some
+  positions on pages from 1408 pixels wide or 3000 tall.
 
 - **`oblique` draws as CSS Fonts 4 matches it, superseding 6.0.0's
   "`oblique` renders as the italic face".** `oblique` and
