@@ -866,3 +866,193 @@ fn an_svg_export_does_not_depend_on_what_was_exported_before() {
         String::from_utf8_lossy(&before)
     );
 }
+
+/// One draw of the sweep, on a page with nothing else on it.
+type SweepDraw = fn(&mut Context2D);
+
+/// The draws the sweep makes: each kind of draw a page holds, and each
+/// that reaches a vector backend some other way -- through a shadow, a
+/// filter, a shader a backend may not write, a paragraph's own paints.
+/// Not a canvas pattern: how one is recorded is changing apart from this.
+fn sweep_draws() -> Vec<(&'static str, SweepDraw)> {
+    vec![
+        ("a rectangle", |ctx| ctx.fill_rect(10.0, 8.0, 30.0, 20.0)),
+        ("a path", |ctx| {
+            ctx.begin_path();
+            ctx.move_to(10.0, 30.0);
+            ctx.line_to(30.0, 5.0);
+            ctx.line_to(55.0, 34.0);
+            ctx.close_path();
+            ctx.fill(FillRule::NonZero);
+        }),
+        ("a stroke", |ctx| {
+            ctx.set_line_width(4.0);
+            ctx.stroke_rect(10.0, 8.0, 30.0, 20.0);
+        }),
+        ("canvas text", |ctx| {
+            assert!(ctx.set_font_css("20px sans-serif"));
+            ctx.fill_text("Hi", 10.0, 28.0, None);
+        }),
+        ("an image", |ctx| {
+            let mut source = Canvas::new(20.0, 20.0);
+            source.context().fill_rect(0.0, 0.0, 20.0, 20.0);
+            let png = source
+                .to_buffer(ImageFormat::Png, &EncodeOptions::default())
+                .expect("a PNG");
+            ctx.draw_image(
+                &Image::from_encoded(&png).expect("an image"),
+                10.0,
+                8.0,
+            );
+        }),
+        ("a canvas drawn in", |ctx| {
+            let mut source = Canvas::new(20.0, 20.0);
+            source.context().fill_rect(0.0, 0.0, 20.0, 20.0);
+            ctx.draw_canvas(&mut source, 10.0, 8.0);
+        }),
+        ("a paragraph", |ctx| {
+            ctx.draw_paragraph(&paragraph(vec![]), 5.0, 5.0)
+        }),
+        ("a paragraph with a blurred shadow", |ctx| {
+            ctx.draw_paragraph(&paragraph(vec![shadow(2.0)]), 5.0, 5.0);
+        }),
+        ("a shadowed rectangle", |ctx| shadowed_square(ctx, 20.0)),
+        ("a blurred rectangle", |ctx| {
+            ctx.set_filter_css("blur(2px)").expect("blur");
+            ctx.fill_rect(10.0, 8.0, 30.0, 20.0);
+        }),
+        ("a drop-shadowed rectangle", |ctx| {
+            ctx.set_filter_css("drop-shadow(3px 3px 1px blue)")
+                .expect("shadow");
+            ctx.fill_rect(10.0, 8.0, 30.0, 20.0);
+        }),
+        ("a linear gradient", |ctx| {
+            ctx.set_fill_shader(&ramp(WIDTH));
+            ctx.fill_rect(10.0, 8.0, 50.0, 20.0);
+        }),
+        ("a conic gradient", |ctx| {
+            let conic = Shader::sweep_gradient(
+                Point { x: 35.0, y: 18.0 },
+                0.0,
+                360.0,
+                &[
+                    GradientStop {
+                        position: 0.0,
+                        color: RgbaLinear::from_srgb8(255, 0, 0, 1.0),
+                    },
+                    GradientStop {
+                        position: 1.0,
+                        color: RgbaLinear::from_srgb8(0, 0, 255, 1.0),
+                    },
+                ],
+                GradientColorSpace::Srgb,
+            )
+            .expect("a conic gradient");
+            ctx.set_fill_shader(&conic);
+            ctx.fill_rect(10.0, 8.0, 50.0, 20.0);
+        }),
+    ]
+}
+
+/// The states the sweep draws each under, set before the draw, and what
+/// ends them after it.
+fn sweep_states() -> Vec<(&'static str, SweepDraw, SweepDraw)> {
+    vec![
+        ("plain", |_| {}, |_| {}),
+        ("a global alpha", |ctx| ctx.set_global_alpha(0.5), |_| {}),
+        (
+            "multiply",
+            |ctx| ctx.set_global_composite_operation(BlendMode::Multiply),
+            |_| {},
+        ),
+        ("a layer", |ctx| ctx.save_layer(), |ctx| ctx.restore()),
+        (
+            "a translucent layer",
+            |ctx| ctx.save_layer_with(0.5, None, None),
+            |ctx| ctx.restore(),
+        ),
+        (
+            "nested translucent layers under a turn",
+            |ctx| {
+                ctx.translate(40.0, 20.0);
+                ctx.rotate(0.2);
+                ctx.translate(-40.0, -20.0);
+                ctx.save_layer_with(0.8, None, None);
+                ctx.save_layer_with(0.6, None, None);
+            },
+            |ctx| {
+                ctx.restore();
+                ctx.restore();
+            },
+        ),
+        (
+            "a clip",
+            |ctx| {
+                ctx.begin_path();
+                ctx.arc(30.0, 20.0, 16.0, 0.0, std::f32::consts::TAU, false)
+                    .expect("arc");
+                ctx.clip(FillRule::NonZero);
+            },
+            |_| {},
+        ),
+    ]
+}
+
+/// Every draw of the sweep under every state exports an SVG that is
+/// well-formed XML, with nothing left of a group's mark, and holds the
+/// draw -- rendered by Skia's renderer, it inks at least half the pixels
+/// the canvas inks -- and a PDF that is a whole file. Neither holds
+/// anything as faint as a mark's paint. A drop here is a draw an export
+/// silently loses.
+#[test]
+fn every_draw_under_every_state_reaches_the_svg_and_the_pdf() {
+    let mut lost = Vec::new();
+    for (draw_name, draw) in sweep_draws() {
+        for (state_name, enter, leave) in sweep_states() {
+            let mut canvas = Canvas::new(WIDTH, HEIGHT);
+            canvas.set_gpu(false);
+            {
+                let ctx = canvas.context();
+                enter(ctx);
+                draw(ctx);
+                leave(ctx);
+            }
+            let svg = svg_of(&mut canvas);
+            let Ok(document) = std::panic::catch_unwind(|| parse(&svg)) else {
+                lost.push(format!(
+                    "{draw_name} under {state_name}: malformed, or a mark left"
+                ));
+                continue;
+            };
+            if faint(&document) > 0 {
+                lost.push(format!(
+                    "{draw_name} under {state_name}: a faint element in the SVG"
+                ));
+            }
+            let inked =
+                |pixels: &[[u8; 4]]| pixels.iter().filter(|p| p[3] > 0).count();
+            let (own, written) =
+                (inked(&pixels(&mut canvas)), inked(&rendered(&svg)));
+            if own > 0 && written * 2 < own {
+                lost.push(format!("{draw_name} under {state_name}: {written} of {own} pixels in the SVG"));
+            }
+            let pdf = canvas
+                .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
+                .expect("a PDF");
+            let ends =
+                String::from_utf8_lossy(&pdf[pdf.len().saturating_sub(16)..])
+                    .into_owned();
+            if !pdf.starts_with(b"%PDF-") || !ends.contains("%%EOF") {
+                lost.push(format!(
+                    "{draw_name} under {state_name}: a PDF cut short"
+                ));
+            }
+            if faint_in_pdf(&pdf) > 0 {
+                lost.push(format!(
+                    "{draw_name} under {state_name}: a faint alpha in the PDF"
+                ));
+            }
+        }
+    }
+    assert!(lost.is_empty(), "{}", lost.join("\n"));
+}
