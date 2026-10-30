@@ -3277,6 +3277,39 @@ mod tests {
         clips
     }
 
+    /// The cut draws of one run share one coverage picture of its clip, made
+    /// once for the run, rather than one each.
+    #[test]
+    fn a_runs_cut_draws_share_one_coverage() {
+        let steps = [
+            Step::Clip,
+            Step::Cut,
+            Step::Fill(40.0),
+            Step::Cut,
+            Step::Read,
+            Step::Cut,
+            Step::Restore,
+        ];
+        let mut canvas = program(&steps, false, true).canvas;
+        let page = canvas.page(0).expect("a page").inner.page();
+        let ops: Vec<_> = page
+            .layers
+            .iter()
+            .filter_map(|layer| match layer {
+                layer::Layer::Clipped(piece) => match &piece.entry {
+                    layer::Layer::Cut(op) => Some(op.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ops.len(), 3, "a cut op for each cut draw");
+        assert!(
+            ops.iter().all(|op| op.shares_coverage_with(&ops[0])),
+            "one coverage picture for the run"
+        );
+    }
+
     /// A blurred draw under a clip is a piece of its frame's run, so a PDF
     /// writes the frame's clip once around it and the draws beside it, as
     /// for the draws alone. Before runs the blur was an entry with its clip

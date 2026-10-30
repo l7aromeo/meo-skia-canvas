@@ -529,13 +529,32 @@ pub struct Clipped {
     pub entry: Layer,
 }
 
+/// A clip as the entries played under it keep it: serialized, and its
+/// bounds. Made once for a run and shared by its pieces and cut draws --
+/// [`Data`] is shared, not copied -- rather than serialized again for each.
+#[derive(Clone, Debug)]
+pub struct ClipData {
+    data: Data,
+    bounds: Rect,
+}
+
+impl ClipData {
+    /// `clip`, in device pixels of the recording.
+    pub fn of(clip: &Path) -> Self {
+        ClipData {
+            data: clip.serialize(),
+            bounds: *clip.bounds(),
+        }
+    }
+}
+
 impl Clipped {
     /// `entry`, drawn under `clip` in run `run`.
-    pub fn new(run: u64, clip: &Path, entry: Layer) -> Self {
+    pub fn new(run: u64, clip: &ClipData, entry: Layer) -> Self {
         Clipped {
             run,
-            clip: clip.serialize(),
-            bounds: *clip.bounds(),
+            clip: clip.data.clone(),
+            bounds: clip.bounds,
             entry,
         }
     }
@@ -653,8 +672,9 @@ pub struct CutOp {
     /// The clip, in device pixels of the recording, for a playback that
     /// clips with it.
     clip: Data,
-    /// The clip as coverage, for a playback that applies it so.
-    coverage: Coverage,
+    /// The clip as coverage, for a playback that applies it so: one for a
+    /// run, shared by every cut draw in it.
+    coverage: Arc<Coverage>,
 }
 
 /// A clip filled, anti-aliased, as coverage a CPU raster playback is clipped
@@ -720,7 +740,8 @@ impl CutOp {
     /// recording, and `matrix`, into one recording or, with `dual`, one for
     /// each kind of target; `None` where a picture could not be made.
     pub fn new(
-        clip: &Path,
+        clip: &ClipData,
+        coverage: Arc<Coverage>,
         matrix: &Matrix,
         bounds: Rect,
         dual: bool,
@@ -739,8 +760,8 @@ impl CutOp {
         Some(CutOp {
             draws: vec![Self::record(matrix, bounds, pixels, &draw)?],
             documents,
-            clip: clip.serialize(),
-            coverage: Coverage::of(clip)?,
+            clip: clip.data.clone(),
+            coverage,
         })
     }
 
@@ -803,6 +824,13 @@ impl CutOp {
         canvas.concat(matrix);
         draw(canvas, recording);
         recorder.finish_recording_as_picture(None)
+    }
+
+    /// Whether this op and `other` share one coverage picture, as the cut
+    /// draws of a run do.
+    #[cfg(test)]
+    pub(crate) fn shares_coverage_with(&self, other: &CutOp) -> bool {
+        Arc::ptr_eq(&self.coverage, &other.coverage)
     }
 
     /// The draws recorded for `target`.

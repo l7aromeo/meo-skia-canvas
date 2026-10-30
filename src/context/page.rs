@@ -38,8 +38,8 @@ use crate::{
         BoxedContext2D,
         faint::composited,
         layer::{
-            BlurDraw, BlurOp, Clipped, Composite, CutOp, Group, Layer,
-            LayerRec, Target, holds_a_cut, play_entries,
+            BlurDraw, BlurOp, ClipData, Clipped, Composite, Coverage, CutOp,
+            Group, Layer, LayerRec, Target, holds_a_cut, play_entries,
         },
     },
     encode::{
@@ -634,6 +634,11 @@ struct Run {
     /// How many runs before this one recorded nothing into its recording --
     /// see [`Spare`].
     idle: u32,
+    /// The clip as its pieces keep it, made once, where the run has filed
+    /// one.
+    shape: Option<ClipData>,
+    /// The clip as coverage, made once, where the run holds a cut draw.
+    coverage: Option<Arc<Coverage>>,
 }
 
 impl Run {
@@ -659,6 +664,8 @@ impl Run {
             changed: false,
             split: false,
             idle,
+            shape: None,
+            coverage: None,
         }
     }
 
@@ -678,6 +685,23 @@ impl Run {
         });
         self.changed = false;
         entry
+    }
+
+    /// The clip as the run's pieces keep it, made the first time it is
+    /// asked for.
+    fn shape(&mut self) -> ClipData {
+        self.shape
+            .get_or_insert_with(|| ClipData::of(&self.clip))
+            .clone()
+    }
+
+    /// The clip as coverage for the run's cut draws, made the first time it
+    /// is asked for; `None` where a picture of it could not be made.
+    fn coverage(&mut self) -> Option<Arc<Coverage>> {
+        if self.coverage.is_none() {
+            self.coverage = Coverage::of(&self.clip).map(Arc::new);
+        }
+        self.coverage.clone()
     }
 
     /// As [`Self::finish`], recording on under the run's transform: for a
@@ -1032,6 +1056,7 @@ impl PageRecorder {
             Some(_) => 0,
             None => run.idle + 1,
         };
+        let shape = run.split.then(|| run.shape());
         let mut recorders = run.recorders;
         let idle = match idle > Spare::IDLE_FRAMES {
             true => {
@@ -1050,11 +1075,11 @@ impl PageRecorder {
         let Some(entry) = entry else {
             return;
         };
-        if run.split {
+        if let Some(shape) = shape {
             // After what the page recorded before the run, which the split
             // filed and nothing has recorded into since.
             self.file_current();
-            let piece = Clipped::new(run.id, &run.clip, entry);
+            let piece = Clipped::new(run.id, &shape, entry);
             self.file_entry(
                 Layer::Clipped(Arc::new(piece)),
                 VectorFeatures::PLAIN,
@@ -1104,7 +1129,7 @@ impl PageRecorder {
         let Some(entry) = run.take(bounds) else {
             return;
         };
-        let piece = Clipped::new(run.id, &run.clip, entry);
+        let piece = Clipped::new(run.id, &run.shape(), entry);
         self.file_entry(Layer::Clipped(Arc::new(piece)), VectorFeatures::PLAIN);
     }
 
@@ -1584,13 +1609,13 @@ impl PageRecorder {
             }
         }
         // Filed after what is recorded, which filing closes no layer to do.
-        let entry = match &self.run {
+        let entry = match self.run.as_mut() {
             Some(run) => {
-                let (id, clip) = (run.id, run.clip.clone());
+                let (id, shape) = (run.id, run.shape());
                 self.split_run();
                 let op =
                     Layer::Blur(Arc::new(BlurOp::start(draw, matrix, None)));
-                Layer::Clipped(Arc::new(Clipped::new(id, &clip, op)))
+                Layer::Clipped(Arc::new(Clipped::new(id, &shape, op)))
             }
             None => {
                 self.file_current();
@@ -1659,7 +1684,17 @@ impl PageRecorder {
             }
         }
         let dual = self.dual();
-        let Some(op) = CutOp::new(clip, &matrix, self.bounds, dual, draw)
+        // One serialized clip and one coverage picture for the run, shared
+        // by each of its cut draws.
+        let (shape, coverage) = match self.run.as_mut() {
+            Some(run) => (run.shape(), run.coverage()),
+            None => (ClipData::of(clip), Coverage::of(clip).map(Arc::new)),
+        };
+        let Some(coverage) = coverage else {
+            return;
+        };
+        let Some(op) =
+            CutOp::new(&shape, coverage, &matrix, self.bounds, dual, draw)
         else {
             return;
         };
@@ -1669,7 +1704,7 @@ impl PageRecorder {
             Some(run) => {
                 let id = run.id;
                 self.split_run();
-                Layer::Clipped(Arc::new(Clipped::new(id, clip, op)))
+                Layer::Clipped(Arc::new(Clipped::new(id, &shape, op)))
             }
             None => {
                 self.file_current();
