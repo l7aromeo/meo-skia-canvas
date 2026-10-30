@@ -32,6 +32,13 @@ impl Document {
 /// where it is not well-formed.
 fn parse(svg: &[u8]) -> Document {
     let text = String::from_utf8_lossy(svg);
+    // What an export marks a group's place with, and the paint it draws to
+    // place the mark, are replaced before it returns.
+    assert!(
+        !text.contains("meo-skia-canvas:group:"),
+        "a group's mark left: {text}"
+    );
+    assert!(!text.contains("#0F1E2D"), "a mark's paint left: {text}");
     let mut reader = Reader::from_str(&text);
     reader.config_mut().check_end_names = true;
     let mut elements = Vec::new();
@@ -272,11 +279,28 @@ fn rendered(svg: &[u8]) -> Vec<[u8; 4]> {
     pixels(&mut back)
 }
 
-/// How many pixels of `a` and `b` part by more than `levels` in a channel,
-/// and the most any pixel parts by.
+/// `p`, read unpremultiplied, premultiplied: what a pixel contributes. A
+/// pixel of alpha 1 is 255 levels of red or of nothing read unpremultiplied,
+/// and one level apart premultiplied.
+fn premultiplied(p: &[u8; 4]) -> [f32; 4] {
+    let a = p[3] as f32 / 255.0;
+    [
+        p[0] as f32 * a,
+        p[1] as f32 * a,
+        p[2] as f32 * a,
+        p[3] as f32,
+    ]
+}
+
+/// How many pixels of `a` and `b` part by more than `levels` in a
+/// premultiplied channel, and the most any pixel parts by.
 fn parted(a: &[[u8; 4]], b: &[[u8; 4]], levels: u8) -> (usize, u8) {
     a.iter().zip(b).fold((0, 0), |(count, most), (a, b)| {
-        let d = (0..4).map(|i| a[i].abs_diff(b[i])).max().unwrap_or(0);
+        let (a, b) = (premultiplied(a), premultiplied(b));
+        let d = (0..4)
+            .map(|i| (a[i] - b[i]).abs())
+            .fold(0.0, f32::max)
+            .round() as u8;
         (count + usize::from(d > levels), most.max(d))
     })
 }
@@ -296,7 +320,7 @@ const RENDERED: u8 = 2;
 
 /// `draw` on a page, exported to SVG: the document, and how many pixels of
 /// it rendered part from the canvas's own by more than [`RENDERED`].
-fn exported_svg(draw: impl Fn(&mut Context2D)) -> (Document, usize) {
+fn exported_svg(draw: impl FnOnce(&mut Context2D)) -> (Document, usize) {
     let mut canvas = Canvas::new(WIDTH, HEIGHT);
     canvas.set_gpu(false);
     draw(canvas.context());
@@ -438,4 +462,250 @@ fn a_layer_over_a_backdrop_filter_is_one_image() {
     });
     assert_eq!(count(&svg, "path"), 1, "only the page's own square");
     assert_eq!(count(&svg, "image"), 1, "the layer");
+}
+
+/// A linear gradient across `width`, red to blue.
+fn ramp(width: f32) -> Shader {
+    Shader::linear_gradient(
+        Point { x: 0.0, y: 0.0 },
+        Point { x: width, y: 0.0 },
+        &[
+            GradientStop {
+                position: 0.0,
+                color: RgbaLinear::from_srgb8(255, 0, 0, 1.0),
+            },
+            GradientStop {
+                position: 1.0,
+                color: RgbaLinear::from_srgb8(0, 0, 255, 1.0),
+            },
+        ],
+        GradientColorSpace::Srgb,
+    )
+    .expect("a gradient")
+}
+
+/// The elements written as groups at an opacity, each with its opacity.
+fn opacities(document: &Document) -> Vec<String> {
+    document
+        .elements
+        .iter()
+        .filter(|(element, _)| element == "g")
+        .filter_map(|(_, attributes)| {
+            attributes
+                .iter()
+                .find(|(key, _)| key == "opacity")
+                .map(|(_, value)| value.clone())
+        })
+        .collect()
+}
+
+/// `draw` on a page exported to SVG, rendered by Skia's SVG renderer.
+fn rendered_export(draw: impl FnOnce(&mut Context2D)) -> Vec<[u8; 4]> {
+    let mut canvas = Canvas::new(WIDTH, HEIGHT);
+    canvas.set_gpu(false);
+    draw(canvas.context());
+    rendered(&svg_of(&mut canvas))
+}
+
+/// How many pixels of `got` part by more than [`RENDERED`] levels, in a
+/// premultiplied channel, from `reference` scaled by the opacity `alpha`
+/// gives the pixel's column: what a group at that opacity renders as, its
+/// content rendered at full opacity and composited at it. A renderer draws
+/// text and gradients its own way, which a canvas's pixels cannot stand in
+/// for, so the reference is the same renderer's.
+fn scaled_parted(
+    got: &[[u8; 4]],
+    reference: &[[u8; 4]],
+    alpha: impl Fn(usize) -> f32,
+) -> usize {
+    got.iter()
+        .zip(reference)
+        .enumerate()
+        .filter(|(at, (got, reference))| {
+            let a = alpha(at % WIDTH as usize);
+            premultiplied(got).iter().zip(premultiplied(reference)).any(
+                |(got, reference)| {
+                    (got - reference * a).abs() > RENDERED as f32
+                },
+            )
+        })
+        .count()
+}
+
+/// A paragraph under a global alpha is its text inside a group at that
+/// opacity, as it is on the canvas: composited as one.
+#[test]
+fn a_paragraph_under_alpha_is_text_in_a_group() {
+    let draw = |alpha: f32| {
+        move |ctx: &mut Context2D| {
+            ctx.set_global_alpha(alpha);
+            ctx.draw_paragraph(&paragraph(vec![]), 5.0, 5.0);
+        }
+    };
+    let (svg, _) = exported_svg(draw(0.25));
+    assert_eq!(opacities(&svg), ["0.25"]);
+    assert_eq!(count(&svg, "text"), 1);
+    assert_eq!(count(&svg, "image"), 0);
+    let parted = scaled_parted(
+        &rendered_export(draw(0.25)),
+        &rendered_export(draw(1.0)),
+        |_| 0.25,
+    );
+    assert_eq!(parted, 0);
+}
+
+/// A paragraph casting a blurred shadow under a global alpha keeps its
+/// text: the group holds the shadow as pixels and the text as a vector.
+#[test]
+fn a_shadowed_paragraph_under_alpha_keeps_its_text() {
+    let draw = |alpha: f32| {
+        move |ctx: &mut Context2D| {
+            ctx.set_global_alpha(alpha);
+            ctx.draw_paragraph(&paragraph(vec![shadow(2.0)]), 5.0, 5.0);
+        }
+    };
+    let (svg, _) = exported_svg(draw(0.6));
+    assert_eq!(opacities(&svg), ["0.6"]);
+    assert_eq!(count(&svg, "text"), 1);
+    assert_eq!(count(&svg, "image"), 1);
+    let parted = scaled_parted(
+        &rendered_export(draw(0.6)),
+        &rendered_export(draw(1.0)),
+        |_| 0.6,
+    );
+    assert_eq!(parted, 0);
+}
+
+/// Translucent layers inside one another nest as groups: where their
+/// squares overlap, the inner one is composited at both opacities.
+#[test]
+fn nested_translucent_layers_nest_their_groups() {
+    let (svg, parted) = exported_svg(|ctx| {
+        ctx.save_layer_with(0.5, None, None);
+        ctx.fill_rect(5.0, 5.0, 30.0, 20.0);
+        ctx.save_layer_with(0.5, None, None);
+        ctx.fill_rect(20.0, 15.0, 30.0, 20.0);
+        ctx.restore();
+        ctx.restore();
+    });
+    assert_eq!(opacities(&svg), ["0.5", "0.5"]);
+    assert_eq!(count(&svg, "image"), 0);
+    assert_eq!(parted, 0);
+}
+
+/// Every id a document declares is declared once, and everything that
+/// refers to one names one it declares: nested groups at an opacity, each
+/// clipped and filled with a gradient, beside the page's own clip and
+/// gradient, are each written into a document of their own whose ids
+/// would otherwise be the page's.
+#[test]
+fn nested_groups_keep_their_ids_apart() {
+    let draw = |outer: f32, inner: f32| {
+        move |ctx: &mut Context2D| {
+            let clipped = |ctx: &mut Context2D, x: f32| {
+                ctx.save();
+                ctx.begin_path();
+                ctx.rect(x, 4.0, 22.0, 30.0);
+                ctx.clip(FillRule::NonZero);
+                ctx.set_fill_shader(&ramp(WIDTH));
+                ctx.fill_rect(0.0, 0.0, WIDTH, HEIGHT);
+                ctx.restore();
+            };
+            clipped(ctx, 2.0);
+            ctx.save_layer_with(outer, None, None);
+            clipped(ctx, 28.0);
+            ctx.save_layer_with(inner, None, None);
+            clipped(ctx, 54.0);
+            ctx.restore();
+            ctx.restore();
+        }
+    };
+    let (svg, _) = exported_svg(draw(0.8, 0.5));
+    let ids: Vec<&str> = svg
+        .elements
+        .iter()
+        .flat_map(|(_, attributes)| attributes)
+        .filter(|(key, _)| key == "id")
+        .map(|(_, value)| value.as_str())
+        .collect();
+    let mut unique = ids.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), ids.len(), "an id declared twice: {ids:?}");
+    let references: Vec<&str> = svg
+        .elements
+        .iter()
+        .flat_map(|(_, attributes)| attributes)
+        .filter_map(|(key, value)| match key.ends_with("href") {
+            true => value.strip_prefix('#'),
+            false => value
+                .strip_prefix("url(#")
+                .and_then(|value| value.strip_suffix(')')),
+        })
+        .collect();
+    assert!(
+        references.len() >= 6,
+        "three clips and three gradients: {references:?}"
+    );
+    for reference in references {
+        assert!(
+            ids.contains(&reference),
+            "{reference} names no id in {ids:?}"
+        );
+    }
+    assert_eq!(opacities(&svg), ["0.8", "0.5"]);
+    // Each strip at the opacities it lies under: none, the outer layer's,
+    // and both layers'.
+    let parted = scaled_parted(
+        &rendered_export(draw(0.8, 0.5)),
+        &rendered_export(draw(1.0, 1.0)),
+        |x| match x {
+            0..26 => 1.0,
+            26..52 => 0.8,
+            _ => 0.4,
+        },
+    );
+    assert_eq!(parted, 0);
+}
+
+/// A canvas drawn into another at another size under a global alpha is a
+/// group at that opacity, and what it holds that an SVG embeds lands where
+/// the canvas draws it, at that size.
+#[test]
+fn a_canvas_drawn_in_under_alpha_embeds_in_place() {
+    let mut source = Canvas::new(40.0, 20.0);
+    {
+        let ctx = source.context();
+        ctx.fill_rect(2.0, 2.0, 10.0, 10.0);
+        shadowed_square(ctx, 20.0);
+    }
+    let (svg, parted) = exported_svg(|ctx| {
+        ctx.set_global_alpha(0.5);
+        ctx.draw_canvas_sized(&mut source, 6.0, 4.0, 60.0, 30.0);
+    });
+    assert_eq!(opacities(&svg), ["0.5"]);
+    assert_eq!(count(&svg, "image"), 1, "the shadowed square");
+    assert_eq!(count(&svg, "path"), 1, "the plain one");
+    // A square and a blurred one, which a renderer draws as the canvas
+    // does: the canvas's own pixels are the reference.
+    assert_eq!(parted, 0);
+}
+
+/// A paragraph under a global alpha inside a clip is clipped once, as the
+/// same paragraph without the alpha is.
+#[test]
+fn a_paragraph_under_alpha_is_clipped_once() {
+    let clips = |alpha: f32| {
+        let mut canvas = Canvas::new(WIDTH, HEIGHT);
+        let ctx = canvas.context();
+        ctx.begin_path();
+        ctx.arc(30.0, 20.0, 18.0, 0.0, std::f32::consts::TAU, false)
+            .expect("arc");
+        ctx.clip(FillRule::NonZero);
+        ctx.set_global_alpha(alpha);
+        ctx.draw_paragraph(&paragraph(vec![]), 5.0, 5.0);
+        count(&parse(&svg_of(&mut canvas)), "clipPath")
+    };
+    assert_eq!(clips(0.5), clips(1.0));
+    assert!(clips(1.0) > 0);
 }

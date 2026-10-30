@@ -400,11 +400,14 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `Paragraph` drawn in one, exported to `ImageFormat::Svg` as a page without
   it. A layer that composites what it holds as it stands -- `save_layer`
   itself -- keeps its draws as vectors and embeds as pixels only those an
-  SVG cannot write. Any other layer holding a draw is rasterized into the
-  SVG on its own and the rest of the page stays vector; a filtered draw
-  inside a layer, which rasterized the whole page, now rasterizes only its
-  layer as well, and a layer that holds nothing leaves the page vector.
-  PDF drew all of these correctly and stays vector.
+  SVG cannot write. One under an alpha alone -- `save_layer_with(0.5, ..)`
+  -- is written as an SVG group at that opacity, `<g opacity="0.5">`, its
+  draws taken the same way inside it. Any other layer holding a draw is
+  rasterized into the SVG on its own and the rest of the page stays
+  vector; a filtered draw inside a layer, which rasterized the whole page,
+  now rasterizes only its layer as well, and a layer that holds nothing
+  leaves the page vector. PDF drew all of these correctly and stays
+  vector.
 
 - **A read inside a `saveLayer` no longer ends it.** `get_image_data`, or an
   export, taken while a layer was open closed the layer at that point, and
@@ -488,8 +491,10 @@ window be changed after it opens.** No signature moves and nothing is removed.
   a colour filter.** `Context2D::draw_canvas` under a global alpha below 1
   left the `ImageFormat::Svg` export without the canvas at all: Skia's SVG
   backend draws such a picture through a layer, which it does not have, and
-  dropped it whole. The draw is now rasterized into the SVG, as a shadow or
-  a filter already is, and a canvas drawn with nothing to carry stays
+  dropped it whole. Under an alpha alone the canvas is now written as an
+  SVG group at that opacity, what it drew kept as vectors where the SVG has
+  them; under a colour filter it is rasterized into the SVG, as a shadow or
+  a filter already is; and a canvas drawn with nothing to carry stays
   vector. PDF drew all of these correctly and is unchanged.
 
 - **A large blur exported at a high density keeps its width.** A

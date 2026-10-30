@@ -461,20 +461,23 @@ impl LayerRec {
             || !matches!(blend, None | Some(BlendMode::SrcOver))
     }
 
-    /// Whether the layer composites what it holds as it stands: over no
-    /// backdrop, through no paint or one that changes nothing -- an alpha
-    /// of 1 under `source-over`, with no shader or filter. Its bounds still
-    /// confine what it holds.
-    pub(crate) fn changes_nothing(&self) -> bool {
-        self.backdrop.is_none()
-            && self.paint.as_ref().is_none_or(|paint| {
-                paint.alpha_f() == 1.0
-                    && paint.as_blend_mode() == Some(BlendMode::SrcOver)
-                    && paint.shader().is_none()
-                    && paint.color_filter().is_none()
-                    && paint.image_filter().is_none()
-                    && paint.mask_filter().is_none()
-            })
+    /// The opacity the layer composites what it holds at, where that is
+    /// all it does: over no backdrop, through no paint or one that is an
+    /// alpha under `source-over` with no shader or filter. `None` for any
+    /// other layer. Its bounds still confine what it holds.
+    pub(crate) fn opacity(&self) -> Option<f32> {
+        if self.backdrop.is_some() {
+            return None;
+        }
+        let Some(paint) = &self.paint else {
+            return Some(1.0);
+        };
+        (paint.as_blend_mode() == Some(BlendMode::SrcOver)
+            && paint.shader().is_none()
+            && paint.color_filter().is_none()
+            && paint.image_filter().is_none()
+            && paint.mask_filter().is_none())
+        .then(|| paint.alpha_f())
     }
 }
 
@@ -597,20 +600,26 @@ impl Entries {
 }
 
 impl Group {
-    /// Whether a document can take the group entry by entry, writing what
-    /// it can of them and embedding the rest as pixels, rather than whole:
-    /// where its layer composites what it holds as it stands.
+    /// The opacity the group composites what it holds at, where that is all
+    /// it does -- see [`LayerRec::opacity`]. A document can take such a
+    /// group entry by entry, writing what it can of them and embedding the
+    /// rest as pixels, rather than whole: opened, at an opacity of 1, and
+    /// in an SVG written as a group of its own at any other. `None` for a
+    /// filter chain or any other layer, which a document takes whole.
     ///
     /// A layer keeps what it holds from blending with what lies beneath it,
     /// so a blend inside one has to be composited in it. A document never
     /// asks this of a group holding one: it embeds every entry up to the
     /// last that blends, with what lies beneath it, first.
-    pub(crate) fn opens_in_a_document(&self) -> bool {
-        matches!(&self.composite, Composite::Layer(rec) if rec.changes_nothing())
+    pub(crate) fn opacity(&self) -> Option<f32> {
+        match &self.composite {
+            Composite::Layer(rec) => rec.opacity(),
+            Composite::Chain { .. } => None,
+        }
     }
 
     /// Plays the group onto `canvas` as a document does a group it opens --
-    /// see [`Self::opens_in_a_document`]: under its clip, its `within` and
+    /// see [`Self::opacity`]: under its clip, its `within` and
     /// its layer's bounds, its transforms composed as [`Self::playback`]
     /// composes them, with no layer around what `entries` plays of its
     /// contents.

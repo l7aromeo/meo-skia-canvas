@@ -8,9 +8,10 @@ use parking_lot::RwLock;
 use rayon::prelude::*;
 use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
-    ColorSpace, ColorType, Document, IRect, ISize, Image as SkImage, ImageInfo,
-    M44, Matrix, Paint, Path, Picture, PictureRecorder, PixelGeometry, Pixmap,
-    Point, Rect, Size, Surface, SurfaceProps, SurfacePropsFlags, XYZD50Hash,
+    ColorSpace, ColorType, Data, Document, IRect, ISize, Image as SkImage,
+    ImageInfo, M44, Matrix, Paint, Path, Picture, PictureRecorder,
+    PixelGeometry, Pixmap, Point, Rect, Size, Surface, SurfaceProps,
+    SurfacePropsFlags, XYZD50Hash, annotate,
     canvas::SrcRectConstraint,
     image::{BitDepth, CachingHint},
     jpeg_encoder, pdf, png_encoder,
@@ -18,6 +19,7 @@ use skia_safe::{
     webp_encoder,
 };
 use std::{
+    cell::Cell,
     collections::HashMap,
     fs,
     io::{BufWriter, Cursor, Write},
@@ -830,9 +832,10 @@ impl PageRecorder {
     /// The group asks a vector backend for [`VectorFeatures::LAYER`] and
     /// whatever its contents asked, so that an SVG export rasterizes the
     /// layer and leaves the rest of the page vector -- or, for a layer that
-    /// composites what it holds as it stands, takes it entry by entry: see
-    /// [`Group::opens_in_a_document`]. One holding nothing that would change
-    /// nothing is dropped.
+    /// composites what it holds as it stands, takes it entry by entry, and
+    /// for one at an opacity alone writes it as a group at that opacity:
+    /// see [`Group::opacity`]. One holding nothing that would change nothing
+    /// is dropped.
     pub fn close_layer(&mut self) {
         if self.open.is_empty() {
             return;
@@ -2913,6 +2916,112 @@ impl Default for Page {
     }
 }
 
+/// The scheme of the link an SVG export marks a group's place with -- see
+/// [`Page::splice_group`]. Nothing else on a page writes a link to it.
+const SPLICE_MARK: &str = "meo-skia-canvas:group:";
+
+/// The colour of the paint drawn before a group's mark, so that the device
+/// writes the mark under the clip the group is drawn under -- see
+/// [`Page::splice_group`]. An alpha of one 255th, since a paint with none
+/// is not drawn at all; it never reaches a document, removed with the mark.
+const SPLICE_SYNC: Color = Color::from_argb(1, 0x0F, 0x1E, 0x2D);
+
+/// The `fill` attribute the device writes for [`SPLICE_SYNC`].
+fn splice_sync_fill() -> String {
+    format!(
+        "fill=\"#{:02X}{:02X}{:02X}\"",
+        SPLICE_SYNC.r(),
+        SPLICE_SYNC.g(),
+        SPLICE_SYNC.b()
+    )
+}
+
+/// The groups an SVG document is written with as groups of their own --
+/// see [`Page::splice_group`]: each the mark of its place, and what replaces
+/// it once Skia has written the document.
+struct Splices<'a> {
+    /// The page's size and the flags its documents are written with.
+    size: Size,
+    flags: Option<Flags>,
+    /// How many groups the export has written so far, in any of its
+    /// documents, so that each takes a mark and ids of its own.
+    count: &'a Cell<usize>,
+    made: Vec<(String, String)>,
+}
+
+impl Splices<'_> {
+    /// `written`, each mark Skia wrote in it, with the paint written just
+    /// before it, replaced by its group. A mark it did not write -- a group
+    /// drawn wholly outside the clip -- leaves nothing to replace.
+    fn apply(&self, mut written: String) -> String {
+        let fill = splice_sync_fill();
+        for (mark, group) in &self.made {
+            let Some(at) = written.find(&format!("<a xlink:href=\"{mark}\""))
+            else {
+                continue;
+            };
+            let Some(end) = written[at..].find("</a>").map(|end| at + end + 4)
+            else {
+                continue;
+            };
+            // The paint is the element before the mark, with nothing but
+            // the device's indentation between them.
+            let start = written[..at]
+                .rfind("<rect")
+                .filter(|&rect| {
+                    let paint = &written[rect..at];
+                    paint.contains(&fill)
+                        && paint.trim_end().ends_with("/>")
+                        && paint.matches('<').count() == 1
+                })
+                .unwrap_or(at);
+            written.replace_range(start..end, group);
+        }
+        written
+    }
+}
+
+/// What the root of `svg` holds: none of it where the root is self-closed.
+fn svg_body(svg: &str) -> &str {
+    let Some(root) = svg.find("<svg") else {
+        return "";
+    };
+    let Some(open) = svg[root..].find('>').map(|at| root + at) else {
+        return "";
+    };
+    if svg[..open].ends_with('/') {
+        return "";
+    }
+    let close = svg.rfind("</svg>").unwrap_or(svg.len());
+    svg.get(open + 1..close).unwrap_or("")
+}
+
+/// `body` with every id it declares, and every reference to one --
+/// `url(#id)` or `href="#id"` -- prefixed with `prefix`, so that it can be
+/// placed in a document declaring ids of its own.
+fn renamed(body: &str, prefix: &str) -> String {
+    let mut ids: Vec<&str> = body
+        .match_indices(" id=\"")
+        .filter_map(|(at, _)| {
+            let from = at + " id=\"".len();
+            body[from..].find('"').map(|len| &body[from..from + len])
+        })
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut body = body.to_owned();
+    for id in ids {
+        for (old, new) in [
+            (format!(" id=\"{id}\""), format!(" id=\"{prefix}{id}\"")),
+            (format!("url(#{id})"), format!("url(#{prefix}{id})")),
+            (format!("href=\"#{id}\""), format!("href=\"#{prefix}{id}\"")),
+        ] {
+            body = body.replace(&old, &new);
+        }
+    }
+    body
+}
+
 /// Adds the `viewBox` Skia does not write, among the root's attributes:
 /// before the `/>` of a root Skia writes self-closed, as it does a document
 /// with nothing in it, and before the `>` of any other.
@@ -3021,6 +3130,7 @@ impl Page {
         backend: VectorFeatures,
         matte: Option<&Matte>,
         density: f32,
+        splices: Option<&mut Splices<'_>>,
     ) -> Result<(), String> {
         if let Some(matte) = matte {
             matte.paint(canvas);
@@ -3060,20 +3170,20 @@ impl Page {
             &self.features[index..],
             backend,
             density,
+            splices,
         )
     }
 
     /// Plays `layers`, each asking for `features` at the same index, onto
     /// `canvas` for a document backend refusing `backend`: each the backend
-    /// can write as it is, each group it can take entry by entry -- see
-    /// [`Group::opens_in_a_document`] -- entry by entry, and each run of
-    /// what it refuses as one image.
+    /// can write as it is; each group composited at an opacity alone entry
+    /// by entry -- opened at an opacity of 1, and written as a group of its
+    /// own at any other where `splices` is the SVG document's -- see
+    /// [`Group::opacity`]; and each run of what it refuses as one image,
+    /// under the transform `canvas` carries.
     ///
     /// Nothing in `layers` blends: [`Self::draw_as_document`] embeds every
-    /// entry up to the last that does, with what lies beneath it, first. A
-    /// group opened here plays its entries under the transform the page's
-    /// own are recorded under, as what a layer holds is, so what is embedded
-    /// of them lands on the page where the page's own embedded draws do.
+    /// entry up to the last that does, with what lies beneath it, first.
     fn play_as_document(
         &self,
         canvas: &SkCanvas,
@@ -3081,10 +3191,18 @@ impl Page {
         features: &[VectorFeatures],
         backend: VectorFeatures,
         density: f32,
+        mut splices: Option<&mut Splices<'_>>,
     ) -> Result<(), String> {
         let refused = |index: usize| features[index].refused_by(backend);
+        let splicing = splices.is_some();
+        // A group composited at an opacity alone is opened where that is 1,
+        // and written as a group of its own at any other where the document
+        // is an SVG one -- see [`Self::splice_group`].
         let opens = |index: usize| match &layers[index] {
-            Layer::Group(group) => group.opens_in_a_document(),
+            Layer::Group(group) => match group.opacity() {
+                Some(alpha) => alpha == 1.0 || splicing,
+                None => false,
+            },
             _ => false,
         };
         // Consecutive refused layers go in as one image rather than one
@@ -3105,17 +3223,26 @@ impl Page {
             if let Layer::Group(group) = &layers[index]
                 && opens(index)
             {
-                let mut played = Ok(());
-                group.open_in_a_document(canvas, |canvas, entries| {
-                    played = self.play_as_document(
-                        canvas,
-                        &entries.layers,
-                        &entries.features,
-                        backend,
-                        density,
-                    );
-                });
-                played?;
+                match (group.opacity(), splices.as_deref_mut()) {
+                    (Some(alpha), Some(splices)) if alpha != 1.0 => self
+                        .splice_group(
+                            canvas, group, alpha, backend, density, splices,
+                        )?,
+                    _ => {
+                        let mut played = Ok(());
+                        group.open_in_a_document(canvas, |canvas, entries| {
+                            played = self.play_as_document(
+                                canvas,
+                                &entries.layers,
+                                &entries.features,
+                                backend,
+                                density,
+                                splices.as_deref_mut(),
+                            );
+                        });
+                        played?;
+                    }
+                }
                 index += 1;
                 continue;
             }
@@ -3126,6 +3253,82 @@ impl Page {
             }
             self.embed_raster(canvas, &layers[start..index], density)?;
         }
+        Ok(())
+    }
+
+    /// Writes `group`, which composites what it holds at `alpha` and nothing
+    /// else, as an SVG group of its own at that opacity: a `<g opacity>`
+    /// around its entries, taken as [`Self::play_as_document`] takes them.
+    ///
+    /// Skia's SVG device has no layers, so it cannot write one. The group's
+    /// place in the document is marked with a link annotation, which the
+    /// device writes as an `<a>` element where the group is drawn, inside
+    /// the clips it is drawn under; its entries are written into a document
+    /// of their own under the transform `canvas` carries; and once Skia has
+    /// written the page, the mark is replaced by the group -- see
+    /// [`Splices::apply`]. Each such document takes ids of its own, so that
+    /// none of its clips, gradients or images is taken for the page's.
+    ///
+    /// Where the group lies wholly outside the clip, nothing is written, as
+    /// Skia writes nothing of a draw there.
+    fn splice_group(
+        &self,
+        canvas: &SkCanvas,
+        group: &Group,
+        alpha: f32,
+        backend: VectorFeatures,
+        density: f32,
+        splices: &mut Splices<'_>,
+    ) -> Result<(), String> {
+        let Some(clip) = canvas.device_clip_bounds() else {
+            return Ok(());
+        };
+        let index = splices.count.get();
+        splices.count.set(index + 1);
+        let mark = format!("{SPLICE_MARK}{index}");
+        let mut url = mark.clone().into_bytes();
+        url.push(0);
+        canvas.save();
+        canvas.reset_matrix();
+        // The device writes an annotation inside whatever clip the draw
+        // before it left open, which can be narrower than this group's. A
+        // paint, which it writes under the clip the canvas holds now, closes
+        // that first; it is removed with the mark.
+        let mut sync = Paint::default();
+        sync.set_color(SPLICE_SYNC);
+        canvas.draw_paint(&sync);
+        annotate::rect_with_url(
+            canvas,
+            Rect::from(clip),
+            &Data::new_copy(&url),
+        );
+        canvas.restore();
+
+        let document =
+            svg::Canvas::new(Rect::from_size(splices.size), splices.flags);
+        document.set_matrix(&canvas.local_to_device());
+        let mut inner = Splices {
+            made: Vec::new(),
+            ..*splices
+        };
+        let mut played = Ok(());
+        group.open_in_a_document(&document, |canvas, entries| {
+            played = self.play_as_document(
+                canvas,
+                &entries.layers,
+                &entries.features,
+                backend,
+                density,
+                Some(&mut inner),
+            );
+        });
+        played?;
+        let written = inner
+            .apply(String::from_utf8_lossy(document.end().as_bytes()).into());
+        let body = renamed(svg_body(&written), &format!("meo{index}-"));
+        splices
+            .made
+            .push((mark, format!("<g opacity=\"{alpha}\">{body}</g>")));
         Ok(())
     }
 
@@ -3150,8 +3353,13 @@ impl Page {
         let mut surface = started::raster(&info, None, None)
             .ok_or("Could not allocate a surface for the SVG fallback")?;
 
+        // Drawn under the transform the document is drawing under, at the
+        // density, and placed back on the page untransformed: what a group's
+        // entries are played under where it maps another page onto this one.
+        let matrix = canvas.local_to_device_as_3x3();
         let raster = surface.canvas();
         raster.scale((density, density));
+        raster.concat(&matrix);
         for layer in layers {
             layer.playback(raster, Target::Embedded);
         }
@@ -3167,12 +3375,17 @@ impl Page {
             ink.right as f32 / density,
             ink.bottom as f32 / density,
         );
-        canvas.draw_image_rect(
-            &image,
-            Some((&Rect::from_irect(ink), SrcRectConstraint::Strict)),
-            dst,
-            &Paint::default(),
-        );
+        let src = Some((&Rect::from_irect(ink), SrcRectConstraint::Strict));
+        match matrix.is_identity() {
+            true => canvas.draw_image_rect(&image, src, dst, &Paint::default()),
+            false => {
+                canvas.save();
+                canvas.reset_matrix();
+                canvas.draw_image_rect(&image, src, dst, &Paint::default());
+                canvas.restore();
+                canvas
+            }
+        };
         Ok(())
     }
 
@@ -3730,6 +3943,7 @@ impl Page {
                     VectorFeatures::PDF_CANNOT,
                     matte.as_ref(),
                     density,
+                    None,
                 )?;
                 document.end_page().close();
                 Ok(pdf_bytes)
@@ -3740,13 +3954,24 @@ impl Page {
                     Rect::from_size(size),
                     options.svg_flags(),
                 );
+                let count = Cell::new(0);
+                let mut splices = Splices {
+                    size,
+                    flags: options.svg_flags(),
+                    count: &count,
+                    made: Vec::new(),
+                };
                 self.draw_as_document(
                     &canvas,
                     VectorFeatures::SVG_CANNOT,
                     matte.as_ref(),
                     density,
+                    Some(&mut splices),
                 )?;
-                Ok(with_view_box(canvas.end().as_bytes(), size))
+                let written = splices.apply(
+                    String::from_utf8_lossy(canvas.end().as_bytes()).into(),
+                );
+                Ok(with_view_box(written.as_bytes(), size))
             }
 
             // handle bitmap formats using (potentially gpu-backed) rasterizer
@@ -4066,6 +4291,7 @@ impl Page {
                 VectorFeatures::PDF_CANNOT,
                 matte,
                 density,
+                None,
             )?;
             Ok(doc.end_page())
         } else {
