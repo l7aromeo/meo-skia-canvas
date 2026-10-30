@@ -372,6 +372,9 @@ pub struct PageRecorder {
     /// What is drawn under the frame's clip, recorded without it, while the
     /// frame lasts -- see [`Run`].
     run: Option<Run>,
+    /// The recorders the last run closed with, for the next -- see
+    /// [`Spare`].
+    spare: Option<Spare>,
     /// How many times one replay of this page walks a nested picture.
     ///
     /// Zero for a page that has only been drawn on directly, however much has
@@ -628,19 +631,23 @@ struct Run {
     /// Whether the run has filed a piece, so that what is left of it is
     /// filed as one too.
     split: bool,
+    /// How many runs before this one recorded nothing into its recording --
+    /// see [`Spare`].
+    idle: u32,
 }
 
 impl Run {
-    fn open(
-        frame: u64,
-        clip: &Path,
-        matrix: Matrix,
-        bounds: Rect,
-        dual: bool,
-    ) -> Self {
+    /// A run of the frame `frame`, recording into `spare`'s recorders --
+    /// recording already, as a run closing hands them back.
+    fn open(frame: u64, clip: &Path, matrix: Matrix, spare: Spare) -> Self {
+        let Spare {
+            mut recorders,
+            idle,
+        } = spare;
         static RUNS: AtomicU64 = AtomicU64::new(0);
-        let mut recorders = Recorders::new(bounds, dual);
         recorders.each(|canvas, _| {
+            canvas.restore_to_count(1);
+            canvas.save();
             canvas.set_matrix(&matrix.into());
         });
         Run {
@@ -651,13 +658,14 @@ impl Run {
             recorders,
             changed: false,
             split: false,
+            idle,
         }
     }
 
     /// What the run has recorded since it opened or this was last asked,
-    /// recording on in a fresh recording; `None` where it has recorded
-    /// nothing.
-    fn take(&mut self, bounds: Rect) -> Option<Layer> {
+    /// its recorders recording again, begun afresh; `None` where it has
+    /// recorded nothing, its recorders left as they were.
+    fn finish(&mut self, bounds: Rect) -> Option<Layer> {
         if !self.changed {
             return None;
         }
@@ -665,14 +673,48 @@ impl Run {
             .recorders
             .finish(|recorder| recorder.finish_recording_as_picture(None));
         self.recorders.begin(bounds);
-        let matrix = self.matrix;
         self.recorders.each(|canvas, _| {
             canvas.save(); // start at depth 2
-            canvas.set_matrix(&matrix.into());
         });
         self.changed = false;
         entry
     }
+
+    /// As [`Self::finish`], recording on under the run's transform: for a
+    /// run that goes on past a split.
+    fn take(&mut self, bounds: Rect) -> Option<Layer> {
+        let entry = self.finish(bounds)?;
+        let matrix = self.matrix;
+        self.recorders.each(|canvas, _| {
+            canvas.set_matrix(&matrix.into());
+        });
+        Some(entry)
+    }
+}
+
+/// The recorders the last run closed with, recording, kept for the next run
+/// to record into.
+///
+/// A `PictureRecorder` carries a recording canvas of its own, and making one
+/// for every frame drawn under a clip was most of what a run cost. A run
+/// that recorded something hands its recorders back begun afresh; one that
+/// recorded nothing hands them back as they were, holding only the frames
+/// opened in them, which cost a picture nothing when it is finished but
+/// grow the recording -- so after [`Spare::IDLE_FRAMES`] of them the
+/// recording is begun afresh.
+struct Spare {
+    recorders: Recorders,
+    /// How many runs have recorded nothing into the recording since it was
+    /// begun.
+    idle: u32,
+}
+
+impl Spare {
+    /// How many runs that recorded nothing a spare recording carries before
+    /// it is begun afresh: enough that a frame drawn under a clip seldom
+    /// pays for it, few enough that the frames left in it stay a few
+    /// hundred operations.
+    const IDLE_FRAMES: u32 = 64;
 }
 
 impl PageRecorder {
@@ -716,6 +758,7 @@ impl PageRecorder {
             blur_run: None,
             cut_run: None,
             run: None,
+            spare: None,
             matrix: Matrix::default(),
             clip: None,
             bounds,
@@ -829,6 +872,8 @@ impl PageRecorder {
                 .recorders
                 .finish(|recorder| recorder.finish_recording_as_picture(None));
         }
+        // Begun at the old bounds.
+        self.spare = None;
 
         self.bounds = bounds;
         self.current.begin(bounds);
@@ -852,6 +897,8 @@ impl PageRecorder {
 
     pub fn update_bounds(&mut self, bounds: Rect) {
         self.bounds = bounds; // non-destructively update the size
+        // A spare recording was begun at the old bounds.
+        self.spare = None;
     }
 
     pub fn set_matrix(&mut self, matrix: Matrix) {
@@ -949,13 +996,11 @@ impl PageRecorder {
         if let Some(clip) = run
             && self.run.is_none()
         {
-            self.run = Some(Run::open(
-                self.frame,
-                clip,
-                matrix,
-                self.bounds,
-                self.current.dual(),
-            ));
+            let spare = self.spare.take().unwrap_or_else(|| Spare {
+                recorders: Recorders::new(self.bounds, self.current.dual()),
+                idle: 0,
+            });
+            self.run = Some(Run::open(self.frame, clip, matrix, spare));
         }
     }
 
@@ -982,15 +1027,29 @@ impl PageRecorder {
         let Some(mut run) = self.run.take() else {
             return;
         };
-        let Some(entry) = run.take(self.bounds) else {
-            let _ = run
-                .recorders
-                .finish(|recorder| recorder.finish_recording_as_picture(None));
+        let entry = run.finish(self.bounds);
+        let idle = match entry {
+            Some(_) => 0,
+            None => run.idle + 1,
+        };
+        let mut recorders = run.recorders;
+        let idle = match idle > Spare::IDLE_FRAMES {
+            true => {
+                let _ = recorders.finish(|recorder| {
+                    recorder.finish_recording_as_picture(None)
+                });
+                recorders.begin(self.bounds);
+                recorders.each(|canvas, _| {
+                    canvas.save(); // start at depth 2
+                });
+                0
+            }
+            false => idle,
+        };
+        self.spare = Some(Spare { recorders, idle });
+        let Some(entry) = entry else {
             return;
         };
-        let _ = run
-            .recorders
-            .finish(|recorder| recorder.finish_recording_as_picture(None));
         if run.split {
             // After what the page recorded before the run, which the split
             // filed and nothing has recorded into since.
@@ -6486,6 +6545,38 @@ mod tests {
         page.composite(&opts, RenderingEngine::CPU)
             .expect("a raster composite of an eight-pixel page");
         assert_eq!(held(), Some((true, 256)), "the next export refills it");
+    }
+
+    /// Frames under a clip that only read hand the next run a recording that
+    /// holds nothing but their frames, and after `Spare::IDLE_FRAMES` of
+    /// them it is begun afresh, so that a page read in a loop of transforms
+    /// does not grow a recording no draw ever finishes.
+    #[test]
+    fn a_spare_recording_left_idle_is_begun_again() {
+        let mut recorder = PageRecorder::new(Rect::from_wh(64.0, 64.0));
+        recorder.set_clip(&Some(Path::circle((32.0, 32.0), 20.5, None)));
+        let mut most = 0;
+        for at in 0..(Spare::IDLE_FRAMES * 3) {
+            recorder.set_matrix(Matrix::translate((at as f32, 0.0)));
+            let _ = recorder.page();
+            // The count travels with the recording: on the run that took
+            // it, or on the spare a run handed back.
+            let idle = match (&recorder.run, &recorder.spare) {
+                (Some(run), _) => run.idle,
+                (None, Some(spare)) => spare.idle,
+                (None, None) => 0,
+            };
+            most = most.max(idle);
+        }
+        assert!(
+            most > 1,
+            "runs that drew nothing left a spare {most} times idle"
+        );
+        assert!(
+            most <= Spare::IDLE_FRAMES,
+            "a spare went {most} runs idle, past {}",
+            Spare::IDLE_FRAMES
+        );
     }
 
     #[test]
