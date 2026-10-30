@@ -37,7 +37,7 @@ use crate::{
     context::{
         BoxedContext2D,
         faint::composited,
-        layer::{BlurDraw, BlurOp, Group, Layer, LayerRec, Target},
+        layer::{BlurDraw, BlurOp, Composite, Group, Layer, LayerRec, Target},
     },
     encode::{
         self, Frame, FrameDepth, Pixels, SequenceSpec, Sink,
@@ -822,7 +822,7 @@ impl PageRecorder {
         self.surface.forget_layers_past(self.open.len());
         if !layer.entries.is_empty() || layer.rec.marks_when_empty() {
             let group = Group {
-                rec: layer.rec,
+                composite: Composite::Layer(layer.rec),
                 matrix: layer.matrix,
                 clip: layer.clip.as_ref().map(Path::serialize),
                 within: None,
@@ -834,7 +834,7 @@ impl PageRecorder {
         self.restore();
     }
 
-    /// Files `contents` as a [`Group`] composited through `rec`, under the
+    /// Files `contents` as a [`Group`] composited by `composite`, under the
     /// transform and clip the recorder holds and inside `within` under that
     /// transform, its entries played under `contents_matrix`; asking
     /// `features` of a vector backend for it. Filed where the recording
@@ -845,7 +845,7 @@ impl PageRecorder {
     /// a shadow is offset from what casts it.
     pub fn append_group(
         &mut self,
-        rec: LayerRec,
+        composite: Composite,
         within: Option<Rect>,
         contents_matrix: Matrix,
         contents: Arc<Vec<Layer>>,
@@ -855,7 +855,7 @@ impl PageRecorder {
         self.file_current();
         let shift = Matrix::translate(shift);
         let group = Group {
-            rec,
+            composite,
             matrix: Matrix::concat(&shift, &self.matrix),
             clip: self.clip.as_ref().map(Path::serialize),
             within,
@@ -926,7 +926,7 @@ impl PageRecorder {
             let mut contents = layer.entries.clone();
             contents.extend(inner);
             Some(Layer::Group(Arc::new(Group {
-                rec: layer.rec.clone(),
+                composite: Composite::Layer(layer.rec.clone()),
                 matrix: layer.matrix,
                 clip: layer.clip.as_ref().map(Path::serialize),
                 within: None,
@@ -4290,7 +4290,7 @@ const PAGE_CACHE_SIZE: usize = 64;
 /// cache and covers what the memoization is for: a handful of canvases being
 /// re-exported. Twenty-one pages at social-card size, five at four times
 /// that, and the count still catches a flood of small ones.
-const PAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const PAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 /// How far below the count bound an eviction pass takes the cache.
 ///
@@ -6397,14 +6397,14 @@ mod tests {
         density: f32,
         engine: RenderingEngine,
     ) -> Vec<u8> {
-        let group = Group {
-            rec: rec.clone(),
+        let group = Arc::new(Group {
+            composite: Composite::Layer(rec.clone()),
             matrix: *matrix,
             clip: clip.map(Path::serialize),
             within: None,
             contents_matrix: Matrix::new_identity(),
             contents: Arc::new(vec![Layer::Picture(contents.clone())]),
-        };
+        });
         let size = CONFINED_PAGE.size() * density;
         let info = ImageInfo::new_n32_premul(
             (size.width as i32, size.height as i32),
@@ -6628,18 +6628,18 @@ mod tests {
         let mut turned = Matrix::rotate_deg_pivot(30.0, (24.0, 20.0));
         turned.post_translate((0.37, 0.61));
         for (drawn, contents) in confined_contents() {
-            let group = Group {
-                rec: LayerRec {
+            let group = Arc::new(Group {
+                composite: Composite::Layer(LayerRec {
                     paint: Some(half.clone()),
                     bounds: Some(Rect::from_xywh(14.0, 8.0, 26.0, 30.0)),
                     ..LayerRec::default()
-                },
+                }),
                 matrix: Matrix::new_identity(),
                 clip: None,
                 within: None,
                 contents_matrix: Matrix::new_identity(),
                 contents: Arc::new(vec![Layer::Picture(contents)]),
-            };
+            });
             let mut recorder = PictureRecorder::new();
             group.playback(
                 recorder.begin_recording(CONFINED_PAGE, true),
@@ -6681,11 +6681,11 @@ mod tests {
             Rect::from_xywh(16.0, 12.0, 10.0, 8.0),
             &Paint::default(),
         );
-        let group = Group {
-            rec: LayerRec {
+        let group = Arc::new(Group {
+            composite: Composite::Layer(LayerRec {
                 paint: Some(half),
                 ..LayerRec::default()
-            },
+            }),
             matrix: Matrix::new_identity(),
             clip: None,
             within: None,
@@ -6695,7 +6695,7 @@ mod tests {
                     .finish_recording_as_picture(None)
                     .expect("a picture of the square"),
             )]),
-        };
+        });
         let pdf = |draw: &dyn Fn(&SkCanvas)| {
             let mut bytes = Vec::new();
             let document = pdf::new_document(&mut bytes, None);
@@ -6802,7 +6802,7 @@ mod tests {
         };
         let group = |rec: LayerRec, contents_matrix: Matrix, contents| {
             Layer::Group(Arc::new(Group {
-                rec,
+                composite: Composite::Layer(rec),
                 matrix: Matrix::new_identity(),
                 clip: None,
                 within: None,
