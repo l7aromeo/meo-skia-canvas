@@ -13,9 +13,8 @@ use super::{BoxedContext2D, Context2D, Dye, page::ExportOptions};
 use crate::{
     color_filter::BoxedColorFilter,
     context2d::{FontKerning, TextRendering, decoration_from_css},
-    css::parse_filter,
+    css::parse_filter_named,
     export::VectorFeatures,
-    filter::FilterOp,
     image_filter::BoxedImageFilter,
     mask_filter::BoxedMaskFilter,
     node::{
@@ -1890,14 +1889,17 @@ pub fn set_filter(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // Read by the crate's own `parse_filter`, so the two surfaces take one
     // grammar from one implementation. A declaration that does not parse,
     // a blank one included, is ignored, as the Canvas API says.
-    let Ok(ops) = parse_filter(&css, &this.state.filter_units()) else {
+    let Ok(parsed) = parse_filter_named(&css, &this.state.filter_units())
+    else {
         return Ok(cx.undefined());
     };
-    if ops.iter().any(|op| op.validate().is_err()) {
+    if parsed.iter().any(|(op, _)| op.validate().is_err()) {
         return Ok(cx.undefined());
     }
-    let specs: Vec<FilterSpec> =
-        ops.into_iter().map(FilterOp::to_spec).collect();
+    let specs: Vec<FilterSpec> = parsed
+        .into_iter()
+        .map(|(op, named)| op.to_spec_named(named))
+        .collect();
     // Compared by what it resolves to as well as by its text: the same
     // `blur(1em)` set again after the font changed is a different blur, and
     // Chrome redraws it at the new size.
