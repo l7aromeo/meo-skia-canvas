@@ -38,7 +38,7 @@ use skia_safe::{
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 use skia_safe::{Data, RuntimeEffect, color_filters};
 
-use crate::{cache_map::CacheMap, started};
+use crate::{cache_map::CacheMap, context::layer::ExactColour, started};
 
 /// How closely the blur is drawn on a surface: how far past each edge, and
 /// how near the middle's value a column has to be to count as the flat
@@ -367,7 +367,13 @@ impl Baked {
 
     /// Draws the rectangle with its extent's origin at `origin` in device
     /// pixels, the interior in `color`.
-    fn draw(&self, canvas: &SkCanvas, origin: IPoint, color: Color4f) {
+    fn draw(
+        &self,
+        canvas: &SkCanvas,
+        origin: IPoint,
+        color: Color4f,
+        exact: Option<&ExactColour>,
+    ) {
         self.bands.iter().for_each(|(image, at)| {
             canvas.draw_image(image, origin + *at, None);
         });
@@ -386,10 +392,18 @@ impl Baked {
             // interior on float pixels is not dropped either -- see the
             // UPSTREAM note on `context::faint::Faint::drawable`.
             let mut paint = Paint::default();
-            paint.set_shader(shaders::color_in_space(
-                fill,
-                ColorSpace::new_srgb(),
-            ));
+            match exact.and_then(ExactColour::shader) {
+                // On a float page, where a paint's alpha is not dropped.
+                Some(shader) => {
+                    paint.set_shader(shader).set_alpha_f(fill.a);
+                }
+                None => {
+                    paint.set_shader(shaders::color_in_space(
+                        fill,
+                        ColorSpace::new_srgb(),
+                    ));
+                }
+            }
             paint.set_anti_alias(false);
             canvas.draw_irect(rect.with_offset(origin), &paint);
         }
@@ -532,6 +546,9 @@ struct RectKey {
     /// The draw's colour, unpremultiplied sRGB with the global alpha in it,
     /// as bits.
     color: [u32; 4],
+    /// The colour held exactly in the surface's space, where the draw has
+    /// one, as bits -- see [`draw_rect`].
+    exact: Option<[u32; 3]>,
     /// The surface's colour type: a bake for 8-bit pixels holds less than a
     /// float surface shows.
     kind: i32,
@@ -737,25 +754,37 @@ fn on_gpu(_canvas: &SkCanvas) -> bool {
 /// expected to be the identity and on which [`draws_on`] is true. Returns
 /// `false`, having drawn nothing, where a surface or a shader could not be
 /// made.
+///
+/// With `exact`, the colour is that, held in the page's own space, at
+/// `color`'s alpha: what a page that keeps a recording for pixels paints a
+/// flat colour in -- see [`ExactColour`]. Converted from sRGB instead, it
+/// lands on the 64-ulp grid Skia's conversion leaves it on. On the CPU the
+/// exact colour is baked as the surface's own components, so it is taken
+/// only on a surface in its space: a page played onto another, as onto the
+/// eight-bit sRGB raster an SVG embeds, is painted `color` converted into
+/// that one.
 pub(crate) fn draw_rect(
     canvas: &SkCanvas,
     rect: Rect,
     sigma: f32,
     color: Color4f,
+    exact: Option<&ExactColour>,
 ) -> bool {
     let sigma = f64::from(sigma);
     #[cfg(any(feature = "metal", feature = "vulkan"))]
     if on_gpu(canvas) {
-        return draw_on_gpu(canvas, rect, sigma, color);
+        return draw_on_gpu(canvas, rect, sigma, color, exact);
     }
     let target = canvas.image_info();
     let space = target.color_space();
+    let exact = exact.filter(|exact| space.as_ref() == Some(&exact.space));
     let key = RectKey {
         window: [0; 4],
         size: [rect.width().to_bits(), rect.height().to_bits()],
         fraction: [rect.left.fract().to_bits(), rect.top.fract().to_bits()],
         sigma: (sigma as f32).to_bits(),
         color: [color.r, color.g, color.b, color.a].map(f32::to_bits),
+        exact: exact.map(|exact| exact.rgb.map(f32::to_bits)),
         kind: target.color_type() as i32,
         space: space
             .as_ref()
@@ -802,7 +831,14 @@ pub(crate) fn draw_rect(
                 Axis::within(rect.left, rect.right, sigma, precision, cols);
             let down =
                 Axis::within(rect.top, rect.bottom, sigma, precision, rows);
-            let Some(premul) = premultiplied(color, &target) else {
+            let premul = match exact {
+                Some(exact) => {
+                    let [r, g, b] = exact.rgb.map(|c| c * color.a);
+                    Some([r, g, b, color.a])
+                }
+                None => premultiplied(color, &target),
+            };
+            let Some(premul) = premul else {
                 return false;
             };
             let Some(baked) = Baked::make(&across, &down, premul, &target)
@@ -814,7 +850,7 @@ pub(crate) fn draw_rect(
             baked
         }
     };
-    baked.draw(canvas, origin, color);
+    baked.draw(canvas, origin, color, exact);
     true
 }
 
@@ -847,6 +883,7 @@ fn draw_on_gpu(
     rect: Rect,
     sigma: f64,
     color: Color4f,
+    exact: Option<&ExactColour>,
 ) -> bool {
     let k = (sigma * std::f64::consts::SQRT_2) as f32;
     let uniforms: Vec<u8> = [rect.left, rect.top, rect.right, rect.bottom, k]
@@ -863,12 +900,23 @@ fn draw_on_gpu(
     };
     let reach = (FLOAT_PRECISION.tail_sigmas * sigma).ceil() as f32 + 1.0;
     let mut paint = Paint::default();
-    paint.set_shader(shader);
-    paint.set_color_filter(color_filters::blend_with_color_space(
-        color,
-        None,
-        BlendMode::SrcIn,
-    ));
+    match exact.and_then(ExactColour::shader) {
+        // The exact colour where the coverage is: `SrcIn` keeps the
+        // colour's shader at the coverage's alpha.
+        Some(colour) => {
+            paint
+                .set_shader(shaders::blend(BlendMode::SrcIn, shader, colour))
+                .set_alpha_f(color.a);
+        }
+        None => {
+            paint.set_shader(shader);
+            paint.set_color_filter(color_filters::blend_with_color_space(
+                color,
+                None,
+                BlendMode::SrcIn,
+            ));
+        }
+    }
     canvas.draw_rect(rect.with_outset((reach, reach)), &paint);
     true
 }
@@ -1116,6 +1164,7 @@ mod tests {
             fraction: [0, 0],
             sigma: 0,
             color: [0; 4],
+            exact: None,
             kind: 0,
             space: None,
         }
@@ -1217,7 +1266,7 @@ mod tests {
                 );
                 let mut surface =
                     started::raster(&info, None, None).expect("a surface");
-                baked.draw(surface.canvas(), IPoint::new(0, 0), color);
+                baked.draw(surface.canvas(), IPoint::new(0, 0), color, None);
                 let mut got = vec![0u8; cols * rows * 4];
                 assert!(surface.read_pixels(&info, &mut got, cols * 4, (0, 0)));
                 let [r, g, b, a] = premul.map(|c| c * 255.0);
@@ -1270,7 +1319,7 @@ mod tests {
             );
             let mut surface =
                 started::raster(&info, None, None).expect("a surface");
-            baked.draw(surface.canvas(), IPoint::new(0, 0), color);
+            baked.draw(surface.canvas(), IPoint::new(0, 0), color, None);
             let read = ImageInfo::new(
                 (cols as i32, rows as i32),
                 ColorType::RGBAF32,

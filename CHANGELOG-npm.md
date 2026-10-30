@@ -729,6 +729,19 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **Canvases that are dropped are collected.** A process that made
+  canvases, read them back and let them go grew without bound: V8 schedules
+  a collection by the size of its own heap, a canvas is a small object there
+  however large the page it holds, and nothing told it otherwise. Two
+  hundred 1000x800 canvases read back once each, with the event loop turning
+  between batches of ten, climbed from 169 MB to 727 MB, and finalized
+  almost none of them. Each context now reports the page and tiles it holds
+  to V8 as external memory, and each image what it keeps, and releases the
+  same amount when it is finalized, so V8 collects them on its own: the same
+  run holds between 227 MB and 250 MB. A process making canvases without
+  ever letting the event loop turn still keeps every one, because Node runs
+  an addon's finalizers only once it does.
+
 - **Reading a GPU canvas back keeps nothing per read.** Each whole-page
   `getImageData()` of a GPU canvas on macOS left about what it read resident
   until the process ended -- 12.2 MB a read of a 2000x1600 canvas -- so a
@@ -816,6 +829,25 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   truncates. Each now reads within half a level of the exact value at every
   alpha, on both engines -- a shadowed one within the rounding of the shadow
   beneath it -- and a PDF still writes it as an opacity, in vectors.
+
+- **A flat colour lands exactly on a float canvas in another space.** On a
+  canvas made with `colorType: "RGBAF16"` or `"RGBAF32"` and `colorSpace`
+  `"srgb-linear"`, `"display-p3"`, `"display-p3-linear"`, `"rec2020"` or
+  `"rec2020-linear"`, a fill, stroke or blurred draw in a flat colour read
+  back as much as 2.3e-4 off the colour named: Skia converts a paint's colour
+  through an approximate transfer function whose results lie 64 ulps apart, so
+  no colour handed to it lands exactly there. Such a canvas now records each
+  draw twice, painting a flat colour through a shader that holds it in the
+  canvas's own space for its pixels, and as a plain colour for a PDF or SVG of
+  it, which still write it as one. Its pixels hold the colour as named, to the
+  precision of the half float on `"RGBAF16"`. The cost is memory: about 1.35x
+  an sRGB canvas's recording for a run of fills in one colour, 2.4x for fills
+  each in a colour of its own. Text keeps its plain colour: Skia weighs a
+  glyph's edges by the luminance of the paint's colour, and would weigh them
+  wrongly through the shader. Not yet exact there either: a shadow, which Skia
+  draws through an eight-bit layer, a `Paragraph`'s own colours, the colours
+  in a filter, a colour filter or a texture, and the `"rec2020-pq"` and
+  `"rec2020-hlg"` spaces.
 
 - **A text decoration's colour is painted at the precision it names, as a
   fill's is.** The colour in `ctx.textDecoration` was rounded to eight bits
