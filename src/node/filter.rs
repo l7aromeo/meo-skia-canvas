@@ -299,11 +299,19 @@ impl Filter {
         self.specs.is_empty()
     }
 
+    /// Whether this filter holds a `drop-shadow()`.
+    pub fn casts_drop_shadow(&self) -> bool {
+        self.specs
+            .iter()
+            .any(|spec| matches!(spec, FilterSpec::Shadow { .. }))
+    }
+
     /// This filter as steps the crate runs on pixels itself -- see
     /// [`chain`](crate::context::chain) -- in the order CSS applies them: a
     /// `blur()` as the exact Gaussian, a colour function as Skia's colour
-    /// filter, which is the same at any scale. `None` for no filter,
-    /// and for one holding a `drop-shadow()`, which Skia still draws.
+    /// filter, which is the same at any scale, and a `drop-shadow()` as the
+    /// draw over its alpha blurred by the exact Gaussian. `None` for no
+    /// filter, and for one holding a function the crate does not run.
     pub(crate) fn steps(&self) -> Option<Vec<Step>> {
         if self.specs.is_empty() {
             return None;
@@ -317,7 +325,19 @@ impl Filter {
                 FilterSpec::Plain { name, value } => {
                     colour_function(name, *value).map(Step::Colour)
                 }
-                FilterSpec::Shadow { .. } => None,
+                FilterSpec::Shadow {
+                    offset,
+                    blur,
+                    color,
+                } => {
+                    let (colour, space) = skia_paint_color(color.0, &color.1);
+                    Some(Step::Shadow {
+                        offset: *offset,
+                        sigma: *blur,
+                        colour,
+                        space,
+                    })
+                }
             })
             .collect()
     }

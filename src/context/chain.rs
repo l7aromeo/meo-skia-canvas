@@ -19,8 +19,9 @@
 
 use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, Color, Color4f, ColorFilter,
-    ColorType, Data, FilterMode, IRect, Image, ImageInfo, Matrix, MipmapMode,
-    Paint, Rect, RoundOut, SamplingOptions, Surface, Vector, color_filters,
+    ColorSpace, ColorType, Data, FilterMode, IRect, Image, ImageInfo, Matrix,
+    MipmapMode, Paint, Rect, RoundOut, SamplingOptions, Surface, Vector,
+    color_filters,
     image::{CachingHint, RequiredProperties},
     image_filters,
 };
@@ -42,6 +43,16 @@ pub enum Step {
     Blur(f32),
     /// A colour filter, which is the same at any scale.
     Colour(ColorFilter),
+    /// A `drop-shadow()`: what the step before left, over its own alpha in
+    /// `colour` blurred by the exact Gaussian of `sigma` and moved by
+    /// `offset`, both in canvas pixels. `colour` is unpremultiplied, in
+    /// `space`.
+    Shadow {
+        offset: Vector,
+        sigma: f32,
+        colour: Color4f,
+        space: ColorSpace,
+    },
 }
 
 /// How the chain's pixels are kept where the canvas it is played onto has
@@ -187,6 +198,19 @@ pub(crate) fn run(
             Step::Colour(filter) => {
                 filtered(context.as_mut(), &image, filter, gain)
             }
+            Step::Shadow {
+                offset,
+                sigma,
+                colour,
+                space,
+            } => shadowed(
+                context.as_ref(),
+                &image,
+                Vector::new(offset.x * scale.0, offset.y * scale.1),
+                (sigma * scale.0, sigma * scale.1),
+                (*colour, space),
+                gain,
+            ),
         };
         image = next?;
     }
@@ -413,6 +437,7 @@ fn region(
             image_filters::color_filter(filter.clone(), None, None)
                 .is_some_and(|filter| filter.can_compute_fast_bounds())
         }
+        Step::Shadow { .. } => true,
     });
     let region = match content.filter(|_| bounded) {
         Some(content) => {
@@ -435,20 +460,40 @@ fn region(
     (!region.is_empty()).then_some(region)
 }
 
-/// How far, in layer pixels along each axis, the chain's blurs together
-/// carry a pixel.
+/// How far, in canvas pixels along each axis, the chain's blurs and
+/// shadows together carry a pixel: what lies farther than this outside
+/// what is shown cannot reach it.
+pub(crate) fn canvas_reach(steps: &[Step]) -> Vector {
+    reach(steps, &Matrix::new_identity())
+}
+
+/// How far, in layer pixels along each axis, the chain's blurs and
+/// shadows together carry a pixel: its blurs' reach, and as far again as
+/// each shadow moves along that axis.
 fn reach(steps: &[Step], layer: &Matrix) -> Vector {
     let (sx, sy) = (layer.scale_x().abs(), layer.scale_y().abs());
     let sigma = steps
         .iter()
         .filter_map(|step| match step {
-            Step::Blur(sigma) => Some(*sigma),
+            Step::Blur(sigma) | Step::Shadow { sigma, .. } => Some(*sigma),
             Step::Colour(_) => None,
         })
         .filter(|sigma| sigma.is_finite() && *sigma > 0.0)
         .fold(0.0, |sum, sigma| sum + sigma);
+    let (moved_x, moved_y) = steps
+        .iter()
+        .filter_map(|step| match step {
+            Step::Shadow { offset, .. } => Some(*offset),
+            Step::Blur(_) | Step::Colour(_) => None,
+        })
+        .fold((0.0, 0.0), |(x, y), offset| {
+            (x + offset.x.abs(), y + offset.y.abs())
+        });
     let taps = |sigma: f32| (REACH_SIGMAS * f64::from(sigma)).ceil() as f32;
-    Vector::new(taps(sigma * sx), taps(sigma * sy))
+    Vector::new(
+        taps(sigma * sx) + (moved_x * sx).ceil(),
+        taps(sigma * sy) + (moved_y * sy).ceil(),
+    )
 }
 
 /// The layer's pixels: the canvas's own colour type and space, or for a
@@ -675,6 +720,126 @@ fn filtered(
     canvas.clear(Color::TRANSPARENT);
     canvas.draw_image(image, (0, 0), Some(&paint));
     Some(surface.image_snapshot())
+}
+
+/// `image` over its shadow, scaled by `gain`, in `image`'s own pixel type:
+/// its alpha in `colour`, blurred by the exact Gaussian of `sigma` along
+/// rows and columns and moved by `offset`, all in layer pixels.
+///
+/// Made in floats on the CPU -- the tint, the blur and the two composited
+/// -- and rounded once into `image`'s type, by [`rounded_once`]: an
+/// eight-bit tint rounded before the blur, or a blurred shadow rounded
+/// before the image is drawn over it, would be rounded again on the way.
+/// The shadow is moved unresampled where the offset is whole pixels, and
+/// bilinearly otherwise.
+fn shadowed(
+    context: Option<&Gpu>,
+    image: &Image,
+    offset: Vector,
+    sigma: (f32, f32),
+    (colour, space): (Color4f, &ColorSpace),
+    gain: f32,
+) -> Option<Image> {
+    let raster = to_raster(context, image)?;
+    let floats = raster.image_info().with_color_type(ColorType::RGBAF32);
+    let on_floats = |draw: &dyn Fn(&SkCanvas)| {
+        let mut surface = started::raster(&floats, None, None)?;
+        surface.canvas().clear(Color::TRANSPARENT);
+        draw(surface.canvas());
+        Some(surface.image_snapshot())
+    };
+    let source = on_floats(&|canvas| {
+        canvas.draw_image(&raster, (0, 0), None);
+    })?;
+    let tint = color_filters::blend_with_color_space(
+        colour,
+        Some(space.clone()),
+        BlendMode::SrcIn,
+    )?;
+    let tinted = filtered(None, &source, &tint, 1.0)?;
+    let shadow = match sigma.0 > 0.0 || sigma.1 > 0.0 {
+        true => blurred_on_cpu(&tinted, sigma.0, sigma.1, 1.0)?,
+        false => tinted,
+    };
+    let sampling = match offset.x.fract() == 0.0 && offset.y.fract() == 0.0 {
+        true => SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
+        false => SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
+    };
+    let composed = on_floats(&|canvas| {
+        canvas.draw_image_with_sampling_options(
+            &shadow,
+            (offset.x, offset.y),
+            sampling,
+            None,
+        );
+        canvas.draw_image(&source, (0, 0), None);
+    })?;
+    rounded_once(&composed, image.image_info(), gain)
+}
+
+/// `floats`, an F32 image, scaled by `gain` into `info`'s type in memory:
+/// rounded once, by the rule [`exact_blur::blur_bytes`] rounds by, where
+/// that is eight bits a channel, and kept as floats otherwise.
+///
+/// Converted here rather than drawn: Skia draws a float image onto an
+/// eight-bit surface through fewer bits than a float, and a shadow at an
+/// alpha of 0.3 -- 76.500003 levels -- came out 76 where a fill of the
+/// colour is 77. Onto a GPU target the floats went through a narrower
+/// texture first, and an image at half alpha read a level high at 807
+/// pixels of a shadow.
+fn rounded_once(floats: &Image, info: &ImageInfo, gain: f32) -> Option<Image> {
+    let (w, h) = (floats.width() as usize, floats.height() as usize);
+    let float_info = floats.image_info().with_alpha_type(AlphaType::Premul);
+    let mut pixels = vec![0f32; w * h * 4];
+    let row_bytes = w * 4 * size_of::<f32>();
+    if !floats.read_pixels(
+        &float_info,
+        &mut pixels,
+        row_bytes,
+        (0, 0),
+        CachingHint::Disallow,
+    ) {
+        return None;
+    }
+    let (info, bytes) = match info.color_type() {
+        ColorType::RGBA8888 | ColorType::BGRA8888 => {
+            let swap = info.color_type() == ColorType::BGRA8888;
+            let level = |v: f32| (v * 255.0 * gain + 0.5) as u8;
+            let bytes = pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|&[r, g, b, a]| match swap {
+                    true => [level(b), level(g), level(r), level(a)],
+                    false => [level(r), level(g), level(b), level(a)],
+                })
+                .collect::<Vec<u8>>();
+            (info.with_alpha_type(AlphaType::Premul), bytes)
+        }
+        _ => {
+            let bytes = pixels
+                .iter()
+                .flat_map(|v| (v * gain).to_ne_bytes())
+                .collect::<Vec<u8>>();
+            (float_info, bytes)
+        }
+    };
+    let row_bytes = info.min_row_bytes();
+    started::raster_from_data(&info, Data::new_copy(&bytes), row_bytes)
+}
+
+/// `image` in memory: read back from the GPU where it lives on one.
+fn to_raster(context: Option<&Gpu>, image: &Image) -> Option<Image> {
+    match context {
+        #[cfg(any(feature = "metal", feature = "vulkan"))]
+        Some(context) => {
+            let mut direct = context.clone().as_direct_context();
+            image.make_raster_image(direct.as_mut(), CachingHint::Disallow)
+        }
+        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
+        Some(never) => match *never {},
+        None => Some(image.clone()),
+    }
 }
 
 #[cfg(test)]
