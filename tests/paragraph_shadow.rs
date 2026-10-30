@@ -348,6 +348,83 @@ fn neighbouring_spans_blur_apart_and_composite_in_order() {
     }
 }
 
+/// The most one rounding to the nearest level moves a value, in levels.
+const ROUNDING: f64 = 0.5;
+
+#[test]
+fn neighbouring_spans_composite_within_three_eight_bit_roundings() {
+    // On an eight-bit page each span's blurred shadow is stored at a level
+    // before the next is composited over it, and Skia's lowp source-over is
+    // `s + div255_accurate(d * (255 - s))` (SkRasterPipeline_opts.h; the
+    // inaccurate `div255` is used only under SK_USE_INACCURATE_DIV255_IN_BLEND,
+    // which no build of ours defines), itself rounded to the nearest level.
+    // With `s` and `d` the second and first span's stored levels, off their
+    // exact blurs `255 B` and `255 A` by `e_s` and `e_d`, and `r` the blend's
+    // rounding, the drawn level misses the exact `255 (B + A (1 - B))` by
+    //
+    //     e_s (1 - A) + e_d (1 - s / 255) + r,
+    //
+    // so by at most half a level for each rounding, weighted as above: under
+    // 1.5 levels, and less wherever either shadow is strong. The float page
+    // has none of these roundings and is held to the exact composite in the
+    // test above.
+    let sigma = 4.0f32;
+    let spans = |first: Vec<TextShadow>, second: Vec<TextShadow>| {
+        paragraph(&[("Hm", style(24.0, first)), ("Hm", style(24.0, second))])
+    };
+    for gpu in [false, true] {
+        // Each sharp in the colour its span casts in: under FreeType a
+        // glyph's coverage follows its colour's luminance (Skia's mask
+        // preblend), so a red mask is not the blue one the blur is of.
+        let sharp = |first: bool| match first {
+            true => {
+                drawn(gpu, &spans(vec![shadow(RED, 1.0, 0.0, 0.0)], vec![]))
+            }
+            false => {
+                drawn(gpu, &spans(vec![], vec![shadow(BLUE, 1.0, 0.0, 0.0)]))
+            }
+        };
+        let (Some(first), Some(second)) = (sharp(true), sharp(false)) else {
+            continue;
+        };
+        let blur =
+            |alpha: &[f64]| sampled(alpha, SIZE.0 as usize, f64::from(sigma));
+        let (a, b) = (blur(&alpha(&first)), blur(&alpha(&second)));
+        let second_alone =
+            drawn(gpu, &spans(vec![], vec![shadow(BLUE, 1.0, 0.0, sigma)]))
+                .expect("pixels");
+        let got = drawn(
+            gpu,
+            &spans(
+                vec![shadow(RED, 1.0, 0.0, sigma)],
+                vec![shadow(BLUE, 1.0, 0.0, sigma)],
+            ),
+        )
+        .expect("pixels");
+        let off: Vec<_> = got
+            .iter()
+            .zip(&second_alone)
+            .zip(a.iter().zip(&b))
+            .enumerate()
+            .filter_map(|(i, ((g, s), (a, b)))| {
+                let exact = (b + a * (1.0 - b)) * 255.0;
+                let stored = f64::from(s[3]) / 255.0;
+                let bound =
+                    ROUNDING * (1.0 - a) + ROUNDING * (1.0 - stored) + ROUNDING;
+                let miss = (f64::from(g[3]) - exact).abs();
+                (miss > bound + TIE).then_some((i, g[3], exact, bound))
+            })
+            .collect();
+        assert!(
+            off.is_empty(),
+            "gpu {gpu}: {} pixels beyond three roundings of the exact \
+             composite, first {:?}",
+            off.len(),
+            &off[..off.len().min(4)],
+        );
+    }
+}
+
 #[test]
 fn a_style_set_in_two_faces_casts_the_blur_of_the_whole_run() {
     // Oswald has no omega and Raleway, next in the families, has, so
