@@ -2004,6 +2004,10 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
   loaded, and draws the same. Nothing the watcher leaves on a thread keeps
   its event loop alive.
 
+- **Skia M153 to M156**, by way of `skia-safe` 0.156.0. No expected pixel
+  moved in either suite; every workaround for a Skia defect was re-checked and
+  is still needed.
+
 ### Known, and not fixed here
 
 - **On Linux, text is laid out at its size truncated to a 64th of a pixel.**

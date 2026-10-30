@@ -1738,6 +1738,16 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   at idle by the npm addon alone, which can post the release to the
   JavaScript thread that owns them; a Rust program's are kept as before.
 
+- **A consumer who also depends on `skia-safe` directly must move to 0.156.**
+  This crate exposes no `skia_safe` type in any public signature, so there is
+  no type conflict to resolve -- but Cargo will happily resolve two versions of
+  the crate and link two copies of the Skia native library. Invisible until it
+  is a build error.
+
+- **Skia M153 to M156**, by way of `skia-safe` 0.156.0. No expected pixel
+  moved in either suite; every workaround for a Skia defect was re-checked and
+  is still needed.
+
 ### Known, and not fixed here
 
 - **On macOS a GPU draw can be dropped when the shader compiler is slow, in
