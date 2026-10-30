@@ -615,3 +615,102 @@ describe("a clip inside a layer", () => {
     );
   });
 });
+
+describe("state kept on the JavaScript side", () => {
+  // The filters, and a style that is an object, are held as JavaScript
+  // references beside the native state, so that reading one back returns the
+  // object that was set. Each has to follow the native state stack: what
+  // `save` saves, `restore` brings back, and `reset` or a change of size
+  // clears.
+  let canvas, ctx;
+  beforeEach(() => {
+    canvas = new Canvas(WIDTH, HEIGHT);
+    ctx = canvas.getContext("2d");
+  });
+
+  const filters = {
+    maskFilter: () => MaskFilter.MakeBlur("normal", 2),
+    imageFilter: () => ImageFilter.MakeBlur(2, 2),
+    colorFilter: () => ColorFilter.MakeSRGBToLinearGamma(),
+  };
+  const styles = {
+    fillStyle: () => ctx.createLinearGradient(0, 0, 10, 0),
+    strokeStyle: () => ctx.createLinearGradient(0, 0, 0, 10),
+  };
+  // Each property with what it reads before anything is set.
+  const all = () => [
+    ...Object.entries(filters).map(([prop, make]) => [prop, make, null]),
+    ...Object.entries(styles).map(([prop, make]) => [prop, make, "#000000"]),
+  ];
+
+  test("restore() brings back what save() saved", () => {
+    for (const [prop, make, initial] of all()) {
+      ctx.reset();
+      ctx.save();
+      ctx[prop] = make();
+      ctx.restore();
+      assert.equal(ctx[prop], initial, `${prop} after save, set, restore`);
+
+      const outer = make();
+      ctx[prop] = outer;
+      ctx.save();
+      ctx[prop] = make();
+      ctx.restore();
+      assert.equal(ctx[prop], outer, `${prop} set before the save`);
+    }
+  });
+
+  test("nested saves unwind one at a time", () => {
+    for (const [prop, make] of all()) {
+      ctx.reset();
+      const [a, b, c] = [make(), make(), make()];
+      ctx[prop] = a;
+      ctx.save();
+      ctx[prop] = b;
+      ctx.save();
+      ctx[prop] = c;
+      ctx.restore();
+      assert.equal(ctx[prop], b, `${prop} after the inner restore`);
+      ctx.restore();
+      assert.equal(ctx[prop], a, `${prop} after the outer restore`);
+    }
+  });
+
+  test("saveLayer() saves as save() does", () => {
+    for (const [prop, make, initial] of all()) {
+      ctx.reset();
+      ctx.saveLayer();
+      ctx[prop] = make();
+      ctx.save();
+      ctx[prop] = make();
+      ctx.restore();
+      ctx.restore();
+      assert.equal(ctx[prop], initial, `${prop} through saveLayer`);
+    }
+  });
+
+  test("reset() and a change of size clear the state and what was saved", () => {
+    for (const [prop, make, initial] of all()) {
+      for (const clear of [() => ctx.reset(), () => (canvas.width = WIDTH)]) {
+        ctx.reset();
+        ctx[prop] = make();
+        ctx.save();
+        ctx[prop] = make();
+        clear();
+        assert.equal(ctx[prop], initial, `${prop} after clearing`);
+        ctx.restore();
+        assert.equal(ctx[prop], initial, `${prop}: nothing left to restore`);
+      }
+    }
+  });
+
+  test("restore() with nothing saved changes nothing", () => {
+    for (const [prop, make] of all()) {
+      ctx.reset();
+      const value = make();
+      ctx[prop] = value;
+      ctx.restore();
+      assert.equal(ctx[prop], value, prop);
+    }
+  });
+});
