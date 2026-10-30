@@ -273,6 +273,24 @@ window be changed after it opens.** No signature moves and nothing is removed.
   the rounding of the shadow beneath it -- and a PDF still writes it as an
   opacity, in vectors.
 
+- **A flat colour lands exactly on a float canvas in another space.** On a
+  canvas made with `PixelDepth::F16` or `PixelDepth::F32` in
+  `PixelColorSpace::SrgbLinear`, `DisplayP3`, `DisplayP3Linear`, `Rec2020` or
+  `Rec2020Linear`, a fill, stroke or blurred draw in a flat colour read back
+  as much as 2.3e-4 off the colour named: Skia converts a paint's colour
+  through an approximate transfer function whose results lie 64 ulps apart, so
+  no colour handed to it lands exactly there. Such a canvas now records each
+  draw twice, painting a flat colour through a shader that holds it in the
+  canvas's own space for its pixels, and as a plain colour for a PDF or SVG of
+  it, which still write it as one. Its pixels hold the colour as named, to the
+  precision of the half float on `F16`. The cost is memory: about 1.35x an
+  sRGB canvas's recording for a run of fills in one colour, 2.4x for fills
+  each in a colour of its own. Text keeps its plain colour: Skia weighs a
+  glyph's edges by the luminance of the paint's colour, and would weigh them
+  wrongly through the shader. Not yet exact there either: a shadow, which Skia
+  draws through an eight-bit layer, a `Paragraph`'s own colours, the colours
+  in a filter, a colour filter or a texture, and `Rec2020Pq` and `Rec2020Hlg`.
+
 - **A text decoration's colour is painted at the precision it names, as a
   fill's is.** The colour named in `Context2D::set_text_decoration_css` or
   `set_text_decoration` was rounded to eight bits of sRGB when it was set.
