@@ -737,6 +737,10 @@ thread_local! {
     /// their clip bounded by what they draw on this thread: off, the clip
     /// covers its own bounds, the reference a bounded clip is held to.
     pub(crate) static BOUNDS_PIECES: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// Whether a run's pieces played onto a raster on the CPU have their
+    /// clip bounded by what they draw on this thread: off, as for
+    /// [`BOUNDS_PIECES`], the reference a bounded clip is held to.
+    pub(crate) static BOUNDS_PAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
     /// Every rectangle a run's clip has been bounded by on this thread.
     pub(crate) static BOUNDED: std::cell::RefCell<Vec<IRect>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -812,18 +816,24 @@ impl Clipped {
         })
     }
 
-    /// Draws the piece onto `canvas` for `target` under its clip.
+    /// Draws the piece onto `canvas` for `target` under its clip: on a
+    /// raster on the CPU, bounded by what it draws -- see [`Self::play_run`]
+    /// -- since Skia builds the clip's mask again for each piece played
+    /// there, and a raster writes no clip of its own anywhere.
     fn playback(&self, canvas: &SkCanvas, target: Target) {
         if let Layer::Cut(op) = &self.entry {
             op.playback(canvas, target);
             return;
         }
+        let bounded = target != Target::Document
+            && blur_mask::draws_on_cpu(canvas)
+            && bounds_page();
         Self::play_run(
             std::slice::from_ref(self),
             &self.clip,
             canvas,
             target,
-            false,
+            bounded,
         );
     }
 
@@ -1071,6 +1081,17 @@ fn drawn_by(picture: &Picture) -> Option<Rect> {
 fn bounds_pieces() -> bool {
     #[cfg(test)]
     if !BOUNDS_PIECES.get() {
+        return false;
+    }
+    true
+}
+
+/// Whether a piece played onto a raster on the CPU is bounded -- see
+/// [`Clipped::playback`]: always, but off on a thread a test has turned it
+/// off on.
+fn bounds_page() -> bool {
+    #[cfg(test)]
+    if !BOUNDS_PAGE.get() {
         return false;
     }
     true

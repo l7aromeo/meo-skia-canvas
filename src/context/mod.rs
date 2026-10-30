@@ -3946,6 +3946,125 @@ mod tests {
         }
     }
 
+    /// A page clipped to `circle` with `kind` drawn, read, and `kind` drawn
+    /// again moved down, so that its run is filed in pieces either side of
+    /// the read -- read at `density`, its pieces' clip bounded or not.
+    fn bounded_on_page(
+        kind: fn(&mut crate::context2d::Context2D),
+        density: u32,
+        bounded: bool,
+    ) -> Vec<u8> {
+        let mut page = crate::canvas::Canvas::new(200.0, 120.0);
+        page.set_gpu(false);
+        {
+            let ctx = page.context();
+            ctx.begin_path();
+            circle(ctx);
+            ctx.clip(crate::path::FillRule::NonZero);
+            ctx.save();
+            kind(ctx);
+            ctx.restore();
+            ctx.get_image_data(0.0, 0.0, 1.0, 1.0).expect("pixels");
+            ctx.translate(0.5, 21.25);
+            kind(ctx);
+        }
+        layer::BOUNDS_PAGE.set(bounded);
+        let pixels = pixels_at(&mut page, density);
+        layer::BOUNDS_PAGE.set(true);
+        pixels
+    }
+
+    /// The kinds of draw a bounded clip must hold whole, drawn on a CPU page
+    /// whose run a read files in pieces: byte for byte what the page draws
+    /// with its pieces' clip unbounded, at densities 1 to 3, each bounded or
+    /// not as `bounded_kinds` says.
+    #[test]
+    fn a_bounded_page_piece_draws_what_an_unbounded_one_does() {
+        for (name, bounded, kind) in bounded_kinds() {
+            layer::BOUNDED.take();
+            bounded_on_page(kind, 1, true);
+            assert_eq!(
+                !layer::BOUNDED.take().is_empty(),
+                bounded,
+                "{name} bounded"
+            );
+            for density in 1..=3 {
+                assert!(
+                    bounded_on_page(kind, density, true)
+                        == bounded_on_page(kind, density, false),
+                    "{name}, {density}x"
+                );
+            }
+        }
+    }
+
+    /// Every program of the clip-run pins, read part way or cut, draws the
+    /// same page with its pieces' clip bounded as unbounded, at densities 1
+    /// and 2, and reads the same part way.
+    #[test]
+    fn a_clip_run_draws_the_same_page_bounded() {
+        let mut programs = vec![CLIPPED.to_vec()];
+        programs.extend(with_each(Step::Read));
+        programs.extend(with_each(Step::Cut));
+        layer::BOUNDED.take();
+        for steps in &programs {
+            let drawn = |bounded| {
+                layer::BOUNDS_PAGE.set(bounded);
+                let mut drawn = program(steps, false, true);
+                let pixels =
+                    [1, 2].map(|density| pixels_at(&mut drawn.canvas, density));
+                layer::BOUNDS_PAGE.set(true);
+                (pixels, drawn.reads)
+            };
+            let (now, unbounded) = (drawn(true), drawn(false));
+            assert!(now.0 == unbounded.0, "pixels of {steps:?}");
+            assert!(now.1 == unbounded.1, "reads of {steps:?}");
+        }
+        let bounded = layer::BOUNDED.take().len();
+        assert!(bounded > 0, "the programs' pieces are bounded");
+    }
+
+    /// A GPU page plays its pieces with their clip unbounded: the mask the
+    /// bound keeps small is the one Skia builds on the CPU, and the GPU
+    /// clips by other means. Runs where a GPU does.
+    #[test]
+    fn a_gpu_page_does_not_bound_its_pieces() {
+        let steps = [
+            Step::Clip,
+            Step::Fill(40.0),
+            Step::Read,
+            Step::Fill(50.0),
+            Step::Restore,
+        ];
+        let mut drawn = program(&steps, true, true);
+        if drawn.canvas.engine_kind() != crate::canvas::EngineKind::Gpu {
+            return;
+        }
+        layer::BOUNDED.take();
+        pixels_at(&mut drawn.canvas, 1);
+        assert!(layer::BOUNDED.take().is_empty());
+    }
+
+    /// Drawn in with `draw_canvas`, which plays the page's entries on the
+    /// destination's raster, the timing rows' source bounds each piece's
+    /// clip by what it draws: every rectangle within the band its fills
+    /// occupy, and none with the bound turned off.
+    #[test]
+    fn a_page_drawn_in_bounds_its_pieces_by_the_band_they_draw() {
+        let mut source = row_source();
+        let mut into = crate::canvas::Canvas::new(1000.0, 1000.0);
+        into.set_gpu(false);
+        into.context().draw_canvas(&mut source, 0.0, 0.0);
+        layer::BOUNDED.take();
+        pixels_at(&mut into, 1);
+        let bounded = layer::BOUNDED.take();
+        assert!(!bounded.is_empty(), "the pieces' clip is bounded");
+        for mask in bounded {
+            assert!(mask.height() <= 39, "{mask:?}");
+            assert!(mask.top >= 400 && mask.bottom <= 438, "{mask:?}");
+        }
+    }
+
     /// A piece of a clip run records its transform and its draws and
     /// nothing else: a run's recording holds no save, so finishing it has
     /// nothing to restore. Read once between two fills, each piece holds the
