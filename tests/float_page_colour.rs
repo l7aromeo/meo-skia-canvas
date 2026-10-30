@@ -187,6 +187,99 @@ fn a_flat_colour_lands_exactly_on_a_float_page() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+/// A drop-shadow in a colour named in the page's space reads back as that
+/// colour, in every pixel it covers whole, on every space, depth and engine:
+/// the shadow is tinted by a colour matrix whose offsets are the colour
+/// converted on this side. Tinted through Skia's blend filter instead, which
+/// converts the colour through skcms's approximate transfer function, it
+/// landed up to 2.6e-4 from the colour on a Display P3 F32 page and a whole
+/// half-float step off on F16.
+#[test]
+fn a_drop_shadow_lands_exactly_on_a_float_page() {
+    let spaces = [(PixelColorSpace::Srgb, "srgb")].into_iter().chain(SPACES);
+    let mut wrong = Vec::new();
+    for gpu in ENGINES {
+        for (space, function) in spaces.clone() {
+            for depth in [PixelDepth::F32, PixelDepth::F16] {
+                let missed: Vec<_> = (0..=400)
+                    .step_by(20)
+                    .filter_map(|i| {
+                        let v = i as f32 / 400.0 * 1.2 - 0.1;
+                        let mut canvas = canvas(space, depth, gpu);
+                        let ctx = canvas.context();
+                        // Cast onto the page from a square drawn off it.
+                        ctx.set_filter_css(&format!(
+                            "drop-shadow({SIDE}px 0 0 color({function} {v} 0.25 0.75))"
+                        ))
+                        .expect("a filter");
+                        ctx.fill_rect(-SIDE, 0.0, SIDE, SIDE);
+                        let got = covered(&mut canvas, space);
+                        match got.iter().find(|px| {
+                            !holds(**px, [v, 0.25, 0.75, 1.0], depth)
+                        }) {
+                            _ if got.is_empty() => {
+                                Some(format!("{v}: nothing covered"))
+                            }
+                            Some(px) => Some(format!("{v}: {px:?}")),
+                            None => None,
+                        }
+                    })
+                    .collect();
+                if let Some(first) = missed.first() {
+                    wrong.push(format!(
+                        "gpu {gpu}, {space:?} {depth:?}: {} missed, first {first}",
+                        missed.len()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// A drop-shadow in a colour named in another space than the page's is
+/// the colour a fill of it paints, in every pixel it covers whole: both
+/// convert it on this side, by the same arithmetic.
+#[test]
+fn a_drop_shadow_in_another_space_is_its_fill_on_a_float_page() {
+    let mut wrong = Vec::new();
+    for gpu in ENGINES {
+        for (space, _) in SPACES {
+            for depth in [PixelDepth::F32, PixelDepth::F16] {
+                for i in (0..=400).step_by(40) {
+                    let v = i as f32 / 400.0 * 1.2 - 0.1;
+                    let colour = format!("color(srgb {v} 0.25 0.75)");
+                    let mut shadow = canvas(space, depth, gpu);
+                    let ctx = shadow.context();
+                    ctx.set_filter_css(&format!(
+                        "drop-shadow({SIDE}px 0 0 {colour})"
+                    ))
+                    .expect("a filter");
+                    ctx.fill_rect(-SIDE, 0.0, SIDE, SIDE);
+                    let mut fill = canvas(space, depth, gpu);
+                    fill.context()
+                        .set_fill_style_css(&colour)
+                        .expect("a colour");
+                    fill.context().fill_rect(0.0, 0.0, SIDE, SIDE);
+                    let (got, want) = (
+                        covered(&mut shadow, space),
+                        covered(&mut fill, space),
+                    );
+                    if got.is_empty() || got != want {
+                        wrong.push(format!(
+                            "gpu {gpu}, {space:?} {depth:?}, {colour}: {:?} \
+                             against {:?}",
+                            got.first(),
+                            want.first()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 fn has(bytes: &[u8], needle: &str) -> bool {
     bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
 }

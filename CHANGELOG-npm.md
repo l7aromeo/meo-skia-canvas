@@ -471,6 +471,16 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A `drop-shadow()` in `ctx.filter` lands in its colour exactly on a float
+  canvas.** On a canvas made with `colorType: "RGBAF16"` or `"RGBAF32"`, a
+  shadow was tinted through Skia's blend filter, which converts its colour
+  through an approximate transfer function: `color(srgb-linear 0.5 0.5 0.5)`
+  landed 6.29e-5 from its encoding on an sRGB F32 canvas, and a shadow parted
+  from a fill of its colour by up to 2.6e-4 on a Display P3 one, and by a
+  whole half-float step on F16. The colour is converted on this side now and
+  handed to Skia where nothing converts it again, so a shadow is its fill to
+  the bit, in sRGB, `srgb-linear`, Display P3 and Rec. 2020 canvases alike.
+
 - **A filter set through `ctx.imageFilter` keeps a float canvas's floats.** On
   a canvas made with `colorType: "RGBAF16"` or `"RGBAF32"`, a draw through a
   CanvasKit image filter came back in eight bits: Skia draws a filtered draw
@@ -698,7 +708,7 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   every canvas; a colour of whole bytes draws as it did. The colour of a
   `drop-shadow()` in `ctx.filter` is kept as named too: on an eight-bit sRGB
   canvas the shadow draws the bytes a fill of its colour draws, and on a float
-  canvas its alpha as named and its colour within 1.1e-4 of a fill's.
+  canvas the colour a fill of it paints.
 
 - **A draw too faint for eight bits draws on a float canvas.** On a canvas
   made with `colorType: "RGBAF16"` or `"RGBAF32"`, a fill under
