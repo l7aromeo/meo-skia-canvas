@@ -224,6 +224,21 @@ window be changed after it opens.** No signature moves and nothing is removed.
   by the exact Gaussian on either engine, the runs' shadows composited in
   document order beneath all the text. A PDF or SVG keeps the mask filter.
 
+- **A `drop-shadow()` lands where Chrome puts it under a turned or skewed
+  transform.** `Context2D::set_filter_css`'s shadow offset and blur were
+  divided by the transform's diagonal, which is its scale only while it
+  neither turns nor skews. `drop-shadow(12px 4px 0 red)` under a 30-degree
+  `rotate` landed 9.69 pixels right and 10.93 down, where Chrome draws it
+  12 right and 4 down under any transform, as it draws a shadow set by
+  `set_shadow_offset`; under a quarter turn the diagonal is 0 and no shadow
+  was drawn at all. A `blur()` beside an `ImageFilter` set by
+  `set_image_filter`, which Skia draws whole, was not blurred under a
+  quarter turn for the same reason. Both keep their lengths on the canvas's
+  axes now; an `ImageFilter`'s own lengths stay in local units. Under a turn
+  or a skew the draw itself is still resampled through Skia's filter layer,
+  where Chrome's is not: up to 16 levels at a square's edge under a
+  30-degree turn on the CPU engine -- see docs/browser-differences.md.
+
 - **A rectangle the closed-form blur cannot take is blurred exactly.** A
   stroked rectangle -- `Context2D::stroke_rect` -- or a dithered one or one played into a
   pattern, blurred by up to 40px, took Skia's coverage blur: a 6px stroke
