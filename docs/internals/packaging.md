@@ -44,16 +44,23 @@ missing -- a transparent export, a dropped blend -- with nothing reported but a
 line on stderr. `containers/skia-metal-untimed-compile.patch` asks the OS
 version at run time instead, which is what upstream Skia's check does.
 
-**Build through `just` on macOS.** The justfile's `dotenv-command`,
+**Build through `just` on macOS and Linux.** The justfile's `dotenv-command`,
 `scripts/skia-source.mjs env`, sets `SKIA_SOURCE_DIR` for every recipe on macOS
-and on no other platform, and `ensure-deps` prepares the tree it names: rust-skia
-at the Cargo.lock tag, Skia's DEPS and gn, the patch applied with `-F0`. It is
+and Linux and on Windows not at all, and `ensure-deps` prepares the tree it
+names: rust-skia at the Cargo.lock tag, Skia's DEPS and gn, and the platform's
+patches from `PATCHES` applied with `-F0` -- the Metal one above on macOS, and
+on Linux `containers/skia-brotli-sources.patch`, which adds the two brotli
+sources Skia's build list leaves out since M156 and without which a `freetype`
+build fails to link on `kCmdLut` and `BrotliDecoderEnsureStaticInit`. It is
 fetched once, about 1 GB, into `$XDG_CACHE_HOME/meo-skia-canvas`, under a name
-that carries the version and the patch's digest. Once a new tree is ready the
-others are removed, except any a worktree of the repository still locks: the
-cache is shared by every worktree on the machine. A bare `cargo build` or
-`bun run build` outside `just` sets nothing, downloads the prebuilt, and builds
-a binary with the timeout in it.
+that carries the version and a digest of the platform's patches. Once a new tree
+is ready the others are removed, except any a worktree of the repository still
+locks: the cache is shared by every worktree on the machine. A bare
+`cargo build` or `bun run build` outside `just` sets nothing, downloads the
+prebuilt, and builds a binary with the timeout in it. On Linux, where no
+prebuilt carries `freetype` and skia-bindings builds Skia from its own unpatched
+source, `build.rs` compiles the missing brotli files from that source instead,
+and does nothing where the build list already has them.
 
 **The release cannot ship that binary.** `build.yml`'s mac job refuses a build
 whose skia-bindings output does not say it built offline from that tree, and

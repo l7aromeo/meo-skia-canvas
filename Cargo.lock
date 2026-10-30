@@ -1216,6 +1216,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "skia-bindings",
  "skia-safe",
  "spin_sleep",
  "tiff",
