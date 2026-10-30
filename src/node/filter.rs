@@ -299,13 +299,6 @@ impl Filter {
         self.specs.is_empty()
     }
 
-    /// Whether this filter holds a `drop-shadow()`.
-    pub fn casts_drop_shadow(&self) -> bool {
-        self.specs
-            .iter()
-            .any(|spec| matches!(spec, FilterSpec::Shadow { .. }))
-    }
-
     /// This filter as steps the crate runs on pixels itself -- see
     /// [`chain`](crate::context::chain) -- in the order CSS applies them: a
     /// `blur()` as the exact Gaussian, a colour function as Skia's colour

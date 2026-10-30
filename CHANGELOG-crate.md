@@ -213,6 +213,17 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A filter set by `Context2D::set_image_filter` keeps a float canvas's
+  floats.** On a canvas made with `PixelDepth::F16` or `PixelDepth::F32`, a
+  draw through an `ImageFilter` came back in eight bits: Skia draws a filtered
+  draw through a layer of its own, and on the CPU makes that layer eight bits
+  a channel whatever the canvas, so a fill in `rgb(0 0 255 / 0.003)` through
+  `ImageFilter::offset(0.0, 0.0, None, None)` read 1/255. It is run on a layer
+  of the canvas's own floats now, and reads 0.003, for a path, text, an image
+  and a canvas drawn in. Its lengths stay in the draw's own units, turning and
+  stretching with the transform as before. Beside a filter set by
+  `set_filter_css` it keeps Skia's layer.
+
 - **A `Paragraph`'s blurred text shadow is the exact blur of its text.** A
   shadow was blurred a glyph at a time by Skia's mask filter, which on macOS
   draws a glyph heavier than the glyph itself -- a 16px word through one at

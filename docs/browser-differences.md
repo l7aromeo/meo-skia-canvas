@@ -927,9 +927,11 @@ skew Skia draws the filtered draw at the transform's scale and turns it onto
 the page, which resamples the draw itself: a 30-pixel square read up to 16
 levels from the square drawn unfiltered under `rotate(30deg)` on the CPU
 engine and 40 on the GPU, and 65 and 80 under a `0.5` skew. A Skia
-`ImageFilter` is drawn through that layer too, and resampled the same way;
-its lengths are in local units, and turn and stretch with the transform as
-CanvasKit's do.
+`ImageFilter` is drawn the same way: its lengths are in local units, and
+turn and stretch with the transform as CanvasKit's do, so it is made at the
+transform's scale and the filtered draw is turned onto the page. On an F16
+or F32 page that is a layer of the page's own floats, where Skia's would be
+eight bits a channel; beside a CSS filter it is Skia's layer on any page.
 
 **A fill or stroke the page's edge cuts is drawn differently far inside the
 page on the CPU engine.** The page's edge cuts a path as a clip does: Skia's
