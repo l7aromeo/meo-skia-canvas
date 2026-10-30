@@ -93,7 +93,7 @@ fn holds(got: [f32; 4], exact: [f32; 4], depth: PixelDepth) -> bool {
 /// covered whole.
 type Draw = fn(&mut Context2D);
 
-const DRAWS: [(&str, Draw); 3] = [
+const DRAWS: [(&str, Draw); 4] = [
     ("a fill", |ctx| ctx.fill_rect(0.0, 0.0, SIDE, SIDE)),
     ("a stroke", |ctx| {
         ctx.set_line_width(SIDE);
@@ -105,6 +105,15 @@ const DRAWS: [(&str, Draw); 3] = [
     ("a blurred fill", |ctx| {
         ctx.set_filter_css("blur(1px)").expect("a blur");
         ctx.fill_rect(-SIDE, -SIDE, SIDE * 3.0, SIDE * 3.0);
+    }),
+    // A path, which the blur takes on its result, through `context::chain`.
+    ("a blurred stroke", |ctx| {
+        ctx.set_filter_css("blur(1px)").expect("a blur");
+        ctx.set_line_width(SIDE * 3.0);
+        ctx.begin_path();
+        ctx.move_to(-SIDE, SIDE / 2.0);
+        ctx.line_to(SIDE * 2.0, SIDE / 2.0);
+        ctx.stroke();
     }),
 ];
 

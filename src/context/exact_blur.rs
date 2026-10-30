@@ -20,9 +20,14 @@
 //! A pass works each line in place, from a copy of it its worker keeps, so
 //! the image and its transpose are the only buffers of its size alive at
 //! once: 32 bytes a pixel in floats.
+//!
+//! Float pixels are worked in f64 a line at a time, and bytes in f32 -- see
+//! [`Lane`]. Unrounded, a float result has to be the f32 nearest the exact
+//! sum, which f32 arithmetic misses by a few ulps; a byte is rounded to a
+//! level, which f32 holds to about 1e-4.
 
 use rayon::prelude::*;
-use rustfft::{Fft, FftPlanner, num_complex::Complex};
+use rustfft::{Fft, FftNum, FftPlanner, num_complex::Complex};
 use std::{cell::RefCell, collections::HashMap, f64::consts::TAU, sync::Arc};
 
 /// How many sigmas the kernel reaches either side of its centre.
@@ -92,27 +97,31 @@ pub(crate) fn gaussian_sum(sigma: f64) -> f64 {
 /// image as transparent. Returns the blurred floats, unrounded, in the
 /// buffer `pixels` came in.
 ///
+/// Each line is worked in f64 and narrowed to f32 once, so that a value is
+/// the f32 nearest the exact sum: inside its reach a constant comes back
+/// to the bit, as a flat colour on a float page has to. Summed in f32, the
+/// rounding of every tap reached 23 ulps at a sigma of 20. Summed in f32
+/// with each product and sum compensated, the direct path was exact too
+/// but slower than f64 at every sigma timed, and the FFT has no such form.
+///
 /// A sigma that is zero, negative or not a number leaves that axis alone,
 /// and an infinite one spreads it to nothing.
 pub(crate) fn blur(
-    mut pixels: Vec<f32>,
+    pixels: Vec<f32>,
     width: usize,
     height: usize,
     sigma_x: f32,
     sigma_y: f32,
 ) -> Vec<f32> {
-    pass(&mut pixels, width, height, sigma_x);
-    let mut columns = vec![0.0; pixels.len()];
-    transpose(&pixels, &mut columns, width, height);
-    pass(&mut columns, height, width, sigma_y);
-    transpose(&columns, &mut pixels, height, width);
-    pixels
+    blur_in::<f64>(pixels, width, height, sigma_x, sigma_y)
 }
 
-/// Blurs `pixels`, premultiplied RGBA bytes, as [`blur`] does, scales the
-/// result by `gain` and rounds once at the end: a blurred draw composited
-/// at an alpha takes its alpha here, so that it is not rounded twice.
-/// `pixels` is let go as soon as it is in floats.
+/// Blurs `pixels`, premultiplied RGBA bytes, as [`blur`] does but in f32,
+/// scales the result by `gain` and rounds once at the end: a blurred draw
+/// composited at an alpha takes its alpha here, so that it is not rounded
+/// twice. f32 holds a level to within about 1e-4, so it decides no byte
+/// that f64 would decide otherwise but on exact ties, at about twice the
+/// speed. `pixels` is let go as soon as it is in floats.
 pub(crate) fn blur_bytes(
     pixels: Vec<u8>,
     width: usize,
@@ -123,7 +132,7 @@ pub(crate) fn blur_bytes(
 ) -> Vec<u8> {
     let floats: Vec<f32> = pixels.par_iter().map(|&b| f32::from(b)).collect();
     drop(pixels);
-    blur(floats, width, height, sigma_x, sigma_y)
+    blur_in::<f32>(floats, width, height, sigma_x, sigma_y)
         .into_par_iter()
         // Each value is a weighted mean of bytes times a gain in [0, 1], so
         // it lies in [0, 255] up to float noise; the cast saturates what
@@ -132,9 +141,102 @@ pub(crate) fn blur_bytes(
         .collect()
 }
 
+/// [`blur`], with each line worked in `L`.
+fn blur_in<L: Lane>(
+    mut pixels: Vec<f32>,
+    width: usize,
+    height: usize,
+    sigma_x: f32,
+    sigma_y: f32,
+) -> Vec<f32> {
+    pass::<L>(&mut pixels, width, height, sigma_x);
+    let mut columns = vec![0.0; pixels.len()];
+    transpose(&pixels, &mut columns, width, height);
+    pass::<L>(&mut columns, height, width, sigma_y);
+    transpose(&columns, &mut pixels, height, width);
+    pixels
+}
+
+/// The arithmetic a line is worked in: f32 for bytes, f64 for floats.
+trait Lane: FftNum {
+    /// `v` in this arithmetic.
+    fn of(v: f32) -> Self;
+    /// A weight, worked out in f64, in this arithmetic.
+    fn weight(w: f64) -> Self;
+    /// This value as the f32 a pixel holds.
+    fn narrow(self) -> f32;
+    /// Runs `sum` over the line's accumulator, which ends in `out`: `out`
+    /// itself in f32, and in f64 `scratch`, narrowed into `out` once
+    /// `sum` is done.
+    fn accumulate(
+        out: &mut [f32],
+        scratch: &mut Vec<Self>,
+        sum: impl FnOnce(&mut [Self]),
+    );
+    /// The forward and inverse plans of `len` in this arithmetic, kept per
+    /// worker.
+    fn plans(len: usize) -> Plans<Self>;
+}
+
+impl Lane for f32 {
+    fn of(v: f32) -> Self {
+        v
+    }
+
+    fn weight(w: f64) -> Self {
+        w as f32
+    }
+
+    fn narrow(self) -> f32 {
+        self
+    }
+
+    fn accumulate(
+        out: &mut [f32],
+        _: &mut Vec<Self>,
+        sum: impl FnOnce(&mut [Self]),
+    ) {
+        sum(out);
+    }
+
+    fn plans(len: usize) -> Plans<Self> {
+        PLANS_F32.with(|plans| plan(&mut plans.borrow_mut(), len))
+    }
+}
+
+impl Lane for f64 {
+    fn of(v: f32) -> Self {
+        f64::from(v)
+    }
+
+    fn weight(w: f64) -> Self {
+        w
+    }
+
+    fn narrow(self) -> f32 {
+        self as f32
+    }
+
+    fn accumulate(
+        out: &mut [f32],
+        scratch: &mut Vec<Self>,
+        sum: impl FnOnce(&mut [Self]),
+    ) {
+        scratch.resize(out.len(), 0.0);
+        sum(scratch);
+        out.iter_mut()
+            .zip(scratch.iter())
+            .for_each(|(o, &v)| *o = v.narrow());
+    }
+
+    fn plans(len: usize) -> Plans<Self> {
+        PLANS_F64.with(|plans| plan(&mut plans.borrow_mut(), len))
+    }
+}
+
 /// One axis: convolves each of `lines` lines of `n` RGBA pixels, laid end
-/// to end in `pixels`, with the kernel for `sigma`, in place.
-fn pass(pixels: &mut [f32], n: usize, lines: usize, sigma: f32) {
+/// to end in `pixels`, with the kernel for `sigma`, in place, in `L`.
+fn pass<L: Lane>(pixels: &mut [f32], n: usize, lines: usize, sigma: f32) {
     if sigma == f32::INFINITY {
         // Spread over an infinite reach, every value comes to nothing.
         pixels.fill(0.0);
@@ -145,8 +247,8 @@ fn pass(pixels: &mut [f32], n: usize, lines: usize, sigma: f32) {
     }
     let k = half_kernel(sigma, n - 1);
     match method(sigma) {
-        Method::Direct => direct(pixels, n, &k),
-        Method::Fourier => fourier(pixels, n, &k),
+        Method::Direct => direct::<L>(pixels, n, &k),
+        Method::Fourier => fourier::<L>(pixels, n, &k),
     }
 }
 
@@ -168,27 +270,33 @@ fn method(sigma: f32) -> Method {
 }
 
 /// Each line tap by tap: `out[x] = k0 in[x] + sum_d k_d (in[x-d] + in[x+d])`,
-/// over a copy of the line padded with zeros so no tap leaves it, written
-/// back over the line. Each tap is one pass over the whole line, which the
-/// compiler vectorises.
-fn direct(pixels: &mut [f32], n: usize, k: &[f64]) {
-    let k: Vec<f32> = k.iter().map(|&w| w as f32).collect();
+/// over a copy of the line padded with zeros so no tap leaves it, summed
+/// into the line's accumulator -- see [`Lane::accumulate`]. Each tap is one
+/// pass over the whole line, which the compiler vectorises.
+fn direct<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
+    let k: Vec<L> = k.iter().map(|&w| L::weight(w)).collect();
     let r = k.len() - 1;
     let (stride, pad) = (n * 4, r * 4);
+    let zero = L::of(0.0);
     pixels.par_chunks_mut(stride).for_each_init(
-        || vec![0f32; stride + 2 * pad],
-        |padded, out| {
-            padded[pad..pad + stride].copy_from_slice(out);
+        || (vec![zero; stride + 2 * pad], Vec::new()),
+        |(padded, scratch), out| {
+            padded[pad..pad + stride]
+                .iter_mut()
+                .zip(out.iter())
+                .for_each(|(p, &v)| *p = L::of(v));
             let padded = &*padded;
             let line = &padded[pad..pad + stride];
-            out.iter_mut().zip(line).for_each(|(o, &v)| *o = k[0] * v);
-            for (d, &w) in k.iter().enumerate().skip(1) {
-                let left = &padded[pad - d * 4..][..stride];
-                let right = &padded[pad + d * 4..][..stride];
-                out.iter_mut()
-                    .zip(left.iter().zip(right))
-                    .for_each(|(o, (&a, &b))| *o += w * (a + b));
-            }
+            L::accumulate(out, scratch, |acc| {
+                acc.iter_mut().zip(line).for_each(|(o, &v)| *o = k[0] * v);
+                for (d, &w) in k.iter().enumerate().skip(1) {
+                    let left = &padded[pad - d * 4..][..stride];
+                    let right = &padded[pad + d * 4..][..stride];
+                    acc.iter_mut()
+                        .zip(left.iter().zip(right))
+                        .for_each(|(o, (&a, &b))| *o = *o + w * (a + b));
+                }
+            });
         },
     );
 }
@@ -212,43 +320,46 @@ fn fast_len(n: usize) -> usize {
 }
 
 /// A forward and an inverse plan of one length.
-type Plans = (Arc<dyn Fft<f32>>, Arc<dyn Fft<f32>>);
+type Plans<L> = (Arc<dyn Fft<L>>, Arc<dyn Fft<L>>);
 
 thread_local! {
     /// Plans by length, kept per worker: planning a length costs more than
-    /// using it, and a page blurs at few lengths.
-    static PLANS: RefCell<HashMap<usize, Plans>> = RefCell::new(HashMap::new());
+    /// using it, and a page blurs at few lengths. One map per arithmetic.
+    static PLANS_F32: RefCell<HashMap<usize, Plans<f32>>> = RefCell::new(HashMap::new());
+    static PLANS_F64: RefCell<HashMap<usize, Plans<f64>>> = RefCell::new(HashMap::new());
 }
 
-fn plans(len: usize) -> Plans {
-    PLANS.with(|plans| {
-        plans
-            .borrow_mut()
-            .entry(len)
-            .or_insert_with(|| {
-                let mut planner = FftPlanner::new();
-                (planner.plan_fft_forward(len), planner.plan_fft_inverse(len))
-            })
-            .clone()
-    })
+/// The plans of `len` in `plans`, made there if they are not yet.
+fn plan<L: FftNum>(
+    plans: &mut HashMap<usize, Plans<L>>,
+    len: usize,
+) -> Plans<L> {
+    plans
+        .entry(len)
+        .or_insert_with(|| {
+            let mut planner = FftPlanner::new();
+            (planner.plan_fft_forward(len), planner.plan_fft_inverse(len))
+        })
+        .clone()
 }
 
-/// Each line through the FFT. The line is zero-padded to at least `n + r`:
-/// the kernel is zero past `r`, so a tap that wraps round the circular
-/// convolution lands outside `[0, n)` and the result is the linear
+/// Each line through the FFT, in `L`. The line is zero-padded to at least
+/// `n + r`: the kernel is zero past `r`, so a tap that wraps round the
+/// circular convolution lands outside `[0, n)` and the result is the linear
 /// convolution, with transparent outside. The kernel is real and symmetric,
 /// so its spectrum is real, and two real channels share one complex
 /// transform: red with green, blue with alpha. The whole line is read into
 /// those transforms before any of it is written back, so it is worked in
 /// place.
-fn fourier(pixels: &mut [f32], n: usize, k: &[f64]) {
+fn fourier<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
     let r = k.len() - 1;
     let len = fast_len(n + r);
-    let spectrum = spectrum(k, len);
-    let zero = Complex::new(0.0f32, 0.0);
+    let spectrum: Vec<L> =
+        spectrum(k, len).into_iter().map(L::weight).collect();
+    let zero = Complex::new(L::of(0.0), L::of(0.0));
     pixels.par_chunks_mut(n * 4).for_each_init(
         || {
-            let (forward, inverse) = plans(len);
+            let (forward, inverse) = L::plans(len);
             let scratch = forward
                 .get_inplace_scratch_len()
                 .max(inverse.get_inplace_scratch_len());
@@ -264,27 +375,29 @@ fn fourier(pixels: &mut [f32], n: usize, k: &[f64]) {
             for (i, [r, g, bl, al]) in
                 line.as_chunks::<4>().0.iter().enumerate()
             {
-                a[i] = Complex::new(*r, *g);
-                b[i] = Complex::new(*bl, *al);
+                a[i] = Complex::new(L::of(*r), L::of(*g));
+                b[i] = Complex::new(L::of(*bl), L::of(*al));
             }
             a[n..].fill(zero);
             b[n..].fill(zero);
             for buffer in [&mut *a, &mut *b] {
                 forward.process_with_scratch(buffer, scratch);
-                buffer.iter_mut().zip(&spectrum).for_each(|(c, &s)| *c *= s);
+                buffer
+                    .iter_mut()
+                    .zip(&spectrum)
+                    .for_each(|(c, &s)| *c = *c * s);
                 inverse.process_with_scratch(buffer, scratch);
             }
             for (i, px) in line.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-                *px = [a[i].re, a[i].im, b[i].re, b[i].im];
+                *px = [a[i].re, a[i].im, b[i].re, b[i].im].map(L::narrow);
             }
         },
     );
 }
 
 /// The kernel's spectrum at length `len`, real since the kernel is
-/// symmetric, with the inverse transform's `1 / len` folded in. Worked in
-/// f64 and narrowed once.
-fn spectrum(k: &[f64], len: usize) -> Vec<f32> {
+/// symmetric, with the inverse transform's `1 / len` folded in, in f64.
+fn spectrum(k: &[f64], len: usize) -> Vec<f64> {
     let forward = FftPlanner::<f64>::new().plan_fft_forward(len);
     let mut buffer = vec![Complex::new(0.0, 0.0); len];
     buffer[0].re = k[0];
@@ -293,7 +406,7 @@ fn spectrum(k: &[f64], len: usize) -> Vec<f32> {
         buffer[len - d].re = w;
     }
     forward.process(&mut buffer);
-    buffer.iter().map(|c| (c.re / len as f64) as f32).collect()
+    buffer.iter().map(|c| c.re / len as f64).collect()
 }
 
 /// Pixels a transpose block spans along each side: 16 RGBA pixels of f32 is
@@ -453,6 +566,70 @@ mod tests {
     /// Float noise moves a value by well under this; a byte that differs from
     /// the reference further from a half-level than this is a wrong byte.
     const TIE: f64 = 1e-3;
+
+    /// FNV-1a over `bytes`: a fingerprint of a blur's output that does not
+    /// move with the standard library's hasher.
+    fn fingerprint(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        })
+    }
+
+    #[test]
+    fn eight_bit_pixels_blur_as_they_always_have() {
+        // An eight-bit blur is rounded to a level, where f32 is exact enough,
+        // and runs in f32 for its speed; only float pixels take the wider
+        // arithmetic. Every scene at direct sigmas, fingerprinted as
+        // `blur_bytes` gave it in f32 alone. Direct sums are the same IEEE
+        // operations in the same order on every target; the FFT's are not,
+        // rustfft picking NEON, AVX or scalar kernels, so its side is held by
+        // which arithmetic ran rather than by its bytes.
+        let got = [0.5f32, 1.0, 2.0, 3.3, 4.9]
+            .into_iter()
+            .flat_map(|sigma| {
+                scenes(64, 48).into_iter().map(move |src| {
+                    fingerprint(&blur_bytes(src, 64, 48, sigma, sigma, 1.0))
+                })
+            })
+            .fold(0u64, |acc, h| acc.rotate_left(7) ^ h);
+        assert_eq!(got, 0x132e_d974_e015_fad3, "{got:#x}");
+    }
+
+    #[test]
+    fn a_constant_blurred_in_floats_is_itself_inside_its_reach() {
+        // Every weight within the reach lands on the constant, and the
+        // weights sum to one, so the exact blur there is the constant: in
+        // floats, unrounded, it has to come back to the bit. Sigmas either
+        // side of the FFT's crossover, on a line wide enough to have an
+        // inside at each.
+        let n = 800;
+        let mut wrong = Vec::new();
+        for sigma in [1.0f32, 2.0, 4.0, 8.0, 20.0, 60.0] {
+            let reach = (REACH_SIGMAS * f64::from(sigma)).ceil() as usize;
+            let mut worst = (0u32, 0f32);
+            for i in 0..=40 {
+                let v = i as f32 / 40.0 * 1.2 - 0.1;
+                let pixel = [v, 0.25, 0.75, 1.0];
+                let line = pixel.repeat(n);
+                let got = blur(line, n, 1, sigma, 0.0);
+                for px in got.as_chunks::<4>().0[reach..n - reach].iter() {
+                    for (g, e) in px.iter().zip(pixel) {
+                        let ulps = g.to_bits().abs_diff(e.to_bits());
+                        if ulps > worst.0 {
+                            worst = (ulps, v);
+                        }
+                    }
+                }
+            }
+            if worst.0 > 0 {
+                wrong.push(format!(
+                    "sigma {sigma}: {} ulps off, at {}",
+                    worst.0, worst.1
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("; "));
+    }
 
     #[test]
     fn a_direct_blur_is_the_exact_gaussian_except_on_ties() {
