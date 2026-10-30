@@ -410,17 +410,17 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 - **A text decoration's colour is painted at the precision it names, as a
   fill's is.** The colour named in `Context2D::set_text_decoration_css` or
-  `set_text_decoration` was rounded to eight bits of sRGB when it was set.
-  On a canvas made with `PixelDepth::F16` or `PixelDepth::F32`, a line in
-  alpha 0.3 drew at 77/255 beside text drawn at 0.3, and a colour under half
-  of one 255th not at all. On an eight-bit canvas a colour outside sRGB was
+  `set_text_decoration` was rounded to eight bits of sRGB when it was set. On
+  a canvas made with `PixelDepth::F16` or `PixelDepth::F32`, a line in alpha
+  0.3 drew at 77/255 beside text drawn at 0.3, and a colour under half of one
+  255th not at all. On an eight-bit canvas a colour outside sRGB was
   gamut-mapped where a fill of it is clipped: `color(display-p3 0 1 0)` drew
   its line at `0,251,41` beside a fill at `0,255,0`. The line now draws the
   bytes a fill draws, on every canvas; a colour of whole bytes draws as it
   did. The colour of a `drop-shadow()` read by `Context2D::set_filter_css`,
-  and its `FilterOp::DropShadow`, is kept as named too, which changes no
-  pixel yet: Skia's raster backend resolves the shadow on an eight-bit layer
-  either way.
+  and its `FilterOp::DropShadow`, is kept as named too: on an eight-bit sRGB
+  canvas the shadow draws the bytes a fill of its colour draws, and on a float
+  canvas its alpha as named and its colour within 1.1e-4 of a fill's.
 
 - **A draw too faint for eight bits draws on a float canvas.** On a canvas
   made with `PixelDepth::F16` or `PixelDepth::F32` as its `color_type`, a

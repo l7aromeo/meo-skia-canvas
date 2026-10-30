@@ -751,11 +751,7 @@ fn shadowed(
     let source = on_floats(&|canvas| {
         canvas.draw_image(&raster, (0, 0), None);
     })?;
-    let tint = color_filters::blend_with_color_space(
-        colour,
-        Some(space.clone()),
-        BlendMode::SrcIn,
-    )?;
+    let tint = tint(colour, space, raster.image_info())?;
     let tinted = filtered(None, &source, &tint, 1.0)?;
     let shadow = match sigma.0 > 0.0 || sigma.1 > 0.0 {
         true => blurred_on_cpu(&tinted, sigma.0, sigma.1, 1.0)?,
@@ -775,6 +771,63 @@ fn shadowed(
         canvas.draw_image(&source, (0, 0), None);
     })?;
     rounded_once(&composed, image.image_info(), gain)
+}
+
+/// The colour filter a shadow in `colour`, unpremultiplied in `space`, is
+/// tinted through onto a layer like `layer`: the colour, in the alpha of
+/// what it is tinting. On a layer of eight bits a channel it is the colour a
+/// fill of it paints there, read back from a pixel filled with it, so that
+/// a shadow's bytes are a fill's: Skia rounds a fill's colour to the layer's
+/// bytes and premultiplies by the rounded alpha, and
+/// `color(srgb 0.25 0.5 0.75 / 0.3)` fills green at 39 of 255 where 0.5 of
+/// 0.3 is 38.25. A float layer takes the colour as named.
+fn tint(
+    colour: Color4f,
+    space: &ColorSpace,
+    layer: &ImageInfo,
+) -> Option<ColorFilter> {
+    let bytes = matches!(
+        layer.color_type(),
+        ColorType::RGBA8888 | ColorType::BGRA8888
+    );
+    if !bytes {
+        return color_filters::blend_with_color_space(
+            colour,
+            Some(space.clone()),
+            BlendMode::SrcIn,
+        );
+    }
+    let pixel = layer.with_dimensions((1, 1));
+    let mut surface = started::raster(&pixel, None, None)?;
+    surface.canvas().clear(Color::TRANSPARENT);
+    surface
+        .canvas()
+        .draw_paint(&Paint::new(colour, Some(space)));
+    // Read back unpremultiplied, in floats, in the layer's own space: the
+    // filled bytes divided out exactly enough that the tint multiplies them
+    // back to the same bytes.
+    let read = ImageInfo::new(
+        (1, 1),
+        ColorType::RGBAF32,
+        AlphaType::Unpremul,
+        layer.color_space(),
+    );
+    let mut filled = [0f32; 4];
+    if !surface.image_snapshot().read_pixels(
+        &read,
+        &mut filled,
+        4 * size_of::<f32>(),
+        (0, 0),
+        CachingHint::Disallow,
+    ) {
+        return None;
+    }
+    let [r, g, b, a] = filled;
+    color_filters::blend_with_color_space(
+        Color4f::new(r, g, b, a),
+        layer.color_space(),
+        BlendMode::SrcIn,
+    )
 }
 
 /// `floats`, an F32 image, scaled by `gain` into `info`'s type in memory:
