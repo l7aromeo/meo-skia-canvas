@@ -683,3 +683,59 @@ fn on_arm_the_cut_blend_is_nearer_exact_source_over() {
         );
     }
 }
+
+/// On a float canvas in a space other than sRGB, which records each draw
+/// for pixels with its flat colour held exactly in the canvas's space, a
+/// fill the clip cuts lands that colour exactly too: inside the triangle
+/// and the clip, every channel is the colour named.
+#[test]
+fn a_cut_fill_lands_its_colour_exactly_on_a_float_page() {
+    let named = [0.2f32, 0.5, 0.75];
+    let clip = CLIPS[3].1;
+    let mut canvas = Canvas::with_options(
+        W,
+        H,
+        CanvasOptions {
+            color_space: PixelColorSpace::DisplayP3,
+            color_type: PixelDepth::F32,
+            gpu: false,
+            ..CanvasOptions::default()
+        },
+    )
+    .expect("a canvas");
+    assert_eq!(canvas.engine_kind(), EngineKind::Cpu, "a CPU canvas");
+    {
+        let ctx = canvas.context();
+        clip.apply(ctx);
+        ctx.set_fill_style_css(&format!(
+            "color(display-p3 {} {} {})",
+            named[0], named[1], named[2]
+        ))
+        .expect("a colour");
+        triangle(ctx);
+    }
+    let export = ImageDataExport {
+        pixels: PixelExportOptions {
+            depth: PixelDepth::F32,
+            color_space: PixelColorSpace::DisplayP3,
+            premultiplied: true,
+            ..PixelExportOptions::default()
+        },
+        ..ImageDataExport::default()
+    };
+    let data = canvas.to_image_data(None, &export).expect("pixels");
+    let pixels = data.pixels().as_chunks::<4>().0;
+    let inside: Vec<usize> = (0..pixels.len() / 4)
+        .filter(|&i| deep_inside(clip, 1, i) && inside_the_triangle(1, i))
+        .collect();
+    assert!(
+        !inside.is_empty(),
+        "pixels inside the triangle and the clip"
+    );
+    for i in inside {
+        let read: Vec<f32> = (0..4)
+            .map(|c| f32::from_le_bytes(pixels[i * 4 + c]))
+            .collect();
+        assert_eq!(read, [named[0], named[1], named[2], 1.0], "pixel {i}");
+    }
+}

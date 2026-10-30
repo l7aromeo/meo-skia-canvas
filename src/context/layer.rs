@@ -51,7 +51,8 @@ pub enum Layer {
     /// Draws Skia recorded, played back as recorded.
     Picture(Picture),
     /// A blurred flat-colour draw, or a run of them, its blur made at
-    /// playback.
+    /// playback. Under a clip it is a piece of the frame's run, and holds no
+    /// clip of its own -- see [`Clipped`].
     ///
     /// Shared, so that a layer is two words whichever kind it is: a page
     /// snapshot copies a pointer for it rather than the op, and every
@@ -67,8 +68,12 @@ pub enum Layer {
     /// a document. Shared, so the two pictures are one pointer.
     Targeted(Arc<(Picture, Picture)>),
     /// A fill or stroke its clip cuts, or a run of them under one clip, the
-    /// clip applied at playback.
+    /// clip applied at playback. Filed as a piece of the frame's run -- see
+    /// [`Clipped`] -- wherever the page keeps runs.
     Cut(Arc<CutOp>),
+    /// Part of what was drawn under one clip and transform, recorded without
+    /// the clip and played under it -- see [`Clipped`].
+    Clipped(Arc<Clipped>),
 }
 
 impl Layer {
@@ -84,6 +89,7 @@ impl Layer {
                 Target::Document => pictures.1.playback(canvas),
             },
             Layer::Cut(op) => op.playback(canvas, target),
+            Layer::Clipped(piece) => piece.playback(canvas, target),
         }
     }
 
@@ -103,6 +109,7 @@ impl Layer {
             // and a document is never confined.
             Layer::Targeted(pictures) => Some(pictures.0.cull_rect()),
             Layer::Cut(op) => Some(op.reach()),
+            Layer::Clipped(piece) => piece.reach(),
         }
     }
 }
@@ -484,13 +491,127 @@ impl Group {
                     clip_within(canvas);
                 }
                 canvas.set_matrix(&entries.into());
-                for entry in self.contents.iter() {
-                    entry.playback(canvas, target);
-                }
+                play_entries(&self.contents, canvas, target);
                 canvas.restore();
             }
         }
         canvas.restore();
+    }
+}
+
+/// Part of a run: what was drawn under one frame of the page -- one clip
+/// and one transform -- recorded without the clip, which is applied where it
+/// is played.
+///
+/// A run the page neither read nor cut part way is drawn into the page's own
+/// recording under its clip when its frame ends, and never becomes one of
+/// these. A read, an export or a draw the clip cuts files what the run has
+/// so far as a piece, and the rest of the run follows as more pieces. Played
+/// as pixels each piece is clipped by itself, as the page's recording clips
+/// a frame; a document plays a run's consecutive pieces under the clip
+/// once, so that it writes the clip once, as for a run nothing split -- see
+/// [`play_entries`]. A clip applied again for each piece is a clip of its
+/// own to a PDF or SVG device, which keys a clip group by the clip's
+/// generation, and the document came out with the clip written once per
+/// piece.
+#[derive(Debug)]
+pub struct Clipped {
+    /// The run the piece belongs to, unique for the process.
+    pub run: u64,
+    /// The clip, in device pixels of the recording.
+    clip: Data,
+    /// The clip's bounds, which bound what the piece can draw.
+    bounds: Rect,
+    /// What the piece draws: a picture, or a pair of them on a page that
+    /// keeps a recording for each kind of target, or a [`BlurOp`], each
+    /// recorded without the clip; or a [`CutOp`], which applies the clip
+    /// itself as pixels.
+    pub entry: Layer,
+}
+
+impl Clipped {
+    /// `entry`, drawn under `clip` in run `run`.
+    pub fn new(run: u64, clip: &Path, entry: Layer) -> Self {
+        Clipped {
+            run,
+            clip: clip.serialize(),
+            bounds: *clip.bounds(),
+            entry,
+        }
+    }
+
+    /// Draws the piece onto `canvas` for `target` under its clip.
+    fn playback(&self, canvas: &SkCanvas, target: Target) {
+        if let Layer::Cut(op) = &self.entry {
+            op.playback(canvas, target);
+            return;
+        }
+        Self::play_run(std::slice::from_ref(self), &self.clip, canvas, target);
+    }
+
+    /// Draws `pieces`, of one run, onto `canvas` for `target` under `clip`,
+    /// applied once.
+    fn play_run(
+        pieces: &[impl std::borrow::Borrow<Clipped>],
+        clip: &Data,
+        canvas: &SkCanvas,
+        target: Target,
+    ) {
+        canvas.save();
+        if let Some(clip) = Path::deserialize(clip) {
+            canvas.clip_path(&clip, ClipOp::Intersect, true);
+        }
+        for piece in pieces {
+            match &piece.borrow().entry {
+                Layer::Cut(op) => op.playback_unclipped(canvas, target),
+                entry => entry.playback(canvas, target),
+            }
+        }
+        canvas.restore();
+    }
+
+    /// What the piece can draw in: what its entry draws, within the clip's
+    /// bounds as a picture recorded under the clip is bounded, or for a cut
+    /// draw what it paints before the clip -- see [`CutOp::reach`].
+    fn reach(&self) -> Option<Rect> {
+        if let Layer::Cut(op) = &self.entry {
+            return Some(op.reach());
+        }
+        let mut within = self.entry.reach()?;
+        if !within.intersect(self.bounds) {
+            return Some(Rect::new_empty());
+        }
+        Some(within)
+    }
+}
+
+/// Plays `entries` onto `canvas` for `target`, in order: each as
+/// [`Layer::playback`] plays it, but for a document's consecutive pieces of
+/// one run, which it plays under their clip once -- see [`Clipped`].
+pub(crate) fn play_entries(
+    entries: &[Layer],
+    canvas: &SkCanvas,
+    target: Target,
+) {
+    let mut at = 0;
+    while at < entries.len() {
+        let run = match (&entries[at], target) {
+            (Layer::Clipped(piece), Target::Document) => piece.run,
+            (entry, _) => {
+                entry.playback(canvas, target);
+                at += 1;
+                continue;
+            }
+        };
+        let pieces: Vec<&Clipped> = entries[at..]
+            .iter()
+            .map_while(|entry| match entry {
+                Layer::Clipped(piece) if piece.run == run => Some(&**piece),
+                _ => None,
+            })
+            .collect();
+        at += pieces.len();
+        Clipped::play_run(&pieces, &pieces[0].clip, canvas, target);
     }
 }
 
@@ -517,8 +638,9 @@ impl Group {
 /// docs/browser-differences.md. Anywhere else --
 /// the GPU, whose multisampled coverage the clip does not move, a vector
 /// document, a recording -- it clips as the page always has. A run of cut
-/// draws shares one op, so that a document clips the run once, as it clips
-/// the draws of an ordinary layer, rather than once for each.
+/// draws shares one op. Under a page's clip the op is a piece of the frame's
+/// run -- see [`Clipped`] -- and a document plays its draws under the run's
+/// clip with the draws around them.
 #[derive(Clone, Debug)]
 pub struct CutOp {
     /// The draws, in order, each under the transform it was drawn with: the
@@ -588,6 +710,7 @@ pub(crate) fn holds_a_cut(entries: &[Layer]) -> bool {
     entries.iter().any(|entry| match entry {
         Layer::Cut(_) => true,
         Layer::Group(group) => holds_a_cut(&group.contents),
+        Layer::Clipped(piece) => matches!(piece.entry, Layer::Cut(_)),
         Layer::Picture(_) | Layer::Blur(_) | Layer::Targeted(_) => false,
     })
 }
@@ -682,13 +805,27 @@ impl CutOp {
         recorder.finish_recording_as_picture(None)
     }
 
+    /// The draws recorded for `target`.
+    fn draws_for(&self, target: Target) -> &[Picture] {
+        match (target, &self.documents) {
+            (Target::Document, Some(documents)) => documents,
+            _ => &self.draws,
+        }
+    }
+
+    /// Draws the draws for `target` onto `canvas` under the clip the canvas
+    /// already carries, for a run of pieces played under their clip once --
+    /// see [`Clipped`].
+    fn playback_unclipped(&self, canvas: &SkCanvas, target: Target) {
+        for draw in self.draws_for(target) {
+            canvas.draw_picture(draw, None, None);
+        }
+    }
+
     /// Draws the cut draws for `target` onto `canvas`, under whatever
     /// transform and clip the canvas already carries.
     pub fn playback(&self, canvas: &SkCanvas, target: Target) {
-        let draws = match (target, &self.documents) {
-            (Target::Document, Some(documents)) => documents,
-            _ => &self.draws,
-        };
+        let draws = self.draws_for(target);
         canvas.save();
         if blur_mask::draws_on_cpu(canvas) {
             self.coverage.clip(canvas);

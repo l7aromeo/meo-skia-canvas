@@ -1970,23 +1970,24 @@ impl Context2D {
             started::raster_from_data(&info, buffer, info.min_row_bytes())
         {
             self.push(); // cache matrix & clip in self.state
-            self.with_canvas(|canvas, _| {
-                let paint = Paint::default();
-                let mut eraser = Paint::default();
-                canvas.restore_to_count(1); // discard current matrix & clip
-                eraser.set_blend_mode(BlendMode::Clear);
-                canvas.draw_image_rect(
-                    &bitmap,
-                    Some((src_rect, Strict)),
-                    dst_rect,
-                    &eraser,
-                );
-                canvas.draw_image_rect(
-                    &bitmap,
-                    Some((src_rect, Strict)),
-                    dst_rect,
-                    &paint,
-                );
+            self.with_recorder(|mut recorder| {
+                recorder.append_unframed(|canvas, _| {
+                    let paint = Paint::default();
+                    let mut eraser = Paint::default();
+                    eraser.set_blend_mode(BlendMode::Clear);
+                    canvas.draw_image_rect(
+                        &bitmap,
+                        Some((src_rect, Strict)),
+                        dst_rect,
+                        &eraser,
+                    );
+                    canvas.draw_image_rect(
+                        &bitmap,
+                        Some((src_rect, Strict)),
+                        dst_rect,
+                        &paint,
+                    );
+                });
             });
             self.pop(); // restore discarded matrix & clip
             return true;
@@ -2809,7 +2810,8 @@ mod tests {
     }
 
     /// `document` with each clip's id renumbered in the order it first
-    /// appears: Skia numbers an SVG's clips from a count the whole process
+    /// appears: Skia names an SVG's clips `cl_` and the clip's generation in
+    /// hexadecimal (`SkSVGDevice.cpp`), from a count the whole process
     /// shares, so two exports of one page are told apart by nothing else.
     fn numbered(document: &[u8]) -> Vec<u8> {
         const PREFIX: &[u8] = b"cl_";
@@ -2821,7 +2823,7 @@ mod tests {
         {
             let digits = rest[at + PREFIX.len()..]
                 .iter()
-                .take_while(|byte| byte.is_ascii_digit())
+                .take_while(|byte| byte.is_ascii_hexdigit())
                 .count();
             let (head, tail) = rest.split_at(at + PREFIX.len());
             let (id, tail) = tail.split_at(digits);
@@ -2840,13 +2842,16 @@ mod tests {
         out
     }
 
-    /// The `CutOp`s among `layers`, and among the entries of every group
-    /// they hold.
+    /// The `CutOp`s among `layers`, among the pieces of a run, and among the
+    /// entries of every group they hold.
     fn cut_ops(layers: &[layer::Layer]) -> usize {
         layers
             .iter()
             .map(|layer| match layer {
                 layer::Layer::Cut(..) => 1,
+                layer::Layer::Clipped(piece) => {
+                    cut_ops(std::slice::from_ref(&piece.entry))
+                }
                 layer::Layer::Group(group) => cut_ops(&group.contents),
                 _ => 0,
             })
@@ -3015,6 +3020,419 @@ mod tests {
                 .to_vec()
         };
         assert!(cpu(true) != cpu(false), "the CPU");
+    }
+
+    /// One step of a program the clip-run pins draw.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Step {
+        /// A small triangle at this height, which a clip around the middle
+        /// of the page contains.
+        Fill(f32),
+        /// A run of text, which records the clip's reach beside it.
+        Text,
+        /// A rectangle filled across the clip's edge, which Skia clips as it
+        /// draws: a filled rectangle never takes the cut route.
+        Rect,
+        /// A blurred fill, which the page keeps as a `BlurOp`.
+        Blur,
+        /// A fill inside a `saveLayer`, which the page keeps as a group.
+        Layer,
+        /// A `clearRect` short of the page, which the page keeps as an
+        /// isolated draw.
+        Clear,
+        /// The triangle `cut_triangle` draws, which the circle cuts.
+        Cut,
+        /// `getImageData` of the whole page, kept to compare.
+        Read,
+        /// An SVG export, kept to compare.
+        Export,
+        /// `save` and a clip to `circle`.
+        Clip,
+        /// `restore`.
+        Restore,
+        /// A translation, which changes the frame and not the clip.
+        Move,
+    }
+
+    /// What a program drew: the page, what each `Export` step exported and
+    /// what each `Read` step read.
+    struct Drawn {
+        canvas: crate::canvas::Canvas,
+        exports: Vec<Vec<u8>>,
+        reads: Vec<Vec<u8>>,
+    }
+
+    /// The page a program's steps draw, on the GPU or the CPU, the cut route
+    /// on or off.
+    fn program(steps: &[Step], gpu: bool, routed: bool) -> Drawn {
+        use crate::export::{EncodeOptions, ImageFormat};
+        ROUTES_CUTS.set(routed);
+        let mut canvas = crate::canvas::Canvas::new(200.0, 120.0);
+        canvas.set_gpu(gpu);
+        let mut exports = vec![];
+        let mut reads = vec![];
+        for step in steps {
+            if *step == Step::Export {
+                exports.push(
+                    canvas
+                        .to_buffer(ImageFormat::Svg, &EncodeOptions::default())
+                        .expect("an export"),
+                );
+                continue;
+            }
+            let ctx = canvas.context();
+            match *step {
+                Step::Fill(y) => {
+                    ctx.begin_path();
+                    ctx.move_to(70.0, y);
+                    ctx.line_to(95.5, y + 9.25);
+                    ctx.line_to(77.0, y + 17.5);
+                    ctx.close_path();
+                    ctx.set_fill_style_css("rgb(30 60 200 / 0.7)")
+                        .expect("a colour");
+                    ctx.fill(crate::path::FillRule::NonZero);
+                }
+                Step::Rect => {
+                    ctx.set_fill_style_css("rgb(20 150 60 / 0.8)")
+                        .expect("a colour");
+                    ctx.fill_rect(100.5, 30.25, 60.0, 40.0);
+                }
+                Step::Blur => {
+                    ctx.set_filter_css("blur(2px)").expect("a filter");
+                    ctx.fill_rect(80.0, 50.0, 20.0, 12.0);
+                    ctx.set_filter_css("none").expect("no filter");
+                }
+                Step::Layer => {
+                    ctx.save_layer();
+                    ctx.fill_rect(60.0, 70.0, 25.0, 10.0);
+                    ctx.restore();
+                }
+                Step::Clear => ctx.clear_rect(85.0, 40.0, 6.0, 6.0),
+                Step::Text => {
+                    ctx.set_font_css("16px sans-serif");
+                    ctx.fill_text("Wg", 75.0, 64.0, None);
+                }
+                Step::Cut => {
+                    ctx.set_fill_style_css("rgb(200 40 90)").expect("a colour");
+                    cut_triangle(ctx);
+                }
+                Step::Read => reads.push(
+                    ctx.get_image_data(0.0, 0.0, 200.0, 120.0)
+                        .expect("pixels")
+                        .pixels()
+                        .to_vec(),
+                ),
+                Step::Clip => {
+                    ctx.save();
+                    ctx.begin_path();
+                    circle(ctx);
+                    ctx.clip(crate::path::FillRule::NonZero);
+                }
+                Step::Restore => ctx.restore(),
+                Step::Move => ctx.translate(1.5, 0.75),
+                Step::Export => unreachable!("exported above"),
+            }
+        }
+        ROUTES_CUTS.set(true);
+        Drawn {
+            canvas,
+            exports,
+            reads,
+        }
+    }
+
+    /// The page's SVG, its clips renumbered, and its PDF.
+    fn documents(canvas: &mut crate::canvas::Canvas) -> (Vec<u8>, Vec<u8>) {
+        use crate::export::{EncodeOptions, ImageFormat};
+        let mut export = |format| {
+            canvas
+                .to_buffer(format, &EncodeOptions::default())
+                .expect("an export")
+        };
+        (
+            numbered(&export(ImageFormat::Svg)),
+            export(ImageFormat::Pdf),
+        )
+    }
+
+    /// Draws outside the clip and in it, under two frames of one clip, with
+    /// text, a blurred draw, a draw that takes the cut route, and in each
+    /// frame a rectangle the clip cuts among them.
+    const CLIPPED: [Step; 13] = [
+        Step::Fill(5.0),
+        Step::Clip,
+        Step::Fill(40.0),
+        Step::Cut,
+        Step::Fill(60.0),
+        Step::Blur,
+        Step::Rect,
+        Step::Text,
+        Step::Move,
+        Step::Fill(45.0),
+        Step::Rect,
+        Step::Restore,
+        Step::Fill(95.0),
+    ];
+
+    /// `CLIPPED` with `step` after each of its steps in turn.
+    fn with_each(step: Step) -> Vec<Vec<Step>> {
+        (0..=CLIPPED.len())
+            .map(|at| {
+                let mut steps = CLIPPED.to_vec();
+                steps.insert(at, step);
+                steps
+            })
+            .collect()
+    }
+
+    /// The SVG and PDF of `CLIPPED` drawn with no cut route and no read: one
+    /// clip group a frame.
+    fn plain_documents() -> (Vec<u8>, Vec<u8>) {
+        documents(&mut program(&CLIPPED, false, false).canvas)
+    }
+
+    /// A PDF or SVG of a page is the same document whether or not a draw the
+    /// clip cuts took the cut route between ordinary draws under the clip:
+    /// the clip is written once for each frame it is drawn under, as it is
+    /// for a page drawn straight through.
+    #[test]
+    fn a_cut_draw_does_not_split_a_document_under_one_clip() {
+        let (svg, pdf) = documents(&mut program(&CLIPPED, false, true).canvas);
+        let plain = plain_documents();
+        assert!(svg == plain.0, "SVG");
+        assert!(pdf == plain.1, "PDF");
+    }
+
+    /// The same document whether or not the page was read between any two
+    /// of its draws.
+    #[test]
+    fn a_read_does_not_split_a_document_under_one_clip() {
+        let plain = plain_documents();
+        for steps in with_each(Step::Read) {
+            let (svg, pdf) =
+                documents(&mut program(&steps, false, true).canvas);
+            assert!(svg == plain.0, "SVG of {steps:?}");
+            assert!(pdf == plain.1, "PDF of {steps:?}");
+        }
+    }
+
+    /// The same document whether or not the page was exported between any
+    /// two of its draws.
+    #[test]
+    fn an_export_does_not_split_a_document_under_one_clip() {
+        let plain = plain_documents();
+        for steps in with_each(Step::Export) {
+            let (svg, pdf) =
+                documents(&mut program(&steps, false, true).canvas);
+            assert!(svg == plain.0, "SVG of {steps:?}");
+            assert!(pdf == plain.1, "PDF of {steps:?}");
+        }
+    }
+
+    /// How many clips a PDF's content streams set: the `W n` and `W* n`
+    /// operators, in every stream inflated.
+    fn pdf_clips(pdf: &[u8]) -> usize {
+        use std::io::Read;
+        let find = |hay: &[u8], needle: &[u8], from: usize| {
+            hay[from..]
+                .windows(needle.len())
+                .position(|w| w == needle)
+                .map(|at| at + from)
+        };
+        let mut clips = 0;
+        let mut at = 0;
+        while let Some(start) = find(pdf, b"stream\n", at) {
+            let body = start + b"stream\n".len();
+            let Some(end) = find(pdf, b"endstream", body) else {
+                break;
+            };
+            let mut text = Vec::new();
+            if flate2::read::ZlibDecoder::new(&pdf[body..end])
+                .read_to_end(&mut text)
+                .is_ok()
+            {
+                clips += text.windows(3).filter(|w| *w == b"W n").count()
+                    + text.windows(4).filter(|w| *w == b"W* n").count();
+            }
+            // Past `endstream`, whose tail would match `stream` again.
+            at = end + b"endstream".len();
+        }
+        clips
+    }
+
+    /// A blurred draw under a clip is a piece of its frame's run, so a PDF
+    /// writes the frame's clip once around it and the draws beside it, as
+    /// for the draws alone. Before runs the blur was an entry with its clip
+    /// of its own and split the frame in three.
+    #[test]
+    fn a_blur_joins_its_frame_in_a_document() {
+        let clips = |steps: &[Step], runs: bool| {
+            page::KEEPS_RUNS.set(runs);
+            let (_, pdf) = documents(&mut program(steps, false, true).canvas);
+            page::KEEPS_RUNS.set(true);
+            pdf_clips(&pdf)
+        };
+        let with = [
+            Step::Clip,
+            Step::Fill(40.0),
+            Step::Blur,
+            Step::Fill(50.0),
+            Step::Restore,
+        ];
+        let without = [
+            Step::Clip,
+            Step::Fill(40.0),
+            Step::Fill(50.0),
+            Step::Restore,
+        ];
+        assert_eq!(clips(&without, true), 1, "the draws alone");
+        assert_eq!(clips(&with, true), 1, "with a blur among them");
+        assert_eq!(clips(&with, false), 3, "with a blur, before runs");
+    }
+
+    /// A layer and an isolated draw under a clip split the page's recording
+    /// as they did before runs, and a document writes the frame's clip again
+    /// after each, as it did: each is a page entry with its clip of its own,
+    /// and the run is filed before it. Joining either would need the group
+    /// to play without the clip it sizes the layer by, or each piece of a
+    /// run to carry its own features; and an SVG export rasterizes both, so
+    /// only a PDF would gain. Pinned so that the documents of such a page
+    /// stay what they were.
+    #[test]
+    fn a_layer_and_an_isolated_draw_keep_their_documents() {
+        let steps = [
+            Step::Clip,
+            Step::Fill(40.0),
+            Step::Layer,
+            Step::Fill(60.0),
+            Step::Clear,
+            Step::Fill(45.0),
+            Step::Restore,
+        ];
+        let documents_with = |runs: bool| {
+            page::KEEPS_RUNS.set(runs);
+            let drawn = documents(&mut program(&steps, false, true).canvas);
+            page::KEEPS_RUNS.set(true);
+            drawn
+        };
+        let (with, without) = (documents_with(true), documents_with(false));
+        assert!(with.0 == without.0, "SVG");
+        assert!(with.1 == without.1, "PDF");
+        // The steps make what they are named for.
+        let mut canvas = program(&steps, false, true).canvas;
+        let page = canvas.page(0).expect("a page").inner.page();
+        let kinds: Vec<&str> = page
+            .layers
+            .iter()
+            .zip(page.features.iter())
+            .map(|(layer, features)| match layer {
+                layer::Layer::Group(_) => "group",
+                _ if *features != VectorFeatures::PLAIN => "isolated",
+                _ => "plain",
+            })
+            .collect();
+        for kind in ["group", "isolated"] {
+            assert!(kinds.contains(&kind), "a {kind} among {kinds:?}");
+        }
+    }
+
+    /// An export part way through a page is the export of the page drawn up
+    /// to there, the frame it was in ended: what the run of that frame holds
+    /// is in it.
+    #[test]
+    fn an_export_part_way_is_the_page_up_to_there() {
+        for (at, steps) in with_each(Step::Export).into_iter().enumerate() {
+            let exports = program(&steps, false, true).exports;
+            let mut before = CLIPPED[..at].to_vec();
+            before.push(Step::Restore);
+            let (svg, _) = documents(&mut program(&before, false, true).canvas);
+            assert!(numbered(&exports[0]) == svg, "an export after {before:?}");
+        }
+    }
+
+    /// The pixels of a page drawn under clips, and of every read taken part
+    /// way, are those it drew with every frame's clip recorded into the
+    /// page's own picture, on the CPU and on the GPU.
+    #[test]
+    fn a_clip_run_draws_the_pixels_a_clip_in_the_picture_does() {
+        let drawn = |steps: &[Step], gpu: bool, runs: bool| {
+            page::KEEPS_RUNS.set(runs);
+            let Drawn {
+                mut canvas, reads, ..
+            } = program(steps, gpu, true);
+            page::KEEPS_RUNS.set(true);
+            let engine = canvas.engine_kind() == crate::canvas::EngineKind::Gpu;
+            (engine == gpu).then(|| {
+                let page = canvas
+                    .to_image_data(
+                        None,
+                        &crate::pixels::ImageDataExport {
+                            density: 2,
+                            ..Default::default()
+                        },
+                    )
+                    .expect("pixels")
+                    .pixels()
+                    .to_vec();
+                (page, reads)
+            })
+        };
+        let plain: Vec<Step> = CLIPPED
+            .iter()
+            .copied()
+            .filter(|step| *step != Step::Cut)
+            .collect();
+        let mut programs = vec![plain.clone()];
+        programs.extend((0..=plain.len()).map(|at| {
+            let mut steps = plain.clone();
+            steps.insert(at, Step::Read);
+            steps
+        }));
+        for gpu in [false, true] {
+            for steps in &programs {
+                let (Some(runs), Some(picture)) =
+                    (drawn(steps, gpu, true), drawn(steps, gpu, false))
+                else {
+                    continue;
+                };
+                assert!(
+                    runs.0 == picture.0,
+                    "gpu {gpu}: the page of {steps:?}"
+                );
+                assert!(
+                    runs.1 == picture.1,
+                    "gpu {gpu}: the reads of {steps:?}"
+                );
+            }
+        }
+    }
+
+    /// A page drawn under clips that nothing cuts or reads part way keeps
+    /// each frame's draws in its own picture, as a page always has: the run
+    /// is drawn into the page's recording when its frame ends, and the page
+    /// is one picture however many frames it was drawn under.
+    #[test]
+    fn a_page_no_cut_or_read_splits_is_one_picture() {
+        let steps = [
+            Step::Fill(5.0),
+            Step::Clip,
+            Step::Fill(40.0),
+            Step::Text,
+            Step::Move,
+            Step::Fill(50.0),
+            Step::Restore,
+            Step::Clip,
+            Step::Fill(45.0),
+            Step::Restore,
+            Step::Fill(95.0),
+        ];
+        let mut canvas = program(&steps, false, true).canvas;
+        let page = canvas.page(0).expect("a page").inner.page();
+        assert_eq!(page.layers.len(), 1, "the page's entries");
+        assert!(
+            matches!(page.layers[0], layer::Layer::Picture(_)),
+            "a picture"
+        );
     }
 
     #[test]
