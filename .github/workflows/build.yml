@@ -315,10 +315,13 @@ jobs:
 
       # fontconfig is linked statically from the image's /opt/skia-static-libs,
       # whose `libfontconfig.a` a `-L native=` path on RUSTFLAGS puts ahead of the
-      # system directories: it outranks the build script's own link search, so
-      # pkg-config's `-lfontconfig` resolves to the static library. Appended, not
-      # set: the image's RUSTFLAGS carry the linker and `-static-libstdc++` (glibc)
-      # or `-crt-static` (musl). freetype is Skia's own, embedded, which
+      # system directories, so skia-bindings' `-lfontconfig` resolves to the
+      # static library even where a shared one is installed: in the glibc image
+      # with `fontconfig-devel` added, the link takes `libfontconfig.so.1`
+      # without the path and the static library with it. The image as built
+      # carries no shared fontconfig, so today the path is a guard rather than
+      # the difference. Appended, not set: the image's RUSTFLAGS carry the linker
+      # and `-static-libstdc++` (glibc) or `-crt-static` (musl). freetype is Skia's own, embedded, which
       # skia-bindings no longer links from the system under `embed-freetype`
       # (rust-skia#1326, in 0.156.0). `src/bdf_stub.c` answers the BDF calls the
       # static fontconfig makes.
