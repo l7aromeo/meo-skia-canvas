@@ -2,9 +2,10 @@
 //! unclipped draw's wherever the clip lets it through, and as near the exact
 //! coverage of the shape within the clip as the unclipped draw is to the
 //! shape -- where the page's edge does not also cut it, which moves pixels as
-//! a clip does. The draws are opaque black on transparent, so that what is
-//! compared is coverage alone: a colour, or content beneath, is blended by
-//! another route under the clip and can land a level away.
+//! a clip does. The coverage pins draw opaque black on transparent, so that
+//! what is compared is coverage alone: a colour, or content beneath, is
+//! blended by another route under the clip on an eight-bit sRGB page, and
+//! the blend pins hold how far that lands.
 //!
 //! Skia's analytic anti-aliasing builds a path's edges against the clip
 //! where the clip does not contain the path, and the edges it adds at the
@@ -427,5 +428,258 @@ fn the_page_edge_moves_pixels_far_inside_the_page() {
                 "{label} x{density}: the page edge moved nothing past {far} px",
             );
         }
+    }
+}
+
+/// A fill a blend pin draws, in CSS, over what lies beneath it.
+struct Blend {
+    name: &'static str,
+    beneath: Option<&'static str>,
+    fill: &'static str,
+}
+
+/// A coloured fill, a translucent one, and a translucent one over
+/// translucent content, which differs at full coverage as well as at the
+/// triangle's edges.
+const BLENDS: [Blend; 3] = [
+    Blend {
+        name: "coloured",
+        beneath: None,
+        fill: "rgb(200 40 90)",
+    },
+    Blend {
+        name: "translucent",
+        beneath: None,
+        fill: "rgb(200 40 90 / 0.5)",
+    },
+    Blend {
+        name: "translucent over translucent",
+        beneath: Some("rgb(200 40 90 / 0.6)"),
+        fill: "rgb(0 0 0 / 0.33)",
+    },
+];
+
+/// The triangle filled as `blend` says on a CPU canvas in `space` at
+/// `depth`, under `clip` where there is one, read at `density`: every
+/// channel premultiplied, in levels of an eight-bit channel.
+fn levels(
+    blend: &Blend,
+    (space, depth): (PixelColorSpace, PixelDepth),
+    clip: Option<Clip>,
+    density: u32,
+) -> Vec<f32> {
+    let mut canvas = Canvas::with_options(
+        W,
+        H,
+        CanvasOptions {
+            color_space: space,
+            color_type: depth,
+            gpu: false,
+            ..CanvasOptions::default()
+        },
+    )
+    .expect("a canvas");
+    assert_eq!(canvas.engine_kind(), EngineKind::Cpu, "a CPU canvas");
+    {
+        let ctx = canvas.context();
+        if let Some(beneath) = blend.beneath {
+            ctx.set_fill_style_css(beneath).expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W, H);
+        }
+        if let Some(clip) = clip {
+            clip.apply(ctx);
+        }
+        ctx.set_fill_style_css(blend.fill).expect("a colour");
+        triangle(ctx);
+    }
+    let export = ImageDataExport {
+        density,
+        pixels: PixelExportOptions {
+            depth: PixelDepth::F32,
+            color_space: space,
+            premultiplied: true,
+            ..PixelExportOptions::default()
+        },
+        ..ImageDataExport::default()
+    };
+    let data = canvas.to_image_data(None, &export).expect("pixels");
+    data.pixels()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b) * 255.0)
+        .collect()
+}
+
+/// An eight-bit canvas in sRGB, the one page whose unclipped flat-colour
+/// fill Skia blends through its legacy blitter.
+const SRGB_8: (PixelColorSpace, PixelDepth) =
+    (PixelColorSpace::Srgb, PixelDepth::Uint8);
+
+/// Pages whose unclipped fill Skia already blends through its raster
+/// pipeline: a space other than sRGB, and a float depth.
+const PIPELINE_PAGES: [(&str, (PixelColorSpace, PixelDepth)); 2] = [
+    (
+        "Display P3 at eight bits",
+        (PixelColorSpace::DisplayP3, PixelDepth::Uint8),
+    ),
+    ("sRGB at F16", (PixelColorSpace::Srgb, PixelDepth::F16)),
+];
+
+/// Inside every clip, more than two pixels from its edge, a cut fill in a
+/// colour, translucent, or over translucent content is blended within one
+/// premultiplied level of the unclipped fill, at densities 1, 2 and 3.
+///
+/// The clip shader takes the draw off Skia's legacy blitter, which an
+/// unclipped flat colour on an eight-bit sRGB page is blended by, onto its
+/// raster pipeline (`SkBlitter::Choose`, which takes the pipeline whenever
+/// there is a clip shader), and the two round differently. So on that page
+/// some channel differs; on a page whose unclipped fill takes the pipeline
+/// already, nothing does.
+#[test]
+fn a_cut_draw_blends_within_a_level_of_the_unclipped_draw() {
+    for blend in &BLENDS {
+        for density in [1u32, 2, 3] {
+            let free = levels(blend, SRGB_8, None, density);
+            let mut differs = 0;
+            for (label, clip) in CLIPS {
+                let cut = levels(blend, SRGB_8, Some(clip), density);
+                let channels = (0..free.len())
+                    .filter(|&c| deep_inside(clip, density, c / 4));
+                let worst = channels
+                    .clone()
+                    .map(|c| (free[c] - cut[c]).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    worst <= 1.0 + 1e-3,
+                    "{} under the {label} x{density}: a channel {worst} \
+                     levels from the unclipped fill",
+                    blend.name,
+                );
+                differs += channels.filter(|&c| free[c] != cut[c]).count();
+            }
+            assert!(
+                differs > 0,
+                "{} x{density}: the cut fill blended as the unclipped one on \
+                 an eight-bit sRGB page",
+                blend.name,
+            );
+            for (page, kind) in PIPELINE_PAGES {
+                let free = levels(blend, kind, None, density);
+                for (label, clip) in CLIPS {
+                    let cut = levels(blend, kind, Some(clip), density);
+                    let differs = (0..free.len())
+                        .filter(|&c| {
+                            deep_inside(clip, density, c / 4)
+                                && free[c] != cut[c]
+                        })
+                        .count();
+                    assert_eq!(
+                        differs, 0,
+                        "{} on {page} under the {label} x{density}: channels \
+                         differing from the unclipped fill",
+                        blend.name,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Whether pixel `i` of a `density` read lies more than two pixels inside
+/// the triangle, which it covers whole.
+fn inside_the_triangle(density: u32, i: usize) -> bool {
+    let w = (W * density as f32) as usize;
+    let s = f64::from(density);
+    let p = (((i % w) as f64 + 0.5) / s, ((i / w) as f64 + 0.5) / s);
+    (0..3).all(|k| {
+        let (a, b) = (TRIANGLE[k], TRIANGLE[(k + 1) % 3]);
+        let (a, b) = (
+            (f64::from(a.0), f64::from(a.1)),
+            (f64::from(b.0), f64::from(b.1)),
+        );
+        let cross = (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0);
+        cross / (b.0 - a.0).hypot(b.1 - a.1) > 2.0 / s
+    })
+}
+
+/// The raster pipeline a cut fill is blended by runs at low precision: it
+/// holds the paint's colour at eight bits. 0.3 black over `rgb(254 254
+/// 254)` comes to 254 x 0.7 = 177.8, so 178, in float; at the eight-bit
+/// alpha 77 it is 254 x 178 / 255 = 177.3, so 177, which is what both the
+/// cut and the unclipped fill lay down.
+#[test]
+fn the_cut_blend_holds_the_colour_at_eight_bits() {
+    let blend = Blend {
+        name: "0.3 black over near white",
+        beneath: Some("rgb(254 254 254)"),
+        fill: "rgb(0 0 0 / 0.3)",
+    };
+    let clip = CLIPS[3].1;
+    let free = levels(&blend, SRGB_8, None, 1);
+    let cut = levels(&blend, SRGB_8, Some(clip), 1);
+    let pixels: Vec<usize> = (0..free.len() / 4)
+        .filter(|&i| deep_inside(clip, 1, i) && inside_the_triangle(1, i))
+        .collect();
+    assert!(
+        !pixels.is_empty(),
+        "pixels inside the triangle and the clip"
+    );
+    for i in pixels {
+        assert_eq!(&free[i * 4..i * 4 + 3], [177.0; 3], "unclipped, pixel {i}");
+        assert_eq!(&cut[i * 4..i * 4 + 3], [177.0; 3], "cut, pixel {i}");
+    }
+}
+
+/// On ARM the cut fill is the nearer of the two to exact source-over, over
+/// the triangle's interior, of 0.33 black -- 84 as the eight-bit alpha Skia
+/// holds -- over `rgba(200 40 90 / 0.6)`: alpha 187 where the unclipped
+/// fill lays down 186 and exact source-over is 186.6, a mean error of 0.294
+/// levels a premultiplied channel against 0.344.
+///
+/// The pipeline's divide by 255 rounds exactly with NEON, and elsewhere is
+/// `(v + 255) / 256`, as much as a level high (`div255` in
+/// `SkRasterPipeline_opts.h`), so off ARM which of the two is nearer is not
+/// established here: `a_cut_draw_blends_within_a_level_of_the_unclipped_draw`
+/// bounds it there.
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn on_arm_the_cut_blend_is_nearer_exact_source_over() {
+    let blend = &BLENDS[2];
+    let under = Blend {
+        name: "what lies beneath",
+        beneath: blend.beneath,
+        fill: "rgb(0 0 0 / 0)",
+    };
+    let clip = CLIPS[3].1;
+    for density in [1u32, 2, 3] {
+        let beneath = levels(&under, SRGB_8, None, density);
+        let free = levels(blend, SRGB_8, None, density);
+        let cut = levels(blend, SRGB_8, Some(clip), density);
+        let pixels: Vec<usize> = (0..free.len() / 4)
+            .filter(|&i| {
+                deep_inside(clip, density, i) && inside_the_triangle(density, i)
+            })
+            .collect();
+        let alpha = (0.33f64 * 255.0).round() / 255.0;
+        let error = |drawn: &[f32]| {
+            let total: f64 = pixels
+                .iter()
+                .flat_map(|&i| (0..4).map(move |c| i * 4 + c))
+                .map(|c| {
+                    let exact = f64::from(beneath[c]) * (1.0 - alpha)
+                        + if c % 4 == 3 { alpha * 255.0 } else { 0.0 };
+                    (f64::from(drawn[c]) - exact).abs()
+                })
+                .sum();
+            total / (pixels.len() * 4) as f64
+        };
+        let (unclipped, routed) = (error(&free), error(&cut));
+        assert!(
+            (unclipped - 0.344).abs() < 5e-4 && (routed - 0.294).abs() < 5e-4,
+            "x{density}: mean errors {unclipped:.4} unclipped and {routed:.4} \
+             cut, over {} pixels",
+            pixels.len(),
+        );
     }
 }

@@ -911,14 +911,28 @@ coverage is not moved by the clip, and the clip shader would move 50 bytes of
 a circle-clipped draw there. A PDF or SVG export is unchanged too, clipped by
 the clip's path as before.
 
-The blend is not always the unclipped draw's bytes. A draw under a clip shader
-is blended by another route through Skia's raster pipeline, so a coloured or
-translucent fill, or one over earlier content, differs from the unclipped draw
-by a level in a premultiplied channel along its edges, and a translucent fill
-over translucent content inside them as well: 2009 pixels of a triangle at
-0.33 black over `rgba(200 40 90 / 0.6)`, by up to 3 levels read back
-unpremultiplied. That route is the nearer of the two to exact source-over, a
-mean of 0.294 levels a channel against 0.344 over the triangle's interior.
+The coverage is the unclipped draw's; the blend is not always its bytes. A
+clip shader takes the draw onto Skia's raster pipeline (`SkBlitter::Choose`
+takes it whenever there is a clip shader), and on an eight-bit canvas in sRGB
+an unclipped fill in a flat colour is blended by Skia's legacy blitter
+instead, which rounds differently. So there a coloured or translucent fill,
+or one over earlier content, lands within a level of a premultiplied channel
+of the unclipped fill, and of Chrome's, whose CPU canvas blends either the
+legacy way: along the edges, and at full coverage too for a translucent fill
+over translucent content. 0.33 black over `rgba(200 40 90 / 0.6)` lays down
+alpha 187 inside the triangle where the unclipped fill lays down 186. Read
+back unpremultiplied, which divides by the alpha, a level grows where the
+alpha is low. On a canvas in another space or at a float
+depth the unclipped fill takes the pipeline already, and the two blend alike.
+
+The pipeline runs at low precision, holding the paint's colour at eight bits
+as the legacy blitter does, and on ARM its divide by 255 rounds exactly, so
+there the cut fill is the nearer of the two to exact source-over: 187 against
+an exact 186.6, a mean error of 0.294 levels a premultiplied channel over the
+triangle's interior against 0.344. Elsewhere that divide is `(v + 255) / 256`,
+as much as a level high (`div255` in `SkRasterPipeline_opts.h`), and which is
+nearer is not measured here. `tests/clip_cut.rs` holds the bound of a level,
+the eight-bit colour, the pages that blend alike, and on ARM the figures.
 
 A draw goes this way only when the clip cuts it: one wholly inside or outside
 the clip, an axis-aligned rectangle filled, text, an image, a texture fill,

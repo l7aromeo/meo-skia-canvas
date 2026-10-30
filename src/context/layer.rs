@@ -510,8 +510,11 @@ impl Group {
 /// instead -- a picture of the clip filled, which Skia rasterizes at the
 /// scale it is drawn at -- so the device clip leaves the path whole, the
 /// draw is the unclipped draw, and the clip multiplies its coverage. Inside
-/// the clip the pixels are the uncut draw's, byte for byte, at any density;
-/// at its edge the coverage is the draw's times the clip's. Anywhere else --
+/// the clip the coverage is the uncut draw's, byte for byte, at any density;
+/// at its edge it is the draw's times the clip's. The blend can land a level
+/// away on an eight-bit sRGB page, where the clip shader takes the draw off
+/// Skia's legacy blitter onto its raster pipeline -- see
+/// docs/browser-differences.md. Anywhere else --
 /// the GPU, whose multisampled coverage the clip does not move, a vector
 /// document, a recording -- it clips as the page always has. A run of cut
 /// draws shares one op, so that a document clips the run once, as it clips
