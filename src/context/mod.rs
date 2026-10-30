@@ -63,10 +63,37 @@ use crate::{
 use chain::{Step, canvas_reach};
 use faint::Faint;
 use layer::{
-    BlurDraw, Composite, ExactColour, Layer, LayerRec, reach_the_clip,
+    BlurDraw, Composite, ExactColour, Group, Layer, LayerRec, reach_the_clip,
 };
 use page::{ExportOptions, Page, PageRecorder, Recording};
 use typesetting::{TextSettings, Typesetting, Typography};
+
+/// A shadow cast by one run of a paragraph's text -- see
+/// [`Context2D::draw_with_shadows`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ShadowCast {
+    /// Its blur, in pixels of the canvas whatever its transform, as a
+    /// filter's length is.
+    pub(crate) sigma: f32,
+    /// What its sharp shadow draws in, in the coordinates the paragraph is
+    /// drawn in.
+    pub(crate) bounds: Rect,
+}
+
+/// The part of a paragraph [`Context2D::draw_with_shadows`] asks a draw
+/// for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShadowPart {
+    /// What lies beneath every shadow: the backgrounds.
+    Beneath,
+    /// The cast at this index, sharp.
+    Sharp(usize),
+    /// The cast at this index, blurred by Skia's mask filter, glyph by
+    /// glyph: what a document draws.
+    Masked(usize),
+    /// What lies over every shadow: the glyphs and their decorations.
+    Over,
+}
 
 const BLACK: Color = Color::BLACK;
 const TRANSPARENT: Color = Color::TRANSPARENT;
@@ -1072,6 +1099,81 @@ impl Context2D {
                 None,
                 Matrix::new_identity(),
                 contents,
+                VectorFeatures::PLAIN,
+                Point::default(),
+            );
+        });
+    }
+
+    /// Records a paragraph that casts text shadows: what lies beneath them,
+    /// each shadow, and the text over them, as one group composited through
+    /// the context's alpha and blend, as [`Self::with_composited_canvas`]
+    /// composites any paragraph. `draw` draws the part it is handed.
+    ///
+    /// A blurred shadow is its own group, whose chain blurs the shadow drawn
+    /// sharp on pixels by the exact Gaussian -- see `context::chain` -- so
+    /// that a run of text casts the blur of the whole run. What it blurs is
+    /// confined to its cast's `bounds`, which the blur spreads past. A
+    /// document draws the shadow as Skia's mask filter draws it, glyph by
+    /// glyph, which its backends keep as vectors. An unblurred shadow is
+    /// drawn sharp on both.
+    pub(crate) fn draw_with_shadows<F>(&self, casts: &[ShadowCast], draw: F)
+    where
+        F: Fn(&SkCanvas, ShadowPart),
+    {
+        let mut paint = Paint::default();
+        paint.set_alpha_f(self.state.global_alpha as f32);
+        paint.set_blend_mode(self.state.global_composite_operation);
+        let paint = self.faint().drawable(&paint).into_owned();
+        let record = |part: ShadowPart| {
+            let mut recorder = PictureRecorder::new();
+            let canvas = recorder.begin_recording(self.bounds, true);
+            canvas.set_matrix(&self.state.matrix.into());
+            draw(canvas, part);
+            recorder.finish_recording_as_picture(None)
+        };
+        // Once for each recording the page keeps, as every draw is.
+        let entry = |part: ShadowPart| match self.recorder.borrow().dual() {
+            false => record(part).map(Layer::Picture),
+            true => record(part)
+                .zip(record(part))
+                .map(|pictures| Layer::Targeted(Arc::new(pictures))),
+        };
+        let mut contents: Vec<Layer> = Vec::with_capacity(casts.len() + 2);
+        contents.extend(entry(ShadowPart::Beneath));
+        for (index, cast) in casts.iter().enumerate() {
+            if !(cast.sigma.is_finite() && cast.sigma > 0.0) {
+                contents.extend(entry(ShadowPart::Sharp(index)));
+                continue;
+            }
+            let Some(drawn) = record(ShadowPart::Sharp(index))
+                .zip(record(ShadowPart::Masked(index)))
+            else {
+                continue;
+            };
+            let within = self.state.matrix.map_rect(cast.bounds).0;
+            contents.push(Layer::Group(Arc::new(Group {
+                composite: Composite::Chain {
+                    steps: Arc::from([Step::Blur(cast.sigma)]),
+                    rec: LayerRec::default(),
+                },
+                matrix: Matrix::new_identity(),
+                clip: None,
+                within: Some(within),
+                contents_matrix: Matrix::new_identity(),
+                contents: Arc::new(vec![Layer::Targeted(Arc::new(drawn))]),
+            })));
+        }
+        contents.extend(entry(ShadowPart::Over));
+        self.with_recorder(|mut recorder| {
+            recorder.append_group(
+                Composite::Layer(LayerRec {
+                    paint: Some(paint),
+                    ..LayerRec::default()
+                }),
+                None,
+                Matrix::new_identity(),
+                Arc::new(contents),
                 VectorFeatures::PLAIN,
                 Point::default(),
             );

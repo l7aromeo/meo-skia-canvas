@@ -23,8 +23,8 @@ use crate::{
     font_library::{FontLibrary, instance_coordinates},
     node::{
         oblique::{
-            ParagraphRecipe, Passes, StyleColours, add_slnt, match_oblique,
-            set_coordinates, without_paragraph_cache,
+            ParagraphRecipe, Passes, StyleColours, add_slnt, draw_shadowed,
+            match_oblique, set_coordinates, without_paragraph_cache,
         },
         typography::{paragraph_style, with_style_axes},
     },
@@ -1666,6 +1666,11 @@ pub fn drawParagraph(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         paragraph, passes, ..
     } = &mut *para;
     let ctx = ctx.borrow();
+    if let Some(passes) = passes.as_mut()
+        && draw_shadowed(&ctx, paragraph, passes, Point::new(x, y))
+    {
+        return Ok(cx.undefined());
+    }
 
     // Composited, not bare: `Paragraph::paint` uses the text styles' own
     // paints, so the context's globalAlpha and globalCompositeOperation have

@@ -21,6 +21,13 @@ removed and no signature moves.
 
 ### Breaking
 
+- **A `Paragraph` style's text shadows paint the first listed on top.** A
+  style's `shadows` were painted in the order given, the first lowest, as
+  CanvasKit paints them. They are now painted as CSS paints `text-shadow`,
+  the first on top of the rest, so a style with two shadows that overlap
+  shows the other one where they meet. Reverse the list to keep a drawing as
+  it was.
+
 - **`sans-serif` is the face Chrome draws it in, and an SVG naming no family
   it has is drawn in the standard serif.** The curated `sans-serif` stack put
   Avenir Next ahead of Helvetica, so on macOS the canvas default font,
@@ -463,6 +470,17 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   already rejected or fired `error`.
 
 ### Fixed
+
+- **A `Paragraph`'s blurred text shadow is the exact blur of its text.** A
+  shadow was blurred a glyph at a time by Skia's mask filter, which on macOS
+  draws a glyph heavier than the glyph itself -- a 16px word through one at
+  a sigma of 0.001 held 1.23 times the word's ink -- and loses ink where two
+  glyphs' blurs overlap: the same word blurred by 20px kept 0.54 of its
+  sharp shadow's ink on macOS's CPU engine. A 24px word blurred by 2px read
+  2515 pixels off the exact blur of its sharp shadow on the CPU engine. Each
+  style's run of text on a line now casts its shadow as one, blurred whole
+  by the exact Gaussian on either engine, the runs' shadows composited in
+  document order beneath all the text. A PDF or SVG keeps the mask filter.
 
 - **A `drop-shadow()` is the exact Gaussian blur of what casts it.** A draw
   under a `ctx.filter` holding a `drop-shadow()` went through Skia's filter
