@@ -642,9 +642,11 @@ impl Canvas {
         // backend rather than quietly dropping to eight bits: `colorType`
         // means the same thing on both engines, and `engine_kind` reports
         // which one answered. Skia's Ganesh Metal and Vulkan backends carry
-        // no 32-bit float format today, so this is where an `F32` canvas
-        // changes hands -- and `can_composite` probes rather than assumes, so
-        // a Skia that grows one keeps the canvas on the GPU.
+        // no 32-bit float format today, and round a draw's colour to eight
+        // bits before compositing it in an `F16` one, so this is where an
+        // `F16` or `F32` canvas changes hands -- and `can_composite` probes
+        // rather than assumes, so a Skia that composites either in float
+        // keeps the canvas on the GPU.
         match engine.can_composite(self.options.color_type.to_skia_color_type())
         {
             true => engine,

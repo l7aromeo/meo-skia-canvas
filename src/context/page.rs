@@ -333,7 +333,7 @@ impl Drop for PageId {
 /// across every size, as they were before `opsz` followed the size,
 /// measured 50.
 pub struct PageRecorder {
-    current: PictureRecorder,
+    current: Recorders,
     /// The recording so far, shared with every [`Page`] taken of it since
     /// it last grew, so that taking a page copies a pointer whatever its
     /// length. Growing it copies the list only while a page taken before
@@ -471,7 +471,116 @@ fn source_bit_depth(color_type: ColorType) -> BitDepth {
     }
 }
 
+/// Which of a page's recordings a draw is being recorded into, and so which
+/// paint it records with -- see [`Recorders`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Recording {
+    /// The only recording of a page that keeps one, played onto every
+    /// target: every colour as a plain paint colour.
+    Shared,
+    /// The recording a page that keeps two plays as pixels: a flat colour
+    /// held exactly in the page's space, where it has one.
+    Pixels,
+    /// The recording a page that keeps two hands a document backend: every
+    /// colour as a plain paint colour.
+    Document,
+}
+
+impl Recording {
+    /// The target a [`Layer`] recorded into this recording is played for.
+    pub fn target(self) -> Target {
+        match self {
+            Recording::Pixels => Target::Pixels,
+            Recording::Shared | Recording::Document => Target::Document,
+        }
+    }
+}
+
+/// The recording a page is drawn into: one, or on a page whose colours Skia
+/// cannot land exactly, two -- see [`Recording`].
+///
+/// Skia stores a paint's colour in sRGB and converts it into the page's
+/// space at the draw through skcms's approximate transfer function, whose
+/// output lies on a grid 64 ulps wide, so no plain colour lands exactly on a
+/// float page in another space. An image shader in the page's own space
+/// does, but a document backend writes it as a pattern. So such a page
+/// records every draw twice, and a draw is handed each recording in turn to
+/// record with the paint that recording needs.
+struct Recorders {
+    pixels: PictureRecorder,
+    document: Option<PictureRecorder>,
+}
+
+impl Recorders {
+    fn new(bounds: Rect, dual: bool) -> Self {
+        let mut recorders = Recorders {
+            pixels: PictureRecorder::new(),
+            document: dual.then(PictureRecorder::new),
+        };
+        recorders.begin(bounds);
+        recorders.each(|canvas, _| {
+            canvas.save(); // start at depth 2
+        });
+        recorders
+    }
+
+    /// Hands `f` each recording's canvas, and which recording it is.
+    fn each(&mut self, f: impl Fn(&SkCanvas, Recording)) {
+        let shared = self.document.is_none();
+        if let Some(canvas) = self.pixels.recording_canvas() {
+            f(
+                canvas,
+                match shared {
+                    true => Recording::Shared,
+                    false => Recording::Pixels,
+                },
+            );
+        }
+        if let Some(canvas) = self
+            .document
+            .as_mut()
+            .and_then(PictureRecorder::recording_canvas)
+        {
+            f(canvas, Recording::Document);
+        }
+    }
+
+    fn begin(&mut self, bounds: Rect) {
+        self.pixels.begin_recording(bounds, true);
+        if let Some(document) = &mut self.document {
+            document.begin_recording(bounds, true);
+        }
+    }
+
+    /// Finishes every recording with `finish` and files what they hold as
+    /// one entry: a picture, or on a page that keeps two, both.
+    fn finish(
+        &mut self,
+        finish: impl Fn(&mut PictureRecorder) -> Option<Picture>,
+    ) -> Option<Layer> {
+        let pixels = finish(&mut self.pixels)?;
+        Some(match &mut self.document {
+            None => Layer::Picture(pixels),
+            Some(document) => {
+                let document = finish(document)?;
+                Layer::Targeted(Arc::new((pixels, document)))
+            }
+        })
+    }
+
+    /// Whether this page keeps a recording for each kind of target.
+    fn dual(&self) -> bool {
+        self.document.is_some()
+    }
+}
+
 impl PageRecorder {
+    /// The bytes this page holds in pixels. See
+    /// [`RecordingSurface::resident_bytes`].
+    pub fn resident_bytes(&self) -> usize {
+        self.surface.resident_bytes()
+    }
+
     /// Mints a page identity and registers it with the cache.
     ///
     /// A generation, not a handle: content that has been erased gets a new
@@ -487,13 +596,16 @@ impl PageRecorder {
     }
 
     pub fn new(bounds: Rect) -> Self {
+        Self::recording(bounds, false)
+    }
+
+    /// A recorder for a page that keeps one recording, or with `dual`, one
+    /// for each kind of target -- see [`Recorders`].
+    pub fn recording(bounds: Rect, dual: bool) -> Self {
         let id = Self::mint_id();
 
-        let mut rec = PictureRecorder::new();
-        rec.begin_recording(bounds, true).save(); // start at depth 2
-
         PageRecorder {
-            current: rec,
+            current: Recorders::new(bounds, dual),
             layers: Arc::default(),
             features: Arc::default(),
             changed: false,
@@ -511,9 +623,12 @@ impl PageRecorder {
         }
     }
 
+    /// Records `f` into every recording the page keeps, each handing it
+    /// the canvas and which recording it is -- see [`Recording`] -- so that a
+    /// draw cannot reach one and miss the other.
     pub fn append<F>(&mut self, f: F)
     where
-        F: FnOnce(&SkCanvas),
+        F: Fn(&SkCanvas, Recording),
     {
         // An ordinary draw cannot join an isolated layer: that layer is
         // marked for rasterization, and everything in it is rasterized with
@@ -522,10 +637,14 @@ impl PageRecorder {
             self.flush();
         }
         self.settle();
-        if let Some(canvas) = self.current.recording_canvas() {
-            f(canvas);
-            self.changed = true;
-        }
+        self.current.each(f);
+        self.changed = true;
+    }
+
+    /// Whether this page keeps a recording for each kind of target -- see
+    /// [`Recorders`].
+    pub fn dual(&self) -> bool {
+        self.current.dual()
     }
 
     /// Erases the page's content, in place.
@@ -562,10 +681,15 @@ impl PageRecorder {
 
         // Finish before beginning again: `flush` reuses the recorder the same
         // way, and Skia expects the open recording closed first.
-        let _ = self.current.finish_recording_as_picture(None);
+        let _ = self
+            .current
+            .finish(|recorder| recorder.finish_recording_as_picture(None));
 
         self.bounds = bounds;
-        self.current.begin_recording(bounds, true).save(); // start at depth 2
+        self.current.begin(bounds);
+        self.current.each(|canvas, _| {
+            canvas.save(); // start at depth 2
+        });
         // Replaced rather than cleared, so that a page taken before keeps
         // what it was given.
         self.layers = Arc::default();
@@ -641,18 +765,19 @@ impl PageRecorder {
     }
 
     fn rebuild_frame(&mut self) {
-        if let Some(canvas) = self.current.recording_canvas() {
+        let (matrix, clip) = (self.matrix, &self.clip);
+        self.current.each(|canvas, _| {
             canvas.restore_to_count(1);
             canvas.save();
-            if let Some(clip) = &self.clip {
+            if let Some(clip) = clip {
                 canvas.clip_path(
                     clip,
                     ClipOp::Intersect,
                     true, /* antialias */
                 );
             }
-            canvas.set_matrix(&self.matrix.into());
-        }
+            canvas.set_matrix(&matrix.into());
+        });
     }
 
     /// Opens a `saveLayer` with `rec`, under the transform and clip the page
@@ -767,10 +892,13 @@ impl PageRecorder {
         if !self.changed {
             return;
         }
-        if let Some(picture) = self.current.finish_recording_as_picture(None) {
-            layer.entries.push(Layer::Picture(picture));
+        if let Some(entry) = self
+            .current
+            .finish(|recorder| recorder.finish_recording_as_picture(None))
+        {
+            layer.entries.push(entry);
         }
-        self.current.begin_recording(self.bounds, true);
+        self.current.begin(self.bounds);
         self.changed = false;
         self.restore();
     }
@@ -993,25 +1121,26 @@ impl PageRecorder {
 
         // store layer as a drawable (so copies are deduplicated) wrapped in
         // a picture (so it can be sent to other threads)
-        if let Some(pict) = self
-            .current
-            .finish_recording_as_drawable()
-            .and_then(|mut drawable| {
-                let mut wrapper = PictureRecorder::new();
-                wrapper
-                    .begin_recording(self.bounds, true)
-                    .draw_drawable(&mut drawable, None);
-                wrapper.finish_recording_as_picture(None)
-            })
-        {
-            Arc::make_mut(&mut self.layers).push(Layer::Picture(pict));
+        let bounds = self.bounds;
+        if let Some(entry) = self.current.finish(|recorder| {
+            recorder
+                .finish_recording_as_drawable()
+                .and_then(|mut drawable| {
+                    let mut wrapper = PictureRecorder::new();
+                    wrapper
+                        .begin_recording(bounds, true)
+                        .draw_drawable(&mut drawable, None);
+                    wrapper.finish_recording_as_picture(None)
+                })
+        }) {
+            Arc::make_mut(&mut self.layers).push(entry);
             Arc::make_mut(&mut self.features)
                 .push(self.isolated.unwrap_or(VectorFeatures::PLAIN));
         }
         self.isolated = None;
 
         // resume recording
-        self.current.begin_recording(self.bounds, true);
+        self.current.begin(self.bounds);
         self.changed = false;
         self.restore();
     }
@@ -1030,7 +1159,7 @@ impl PageRecorder {
     /// filed -- see [`Self::close_layer`].
     pub fn append_isolated<F>(&mut self, features: VectorFeatures, f: F)
     where
-        F: FnOnce(&SkCanvas),
+        F: Fn(&SkCanvas, Recording),
     {
         if let Some(layer) = self.open.last_mut() {
             layer.features = layer.features.with(features);
@@ -1062,10 +1191,8 @@ impl PageRecorder {
             self.isolated = Some(features);
         }
 
-        if let Some(canvas) = self.current.recording_canvas() {
-            f(canvas);
-            self.changed = true;
-        }
+        self.current.each(f);
+        self.changed = true;
     }
 
     /// Records `draw` as a [`BlurOp`], so that its blur is made where the
@@ -1862,6 +1989,25 @@ impl Default for RecordingSurface {
 }
 
 impl RecordingSurface {
+    /// The bytes this holds in pixels: the page surface, its CPU copy and
+    /// every tile.
+    ///
+    /// What the surfaces' own pixels take, which on the GPU leaves out a
+    /// multisampled attachment Skia keeps beside the target and does not
+    /// expose.
+    pub fn resident_bytes(&self) -> usize {
+        let surfaces = self
+            .surface
+            .iter()
+            .chain(self.tiles.values().map(|tile| &tile.surface))
+            .map(|surface| surface.image_info().compute_min_byte_size());
+        let raster = self
+            .raster
+            .iter()
+            .map(|image| image.image_info().compute_min_byte_size());
+        surfaces.chain(raster).sum()
+    }
+
     /// The tile origins a page-space rectangle covers.
     ///
     /// Clamped to the page, so a read that runs past the edge asks for no
@@ -5722,7 +5868,7 @@ mod tests {
         // difference between the two exports below.
         let drawn = || {
             let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
-            recorder.append(|canvas| {
+            recorder.append(|canvas, _| {
                 canvas.draw_rect(Rect::from_wh(4.0, 4.0), &Paint::default());
             });
             let page = recorder.page();
@@ -5798,7 +5944,7 @@ mod tests {
         }
 
         let mut recorder = PageRecorder::new(Rect::from_wh(4.0, 4.0));
-        recorder.append(|canvas| {
+        recorder.append(|canvas, _| {
             canvas.draw_rect(Rect::from_wh(4.0, 4.0), &Paint::default());
         });
 
@@ -5828,7 +5974,7 @@ mod tests {
     #[test]
     fn a_fractional_density_read_rounds_each_edge() {
         let mut recorder = PageRecorder::new(Rect::from_wh(20.0, 20.0));
-        recorder.append(|canvas| {
+        recorder.append(|canvas, _| {
             canvas.draw_rect(Rect::from_wh(20.0, 20.0), &Paint::default());
         });
 
@@ -5862,7 +6008,7 @@ mod tests {
     #[test]
     fn two_abutting_reads_lose_no_column_and_share_none() {
         let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
-        recorder.append(|canvas| {
+        recorder.append(|canvas, _| {
             canvas.draw_rect(Rect::from_wh(8.0, 8.0), &Paint::default());
         });
 
@@ -5921,7 +6067,7 @@ mod tests {
         // this once rendering has stopped; here it is called directly, since
         // waiting three seconds for a thread is not what is being tested.
         let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
-        recorder.append(|canvas| {
+        recorder.append(|canvas, _| {
             canvas.draw_rect(Rect::from_wh(4.0, 4.0), &Paint::default());
         });
         let page = recorder.page();
@@ -5967,7 +6113,7 @@ mod tests {
         // memory no lookup could reach, freed only by the byte bound
         // evicting it again.
         let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
-        recorder.append(|canvas| {
+        recorder.append(|canvas, _| {
             canvas.draw_rect(Rect::from_wh(4.0, 4.0), &Paint::default());
         });
         let page = recorder.page();
@@ -6027,7 +6173,7 @@ mod tests {
                     ..LayerRec::default()
                 });
                 for _ in 0..READS {
-                    recorder.append(|canvas| {
+                    recorder.append(|canvas, _| {
                         canvas.draw_rect(
                             Rect::from_wh(1.0, 1.0),
                             &Paint::default(),
@@ -6706,7 +6852,7 @@ mod tests {
         let crop = IRect::from_xywh(7, 7, 1, 1);
         recorder.open_layer(LayerRec::default());
         for _ in 0..READS {
-            recorder.append(|canvas| {
+            recorder.append(|canvas, _| {
                 canvas.draw_rect(Rect::from_wh(1.0, 1.0), &Paint::default());
             });
             recorder
@@ -6747,7 +6893,7 @@ mod tests {
                 paint: Some(half.clone()),
                 ..LayerRec::default()
             });
-            recorder.append(|canvas| {
+            recorder.append(|canvas, _| {
                 canvas.draw_rect(
                     Rect::from_xywh(at as f32, 1.5, 3.25, 2.0),
                     &Paint::default(),
@@ -6824,7 +6970,7 @@ mod tests {
             paint: Some(half),
             ..LayerRec::default()
         });
-        recorder.append(|canvas| {
+        recorder.append(|canvas, _| {
             canvas.draw_rect(
                 Rect::from_xywh(5.0, 5.0, 2.0, 2.0),
                 &Paint::default(),
@@ -6857,7 +7003,7 @@ mod tests {
                 .expect("a read of the page");
         };
         recorder.open_layer(LayerRec::default());
-        recorder.append(|canvas| {
+        recorder.append(|canvas, _| {
             canvas.draw_rect(Rect::from_wh(1.0, 1.0), &Paint::default());
         });
         // A layer inside, so that the recording around it is filed too.
@@ -6887,7 +7033,7 @@ mod tests {
         // either has committed to. Closing the layer is what files it.
         // Wider than one tile, so that a read is served by the whole page.
         let mut recorder = PageRecorder::new(Rect::from_wh(600.0, 300.0));
-        let square = |canvas: &SkCanvas| {
+        let square = |canvas: &SkCanvas, _: Recording| {
             canvas.draw_rect(Rect::from_wh(4.0, 4.0), &Paint::default());
         };
         recorder.append(square);
@@ -6942,15 +7088,14 @@ mod tests {
         // nothing keeps -- and the entry goes when the canvas does, as every
         // entry of its generation does.
         let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
-        let square = |canvas: &SkCanvas| {
+        recorder.append(|canvas, _| {
             canvas.draw_rect(Rect::from_wh(4.0, 4.0), &Paint::default());
-        };
-        recorder.append(square);
+        });
         let filed = recorder.page();
         let (id, depth) = (filed.id, filed.depth());
         recorder.open_layer(LayerRec::default());
         // Translucent and beside the square, so that drawing it twice shows.
-        recorder.append(|canvas| {
+        recorder.append(|canvas, _| {
             let mut half = Paint::default();
             half.set_alpha_f(0.5);
             canvas.draw_rect(Rect::from_xywh(2.0, 2.0, 6.0, 6.0), &half);
@@ -7239,7 +7384,7 @@ mod tests {
                     features,
                 );
                 if between {
-                    recorder.append(|canvas| {
+                    recorder.append(|canvas, _| {
                         canvas.draw_rect(
                             Rect::from_xywh(50.0, 50.0, 5.0, 5.0),
                             &Paint::default(),
@@ -7255,6 +7400,7 @@ mod tests {
                     Layer::Picture(_) => "picture",
                     Layer::Blur(_) => "blur",
                     Layer::Group(_) => "group",
+                    Layer::Targeted(_) => "pair",
                 })
                 .collect();
             kinds.join(" ")
@@ -7300,7 +7446,7 @@ mod tests {
     fn read_every_draw(reads: usize) -> PageRecorder {
         let mut recorder = PageRecorder::new(Rect::from_wh(100.0, 100.0));
         for at in 0..reads {
-            recorder.append(|canvas| {
+            recorder.append(|canvas, _| {
                 canvas.draw_rect(
                     Rect::from_xywh((at % 90) as f32, 0.0, 10.0, 10.0),
                     &Paint::default(),
@@ -7334,7 +7480,7 @@ mod tests {
     fn a_page_keeps_what_it_was_given() {
         let mut recorder = read_every_draw(3);
         let before = recorder.page();
-        recorder.append(|canvas| {
+        recorder.append(|canvas, _| {
             canvas.draw_rect(Rect::from_wh(5.0, 5.0), &Paint::default());
         });
         let after = recorder.page();
@@ -7347,7 +7493,7 @@ mod tests {
     /// Draws a square at `at` into `recorder` and closes the layer it is
     /// in, as the next read would.
     fn draw_and_close(recorder: &mut PageRecorder, at: usize) {
-        recorder.append(|canvas| {
+        recorder.append(|canvas, _| {
             canvas.draw_rect(
                 Rect::from_xywh((at % 90) as f32, 10.0, 10.0, 10.0),
                 &Paint::default(),

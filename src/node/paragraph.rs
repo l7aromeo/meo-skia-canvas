@@ -1670,8 +1670,12 @@ pub fn drawParagraph(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // Composited, not bare: `Paragraph::paint` uses the text styles' own
     // paints, so the context's globalAlpha and globalCompositeOperation have
     // to be applied around it or they are silently dropped.
+    // In a cell because the draw is handed every recording the page keeps,
+    // and painting a paragraph borrows it mutably each time.
+    let held = RefCell::new((paragraph, passes));
     ctx.with_composited_canvas(|canvas| {
         let at = Point::new(x, y);
+        let (paragraph, passes) = &mut *held.borrow_mut();
         match passes {
             Some(passes) => passes.paint(paragraph, canvas, at),
             None => paragraph.paint(canvas, at),

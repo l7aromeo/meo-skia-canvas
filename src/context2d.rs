@@ -5534,3 +5534,152 @@ mod paragraph_shadow_tests {
         assert!(differing.is_empty(), "{}", differing.join("\n"));
     }
 }
+
+#[cfg(test)]
+mod recording_tests {
+    use super::{Canvas, CanvasOptions, Context2D};
+    use crate::{
+        RgbaLinear,
+        context::layer::Layer,
+        font::FontLibrary,
+        image::Image,
+        pixels::{PixelColorSpace, PixelDepth, PixelExportOptions},
+        text::{TextEngine, TextStyle},
+    };
+
+    /// The side of the square canvas every case draws on.
+    const SIDE: f32 = 16.0;
+
+    fn canvas(space: PixelColorSpace, depth: PixelDepth) -> Canvas {
+        Canvas::with_options(
+            SIDE,
+            SIDE,
+            CanvasOptions {
+                color_space: space,
+                color_type: depth,
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas")
+    }
+
+    /// A verb that records, as it is drawn on a context.
+    type Verb = fn(&mut Context2D);
+
+    /// Every verb that records, each on a canvas of its own.
+    const VERBS: [(&str, Verb); 11] =
+        [
+            ("fill", |ctx| ctx.fill_rect(2.0, 2.0, 8.0, 8.0)),
+            ("stroke", |ctx| ctx.stroke_rect(2.0, 2.0, 8.0, 8.0)),
+            ("text", |ctx| ctx.fill_text("M", 2.0, 12.0, None)),
+            ("image", |ctx| {
+                let pixels = [255u8, 0, 0, 255].repeat(4);
+                let image = Image::from_pixels(
+                    &pixels,
+                    2,
+                    2,
+                    8,
+                    PixelExportOptions::default(),
+                )
+                .expect("an image");
+                ctx.draw_image(&image, 2.0, 2.0);
+            }),
+            ("canvas", |ctx| {
+                let mut source = Canvas::new(SIDE, SIDE);
+                source.context().fill_rect(0.0, 0.0, 4.0, 4.0);
+                ctx.draw_canvas(&mut source, 2.0, 2.0);
+            }),
+            ("clear", |ctx| ctx.clear_rect(2.0, 2.0, 4.0, 4.0)),
+            ("put", |ctx| {
+                let data =
+                    ctx.get_image_data(0.0, 0.0, 4.0, 4.0).expect("pixels");
+                ctx.put_image_data(&data, 4.0, 4.0).expect("a put");
+            }),
+            ("layer", |ctx| {
+                ctx.save_layer_with(0.5, None, None);
+                ctx.fill_rect(2.0, 2.0, 8.0, 8.0);
+                ctx.restore();
+            }),
+            ("blur", |ctx| {
+                ctx.set_filter_css("blur(2px)").expect("a blur");
+                ctx.fill_rect(2.0, 2.0, 8.0, 8.0);
+            }),
+            ("shadow", |ctx| {
+                ctx.set_shadow_color(RgbaLinear::opaque(0.0, 0.0, 1.0));
+                ctx.set_shadow_offset(2.0, 2.0);
+                ctx.fill_rect(2.0, 2.0, 8.0, 8.0);
+            }),
+            ("paragraph", |ctx| {
+                let paragraph = TextEngine::new(&FontLibrary::new())
+                    .layout_text("M", &TextStyle::default(), SIDE);
+                ctx.set_global_alpha(0.5);
+                ctx.draw_paragraph(&paragraph, 0.0, 0.0);
+            }),
+        ];
+
+    /// What each of `entries` and the groups among them holds that breaks
+    /// the rule for a page that keeps two recordings -- every draw in both,
+    /// the pair alike -- or for one that keeps one, which holds no pair. A
+    /// canvas drawn in brings its own page's recordings, and is not looked
+    /// into.
+    fn wrong(entries: &[Layer], dual: bool, out: &mut Vec<String>) {
+        for entry in entries {
+            match entry {
+                Layer::Picture(_) if dual => out.push("a picture".into()),
+                Layer::Targeted(_) if !dual => out.push("a pair".into()),
+                Layer::Targeted(pair) => {
+                    let (pixels, document) = &**pair;
+                    let ops = (
+                        pixels.approximate_op_count(),
+                        document.approximate_op_count(),
+                    );
+                    if ops.0 != ops.1 {
+                        out.push(format!("{} ops against {}", ops.0, ops.1));
+                    }
+                }
+                Layer::Group(group) if group.within.is_none() => {
+                    wrong(&group.contents, dual, out)
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// On a canvas that keeps a recording for each kind of target, every
+    /// verb lands in both, with as many ops in each; on one that keeps one,
+    /// nothing is recorded twice, so its pixels are what they were.
+    #[test]
+    fn every_draw_lands_in_every_recording() {
+        let pages = [
+            (PixelColorSpace::DisplayP3, PixelDepth::F32, true),
+            (PixelColorSpace::Srgb, PixelDepth::F32, false),
+            (PixelColorSpace::DisplayP3, PixelDepth::Uint8, false),
+            (PixelColorSpace::Rec2020Pq, PixelDepth::F32, false),
+        ];
+        let mut problems = Vec::new();
+        for (space, depth, dual) in pages {
+            for (verb, draw) in VERBS {
+                let mut canvas = canvas(space, depth);
+                let ctx = canvas.context();
+                ctx.set_fill_style_css("color(display-p3 0.2 0.4 0.6)")
+                    .expect("a colour");
+                ctx.set_stroke_style_css("color(display-p3 0.2 0.4 0.6)")
+                    .expect("a colour");
+                draw(ctx);
+                let page = ctx.inner.page();
+                let mut out = Vec::new();
+                if page.layers.is_empty() {
+                    out.push("nothing recorded".into());
+                }
+                wrong(&page.layers, dual, &mut out);
+                problems.extend(
+                    out.into_iter().map(|why| {
+                        format!("{space:?} {depth:?}, {verb}: {why}")
+                    }),
+                );
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+}

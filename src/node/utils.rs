@@ -25,6 +25,7 @@ use crate::{
         DEGREES_PER_TURN, Dimension, Expect, FontUnits, Percent, Quantity,
         evaluate, is_math, literal, without_comments,
     },
+    pixels::PixelColorSpace,
     shader::HueMethod,
 };
 
@@ -3520,6 +3521,70 @@ pub fn color4f_to_srgb(color: Color4f, space: Option<&ColorSpace>) -> Color4f {
         Some(name) => color_function_to_srgb(color, name),
         None => color,
     }
+}
+
+/// `color`, unpremultiplied in `space`, as components in the canvas space
+/// `canvas`, in `f64`; `None` where either is one this crate does not
+/// convert, PQ and HLG among them.
+///
+/// For a page that holds a colour exactly in its own space rather than
+/// through Skia's conversion -- see `Dye::exact_paint`. Spaces that share
+/// primaries convert by their transfer functions alone, as
+/// [`srgb_to_color_function`] does, so that the matrices' product, the
+/// identity only to within `f64` rounding, cannot move a value.
+pub fn color_in_canvas_space(
+    color: Color4f,
+    space: &ColorSpace,
+    canvas: PixelColorSpace,
+) -> Option<[f64; 3]> {
+    let named = color_space_name(space)?;
+    let rgb = [color.r, color.g, color.b].map(f64::from);
+    // The primaries `canvas` shares with a `color()` space, and whether its
+    // components are that space's linear light.
+    let (primaries, linear) = match canvas {
+        PixelColorSpace::Srgb => ("srgb", false),
+        PixelColorSpace::SrgbLinear => ("srgb", true),
+        PixelColorSpace::DisplayP3 => ("display-p3", false),
+        PixelColorSpace::DisplayP3Linear => ("display-p3", true),
+        PixelColorSpace::Rec2020 => ("rec2020", false),
+        PixelColorSpace::Rec2020Linear => ("rec2020", true),
+        PixelColorSpace::Rec2020Pq | PixelColorSpace::Rec2020Hlg => {
+            return None;
+        }
+    };
+    let decode = |space: &str| -> fn(f64) -> f64 {
+        match space {
+            "rec2020" => rec2020_decode,
+            _ => srgb_to_linear_f64,
+        }
+    };
+    let encode = |space: &str| -> fn(f64) -> f64 {
+        match space {
+            "rec2020" => rec2020_encode,
+            _ => linear_to_srgb_f64,
+        }
+    };
+    if named == primaries && !linear {
+        return Some(rgb);
+    }
+    // Linear light in the canvas's primaries.
+    let light = match (named, primaries) {
+        ("srgb-linear", "srgb") => rgb,
+        (named, primaries) if named == primaries => rgb.map(decode(named)),
+        _ => {
+            let xyz = color_function_to_xyz(named, rgb)?;
+            let to_linear = match primaries {
+                "srgb" => XYZ_TO_LINEAR_SRGB,
+                "display-p3" => XYZ_TO_LINEAR_P3,
+                _ => XYZ_TO_LINEAR_REC2020,
+            };
+            apply_matrix(to_linear, xyz)
+        }
+    };
+    Some(match linear {
+        true => light,
+        false => light.map(encode(primaries)),
+    })
 }
 
 /// `color` in `space` as Skia is handed it.
