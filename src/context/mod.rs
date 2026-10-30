@@ -3035,6 +3035,10 @@ mod tests {
         Rect,
         /// A blurred fill, which the page keeps as a `BlurOp`.
         Blur,
+        /// A triangle blurred by `blur(n px)`: by its coverage at 3, and at
+        /// 70, read at density 2, past what a mask filter can draw, by its
+        /// result through `chain`.
+        BlurPath(f32),
         /// A fill inside a `saveLayer`, which the page keeps as a group.
         Layer,
         /// A `clearRect` short of the page, which the page keeps as an
@@ -3102,6 +3106,17 @@ mod tests {
                     ctx.fill_rect(80.0, 50.0, 20.0, 12.0);
                     ctx.set_filter_css("none").expect("no filter");
                 }
+                Step::BlurPath(radius) => {
+                    ctx.set_filter_css(&format!("blur({radius}px)"))
+                        .expect("a filter");
+                    ctx.begin_path();
+                    ctx.move_to(75.0, 30.0);
+                    ctx.line_to(105.5, 52.25);
+                    ctx.line_to(82.0, 75.5);
+                    ctx.close_path();
+                    ctx.fill(crate::path::FillRule::NonZero);
+                    ctx.set_filter_css("none").expect("no filter");
+                }
                 Step::Layer => {
                     ctx.save_layer();
                     ctx.fill_rect(60.0, 70.0, 25.0, 10.0);
@@ -3156,15 +3171,17 @@ mod tests {
     }
 
     /// Draws outside the clip and in it, under two frames of one clip, with
-    /// text, a blurred draw, a draw that takes the cut route, and in each
-    /// frame a rectangle the clip cuts among them.
-    const CLIPPED: [Step; 13] = [
+    /// text, a blurred rectangle and two blurred triangles, a draw that takes
+    /// the cut route, and in each frame a rectangle the clip cuts among them.
+    const CLIPPED: [Step; 15] = [
         Step::Fill(5.0),
         Step::Clip,
         Step::Fill(40.0),
         Step::Cut,
         Step::Fill(60.0),
         Step::Blur,
+        Step::BlurPath(3.0),
+        Step::BlurPath(70.0),
         Step::Rect,
         Step::Text,
         Step::Move,
