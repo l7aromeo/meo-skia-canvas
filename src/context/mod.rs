@@ -80,6 +80,14 @@ pub(crate) struct ShadowCast {
     pub(crate) bounds: Rect,
 }
 
+impl ShadowCast {
+    /// Whether the shadow is blurred: by a sigma that is a length, and more
+    /// than none.
+    fn blurs(&self) -> bool {
+        self.sigma.is_finite() && self.sigma > 0.0
+    }
+}
+
 /// The part of a paragraph [`Context2D::draw_with_shadows`] asks a draw
 /// for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1110,7 +1118,7 @@ impl Context2D {
                 None,
                 Matrix::new_identity(),
                 contents,
-                VectorFeatures::PLAIN,
+                self.composited_features(),
                 Point::default(),
             );
         });
@@ -1126,12 +1134,42 @@ impl Context2D {
     /// that a run of text casts the blur of the whole run. What it blurs is
     /// confined to its cast's `bounds`, which the blur spreads past. A
     /// document draws the shadow as Skia's mask filter draws it, glyph by
-    /// glyph, which its backends keep as vectors. An unblurred shadow is
-    /// drawn sharp on both.
+    /// glyph, which a PDF holds as an image mask and an SVG, which has no
+    /// mask filter to write, embeds as pixels. An unblurred shadow is drawn
+    /// sharp on both.
+    ///
+    /// Under an alpha of 1 and `source-over` a group around them all would
+    /// change nothing, since every part is drawn `source-over` too, so there
+    /// is none: each part is filed on the page as it stands, which a vector
+    /// backend then takes part by part -- an SVG keeps the text and the
+    /// sharp shadows as vectors, where it writes nothing of a layer.
     pub(crate) fn draw_with_shadows<F>(&self, casts: &[ShadowCast], draw: F)
     where
         F: Fn(&SkCanvas, ShadowPart),
     {
+        if self.state.global_alpha == 1.0
+            && self.state.global_composite_operation == BlendMode::SrcOver
+        {
+            self.with_canvas(|canvas, _| draw(canvas, ShadowPart::Beneath));
+            for (index, cast) in casts.iter().enumerate() {
+                if !cast.blurs() {
+                    self.with_canvas(|canvas, _| {
+                        draw(canvas, ShadowPart::Sharp(index));
+                    });
+                } else if let Some(group) =
+                    self.shadow_group(cast, index, &draw)
+                {
+                    self.with_recorder(|mut recorder| {
+                        recorder.append_device_group(
+                            group,
+                            VectorFeatures::IMAGE_FILTER,
+                        );
+                    });
+                }
+            }
+            self.with_canvas(|canvas, _| draw(canvas, ShadowPart::Over));
+            return;
+        }
         let mut paint = Paint::default();
         paint.set_alpha_f(self.state.global_alpha as f32);
         paint.set_blend_mode(self.state.global_composite_operation);
@@ -1153,27 +1191,13 @@ impl Context2D {
         let mut contents: Vec<Layer> = Vec::with_capacity(casts.len() + 2);
         contents.extend(entry(ShadowPart::Beneath));
         for (index, cast) in casts.iter().enumerate() {
-            if !(cast.sigma.is_finite() && cast.sigma > 0.0) {
-                contents.extend(entry(ShadowPart::Sharp(index)));
-                continue;
+            match cast.blurs() {
+                false => contents.extend(entry(ShadowPart::Sharp(index))),
+                true => contents.extend(
+                    self.shadow_group(cast, index, &draw)
+                        .map(|group| Layer::Group(Arc::new(group))),
+                ),
             }
-            let Some(drawn) = record(ShadowPart::Sharp(index))
-                .zip(record(ShadowPart::Masked(index)))
-            else {
-                continue;
-            };
-            let within = self.state.matrix.map_rect(cast.bounds).0;
-            contents.push(Layer::Group(Arc::new(Group {
-                composite: Composite::Chain {
-                    steps: Arc::from([Step::Blur(cast.sigma)]),
-                    rec: LayerRec::default(),
-                },
-                matrix: Matrix::new_identity(),
-                clip: None,
-                within: Some(within),
-                contents_matrix: Matrix::new_identity(),
-                contents: Arc::new(vec![Layer::Targeted(Arc::new(drawn))]),
-            })));
         }
         contents.extend(entry(ShadowPart::Over));
         self.with_recorder(|mut recorder| {
@@ -1185,10 +1209,55 @@ impl Context2D {
                 None,
                 Matrix::new_identity(),
                 Arc::new(contents),
-                VectorFeatures::PLAIN,
+                self.composited_features(),
                 Point::default(),
             );
         });
+    }
+
+    /// What a group composited through the context's alpha and blend asks
+    /// of a vector backend: a layer, which an SVG has none of, and the blend
+    /// where it is not `source-over`, which a PDF composites wrongly.
+    fn composited_features(&self) -> VectorFeatures {
+        match self.state.global_composite_operation {
+            BlendMode::SrcOver => VectorFeatures::LAYER,
+            _ => VectorFeatures::LAYER.with(VectorFeatures::BLEND_MODE),
+        }
+    }
+
+    /// The group a blurred shadow is drawn in for `draw_with_shadows`: its
+    /// chain blurs the shadow drawn sharp on pixels, confined to the cast's
+    /// `bounds` on the device, and a document plays the shadow Skia's mask
+    /// filter draws instead. `None` where either recording draws nothing.
+    fn shadow_group<F>(
+        &self,
+        cast: &ShadowCast,
+        index: usize,
+        draw: &F,
+    ) -> Option<Group>
+    where
+        F: Fn(&SkCanvas, ShadowPart),
+    {
+        let record = |part: ShadowPart| {
+            let mut recorder = PictureRecorder::new();
+            let canvas = recorder.begin_recording(self.bounds, true);
+            canvas.set_matrix(&self.state.matrix.into());
+            draw(canvas, part);
+            recorder.finish_recording_as_picture(None)
+        };
+        let drawn = record(ShadowPart::Sharp(index))
+            .zip(record(ShadowPart::Masked(index)))?;
+        Some(Group {
+            composite: Composite::Chain {
+                steps: Arc::from([Step::Blur(cast.sigma)]),
+                rec: LayerRec::default(),
+            },
+            matrix: Matrix::new_identity(),
+            clip: None,
+            within: Some(self.state.matrix.map_rect(cast.bounds).0),
+            contents_matrix: Matrix::new_identity(),
+            contents: Arc::new(vec![Layer::Targeted(Arc::new(drawn))]),
+        })
     }
 
     /// Pushes a save frame that also opens a Skia layer. Subsequent draws

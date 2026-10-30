@@ -866,6 +866,24 @@ impl PageRecorder {
         self.restore();
     }
 
+    /// Files `group` as it is given, its transform and its `within` the
+    /// device's, under the clip the recorder holds: a group whose entries
+    /// were recorded under the recorder's transform already, filed where
+    /// [`Self::append_group`] files one.
+    pub fn append_device_group(
+        &mut self,
+        group: Group,
+        features: VectorFeatures,
+    ) {
+        self.file_current();
+        let group = Group {
+            clip: self.clip.as_ref().map(Path::serialize),
+            ..group
+        };
+        self.file_group(group, features);
+        self.restore();
+    }
+
     /// Files `group` after what [`Self::file_current`] has filed.
     fn file_group(&mut self, group: Group, features: VectorFeatures) {
         let entry = Layer::Group(Arc::new(group));

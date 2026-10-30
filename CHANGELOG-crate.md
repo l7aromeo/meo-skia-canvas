@@ -213,6 +213,15 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A `Paragraph` under a composite operation reaches an SVG, and a PDF
+  composites it.** Drawn under a composite operation other than
+  `source-over`, set by `Context2D::set_global_composite_operation`, a
+  paragraph is composited as one group through a layer, which Skia's SVG
+  backend drops whole, so the SVG held nothing of it; a PDF wrote the
+  blend itself, which its backend composites wrongly. Both now embed the
+  paragraph and what lies beneath it as pixels, as they embed any other
+  blended draw.
+
 - **An SVG of a page with nothing on it is well-formed XML.**
   `Canvas::to_buffer` with `ImageFormat::Svg` wrote an empty page's root as
   `<svg ... height="40"/ viewBox="0 0 80 40">`: Skia writes an empty
@@ -253,7 +262,9 @@ window be changed after it opens.** No signature moves and nothing is removed.
   2515 pixels off the exact blur of its sharp shadow on the CPU engine. Each
   style's run of text on a line now casts its shadow as one, blurred whole
   by the exact Gaussian on either engine, the runs' shadows composited in
-  document order beneath all the text. A PDF or SVG keeps the mask filter.
+  document order beneath all the text. A PDF keeps Skia's mask filter, and
+  an SVG, which has no blur to write, embeds the shadow as pixels beneath
+  the text it keeps as vectors.
 
 - **A `drop-shadow()` is the exact Gaussian blur of what casts it.** A draw
   under a filter holding a `drop-shadow()`, set by
