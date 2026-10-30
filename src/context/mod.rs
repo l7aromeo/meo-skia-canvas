@@ -3336,6 +3336,28 @@ mod tests {
         Move,
     }
 
+    impl Step {
+        /// Whether the step puts pixels on the page, rather than reading,
+        /// exporting or changing the frame or the clip.
+        fn draws(self) -> bool {
+            match self {
+                Step::Fill(_)
+                | Step::Text
+                | Step::Rect
+                | Step::Blur
+                | Step::BlurPath(_)
+                | Step::Layer
+                | Step::Clear
+                | Step::Cut => true,
+                Step::Read
+                | Step::Export
+                | Step::Clip
+                | Step::Restore
+                | Step::Move => false,
+            }
+        }
+    }
+
     /// What a program drew: the page, what each `Export` step exported and
     /// what each `Read` step read.
     struct Drawn {
@@ -3574,13 +3596,8 @@ mod tests {
             .to_vec()
     }
 
-    /// The pixels, at `density`, of `source` used as a pattern filling
-    /// another CPU canvas, and of `source` drawn into one with
-    /// `draw_canvas`.
-    fn drawn_in(
-        source: &mut crate::canvas::Canvas,
-        density: u32,
-    ) -> (Vec<u8>, Vec<u8>) {
+    /// A CPU canvas the size of `source`'s, filled with a pattern of it.
+    fn patterned(source: &mut crate::canvas::Canvas) -> crate::canvas::Canvas {
         let mut filled = crate::canvas::Canvas::new(200.0, 120.0);
         filled.set_gpu(false);
         let pattern = filled.context().create_pattern_from_canvas(
@@ -3589,6 +3606,17 @@ mod tests {
         );
         filled.context().set_fill_pattern(&pattern);
         filled.context().fill_rect(0.0, 0.0, 200.0, 120.0);
+        filled
+    }
+
+    /// The pixels, at `density`, of `source` used as a pattern filling
+    /// another CPU canvas, and of `source` drawn into one with
+    /// `draw_canvas`.
+    fn drawn_in(
+        source: &mut crate::canvas::Canvas,
+        density: u32,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let mut filled = patterned(source);
         let mut into = crate::canvas::Canvas::new(200.0, 120.0);
         into.set_gpu(false);
         into.context().draw_canvas(source, 0.0, 0.0);
@@ -3615,7 +3643,9 @@ mod tests {
     /// entries whatever the paint; without them a plain paint takes the
     /// route for a page holding a cut draw, and both are held here. A
     /// pattern is held to it only without the blurs, which a pattern draws
-    /// other than the page does, cut draw or none.
+    /// other than the page does, cut draw or none, and within
+    /// [`tile_slack`] a draw, which is how far Skia's picture shader draws a
+    /// page's translucent edges from where the page draws them.
     #[test]
     fn a_page_drawn_into_another_draws_as_it_does_itself() {
         let mut programs = vec![CLIPPED.to_vec()];
@@ -3630,10 +3660,154 @@ mod tests {
                 let steps = unblurred(steps.clone());
                 let mut source = program(&steps, false, true).canvas;
                 let direct = pixels_at(&mut source, density);
-                let (pattern, drawn) = drawn_in(&mut source, density);
+                let (_, drawn) = drawn_in(&mut source, density);
                 assert!(drawn == direct, "unblurred, {density}x: {steps:?}");
-                assert!(pattern == direct, "a pattern, {density}x: {steps:?}");
+                // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
+                // Re-check: cargo test a_picture_shader_tile_blits_as_rgba
+                // A pattern lies over its page to the byte where the
+                // platform's native colour type is the RGBA8888 Skia's
+                // picture shader rasterizes a tile in, and elsewhere --
+                // Linux -- within a premultiplied level for each draw a
+                // pixel lies under: a translucent edge blits a level apart
+                // in the tile and on the page, and a draw over it carries
+                // that on and can add its own. Measured on Linux, a lone
+                // edge parts by one, two overlapping fills by two, and
+                // `CLIPPED` by 3, 4 and 3 at densities 1 to 3. Read
+                // premultiplied, which is what the tile holds:
+                // unpremultiplied, a level at a faint edge reads as up to
+                // 128. The pattern work that rasterizes a canvas pattern in
+                // the page's own colour type is what lifts this.
+                let page = premultiplied_at(&mut source, density);
+                let pattern =
+                    premultiplied_at(&mut patterned(&mut source), density);
+                let most = farthest(&pattern, &page);
+                let draws = steps.iter().filter(|step| step.draws()).count();
+                assert!(
+                    usize::from(most) <= usize::from(tile_slack()) * draws,
+                    "a pattern, {density}x, parted by {most}: {steps:?}"
+                );
             }
+        }
+    }
+
+    /// The pixels of `canvas` read at `density`, premultiplied.
+    fn premultiplied_at(
+        canvas: &mut crate::canvas::Canvas,
+        density: u32,
+    ) -> Vec<u8> {
+        canvas
+            .to_image_data(
+                None,
+                &crate::pixels::ImageDataExport {
+                    density,
+                    pixels: crate::pixels::PixelExportOptions {
+                        premultiplied: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .expect("pixels")
+            .pixels()
+            .to_vec()
+    }
+
+    /// The most two reads part by in any byte.
+    fn farthest(a: &[u8], b: &[u8]) -> u8 {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| x.abs_diff(*y))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// How far, in premultiplied levels, a canvas pattern may part from its
+    /// page here for each draw a pixel lies under: none where the
+    /// platform's native colour type is the RGBA8888 Skia's picture shader
+    /// rasterizes a tile in, one elsewhere -- see
+    /// [`a_picture_shader_tile_blits_as_rgba`].
+    fn tile_slack() -> u8 {
+        match ColorType::N32 == ColorType::RGBA8888 {
+            true => 0,
+            false => 1,
+        }
+    }
+
+    /// Skia's picture shader rasterizes its tile as RGBA8888 whatever the
+    /// surface it fills (`SkPictureShader::CachedImageInfo::Make`), and an
+    /// anti-aliased translucent edge blits a premultiplied level apart in
+    /// the platform's native colour type and in the other byte order: 58
+    /// pixels of this triangle, on macOS, whose native type is RGBA8888,
+    /// between it and BGRA8888, and on Linux, whose native type is
+    /// BGRA8888, between it and RGBA8888. So a picture-shader fill draws a
+    /// translucent edge as a draw onto the native surface does only where
+    /// that type is RGBA8888. Fails, as the sign to look again, once the
+    /// two agree everywhere, when the slack the pattern pin allows can go.
+    #[test]
+    fn a_picture_shader_tile_blits_as_rgba() {
+        use skia_safe::{FilterMode, PictureRecorder, TileMode};
+
+        let (width, height) = (200, 120);
+        let page = Rect::from_wh(width as f32, height as f32);
+        let mut builder = PathBuilder::new();
+        builder
+            .move_to((70.0, 5.0))
+            .line_to((95.5, 14.25))
+            .line_to((77.0, 22.5))
+            .close();
+        let triangle = builder.detach();
+        // `rgb(30 60 200 / 0.7)`, the fill the clip-run programs draw.
+        let rgb = |channel: f32| channel / u8::MAX as f32;
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true).set_color4f(
+            Color4f::new(rgb(30.0), rgb(60.0), rgb(200.0), 0.7),
+            None,
+        );
+        let info = ImageInfo::new_n32_premul((width, height), None);
+        let read = |surface: &mut skia_safe::Surface| {
+            let mut pixels = vec![0; info.compute_min_byte_size()];
+            assert!(surface.read_pixels(
+                &info,
+                &mut pixels,
+                info.min_row_bytes(),
+                (0, 0)
+            ));
+            pixels
+        };
+
+        let mut drawn = started::raster(&info, None, None).expect("a page");
+        drawn.canvas().draw_path(&triangle, &paint);
+        let mut recorder = PictureRecorder::new();
+        recorder
+            .begin_recording(page, true)
+            .draw_path(&triangle, &paint);
+        let picture = recorder
+            .finish_recording_as_picture(None)
+            .expect("a picture");
+        let mut fill = Paint::default();
+        fill.set_shader(picture.to_shader(
+            (TileMode::Repeat, TileMode::Repeat),
+            FilterMode::Linear,
+            None,
+            Some(&page),
+        ));
+        let mut tiled = started::raster(&info, None, None).expect("a page");
+        tiled.canvas().draw_rect(page, &fill);
+
+        let (drawn, tiled) = (read(&mut drawn), read(&mut tiled));
+        let parted = drawn
+            .chunks(4)
+            .zip(tiled.chunks(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        let most = farthest(&drawn, &tiled);
+        match ColorType::N32 == ColorType::RGBA8888 {
+            true => assert!(parted == 0, "native RGBA: {parted} px, {most}"),
+            false => assert!(
+                parted > 0 && most == 1,
+                "native {:?}: {parted} px, {most}",
+                ColorType::N32
+            ),
         }
     }
 
