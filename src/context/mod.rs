@@ -36,6 +36,7 @@ use crate::{
     gpu::{self, RenderingEngine},
     gradient::{BoxedCanvasGradient, CanvasGradient},
     node::{
+        external::External,
         filter::{
             Coverage, Filter, SamplingFilter, SamplingQuality, ScalingOperation,
         },
@@ -82,7 +83,12 @@ const DEFAULT_MITER_LIMIT: f32 = 10.0;
 const DEFAULT_FONT_SIZE: f32 = 10.0;
 
 pub type BoxedContext2D = JsBox<RefCell<Context2D>>;
-impl Finalize for Context2D {}
+impl Finalize for Context2D {
+    /// Releases what this context told the engine its page holds.
+    fn finalize<'a, C: Context<'a>>(mut self, cx: &mut C) {
+        self.external.release(cx);
+    }
+}
 
 pub struct Context2D {
     pub bounds: Rect,
@@ -107,6 +113,9 @@ pub struct Context2D {
     /// matching `canvas.restore()` to composite the layer.
     layers: Vec<bool>,
     pub path: PathBuilder,
+    /// What the JavaScript engine has been told this context's page holds.
+    /// See [`Context2D::report_resident`].
+    external: External,
 }
 
 /// A picture-backed image with its pixels taken now.
@@ -561,7 +570,22 @@ impl Context2D {
             stack: vec![],
             layers: vec![],
             state: State::default(),
+            external: External::default(),
         }
+    }
+
+    /// Tells the JavaScript engine what this context's page holds in pixels
+    /// now, so that a collection is scheduled by the native memory a
+    /// canvas holds and not only by its small JavaScript object.
+    ///
+    /// Called by the binding after a read, which builds the page surface or
+    /// its tiles, and after a resize, which drops them, and released in the
+    /// finalizer. A drawing that clears the whole page drops them too and is
+    /// counted at the next of those, so the engine is told too much in
+    /// between and never too little.
+    pub(crate) fn report_resident<'a, C: Context<'a>>(&mut self, cx: &mut C) {
+        let bytes = self.recorder.borrow().resident_bytes();
+        self.external.hold(cx, bytes);
     }
 
     pub fn in_local_coordinates(&mut self, x: f32, y: f32) -> Point {

@@ -464,6 +464,19 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **Canvases that are dropped are collected.** A process that made
+  canvases, read them back and let them go grew without bound: V8 schedules
+  a collection by the size of its own heap, a canvas is a small object there
+  however large the page it holds, and nothing told it otherwise. Two
+  hundred 1000x800 canvases read back once each, with the event loop turning
+  between batches of ten, climbed from 169 MB to 727 MB, and finalized
+  almost none of them. Each context now reports the page and tiles it holds
+  to V8 as external memory, and each image what it keeps, and releases the
+  same amount when it is finalized, so V8 collects them on its own: the same
+  run holds between 227 MB and 250 MB. A process making canvases without
+  ever letting the event loop turn still keeps every one, because Node runs
+  an addon's finalizers only once it does.
+
 - **Reading a GPU canvas back keeps nothing per read.** Each whole-page
   `getImageData()` of a GPU canvas on macOS left about what it read resident
   until the process ended -- 12.2 MB a read of a 2000x1600 canvas -- so a

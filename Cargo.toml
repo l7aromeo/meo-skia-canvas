@@ -238,7 +238,13 @@ quantette = { version = "0.6", default-features = false, features = [
 # pull a second copy of `png` into the tree beside the one APNG uses.
 tiff = "0.11"
 
-neon = "1"
+neon = { version = "1", features = ["sys"] }
+
+# Resolves `napi_adjust_external_memory` from the host process, the way
+# `neon` resolves every other Node-API function: the addon links against no
+# Node library, so a symbol it declared itself would have nothing to link to
+# on Windows. Already linked through `neon`. See `node::external`.
+libloading = "0.8.9"
 
 # Subresource Integrity: the digests `Integrity::verify` compares, and the
 # base64 they are written in. Both pure Rust, and `base64` is already linked
