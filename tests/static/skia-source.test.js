@@ -125,6 +125,12 @@ function scratch(t) {
 }
 
 /**
+ * Git's options that keep a checkout byte for byte what was committed: a
+ * Windows runner's global `core.autocrlf` otherwise writes CRLF line endings.
+ */
+const NO_LINE_ENDING_CONVERSION = ["-c", "core.autocrlf=false"];
+
+/**
  * Runs git for a test's own setup, clear of any repository the environment
  * names, so the suite behaves the same when `just ci` runs from a hook.
  */
@@ -143,6 +149,7 @@ function git(cwd, ...args) {
       "commit.gpgsign=false",
       "-c",
       "init.defaultBranch=main",
+      ...NO_LINE_ENDING_CONVERSION,
       ...args,
     ],
     { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
@@ -209,7 +216,7 @@ describe("skia-source's git acts on its own checkout inside a hook", () => {
     // below reports what reached the hook's repository rather than the first
     // step to fail.
     const failed = [
-      ["clone", "--quiet", dependency, checkout],
+      [...NO_LINE_ENDING_CONVERSION, "clone", "--quiet", dependency, checkout],
       [
         "-C",
         checkout,
