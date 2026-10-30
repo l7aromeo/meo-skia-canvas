@@ -971,9 +971,8 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   a fill of it is clipped: `color(display-p3 0 1 0)` drew its line at
   `0,251,41` beside a fill at `0,255,0`. The line now draws the bytes a fill
   draws, on every canvas; a colour of whole bytes draws as it did. The
-  colour of a `drop-shadow()` in `ctx.filter` is kept as named too, which
-  changes no pixel yet: Skia's raster backend resolves the shadow on an
-  eight-bit layer either way.
+  colour of a `drop-shadow()` in `ctx.filter` is kept as named too, and is
+  the colour the exact drop-shadow is tinted with.
 
 - **A draw too faint for eight bits draws on a float canvas.** On a canvas
   made with `colorType: "RGBAF16"` or `"RGBAF32"`, a fill under

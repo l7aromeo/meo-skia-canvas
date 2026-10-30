@@ -618,9 +618,8 @@ read the math functions and every length unit.
   its line at `0,251,41` beside a fill at `0,255,0`. The line now draws the
   bytes a fill draws, on every canvas; a colour of whole bytes draws as it
   did. The colour of a `drop-shadow()` read by `Context2D::set_filter_css`,
-  and its `FilterOp::DropShadow`, is kept as named too, which changes no
-  pixel yet: Skia's raster backend resolves the shadow on an eight-bit layer
-  either way.
+  and its `FilterOp::DropShadow`, is kept as named too, and is the colour
+  the exact drop-shadow is tinted with.
 
 - **A draw too faint for eight bits draws on a float canvas.** On a canvas
   made with `PixelDepth::F16` or `PixelDepth::F32` as its `color_type`, a
