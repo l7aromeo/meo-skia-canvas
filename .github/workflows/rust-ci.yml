@@ -96,10 +96,16 @@ jobs:
   # Clippy axes are the features that gate Rust code behind `#[cfg]`:
   # node-addon, window, vulkan, metal, fetch. `freetype` is a skia-safe *build*
   # option (embed-freetype) -- it gates no Rust, so it's pointless here.
-  # These four configs cover every `#[cfg]` permutation of our code:
-  # everything off, all Linux-gated code on, Metal (macOS only), and both
-  # backends at once -- the last because cargo features are additive and
-  # nothing else in the matrix compiles the pair. The entry says why.
+  # Four configs: everything off, all Linux-gated code on, Metal (macOS
+  # only), and both backends at once -- the last because cargo features are
+  # additive and nothing else in the matrix compiles the pair. The entry says
+  # why. The two single-platform legs also lint their backend alone
+  # (`backendOnly`), the GPU path without `window` that docs/rust.md
+  # documents: an import used only under `window` inside a backend's module
+  # is unused there, and no full set reaches that. It enables the same
+  # skia-safe features as the leg's own set, so it reuses the leg's Skia.
+  # Not every permutation is built: each pass is here for a `#[cfg]`
+  # combination none of the others compiles.
   # The patched Skia tree both macOS clippy legs compile from, prepared once.
   # On a cold cache the two legs used to prepare it side by side, each running
   # Skia's git-sync-deps -- dozens of parallel fetches from googlesource -- at
@@ -147,10 +153,12 @@ jobs:
           - name: linux (vulkan,window,node-addon,fetch)
             os: ubuntu-latest
             features: vulkan,window,node-addon,fetch
+            backendOnly: vulkan
             cacheKey: vulkan-window-node-addon-fetch
           - name: macos (metal,window,node-addon,fetch)
             os: macos-latest
             features: metal,window,node-addon,fetch
+            backendOnly: metal
             cacheKey: metal-window-node-addon-fetch
           # Both backends at once. Cargo features are additive, so a binary
           # depending on two crates that each ask for a different backend gets
@@ -224,6 +232,11 @@ jobs:
           else
             cargo clippy --no-default-features --all-targets -- -D warnings
           fi
+      - name: cargo clippy (backend alone)
+        if: matrix.backendOnly
+        run: |
+          cargo clippy --no-default-features \
+            --features "${{ matrix.backendOnly }}" --all-targets -- -D warnings
 
   test:
     needs: changes

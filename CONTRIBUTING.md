@@ -60,7 +60,7 @@ and without it those check out as pointer text rather than as images.
 The crate is the other half of this tree, and one feature set does not cover it. `just typecheck`
 checks the `vulkan,window,freetype` set on every host -- that one compiles on macOS too, against
 MoltenVK -- and `just lint-check` adds the backend and binding for the machine it runs on, `metal`
-on a Mac and `vulkan` elsewhere. What is left for CI is the other platform's GPU backend, which
+on a Mac and `vulkan` elsewhere, and that backend alone, without `window`. What is left for CI is the other platform's GPU backend, which
 genuinely will not build here: `metal` needs macOS. The crate needs Rust 1.90 or newer, and versions
 independently of the npm package.
 
@@ -71,7 +71,7 @@ what goes stale.
 
 `just install-hooks` puts a pre-commit hook in front of `just precommit`, which is the subset fast
 enough to sit there: formatting for both languages, ESLint, and clippy without features, about four
-seconds. It leaves out the feature-carrying clippy pass and the test suite, which are what make
+seconds. It leaves out the feature-carrying clippy passes and the test suite, which are what make
 `just ci` take minutes. Opt-in and run once per clone -- it writes a single file into `.git/hooks/`
 and leaves alone the git-lfs hooks a pre-switch clone still carries, rather than redirecting
 `core.hooksPath` and disabling them.
