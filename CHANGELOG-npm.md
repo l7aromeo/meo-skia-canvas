@@ -729,6 +729,22 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A `drop-shadow()` is the exact Gaussian blur of what casts it.** A draw
+  under a `ctx.filter` holding a `drop-shadow()` went through Skia's filter
+  layer, whose blur approximates the Gaussian: a triangle under `drop-shadow(0
+0 2px black)` read 6.85 levels off the exact shadow on the CPU engine, as
+  Chrome's does. Under a turn or a skew the layer also resampled the draw
+  itself, by up to 16 levels at a square's edge under `rotate(30deg)` on the
+  CPU engine and 80 under a skew on the GPU. The shadow is made from the
+  draw's own pixels now, blurred by the exact Gaussian, composited under it
+  and rounded once, within half a level on either engine and unrounded on F16
+  and F32 canvases, and the draw is the draw unfiltered to the level. A path,
+  text, an image and a canvas drawn in all take it. An offset that is not
+  whole pixels lands where it is asked to, where Chrome moves `4.25px` to 4.5.
+  A draw casting a `shadowColor` shadow too, or under a
+  `globalCompositeOperation` that composites the whole canvas, keeps Skia's
+  layer.
+
 - **A `drop-shadow()` lands where Chrome puts it under a turned or skewed
   transform.** `ctx.filter`'s shadow offset and blur were divided by the
   transform's diagonal, which is its scale only while it neither turns nor
@@ -738,10 +754,7 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   `rotate(90deg)` the diagonal is 0 and no shadow was drawn at all. A `blur()`
   beside a `ctx.imageFilter`, which Skia draws whole, was not blurred under a
   quarter turn for the same reason. Both keep their lengths on the canvas's
-  axes now. Under a turn or a skew the draw itself is still resampled through
-  Skia's filter layer, where Chrome's is not: up to 16 levels at a square's
-  edge under `rotate(30deg)` on the CPU engine -- see
-  docs/browser-differences.md.
+  axes now.
 
 - **A rectangle the closed-form blur cannot take is blurred exactly.** A
   stroked rectangle -- `ctx.strokeRect()` -- or a dithered one or one played into a
@@ -768,13 +781,12 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   either engine.
 
 - **An image drawn under a blur is its exact Gaussian blur.** An image or a
-  canvas drawn with `ctx.drawImage()` under a `ctx.filter` of blurs and
-  colour functions was blurred by Skia's image filter, as Chrome's is: a
-  40px red square drawn in and blurred by 8px read 233 ten pixels inside its
-  edge where the exact blur is 228. It is now blurred by the exact Gaussian
-  on either engine, as a blurred path is. A `drop-shadow()`, a shadow, or a
-  `globalCompositeOperation` that composites the whole canvas keeps Skia's
-  filter.
+  canvas drawn with `ctx.drawImage()` under a `ctx.filter` of blurs and colour
+  functions was blurred by Skia's image filter, as Chrome's is: a 40px red
+  square drawn in and blurred by 8px read 233 ten pixels inside its edge where
+  the exact blur is 228. It is now blurred by the exact Gaussian on either
+  engine, as a blurred path is. A shadow, or a `globalCompositeOperation` that
+  composites the whole canvas, keeps Skia's filter.
 
 - **A blurred path, image or canvas drawn at an alpha is rounded once.** On
   an eight-bit canvas the blur of an image or a canvas drawn at a
@@ -787,14 +799,14 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   under a `blur()` keeps Skia's filter.
 
 - **A canvas drawn in under a filter spreads past where it is drawn.** A
-  canvas drawn into another with `ctx.drawCanvas()` under `ctx.filter` was
-  cut at its destination rectangle: a 40px square blurred by 8px read alpha
-  0 five pixels outside it, where Chrome's `drawImage` of the same canvas
-  reads 72, and a `drop-shadow()` cast past the square was not drawn at
-  all. The rectangle now bounds what is drawn and not what the filter makes
-  of it. A `blur()` and the colour functions are run on the drawn canvas's
-  pixels by the exact Gaussian, as a blurred path is, on either engine; a
-  `drop-shadow()` is still Skia's.
+  canvas drawn into another with `ctx.drawCanvas()` under `ctx.filter` was cut
+  at its destination rectangle: a 40px square blurred by 8px read alpha 0 five
+  pixels outside it, where Chrome's `drawImage` of the same canvas reads 72,
+  and a `drop-shadow()` cast past the square was not drawn at all. The
+  rectangle now bounds what is drawn and not what the filter makes of it. A
+  `blur()` and the colour functions are run on the drawn canvas's pixels by
+  the exact Gaussian, as a blurred path is, on either engine, and so is a
+  `drop-shadow()`.
 
 - **A blurred path is the exact Gaussian blur of what it draws.** A
   flat-colour shape that `ctx.filter = "blur(...)"` blurs on its result --
