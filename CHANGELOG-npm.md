@@ -617,18 +617,18 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 - **A flat colour lands exactly on a float canvas in another space.** On a
   canvas made with `colorType: "RGBAF16"` or `"RGBAF32"` and `colorSpace`
   `"srgb-linear"`, `"display-p3"`, `"display-p3-linear"`, `"rec2020"` or
-  `"rec2020-linear"`, a fill, stroke or blurred draw in a flat colour read
-  back as much as 2.3e-4 off the colour named: Skia converts a paint's colour
-  through an approximate transfer function whose results lie 64 ulps apart, so
-  no colour handed to it lands exactly there. Such a canvas now records each
-  draw twice, painting a flat colour through a shader that holds it in the
-  canvas's own space for its pixels, and as a plain colour for a PDF or SVG of
-  it, which still write it as one. Its pixels hold the colour as named, to the
-  precision of the half float on `"RGBAF16"`. The cost is memory: about 1.35x
-  an sRGB canvas's recording for a run of fills in one colour, 2.4x for fills
-  each in a colour of its own. Text keeps its plain colour: Skia weighs a
-  glyph's edges by the luminance of the paint's colour, and would weigh them
-  wrongly through the shader. Not yet exact there either: a shadow, which Skia
+  `"rec2020-linear"`, a fill, stroke, blurred draw or text in a flat colour
+  read back as much as 2.3e-4 off the colour named: Skia converts a paint's
+  colour through an approximate transfer function whose results lie 64 ulps
+  apart, so no colour handed to it lands exactly there. Such a canvas now
+  records each draw twice: for its pixels painting a flat colour through a
+  shader, and text through a colour filter, that holds it in the canvas's own
+  space; and as a plain colour for a PDF or SVG of it, which still write it as
+  one. Its pixels hold the colour as named, to the precision of the half float
+  on `"RGBAF16"`. Text keeps the edges the plain colour gives it, which Skia
+  weighs by the luminance of the paint's colour. The cost is memory: about
+  1.35x an sRGB canvas's recording for a run of fills in one colour, 2.4x for
+  fills each in a colour of its own. Not yet exact there: a shadow, which Skia
   draws through an eight-bit layer, a `Paragraph`'s own colours, the colours
   in a filter, a colour filter or a texture, and the `"rec2020-pq"` and
   `"rec2020-hlg"` spaces.
