@@ -3398,6 +3398,37 @@ mod tests {
         }
     }
 
+    /// A piece of a clip run records its transform and its draws and
+    /// nothing else: a run's recording holds no save, so finishing it has
+    /// nothing to restore. Read once between two fills, each piece holds the
+    /// transform and one fill; with a save it held four operations.
+    #[test]
+    fn a_run_piece_records_its_transform_and_draws_alone() {
+        let steps = [
+            Step::Clip,
+            Step::Fill(40.0),
+            Step::Read,
+            Step::Fill(50.0),
+            Step::Restore,
+        ];
+        let mut canvas = program(&steps, false, true).canvas;
+        let page = canvas.page(0).expect("a page").inner.page();
+        let counts: Vec<usize> = page
+            .layers
+            .iter()
+            .filter_map(|layer| match layer {
+                layer::Layer::Clipped(piece) => match &piece.entry {
+                    layer::Layer::Picture(picture) => {
+                        Some(picture.approximate_op_count())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(counts, [2, 2], "operations in each piece");
+    }
+
     /// How many clips a PDF's content streams set: the `W n` and `W* n`
     /// operators, in every stream inflated.
     fn pdf_clips(pdf: &[u8]) -> usize {
