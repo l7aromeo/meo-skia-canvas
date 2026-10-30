@@ -1925,6 +1925,21 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
   loaded, and draws the same. Nothing the watcher leaves on a thread keeps
   its event loop alive.
 
+- **Skia M153 to M156**, by way of `skia-safe` 0.156.0. Every workaround for
+  a Skia defect was re-checked against it and is still needed, but for two
+  that this release had no way to re-check: a half-float stage on x86
+  machines without AVX2 or F16C, and what it costs to measure a text run's
+  bounds, which needs a profile. One drawing changes, on Linux alone: the
+  FreeType M156 brings, 2.14.3, refuses a glyph transform sheared past about
+  79.65 degrees and draws the glyph upright instead, so text sheared past
+  about 79.3 degrees -- by an `oblique` angle or by the canvas's transform --
+  is now drawn as paths from the glyphs' outlines, sheared here. Its shape is
+  right; against M153's anti-aliased glyphs, its edge pixels differ by about
+  100 levels at 12 to 40px and up to 18 at 200px, and it carries up to 2% more
+  ink, 13% for 12px text at 89 degrees. Below that shear nothing moved: 270
+  scenes and the gallery's images are identical on Linux and macOS, and its
+  animations on Linux, where their encoding repeats run to run.
+
 ## 📦 ⟩ [v6.0.2] (npm) ⟩ September 16, 2026
 
 **A patch closing a gap 6.0.1 shipped knowingly.** Nothing is added and
