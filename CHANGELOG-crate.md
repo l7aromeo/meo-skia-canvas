@@ -230,12 +230,15 @@ window be changed after it opens.** No signature moves and nothing is removed.
   blurred path is. A `drop-shadow()`, a shadow, or a composite operation
   that composites the whole canvas keeps Skia's filter.
 
-- **A blurred draw composited at a global alpha is rounded once.** On an
-  eight-bit canvas the blur of a drawn image or canvas was rounded to a
-  level and then scaled by the alpha and rounded again, which for an alpha
-  of 0.5 lands every odd level on an exact tie and moved hundreds of pixels
-  of a blurred image a level off. The alpha is now taken into the blur
-  before its one rounding.
+- **A blurred path, image or canvas drawn at an alpha is rounded once.** On
+  an eight-bit canvas the blur of an image or a canvas drawn at a global
+  alpha was rounded to a level, then scaled by the alpha and rounded again,
+  and a blurred path drew its colour's alpha, the global alpha included,
+  into what it blurred, and was rounded there first. At an alpha of 0.5
+  every odd level lands on an exact tie: hundreds of pixels of a blurred
+  image, and 1459 of a triangle blurred by 2px, came out a level off. The
+  alpha is now taken into the blur before its one rounding. Text under a
+  `blur()` keeps Skia's filter.
 
 - **A canvas drawn in under a filter spreads past where it is drawn.** A
   canvas drawn into another with `Context2D::draw_canvas` or

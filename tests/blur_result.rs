@@ -187,6 +187,78 @@ fn a_blurred_path_is_the_exact_gaussian_of_what_it_draws() {
     }
 }
 
+/// A canvas on `gpu`'s engine with the triangle [`WIDE`] filled in `colour`
+/// through `filter` at `global_alpha`, or `None` where that engine is not
+/// available.
+fn faded_triangle(
+    gpu: bool,
+    filter: &str,
+    colour: &str,
+    global_alpha: f32,
+) -> Option<Canvas> {
+    let mut canvas = Canvas::new(SIZE.0, SIZE.1);
+    canvas.set_gpu(gpu);
+    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+        return None;
+    }
+    let ctx = canvas.context();
+    ctx.set_fill_style_css(colour).expect("a colour");
+    ctx.set_filter_css(filter).expect("a filter");
+    ctx.set_global_alpha(global_alpha);
+    ctx.begin_path();
+    let [(x0, y0), (x1, y1), (x2, y2)] = WIDE;
+    ctx.move_to(x0, y0);
+    ctx.line_to(x1, y1);
+    ctx.line_to(x2, y2);
+    ctx.close_path();
+    ctx.fill(FillRule::NonZero);
+    Some(canvas)
+}
+
+#[test]
+fn a_blurred_path_at_an_alpha_is_rounded_once() {
+    // The global alpha and the colour's own scale what is drawn, and the
+    // blur of that is the blur of the opaque draw scaled by them: the
+    // reference is the path drawn opaque, blurred, then scaled. At 0.5
+    // every odd level of a draw rounded before its blur is a tie.
+    for gpu in [false, true] {
+        for sigma in [2.0f32, 8.0] {
+            for (colour, global) in
+                [("black", 0.5f32), ("rgb(0 0 0 / 0.5)", 1.0)]
+            {
+                let (Some(mut drawn), Some(mut blurred)) = (
+                    faded_triangle(gpu, "none", "black", 1.0),
+                    faded_triangle(
+                        gpu,
+                        &format!("blur({sigma}px)"),
+                        colour,
+                        global,
+                    ),
+                ) else {
+                    continue;
+                };
+                let drawn: Vec<f64> = alpha(&mut drawn)
+                    .into_iter()
+                    .map(|a| f64::from(a) / 255.0)
+                    .collect();
+                let reference: Vec<f64> =
+                    sampled(&drawn, SIZE.0 as usize, f64::from(sigma))
+                        .into_iter()
+                        .map(|v| v * 0.5)
+                        .collect();
+                let misses = misses(&alpha(&mut blurred), &reference);
+                assert!(
+                    misses.is_empty(),
+                    "gpu {gpu} sigma {sigma} {colour} at {global}: {} \
+                     pixels off the exact blur, first {:?}",
+                    misses.len(),
+                    &misses[..misses.len().min(4)],
+                );
+            }
+        }
+    }
+}
+
 /// Where the left part of the canvas keeps what the blur leaves there.
 const CLIP: f32 = 70.0;
 

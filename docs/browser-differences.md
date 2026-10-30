@@ -801,7 +801,8 @@ standard deviation is the length given. A rasterised pixel is already its
 shape averaged over the pixel's box, so the blur of what a draw paints is
 those pixels convolved with the Gaussian sampled at whole-pixel offsets, and
 a flat-colour path that is not a rectangle the transform keeps one, which
-the next entry blurs in closed form, is drawn here as exactly that, rounded once: within half
+the next entry blurs in closed form, is drawn here as exactly that, rounded once at
+whatever alpha it is drawn: within half
 a level on 8-bit pixels on either engine, and on F16 and F32 to the surface's
 precision, as measured on the CPU engine, where a float canvas made for the
 GPU on macOS is drawn. Chrome 156.0.8078.4 headless approximates it, on both of its

@@ -682,9 +682,14 @@ impl BlurOp {
         match (made, target) {
             // On pixels the result is blurred by `chain`, exactly, each
             // geometry of a run in a layer of its own, as separate draws
-            // composite.
+            // composite. The path is drawn opaque in its colour and the
+            // colour's alpha, the global alpha in it, is the chain's gain,
+            // so that the blur is rounded once and not once more where the
+            // draw is.
             (Made::Result(_), Target::Pixels) => {
-                let paint = self.paint.faint.drawable(&paint);
+                paint.set_alpha_f(1.0);
+                let mut gain = Paint::default();
+                gain.set_alpha_f(self.paint.color.a);
                 let steps = [Step::Blur(self.paint.sigma)];
                 let depth = match self.paint.faint {
                     Faint::Dropped => Depth::Bytes,
@@ -697,7 +702,7 @@ impl BlurOp {
                         &steps,
                         Some(content),
                         depth,
-                        &Paint::default(),
+                        &gain,
                         |layer| {
                             layer.concat(&self.matrix);
                             layer.draw_path(&path, &paint);
