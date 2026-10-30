@@ -24,3 +24,8 @@ rustfmt.toml
 # built even when no source moves.
 build.rs
 Cargo.lock
+
+# The Skia patches name the tree every source build compiles from, and the
+# action restores it, so a change to either changes what is built.
+:(glob)containers/skia-*.patch
+:(glob).github/actions/**

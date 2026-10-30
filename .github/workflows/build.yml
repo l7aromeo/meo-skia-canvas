@@ -290,7 +290,7 @@ jobs:
           cd skia-canvas
           git submodule update --init --depth 1 vendor/freetype vendor/zlib
 
-      - name: Checkout rust-skia
+      - name: Checkout and patch rust-skia
         run: |
           # Assigned and exported separately: `export VAR=$(cmd)` takes its
           # status from `export`, so a failing `just skia-version` would go
@@ -298,6 +298,14 @@ jobs:
           TAG=$(cd skia-canvas && just skia-version)
           export TAG
           git clone --depth 1 --branch "$TAG" --recurse-submodules -j8 https://github.com/rust-skia/rust-skia.git
+          # Linux's patches from `PATCHES` in scripts/skia-source.mjs: the
+          # brotli sources Skia's build list leaves out, without which this
+          # `freetype` build fails to link on kCmdLut and
+          # BrotliDecoderEnsureStaticInit. `-F0` fails a hunk that
+          # no longer matches rather than placing it by guesswork. Under
+          # `use-local-skia` the justfile names no tree of its own, so this
+          # checkout is what skia-bindings builds.
+          patch -p1 -F0 -d rust-skia -i "$GITHUB_WORKSPACE/skia-canvas/containers/skia-brotli-sources.patch"
 
       - name: Vendor Skia dependencies
         run: |

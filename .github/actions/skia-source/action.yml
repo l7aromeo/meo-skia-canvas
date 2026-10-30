@@ -1,0 +1,28 @@
+name: Skia source
+description: >-
+  Restore the patched Skia tree the skia-source job saved for this runner's
+  platform, name it with `node scripts/skia-source.mjs prepare`, and export it
+  as SKIA_SOURCE_DIR, so skia-bindings builds offline from it.
+runs:
+  using: composite
+  steps:
+    # The key is the one the skia-source job saves under: the lock and the
+    # platform's patches from `PATCHES` in scripts/skia-source.mjs, which are
+    # what name the tree. macOS keeps the key it has always had, so the caches
+    # build.yml and the clippy legs saved stay valid.
+    - name: Restore the Skia source
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/meo-skia-canvas
+        key: ${{ runner.os == 'macOS' && format('skia-source-{0}', hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch')) || format('skia-source-linux-{0}', hashFiles('Cargo.lock', 'containers/skia-brotli-sources.patch')) }}
+    # The directory is taken by an assignment of its own before it is
+    # written out. Inside echo's arguments a failing `prepare` did not fail
+    # the step -- `bash -e` does not see a command substitution's status
+    # there -- so a fetch that failed wrote an empty `SKIA_SOURCE_DIR`, and
+    # skia-bindings read that as an offline build from no directory and died
+    # reporting gn missing. An assignment carries the status.
+    - name: Prepare the Skia source
+      shell: bash
+      run: |
+        dir=$(node scripts/skia-source.mjs prepare)
+        echo "SKIA_SOURCE_DIR=$dir" >> "$GITHUB_ENV"
