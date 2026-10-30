@@ -33,6 +33,10 @@ linux_features := "vulkan,window,freetype"
 # `licenses` also reads as what ships: the addon does not enable `fetch`, and
 # counting its crates there would list a TLS stack the binary does not carry.
 host_features := if os() == "macos" { "metal,window,node-addon,fetch" } else { "vulkan,window,node-addon,fetch" }
+# This machine's GPU backend alone: the GPU path without `window`, which
+# docs/rust.md documents and `host_features` never builds. It enables the same
+# skia-safe features as `host_features`, so it reuses that build's Skia.
+host_backend := if os() == "macos" { "metal" } else { "vulkan" }
 # Must match the fmt job in .github/workflows/rust-ci.yml.
 fmt_toolchain := "nightly-2026-09-04"
 # How a changelog heading spells a released version: `[v0.15.0] (crate)`,
@@ -125,9 +129,9 @@ typecheck: ensure-deps
 # What the pre-commit hook runs: the checks that are fast enough to sit in
 # front of every commit.
 #
-# Not the whole gate, deliberately. `lint-check` runs clippy twice and the
-# second pass carries `{{ host_features }}`, which is most of its ten
-# seconds; `test` and `build` are minutes. A hook that costs that much stops
+# Not the whole gate, deliberately. `lint-check` runs clippy three times and
+# the passes with a GPU backend are most of its time; `test` and `build` are
+# minutes. A hook that costs that much stops
 # being run -- `--no-verify` is one flag away -- and a hook nobody runs
 # enforces nothing. These four cost about six seconds together and catch what
 # is actually forgotten: formatting, and a lint that fails the build.
@@ -530,28 +534,29 @@ install-hooks:
 lint: ensure-deps
     cargo clippy --fix --allow-dirty --allow-staged --all-targets --no-default-features -- -D warnings
     cargo clippy --fix --allow-dirty --allow-staged --all-targets --features "{{ host_features }}" -- -D warnings
+    cargo clippy --fix --allow-dirty --allow-staged --all-targets --no-default-features --features "{{ host_backend }}" -- -D warnings
     bun run lint:fix
 
 # Run clippy without fixing (CI-safe).
 #
-# Two passes, because one feature set does not lint the crate. The matrix in
-# rust-ci.yml runs four -- no features, each platform's GPU backend with the
-# binding, and both backends at once -- and only one of those is reachable
-# here, on a set that happened to include neither. `ThreadBound` is built
-# solely by the two GPU engines, so with none compiled it is dead code and
-# `-D warnings` refuses it: a red CI job on a branch whose local gate was
-# green.
+# Three passes, because one feature set does not lint the crate: no features,
+# this host's full set, and this host's GPU backend alone. Each catches what
+# the others compile away. `ThreadBound` is built solely by the two GPU
+# engines, so with none compiled it is dead code and `-D warnings` refuses it.
+# An import used only under `window` inside a backend's module is unused with
+# the backend and no `window`, which only the third pass builds.
 #
-# The two this cannot reach are the other platform's backend, which does not
+# What this cannot reach is the other platform's backend, which does not
 # compile here at all, and the both-backends set, which exists because cargo
 # features are additive -- a binary depending on two crates that each ask for
 # a different backend gets that combination, and `gpu` has to resolve `Engine`
-# and `Renderer` to one of them rather than bind each name twice. Those two
-# are what CI is for.
-[doc("Run clippy and ESLint without fixing. Two clippy passes: no features, then this host's.")]
+# and `Renderer` to one of them rather than bind each name twice. Those are
+# what the `clippy` matrix in rust-ci.yml is for.
+[doc("Run clippy and ESLint without fixing. Three clippy passes: no features, this host's, its GPU backend alone.")]
 lint-check: ensure-deps
     cargo clippy --all-targets --no-default-features -- -D warnings
     cargo clippy --all-targets --features "{{ host_features }}" -- -D warnings
+    cargo clippy --all-targets --no-default-features --features "{{ host_backend }}" -- -D warnings
     bun run lint
 
 # Rust and JavaScript both: `just ci` checks both, so fixing only one half still fails.

@@ -16,10 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{
-    context::{layer::Target, page::ExportOptions},
-    gpu::ThreadBound,
-};
+use crate::{context::page::ExportOptions, gpu::ThreadBound};
 
 thread_local!(
     static MTL_CONTEXT: RefCell<Option<MetalContext>> =
@@ -247,7 +244,7 @@ impl MetalContext {
 #[cfg(feature = "window")]
 use {
     super::{RenderCache, RenderState::Resizing},
-    crate::context::page::Page,
+    crate::context::{layer::Target, page::Page},
     objc2_core_foundation::CGSize,
     objc2_foundation::NSString,
     objc2_metal::{MTLCommandBuffer, MTLCommandQueue, MTLPixelFormat},

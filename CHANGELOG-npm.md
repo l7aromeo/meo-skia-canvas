@@ -729,6 +729,20 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A `drop-shadow()` lands where Chrome puts it under a turned or skewed
+  transform.** `ctx.filter`'s shadow offset and blur were divided by the
+  transform's diagonal, which is its scale only while it neither turns nor
+  skews. `drop-shadow(12px 4px 0 red)` under `rotate(30deg)` landed 9.69
+  pixels right and 10.93 down, where Chrome draws it 12 right and 4 down under
+  any transform, as it draws `shadowOffsetX` and `shadowOffsetY`; under
+  `rotate(90deg)` the diagonal is 0 and no shadow was drawn at all. A `blur()`
+  beside a `ctx.imageFilter`, which Skia draws whole, was not blurred under a
+  quarter turn for the same reason. Both keep their lengths on the canvas's
+  axes now. Under a turn or a skew the draw itself is still resampled through
+  Skia's filter layer, where Chrome's is not: up to 16 levels at a square's
+  edge under `rotate(30deg)` on the CPU engine -- see
+  docs/browser-differences.md.
+
 - **A rectangle the closed-form blur cannot take is blurred exactly.** A
   stroked rectangle -- `ctx.strokeRect()` -- or a dithered one or one played into a
   pattern, blurred by up to 40px, took Skia's coverage blur: a 6px stroke
