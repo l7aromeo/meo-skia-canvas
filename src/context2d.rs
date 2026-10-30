@@ -5515,10 +5515,13 @@ mod paragraph_shadow_tests {
 
     #[test]
     fn a_style_set_in_two_faces_casts_one_shadow() {
-        // Oswald has no arrow, which falls back to another face: three
-        // glyph runs of one style, one element, one shadow. `tests/
+        // Oswald has no omega and Raleway, next in the families, has: three
+        // glyph runs of one style, one element, one shadow. Both faces are
+        // bundled, so the split is the same wherever the test runs. `tests/
         // paragraph_shadow.rs` holds its blur to the blur of the whole run.
-        let spans: Spans = vec![("Ab→Cd", |s| {
+        let spans: Spans = vec![("AbΩΩCd", |s| {
+            s.font_families =
+                vec!["ShadowOswald".into(), "ShadowRaleway".into()];
             s.shadows = vec![shadow((200, 0, 0, 1.0), (1.0, 0.0), 4.0)]
         })];
         let paragraph = laid_out(&base(), &spans, W, |_| {});

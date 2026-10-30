@@ -245,34 +245,84 @@ fn a_later_lines_shadow_lies_over_an_earlier_lines() {
     }
 }
 
+/// How far a float page's alpha may sit from the exact composite: the f32
+/// a blur is narrowed to and a layer composites in, well under a level.
+const FLOAT_NOISE: f64 = 1e-4;
+
+/// `paragraph` drawn at [`AT`] on an F32 page on `gpu`'s engine, its
+/// premultiplied alpha read back, or `None` where that engine is not
+/// available.
+fn drawn_float(gpu: bool, paragraph: &Paragraph) -> Option<Vec<f64>> {
+    let mut canvas = Canvas::with_options(
+        SIZE.0,
+        SIZE.1,
+        CanvasOptions {
+            color_type: PixelDepth::F32,
+            gpu,
+            ..CanvasOptions::default()
+        },
+    )
+    .expect("a canvas");
+    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+        return None;
+    }
+    canvas.context().draw_paragraph(paragraph, AT.0, AT.1);
+    let data = canvas
+        .context()
+        .get_image_data_as(
+            0.0,
+            0.0,
+            SIZE.0,
+            SIZE.1,
+            PixelExportOptions {
+                depth: PixelDepth::F32,
+                premultiplied: true,
+                ..PixelExportOptions::default()
+            },
+        )
+        .expect("pixels");
+    Some(
+        data.pixels()
+            .chunks(16)
+            .map(|p| {
+                f64::from(f32::from_le_bytes([p[12], p[13], p[14], p[15]]))
+            })
+            .collect(),
+    )
+}
+
 #[test]
 fn neighbouring_spans_blur_apart_and_composite_in_order() {
     // Each span's shadow is the blur of its own run, and the second lies
-    // over the first's tail where the two meet: alpha `b + a (1 - b)`, each
-    // blur rounded once and the composite once more.
+    // over the first's tail where the two meet: alpha `b + a (1 - b)`. On
+    // a float page, where nothing rounds them to a level, so that the
+    // composite is held to the exact one and not to whatever Skia's eight
+    // bit source-over makes of two rounded blurs.
     let sigma = 4.0f32;
     let spans = |first: Vec<TextShadow>, second: Vec<TextShadow>| {
         paragraph(&[("Hm", style(24.0, first)), ("Hm", style(24.0, second))])
     };
     for gpu in [false, true] {
-        let sharp = |first: bool| {
-            let cast = vec![shadow(RED, 1.0, 0.0, 0.0)];
-            match first {
-                true => drawn(gpu, &spans(cast, vec![])),
-                false => drawn(gpu, &spans(vec![], cast)),
-            }
+        // Each sharp in the colour its span casts in: under FreeType a
+        // glyph's coverage follows its colour's luminance (Skia's mask
+        // preblend), so a red mask is not the blue one the blur is of.
+        let sharp = |first: bool| match first {
+            true => drawn_float(
+                gpu,
+                &spans(vec![shadow(RED, 1.0, 0.0, 0.0)], vec![]),
+            ),
+            false => drawn_float(
+                gpu,
+                &spans(vec![], vec![shadow(BLUE, 1.0, 0.0, 0.0)]),
+            ),
         };
         let (Some(first), Some(second)) = (sharp(true), sharp(false)) else {
             continue;
         };
-        let blur = |pixels: &[[u8; 4]]| -> Vec<f64> {
-            sampled(&alpha(pixels), SIZE.0 as usize, f64::from(sigma))
-                .into_iter()
-                .map(|v| (v * 255.0).round())
-                .collect()
-        };
+        let blur =
+            |alpha: &[f64]| sampled(alpha, SIZE.0 as usize, f64::from(sigma));
         let (a, b) = (blur(&first), blur(&second));
-        let got = drawn(
+        let got = drawn_float(
             gpu,
             &spans(
                 vec![shadow(RED, 1.0, 0.0, sigma)],
@@ -284,15 +334,14 @@ fn neighbouring_spans_blur_apart_and_composite_in_order() {
             .iter()
             .zip(a.iter().zip(&b))
             .enumerate()
-            .filter(|(_, (p, (a, b)))| {
-                let want = **b + **a * (255.0 - **b) / 255.0;
-                (f64::from(p[3]) - want).abs() > 1.0
+            .filter(|(_, (g, (a, b)))| {
+                (**g - (**b + **a * (1.0 - **b))).abs() > FLOAT_NOISE
             })
-            .map(|(i, (p, (a, b)))| (i, p[3], *a, *b))
+            .map(|(i, (g, (a, b)))| (i, *g, *a, *b))
             .collect();
         assert!(
             off.is_empty(),
-            "gpu {gpu}: {} pixels more than a level off, first {:?}",
+            "gpu {gpu}: {} pixels off the exact composite, first {:?}",
             off.len(),
             &off[..off.len().min(4)],
         );
@@ -301,20 +350,32 @@ fn neighbouring_spans_blur_apart_and_composite_in_order() {
 
 #[test]
 fn a_style_set_in_two_faces_casts_the_blur_of_the_whole_run() {
-    // Oswald has no arrow, so "Ab→Cd" is three glyph runs in one style --
-    // `context2d`'s `a_style_set_in_two_faces_casts_one_shadow` holds that
-    // -- and its shadow is the blur of all three, not three blurs laid over
-    // one another, which lose ink where their tails meet.
-    FontLibrary::new()
-        .register_font_from_path(
-            "ShadowSplitOswald",
-            "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
-        )
-        .expect("a bundled face registers");
+    // Oswald has no omega and Raleway, next in the families, has, so
+    // "AbΩΩCd" is three glyph runs in one style -- `context2d`'s
+    // `a_style_set_in_two_faces_casts_one_shadow` holds that -- and its
+    // shadow is the blur of all three, not three blurs laid over one
+    // another, which lose ink where their tails meet. Both faces are
+    // bundled, so the split is the same wherever the test runs.
+    let library = FontLibrary::new();
+    for (family, file) in [
+        ("ShadowSplitOswald", "Oswald/Oswald-VariableFont_wght.ttf"),
+        (
+            "ShadowSplitRaleway",
+            "Raleway/Raleway-VariableFont_wght.ttf",
+        ),
+    ] {
+        library
+            .register_font_from_path(
+                family,
+                format!("tests/assets/fonts/{file}"),
+            )
+            .expect("a bundled face registers");
+    }
     let shadowed = |sigma: f32| {
         let mut style = style(36.0, vec![shadow((0, 0, 0), 1.0, 0.0, sigma)]);
-        style.font_families = vec!["ShadowSplitOswald".into()];
-        paragraph(&[("Ab→Cd", style)])
+        style.font_families =
+            vec!["ShadowSplitOswald".into(), "ShadowSplitRaleway".into()];
+        paragraph(&[("AbΩΩCd", style)])
     };
     for gpu in [false, true] {
         let Some(sharp) = drawn(gpu, &shadowed(0.0)) else {
