@@ -4144,7 +4144,7 @@ const PAGE_CACHE_SIZE: usize = 64;
 /// cache and covers what the memoization is for: a handful of canvases being
 /// re-exported. Twenty-one pages at social-card size, five at four times
 /// that, and the count still catches a flood of small ones.
-const PAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const PAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 /// How far below the count bound an eviction pass takes the cache.
 ///

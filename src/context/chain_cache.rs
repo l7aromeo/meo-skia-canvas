@@ -40,6 +40,7 @@ use crate::{
     context::{
         chain::{Outcome, is_on_gpu},
         layer::Group,
+        page::PAGE_CACHE_BYTES,
     },
 };
 
@@ -47,11 +48,12 @@ use crate::{
 /// thread: as many as the page cache keeps, since a result is at most a
 /// page and a page drawn into itself repeatedly needs one per round it
 /// replays. A 900-pixel square at 8 bits is 3.2 MB.
-const CHAIN_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const CHAIN_CACHE_BYTES: usize = PAGE_CACHE_BYTES;
 
 /// The largest single result that is kept, so that one page-sized F32
-/// result cannot push out every smaller one: a 1920 by 1080 page at 8 bits
-/// is 8 MB and is kept; the same page in F32 is 33 MB and is not.
+/// result cannot push out every smaller one: a 1920 by 1080 page is 8.3 MB
+/// at 8 bits and 33.2 MB in F32, and both are kept; a 2560 by 1440 page in
+/// F32 is 59 MB and is not.
 const CHAIN_MAX_BYTES: usize = CHAIN_CACHE_BYTES / 2;
 
 /// What a fill of the cache is cut back to, as a share of

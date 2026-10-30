@@ -297,7 +297,8 @@ fn spectrum(k: &[f64], len: usize) -> Vec<f32> {
 }
 
 /// Pixels a transpose block spans along each side: 16 RGBA pixels of f32 is
-/// 256 bytes, four cache lines, per row read.
+/// 256 bytes per row read, four 64-byte cache lines on x86-64 and most Arm
+/// cores, and two of the 128-byte lines of Apple silicon.
 const BLOCK: usize = 16;
 
 /// Writes the transpose of `src`, `height` rows of `width` RGBA pixels,

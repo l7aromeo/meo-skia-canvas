@@ -289,12 +289,14 @@ fn split(base: &Matrix) -> Option<(Matrix, Matrix)> {
 ///   notes.
 /// - That layer costs a second target the page's size, at the page's sample
 ///   count, for as long as [`layer_surface`] says Skia keeps it.
-/// - Where Skia refuses one, the layer is the region alone, widened to an even
-///   left edge and a bottom an even number of pixels from the page's: Metal's
-///   surfaces have their origin at the bottom, and an odd offset either way
-///   moved a rounded rectangle's corners by up to 7 levels. Blurred by 2px it
-///   moved 80 to 132 pixels of one; the region-sized layer at even edges moved
-///   none.
+/// - On the GPU the region is widened to an even left edge and a bottom an even
+///   number of pixels from the page's, whichever layer it is drawn in, so that
+///   where Skia refuses the page-sized one the layer can be the region alone:
+///   Metal's surfaces have their origin at the bottom, and an odd offset either
+///   way moved a rounded rectangle's corners by up to 7 levels. Blurred by 2px
+///   it moved 80 to 132 pixels of one; the region-sized layer at even edges
+///   moved none. In the page-sized layer the widening reads and writes at most
+///   one more column and one more row of the blur.
 ///
 /// A layer the rest of the transform maps onto the device is not in its
 /// pixels, and is left where the region puts it.
