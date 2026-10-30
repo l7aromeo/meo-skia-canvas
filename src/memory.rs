@@ -81,7 +81,8 @@ use std::{
 };
 
 use crate::context::{
-    blur_mask::release_cached_masks, page::release_cached_pages,
+    blur_mask::release_cached_masks, chain_cache::release_cached_chains,
+    page::release_cached_pages,
 };
 #[cfg(feature = "node-addon")]
 use crate::node::idle::release_font_caches;
@@ -213,6 +214,7 @@ fn reclaim() {
     // trim cannot hand back a page something is still using.
     release_cached_pages();
     release_cached_masks();
+    release_cached_chains();
     trim();
 }
 

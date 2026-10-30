@@ -386,6 +386,77 @@ read the math functions and every length unit.
 
 ### Fixed
 
+- **A rectangle the closed-form blur cannot take is blurred exactly.** A
+  stroked rectangle -- `Context2D::stroke_rect` -- or a dithered one or one played into a
+  pattern, blurred by up to 40px, took Skia's coverage blur: a 6px stroke
+  blurred by 2px read 10.5 levels off the exact blur on the CPU engine and
+  by 8px 5.4. It is blurred on its result now, by the exact Gaussian, as a
+  blurred path is.
+
+- **A blurred rounded rectangle or oval is its exact Gaussian blur.** A
+  flat-colour rounded rectangle or oval, such as `Context2D::round_rect`
+  draws, blurred by up to 10px took Skia's coverage blur, which approximates
+  the Gaussian: a rounded rectangle blurred by 2px read 7.0 levels off it on
+  the CPU engine and 13.6 on the GPU, and by 8px 6.2 and 3.6. It is blurred
+  on its result now, by the exact Gaussian, and reads within half a level on
+  either engine.
+
+- **A rounded rectangle or oval blurred past 10px is its exact Gaussian
+  blur.** Past 10px a flat-colour rounded rectangle or oval that
+  `Context2D::round_rect` draws was blurred on its result by Skia's image
+  blur, which approximates the Gaussian: an 80 by 40 rounded rectangle
+  blurred by 12px read 5.2 levels off it on the CPU engine and 5.4 on the
+  GPU, and by 30px 4.4 and 4.1; a 40px circle 5.0 and 2.1, and 2.3 and 1.8.
+  It is blurred by the exact Gaussian now, and reads within half a level on
+  either engine.
+
+- **An image drawn under a blur is its exact Gaussian blur.** An image
+  drawn with `Context2D::draw_image`, `draw_image_sized` or
+  `draw_image_region` under a filter of blurs and colour functions was
+  blurred by Skia's image filter, as Chrome's is: a 40px red square drawn in
+  and blurred by 8px read 233 ten pixels inside its edge where the exact blur
+  is 228. It is now blurred by the exact Gaussian on either engine, as a
+  blurred path is. A `drop-shadow()`, a shadow, or a composite operation
+  that composites the whole canvas keeps Skia's filter.
+
+- **A blurred path, image or canvas drawn at an alpha is rounded once.** On
+  an eight-bit canvas the blur of an image or a canvas drawn at a global
+  alpha was rounded to a level, then scaled by the alpha and rounded again,
+  and a blurred path drew its colour's alpha, the global alpha included,
+  into what it blurred, and was rounded there first. At an alpha of 0.5
+  every odd level lands on an exact tie: hundreds of pixels of a blurred
+  image, and 1459 of a triangle blurred by 2px, came out a level off. The
+  alpha is now taken into the blur before its one rounding. Text under a
+  `blur()` keeps Skia's filter.
+
+- **A canvas drawn in under a filter spreads past where it is drawn.** A
+  canvas drawn into another with `Context2D::draw_canvas` or
+  `draw_canvas_sized` under `Context2D::set_filter_css` was cut at its
+  destination rectangle: a 40px square blurred by 8px read alpha 0 five
+  pixels outside it, where Chrome reads 72, and a `drop-shadow()` cast past
+  the square was not drawn at all. The rectangle now bounds what is drawn
+  and not what the filter makes of it. A `blur()` and the colour functions
+  are run on the drawn canvas's pixels by the exact Gaussian, as a blurred
+  path is, on either engine; a `drop-shadow()` is still Skia's.
+
+- **A blurred path is the exact Gaussian blur of what it draws.** A
+  flat-colour shape that `Context2D::set_filter_css("blur(...)")` blurs on
+  its result -- any path but a rectangle or a rounded
+  rectangle -- went through Skia's image
+  blur, which approximates the Gaussian: a triangle blurred by 2px read 11
+  levels off it on the CPU engine and 1 on the GPU, as Chrome's does. It is
+  now blurred by the Gaussian sampled at whole-pixel offsets and rounded
+  once, on either engine, on an eight-bit or a float canvas, and at any
+  export density.
+
+- **A large blur inside a `saveLayer` keeps its width at a high density.** A
+  `blur(40px)` rectangle drawn in `Context2D::save_layer` and exported with
+  `ImageDataExport { density: 4, .. }` took Skia's coverage blur, which stops
+  at 128 output pixels where 160 were asked for, and read 48.7 levels off on
+  the CPU and 40.9 on the GPU: which blur it took was decided when it was
+  recorded into the layer, at density 1. It is decided where the page is
+  played back, as it is outside a layer, and the blur is the exact one.
+
 - **Reading a GPU canvas back drains its own autorelease pool.** On macOS,
   `Context2D::get_image_data` and its variants on a GPU canvas make Metal
   objects that are autoreleased. Read from a Node addon's main thread, which
@@ -543,15 +614,14 @@ read the math functions and every length unit.
   a filter already is, and a canvas drawn with nothing to carry stays
   vector. PDF drew all of these correctly and is unchanged.
 
-- **A large blur exported at a high density keeps its width.** A
-  `blur()` on a flat-colour shape is drawn by Skia's coverage blur up to a
-  sigma chosen at density 1, and that blur stops at 128 output pixels: a
-  `blur(40px)` rectangle exported at `density: 4` in `ImageDataExport` or
-  `EncodeOptions`, 160 pixels, came out at 128 and read 49 levels off on the
-  CPU, 41 on the GPU. Which blur a draw gets is now decided where the page
-  is drawn, at the size it is drawn at, and past that limit it takes the
-  blur that reaches it -- within the 7 and 5 levels that blur is off at any
-  density.
+- **A large blur exported at a high density keeps its width.** A `blur()` on a
+  flat-colour shape is drawn by Skia's coverage blur up to a sigma chosen at
+  density 1, and that blur stops at 128 output pixels: a `blur(40px)` rectangle
+  exported at `density: 4` in `ImageDataExport` or `EncodeOptions`, 160 pixels,
+  came out at 128 and read 49 levels off on the CPU, 41 on the GPU. Which blur
+  a draw gets is now decided where the page is drawn, at the size it is drawn
+  at, and past that limit it takes the exact blur of the result -- see "A
+  blurred path is the exact Gaussian blur of what it draws".
 
 - **A paragraph's text shadow keeps its blur at every export density.** A
   `TextShadow`'s `blur_sigma` was sized in output pixels, so a paragraph
@@ -1593,6 +1663,17 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   remember 256 family lists and styles. Past its bound each of the last
   three is dropped whole. All of it is let go when the registered fonts
   change. Nothing drawn changes.
+
+- **On the GPU, an exact blur draws into a second target the page's size.**
+  To draw what it blurs exactly as the page draws it, the GPU engine
+  draws it into a layer the page's size, at the page's sample count: a
+  multisampled target of about 17 MB for a 1200x900 canvas at four samples
+  and 384 MB for 6000x4000. Skia keeps it for the next blurred draw while
+  its GPU cache is within budget, and lets it go once the draw's GPU work
+  has run where it is not. A blurred draw takes about 0.15 ms longer at
+  1200x900 and 1.5 ms at 6000x4000 than in a layer the size of the blur,
+  which drew edges otherwise -- up to 0.13 of a level past a tie -- at some
+  positions on pages from 1408 pixels wide or 3000 tall.
 
 - **`FontSlant::Oblique` and `TextSlant::Oblique` draw as CSS Fonts 4
   matches them, superseding 0.16.0's "`TextSlant::Oblique` now renders the

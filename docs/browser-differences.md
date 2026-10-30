@@ -795,6 +795,42 @@ full progress bar fill with `#0075ff`, and the checkbox's mark is white. The
 other system colours read as Chrome reads them on a canvas, in its light scheme
 on macOS; `tests/assets/cases/css-system-colors.json` has every row.
 
+**A blurred path is the exact Gaussian blur of what it draws, and Chrome's is
+not.** Filter Effects Module Level 1 defines `blur()` as a Gaussian blur whose
+standard deviation is the length given. A rasterised pixel is already its
+shape averaged over the pixel's box, so the blur of what a draw paints is
+those pixels convolved with the Gaussian sampled at whole-pixel offsets, and
+a flat-colour path that is not a rectangle the transform keeps one, which
+the next entry blurs in closed form, is drawn here as exactly that, rounded once at
+whatever alpha it is drawn: within half
+a level on 8-bit pixels on either engine, and on F16 and F32 to the surface's
+precision, as measured on the CPU engine, where a float canvas made for the
+GPU on macOS is drawn. Chrome 156.0.8078.4 headless approximates it, on both of its
+canvases alike. A black triangle on a 160 by 100 canvas, worst levels from
+the exact blur of Chrome's own unblurred triangle:
+
+        sigma        2      8     30
+        here      0.50   0.50   0.50
+        Chrome   11.01   6.24   5.56
+
+Chrome's figures are the ones Skia's image blur gave this library before, to
+the hundredth. An image, or a canvas drawn into another, through a `blur()`
+or a chain of blurs and colour functions is blurred the same way, and
+composited at its `globalAlpha` rounded once: a 40px red square blurred by
+8px reads alpha 72 and 30 five and ten pixels outside it and 228 ten pixels
+inside it here, where Chrome's `drawImage` of it reads 72, 28 and 233. `tests/blur_result.rs`
+holds the pixels, at a density and inside a `saveLayer` too. A draw that its clip cuts is the exception, and
+the same one any clipped draw is: Skia anti-aliases a path its clip does not
+contain by another route, whose edges move by up to 15 levels, and the blur
+is exact on what that route draws. On the CPU engine the page's edge is such
+a clip for a draw past it by more than the blur's reach: an 80 by 40 rounded
+rectangle 40 pixels past the right edge of a 300 by 200 page reads 15 pixels
+off the exact blur of the whole draw blurred by 2px, by at most 0.85 of a
+level, and none off blurred by 8px. The cause is the one in the entry on a
+fill or stroke the page's edge cuts, and it is not worked around for the
+same reason. Within the reach, and on the GPU engine, a blur of a draw past
+the page is the exact blur of all of it.
+
 **A blurred rectangle is its exact Gaussian blur, and Chrome's is not.**
 Filter Effects Module Level 1 defines `blur()` as a Gaussian blur whose
 standard deviation is the length given. Blurring a rectangle by it gives the
@@ -827,9 +863,11 @@ sums to the exact values, and `tests/blur_rect.rs` the pixels. Copying Chrome
 would mean choosing between two approximations that differ from each other by
 more than either differs from the definition.
 
-A rectangle in a canvas drawn into another is replayed as a recording, where
-there are no pixels to draw the blur in, and takes Skia's: its coverage blur
-up to a sigma of 40 and its image blur past it.
+A rectangle in a canvas drawn into another is played onto the page with the
+rest of that canvas, and is drawn in closed form there too: within half a
+level at densities 1 and 2. One played into a picture -- a canvas used as a
+pattern -- has no pixels for the closed form, and is blurred on its result,
+by the exact Gaussian of the entry above.
 
 **A fill or stroke the page's edge cuts is drawn differently far inside the
 page on the CPU engine.** The page's edge cuts a path as a clip does: Skia's
