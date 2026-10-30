@@ -6,6 +6,8 @@
 //! written apart from any code that draws a blur, in f64, reaching eight
 //! sigmas.
 
+use std::f32::consts::TAU;
+
 use meo_skia_canvas::prelude::*;
 
 const SIZE: (f32, f32) = (160.0, 100.0);
@@ -676,6 +678,66 @@ fn a_blurred_image_is_the_exact_gaussian_of_what_it_draws() {
                     misses.is_empty(),
                     "gpu {gpu} sigma {sigma} alpha {global}: {} pixels off \
                      the exact blur, first {:?}",
+                    misses.len(),
+                    &misses[..misses.len().min(4)],
+                );
+            }
+        }
+    }
+}
+
+/// A canvas on `gpu`'s engine with an oval filled in flat black through
+/// `filter`: a 40px circle as `round_rect` draws it, with radii of half its
+/// side, where `rounded` says so, and an 80 by 40 ellipse as `ellipse`
+/// draws it otherwise. `None` where that engine is not available.
+fn oval(gpu: bool, filter: &str, rounded: bool) -> Option<Canvas> {
+    let mut canvas = Canvas::new(SIZE.0, SIZE.1);
+    canvas.set_gpu(gpu);
+    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+        return None;
+    }
+    let ctx = canvas.context();
+    ctx.set_fill_style_css("black").expect("a colour");
+    ctx.set_filter_css(filter).expect("a filter");
+    ctx.begin_path();
+    match rounded {
+        true => ctx
+            .round_rect(60.0, 30.25, 40.0, 40.0, [20.0; 4])
+            .expect("a circle"),
+        false => ctx
+            .ellipse(80.0, 50.25, 40.0, 20.0, 0.0, 0.0, TAU, false)
+            .expect("an ellipse"),
+    };
+    ctx.fill(FillRule::NonZero);
+    Some(canvas)
+}
+
+#[test]
+fn a_blurred_oval_is_the_exact_gaussian_of_what_it_draws() {
+    // A circle `round_rect` draws is an oval to Skia, whose coverage blur
+    // took it up to 10px and whose image blur took it past; an ellipse
+    // `ellipse` draws is a path to Skia, and took the image blur at every
+    // sigma. Both are blurred on their result now.
+    for rounded in [true, false] {
+        for gpu in [false, true] {
+            for sigma in [2.0f32, 8.0, 12.0, 30.0] {
+                let filter = format!("blur({sigma}px)");
+                let (Some(mut drawn), Some(mut blurred)) =
+                    (oval(gpu, "none", rounded), oval(gpu, &filter, rounded))
+                else {
+                    continue;
+                };
+                let drawn: Vec<f64> = alpha(&mut drawn)
+                    .into_iter()
+                    .map(|a| f64::from(a) / 255.0)
+                    .collect();
+                let reference =
+                    sampled(&drawn, SIZE.0 as usize, f64::from(sigma));
+                let misses = misses(&alpha(&mut blurred), &reference);
+                assert!(
+                    misses.is_empty(),
+                    "rounded {rounded} gpu {gpu} sigma {sigma}: {} pixels \
+                     off the exact blur, first {:?}",
                     misses.len(),
                     &misses[..misses.len().min(4)],
                 );
