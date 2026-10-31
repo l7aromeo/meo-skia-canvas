@@ -1,10 +1,12 @@
 #![allow(non_snake_case)]
 use neon::prelude::*;
 use skia_safe::{FilterMode, Matrix, Rect, Shader, Size, TileMode};
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use crate::{
-    context::BoxedContext2D,
+    context::{
+        BoxedContext2D, Context2D, layer::TileSource, page::ExportOptions,
+    },
     node::{
         filter::{SamplingFilter, ScalingOperation},
         image::{BoxedImage, Content},
@@ -20,6 +22,11 @@ pub struct Stamp {
     dims: Size,
     repeat: (TileMode, TileMode),
     matrix: Matrix,
+    /// The page a canvas pattern was made from, which a draw dyed by the
+    /// pattern rasterizes where it is played -- see [`TileSource`]. `None`
+    /// for an image's pattern. `content` holds the page as a document
+    /// writes it.
+    source: Option<Arc<TileSource>>,
 }
 
 #[derive(Clone)]
@@ -45,8 +52,67 @@ impl CanvasPattern {
                 dims,
                 repeat,
                 matrix,
+                source: None,
             })),
         }
+    }
+
+    /// A pattern of the page `ctx` holds now, repeated as `repeat` says.
+    ///
+    /// The page is kept, for a draw dyed by the pattern to rasterize it
+    /// where the draw is played, as the page composites itself -- see
+    /// [`TileSource`]. For a document it is kept as a picture too, so that
+    /// a vector backend can see through it -- but a page that already
+    /// carries someone else's picture pays for its pixels here instead,
+    /// because a picture reached by two paths is replayed twice while being
+    /// recorded once. A page turned into a pattern, painted onto another
+    /// page, and that page turned into a pattern again doubles the eventual
+    /// rasterization each round -- 47, 122, 378, 1409 milliseconds at eight,
+    /// twelve, fourteen and sixteen rounds. One that has only been drawn on
+    /// does not pay, which is what keeps an ordinary pattern cheap and
+    /// leaves it vector. The same rule `node::image::Source::of` follows.
+    pub fn of_page(ctx: &Context2D, repeat: (TileMode, TileMode)) -> Self {
+        let dims = ctx.bounds.size();
+        let content = match ctx.replay_cost() > 0 {
+            true => ctx
+                .source_image(true)
+                .map(Content::Bitmap)
+                .unwrap_or_default(),
+            false => ctx
+                .picture()
+                .map(|picture| Content::Vector(picture, dims))
+                .unwrap_or_default(),
+        };
+        let (text_contrast, text_gamma) = ctx.canvas_text;
+        let options = ExportOptions {
+            color_space: ctx.canvas_color_space.clone(),
+            color_type: ctx.canvas_color_type,
+            surface_color_space: ctx.canvas_color_space.clone(),
+            surface_color_type: ctx.canvas_color_type,
+            text_contrast,
+            text_gamma,
+            ..ExportOptions::default()
+        };
+        let pattern =
+            Self::from_parts(content, dims, repeat, Matrix::new_identity());
+        pattern.stamp.borrow_mut().source =
+            Some(Arc::new(TileSource::new(ctx.page(), options)));
+        pattern
+    }
+
+    /// What a draw dyed by this pattern rasterizes it from where it is
+    /// played -- the canvas's page, the pattern's own transform, and how it
+    /// repeats -- for a canvas's pattern; `None` for an image's, which its
+    /// [`shader`](Self::shader) paints.
+    pub fn tiling(
+        &self,
+    ) -> Option<(Arc<TileSource>, Matrix, (TileMode, TileMode))> {
+        let stamp = self.stamp.borrow();
+        Some((
+            Arc::clone(stamp.source.as_ref()?),
+            stamp.matrix,
+            stamp.repeat,
+        ))
     }
 
     /// Replaces the tile's local transform.
@@ -150,34 +216,7 @@ pub fn from_canvas(mut cx: FunctionContext) -> JsResult<BoxedCanvasPattern> {
     let src = cx.argument::<BoxedContext2D>(1)?;
     let repeat = repetition_arg(&mut cx, 2)?;
 
-    let ctx = src.borrow();
-    let dims = ctx.bounds.size();
-    let matrix = Matrix::new_identity();
-
-    // The same rule `node::image::Source::of` follows, and for the same
-    // reason: a canvas is kept as a picture so that a vector backend can see
-    // through it, and a picture reached by two paths is replayed twice while
-    // being recorded once. A page turned into a pattern, painted onto another
-    // page, and that page turned into a pattern again doubles the eventual
-    // rasterization each round -- 47, 122, 378, 1409 milliseconds at eight,
-    // twelve, fourteen and sixteen rounds.
-    //
-    // So a source that already carries someone else's picture pays for its
-    // pixels here instead. One that has only been drawn on does not, which is
-    // what keeps an ordinary pattern cheap and leaves it vector.
-    let content = match ctx.replay_cost() > 0 {
-        true => ctx
-            .source_image(true)
-            .map(Content::Bitmap)
-            .unwrap_or_default(),
-        false => ctx
-            .picture()
-            .map(|picture| Content::Vector(picture, dims))
-            .unwrap_or_default(),
-    };
-
-    let canvas_pattern =
-        CanvasPattern::from_parts(content, dims, repeat, matrix);
+    let canvas_pattern = CanvasPattern::of_page(&src.borrow(), repeat);
     Ok(cx.boxed(RefCell::new(canvas_pattern)))
 }
 

@@ -433,6 +433,7 @@ impl Canvas {
         let inner = Inner::new(
             space,
             options.color_type.to_skia_color_type(),
+            (options.text_contrast, options.text_gamma),
             (width, height),
         );
         Context2D::from_inner(inner, gpu, options)

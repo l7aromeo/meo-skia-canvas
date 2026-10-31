@@ -213,6 +213,22 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A pattern of a canvas draws the canvas as the canvas draws itself.**
+  `Context2D::create_pattern_from_canvas` filled with Skia's picture shader,
+  which rasterizes the canvas's picture once, at the density it is first
+  drawn at, and always as RGBA8888. So a read or an export at `density: 2`
+  resampled the canvas's blurs, filter chains and `save_layer` groups from
+  density 1 -- a `blur(2px)` rectangle came out up to 16 levels from the
+  canvas's own pixels -- on the GPU engine a `save_layer` under a blur parted
+  at every density, and on Linux, whose native pixels are BGRA, every
+  translucent edge in a pattern came out a level from the canvas's. A draw
+  dyed by a canvas's pattern now rasterizes the canvas as it composites
+  itself, at the density the draw is read at and on the engine it is drawn
+  on, and paints it where the draw covers through the draw's own alpha,
+  blend mode and colour filter: to the byte the pixels a pattern of the
+  canvas's own pixels at that density paints, path, stroke, text, shadow and
+  filter alike. A PDF still writes the pattern from the canvas's picture.
+
 - **A `drop-shadow()` set by `Context2D::set_filter_css` lands in its colour
   exactly on a float canvas.** On a canvas made with `PixelDepth::F16` or
   `PixelDepth::F32`, a shadow was tinted through Skia's blend filter, which

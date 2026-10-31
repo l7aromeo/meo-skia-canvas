@@ -39,7 +39,8 @@ use crate::{
         faint::composited,
         layer::{
             BlurDraw, BlurOp, ClipData, Clipped, Composite, Coverage, CutOp,
-            Group, Layer, LayerRec, Target, holds_a_cut, play_entries,
+            Group, Layer, LayerRec, PatternDraw, Target, holds_a_cut,
+            play_entries,
         },
     },
     encode::{
@@ -1667,6 +1668,39 @@ impl PageRecorder {
         };
         self.file_entry(entry, features);
         self.blur_run = Some(self.frame);
+    }
+
+    /// Files `tile`, a draw dyed by a canvas's pattern -- see [`PatternDraw`]
+    /// -- under `clip`, the frame's clip, as a blur is filed: a piece of
+    /// the frame's run where one is open, which applies the clip, and
+    /// holding the clip itself where none is. Inside an open `saveLayer` it
+    /// is filed among the layer's entries.
+    pub fn append_tile(
+        &mut self,
+        tile: Arc<PatternDraw>,
+        clip: Option<&Path>,
+        features: VectorFeatures,
+    ) {
+        if self.isolated.is_some() {
+            self.flush();
+        }
+        self.settle();
+        // Filed after what is recorded, which filing closes no layer to do.
+        let entry = match self.run.as_mut() {
+            Some(run) => {
+                let (id, shape) = (run.id, run.shape());
+                self.split_run();
+                let tile = Layer::Pattern(tile);
+                Layer::Clipped(Arc::new(Clipped::new(id, &shape, tile)))
+            }
+            None => {
+                self.file_current();
+                let mut tile = Arc::unwrap_or_clone(tile);
+                tile.clip = clip.map(Path::serialize);
+                Layer::Pattern(Arc::new(tile))
+            }
+        };
+        self.file_entry(entry, features);
     }
 
     /// Records the draw `draw` makes, under `matrix`, as a [`CutOp`]: a fill
@@ -3673,7 +3707,7 @@ impl Page {
     /// [`crate::gpu::owner`] for why there is only one. On the CPU there is no
     /// context to own, and rasterizing on the calling worker is what makes an
     /// animation export parallel, so it happens here.
-    fn rasterized(
+    pub(crate) fn rasterized(
         &self,
         options: &ExportOptions,
         engine: RenderingEngine,
@@ -7997,6 +8031,7 @@ mod tests {
                     Layer::Targeted(_) => "pair",
                     Layer::Cut(_) => "cut",
                     Layer::Clipped(_) => "clipped",
+                    Layer::Pattern(_) => "tile",
                 })
                 .collect();
             kinds.join(" ")
