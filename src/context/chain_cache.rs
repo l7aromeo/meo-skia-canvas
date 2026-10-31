@@ -267,7 +267,7 @@ mod tests {
         Canvas,
         context::{
             chain::RUNS,
-            layer::{Composite, LayerRec},
+            layer::{Composite, Entries, LayerRec},
         },
         path::FillRule,
         started,
@@ -279,9 +279,10 @@ mod tests {
             composite: Composite::Layer(LayerRec::default()),
             matrix: Matrix::new_identity(),
             clip: None,
+            entries_clipped: false,
             within: None,
             contents_matrix: Matrix::new_identity(),
-            contents: Arc::new(Vec::new()),
+            contents: Entries::default(),
         })
     }
 

@@ -213,6 +213,30 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A `Paragraph` under a composite operation reaches an SVG, and a PDF
+  composites it.** Drawn under a composite operation other than
+  `source-over`, set by `Context2D::set_global_composite_operation`, a
+  paragraph is composited as one group through a layer, which Skia's SVG
+  backend drops whole, so the SVG held nothing of it; a PDF wrote the
+  blend itself, which its backend composites wrongly. Both now embed the
+  paragraph and what lies beneath it as pixels, as they embed any other
+  blended draw.
+
+- **An SVG of a page with nothing on it is well-formed XML.**
+  `Canvas::to_buffer` with `ImageFormat::Svg` wrote an empty page's root as
+  `<svg ... height="40"/ viewBox="0 0 80 40">`: Skia writes an empty
+  document's root self-closed, and the `viewBox` this crate adds went in
+  after its `/`, so no XML parser read the file. The `viewBox` goes before
+  the `/>` now.
+
+- **An SVG export comes out the same each time.**
+  `Canvas::to_buffer` with `ImageFormat::Svg` named each clip path after a
+  counter Skia's SVG writer shares across the whole process, so the same
+  canvas exported twice, with any other export between, came out under other
+  clip ids, and a file kept under version control or compared by hash
+  changed with nothing in the drawing changed. Clip paths are numbered in
+  the order the document declares them now, from `cl_0`.
+
 - **A `drop-shadow()` set by `Context2D::set_filter_css` lands in its colour
   exactly on a float canvas.** On a canvas made with `PixelDepth::F16` or
   `PixelDepth::F32`, a shadow was tinted through Skia's blend filter, which
@@ -246,7 +270,9 @@ window be changed after it opens.** No signature moves and nothing is removed.
   2515 pixels off the exact blur of its sharp shadow on the CPU engine. Each
   style's run of text on a line now casts its shadow as one, blurred whole
   by the exact Gaussian on either engine, the runs' shadows composited in
-  document order beneath all the text. A PDF or SVG keeps the mask filter.
+  document order beneath all the text. A PDF keeps Skia's mask filter, and
+  an SVG, which has no blur to write, embeds the shadow as pixels beneath
+  the text it keeps as vectors.
 
 - **A `drop-shadow()` is the exact Gaussian blur of what casts it.** A draw
   under a filter holding a `drop-shadow()`, set by
@@ -380,11 +406,16 @@ window be changed after it opens.** No signature moves and nothing is removed.
   no layers and dropped whatever was drawn inside one: a red square in
   `Context2D::save_layer` or `save_layer_with`, in a nested layer, or a
   `Paragraph` drawn in one, exported to `ImageFormat::Svg` as a page without
-  it. A layer holding a draw is now rasterized into the SVG on its own and
-  the rest of the page stays vector; a filtered draw inside a layer, which
-  rasterized the whole page, now rasterizes only its layer as well, and a
-  layer that holds nothing leaves the page vector. PDF drew all of these
-  correctly and stays vector.
+  it. A layer that composites what it holds as it stands -- `save_layer`
+  itself -- keeps its draws as vectors and embeds as pixels only those an
+  SVG cannot write. One under an alpha alone -- `save_layer_with(0.5, ..)`
+  -- is written as an SVG group at that opacity, `<g opacity="0.5">`, its
+  draws taken the same way inside it. Any other layer holding a draw is
+  rasterized into the SVG on its own and the rest of the page stays
+  vector; a filtered draw inside a layer, which rasterized the whole page,
+  now rasterizes only its layer as well, and a layer that holds nothing
+  leaves the page vector. PDF drew all of these correctly and stays
+  vector.
 
 - **A read inside a `saveLayer` no longer ends it.** `get_image_data`, or an
   export, taken while a layer was open closed the layer at that point, and
@@ -468,8 +499,10 @@ window be changed after it opens.** No signature moves and nothing is removed.
   a colour filter.** `Context2D::draw_canvas` under a global alpha below 1
   left the `ImageFormat::Svg` export without the canvas at all: Skia's SVG
   backend draws such a picture through a layer, which it does not have, and
-  dropped it whole. The draw is now rasterized into the SVG, as a shadow or
-  a filter already is, and a canvas drawn with nothing to carry stays
+  dropped it whole. Under an alpha alone the canvas is now written as an
+  SVG group at that opacity, what it drew kept as vectors where the SVG has
+  them; under a colour filter it is rasterized into the SVG, as a shadow or
+  a filter already is; and a canvas drawn with nothing to carry stays
   vector. PDF drew all of these correctly and is unchanged.
 
 - **A large blur exported at a high density keeps its width.** A
