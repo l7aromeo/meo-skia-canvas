@@ -2225,13 +2225,16 @@ impl Context2D {
         // source. A source holding a cut draw is drawn as its entries where
         // the paint has nothing to say, through no layer, so that each target
         // clips the draw its own way -- see `Composite::Plain` -- where the
-        // picture `render_to_canvas` draws holds one way for all.
+        // picture `render_to_canvas` draws holds one way for all. So is a
+        // source the destination crops, so that a raster crops it by
+        // coverage rather than cutting its paths -- see `Group::confine`.
         let drawn = self.faint().drawable(&paint).into_owned();
         let through_paint = carries(source, &drawn);
         let cut = entries
             .as_ref()
             .is_some_and(|entries| holds_a_cut(&entries.layers));
-        if (through_paint || cut)
+        let crops = !dst_rect.contains(matrix.map_rect(picture.cull_rect()).0);
+        if (through_paint || cut || crops)
             && !covers_beyond_the_draw(self.state.global_composite_operation)
         {
             let contents_matrix = Matrix::concat(&self.state.matrix, &matrix);
@@ -4079,6 +4082,141 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The pixels of `canvas` read at `density`, premultiplied.
+    fn premultiplied_at(
+        canvas: &mut crate::canvas::Canvas,
+        density: u32,
+    ) -> Vec<u8> {
+        canvas
+            .to_image_data(
+                None,
+                &crate::pixels::ImageDataExport {
+                    density,
+                    pixels: crate::pixels::PixelExportOptions {
+                        premultiplied: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .expect("pixels")
+            .pixels()
+            .to_vec()
+    }
+
+    /// A page drawn into another through a source rectangle that cuts what
+    /// it draws -- `draw_canvas_region`, crop and destination the same --
+    /// draws inside the crop what the page drawn in whole draws there, to
+    /// the byte, and nothing outside it: as it is, and at an alpha, which
+    /// composites it through a layer; on either engine at every density --
+    /// see `Group::crop`. Applied as a clip, the crop cut the page's paths
+    /// and moved their edges by up to 36 levels on the CPU, and on the GPU
+    /// cut a blur off from what it spread into the crop by 63.
+    #[test]
+    fn a_page_drawn_in_cropped_draws_its_own_pixels_inside_the_crop() {
+        // Each on whole pixels, so that a pixel lies inside or outside it.
+        let crops = [(60.0, 20.0, 80.0, 80.0), (65.0, 10.0, 60.0, 95.0)];
+        // A page holding nothing but a triangle the crops cut, which takes
+        // no route of its own until it is cropped, and `CLIPPED`, with its
+        // blurs and without, which holds a cut draw.
+        let triangle = |gpu: bool| {
+            let mut canvas = crate::canvas::Canvas::new(200.0, 120.0);
+            canvas.set_gpu(gpu);
+            let ctx = canvas.context();
+            ctx.begin_path();
+            ctx.move_to(20.0, 80.0);
+            ctx.line_to(80.0, 15.25);
+            ctx.line_to(140.5, 85.0);
+            ctx.close_path();
+            ctx.fill(crate::path::FillRule::NonZero);
+            canvas
+        };
+        let mut failures = vec![];
+        for gpu in [false, true] {
+            let sources = [
+                ("a triangle", triangle(gpu)),
+                ("CLIPPED", program(&CLIPPED, gpu, true).canvas),
+                (
+                    "CLIPPED unblurred",
+                    program(&unblurred(CLIPPED.to_vec()), gpu, true).canvas,
+                ),
+            ];
+            for (name, mut source) in sources {
+                for alpha in [1.0, 0.5] {
+                    let mut drawn_in = |crop: Option<(f32, f32, f32, f32)>| {
+                        let mut into = crate::canvas::Canvas::new(200.0, 120.0);
+                        into.set_gpu(gpu);
+                        let ctx = into.context();
+                        ctx.set_global_alpha(alpha);
+                        match crop {
+                            Some((x, y, w, h)) => ctx.draw_canvas_region(
+                                &mut source,
+                                x,
+                                y,
+                                w,
+                                h,
+                                x,
+                                y,
+                                w,
+                                h,
+                            ),
+                            None => ctx.draw_canvas(&mut source, 0.0, 0.0),
+                        }
+                        into
+                    };
+                    let mut whole = drawn_in(None);
+                    let mut cropped: Vec<_> = crops
+                        .iter()
+                        .map(|crop| drawn_in(Some(*crop)))
+                        .collect();
+                    for density in 1..=3 {
+                        let page = premultiplied_at(&mut whole, density);
+                        for ((x, y, w, h), into) in
+                            crops.iter().zip(&mut cropped)
+                        {
+                            let drawn = premultiplied_at(into, density);
+                            let d = density as f32;
+                            let width = (200.0 * d) as usize;
+                            let (inside, outside) = drawn
+                                .chunks(4)
+                                .zip(page.chunks(4))
+                                .enumerate()
+                                .fold(
+                                    (0u8, 0u8),
+                                    |(inside, outside), (at, (got, own))| {
+                                        let (col, row) = (
+                                            (at % width) as f32 / d,
+                                            (at / width) as f32 / d,
+                                        );
+                                        let within = (*x..x + w).contains(&col)
+                                            && (*y..y + h).contains(&row);
+                                        match within {
+                                            true => (
+                                                inside.max(farthest(got, own)),
+                                                outside,
+                                            ),
+                                            false => (
+                                                inside,
+                                                outside.max(farthest(
+                                                    got, &[0; 4],
+                                                )),
+                                            ),
+                                        }
+                                    },
+                                );
+                            if inside > 0 || outside > 0 {
+                                failures.push(format!(
+                                    "{name}, gpu {gpu}, alpha {alpha}, {density}x, crop {x},{y}: inside {inside}, outside {outside}"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 
     /// The most two reads part by in any byte.
