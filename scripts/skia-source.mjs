@@ -4,7 +4,7 @@
 //
 //   node scripts/skia-source.mjs env       `SKIA_SOURCE_DIR=<dir>` on a platform with patches, nothing elsewhere
 //   node scripts/skia-source.mjs dir       the directory, prepared or not
-//   node scripts/skia-source.mjs prepare   fetch, sync and patch it once; print the directory
+//   node scripts/skia-source.mjs prepare   make it once, from a tree already here or the network; print the directory
 //
 // Against a local rust-skia checkout (`just use-local-skia`) both `env` and
 // `prepare` do nothing: skia-bindings builds the checkout's own Skia.
@@ -22,6 +22,12 @@
 // patch gets a new directory and a stale one cannot be reused. Once a new one
 // is ready, the others are removed unless a worktree of this repository still
 // builds from one -- the cache is shared by every worktree on the machine.
+//
+// Every tree for a version holds the same checkout, dependencies and gn, and
+// differs from the others only in the patches applied to tracked files. So a
+// new tree is made from one already in the cache where one passes `derive`'s
+// checks -- copied, its sources restored by git, then patched -- and fetched,
+// about 1 GB, only where none does.
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
@@ -31,10 +37,11 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -241,7 +248,7 @@ export function treesInUse(root = ROOT) {
 /**
  * Removes every tree under `cache` that `inUse` does not name, and the partial
  * preparation of each. Nothing is removed when `inUse` is null: a tree left
- * behind costs disk, one removed from under a worktree costs it a fresh fetch.
+ * behind costs disk, one removed from under a worktree costs it a fresh tree.
  */
 export function removeSuperseded(cache, inUse) {
   if (inUse === null) {
@@ -255,6 +262,175 @@ export function removeSuperseded(cache, inUse) {
     if (name.startsWith("skia-") && !inUse.has(name.replace(/\.partial$/, "")))
       rmSync(join(cache, name), { recursive: true, force: true });
   }
+}
+
+/**
+ * The paths, relative to the rust-skia checkout, of the files `patchText`
+ * creates rather than changes: those its hunks take from `/dev/null`.
+ */
+export function patchCreates(patchText) {
+  return [...patchText.matchAll(/^--- \/dev\/null\n\+\+\+ b\/(\S+)/gm)].map(
+    ([, path]) => path,
+  );
+}
+
+/**
+ * Reads the dependencies Skia's DEPS pins, as git-sync-deps reads them: the
+ * file is Python, executed with `Var` defined, and each entry that names a
+ * repository `@` a commit is a checkout under Skia's root.
+ */
+const PINS = `
+import json, sys
+scope = {}
+exec("def Var(x): return vars[x]\\n" + open(sys.argv[1]).read(), scope)
+print(json.dumps({d: v.split("@", 1)[1] for d, v in scope["deps"].items()
+                  if isinstance(v, str) and "@" in v}))
+`;
+
+/** `git` in `cwd`, its output trimmed, or `null` when it fails. */
+function git(cwd, ...args) {
+  try {
+    return execFileSync("git", args, {
+      cwd,
+      env: childEnv(),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Why the tree at `tree` is not a whole preparation of rust-skia `version`,
+ * or `null` when it is: its checkout at the version's tag, Skia's gn in
+ * place, every dependency DEPS pins checked out at its pin and unedited, and
+ * none of the files `created` names, which a patch would have to make.
+ *
+ * What it does not check is the tracked sources, which a patched tree has
+ * changed on purpose: [`restoredRefusal`] does, once they are restored.
+ */
+export function baseRefusal(tree, version, created = []) {
+  const ready = join(tree, READY);
+  if (!existsSync(ready) || readFileSync(ready, "utf8").trim() !== version)
+    return `it is not a finished tree for ${version}`;
+  const checkout = join(tree, "rust-skia");
+  const head = git(checkout, "rev-parse", "HEAD");
+  const tag = git(checkout, "rev-parse", `refs/tags/${version}^{commit}`);
+  if (!head || head !== tag) return `its checkout is not at the ${version} tag`;
+  const skia = sourceDir(tree);
+  if (!existsSync(join(skia, "bin", "gn"))) return "it has no gn";
+  let pins;
+  try {
+    pins = JSON.parse(
+      execFileSync("python3", ["-c", PINS, join(skia, "DEPS")], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }),
+    );
+  } catch {
+    return "its DEPS could not be read";
+  }
+  for (const [directory, pin] of Object.entries(pins)) {
+    const dependency = join(skia, directory);
+    if (git(dependency, "rev-parse", "HEAD") !== pin)
+      return `${directory} is not at the commit DEPS pins`;
+    if (git(dependency, "status", "--porcelain", "--untracked-files=no") !== "")
+      return `${directory} has been edited`;
+  }
+  const present = created.find((path) => existsSync(join(checkout, path)));
+  if (present) return `${present} exists, which a patch creates`;
+  return null;
+}
+
+/**
+ * Why the copy at `tree`, its sources restored, is not the checkout a fresh
+ * clone would make, or `null` when it is: no tracked file of rust-skia or of
+ * its Skia submodule differs from its commit, and Skia is at the commit
+ * rust-skia records for it.
+ */
+export function restoredRefusal(tree) {
+  const checkout = join(tree, "rust-skia");
+  const skia = sourceDir(tree);
+  // First, because rust-skia's own status reports a moved submodule as a
+  // change, which would name the symptom rather than the cause.
+  const recorded = git(checkout, "rev-parse", "HEAD:skia-bindings/skia");
+  if (!recorded || git(skia, "rev-parse", "HEAD") !== recorded)
+    return "Skia is not at the commit rust-skia records";
+  for (const repository of [checkout, skia])
+    if (git(repository, "status", "--porcelain", "--untracked-files=no") !== "")
+      return `${repository} still differs from its commit`;
+  return null;
+}
+
+/**
+ * Copies `from` to `to` sharing its blocks where the filesystem can -- a
+ * clone on APFS, a reflink where Linux has them -- and in full where it
+ * cannot.
+ */
+function copyTree(from, to) {
+  const args =
+    process.platform === "darwin"
+      ? ["-c", "-R", from, to]
+      : ["-a", "--reflink=auto", from, to];
+  execFileSync("cp", args, { stdio: ["ignore", process.stderr.fd, "inherit"] });
+}
+
+/**
+ * Makes `partial` from another tree for `version` already under `cache`
+ * rather than from the network, and returns that tree's name, or `null` when
+ * none would do -- each refused with a line on stderr saying why.
+ *
+ * Every tree for a version has the same checkout, dependencies and gn; they
+ * differ only in the patches applied to tracked files. So a base is copied,
+ * its tracked sources restored by git to their commits, and the result
+ * checked again before the caller patches it. The newest base is tried
+ * first.
+ */
+export function derive(cache, partial, version, created = []) {
+  const name = basename(partial).replace(/\.partial$/, "");
+  let names;
+  try {
+    names = readdirSync(cache);
+  } catch {
+    return null;
+  }
+  const bases = names
+    .filter(
+      (base) =>
+        base.startsWith(`skia-${version}-`) &&
+        base !== name &&
+        !base.endsWith(".partial"),
+    )
+    .map((base) => [base, statSync(join(cache, base)).mtimeMs])
+    .sort((a, b) => b[1] - a[1])
+    .map(([base]) => base);
+  for (const base of bases) {
+    const from = join(cache, base);
+    const before = baseRefusal(from, version, created);
+    if (before) {
+      console.error(`skia-source: not deriving from ${base}: ${before}`);
+      continue;
+    }
+    try {
+      copyTree(from, partial);
+      rmSync(join(partial, READY), { force: true });
+      run("git", ["checkout", "--", "."], { cwd: sourceDir(partial) });
+      run("git", ["checkout", "--", "."], { cwd: join(partial, "rust-skia") });
+    } catch (error) {
+      rmSync(partial, { recursive: true, force: true });
+      console.error(`skia-source: copying ${base} failed: ${error.message}`);
+      continue;
+    }
+    const after = restoredRefusal(partial);
+    if (after) {
+      rmSync(partial, { recursive: true, force: true });
+      console.error(`skia-source: not deriving from ${base}: ${after}`);
+      continue;
+    }
+    return base;
+  }
+  return null;
 }
 
 /** Blocks the thread for `seconds`: the script is synchronous throughout. */
@@ -301,6 +477,35 @@ function prepare() {
   const partial = `${tree}.partial`;
   rmSync(partial, { recursive: true, force: true });
   const checkout = join(partial, "rust-skia");
+  const created = patches().flatMap((patch) =>
+    patchCreates(readFileSync(join(ROOT, patch), "utf8")),
+  );
+  const base = derive(cacheRoot(), partial, lockedVersion(), created);
+  if (base) console.error(`skia-source: derived ${treeName()} from ${base}`);
+  else fetchTree(partial, checkout);
+
+  // `-F0`: a hunk that no longer matches fails here rather than being placed
+  // by guesswork.
+  for (const patch of patches())
+    run("patch", ["-p1", "-F0", "-d", checkout, "-i", join(ROOT, patch)]);
+  writeFileSync(join(partial, READY), `${lockedVersion()}\n`);
+  renameSync(partial, tree);
+
+  // This checkout is one of the worktrees, so the new tree is kept with them.
+  removeSuperseded(cacheRoot(), treesInUse());
+  return sourceDir(tree);
+}
+
+/**
+ * Fetches rust-skia at the locked tag into `checkout`, with Skia's DEPS and
+ * gn: about 1 GB, said so on stderr before it starts, because nothing else
+ * would show a build that is waiting on it.
+ */
+function fetchTree(partial, checkout) {
+  console.error(
+    `skia-source: no tree for ${lockedVersion()} to derive ${treeName()} ` +
+      "from; fetching rust-skia, Skia's dependencies and gn, about 1 GB",
+  );
   // A clone that failed part way leaves a directory git will not clone into,
   // so each try starts from none.
   retry("cloning rust-skia", () => {
@@ -335,16 +540,6 @@ function prepare() {
   retry("fetching gn", () =>
     run("python3", ["bin/fetch-gn"], { cwd: sourceDir(partial) }),
   );
-  // `-F0`: a hunk that no longer matches fails here rather than being placed
-  // by guesswork.
-  for (const patch of patches())
-    run("patch", ["-p1", "-F0", "-d", checkout, "-i", join(ROOT, patch)]);
-  writeFileSync(join(partial, READY), `${lockedVersion()}\n`);
-  renameSync(partial, tree);
-
-  // This checkout is one of the worktrees, so the new tree is kept with them.
-  removeSuperseded(cacheRoot(), treesInUse());
-  return sourceDir(tree);
 }
 
 // Run as a command, not when a test imports `retry`. Both sides resolved, as

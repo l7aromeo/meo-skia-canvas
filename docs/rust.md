@@ -249,7 +249,7 @@ On macOS, the Skia that skia-bindings 0.156.0 downloads waits at most one second
 
 The same Skia's atlas path renderer can also move a pixel of an anti-aliased path's coverage a step up or down, about 50 of 255 levels of alpha, on Metal and on Vulkan alike: it does to a path it places at an atlas row of 512 or more, and where a path lands depends on everything else the same flush draws. The npm package's macOS and Linux binaries cap the atlas at 512 by 512, so no path is placed there; a crate build does not.
 
-To build without either, compile Skia from source with this repository's patches: on macOS `containers/skia-metal-untimed-compile.patch` and `containers/skia-atlas-size.patch`, on Linux the second of those with `containers/skia-brotli-sources.patch`. `node scripts/skia-source.mjs prepare`, run in a checkout of this repository, fetches rust-skia at the matching tag, applies them and prints the directory to set as `SKIA_SOURCE_DIR` for your build. It is about 1 GB, and the build compiles Skia, which takes a few minutes.
+To build without either, compile Skia from source with this repository's patches: on macOS `containers/skia-metal-untimed-compile.patch` and `containers/skia-atlas-size.patch`, on Linux the second of those with `containers/skia-brotli-sources.patch`. `node scripts/skia-source.mjs prepare`, run in a checkout of this repository, fetches rust-skia at the matching tag, applies them and prints the directory to set as `SKIA_SOURCE_DIR` for your build. It is about 1 GB the first time; a later patch list for the same version is made from that tree without downloading anything. The build compiles Skia, which takes a few minutes.
 
 ## Paint
 

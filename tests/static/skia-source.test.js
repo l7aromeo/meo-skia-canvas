@@ -419,3 +419,214 @@ describe("skia-source stands aside for a local rust-skia checkout", () => {
     assert.equal(usesLocalSkia(root), false);
   });
 });
+
+/**
+ * A prepared tree for `version` under `cache`, named `name`, built the way
+ * `prepare` builds one but from local repositories: rust-skia at the
+ * version's tag with Skia as its submodule, one dependency DEPS pins checked
+ * out at its pin, and a gn. `src/a.cc` is the file a patch changes; `patched`
+ * leaves it changed, as a tree with a different patch list would be.
+ */
+function preparedTree(dir, cache, name, version, { patched = true } = {}) {
+  const sources = join(dir, `sources-${name}`);
+  const dependency = repository(join(sources, "dep"), { "dep.c": "dep\n" });
+  const pin = git(dependency, "rev-parse", "HEAD").trim();
+  const skia = repository(join(sources, "skia"), {
+    DEPS: `deps = {"third_party/externals/dep": "${dependency}@${pin}"}\n`,
+    "src/a.cc": "pristine\n",
+  });
+  const rustSkia = repository(join(sources, "rust-skia"), { README: "r\n" });
+  const local = ["-c", "protocol.file.allow=always"];
+  git(
+    rustSkia,
+    ...local,
+    "submodule",
+    "add",
+    "--quiet",
+    skia,
+    "skia-bindings/skia",
+  );
+  git(rustSkia, "commit", "--quiet", "--message", "skia");
+  git(rustSkia, "tag", version);
+
+  const tree = join(cache, name);
+  const checkout = join(tree, "rust-skia");
+  git(
+    dir,
+    ...local,
+    "clone",
+    "--quiet",
+    "--recurse-submodules",
+    "--branch",
+    version,
+    rustSkia,
+    checkout,
+  );
+  const source = join(checkout, "skia-bindings", "skia");
+  git(
+    dir,
+    "clone",
+    "--quiet",
+    dependency,
+    join(source, "third_party", "externals", "dep"),
+  );
+  mkdirSync(join(source, "bin"), { recursive: true });
+  writeFileSync(join(source, "bin", "gn"), "gn\n");
+  if (patched) writeFileSync(join(source, "src", "a.cc"), "patched\n");
+  writeFileSync(join(tree, ".ready"), `${version}\n`);
+  return {
+    tree,
+    checkout,
+    source,
+    dependency: join(source, "third_party", "externals", "dep"),
+  };
+}
+
+// A changed patch list names a new tree, and `prepare` fetched every new tree
+// from the network -- rust-skia, Skia's DEPS and gn, about 1 GB -- though every
+// tree for a version holds the same checkout and dependencies and differs only
+// in the patches applied to tracked files.
+describe("skia-source derives a tree from another of its version", () => {
+  let derive, patchCreates;
+  beforeEach(async () => {
+    ({ derive, patchCreates } = await import(pathToFileURL(SCRIPT).href));
+  });
+
+  test("a patched tree is copied with its sources restored and nothing fetched", (t) => {
+    const dir = scratch(t);
+    const cache = join(dir, "cache");
+    const base = preparedTree(dir, cache, "skia-1.0.0-aaaa", "1.0.0");
+    const partial = join(cache, "skia-1.0.0-bbbb.partial");
+    t.mock.method(console, "error", () => {});
+
+    assert.equal(derive(cache, partial, "1.0.0"), "skia-1.0.0-aaaa");
+    const source = join(partial, "rust-skia", "skia-bindings", "skia");
+    assert.equal(
+      readFileSync(join(source, "src", "a.cc"), "utf8"),
+      "pristine\n",
+    );
+    assert.equal(readFileSync(join(source, "bin", "gn"), "utf8"), "gn\n");
+    assert.equal(
+      readFileSync(
+        join(source, "third_party", "externals", "dep", "dep.c"),
+        "utf8",
+      ),
+      "dep\n",
+    );
+    assert.ok(
+      !existsSync(join(partial, ".ready")),
+      "the caller marks it ready",
+    );
+    // The base is left as it was.
+    assert.equal(
+      readFileSync(join(base.source, "src", "a.cc"), "utf8"),
+      "patched\n",
+    );
+  });
+
+  // Each way a base can fail to be a whole preparation, and what `derive`
+  // must say about it. None may leave a partial tree behind.
+  const defects = [
+    [
+      "its dependency off its pin",
+      ({ dependency }) => {
+        writeFileSync(join(dependency, "dep.c"), "moved\n");
+        git(dependency, "commit", "--quiet", "--all", "--message", "moved");
+      },
+      /is not at the commit DEPS pins/,
+    ],
+    [
+      "its dependency edited",
+      ({ dependency }) => {
+        writeFileSync(join(dependency, "dep.c"), "edited\n");
+      },
+      /has been edited/,
+    ],
+    ["no gn", ({ source }) => rmSync(join(source, "bin", "gn"))],
+    [
+      "a ready mark for another version",
+      ({ tree }) => {
+        writeFileSync(join(tree, ".ready"), "0.9.0\n");
+      },
+      /not a finished tree/,
+    ],
+    [
+      "no ready mark",
+      ({ tree }) => rmSync(join(tree, ".ready")),
+      /not a finished tree/,
+    ],
+    [
+      "its checkout moved off the tag",
+      ({ checkout }) => {
+        writeFileSync(join(checkout, "README"), "moved\n");
+        git(checkout, "commit", "--quiet", "--all", "--message", "moved");
+      },
+      /not at the 1.0.0 tag/,
+    ],
+    [
+      "Skia moved off the commit rust-skia records",
+      ({ source }) => {
+        git(source, "commit", "--quiet", "--allow-empty", "--message", "moved");
+      },
+      /not at the commit rust-skia records/,
+    ],
+  ].map(([what, damage, reason = /no gn/]) => ({ what, damage, reason }));
+
+  for (const { what, damage, reason } of defects)
+    test(`a base with ${what} is refused`, (t) => {
+      const dir = scratch(t);
+      const cache = join(dir, "cache");
+      damage(preparedTree(dir, cache, "skia-1.0.0-aaaa", "1.0.0"));
+      const partial = join(cache, "skia-1.0.0-bbbb.partial");
+      const said = [];
+      t.mock.method(console, "error", (line) => said.push(line));
+
+      assert.equal(derive(cache, partial, "1.0.0"), null);
+      assert.ok(!existsSync(partial), "nothing is left behind");
+      assert.match(said.join("\n"), reason);
+    });
+
+  test("a base that holds a file a patch creates is refused", (t) => {
+    const dir = scratch(t);
+    const cache = join(dir, "cache");
+    const { checkout } = preparedTree(dir, cache, "skia-1.0.0-aaaa", "1.0.0");
+    writeFileSync(join(checkout, "NEW"), "left over\n");
+    const said = [];
+    t.mock.method(console, "error", (line) => said.push(line));
+
+    const partial = join(cache, "skia-1.0.0-bbbb.partial");
+    assert.equal(derive(cache, partial, "1.0.0", ["NEW"]), null);
+    assert.match(said.join("\n"), /NEW exists, which a patch creates/);
+  });
+
+  test("a tree for another version is not considered", (t) => {
+    const dir = scratch(t);
+    const cache = join(dir, "cache");
+    preparedTree(dir, cache, "skia-0.9.0-aaaa", "0.9.0");
+    const said = [];
+    t.mock.method(console, "error", (line) => said.push(line));
+
+    assert.equal(
+      derive(cache, join(cache, "skia-1.0.0-bbbb.partial"), "1.0.0"),
+      null,
+    );
+    assert.deepEqual(said, []);
+  });
+
+  test("the files a patch creates are the ones it takes from /dev/null", () => {
+    const patch = [
+      "--- a/skia-bindings/skia/src/a.cc",
+      "+++ b/skia-bindings/skia/src/a.cc",
+      "@@ -1 +1 @@",
+      "-pristine",
+      "+patched",
+      "--- /dev/null",
+      "+++ b/skia-bindings/skia/src/new.cc",
+      "@@ -0,0 +1 @@",
+      "+new",
+      "",
+    ].join("\n");
+    assert.deepEqual(patchCreates(patch), ["skia-bindings/skia/src/new.cc"]);
+    assert.deepEqual(patchCreates(patch.replace("/dev/null", "a/x")), []);
+  });
+});

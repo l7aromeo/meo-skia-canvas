@@ -96,8 +96,8 @@ ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards ch
 # Installs when node_modules is missing *or* no longer matches bun.lock, which
 # a rebase or merge can move under a warm worktree. scripts/install-deps.mjs
 # says how it tells, and why it is not a `test -d`.
-# The patched Skia tree `dotenv-command` names, fetched once into the cache on
-# macOS and Linux. Nothing on Windows, where skia-bindings builds as it always
+# The patched Skia tree `dotenv-command` names, made once into the cache on
+# macOS and Linux, from a tree already there where one will do. Nothing on Windows, where skia-bindings builds as it always
 # has.
 [private]
 ensure-skia-source:
