@@ -156,12 +156,17 @@ pub struct Context2D {
     /// what a pattern made from it rasterizes it with -- see
     /// [`CanvasOptions::text_contrast`](crate::canvas::CanvasOptions::text_contrast).
     pub(crate) canvas_text: (f32, f32),
+    /// `canvas_color_space` as the one of this crate's spaces it is, fixed
+    /// with it: what a draw on a page keeping two recordings converts its
+    /// colour into, found once rather than by comparing Skia's hashes of
+    /// each space this crate names at every draw.
+    canvas_pixels: Option<PixelColorSpace>,
     /// What the surface `canvas_color_type` composites in does with a
     /// paint too faint for eight bits, fixed with it.
     faint: Faint,
     recorder: RefCell<PageRecorder>,
     /// The last exact colour a pixels recording painted with and its shader,
-    /// so that a run of draws in one colour holds one image between them
+    /// so that a run of draws in one colour holds one shader between them
     /// rather than one each -- see [`Self::exact_paint`].
     exact_shader: RefCell<Option<(ExactColour, SkShader)>>,
     /// The same for text: the last exact colour, the plain colour beside
@@ -621,13 +626,15 @@ impl Context2D {
         dims: impl Into<Size>,
     ) -> Self {
         let bounds = Rect::from_size(dims);
-        let dual = keeps_two_recordings(&canvas_color_space, canvas_color_type);
+        let dual = keeps_two_recordings(&canvas_color_space);
+        let canvas_pixels = PixelColorSpace::matching(&canvas_color_space);
 
         Context2D {
             bounds,
             canvas_color_space,
             canvas_color_type,
             canvas_text,
+            canvas_pixels,
             faint: Faint::of(canvas_color_type),
             recorder: RefCell::new(PageRecorder::recording(bounds, dual)),
             exact_shader: RefCell::default(),
@@ -742,15 +749,15 @@ impl Context2D {
         features
     }
 
-    /// Records the draw `f` makes with `paint`, its shadow beneath it, into
-    /// every recording the page keeps. Where the page keeps one for pixels,
-    /// `exact` is the paint that recording draws with instead -- see
-    /// [`Self::exact_paint`].
     /// The paint a page's pixels recording draws `paint` with, where the
     /// page keeps one: the flat colour `style` dyes with, held exactly in the
-    /// page's own space by [`ExactColour::shader`] where Skia's conversion of a
-    /// paint colour would land it off -- see `page::Recorders`. Its alpha
-    /// stays on the paint, which scales the shader's opaque colour.
+    /// page's own space, where Skia's conversion of a paint colour would land
+    /// it off -- see `page::Recorders`. On an eight-bit page the colour and
+    /// its alpha are first placed on the bytes their exact product rounds to
+    /// -- see [`ExactColour::at`] -- and drawn as a plain paint colour where
+    /// Skia lands that on its bytes -- see [`ExactColour::verified_paint`].
+    /// Otherwise, and on a float page, [`ExactColour::shader`] paints the
+    /// colour opaque and the paint's alpha scales it.
     ///
     /// `None` on a page that keeps one recording, for a dye that is not a
     /// flat colour, and for a colour this crate cannot convert into the
@@ -764,6 +771,13 @@ impl Context2D {
             return None;
         }
         let exact = self.exact_colour(style)?;
+        if exact.bytes
+            && matches!(self.state.dye(style), Dye::Color(..))
+            && let Some(placed) = exact.verified_paint(paint)
+        {
+            return Some(placed);
+        }
+        let (exact, alpha) = exact.at(paint.alpha_f());
         let mut held = self.exact_shader.borrow_mut();
         let shader = match &*held {
             Some((colour, shader)) if *colour == exact => shader.clone(),
@@ -774,19 +788,21 @@ impl Context2D {
             }
         };
         let mut paint = paint.clone();
-        paint.set_shader(shader);
+        paint.set_shader(shader).set_alpha_f(alpha);
         Some(paint)
     }
 
     /// The paint a page's pixels recording draws text in `paint` with, where
-    /// the page keeps one: `paint` over a colour shader of its own colour,
-    /// opaque, with [`ExactColour::dye`] replacing that colour -- or, before
-    /// a colour filter `paint` already carries,
-    /// [`ExactColour::dye_keeping_plain_luminance`]. Without a shader Skia
-    /// folds a colour filter into the paint's colour, through the
-    /// conversion the dye exists to avoid; and a colour shader answers the
-    /// luminance Skia sets a glyph mask's contrast from, which an image
-    /// shader does not.
+    /// the page keeps one: on an eight-bit page the placed colour as a plain
+    /// paint colour where Skia lands it and the glyph contrast stays -- see
+    /// [`ExactColour::verified_text_paint`] -- and otherwise `paint` over a
+    /// colour shader of its own colour, opaque, with [`ExactColour::dye`]
+    /// replacing that colour -- or, before a colour filter `paint` already
+    /// carries, [`ExactColour::dye_keeping_plain_luminance`]. Without a
+    /// shader Skia folds a colour filter into the paint's colour, through
+    /// the conversion the dye exists to avoid; and a colour shader answers
+    /// the luminance Skia sets a glyph mask's contrast from, which the shader
+    /// [`ExactColour::shader`] makes does not.
     pub fn exact_text_paint(
         &self,
         paint: &Paint,
@@ -808,6 +824,12 @@ impl Context2D {
         if paint.shader().is_some() {
             return None;
         }
+        if exact.bytes
+            && let Some(placed) = exact.verified_text_paint(paint)
+        {
+            return Some(placed);
+        }
+        let (exact, alpha) = exact.at(paint.alpha_f());
         let mut opaque = paint.color4f();
         opaque.a = 1.0;
         let dye = match paint.color_filter() {
@@ -839,7 +861,7 @@ impl Context2D {
             opaque,
             ColorSpace::new_srgb(),
         ));
-        paint.set_color_filter(dye);
+        paint.set_color_filter(dye).set_alpha_f(alpha);
         Some(paint)
     }
 
@@ -848,10 +870,11 @@ impl Context2D {
     /// it paints as its style named it -- see
     /// `node::oblique::Resolve`. On a page that keeps a recording for
     /// pixels, that recording paints the colour held exactly in the page's
-    /// space, as text in a fill colour does; on a float page that keeps one,
-    /// the colour sRGB-encoded on this side, which Skia then converts by
-    /// the identity onto sRGB -- see [`skia_paint_color_onto`]. Every other
-    /// page and recording draws `paint` as it was built.
+    /// space, as text in a fill colour does, and the document recording
+    /// beside it the colour sRGB-encoded on this side, which Skia then
+    /// converts by the identity onto sRGB -- see [`skia_paint_color_onto`];
+    /// as does a float page that keeps one recording. Every other page
+    /// draws `paint` as it was built.
     pub(crate) fn paragraph_paint(
         &self,
         paint: &Paint,
@@ -862,34 +885,53 @@ impl Context2D {
             return paint.clone();
         };
         match recording {
-            Recording::Pixels => {
-                PixelColorSpace::matching(&self.canvas_color_space)
-                    .and_then(|canvas| {
-                        color_in_canvas_space(*colour, named_in, canvas)
-                    })
-                    .and_then(|rgb| {
-                        let exact = ExactColour {
-                            rgb: rgb.map(|c| c as f32),
-                            space: self.canvas_color_space.clone(),
-                        };
-                        let mut plain = paint.clone();
-                        plain.set_color4f(*colour, Some(named_in));
-                        self.exact_text_paint_in(&plain, exact)
-                    })
-                    .unwrap_or_else(|| paint.clone())
-            }
+            Recording::Pixels => self
+                .canvas_pixels
+                .and_then(|canvas| {
+                    let rgb = color_in_canvas_space(*colour, named_in, canvas)?;
+                    Some(ExactColour::new(
+                        rgb,
+                        self.canvas_color_space.clone(),
+                        canvas,
+                        !self.composites_in_floats(),
+                    ))
+                })
+                .and_then(|exact| {
+                    let mut plain = paint.clone();
+                    plain.set_color4f(*colour, Some(named_in));
+                    self.exact_text_paint_in(&plain, exact)
+                })
+                .unwrap_or_else(|| paint.clone()),
+            Recording::Document => self.encoded(paint, *colour, named_in),
             Recording::Shared if self.composites_in_floats() => {
-                let (colour, space) = skia_paint_color_onto(
-                    *colour,
-                    named_in,
-                    &self.canvas_color_space,
-                );
-                let mut paint = paint.clone();
-                paint.set_color4f(colour, Some(&space));
-                paint
+                self.encoded(paint, *colour, named_in)
             }
-            _ => paint.clone(),
+            Recording::Shared => paint.clone(),
         }
+    }
+
+    /// `paint` in `colour`, named in `space`, as a paint's colour is handed
+    /// to Skia for this page -- see [`skia_paint_color_onto`].
+    fn encoded(
+        &self,
+        paint: &Paint,
+        colour: Color4f,
+        space: &ColorSpace,
+    ) -> Paint {
+        let (colour, space) =
+            skia_paint_color_onto(colour, space, &self.canvas_color_space);
+        let mut paint = paint.clone();
+        paint.set_color4f(colour, Some(&space));
+        paint
+    }
+
+    /// Whether a paragraph is drawn run by run in paints made for this
+    /// page, rather than in the paints it was built with -- see
+    /// [`Self::paragraph_paint`]: on a page that composites in floats, and
+    /// on one that keeps a recording for pixels.
+    pub(crate) fn makes_paragraph_paints(&self) -> bool {
+        self.composites_in_floats()
+            || keeps_two_recordings(&self.canvas_color_space)
     }
 
     /// The flat colour `style` dyes with -- a colour, or a texture's mark --
@@ -904,12 +946,43 @@ impl Context2D {
             Dye::Texture(texture) => texture.color(),
             _ => return None,
         };
-        let canvas = PixelColorSpace::matching(&self.canvas_color_space)?;
+        let canvas = self.canvas_pixels?;
         let rgb = color_in_canvas_space(color, &space, canvas)?;
-        Some(ExactColour {
-            rgb: rgb.map(|c| c as f32),
-            space: self.canvas_color_space.clone(),
-        })
+        Some(ExactColour::new(
+            rgb,
+            self.canvas_color_space.clone(),
+            canvas,
+            !self.composites_in_floats(),
+        ))
+    }
+
+    /// `color`, unpremultiplied in `space`, converted exactly into the page's
+    /// space and placed on the bytes an eight-bit page stores it as -- see
+    /// [`ExactColour::at`] -- tagged with the page's space, on a page that
+    /// keeps a recording for pixels; `None` elsewhere. Asked of the page's
+    /// space rather than of the recorder, which a draw being recorded holds.
+    fn placed_colour(
+        &self,
+        color: Color4f,
+        space: &ColorSpace,
+    ) -> Option<(Color4f, ColorSpace)> {
+        if !keeps_two_recordings(&self.canvas_color_space) {
+            return None;
+        }
+        let canvas = self.canvas_pixels?;
+        let rgb = color_in_canvas_space(color, space, canvas)?;
+        let exact = ExactColour::new(
+            rgb,
+            self.canvas_color_space.clone(),
+            canvas,
+            true,
+        );
+        let (placed, alpha) = exact.at(color.a);
+        let [r, g, b] = placed.rgb;
+        Some((
+            Color4f::new(r, g, b, alpha),
+            self.canvas_color_space.clone(),
+        ))
     }
 
     /// Records the draw `f` makes with a paint it is handed, through the
@@ -935,17 +1008,20 @@ impl Context2D {
             (Recording::Pixels, Some(exact)) => exact,
             _ => paint,
         };
-        let render_shadow = |canvas: &SkCanvas, paint: &Paint| {
-            if let Some(shadow_paint) = self.paint_for_shadow(paint) {
-                canvas.save();
-                canvas.set_matrix(
-                    &Matrix::translate(self.state.shadow_offset).into(),
-                );
-                canvas.concat(&self.state.matrix);
-                f(canvas, &shadow_paint);
-                canvas.restore();
-            }
-        };
+        let render_shadow =
+            |canvas: &SkCanvas, paint: &Paint, recording: Recording| {
+                if let Some(shadow_paint) =
+                    self.paint_for_shadow_in(paint, recording)
+                {
+                    canvas.save();
+                    canvas.set_matrix(
+                        &Matrix::translate(self.state.shadow_offset).into(),
+                    );
+                    canvas.concat(&self.state.matrix);
+                    f(canvas, &shadow_paint);
+                    canvas.restore();
+                }
+            };
 
         match covers_beyond_the_draw(self.state.global_composite_operation) {
             true => {
@@ -960,7 +1036,7 @@ impl Context2D {
                     layer_recorder.begin_recording(self.bounds, true);
                     if let Some(layer) = layer_recorder.recording_canvas() {
                         // draw the dropshadow (if applicable)
-                        render_shadow(layer, &layer_paint);
+                        render_shadow(layer, &layer_paint, recording);
                         // draw normally
                         layer.set_matrix(&self.state.matrix.into());
                         f(layer, &layer_paint);
@@ -988,7 +1064,7 @@ impl Context2D {
             false => {
                 self.append_draw(features, |canvas, recording| {
                     // draw the dropshadow (if applicable)
-                    render_shadow(canvas, paint);
+                    render_shadow(canvas, paint, recording);
                     // draw with the normal paint
                     f(canvas, paint_for(recording));
                 });
@@ -1856,6 +1932,11 @@ impl Context2D {
         let paint = self.paint_for_drawing(style, coverage);
         let features = self.vector_features(&paint, Some(style));
         let exact = self.exact_paint(&paint, style);
+        // A texture's mark held exactly, asked for here because the draw
+        // below runs while the recorder is held -- see `place_mark`.
+        let mark = matches!(self.state.dye(style), Dye::Texture(_))
+            .then(|| self.exact_colour(style))
+            .flatten();
         if let Some(clip) = self.cut_clip(&path, &paint, style) {
             let (matrix, faint) = (self.state.matrix, self.faint());
             self.with_recorder(|mut recorder| {
@@ -1930,6 +2011,13 @@ impl Context2D {
                         device_pixel,
                         self.onto().as_ref(),
                     );
+                    let mark_alpha = tile_paint.alpha_f();
+                    place_mark(
+                        &mut tile_paint,
+                        paint,
+                        mark.as_ref(),
+                        mark_alpha,
+                    );
 
                     let enclosing_frame = Path::rect(expanded_bounds, None);
 
@@ -1975,6 +2063,12 @@ impl Context2D {
                             fill_paint
                                 .set_alpha_f(fill_paint.alpha_f() * thinned);
                         }
+                        place_mark(
+                            &mut fill_paint,
+                            paint,
+                            mark.as_ref(),
+                            mark_alpha,
+                        );
                         if let Some(fill_path) =
                             stencil.op(&textured_frame, PathOp::Intersect)
                         {
@@ -2824,9 +2918,9 @@ impl Context2D {
             let faint = self.faint();
             // On a page that keeps a recording for pixels, text there takes
             // its colour exactly through a dye -- see `exact_text_paint` --
-            // rather than the image shader a fill takes: Skia sets a glyph
-            // mask's contrast from the luminance of the paint's colour,
-            // which an image shader does not report, so text through one is
+            // rather than the shader a fill takes: Skia sets a glyph mask's
+            // contrast from the luminance of the paint's colour, which that
+            // shader does not report, so text through one is
             // read as mid-grey and drawn with heavier edges -- 360 pixels of
             // a bold 40px run on a Display P3 F32 page.
             let dyed = self.exact_text_paint(&paint, style);
@@ -3152,6 +3246,23 @@ impl Context2D {
     }
 
     pub fn paint_for_shadow(&self, base_paint: &Paint) -> Option<Paint> {
+        self.paint_for_shadow_in(base_paint, Recording::Shared)
+    }
+
+    /// [`Self::paint_for_shadow`] in `recording`. On an eight-bit page that
+    /// keeps a recording for pixels, that recording casts the shadow in its
+    /// colour's exact conversion placed on the bytes it stores -- see
+    /// [`ExactColour::at`] -- which is how a fill of the colour lands, and
+    /// which Skia's approximate conversion of the colour the shadow filter
+    /// holds cannot move off them: it moves a colour by about 6e-5, under
+    /// a fiftieth of a level. Converted from sRGB instead, the shadow of a
+    /// rectangle in `color(display-p3 0.00196 0.00196 0.00196)` stored
+    /// 1, 0, 0 where the fill stores 1, 1, 1.
+    fn paint_for_shadow_in(
+        &self,
+        base_paint: &Paint,
+        recording: Recording,
+    ) -> Option<Paint> {
         let (shadow_color, shadow_space) = &self.state.shadow_color;
         let mut shadow_blur = self.state.shadow_blur;
         if !self.casts_shadow() {
@@ -3183,11 +3294,19 @@ impl Context2D {
             }
         }
         let mut paint = base_paint.clone();
-        let (mut shadow_color, shadow_space) = skia_paint_color_onto(
-            *shadow_color,
-            shadow_space,
-            &self.canvas_color_space,
-        );
+        let placed = match recording {
+            Recording::Pixels if !self.composites_in_floats() => {
+                self.placed_colour(*shadow_color, shadow_space)
+            }
+            _ => None,
+        };
+        let (mut shadow_color, shadow_space) = placed.unwrap_or_else(|| {
+            skia_paint_color_onto(
+                *shadow_color,
+                shadow_space,
+                &self.canvas_color_space,
+            )
+        });
         // On float pixels the paint's own alpha moves into the shadow's
         // colour, which the filter applies to the shape in float: the shape
         // is drawn into the filter's layer, and on Skia's raster backend a
@@ -3358,27 +3477,22 @@ impl Dye {
     }
 }
 
-/// Whether a canvas's picture, carrying `source`'s features, is drawn with
-/// `paint` rather than without one: where the source composites in a mode of
-/// its own, or where the paint says something -- an alpha under one, a blend
-/// mode past source-over, an image filter, a colour filter. See
-/// `Context2D::draw_picture_costing`.
-/// Whether a canvas in `space` and `color_type` keeps a recording for each
-/// kind of target -- see `page::Recorders`: one whose pixels hold a float
-/// and whose space is one a flat colour can be converted into exactly here,
-/// other than sRGB, onto which Skia lands a paint colour exactly itself.
-fn keeps_two_recordings(space: &ColorSpace, color_type: ColorType) -> bool {
-    Faint::of(color_type) == Faint::Kept
-        && matches!(
-            PixelColorSpace::matching(space),
-            Some(
-                PixelColorSpace::SrgbLinear
-                    | PixelColorSpace::DisplayP3
-                    | PixelColorSpace::DisplayP3Linear
-                    | PixelColorSpace::Rec2020
-                    | PixelColorSpace::Rec2020Linear
-            )
-        )
+/// Whether a canvas in `space` keeps a recording for each kind of target --
+/// see `page::Recorders`: one whose space is one a flat colour can be
+/// converted into exactly here, other than sRGB, onto which Skia lands a
+/// paint colour exactly itself.
+///
+/// At any depth. Skia keeps a paint's colour in sRGB and converts it into
+/// the page's space at the draw, through skcms's approximate transfer
+/// function: at eight bits that moved a channel across a rounding boundary
+/// for about one colour in 25, and at every tie between two bytes -- on a
+/// Display P3 canvas `color(display-p3 0.5 0.5 0.5)` filled 127 where an
+/// sRGB canvas fills the same grey 128 -- as at a float depth it moved the
+/// colour itself.
+fn keeps_two_recordings(space: &ColorSpace) -> bool {
+    PixelColorSpace::matching(space).is_some_and(|space| {
+        space != PixelColorSpace::Srgb && space.converts_exactly()
+    })
 }
 
 /// Whether `blend` changes the canvas outside what a draw covers, so that
@@ -3396,6 +3510,35 @@ fn covers_beyond_the_draw(blend: BlendMode) -> bool {
     )
 }
 
+/// `tile`, a paint `CanvasTexture::mix_into` has made from `paint`, given the
+/// mark's colour back where `paint` is the exact one a page that keeps a
+/// recording for pixels draws with: the colour `mark` held exactly in the
+/// page's space, placed at `alpha`, the mark's -- see [`ExactColour::at`].
+/// `mix_into` hands the paint the mark's own colour again, its alpha
+/// unplaced, and the GPU engine stored a translucent mark a premultiplied
+/// level off a fill of its colour on an eight-bit page.
+fn place_mark(
+    tile: &mut Paint,
+    paint: &Paint,
+    mark: Option<&ExactColour>,
+    alpha: f32,
+) {
+    if paint.shader().is_none() {
+        return;
+    }
+    let Some((placed, alpha)) = mark.map(|mark| mark.at(alpha)) else {
+        return;
+    };
+    if let Some(shader) = placed.shader() {
+        tile.set_shader(shader).set_alpha_f(alpha);
+    }
+}
+
+/// Whether a canvas's picture, carrying `source`'s features, is drawn with
+/// `paint` rather than without one: where the source composites in a mode of
+/// its own, or where the paint says something -- an alpha under one, a blend
+/// mode past source-over, an image filter, a colour filter. See
+/// `Context2D::draw_picture_costing`.
 fn carries(source: VectorFeatures, paint: &Paint) -> bool {
     !matches!(
         (
