@@ -213,6 +213,19 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **A canvas drawn in through a source rectangle draws its edges where the
+  canvas does.** `Context2D::draw_canvas_region` given a source rectangle
+  that cuts what the canvas draws clipped it there, and the clip cut every
+  path drawn across it: Skia's anti-aliasing then moved the path's edges
+  however far from the cut, a triangle by up to 28 levels at 156 pixels
+  more than two inside the crop. On the GPU engine the clip also bounded
+  what a blur in the canvas read, so a blur lost what it spread in from
+  past the crop. A canvas drawn in so is now drawn whole and cropped by
+  the rectangle's coverage, and inside the crop draws what it draws
+  uncropped: to the byte on an empty page, and on the CPU within two
+  levels over what a page already holds, where the canvas is composited
+  as one image. A PDF or SVG writes the crop as it did.
+
 - **An SVG export keeps a draw dyed by a canvas's pattern.** SVG names no
   paint server for a pattern made by `create_pattern_from_canvas`, and the
   export wrote such a draw as a bare path, filled black. It now embeds the
@@ -235,14 +248,28 @@ window be changed after it opens.** No signature moves and nothing is removed.
   canvas's own pixels at that density paints, path, stroke, text, shadow and
   filter alike. A PDF still writes the pattern from the canvas's picture.
 
-- **A `Paragraph` under a composite operation reaches an SVG, and a PDF
-  composites it.** Drawn under a composite operation other than
-  `source-over`, set by `Context2D::set_global_composite_operation`, a
-  paragraph is composited as one group through a layer, which Skia's SVG
-  backend drops whole, so the SVG held nothing of it; a PDF wrote the
-  blend itself, which its backend composites wrongly. Both now embed the
-  paragraph and what lies beneath it as pixels, as they embed any other
-  blended draw.
+- **A `Paragraph` under a composite operation reaches an SVG.** Drawn under a
+  composite operation other than `source-over`, set by
+  `Context2D::set_global_composite_operation`, a paragraph is composited as
+  one group through a layer, which Skia's SVG backend drops whole, so the SVG
+  held nothing of it. It now embeds the paragraph and what lies beneath it as
+  pixels, as it embeds any other blended draw; a PDF writes the blend itself
+  -- see below.
+
+- **A PDF writes a composite operation as the blend it is.**
+  `Canvas::to_buffer` with `ImageFormat::Pdf` embedded every draw under a
+  composite operation other than `source-over` as pixels, with everything
+  beneath it, as one JPEG at the export's density, which came out 8 to 38
+  levels off over the blended source when the page was viewed at four times
+  its size. On a canvas in sRGB, a blend is now written into the PDF as the
+  blend mode it is, on a page whose transparency group blends in DeviceRGB,
+  the space its colours are written in; poppler renders every such mode within
+  2 levels of the canvas, and macOS Preview all but the few
+  docs/browser-differences.md lists. `lighter`, `xor`, and `destination-atop`
+  from a source that may be translucent, which PDF has no blend mode for or
+  Skia's PDF backend writes wrongly, are still embedded, and so is every blend
+  on a canvas in any other colour space, since a PDF blends in sRGB where the
+  canvas blends in its own.
 
 - **An SVG of a page with nothing on it is well-formed XML.**
   `Canvas::to_buffer` with `ImageFormat::Svg` wrote an empty page's root as
@@ -1616,6 +1643,16 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   commits, checks them and the dependencies Skia's DEPS pins, and patches
   that: seconds rather than a download. It fetches only where no tree
   passes those checks, and says so before it starts.
+
+- **`Path2D::to_svg` writes numbers exactly and conics as arcs.** Its text
+  changes for any path; the geometry it describes does not. Each number is
+  now the shortest decimal that reads back as the same `f32`, where Skia's
+  writer rounded to eight significant digits, so `from_svg` of the output
+  rebuilds lines, quadratics and cubics exactly. A conic -- what `arc`,
+  `ellipse` and `round_rect` make -- was written as 32 quadratics and is now
+  an SVG `A` arc, which `from_svg` rebuilds as a conic within about a
+  thousandth of a pixel. A conic of weight above 1 is written as the
+  quadratics it was before.
 
 - **On the GPU, an exact blur draws into a second target the page's size.**
   To draw what it blurs exactly as the page draws it, the GPU engine

@@ -471,6 +471,19 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A canvas drawn in through a source rectangle draws its edges where the
+  canvas does.** `drawCanvas()` given a source rectangle that cuts what
+  the canvas draws clipped it there, and the clip cut every path drawn
+  across it: Skia's anti-aliasing then moved the path's edges however far
+  from the cut, a triangle by up to 28 levels at 156 pixels more than two
+  inside the crop. On the GPU the clip also bounded what a blur in the
+  canvas read, so a blur lost what it spread in from past the crop. A
+  canvas drawn in so is now drawn whole and cropped by the rectangle's
+  coverage, and inside the crop draws what it draws uncropped: to the
+  byte on an empty page, and on the CPU within two levels over what a
+  page already holds, where the canvas is composited as one image. A PDF
+  or SVG writes the crop as it did.
+
 - **An SVG export keeps a draw dyed by a canvas's pattern.** SVG names no
   paint server for a canvas's pattern, and the export wrote such a draw as a
   bare path, filled black. It now embeds the draw as pixels, as it does a
@@ -492,13 +505,26 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   canvas's own pixels at that density paints, path, stroke, text, shadow and
   filter alike. A PDF still writes the pattern from the canvas's picture.
 
-- **A `Paragraph` under a composite operation reaches an SVG, and a PDF
-  composites it.** Drawn under a `globalCompositeOperation` other than
-  `source-over`, a paragraph is composited as one group through a layer,
-  which Skia's SVG backend drops whole, so the SVG held nothing of it; a
-  PDF wrote the blend itself, which its backend composites wrongly. Both
-  now embed the paragraph and what lies beneath it as pixels, as they
-  embed any other blended draw.
+- **A `Paragraph` under a composite operation reaches an SVG.** Drawn under a
+  `globalCompositeOperation` other than `source-over`, a paragraph is
+  composited as one group through a layer, which Skia's SVG backend drops
+  whole, so the SVG held nothing of it. It now embeds the paragraph and what
+  lies beneath it as pixels, as it embeds any other blended draw; a PDF writes
+  the blend itself -- see below.
+
+- **A PDF writes a composite operation as the blend it is.** `toBuffer("pdf")`
+  embedded every draw under a `globalCompositeOperation` other than
+  `source-over` as pixels, with everything beneath it, as one JPEG at the
+  export's density, which came out 8 to 38 levels off over the blended source
+  when the page was viewed at four times its size. On a canvas in `"srgb"`, a
+  blend is now written into the PDF as the blend mode it is, on a page whose
+  transparency group blends in DeviceRGB, the space its colours are written
+  in; poppler renders every such mode within 2 levels of the canvas, and macOS
+  Preview all but the few docs/browser-differences.md lists. `lighter`, `xor`,
+  and `destination-atop` from a source that may be translucent, which PDF has
+  no blend mode for or Skia's PDF backend writes wrongly, are still embedded,
+  and so is every blend on a canvas in any other colour space, since a PDF
+  blends in sRGB where the canvas blends in its own.
 
 - **An SVG of a page with nothing on it is well-formed XML.**
   `toBuffer("svg")` wrote an empty page's root as
@@ -1973,6 +1999,21 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
   channel with zero, and is therefore black.
 
 ### Changed
+
+- **`Path2D.d` writes numbers exactly and arcs as arcs.** Its text changes
+  for any path; the geometry it describes does not. Each number is now the
+  shortest decimal that reads back as the same single-precision value,
+  where it was rounded to eight significant digits: `123.400024` was
+  written `123.40002`, which reads back one step lower, so a path set from
+  its own `d` could move. The arcs `arc`, `ellipse` and `roundRect` draw
+  were written as 32 quadratics each, an ellipse taking about 5,080
+  characters; they are now SVG `A` commands, about 220, which read back as
+  the same kind of curve within about a thousandth of a pixel. Filled at
+  1200x1200 on the CPU, a 500x450 ellipse set from its old `d` differed
+  from the original at 3,519 pixels by up to 107 levels, and from its new
+  one at 65 pixels by up to 6; on the GPU the new `d` draws every ellipse
+  tested exactly as the original. A hyperbolic `conicCurveTo`, a weight
+  above 1, still comes out as quadratics, the same ones as before.
 
 - **On the GPU, an exact blur draws into a second target the page's size.**
   To draw what it blurs exactly as the page draws it, the GPU engine

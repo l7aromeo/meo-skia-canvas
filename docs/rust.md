@@ -262,6 +262,7 @@ To build without either, compile Skia from source with this repository's patches
 ## Paths
 
 - `Path2D::from_svg(svg_data, FillRule::{NonZero, EvenOdd})` parses SVG path data (the `d=""` form). Invalid input returns `Error::InvalidSvgPath`.
+- `Path2D::to_svg()` writes it back in absolute commands, each number the shortest decimal that reads back as the same `f32`, so lines, quadratics and cubics round-trip exactly. A conic -- what `arc`, `ellipse` and `round_rect` make -- is written as an SVG `A` arc, which `from_svg` rebuilds as a conic within about a thousandth of a pixel; a conic of weight above 1, which SVG cannot state, as quadratics within 1/1024 of a pixel.
 - `PathBuilder` builds one segment by segment: `move_to`, `line_to`, `bezier_curve_to`, `quadratic_curve_to`, `conic_curve_to`, `arc`, `ellipse`, `arc_to`, `rect`, `round_rect`, `round_rect_elliptical`, `add_path`, `close_path`. Same names, arguments and semantics as the `Context2D` methods, minus the current transform, which belongs to a context. `build(fill_rule)` snapshots without ending the build; `PathBuilder::from_path` starts one from an existing `Path2D`.
 - A negative width or height reverses the winding of `rect` and `round_rect`, as it does in a browser, so a reversed rectangle inside another punches a hole under `NonZero`. Two negatives cancel.
 - `arc_to` and the `round_rect` pair return `Error::InvalidRect` for a negative or non-finite radius.

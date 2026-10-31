@@ -1008,6 +1008,24 @@ draws there as the GPU draws the page.
 `a_page_drawn_into_another_draws_as_it_does_itself` and its neighbours in
 `src/context/mod.rs` hold it.
 
+A canvas drawn in through a source rectangle that cuts what it draws --
+`drawCanvas` with a crop -- is drawn whole and cropped by the rectangle's
+coverage on pixels, on both engines, rather than clipped by it, which on
+the CPU moved its paths' edges as any clip does: a triangle by up to 28
+levels at 156 pixels more than two inside the crop. On the GPU the clip moved
+no edge, but bounded what a blur in the canvas read: a pixel four inside the
+crop parted by 63 at density 3. On the CPU a canvas composited plainly is
+drawn into a layer, which the crop multiplies before it closes. That keeps
+every draw on Skia's legacy blitter -- a clip shader would put each through
+its raster pipeline, a level off for each draw a pixel lies under -- and
+composites the canvas as one image, as `drawImage` does. Over what the page already holds it lands
+within two levels of the same canvas drawn in uncropped, which blends each
+of its draws onto the page in turn: 72 pixels at density 1 over a band of
+colour. On an empty page, through a layer -- at an alpha, under a blend --
+and on the GPU it is that canvas's draw to the byte.
+`a_page_drawn_in_cropped_draws_its_own_pixels_inside_the_crop` holds it. A
+PDF or SVG writes the crop as a clip, as before.
+
 A draw the page's edge also cuts is not exact here either. The route plays the
 draw back on a raster of the page, whose edge cuts it as the next entry
 describes: a triangle from (-30, 80) through (60, 15.25) to (140.5, 95) under a
@@ -1093,3 +1111,39 @@ and none is:
   `SkScan::AAAFillPath` (`SkScan_AntiPath.cpp` line 130); its other branch, at
   lines 87 and 88, fills a path too large for anti-aliasing without it. This
   Skia has no supersampling converter and no setting that selects one.
+
+**A PDF's blend modes render as the canvas's in poppler, and macOS's
+CoreGraphics renders a few of them otherwise.** A composite operation on an
+sRGB canvas is written into the PDF as the blend mode it is, on a page whose
+transparency group blends in DeviceRGB, the space the page's colours are
+written in (`export::pdf`). `lighter`, `xor`, and `destination-atop` under a
+source that may be translucent are not -- PDF has no mode for the first two,
+and Skia's PDF backend writes the third 35 levels off -- so they are embedded
+as pixels with what lies beneath them, as every blend is on a canvas in any
+other colour space. Measured with a rectangle and a circle in
+`rgb(200 40 120)` over two opaque colours, opaque and at an alpha of 0.8,
+against the canvas drawn at four times the size: poppler 26.10 (`pdftoppm`)
+comes within 2 levels of the canvas for every mode the PDF writes, wherever
+the source covers a pixel whole. CoreGraphics, rendering through `sips` on
+macOS 27.2, does too, except:
+
+- `soft-light`, 16 levels off with an opaque source and 14 at 0.8, on every
+  pixel the source covers.
+- At 0.8, `color-burn` 35, `color-dodge` 11 and `source-atop` 5, over the 6
+  levels CoreGraphics puts a translucent `source-over` fill off by with no
+  blend at all.
+- Along an antialiased edge, `color-dodge` and `color-burn` up to 215 and 200
+  levels, on the edge's partly covered pixels.
+
+poppler's figures are held by `tests/pdf_blend.rs`, which renders every
+blend a PDF writes with `pdftoppm` and runs on CI. CoreGraphics' are a
+manual check on macOS: `sips -s format png -Z 800 page.pdf --out page.png`,
+then `sips -m "/System/Library/ColorSync/Profiles/sRGB Profile.icc"
+page.png`, since `sips` renders into Display P3, compared with the canvas
+exported at density 4.
+
+Without a page group CoreGraphics chose a blending space of its own and put
+every separable mode 10 to 51 levels off. Before blends were written natively
+the whole backdrop was embedded as one JPEG at the export's density, and the
+blended source came out 8 to 38 levels off in poppler, on 7,900 to 46,000 of
+its pixels at four times the size.

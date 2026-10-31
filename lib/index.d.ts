@@ -4600,6 +4600,14 @@ export interface Path2D extends CanvasPath {
   /**
    * The path as SVG path data. Readable, writable, and appendable with `+=`.
    *
+   * Read, every number is the shortest decimal that reads back as the same
+   * single-precision value, so setting `d` to what it reads rebuilds the
+   * points of lines and curves exactly. The arcs `arc`, `ellipse` and
+   * `roundRect` draw are written as SVG `A` commands, which read back as the
+   * same curves to within about a thousandth of a pixel; a hyperbolic
+   * `conicCurveTo` (a weight above 1), which SVG cannot state, is written as
+   * quadratics within 1/1024 of a pixel of it.
+   *
    * 🧪 Not in the HTML Canvas standard.
    */
   d: string;
