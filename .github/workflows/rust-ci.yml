@@ -139,7 +139,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/meo-skia-canvas
-          key: ${{ runner.os == 'macOS' && format('skia-source-{0}', hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch')) || format('skia-source-linux-{0}', hashFiles('Cargo.lock', 'containers/skia-brotli-sources.patch')) }}
+          key: ${{ runner.os == 'macOS' && format('skia-source-{0}', hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch', 'containers/skia-atlas-size.patch')) || format('skia-source-linux-{0}', hashFiles('Cargo.lock', 'containers/skia-brotli-sources.patch')) }}
           lookup-only: true
       - name: Prepare the Skia source
         if: steps.cache.outputs.cache-hit != 'true'

@@ -1670,6 +1670,20 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   Not changed: right-to-left text, for which nothing has been measured in
   Chrome.
 
+- **A path drawn on the GPU on macOS keeps all of its coverage.** Skia's
+  atlas path renderer could drop one pixel of an anti-aliased path where it
+  placed the path at row 512 or more of the atlas it rasterises paths into,
+  and where a path lands depends on everything else the same flush draws. An
+  eyelash of `examples/node/animated-eye.js`, drawn after blurred shapes
+  whose masks were rasterised in the same flush, lost the pixel at its tip:
+  it read the alpha of what lay under it alone, 24 where the two composite
+  to 77. When those masks were already cached it did not, so the same page
+  exported differently depending on the pages exported before it. The atlas
+  is capped at 512 by 512 now, so no path is placed there; a full atlas
+  starts another, and a path with a side past 512 pixels goes to Skia's next
+  path renderer. Why row 512 is unknown. Not every frame is order-independent
+  yet -- see Known, and not fixed here.
+
 ### Added
 
 - **CSS Color 4's system colours**, in any case, wherever a colour string
@@ -1949,6 +1963,18 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
   ink, 13% for 12px text at 89 degrees. Below that shear nothing moved: 270
   scenes and the gallery's images are identical on Linux and macOS, and its
   animations on Linux, where their encoding repeats run to run.
+
+### Known, and not fixed here
+
+- **On macOS a GPU frame can still differ by a level at a few pixels with
+  what the GPU drew before it.** Skia's atlas path renderer, again: a
+  blurred shape whose mask is rasterised in the same flush as another
+  blurred fill moves that fill by one level at a handful of pixels, and a
+  mask already cached from an earlier page does not. In
+  `examples/node/animated-eye.js` the first frame's iris differs at 15
+  pixels depending on whether a page with the same shading was exported
+  before it. The cached render is the right one. The cause is not known;
+  this release does not work around it.
 
 ## 📦 ⟩ [v6.0.2] (npm) ⟩ September 16, 2026
 

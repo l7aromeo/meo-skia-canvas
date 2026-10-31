@@ -8,13 +8,13 @@ runs:
   steps:
     # The key is the one the skia-source job saves under: the lock and the
     # platform's patches from `PATCHES` in scripts/skia-source.mjs, which are
-    # what name the tree. macOS keeps the key it has always had, so the caches
-    # build.yml and the clippy legs saved stay valid.
+    # what name the tree. macOS's matches build.yml's, so the clippy legs and
+    # the release build share one cache.
     - name: Restore the Skia source
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/meo-skia-canvas
-        key: ${{ runner.os == 'macOS' && format('skia-source-{0}', hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch')) || format('skia-source-linux-{0}', hashFiles('Cargo.lock', 'containers/skia-brotli-sources.patch')) }}
+        key: ${{ runner.os == 'macOS' && format('skia-source-{0}', hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch', 'containers/skia-atlas-size.patch')) || format('skia-source-linux-{0}', hashFiles('Cargo.lock', 'containers/skia-brotli-sources.patch')) }}
     # The directory is taken by an assignment of its own before it is
     # written out. Inside echo's arguments a failing `prepare` did not fail
     # the step -- `bash -e` does not see a command substitution's status

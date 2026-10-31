@@ -6,18 +6,19 @@
 //   node scripts/check-patched-skia.mjs --self-test
 //
 // rust-skia's prebuilt Skia waits one second for each Metal shader compile
-// and drops the draw when it runs out, and a binary built against it passes
-// every test that does not stall the compiler. Three things have to hold, and
-// each is read from skia-bindings' `output`:
+// and drops the draw when it runs out, and its atlas path renderer can lose a
+// pixel of a path's coverage on Metal; a binary built against it passes every
+// test that does not stall the compiler or land a path where the pixel goes.
+// Three things have to hold, and each is read from skia-bindings' `output`:
 //
 // 1. It built offline from a source tree -- "STARTING OFFLINE BUILD" -- and
 //    did not try a download.
-// 2. ninja compiled `GrMtlUtil.mm`. A build without Metal never does, and
-//    has nothing for this to vouch for.
-// 3. The file it compiled, resolved against the directory ninja ran in, is
-//    the patched one: it defines `GrMtlCompilesWithoutTimeout`, which
-//    containers/skia-metal-untimed-compile.patch adds. An offline build from
-//    an unpatched tree passes the first two and fails this.
+// 2. ninja compiled each file a macOS patch changes. A build without Metal
+//    never compiles `GrMtlUtil.mm`, and has nothing for this to vouch for.
+// 3. Each file it compiled, resolved against the directory ninja ran in, is
+//    the patched one: it holds what only the patch puts there -- see
+//    `PATCHED`. An offline build from an unpatched tree passes the first two
+//    and fails this.
 import {
   existsSync,
   mkdirSync,
@@ -29,9 +30,26 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-/// What only the patched `GrMtlUtil.mm` contains.
-const PATCHED = "GrMtlCompilesWithoutTimeout";
-const COMPILED = /compile (\S+\/src\/gpu\/ganesh\/mtl\/GrMtlUtil\.mm)/;
+/// Each file a macOS patch changes, under Skia's source root, with what only
+/// the patched file contains.
+export const PATCHED = [
+  {
+    // containers/skia-metal-untimed-compile.patch
+    file: "src/gpu/ganesh/mtl/GrMtlUtil.mm",
+    marker: "GrMtlCompilesWithoutTimeout",
+  },
+  {
+    // containers/skia-atlas-size.patch
+    file: "src/gpu/ganesh/ops/AtlasPathRenderer.cpp",
+    marker: "fAtlasMaxSize = 512;",
+  },
+];
+
+/** The ninja line that names `file` compiled, capturing the path it gave. */
+function compiledLine(file) {
+  const escaped = file.replace(/[./]/g, (c) => `\\${c}`);
+  return new RegExp(`compile (\\S+\\/${escaped})`);
+}
 const NINJA_DIR = /^ninja: Entering directory `(.*)'$/m;
 
 /** Why `output` does not show a patched Skia, or `null` when it does. */
@@ -40,14 +58,16 @@ export function refusal(output) {
     return "skia-bindings did not build offline from a source tree";
   if (output.includes("DOWNLOAD AND INSTALL"))
     return "skia-bindings tried to download prebuilt Skia";
-  const compiled = output.match(COMPILED)?.[1];
-  if (!compiled) return "ninja did not compile GrMtlUtil.mm";
   const ninja = output.match(NINJA_DIR)?.[1];
-  if (!ninja) return "the output does not say where ninja ran";
-  const file = resolve(ninja, compiled);
-  if (!existsSync(file)) return `the compiled ${file} is gone`;
-  if (!readFileSync(file, "utf8").includes(PATCHED))
-    return `${file} is not the patched source`;
+  for (const { file, marker } of PATCHED) {
+    const compiled = output.match(compiledLine(file))?.[1];
+    if (!compiled) return `ninja did not compile ${file}`;
+    if (!ninja) return "the output does not say where ninja ran";
+    const path = resolve(ninja, compiled);
+    if (!existsSync(path)) return `the compiled ${path} is gone`;
+    if (!readFileSync(path, "utf8").includes(marker))
+      return `${path} is not the patched source`;
+  }
   return null;
 }
 
@@ -75,21 +95,44 @@ function check(buildDir) {
 function selfTest() {
   const root = join(tmpdir(), `check-patched-skia-${process.pid}`);
   const ninja = join(root, "out", "skia");
-  const mtl = join(root, "skia", "src", "gpu", "ganesh", "mtl");
   mkdirSync(ninja, { recursive: true });
-  mkdirSync(mtl, { recursive: true });
-  const relative = "../../skia/src/gpu/ganesh/mtl/GrMtlUtil.mm";
-  const output = (lines) => lines.join("\n");
-  const good = output([
+  const source = (file) => join(root, "skia", file);
+  const relative = (file) => `../../skia/${file}`;
+  const write = (files) => {
+    for (const { file } of PATCHED) {
+      mkdirSync(join(source(file), ".."), { recursive: true });
+      writeFileSync(source(file), files[file]);
+    }
+  };
+  const patched = Object.fromEntries(
+    PATCHED.map(({ file, marker }) => [file, `before ${marker} after`]),
+  );
+  const good = [
     "STARTING OFFLINE BUILD",
     `ninja: Entering directory \`${ninja}'`,
-    `[1/2] compile ${relative}`,
-  ]);
+    ...PATCHED.map(
+      ({ file }, i) => `[${i + 1}/${PATCHED.length}] compile ${relative(file)}`,
+    ),
+  ].join("\n");
   const cases = [
-    [`if (${PATCHED}()) {`, good, true, "an offline build of the patched file"],
-    ["if (false) {", good, false, "an offline build of the unpatched file"],
+    [patched, good, true, "an offline build of every patched file"],
+    ...PATCHED.map(({ file }) => [
+      { ...patched, [file]: "unpatched" },
+      good,
+      false,
+      `an offline build of an unpatched ${file}`,
+    ]),
+    ...PATCHED.map(({ file }) => [
+      patched,
+      good
+        .split("\n")
+        .filter((line) => !line.endsWith(relative(file)))
+        .join("\n"),
+      false,
+      `no ${file} compiled`,
+    ]),
     [
-      `if (${PATCHED}()) {`,
+      patched,
       good.replace(
         "STARTING OFFLINE BUILD",
         "TRYING TO DOWNLOAD AND INSTALL SKIA BINARIES",
@@ -98,27 +141,21 @@ function selfTest() {
       "a download",
     ],
     [
-      `if (${PATCHED}()) {`,
+      patched,
       `${good}\nDOWNLOAD AND INSTALL FAILED: curl`,
       false,
       "a download tried alongside",
     ],
     [
-      `if (${PATCHED}()) {`,
-      good.replace(`[1/2] compile ${relative}`, ""),
-      false,
-      "no Metal source compiled",
-    ],
-    [
-      `if (${PATCHED}()) {`,
+      patched,
       good.replace(/^ninja: Entering.*$/m, ""),
       false,
       "no ninja directory",
     ],
   ];
   try {
-    for (const [source, text, accepted, what] of cases) {
-      writeFileSync(join(mtl, "GrMtlUtil.mm"), source);
+    for (const [files, text, accepted, what] of cases) {
+      write(files);
       if ((refusal(text) === null) !== accepted) {
         console.error(
           `check-patched-skia self-test: ${what} was ${accepted ? "refused" : "accepted"}`,

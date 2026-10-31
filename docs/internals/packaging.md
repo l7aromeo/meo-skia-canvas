@@ -44,11 +44,16 @@ missing -- a transparent export, a dropped blend -- with nothing reported but a
 line on stderr. `containers/skia-metal-untimed-compile.patch` asks the OS
 version at run time instead, which is what upstream Skia's check does.
 
+The same tree carries `containers/skia-atlas-size.patch`, which caps Ganesh's
+atlas path renderer at a 512-by-512 atlas: on Metal, a path the renderer places
+at an atlas row of 512 or more can lose a pixel of its coverage. The UPSTREAM
+note beside it in `PATCHES` says what is and is not known.
+
 **Build through `just` on macOS and Linux.** The justfile's `dotenv-command`,
 `scripts/skia-source.mjs env`, sets `SKIA_SOURCE_DIR` for every recipe on macOS
 and Linux and on Windows not at all, and `ensure-deps` prepares the tree it
 names: rust-skia at the Cargo.lock tag, Skia's DEPS and gn, and the platform's
-patches from `PATCHES` applied with `-F0` -- the Metal one above on macOS, and
+patches from `PATCHES` applied with `-F0` -- the two above on macOS, and
 on Linux `containers/skia-brotli-sources.patch`, which adds the two brotli
 sources Skia's build list leaves out since M156 and without which a `freetype`
 build fails to link on `kCmdLut` and `BrotliDecoderEnsureStaticInit`. It is

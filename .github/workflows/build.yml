@@ -76,15 +76,15 @@ jobs:
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
 
       # The patched Skia tree the macOS build compiles from -- rust-skia at the
-      # Cargo.lock tag, Skia's DEPS and gn, and
-      # containers/skia-metal-untimed-compile.patch. `just build-release`
-      # prepares it when the cache misses; scripts/skia-source.mjs names it by
-      # version and patch digest, so the key below follows the same two files.
+      # Cargo.lock tag, Skia's DEPS and gn, and macOS's patches from `PATCHES`
+      # in scripts/skia-source.mjs. `just build-release` prepares it when the
+      # cache misses; skia-source names it by version and patch digest, so the
+      # key below follows the lock and the same patches.
       - name: Cache the Skia source
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/meo-skia-canvas
-          key: skia-source-${{ hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch') }}
+          key: skia-source-${{ hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch', 'containers/skia-atlas-size.patch') }}
 
       - name: Build module
         env:

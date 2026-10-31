@@ -8,8 +8,8 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 # tree itself is prepared by `ensure-skia-source`, because this runs on every
 # invocation and must not download. A variable already set in the environment
 # wins. Which patches each platform's tree carries is `PATCHES` in
-# scripts/skia-source.mjs; macOS's is the one below, Linux's the brotli
-# build-list fix noted there.
+# scripts/skia-source.mjs; macOS's are the one below and the atlas-size cap
+# noted there, Linux's the brotli build-list fix noted there.
 #
 # UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
 # Re-check: node --test tests/suite/metal-compile.test.js, against a binary built without SKIA_SOURCE_DIR
