@@ -471,6 +471,15 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **`restore()` brings back the filters and object styles `save()` saved.**
+  Since 6.0.0, after `save()`, a change and `restore()`, reading
+  `maskFilter`, `imageFilter` or `colorFilter` returned the filter set inside
+  the save, and so did `fillStyle` or `strokeStyle` where the saved style and
+  the one set inside were both a gradient, pattern, texture or shader. Drawing
+  used the restored state; only what the properties read back was wrong.
+  `reset()` and setting the canvas's `width` or `height` now clear them too,
+  along with what was saved.
+
 - **A `drop-shadow()` in `ctx.filter` lands in its colour exactly on a float
   canvas.** On a canvas made with `colorType: "RGBAF16"` or `"RGBAF32"`, a
   shadow was tinted through Skia's blend filter, which converts its colour
