@@ -1957,6 +1957,21 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
 
 ### Changed
 
+- **`Path2D.d` writes numbers exactly and arcs as arcs.** Its text changes
+  for any path; the geometry it describes does not. Each number is now the
+  shortest decimal that reads back as the same single-precision value,
+  where it was rounded to eight significant digits: `123.400024` was
+  written `123.40002`, which reads back one step lower, so a path set from
+  its own `d` could move. The arcs `arc`, `ellipse` and `roundRect` draw
+  were written as 32 quadratics each, an ellipse taking about 5,080
+  characters; they are now SVG `A` commands, about 220, which read back as
+  the same kind of curve within about a thousandth of a pixel. Filled at
+  1200x1200 on the CPU, a 500x450 ellipse set from its old `d` differed
+  from the original at 3,519 pixels by up to 107 levels, and from its new
+  one at 65 pixels by up to 6; on the GPU the new `d` draws every ellipse
+  tested exactly as the original. A hyperbolic `conicCurveTo`, a weight
+  above 1, still comes out as quadratics, the same ones as before.
+
 - **On the GPU, an exact blur draws into a second target the page's size.**
   To draw what it blurs exactly as the page draws it, the GPU engine
   draws it into a layer the page's size, at the page's sample count: a

@@ -1591,6 +1591,16 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Changed
 
+- **`Path2D::to_svg` writes numbers exactly and conics as arcs.** Its text
+  changes for any path; the geometry it describes does not. Each number is
+  now the shortest decimal that reads back as the same `f32`, where Skia's
+  writer rounded to eight significant digits, so `from_svg` of the output
+  rebuilds lines, quadratics and cubics exactly. A conic -- what `arc`,
+  `ellipse` and `round_rect` make -- was written as 32 quadratics and is now
+  an SVG `A` arc, which `from_svg` rebuilds as a conic within about a
+  thousandth of a pixel. A conic of weight above 1 is written as the
+  quadratics it was before.
+
 - **On the GPU, an exact blur draws into a second target the page's size.**
   To draw what it blurs exactly as the page draws it, the GPU engine
   draws it into a layer the page's size, at the page's sample count: a
