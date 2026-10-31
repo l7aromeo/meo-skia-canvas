@@ -1608,6 +1608,15 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Changed
 
+- **`node scripts/skia-source.mjs prepare` makes a tree from one it already
+  has.** docs/rust.md sends a crate build that wants the patched Skia to
+  `prepare`, which fetched every tree it made, about 1 GB, including one
+  for a new patch list over a version it already held. It now copies a
+  tree it holds for the same version, restores the copy's sources to their
+  commits, checks them and the dependencies Skia's DEPS pins, and patches
+  that: seconds rather than a download. It fetches only where no tree
+  passes those checks, and says so before it starts.
+
 - **On the GPU, an exact blur draws into a second target the page's size.**
   To draw what it blurs exactly as the page draws it, the GPU engine
   draws it into a layer the page's size, at the page's sample count: a
