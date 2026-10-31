@@ -4,8 +4,9 @@ use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
     ColorFilter as SkColorFilter, ColorSpace, ColorType, Contains, Data, IRect,
     Image, ImageFilter as SkImageFilter, ImageInfo, MaskFilter as SkMaskFilter,
-    Paint, PaintStyle, Path, PathBuilder, PathFillType, PathOp, Picture,
-    PictureRecorder, Point, Rect, RoundOut, Shader as SkShader, Size, Typeface,
+    Paint, PaintCap, PaintJoin, PaintStyle, Path, PathBuilder, PathFillType,
+    PathOp, Picture, PictureRecorder, Point, Rect, RoundOut,
+    Shader as SkShader, Size, Typeface,
     canvas::SrcRectConstraint::Strict,
     color_filters, dash_path_effect,
     font_style::{FontStyle, Width},
@@ -63,7 +64,8 @@ use crate::{
 use chain::{Step, canvas_reach};
 use faint::Faint;
 use layer::{
-    BlurDraw, Composite, ExactColour, Group, Layer, LayerRec, reach_the_clip,
+    BlurDraw, Composite, ExactColour, Group, Layer, LayerRec, holds_a_cut,
+    reach_the_clip,
 };
 use page::{ExportOptions, Page, PageRecorder, Recording};
 use typesetting::{TextSettings, Typesetting, Typography};
@@ -1454,6 +1456,24 @@ impl Context2D {
         let paint = self.paint_for_drawing(style, coverage);
         let features = self.vector_features(&paint, Some(style));
         let exact = self.exact_paint(&paint, style);
+        if let Some(clip) = self.cut_clip(&path, &paint, style) {
+            let (matrix, faint) = (self.state.matrix, self.faint());
+            self.with_recorder(|mut recorder| {
+                recorder.append_cut(
+                    clip,
+                    matrix,
+                    features,
+                    |canvas, recording| {
+                        let paint = match (recording, exact.as_ref()) {
+                            (Recording::Pixels, Some(exact)) => exact,
+                            _ => &paint,
+                        };
+                        canvas.draw_path(&path, &faint.drawable(paint));
+                    },
+                );
+            });
+            return;
+        }
         self.render_to_canvas(
             &paint,
             exact.as_ref(),
@@ -1564,6 +1584,76 @@ impl Context2D {
                 }
             },
         );
+    }
+
+    /// The clip a fill or stroke of `path` in `paint` is recorded under as a
+    /// [`CutOp`](layer::CutOp): the frame's clip, where it cuts the draw --
+    /// covers part of where the draw can put coverage, and not all of it.
+    ///
+    /// `None` where it leaves the draw whole or misses it, which Skia draws
+    /// alike clipped or not, and for the draws the op does not take: an
+    /// axis-aligned rectangle filled, which Skia draws by a rectangle blitter
+    /// the clip does not move; a texture, whose clip is its own outline; a
+    /// shadow, a filter or a mask filter, each drawn through a layer of its
+    /// own; and a blend that reaches past the draw, which is drawn through a
+    /// picture of its own.
+    fn cut_clip(
+        &self,
+        path: &Path,
+        paint: &Paint,
+        style: PaintStyle,
+    ) -> Option<&Path> {
+        #[cfg(test)]
+        if !ROUTES_CUTS.get() {
+            return None;
+        }
+        let clip = self.state.clip.as_ref()?;
+        let matrix = &self.state.matrix;
+        let rectangle = style == PaintStyle::Fill
+            && matrix.rect_stays_rect()
+            && path.is_rect().is_some();
+        let plain = !rectangle
+            && self.state.texture(style).is_none()
+            && !matches!(
+                self.state.global_composite_operation,
+                BlendMode::SrcIn
+                    | BlendMode::SrcOut
+                    | BlendMode::DstIn
+                    | BlendMode::DstOut
+                    | BlendMode::DstATop
+                    | BlendMode::Src
+            )
+            && paint.image_filter().is_none()
+            && paint.mask_filter().is_none()
+            && !self.casts_shadow();
+        if !plain {
+            return None;
+        }
+        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+        // Re-check: cargo test the_page_edge_moves_pixels_far_inside_the_page
+        // The page's own edge cuts a draw as a clip does -- Skia's analytic
+        // anti-aliasing builds the path's edges against the device bounds
+        // where they do not contain it -- and the op plays the draw back on
+        // a raster of the page, so a draw the page also cuts moves inside
+        // the clip as it does with no clip. Neither cutting the path to the
+        // page first nor a raster wider than the page is exact; the
+        // measurements are in docs/browser-differences.md.
+        let cuts = |drawn: Rect| {
+            !clip.conservatively_contains_rect(drawn)
+                && clip.bounds().intersects(drawn)
+        };
+        // The estimate takes a mitred stroke as reaching its miter limit
+        // everywhere, ten half-widths by default, which would route every
+        // line drawn that near the clip. Where it says cut, a stroke's
+        // outline settles it, which costs a stroker pass on a draw near the
+        // clip and spares the op where the stroke does not reach it.
+        let outlined = style != PaintStyle::Fill
+            && paint.path_effect().is_none()
+            && paint.stroke_width() > 0.0;
+        let cut = cuts(drawn_bounds(path, paint, style, matrix, false))
+            && (!outlined
+                || cuts(drawn_bounds(path, paint, style, matrix, true)));
+        cut.then_some(clip)
     }
 
     pub fn clip_path(&mut self, path: Option<Path>, rule: PathFillType) {
@@ -1737,9 +1827,16 @@ impl Context2D {
         // `LayerRec::open_on` -- wherever the blend composites only where
         // the source lands, which `render_to_canvas` draws as it is: its
         // shadow first, as a group of its own offset from it, then the
-        // source.
+        // source. A source holding a cut draw is drawn as its entries where
+        // the paint has nothing to say, through no layer, so that each target
+        // clips the draw its own way -- see `Composite::Plain` -- where the
+        // picture `render_to_canvas` draws holds one way for all.
         let drawn = self.faint().drawable(&paint).into_owned();
-        if carries(source, &drawn)
+        let through_paint = carries(source, &drawn);
+        let cut = entries
+            .as_deref()
+            .is_some_and(|entries| holds_a_cut(entries));
+        if (through_paint || cut)
             && !covers_beyond_the_draw(self.state.global_composite_operation)
         {
             let contents_matrix = Matrix::concat(&self.state.matrix, &matrix);
@@ -1759,6 +1856,7 @@ impl Context2D {
                     };
                     let composite = match steps.clone().filter(|_| own) {
                         Some(steps) => Composite::Chain { steps, rec },
+                        None if own && !through_paint => Composite::Plain,
                         None => Composite::Layer(rec),
                     };
                     recorder.append_group(
@@ -2132,23 +2230,24 @@ impl Context2D {
             started::raster_from_data(&info, buffer, info.min_row_bytes())
         {
             self.push(); // cache matrix & clip in self.state
-            self.with_canvas(|canvas, _| {
-                let paint = Paint::default();
-                let mut eraser = Paint::default();
-                canvas.restore_to_count(1); // discard current matrix & clip
-                eraser.set_blend_mode(BlendMode::Clear);
-                canvas.draw_image_rect(
-                    &bitmap,
-                    Some((src_rect, Strict)),
-                    dst_rect,
-                    &eraser,
-                );
-                canvas.draw_image_rect(
-                    &bitmap,
-                    Some((src_rect, Strict)),
-                    dst_rect,
-                    &paint,
-                );
+            self.with_recorder(|mut recorder| {
+                recorder.append_unframed(|canvas, _| {
+                    let paint = Paint::default();
+                    let mut eraser = Paint::default();
+                    eraser.set_blend_mode(BlendMode::Clear);
+                    canvas.draw_image_rect(
+                        &bitmap,
+                        Some((src_rect, Strict)),
+                        dst_rect,
+                        &eraser,
+                    );
+                    canvas.draw_image_rect(
+                        &bitmap,
+                        Some((src_rect, Strict)),
+                        dst_rect,
+                        &paint,
+                    );
+                });
             });
             self.pop(); // restore discarded matrix & clip
             return true;
@@ -2881,6 +2980,58 @@ fn coverage_given(path: &Path, rect: bool, matrix: &Matrix) -> Coverage {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// Whether [`Context2D::cut_clip`] routes a cut draw at all on this
+    /// thread: off, a page records every draw as it did before the route,
+    /// the reference the route's vector and GPU playbacks are held to.
+    static ROUTES_CUTS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Where a fill or stroke of `path` in `paint` under `matrix` can put
+/// coverage, in device pixels: the path's bounds, widened by the stroke --
+/// half its width, times the miter limit where joins are mitred and the
+/// square root of two where caps are square -- or, where `outline` is set or
+/// a path effect makes the path drawn, the bounds of the outline Skia fills;
+/// and a pixel either side for anti-aliasing, two for a hairline.
+fn drawn_bounds(
+    path: &Path,
+    paint: &Paint,
+    style: PaintStyle,
+    matrix: &Matrix,
+    outline: bool,
+) -> Rect {
+    let stroked = style != PaintStyle::Fill;
+    let local = match outline || paint.path_effect().is_some() {
+        true => {
+            let mut filled = PathBuilder::new();
+            fill_path_with_paint(path, paint, &mut filled, None, Some(*matrix));
+            *filled.detach().bounds()
+        }
+        false if stroked => {
+            let reach = [
+                1.0,
+                match paint.stroke_join() {
+                    PaintJoin::Miter => paint.stroke_miter(),
+                    _ => 1.0,
+                },
+                match paint.stroke_cap() {
+                    PaintCap::Square => std::f32::consts::SQRT_2,
+                    _ => 1.0,
+                },
+            ]
+            .into_iter()
+            .fold(0.0, f32::max);
+            let half = paint.stroke_width().max(0.0) * 0.5 * reach;
+            path.bounds().with_outset((half, half))
+        }
+        false => *path.bounds(),
+    };
+    let hairline = stroked && paint.stroke_width() <= 0.0;
+    let margin = if hairline { 2.0 } else { 1.0 };
+    matrix.map_rect(local).0.with_outset((margin, margin))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::node::filter::FilterSpec;
@@ -2888,6 +3039,1731 @@ mod tests {
     /// Builds a context the size of a small canvas, as `Canvas::new` does.
     fn context() -> Context2D {
         Context2D::new(ColorSpace::new_srgb(), ColorType::N32, (200.0, 100.0))
+    }
+
+    /// A triangle reaching from x 20 to x 140.5, a third of it right of a
+    /// cut at x 82.
+    fn cut_triangle(ctx: &mut crate::context2d::Context2D) {
+        ctx.begin_path();
+        ctx.move_to(20.0, 80.0);
+        ctx.line_to(80.0, 15.25);
+        ctx.line_to(140.5, 85.0);
+        ctx.close_path();
+        ctx.fill(crate::path::FillRule::NonZero);
+    }
+
+    /// Clips at x 82.
+    fn cut(ctx: &mut crate::context2d::Context2D) {
+        ctx.rect(-10.0, -10.0, 92.0, 200.0);
+    }
+
+    /// Clips to a circle off the pixel grid, which the GPU clips by other
+    /// than a rectangle's bounds.
+    fn circle(ctx: &mut crate::context2d::Context2D) {
+        ctx.arc(90.3, 60.2, 45.3, 0.0, std::f32::consts::TAU, false)
+            .expect("a positive radius");
+    }
+
+    /// A page clipped by the path `clip` makes, with `draw` on it, the route
+    /// on or off.
+    fn clipped_canvas(
+        routed: bool,
+        gpu: bool,
+        clip: fn(&mut crate::context2d::Context2D),
+        draw: fn(&mut crate::context2d::Context2D),
+    ) -> crate::canvas::Canvas {
+        ROUTES_CUTS.set(routed);
+        let mut canvas = crate::canvas::Canvas::new(200.0, 120.0);
+        canvas.set_gpu(gpu);
+        {
+            let ctx = canvas.context();
+            ctx.begin_path();
+            clip(ctx);
+            ctx.clip(crate::path::FillRule::NonZero);
+            ctx.set_line_width(3.3);
+            draw(ctx);
+        }
+        ROUTES_CUTS.set(true);
+        canvas
+    }
+
+    /// `document` with each clip's id renumbered in the order it first
+    /// appears: Skia names an SVG's clips `cl_` and the clip's generation in
+    /// hexadecimal (`SkSVGDevice.cpp`), from a count the whole process
+    /// shares, so two exports of one page are told apart by nothing else.
+    fn numbered(document: &[u8]) -> Vec<u8> {
+        const PREFIX: &[u8] = b"cl_";
+        let mut seen: Vec<&[u8]> = vec![];
+        let mut out = Vec::with_capacity(document.len());
+        let mut rest = document;
+        while let Some(at) =
+            rest.windows(PREFIX.len()).position(|w| w == PREFIX)
+        {
+            let digits = rest[at + PREFIX.len()..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_hexdigit())
+                .count();
+            let (head, tail) = rest.split_at(at + PREFIX.len());
+            let (id, tail) = tail.split_at(digits);
+            let index = seen
+                .iter()
+                .position(|known| *known == id)
+                .unwrap_or_else(|| {
+                    seen.push(id);
+                    seen.len() - 1
+                });
+            out.extend_from_slice(head);
+            out.extend_from_slice(index.to_string().as_bytes());
+            rest = tail;
+        }
+        out.extend_from_slice(rest);
+        out
+    }
+
+    /// The `CutOp`s among `layers`, among the pieces of a run, and among the
+    /// entries of every group they hold.
+    fn cut_ops(layers: &[layer::Layer]) -> usize {
+        layers
+            .iter()
+            .map(|layer| match layer {
+                layer::Layer::Cut(..) => 1,
+                layer::Layer::Clipped(piece) => {
+                    cut_ops(std::slice::from_ref(piece.entry()))
+                }
+                layer::Layer::Group(group) => cut_ops(&group.contents),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// Only a fill or stroke the clip cuts is recorded as a `CutOp`: not one
+    /// it leaves whole, not one it misses, and not an axis-aligned rectangle
+    /// filled, which Skia draws by a blitter the clip does not move. One
+    /// inside a layer is, among the layer's entries.
+    #[test]
+    fn only_a_draw_the_clip_cuts_records_a_cut_op() {
+        let cuts = |draw: fn(&mut crate::context2d::Context2D)| {
+            let mut canvas = clipped_canvas(true, false, cut, draw);
+            let page = canvas.page(0).expect("a page").inner.page();
+            cut_ops(&page.layers)
+        };
+        assert_eq!(cuts(cut_triangle), 1, "a triangle the clip cuts");
+        assert_eq!(
+            cuts(|ctx| {
+                ctx.begin_path();
+                ctx.move_to(80.5, 20.0);
+                ctx.line_to(80.5, 90.0);
+                ctx.stroke();
+            }),
+            1,
+            "a line the clip misses whose stroke it cuts"
+        );
+        assert_eq!(
+            cuts(|ctx| {
+                ctx.begin_path();
+                ctx.move_to(78.0, 20.0);
+                ctx.line_to(78.0, 90.0);
+                ctx.stroke();
+            }),
+            0,
+            "a stroke wholly inside"
+        );
+        assert_eq!(
+            cuts(|ctx| {
+                ctx.begin_path();
+                ctx.move_to(10.0, 80.0);
+                ctx.line_to(40.0, 15.0);
+                ctx.line_to(70.0, 85.0);
+                ctx.close_path();
+                ctx.fill(crate::path::FillRule::NonZero);
+            }),
+            0,
+            "a triangle wholly inside"
+        );
+        assert_eq!(
+            cuts(|ctx| {
+                ctx.begin_path();
+                ctx.move_to(110.0, 80.0);
+                ctx.line_to(140.0, 15.0);
+                ctx.line_to(170.0, 85.0);
+                ctx.close_path();
+                ctx.fill(crate::path::FillRule::NonZero);
+            }),
+            0,
+            "a triangle wholly outside"
+        );
+        assert_eq!(
+            cuts(|ctx| ctx.fill_rect(40.25, 20.5, 80.0, 50.0)),
+            0,
+            "an aligned rectangle"
+        );
+        assert_eq!(
+            cuts(|ctx| {
+                ctx.save_layer();
+                cut_triangle(ctx);
+                ctx.restore();
+            }),
+            1,
+            "a cut triangle inside a layer"
+        );
+        assert_eq!(
+            cuts(|ctx| {
+                ctx.set_shadow_color_css("red").expect("a colour");
+                ctx.set_shadow_offset(4.0, 4.0);
+                cut_triangle(ctx);
+            }),
+            0,
+            "a cut triangle casting a shadow"
+        );
+        assert_eq!(
+            cuts(|ctx| {
+                ctx.set_filter_css("brightness(50%)").expect("a filter");
+                cut_triangle(ctx);
+            }),
+            0,
+            "a cut triangle through a filter"
+        );
+        assert_eq!(
+            cuts(|ctx| {
+                ctx.set_global_composite_operation(
+                    crate::paint::BlendMode::DestinationIn,
+                );
+                cut_triangle(ctx);
+            }),
+            0,
+            "a cut triangle in a blend reaching past it"
+        );
+        assert_eq!(
+            cuts(|ctx| {
+                ctx.set_fill_texture(&crate::texture::Texture::new(
+                    &crate::texture::TextureOptions::default(),
+                ));
+                cut_triangle(ctx);
+            }),
+            0,
+            "a cut triangle filled with a texture"
+        );
+    }
+
+    /// A cut draw exports to SVG and to PDF exactly as it did before the
+    /// route, and draws on the GPU exactly as it did: only a raster playback
+    /// on the CPU applies its clip as coverage. The GPU half runs where a GPU
+    /// does; under this circle the coverage route moves 50 bytes there.
+    #[test]
+    fn a_cut_draw_exports_to_vectors_and_draws_on_the_gpu_as_it_did() {
+        use crate::export::{EncodeOptions, ImageFormat};
+        fn draw(ctx: &mut crate::context2d::Context2D) {
+            cut_triangle(ctx);
+            ctx.begin_path();
+            ctx.move_to(10.2, 100.4);
+            ctx.line_to(70.7, 20.1);
+            ctx.line_to(150.3, 90.9);
+            ctx.stroke();
+        }
+        for format in [ImageFormat::Svg, ImageFormat::Pdf] {
+            let export = |routed| {
+                clipped_canvas(routed, false, circle, draw)
+                    .to_buffer(format, &EncodeOptions::default())
+                    .expect("an export")
+            };
+            assert!(
+                numbered(&export(true)) == numbered(&export(false)),
+                "{format:?}"
+            );
+        }
+        let gpu = |routed| {
+            let mut canvas = clipped_canvas(routed, true, circle, draw);
+            (canvas.engine_kind() == crate::canvas::EngineKind::Gpu).then(
+                || {
+                    canvas
+                        .to_image_data(
+                            None,
+                            &crate::pixels::ImageDataExport::default(),
+                        )
+                        .expect("pixels")
+                        .pixels()
+                        .to_vec()
+                },
+            )
+        };
+        if let (Some(routed), Some(plain)) = (gpu(true), gpu(false)) {
+            assert!(routed == plain, "the GPU");
+        }
+        // The control: on the CPU the route does change the pixels.
+        let cpu = |routed| {
+            clipped_canvas(routed, false, circle, draw)
+                .to_image_data(None, &crate::pixels::ImageDataExport::default())
+                .expect("pixels")
+                .pixels()
+                .to_vec()
+        };
+        assert!(cpu(true) != cpu(false), "the CPU");
+    }
+
+    /// One step of a program the clip-run pins draw.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Step {
+        /// A small triangle at this height, which a clip around the middle
+        /// of the page contains.
+        Fill(f32),
+        /// A run of text, which records the clip's reach beside it.
+        Text,
+        /// A rectangle filled across the clip's edge, which Skia clips as it
+        /// draws: a filled rectangle never takes the cut route.
+        Rect,
+        /// A blurred fill, which the page keeps as a `BlurOp`.
+        Blur,
+        /// A triangle blurred by `blur(n px)`: by its coverage at 3, and at
+        /// 70, read at density 2, past what a mask filter can draw, by its
+        /// result through `chain`.
+        BlurPath(f32),
+        /// A fill inside a `saveLayer`, which the page keeps as a group.
+        Layer,
+        /// A `clearRect` short of the page, which the page keeps as an
+        /// isolated draw.
+        Clear,
+        /// The triangle `cut_triangle` draws, which the circle cuts.
+        Cut,
+        /// `getImageData` of the whole page, kept to compare.
+        Read,
+        /// An SVG export, kept to compare.
+        Export,
+        /// `save` and a clip to `circle`.
+        Clip,
+        /// `restore`.
+        Restore,
+        /// A translation, which changes the frame and not the clip.
+        Move,
+    }
+
+    impl Step {
+        /// Whether the step puts pixels on the page, rather than reading,
+        /// exporting or changing the frame or the clip.
+        fn draws(self) -> bool {
+            match self {
+                Step::Fill(_)
+                | Step::Text
+                | Step::Rect
+                | Step::Blur
+                | Step::BlurPath(_)
+                | Step::Layer
+                | Step::Clear
+                | Step::Cut => true,
+                Step::Read
+                | Step::Export
+                | Step::Clip
+                | Step::Restore
+                | Step::Move => false,
+            }
+        }
+    }
+
+    /// What a program drew: the page, what each `Export` step exported and
+    /// what each `Read` step read.
+    struct Drawn {
+        canvas: crate::canvas::Canvas,
+        exports: Vec<Vec<u8>>,
+        reads: Vec<Vec<u8>>,
+    }
+
+    /// The page a program's steps draw, on the GPU or the CPU, the cut route
+    /// on or off.
+    fn program(steps: &[Step], gpu: bool, routed: bool) -> Drawn {
+        use crate::export::{EncodeOptions, ImageFormat};
+        ROUTES_CUTS.set(routed);
+        let mut canvas = crate::canvas::Canvas::new(200.0, 120.0);
+        canvas.set_gpu(gpu);
+        let mut exports = vec![];
+        let mut reads = vec![];
+        for step in steps {
+            if *step == Step::Export {
+                exports.push(
+                    canvas
+                        .to_buffer(ImageFormat::Svg, &EncodeOptions::default())
+                        .expect("an export"),
+                );
+                continue;
+            }
+            let ctx = canvas.context();
+            match *step {
+                Step::Fill(y) => {
+                    ctx.begin_path();
+                    ctx.move_to(70.0, y);
+                    ctx.line_to(95.5, y + 9.25);
+                    ctx.line_to(77.0, y + 17.5);
+                    ctx.close_path();
+                    ctx.set_fill_style_css("rgb(30 60 200 / 0.7)")
+                        .expect("a colour");
+                    ctx.fill(crate::path::FillRule::NonZero);
+                }
+                Step::Rect => {
+                    ctx.set_fill_style_css("rgb(20 150 60 / 0.8)")
+                        .expect("a colour");
+                    ctx.fill_rect(100.5, 30.25, 60.0, 40.0);
+                }
+                Step::Blur => {
+                    ctx.set_filter_css("blur(2px)").expect("a filter");
+                    ctx.fill_rect(80.0, 50.0, 20.0, 12.0);
+                    ctx.set_filter_css("none").expect("no filter");
+                }
+                Step::BlurPath(radius) => {
+                    ctx.set_filter_css(&format!("blur({radius}px)"))
+                        .expect("a filter");
+                    ctx.begin_path();
+                    ctx.move_to(75.0, 30.0);
+                    ctx.line_to(105.5, 52.25);
+                    ctx.line_to(82.0, 75.5);
+                    ctx.close_path();
+                    ctx.fill(crate::path::FillRule::NonZero);
+                    ctx.set_filter_css("none").expect("no filter");
+                }
+                Step::Layer => {
+                    ctx.save_layer();
+                    ctx.fill_rect(60.0, 70.0, 25.0, 10.0);
+                    ctx.restore();
+                }
+                Step::Clear => ctx.clear_rect(85.0, 40.0, 6.0, 6.0),
+                Step::Text => {
+                    ctx.set_font_css("16px sans-serif");
+                    ctx.fill_text("Wg", 75.0, 64.0, None);
+                }
+                Step::Cut => {
+                    ctx.set_fill_style_css("rgb(200 40 90)").expect("a colour");
+                    cut_triangle(ctx);
+                }
+                Step::Read => reads.push(
+                    ctx.get_image_data(0.0, 0.0, 200.0, 120.0)
+                        .expect("pixels")
+                        .pixels()
+                        .to_vec(),
+                ),
+                Step::Clip => {
+                    ctx.save();
+                    ctx.begin_path();
+                    circle(ctx);
+                    ctx.clip(crate::path::FillRule::NonZero);
+                }
+                Step::Restore => ctx.restore(),
+                Step::Move => ctx.translate(1.5, 0.75),
+                Step::Export => unreachable!("exported above"),
+            }
+        }
+        ROUTES_CUTS.set(true);
+        Drawn {
+            canvas,
+            exports,
+            reads,
+        }
+    }
+
+    /// The page's SVG, its clips renumbered, and its PDF.
+    fn documents(canvas: &mut crate::canvas::Canvas) -> (Vec<u8>, Vec<u8>) {
+        use crate::export::{EncodeOptions, ImageFormat};
+        let mut export = |format| {
+            canvas
+                .to_buffer(format, &EncodeOptions::default())
+                .expect("an export")
+        };
+        (
+            numbered(&export(ImageFormat::Svg)),
+            export(ImageFormat::Pdf),
+        )
+    }
+
+    /// Draws outside the clip and in it, under two frames of one clip, with
+    /// text, a blurred rectangle and two blurred triangles, a draw that takes
+    /// the cut route, and in each frame a rectangle the clip cuts among them.
+    const CLIPPED: [Step; 15] = [
+        Step::Fill(5.0),
+        Step::Clip,
+        Step::Fill(40.0),
+        Step::Cut,
+        Step::Fill(60.0),
+        Step::Blur,
+        Step::BlurPath(3.0),
+        Step::BlurPath(70.0),
+        Step::Rect,
+        Step::Text,
+        Step::Move,
+        Step::Fill(45.0),
+        Step::Rect,
+        Step::Restore,
+        Step::Fill(95.0),
+    ];
+
+    /// `CLIPPED` with `step` after each of its steps in turn.
+    fn with_each(step: Step) -> Vec<Vec<Step>> {
+        (0..=CLIPPED.len())
+            .map(|at| {
+                let mut steps = CLIPPED.to_vec();
+                steps.insert(at, step);
+                steps
+            })
+            .collect()
+    }
+
+    /// The SVG and PDF of `CLIPPED` drawn with no cut route and no read: one
+    /// clip group a frame.
+    fn plain_documents() -> (Vec<u8>, Vec<u8>) {
+        documents(&mut program(&CLIPPED, false, false).canvas)
+    }
+
+    /// A PDF or SVG of a page is the same document whether or not a draw the
+    /// clip cuts took the cut route between ordinary draws under the clip:
+    /// the clip is written once for each frame it is drawn under, as it is
+    /// for a page drawn straight through.
+    #[test]
+    fn a_cut_draw_does_not_split_a_document_under_one_clip() {
+        let (svg, pdf) = documents(&mut program(&CLIPPED, false, true).canvas);
+        let plain = plain_documents();
+        assert!(svg == plain.0, "SVG");
+        assert!(pdf == plain.1, "PDF");
+    }
+
+    /// The same document whether or not the page was read between any two
+    /// of its draws.
+    #[test]
+    fn a_read_does_not_split_a_document_under_one_clip() {
+        let plain = plain_documents();
+        for steps in with_each(Step::Read) {
+            let (svg, pdf) =
+                documents(&mut program(&steps, false, true).canvas);
+            assert!(svg == plain.0, "SVG of {steps:?}");
+            assert!(pdf == plain.1, "PDF of {steps:?}");
+        }
+    }
+
+    /// The same document whether or not the page was exported between any
+    /// two of its draws.
+    #[test]
+    fn an_export_does_not_split_a_document_under_one_clip() {
+        let plain = plain_documents();
+        for steps in with_each(Step::Export) {
+            let (svg, pdf) =
+                documents(&mut program(&steps, false, true).canvas);
+            assert!(svg == plain.0, "SVG of {steps:?}");
+            assert!(pdf == plain.1, "PDF of {steps:?}");
+        }
+    }
+
+    /// How many clip groups the picture of a page -- what a canvas drawn
+    /// into another, or used as a pattern, is replayed into -- writes when it
+    /// is played into an SVG, which writes one for each clip applied.
+    fn picture_clips(canvas: &mut crate::canvas::Canvas) -> usize {
+        let page = canvas.page(0).expect("a page").inner.page();
+        let picture = page.picture(None).expect("a picture");
+        // The size `program` draws at.
+        let svg =
+            skia_safe::svg::Canvas::new(Rect::from_wh(200.0, 120.0), None);
+        svg.draw_picture(&picture, None, None);
+        let text = svg.end();
+        text.as_bytes()
+            .windows(b"<clipPath".len())
+            .filter(|w| *w == b"<clipPath")
+            .count()
+    }
+
+    /// The picture a page is replayed into for a canvas drawn into another,
+    /// or used as a pattern, applies a frame's clip as often whether or not
+    /// the page was read between its draws: once around the draws between
+    /// its cut draws, which clip by coverage. A read splits a run into
+    /// pieces, and each piece applied the clip again: on a raster that
+    /// rebuilds Skia's anti-aliased clip mask for every piece, which a page
+    /// of cut draws drawn into another paid for four milliseconds of in each
+    /// copy.
+    #[test]
+    fn a_page_drawn_into_another_applies_a_frames_clip_once() {
+        let plain = picture_clips(&mut program(&CLIPPED, false, true).canvas);
+        assert!(plain > 0, "the page applies its clips");
+        for steps in with_each(Step::Read) {
+            let clips = picture_clips(&mut program(&steps, false, true).canvas);
+            assert_eq!(clips, plain, "clips in the picture of {steps:?}");
+        }
+    }
+
+    /// The pixels of `canvas`, read at `density`.
+    fn pixels_at(canvas: &mut crate::canvas::Canvas, density: u32) -> Vec<u8> {
+        canvas
+            .to_image_data(
+                None,
+                &crate::pixels::ImageDataExport {
+                    density,
+                    ..Default::default()
+                },
+            )
+            .expect("pixels")
+            .pixels()
+            .to_vec()
+    }
+
+    /// A CPU canvas the size of `source`'s, filled with a pattern of it.
+    fn patterned(source: &mut crate::canvas::Canvas) -> crate::canvas::Canvas {
+        let mut filled = crate::canvas::Canvas::new(200.0, 120.0);
+        filled.set_gpu(false);
+        let pattern = filled.context().create_pattern_from_canvas(
+            source,
+            crate::pattern::PatternRepeat::Repeat,
+        );
+        filled.context().set_fill_pattern(&pattern);
+        filled.context().fill_rect(0.0, 0.0, 200.0, 120.0);
+        filled
+    }
+
+    /// The pixels, at `density`, of `source` used as a pattern filling
+    /// another CPU canvas, and of `source` drawn into one with
+    /// `draw_canvas`.
+    fn drawn_in(
+        source: &mut crate::canvas::Canvas,
+        density: u32,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let mut filled = patterned(source);
+        let mut into = crate::canvas::Canvas::new(200.0, 120.0);
+        into.set_gpu(false);
+        into.context().draw_canvas(source, 0.0, 0.0);
+        (
+            pixels_at(&mut filled, density),
+            pixels_at(&mut into, density),
+        )
+    }
+
+    /// `steps` without their blurs: a page a document draws as vectors, and
+    /// a pattern draws as the page does.
+    fn unblurred(steps: Vec<Step>) -> Vec<Step> {
+        steps
+            .into_iter()
+            .filter(|step| !matches!(step, Step::Blur | Step::BlurPath(_)))
+            .collect()
+    }
+
+    /// A page drawn into another canvas -- with `draw_canvas`, or as a
+    /// pattern -- draws there what it draws itself, at densities 1 to 3,
+    /// read part way or not: a draw its clip cuts is as exact in the picture
+    /// another canvas replays as it is on the page. With its blurs the page
+    /// carries features that send `draw_canvas` through a group of its
+    /// entries whatever the paint; without them a plain paint takes the
+    /// route for a page holding a cut draw, and both are held here. A
+    /// pattern is held to it only without the blurs, which a pattern draws
+    /// other than the page does, cut draw or none, and within
+    /// [`tile_slack`] a draw, which is how far Skia's picture shader draws a
+    /// page's translucent edges from where the page draws them.
+    #[test]
+    fn a_page_drawn_into_another_draws_as_it_does_itself() {
+        let mut programs = vec![CLIPPED.to_vec()];
+        programs.extend(with_each(Step::Read));
+        for steps in programs {
+            for density in 1..=3 {
+                let mut source = program(&steps, false, true).canvas;
+                let direct = pixels_at(&mut source, density);
+                let (_, drawn) = drawn_in(&mut source, density);
+                assert!(drawn == direct, "drawn in, {density}x: {steps:?}");
+
+                let steps = unblurred(steps.clone());
+                let mut source = program(&steps, false, true).canvas;
+                let direct = pixels_at(&mut source, density);
+                let (_, drawn) = drawn_in(&mut source, density);
+                assert!(drawn == direct, "unblurred, {density}x: {steps:?}");
+                // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
+                // Re-check: cargo test a_picture_shader_tile_blits_as_rgba
+                // A pattern lies over its page to the byte where the
+                // platform's native colour type is the RGBA8888 Skia's
+                // picture shader rasterizes a tile in, and elsewhere --
+                // Linux -- within a premultiplied level for each draw a
+                // pixel lies under: a translucent edge blits a level apart
+                // in the tile and on the page, and a draw over it carries
+                // that on and can add its own. Measured on Linux, a lone
+                // edge parts by one, two overlapping fills by two, and
+                // `CLIPPED` by 3, 4 and 3 at densities 1 to 3. Read
+                // premultiplied, which is what the tile holds:
+                // unpremultiplied, a level at a faint edge reads as up to
+                // 128. The pattern work that rasterizes a canvas pattern in
+                // the page's own colour type is what lifts this.
+                let page = premultiplied_at(&mut source, density);
+                let pattern =
+                    premultiplied_at(&mut patterned(&mut source), density);
+                let most = farthest(&pattern, &page);
+                let draws = steps.iter().filter(|step| step.draws()).count();
+                assert!(
+                    usize::from(most) <= usize::from(tile_slack()) * draws,
+                    "a pattern, {density}x, parted by {most}: {steps:?}"
+                );
+            }
+        }
+    }
+
+    /// The pixels of `canvas` read at `density`, premultiplied.
+    fn premultiplied_at(
+        canvas: &mut crate::canvas::Canvas,
+        density: u32,
+    ) -> Vec<u8> {
+        canvas
+            .to_image_data(
+                None,
+                &crate::pixels::ImageDataExport {
+                    density,
+                    pixels: crate::pixels::PixelExportOptions {
+                        premultiplied: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .expect("pixels")
+            .pixels()
+            .to_vec()
+    }
+
+    /// The most two reads part by in any byte.
+    fn farthest(a: &[u8], b: &[u8]) -> u8 {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| x.abs_diff(*y))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// How far, in premultiplied levels, a canvas pattern may part from its
+    /// page here for each draw a pixel lies under: none where the
+    /// platform's native colour type is the RGBA8888 Skia's picture shader
+    /// rasterizes a tile in, one elsewhere -- see
+    /// [`a_picture_shader_tile_blits_as_rgba`].
+    fn tile_slack() -> u8 {
+        match ColorType::N32 == ColorType::RGBA8888 {
+            true => 0,
+            false => 1,
+        }
+    }
+
+    /// Skia's picture shader rasterizes its tile as RGBA8888 whatever the
+    /// surface it fills (`SkPictureShader::CachedImageInfo::Make`), and an
+    /// anti-aliased translucent edge blits a premultiplied level apart in
+    /// the platform's native colour type and in the other byte order: 58
+    /// pixels of this triangle, on macOS, whose native type is RGBA8888,
+    /// between it and BGRA8888, and on Linux, whose native type is
+    /// BGRA8888, between it and RGBA8888. So a picture-shader fill draws a
+    /// translucent edge as a draw onto the native surface does only where
+    /// that type is RGBA8888. Fails, as the sign to look again, once the
+    /// two agree everywhere, when the slack the pattern pin allows can go.
+    #[test]
+    fn a_picture_shader_tile_blits_as_rgba() {
+        use skia_safe::{FilterMode, PictureRecorder, TileMode};
+
+        let (width, height) = (200, 120);
+        let page = Rect::from_wh(width as f32, height as f32);
+        let mut builder = PathBuilder::new();
+        builder
+            .move_to((70.0, 5.0))
+            .line_to((95.5, 14.25))
+            .line_to((77.0, 22.5))
+            .close();
+        let triangle = builder.detach();
+        // `rgb(30 60 200 / 0.7)`, the fill the clip-run programs draw.
+        let rgb = |channel: f32| channel / u8::MAX as f32;
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true).set_color4f(
+            Color4f::new(rgb(30.0), rgb(60.0), rgb(200.0), 0.7),
+            None,
+        );
+        let info = ImageInfo::new_n32_premul((width, height), None);
+        let read = |surface: &mut skia_safe::Surface| {
+            let mut pixels = vec![0; info.compute_min_byte_size()];
+            assert!(surface.read_pixels(
+                &info,
+                &mut pixels,
+                info.min_row_bytes(),
+                (0, 0)
+            ));
+            pixels
+        };
+
+        let mut drawn = started::raster(&info, None, None).expect("a page");
+        drawn.canvas().draw_path(&triangle, &paint);
+        let mut recorder = PictureRecorder::new();
+        recorder
+            .begin_recording(page, true)
+            .draw_path(&triangle, &paint);
+        let picture = recorder
+            .finish_recording_as_picture(None)
+            .expect("a picture");
+        let mut fill = Paint::default();
+        fill.set_shader(picture.to_shader(
+            (TileMode::Repeat, TileMode::Repeat),
+            FilterMode::Linear,
+            None,
+            Some(&page),
+        ));
+        let mut tiled = started::raster(&info, None, None).expect("a page");
+        tiled.canvas().draw_rect(page, &fill);
+
+        let (drawn, tiled) = (read(&mut drawn), read(&mut tiled));
+        let parted = drawn
+            .chunks(4)
+            .zip(tiled.chunks(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        let most = farthest(&drawn, &tiled);
+        match ColorType::N32 == ColorType::RGBA8888 {
+            true => assert!(parted == 0, "native RGBA: {parted} px, {most}"),
+            false => assert!(
+                parted > 0 && most == 1,
+                "native {:?}: {parted} px, {most}",
+                ColorType::N32
+            ),
+        }
+    }
+
+    /// A page that has itself drawn a canvas is drawn into another as
+    /// pixels, made from its picture, and a draw its clip cuts is as exact
+    /// there as on the page: at density 1, where those pixels are the
+    /// page's own, as a pattern and with `draw_canvas` through a plain paint
+    /// and through `xor`, which draws through a group over nothing as
+    /// source-over does.
+    #[test]
+    fn a_page_that_drew_a_canvas_draws_its_cut_draws_exact_in_another() {
+        let mut source = clipped_canvas(true, false, circle, |ctx| {
+            let mut inner = crate::canvas::Canvas::new(4.0, 4.0);
+            inner.context().fill_rect(0.0, 0.0, 4.0, 4.0);
+            ctx.draw_canvas(&mut inner, 100.0, 60.0);
+            cut_triangle(ctx);
+        });
+        let direct = pixels_at(&mut source, 1);
+        let (pattern, drawn) = drawn_in(&mut source, 1);
+        assert!(pattern == direct, "as a pattern");
+        assert!(drawn == direct, "drawn in");
+        let mut into = crate::canvas::Canvas::new(200.0, 120.0);
+        into.set_gpu(false);
+        into.context()
+            .set_global_composite_operation(crate::paint::BlendMode::Xor);
+        into.context().draw_canvas(&mut source, 0.0, 0.0);
+        assert!(pixels_at(&mut into, 1) == direct, "drawn in through xor");
+    }
+
+    /// A cut draw inside a `saveLayer` opened under the clip is as exact in
+    /// a page drawn into another as on the page, at densities 1 to 3: the
+    /// layer applies the clip by coverage in the picture another canvas
+    /// replays, as on the page, rather than being made no larger than it.
+    #[test]
+    fn a_cut_draw_in_a_layer_is_exact_in_a_page_drawn_into_another() {
+        for density in 1..=3 {
+            let mut source = clipped_canvas(true, false, circle, |ctx| {
+                ctx.save_layer();
+                cut_triangle(ctx);
+                ctx.restore();
+            });
+            let direct = pixels_at(&mut source, density);
+            let (pattern, drawn) = drawn_in(&mut source, density);
+            assert!(pattern == direct, "as a pattern, {density}x");
+            assert!(drawn == direct, "drawn in, {density}x");
+        }
+    }
+
+    /// A region of a page drawn into another in place draws the page's own
+    /// pixels inside the region, its cut draws exact, and nothing outside
+    /// it. The region holds the whole of the cut path: one that cuts a path
+    /// moves its edges as a clip does, a defect of its own.
+    #[test]
+    fn a_region_of_a_page_drawn_into_another_draws_the_region_alone() {
+        let mut source = crate::canvas::Canvas::new(200.0, 120.0);
+        source.set_gpu(false);
+        {
+            let ctx = source.context();
+            ctx.fill_rect(165.0, 30.0, 20.0, 20.0);
+            ctx.begin_path();
+            circle(ctx);
+            ctx.clip(crate::path::FillRule::NonZero);
+            cut_triangle(ctx);
+        }
+        let direct = pixels_at(&mut source, 1);
+        let mut into = crate::canvas::Canvas::new(200.0, 120.0);
+        into.set_gpu(false);
+        let (x, y, width, height) = (10.0, 10.0, 140.0, 100.0);
+        into.context().draw_canvas_region(
+            &mut source,
+            x,
+            y,
+            width,
+            height,
+            x,
+            y,
+            width,
+            height,
+        );
+        let drawn = pixels_at(&mut into, 1);
+        let inside = |at: usize| {
+            let (px, py) = ((at % 200) as f32, (at / 200) as f32);
+            (x..x + width).contains(&px) && (y..y + height).contains(&py)
+        };
+        assert!(
+            direct
+                .chunks(4)
+                .enumerate()
+                .any(|(at, px)| { !inside(at) && px[3] > 0 })
+        );
+        for (at, (drawn, direct)) in
+            drawn.chunks(4).zip(direct.chunks(4)).enumerate()
+        {
+            match inside(at) {
+                true => assert_eq!(drawn, direct, "pixel {at}"),
+                false => assert_eq!(drawn, [0; 4], "pixel {at}"),
+            }
+        }
+    }
+
+    /// A page drawn into another with `draw_canvas` writes into a PDF or SVG
+    /// what it wrote before its cut draws took the route, read part way or
+    /// not: a document clips a cut draw by the path, and has no way to write
+    /// a clip by coverage at all -- Skia's SVG device writes one as an empty
+    /// `clipPath`, which hides what it clips. Without the page's blurs,
+    /// which a document draws as pixels, so that both documents hold the
+    /// draws as vectors.
+    #[test]
+    fn a_page_drawn_into_another_exports_as_it_did() {
+        let mut programs = vec![unblurred(CLIPPED.to_vec())];
+        programs.extend(with_each(Step::Read).into_iter().map(unblurred));
+        for steps in &programs {
+            let export = |routed| {
+                let mut source = program(steps, false, routed).canvas;
+                let mut into = crate::canvas::Canvas::new(200.0, 120.0);
+                into.set_gpu(false);
+                into.context().draw_canvas(&mut source, 0.0, 0.0);
+                documents(&mut into)
+            };
+            let (now, before) = (export(true), export(false));
+            assert!(now.0 == before.0, "SVG of {steps:?}");
+            assert!(now.1 == before.1, "PDF of {steps:?}");
+        }
+    }
+
+    /// A page holding no cut draw, drawn into another with `draw_canvas`,
+    /// writes the same PDF and SVG with its pieces' clip bounded or not: a
+    /// document walks the picture of such a page as vectors and would write
+    /// the bound as a clip of its own, so the bound is kept to pages holding
+    /// a cut draw. The pieces a read files are each bounded otherwise.
+    #[test]
+    fn a_page_drawn_into_another_writes_no_bound_into_a_document() {
+        let programs = [
+            vec![
+                Step::Clip,
+                Step::Fill(40.0),
+                Step::Read,
+                Step::Fill(50.0),
+                Step::Restore,
+            ],
+            vec![
+                Step::Clip,
+                Step::Fill(40.0),
+                Step::Read,
+                Step::Rect,
+                Step::Fill(50.0),
+                Step::Restore,
+            ],
+        ];
+        for steps in &programs {
+            let export = |bounded| {
+                layer::BOUNDS_PIECES.set(bounded);
+                let mut source = program(steps, false, true).canvas;
+                let mut into = crate::canvas::Canvas::new(200.0, 120.0);
+                into.set_gpu(false);
+                into.context().draw_canvas(&mut source, 0.0, 0.0);
+                let documents = documents(&mut into);
+                layer::BOUNDS_PIECES.set(true);
+                documents
+            };
+            let (now, unbounded) = (export(true), export(false));
+            assert!(now.0 == unbounded.0, "SVG of {steps:?}");
+            assert!(now.1 == unbounded.1, "PDF of {steps:?}");
+        }
+    }
+
+    /// A page drawn into a GPU canvas with `draw_canvas` draws there what it
+    /// draws on the GPU itself: the GPU clips a cut draw by the path, as it
+    /// always has. Runs where a GPU does.
+    #[test]
+    fn a_page_drawn_into_a_gpu_canvas_draws_as_the_gpu_does() {
+        let mut source = program(&CLIPPED, true, true).canvas;
+        if source.engine_kind() != crate::canvas::EngineKind::Gpu {
+            return;
+        }
+        let direct = pixels_at(&mut source, 2);
+        let mut into = crate::canvas::Canvas::new(200.0, 120.0);
+        into.set_gpu(true);
+        into.context().draw_canvas(&mut source, 0.0, 0.0);
+        assert!(pixels_at(&mut into, 2) == direct);
+    }
+
+    /// A piece of a clip run is bounded by what it draws, not by the clip:
+    /// a small triangle under a large circle, filed as a piece by a read,
+    /// reaches the triangle's rows and not the circle's.
+    #[test]
+    fn a_run_piece_is_bounded_by_what_it_draws() {
+        let steps = [Step::Clip, Step::Fill(40.0), Step::Read, Step::Restore];
+        let mut canvas = program(&steps, false, true).canvas;
+        let page = canvas.page(0).expect("a page").inner.page();
+        let piece = page
+            .layers
+            .iter()
+            .find_map(|layer| match layer {
+                layer::Layer::Clipped(piece) => Some(piece.clone()),
+                _ => None,
+            })
+            .expect("a piece");
+        let drawn = piece.drawn().expect("a bound");
+        let clip = piece.clip_bounds();
+        assert!(clip.contains(drawn), "{drawn:?} within {clip:?}");
+        assert!(
+            drawn.height() < clip.height() / 2.0,
+            "{drawn:?} against {clip:?}"
+        );
+    }
+
+    /// A kind of draw `bounded_kinds` lists: its name, whether its stretch
+    /// is bounded, and the draw.
+    type BoundedKind =
+        (&'static str, bool, fn(&mut crate::context2d::Context2D));
+
+    /// One kind of draw a bound must hold whole, placed at fractional
+    /// coordinates: where it inks is where its piece's bound is drawn. Each
+    /// with whether its stretch of the run is bounded: a draw with a shadow
+    /// or a filter is a group or a blur of its own, which has no rectangle
+    /// to bound by, and a draw whose ink crosses the clip's edge is left
+    /// unbounded -- see `Clipped::play_run`.
+    fn bounded_kinds() -> Vec<BoundedKind> {
+        use crate::paint::{StrokeCap, StrokeJoin};
+        vec![
+            ("an anti-aliased fill", true, |ctx| {
+                ctx.begin_path();
+                ctx.move_to(70.3, 40.6);
+                ctx.line_to(98.7, 52.35);
+                ctx.line_to(77.15, 71.9);
+                ctx.close_path();
+                ctx.fill(crate::path::FillRule::NonZero);
+            }),
+            // Joined at 53 degrees, mitred under a limit of 4, which Skia
+            // bounds by the stroke's radius times the limit.
+            ("a mitred spike", true, |ctx| {
+                ctx.set_line_width(3.3);
+                ctx.set_line_join(StrokeJoin::Miter);
+                ctx.set_miter_limit(4.0);
+                ctx.begin_path();
+                ctx.move_to(80.35, 67.6);
+                ctx.line_to(90.55, 47.15);
+                ctx.line_to(100.65, 67.9);
+                ctx.stroke();
+            }),
+            // Joined round: Skia bounds a stroke with mitred joins by its
+            // radius times the miter limit, which no clip here contains.
+            ("square and round caps", true, |ctx| {
+                ctx.set_line_width(5.7);
+                ctx.set_line_join(StrokeJoin::Round);
+                ctx.set_line_cap(StrokeCap::Square);
+                ctx.begin_path();
+                ctx.move_to(70.25, 45.5);
+                ctx.line_to(104.75, 49.25);
+                ctx.stroke();
+                ctx.set_line_cap(StrokeCap::Round);
+                ctx.begin_path();
+                ctx.move_to(72.6, 75.35);
+                ctx.line_to(101.4, 69.8);
+                ctx.stroke();
+            }),
+            ("a shadow, offset and blurred", false, |ctx| {
+                ctx.set_shadow_color_css("rgb(20 140 60)")
+                    .expect("a colour");
+                ctx.set_shadow_offset(6.5, 4.25);
+                ctx.set_shadow_blur(5.0);
+                ctx.fill_rect(70.4, 45.6, 18.3, 12.7);
+            }),
+            ("a shadow offset, unblurred", false, |ctx| {
+                ctx.set_shadow_color_css("rgb(20 140 60)")
+                    .expect("a colour");
+                ctx.set_shadow_offset(7.5, 5.25);
+                ctx.begin_path();
+                ctx.move_to(70.3, 44.6);
+                ctx.line_to(92.7, 52.35);
+                ctx.line_to(77.15, 66.9);
+                ctx.close_path();
+                ctx.fill(crate::path::FillRule::NonZero);
+            }),
+            ("a drop-shadow filter, unblurred", false, |ctx| {
+                ctx.set_filter_css(
+                    "drop-shadow(6.5px 4.25px 0 rgb(40 60 200))",
+                )
+                .expect("a filter");
+                ctx.fill_rect(70.4, 45.6, 18.3, 12.7);
+            }),
+            ("a drop-shadow filter", false, |ctx| {
+                ctx.set_filter_css(
+                    "drop-shadow(5.5px 3.25px 2px rgb(40 60 200))",
+                )
+                .expect("a filter");
+                ctx.begin_path();
+                ctx.move_to(70.3, 44.6);
+                ctx.line_to(95.7, 52.35);
+                ctx.line_to(77.15, 69.9);
+                ctx.close_path();
+                ctx.fill(crate::path::FillRule::NonZero);
+            }),
+            ("an image drawn smoothed at a fraction", true, |ctx| {
+                let pixels: Vec<u8> = (0..8 * 8)
+                    .flat_map(|i| {
+                        [(i * 29 % 256) as u8, 90, (i * 7 % 256) as u8, 255]
+                    })
+                    .collect();
+                let image = crate::image::Image::from_pixels(
+                    &pixels,
+                    8,
+                    8,
+                    32,
+                    Default::default(),
+                )
+                .expect("an image");
+                ctx.set_image_smoothing_enabled(true);
+                ctx.draw_image_sized(&image, 72.35, 44.6, 21.3, 17.85);
+            }),
+            ("a shadowed triangle the clip cuts", false, |ctx| {
+                ctx.set_shadow_color_css("rgb(20 140 60)")
+                    .expect("a colour");
+                ctx.set_shadow_offset(3.5, 2.25);
+                ctx.set_shadow_blur(2.0);
+                ctx.begin_path();
+                ctx.move_to(118.3, 40.6);
+                ctx.line_to(146.7, 52.35);
+                ctx.line_to(125.15, 71.9);
+                ctx.close_path();
+                ctx.fill(crate::path::FillRule::NonZero);
+            }),
+        ]
+    }
+
+    /// A page clipped to `circle` with `kind` drawn, a cut triangle, and
+    /// `kind` drawn again moved down, so that the run splits on the cut
+    /// draw into pieces either side of it -- drawn into another canvas as a
+    /// pattern and with `draw_canvas`, read at `density`, its pieces' clip
+    /// bounded or not.
+    fn bounded_in(
+        kind: fn(&mut crate::context2d::Context2D),
+        density: u32,
+        bounded: bool,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let mut source = crate::canvas::Canvas::new(200.0, 120.0);
+        source.set_gpu(false);
+        {
+            let ctx = source.context();
+            ctx.begin_path();
+            circle(ctx);
+            ctx.clip(crate::path::FillRule::NonZero);
+            ctx.save();
+            kind(ctx);
+            ctx.restore();
+            ctx.set_fill_style_css("rgb(200 40 90)").expect("a colour");
+            cut_triangle(ctx);
+            ctx.translate(0.5, 21.25);
+            kind(ctx);
+        }
+        layer::BOUNDS_PIECES.set(bounded);
+        let drawn = drawn_in(&mut source, density);
+        layer::BOUNDS_PIECES.set(true);
+        drawn
+    }
+
+    /// How many times drawing `kind` in as [`bounded_in`] does bounded a
+    /// run's clip.
+    fn bounds_applied(kind: fn(&mut crate::context2d::Context2D)) -> usize {
+        layer::BOUNDED.take();
+        bounded_in(kind, 1, true);
+        layer::BOUNDED.take().len()
+    }
+
+    /// The source of the timing rows that draw a clipped canvas into
+    /// another: 50 small fills in a band 37 pixels tall under a circle of
+    /// radius 450.3, the fills at its edge cut draws by their bounds, read
+    /// once part way.
+    fn row_source() -> crate::canvas::Canvas {
+        let mut source = crate::canvas::Canvas::new(1000.0, 1000.0);
+        source.set_gpu(false);
+        let ctx = source.context();
+        ctx.set_fill_style_css("rgba(30 60 200 / 0.7)")
+            .expect("a colour");
+        ctx.begin_path();
+        ctx.arc(500.0, 500.0, 450.3, 0.0, std::f32::consts::TAU, false)
+            .expect("a positive radius");
+        ctx.clip(crate::path::FillRule::NonZero);
+        for i in 0..50 {
+            let (x, y) =
+                ((i % 40 * 20 + 200) as f32, (i / 40 * 20 + 400) as f32);
+            if i == 25 {
+                ctx.get_image_data(0.0, 0.0, 1.0, 1.0).expect("pixels");
+            }
+            ctx.begin_path();
+            ctx.move_to(x + 2.0, y + 3.0);
+            ctx.line_to(x + 17.5, y + 8.25);
+            ctx.line_to(x + 6.0, y + 17.0);
+            ctx.close_path();
+            ctx.fill(crate::path::FillRule::NonZero);
+        }
+        source
+    }
+
+    /// Used as a pattern, the timing rows' source bounds its clip by the
+    /// band its fills occupy, not by the circle's 900 rows: the mask Skia
+    /// builds is the band's. Every rectangle the clip is bounded by is at
+    /// most the band's 37 rows and a row of rounding either side.
+    #[test]
+    fn a_drawn_in_run_bounds_its_clip_by_the_band_it_draws() {
+        let mut source = row_source();
+        let mut into = crate::canvas::Canvas::new(1000.0, 1000.0);
+        into.set_gpu(false);
+        layer::BOUNDED.take();
+        let pattern = into.context().create_pattern_from_canvas(
+            &mut source,
+            crate::pattern::PatternRepeat::NoRepeat,
+        );
+        into.context().set_fill_pattern(&pattern);
+        into.context().fill_rect(0.0, 0.0, 1000.0, 1000.0);
+        pixels_at(&mut into, 1);
+        let bounded = layer::BOUNDED.take();
+        assert!(!bounded.is_empty(), "the clip is bounded");
+        for mask in bounded {
+            assert!(mask.height() <= 39, "{mask:?}");
+            assert!(mask.top >= 400 && mask.bottom <= 438, "{mask:?}");
+        }
+    }
+
+    /// A piece whose paint Skia cannot bound -- an image filter that turns
+    /// transparent black into a colour, which
+    /// `SkImageFilter::canComputeFastBounds` refuses -- reaches the clip's
+    /// bounds, which no clip contains, so its stretch is not bounded; the
+    /// same draw through a plain paint reaches only what it draws.
+    #[test]
+    fn a_piece_skia_cannot_bound_reaches_the_clip() {
+        let piece = |filtered: bool| {
+            let mut recorder = skia_safe::PictureRecorder::new();
+            let canvas =
+                recorder.begin_recording(Rect::from_wh(200.0, 120.0), false);
+            let mut paint = Paint::default();
+            if filtered {
+                let flood = skia_safe::color_filters::blend(
+                    Color::from_rgb(200, 40, 90),
+                    BlendMode::SrcOver,
+                )
+                .expect("a colour filter");
+                let filter =
+                    skia_safe::image_filters::color_filter(flood, None, None)
+                        .expect("an image filter");
+                assert!(!filter.can_compute_fast_bounds(), "the control");
+                paint.set_image_filter(filter);
+            }
+            canvas.draw_rect(Rect::from_xywh(80.5, 50.25, 10.0, 8.0), &paint);
+            let picture = recorder
+                .finish_recording_as_picture(None)
+                .expect("a picture");
+            let clip =
+                Path::rect(Rect::from_xywh(40.0, 20.0, 100.0, 80.0), None);
+            layer::Clipped::new(
+                7,
+                &layer::ClipData::of(&clip),
+                layer::Layer::Picture(picture),
+            )
+        };
+        let clip = Rect::from_xywh(40.0, 20.0, 100.0, 80.0);
+        assert_eq!(piece(true).drawn(), Some(clip));
+        let plain = piece(false).drawn().expect("a bound");
+        assert!(plain.height() < 10.0, "{plain:?}");
+    }
+
+    /// A piece grown by the next draw of its run forgets what it was found
+    /// to draw, and finds it again from what it now draws.
+    #[test]
+    fn a_grown_piece_finds_again_what_it_draws() {
+        let picture = |height: f32| {
+            let mut recorder = skia_safe::PictureRecorder::new();
+            let canvas =
+                recorder.begin_recording(Rect::from_wh(200.0, 120.0), false);
+            canvas.draw_rect(
+                Rect::from_xywh(60.0, 30.0, 20.0, height),
+                &Paint::default(),
+            );
+            recorder
+                .finish_recording_as_picture(None)
+                .expect("a picture")
+        };
+        let clip = Path::rect(Rect::from_xywh(40.0, 20.0, 100.0, 80.0), None);
+        let mut piece = layer::Clipped::new(
+            7,
+            &layer::ClipData::of(&clip),
+            layer::Layer::Picture(picture(10.0)),
+        );
+        assert_eq!(piece.drawn().map(|drawn| drawn.height()), Some(10.0));
+        *piece.entry_mut() = layer::Layer::Picture(picture(40.0));
+        assert_eq!(piece.drawn().map(|drawn| drawn.height()), Some(40.0));
+    }
+
+    /// Every kind of draw a piece holds -- its anti-aliased fringe, a
+    /// mitred spike, caps, a shadow's offset and blur, a filter's reach and
+    /// an image's smoothed footprint, and a draw the clip cuts that is not
+    /// routed -- is drawn byte for byte as it is with the pieces' clip
+    /// unbounded, at densities 1 to 3, as a pattern and with `draw_canvas`.
+    /// Each is bounded or not as `bounded_kinds` says, so that a kind cannot
+    /// pass by never being bounded at all.
+    #[test]
+    fn a_bounded_piece_draws_what_an_unbounded_one_does() {
+        for (name, bounded, kind) in bounded_kinds() {
+            assert_eq!(bounds_applied(kind) > 0, bounded, "{name} bounded");
+        }
+        for (name, _, kind) in bounded_kinds() {
+            for density in 1..=3 {
+                let (pattern, drawn) = bounded_in(kind, density, true);
+                let (pattern_unbounded, drawn_unbounded) =
+                    bounded_in(kind, density, false);
+                assert!(
+                    pattern.iter().any(|&v| v != 0),
+                    "{name} draws something"
+                );
+                assert!(
+                    pattern == pattern_unbounded,
+                    "{name} as a pattern, {density}x"
+                );
+                assert!(
+                    drawn == drawn_unbounded,
+                    "{name} drawn in, {density}x"
+                );
+            }
+        }
+    }
+
+    /// A page clipped to `circle` with `kind` drawn, read, and `kind` drawn
+    /// again moved down, so that its run is filed in pieces either side of
+    /// the read -- read at `density`, its pieces' clip bounded or not.
+    fn bounded_on_page(
+        kind: fn(&mut crate::context2d::Context2D),
+        density: u32,
+        bounded: bool,
+    ) -> Vec<u8> {
+        let mut page = crate::canvas::Canvas::new(200.0, 120.0);
+        page.set_gpu(false);
+        {
+            let ctx = page.context();
+            ctx.begin_path();
+            circle(ctx);
+            ctx.clip(crate::path::FillRule::NonZero);
+            ctx.save();
+            kind(ctx);
+            ctx.restore();
+            ctx.get_image_data(0.0, 0.0, 1.0, 1.0).expect("pixels");
+            ctx.translate(0.5, 21.25);
+            kind(ctx);
+        }
+        layer::BOUNDS_PAGE.set(bounded);
+        let pixels = pixels_at(&mut page, density);
+        layer::BOUNDS_PAGE.set(true);
+        pixels
+    }
+
+    /// The kinds of draw a bounded clip must hold whole, drawn on a CPU page
+    /// whose run a read files in pieces: byte for byte what the page draws
+    /// with its pieces' clip unbounded, at densities 1 to 3, each bounded or
+    /// not as `bounded_kinds` says.
+    #[test]
+    fn a_bounded_page_piece_draws_what_an_unbounded_one_does() {
+        for (name, bounded, kind) in bounded_kinds() {
+            layer::BOUNDED.take();
+            bounded_on_page(kind, 1, true);
+            assert_eq!(
+                !layer::BOUNDED.take().is_empty(),
+                bounded,
+                "{name} bounded"
+            );
+            for density in 1..=3 {
+                assert!(
+                    bounded_on_page(kind, density, true)
+                        == bounded_on_page(kind, density, false),
+                    "{name}, {density}x"
+                );
+            }
+        }
+    }
+
+    /// Every program of the clip-run pins, read part way or cut, draws the
+    /// same page with its pieces' clip bounded as unbounded, at densities 1
+    /// and 2, and reads the same part way.
+    #[test]
+    fn a_clip_run_draws_the_same_page_bounded() {
+        let mut programs = vec![CLIPPED.to_vec()];
+        programs.extend(with_each(Step::Read));
+        programs.extend(with_each(Step::Cut));
+        layer::BOUNDED.take();
+        for steps in &programs {
+            let drawn = |bounded| {
+                layer::BOUNDS_PAGE.set(bounded);
+                let mut drawn = program(steps, false, true);
+                let pixels =
+                    [1, 2].map(|density| pixels_at(&mut drawn.canvas, density));
+                layer::BOUNDS_PAGE.set(true);
+                (pixels, drawn.reads)
+            };
+            let (now, unbounded) = (drawn(true), drawn(false));
+            assert!(now.0 == unbounded.0, "pixels of {steps:?}");
+            assert!(now.1 == unbounded.1, "reads of {steps:?}");
+        }
+        let bounded = layer::BOUNDED.take().len();
+        assert!(bounded > 0, "the programs' pieces are bounded");
+    }
+
+    /// A GPU page plays its pieces with their clip unbounded: the mask the
+    /// bound keeps small is the one Skia builds on the CPU, and the GPU
+    /// clips by other means. Runs where a GPU does.
+    #[test]
+    fn a_gpu_page_does_not_bound_its_pieces() {
+        let steps = [
+            Step::Clip,
+            Step::Fill(40.0),
+            Step::Read,
+            Step::Fill(50.0),
+            Step::Restore,
+        ];
+        let mut drawn = program(&steps, true, true);
+        if drawn.canvas.engine_kind() != crate::canvas::EngineKind::Gpu {
+            return;
+        }
+        layer::BOUNDED.take();
+        pixels_at(&mut drawn.canvas, 1);
+        assert!(layer::BOUNDED.take().is_empty());
+    }
+
+    /// Drawn in with `draw_canvas`, which plays the page's entries on the
+    /// destination's raster, the timing rows' source bounds each piece's
+    /// clip by what it draws: every rectangle within the band its fills
+    /// occupy, and none with the bound turned off.
+    #[test]
+    fn a_page_drawn_in_bounds_its_pieces_by_the_band_they_draw() {
+        let mut source = row_source();
+        let mut into = crate::canvas::Canvas::new(1000.0, 1000.0);
+        into.set_gpu(false);
+        into.context().draw_canvas(&mut source, 0.0, 0.0);
+        layer::BOUNDED.take();
+        pixels_at(&mut into, 1);
+        let bounded = layer::BOUNDED.take();
+        assert!(!bounded.is_empty(), "the pieces' clip is bounded");
+        for mask in bounded {
+            assert!(mask.height() <= 39, "{mask:?}");
+            assert!(mask.top >= 400 && mask.bottom <= 438, "{mask:?}");
+        }
+    }
+
+    /// A piece of a clip run records its transform and its draws and
+    /// nothing else: a run's recording holds no save, so finishing it has
+    /// nothing to restore. Read once between two fills, each piece holds the
+    /// transform and one fill; with a save it held four operations.
+    #[test]
+    fn a_run_piece_records_its_transform_and_draws_alone() {
+        let steps = [
+            Step::Clip,
+            Step::Fill(40.0),
+            Step::Read,
+            Step::Fill(50.0),
+            Step::Restore,
+        ];
+        let mut canvas = program(&steps, false, true).canvas;
+        let page = canvas.page(0).expect("a page").inner.page();
+        let counts: Vec<usize> = page
+            .layers
+            .iter()
+            .filter_map(|layer| match layer {
+                layer::Layer::Clipped(piece) => match piece.entry() {
+                    layer::Layer::Picture(picture) => {
+                        Some(picture.approximate_op_count())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(counts, [2, 2], "operations in each piece");
+    }
+
+    /// How many clips a PDF's content streams set: the `W n` and `W* n`
+    /// operators, in every stream inflated.
+    fn pdf_clips(pdf: &[u8]) -> usize {
+        use std::io::Read;
+        let find = |hay: &[u8], needle: &[u8], from: usize| {
+            hay[from..]
+                .windows(needle.len())
+                .position(|w| w == needle)
+                .map(|at| at + from)
+        };
+        let mut clips = 0;
+        let mut at = 0;
+        while let Some(start) = find(pdf, b"stream\n", at) {
+            let body = start + b"stream\n".len();
+            let Some(end) = find(pdf, b"endstream", body) else {
+                break;
+            };
+            let mut text = Vec::new();
+            if flate2::read::ZlibDecoder::new(&pdf[body..end])
+                .read_to_end(&mut text)
+                .is_ok()
+            {
+                clips += text.windows(3).filter(|w| *w == b"W n").count()
+                    + text.windows(4).filter(|w| *w == b"W* n").count();
+            }
+            // Past `endstream`, whose tail would match `stream` again.
+            at = end + b"endstream".len();
+        }
+        clips
+    }
+
+    /// A layer around a small draw under a large clip reaches what the draw
+    /// does, not the clip: a run inside a `saveLayer` keeps the bounds of
+    /// what it records, which the layer is confined to.
+    #[test]
+    fn a_layer_of_clipped_draws_reaches_what_they_draw() {
+        // A triangle the clip contains, and one it cuts, which is recorded
+        // as a cut op.
+        for (cx, r) in [(200.0, 180.3), (210.0, 12.3)] {
+            let mut canvas = crate::canvas::Canvas::new(400.0, 400.0);
+            canvas.set_gpu(false);
+            {
+                let ctx = canvas.context();
+                ctx.begin_path();
+                ctx.arc(cx, 200.0, r, 0.0, std::f32::consts::TAU, false)
+                    .expect("a positive radius");
+                ctx.clip(crate::path::FillRule::NonZero);
+                ctx.save_layer_with(0.5, None, None);
+                ctx.begin_path();
+                ctx.move_to(190.0, 190.0);
+                ctx.line_to(215.5, 199.25);
+                ctx.line_to(197.0, 207.5);
+                ctx.close_path();
+                ctx.fill(crate::path::FillRule::NonZero);
+                ctx.restore();
+            }
+            let page = canvas.page(0).expect("a page").inner.page();
+            let group = page
+                .layers
+                .iter()
+                .find_map(|layer| match layer {
+                    layer::Layer::Group(group) => Some(group.clone()),
+                    _ => None,
+                })
+                .expect("the layer");
+            assert_eq!(
+                cut_ops(&group.contents),
+                usize::from(r < 100.0),
+                "radius {r}: cut ops in the layer"
+            );
+            let reach = group.reach().expect("a reach");
+            assert!(
+                reach.width() < 40.0 && reach.height() < 40.0,
+                "radius {r}: the layer reaches {reach:?}, past the triangle"
+            );
+        }
+    }
+
+    /// The cut draws of one run share one coverage picture of its clip, made
+    /// once for the run, rather than one each.
+    #[test]
+    fn a_runs_cut_draws_share_one_coverage() {
+        let steps = [
+            Step::Clip,
+            Step::Cut,
+            Step::Fill(40.0),
+            Step::Cut,
+            Step::Read,
+            Step::Cut,
+            Step::Restore,
+        ];
+        let mut canvas = program(&steps, false, true).canvas;
+        let page = canvas.page(0).expect("a page").inner.page();
+        let ops: Vec<_> = page
+            .layers
+            .iter()
+            .filter_map(|layer| match layer {
+                layer::Layer::Clipped(piece) => match piece.entry() {
+                    layer::Layer::Cut(op) => Some(op.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ops.len(), 3, "a cut op for each cut draw");
+        assert!(
+            ops.iter().all(|op| op.shares_coverage_with(&ops[0])),
+            "one coverage picture for the run"
+        );
+    }
+
+    /// A blurred draw under a clip is a piece of its frame's run, so a PDF
+    /// writes the frame's clip once around it and the draws beside it, as
+    /// for the draws alone. Before runs the blur was an entry with its clip
+    /// of its own and split the frame in three.
+    #[test]
+    fn a_blur_joins_its_frame_in_a_document() {
+        let clips = |steps: &[Step], runs: bool| {
+            page::KEEPS_RUNS.set(runs);
+            let (_, pdf) = documents(&mut program(steps, false, true).canvas);
+            page::KEEPS_RUNS.set(true);
+            pdf_clips(&pdf)
+        };
+        let with = [
+            Step::Clip,
+            Step::Fill(40.0),
+            Step::Blur,
+            Step::Fill(50.0),
+            Step::Restore,
+        ];
+        let without = [
+            Step::Clip,
+            Step::Fill(40.0),
+            Step::Fill(50.0),
+            Step::Restore,
+        ];
+        assert_eq!(clips(&without, true), 1, "the draws alone");
+        assert_eq!(clips(&with, true), 1, "with a blur among them");
+        assert_eq!(clips(&with, false), 3, "with a blur, before runs");
+    }
+
+    /// A layer and an isolated draw under a clip split the page's recording
+    /// as they did before runs, and a document writes the frame's clip again
+    /// after each, as it did: each is a page entry with its clip of its own,
+    /// and the run is filed before it. Joining either would need the group
+    /// to play without the clip it sizes the layer by, or each piece of a
+    /// run to carry its own features; and an SVG export rasterizes both, so
+    /// only a PDF would gain. Pinned so that the documents of such a page
+    /// stay what they were.
+    #[test]
+    fn a_layer_and_an_isolated_draw_keep_their_documents() {
+        let steps = [
+            Step::Clip,
+            Step::Fill(40.0),
+            Step::Layer,
+            Step::Fill(60.0),
+            Step::Clear,
+            Step::Fill(45.0),
+            Step::Restore,
+        ];
+        let documents_with = |runs: bool| {
+            page::KEEPS_RUNS.set(runs);
+            let drawn = documents(&mut program(&steps, false, true).canvas);
+            page::KEEPS_RUNS.set(true);
+            drawn
+        };
+        let (with, without) = (documents_with(true), documents_with(false));
+        assert!(with.0 == without.0, "SVG");
+        assert!(with.1 == without.1, "PDF");
+        // The steps make what they are named for.
+        let mut canvas = program(&steps, false, true).canvas;
+        let page = canvas.page(0).expect("a page").inner.page();
+        let kinds: Vec<&str> = page
+            .layers
+            .iter()
+            .zip(page.features.iter())
+            .map(|(layer, features)| match layer {
+                layer::Layer::Group(_) => "group",
+                _ if *features != VectorFeatures::PLAIN => "isolated",
+                _ => "plain",
+            })
+            .collect();
+        for kind in ["group", "isolated"] {
+            assert!(kinds.contains(&kind), "a {kind} among {kinds:?}");
+        }
+    }
+
+    /// An export part way through a page is the export of the page drawn up
+    /// to there, the frame it was in ended: what the run of that frame holds
+    /// is in it.
+    #[test]
+    fn an_export_part_way_is_the_page_up_to_there() {
+        for (at, steps) in with_each(Step::Export).into_iter().enumerate() {
+            let exports = program(&steps, false, true).exports;
+            let mut before = CLIPPED[..at].to_vec();
+            before.push(Step::Restore);
+            let (svg, _) = documents(&mut program(&before, false, true).canvas);
+            assert!(numbered(&exports[0]) == svg, "an export after {before:?}");
+        }
+    }
+
+    /// The pixels of a page drawn under clips, and of every read taken part
+    /// way, are those it drew with every frame's clip recorded into the
+    /// page's own picture, on the CPU and on the GPU.
+    #[test]
+    fn a_clip_run_draws_the_pixels_a_clip_in_the_picture_does() {
+        let drawn = |steps: &[Step], gpu: bool, runs: bool| {
+            page::KEEPS_RUNS.set(runs);
+            let Drawn {
+                mut canvas, reads, ..
+            } = program(steps, gpu, true);
+            page::KEEPS_RUNS.set(true);
+            let engine = canvas.engine_kind() == crate::canvas::EngineKind::Gpu;
+            (engine == gpu).then(|| {
+                let page = canvas
+                    .to_image_data(
+                        None,
+                        &crate::pixels::ImageDataExport {
+                            density: 2,
+                            ..Default::default()
+                        },
+                    )
+                    .expect("pixels")
+                    .pixels()
+                    .to_vec();
+                (page, reads)
+            })
+        };
+        let plain: Vec<Step> = CLIPPED
+            .iter()
+            .copied()
+            .filter(|step| *step != Step::Cut)
+            .collect();
+        let mut programs = vec![plain.clone()];
+        programs.extend((0..=plain.len()).map(|at| {
+            let mut steps = plain.clone();
+            steps.insert(at, Step::Read);
+            steps
+        }));
+        for gpu in [false, true] {
+            for steps in &programs {
+                let (Some(runs), Some(picture)) =
+                    (drawn(steps, gpu, true), drawn(steps, gpu, false))
+                else {
+                    continue;
+                };
+                assert!(
+                    runs.0 == picture.0,
+                    "gpu {gpu}: the page of {steps:?}"
+                );
+                assert!(
+                    runs.1 == picture.1,
+                    "gpu {gpu}: the reads of {steps:?}"
+                );
+            }
+        }
+    }
+
+    /// A page drawn under clips that nothing cuts or reads part way keeps
+    /// each frame's draws in its own picture, as a page always has: the run
+    /// is drawn into the page's recording when its frame ends, and the page
+    /// is one picture however many frames it was drawn under.
+    #[test]
+    fn a_page_no_cut_or_read_splits_is_one_picture() {
+        let steps = [
+            Step::Fill(5.0),
+            Step::Clip,
+            Step::Fill(40.0),
+            Step::Text,
+            Step::Move,
+            Step::Fill(50.0),
+            Step::Restore,
+            Step::Clip,
+            Step::Fill(45.0),
+            Step::Restore,
+            Step::Fill(95.0),
+        ];
+        let mut canvas = program(&steps, false, true).canvas;
+        let page = canvas.page(0).expect("a page").inner.page();
+        assert_eq!(page.layers.len(), 1, "the page's entries");
+        assert!(
+            matches!(page.layers[0], layer::Layer::Picture(_)),
+            "a picture"
+        );
     }
 
     #[test]
