@@ -48,16 +48,17 @@ mod mac {
     /// their address may be reused: four times [`CORE_TEXT_FONT_CACHE`], and
     /// so eight times the depth measured through Skia -- the margin for a
     /// macOS whose cache is deeper than the one measured.
-    // UPSTREAM: CoreText (macOS 27.2) -- unfiled -- worked around
-    // Re-check: cargo test
-    // core_text_reads_a_reused_address_through_the_old_font CoreText keys
-    // the fonts it parses from memory by the memory's address and length,
-    // and keeps the key after releasing the memory, so a font whose bytes
-    // land at a freed font's address with its length is read through the
-    // freed font's table directory. The re-check fails once a
+    // UPSTREAM: macOS CoreText 27.2 -- unfiled -- worked around
+    // Re-check: cargo test a_reused_address_reads_the_old_font
+    //
+    // CoreText keys the fonts it parses from memory by the memory's address
+    // and length, and keeps the key after releasing the memory, so a font
+    // whose bytes land at a freed font's address with its length is read
+    // through the freed font's table directory. The re-check fails once a
     // reused address reads its own tables, and reports the cache's depth.
-    // Linux and Windows build their faces without CoreText and were not
-    // measured.
+    // Only faces made through `font_data` are kept apart: a caller making
+    // faces from bytes with skia-safe directly is outside this. Linux and
+    // Windows build their faces without CoreText and were not measured.
     pub(crate) const QUARANTINE_LOADS: u64 = 4 * CORE_TEXT_FONT_CACHE;
 
     /// The mappings whose fonts are gone, each held until
@@ -412,23 +413,18 @@ mod mac {
         /// after enough further loads it is not. The depth found is reported,
         /// and must be inside the quarantine's.
         #[test]
-        fn core_text_reads_a_reused_address_through_the_old_font() {
-            alone(
-                "core_text_reads_a_reused_address_through_the_old_font",
-                || {
-                    assert_eq!(
-                        reuse(1, 0),
-                        Some(false),
-                        "a reused address read its own tables: CoreText no longer keeps the old key"
-                    );
-                    let depth = (2..=QUARANTINE_LOADS as usize)
-                        .find(|&between| reuse(between, 0) == Some(true))
-                        .expect("the old key outlived the quarantine");
-                    eprintln!(
-                        "CoreText forgot the old font after {depth} loads"
-                    );
-                },
-            );
+        fn a_reused_address_reads_the_old_font() {
+            alone("a_reused_address_reads_the_old_font", || {
+                assert_eq!(
+                    reuse(1, 0),
+                    Some(false),
+                    "a reused address read its own tables: CoreText no longer keeps the old key"
+                );
+                let depth = (2..=QUARANTINE_LOADS as usize)
+                    .find(|&between| reuse(between, 0) == Some(true))
+                    .expect("the old key outlived the quarantine");
+                eprintln!("CoreText forgot the old font after {depth} loads");
+            });
         }
 
         /// Held, the address cannot be reused: the font that would have taken
