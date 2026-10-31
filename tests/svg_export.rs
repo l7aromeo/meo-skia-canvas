@@ -927,8 +927,8 @@ type SweepDraw = fn(&mut Context2D);
 
 /// The draws the sweep makes: each kind of draw a page holds, and each
 /// that reaches a vector backend some other way -- through a shadow, a
-/// filter, a shader a backend may not write, a paragraph's own paints.
-/// Not a canvas pattern: how one is recorded is changing apart from this.
+/// filter, a shader a backend may not write, a paragraph's own paints, a
+/// canvas's pattern.
 fn sweep_draws() -> Vec<(&'static str, SweepDraw)> {
     vec![
         ("a rectangle", |ctx| ctx.fill_rect(10.0, 8.0, 30.0, 20.0)),
@@ -979,6 +979,21 @@ fn sweep_draws() -> Vec<(&'static str, SweepDraw)> {
         ("a drop-shadowed rectangle", |ctx| {
             ctx.set_filter_css("drop-shadow(3px 3px 1px blue)")
                 .expect("shadow");
+            ctx.fill_rect(10.0, 8.0, 30.0, 20.0);
+        }),
+        ("a canvas pattern", |ctx| {
+            let mut source = Canvas::new(20.0, 20.0);
+            {
+                let tile = source.context();
+                tile.set_fill_style_css("rgb(200 40 90)").expect("a colour");
+                tile.fill_rect(0.0, 0.0, 20.0, 20.0);
+                tile.set_filter_css("blur(2px)").expect("blur");
+                tile.set_fill_style_css("rgb(30 60 200)").expect("a colour");
+                tile.fill_rect(5.0, 5.0, 10.0, 10.0);
+            }
+            let pattern = ctx
+                .create_pattern_from_canvas(&mut source, PatternRepeat::Repeat);
+            ctx.set_fill_pattern(&pattern);
             ctx.fill_rect(10.0, 8.0, 30.0, 20.0);
         }),
         ("a linear gradient", |ctx| {

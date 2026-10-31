@@ -41,7 +41,8 @@ use crate::{
         faint::composited,
         layer::{
             BlurDraw, BlurOp, ClipData, Clipped, Composite, Coverage, CutOp,
-            Entries, Group, Layer, LayerRec, Target, holds_a_cut, play_entries,
+            Entries, Group, Layer, LayerRec, PatternDraw, Target, TileScope,
+            holds_a_cut, play_entries,
         },
     },
     encode::{
@@ -1769,6 +1770,39 @@ impl PageRecorder {
         self.blur_run = Some(self.frame);
     }
 
+    /// Files `tile`, a draw dyed by a canvas's pattern -- see [`PatternDraw`]
+    /// -- under `clip`, the frame's clip, as a blur is filed: a piece of
+    /// the frame's run where one is open, which applies the clip, and
+    /// holding the clip itself where none is. Inside an open `saveLayer` it
+    /// is filed among the layer's entries.
+    pub fn append_tile(
+        &mut self,
+        tile: Arc<PatternDraw>,
+        clip: Option<&Path>,
+        features: VectorFeatures,
+    ) {
+        if self.isolated.is_some() {
+            self.flush();
+        }
+        self.settle();
+        // Filed after what is recorded, which filing closes no layer to do.
+        let entry = match self.run.as_mut() {
+            Some(run) => {
+                let (id, shape) = (run.id, run.shape());
+                self.split_run();
+                let tile = Layer::Pattern(tile);
+                Layer::Clipped(Arc::new(Clipped::new(id, &shape, tile)))
+            }
+            None => {
+                self.file_current();
+                let mut tile = Arc::unwrap_or_clone(tile);
+                tile.clip = clip.map(Path::serialize);
+                Layer::Pattern(Arc::new(tile))
+            }
+        };
+        self.file_entry(entry, features);
+    }
+
     /// Records the draw `draw` makes, under `matrix`, as a [`CutOp`]: a fill
     /// or stroke `clip`, the frame's clip, cuts, so that a raster playback
     /// on the CPU applies the clip as coverage and draws the path whole.
@@ -2717,6 +2751,7 @@ impl RecordingSurface {
         let page_size = page.scaled_dimensions(opts.density);
         let target = page.layers.len();
 
+        let _tiles = TileScope::open();
         for origin in wanted {
             let rect = Self::tile_rect(*origin, page_size);
             if rect.is_empty() {
@@ -3054,6 +3089,7 @@ impl RecordingSurface {
             // density. Inside a save, since the scale is the canvas's own
             // state: left on it, every later update multiplied it again, and
             // a page read twice at density two drew its new layers at four.
+            let _tiles = TileScope::open();
             canvas.save();
             canvas.scale((self.density, self.density));
             for pict in page.layers.iter().skip(self.depth) {
@@ -3190,6 +3226,7 @@ impl RecordingSurface {
                 drawn: 0,
             });
         }
+        let _tiles = TileScope::open();
         for (at, raster) in self.layers.iter_mut().enumerate() {
             let entries = &open[at].entries;
             if raster.drawn == entries.len() {
@@ -3329,6 +3366,7 @@ impl RecordingSurface {
             }
             canvas.draw_image(surface.image_snapshot(), (0, 0), Some(&copy));
             if let Some(over) = over {
+                let _tiles = TileScope::open();
                 canvas.scale((density, density));
                 over.playback(canvas, Target::Pixels);
             }
@@ -4105,7 +4143,7 @@ impl Page {
     /// [`crate::gpu::owner`] for why there is only one. On the CPU there is no
     /// context to own, and rasterizing on the calling worker is what makes an
     /// animation export parallel, so it happens here.
-    fn rasterized(
+    pub(crate) fn rasterized(
         &self,
         options: &ExportOptions,
         engine: RenderingEngine,
@@ -4131,6 +4169,7 @@ impl Page {
         let img_dims = self.scaled_dimensions(options.density);
         let img_scale =
             M44::from(Matrix::scale((options.density, options.density)));
+        let _tiles = TileScope::open();
         let mut surface = make_compositing_surface(
             &engine,
             options,
@@ -4451,6 +4490,7 @@ impl Page {
         let img_scale =
             M44::from(Matrix::scale((options.density, options.density)));
         let draw = || -> Result<Surface, String> {
+            let _tiles = TileScope::open();
             let mut surface = make_compositing_surface(
                 &engine,
                 options,
@@ -8552,6 +8592,7 @@ mod tests {
                     Layer::Targeted(_) => "pair",
                     Layer::Cut(_) => "cut",
                     Layer::Clipped(_) => "clipped",
+                    Layer::Pattern(_) => "tile",
                 })
                 .collect();
             kinds.join(" ")

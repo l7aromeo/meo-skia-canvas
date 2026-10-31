@@ -20,18 +20,21 @@
 
 use std::{
     borrow::Cow,
+    cell::RefCell,
     f32::consts::SQRT_2,
     iter,
+    marker::PhantomData,
     sync::{Arc, OnceLock},
 };
 
+use parking_lot::Mutex;
 use skia_safe::{
     AlphaType, BlendMode, BlurStyle, Canvas as SkCanvas, ClipOp, Color4f,
-    ColorFilter, ColorSpace, ColorType, Data, FilterMode, IRect, ImageFilter,
-    ImageInfo, MaskFilter, Matrix, Paint, PaintCap, PaintJoin, PaintStyle,
-    Path, PathDirection, Picture, PictureRecorder, Rect, RoundOut,
-    RuntimeEffect, SamplingOptions, Shader, TileMode, canvas::SaveLayerRec,
-    color_filters, image_filters,
+    ColorFilter, ColorSpace, ColorType, Data, FilterMode, IRect, Image,
+    ImageFilter, ImageInfo, MaskFilter, Matrix, Paint, PaintCap, PaintJoin,
+    PaintStyle, Path, PathDirection, Picture, PictureRecorder, Point, Rect,
+    RoundOut, RuntimeEffect, SamplingOptions, Shader, TileMode,
+    canvas::SaveLayerRec, color_filters, image_filters,
 };
 
 use crate::{
@@ -40,9 +43,11 @@ use crate::{
         chain::{self, Depth, Step},
         chain_cache, coverage_of,
         faint::{Faint, composited},
+        page::{ExportOptions, Page},
     },
     export::VectorFeatures,
-    node::filter::MASK_BLUR_MAX_SIGMA,
+    gpu::RenderingEngine,
+    node::{filter::MASK_BLUR_MAX_SIGMA, typography::RunPaint},
     started,
 };
 
@@ -75,6 +80,9 @@ pub enum Layer {
     /// Part of what was drawn under one clip and transform, recorded without
     /// the clip and played under it -- see [`Clipped`].
     Clipped(Arc<Clipped>),
+    /// A canvas pattern painted over what its group holds, made from the
+    /// canvas's page at the scale it is played back at -- see [`PatternDraw`].
+    Pattern(Arc<PatternDraw>),
 }
 
 impl Layer {
@@ -93,6 +101,7 @@ impl Layer {
             },
             Layer::Cut(op) => op.playback(canvas, target),
             Layer::Clipped(piece) => piece.playback(canvas, target),
+            Layer::Pattern(tile) => tile.playback(canvas, target),
         }
     }
 
@@ -114,6 +123,7 @@ impl Layer {
             Layer::Targeted(pictures) => Some(pictures.0.cull_rect()),
             Layer::Cut(op) => Some(op.reach()),
             Layer::Clipped(piece) => piece.reach(),
+            Layer::Pattern(tile) => Some(tile.reach()),
         }
     }
 }
@@ -156,6 +166,75 @@ pub(crate) fn reach_of(entries: &[Layer]) -> Option<Rect> {
             all.join(entry.reach()?);
             Some(all)
         })
+}
+
+thread_local! {
+    /// The tiles rasterized on the GPU in the playback under way on this
+    /// thread -- see [`TileScope`].
+    static GPU_TILES: RefCell<GpuTiles> = RefCell::default();
+}
+
+/// See [`TileScope`].
+#[derive(Default)]
+struct GpuTiles {
+    /// How many scopes are open.
+    open: usize,
+    /// Each tile under its source's address and its density.
+    tiles: Vec<((usize, u32), Image)>,
+}
+
+/// Keeps each tile a GPU playback rasterizes for the rest of that playback,
+/// so that a pattern drawn many times on a page rasterizes its source once
+/// rather than at each draw: 200 small fills dyed by one pattern made a
+/// GPU surface and played the source's page onto it 200 times.
+///
+/// Opened where a page is played onto pixels, and let go there when the
+/// playback ends: a GPU image lives on its thread's context and has to
+/// be let go on that thread, and a playback whose draws the GPU discarded
+/// is drawn again on a fresh surface with tiles of its own. A source is
+/// filed by its address, which stays its own while the page that holds it
+/// is played. Outside a scope nothing is kept.
+pub(crate) struct TileScope(PhantomData<*const ()>);
+
+impl TileScope {
+    /// Opens a scope on this thread, with no tile kept yet: a scope opened
+    /// inside another starts afresh, and the outer one rasterizes again what
+    /// it needs.
+    pub(crate) fn open() -> Self {
+        GPU_TILES.with_borrow_mut(|held| {
+            held.open += 1;
+            held.tiles.clear();
+        });
+        Self(PhantomData)
+    }
+
+    fn held(key: (usize, u32)) -> Option<Image> {
+        GPU_TILES.with_borrow(|held| {
+            held.tiles
+                .iter()
+                .find(|(at, _)| *at == key)
+                .map(|(_, image)| image.clone())
+        })
+    }
+
+    fn hold(key: (usize, u32), image: &Image) {
+        GPU_TILES.with_borrow_mut(|held| {
+            if held.open > 0 {
+                held.tiles.push((key, image.clone()));
+            }
+        });
+    }
+}
+
+impl Drop for TileScope {
+    fn drop(&mut self) {
+        GPU_TILES.with_borrow_mut(|held| {
+            held.open -= 1;
+            if held.open == 0 {
+                held.tiles.clear();
+            }
+        });
+    }
 }
 
 /// A flat colour held exactly in a page's own space, for the recording a
@@ -361,6 +440,262 @@ impl ExactColour {
         // meaningless, so the glyph contrast of a filter worked in another
         // space is set from its output converted back to sRGB.
         color_filters::compose(&unconverted, &replacement)
+    }
+}
+
+/// The largest tile, in device pixels, a [`TileSource`] rasterizes a page
+/// into: the bound Skia's picture shader puts on the tile it rasterizes a
+/// pattern's picture into, `kMaxTileArea` in `SkPictureShader.cpp`, so that
+/// a pattern made from a page asks for no larger a raster than one made
+/// from its picture does.
+const TILE_AREA_MAX: f32 = 2048.0 * 2048.0;
+
+/// How far past a whole number a scale may lie and still be taken as that
+/// number. A density composed with the transforms a pattern is drawn under
+/// reaches [`TileSource::density_for`] a few units in the last place off
+/// the whole number it stands for, and rounding that up would rasterize the
+/// page at the next density and resample it down.
+const SCALE_SLACK: f32 = 1.0 / 1024.0;
+
+/// A canvas's page as a pattern made from it paints it: rasterized as the
+/// page composites itself, at a whole density, on the device the pattern is
+/// drawn on and in the page's own colour type -- as a canvas drawn into
+/// another plays its page there. On the CPU the raster is kept for the
+/// density asked for last; on the GPU it is a texture of the context
+/// drawing it, kept for the rest of the playback that made it and gone with
+/// it -- see [`TileScope`] -- so that nothing here holds a texture past the
+/// playback.
+///
+/// Not a picture shader of the page's picture, which Skia rasterizes once
+/// at the scale it is first drawn at and always as RGBA8888: a blur the
+/// page makes at playback comes out of it made at that scale and
+/// resampled, and on a platform whose native colour type is BGRA8888 a
+/// translucent edge blits a level apart from the page's -- see
+/// `a_picture_shader_tile_blits_as_rgba`.
+#[derive(Debug)]
+pub struct TileSource {
+    page: Page,
+    /// What the page is rasterized with: its own colour space, format and
+    /// glyph settings. The density is set for each raster.
+    options: ExportOptions,
+    /// The raster made last on the CPU, and the density it was made at.
+    raster: Mutex<Option<(u32, Image)>>,
+}
+
+impl TileSource {
+    /// `page`, rasterized with `options` at whatever density a draw asks.
+    pub fn new(page: Page, options: ExportOptions) -> Self {
+        Self {
+            page,
+            options,
+            raster: Mutex::new(None),
+        }
+    }
+
+    /// The page rasterized at `density` for a pattern drawn on `canvas`.
+    fn raster(&self, canvas: &SkCanvas, density: u32) -> Option<Image> {
+        // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+        // Re-check: cargo test a_picture_shader_tile_blits_as_rgba
+        // Rasterized here, in the page's own colour type, rather than
+        // through Skia's picture shader, whose tile is RGBA8888 whatever
+        // the page -- see the type's note.
+        if blur_mask::on_gpu(canvas) {
+            let key = (self as *const Self as usize, density);
+            if let Some(image) = TileScope::held(key) {
+                return Some(image);
+            }
+            let dims = self.page.scaled_dimensions(density as f32);
+            let info = self
+                .options
+                .compositing_info(dims, &self.options.surface_color_space);
+            let props = self.options.surface_props();
+            let mut surface = canvas.new_surface(&info, Some(&props))?;
+            let tile = surface.canvas();
+            tile.set_matrix(
+                &Matrix::scale((density as f32, density as f32)).into(),
+            );
+            for entry in self.page.layers.iter() {
+                entry.playback(tile, Target::Pixels);
+            }
+            let image = surface.image_snapshot();
+            TileScope::hold(key, &image);
+            return Some(image);
+        }
+        let mut held = self.raster.lock();
+        if let Some((at, image)) = held.as_ref()
+            && *at == density
+        {
+            return Some(image.clone());
+        }
+        let options = ExportOptions {
+            density: density as f32,
+            ..self.options.clone()
+        };
+        let image =
+            self.page.rasterized(&options, RenderingEngine::CPU).ok()?;
+        *held = Some((density, image.clone()));
+        Some(image)
+    }
+
+    /// The density a tile is rasterized at for a pattern drawn through
+    /// `to_device`, the transform from the page's space to the device: the
+    /// larger of the two scales it maps by, rounded up to a whole number
+    /// unless it lies within [`SCALE_SLACK`] of one, and lowered until the
+    /// tile fits [`TILE_AREA_MAX`]; never below 1. A whole density is what
+    /// the page draws itself at, so a pattern drawn at it lies over the
+    /// page's own pixels exactly.
+    fn density_for(&self, to_device: &Matrix) -> u32 {
+        let scale = to_device
+            .decompose_scale(None)
+            .map_or(1.0, |scale| scale.width.max(scale.height));
+        let near = scale.round();
+        let wanted = match (scale - near).abs() <= SCALE_SLACK {
+            true => near,
+            false => scale.ceil(),
+        };
+        let size = self.page.bounds.size();
+        let fits = (TILE_AREA_MAX / (size.width * size.height)).sqrt().floor();
+        wanted.min(fits).max(1.0) as u32
+    }
+}
+
+/// A draw dyed by a canvas pattern, the pattern made where the draw is
+/// played: from the canvas's page rasterized as the page composites itself,
+/// at the scale it is played at -- see [`TileSource`] -- rather than from a
+/// picture of it Skia rasterizes as RGBA8888 at the scale the picture was
+/// recorded at.
+///
+/// On pixels, and so in the raster a document embeds, the draw is kept
+/// whole -- see [`Replay`] -- and drawn again with the pattern as its
+/// shader, through its own alpha, blend mode and colour filter, as a draw
+/// dyed by a pattern of the canvas's pixels is. In a document the draw is
+/// played as recorded, with the page's picture as its pattern -- which
+/// Skia's PDF backend writes as an image, and its SVG backend drops: a
+/// canvas's pattern asks an SVG export to embed the draw -- see
+/// `Dye::vector_features`.
+#[derive(Clone, Debug)]
+pub struct PatternDraw {
+    pub source: Arc<TileSource>,
+    /// The transform the draw was made under.
+    pub matrix: Matrix,
+    /// The pattern's own transform, from the page's space to the draw's.
+    pub pattern_matrix: Matrix,
+    pub repeat: (TileMode, TileMode),
+    /// The draw as a document writes it, under the transform it was made
+    /// under; its bounds are what the draw reaches.
+    pub plain: Picture,
+    /// What the pattern is painted through: the draw's alpha, blend mode
+    /// and colour filter.
+    pub paint: Paint,
+    /// The clip the draw was made under, in device pixels of the recording,
+    /// where it is not a piece of a run that applies it -- see [`Clipped`].
+    pub clip: Option<Data>,
+    /// The draw kept whole, to draw on pixels with the pattern as its
+    /// shader, as a draw dyed by a pattern of the canvas's pixels is.
+    pub replay: Replay,
+}
+
+/// A draw kept whole, so that the pattern a [`PatternDraw`] makes at
+/// playback is drawn through it as any shader is: a picture of the draw
+/// holds the shader it was recorded with, and the pattern's is not made
+/// until the scale the draw is played at is known.
+#[derive(Clone, Debug)]
+pub enum Replay {
+    /// A path filled or stroked as the paint says, onto pixels that do with
+    /// a faint paint what the [`Faint`] says; serialized, as a group's clip
+    /// is, so that a page holding it can be sent to another thread.
+    Path(Data, Faint),
+    /// A run of text, as `Context2D::draw_text` paints it: what it draws,
+    /// with its anchor at `at`, painted `offset` from it and squeezed by
+    /// `condensation` about it, its named line colour's alpha multiplied
+    /// by `global_alpha`, onto pixels that do with a faint paint what
+    /// `faint` says.
+    Text {
+        run: Arc<RunPaint>,
+        at: Point,
+        offset: Point,
+        condensation: f32,
+        global_alpha: f32,
+        faint: Faint,
+    },
+}
+
+impl PatternDraw {
+    fn playback(&self, canvas: &SkCanvas, target: Target) {
+        canvas.save();
+        if let Some(clip) = self.clip.as_ref().and_then(Path::deserialize) {
+            canvas.clip_path(&clip, ClipOp::Intersect, true);
+        }
+        match target {
+            Target::Pixels | Target::Embedded => self.paint_onto(canvas),
+            Target::Document => self.plain.playback(canvas),
+        }
+        canvas.restore();
+    }
+
+    /// Paints the pattern onto `canvas` where the draw covers it.
+    fn paint_onto(&self, canvas: &SkCanvas) {
+        let to_draw =
+            Matrix::concat(&canvas.local_to_device_as_3x3(), &self.matrix);
+        let density = self
+            .source
+            .density_for(&Matrix::concat(&to_draw, &self.pattern_matrix));
+        let Some(image) = self.source.raster(canvas, density) else {
+            return;
+        };
+        // The raster back to the page's own size, which its pixels cover.
+        let size = self.source.page.bounds.size();
+        let to_page = Matrix::scale((
+            size.width / image.width() as f32,
+            size.height / image.height() as f32,
+        ));
+        let Some(shader) = image.to_shader(
+            self.repeat,
+            SamplingOptions::from(FilterMode::Linear),
+            &Matrix::concat(&self.pattern_matrix, &to_page),
+        ) else {
+            return;
+        };
+        let mut paint = self.paint.clone();
+        paint.set_shader(shader);
+        match &self.replay {
+            Replay::Path(path, faint) => {
+                let Some(path) = Path::deserialize(path) else {
+                    return;
+                };
+                canvas.concat(&self.matrix);
+                canvas.draw_path(&path, &faint.drawable(&paint));
+            }
+            Replay::Text {
+                run,
+                at,
+                offset,
+                condensation,
+                global_alpha,
+                faint,
+            } => {
+                canvas.concat(&self.matrix);
+                // Squeezed as `draw_text` squeezes it: by a scale about the
+                // anchor, the pen with it.
+                if *condensation == 1.0 {
+                    run.paint(
+                        canvas,
+                        *at + *offset,
+                        &paint,
+                        *global_alpha,
+                        *faint,
+                    );
+                } else {
+                    canvas.translate(*at).scale((*condensation, 1.0));
+                    run.paint(canvas, *offset, &paint, *global_alpha, *faint);
+                }
+            }
+        }
+    }
+
+    /// What the draw covers, under the transform it is played under.
+    fn reach(&self) -> Rect {
+        self.plain.cull_rect()
     }
 }
 
@@ -1272,7 +1607,10 @@ pub(crate) fn holds_a_cut(entries: &[Layer]) -> bool {
         Layer::Cut(_) => true,
         Layer::Group(group) => holds_a_cut(&group.contents.layers),
         Layer::Clipped(piece) => matches!(piece.entry, Layer::Cut(_)),
-        Layer::Picture(_) | Layer::Blur(_) | Layer::Targeted(_) => false,
+        Layer::Picture(_)
+        | Layer::Blur(_)
+        | Layer::Targeted(_)
+        | Layer::Pattern(_) => false,
     })
 }
 
