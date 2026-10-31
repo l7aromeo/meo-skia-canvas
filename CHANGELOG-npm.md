@@ -505,13 +505,26 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   canvas's own pixels at that density paints, path, stroke, text, shadow and
   filter alike. A PDF still writes the pattern from the canvas's picture.
 
-- **A `Paragraph` under a composite operation reaches an SVG, and a PDF
-  composites it.** Drawn under a `globalCompositeOperation` other than
-  `source-over`, a paragraph is composited as one group through a layer,
-  which Skia's SVG backend drops whole, so the SVG held nothing of it; a
-  PDF wrote the blend itself, which its backend composites wrongly. Both
-  now embed the paragraph and what lies beneath it as pixels, as they
-  embed any other blended draw.
+- **A `Paragraph` under a composite operation reaches an SVG.** Drawn under a
+  `globalCompositeOperation` other than `source-over`, a paragraph is
+  composited as one group through a layer, which Skia's SVG backend drops
+  whole, so the SVG held nothing of it. It now embeds the paragraph and what
+  lies beneath it as pixels, as it embeds any other blended draw; a PDF writes
+  the blend itself -- see below.
+
+- **A PDF writes a composite operation as the blend it is.** `toBuffer("pdf")`
+  embedded every draw under a `globalCompositeOperation` other than
+  `source-over` as pixels, with everything beneath it, as one JPEG at the
+  export's density, which came out 8 to 38 levels off over the blended source
+  when the page was viewed at four times its size. On a canvas in `"srgb"`, a
+  blend is now written into the PDF as the blend mode it is, on a page whose
+  transparency group blends in DeviceRGB, the space its colours are written
+  in; poppler renders every such mode within 2 levels of the canvas, and macOS
+  Preview all but the few docs/browser-differences.md lists. `lighter`, `xor`,
+  and `destination-atop` from a source that may be translucent, which PDF has
+  no blend mode for or Skia's PDF backend writes wrongly, are still embedded,
+  and so is every blend on a canvas in any other colour space, since a PDF
+  blends in sRGB where the canvas blends in its own.
 
 - **An SVG of a page with nothing on it is well-formed XML.**
   `toBuffer("svg")` wrote an empty page's root as
