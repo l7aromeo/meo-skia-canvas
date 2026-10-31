@@ -45,6 +45,7 @@ use crate::{
         faint::{Faint, composited},
         page::{ExportOptions, Page},
     },
+    export::VectorFeatures,
     gpu::RenderingEngine,
     node::filter::MASK_BLUR_MAX_SIGMA,
     started,
@@ -902,6 +903,25 @@ impl LayerRec {
         self.backdrop.is_some()
             || !matches!(blend, None | Some(BlendMode::SrcOver))
     }
+
+    /// The opacity the layer composites what it holds at, where that is
+    /// all it does: over no backdrop, through no paint or one that is an
+    /// alpha under `source-over` with no shader or filter. `None` for any
+    /// other layer. Its bounds still confine what it holds.
+    pub(crate) fn opacity(&self) -> Option<f32> {
+        if self.backdrop.is_some() {
+            return None;
+        }
+        let Some(paint) = &self.paint else {
+            return Some(1.0);
+        };
+        (paint.as_blend_mode() == Some(BlendMode::SrcOver)
+            && paint.shader().is_none()
+            && paint.color_filter().is_none()
+            && paint.image_filter().is_none()
+            && paint.mask_filter().is_none())
+        .then(|| paint.alpha_f())
+    }
 }
 
 /// How a [`Group`] composites onto what lies beneath it.
@@ -952,6 +972,12 @@ pub struct Group {
     /// another thread.
     pub matrix: Matrix,
     pub clip: Option<Data>,
+    /// Whether every entry was recorded under `clip` already, as what a
+    /// layer holds is. A document opening the group -- see
+    /// [`Self::open_in_a_document`] -- clips by it only where not: clipped
+    /// twice by one path, an SVG writes two clip paths, and a renderer
+    /// takes their edges' coverage twice.
+    pub entries_clipped: bool,
     /// A rectangle under `matrix` that what the group draws is confined to:
     /// the destination a canvas is drawn into. It bounds what is drawn and
     /// not what a filter makes of it, which spreads past it as a blur of
@@ -961,12 +987,124 @@ pub struct Group {
     /// layer held, recorded in page coordinates; for a canvas drawn in, the
     /// mapping from its page onto this one.
     pub contents_matrix: Matrix,
-    /// Shared, so that a canvas drawn in brings its page's list without
-    /// copying it.
-    pub contents: Arc<Vec<Layer>>,
+    /// What the group holds, each entry with what it asks of a vector
+    /// backend.
+    pub(crate) contents: Entries,
+}
+
+/// Entries played in order, each with what it asks of a vector backend: the
+/// page's own, or a [`Group`]'s, which a document can then take entry by
+/// entry rather than as the group as a whole.
+///
+/// Shared, so that a canvas drawn in brings its page's lists without copying
+/// them.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Entries {
+    pub(crate) layers: Arc<Vec<Layer>>,
+    /// One for each of `layers`, in the same order.
+    pub(crate) features: Arc<Vec<VectorFeatures>>,
+}
+
+impl FromIterator<(Layer, VectorFeatures)> for Entries {
+    fn from_iter<I: IntoIterator<Item = (Layer, VectorFeatures)>>(
+        entries: I,
+    ) -> Self {
+        let (layers, features) = entries.into_iter().unzip();
+        Self::new(layers, features)
+    }
+}
+
+impl Entries {
+    /// `layers`, each asking for `features` at the same index.
+    pub(crate) fn new(
+        layers: Vec<Layer>,
+        features: Vec<VectorFeatures>,
+    ) -> Self {
+        Self::shared(Arc::new(layers), Arc::new(features))
+    }
+
+    /// [`Self::new`] for lists already shared.
+    pub(crate) fn shared(
+        layers: Arc<Vec<Layer>>,
+        features: Arc<Vec<VectorFeatures>>,
+    ) -> Self {
+        debug_assert_eq!(layers.len(), features.len(), "a feature per entry");
+        Self { layers, features }
+    }
+
+    /// `layers` asking nothing of a vector backend.
+    pub(crate) fn plain(layers: Vec<Layer>) -> Self {
+        let features = vec![VectorFeatures::PLAIN; layers.len()];
+        Self::new(layers, features)
+    }
+
+    /// Every entry, each with what it asks of a vector backend.
+    pub(crate) fn iter(
+        &self,
+    ) -> impl Iterator<Item = (&Layer, VectorFeatures)> {
+        self.layers.iter().zip(self.features.iter().copied())
+    }
+
+    /// Everything the entries ask of a vector backend, together.
+    pub(crate) fn all_features(&self) -> VectorFeatures {
+        self.features
+            .iter()
+            .fold(VectorFeatures::PLAIN, |all, features| all.with(*features))
+    }
 }
 
 impl Group {
+    /// The opacity the group composites what it holds at, where that is all
+    /// it does -- see [`LayerRec::opacity`]. A document can take such a
+    /// group entry by entry, writing what it can of them and embedding the
+    /// rest as pixels, rather than whole: opened, at an opacity of 1, and
+    /// in an SVG written as a group of its own at any other. `None` for a
+    /// filter chain or any other layer, which a document takes whole.
+    ///
+    /// A layer keeps what it holds from blending with what lies beneath it,
+    /// so a blend inside one has to be composited in it. A document never
+    /// asks this of a group holding one: it embeds every entry up to the
+    /// last that blends, with what lies beneath it, first.
+    pub(crate) fn opacity(&self) -> Option<f32> {
+        match &self.composite {
+            Composite::Plain => Some(1.0),
+            Composite::Layer(rec) => rec.opacity(),
+            Composite::Chain { .. } => None,
+        }
+    }
+
+    /// Plays the group onto `canvas` as a document does a group it opens --
+    /// see [`Self::opacity`]: under its clip, its `within` and
+    /// its layer's bounds, its transforms composed as [`Self::playback`]
+    /// composes them, with no layer around what `entries` plays of its
+    /// contents.
+    pub(crate) fn open_in_a_document(
+        &self,
+        canvas: &SkCanvas,
+        entries: impl FnOnce(&SkCanvas, &Entries),
+    ) {
+        let base = canvas.local_to_device_as_3x3();
+        canvas.save();
+        if !self.entries_clipped
+            && let Some(clip) = self.clip.as_ref().and_then(Path::deserialize)
+        {
+            canvas.clip_path(&clip, ClipOp::Intersect, true);
+        }
+        canvas.set_matrix(&Matrix::concat(&base, &self.matrix).into());
+        if let Some(within) = &self.within {
+            canvas.clip_rect(within, ClipOp::Intersect, true);
+        }
+        if let Composite::Layer(rec) | Composite::Chain { rec, .. } =
+            &self.composite
+            && let Some(bounds) = &rec.bounds
+        {
+            canvas.clip_rect(bounds, ClipOp::Intersect, true);
+        }
+        canvas.set_matrix(&Matrix::concat(&base, &self.contents_matrix).into());
+        entries(canvas, &self.contents);
+        canvas.restore();
+    }
+
     /// Draws the group onto `canvas` for `target`, its transforms composed
     /// with the one the canvas carries: a recorded picture replays its
     /// matrices relative to the canvas it is played onto, and these have to
@@ -980,8 +1118,8 @@ impl Group {
     /// were.
     pub fn playback(self: &Arc<Self>, canvas: &SkCanvas, target: Target) {
         let pixels = target != Target::Document && blur_mask::draws_on(canvas);
-        let within =
-            pixels.then(|| self.composite.footprint(reach_of(&self.contents)));
+        let within = pixels
+            .then(|| self.composite.footprint(reach_of(&self.contents.layers)));
         self.playback_within(canvas, target, within.flatten());
     }
 
@@ -990,7 +1128,8 @@ impl Group {
     /// they are played under, where the layer can be confined to it. `None`
     /// where it covers what the clip allows.
     pub fn reach(&self) -> Option<Rect> {
-        let drawn = self.composite.footprint(reach_of(&self.contents))?;
+        let drawn =
+            self.composite.footprint(reach_of(&self.contents.layers))?;
         Some(self.contents_matrix.map_rect(drawn).0)
     }
 
@@ -1015,7 +1154,7 @@ impl Group {
             // what the layer composites, as the cut draw's own clip does.
             let coverage = (target == Target::Pixels
                 && clips_by_coverage(canvas, target)
-                && holds_a_cut(&self.contents))
+                && holds_a_cut(&self.contents.layers))
             .then(|| Coverage::of(&clip))
             .flatten();
             match coverage {
@@ -1057,17 +1196,18 @@ impl Group {
                 // What is drawn is bounded by `within`, or for a single
                 // picture by what it was recorded within.
                 let to_space = |matrix: &Matrix| Matrix::concat(&back, matrix);
-                let content = match (&self.within, self.contents.as_slice()) {
-                    (Some(within), _) => {
-                        Some(to_space(&self.matrix).map_rect(within).0)
-                    }
-                    (None, [Layer::Picture(picture)]) => Some(
-                        to_space(&self.contents_matrix)
-                            .map_rect(picture.cull_rect())
-                            .0,
-                    ),
-                    (None, _) => None,
-                };
+                let content =
+                    match (&self.within, self.contents.layers.as_slice()) {
+                        (Some(within), _) => {
+                            Some(to_space(&self.matrix).map_rect(within).0)
+                        }
+                        (None, [Layer::Picture(picture)]) => Some(
+                            to_space(&self.contents_matrix)
+                                .map_rect(picture.cull_rect())
+                                .0,
+                        ),
+                        (None, _) => None,
+                    };
                 // A group a canvas drawn into another brings with it is played
                 // once for each time that canvas is, and its chain is run the
                 // first of those -- see `chain_cache`.
@@ -1099,7 +1239,7 @@ impl Group {
                             )
                             .into(),
                         );
-                        for entry in self.contents.iter() {
+                        for entry in self.contents.layers.iter() {
                             entry.playback(layer, target);
                         }
                     },
@@ -1117,7 +1257,7 @@ impl Group {
                     canvas.clip_rect(within, ClipOp::Intersect, true);
                 }
                 canvas.set_matrix(&entries.into());
-                play_entries(&self.contents, canvas, target);
+                play_entries(&self.contents.layers, canvas, target);
             }
             (Composite::Layer(rec) | Composite::Chain { rec, .. }, target) => {
                 canvas.set_matrix(&Matrix::concat(&base, &self.matrix).into());
@@ -1141,7 +1281,7 @@ impl Group {
                     clip_within(canvas);
                 }
                 canvas.set_matrix(&entries.into());
-                play_entries(&self.contents, canvas, target);
+                play_entries(&self.contents.layers, canvas, target);
                 canvas.restore();
             }
         }
@@ -1554,7 +1694,7 @@ fn bounds_page() -> bool {
 pub(crate) fn holds_a_cut(entries: &[Layer]) -> bool {
     entries.iter().any(|entry| match entry {
         Layer::Cut(_) => true,
-        Layer::Group(group) => holds_a_cut(&group.contents),
+        Layer::Group(group) => holds_a_cut(&group.contents.layers),
         Layer::Clipped(piece) => matches!(piece.entry, Layer::Cut(_)),
         Layer::Picture(_)
         | Layer::Blur(_)
@@ -2101,9 +2241,27 @@ impl BlurOp {
 
 #[cfg(test)]
 mod tests {
-    use super::luminance_colour;
-    use skia_safe::{BlendMode, Color, Color4f, color_filters};
+    use super::{Composite, Entries, Group, luminance_colour};
+    use skia_safe::{BlendMode, Color, Color4f, Matrix, color_filters};
     use std::iter::zip;
+
+    /// A group through no layer composites what it holds as it is, so a
+    /// document opens it at an opacity of 1. `Context2D` makes one only for
+    /// a source asking nothing of a backend, which a document plays without
+    /// asking this; it holds what the answer is where it is asked.
+    #[test]
+    fn a_plain_group_opens_at_an_opacity_of_one() {
+        let group = Group {
+            composite: Composite::Plain,
+            matrix: Matrix::new_identity(),
+            clip: None,
+            entries_clipped: false,
+            within: None,
+            contents_matrix: Matrix::new_identity(),
+            contents: Entries::plain(Vec::new()),
+        };
+        assert_eq!(group.opacity(), Some(1.0));
+    }
 
     #[test]
     fn a_filters_luminance_colour_is_its_output() {

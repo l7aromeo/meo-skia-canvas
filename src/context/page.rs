@@ -8,9 +8,10 @@ use parking_lot::RwLock;
 use rayon::prelude::*;
 use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
-    ColorSpace, ColorType, Document, IRect, ISize, Image as SkImage, ImageInfo,
-    M44, Matrix, Paint, Path, Picture, PictureRecorder, PixelGeometry, Pixmap,
-    Point, Rect, Size, Surface, SurfaceProps, SurfacePropsFlags, XYZD50Hash,
+    ColorSpace, ColorType, Data, Document, IRect, ISize, Image as SkImage,
+    ImageInfo, M44, Matrix, Paint, Path, Picture, PictureRecorder,
+    PixelGeometry, Pixmap, Point, Rect, Size, Surface, SurfaceProps,
+    SurfacePropsFlags, XYZD50Hash, annotate,
     canvas::SrcRectConstraint,
     image::{BitDepth, CachingHint},
     jpeg_encoder, pdf, png_encoder,
@@ -18,7 +19,8 @@ use skia_safe::{
     webp_encoder,
 };
 use std::{
-    collections::HashMap,
+    cell::Cell,
+    collections::{HashMap, HashSet},
     fs,
     io::{BufWriter, Cursor, Write},
     path::Path as FilePath,
@@ -39,7 +41,7 @@ use crate::{
         faint::composited,
         layer::{
             BlurDraw, BlurOp, ClipData, Clipped, Composite, Coverage, CutOp,
-            Group, Layer, LayerRec, PatternDraw, Target, TileScope,
+            Entries, Group, Layer, LayerRec, PatternDraw, Target, TileScope,
             holds_a_cut, play_entries,
         },
     },
@@ -427,6 +429,11 @@ struct OpenLayer {
     /// a group was filed among it, and the groups -- a layer opened inside
     /// this one, a canvas drawn in through a paint.
     entries: Vec<Layer>,
+    /// What each of `entries` asks of a vector backend, in the same order.
+    entry_features: Vec<VectorFeatures>,
+    /// What the draws `current` holds for this layer ask of a vector
+    /// backend: the entry they are filed as asks it in turn.
+    current_features: VectorFeatures,
     rec: LayerRec,
     /// The transform and clip the layer was opened under.
     matrix: Matrix,
@@ -838,6 +845,16 @@ impl PageRecorder {
         if self.isolated.is_some() {
             self.flush();
         }
+        // Nor can it join draws an open layer holds that ask for something:
+        // filing them first keeps this one an entry asking for nothing.
+        if self.changed
+            && self
+                .open
+                .last()
+                .is_some_and(|layer| layer.current_features.any())
+        {
+            self.file_current();
+        }
         self.settle();
         match &mut self.run {
             Some(run) => {
@@ -1077,6 +1094,7 @@ impl PageRecorder {
         match self.open.last_mut() {
             Some(layer) => {
                 layer.entries.push(entry);
+                layer.entry_features.push(features);
                 layer.features = layer.features.with(features);
             }
             None => {
@@ -1156,6 +1174,12 @@ impl PageRecorder {
     /// which is filed as a piece of its own. A run whose frame has ended is
     /// closed instead -- see [`Self::close_run`].
     fn split_run(&mut self) {
+        self.split_run_asking(VectorFeatures::PLAIN);
+    }
+
+    /// [`Self::split_run`], the piece asking `features` of a vector backend
+    /// -- see [`Self::append_isolated`].
+    fn split_run_asking(&mut self, features: VectorFeatures) {
         let Some(run) = &self.run else {
             return;
         };
@@ -1174,7 +1198,7 @@ impl PageRecorder {
             return;
         };
         let piece = Clipped::new(run.id, &run.shape(), entry);
-        self.file_entry(Layer::Clipped(Arc::new(piece)), VectorFeatures::PLAIN);
+        self.file_entry(Layer::Clipped(Arc::new(piece)), features);
     }
 
     /// Opens a `saveLayer` with `rec`, under the transform and clip the page
@@ -1193,6 +1217,8 @@ impl PageRecorder {
         self.open.push(OpenLayer {
             id: LAYERS.fetch_add(1, Ordering::Relaxed),
             entries: Vec::new(),
+            entry_features: Vec::new(),
+            current_features: VectorFeatures::PLAIN,
             rec,
             matrix: self.matrix,
             clip: self.clip.clone(),
@@ -1207,8 +1233,11 @@ impl PageRecorder {
     ///
     /// The group asks a vector backend for [`VectorFeatures::LAYER`] and
     /// whatever its contents asked, so that an SVG export rasterizes the
-    /// layer and leaves the rest of the page vector. One holding nothing
-    /// that would change nothing is dropped.
+    /// layer and leaves the rest of the page vector -- or, for a layer that
+    /// composites what it holds as it stands, takes it entry by entry, and
+    /// for one at an opacity alone writes it as a group at that opacity:
+    /// see [`Group::opacity`]. One holding nothing that would change nothing
+    /// is dropped.
     pub fn close_layer(&mut self) {
         if self.open.is_empty() {
             return;
@@ -1224,9 +1253,10 @@ impl PageRecorder {
                 composite: Composite::Layer(layer.rec),
                 matrix: layer.matrix,
                 clip: layer.clip.as_ref().map(Path::serialize),
+                entries_clipped: true,
                 within: None,
                 contents_matrix: Matrix::new_identity(),
-                contents: Arc::new(layer.entries),
+                contents: Entries::new(layer.entries, layer.entry_features),
             };
             self.file_group(group, layer.features.with(VectorFeatures::LAYER));
         }
@@ -1236,18 +1266,19 @@ impl PageRecorder {
     /// Files `contents` as a [`Group`] composited by `composite`, under the
     /// transform and clip the recorder holds and inside `within` under that
     /// transform, its entries played under `contents_matrix`; asking
-    /// `features` of a vector backend for it. Filed where the recording
+    /// `features` of a vector backend for the group as a whole, beside what
+    /// each of its entries asks. Filed where the recording
     /// stands: on the page, or among the contents of the innermost open
     /// layer.
     ///
     /// `shift` moves the group in device space, both transforms with it, as
     /// a shadow is offset from what casts it.
-    pub fn append_group(
+    pub(crate) fn append_group(
         &mut self,
         composite: Composite,
         within: Option<Rect>,
         contents_matrix: Matrix,
-        contents: Arc<Vec<Layer>>,
+        contents: Entries,
         features: VectorFeatures,
         shift: Point,
     ) {
@@ -1258,9 +1289,29 @@ impl PageRecorder {
             composite,
             matrix: Matrix::concat(&shift, &self.matrix),
             clip: self.clip.as_ref().map(Path::serialize),
+            // Recorded by the caller under no clip of this page's.
+            entries_clipped: false,
             within,
             contents_matrix: Matrix::concat(&shift, &contents_matrix),
             contents,
+        };
+        self.file_group(group, features);
+        self.restore();
+    }
+
+    /// Files `group` as it is given, its transform and its `within` the
+    /// device's, under the clip the recorder holds: a group whose entries
+    /// were recorded under the recorder's transform already, filed where
+    /// [`Self::append_group`] files one.
+    pub fn append_device_group(
+        &mut self,
+        group: Group,
+        features: VectorFeatures,
+    ) {
+        self.file_current();
+        let group = Group {
+            clip: self.clip.as_ref().map(Path::serialize),
+            ..group
         };
         self.file_group(group, features);
         self.restore();
@@ -1287,7 +1338,9 @@ impl PageRecorder {
             .finish(|recorder| recorder.finish_recording_as_picture(None))
         {
             layer.entries.push(entry);
+            layer.entry_features.push(layer.current_features);
         }
+        layer.current_features = VectorFeatures::PLAIN;
         self.current.begin(self.bounds);
         self.changed = false;
         self.reframe();
@@ -1313,18 +1366,30 @@ impl PageRecorder {
         self.split_run();
         self.file_current();
         self.reframe();
-        self.open.iter().rev().fold(None, |inner, layer| {
-            let mut contents = layer.entries.clone();
-            contents.extend(inner);
-            Some(Layer::Group(Arc::new(Group {
-                composite: Composite::Layer(layer.rec.clone()),
-                matrix: layer.matrix,
-                clip: layer.clip.as_ref().map(Path::serialize),
-                within: None,
-                contents_matrix: Matrix::new_identity(),
-                contents: Arc::new(contents),
-            })))
-        })
+        // Each layer holds the one inside it as it would be filed on
+        // closing: asking for a layer and for what it holds.
+        self.open
+            .iter()
+            .rev()
+            .fold(None, |inner: Option<(Layer, VectorFeatures)>, layer| {
+                let mut contents = layer.entries.clone();
+                let mut features = layer.entry_features.clone();
+                if let Some((entry, asks)) = inner {
+                    contents.push(entry);
+                    features.push(asks);
+                }
+                let group = Layer::Group(Arc::new(Group {
+                    composite: Composite::Layer(layer.rec.clone()),
+                    matrix: layer.matrix,
+                    clip: layer.clip.as_ref().map(Path::serialize),
+                    entries_clipped: true,
+                    within: None,
+                    contents_matrix: Matrix::new_identity(),
+                    contents: Entries::new(contents, features),
+                }));
+                Some((group, layer.features.with(VectorFeatures::LAYER)))
+            })
+            .map(|(group, _)| group)
     }
 
     /// What the open layers ask of a vector backend, as the page they are
@@ -1554,9 +1619,42 @@ impl PageRecorder {
     where
         F: Fn(&SkCanvas, Recording),
     {
-        if let Some(layer) = self.open.last_mut() {
-            layer.features = layer.features.with(features);
-            self.append(f);
+        // Inside a layer a run of draws asking for the same features is one
+        // of its entries, as on the page, and one asking for others is
+        // filed apart: what the frame's run holds, drawn before this and
+        // asking for nothing, first -- see `Run`.
+        //
+        // Under a clip the draw goes into the frame's run, as an ordinary
+        // one does, so that the run's clip holds it, and is filed at once as
+        // a piece of its own asking for its features.
+        if self.open.last().is_some() {
+            if self.run.as_ref().is_some_and(|run| run.changed) {
+                self.split_run();
+            }
+            if let Some(layer) = self.open.last()
+                && self.changed
+                && layer.current_features != features
+            {
+                self.file_current();
+            }
+            self.settle();
+            if let Some(layer) = self.open.last_mut() {
+                layer.features = layer.features.with(features);
+            }
+            match &mut self.run {
+                Some(run) => {
+                    run.recorders.each(f);
+                    run.changed = true;
+                    self.split_run_asking(features);
+                }
+                None => {
+                    if let Some(layer) = self.open.last_mut() {
+                        layer.current_features = features;
+                    }
+                    self.current.each(f);
+                    self.changed = true;
+                }
+            }
             return;
         }
 
@@ -1622,7 +1720,9 @@ impl PageRecorder {
         if self.blur_run == Some(self.frame) && !self.pending() {
             let run = self.run.as_ref().map(|run| run.id);
             let (entries, last_features) = match self.open.last_mut() {
-                Some(layer) => (&mut layer.entries, None),
+                Some(layer) => {
+                    (&mut layer.entries, layer.entry_features.last())
+                }
                 None => (Arc::make_mut(&mut self.layers), self.features.last()),
             };
             let op = match entries.last_mut() {
@@ -3425,7 +3525,189 @@ impl Default for Page {
     }
 }
 
-/// Adds the `viewBox` Skia does not write.
+/// The scheme of the link an SVG export marks a group's place with -- see
+/// [`Page::splice_group`]. Nothing else on a page writes a link to it.
+const SPLICE_MARK: &str = "meo-skia-canvas:group:";
+
+/// The colour of the paint drawn before a group's mark, so that the device
+/// writes the mark under the clip the group is drawn under -- see
+/// [`Page::splice_group`]. An alpha of one 255th, since a paint with none
+/// is not drawn at all; it never reaches a document, removed with the mark.
+const SPLICE_SYNC: Color = Color::from_argb(1, 0x0F, 0x1E, 0x2D);
+
+/// The `fill` attribute the device writes for [`SPLICE_SYNC`].
+fn splice_sync_fill() -> String {
+    format!(
+        "fill=\"#{:02X}{:02X}{:02X}\"",
+        SPLICE_SYNC.r(),
+        SPLICE_SYNC.g(),
+        SPLICE_SYNC.b()
+    )
+}
+
+/// The groups an SVG document is written with as groups of their own --
+/// see [`Page::splice_group`]: each the mark of its place, and what replaces
+/// it once Skia has written the document.
+struct Splices<'a> {
+    /// The page's size and the flags its documents are written with.
+    size: Size,
+    flags: Option<Flags>,
+    /// How many groups the export has written so far, in any of its
+    /// documents, so that each takes a mark and ids of its own.
+    count: &'a Cell<usize>,
+    made: Vec<(String, String)>,
+}
+
+impl Splices<'_> {
+    /// `written`, each mark Skia wrote in it, with the paint written just
+    /// before it, replaced by its group. A mark it did not write -- a group
+    /// drawn wholly outside the clip -- leaves nothing to replace.
+    fn apply(&self, mut written: String) -> String {
+        for (mark, group) in &self.made {
+            let Some(at) = mark_at(&written, mark) else {
+                continue;
+            };
+            let Some(end) = written[at..].find("</a>").map(|end| at + end + 4)
+            else {
+                continue;
+            };
+            let start = mark_paint(&written, at).unwrap_or(at);
+            written.replace_range(start..end, group);
+        }
+        written
+    }
+}
+
+/// Where the device wrote `mark` in `written`: the start of its `<a>`.
+fn mark_at(written: &str, mark: &str) -> Option<usize> {
+    written.find(&format!("<a xlink:href=\"{mark}\""))
+}
+
+/// Where the paint drawn before the mark starting at `at` in `written`
+/// starts: the element before the mark, with nothing but the device's
+/// indentation between them.
+fn mark_paint(written: &str, at: usize) -> Option<usize> {
+    let fill = splice_sync_fill();
+    written[..at].rfind("<rect").filter(|&rect| {
+        let paint = &written[rect..at];
+        paint.contains(&fill)
+            && paint.trim_end().ends_with("/>")
+            && paint.matches('<').count() == 1
+    })
+}
+
+/// What the root of `svg` holds: none of it where the root is self-closed.
+fn svg_body(svg: &str) -> &str {
+    let Some(root) = svg.find("<svg") else {
+        return "";
+    };
+    let Some(open) = svg[root..].find('>').map(|at| root + at) else {
+        return "";
+    };
+    if svg[..open].ends_with('/') {
+        return "";
+    }
+    let close = svg.rfind("</svg>").unwrap_or(svg.len());
+    svg.get(open + 1..close).unwrap_or("")
+}
+
+/// How the device writes an id where it declares one, and where it refers
+/// to one: what precedes the id, and the character that ends it.
+const ID_SITES: [(&str, char); 3] =
+    [(" id=\"", '"'), ("url(#", ')'), ("href=\"#", '"')];
+
+/// The ids `svg` declares, in the order it declares them.
+fn declared_ids(svg: &str) -> impl Iterator<Item = &str> {
+    let (opener, close) = ID_SITES[0];
+    svg.match_indices(opener).filter_map(move |(at, _)| {
+        let from = at + opener.len();
+        svg[from..].find(close).map(|len| &svg[from..from + len])
+    })
+}
+
+/// `svg` with every id it declares or refers to replaced by what `rename`
+/// gives it, in one pass, so that no new name is itself renamed. An id
+/// `rename` gives nothing for is kept.
+fn with_ids_renamed(
+    svg: &str,
+    rename: impl Fn(&str) -> Option<String>,
+) -> String {
+    let find = |site: usize, from: usize| {
+        svg[from..].find(ID_SITES[site].0).map(|at| from + at)
+    };
+    let mut next = [0, 1, 2].map(|site| find(site, 0));
+    let mut out = String::with_capacity(svg.len());
+    let mut copied = 0;
+    while let Some((site, at)) = next
+        .iter()
+        .enumerate()
+        .filter_map(|(site, at)| at.map(|at| (site, at)))
+        .min_by_key(|&(_, at)| at)
+    {
+        let (opener, close) = ID_SITES[site];
+        let from = at + opener.len();
+        let end = svg[from..].find(close).map_or(svg.len(), |len| from + len);
+        let id = &svg[from..end];
+        out.push_str(&svg[copied..from]);
+        out.push_str(rename(id).as_deref().unwrap_or(id));
+        copied = end;
+        for (site, at) in next.iter_mut().enumerate() {
+            if at.is_some_and(|at| at < end) {
+                *at = find(site, end);
+            }
+        }
+    }
+    out.push_str(&svg[copied..]);
+    out
+}
+
+/// `body` with every id it declares, and every reference to one --
+/// `url(#id)` or `href="#id"` -- prefixed with `prefix`, so that it can be
+/// placed in a document declaring ids of its own.
+fn renamed(body: &str, prefix: &str) -> String {
+    let declared: HashSet<&str> = declared_ids(body).collect();
+    with_ids_renamed(body, |id| {
+        declared.contains(id).then(|| format!("{prefix}{id}"))
+    })
+}
+
+/// What Skia's SVG device names a clip path with, ahead of a number in
+/// hexadecimal it takes from a counter the whole process shares.
+const DEVICE_CLIP_ID: &str = "cl_";
+
+/// `svg` with each clip path the device named numbered in the order the
+/// document declares them, from 0, keeping the prefix [`renamed`] gave
+/// it. The device's own numbers depend on what the process drew before,
+/// so the same page exported twice, with another export between, would
+/// otherwise come out under other names.
+fn with_clips_numbered(svg: &str) -> String {
+    let mut numbered: HashMap<&str, String> = HashMap::new();
+    for id in declared_ids(svg) {
+        if let Some(prefix) = device_clip_prefix(id) {
+            let number = numbered.len();
+            numbered
+                .entry(id)
+                .or_insert_with(|| format!("{prefix}{DEVICE_CLIP_ID}{number}"));
+        }
+    }
+    with_ids_renamed(svg, |id| numbered.get(id).cloned())
+}
+
+/// The prefix [`renamed`] gave `id`, where `id` names a clip path as the
+/// device does: [`DEVICE_CLIP_ID`] and a number, after nothing or a prefix.
+fn device_clip_prefix(id: &str) -> Option<&str> {
+    id.rsplit_once(DEVICE_CLIP_ID)
+        .filter(|(prefix, number)| {
+            (prefix.is_empty() || prefix.ends_with('-'))
+                && !number.is_empty()
+                && number.bytes().all(|b| b.is_ascii_hexdigit())
+        })
+        .map(|(prefix, _)| prefix)
+}
+
+/// Adds the `viewBox` Skia does not write, among the root's attributes:
+/// before the `/>` of a root Skia writes self-closed, as it does a document
+/// with nothing in it, and before the `>` of any other.
 ///
 /// Skia's SVG writer gives the root a `width` and a `height` and nothing
 /// else. Without a `viewBox` the file has no intrinsic ratio to scale by, so
@@ -3461,10 +3743,14 @@ fn with_view_box(svg: &[u8], size: Size) -> Vec<u8> {
         number(size.height)
     );
 
+    let at = match text[..end].ends_with('/') {
+        true => end - 1,
+        false => end,
+    };
     let mut out = Vec::with_capacity(svg.len() + attribute.len());
-    out.extend_from_slice(&svg[..end]);
+    out.extend_from_slice(&svg[..at]);
     out.extend_from_slice(attribute.as_bytes());
-    out.extend_from_slice(&svg[end..]);
+    out.extend_from_slice(&svg[at..]);
     out
 }
 
@@ -3527,24 +3813,11 @@ impl Page {
         backend: VectorFeatures,
         matte: Option<&Matte>,
         density: f32,
+        splices: Option<&mut Splices<'_>>,
     ) -> Result<(), String> {
         if let Some(matte) = matte {
             matte.paint(canvas);
         }
-
-        // Consecutive refused layers go in as one image rather than one
-        // each. Every embedded image costs a page-sized surface, a playback
-        // and a scan for its bounds, and a scene draws these in runs --
-        // sixty shadowed panels in a row are sixty layers with nothing
-        // vector between them. Rasterizing them separately took 1.1 seconds
-        // where the same page without shadows took 8 milliseconds; as one
-        // run it is a single image and the cost stops scaling with the
-        // count.
-        let refused = |index: usize| {
-            self.features
-                .get(index)
-                .is_some_and(|features| features.refused_by(backend))
-        };
 
         // A blend mode is the one refusal that cannot be rasterized on its
         // own. The others -- an exotic shader, an image filter, a mask filter
@@ -3574,30 +3847,179 @@ impl Page {
             self.embed_raster(canvas, &self.layers[..=last], density)?;
             index = last + 1;
         }
+        self.play_as_document(
+            canvas,
+            &self.layers[index..],
+            &self.features[index..],
+            backend,
+            density,
+            splices,
+        )
+    }
 
-        while index < self.layers.len() {
+    /// Plays `layers`, each asking for `features` at the same index, onto
+    /// `canvas` for a document backend refusing `backend`: each the backend
+    /// can write as it is; each group composited at an opacity alone entry
+    /// by entry -- opened at an opacity of 1, and written as a group of its
+    /// own at any other where `splices` is the SVG document's -- see
+    /// [`Group::opacity`]; and each run of what it refuses as one image,
+    /// under the transform `canvas` carries.
+    ///
+    /// Nothing in `layers` blends: [`Self::draw_as_document`] embeds every
+    /// entry up to the last that does, with what lies beneath it, first.
+    fn play_as_document(
+        &self,
+        canvas: &SkCanvas,
+        layers: &[Layer],
+        features: &[VectorFeatures],
+        backend: VectorFeatures,
+        density: f32,
+        mut splices: Option<&mut Splices<'_>>,
+    ) -> Result<(), String> {
+        let refused = |index: usize| features[index].refused_by(backend);
+        let splicing = splices.is_some();
+        // A group composited at an opacity alone is opened where that is 1,
+        // and written as a group of its own at any other where the document
+        // is an SVG one -- see [`Self::splice_group`].
+        let opens = |index: usize| match &layers[index] {
+            Layer::Group(group) => match group.opacity() {
+                Some(alpha) => alpha == 1.0 || splicing,
+                None => false,
+            },
+            _ => false,
+        };
+        // Consecutive refused layers go in as one image rather than one
+        // each. Every embedded image costs a page-sized surface, a playback
+        // and a scan for its bounds, and a scene draws these in runs --
+        // sixty shadowed panels in a row are sixty layers with nothing
+        // vector between them. Rasterizing them separately took 1.1 seconds
+        // where the same page without shadows took 8 milliseconds; as one
+        // run it is a single image and the cost stops scaling with the
+        // count.
+        let mut index = 0;
+        while index < layers.len() {
             if !refused(index) {
                 // Consecutive entries none of which is refused, so that the
                 // pieces of a run among them share their clip -- see
                 // `Clipped`.
                 let start = index;
-                while index < self.layers.len() && !refused(index) {
+                while index < layers.len() && !refused(index) {
                     index += 1;
                 }
-                play_entries(
-                    &self.layers[start..index],
-                    canvas,
-                    Target::Document,
-                );
+                play_entries(&layers[start..index], canvas, Target::Document);
+                continue;
+            }
+            if let Layer::Group(group) = &layers[index]
+                && opens(index)
+            {
+                match (group.opacity(), splices.as_deref_mut()) {
+                    (Some(alpha), Some(splices)) if alpha != 1.0 => self
+                        .splice_group(
+                            canvas, group, alpha, backend, density, splices,
+                        )?,
+                    _ => {
+                        let mut played = Ok(());
+                        group.open_in_a_document(canvas, |canvas, entries| {
+                            played = self.play_as_document(
+                                canvas,
+                                &entries.layers,
+                                &entries.features,
+                                backend,
+                                density,
+                                splices.as_deref_mut(),
+                            );
+                        });
+                        played?;
+                    }
+                }
+                index += 1;
                 continue;
             }
 
             let start = index;
-            while index < self.layers.len() && refused(index) {
+            while index < layers.len() && refused(index) && !opens(index) {
                 index += 1;
             }
-            self.embed_raster(canvas, &self.layers[start..index], density)?;
+            self.embed_raster(canvas, &layers[start..index], density)?;
         }
+        Ok(())
+    }
+
+    /// Writes `group`, which composites what it holds at `alpha` and nothing
+    /// else, as an SVG group of its own at that opacity: a `<g opacity>`
+    /// around its entries, taken as [`Self::play_as_document`] takes them.
+    ///
+    /// Skia's SVG device has no layers, so it cannot write one. The group's
+    /// place in the document is marked with a link annotation, which the
+    /// device writes as an `<a>` element where the group is drawn, inside
+    /// the clips it is drawn under; its entries are written into a document
+    /// of their own under the transform `canvas` carries; and once Skia has
+    /// written the page, the mark is replaced by the group -- see
+    /// [`Splices::apply`]. Each such document takes ids of its own, so that
+    /// none of its clips, gradients or images is taken for the page's.
+    ///
+    /// Where the group lies wholly outside the clip, nothing is written, as
+    /// Skia writes nothing of a draw there.
+    fn splice_group(
+        &self,
+        canvas: &SkCanvas,
+        group: &Group,
+        alpha: f32,
+        backend: VectorFeatures,
+        density: f32,
+        splices: &mut Splices<'_>,
+    ) -> Result<(), String> {
+        let Some(clip) = canvas.device_clip_bounds() else {
+            return Ok(());
+        };
+        let index = splices.count.get();
+        splices.count.set(index + 1);
+        let mark = format!("{SPLICE_MARK}{index}");
+        let mut url = mark.clone().into_bytes();
+        url.push(0);
+        canvas.save();
+        canvas.reset_matrix();
+        // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+        // Re-check: cargo test an_svg_annotation_lands_in_the_clip_left_open
+        // The device writes an annotation inside whatever clip the draw
+        // before it left open, which can be narrower than this group's. A
+        // paint, which it writes under the clip the canvas holds now, closes
+        // that first; it is removed with the mark.
+        let mut sync = Paint::default();
+        sync.set_color(SPLICE_SYNC);
+        canvas.draw_paint(&sync);
+        annotate::rect_with_url(
+            canvas,
+            Rect::from(clip),
+            &Data::new_copy(&url),
+        );
+        canvas.restore();
+
+        let document =
+            svg::Canvas::new(Rect::from_size(splices.size), splices.flags);
+        document.set_matrix(&canvas.local_to_device());
+        let mut inner = Splices {
+            made: Vec::new(),
+            ..*splices
+        };
+        let mut played = Ok(());
+        group.open_in_a_document(&document, |canvas, entries| {
+            played = self.play_as_document(
+                canvas,
+                &entries.layers,
+                &entries.features,
+                backend,
+                density,
+                Some(&mut inner),
+            );
+        });
+        played?;
+        let written = inner
+            .apply(String::from_utf8_lossy(document.end().as_bytes()).into());
+        let body = renamed(svg_body(&written), &format!("meo{index}-"));
+        splices
+            .made
+            .push((mark, format!("<g opacity=\"{alpha}\">{body}</g>")));
         Ok(())
     }
 
@@ -3622,8 +4044,13 @@ impl Page {
         let mut surface = started::raster(&info, None, None)
             .ok_or("Could not allocate a surface for the SVG fallback")?;
 
+        // Drawn under the transform the document is drawing under, at the
+        // density, and placed back on the page untransformed: what a group's
+        // entries are played under where it maps another page onto this one.
+        let matrix = canvas.local_to_device_as_3x3();
         let raster = surface.canvas();
         raster.scale((density, density));
+        raster.concat(&matrix);
         for layer in layers {
             layer.playback(raster, Target::Embedded);
         }
@@ -3639,12 +4066,17 @@ impl Page {
             ink.right as f32 / density,
             ink.bottom as f32 / density,
         );
-        canvas.draw_image_rect(
-            &image,
-            Some((&Rect::from_irect(ink), SrcRectConstraint::Strict)),
-            dst,
-            &Paint::default(),
-        );
+        let src = Some((&Rect::from_irect(ink), SrcRectConstraint::Strict));
+        match matrix.is_identity() {
+            true => canvas.draw_image_rect(&image, src, dst, &Paint::default()),
+            false => {
+                canvas.save();
+                canvas.reset_matrix();
+                canvas.draw_image_rect(&image, src, dst, &Paint::default());
+                canvas.restore();
+                canvas
+            }
+        };
         Ok(())
     }
 
@@ -4206,6 +4638,7 @@ impl Page {
                     VectorFeatures::PDF_CANNOT,
                     matte.as_ref(),
                     density,
+                    None,
                 )?;
                 document.end_page().close();
                 Ok(pdf_bytes)
@@ -4216,13 +4649,27 @@ impl Page {
                     Rect::from_size(size),
                     options.svg_flags(),
                 );
+                let count = Cell::new(0);
+                let mut splices = Splices {
+                    size,
+                    flags: options.svg_flags(),
+                    count: &count,
+                    made: Vec::new(),
+                };
                 self.draw_as_document(
                     &canvas,
                     VectorFeatures::SVG_CANNOT,
                     matte.as_ref(),
                     density,
+                    Some(&mut splices),
                 )?;
-                Ok(with_view_box(canvas.end().as_bytes(), size))
+                let written = splices.apply(
+                    String::from_utf8_lossy(canvas.end().as_bytes()).into(),
+                );
+                // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+                // Re-check: cargo test svg_clip_ids_count_across_documents
+                let written = with_clips_numbered(&written);
+                Ok(with_view_box(written.as_bytes(), size))
             }
 
             // handle bitmap formats using (potentially gpu-backed) rasterizer
@@ -4542,6 +4989,7 @@ impl Page {
                 VectorFeatures::PDF_CANNOT,
                 matte,
                 density,
+                None,
             )?;
             Ok(doc.end_page())
         } else {
@@ -7035,9 +7483,10 @@ mod tests {
             composite: Composite::Layer(rec.clone()),
             matrix: *matrix,
             clip: clip.map(Path::serialize),
+            entries_clipped: false,
             within: None,
             contents_matrix: Matrix::new_identity(),
-            contents: Arc::new(vec![Layer::Picture(contents.clone())]),
+            contents: Entries::plain(vec![Layer::Picture(contents.clone())]),
         });
         let size = CONFINED_PAGE.size() * density;
         let info = ImageInfo::new_n32_premul(
@@ -7270,9 +7719,10 @@ mod tests {
                 }),
                 matrix: Matrix::new_identity(),
                 clip: None,
+                entries_clipped: false,
                 within: None,
                 contents_matrix: Matrix::new_identity(),
-                contents: Arc::new(vec![Layer::Picture(contents)]),
+                contents: Entries::plain(vec![Layer::Picture(contents)]),
             });
             let mut recorder = PictureRecorder::new();
             group.playback(
@@ -7322,9 +7772,10 @@ mod tests {
             }),
             matrix: Matrix::new_identity(),
             clip: None,
+            entries_clipped: false,
             within: None,
             contents_matrix: Matrix::new_identity(),
-            contents: Arc::new(vec![Layer::Picture(
+            contents: Entries::plain(vec![Layer::Picture(
                 recorder
                     .finish_recording_as_picture(None)
                     .expect("a picture of the square"),
@@ -7439,9 +7890,10 @@ mod tests {
                 composite: Composite::Layer(rec),
                 matrix: Matrix::new_identity(),
                 clip: None,
+                entries_clipped: false,
                 within: None,
                 contents_matrix,
-                contents: Arc::new(contents),
+                contents: Entries::plain(contents),
             }))
         };
         let (a, b) = (
@@ -7471,6 +7923,109 @@ mod tests {
         };
         let covering = group(copy, Matrix::new_identity(), vec![picture(a)]);
         assert_eq!(reach_of(&[picture(b), covering]), None, "a backdrop");
+    }
+
+    /// A layer closes into a group that keeps what each of its entries asks
+    /// of a vector backend: a run of draws asking for nothing, a run asking
+    /// for the same features joined into one entry, and a layer closed
+    /// inside it asking for a layer.
+    #[test]
+    fn a_closed_layer_keeps_each_entry_s_features() {
+        let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
+        let draw = |canvas: &SkCanvas, _: Recording| {
+            canvas.draw_rect(Rect::from_wh(1.0, 1.0), &Paint::default());
+        };
+        recorder.open_layer(LayerRec::default());
+        recorder.append(draw);
+        recorder.append_isolated(VectorFeatures::IMAGE_FILTER, draw);
+        recorder.append_isolated(VectorFeatures::IMAGE_FILTER, draw);
+        recorder.append(draw);
+        recorder.open_layer(LayerRec::default());
+        recorder.append(draw);
+        recorder.close_layer();
+        recorder.close_layer();
+        let Some(Layer::Group(group)) = recorder.layers.last() else {
+            panic!("the layer is filed as a group");
+        };
+        assert_eq!(group.contents.layers.len(), group.contents.features.len());
+        assert_eq!(
+            *group.contents.features,
+            [
+                VectorFeatures::PLAIN,
+                VectorFeatures::IMAGE_FILTER,
+                VectorFeatures::PLAIN,
+                VectorFeatures::LAYER,
+            ],
+        );
+        assert_eq!(
+            recorder.features.last(),
+            Some(&VectorFeatures::IMAGE_FILTER.with(VectorFeatures::LAYER)),
+            "the page's entry asks for all of it",
+        );
+    }
+
+    /// The layers open on a page, as a read sees them, keep what each of
+    /// their entries asks of a vector backend as closing them would: a
+    /// blurred draw its features, and the layer open inside a layer.
+    #[test]
+    fn open_layers_keep_each_entry_s_features() {
+        let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
+        recorder.open_layer(LayerRec::default());
+        recorder.append_blur(
+            blurred_square(0.0),
+            Matrix::new_identity(),
+            None,
+            VectorFeatures::MASK_FILTER,
+        );
+        recorder.open_layer(LayerRec::default());
+        recorder.append_isolated(VectorFeatures::EXOTIC_SHADER, |canvas, _| {
+            canvas.draw_rect(Rect::from_wh(1.0, 1.0), &Paint::default());
+        });
+        let Some(Layer::Group(outer)) = recorder.open_layers_entry() else {
+            panic!("the open layers are a group");
+        };
+        assert_eq!(
+            *outer.contents.features,
+            [
+                VectorFeatures::MASK_FILTER,
+                VectorFeatures::EXOTIC_SHADER.with(VectorFeatures::LAYER)
+            ],
+        );
+        let Some(Layer::Group(inner)) = outer.contents.layers.last() else {
+            panic!("the inner layer is a group in the outer one");
+        };
+        assert_eq!(*inner.contents.features, [VectorFeatures::EXOTIC_SHADER]);
+    }
+
+    /// A blurred draw inside a layer joins the op before it only where the
+    /// two ask for the same features, as on the page.
+    #[test]
+    fn a_blur_op_in_a_layer_keeps_apart_from_one_asking_otherwise() {
+        let mut recorder = PageRecorder::new(Rect::from_wh(100.0, 100.0));
+        recorder.open_layer(LayerRec::default());
+        for (at, features) in [
+            (0.0, VectorFeatures::MASK_FILTER),
+            (
+                20.0,
+                VectorFeatures::MASK_FILTER.with(VectorFeatures::BLEND_MODE),
+            ),
+        ] {
+            recorder.append_blur(
+                blurred_square(at),
+                Matrix::new_identity(),
+                None,
+                features,
+            );
+        }
+        let layer = &recorder.open[0];
+        assert_eq!(layer.entries.len(), 2, "two ops");
+        assert_eq!(
+            layer.entry_features,
+            [
+                VectorFeatures::MASK_FILTER,
+                VectorFeatures::MASK_FILTER.with(VectorFeatures::BLEND_MODE),
+            ],
+        );
     }
 
     /// Ten thousand reads inside one layer, each after a draw, leave the
@@ -8178,5 +8733,135 @@ mod tests {
         let next = recorder.page();
         assert!(Arc::ptr_eq(&next.layers, &recorder.layers), "N + 1 shares");
         assert_eq!(Arc::strong_count(&recorder.layers), 2, "and no other");
+    }
+
+    /// An SVG document holding a draw clipped to the left half, then a mark
+    /// drawn under a clip to the right half, with [`SPLICE_SYNC`] painted
+    /// before it where `synced`; and where in the document the draw and the
+    /// mark start.
+    fn annotated(synced: bool) -> (String, usize, usize) {
+        let document = svg::Canvas::new(Rect::from_wh(40.0, 20.0), None);
+        let left = Rect::from_xywh(0.0, 0.0, 20.0, 20.0);
+        let right = Rect::from_xywh(20.0, 0.0, 20.0, 20.0);
+        document.save();
+        document.clip_rect(left, None, None);
+        document.draw_rect(left, &Paint::default());
+        document.restore();
+        document.save();
+        document.clip_rect(right, None, None);
+        if synced {
+            let mut sync = Paint::default();
+            sync.set_color(SPLICE_SYNC);
+            document.draw_paint(&sync);
+        }
+        let mark = format!("{SPLICE_MARK}0");
+        let url = [mark.as_bytes(), b"\0"].concat();
+        annotate::rect_with_url(&document, right, &Data::new_copy(&url));
+        document.restore();
+        let written: String =
+            String::from_utf8_lossy(document.end().as_bytes()).into();
+        let drawn = written.find("<rect").expect("the draw");
+        let at = mark_at(&written, &mark).expect("the mark");
+        (written, drawn, at)
+    }
+
+    /// The defect [`Page::splice_group`] works around: Skia's SVG device
+    /// writes an annotation inside the clip group the draw before it left
+    /// open, rather than under the clip the canvas holds, so a mark lands
+    /// under the left half's clip with no group closed before it. Fails
+    /// once the device writes an annotation under the canvas's clip, when
+    /// the paint drawn before each mark can go.
+    #[test]
+    fn an_svg_annotation_lands_in_the_clip_left_open() {
+        let (written, drawn, at) = annotated(false);
+        assert!(
+            !written[drawn..at].contains("</g>"),
+            "the mark is written under the canvas's clip: {written}"
+        );
+    }
+
+    /// What the workaround relies on: the paint drawn before a mark closes
+    /// the group the draw before it left open, and is written as the
+    /// element just before the mark, where [`mark_paint`] finds it to
+    /// remove with the mark.
+    #[test]
+    fn a_paint_before_an_svg_annotation_writes_it_under_the_canvas_s_clip() {
+        let (written, drawn, at) = annotated(true);
+        let paint = mark_paint(&written, at).unwrap_or_else(|| {
+            panic!("no paint just before the mark: {written}")
+        });
+        assert!(
+            written[drawn..paint].contains("</g>"),
+            "the left half's clip left open: {written}"
+        );
+    }
+
+    /// The id of the clip path in an SVG document holding one clipped draw.
+    fn clip_id() -> String {
+        let document = svg::Canvas::new(Rect::from_wh(40.0, 20.0), None);
+        let half = Rect::from_xywh(0.0, 0.0, 20.0, 20.0);
+        document.clip_rect(half, None, None);
+        document.draw_rect(half, &Paint::default());
+        let written: String =
+            String::from_utf8_lossy(document.end().as_bytes()).into();
+        declared_ids(&written)
+            .next()
+            .expect("a clip path")
+            .to_owned()
+    }
+
+    /// The defect [`with_clips_numbered`] works around: Skia's SVG device
+    /// numbers clip paths from a counter the process shares, so the same
+    /// drawing in a second document names its clip otherwise. Fails once
+    /// the device numbers each document's clips from its own start.
+    #[test]
+    fn svg_clip_ids_count_across_documents() {
+        let (first, second) = (clip_id(), clip_id());
+        assert!(first.starts_with(DEVICE_CLIP_ID), "{first}");
+        assert_ne!(first, second, "each document numbers its own clips");
+    }
+
+    /// Clip ids are numbered in the order they are declared, at every site
+    /// that names them and in one pass, so a clip renumbered to a name
+    /// another clip held is not renumbered again. A group's prefix is kept,
+    /// and an id the device did not number as a clip is left alone.
+    #[test]
+    fn clips_are_numbered_in_document_order() {
+        let svg = concat!(
+            r##"<clipPath id="cl_1a"/><clipPath id="cl_0"/>"##,
+            r##"<g clip-path="url(#cl_1a)"><g clip-path="url(#cl_0)"/></g>"##,
+            r##"<clipPath id="meo0-cl_7"/><use xlink:href="#meo0-cl_7"/>"##,
+            r##"<clipPath id="cl_x"/><clipPath id="meo0cl_2"/>"##,
+            r##"<linearGradient id="gradient_0"/><g fill="url(#gradient_0)"/>"##,
+        );
+        assert_eq!(
+            with_clips_numbered(svg),
+            concat!(
+                r##"<clipPath id="cl_0"/><clipPath id="cl_1"/>"##,
+                r##"<g clip-path="url(#cl_0)"><g clip-path="url(#cl_1)"/></g>"##,
+                r##"<clipPath id="meo0-cl_2"/><use xlink:href="#meo0-cl_2"/>"##,
+                r##"<clipPath id="cl_x"/><clipPath id="meo0cl_2"/>"##,
+                r##"<linearGradient id="gradient_0"/><g fill="url(#gradient_0)"/>"##,
+            )
+        );
+    }
+
+    /// A group's ids are prefixed where they are declared and wherever they
+    /// are named, and a name the group does not declare is left alone.
+    #[test]
+    fn a_group_s_ids_take_its_prefix() {
+        let body = concat!(
+            r##"<clipPath id="cl_3"/><g clip-path="url(#cl_3)">"##,
+            r##"<use xlink:href="#img_0"/><image id="img_0"/>"##,
+            r##"<rect fill="url(#elsewhere)"/></g>"##,
+        );
+        assert_eq!(
+            renamed(body, "meo1-"),
+            concat!(
+                r##"<clipPath id="meo1-cl_3"/><g clip-path="url(#meo1-cl_3)">"##,
+                r##"<use xlink:href="#meo1-img_0"/><image id="meo1-img_0"/>"##,
+                r##"<rect fill="url(#elsewhere)"/></g>"##,
+            )
+        );
     }
 }

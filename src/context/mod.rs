@@ -65,8 +65,8 @@ use chain::{Step, canvas_reach};
 use exact_blur::REACH_SIGMAS;
 use faint::Faint;
 use layer::{
-    BlurDraw, Composite, ExactColour, Group, Layer, LayerRec, holds_a_cut,
-    reach_the_clip,
+    BlurDraw, Composite, Entries, ExactColour, Group, Layer, LayerRec,
+    holds_a_cut, reach_the_clip,
 };
 use page::{ExportOptions, Page, PageRecorder, Recording};
 use typesetting::{TextSettings, Typesetting, Typography};
@@ -81,6 +81,14 @@ pub(crate) struct ShadowCast {
     /// What its sharp shadow draws in, in the coordinates the paragraph is
     /// drawn in.
     pub(crate) bounds: Rect,
+}
+
+impl ShadowCast {
+    /// Whether the shadow is blurred: by a sigma that is a length, and more
+    /// than none.
+    fn blurs(&self) -> bool {
+        self.sigma.is_finite() && self.sigma > 0.0
+    }
 }
 
 /// The part of a paragraph [`Context2D::draw_with_shadows`] asks a draw
@@ -1025,8 +1033,10 @@ impl Context2D {
             clip: None,
         };
         let tile = Arc::new(tile);
-        let unit: Arc<Vec<Layer>> =
-            Arc::new(vec![Layer::Pattern(Arc::clone(&tile))]);
+        let unit = Entries::new(
+            vec![Layer::Pattern(Arc::clone(&tile))],
+            vec![features],
+        );
         let rec = |paint: Paint| LayerRec {
             paint: Some(paint),
             ..LayerRec::default()
@@ -1066,7 +1076,7 @@ impl Context2D {
                         shadow,
                         None,
                         identity,
-                        Arc::clone(&unit),
+                        unit.clone(),
                         features.with(VectorFeatures::LAYER),
                         offset,
                     );
@@ -1094,9 +1104,10 @@ impl Context2D {
                     composite,
                     matrix: Matrix::concat(&shift, &self.state.matrix),
                     clip: None,
+                    entries_clipped: false,
                     within: None,
                     contents_matrix: shift,
-                    contents: Arc::clone(&unit),
+                    contents: unit.clone(),
                 }))
             };
             let mut held = Vec::with_capacity(2);
@@ -1110,7 +1121,7 @@ impl Context2D {
                 Composite::Layer(rec(blended)),
                 None,
                 identity,
-                Arc::new(held),
+                held.into_iter().map(|group| (group, grouped)).collect(),
                 grouped,
                 Point::default(),
             );
@@ -1194,7 +1205,12 @@ impl Context2D {
         through
             .set_blend_mode(self.state.global_composite_operation)
             .set_image_filter(paint.image_filter());
-        let contents = Arc::new(entry.into_iter().collect());
+        // The draw inside asks for what its paint does, less the filter and
+        // the blend, which the group composites through.
+        let drawn = features.without(
+            VectorFeatures::IMAGE_FILTER.with(VectorFeatures::BLEND_MODE),
+        );
+        let contents = entry.map(|entry| (entry, drawn)).into_iter().collect();
         self.with_recorder(|mut recorder| {
             recorder.append_group(
                 Composite::Chain {
@@ -1325,7 +1341,8 @@ impl Context2D {
                 .zip(record())
                 .map(|pictures| Layer::Targeted(Arc::new(pictures))),
         };
-        let contents = Arc::new(entry.into_iter().collect());
+        // What it draws with its own paints, which ask for nothing.
+        let contents = Entries::plain(entry.into_iter().collect());
         self.with_recorder(|mut recorder| {
             recorder.append_group(
                 Composite::Layer(LayerRec {
@@ -1335,7 +1352,7 @@ impl Context2D {
                 None,
                 Matrix::new_identity(),
                 contents,
-                VectorFeatures::PLAIN,
+                self.composited_features(),
                 Point::default(),
             );
         });
@@ -1351,12 +1368,42 @@ impl Context2D {
     /// that a run of text casts the blur of the whole run. What it blurs is
     /// confined to its cast's `bounds`, which the blur spreads past. A
     /// document draws the shadow as Skia's mask filter draws it, glyph by
-    /// glyph, which its backends keep as vectors. An unblurred shadow is
-    /// drawn sharp on both.
+    /// glyph, which a PDF holds as an image mask and an SVG, which has no
+    /// mask filter to write, embeds as pixels. An unblurred shadow is drawn
+    /// sharp on both.
+    ///
+    /// Under an alpha of 1 and `source-over` a group around them all would
+    /// change nothing, since every part is drawn `source-over` too, so there
+    /// is none: each part is filed on the page as it stands, which a vector
+    /// backend then takes part by part -- an SVG keeps the text and the
+    /// sharp shadows as vectors, where it writes nothing of a layer.
     pub(crate) fn draw_with_shadows<F>(&self, casts: &[ShadowCast], draw: F)
     where
         F: Fn(&SkCanvas, ShadowPart),
     {
+        if self.state.global_alpha == 1.0
+            && self.state.global_composite_operation == BlendMode::SrcOver
+        {
+            self.with_canvas(|canvas, _| draw(canvas, ShadowPart::Beneath));
+            for (index, cast) in casts.iter().enumerate() {
+                if !cast.blurs() {
+                    self.with_canvas(|canvas, _| {
+                        draw(canvas, ShadowPart::Sharp(index));
+                    });
+                } else if let Some(group) =
+                    self.shadow_group(cast, index, &draw)
+                {
+                    self.with_recorder(|mut recorder| {
+                        recorder.append_device_group(
+                            group,
+                            VectorFeatures::IMAGE_FILTER,
+                        );
+                    });
+                }
+            }
+            self.with_canvas(|canvas, _| draw(canvas, ShadowPart::Over));
+            return;
+        }
         let mut paint = Paint::default();
         paint.set_alpha_f(self.state.global_alpha as f32);
         paint.set_blend_mode(self.state.global_composite_operation);
@@ -1375,32 +1422,26 @@ impl Context2D {
                 .zip(record(part))
                 .map(|pictures| Layer::Targeted(Arc::new(pictures))),
         };
-        let mut contents: Vec<Layer> = Vec::with_capacity(casts.len() + 2);
-        contents.extend(entry(ShadowPart::Beneath));
+        // The parts drawn sharp ask for nothing, and a blurred shadow for
+        // its filter, as each does filed on the page.
+        let plain = |part| entry(part).map(|e| (e, VectorFeatures::PLAIN));
+        let mut contents: Vec<(Layer, VectorFeatures)> =
+            Vec::with_capacity(casts.len() + 2);
+        contents.extend(plain(ShadowPart::Beneath));
         for (index, cast) in casts.iter().enumerate() {
-            if !(cast.sigma.is_finite() && cast.sigma > 0.0) {
-                contents.extend(entry(ShadowPart::Sharp(index)));
-                continue;
+            match cast.blurs() {
+                false => contents.extend(plain(ShadowPart::Sharp(index))),
+                true => contents.extend(
+                    self.shadow_group(cast, index, &draw).map(|group| {
+                        (
+                            Layer::Group(Arc::new(group)),
+                            VectorFeatures::IMAGE_FILTER,
+                        )
+                    }),
+                ),
             }
-            let Some(drawn) = record(ShadowPart::Sharp(index))
-                .zip(record(ShadowPart::Masked(index)))
-            else {
-                continue;
-            };
-            let within = self.state.matrix.map_rect(cast.bounds).0;
-            contents.push(Layer::Group(Arc::new(Group {
-                composite: Composite::Chain {
-                    steps: Arc::from([Step::Blur(cast.sigma)]),
-                    rec: LayerRec::default(),
-                },
-                matrix: Matrix::new_identity(),
-                clip: None,
-                within: Some(within),
-                contents_matrix: Matrix::new_identity(),
-                contents: Arc::new(vec![Layer::Targeted(Arc::new(drawn))]),
-            })));
         }
-        contents.extend(entry(ShadowPart::Over));
+        contents.extend(plain(ShadowPart::Over));
         self.with_recorder(|mut recorder| {
             recorder.append_group(
                 Composite::Layer(LayerRec {
@@ -1409,11 +1450,62 @@ impl Context2D {
                 }),
                 None,
                 Matrix::new_identity(),
-                Arc::new(contents),
-                VectorFeatures::PLAIN,
+                contents.into_iter().collect(),
+                self.composited_features(),
                 Point::default(),
             );
         });
+    }
+
+    /// What a group composited through the context's alpha and blend asks
+    /// of a vector backend: a layer, which an SVG has none of, and the blend
+    /// where it is not `source-over`, which a PDF composites wrongly.
+    fn composited_features(&self) -> VectorFeatures {
+        match self.state.global_composite_operation {
+            BlendMode::SrcOver => VectorFeatures::LAYER,
+            _ => VectorFeatures::LAYER.with(VectorFeatures::BLEND_MODE),
+        }
+    }
+
+    /// The group a blurred shadow is drawn in for `draw_with_shadows`: its
+    /// chain blurs the shadow drawn sharp on pixels, confined to the cast's
+    /// `bounds` on the device, and a document plays the shadow Skia's mask
+    /// filter draws instead. `None` where either recording draws nothing.
+    fn shadow_group<F>(
+        &self,
+        cast: &ShadowCast,
+        index: usize,
+        draw: &F,
+    ) -> Option<Group>
+    where
+        F: Fn(&SkCanvas, ShadowPart),
+    {
+        let record = |part: ShadowPart| {
+            let mut recorder = PictureRecorder::new();
+            let canvas = recorder.begin_recording(self.bounds, true);
+            canvas.set_matrix(&self.state.matrix.into());
+            draw(canvas, part);
+            recorder.finish_recording_as_picture(None)
+        };
+        let drawn = record(ShadowPart::Sharp(index))
+            .zip(record(ShadowPart::Masked(index)))?;
+        Some(Group {
+            composite: Composite::Chain {
+                steps: Arc::from([Step::Blur(cast.sigma)]),
+                rec: LayerRec::default(),
+            },
+            matrix: Matrix::new_identity(),
+            clip: None,
+            entries_clipped: false,
+            within: Some(self.state.matrix.map_rect(cast.bounds).0),
+            contents_matrix: Matrix::new_identity(),
+            // What a document plays of it is the shadow Skia's mask filter
+            // draws.
+            contents: Entries::new(
+                vec![Layer::Targeted(Arc::new(drawn))],
+                vec![VectorFeatures::MASK_FILTER],
+            ),
+        })
     }
 
     /// Pushes a save frame that also opens a Skia layer. Subsequent draws
@@ -2006,13 +2098,15 @@ impl Context2D {
     /// declare its own cost. See `PageRecorder::replay_cost`.
     ///
     /// `entries` is the source page's own list where the picture is a
-    /// canvas's, so that a draw through its paint holds the page as it was
-    /// recorded and each target composites its groups as it needs -- see
-    /// `LayerRec::open_on`. `None` for a picture with no page behind it.
-    pub fn draw_picture_costing(
+    /// canvas's, each entry with what it asks of a vector backend, so that a
+    /// draw through its paint holds the page as it was recorded and each
+    /// target composites its groups as it needs -- see `LayerRec::open_on`.
+    /// `None` for a picture with no page behind it, which is then one entry
+    /// asking for what `source` names.
+    pub(crate) fn draw_picture_costing(
         &mut self,
         picture: &Picture,
-        entries: Option<Arc<Vec<Layer>>>,
+        entries: Option<Entries>,
         src_rect: &Rect,
         dst_rect: &Rect,
         source: VectorFeatures,
@@ -2057,14 +2151,17 @@ impl Context2D {
         let drawn = self.faint().drawable(&paint).into_owned();
         let through_paint = carries(source, &drawn);
         let cut = entries
-            .as_deref()
-            .is_some_and(|entries| holds_a_cut(entries));
+            .as_ref()
+            .is_some_and(|entries| holds_a_cut(&entries.layers));
         if (through_paint || cut)
             && !covers_beyond_the_draw(self.state.global_composite_operation)
         {
             let contents_matrix = Matrix::concat(&self.state.matrix, &matrix);
             let contents = entries.unwrap_or_else(|| {
-                Arc::new(vec![Layer::Picture(picture.clone())])
+                Entries::new(
+                    vec![Layer::Picture(picture.clone())],
+                    vec![source],
+                )
             });
             let shadow = self
                 .paint_for_shadow(&paint)
@@ -2086,7 +2183,7 @@ impl Context2D {
                         composite,
                         Some(*dst_rect),
                         contents_matrix,
-                        Arc::clone(&contents),
+                        contents.clone(),
                         features,
                         shift,
                     );
@@ -2261,13 +2358,13 @@ impl Context2D {
                 sampling,
                 &drawn,
             );
-            let contents = Arc::new(
-                recorder
-                    .finish_recording_as_picture(None)
-                    .map(Layer::Picture)
-                    .into_iter()
-                    .collect(),
-            );
+            // The image drawn inside asks for nothing: its filter and its
+            // blend are the group's.
+            let contents = recorder
+                .finish_recording_as_picture(None)
+                .map(|picture| (Layer::Picture(picture), VectorFeatures::PLAIN))
+                .into_iter()
+                .collect();
             let mut through = Paint::default();
             through
                 .set_alpha_f(paint.alpha_f())
@@ -2359,8 +2456,9 @@ impl Context2D {
     /// The page's own list of entries, for another canvas to draw this one
     /// through a paint without flattening it -- see
     /// [`Self::draw_picture_costing`].
-    pub fn entries(&self) -> Arc<Vec<Layer>> {
-        self.recorder.borrow_mut().page().layers
+    pub(crate) fn entries(&self) -> Entries {
+        let page = self.recorder.borrow_mut().page();
+        Entries::shared(page.layers, page.features)
     }
 
     /// The page flattened for another canvas to draw, with what an SVG
@@ -3367,7 +3465,7 @@ mod tests {
                 layer::Layer::Clipped(piece) => {
                     cut_ops(std::slice::from_ref(piece.entry()))
                 }
-                layer::Layer::Group(group) => cut_ops(&group.contents),
+                layer::Layer::Group(group) => cut_ops(&group.contents.layers),
                 _ => 0,
             })
             .sum()
@@ -4708,7 +4806,7 @@ mod tests {
                 })
                 .expect("the layer");
             assert_eq!(
-                cut_ops(&group.contents),
+                cut_ops(&group.contents.layers),
                 usize::from(r < 100.0),
                 "radius {r}: cut ops in the layer"
             );
