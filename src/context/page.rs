@@ -5165,12 +5165,12 @@ impl PageSequence {
     ) -> Result<(), String> {
         options.check_timing()?;
         let backend = pdf_cannot(&options.surface_color_space);
+        let color_type = options.compositing_color_type();
         let ExportOptions {
             quality,
             density,
             matte,
             surface_color_space,
-            surface_color_type,
             text_contrast,
             text_gamma,
             ..
@@ -5178,7 +5178,7 @@ impl PageSequence {
         let embedding = Embedding {
             density,
             space: &surface_color_space,
-            color_type: surface_color_type,
+            color_type,
             text: (text_contrast, text_gamma),
         };
         let metadata = pdf::Metadata {
@@ -5724,7 +5724,8 @@ pub fn pages_arg(
 
 /// How a run of a page a document embeds as pixels is made -- see
 /// [`Page::embed_raster`]: at the export's density, in the space and pixel
-/// format the page composites in, and with its text's contrast and gamma.
+/// format the page composites in -- [`ExportOptions::compositing_color_type`],
+/// not the canvas's own type -- and with its text's contrast and gamma.
 #[derive(Clone, Copy)]
 struct Embedding<'a> {
     density: f32,
@@ -5960,7 +5961,7 @@ impl ExportOptions {
         Embedding {
             density: self.density,
             space: &self.surface_color_space,
-            color_type: self.surface_color_type,
+            color_type: self.compositing_color_type(),
             text: (self.text_contrast, self.text_gamma),
         }
     }
@@ -7946,7 +7947,14 @@ mod tests {
 
             let page = ctx.inner.page();
             let p3 = ctx.inner.canvas_color_space.clone();
-            let color_type = ctx.inner.canvas_color_type;
+            // The type the page composites in, which is the canvas's own
+            // only where that is a float one: an eight-bit page composites
+            // in N32, BGRA8888 on Linux.
+            let color_type = ExportOptions {
+                surface_color_type: ctx.inner.canvas_color_type,
+                ..ExportOptions::default()
+            }
+            .compositing_color_type();
             let embedded = |backend: VectorFeatures| {
                 let mut recorder = PictureRecorder::new();
                 page.draw_as_document(
