@@ -501,3 +501,78 @@ fn a_style_set_in_two_faces_casts_the_blur_of_the_whole_run() {
         }
     }
 }
+
+/// A blurred shadow is drawn inside the clip its paragraph is drawn under:
+/// past the clip's edge it lays down nothing, and inside it the shadow is
+/// drawn as it is unclipped.
+#[test]
+fn a_blurred_shadow_keeps_to_the_clip() {
+    let text = paragraph(&[(
+        "Clipped",
+        style(24.0, vec![shadow(RED, 0.0, 0.0, 3.0)]),
+    )]);
+    let edge = 60.0;
+    for gpu in [false, true] {
+        let Some(free) = drawn(gpu, &text) else {
+            continue;
+        };
+        let mut canvas = Canvas::new(SIZE.0, SIZE.1);
+        canvas.set_gpu(gpu);
+        let ctx = canvas.context();
+        ctx.begin_path();
+        ctx.rect(0.0, 0.0, edge, SIZE.1);
+        ctx.clip(FillRule::NonZero);
+        ctx.draw_paragraph(&text, AT.0, AT.1);
+        let data = ctx
+            .get_image_data(0.0, 0.0, SIZE.0, SIZE.1)
+            .expect("pixels");
+        let width = SIZE.0 as usize;
+        let (mut outside, mut inside_wrong, mut inside_inked) = (0, 0, 0);
+        for (i, p) in data.pixels().chunks(4).enumerate() {
+            let x = i % width;
+            match (x as f32) < edge - 1.0 {
+                true => {
+                    inside_inked += usize::from(free[i][3] > 0);
+                    inside_wrong += usize::from(p != free[i]);
+                }
+                false if x as f32 >= edge => outside += usize::from(p[3] > 0),
+                false => {}
+            }
+        }
+        assert!(
+            inside_inked > 0,
+            "gpu {gpu}: the shadow reaches inside the clip"
+        );
+        assert_eq!(outside, 0, "gpu {gpu}: pixels drawn past the clip");
+        assert_eq!(
+            inside_wrong, 0,
+            "gpu {gpu}: pixels inside the clip that differ unclipped"
+        );
+    }
+}
+
+/// A style's background lies beneath its shadow, which lies beneath its
+/// text: CSS 2.1 Appendix E paints a box's background before its text, and
+/// CSS Text Decoration 3 casts `text-shadow` beneath the text.
+#[test]
+fn a_shadow_lies_over_its_background_and_under_its_text() {
+    let styled = TextStyle {
+        color: RgbaLinear::from_srgb8(0, 0, 0, 1.0),
+        background_color: Some(RgbaLinear::from_srgb8(
+            BLUE.0, BLUE.1, BLUE.2, 1.0,
+        )),
+        ..style(24.0, vec![shadow(RED, 2.0, 2.0, 0.0)])
+    };
+    let Some(pixels) = drawn(false, &paragraph(&[("HHHH", styled)])) else {
+        return;
+    };
+    let count = |rgb: (u8, u8, u8)| {
+        pixels
+            .iter()
+            .filter(|p| p[..3] == [rgb.0, rgb.1, rgb.2] && p[3] == 255)
+            .count()
+    };
+    assert!(count(BLUE) > 0, "the background is drawn");
+    assert!(count(RED) > 0, "the shadow is drawn over the background");
+    assert!(count((0, 0, 0)) > 0, "the text is drawn over its shadow");
+}
