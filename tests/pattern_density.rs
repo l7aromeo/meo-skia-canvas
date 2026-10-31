@@ -577,3 +577,168 @@ fn a_gpu_page_draws_each_pattern_at_each_density_from_its_own_tile() {
         .collect();
     assert_eq!(parting(&together, &merged), (0, 0));
 }
+
+/// The face the text cases below are drawn in, registered once.
+const OSWALD: &str = "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf";
+const OSWALD_FAMILY: &str = "PatternDensityOswald";
+
+/// What a run of text is drawn with, beyond its font: every way the run
+/// painter draws a run other than as plain glyphs.
+#[derive(Clone, Copy, Debug)]
+enum Run {
+    /// Leaning past the shear FreeType draws -- about 79.65 degrees -- so
+    /// that on Linux its glyphs are drawn from their outlines.
+    PastFreeType,
+    /// Underlined and struck through, the lines drawn beneath and over the
+    /// glyphs.
+    Decorated,
+    /// Given a maximum width under its natural one, which squeezes the run
+    /// by a scale about its anchor.
+    Squeezed,
+    /// Stroked rather than filled.
+    Stroked,
+}
+
+impl Run {
+    const ALL: [Run; 4] = [
+        Run::PastFreeType,
+        Run::Decorated,
+        Run::Squeezed,
+        Run::Stroked,
+    ];
+
+    fn on(self, ctx: &mut Context2D) {
+        let font = match self {
+            Run::PastFreeType => format!("oblique 85deg 40px {OSWALD_FAMILY}"),
+            _ => format!("40px {OSWALD_FAMILY}"),
+        };
+        assert!(ctx.set_font_css(&font));
+        if let Run::Decorated = self {
+            ctx.set_text_decoration_css("underline line-through")
+                .expect("a decoration");
+        }
+        match self {
+            Run::Stroked => {
+                ctx.set_line_width(2.0);
+                ctx.stroke_text("IHg", 30.3, 70.6, None);
+            }
+            Run::Squeezed => ctx.fill_text("IHg", 30.3, 70.6, Some(30.0)),
+            _ => ctx.fill_text("IHg", 30.3, 70.6, None),
+        }
+    }
+}
+
+/// `run` dyed by `pattern` on the engine `gpu` asks for, over the band
+/// [`dyed`] draws, read at `density`.
+fn dyed_run(pattern: &Pattern, run: Run, gpu: bool, density: u32) -> Vec<u8> {
+    let mut canvas = Canvas::new(WIDTH, HEIGHT);
+    canvas.set_gpu(gpu);
+    let ctx = canvas.context();
+    ctx.set_fill_style_css("rgb(250 200 0)").expect("a colour");
+    ctx.fill_rect(0.0, 0.0, WIDTH, 40.0);
+    ctx.set_fill_pattern(pattern);
+    ctx.set_stroke_pattern(pattern);
+    run.on(ctx);
+    premultiplied(&mut canvas, density)
+}
+
+/// Text dyed by the pattern is drawn as the run painter draws it -- leaning
+/// past what FreeType draws, decorated, condensed, stroked -- and paints the
+/// canvas's pixels there as text dyed by a pattern of those pixels does, to
+/// the byte, on either engine and at every density.
+#[test]
+fn every_way_a_run_is_drawn_is_dyed_as_the_pixels_pattern_dyes_it() {
+    FontLibrary::new()
+        .use_paths(Some(OSWALD_FAMILY), [OSWALD])
+        .expect("bundled Oswald registers");
+    let mut failures = vec![];
+    for gpu in [false, true] {
+        for density in DENSITIES {
+            let mut source = source_on(Source::Path70, gpu);
+            let pixels = pixels_pattern(&mut source, density);
+            let mut holder = Canvas::new(WIDTH, HEIGHT);
+            let made = holder
+                .context()
+                .create_pattern_from_canvas(&mut source, PatternRepeat::Repeat);
+            for run in Run::ALL {
+                let want = dyed_run(&pixels, run, gpu, density);
+                let got = dyed_run(&made, run, gpu, density);
+                if got != want {
+                    failures.push(format!(
+                        "{run:?} gpu {gpu} {density}x: {:?}",
+                        parting(&got, &want)
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// A run dyed by a canvas's pattern, drawn again on the GPU in another
+/// pattern and alpha after any other and with the canvas read back in
+/// between, draws what a fresh canvas draws: a replayed run builds its
+/// blobs for each draw rather than drawing again blobs built for another
+/// paint, which Skia's GPU backend draws unlike fresh ones -- see
+/// `LaidOut`'s blobs.
+#[test]
+fn a_run_replayed_on_the_gpu_draws_as_a_fresh_one() {
+    FontLibrary::new()
+        .use_paths(Some(OSWALD_FAMILY), [OSWALD])
+        .expect("bundled Oswald registers");
+    let colours = [
+        ("#000000", 1.0),
+        ("#203040", 1.0),
+        ("green", 1.0),
+        ("green", 0.5),
+        ("#c03010", 1.0),
+        ("#808080", 1.0),
+        ("#ffffff", 1.0),
+    ];
+    let mut holder = Canvas::new(WIDTH, HEIGHT);
+    let patterns: Vec<(Pattern, f32)> = colours
+        .iter()
+        .map(|&(colour, alpha)| {
+            let mut source = Canvas::new(20.0, 20.0);
+            let tile = source.context();
+            tile.set_fill_style_css(colour).expect("a colour");
+            tile.fill_rect(0.0, 0.0, 20.0, 20.0);
+            let pattern = holder
+                .context()
+                .create_pattern_from_canvas(&mut source, PatternRepeat::Repeat);
+            (pattern, alpha)
+        })
+        .collect();
+    let draw = |canvas: &mut Canvas, (pattern, alpha): &(Pattern, f32)| {
+        let ctx = canvas.context();
+        ctx.clear_rect(0.0, 0.0, WIDTH, HEIGHT);
+        ctx.set_global_alpha(*alpha);
+        ctx.set_fill_pattern(pattern);
+        ctx.fill_text("Hamburgefonstiv fi AV", 10.0, 70.0, None);
+        pixels(canvas, 1)
+    };
+    let canvas = || {
+        let mut canvas = Canvas::new(WIDTH, HEIGHT);
+        canvas.set_gpu(true);
+        assert!(
+            canvas
+                .context()
+                .set_font_css(&format!("28px {OSWALD_FAMILY}"))
+        );
+        canvas
+    };
+    let mut differing = vec![];
+    for (second, colour) in patterns.iter().zip(colours) {
+        let wanted = draw(&mut canvas(), second);
+        for (first, before) in patterns.iter().zip(colours) {
+            // Twice in the first, for the run to be kept.
+            let mut again = canvas();
+            draw(&mut again, first);
+            draw(&mut again, first);
+            if draw(&mut again, second) != wanted {
+                differing.push(format!("{before:?} then {colour:?}"));
+            }
+        }
+    }
+    assert!(differing.is_empty(), "{differing:#?}");
+}

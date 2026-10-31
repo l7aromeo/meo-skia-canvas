@@ -32,7 +32,7 @@ use skia_safe::{
     AlphaType, BlendMode, BlurStyle, Canvas as SkCanvas, ClipOp, Color4f,
     ColorFilter, ColorSpace, ColorType, Data, FilterMode, IRect, Image,
     ImageFilter, ImageInfo, MaskFilter, Matrix, Paint, PaintCap, PaintJoin,
-    PaintStyle, Path, PathDirection, Picture, PictureRecorder, Pixmap, Rect,
+    PaintStyle, Path, PathDirection, Picture, PictureRecorder, Point, Rect,
     RoundOut, RuntimeEffect, SamplingOptions, Shader, TileMode,
     canvas::SaveLayerRec, color_filters, image_filters,
 };
@@ -47,7 +47,7 @@ use crate::{
     },
     export::VectorFeatures,
     gpu::RenderingEngine,
-    node::filter::MASK_BLUR_MAX_SIGMA,
+    node::{filter::MASK_BLUR_MAX_SIGMA, typography::RunPaint},
     started,
 };
 
@@ -235,42 +235,6 @@ impl Drop for TileScope {
             }
         });
     }
-}
-
-/// The smallest rectangle holding every pixel of `pixels` that is not
-/// all zero bytes -- transparent, in any premultiplied colour type -- or
-/// `None` where every pixel is.
-fn inked(pixels: &Pixmap) -> Option<IRect> {
-    let bytes = pixels.bytes()?;
-    let pixel = pixels.info().bytes_per_pixel();
-    let width = pixels.width() as usize * pixel;
-    let rows = || bytes.chunks(pixels.row_bytes()).map(|row| &row[..width]);
-    // Or-ed whole rather than searched, so that the loop has no exit to
-    // keep it from being vectorized: most rows of a text's coverage over
-    // the clip are empty, and each of those is read to its end either way.
-    let holds_ink =
-        |row: &[u8]| row.iter().fold(0, |all, byte| all | byte) != 0;
-    let top = rows().position(holds_ink)?;
-    let bottom = rows().rposition(holds_ink)?;
-    let (left, right) = rows().take(bottom + 1).skip(top).fold(
-        (usize::MAX, 0),
-        |(left, right), row| {
-            let first = row.iter().position(|&byte| byte != 0);
-            let last = row.iter().rposition(|&byte| byte != 0);
-            match (first, last) {
-                (Some(first), Some(last)) => {
-                    (left.min(first / pixel), right.max(last / pixel + 1))
-                }
-                _ => (left, right),
-            }
-        },
-    );
-    Some(IRect::from_ltrb(
-        left as i32,
-        top as i32,
-        right as i32,
-        bottom as i32 + 1,
-    ))
 }
 
 /// A flat colour held exactly in a page's own space, for the recording a
@@ -595,42 +559,20 @@ impl TileSource {
     }
 }
 
-/// A shader painting opaque white: a 1x1 image, repeated. Like a pattern's,
-/// it reports no colour for Skia to set a glyph mask's contrast from -- see
-/// `Context::files_through_pattern` -- where a colour, or a colour's shader,
-/// would set text's contrast from white.
-pub(crate) fn white() -> Option<Shader> {
-    let info =
-        ImageInfo::new((1, 1), ColorType::RGBA8888, AlphaType::Premul, None);
-    started::raster_from_data(
-        &info,
-        Data::new_copy(&[u8::MAX; 4]),
-        info.min_row_bytes(),
-    )?
-    .to_shader(
-        (TileMode::Repeat, TileMode::Repeat),
-        SamplingOptions::default(),
-        None,
-    )
-}
-
 /// A draw dyed by a canvas pattern, the pattern made where the draw is
 /// played: from the canvas's page rasterized as the page composites itself,
 /// at the scale it is played at -- see [`TileSource`] -- rather than from a
 /// picture of it Skia rasterizes as RGBA8888 at the scale the picture was
 /// recorded at.
 ///
-/// On pixels a draw kept whole -- see [`Replay`] -- is drawn again with the
-/// pattern as its shader, through its own alpha, blend mode and colour
-/// filter, as a draw dyed by a pattern of the canvas's pixels is. Any other
-/// draw's coverage clips the canvas as a clip shader -- the technique a cut
-/// draw takes, see [`CutOp`] -- and the pattern is painted over what the
-/// coverage allows in one draw, through the same paint, as Skia paints a
-/// shader through the draw's path. Both reach the raster a document embeds. In
-/// a document, which writes a clip by coverage as an empty `clipPath`, the draw
-/// is played as recorded with the page's picture as its pattern -- which Skia's
-/// PDF backend writes as an image, and its SVG backend drops: a canvas's
-/// pattern asks an SVG export to embed the draw -- see `Dye::vector_features`.
+/// On pixels, and so in the raster a document embeds, the draw is kept
+/// whole -- see [`Replay`] -- and drawn again with the pattern as its
+/// shader, through its own alpha, blend mode and colour filter, as a draw
+/// dyed by a pattern of the canvas's pixels is. In a document the draw is
+/// played as recorded, with the page's picture as its pattern -- which
+/// Skia's PDF backend writes as an image, and its SVG backend drops: a
+/// canvas's pattern asks an SVG export to embed the draw -- see
+/// `Dye::vector_features`.
 #[derive(Clone, Debug)]
 pub struct PatternDraw {
     pub source: Arc<TileSource>,
@@ -639,11 +581,8 @@ pub struct PatternDraw {
     /// The pattern's own transform, from the page's space to the draw's.
     pub pattern_matrix: Matrix,
     pub repeat: (TileMode, TileMode),
-    /// The draw in opaque white, under the transform it was made under:
-    /// what it covers, and by how much. A draw kept whole takes only its
-    /// bounds from it.
-    pub covered: Picture,
-    /// The draw as a document writes it.
+    /// The draw as a document writes it, under the transform it was made
+    /// under; its bounds are what the draw reaches.
     pub plain: Picture,
     /// What the pattern is painted through: the draw's alpha, blend mode
     /// and colour filter.
@@ -651,22 +590,34 @@ pub struct PatternDraw {
     /// The clip the draw was made under, in device pixels of the recording,
     /// where it is not a piece of a run that applies it -- see [`Clipped`].
     pub clip: Option<Data>,
-    /// The draw kept whole, where its kind can be: drawn on pixels with the
-    /// pattern as its shader, as a draw dyed by a pattern of the canvas's
-    /// pixels is. `None` where it is clipped by its coverage instead.
-    pub replay: Option<Replay>,
+    /// The draw kept whole, to draw on pixels with the pattern as its
+    /// shader, as a draw dyed by a pattern of the canvas's pixels is.
+    pub replay: Replay,
 }
 
 /// A draw kept whole, so that the pattern a [`PatternDraw`] makes at
-/// playback is drawn through it, as any shader is, rather than painted
-/// under a clip of its coverage: no coverage to rasterize, and nothing
-/// shaded past what the draw covers.
+/// playback is drawn through it as any shader is: a picture of the draw
+/// holds the shader it was recorded with, and the pattern's is not made
+/// until the scale the draw is played at is known.
 #[derive(Clone, Debug)]
 pub enum Replay {
     /// A path filled or stroked as the paint says, onto pixels that do with
     /// a faint paint what the [`Faint`] says; serialized, as a group's clip
     /// is, so that a page holding it can be sent to another thread.
     Path(Data, Faint),
+    /// A run of text, as `Context2D::draw_text` paints it: what it draws,
+    /// with its anchor at `at`, painted `offset` from it and squeezed by
+    /// `condensation` about it, its named line colour's alpha multiplied
+    /// by `global_alpha`, onto pixels that do with a faint paint what
+    /// `faint` says.
+    Text {
+        run: Arc<RunPaint>,
+        at: Point,
+        offset: Point,
+        condensation: f32,
+        global_alpha: f32,
+        faint: Faint,
+    },
 }
 
 impl PatternDraw {
@@ -708,113 +659,43 @@ impl PatternDraw {
         let mut paint = self.paint.clone();
         paint.set_shader(shader);
         match &self.replay {
-            Some(Replay::Path(path, faint)) => {
+            Replay::Path(path, faint) => {
                 let Some(path) = Path::deserialize(path) else {
                     return;
                 };
                 canvas.concat(&self.matrix);
                 canvas.draw_path(&path, &faint.drawable(&paint));
             }
-            None => {
-                self.clip_by_coverage(canvas);
+            Replay::Text {
+                run,
+                at,
+                offset,
+                condensation,
+                global_alpha,
+                faint,
+            } => {
                 canvas.concat(&self.matrix);
-                canvas.draw_paint(&paint);
+                // Squeezed as `draw_text` squeezes it: by a scale about the
+                // anchor, the pen with it.
+                if *condensation == 1.0 {
+                    run.paint(
+                        canvas,
+                        *at + *offset,
+                        &paint,
+                        *global_alpha,
+                        *faint,
+                    );
+                } else {
+                    canvas.translate(*at).scale((*condensation, 1.0));
+                    run.paint(canvas, *offset, &paint, *global_alpha, *faint);
+                }
             }
         }
     }
 
-    /// Clips `canvas` by what the draw covers, rasterized as the canvas
-    /// rasterizes: on a surface the canvas makes, which takes its colour
-    /// type, its device and its text contrast and gamma, over the device
-    /// pixels the draw reaches within the clip, at the device's own phase.
-    /// Not a picture shader of the coverage, which Skia rasterizes as
-    /// RGBA8888 with props of its own: on Linux, whose pages set a text
-    /// contrast and gamma, text covered that way parted from text drawn
-    /// with the pattern by up to 9 levels. A recording, which has no
-    /// surface to make one like, takes the picture shader, rasterized when
-    /// the recording is.
-    fn clip_by_coverage(&self, canvas: &SkCanvas) {
-        let to_device = canvas.local_to_device_as_3x3();
-        let reach: IRect =
-            to_device.map_rect(self.covered.cull_rect()).0.round_out();
-        let area = canvas
-            .device_clip_bounds()
-            .and_then(|clip| IRect::intersect(&reach, &clip));
-        let Some(area) = area.filter(|area| !area.is_empty()) else {
-            canvas.clip_rect(Rect::new_empty(), ClipOp::Intersect, false);
-            return;
-        };
-        // The device clip itself kept to the pixels the coverage holds: a
-        // clip shader leaves the clip's bounds as they are, and the pattern
-        // painted under it would be shaded over every pixel they hold -- the
-        // whole page, for each small draw. Whole pixels, outside of which
-        // the coverage is nothing, so no pixel it reaches changes.
-        let clip_to = |canvas: &SkCanvas, pixels: IRect| {
-            canvas.reset_matrix();
-            canvas.clip_irect(pixels, ClipOp::Intersect);
-            canvas.set_matrix(&to_device.into());
-        };
-        let info = canvas.image_info().with_dimensions(area.size());
-        let corner = Matrix::translate((area.left as f32, area.top as f32));
-        let Some(mut surface) = canvas.new_surface(&info, None) else {
-            clip_to(canvas, area);
-            // A picture shader puts its tile's corner at the origin, so the
-            // tile is the whole pixels the draw reaches, moved back to
-            // where they lie.
-            let reach: IRect = self.covered.cull_rect().round_out();
-            let corner =
-                Matrix::translate((reach.left as f32, reach.top as f32));
-            canvas.clip_shader(
-                self.covered.to_shader(
-                    (TileMode::Decal, TileMode::Decal),
-                    FilterMode::Nearest,
-                    Some(&corner),
-                    Some(&Rect::from(reach)),
-                ),
-                ClipOp::Intersect,
-            );
-            return;
-        };
-        let onto = surface.canvas();
-        onto.set_matrix(
-            &Matrix::concat(
-                &Matrix::translate((-area.left as f32, -area.top as f32)),
-                &to_device,
-            )
-            .into(),
-        );
-        self.covered.playback(onto);
-        // Text reaches the whole clip -- see `reach_the_clip` -- so the
-        // pixels it covers are found in the coverage itself where it can be
-        // read, on the CPU. A GPU surface keeps the area: reading it would
-        // wait on the GPU, where shading the area costs little.
-        let inked = match surface.peek_pixels() {
-            Some(pixels) => inked(&pixels)
-                .map(|inked| inked.with_offset((area.left, area.top))),
-            None => Some(area),
-        };
-        let Some(inked) = inked else {
-            canvas.clip_rect(Rect::new_empty(), ClipOp::Intersect, false);
-            return;
-        };
-        clip_to(canvas, inked);
-        let Some(shader) = surface.image_snapshot().to_shader(
-            (TileMode::Decal, TileMode::Decal),
-            SamplingOptions::from(FilterMode::Nearest),
-            &corner,
-        ) else {
-            return;
-        };
-        // In device space, where the coverage lies; the canvas's own
-        // transform is put back for what is drawn under the clip.
-        canvas.reset_matrix();
-        canvas.clip_shader(shader, ClipOp::Intersect);
-        canvas.set_matrix(&to_device.into());
-    }
-
     /// What the draw covers, under the transform it is played under.
     fn reach(&self) -> Rect {
-        self.covered.cull_rect()
+        self.plain.cull_rect()
     }
 }
 

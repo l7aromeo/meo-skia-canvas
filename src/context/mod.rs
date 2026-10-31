@@ -967,7 +967,9 @@ impl Context2D {
         let Some((source, pattern_matrix, repeat)) = pattern.tiling() else {
             return false;
         };
-        let Some(white) = layer::white() else {
+        // A draw whose kind is not kept whole takes Skia's picture shader;
+        // none that carries a dye is such a draw.
+        let Some(replay) = replay else {
             return false;
         };
         let steps = self.draw_chain();
@@ -1010,20 +1012,7 @@ impl Context2D {
         if !alone {
             plain.set_blend_mode(BlendMode::SrcOver);
         }
-        // What the draw covers. White through an image's shader rather than
-        // a colour: Skia sets a glyph mask's contrast from the luminance of
-        // the paint's colour, which a shader painting an image does not
-        // report, the pattern's included, so text covers what it covers
-        // through the pattern's paint.
-        let mut covered = plain.clone();
-        covered
-            .set_shader(white)
-            .set_color_filter(None)
-            .set_alpha_f(1.0)
-            .set_blend_mode(BlendMode::SrcOver);
-        let (Some(covered), Some(recorded)) =
-            (record(&covered), record(&plain))
-        else {
+        let Some(recorded) = record(&plain) else {
             return false;
         };
         let mut through = plain;
@@ -1033,7 +1022,6 @@ impl Context2D {
             matrix: self.state.matrix,
             pattern_matrix,
             repeat,
-            covered,
             plain: recorded,
             paint: through,
             clip: None,
@@ -2748,11 +2736,25 @@ impl Context2D {
             // a bold 40px run on a Display P3 F32 page.
             let dyed = self.exact_text_paint(&paint, style);
             let dyed = dyed.as_ref();
+            // Kept only for a canvas's pattern, the one dye that takes it.
+            let replay =
+                matches!(self.state.dye(style), Dye::Pattern(_)).then(|| {
+                    let (run, offset, condensation) =
+                        typesetter.replayed(kept.as_deref());
+                    Replay::Text {
+                        run,
+                        at: origin,
+                        offset,
+                        condensation,
+                        global_alpha,
+                        faint,
+                    }
+                });
             self.render_to_canvas(
                 &paint,
                 dyed,
                 features,
-                None,
+                replay,
                 |canvas, paint| {
                     // The kept run, or, the first time a run is drawn, the run
                     // laid out for this paint -- see `Typesetter::laid_out`.
