@@ -177,7 +177,8 @@ let repositoryVariables;
 
 /**
  * This process's environment, less the variables that tie git to one
- * repository, for every tool `prepare` runs.
+ * repository, for every tool `prepare` runs, with git told to write files as
+ * they are committed.
  *
  * `git commit` runs its hooks with `GIT_DIR` and `GIT_INDEX_FILE` naming the
  * repository being committed to, and git honours them over the directory a
@@ -185,6 +186,13 @@ let repositoryVariables;
  * and git-sync-deps' `remote set-url`, `fetch` and `checkout` act on that
  * repository rather than on the checkout -- its index, origin and object
  * store, not Skia's.
+ *
+ * Skia has no `.gitattributes`, so a clone or a restore following the
+ * machine's config wrote its sources with CRLF where that config sets
+ * `core.autocrlf` true, as Git for Windows installs it, or marks every file
+ * text with `core.eol` crlf: not the bytes a tree's name stands for, and this
+ * repository's LF patches then fail at `-F0`. `GIT_CONFIG_COUNT` is one of the
+ * variables removed above, so these are the only entries it counts.
  */
 function childEnv() {
   repositoryVariables ??= new Set(
@@ -192,11 +200,18 @@ function childEnv() {
       encoding: "utf8",
     }).split("\n"),
   );
-  return Object.fromEntries(
-    Object.entries(process.env).filter(
-      ([name]) => !repositoryVariables.has(name),
+  return {
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(
+        ([name]) => !repositoryVariables.has(name),
+      ),
     ),
-  );
+    GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_KEY_0: "core.autocrlf",
+    GIT_CONFIG_VALUE_0: "false",
+    GIT_CONFIG_KEY_1: "core.eol",
+    GIT_CONFIG_VALUE_1: "lf",
+  };
 }
 
 /** The directory `SKIA_SOURCE_DIR` names: Skia itself, inside the checkout. */

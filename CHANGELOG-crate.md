@@ -1642,7 +1642,10 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   tree it holds for the same version, restores the copy's sources to their
   commits, checks them and the dependencies Skia's DEPS pins, and patches
   that: seconds rather than a download. It fetches only where no tree
-  passes those checks, and says so before it starts.
+  passes those checks, and says so before it starts. Either way it writes
+  Skia's sources as they are committed: where git's config sets
+  `core.autocrlf` true, as Git for Windows installs it, they were written
+  with CRLF line endings, and the patches then failed to apply.
 
 - **`Path2D::to_svg` writes numbers exactly and conics as arcs.** Its text
   changes for any path; the geometry it describes does not. Each number is

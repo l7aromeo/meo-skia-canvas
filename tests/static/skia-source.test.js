@@ -265,6 +265,50 @@ describe("skia-source's git acts on its own checkout inside a hook", () => {
   });
 });
 
+describe("skia-source's git writes a repository's bytes", () => {
+  let run;
+  let saved;
+  beforeEach(async () => {
+    ({ run } = await import(pathToFileURL(SCRIPT).href));
+    saved = { ...process.env };
+  });
+  afterEach(() => {
+    for (const name of Object.keys(process.env))
+      if (!(name in saved)) delete process.env[name];
+    Object.assign(process.env, saved);
+  });
+
+  // The fetch's clone, under the config Windows's git is installed with.
+  test("a clone under core.autocrlf=true checks out LF as committed", (t) => {
+    const dir = scratch(t);
+    const upstream = repository(join(dir, "upstream"), { "a.cc": "a\nb\n" });
+    const config = join(dir, "gitconfig");
+    writeFileSync(config, "[core]\n\tautocrlf = true\n");
+    process.env.GIT_CONFIG_GLOBAL = config;
+
+    run("git", ["clone", "--quiet", upstream, join(dir, "checkout")]);
+    assert.equal(readFileSync(join(dir, "checkout", "a.cc"), "utf8"), "a\nb\n");
+  });
+
+  // The other route to CRLF: a machine's own attributes marking every file
+  // text, with CRLF as its line ending.
+  test("a clone under core.eol=crlf and a global text attribute checks out LF", (t) => {
+    const dir = scratch(t);
+    const upstream = repository(join(dir, "upstream"), { "a.cc": "a\nb\n" });
+    const attributes = join(dir, "gitattributes");
+    writeFileSync(attributes, "* text=auto\n");
+    const config = join(dir, "gitconfig");
+    writeFileSync(
+      config,
+      `[core]\n\teol = crlf\n\tattributesFile = ${attributes.replaceAll("\\", "/")}\n`,
+    );
+    process.env.GIT_CONFIG_GLOBAL = config;
+
+    run("git", ["clone", "--quiet", upstream, join(dir, "checkout")]);
+    assert.equal(readFileSync(join(dir, "checkout", "a.cc"), "utf8"), "a\nb\n");
+  });
+});
+
 /**
  * The cache name `prepare` gives the tree for `version` and this platform's
  * patches holding `contents`, in order.
@@ -527,6 +571,32 @@ describe("skia-source derives a tree from another of its version", () => {
     assert.equal(
       readFileSync(join(base.source, "src", "a.cc"), "utf8"),
       "patched\n",
+    );
+  });
+
+  // Windows's git is installed with core.autocrlf true, so a restore that
+  // follows the machine's config wrote Skia's sources with CRLF: not the bytes
+  // a tree is named for, and an LF patch then fails to apply at `-F0`.
+  test("a restore under core.autocrlf=true writes the repository's bytes", (t) => {
+    const dir = scratch(t);
+    const cache = join(dir, "cache");
+    preparedTree(dir, cache, "skia-1.0.0-aaaa", "1.0.0");
+    const partial = join(cache, "skia-1.0.0-bbbb.partial");
+    t.mock.method(console, "error", () => {});
+    const config = join(dir, "gitconfig");
+    writeFileSync(config, "[core]\n\tautocrlf = true\n");
+    const before = process.env.GIT_CONFIG_GLOBAL;
+    t.after(() => {
+      if (before === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+      else process.env.GIT_CONFIG_GLOBAL = before;
+    });
+    process.env.GIT_CONFIG_GLOBAL = config;
+
+    assert.equal(derive(cache, partial, "1.0.0"), "skia-1.0.0-aaaa");
+    const source = join(partial, "rust-skia", "skia-bindings", "skia");
+    assert.equal(
+      readFileSync(join(source, "src", "a.cc"), "utf8"),
+      "pristine\n",
     );
   });
 
