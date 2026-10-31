@@ -9,8 +9,9 @@ use std::{
 };
 
 use skia_safe::{
-    Canvas as SkCanvas, FontArguments, FontMgr, FontStyle, FourByteTag,
-    Paint as SkPaint, PaintStyle as SkPaintStyle, Point as SkPoint, Typeface,
+    Canvas as SkCanvas, Color4f, FontArguments, FontMgr, FontStyle,
+    FourByteTag, Paint as SkPaint, PaintStyle as SkPaintStyle,
+    Point as SkPoint, Typeface,
     font_arguments::{VariationPosition, variation_position::Coordinate},
     font_parameters::variation::Axis,
     font_style::{Slant, Weight},
@@ -37,6 +38,7 @@ use crate::{
     },
     context::Context2D as Inner,
     context2d::{FontStretch, TextDirection},
+    css::NamedColour,
     font::{
         FontAxisTag, FontFamily, FontLibrary, FontVariation,
         InstancedPositions, KnownAxes, ObliqueAngle, optical_size,
@@ -49,8 +51,8 @@ use crate::{
             FontLibrary as SharedFontRegistry, font_generation, forgetful,
         },
         oblique::{
-            GlyphPaints, ParagraphRecipe, Passes, StyleColours, add_slnt,
-            draw_shadowed, match_oblique, paint_glyphs,
+            Built, GlyphPaints, ParagraphRecipe, Passes, PlainPaints, Resolve,
+            StyleColours, add_slnt, draw_shadowed, match_oblique, paint_glyphs,
             without_paragraph_cache,
         },
         typography::paragraph_style,
@@ -1521,7 +1523,11 @@ impl ParagraphBuilder {
                 self.recipe
                     .push_style(sk_style, oblique, &style_colours(style))
             }
-            false => self.recipe.push_style_as_given(sk_style, oblique),
+            false => self.recipe.push_style_as_given(
+                sk_style,
+                oblique,
+                Some(foreground_colour(style)),
+            ),
         }
         self
     }
@@ -1551,10 +1557,15 @@ impl ParagraphBuilder {
     /// Closes the paragraph and lays it out, wrapping at `max_width`.
     pub fn build(self, max_width: f32) -> Paragraph {
         let uncached = self.recipe.uncached();
-        let (paragraph, passes) = self.recipe.build();
+        let Built {
+            paragraph,
+            passes,
+            plain,
+        } = self.recipe.build_drawable();
         let mut paragraph = Paragraph {
             paragraph: RefCell::new(paragraph),
             passes: RefCell::new(passes),
+            plain,
             uncached,
             max_width,
         };
@@ -1590,6 +1601,9 @@ pub struct Paragraph {
     /// neither `Send`, `Sync` nor unwind-safe before.
     pub(crate) paragraph: RefCell<SkParagraph>,
     passes: RefCell<Option<Passes>>,
+    /// What a page that needs paints of its own paints a paragraph without
+    /// passes from -- see `node::oblique::PlainPaints`.
+    plain: PlainPaints,
     /// The collection whose paragraph cache a layout goes without -- see
     /// `node::oblique::without_paragraph_cache`.
     uncached: Option<FontCollection>,
@@ -1641,7 +1655,7 @@ impl Paragraph {
         }
         let mut paragraph = self.paragraph.borrow_mut();
         match passes.as_mut() {
-            Some(passes) => passes.paint(&mut paragraph, canvas, origin),
+            Some(passes) => passes.paint(&mut paragraph, canvas, origin, None),
             None => paint_glyphs(
                 &mut paragraph,
                 canvas,
@@ -1649,6 +1663,38 @@ impl Paragraph {
                 GlyphPaints::Styles,
             ),
         }
+    }
+
+    /// Paints the paragraph as [`Self::paint`] does, every glyph run drawn
+    /// in its paint as `resolve` makes it for the page -- see
+    /// `node::oblique::Resolve` -- by its passes, or from SkParagraph's
+    /// styles where it has none.
+    pub(crate) fn paint_resolved(
+        &self,
+        canvas: &SkCanvas,
+        origin: SkPoint,
+        resolve: Resolve,
+    ) {
+        let mut paragraph = self.paragraph.borrow_mut();
+        match self.passes.borrow_mut().as_mut() {
+            Some(passes) => {
+                passes.paint(&mut paragraph, canvas, origin, Some(resolve));
+            }
+            None => paint_glyphs(
+                &mut paragraph,
+                canvas,
+                origin,
+                self.plain.resolved(resolve),
+            ),
+        }
+    }
+
+    /// [`Self::paint_resolved`] with every paint as it was built, for the
+    /// tests to hold the two routes against each other.
+    #[cfg(test)]
+    pub(crate) fn paint_run_by_run(&self, canvas: &SkCanvas, origin: SkPoint) {
+        let same = |paint: &SkPaint, _: Option<&NamedColour>| paint.clone();
+        self.paint_resolved(canvas, origin, &same);
     }
 
     /// Draws the paragraph onto `context` with its top-left corner at
@@ -1681,6 +1727,13 @@ impl Paragraph {
             .map_or_else(Vec::new, |passes| {
                 passes.casts().iter().map(|cast| cast.runs()).collect()
             })
+    }
+
+    /// What the paragraph keeps for a page that needs paints of its own,
+    /// where it has no passes -- see `node::oblique::PlainPaints`.
+    #[cfg(test)]
+    pub(crate) fn plain(&self) -> &PlainPaints {
+        &self.plain
     }
 
     /// How many times this paragraph's layouts have been followed for
@@ -2575,20 +2628,47 @@ fn fill_text_style(
 
 /// The colours of `style` that SkParagraph would hold in eight bits, as the
 /// style names them -- see `node::oblique::StyleColours`.
+/// `color` sRGB-encoded in `f64`, unpremultiplied, as a style's colours are
+/// handed to what draws them -- see [`StyleColours`].
+fn srgb(color: RgbaLinear) -> Color4f {
+    color4f_to_srgb(
+        rgba_linear_to_unpremul_color4f(color),
+        Some(&linear_srgb_color_space()),
+    )
+}
+
+/// `color` as a style names it to what draws it, unpremultiplied, in the
+/// linear-light sRGB an `RgbaLinear` holds -- see [`StyleColours`].
+fn named(color: RgbaLinear) -> NamedColour {
+    (
+        rgba_linear_to_unpremul_color4f(color),
+        linear_srgb_color_space(),
+    )
+}
+
+/// The colour `style`'s glyphs are painted in -- see
+/// [`StyleColours::foreground`].
+fn foreground_colour(style: &TextStyle) -> NamedColour {
+    named(style.foreground_color.unwrap_or(style.color))
+}
+
 fn style_colours(style: &TextStyle) -> StyleColours {
-    let srgb = |color: RgbaLinear| {
-        color4f_to_srgb(
-            rgba_linear_to_unpremul_color4f(color),
-            Some(&linear_srgb_color_space()),
-        )
-    };
     StyleColours {
+        foreground: Some(foreground_colour(style)),
+        background: style.background_color.map(named),
         decoration: (style.decoration != TextDecoration::default())
             .then(|| srgb(style.decoration_color.unwrap_or(style.color))),
+        decoration_named: (style.decoration != TextDecoration::default())
+            .then(|| named(style.decoration_color.unwrap_or(style.color))),
         shadows: style
             .shadows
             .iter()
             .map(|shadow| srgb(shadow.color))
+            .collect(),
+        shadows_named: style
+            .shadows
+            .iter()
+            .map(|shadow| named(shadow.color))
             .collect(),
     }
 }
@@ -3449,5 +3529,690 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    //! A paragraph's glyphs drawn run by run, by its passes or, where it has
+    //! none, from SkParagraph's styles, as a float page draws them with its
+    //! paints made for the page, against `Paragraph::paint`, which every
+    //! other page draws them with: the same pixels, to the bit, on an sRGB
+    //! F32 surface.
+
+    use std::cell::RefCell;
+
+    use skia_safe::{
+        AlphaType, Color, Color4f, ColorSpace, ColorType, ImageInfo, Paint,
+        Point, image::CachingHint,
+    };
+
+    use super::{
+        FontVariationSettings, NamedColour, Paragraph, Placeholder,
+        TextDecoration, TextDecorationStyle, TextEngine, TextShadow, TextStyle,
+    };
+    use crate::{
+        color::RgbaLinear,
+        context2d::TextDirection,
+        font::{FontAxisTag, FontLibrary, FontVariation},
+        started,
+    };
+
+    const SIZE: (i32, i32) = (360, 220);
+
+    fn engine() -> TextEngine {
+        let fonts = FontLibrary::new();
+        fonts
+            .register_font_from_path(
+                "OswaldTest",
+                "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+            )
+            .expect("a bundled font registers");
+        fonts
+            .register_font_from_path(
+                "ColrTest",
+                "tests/assets/fonts/color-fonts/samples-glyf_colr_1.ttf",
+            )
+            .expect("the COLRv1 font registers");
+        TextEngine::new(&fonts)
+    }
+
+    fn style(families: &[&str]) -> TextStyle {
+        TextStyle {
+            font_families: families.iter().map(|f| (*f).into()).collect(),
+            font_size: 28.0,
+            color: RgbaLinear::from_srgb8(0, 0, 0, 1.0),
+            ..TextStyle::default()
+        }
+    }
+
+    /// The paragraph a case builds: its base style, and the spans after it.
+    struct Case {
+        name: &'static str,
+        base: TextStyle,
+        spans: Vec<(&'static str, TextStyle)>,
+        placeholder: bool,
+        width: f32,
+    }
+
+    fn cases() -> Vec<Case> {
+        let sans = || style(&["sans-serif"]);
+        let oswald = || style(&["OswaldTest"]);
+        let colr = || style(&["ColrTest"]);
+        let decorated =
+            |line: TextDecoration, s: TextDecorationStyle| TextStyle {
+                decoration: line,
+                decoration_style: s,
+                decoration_thickness: 3.0,
+                ..sans()
+            };
+        let mut cases = vec![
+            Case {
+                name: "plain",
+                base: sans(),
+                spans: vec![("Hamburgefonstiv", sans())],
+                placeholder: false,
+                width: 340.0,
+            },
+            Case {
+                name: "two colours",
+                base: sans(),
+                spans: vec![
+                    ("Hambur", sans()),
+                    (
+                        "gefonstiv",
+                        TextStyle {
+                            color: RgbaLinear::from_srgb8(200, 30, 90, 1.0),
+                            ..sans()
+                        },
+                    ),
+                ],
+                placeholder: false,
+                width: 340.0,
+            },
+            Case {
+                name: "ellipsis and max lines",
+                base: TextStyle {
+                    max_lines: Some(1),
+                    ellipsis: Some("…".into()),
+                    ..sans()
+                },
+                spans: vec![(
+                    "The quick brown fox jumps over the lazy dog again",
+                    sans(),
+                )],
+                placeholder: false,
+                width: 200.0,
+            },
+            Case {
+                name: "wrapped lines",
+                base: sans(),
+                spans: vec![(
+                    "The quick brown fox jumps over the lazy dog, and then again over the fence",
+                    sans(),
+                )],
+                placeholder: false,
+                width: 220.0,
+            },
+            Case {
+                name: "placeholder",
+                base: sans(),
+                spans: vec![("before ", sans()), (" after", sans())],
+                placeholder: true,
+                width: 340.0,
+            },
+            Case {
+                name: "right to left",
+                base: TextStyle {
+                    direction: TextDirection::RightToLeft,
+                    ..sans()
+                },
+                spans: vec![(
+                    "שלום עולם",
+                    TextStyle {
+                        direction: TextDirection::RightToLeft,
+                        ..sans()
+                    },
+                )],
+                placeholder: false,
+                width: 340.0,
+            },
+            Case {
+                name: "mixed bidi",
+                base: sans(),
+                spans: vec![("abc שלום 123 مرحبا def", sans())],
+                placeholder: false,
+                width: 340.0,
+            },
+            Case {
+                name: "variable axes",
+                base: oswald(),
+                spans: vec![
+                    (
+                        "Light ",
+                        TextStyle {
+                            font_variations: FontVariationSettings::Axes(vec![
+                                FontVariation::new(FontAxisTag::WGHT, 250.0),
+                            ]),
+                            ..oswald()
+                        },
+                    ),
+                    (
+                        "Heavy",
+                        TextStyle {
+                            font_variations: FontVariationSettings::Axes(vec![
+                                FontVariation::new(FontAxisTag::WGHT, 690.0),
+                            ]),
+                            ..oswald()
+                        },
+                    ),
+                ],
+                placeholder: false,
+                width: 340.0,
+            },
+            Case {
+                name: "letter and word spacing",
+                base: sans(),
+                spans: vec![(
+                    "spaced out words",
+                    TextStyle {
+                        letter_spacing: 3.0,
+                        word_spacing: 12.0,
+                        ..sans()
+                    },
+                )],
+                placeholder: false,
+                width: 340.0,
+            },
+            Case {
+                name: "half leading",
+                base: TextStyle {
+                    half_leading: true,
+                    line_height_multiplier: 2.0,
+                    ..sans()
+                },
+                spans: vec![(
+                    "tall lines of text that wrap",
+                    TextStyle {
+                        half_leading: true,
+                        line_height_multiplier: 2.0,
+                        ..sans()
+                    },
+                )],
+                placeholder: false,
+                width: 160.0,
+            },
+            Case {
+                name: "stroked",
+                base: sans(),
+                spans: vec![(
+                    "Outlined",
+                    TextStyle {
+                        stroke_width: Some(1.5),
+                        ..sans()
+                    },
+                )],
+                placeholder: false,
+                width: 340.0,
+            },
+            Case {
+                name: "background",
+                base: sans(),
+                spans: vec![(
+                    "behind",
+                    TextStyle {
+                        background_color: Some(RgbaLinear::from_srgb8(
+                            40, 200, 120, 1.0,
+                        )),
+                        ..sans()
+                    },
+                )],
+                placeholder: false,
+                width: 340.0,
+            },
+            Case {
+                name: "bitmap emoji",
+                base: sans(),
+                spans: vec![("smile 😀🎉 ok", sans())],
+                placeholder: false,
+                width: 340.0,
+            },
+            Case {
+                name: "bitmap emoji alone",
+                base: sans(),
+                spans: vec![("😀🎉", sans())],
+                placeholder: false,
+                width: 340.0,
+            },
+            Case {
+                name: "COLRv1 glyphs",
+                base: sans(),
+                spans: vec![
+                    ("plain ", sans()),
+                    ("simple_radial linear_repeat", colr()),
+                ],
+                placeholder: false,
+                width: 340.0,
+            },
+            Case {
+                name: "shadow",
+                base: sans(),
+                spans: vec![(
+                    "Shadowed",
+                    TextStyle {
+                        shadows: vec![shadow(0.0)],
+                        ..sans()
+                    },
+                )],
+                placeholder: false,
+                width: 340.0,
+            },
+            Case {
+                name: "shadow, blurred",
+                base: sans(),
+                spans: vec![(
+                    "Shadowed",
+                    TextStyle {
+                        shadows: vec![shadow(2.0)],
+                        ..sans()
+                    },
+                )],
+                placeholder: false,
+                width: 340.0,
+            },
+            Case {
+                name: "the paragraph's own style",
+                base: TextStyle {
+                    color: RgbaLinear::from_srgb8(90, 40, 160, 1.0),
+                    background_color: Some(RgbaLinear::from_srgb8(
+                        240, 220, 120, 1.0,
+                    )),
+                    decoration: TextDecoration::underline(),
+                    shadows: vec![shadow(0.0)],
+                    ..sans()
+                },
+                spans: Vec::new(),
+                placeholder: false,
+                width: 340.0,
+            },
+        ];
+        for (line, line_name) in [
+            (TextDecoration::underline(), "underline"),
+            (
+                TextDecoration {
+                    overline: true,
+                    ..TextDecoration::default()
+                },
+                "overline",
+            ),
+            (
+                TextDecoration {
+                    line_through: true,
+                    ..TextDecoration::default()
+                },
+                "line-through",
+            ),
+        ] {
+            for (s, s_name) in [
+                (TextDecorationStyle::Solid, "solid"),
+                (TextDecorationStyle::Double, "double"),
+                (TextDecorationStyle::Dotted, "dotted"),
+                (TextDecorationStyle::Dashed, "dashed"),
+                (TextDecorationStyle::Wavy, "wavy"),
+            ] {
+                cases.push(Case {
+                    name: Box::leak(
+                        format!("{line_name} {s_name}, thick").into_boxed_str(),
+                    ),
+                    base: sans(),
+                    spans: vec![("Decorated text", decorated(line, s))],
+                    placeholder: false,
+                    width: 340.0,
+                });
+            }
+        }
+        cases
+    }
+
+    fn shadow(blur_sigma: f32) -> TextShadow {
+        TextShadow {
+            color: RgbaLinear::from_srgb8(30, 60, 200, 1.0),
+            offset_x: 4.0,
+            offset_y: 5.0,
+            blur_sigma,
+        }
+    }
+
+    /// `style` with every colour it names, and the one it paints its glyphs
+    /// in, made `colour`.
+    fn all_in(style: &TextStyle, colour: RgbaLinear) -> TextStyle {
+        TextStyle {
+            color: colour,
+            foreground_color: style.foreground_color.map(|_| colour),
+            background_color: style.background_color.map(|_| colour),
+            decoration_color: Some(colour),
+            shadows: style
+                .shadows
+                .iter()
+                .map(|shadow| TextShadow {
+                    color: colour,
+                    ..*shadow
+                })
+                .collect(),
+            ..style.clone()
+        }
+    }
+
+    /// `case`'s paragraph, its text in the spans it names, or in its base
+    /// style where it names none.
+    fn build(engine: &TextEngine, case: &Case) -> Paragraph {
+        let mut builder = engine.paragraph_builder(&case.base);
+        if case.spans.is_empty() {
+            builder.add_text("Hamburgefonstiv");
+        }
+        for (i, (text, style)) in case.spans.iter().enumerate() {
+            if case.placeholder && i == 1 {
+                builder.add_placeholder(Placeholder::new(40.0, 20.0));
+            }
+            builder.push_style(style);
+            builder.add_text(text);
+            builder.pop();
+        }
+        builder.build(case.width)
+    }
+
+    /// How a test paints a paragraph.
+    enum Route<'a> {
+        /// `Paragraph::paint`, as an eight-bit page does.
+        Skia,
+        /// Run by run, every paint as it was built.
+        RunByRun,
+        /// Run by run, every paint through a resolver.
+        Resolved(&'a dyn Fn(&Paint, Option<&NamedColour>) -> Paint),
+    }
+
+    /// `paragraph` painted by `route` onto a fresh sRGB F32 surface, read
+    /// back premultiplied.
+    fn painted(paragraph: &Paragraph, route: Route) -> Vec<f32> {
+        let info = ImageInfo::new(
+            SIZE,
+            ColorType::RGBAF32,
+            AlphaType::Premul,
+            Some(ColorSpace::new_srgb()),
+        );
+        let mut surface =
+            started::raster(&info, None, None).expect("a surface");
+        surface.canvas().clear(Color::TRANSPARENT);
+        let at = Point::new(10.0, 10.0);
+        match route {
+            Route::Skia => paragraph.paint(surface.canvas(), at),
+            Route::RunByRun => paragraph.paint_run_by_run(surface.canvas(), at),
+            Route::Resolved(resolve) => {
+                paragraph.paint_resolved(surface.canvas(), at, resolve)
+            }
+        }
+        let mut pixels = vec![0f32; (SIZE.0 * SIZE.1 * 4) as usize];
+        assert!(surface.image_snapshot().read_pixels(
+            &info,
+            &mut pixels,
+            SIZE.0 as usize * 16,
+            (0, 0),
+            CachingHint::Disallow,
+        ));
+        pixels
+    }
+
+    #[test]
+    fn a_paragraph_drawn_run_by_run_is_the_paragraph_skia_paints() {
+        let engine = engine();
+        let mut parted = Vec::new();
+        for case in cases() {
+            let paragraph = build(&engine, &case);
+            let (skia, ours) = (
+                painted(&paragraph, Route::Skia),
+                painted(&paragraph, Route::RunByRun),
+            );
+            let inked = skia.chunks(4).filter(|p| p[3] > 0.0).count();
+            let differ = skia
+                .chunks(4)
+                .zip(ours.chunks(4))
+                .filter(|(a, b)| a != b)
+                .count();
+            if differ > 0 || inked == 0 {
+                parted.push(format!(
+                    "{}: {differ} pixels differ of {inked} inked",
+                    case.name
+                ));
+            }
+        }
+        assert!(parted.is_empty(), "{}", parted.join("\n"));
+    }
+
+    /// A paragraph without passes whose every style names one colour keeps
+    /// nothing on the heap for a page that needs paints of its own, however
+    /// many spans and however long; one whose styles name two keeps its
+    /// lists.
+    #[test]
+    fn a_paragraph_in_one_colour_keeps_no_list_for_its_paints() {
+        let engine = engine();
+        let words = "The quick brown fox jumps over the lazy dog. ";
+        let white = RgbaLinear::from_srgb8(255, 255, 255, 1.0);
+        let sans = || style(&["sans-serif"]);
+        // Each case's spans, and whether it keeps lists for them.
+        type Spans = Vec<(String, TextStyle)>;
+        let cases: Vec<(&str, Spans, bool)> = vec![
+            ("one span", vec![("Hamburgefonstiv".into(), sans())], false),
+            ("a long span", vec![(words.repeat(40), sans())], false),
+            (
+                "forty spans in one paint",
+                (0..40).map(|_| (words.to_string(), sans())).collect(),
+                false,
+            ),
+            (
+                "a mark in another colour",
+                vec![
+                    (
+                        "Cafe".into(),
+                        TextStyle {
+                            color: white,
+                            ..sans()
+                        },
+                    ),
+                    ("\u{301}".into(), sans()),
+                ],
+                true,
+            ),
+        ];
+        for (name, spans, keeps) in cases {
+            let mut builder = engine.paragraph_builder(&sans());
+            for (text, style) in &spans {
+                builder.push_style(style);
+                builder.add_text(text);
+                builder.pop();
+            }
+            let paragraph = builder.build(340.0);
+            assert_eq!(paragraph.follows(), None, "{name}: no passes");
+            assert_eq!(paragraph.plain().heap_bytes() > 0, keeps, "{name}");
+        }
+    }
+
+    /// A paragraph without passes -- in one style, in several in one paint,
+    /// or in several whose every edge lies between clusters -- drawn run by
+    /// run in paints made from SkParagraph's styles and the colours as named,
+    /// as a float page draws it, against `Paragraph::paint`: the same pixels,
+    /// in white and in black, which an sRGB F32 surface holds exactly from
+    /// either route.
+    #[test]
+    fn a_paragraph_without_passes_resolved_run_by_run_is_skias() {
+        const PLAIN: [&str; 13] = [
+            "plain",
+            "ellipsis and max lines",
+            "wrapped lines",
+            "placeholder",
+            "right to left",
+            "mixed bidi",
+            "variable axes",
+            "letter and word spacing",
+            "half leading",
+            "stroked",
+            "bitmap emoji",
+            "bitmap emoji alone",
+            "COLRv1 glyphs",
+        ];
+        let named = |paint: &Paint, colour: Option<&NamedColour>| {
+            let mut paint = paint.clone();
+            if let Some((colour, space)) = colour {
+                paint.set_color4f(*colour, Some(space));
+            }
+            paint
+        };
+        let engine = engine();
+        let (white, black) = (
+            RgbaLinear::from_srgb8(255, 255, 255, 1.0),
+            RgbaLinear::from_srgb8(0, 0, 0, 1.0),
+        );
+        let mut checked = Vec::new();
+        for colour in [white, black] {
+            for case in cases().into_iter().filter(|c| PLAIN.contains(&c.name))
+            {
+                checked.push(Case {
+                    base: all_in(&case.base, colour),
+                    spans: case
+                        .spans
+                        .iter()
+                        .map(|(text, style)| (*text, all_in(style, colour)))
+                        .collect(),
+                    ..case
+                });
+            }
+        }
+        // The last way `ParagraphRecipe::built` leaves a paragraph without
+        // passes: the mark's edge moves past it into the style of the text
+        // it marks, so that none is left. Its text is all in the pushed
+        // white style, the paragraph's own style black, so a route taking
+        // the paragraph's colour for every glyph paints black.
+        checked.push(Case {
+            name: "a mark in another colour",
+            base: style(&["sans-serif"]),
+            spans: vec![
+                (
+                    "Cafe",
+                    TextStyle {
+                        color: white,
+                        ..style(&["sans-serif"])
+                    },
+                ),
+                ("\u{301}", style(&["sans-serif"])),
+            ],
+            placeholder: false,
+            width: 340.0,
+        });
+        assert_eq!(checked.len(), 2 * PLAIN.len() + 1, "every case named");
+        let mut parted = Vec::new();
+        for case in &checked {
+            let paragraph = build(&engine, case);
+            assert_eq!(paragraph.follows(), None, "{}: no passes", case.name);
+            let (skia, ours) = (
+                painted(&paragraph, Route::Skia),
+                painted(&paragraph, Route::Resolved(&named)),
+            );
+            let inked = skia.chunks(4).filter(|p| p[3] > 0.0).count();
+            let differ = skia
+                .chunks(4)
+                .zip(ours.chunks(4))
+                .filter(|(a, b)| a != b)
+                .count();
+            if differ > 0 || inked == 0 {
+                parted.push(format!(
+                    "{}: {differ} pixels differ of {inked} inked",
+                    case.name
+                ));
+            }
+        }
+        assert!(parted.is_empty(), "{}", parted.join("\n"));
+    }
+
+    /// A colour font's glyphs keep the colours the font gives them: a
+    /// resolver that makes every paint red leaves COLRv1 glyphs as
+    /// SkParagraph paints them, in their palette's colours.
+    #[test]
+    fn a_colour_font_keeps_its_own_colours_run_by_run() {
+        let engine = engine();
+        let colr = Case {
+            name: "COLRv1 glyphs alone",
+            base: style(&["ColrTest"]),
+            spans: vec![("simple_linear radial_reflect", style(&["ColrTest"]))],
+            placeholder: false,
+            width: 340.0,
+        };
+        let paragraph = build(&engine, &colr);
+        let reddened = |paint: &Paint, _: Option<&NamedColour>| {
+            let mut paint = paint.clone();
+            let alpha = paint.alpha_f();
+            paint.set_color4f(Color4f::new(1.0, 0.0, 0.0, alpha), None);
+            paint
+        };
+        let skia = painted(&paragraph, Route::Skia);
+        // In colour, not in the black the style names: some inked pixel is
+        // neither black nor grey.
+        assert!(
+            skia.chunks(4).any(|p| p[3] > 0.0
+                && (p[0] - p[1]).abs().max((p[1] - p[2]).abs()) > 0.1),
+            "the COLRv1 glyphs ink in colour"
+        );
+        let ours = painted(&paragraph, Route::Resolved(&reddened));
+        let differ = skia
+            .chunks(4)
+            .zip(ours.chunks(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(differ, 0, "pixels the red resolver moved");
+    }
+
+    /// Every paint the passes draw goes through the resolver, with the
+    /// colour its style named: a resolver making every paint red paints
+    /// what SkParagraph paints for the paragraph styled all in red.
+    #[test]
+    fn every_paint_drawn_run_by_run_is_the_one_its_resolver_makes() {
+        let red = RgbaLinear::from_srgb8(255, 0, 0, 1.0);
+        let engine = engine();
+        let mut parted = Vec::new();
+        for case in cases() {
+            let unnamed = RefCell::new(0);
+            let reddened = |paint: &Paint, named: Option<&NamedColour>| {
+                if named.is_none() {
+                    *unnamed.borrow_mut() += 1;
+                }
+                let mut paint = paint.clone();
+                let alpha = paint.alpha_f();
+                paint.set_color4f(Color4f::new(1.0, 0.0, 0.0, alpha), None);
+                paint
+            };
+            let ours =
+                painted(&build(&engine, &case), Route::Resolved(&reddened));
+            let all_red = Case {
+                base: all_in(&case.base, red),
+                spans: case
+                    .spans
+                    .iter()
+                    .map(|(text, style)| (*text, all_in(style, red)))
+                    .collect(),
+                ..case
+            };
+            let skia = painted(&build(&engine, &all_red), Route::Skia);
+            let differ = skia
+                .chunks(4)
+                .zip(ours.chunks(4))
+                .filter(|(a, b)| a != b)
+                .count();
+            let unnamed = unnamed.into_inner();
+            if differ > 0 || unnamed > 0 {
+                parted.push(format!(
+                    "{}: {differ} pixels differ, {unnamed} paints unnamed",
+                    all_red.name
+                ));
+            }
+        }
+        assert!(parted.is_empty(), "{}", parted.join("\n"));
     }
 }
