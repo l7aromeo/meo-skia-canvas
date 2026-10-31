@@ -3063,10 +3063,16 @@ impl Dye {
     /// this dye.
     ///
     /// SVG names a solid color, a linear, radial or two-point conical
-    /// gradient, and an image shader. A sweep gradient or a procedural
-    /// shader leaves it with nothing to write.
+    /// gradient, and an image shader. A sweep gradient, a procedural shader
+    /// or a canvas's pattern leaves it with nothing to write.
     pub fn vector_features(&self) -> VectorFeatures {
         match self {
+            // A canvas's pattern is a picture shader to a document, which
+            // SVG names no paint server for: a draw dyed by one wrote a bare
+            // path, black. An image's is an image shader, which it writes.
+            Dye::Pattern(pattern) if pattern.tiling().is_some() => {
+                VectorFeatures::EXOTIC_SHADER
+            }
             Dye::Color(..) | Dye::Pattern(_) | Dye::Texture(_) => {
                 VectorFeatures::PLAIN
             }

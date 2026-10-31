@@ -401,3 +401,32 @@ fn a_draw_dyed_by_it_paints_the_canvas_at_every_density() {
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+/// An SVG export embeds a draw dyed by a canvas's pattern as pixels: SVG
+/// names no paint server for the picture the pattern is to a document, and
+/// Skia's SVG backend wrote the draw as a bare path, black.
+#[test]
+fn an_svg_rasterizes_a_draw_dyed_by_it() {
+    let mut source = source(Source::ClippedRect {
+        before: false,
+        saved: false,
+    });
+    let mut canvas = Canvas::new(WIDTH, HEIGHT);
+    let pattern = canvas
+        .context()
+        .create_pattern_from_canvas(&mut source, PatternRepeat::Repeat);
+    let ctx = canvas.context();
+    ctx.set_fill_pattern(&pattern);
+    ctx.begin_path();
+    ctx.move_to(40.3, 20.7);
+    ctx.line_to(95.8, 39.95);
+    ctx.line_to(57.3, 68.2);
+    ctx.close_path();
+    ctx.fill(FillRule::NonZero);
+    let svg = canvas
+        .to_buffer(ImageFormat::Svg, &EncodeOptions::default())
+        .expect("an svg");
+    let svg = String::from_utf8_lossy(&svg);
+    assert!(svg.contains("<image"), "the draw is in the SVG: {svg}");
+    assert!(!svg.contains("<path"), "the draw is a bare path: {svg}");
+}

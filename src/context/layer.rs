@@ -509,9 +509,11 @@ pub(crate) fn white() -> Option<Shader> {
 /// technique a cut draw takes, see [`CutOp`] -- and the pattern is painted
 /// over what the coverage allows in one draw, through the draw's own alpha,
 /// blend mode and colour filter, as Skia paints a shader through the draw's
-/// path. In a document, which writes a clip by coverage as an empty
-/// `clipPath`, and in the raster a document embeds, the draw is played as
-/// recorded with the page's picture as its pattern.
+/// path, and so in the raster a document embeds. In a document, which writes
+/// a clip by coverage as an empty `clipPath`, the draw is played as recorded
+/// with the page's picture as its pattern -- which Skia's PDF backend writes
+/// as an image, and its SVG backend drops: a canvas's pattern asks an SVG
+/// export to embed the draw -- see `Dye::vector_features`.
 #[derive(Clone, Debug)]
 pub struct PatternDraw {
     pub source: Arc<TileSource>,
@@ -540,8 +542,8 @@ impl PatternDraw {
             canvas.clip_path(&clip, ClipOp::Intersect, true);
         }
         match target {
-            Target::Pixels => self.paint_onto(canvas),
-            Target::Embedded | Target::Document => self.plain.playback(canvas),
+            Target::Pixels | Target::Embedded => self.paint_onto(canvas),
+            Target::Document => self.plain.playback(canvas),
         }
         canvas.restore();
     }

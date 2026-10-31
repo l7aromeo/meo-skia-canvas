@@ -471,6 +471,11 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **An SVG export keeps a draw dyed by a canvas's pattern.** SVG names no
+  paint server for a canvas's pattern, and the export wrote such a draw as a
+  bare path, filled black. It now embeds the draw as pixels, as it does a
+  conic gradient. A PDF writes the pattern as it did.
+
 - **A pattern of a canvas draws the canvas as the canvas draws itself.**
   `createPattern(canvas)` filled with Skia's picture shader, which
   rasterizes the canvas's picture once, at the density it is first drawn at,
