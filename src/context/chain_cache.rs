@@ -32,9 +32,10 @@ use std::{
     },
 };
 
-use parking_lot::Mutex;
 #[cfg(test)]
-use parking_lot::MutexGuard;
+use std::cell::RefCell;
+
+use parking_lot::Mutex;
 use skia_safe::{Canvas as SkCanvas, IRect};
 
 use crate::{
@@ -139,19 +140,36 @@ pub(crate) struct ChainCache {
 /// workers.
 static CHAINS: LazyLock<Mutex<ChainCache>> = LazyLock::new(Mutex::default);
 
-/// Taken by [`release_cached_chains`] for the release alone, and by
-/// whatever has to keep the results it files for a while -- see
-/// `hold_chain_release`. The memory watcher releases from a thread of its
-/// own whenever rendering has been idle, so nothing else would keep it off.
-static RELEASE: Mutex<()> = Mutex::new(());
-
-/// Holds every release of the cache off for as long as the guard lives:
-/// for a test that counts the chains it runs, which a release in the middle
-/// of it would make it run again. Emptied once mid-test, a page drawn into
-/// itself sixteen times ran 31 to 36 chains where 26 run.
 #[cfg(test)]
-pub(crate) fn hold_chain_release() -> MutexGuard<'static, ()> {
-    RELEASE.lock()
+thread_local! {
+    /// A cache of this thread's own, which [`get`] and [`put`] use in place
+    /// of [`CHAINS`] while an [`OwnChainCache`] lives.
+    static OWN: RefCell<Option<ChainCache>> = const { RefCell::new(None) };
+}
+
+/// A cache of the calling thread's own for as long as the guard lives: for
+/// a test that counts the chains it runs. In the shared cache, what tests
+/// drawing in parallel file evicts what the count relies on, and the
+/// memory watcher's idle release empties it; either makes the count's
+/// chains run again. With the shared cache filled past its bytes from
+/// another thread, a page drawn into itself eight times ran 63 chains
+/// where 16 run.
+#[cfg(test)]
+pub(crate) struct OwnChainCache;
+
+#[cfg(test)]
+impl OwnChainCache {
+    pub(crate) fn new() -> Self {
+        OWN.with_borrow_mut(|own| *own = Some(ChainCache::default()));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for OwnChainCache {
+    fn drop(&mut self) {
+        OWN.with_borrow_mut(|own| *own = None);
+    }
 }
 
 /// Ticks once per use, to order entries for eviction.
@@ -159,18 +177,33 @@ static CHAIN_USES: AtomicU64 = AtomicU64::new(0);
 
 /// The result filed under `key`, if one is.
 pub(crate) fn get(key: &Key) -> Option<Outcome> {
+    #[cfg(test)]
+    if let Some(found) =
+        OWN.with_borrow_mut(|own| own.as_mut().map(|cache| cache.get(key)))
+    {
+        return found;
+    }
     CHAINS.lock().get(key)
 }
 
 /// Files `outcome` under `key`.
 pub(crate) fn put(key: Key, outcome: Outcome) {
+    #[cfg(test)]
+    let Some((key, outcome)) = OWN.with_borrow_mut(|own| match own {
+        Some(cache) => {
+            cache.put(key, outcome);
+            None
+        }
+        None => Some((key, outcome)),
+    }) else {
+        return;
+    };
     CHAINS.lock().put(key, outcome);
 }
 
 /// Drops every result. Called with the page cache's release, when rendering
 /// has been idle.
 pub(crate) fn release_cached_chains() {
-    let _release = RELEASE.lock();
     let mut cache = CHAINS.lock();
     cache.entries.clear();
     cache.bytes = 0;
@@ -406,24 +439,79 @@ mod tests {
         RUNS.with(|runs| runs.get()) - before
     }
 
+    /// Runs `count` while another thread files results into the shared
+    /// cache past its bytes, over and over, as tests drawing in parallel
+    /// do: each of a quarter of the budget, under a group of its own kept
+    /// alive, so that every few of them evict the least recently used.
+    fn while_the_shared_cache_fills<T>(count: impl FnOnce() -> T) -> T {
+        let side = ((CHAIN_CACHE_BYTES / 4 / 4) as f64).sqrt() as i32;
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let filling = Arc::clone(&stop);
+        let filler = std::thread::spawn(move || {
+            let mut kept = vec![];
+            while !filling.load(Ordering::Relaxed) {
+                let one = group();
+                put(
+                    key(&one, &n32(), &Matrix::new_identity(), clip()),
+                    Outcome::blank(side),
+                );
+                kept.push(one);
+            }
+        });
+        let counted = count();
+        stop.store(true, Ordering::Relaxed);
+        filler.join().expect("the filling thread");
+        counted
+    }
+
+    #[test]
+    fn a_threads_own_chain_cache_keeps_its_results_to_itself() {
+        let identity = Matrix::new_identity();
+        let (mine, shared) = (group(), group());
+        let own = OwnChainCache::new();
+        put(key(&mine, &n32(), &identity, clip()), Outcome::blank(8));
+        assert!(get(&key(&mine, &n32(), &identity, clip())).is_some());
+        assert!(
+            CHAINS
+                .lock()
+                .get(&key(&mine, &n32(), &identity, clip()))
+                .is_none(),
+            "filed in the shared cache"
+        );
+        drop(own);
+        assert!(
+            get(&key(&mine, &n32(), &identity, clip())).is_none(),
+            "kept past its guard"
+        );
+        put(key(&shared, &n32(), &identity, clip()), Outcome::blank(8));
+        assert!(
+            CHAINS
+                .lock()
+                .get(&key(&shared, &n32(), &identity, clip()))
+                .is_some(),
+            "not filed in the shared cache once the guard is gone"
+        );
+    }
+
     #[test]
     fn a_canvas_drawn_into_itself_runs_each_rounds_chain_once() {
         // Each round's group holds every earlier round's, so a replay that
         // ran their chains again would run about rounds squared over two.
-        let held = hold_chain_release();
+        let own = OwnChainCache::new();
         for rounds in [8, 16] {
-            let runs = runs_for(rounds);
+            let runs = while_the_shared_cache_fills(|| runs_for(rounds));
             assert!(runs <= 2 * rounds, "{rounds} rounds ran {runs} chains");
         }
-        drop(held);
+        drop(own);
     }
 
     #[test]
-    fn a_held_release_waits_for_a_test_that_counts_its_chains() {
+    fn the_idle_release_leaves_a_test_its_own_chain_cache() {
         // What the memory watcher's idle release does from its own thread,
-        // over and over, while a test holding the release off counts its
-        // chains: unheld, a page drawn into itself sixteen times ran 245.
-        let held = hold_chain_release();
+        // over and over, while a test with a cache of its own counts its
+        // chains: in the shared cache, a page drawn into itself sixteen
+        // times ran 245.
+        let own = OwnChainCache::new();
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let releasing = Arc::clone(&stop);
         let releaser = std::thread::spawn(move || {
@@ -434,10 +522,8 @@ mod tests {
         });
         let runs = runs_for(16);
         stop.store(true, Ordering::Relaxed);
-        // Let go before waiting for the releaser, which may be waiting for
-        // the release this holds.
-        drop(held);
         releaser.join().expect("the releasing thread");
+        drop(own);
         assert!(runs <= 32, "16 rounds ran {runs} chains");
     }
 }
