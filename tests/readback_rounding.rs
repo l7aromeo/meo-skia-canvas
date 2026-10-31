@@ -6,14 +6,18 @@
 //! down, so on that engine the first read of a state came back a level low
 //! wherever the quotient fell on a half -- 127 for 128 -- and the second,
 //! served from a raster copy, did not. Each row was measured in Chrome 153
-//! on a Display P3 canvas read back in P3.
+//! on a Display P3 canvas read back in P3, but for two premultiplied ties,
+//! which Chrome's approximate conversion rounds down and this rounds up --
+//! see docs/browser-differences.md.
 
 use meo_skia_canvas::prelude::*;
 
 const ROWS: &[(&str, [u8; 4])] = &[
     ("color(display-p3 0.5 0.2 0.1 / 0.1)", [128, 49, 29, 26]),
     ("color(display-p3 0.3 0.6 0.9 / 0.1)", [78, 147, 226, 26]),
-    ("color(display-p3 0.5 0.2 0.1 / 0.2)", [125, 50, 25, 51]),
+    // Red 25.5 premultiplied, a tie rounded up to 26; Chrome 153 stores 25
+    // and reads 125, 50, 25, 51.
+    ("color(display-p3 0.5 0.2 0.1 / 0.2)", [130, 50, 25, 51]),
     ("color(display-p3 0.3 0.6 0.9 / 0.2)", [75, 155, 230, 51]),
     ("color(display-p3 0.5 0.2 0.1 / 0.25)", [128, 52, 24, 64]),
     ("color(display-p3 0.3 0.6 0.9 / 0.25)", [76, 151, 227, 64]),
@@ -23,7 +27,9 @@ const ROWS: &[(&str, [u8; 4])] = &[
     ("color(display-p3 0.3 0.6 0.9 / 0.4)", [77, 152, 230, 102]),
     ("color(display-p3 0.5 0.2 0.1 / 0.5)", [128, 52, 26, 128]),
     ("color(display-p3 0.3 0.6 0.9 / 0.5)", [76, 153, 229, 128]),
-    ("color(display-p3 0.5 0.2 0.1 / 0.6)", [127, 52, 25, 153]),
+    // Red 76.5 premultiplied, a tie rounded up to 77; Chrome 153 stores 76
+    // and reads 127, 52, 25, 153.
+    ("color(display-p3 0.5 0.2 0.1 / 0.6)", [128, 52, 25, 153]),
     ("color(display-p3 0.3 0.6 0.9 / 0.6)", [77, 153, 230, 153]),
     ("color(display-p3 0.5 0.2 0.1 / 0.7)", [127, 51, 26, 179]),
     ("color(display-p3 0.3 0.6 0.9 / 0.7)", [77, 152, 229, 179]),

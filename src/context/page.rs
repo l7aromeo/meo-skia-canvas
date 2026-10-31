@@ -531,11 +531,16 @@ impl Recording {
 ///
 /// Skia stores a paint's colour in sRGB and converts it into the page's
 /// space at the draw through skcms's approximate transfer function, whose
-/// output lies on a grid 64 ulps wide, so no plain colour lands exactly on a
-/// float page in another space. An image shader in the page's own space
-/// does, but a document backend writes it as a pattern. So such a page
-/// records every draw twice, and a draw is handed each recording in turn to
-/// record with the paint that recording needs.
+/// output lies on a grid 64 ulps wide: on a float page in another space no
+/// plain colour lands exactly, and on an eight-bit one a channel moves a
+/// level wherever that crosses a rounding boundary. So the pixels take
+/// either a shader worked in the page's own space, which lands exactly --
+/// see `ExactColour::shader` -- or, at eight bits, a plain colour moved
+/// until Skia lands it on its bytes -- see `ExactColour::verified_paint`;
+/// and a document takes neither, writing the shader as a pattern and the
+/// moved colour as moved. So such a page records every draw twice, and a
+/// draw is handed each recording in turn to record with the paint that
+/// recording needs.
 struct Recorders {
     pixels: PictureRecorder,
     document: Option<PictureRecorder>,

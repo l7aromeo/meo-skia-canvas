@@ -562,11 +562,40 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   the colour as the style named it, so a paragraph's `color`,
   `foregroundColor`, `backgroundColor`, shadow colour, `decorationColor` and
   `strokeWidth` outline are a fill of their colour to the bit. A colour
-  font's glyphs keep their own colours. On an eight-bit canvas nothing
+  font's glyphs keep their own colours. On an eight-bit sRGB canvas nothing
   changes, so its PDF still writes a paragraph's colour as Skia converts it,
   `.0785 .4706 .8628` for `rgb(20 120 220)` where a fill writes
   `.0784 .4706 .8627`; on a float sRGB canvas the paragraph's is now the
   fill's.
+
+- **Colours land exactly on an eight-bit wide-gamut canvas.** On a canvas made
+  with `colorSpace` `"display-p3"`, `"display-p3-linear"`, `"rec2020"`,
+  `"rec2020-linear"` or `"srgb-linear"` and an eight-bit `colorType`, Skia
+  converted a flat colour to sRGB and back through an approximate transfer
+  function, and a channel landed a level off wherever that crossed a rounding
+  boundary: `color(display-p3 0.5 0.5 0.5)` filled 127 where an sRGB canvas
+  fills the same grey 128, and `color(srgb 0.5 0.5 0.5)` filled 128, 127, 127.
+  Such a canvas now records each draw twice, as a float canvas in those spaces
+  already does: for its pixels in the colour converted exactly and stored as
+  its exact premultiplied product, rounded, as Chrome's Display P3 canvas
+  stores a translucent colour -- and for a PDF or SVG in the colour's exact
+  sRGB encoding, `.5 .5 .5` and `gray` where they wrote `.4999 .5 .5` and
+  `#7F7F80`. A fill, a stroke, text, a `Paragraph`, a `drop-shadow()`, a
+  `shadowColor` shadow and a blurred rectangle store a fill's bytes,
+  translucent or not and under any `globalAlpha`. An sRGB canvas is unchanged.
+  Chrome converts a colour onto such a canvas through the same approximation,
+  so where that crosses a rounding boundary Chrome is a level off and this is
+  not -- see docs/browser-differences.md. Not yet exact there: a blurred path,
+  which stores a level off a fill of its colour on an sRGB canvas too.
+
+  The exact colour is drawn as a plain paint colour where Skia lands it on
+  its bytes, which each thread finds once per colour by drawing it onto a
+  pixel of the canvas's space and keeps for the colours a page repeats, and
+  through a shader where Skia does not. So the cost falls on colours not
+  drawn before: 5000 rectangles each in a colour of its own take about 1.3
+  times what recording twice costs alone, on either engine, where a palette,
+  text in a few colours and shadows cost about what recording twice does,
+  which is up to about 1.15 times what one recording took [RE-TIME vs 6.0.2].
 
 - **A `drop-shadow()` in `ctx.filter` lands in its colour exactly on a float
   canvas.** On a canvas made with `colorType: "RGBAF16"` or `"RGBAF32"`, a

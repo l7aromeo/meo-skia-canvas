@@ -3225,13 +3225,14 @@ impl Context2D {
         // Composited, not bare: the paragraph carries its own paints, so
         // without this wrapper the context's alpha and blend mode would be
         // silently dropped.
-        // On a float page every glyph is drawn run by run in a paint made
-        // for the page, where SkParagraph would draw the paint the
-        // paragraph was built with -- see `Inner::paragraph_paint`.
-        let floats = self.inner.composites_in_floats();
+        // On a float page, and on one that keeps a recording for pixels,
+        // every glyph is drawn run by run in a paint made for the page,
+        // where SkParagraph would draw the paint the paragraph was built
+        // with -- see `Inner::paragraph_paint`.
+        let resolved = self.inner.makes_paragraph_paints();
         let at = SkPoint::new(x, y);
         self.inner.with_composited_canvas(|canvas, recording| {
-            match floats {
+            match resolved {
                 true => layout.paint_resolved(canvas, at, &|paint, colour| {
                     self.inner.paragraph_paint(paint, colour, recording)
                 }),
@@ -5708,7 +5709,8 @@ mod recording_tests {
         let pages = [
             (PixelColorSpace::DisplayP3, PixelDepth::F32, true),
             (PixelColorSpace::Srgb, PixelDepth::F32, false),
-            (PixelColorSpace::DisplayP3, PixelDepth::Uint8, false),
+            (PixelColorSpace::DisplayP3, PixelDepth::Uint8, true),
+            (PixelColorSpace::Srgb, PixelDepth::Uint8, false),
             (PixelColorSpace::Rec2020Pq, PixelDepth::F32, false),
         ];
         let mut problems = Vec::new();
@@ -5746,7 +5748,7 @@ mod recording_tests {
     fn a_page_of_one_recording_embeds_its_layers_as_pixels() {
         use crate::{context::layer::Target, started};
         use skia_safe::{AlphaType, ColorSpace, ColorType, ImageInfo};
-        for space in [PixelColorSpace::Srgb, PixelColorSpace::DisplayP3] {
+        for space in [PixelColorSpace::Srgb, PixelColorSpace::Rec2020Pq] {
             let mut canvas = canvas(space, PixelDepth::Uint8);
             let ctx = canvas.context();
             let css = "color(display-p3 0.2 0.4 0.6)";
