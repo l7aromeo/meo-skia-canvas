@@ -1932,6 +1932,11 @@ impl Context2D {
         let paint = self.paint_for_drawing(style, coverage);
         let features = self.vector_features(&paint, Some(style));
         let exact = self.exact_paint(&paint, style);
+        // A texture's mark held exactly, asked for here because the draw
+        // below runs while the recorder is held -- see `place_mark`.
+        let mark = matches!(self.state.dye(style), Dye::Texture(_))
+            .then(|| self.exact_colour(style))
+            .flatten();
         if let Some(clip) = self.cut_clip(&path, &paint, style) {
             let (matrix, faint) = (self.state.matrix, self.faint());
             self.with_recorder(|mut recorder| {
@@ -2006,6 +2011,13 @@ impl Context2D {
                         device_pixel,
                         self.onto().as_ref(),
                     );
+                    let mark_alpha = tile_paint.alpha_f();
+                    place_mark(
+                        &mut tile_paint,
+                        paint,
+                        mark.as_ref(),
+                        mark_alpha,
+                    );
 
                     let enclosing_frame = Path::rect(expanded_bounds, None);
 
@@ -2051,6 +2063,12 @@ impl Context2D {
                             fill_paint
                                 .set_alpha_f(fill_paint.alpha_f() * thinned);
                         }
+                        place_mark(
+                            &mut fill_paint,
+                            paint,
+                            mark.as_ref(),
+                            mark_alpha,
+                        );
                         if let Some(fill_path) =
                             stencil.op(&textured_frame, PathOp::Intersect)
                         {
@@ -3490,6 +3508,30 @@ fn covers_beyond_the_draw(blend: BlendMode) -> bool {
             | BlendMode::DstATop
             | BlendMode::Src
     )
+}
+
+/// `tile`, a paint `CanvasTexture::mix_into` has made from `paint`, given the
+/// mark's colour back where `paint` is the exact one a page that keeps a
+/// recording for pixels draws with: the colour `mark` held exactly in the
+/// page's space, placed at `alpha`, the mark's -- see [`ExactColour::at`].
+/// `mix_into` hands the paint the mark's own colour again, its alpha
+/// unplaced, and the GPU engine stored a translucent mark a premultiplied
+/// level off a fill of its colour on an eight-bit page.
+fn place_mark(
+    tile: &mut Paint,
+    paint: &Paint,
+    mark: Option<&ExactColour>,
+    alpha: f32,
+) {
+    if paint.shader().is_none() {
+        return;
+    }
+    let Some((placed, alpha)) = mark.map(|mark| mark.at(alpha)) else {
+        return;
+    };
+    if let Some(shader) = placed.shader() {
+        tile.set_shader(shader).set_alpha_f(alpha);
+    }
 }
 
 /// Whether a canvas's picture, carrying `source`'s features, is drawn with
