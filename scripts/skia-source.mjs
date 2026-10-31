@@ -43,19 +43,56 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
  * relative to a checkout of this repository. A platform with none builds
  * skia-bindings as it always has, and `env` names no tree there.
  */
+// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+// Re-check: cargo test a_path_covers_a_crowded_flush_as_it_covers_a_small_one with `metal` on macOS, on a tree prepared without this patch; 28 pixels read a step above or below a small flush of the same stars
+//
+// A path Ganesh's atlas path renderer places at an atlas row of 512 or more
+// can have a pixel's coverage moved a step up or down -- about 50 of 255
+// levels of alpha -- and which ones do depends on the atlas's layout. On a
+// page of 2000 small stars, 28 pixels read 51 levels above or below what a
+// flush of the stars reaching them draws, 19 above and 9 below; an eyelash
+// drawn after blurred shapes whose masks were rasterised in the same flush
+// lost its tip. Seen on Metal (an Apple GPU), and the eyelash on Vulkan too
+// (lavapipe, CI's Linux runner), so it is the renderer's and not a driver's.
+// Why row 512 is unknown. The patch caps the atlas at 512 by 512 so no path
+// is placed past it; a full atlas starts another sharing its texture, and a
+// path with a side past 512 pixels goes to the next path renderer rather than
+// the atlas.
+const ATLAS_SIZE = join("containers", "skia-atlas-size.patch");
+
 export const PATCHES = {
-  // The Metal compile timeout -- see the UPSTREAM note in the justfile.
-  darwin: [join("containers", "skia-metal-untimed-compile.patch")],
-  // UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
-  // Re-check: link a Linux build with `freetype` from a tree prepared without this patch, with build.rs's shim returning at once; it fails on undefined `kCmdLut` and `BrotliDecoderEnsureStaticInit`
-  //
-  // Skia's `third_party/brotli/BUILD.gn` leaves out `c/dec/prefix.c` and
-  // `c/dec/static_init.c`, which define `kCmdLut` and
-  // `BrotliDecoderEnsureStaticInit` since the brotli roll in M156's DEPS. Only
-  // `freetype-woff2` links brotli and skia-bindings drops it on macOS, so the
-  // patch is Linux's alone. build.rs carries the same fix for builds that do
-  // not come through here, and stands aside where this patch has applied.
-  linux: [join("containers", "skia-brotli-sources.patch")],
+  darwin: [
+    // The Metal compile timeout -- see the UPSTREAM note in the justfile.
+    join("containers", "skia-metal-untimed-compile.patch"),
+    ATLAS_SIZE,
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
+    // Re-check: cargo test a_blurred_mask_in_the_same_flush_moves_another_by_a_level with `metal`; it pins the defect and fails once the caustic stops moving
+    //
+    // The same renderer, with the cap above in place: a blurred fill moves
+    // by one level at a few dozen pixels where another shape's blurred mask
+    // is computed in the same flush, and not where that mask is already
+    // cached, so a frame can read a level apart with what the GPU drew
+    // before it. Shown with the atlas renderer declining every path, which
+    // makes it go; ruled out are the shared stencil attachment's loads,
+    // atlas texture sharing, atlas growth, path-mask caching and scratch
+    // textures. The cause is not known. Declining the atlas would fix it at
+    // a cost in every page's anti-aliasing against the CPU engine's, which is
+    // why it is not taken. Seen on Metal only; not looked for elsewhere.
+  ],
+  linux: [
+    // UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
+    // Re-check: link a Linux build with `freetype` from a tree prepared without this patch, with build.rs's shim returning at once; it fails on undefined `kCmdLut` and `BrotliDecoderEnsureStaticInit`
+    //
+    // Skia's `third_party/brotli/BUILD.gn` leaves out `c/dec/prefix.c` and
+    // `c/dec/static_init.c`, which define `kCmdLut` and
+    // `BrotliDecoderEnsureStaticInit` since the brotli roll in M156's DEPS.
+    // Only `freetype-woff2` links brotli and skia-bindings drops it on macOS,
+    // so the patch is Linux's alone. build.rs carries the same fix for builds
+    // that do not come through here, and stands aside where this patch has
+    // applied.
+    join("containers", "skia-brotli-sources.patch"),
+    ATLAS_SIZE,
+  ],
 };
 
 /** This platform's patches, or none. */

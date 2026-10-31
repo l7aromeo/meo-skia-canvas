@@ -8,8 +8,8 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 # tree itself is prepared by `ensure-skia-source`, because this runs on every
 # invocation and must not download. A variable already set in the environment
 # wins. Which patches each platform's tree carries is `PATCHES` in
-# scripts/skia-source.mjs; macOS's is the one below, Linux's the brotli
-# build-list fix noted there.
+# scripts/skia-source.mjs; macOS's are the one below and the atlas-size cap
+# noted there, Linux's the brotli build-list fix noted there.
 #
 # UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
 # Re-check: node --test tests/suite/metal-compile.test.js, against a binary built without SKIA_SOURCE_DIR
@@ -416,7 +416,7 @@ check-release-guards:
     # commented out, stripped of its flag and moved below the bump.
     node scripts/check-release-parity.mjs --self-test
     node scripts/check-release-parity.mjs
-    # build.yml's mac job refuses a darwin binary whose Skia is not the
+    # build.yml's mac and linux jobs refuse a binary whose Skia is not the
     # patched source; the self-test keeps that check able to refuse.
     node scripts/check-patched-skia.mjs --self-test
 

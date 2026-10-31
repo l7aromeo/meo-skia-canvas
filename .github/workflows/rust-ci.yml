@@ -139,7 +139,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/meo-skia-canvas
-          key: ${{ runner.os == 'macOS' && format('skia-source-{0}', hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch')) || format('skia-source-linux-{0}', hashFiles('Cargo.lock', 'containers/skia-brotli-sources.patch')) }}
+          key: ${{ runner.os == 'macOS' && format('skia-source-{0}', hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch', 'containers/skia-atlas-size.patch')) || format('skia-source-linux-{0}', hashFiles('Cargo.lock', 'containers/skia-brotli-sources.patch', 'containers/skia-atlas-size.patch')) }}
           lookup-only: true
       - name: Prepare the Skia source
         if: steps.cache.outputs.cache-hit != 'true'
@@ -379,7 +379,13 @@ jobs:
       - name: Check the declarations against the built addon
         run: just check-dts-surface
 
+      # `MEO_SKIA_CANVAS_REQUIRE_GPU` names the device tests/gpu_path_coverage.rs
+      # and tests/gpu_crowded_flush.rs have to draw on, lavapipe's `llvmpipe`,
+      # so a green run says they drew there rather than skipped for want of a
+      # GPU.
       - name: Test the engine against the same build
+        env:
+          MEO_SKIA_CANVAS_REQUIRE_GPU: llvmpipe
         run: |
           cargo test \
             --no-default-features \

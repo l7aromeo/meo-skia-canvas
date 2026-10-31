@@ -1744,13 +1744,31 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 ### Known, and not fixed here
 
 - **On macOS a GPU draw can be dropped when the shader compiler is slow, in
-  a crate build.** The Skia skia-bindings 0.153.3 downloads waits one second
+  a crate build.** The Skia skia-bindings 0.156.0 downloads waits one second
   for each Metal shader and pipeline it compiles and then draws nothing, so
   on a loaded machine a process's first image draw, blend mode or gradient
   can come back missing. The npm package's macOS binary is built without
   that limit; a crate build gets whatever Skia skia-bindings provides.
   docs/rust.md, "Metal and skia-bindings' prebuilt Skia", says how to build
   Skia from source with the patch that removes it.
+
+- **A GPU path can have a pixel's coverage moved a step, in a crate
+  build.** The Skia skia-bindings provides has an atlas path renderer that
+  can move a pixel of an anti-aliased path placed at row 512 or more of its
+  atlas up or down by about 50 of 255 levels of alpha, on Metal and on
+  Vulkan, and where a path lands depends on everything else the same flush
+  draws -- so the same page can export differently depending on what was
+  drawn before it. The npm package's macOS and Linux binaries
+  cap the atlas at 512 by 512; docs/rust.md says how to build Skia with that
+  patch. Why row 512 is unknown. Building with it costs up to about 8% of a
+  GPU page dense with small paths -- 2000 small stars at 1280 by 960, 6.78
+  ms against 6.29 on an M4 Pro -- and nothing measurable on a typical page.
+
+- **On macOS a GPU frame can differ by a level at a few pixels with what
+  the GPU drew before it, in any build.** The same renderer: a blurred
+  shape whose mask is rasterised in the same flush as another blurred fill
+  moves that fill by one level at a handful of pixels, where a mask already
+  cached does not. The cause is not known and is not worked around.
 
 ## 📦 ⟩ [v0.16.3] (crate) ⟩ September 16, 2026
 
