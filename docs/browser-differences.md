@@ -1008,6 +1008,24 @@ draws there as the GPU draws the page.
 `a_page_drawn_into_another_draws_as_it_does_itself` and its neighbours in
 `src/context/mod.rs` hold it.
 
+A canvas drawn in through a source rectangle that cuts what it draws --
+`drawCanvas` with a crop -- is drawn whole and cropped by the rectangle's
+coverage on pixels, on both engines, rather than clipped by it, which on
+the CPU moved its paths' edges as any clip does: a triangle by up to 28
+levels at 156 pixels more than two inside the crop. On the GPU the clip moved
+no edge, but bounded what a blur in the canvas read: a pixel four inside the
+crop parted by 63 at density 3. On the CPU a canvas composited plainly is
+drawn into a layer, which the crop multiplies before it closes. That keeps
+every draw on Skia's legacy blitter -- a clip shader would put each through
+its raster pipeline, a level off for each draw a pixel lies under -- and
+composites the canvas as one image, as `drawImage` does. Over what the page already holds it lands
+within two levels of the same canvas drawn in uncropped, which blends each
+of its draws onto the page in turn: 72 pixels at density 1 over a band of
+colour. On an empty page, through a layer -- at an alpha, under a blend --
+and on the GPU it is that canvas's draw to the byte.
+`a_page_drawn_in_cropped_draws_its_own_pixels_inside_the_crop` holds it. A
+PDF or SVG writes the crop as a clip, as before.
+
 A draw the page's edge also cuts is not exact here either. The route plays the
 draw back on a raster of the page, whose edge cuts it as the next entry
 describes: a triangle from (-30, 80) through (60, 15.25) to (140.5, 95) under a
