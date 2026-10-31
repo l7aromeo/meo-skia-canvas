@@ -3825,6 +3825,10 @@ impl Page {
         if let Some(matte) = matte {
             matte.paint(canvas);
         }
+        let embedding = Embedding {
+            page: canvas.local_to_device_as_3x3(),
+            ..embedding
+        };
 
         // A blend mode is the one refusal that cannot be rasterized on its
         // own. The others -- an exotic shader, an image filter, a mask filter
@@ -4060,6 +4064,7 @@ impl Page {
             space,
             color_type,
             text: (contrast, gamma),
+            page,
         } = embedding;
         let dims = self.scaled_dimensions(density);
         let info = ImageInfo::new(
@@ -4072,13 +4077,23 @@ impl Page {
         let mut surface = started::raster(&info, None, Some(&props))
             .ok_or("Could not allocate a surface for the document fallback")?;
 
-        // Drawn under the transform the document is drawing under, at the
-        // density, and placed back on the page untransformed: what a group's
-        // entries are played under where it maps another page onto this one.
-        let matrix = canvas.local_to_device_as_3x3();
+        // Drawn under the transform the document is drawing under, relative
+        // to its page -- what a group's entries are played under where it
+        // maps another page onto this one -- at the density, and placed back
+        // under the page's own transform. The page's own transform is not
+        // the identity where the backend scales its page canvas: drawn under
+        // it as well, a PDF at a density of 4 rasterized the run at 16 times
+        // its scale, and placed with no transform at all, in page units, the
+        // image covered a quarter of its place.
+        let within = Matrix::concat(
+            &page
+                .invert()
+                .ok_or("The document's page cannot be inverted")?,
+            &canvas.local_to_device_as_3x3(),
+        );
         let raster = surface.canvas();
         raster.scale((density, density));
-        raster.concat(&matrix);
+        raster.concat(&within);
         for layer in layers {
             layer.playback(raster, Target::Pixels);
         }
@@ -4108,16 +4123,10 @@ impl Page {
             ink.bottom as f32 / density,
         );
         let src = Some((&Rect::from_irect(ink), SrcRectConstraint::Strict));
-        match matrix.is_identity() {
-            true => canvas.draw_image_rect(&image, src, dst, &Paint::default()),
-            false => {
-                canvas.save();
-                canvas.reset_matrix();
-                canvas.draw_image_rect(&image, src, dst, &Paint::default());
-                canvas.restore();
-                canvas
-            }
-        };
+        canvas.save();
+        canvas.set_matrix(&M44::from(page));
+        canvas.draw_image_rect(&image, src, dst, &Paint::default());
+        canvas.restore();
         Ok(())
     }
 
@@ -5180,6 +5189,7 @@ impl PageSequence {
             space: &surface_color_space,
             color_type,
             text: (text_contrast, text_gamma),
+            page: Matrix::new_identity(),
         };
         let metadata = pdf::Metadata {
             producer: PDF_PRODUCER.to_string(),
@@ -5733,6 +5743,12 @@ struct Embedding<'a> {
     color_type: ColorType,
     /// The page's text contrast and gamma -- see [`text_surface_props`].
     text: (f32, f32),
+    /// The document page canvas's own transform, which
+    /// [`Page::draw_as_document`] takes as it starts: the identity for an
+    /// SVG, and for a PDF the density as a scale, by which Skia's PDF
+    /// backend scales its page canvas to its raster DPI. The identity until
+    /// then.
+    page: Matrix,
 }
 
 /// The surface properties a page's text is rasterized under: `contrast` and
@@ -5963,6 +5979,7 @@ impl ExportOptions {
             space: &self.surface_color_space,
             color_type: self.compositing_color_type(),
             text: (self.text_contrast, self.text_gamma),
+            page: Matrix::new_identity(),
         }
     }
 
@@ -7966,6 +7983,7 @@ mod tests {
                         space: &p3,
                         color_type,
                         text: ctx.inner.canvas_text,
+                        page: Matrix::new_identity(),
                     },
                     None,
                 )
@@ -8027,6 +8045,114 @@ mod tests {
                     0,
                     "{depth:?} {mode:?} at {alpha} onto {:?}, refusing {backend:?}",
                     page_info.color_type()
+                );
+            }
+        }
+    }
+
+    /// A run a document embeds lands on its place at any density: a page
+    /// holding a blend, embedded whole, stores what the page composites at
+    /// that density, at densities 1, 2, 2.5 and 4. In a PDF, into a page
+    /// canvas scaled by the density as Skia's PDF backend scales one to its
+    /// raster DPI; in an SVG, into an unscaled one, drawn under the density.
+    /// An embed placed in page units under a PDF's scale covered a quarter of
+    /// its place at 4.
+    #[test]
+    fn a_run_embedded_at_a_density_lands_on_its_place() {
+        use crate::{
+            canvas::{Canvas, CanvasOptions},
+            paint::BlendMode as Mode,
+            pixels::PixelColorSpace,
+        };
+        let (width, height) = (40.0f32, 24.0f32);
+        let mut canvas = Canvas::with_options(
+            width,
+            height,
+            CanvasOptions {
+                color_space: PixelColorSpace::DisplayP3,
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a Display P3 canvas");
+        let ctx = canvas.context();
+        for (at, css) in
+            ["rgb(230 180 40)", "rgb(40 90 200)"].iter().enumerate()
+        {
+            ctx.set_fill_style_css(css).expect("a colour");
+            ctx.fill_rect(at as f32 * 20.0, 0.0, 20.0, height);
+        }
+        ctx.set_global_composite_operation(Mode::Multiply);
+        ctx.set_fill_style_css("rgb(200 40 120)").expect("a colour");
+        ctx.fill_rect(10.0, 6.0, 20.0, 12.0);
+        let page = ctx.inner.page();
+        let p3 = ctx.inner.canvas_color_space.clone();
+        let (contrast, gamma) = ctx.inner.canvas_text;
+        let export = |density: f32| ExportOptions {
+            density,
+            color_space: ColorSpace::new_srgb(),
+            surface_color_space: p3.clone(),
+            surface_color_type: ctx.inner.canvas_color_type,
+            text_contrast: contrast,
+            text_gamma: gamma,
+            ..ExportOptions::default()
+        };
+        for (backend, scaled) in
+            [(pdf_cannot(&p3), true), (VectorFeatures::SVG_CANNOT, false)]
+        {
+            for density in [1.0f32, 2.0, 2.5, 4.0] {
+                let options = export(density);
+                let dims = page.scaled_dimensions(density);
+                let info = ImageInfo::new(
+                    dims,
+                    ColorType::RGBA8888,
+                    AlphaType::Premul,
+                    Some(ColorSpace::new_srgb()),
+                );
+                let want = page
+                    .composite_into(&options, RenderingEngine::CPU, &info)
+                    .expect("the page at the density");
+                let mut recorder = PictureRecorder::new();
+                let document = recorder.begin_recording(
+                    match scaled {
+                        true => Rect::from_isize(dims),
+                        false => page.bounds,
+                    },
+                    true,
+                );
+                if scaled {
+                    document.scale((density, density));
+                }
+                page.draw_as_document(
+                    document,
+                    backend,
+                    None,
+                    options.embedding(),
+                    None,
+                )
+                .expect("the document's page");
+                let embedded = recorder
+                    .finish_recording_as_picture(None)
+                    .expect("a picture of it");
+                let mut surface =
+                    started::raster(&info, None, None).expect("a page");
+                if !scaled {
+                    surface.canvas().scale((density, density));
+                }
+                surface.canvas().draw_picture(&embedded, None, None);
+                let row = info.min_row_bytes();
+                let mut got = vec![0u8; row * info.height() as usize];
+                assert!(surface.read_pixels(&info, &mut got, row, (0, 0)));
+                let parted = want
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(got.as_chunks::<4>().0)
+                    .filter(|(a, b)| a != b)
+                    .count();
+                assert_eq!(
+                    parted, 0,
+                    "at a density of {density}, refusing {backend:?}"
                 );
             }
         }
