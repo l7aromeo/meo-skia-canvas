@@ -292,6 +292,39 @@ const POST_ITALIC_ANGLE_AT: usize = 4;
 /// One in a 16.16 `Fixed`.
 const FIXED_ONE: f32 = (1u32 << 16) as f32;
 
+/// The byte offset of `sTypoAscender`, an `int16` in font units, in `OS/2`,
+/// with `sTypoDescender` after it -- negative below the baseline -- by the
+/// same table.
+const OS2_TYPO_ASCENDER_AT: usize = 68;
+
+/// The share of the em square above the alphabetic baseline: `face`'s
+/// typographic ascender over its typographic ascender and descender
+/// together, or `None` where the face states no such span -- no `OS/2`
+/// table, or a typographic ascender and descender of zero.
+///
+/// This is how Chrome 156 divides the em square for a canvas's `top`,
+/// `middle` and `bottom` baselines, measured rather than read: on seven
+/// faces whose `hhea`, typographic and Windows metrics disagree, its `top`
+/// is the em times this share, whether or not `USE_TYPO_METRICS` is set --
+/// 77.72 for 100px Georgia, where `hhea` would put it at 80.70. Chrome also
+/// snaps the result to its 1/64 px layout unit, which this does not; see
+/// docs/browser-differences.md.
+///
+/// The values are the ones the table stores. An `MVAR` table can vary them
+/// per instance (`hasc`, `hdsc`), and Chrome does not apply it: a face whose
+/// `MVAR` moves them along `wght` keeps the stored share at every weight.
+pub(crate) fn typo_ascent_share(face: &Typeface) -> Option<f32> {
+    let mut os2 = [0u8; OS2_TYPO_ASCENDER_AT + 4];
+    let read = face.get_table_data(*OS2, &mut os2);
+    let at = |offset: usize| {
+        i16::from_be_bytes([os2[offset], os2[offset + 1]]) as f32
+    };
+    let (ascender, descender) =
+        (at(OS2_TYPO_ASCENDER_AT), at(OS2_TYPO_ASCENDER_AT + 2));
+    let span = ascender - descender;
+    (read == os2.len() && span > 0.0).then(|| ascender / span)
+}
+
 /// The oblique angle `face` is drawn at by its own design, in CSS degrees --
 /// clockwise positive, as `oblique <angle>` counts them -- or `None` where
 /// the face is not an oblique one.

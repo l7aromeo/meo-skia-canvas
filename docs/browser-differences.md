@@ -204,6 +204,24 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   the values, where Chrome refuses it with a `DataCloneError`: a class
   instance in Node is cloned as an ordinary object, and nothing here marks
   it as uncloneable.
+- _`fontBoundingBoxAscent` and `fontBoundingBoxDescent` are not rounded to
+  whole pixels._ Chrome 156 reports the face's ascent and descent rounded to
+  the pixel, and its `hangingBaseline`, four fifths of that ascent, follows
+  the rounding; this library reports them as the face gives them. At 100px
+  Oswald the ascent is 119.30 here and 119 in Chrome, the descent 28.90
+  against 29, the hanging baseline 95.44 against 95.20; Georgia's ascent is
+  91.70 against 92.
+- _The em square that places `top`, `middle` and `bottom` is not snapped to
+  a 64th of a pixel._ Both divide the font size at the alphabetic baseline
+  as the face's typographic ascender and descender divide it, whether or not
+  the face sets `USE_TYPO_METRICS`; Chrome 156 then rounds the top to its
+  1/64 px layout unit, which this library does not, so the two part by at
+  most 1/128 px. At 100px Georgia the top is 77.722 here and 77.71875 in
+  Chrome, Arial 77.575 against 77.578125, Times New Roman 76.262 against
+  76.265625. A face whose typographic ascender and descender are zero is
+  divided as its ascent and descent divide it, in both. An `MVAR` table that
+  varies the typographic ascender and descender per instance moves neither:
+  the stored values place it at every instance.
 
 - _`imageSmoothingQuality = "high"` picks its sampler from the device-space
   scale._ The Chrome mapping this ports, and why one unconditional cubic is

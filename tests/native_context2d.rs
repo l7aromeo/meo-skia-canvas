@@ -1617,6 +1617,79 @@ fn text_baseline_moves_the_outline_and_both_boxes_with_the_run() {
     }
 }
 
+/// `Top`, `Middle` and `Bottom` are the em square's top, middle and bottom:
+/// the font size divided at the alphabetic baseline as the face's
+/// typographic ascender and descender divide it, as Chrome 156 measures on
+/// every face tried. Chrome's figures for 100px, which it snaps to 1/64 px
+/// where this does not, so the two part by up to 1/128. Amstelvar's `hhea`
+/// would put its top at 79.17 and its typographic metrics at 75; with those
+/// zeroed, Chrome divides the em as the face's ascent and descent do.
+#[test]
+fn top_middle_and_bottom_are_the_em_squares() {
+    /// Half Chrome's 1/64 px layout unit.
+    const SNAP: f32 = 1.0 / 128.0;
+    /// `sTypoAscender` in `OS/2`, with `sTypoDescender` after it.
+    const TYPO_ASCENDER_AT: usize = 68;
+    let amstelvar = std::fs::read("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+        .expect("bundled Amstelvar");
+    let mut zeroed = amstelvar.clone();
+    let tables = u16::from_be_bytes([zeroed[4], zeroed[5]]) as usize;
+    for entry in (0..tables).map(|i| 12 + 16 * i) {
+        if &zeroed[entry..entry + 4] == b"OS/2" {
+            let table = u32::from_be_bytes(
+                zeroed[entry + 8..entry + 12].try_into().expect("an offset"),
+            ) as usize;
+            zeroed[table + TYPO_ASCENDER_AT..table + TYPO_ASCENDER_AT + 4]
+                .fill(0);
+        }
+    }
+    let library = FontLibrary::new();
+    library
+        .register_font_from_data("EmAmstelvar", &amstelvar)
+        .expect("Amstelvar registers");
+    library
+        .register_font_from_data("EmZeroTypo", &zeroed)
+        .expect("the zeroed Amstelvar registers");
+    let chrome = [
+        (oswald(), [80.5, 30.5, -19.5]),
+        ("EmAmstelvar", [75.0, 25.0, -25.0]),
+        ("EmZeroTypo", [79.171875, 29.171875, -20.828125]),
+    ];
+    let measure = |family: &str, baseline: TextBaseline| {
+        let mut canvas = Canvas::new(10.0, 10.0);
+        let ctx = canvas.context();
+        ctx.set_font(&Font::new(family, 100.0));
+        ctx.set_text_baseline(baseline);
+        ctx.measure_text("H", None)
+    };
+    for (family, above) in chrome {
+        let baselines = [
+            TextBaseline::Top,
+            TextBaseline::Middle,
+            TextBaseline::Bottom,
+        ];
+        for (baseline, above) in baselines.into_iter().zip(above) {
+            let m = measure(family, baseline);
+            assert!(
+                (-m.alphabetic_baseline - above).abs() <= SNAP,
+                "{family} {baseline:?}: {} above the alphabetic baseline against Chrome's {above}",
+                -m.alphabetic_baseline,
+            );
+            assert!(
+                (m.em_height_ascent + m.em_height_descent - 100.0).abs() < 1e-3,
+                "{family} {baseline:?}: the em square is {} high",
+                m.em_height_ascent + m.em_height_descent,
+            );
+        }
+        let top = measure(family, TextBaseline::Top);
+        assert!(
+            top.em_height_ascent.abs() < 1e-3,
+            "{family}: the em square's top is the top baseline, not {} above it",
+            top.em_height_ascent,
+        );
+    }
+}
+
 #[test]
 fn reset_clears_the_page_and_the_state() {
     let mut canvas = Canvas::new(10.0, 10.0);

@@ -3021,3 +3021,117 @@ describe("textBaseline moves measureText and outlineText as it moves fillText", 
     FontLibrary.reset();
   });
 });
+
+describe("top, middle and bottom are the em square's", () => {
+  // HTML puts `top`, `middle` and `bottom` at the top, middle and bottom of
+  // the em square. They were the face's ascent, its descent and their middle,
+  // which sit apart from the em square wherever the face's ascent and
+  // descent do not add up to the font size.
+  //
+  // The em square's top is the font size times the face's typographic
+  // ascender over its typographic ascender and descender: what Chrome 156
+  // measures on every face tried, `USE_TYPO_METRICS` set or not. The figures
+  // below are Chrome's for 100px "H". Chrome snaps the top to its 1/64 px
+  // layout unit and this library does not, so the two part by up to 1/128.
+  const fs = require("fs"),
+    os = require("os"),
+    path = require("path");
+  const AMSTELVAR = "tests/assets/fonts/AmstelvarAlpha-VF.ttf";
+  FontLibrary.use("EmOswald", [
+    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+  ]);
+  // Its `hhea` puts 1900 above and 500 below, its typographic metrics 1500
+  // and 500: 79.17 against 75, which tells the two rules apart.
+  FontLibrary.use("EmAmstelvar", [AMSTELVAR]);
+  // The same face with its typographic ascender and descender zeroed, which
+  // Chrome divides as the face's ascent and descent divide it.
+  const zeroed = Buffer.from(fs.readFileSync(AMSTELVAR));
+  for (let i = 0, n = zeroed.readUInt16BE(4); i < n; i++) {
+    const entry = 12 + 16 * i;
+    if (zeroed.toString("latin1", entry, entry + 4) !== "OS/2") continue;
+    const table = zeroed.readUInt32BE(entry + 8);
+    zeroed.writeInt16BE(0, table + 68);
+    zeroed.writeInt16BE(0, table + 70);
+  }
+  const zeroedPath = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), "em-square-")),
+    "amstelvar-zero-typo.ttf",
+  );
+  fs.writeFileSync(zeroedPath, zeroed);
+  FontLibrary.use("EmZeroTypo", [zeroedPath]);
+
+  // Chrome 156: how far each baseline is above the alphabetic one.
+  const CHROME = {
+    EmOswald: { top: 80.5, middle: 30.5, bottom: -19.5 },
+    EmAmstelvar: { top: 75, middle: 25, bottom: -25 },
+    EmZeroTypo: { top: 79.171875, middle: 29.171875, bottom: -20.828125 },
+  };
+  /** Half Chrome's 1/64 px layout unit: the most its snapping can move one. */
+  const SNAP = 1 / 128;
+  const measure = (family, baseline) => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = `100px ${family}`;
+    ctx.textBaseline = baseline;
+    return ctx.measureText("H");
+  };
+
+  test("each sits where Chrome puts it", () => {
+    for (const [family, at] of Object.entries(CHROME))
+      for (const [baseline, above] of Object.entries(at)) {
+        // `alphabeticBaseline` is the alphabetic baseline's height above the
+        // selected one, so the selected one is that far below it.
+        const measured = -measure(family, baseline).alphabeticBaseline;
+        assert.ok(
+          Math.abs(measured - above) <= SNAP,
+          `${family} ${baseline}: ${measured} above the alphabetic baseline against Chrome's ${above}`,
+        );
+      }
+  });
+
+  test("the text is drawn there", () => {
+    // The ink moves with the baseline: "H" drawn at `top` inks from 75
+    // rows below where it does at `alphabetic` in Amstelvar, its em top.
+    const rowOfInk = (baseline) => {
+      const ctx = new Canvas(200, 400).getContext("2d");
+      ctx.font = "100px EmAmstelvar";
+      ctx.fontHinting = false;
+      ctx.textBaseline = baseline;
+      ctx.fillText("H", 10, 200);
+      const d = ctx.getImageData(0, 0, 200, 400).data;
+      for (let y = 0; y < 400; y++)
+        for (let x = 0; x < 200; x++) if (d[(y * 200 + x) * 4 + 3]) return y;
+      return -1;
+    };
+    const moved = rowOfInk("top") - rowOfInk("alphabetic");
+    assert.ok(
+      Math.abs(moved - 75) <= 1,
+      `the ink moved ${moved} rows, where the em top is 75 above the alphabetic baseline`,
+    );
+  });
+
+  test("emHeightAscent and emHeightDescent span the em square", () => {
+    for (const family of Object.keys(CHROME))
+      for (const baseline of [
+        "top",
+        "hanging",
+        "middle",
+        "alphabetic",
+        "ideographic",
+        "bottom",
+      ]) {
+        const m = measure(family, baseline),
+          top = -measure(family, "top").alphabeticBaseline;
+        // From the selected baseline: the em top is `top` above the
+        // alphabetic baseline, which is `alphabeticBaseline` above this one.
+        assert.ok(
+          Math.abs(m.emHeightAscent - (top + m.alphabeticBaseline)) < 1e-3,
+          `${family} ${baseline}: emHeightAscent ${m.emHeightAscent}`,
+        );
+        assert.ok(
+          Math.abs(m.emHeightAscent + m.emHeightDescent - 100) < 1e-3,
+          `${family} ${baseline}: the em square is ${m.emHeightAscent + m.emHeightDescent} high`,
+        );
+      }
+    FontLibrary.reset();
+  });
+});
