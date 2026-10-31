@@ -1697,14 +1697,14 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   docs/rust.md, "Metal and skia-bindings' prebuilt Skia", says how to build
   Skia from source with the patch that removes it.
 
-- **On macOS a GPU path can lose a pixel of its coverage, in a crate
-  build.** The Skia skia-bindings provides has an atlas path renderer that
-  can drop one pixel of an anti-aliased path placed at row 512 or more of
-  its atlas, and where a path lands depends on everything else the same
-  flush draws -- so the same page can export differently depending on what
-  was drawn before it. The npm package's macOS binary caps the atlas at 512
-  by 512; docs/rust.md says how to build Skia with that patch. Why row 512
-  is unknown.
+- **A GPU path can lose a pixel of its coverage, in a crate build.** The
+  Skia skia-bindings provides has an atlas path renderer that can drop one
+  pixel of an anti-aliased path placed at row 512 or more of its atlas, on
+  Metal and on Vulkan, and where a path lands depends on everything else
+  the same flush draws -- so the same page can export differently depending
+  on what was drawn before it. The npm package's macOS and Linux binaries
+  cap the atlas at 512 by 512; docs/rust.md says how to build Skia with that
+  patch. Why row 512 is unknown.
 
 - **On macOS a GPU frame can differ by a level at a few pixels with what
   the GPU drew before it, in any build.** The same renderer: a blurred

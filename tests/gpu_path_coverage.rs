@@ -4,14 +4,15 @@
 //! the blurred strokes of the shading beside it -- the background -- and a row
 //! of eyelashes over them. Drawn source-over, the page's alpha is the
 //! background's plus the lashes' over what the background left, at every
-//! pixel. On Metal it was not: computing the blob's blurred mask in the same
-//! flush as the lashes lost one lash's coverage at its tip, (263, 145), where
-//! the page read the background's alpha alone. A page whose blob mask was
-//! already cached kept the pixel, so the page here is drawn first, in a
-//! process that has drawn nothing. Any one of the draws taken away and the
-//! pixel came back, so the page is kept whole rather than reduced.
+//! pixel. On Metal and on Vulkan (lavapipe) it was not: computing the blob's
+//! blurred mask in the same flush as the lashes lost one lash's coverage at
+//! its tip, (263, 145), where the page read the background's alpha alone. A
+//! page whose blob mask was already cached kept the pixel, so the page here
+//! is drawn first, in a process that has drawn nothing. Any one of the draws
+//! taken away and the pixel came back, so the page is kept whole rather than
+//! reduced.
 
-use std::fs;
+use std::{env, fs};
 
 use meo_skia_canvas::prelude::*;
 use serde_json::Value;
@@ -123,10 +124,16 @@ fn has_metal_device() -> bool {
     false
 }
 
+/// Text the GPU's device name has to contain where it is set, as on CI's
+/// Linux runner, which names lavapipe's `llvmpipe`: a run that has to show it
+/// drew on that device, rather than one that skipped for want of a GPU.
+const REQUIRE_GPU: &str = "MEO_SKIA_CANVAS_REQUIRE_GPU";
+
 /// Skips where there is no GPU, and fails where Metal has a device but the
 /// engine did not start on it: `set_gpu(true)` falls back silently to the
 /// raster path, so a skip keyed on `engine_kind` alone would pass on a Mac
-/// whose GPU engine broke.
+/// whose GPU engine broke. Fails as well where [`REQUIRE_GPU`] names a device
+/// the engine is not on.
 #[test]
 fn a_path_over_a_blurred_one_keeps_its_coverage() -> Result<(), Error> {
     let draws: Vec<Value> =
@@ -134,6 +141,21 @@ fn a_path_over_a_blurred_one_keeps_its_coverage() -> Result<(), Error> {
             .expect("the draws parse");
     let mut probe = Canvas::new(1.0, 1.0);
     probe.set_gpu(true);
+    if let Ok(required) = env::var(REQUIRE_GPU) {
+        let backend = BackendInfo::query();
+        assert!(
+            probe.engine_kind() == EngineKind::Gpu
+                && backend
+                    .device
+                    .as_deref()
+                    .is_some_and(|device| device.contains(&required)),
+            "{REQUIRE_GPU} asks for a GPU named {required:?}; the engine is \
+             {:?} on {:?}, error {:?}",
+            probe.engine_kind(),
+            backend.device,
+            backend.error,
+        );
+    }
     if probe.engine_kind() != EngineKind::Gpu {
         assert!(
             !has_metal_device(),

@@ -1,13 +1,14 @@
 --- a/skia-bindings/skia/src/gpu/ganesh/ops/AtlasPathRenderer.cpp
 +++ b/skia-bindings/skia/src/gpu/ganesh/ops/AtlasPathRenderer.cpp
-@@ -167,7 +167,10 @@
+@@ -167,7 +167,11 @@
  #if defined(GPU_TEST_UTILS)
      fAtlasMaxSize = dContext->priv().options().fMaxTextureAtlasSize;
  #else
 -    fAtlasMaxSize = 2048;
-+    // Capped at 512 rather than 2048: on Metal, a path placed at an atlas row
-+    // of 512 or more could lose a texel of its coverage, so no atlas is let
-+    // grow that far. A full atlas starts another, which shares its texture.
++    // Capped at 512 rather than 2048: on Metal and on Vulkan, a path placed
++    // at an atlas row of 512 or more could lose a texel of its coverage, so no
++    // atlas is let grow that far. A full atlas starts another, which shares
++    // its texture.
 +    fAtlasMaxSize = 512;
  #endif
      fAtlasMaxSize = SkPrevPow2(std::min(fAtlasMaxSize, (float)caps.maxPreferredRenderTargetSize()));
