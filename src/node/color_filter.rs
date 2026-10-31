@@ -4,7 +4,10 @@ use skia_safe::{ColorFilter as SkColorFilter, color_filters};
 use std::cell::RefCell;
 
 use crate::{
-    filter::{lighting_color_filter, onto::PageFilter},
+    filter::{
+        lighting_color_filter,
+        onto::{PageFilter, blend_filter},
+    },
     utils::*,
 };
 
@@ -105,11 +108,7 @@ pub fn makeBlend(mut cx: FunctionContext) -> JsResult<JsValue> {
     wrap_page_color_filter!(
         cx,
         PageFilter::built(true, move |onto| {
-            let (color, space) = match onto {
-                Some(onto) => onto.color(color, &space),
-                None => skia_paint_color(color, &space),
-            };
-            color_filters::blend_with_color_space(color, Some(space), mode)
+            blend_filter(onto, color, &space, mode)
         })
     )
 }

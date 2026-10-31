@@ -328,9 +328,11 @@ window be changed after it opens.** No signature moves and nothing is removed.
   fill is, and is a fill of its colour to the bit on every such canvas. A
   filter holding a colour is built again for the canvas it is drawn onto, and
   so is any filter composed, merged, offset or interpolated over one, set by
-  `set_color_filter`, `set_image_filter` or as a layer's backdrop; on a float
-  canvas in sRGB it lands as a fill of its colour does, and on the others it
-  keeps up to 1.8e-4. On an eight-bit canvas nothing changes, so its PDF
+  `set_color_filter`, `set_image_filter` or as a layer's backdrop, and lands
+  as a fill of its colour does on every such canvas, in every blend mode. On
+  a canvas in another space than sRGB it is drawn into the canvas's pixels
+  through a filter of this crate's, which holds the colour converted on this
+  side, and a PDF or SVG of it writes the filter as before. On an eight-bit canvas nothing changes, so its PDF
   still writes such a colour as Skia converts it, as it does a paragraph's; a
   PDF or SVG of a float canvas in sRGB writes it as it writes a fill of the
   colour.

@@ -54,6 +54,18 @@ function misses(colorSpace, draw) {
   });
 }
 
+// Every space a float canvas lands a fill in exactly: sRGB, where Skia's
+// conversion of a colour is the identity, and three where the canvas keeps
+// a recording for its pixels.
+const SPACES = ["srgb", "srgb-linear", "display-p3", "rec2020"];
+
+/** The space and grey of each case `draw` paints otherwise than a fill. */
+function missesEverywhere(draw) {
+  return SPACES.flatMap((colorSpace) =>
+    misses(colorSpace, draw).map((grey) => `${colorSpace}: ${grey}`),
+  );
+}
+
 /** White over the square, which a filter turns into its colour. */
 function white(ctx) {
   ctx.fillStyle = "white";
@@ -61,22 +73,20 @@ function white(ctx) {
 }
 
 describe("a colour built into a texture or a CanvasKit filter", () => {
-  for (const colorSpace of ["srgb", "display-p3"]) {
-    test(`a texture's mark lands as a fill of its colour (${colorSpace})`, () => {
-      const mark = new Path2D("M-1 -1H9V9H-1Z");
-      assert.deepEqual(
-        misses(colorSpace, (ctx, color) => {
-          ctx.fillStyle = new CanvasTexture(SIDE, { path: mark, color });
-          ctx.fillRect(0, 0, SIDE, SIDE);
-        }),
-        [],
-      );
-    });
-  }
+  test("a texture's mark lands as a fill of its colour", () => {
+    const mark = new Path2D("M-1 -1H9V9H-1Z");
+    assert.deepEqual(
+      missesEverywhere((ctx, color) => {
+        ctx.fillStyle = new CanvasTexture(SIDE, { path: mark, color });
+        ctx.fillRect(0, 0, SIDE, SIDE);
+      }),
+      [],
+    );
+  });
 
   test("a blend colour filter lands as a fill of its colour", () => {
     assert.deepEqual(
-      misses("srgb", (ctx, color) => {
+      missesEverywhere((ctx, color) => {
         ctx.colorFilter = new ColorFilter("blend", color, "copy");
         white(ctx);
       }),
@@ -97,7 +107,7 @@ describe("a colour built into a texture or a CanvasKit filter", () => {
         new ColorFilter("lerp", 1, identity(), blend),
     ]) {
       assert.deepEqual(
-        misses("srgb", (ctx, color) => {
+        missesEverywhere((ctx, color) => {
           ctx.colorFilter = build(new ColorFilter("blend", color, "copy"));
           white(ctx);
         }),
@@ -108,7 +118,7 @@ describe("a colour built into a texture or a CanvasKit filter", () => {
 
   test("a drop shadow lands as a fill of its colour", () => {
     assert.deepEqual(
-      misses("srgb", (ctx, color) => {
+      missesEverywhere((ctx, color) => {
         ctx.imageFilter = new ImageFilter(
           "drop-shadow-only",
           0,
@@ -124,7 +134,7 @@ describe("a colour built into a texture or a CanvasKit filter", () => {
     // Beside what casts it: cast from a square off the canvas, so that the
     // shadow alone falls on the square read.
     assert.deepEqual(
-      misses("srgb", (ctx, color) => {
+      missesEverywhere((ctx, color) => {
         ctx.imageFilter = new ImageFilter("drop-shadow", SIDE, 0, 0, 0, color);
         ctx.fillStyle = "white";
         ctx.fillRect(-SIDE, 0, SIDE, SIDE);
@@ -159,7 +169,7 @@ describe("a colour built into a texture or a CanvasKit filter", () => {
         ]),
     ]) {
       assert.deepEqual(
-        misses("srgb", (ctx, color) => {
+        missesEverywhere((ctx, color) => {
           ctx.imageFilter = build(color);
           white(ctx);
         }),

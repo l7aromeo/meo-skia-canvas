@@ -17,6 +17,8 @@
 //! a density, a tile -- the layer is the device's own pixels and the result
 //! lands on them unresampled.
 
+use std::sync::Arc;
+
 use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, Color, Color4f, ColorFilter,
     ColorSpace, ColorType, Data, FilterMode, IRect, Image, ImageFilter,
@@ -64,7 +66,15 @@ pub enum Step {
     /// layer whose paint carries an image filter `kN32`. A chain holding one
     /// is run in the space of the transform the draw was made under -- see
     /// [`Step::runs_in_local_space`].
-    Image(ImageFilter),
+    ///
+    /// `pixels` is the filter a page's pixels run in its place, where the
+    /// page keeps a recording for them and the filter holds a colour built
+    /// for them -- see `Context2D::pixels_onto`; a document's embedded
+    /// pixels run `filter`, as its vectors do.
+    Image {
+        filter: ImageFilter,
+        pixels: Option<ImageFilter>,
+    },
 }
 
 impl Step {
@@ -73,7 +83,39 @@ impl Step {
     /// Skia image filter's lengths turn and stretch with that transform,
     /// and only a layer in its space keeps them so.
     pub(crate) fn runs_in_local_space(&self) -> bool {
-        matches!(self, Step::Image(_))
+        matches!(self, Step::Image { .. })
+    }
+
+    /// `steps` as a page's pixels run them: each Skia image filter replaced
+    /// by the one built for those pixels, where there is one. `None` where
+    /// none is, and the pixels run `steps` as they are.
+    pub(crate) fn for_pixels(steps: &[Step]) -> Option<Arc<[Step]>> {
+        steps
+            .iter()
+            .any(|step| {
+                matches!(
+                    step,
+                    Step::Image {
+                        pixels: Some(_),
+                        ..
+                    }
+                )
+            })
+            .then(|| {
+                steps
+                    .iter()
+                    .map(|step| match step {
+                        Step::Image {
+                            pixels: Some(pixels),
+                            ..
+                        } => Step::Image {
+                            filter: pixels.clone(),
+                            pixels: None,
+                        },
+                        step => step.clone(),
+                    })
+                    .collect()
+            })
     }
 }
 
@@ -233,7 +275,7 @@ pub(crate) fn run(
                 (*colour, space),
                 gain,
             ),
-            Step::Image(filter) => {
+            Step::Image { filter, .. } => {
                 imaged(context.as_mut(), &image, filter, &layer, gain)
             }
         };
@@ -463,7 +505,7 @@ fn region(
                 .is_some_and(|filter| filter.can_compute_fast_bounds())
         }
         Step::Shadow { .. } => true,
-        Step::Image(filter) => filter.can_compute_fast_bounds(),
+        Step::Image { filter, .. } => filter.can_compute_fast_bounds(),
     });
     let region = match content.filter(|_| bounded) {
         Some(content) => {
@@ -510,7 +552,7 @@ fn reach(steps: &[Step], layer: &Matrix) -> Vector {
         .iter()
         .filter_map(|step| match step {
             Step::Blur(sigma) | Step::Shadow { sigma, .. } => Some(*sigma),
-            Step::Colour(_) | Step::Image(_) => None,
+            Step::Colour(_) | Step::Image { .. } => None,
         })
         .filter(|sigma| sigma.is_finite() && *sigma > 0.0)
         .fold(0.0, |sum, sigma| sum + sigma);
@@ -518,7 +560,7 @@ fn reach(steps: &[Step], layer: &Matrix) -> Vector {
         .iter()
         .filter_map(|step| match step {
             Step::Shadow { offset, .. } => Some(*offset),
-            Step::Blur(_) | Step::Colour(_) | Step::Image(_) => None,
+            Step::Blur(_) | Step::Colour(_) | Step::Image { .. } => None,
         })
         .fold((0.0, 0.0), |(x, y), offset| {
             (x + offset.x.abs(), y + offset.y.abs())
@@ -526,7 +568,7 @@ fn reach(steps: &[Step], layer: &Matrix) -> Vector {
     let imaged = steps
         .iter()
         .filter_map(|step| match step {
-            Step::Image(filter) => Some(image_reach(filter, layer)),
+            Step::Image { filter, .. } => Some(image_reach(filter, layer)),
             Step::Blur(_) | Step::Colour(_) | Step::Shadow { .. } => None,
         })
         .fold(Vector::default(), |sum, reach| sum + reach);
