@@ -5,6 +5,10 @@ use skia_safe::{
     named_transfer_fn,
 };
 
+use std::sync::LazyLock;
+
+#[cfg(test)]
+use crate::node::utils::SPACES_BUILT;
 use crate::{color::RgbaLinear, error::Error};
 
 /// Image sampling strategy for `draw_image_src` and similar resampled draws.
@@ -630,12 +634,15 @@ impl PixelColorSpace {
     /// answer is that the space cannot be written down in a code point --
     /// which is what the callers of this do with a `None`.
     pub(crate) fn matching(skia: &SkColorSpace) -> Option<Self> {
-        Self::all().find(|space| {
-            space.to_skia_color_space().is_ok_and(|mine| {
-                mine.to_xyzd50_hash() == skia.to_xyzd50_hash()
-                    && mine.transfer_fn_hash() == skia.transfer_fn_hash()
+        SKIA_SPACES
+            .iter()
+            .find(|(_, built)| {
+                built.as_ref().is_some_and(|mine| {
+                    mine.to_xyzd50_hash() == skia.to_xyzd50_hash()
+                        && mine.transfer_fn_hash() == skia.transfer_fn_hash()
+                })
             })
-        })
+            .map(|(space, _)| *space)
     }
 
     /// Everything fixed about this space.
@@ -697,7 +704,20 @@ impl PixelColorSpace {
         }
     }
 
+    /// The Skia space this is, from [`SKIA_SPACES`]: built from its code
+    /// points once, and handed back as a clone, which counts a reference.
     pub(crate) fn to_skia_color_space(self) -> Result<SkColorSpace, Error> {
+        SKIA_SPACES
+            .iter()
+            .find(|(space, _)| *space == self)
+            .and_then(|(_, built)| built.clone())
+            .ok_or(Error::UnsupportedPixelColorSpace { color_space: self })
+    }
+
+    /// The Skia space this is, built from its code points.
+    fn built_skia_color_space(self) -> Option<SkColorSpace> {
+        #[cfg(test)]
+        SPACES_BUILT.set(SPACES_BUILT.get() + 1);
         let traits = self.traits();
         // sRGB and linear sRGB were built through `new_srgb` and
         // `new_srgb_linear` until the table existed. Measured against the
@@ -706,9 +726,21 @@ impl PixelColorSpace {
         // one and false for the other. Pinned by a test below, because that
         // equivalence is Skia's to keep rather than ours.
         SkColorSpace::new_cicp(traits.primaries, traits.transfer)
-            .ok_or(Error::UnsupportedPixelColorSpace { color_space: self })
     }
 }
+
+/// Each [`PixelColorSpace`] and the Skia space it is, built once: a draw on
+/// a page that keeps two recordings asks which space its page is -- see
+/// [`PixelColorSpace::matching`] -- and built anew each time that took a
+/// space for each one it compared. `None` for a pair Skia refuses. A Skia
+/// colour space is immutable and its reference count atomic -- skia-safe
+/// declares it `Send` and `Sync` -- so one built here serves every thread.
+static SKIA_SPACES: LazyLock<Vec<(PixelColorSpace, Option<SkColorSpace>)>> =
+    LazyLock::new(|| {
+        PixelColorSpace::all()
+            .map(|space| (space, space.built_skia_color_space()))
+            .collect()
+    });
 
 impl PixelDepth {
     pub(crate) fn to_skia_color_type(self) -> ColorType {

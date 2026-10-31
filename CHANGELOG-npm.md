@@ -753,6 +753,23 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **`textBaseline` `top`, `middle` and `bottom` sit on the em square.** HTML
+  puts them at the top, middle and bottom of the em square; they were at the
+  face's ascent, its descent and halfway between, which lie outside the em
+  square wherever the face's ascent and descent add up to more than the font
+  size. The em square is now the font size divided at the alphabetic
+  baseline as the face's typographic ascender and descender divide it, which
+  is where Chrome 156 puts these baselines on every face measured: 100px
+  Oswald's `top` is 80.50 above the alphabetic baseline where it was 119.30,
+  Amstelvar's 75 where it was 95. A face that states no typographic span is
+  divided as its ascent and descent divide it, as in Chrome. Text drawn,
+  stroked or outlined at these three baselines moves by the difference, and
+  `measureText`'s values move with the baseline they are measured from.
+  `emHeightAscent` and `emHeightDescent`, which reported the face's ascent
+  and descent, now report the em square, adding up to the font size at every
+  baseline. Code that offset text drawn at `top`, `middle` or `bottom` to
+  make up for where it used to sit is now off by that offset.
+
 - **`fontBoundingBoxAscent` and `fontBoundingBoxDescent` are measured from
   the `textBaseline` set.** At every baseline but `alphabetic` they were a
   second baseline offset away: at `top`, 96px Oswald reported an ascent of
@@ -888,7 +905,7 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   drawn before: 5000 rectangles each in a colour of its own take about 1.3
   times what recording twice costs alone, on either engine, where a palette,
   text in a few colours and shadows cost about what recording twice does,
-  which is up to about 1.15 times what one recording took [RE-TIME vs 6.0.2].
+  which is up to about 1.15 times what one recording took [RE-TIME].
 
 - **A `drop-shadow()` in `ctx.filter` lands in its colour exactly on a float
   canvas.** On a canvas made with `colorType: "RGBAF16"` or `"RGBAF32"`, a
@@ -2154,10 +2171,10 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
 
 ### Changed
 
-- **Text costs less to lay out, draw and measure, blurred shapes less to
-  record and export, and a repeated read of a GPU canvas less to wait
-  for.** Each figure below is from one release-prep window [RE-TIME: the
-  window and its load].
+- **Text costs less to lay out, draw and measure, a colour less to look up,
+  blurred shapes less to record and export, and a repeated read of a GPU
+  canvas less to wait for.** Each figure below is from one release-prep
+  window [RE-TIME: the window and its load].
   - A line of text drawn a second time in the same settings is kept as
     laid out, and every later draw of it, in any paint and `oblique`
     included, is drawn from what was kept rather than laid out afresh: a
@@ -2209,6 +2226,13 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
     canvas, and a small one after something has composited the whole
     canvas since the last draw -- a full read or an export -- still waits
     each time.
+  - A draw builds no colour space. Every fill, stroke and text draw
+    looked up the colour space its colour was named in by building each
+    space `color()` names and comparing it: two spaces a draw for an sRGB
+    colour, seven for one named in `"display-p3"`, and on a
+    `"display-p3"` canvas one more for the canvas's own. Each space is now
+    built once and compared by Skia's hashes [RE-TIME vs 6.0.2: 200 fills
+    each in its own hex colour on an eight-bit sRGB canvas].
 
   What is kept costs memory, and each part of it is bounded. Each thread
   keeps up to 512 lines of text or an estimated 8 MiB of them, the least
