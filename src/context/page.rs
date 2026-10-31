@@ -55,7 +55,7 @@ use crate::{
     export::{
         ChromaSampling, Content, EncoderKind, ImageFormat, NOMINAL_DPI,
         QUALITY_SCALE, VectorFeatures, dots_per_inch, encoder_quality,
-        pixels_per_metre,
+        pdf::with_page_groups, pixels_per_metre,
     },
     gpu::{
         RenderingEngine,
@@ -3798,9 +3798,11 @@ impl Page {
     /// [`VectorFeatures::PDF_CANNOT`] -- and the two are not the same set,
     /// which is the reason this asks rather than assuming. SVG drops sweep
     /// gradients, procedural shaders, filters, shadows and blend modes
-    /// alike; PDF renders every one of those correctly and mishandles blend
-    /// modes only. Rasterizing a shadowed page for PDF because SVG could not
-    /// draw it would cost fidelity and size for nothing.
+    /// alike; PDF renders every one of those correctly and mishandles a few
+    /// blend modes only -- see
+    /// [`blend_features`](crate::export::blend_features). Rasterizing a
+    /// shadowed page for PDF because SVG could not draw it would cost
+    /// fidelity and size for nothing.
     ///
     /// The layers holding refused draws are marked when they are recorded;
     /// each run of them is rendered here and drawn in as an image, which
@@ -3834,9 +3836,11 @@ impl Page {
         // rather than the first keeps that true for every blend on the page,
         // and what is drawn after it stays vector -- a page that composites
         // early and draws normally afterwards still exports as mostly vectors.
+        // Only a refused blend counts: one the backend writes composites
+        // against what the document already holds beneath it.
         let blends = |index: usize| {
             self.features.get(index).is_some_and(|features| {
-                features.refused_by(backend.with(VectorFeatures::BLEND_MODE))
+                features.refused_by(backend)
                     && features.refused_by(VectorFeatures::BLEND_MODE)
             })
         };
@@ -3865,8 +3869,10 @@ impl Page {
     /// [`Group::opacity`]; and each run of what it refuses as one image,
     /// under the transform `canvas` carries.
     ///
-    /// Nothing in `layers` blends: [`Self::draw_as_document`] embeds every
-    /// entry up to the last that does, with what lies beneath it, first.
+    /// Nothing in `layers` blends in a way the backend refuses:
+    /// [`Self::draw_as_document`] embeds every entry up to the last that
+    /// does, with what lies beneath it, first. A blend the backend writes
+    /// is played as any other draw.
     fn play_as_document(
         &self,
         canvas: &SkCanvas,
@@ -4635,13 +4641,13 @@ impl Page {
                 let canvas = document.canvas();
                 self.draw_as_document(
                     canvas,
-                    VectorFeatures::PDF_CANNOT,
+                    pdf_cannot(&options.surface_color_space),
                     matte.as_ref(),
                     density,
                     None,
                 )?;
                 document.end_page().close();
-                Ok(pdf_bytes)
+                Ok(with_page_groups(pdf_bytes))
             }
 
             ImageFormat::Svg => {
@@ -4976,6 +4982,7 @@ impl Page {
         doc: Document<'a>,
         matte: Option<&Matte>,
         density: f32,
+        backend: VectorFeatures,
     ) -> Result<Document<'a>, String> {
         if !self.bounds.is_empty() {
             let mut doc = doc.begin_page(self.bounds.size(), None);
@@ -4984,13 +4991,7 @@ impl Page {
             // this one writes every page of a canvas, the other answers
             // `to_buffer` -- and a blend mode drawn on page two is no more
             // expressible than one drawn on a page of its own.
-            self.draw_as_document(
-                canvas,
-                VectorFeatures::PDF_CANNOT,
-                matte,
-                density,
-                None,
-            )?;
+            self.draw_as_document(canvas, backend, matte, density, None)?;
             Ok(doc.end_page())
         } else {
             Err("Width and height must be non-zero to generate a PDF page"
@@ -5128,6 +5129,7 @@ impl PageSequence {
         options: ExportOptions,
     ) -> Result<(), String> {
         options.check_timing()?;
+        let backend = pdf_cannot(&options.surface_color_space);
         let ExportOptions {
             quality,
             density,
@@ -5140,12 +5142,17 @@ impl PageSequence {
             raster_dpi: Some(density * NOMINAL_DPI),
             ..Default::default()
         };
+        // Held whole rather than streamed into `out`: the page groups are
+        // added once Skia has written the document -- see `export::pdf`.
+        let mut written = Vec::new();
         self.pages
             .iter()
-            .try_fold(pdf_document(out, &metadata), |doc, page| {
-                page.append_to(doc, matte.as_ref(), density)
+            .try_fold(pdf_document(&mut written, &metadata), |doc, page| {
+                page.append_to(doc, matte.as_ref(), density, backend)
             })
-            .map(|doc| doc.close())
+            .map(|doc| doc.close())?;
+        out.write_all(&with_page_groups(written))
+            .map_err(|e| format!("Could not write the PDF: {e}"))
     }
 
     pub fn write_image(
@@ -5668,6 +5675,17 @@ pub fn pages_arg(
         .map(|obj| obj.unwrap().borrow().page_for_export(opts, &engine))
         .collect();
     Ok(PageSequence::from(pages, engine))
+}
+
+/// What a PDF refuses of a page composited in `space`: the blends it cannot
+/// write -- see [`blend_features`](crate::export::blend_features) -- and, on
+/// a page composited anywhere but sRGB, every blend, since a PDF blends in
+/// its page group's sRGB rather than in the canvas's own space.
+fn pdf_cannot(space: &ColorSpace) -> VectorFeatures {
+    match space.is_srgb() {
+        true => VectorFeatures::PDF_CANNOT,
+        false => VectorFeatures::PDF_CANNOT.with(VectorFeatures::BLEND_MODE),
+    }
 }
 
 fn pdf_document<'a>(

@@ -37,7 +37,7 @@ use crate::node::typography::Painter;
 use crate::{
     context2d::{FontKerning, TextRendering, font_spec_from_css},
     css::{FontUnits, NamedColour, ROOT_FONT_PX},
-    export::VectorFeatures,
+    export::{VectorFeatures, blend_features},
     font::GenericFamily,
     font_library::{FontLibrary, ResolvedFont, generic_name, text_hinting},
     gpu::{self, RenderingEngine},
@@ -716,9 +716,15 @@ impl Context2D {
     ) -> VectorFeatures {
         let mut features = VectorFeatures::PLAIN;
 
-        if self.state.global_composite_operation != BlendMode::SrcOver {
-            features = features.with(VectorFeatures::BLEND_MODE);
-        }
+        // Opaque wherever it inks: a colour or an opaque shader at full
+        // alpha. An image or a canvas drawn in may hold translucent pixels.
+        let opaque = style.is_some()
+            && paint.alpha() == u8::MAX
+            && paint.shader().is_none_or(|shader| shader.is_opaque());
+        features = features.with(blend_features(
+            self.state.global_composite_operation,
+            opaque,
+        ));
         // A shadow is drawn with an image filter of its own, so it counts as
         // one whether or not the caller set `ctx.filter`.
         if paint.image_filter().is_some()
@@ -1264,7 +1270,9 @@ impl Context2D {
         // The draw inside asks for what its paint does, less the filter and
         // the blend, which the group composites through.
         let drawn = features.without(
-            VectorFeatures::IMAGE_FILTER.with(VectorFeatures::BLEND_MODE),
+            VectorFeatures::IMAGE_FILTER
+                .with(VectorFeatures::BLEND_MODE)
+                .with(VectorFeatures::UNMATCHED_BLEND),
         );
         let contents = entry.map(|entry| (entry, drawn)).into_iter().collect();
         self.with_recorder(|mut recorder| {
@@ -1527,12 +1535,11 @@ impl Context2D {
 
     /// What a group composited through the context's alpha and blend asks
     /// of a vector backend: a layer, which an SVG has none of, and the blend
-    /// where it is not `source-over`, which a PDF composites wrongly.
+    /// -- see [`blend_features`] -- its source taken for translucent, since a
+    /// group may hold anything.
     fn composited_features(&self) -> VectorFeatures {
-        match self.state.global_composite_operation {
-            BlendMode::SrcOver => VectorFeatures::LAYER,
-            _ => VectorFeatures::LAYER.with(VectorFeatures::BLEND_MODE),
-        }
+        VectorFeatures::LAYER
+            .with(blend_features(self.state.global_composite_operation, false))
     }
 
     /// The group a blurred shadow is drawn in for `draw_with_shadows`: its
@@ -2145,16 +2152,17 @@ impl Context2D {
             // `Clear` is a blend mode, and Skia's SVG backend writes none
             // of those, so this lands as an opaque black rectangle unless
             // the draw is kept for rasterizing.
-            false => {
-                self.append_draw(VectorFeatures::BLEND_MODE, |canvas, _| {
+            false => self.append_draw(
+                blend_features(BlendMode::Clear, true),
+                |canvas, _| {
                     let mut paint = Paint::default();
                     paint
                         .set_anti_alias(true)
                         .set_style(PaintStyle::Fill)
                         .set_blend_mode(BlendMode::Clear);
                     canvas.draw_rect(rect, &paint);
-                })
-            }
+                },
+            ),
         }
     }
 

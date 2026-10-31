@@ -117,6 +117,11 @@ jobs:
       - name: Build with feature subset that crates.io will use
         run: cargo build --no-default-features --features "vulkan,window,freetype"
 
+      # poppler's `pdftoppm`, which `tests/pdf_blend.rs` renders the PDF's
+      # blends with; the test fails on CI where it is missing, rather than
+      # skip and stop guarding them. The runner's own distribution package.
+      - name: Install poppler (apt)
+        run: .github/scripts/apt-install.sh poppler-utils
       - name: Run the native test suite
         run: cargo test --no-default-features --features "vulkan,window,freetype"
 

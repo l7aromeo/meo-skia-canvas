@@ -228,12 +228,19 @@ fn a_composited_paragraph_reaches_the_svg() {
     }
 }
 
-/// Under a blend a PDF composites wrongly, so a blended paragraph is
-/// embedded there as it is in an SVG.
+/// A PDF writes a blended paragraph as the blend it is, where it has one,
+/// and embeds it, as an SVG does, where it has none.
 #[test]
-fn a_blended_paragraph_is_embedded_in_a_pdf() {
+fn a_blended_paragraph_is_written_as_its_blend_in_a_pdf() {
     let (_, pdf) = exported(&paragraph(vec![]), 1.0, BlendMode::Multiply);
-    assert!(embeds_an_image(&pdf));
+    assert!(!embeds_an_image(&pdf), "multiply is a PDF blend mode");
+    assert!(
+        pdf.windows(b"/BM /Multiply".len())
+            .any(|w| w == b"/BM /Multiply"),
+        "written as one"
+    );
+    let (_, added) = exported(&paragraph(vec![]), 1.0, BlendMode::Lighter);
+    assert!(embeds_an_image(&added), "lighter, an addition, is not");
     let (_, plain) = exported(&paragraph(vec![]), 0.5, BlendMode::SourceOver);
     assert!(
         !embeds_an_image(&plain),

@@ -7,7 +7,11 @@
 //!
 //! [`PixelExportOptions`]: crate::pixels::PixelExportOptions
 
+pub(crate) mod pdf;
+
 use std::{ops::Range, path::Path};
+
+use skia_safe::BlendMode;
 
 use crate::{
     color::RgbaLinear,
@@ -32,7 +36,7 @@ use crate::{
 /// | a canvas's pattern             | dropped  | fine  |
 /// | image filter, shadow           | dropped  | fine  |
 /// | mask filter                    | dropped  | fine  |
-/// | blend mode past source-over    | dropped  | wrong |
+/// | blend mode past source-over    | dropped  | fine, but for those [`blend_features`] names |
 /// | canvas drawn in through a paint| dropped  | fine  |
 /// | anything drawn in a `saveLayer`| dropped  | fine  |
 ///
@@ -61,11 +65,12 @@ impl VectorFeatures {
     pub(crate) const LAYER: Self = Self(1 << 5);
     /// A mask filter.
     pub(crate) const MASK_FILTER: Self = Self(1 << 2);
-    /// What the PDF backend gets wrong, which is blend modes and nothing
-    /// else: a conic gradient, a shadow and a `blur()` all come out of it
-    /// pixel-identical to the raster export, and a `multiply` moves a fifth
-    /// of the page.
-    pub(crate) const PDF_CANNOT: Self = Self::BLEND_MODE;
+    /// What the PDF backend gets wrong, which is a few blend modes and
+    /// nothing else: a conic gradient, a shadow and a `blur()` all come out
+    /// of it pixel-identical to the raster export -- see [`blend_features`]
+    /// for which blends. On a page composited outside sRGB every blend is
+    /// refused as well -- see `context::page::pdf_cannot`.
+    pub(crate) const PDF_CANNOT: Self = Self::UNMATCHED_BLEND;
     /// A canvas drawn into another through a paint -- a global alpha, a
     /// blend mode or a colour filter -- which reaches its picture through a
     /// layer. The SVG backend has no layers and drops the picture whole.
@@ -78,9 +83,13 @@ impl VectorFeatures {
             | Self::IMAGE_FILTER.0
             | Self::MASK_FILTER.0
             | Self::BLEND_MODE.0
+            | Self::UNMATCHED_BLEND.0
             | Self::PICTURE_PAINT.0
             | Self::LAYER.0,
     );
+    /// A blend past source-over that a PDF cannot write -- see
+    /// [`blend_features`]. Never without [`Self::BLEND_MODE`].
+    pub(crate) const UNMATCHED_BLEND: Self = Self(1 << 6);
 
     pub(crate) fn with(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -98,6 +107,42 @@ impl VectorFeatures {
     /// Whether this draw uses anything the backend cannot express.
     pub(crate) fn refused_by(self, backend: Self) -> bool {
         self.0 & backend.0 != 0
+    }
+}
+
+/// What a draw composited by `operation` asks of a vector backend, its
+/// source `opaque` wherever it inks.
+///
+/// SVG writes no blend at all. A PDF writes every other one, under the page
+/// group [`pdf::with_page_groups`] adds, and on an sRGB canvas each comes out
+/// within 2 levels of the canvas in poppler wherever the source covers a
+/// pixel whole, opaque or at 0.8; CoreGraphics' misses are listed in
+/// docs/browser-differences.md. Three it cannot write, and they are
+/// embedded as pixels with what lies beneath them:
+///
+/// - `lighter`, an addition, which PDF has no blend mode for (ISO 32000-1,
+///   11.3.5): Skia's PDF backend wrote it 180 levels off.
+/// - `xor`, a Porter-Duff operator PDF's transparency model has no counterpart
+///   for: 215 levels off.
+/// - `destination-atop` where the source may be translucent: 35 levels off at
+///   an alpha of 0.8, in poppler, where an opaque source comes out exact.
+///
+/// The figures are poppler's, for a rectangle in `rgb(200 40 120)` over two
+/// opaque colours.
+pub(crate) fn blend_features(
+    operation: BlendMode,
+    opaque: bool,
+) -> VectorFeatures {
+    let blend = VectorFeatures::BLEND_MODE;
+    match operation {
+        BlendMode::SrcOver => VectorFeatures::PLAIN,
+        BlendMode::Plus | BlendMode::Xor => {
+            blend.with(VectorFeatures::UNMATCHED_BLEND)
+        }
+        BlendMode::DstATop if !opaque => {
+            blend.with(VectorFeatures::UNMATCHED_BLEND)
+        }
+        _ => blend,
     }
 }
 
