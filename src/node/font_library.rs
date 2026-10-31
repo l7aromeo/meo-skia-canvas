@@ -16,7 +16,7 @@ use std::{
 };
 
 use skia_safe::{
-    Data, FontArguments, FontHinting, FontMgr, FourByteTag, Typeface,
+    FontArguments, FontHinting, FontMgr, FourByteTag, Typeface,
     font_arguments::{VariationPosition, variation_position::Coordinate},
     font_parameters::variation::Axis,
     font_style::{FontStyle, Slant},
@@ -29,7 +29,7 @@ use crate::{
     context2d::{Font, FontFields, FontKey},
     font::{
         FontFamily, GenericFamily, InstancedPositions, KnownAxes, caseless,
-        optical_size,
+        optical_size, quarantine::font_data,
     },
     image::x_height_ratio,
     memory::note_font_use,
@@ -2092,7 +2092,7 @@ fn read_typeface(filename: &str) -> Result<Typeface, String> {
     .unwrap_or(bytes);
 
     FontLibrary::with_shared(|lib| {
-        lib.mgr.new_from_data(Data::new_copy(&bytes), None)
+        lib.mgr.new_from_data(font_data(&bytes), None)
     })
     .ok_or_else(|| format!("Could not decode font data in {}", path.display()))
 }
@@ -2165,7 +2165,7 @@ pub fn addFamilyFromData(mut cx: FunctionContext) -> JsResult<JsValue> {
         let buf = buf_val.downcast_or_throw::<JsBuffer, _>(&mut cx)?;
         let bytes = buf.as_slice(&cx).to_vec();
         match FontLibrary::with_shared(|lib| {
-            lib.mgr.new_from_data(Data::new_copy(&bytes), None)
+            lib.mgr.new_from_data(font_data(&bytes), None)
         }) {
             Some(font) => faces.push(("<buffer>".to_string(), font)),
             None => {
@@ -2203,6 +2203,7 @@ pub fn reset(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 #[cfg(test)]
 mod tests {
     use skia_safe::{
+        Data,
         font_style::{Weight, Width},
         textlayout::{ParagraphBuilder as SkParagraphBuilder, ParagraphStyle},
     };
