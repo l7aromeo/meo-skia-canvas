@@ -19,7 +19,6 @@ use std::{
     hash::{Hash, Hasher},
     iter::{self, Peekable},
     str::CharIndices,
-    sync::Arc,
 };
 
 use skia_safe::{
@@ -45,7 +44,7 @@ use crate::{
     },
     context::{
         Context2D as Inner, Dye, initial_root_face,
-        layer::{Layer, reach_the_clip},
+        layer::{Entries, reach_the_clip},
         page::{ExportOptions, Matte},
     },
     css::{
@@ -4398,7 +4397,7 @@ struct Captured {
     /// The source page's own entries where the content is its picture, so a
     /// draw through a paint holds the page as recorded -- see
     /// `Inner::draw_picture_costing`.
-    entries: Option<Arc<Vec<Layer>>>,
+    entries: Option<Entries>,
 }
 
 fn capture(source: &mut Canvas) -> Option<Captured> {
@@ -5713,7 +5712,7 @@ mod recording_tests {
                     }
                 }
                 Layer::Group(group) if group.within.is_none() => {
-                    wrong(&group.contents, dual, out)
+                    wrong(&group.contents.layers, dual, out)
                 }
                 _ => {}
             }

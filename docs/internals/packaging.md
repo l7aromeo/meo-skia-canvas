@@ -44,14 +44,21 @@ missing -- a transparent export, a dropped blend -- with nothing reported but a
 line on stderr. `containers/skia-metal-untimed-compile.patch` asks the OS
 version at run time instead, which is what upstream Skia's check does.
 
+The same tree carries `containers/skia-atlas-size.patch`, as Linux's does,
+which caps Ganesh's atlas path renderer at a 512-by-512 atlas: on Metal and on
+Vulkan, a path the renderer places at an atlas row of 512 or more can have a
+pixel's coverage moved a step up or down. The UPSTREAM note beside it in `PATCHES` says what is and
+is not known.
+
 **Build through `just` on macOS and Linux.** The justfile's `dotenv-command`,
 `scripts/skia-source.mjs env`, sets `SKIA_SOURCE_DIR` for every recipe on macOS
 and Linux and on Windows not at all, and `ensure-deps` prepares the tree it
 names: rust-skia at the Cargo.lock tag, Skia's DEPS and gn, and the platform's
-patches from `PATCHES` applied with `-F0` -- the Metal one above on macOS, and
-on Linux `containers/skia-brotli-sources.patch`, which adds the two brotli
-sources Skia's build list leaves out since M156 and without which a `freetype`
-build fails to link on `kCmdLut` and `BrotliDecoderEnsureStaticInit`. It is
+patches from `PATCHES` applied with `-F0` -- the two above on macOS, and on
+Linux `containers/skia-brotli-sources.patch` and the atlas-size cap. The brotli
+patch adds the two sources Skia's build list leaves out since M156, without
+which a `freetype` build fails to link on `kCmdLut` and
+`BrotliDecoderEnsureStaticInit`. It is
 fetched once, about 1 GB, into `$XDG_CACHE_HOME/meo-skia-canvas`, under a name
 that carries the version and a digest of the platform's patches. Once a new tree
 is ready the others are removed, except any a worktree of the repository still
@@ -64,7 +71,8 @@ and does nothing where the build list already has them.
 
 **The release cannot ship that binary.** `build.yml`'s mac job refuses a build
 whose skia-bindings output does not say it built offline from that tree, and
-`tests/suite/metal-compile.test.js`, required there by
+its linux job one built from a rust-skia checkout without Linux's atlas patch.
+On the mac job, `tests/suite/metal-compile.test.js`, required there by
 `MEO_SKIA_CANVAS_REQUIRE_METAL`, stops the process's own compiler service for
 three seconds under a sandbox that hides the Metal shader cache, and reads a
 transparent pixel from a timed build. The structural check is the one that

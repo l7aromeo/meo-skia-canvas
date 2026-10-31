@@ -471,6 +471,38 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A `Paragraph` under a composite operation reaches an SVG, and a PDF
+  composites it.** Drawn under a `globalCompositeOperation` other than
+  `source-over`, a paragraph is composited as one group through a layer,
+  which Skia's SVG backend drops whole, so the SVG held nothing of it; a
+  PDF wrote the blend itself, which its backend composites wrongly. Both
+  now embed the paragraph and what lies beneath it as pixels, as they
+  embed any other blended draw.
+
+- **An SVG of a page with nothing on it is well-formed XML.**
+  `toBuffer("svg")` wrote an empty page's root as
+  `<svg ... height="40"/ viewBox="0 0 80 40">`: Skia writes an empty
+  document's root self-closed, and the `viewBox` this library adds went in
+  after its `/`, so no XML parser read the file. The `viewBox` goes before
+  the `/>` now.
+
+- **An SVG export comes out the same each time.**
+  `toBuffer("svg")` named each clip path after a counter Skia's SVG writer
+  shares across the whole process, so the same canvas exported twice, with
+  any other export between, came out under other clip ids, and a file kept
+  under version control or compared by hash changed with nothing in the
+  drawing changed. Clip paths are numbered in the order the document
+  declares them now, from `cl_0`.
+
+- **`restore()` brings back the filters and object styles `save()` saved.**
+  Since 6.0.0, after `save()`, a change and `restore()`, reading
+  `maskFilter`, `imageFilter` or `colorFilter` returned the filter set inside
+  the save, and so did `fillStyle` or `strokeStyle` where the saved style and
+  the one set inside were both a gradient, pattern, texture or shader. Drawing
+  used the restored state; only what the properties read back was wrong.
+  `reset()` and setting the canvas's `width` or `height` now clear them too,
+  along with what was saved.
+
 - **A `Paragraph` lands in its colours exactly on a float canvas.** On a
   canvas made with `colorType: "RGBAF16"` or `"RGBAF32"`, SkParagraph
   painted a paragraph's glyphs, background, shadows and decoration in the
@@ -518,7 +550,9 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   2515 pixels off the exact blur of its sharp shadow on the CPU engine. Each
   style's run of text on a line now casts its shadow as one, blurred whole
   by the exact Gaussian on either engine, the runs' shadows composited in
-  document order beneath all the text. A PDF or SVG keeps the mask filter.
+  document order beneath all the text. A PDF keeps Skia's mask filter, and
+  an SVG, which has no blur to write, embeds the shadow as pixels beneath
+  the text it keeps as vectors.
 
 - **A `drop-shadow()` is the exact Gaussian blur of what casts it.** A draw
   under a `ctx.filter` holding a `drop-shadow()` went through Skia's filter
@@ -662,12 +696,16 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 - **An SVG export keeps what a `saveLayer` holds.** Skia's SVG backend has
   no layers and dropped whatever was drawn inside one: a red square in
   `ctx.saveLayer()`, in a translucent or nested layer, or a paragraph drawn
-  in one, exported as a page without it. A layer holding a draw is now
-  rasterized into the SVG on its own and the rest of the page stays
-  vector; a filtered draw inside a layer, which rasterized the whole page,
-  now rasterizes only its layer as well, and a layer that holds nothing
-  leaves the page vector. PDF drew all of these correctly and stays
-  vector.
+  in one, exported as a page without it. A layer that composites what it
+  holds as it stands -- `ctx.saveLayer()` itself -- keeps its draws as
+  vectors and embeds as pixels only those an SVG cannot write. One under an
+  alpha alone, as a translucent layer is, is written as an SVG group at
+  that opacity, `<g opacity="0.5">`, its draws taken the same way inside
+  it. Any other layer holding a draw is rasterized into the SVG on its own
+  and the rest of the page stays vector; a filtered draw inside a layer,
+  which rasterized the whole page, now rasterizes only its layer as well,
+  and a layer that holds nothing leaves the page vector. PDF drew all of
+  these correctly and stays vector.
 
 - **A read inside a `saveLayer` no longer ends it.** `getImageData()`,
   `toBuffer()` or any export taken while a layer was open closed the layer
@@ -749,9 +787,11 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   `colorFilter`.** `ctx.drawImage(canvas, ...)` under a `globalAlpha` below
   1 left the SVG without the canvas at all: Skia's SVG backend draws such a
   picture through a layer, which it does not have, and dropped it whole.
-  The draw is now rasterized into the SVG, as a shadow or a filter already
-  is, and a canvas drawn with nothing to carry stays vector. PDF drew all
-  of these correctly and is unchanged.
+  Under a `globalAlpha` alone the canvas is now written as an SVG group at
+  that opacity, what it drew kept as vectors where the SVG has them; under
+  a `colorFilter` it is rasterized into the SVG, as a shadow or a filter
+  already is; and a canvas drawn with nothing to carry stays vector. PDF
+  drew all of these correctly and is unchanged.
 
 - **A large blur exported at a high density keeps its width.** A
   `blur()` on a flat-colour shape is drawn by Skia's coverage blur up to a
@@ -1687,6 +1727,31 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   Not changed: right-to-left text, for which nothing has been measured in
   Chrome.
 
+- **A path drawn on the GPU covers each pixel as it would in a flush of
+  its own.** Skia's atlas path renderer, on macOS and Linux alike, could
+  move a pixel of an anti-aliased path a step up or down where it placed
+  the path at row 512 or more of the atlas it rasterises paths into, and
+  where a path lands depends on everything else the same flush draws. On a
+  page of 2000 small filled stars, 28 pixels read 51 levels of alpha above
+  or below what the stars reaching them draw on their own, 19 above and 9
+  below. An eyelash of `examples/node/animated-eye.js`, drawn after blurred
+  shapes whose masks were rasterised in the same flush, lost the pixel at
+  its tip: it read the alpha of what lay under it alone, 24 where the two
+  composite to 77. When those masks were already cached it did not, so the
+  same page exported differently depending on the pages exported before
+  it. The atlas is capped at 512 by 512 now, so no path is
+  placed there; a full atlas starts another, and a path with a side past 512
+  pixels goes to Skia's next path renderer. Why row 512 is unknown. Not
+  every frame is order-independent yet -- see Known, and not fixed here.
+
+  The cap costs time where a page holds enough small paths to fill more
+  than one atlas. Drawn on the GPU and read back, on an M4 Pro on Metal,
+  the mean of three runs' medians in a release build: 2000 small stars on a
+  1280 by 960 page take 6.78 ms against 6.29, 7.8% more; 400 stroked curves
+  on the same page 2.94 ms against 2.88, within the runs' spread; the
+  eyelash page 1.69 ms against 1.73, no difference. The same stars on the
+  CPU, which the cap does not touch, read 1.5% apart between the two builds.
+
 ### Added
 
 - **CSS Color 4's system colours**, in any case, wherever a colour string
@@ -1966,6 +2031,18 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
   ink, 13% for 12px text at 89 degrees. Below that shear nothing moved: 270
   scenes and the gallery's images are identical on Linux and macOS, and its
   animations on Linux, where their encoding repeats run to run.
+
+### Known, and not fixed here
+
+- **On macOS a GPU frame can still differ by a level at a few pixels with
+  what the GPU drew before it.** Skia's atlas path renderer, again: a
+  blurred shape whose mask is rasterised in the same flush as another
+  blurred fill moves that fill by one level at a handful of pixels, and a
+  mask already cached from an earlier page does not. In
+  `examples/node/animated-eye.js` the first frame's iris differs at 15
+  pixels depending on whether a page with the same shading was exported
+  before it. The cached render is the right one. The cause is not known;
+  this release does not work around it.
 
 ## 📦 ⟩ [v6.0.2] (npm) ⟩ September 16, 2026
 

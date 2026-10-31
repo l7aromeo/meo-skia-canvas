@@ -53,9 +53,10 @@ impl VectorFeatures {
     pub(crate) const EXOTIC_SHADER: Self = Self(1 << 0);
     /// An image filter, which is also how a shadow is drawn here.
     pub(crate) const IMAGE_FILTER: Self = Self(1 << 1);
-    /// A layer opened with `saveLayer`, filed whole once it closes, which
-    /// the SVG backend has none of: it drops whatever is drawn inside one,
-    /// plain, translucent or nested.
+    /// A layer: one opened with `saveLayer`, filed whole once it closes, or
+    /// a group of draws composited as one through the context's alpha and
+    /// blend. The SVG backend has none: it drops whatever is drawn inside
+    /// one, plain, translucent or nested.
     pub(crate) const LAYER: Self = Self(1 << 5);
     /// A mask filter.
     pub(crate) const MASK_FILTER: Self = Self(1 << 2);
@@ -82,6 +83,11 @@ impl VectorFeatures {
 
     pub(crate) fn with(self, other: Self) -> Self {
         Self(self.0 | other.0)
+    }
+
+    /// This, less what `other` names.
+    pub(crate) fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
     }
 
     pub(crate) fn any(self) -> bool {

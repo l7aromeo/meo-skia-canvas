@@ -888,11 +888,11 @@ fn has(bytes: &[u8], needle: &str) -> bool {
     bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
 }
 
-/// An SVG export rasterizes the layer and nothing else: a square drawn
-/// outside it stays a vector beside the layer's image. A PDF keeps both
-/// vector.
+/// An SVG export writes a translucent layer as a group at its opacity, and
+/// what it holds as vectors beside the square drawn outside it. A PDF keeps
+/// both vector.
 #[test]
-fn an_svg_rasterizes_only_the_layer() {
+fn an_svg_writes_a_translucent_layer_as_a_group() {
     let mut canvas = white_page(true);
     let ctx = canvas.context();
     square(ctx, 2);
@@ -902,10 +902,11 @@ fn an_svg_rasterizes_only_the_layer() {
     let svg = canvas
         .to_buffer(ImageFormat::Svg, &EncodeOptions::default())
         .expect("an svg");
-    assert!(has(&svg, "<image"), "the layer is in the SVG");
+    assert!(has(&svg, "<g opacity=\"0.5\""), "the layer is in the SVG");
+    assert!(!has(&svg, "<image"), "and nothing of it is rasterized");
     assert!(
-        String::from_utf8_lossy(&svg).matches("<path").count() >= 2,
-        "the page and the square outside the layer stay vector",
+        String::from_utf8_lossy(&svg).matches("<path").count() >= 3,
+        "the page, the square outside the layer and the one in it stay vector",
     );
     let pdf = canvas
         .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
