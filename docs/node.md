@@ -210,6 +210,8 @@ For example, you can limit your asynchronous processing to two simultaneous task
 SKIA_CANVAS_THREADS=2 node my-canvas-script.js
 ```
 
+One part of an export does not use that pool. A GIF's palettes are refined on a pool of their own, a fixed eight threads started the first time a GIF is written, because the refinement's result depends on how many threads it runs on: a fixed count is what makes a GIF the same file on every machine and under every `SKIA_CANVAS_THREADS`. So a script run with `SKIA_CANVAS_THREADS=1` or `RAYON_NUM_THREADS=1` still has those eight threads at work while a GIF is written: on a 14-core M4 Pro, one 640x500 frame took 29.6 ms that way, against 12.9 ms with the default pool.
+
 ### Argument Validation
 
 There are a number of situations where the browser API will react to invalid arguments by silently ignoring the method call rather than throwing an error. For example, these lines will simply have no effect:

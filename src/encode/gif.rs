@@ -1,12 +1,16 @@
 //! GIF, which Skia can read and cannot write.
 
-use std::slice;
+use std::{slice, sync::OnceLock};
 
-use rayon::prelude::*;
+use rayon::{ThreadPool, ThreadPoolBuilder, prelude::*};
 
 use gif::{DisposalMethod, Encoder, Frame as GifFrame, Repeat};
 use quantette::{
-    ImageRef, PaletteSize, Pipeline, QuantizeMethod, deps::palette::Srgb,
+    ImageRef, PaletteSize,
+    color_space::{oklab_to_srgb8, srgb8_to_oklab_par},
+    deps::palette::Srgb,
+    kmeans::{Kmeans, KmeansOptions},
+    wu::{BinnerF32x3, WuF32x3},
 };
 
 use super::{
@@ -33,6 +37,46 @@ const OPAQUE_AT: u8 = 128;
 /// The last, so the quantizer is asked for the other 255 and its own indices
 /// need no shifting.
 const TRANSPARENT: u8 = 255;
+
+/// How many threads a frame's palette is refined on, whatever the machine.
+///
+/// Fixed rather than taken from the global pool, because quantette's
+/// parallel k-means cuts each batch of samples into one chunk per thread of
+/// the pool it runs in and draws each chunk from its own random stream: the
+/// palette is a function of the pixels and of this number. A number that
+/// followed the core count, `SKIA_CANVAS_THREADS` or `RAYON_NUM_THREADS`,
+/// would make the file follow it too, which is the one thing a GIF written
+/// twice must not do.
+///
+/// Eight by measurement, on a 14-core M4 Pro encoding 640x500 frames of
+/// noise over a gradient, the mean of three rounds' medians at 4, 8 and 16
+/// threads: 24 frames in 240.9, 212.4 and 205.3 ms; 6 frames in 62.9, 57.1
+/// and 55.9; one frame in 12.9, 12.9 and 12.7. Sixteen is at most 3% faster
+/// than eight, inside the rounds' spread, for twice the threads; four is 10%
+/// to 13% slower on the frames of an animation.
+///
+/// On a machine with fewer cores than this the palette is the same and the
+/// refinement's threads share the cores there are: oversubscribed, not
+/// wrong. That case has not been timed.
+const PALETTE_THREADS: usize = 8;
+
+/// The pool [`PALETTE_THREADS`] names, made the first time a GIF is written,
+/// so a process that never writes one never starts it.
+static PALETTE_POOL: OnceLock<Result<ThreadPool, String>> = OnceLock::new();
+
+/// [`PALETTE_POOL`], started on first use.
+fn palette_pool() -> Result<&'static ThreadPool, String> {
+    PALETTE_POOL
+        .get_or_init(|| {
+            ThreadPoolBuilder::new()
+                .num_threads(PALETTE_THREADS)
+                .thread_name(|index| format!("gif-palette-{index}"))
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map_err(|e| format!("Could not start the GIF palette's threads: {e}"))
+}
 
 /// Milliseconds in the hundredth of a second GIF89a counts a frame delay in.
 ///
@@ -146,21 +190,19 @@ impl GifSink<'_> {
         (0, 0, u32::from(self.width), u32::from(self.height))
     }
 
-    /// Writes the held-back frame, now that its disposal is known.
+    /// Takes the held-back frame, now that its disposal is known, and cuts
+    /// out the rectangle it will carry.
     ///
     /// `cleared` says the frame after this one needs a clear canvas, which is
     /// the one case a rectangle cannot serve: disposing to the background
     /// clears only what this frame covered, so to clear the canvas this frame
     /// has to have been the canvas.
-    fn flush(&mut self, cleared: bool) -> Result<(), String> {
-        let Some(pending) = self.pending.take() else {
-            return Ok(());
-        };
+    fn settle(&mut self, cleared: bool) -> Option<Settled> {
+        let pending = self.pending.take()?;
         let region = match cleared {
             true => self.whole(),
             false => pending.region,
         };
-        let (x, y, width, height) = region;
 
         // Quantized against the rectangle rather than the page. A palette
         // chosen for the part that moved describes it better than one
@@ -175,37 +217,73 @@ impl GifSink<'_> {
                 region,
             ),
         };
-        let (palette, indices, transparent) = quantize(width, height, &cropped);
-
-        let mut written = GifFrame {
-            left: x as u16,
-            top: y as u16,
-            width: width as u16,
-            height: height as u16,
-            palette: Some(palette),
-            buffer: indices.into(),
+        Some(Settled {
+            cropped,
+            region,
             delay: pending.delay,
-            // Keep what is under this frame, so that everything outside its
-            // rectangle survives into the next one. That is the whole point
-            // of sending a rectangle, and the same answer `apng.rs` and
-            // `webp.rs` give.
-            //
-            // Background only where the next frame has a pixel to erase and
-            // no way to erase it. Every frame took this branch once, when
-            // each covered the whole canvas and the choice cost nothing:
-            // clearing a canvas about to be painted over completely is the
-            // same picture.
-            dispose: match cleared {
-                true => DisposalMethod::Background,
-                false => DisposalMethod::Keep,
-            },
-            ..GifFrame::default()
-        };
-        written.transparent = transparent;
-        self.encoder
-            .write_frame(&written)
-            .map_err(|e| format!("Could not write a GIF frame: {e}"))
+            cleared,
+        })
     }
+
+    /// Writes `settled` in order, their palettes chosen in parallel.
+    ///
+    /// The frames of the batch in parallel, and the stages inside each frame
+    /// as [`quantize`] places them: each palette is a function of its frame's
+    /// pixels and of [`PALETTE_THREADS`] alone, so the file is the same
+    /// whatever the batch size or the caller's thread count.
+    fn write_settled(&mut self, settled: Vec<Settled>) -> Result<(), String> {
+        let quantized = settled
+            .par_iter()
+            .map(|frame| {
+                let (_, _, width, height) = frame.region;
+                quantize(width, height, &frame.cropped)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for (frame, (palette, indices, transparent)) in
+            settled.into_iter().zip(quantized)
+        {
+            let (x, y, width, height) = frame.region;
+            let mut written = GifFrame {
+                left: x as u16,
+                top: y as u16,
+                width: width as u16,
+                height: height as u16,
+                palette: Some(palette),
+                buffer: indices.into(),
+                delay: frame.delay,
+                // Keep what is under this frame, so that everything outside
+                // its rectangle survives into the next one. That is the whole
+                // point of sending a rectangle, and the same answer `apng.rs`
+                // and `webp.rs` give.
+                //
+                // Background only where the next frame has a pixel to erase
+                // and no way to erase it. Every frame took this branch once,
+                // when each covered the whole canvas and the choice cost
+                // nothing: clearing a canvas about to be painted over
+                // completely is the same picture.
+                dispose: match frame.cleared {
+                    true => DisposalMethod::Background,
+                    false => DisposalMethod::Keep,
+                },
+                ..GifFrame::default()
+            };
+            written.transparent = transparent;
+            self.encoder
+                .write_frame(&written)
+                .map_err(|e| format!("Could not write a GIF frame: {e}"))?;
+        }
+        Ok(())
+    }
+}
+
+/// A frame whose disposal is known, cut to the rectangle it carries and
+/// waiting for its palette.
+struct Settled {
+    cropped: Vec<u8>,
+    region: (u32, u32, u32, u32),
+    delay: u16,
+    cleared: bool,
 }
 
 impl FrameSink for GifSink<'_> {
@@ -213,7 +291,8 @@ impl FrameSink for GifSink<'_> {
         self.write_batch(slice::from_ref(frame))
     }
 
-    /// Places the batch's frames, then writes them a frame behind.
+    /// Places the batch's frames in order, then quantizes and writes them a
+    /// frame behind.
     ///
     /// Placing is where the work went: a frame carries the rectangle it
     /// differs from its predecessor in, so the quantizing and the LZW that
@@ -235,6 +314,7 @@ impl FrameSink for GifSink<'_> {
             .map(|frame| frame.eight().into_owned())
             .collect::<Vec<_>>();
 
+        let mut settled = Vec::with_capacity(frames.len());
         for (frame, eight) in frames.iter().zip(narrowed) {
             let whole = (0, 0, frame.width, frame.height);
 
@@ -258,7 +338,7 @@ impl FrameSink for GifSink<'_> {
                 ),
             };
 
-            self.flush(cleared)?;
+            settled.extend(self.settle(cleared));
             self.pending = Some(Pending {
                 eight,
                 width: frame.width,
@@ -271,13 +351,14 @@ impl FrameSink for GifSink<'_> {
                 },
             });
         }
-        Ok(())
+        self.write_settled(settled)
     }
 
     fn finish(mut self: Box<Self>) -> Result<(), String> {
         // Nothing follows the last frame, so nothing needs a clear canvas
         // after it.
-        self.flush(false)?;
+        let last = self.settle(false).into_iter().collect();
+        self.write_settled(last)?;
         // GIF's trailer is written when the encoder drops, and dropping is
         // where a write error would otherwise be swallowed. `into_inner`
         // writes it now and hands the error back.
@@ -390,6 +471,10 @@ fn repeat(loops: Option<u32>) -> Repeat {
     }
 }
 
+/// A frame quantized: its palette as RGB triples, each pixel's index into it,
+/// and the index reserved for transparency where the frame has one.
+type Quantized = (Vec<u8>, Vec<u8>, Option<u8>);
+
 /// A palette and one index per pixel, in k-means-refined Oklab.
 ///
 /// The transparent pixels keep whatever colour they carry while the palette
@@ -410,7 +495,7 @@ fn quantize(
     width: u32,
     height: u32,
     eight: &[u8],
-) -> (Vec<u8>, Vec<u8>, Option<u8>) {
+) -> Result<Quantized, String> {
     let transparent = transparent_index(eight);
     let opaque: Vec<Srgb<u8>> = eight
         .as_chunks::<BYTES_PER_PIXEL>()
@@ -420,48 +505,82 @@ fn quantize(
         .collect();
 
     let image = ImageRef::new(width, height, &opaque).unwrap_or_default();
+    let palette_size = match transparent {
+        Some(_) => PaletteSize::from_u8_clamped(TRANSPARENT),
+        None => PaletteSize::MAX,
+    };
 
-    let quantized = Pipeline::new()
-        .palette_size(match transparent {
-            Some(_) => PaletteSize::from_u8_clamped(TRANSPARENT),
-            None => PaletteSize::MAX,
-        })
-        // k-means, which the pipeline runs in Oklab.
-        //
-        // Wu's method alone is the fast path, and "visibly coarser on a
-        // gradient" was the whole of the reason given for not taking it.
-        // Measured since, on three 1200x900 pages against the pixels that
-        // were drawn -- root-mean-square error a channel, and the file the
-        // choice produces:
-        //
-        //           k-means            Wu
-        //   grad    18.5ms  73.9KB  rms 2.25    16.7ms  73.4KB  rms 2.85
-        //   chart   16.0    18.1        0.56    11.9    18.1        0.53
-        //   photo   22.1   201.7        8.19    14.8   218.8        9.07
-        //
-        // So the coarseness is real and it is not only the gradient: the
-        // photographic page is both further from its pixels and 17 KB
-        // larger under Wu. Wu is 35% to 50% faster and marginally better on
-        // a flat chart, which is the one drawing that has few enough colours
-        // for the refinement to have nothing to do.
-        //
-        // The sample budget is left at the crate's own 262144 pixels. It is
-        // already at the knee: doubling it changes no error in the second
-        // decimal and costs 22% to 34% of the time, and halving it is 6% to
-        // 16% faster for the photographic page's 8.10 becoming 8.19 -- a cut
-        // on the one axis k-means is here for.
-        //
-        // No ditherer, which is a choice rather than an omission. Floyd-
-        // Steinberg roughly doubles the file -- measured on the same three
-        // drawings at 600x450, the gradient 30.8 KB to 65.7 and the
-        // photographic page 58.8 to 134.5 -- and raises the error on all
-        // three at once, 2.17 to 2.58, 1.13 to 1.32 and 8.19 to 9.99. It
-        // gives LZW noise to encode and moves every pixel rather than the
-        // ones that needed it.
-        .quantize_method(QuantizeMethod::kmeans())
-        .parallel(true)
-        .input_image(image)
-        .output_srgb8_indexed_image();
+    // k-means, run in Oklab, from Wu's palette as its starting centroids:
+    // the stages quantette's own pipeline runs, called one by one so that
+    // each runs where its result cannot depend on the thread count.
+    //
+    // Wu's method alone is the fast path, and "visibly coarser on a
+    // gradient" was the whole of the reason given for not taking it.
+    // Measured since, on three 1200x900 pages against the pixels that were
+    // drawn -- root-mean-square error a channel, and the file the choice
+    // produces:
+    //
+    //           k-means            Wu
+    //   grad    18.5ms  73.9KB  rms 2.25    16.7ms  73.4KB  rms 2.85
+    //   chart   16.0    18.1        0.56    11.9    18.1        0.53
+    //   photo   22.1   201.7        8.19    14.8   218.8        9.07
+    //
+    // So the coarseness is real and it is not only the gradient: the
+    // photographic page is both further from its pixels and 17 KB larger
+    // under Wu. Wu is 35% to 50% faster and marginally better on a flat
+    // chart, which is the one drawing that has few enough colours for the
+    // refinement to have nothing to do.
+    //
+    // The sample budget is left at the crate's own 262144 pixels. It is
+    // already at the knee: doubling it changes no error in the second
+    // decimal and costs 22% to 34% of the time, and halving it is 6% to 16%
+    // faster for the photographic page's 8.10 becoming 8.19 -- a cut on the
+    // one axis k-means is here for.
+    //
+    // No ditherer, which is a choice rather than an omission. Floyd-
+    // Steinberg roughly doubles the file -- measured on the same three
+    // drawings at 600x450, the gradient 30.8 KB to 65.7 and the
+    // photographic page 58.8 to 134.5 -- and raises the error on all three
+    // at once, 2.17 to 2.58, 1.13 to 1.32 and 8.19 to 9.99. It gives LZW
+    // noise to encode and moves every pixel rather than the ones that
+    // needed it.
+    //
+    // Where each stage runs:
+    //
+    // - The conversion to Oklab and the final mapping of each pixel to its
+    //   nearest palette entry are one function a pixel, so they run on the
+    //   global pool: however they are split, every pixel gets the same answer.
+    // - Wu's histogram runs on one thread. quantette's parallel version adds
+    //   its f64 moments with `reduce_with`, in whatever tree rayon's work
+    //   stealing builds, so its sums -- and the palette -- could differ run to
+    //   run. It is the cheapest stage, about 1% of a frame.
+    // - The k-means refinement runs in [`PALETTE_POOL`]: quantette's minibatch
+    //   k-means, whose only dependence on the pool is how many threads it has,
+    //   and that is [`PALETTE_THREADS`] everywhere. The serial alternative is a
+    //   different algorithm, online k-means, one update a sample: on one thread
+    //   it spent 14.3 ms of a 640x500 frame where minibatch spent 11.7.
+    let oklab = image.map_ref(srgb8_to_oklab_par);
+    let quantized = match WuF32x3::run_image(
+        oklab.as_ref(),
+        BinnerF32x3::oklab_from_srgb8(),
+    ) {
+        Some(wu) => {
+            let centroids = wu.palette(palette_size);
+            let kmeans = palette_pool()?.install(|| {
+                Kmeans::run_image_par(
+                    oklab.as_ref(),
+                    centroids,
+                    KmeansOptions::new(),
+                )
+            });
+            oklab
+                .as_ref()
+                .map_to_indexed(kmeans.into_parallel_color_map())
+                .map(|palette| oklab_to_srgb8(&palette))
+        }
+        // No pixels: an empty frame quantizes to nothing.
+        None => Default::default(),
+    };
 
     let mut palette: Vec<u8> = quantized
         .palette()
@@ -485,7 +604,7 @@ fn quantize(
 
     // Handed back rather than recomputed by the caller, which was the second
     // full alpha scan.
-    (palette, indices, transparent)
+    Ok((palette, indices, transparent))
 }
 
 #[cfg(test)]
@@ -906,7 +1025,8 @@ mod tests {
             delay_ms: 100,
         };
         let (palette, indices, _) =
-            quantize(frame.width, frame.height, &frame.eight());
+            quantize(frame.width, frame.height, &frame.eight())
+                .expect("the palette pool starts");
         assert_eq!(
             palette.len(),
             (TRANSPARENT as usize + 1) * 3,
@@ -921,7 +1041,8 @@ mod tests {
             ..frame
         };
         let (palette, indices, _) =
-            quantize(opaque.width, opaque.height, &opaque.eight());
+            quantize(opaque.width, opaque.height, &opaque.eight())
+                .expect("the palette pool starts");
         let highest = *indices.iter().max().expect("two pixels");
         assert!(
             (highest as usize + 1) * 3 <= palette.len(),
@@ -981,5 +1102,108 @@ mod tests {
         assert_eq!(repeat(Some(4)), Repeat::Finite(3));
         // Nobody means "zero plays", and reading it as one beats a panic.
         assert_eq!(repeat(Some(0)), Repeat::Finite(0));
+    }
+
+    /// Four frames of a gradient under per-pixel noise, with a square that
+    /// moves: thousands of colours, so the palette is chosen rather than
+    /// found, and a rectangle that changes from frame to frame.
+    fn busy_frames() -> Vec<Frame> {
+        let (width, height) = (192u32, 144u32);
+        let mut state = 0x9E37_79B9_u32;
+        let mut noise = move || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 24) as u8 / 8
+        };
+        (0..4)
+            .map(|n| {
+                let pixels = (0..height)
+                    .flat_map(|y| (0..width).map(move |x| (x, y)))
+                    .flat_map(|(x, y)| {
+                        let inside = (x / 32 == n + 1) && (y / 32 == 2);
+                        let r = (x * 255 / width) as u8;
+                        let g = (y * 255 / height) as u8;
+                        let b = if inside { 40 } else { 200 };
+                        [r, g, b]
+                    })
+                    .collect::<Vec<_>>()
+                    .chunks(3)
+                    .flat_map(|c| {
+                        [
+                            c[0].saturating_add(noise()),
+                            c[1].saturating_add(noise()),
+                            c[2].saturating_sub(noise()),
+                            255,
+                        ]
+                    })
+                    .collect();
+                Frame {
+                    pixels: Pixels::Eight(pixels),
+                    width,
+                    height,
+                    delay_ms: 40,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_file_does_not_depend_on_how_many_threads_wrote_it() {
+        // The palette was chosen by k-means sampling one random stream per
+        // worker thread, so the same frames written on a machine with more
+        // cores came out with different colours.
+        let frames = busy_frames();
+        let written = |threads: usize, batched: bool| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("a thread pool")
+                .install(|| match batched {
+                    true => {
+                        let first = &frames[0];
+                        let spec = SequenceSpec {
+                            chroma: ChromaSampling::Full,
+                            lossless: false,
+                            width: first.width,
+                            height: first.height,
+                            frames: frames.len(),
+                            loops: None,
+                            quality: 90.0,
+                            density: 1.0,
+                            color: ColorProfile::of(PixelColorSpace::Srgb),
+                            space: PixelColorSpace::Srgb,
+                            depth: FrameDepth::Eight,
+                            bits: None,
+                        };
+                        let mut bytes = Cursor::new(Vec::new());
+                        {
+                            let mut sink = super::super::start(
+                                ImageFormat::Gif,
+                                &spec,
+                                &mut bytes,
+                            )
+                            .expect("the spec is well formed");
+                            sink.write_batch(&frames).expect("a batch");
+                            sink.finish().expect("the encoder closes");
+                        }
+                        bytes.into_inner()
+                    }
+                    false => encoded(&frames, None),
+                })
+        };
+        let one = written(1, false);
+        for (threads, batched) in [(1, true), (2, false), (2, true), (8, true)]
+        {
+            let other = written(threads, batched);
+            assert_eq!(
+                decoded(&other),
+                decoded(&one),
+                "{threads} threads, batched {batched}: decoded frames differ \
+                 from one thread's"
+            );
+            assert!(
+                other == one,
+                "{threads} threads, batched {batched}: the bytes differ"
+            );
+        }
     }
 }

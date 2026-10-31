@@ -1756,6 +1756,21 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   eyelash page 1.69 ms against 1.73, no difference. The same stars on the
   CPU, which the cap does not touch, read 1.5% apart between the two builds.
 
+- **An animated GIF is the same file on any machine.** Each frame's palette
+  was chosen by quantette's parallel k-means, which draws its samples from
+  one random stream per worker thread and adds its colour histogram in
+  whatever order the threads finish: the same animation written with one
+  thread and with two came out in different colours, so the file depended
+  on the core count and on `SKIA_CANVAS_THREADS`. The refinement now runs
+  on a pool of its own with a fixed eight threads, started the first time
+  a GIF is written, and the one stage whose sums depended on scheduling,
+  Wu's starting palette, runs on one thread: `examples/node/animated-eye.js`
+  exports the same GIF, byte for byte, at one thread, two and the default.
+  It is faster too. On a 14-core M4 Pro, 640x500 frames of noise over a
+  gradient encode in 12.9 ms for one frame against 22.3 before, 57.1 ms
+  for six against 128.7, and 212.4 ms for 24 against 512.0, the mean of
+  three runs' medians.
+
 ### Added
 
 - **CSS Color 4's system colours**, in any case, wherever a colour string
