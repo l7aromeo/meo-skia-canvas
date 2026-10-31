@@ -76,15 +76,15 @@ jobs:
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
 
       # The patched Skia tree the macOS build compiles from -- rust-skia at the
-      # Cargo.lock tag, Skia's DEPS and gn, and
-      # containers/skia-metal-untimed-compile.patch. `just build-release`
-      # prepares it when the cache misses; scripts/skia-source.mjs names it by
-      # version and patch digest, so the key below follows the same two files.
+      # Cargo.lock tag, Skia's DEPS and gn, and macOS's patches from `PATCHES`
+      # in scripts/skia-source.mjs. `just build-release` prepares it when the
+      # cache misses; skia-source names it by version and patch digest, so the
+      # key below follows the lock and the same patches.
       - name: Cache the Skia source
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/meo-skia-canvas
-          key: skia-source-${{ hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch') }}
+          key: skia-source-${{ hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch', 'containers/skia-atlas-size.patch') }}
 
       - name: Build module
         env:
@@ -92,11 +92,13 @@ jobs:
         run: just build-release
 
       # A binary built against rust-skia's prebuilt Skia, or from an unpatched
-      # tree, carries the one-second Metal compile timeout and passes every test
-      # that does not stall the compiler. skia-bindings' build output says
+      # tree, carries the one-second Metal compile timeout and the atlas that
+      # can move a pixel of a path's coverage, and passes every test that does
+      # not stall the compiler or land a path there. skia-bindings' build output says
       # whether it built offline and names each file ninja compiled, so this
-      # refuses a build that downloaded, or whose `GrMtlUtil.mm` is not the
-      # patched one -- scripts/check-patched-skia.mjs says how.
+      # refuses a build that downloaded, or whose `GrMtlUtil.mm` or
+      # `AtlasPathRenderer.cpp` is not the patched one --
+      # scripts/check-patched-skia.mjs says how.
       - name: Check Skia was built from the patched source
         run: node scripts/check-patched-skia.mjs target/release/build
 
@@ -298,14 +300,16 @@ jobs:
           TAG=$(cd skia-canvas && just skia-version)
           export TAG
           git clone --depth 1 --branch "$TAG" --recurse-submodules -j8 https://github.com/rust-skia/rust-skia.git
-          # Linux's patches from `PATCHES` in scripts/skia-source.mjs: the
-          # brotli sources Skia's build list leaves out, without which this
-          # `freetype` build fails to link on kCmdLut and
-          # BrotliDecoderEnsureStaticInit. `-F0` fails a hunk that
-          # no longer matches rather than placing it by guesswork. Under
-          # `use-local-skia` the justfile names no tree of its own, so this
-          # checkout is what skia-bindings builds.
+          # Linux's patches from `PATCHES` in scripts/skia-source.mjs, in its
+          # order: the brotli sources Skia's build list leaves out, without
+          # which this `freetype` build fails to link on kCmdLut and
+          # BrotliDecoderEnsureStaticInit, and the atlas-size cap, without
+          # which a GPU path can have a pixel's coverage moved a step. `-F0` fails a
+          # hunk that no longer matches rather than placing it by guesswork.
+          # Under `use-local-skia` the justfile names no tree of its own, so
+          # this checkout is what skia-bindings builds.
           patch -p1 -F0 -d rust-skia -i "$GITHUB_WORKSPACE/skia-canvas/containers/skia-brotli-sources.patch"
+          patch -p1 -F0 -d rust-skia -i "$GITHUB_WORKSPACE/skia-canvas/containers/skia-atlas-size.patch"
 
       - name: Vendor Skia dependencies
         run: |
@@ -329,6 +333,16 @@ jobs:
         run: |
           export RUSTFLAGS="${RUSTFLAGS:-} -L native=/opt/skia-static-libs"
           cd skia-canvas && just use-local-skia && just build-release
+
+      # The macOS job's check, for Linux's patches: a build from an unpatched
+      # rust-skia checkout links and passes every test that does not land a
+      # path where the atlas moves a pixel. This checkout carries no crates.io
+      # package hash, so skia-bindings does a full build from the tree inside
+      # it and never tries a download -- scripts/check-patched-skia.mjs reads
+      # that from its output, and refuses either kind of build whose
+      # `AtlasPathRenderer.cpp` is not the patched one.
+      - name: Check Skia was built from the patched source
+        run: node skia-canvas/scripts/check-patched-skia.mjs skia-canvas/target/release/build
 
       # A link that missed the static library does not fail: it links the
       # shared one, and the ABI checks below read symbol versions, not NEEDED.
