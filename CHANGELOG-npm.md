@@ -2049,6 +2049,14 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
 
 ### Changed
 
+- **A draw builds no colour space.** Every fill, stroke and text draw
+  looked up the colour space its colour was named in by building each space
+  `color()` names and comparing it: two spaces a draw for an sRGB colour,
+  seven for one named in `"display-p3"`, and on a `"display-p3"` canvas one
+  more for the canvas's own. Each space is now built once and compared by
+  Skia's hashes. The time it saves is measured at release [RE-TIME vs 6.0.2:
+  200 fills each in its own hex colour on an eight-bit sRGB canvas].
+
 - **`Path2D.d` writes numbers exactly and arcs as arcs.** Its text changes
   for any path; the geometry it describes does not. Each number is now the
   shortest decimal that reads back as the same single-precision value,
