@@ -14,10 +14,16 @@
 //! to Skia lands exactly there. Its pixels take a filter built
 //! [`Onto::exact`]: the colour converted into the page's space on this side
 //! and held where nothing converts it again, in [`exact_blend`], which the
-//! CPU draws to the bit as Skia's own blend filter does. Its documents take
-//! the filter as built, a plain colour a backend can write.
+//! CPU draws to the bit as Skia's own blend filter does. Over a flat colour
+//! the pixels do not run it per pixel: `context::fold` runs it once and
+//! draws what it made. Its documents take the filter as built, a plain
+//! colour a backend can write.
 
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use skia_safe::{
     BlendMode, Blender, Color4f, ColorFilter, ColorSpace, Data, FilterMode,
@@ -179,7 +185,15 @@ type Build<T> = Box<dyn Fn(Option<&Onto>) -> Option<T>>;
 struct Rebuild<T> {
     build: Build<T>,
     held: RefCell<[Option<(Onto, T)>; 2]>,
+    /// This filter's identity -- see [`PageFilter::identity`].
+    id: u64,
 }
+
+/// The next [`PageFilter::identity`] handed out: counted up from one for
+/// the process and never handed out twice, so that a filter freed and
+/// another built in its memory are not taken for one another, as their
+/// addresses would be.
+static NEXT_IDENTITY: AtomicU64 = AtomicU64::new(1);
 
 impl<T: Clone> PageFilter<T> {
     /// A filter that draws the same onto every page.
@@ -206,9 +220,18 @@ impl<T: Clone> PageFilter<T> {
             Rc::new(Rebuild {
                 build: Box::new(build),
                 held: RefCell::new([None, None]),
+                id: NEXT_IDENTITY.fetch_add(1, Ordering::Relaxed),
             })
         });
         Some(Self { plain, rebuild })
+    }
+
+    /// What tells this filter from every other that depends on the page,
+    /// for the life of the process: a clone shares it, and no filter built
+    /// later takes it. `None` for a filter that depends on nothing, which
+    /// is the same on every page.
+    pub fn identity(&self) -> Option<u64> {
+        self.rebuild.as_ref().map(|rebuild| rebuild.id)
     }
 
     /// Whether what this filter holds depends on the page it is drawn

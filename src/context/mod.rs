@@ -28,6 +28,7 @@ pub(crate) mod exact_blur;
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 pub(crate) mod exact_blur_gpu;
 pub(crate) mod faint;
+pub(crate) mod fold;
 pub mod layer;
 pub mod page;
 pub mod typesetting;
@@ -753,13 +754,14 @@ impl Context2D {
     /// page keeps one: the flat colour `style` dyes with, held exactly in the
     /// page's own space, where Skia's conversion of a paint colour would land
     /// it off -- see `page::Recorders` -- and its CanvasKit colour filter
-    /// built for those pixels -- see [`Self::pixels_paint`]. On an eight-bit
-    /// page the colour and its alpha are first placed on the bytes their
-    /// exact product rounds to -- see [`ExactColour::at`] -- and drawn as a
-    /// plain paint colour where Skia lands that on its bytes -- see
-    /// [`ExactColour::verified_paint`]. Otherwise, and on a float page,
-    /// [`ExactColour::shader`] paints the colour opaque and the paint's alpha
-    /// scales it.
+    /// built for those pixels -- see [`Self::pixels_paint`] -- folded into
+    /// that colour where it can be -- see [`Self::folded_fill`]. On an
+    /// eight-bit page the colour and its alpha are first placed on the
+    /// bytes their exact product rounds to -- see [`ExactColour::at`] --
+    /// and drawn as a plain paint colour where Skia lands that on its bytes
+    /// -- see [`ExactColour::verified_paint`]. Otherwise, and on a float
+    /// page, [`ExactColour::shader`] paints the colour opaque and the
+    /// paint's alpha scales it.
     ///
     /// `None` on a page that keeps one recording, and where neither the dye
     /// nor the filter has a colour this crate converts into the page's
@@ -791,14 +793,54 @@ impl Context2D {
                     let Some(shader) = exact.shader() else {
                         return filtered;
                     };
-                    *held = Some((exact, shader.clone()));
+                    *held = Some((exact.clone(), shader.clone()));
                     shader
                 }
             }
         };
+        let folds = filtered.is_some();
         let mut paint = filtered.unwrap_or_else(|| paint.clone());
         paint.set_shader(shader).set_alpha_f(alpha);
-        Some(paint)
+        match folds {
+            true => self.folded_fill(&paint, &exact).or(Some(paint)),
+            false => Some(paint),
+        }
+    }
+
+    /// `exact`, a paint the page's pixels draw a flat colour, `colour`,
+    /// with through a CanvasKit colour filter built for them, as a paint
+    /// that draws what that filter makes of it with no filter: the filter
+    /// folded into the colour -- see [`fold`]. `None` where it cannot be
+    /// folded, and the paint is drawn as it is.
+    fn folded_fill(
+        &self,
+        exact: &Paint,
+        colour: &ExactColour,
+    ) -> Option<Paint> {
+        let key = fold::FoldKey::new(
+            self.canvas_pixels?,
+            self.state.skia_color_filter.as_ref()?.identity()?,
+            colour.rgb,
+            exact.alpha_f(),
+            None,
+        );
+        let fold::Folded::Shader(shader) = fold::folded(key, || {
+            let pixel = fold::fold_pixel(
+                &self.faint().drawable(exact),
+                &self.canvas_color_space,
+            )?;
+            fold::premul_shader(pixel, &self.canvas_color_space)
+                .map(fold::Folded::Shader)
+        })?
+        else {
+            return None;
+        };
+        let mut folded = exact.clone();
+        folded
+            .set_shader(shader)
+            .set_color_filter(None)
+            .set_alpha_f(1.0);
+        Some(folded)
     }
 
     /// `paint` as a page's pixels recording draws it, where the page keeps
@@ -903,7 +945,7 @@ impl Context2D {
                     }
                     _ => {
                         let dye = exact.dye(opaque)?;
-                        *held = Some((exact, opaque, dye.clone()));
+                        *held = Some((exact.clone(), opaque, dye.clone()));
                         dye
                     }
                 }
@@ -915,7 +957,50 @@ impl Context2D {
             ColorSpace::new_srgb(),
         ));
         paint.set_color_filter(dye).set_alpha_f(alpha);
+        if let Some(plain) = &plain_filter
+            && let Some(folded) =
+                self.folded_text(&paint, &exact, plain, opaque)
+        {
+            paint.set_color_filter(folded);
+        }
         Some(paint)
+    }
+
+    /// The colour filter for `paint`, text in a flat colour, `exact`,
+    /// through a CanvasKit colour filter built for the page's pixels -- the
+    /// one `paint` carries -- with that filter folded into the colour: what
+    /// it makes of the colour, whatever the glyph, keeping the glyph
+    /// contrast `plain_filter` gives `opaque` -- see
+    /// [`ExactColour::keeping_luminance_of`] and [`fold`]. `None` where it
+    /// cannot be folded.
+    fn folded_text(
+        &self,
+        paint: &Paint,
+        exact: &ExactColour,
+        plain_filter: &SkColorFilter,
+        opaque: Color4f,
+    ) -> Option<SkColorFilter> {
+        let key = fold::FoldKey::new(
+            self.canvas_pixels?,
+            self.state.skia_color_filter.as_ref()?.identity()?,
+            exact.rgb,
+            paint.alpha_f(),
+            Some(opaque),
+        );
+        let fold::Folded::Filter(filter) = fold::folded(key, || {
+            let pixel = fold::fold_pixel(
+                &self.faint().drawable(paint),
+                &self.canvas_color_space,
+            )?;
+            let constant = fold::constant_filter(pixel)?;
+            exact
+                .keeping_luminance_of(constant, plain_filter, opaque)
+                .map(fold::Folded::Filter)
+        })?
+        else {
+            return None;
+        };
+        Some(filter)
     }
 
     /// `paint`, built with a paragraph before the page it lands on was
