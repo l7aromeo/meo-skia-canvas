@@ -38,6 +38,7 @@ use crate::{
     context2d::{FontKerning, TextRendering, font_spec_from_css},
     css::{FontUnits, NamedColour, ROOT_FONT_PX},
     export::{VectorFeatures, blend_features},
+    filter::onto::{Onto, PageFilter},
     font::GenericFamily,
     font_library::{FontLibrary, ResolvedFont, generic_name, text_hinting},
     gpu::{self, RenderingEngine},
@@ -287,8 +288,8 @@ pub struct State {
     pub filter: Filter,
 
     // Skia filter objects for CanvasKit parity
-    pub skia_color_filter: Option<SkColorFilter>,
-    pub skia_image_filter: Option<SkImageFilter>,
+    pub skia_color_filter: Option<PageFilter<SkColorFilter>>,
+    pub skia_image_filter: Option<PageFilter<SkImageFilter>>,
     pub skia_mask_filter: Option<SkMaskFilter>,
     pub dither: bool,
 
@@ -891,18 +892,20 @@ impl Context2D {
         }
     }
 
-    /// The flat colour `style` dyes with, held exactly in the page's own
-    /// space, on a page that keeps a recording for pixels -- see
-    /// [`Self::exact_paint`].
+    /// The flat colour `style` dyes with -- a colour, or a texture's mark --
+    /// held exactly in the page's own space, on a page that keeps a
+    /// recording for pixels -- see [`Self::exact_paint`].
     pub fn exact_colour(&self, style: PaintStyle) -> Option<ExactColour> {
         if !self.recorder.borrow().dual() {
             return None;
         }
-        let Dye::Color(color, Some(space), _) = self.state.dye(style) else {
-            return None;
+        let (color, space) = match self.state.dye(style) {
+            Dye::Color(color, Some(space), _) => (*color, space.clone()),
+            Dye::Texture(texture) => texture.color(),
+            _ => return None,
         };
         let canvas = PixelColorSpace::matching(&self.canvas_color_space)?;
-        let rgb = color_in_canvas_space(*color, space, canvas)?;
+        let rgb = color_in_canvas_space(color, &space, canvas)?;
         Some(ExactColour {
             rgb: rgb.map(|c| c as f32),
             space: self.canvas_color_space.clone(),
@@ -1600,10 +1603,11 @@ impl Context2D {
         &mut self,
         paint: Option<Paint>,
         bounds: Option<Rect>,
-        backdrop: Option<SkImageFilter>,
+        backdrop: Option<PageFilter<SkImageFilter>>,
     ) {
         let paint =
             paint.map(|paint| self.faint().drawable(&paint).into_owned());
+        let backdrop = backdrop.map(|filter| filter.on(self.onto().as_ref()));
         // open_layer, not with_canvas: the recorder draws the layer around
         // its contents once it closes -- see `PageRecorder::open_layer`.
         self.with_recorder(|mut recorder| {
@@ -1924,6 +1928,7 @@ impl Context2D {
                         self.state.global_alpha as f32,
                         magnify,
                         device_pixel,
+                        self.onto().as_ref(),
                     );
 
                     let enclosing_frame = Path::rect(expanded_bounds, None);
@@ -2940,7 +2945,7 @@ impl Context2D {
 
         // 1. Apply Skia colorFilter (operates on source colors before blend)
         if let Some(cf) = &self.state.skia_color_filter {
-            paint.set_color_filter(cf.clone());
+            paint.set_color_filter(cf.on(self.onto().as_ref()));
         }
 
         // 2. Apply CSS filter (image_filter + mask_filter)
@@ -2962,11 +2967,10 @@ impl Context2D {
 
         // 3. Compose Skia imageFilter with CSS imageFilter (if both present)
         if let Some(skia_imgf) = &self.state.skia_image_filter {
+            let skia_imgf = skia_imgf.on(self.onto().as_ref());
             let final_image_filter = match paint.image_filter() {
-                Some(css_imgf) => {
-                    image_filters::compose(skia_imgf.clone(), css_imgf)
-                }
-                None => Some(skia_imgf.clone()),
+                Some(css_imgf) => image_filters::compose(skia_imgf, css_imgf),
+                None => Some(skia_imgf),
             };
             paint.set_image_filter(final_image_filter);
         }
@@ -2982,6 +2986,7 @@ impl Context2D {
             self.state.global_alpha as f32,
             self.state.sampling_filter,
             &self.canvas_color_space,
+            self.onto().as_ref(),
         );
         paint.set_style(style);
 
@@ -3029,7 +3034,7 @@ impl Context2D {
 
         // 1. Apply Skia colorFilter (operates on source colors before blend)
         if let Some(cf) = &self.state.skia_color_filter {
-            paint.set_color_filter(cf.clone());
+            paint.set_color_filter(cf.on(self.onto().as_ref()));
         }
 
         // 2. Apply CSS filter (image_filter + mask_filter)
@@ -3040,11 +3045,10 @@ impl Context2D {
 
         // 3. Compose Skia imageFilter with CSS imageFilter (if both present)
         if let Some(skia_imgf) = &self.state.skia_image_filter {
+            let skia_imgf = skia_imgf.on(self.onto().as_ref());
             let final_image_filter = match paint.image_filter() {
-                Some(css_imgf) => {
-                    image_filters::compose(skia_imgf.clone(), css_imgf)
-                }
-                None => Some(skia_imgf.clone()),
+                Some(css_imgf) => image_filters::compose(skia_imgf, css_imgf),
+                None => Some(skia_imgf),
             };
             paint.set_image_filter(final_image_filter);
         }
@@ -3093,6 +3097,7 @@ impl Context2D {
             self.state.global_alpha as f32,
             self.state.sampling_filter,
             &self.canvas_color_space,
+            self.onto().as_ref(),
         );
         paint.set_style(style);
         paint
@@ -3113,8 +3118,18 @@ impl Context2D {
             None => self.state.filter.steps().map(Arc::<[Step]>::from),
             Some(filter) => (self.composites_in_floats()
                 && self.state.filter.is_none())
-            .then(|| Arc::from([Step::Image(filter.clone())])),
+            .then(|| Arc::from([Step::Image(filter.on(self.onto().as_ref()))])),
         }
+    }
+
+    /// The page a CanvasKit filter or a texture drawn here is built for --
+    /// see [`PageFilter::on`] -- on a page that composites in floats. An
+    /// eight-bit page draws them as built, whose colours Skia's conversion
+    /// moves by less than a byte.
+    pub(crate) fn onto(&self) -> Option<Onto> {
+        self.composites_in_floats().then(|| Onto {
+            destination: self.canvas_color_space.clone(),
+        })
     }
 
     /// Whether the page composites in floats, `F16` or `F32`: a page whose
@@ -3298,13 +3313,15 @@ impl Dye {
         }
     }
 
-    /// Puts the dye on `paint` at `alpha`, for a page in `destination`.
+    /// Puts the dye on `paint` at `alpha`, for a page in `destination`, a
+    /// texture's mark as built for `onto` -- see [`CanvasTexture::to_color4f`].
     pub fn mix_into(
         &self,
         paint: &mut Paint,
         alpha: f32,
         sampling_filter: SamplingFilter,
         destination: &ColorSpace,
+        onto: Option<&Onto>,
     ) {
         match self {
             Dye::Color(color, cs, _) => {
@@ -3331,8 +3348,8 @@ impl Dye {
                     .set_alpha_f(alpha);
             }
             Dye::Texture(texture) => {
-                let (color, cs) = texture.to_color4f(alpha);
-                paint.set_color4f(color, cs.as_ref());
+                let (color, space) = texture.to_color4f(alpha, onto);
+                paint.set_color4f(color, &space);
             }
             Dye::Shader(shader, _) => {
                 paint.set_shader(Some(shader.clone())).set_alpha_f(alpha);
