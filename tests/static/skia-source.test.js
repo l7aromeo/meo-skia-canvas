@@ -7,8 +7,10 @@ const {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } = require("fs");
 const { tmpdir } = require("os");
@@ -432,7 +434,9 @@ function preparedTree(dir, cache, name, version, { patched = true } = {}) {
   const dependency = repository(join(sources, "dep"), { "dep.c": "dep\n" });
   const pin = git(dependency, "rev-parse", "HEAD").trim();
   const skia = repository(join(sources, "skia"), {
-    DEPS: `deps = {"third_party/externals/dep": "${dependency}@${pin}"}\n`,
+    // A URL, as a real DEPS names its repositories: a Windows path in a
+    // Python string reads `\U` as the start of an escape.
+    DEPS: `deps = {"third_party/externals/dep": "${pathToFileURL(dependency).href}@${pin}"}\n`,
     "src/a.cc": "pristine\n",
   });
   const rustSkia = repository(join(sources, "rust-skia"), { README: "r\n" });
@@ -487,9 +491,11 @@ function preparedTree(dir, cache, name, version, { patched = true } = {}) {
 // tree for a version holds the same checkout and dependencies and differs only
 // in the patches applied to tracked files.
 describe("skia-source derives a tree from another of its version", () => {
-  let derive, patchCreates;
+  let derive, patchCreates, copyTree;
   beforeEach(async () => {
-    ({ derive, patchCreates } = await import(pathToFileURL(SCRIPT).href));
+    ({ derive, patchCreates, copyTree } = await import(
+      pathToFileURL(SCRIPT).href
+    ));
   });
 
   test("a patched tree is copied with its sources restored and nothing fetched", (t) => {
@@ -543,6 +549,13 @@ describe("skia-source derives a tree from another of its version", () => {
       /has been edited/,
     ],
     ["no gn", ({ source }) => rmSync(join(source, "bin", "gn"))],
+    [
+      "a DEPS Python cannot read",
+      ({ source }) => {
+        writeFileSync(join(source, "DEPS"), 'deps = {"x": "C:\\Users\\x@0"}\n');
+      },
+      /its DEPS could not be read: .*SyntaxError/,
+    ],
     [
       "a ready mark for another version",
       ({ tree }) => {
@@ -611,6 +624,30 @@ describe("skia-source derives a tree from another of its version", () => {
       null,
     );
     assert.deepEqual(said, []);
+  });
+
+  // Windows has no `cp`, so the copy there is Node's. Run here too, where it
+  // can be: what it makes has to be the tree, links included.
+  test("Windows's copy makes the tree, its links as links", (t) => {
+    const dir = scratch(t);
+    const from = join(dir, "from");
+    mkdirSync(join(from, "a", "b"), { recursive: true });
+    writeFileSync(join(from, "a", "b", "file"), "contents\n");
+    // Windows lets an account without the right make no link: the copy is
+    // still checked there, its link only where one could be made.
+    let linked = true;
+    try {
+      symlinkSync("..", join(from, "a", "up"), "dir");
+    } catch (error) {
+      if (error.code !== "EPERM") throw error;
+      linked = false;
+    }
+    copyTree(from, join(dir, "to"), "win32");
+    assert.equal(
+      readFileSync(join(dir, "to", "a", "b", "file"), "utf8"),
+      "contents\n",
+    );
+    if (linked) assert.equal(readlinkSync(join(dir, "to", "a", "up")), "..");
   });
 
   test("the files a patch creates are the ones it takes from /dev/null", () => {

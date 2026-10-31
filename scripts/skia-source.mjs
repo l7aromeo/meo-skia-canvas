@@ -31,6 +31,8 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
+  constants,
+  cpSync,
   existsSync,
   readdirSync,
   readFileSync,
@@ -287,6 +289,26 @@ print(json.dumps({d: v.split("@", 1)[1] for d, v in scope["deps"].items()
                   if isinstance(v, str) and "@" in v}))
 `;
 
+/**
+ * The Python to run DEPS and Skia's scripts with: `python3` where there is
+ * one, and otherwise `python`, the name Windows installs it under -- where
+ * `python3` is often the Store's placeholder, which exits without running
+ * anything.
+ */
+let python;
+function pythonCommand() {
+  python ??=
+    ["python3", "python"].find((name) => {
+      try {
+        execFileSync(name, ["--version"], { stdio: "ignore" });
+        return true;
+      } catch {
+        return false;
+      }
+    }) ?? "python3";
+  return python;
+}
+
 /** `git` in `cwd`, its output trimmed, or `null` when it fails. */
 function git(cwd, ...args) {
   try {
@@ -323,13 +345,16 @@ export function baseRefusal(tree, version, created = []) {
   let pins;
   try {
     pins = JSON.parse(
-      execFileSync("python3", ["-c", PINS, join(skia, "DEPS")], {
+      execFileSync(pythonCommand(), ["-c", PINS, join(skia, "DEPS")], {
         encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
+        stdio: ["ignore", "pipe", "pipe"],
       }),
     );
-  } catch {
-    return "its DEPS could not be read";
+  } catch (error) {
+    // The last line of what Python said, which names the error, or why it
+    // did not start.
+    const said = `${error.stderr ?? ""}`.trim().split("\n").pop();
+    return `its DEPS could not be read: ${said || error.message}`;
   }
   for (const [directory, pin] of Object.entries(pins)) {
     const dependency = join(skia, directory);
@@ -367,10 +392,24 @@ export function restoredRefusal(tree) {
  * Copies `from` to `to` sharing its blocks where the filesystem can -- a
  * clone on APFS, a reflink where Linux has them -- and in full where it
  * cannot.
+ *
+ * `cp` where there is one, because it clones a tree in one call where Node
+ * copies it a file at a time; Node's copy on Windows, which has no `cp`,
+ * asking for a clone and taking a full copy where none can be made. Links
+ * are copied as links either way: rust-skia's checkout holds one that points
+ * at a directory above it.
  */
-function copyTree(from, to) {
+export function copyTree(from, to, platform = process.platform) {
+  if (platform === "win32") {
+    cpSync(from, to, {
+      recursive: true,
+      verbatimSymlinks: true,
+      mode: constants.COPYFILE_FICLONE,
+    });
+    return;
+  }
   const args =
-    process.platform === "darwin"
+    platform === "darwin"
       ? ["-c", "-R", from, to]
       : ["-a", "--reflink=auto", from, to];
   execFileSync("cp", args, { stdio: ["ignore", process.stderr.fd, "inherit"] });
@@ -529,7 +568,7 @@ function fetchTree(partial, checkout) {
   // It fetches into what an earlier try left and checks each dependency out
   // at its pinned revision, so a try resumes rather than starting over.
   retry("syncing Skia's DEPS", () =>
-    run("python3", ["skia/tools/git-sync-deps"], {
+    run(pythonCommand(), ["skia/tools/git-sync-deps"], {
       cwd: join(checkout, "skia-bindings"),
       env: {
         GIT_SYNC_DEPS_PATH: "skia/DEPS",
@@ -538,7 +577,7 @@ function fetchTree(partial, checkout) {
     }),
   );
   retry("fetching gn", () =>
-    run("python3", ["bin/fetch-gn"], { cwd: sourceDir(partial) }),
+    run(pythonCommand(), ["bin/fetch-gn"], { cwd: sourceDir(partial) }),
   );
 }
 
