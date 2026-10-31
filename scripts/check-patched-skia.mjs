@@ -6,10 +6,10 @@
 //   node scripts/check-patched-skia.mjs --self-test
 //
 // rust-skia's prebuilt Skia waits one second for each Metal shader compile
-// and drops the draw when it runs out, and its atlas path renderer can lose a
-// pixel of a path's coverage on Metal and on Vulkan; a binary built against it
-// passes every test that does not stall the compiler or land a path where the
-// pixel goes. Three things have to hold, and each is read from skia-bindings'
+// and drops the draw when it runs out, and its atlas path renderer can move a
+// pixel of a path's coverage a step up or down on Metal and on Vulkan; a binary
+// built against it passes every test that does not stall the compiler or land
+// a path where the pixel moves. Three things have to hold, and each is read from skia-bindings'
 // `output`:
 //
 // 1. It built from a source tree and did not try a download: offline from

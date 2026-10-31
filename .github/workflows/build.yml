@@ -93,8 +93,8 @@ jobs:
 
       # A binary built against rust-skia's prebuilt Skia, or from an unpatched
       # tree, carries the one-second Metal compile timeout and the atlas that
-      # can lose a pixel of a path, and passes every test that does not stall
-      # the compiler or land a path there. skia-bindings' build output says
+      # can move a pixel of a path's coverage, and passes every test that does
+      # not stall the compiler or land a path there. skia-bindings' build output says
       # whether it built offline and names each file ninja compiled, so this
       # refuses a build that downloaded, or whose `GrMtlUtil.mm` or
       # `AtlasPathRenderer.cpp` is not the patched one --
@@ -304,7 +304,7 @@ jobs:
           # order: the brotli sources Skia's build list leaves out, without
           # which this `freetype` build fails to link on kCmdLut and
           # BrotliDecoderEnsureStaticInit, and the atlas-size cap, without
-          # which a GPU path can lose a pixel of its coverage. `-F0` fails a
+          # which a GPU path can have a pixel's coverage moved a step. `-F0` fails a
           # hunk that no longer matches rather than placing it by guesswork.
           # Under `use-local-skia` the justfile names no tree of its own, so
           # this checkout is what skia-bindings builds.
@@ -336,7 +336,7 @@ jobs:
 
       # The macOS job's check, for Linux's patches: a build from an unpatched
       # rust-skia checkout links and passes every test that does not land a
-      # path where the atlas loses a pixel. This checkout carries no crates.io
+      # path where the atlas moves a pixel. This checkout carries no crates.io
       # package hash, so skia-bindings does a full build from the tree inside
       # it and never tries a download -- scripts/check-patched-skia.mjs reads
       # that from its output, and refuses either kind of build whose

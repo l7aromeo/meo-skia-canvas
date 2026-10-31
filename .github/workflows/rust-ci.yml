@@ -380,8 +380,9 @@ jobs:
         run: just check-dts-surface
 
       # `MEO_SKIA_CANVAS_REQUIRE_GPU` names the device tests/gpu_path_coverage.rs
-      # has to draw on, lavapipe's `llvmpipe`, so a green run says it drew
-      # there rather than skipped for want of a GPU.
+      # and tests/gpu_crowded_flush.rs have to draw on, lavapipe's `llvmpipe`,
+      # so a green run says they drew there rather than skipped for want of a
+      # GPU.
       - name: Test the engine against the same build
         env:
           MEO_SKIA_CANVAS_REQUIRE_GPU: llvmpipe

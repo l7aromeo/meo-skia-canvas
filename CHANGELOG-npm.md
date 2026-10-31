@@ -1670,16 +1670,19 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   Not changed: right-to-left text, for which nothing has been measured in
   Chrome.
 
-- **A path drawn on the GPU keeps all of its coverage.** Skia's atlas path
-  renderer, on macOS and Linux alike, could drop one pixel of an
-  anti-aliased path where it placed the path at row 512 or more of the atlas
-  it rasterises paths into, and where a path lands depends on everything
-  else the same flush draws. An eyelash of `examples/node/animated-eye.js`,
-  drawn after blurred shapes whose masks were rasterised in the same flush,
-  lost the pixel at its tip: it read the alpha of what lay under it alone,
-  24 where the two composite to 77. When those masks were already cached it
-  did not, so the same page exported differently depending on the pages
-  exported before it. The atlas is capped at 512 by 512 now, so no path is
+- **A path drawn on the GPU covers each pixel as it would in a flush of
+  its own.** Skia's atlas path renderer, on macOS and Linux alike, could
+  move a pixel of an anti-aliased path a step up or down where it placed
+  the path at row 512 or more of the atlas it rasterises paths into, and
+  where a path lands depends on everything else the same flush draws. On a
+  page of 2000 small filled stars, 28 pixels read 51 levels of alpha above
+  or below what the stars reaching them draw on their own, 19 above and 9
+  below. An eyelash of `examples/node/animated-eye.js`, drawn after blurred
+  shapes whose masks were rasterised in the same flush, lost the pixel at
+  its tip: it read the alpha of what lay under it alone, 24 where the two
+  composite to 77. When those masks were already cached it did not, so the
+  same page exported differently depending on the pages exported before
+  it. The atlas is capped at 512 by 512 now, so no path is
   placed there; a full atlas starts another, and a path with a side past 512
   pixels goes to Skia's next path renderer. Why row 512 is unknown. Not
   every frame is order-independent yet -- see Known, and not fixed here.

@@ -46,8 +46,8 @@ version at run time instead, which is what upstream Skia's check does.
 
 The same tree carries `containers/skia-atlas-size.patch`, as Linux's does,
 which caps Ganesh's atlas path renderer at a 512-by-512 atlas: on Metal and on
-Vulkan, a path the renderer places at an atlas row of 512 or more can lose a
-pixel of its coverage. The UPSTREAM note beside it in `PATCHES` says what is and
+Vulkan, a path the renderer places at an atlas row of 512 or more can have a
+pixel's coverage moved a step up or down. The UPSTREAM note beside it in `PATCHES` says what is and
 is not known.
 
 **Build through `just` on macOS and Linux.** The justfile's `dotenv-command`,

@@ -44,12 +44,15 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
  * skia-bindings as it always has, and `env` names no tree there.
  */
 // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
-// Re-check: cargo test a_path_over_a_blurred_one_keeps_its_coverage with `metal` on macOS or `vulkan` on Linux, on a tree prepared without this patch; the pixel at (263, 145) reads the background's alpha alone
+// Re-check: cargo test a_path_covers_a_crowded_flush_as_it_covers_a_small_one with `metal` on macOS, on a tree prepared without this patch; 28 pixels read a step above or below a small flush of the same stars
 //
 // A path Ganesh's atlas path renderer places at an atlas row of 512 or more
-// can lose a texel of its coverage, and which ones do depends on the atlas's
-// layout: an eyelash drawn after blurred shapes whose masks were rasterised
-// in the same flush lost its tip. Seen on Metal (an Apple GPU) and on Vulkan
+// can have a pixel's coverage moved a step up or down -- about 50 of 255
+// levels of alpha -- and which ones do depends on the atlas's layout. On a
+// page of 2000 small stars, 28 pixels read 51 levels above or below what a
+// flush of the stars reaching them draws, 19 above and 9 below; an eyelash
+// drawn after blurred shapes whose masks were rasterised in the same flush
+// lost its tip. Seen on Metal (an Apple GPU), and the eyelash on Vulkan too
 // (lavapipe, CI's Linux runner), so it is the renderer's and not a driver's.
 // Why row 512 is unknown. The patch caps the atlas at 512 by 512 so no path
 // is placed past it; a full atlas starts another sharing its texture, and a
