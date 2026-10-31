@@ -27,8 +27,10 @@
 //! canvas that shears its glyphs past what FreeType draws -- see
 //! [`paint_glyphs`].
 //!
-//! On a page whose colours land in floats, every run is drawn in a paint
-//! made for the page from the colour its style named -- see [`Resolve`]:
+//! On a page whose colours land in floats, or that keeps a recording for
+//! pixels, every run is drawn in a paint made for the page from the colour
+//! its style named -- see [`Resolve`] and
+//! `Context2D::makes_paragraph_paints`:
 //! by [`Passes`] where the paragraph has them, and by [`paint_glyphs`] from
 //! what SkParagraph keeps of its styles where it has none -- see
 //! [`PlainPaints`].
@@ -1199,7 +1201,8 @@ pub(crate) struct Shadow {
     /// In extended sRGB, unpremultiplied.
     color: Color4f,
     /// The colour as the style named it, in the space it named it in, where
-    /// it is known: what a float page draws the shadow in -- see
+    /// it is known: what a page making its own paints draws the shadow in
+    /// -- see
     /// [`StyleColours::shadows_named`].
     named: Option<NamedColour>,
 }
@@ -1232,7 +1235,7 @@ impl Shadow {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct StyleColours {
     /// The glyphs' colour, as the style named it and in the space it named
-    /// it in: what a float page draws them in, made for the page -- see
+    /// it in: what a page making its own paints draws them in -- see
     /// [`Passes::paint`].
     pub(crate) foreground: Option<NamedColour>,
     /// The background's colour, as the style named it.
@@ -1426,8 +1429,9 @@ pub(crate) fn without_paragraph_cache<T>(
 ///
 /// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
 /// Re-check: grep for `update_foreground_paint` in skia-safe's
-/// `src/modules/paragraph/paragraph.rs`. While it is absent, a float page
-/// cannot have SkParagraph paint in its colours and the runs are drawn here.
+/// `src/modules/paragraph/paragraph.rs`. While it is absent, a page making
+/// its own paints cannot have SkParagraph paint in them and the runs are
+/// drawn here.
 pub(crate) type Resolve<'a> = &'a dyn Fn(&Paint, Option<&NamedColour>) -> Paint;
 
 /// What paints a paragraph that has an oblique range, a decoration, a shadow
@@ -2343,14 +2347,15 @@ pub(crate) fn draw_shadowed(
             bounds: cast.bounds(passes, at),
         })
         .collect();
-    // On a float page every paint is made for the page, the shadows' and
-    // the backgrounds' as well as the glyphs' -- see `Passes::paint`.
-    let floats = context.composites_in_floats();
+    // On a float page, and on one that keeps a recording for pixels, every
+    // paint is made for the page, the shadows' and the backgrounds' as well
+    // as the glyphs' -- see `Passes::paint`.
+    let resolved = context.makes_paragraph_paints();
     context.draw_with_shadows(&shadows, |canvas, part, recording| {
         let page = |paint: &Paint, colour: Option<&NamedColour>| {
             context.paragraph_paint(paint, colour, recording)
         };
-        let resolve = floats.then_some(&page as Resolve);
+        let resolve = resolved.then_some(&page as Resolve);
         let made = |paint: Paint, index: usize| match resolve {
             Some(resolve) => resolve(&paint, casts[index].named()),
             None => paint,

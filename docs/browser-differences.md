@@ -8,13 +8,42 @@ few percent of pixels, confined to stem edges; metrics are unchanged. A contour
 of a single `moveTo` no longer survives, so `Path2D.d`, `.edges` and `.bounds`
 lose the orphan point -- no pixel effect, since a move-only contour paints
 nothing. On the GPU engine, a translucent colour can be stored one
-premultiplied step away from where the raster engine and Chrome's software
-canvas store it, because Skia's GPU rasteriser rounds the premultiply
-differently: `color(display-p3 1 0 0 / 0.5)` stores red 128 and reads back as
-255, where the raster engine and Chrome store 127 and read 253, and
+premultiplied step away from where the raster engine stores it, because
+Skia's GPU rasteriser rounds the premultiply differently: on an sRGB canvas
 `color(display-p3 1 0 0 / 0.1)` stores alpha 25 and reads 255, 0, 0, 25,
-against 26 and 245, 0, 0, 26. The read itself converts exactly on both
+where the raster engine stores 26. The read itself converts exactly on both
 engines; the step is in what was drawn.
+
+**Chrome's colours on a Display P3 canvas, a level off where its conversion
+crosses a rounding boundary.** Chrome converts a colour into an eight-bit
+Display P3 canvas through skcms's approximate transfer function, whose
+results lie 64 ulps apart, so a channel that falls near a boundary between
+two bytes can land on the wrong side of it. Here the colour is converted
+exactly and stored as the exact product rounded, a tie rounded up -- see
+`ExactColour::at`. Measured in Chrome 153 on a Display P3 canvas, read back
+in P3:
+
+| colour                                    | exact, x255              | here                           | Chrome                         |
+| ----------------------------------------- | ------------------------ | ------------------------------ | ------------------------------ |
+| `hsl(0 -50% 50%)`                         | 127.5 in each channel    | 128, 128, 128                  | 128, 127, 127                  |
+| `hwb(from red h 60% 60%)`                 | 127.5 in each channel    | 128, 128, 128                  | 128, 127, 127                  |
+| `color(from red xyz-d50 calc(x / 2) y z)` | red 148.498              | 148                            | 149                            |
+| `hsl(from red 1e3 s l)`                   | green 30.505             | 31                             | 30                             |
+| `color(display-p3 1 0 0 / 0.5)`           | red 127.5, premultiplied | stores 128, reads 255          | stores 127, reads 253          |
+| `color(display-p3 1 0 0 / 0.1)`           | red 25.5, premultiplied  | stores 26, reads 255, 0, 0, 26 | stores 25, reads 245, 0, 0, 26 |
+| `color(display-p3 0.5 0.2 0.1 / 0.2)`     | red 25.5, premultiplied  | stores 26, reads 130           | stores 25, reads 125           |
+| `color(display-p3 0.5 0.2 0.1 / 0.6)`     | red 76.5, premultiplied  | stores 77, reads 128           | stores 76, reads 127           |
+
+A grey with one channel apart from the others, and 148.498 stored as 149,
+are wrong by arithmetic, which is why this differs. A tie Chrome rounds either
+way -- the same canvas stores the green 25.5 of
+`color(display-p3 0.5 0.2 0.1 / 0.5)` as 26 -- and here always up. Away from a boundary the
+two agree, translucent colours included: Chrome's canvas premultiplies in
+float and rounds once, as this one does, so
+`color(a98-rgb 0.3 0.6 0.9 / 0.5)` reads 50, 151, 225 and
+`rgb(from oklch(0.8 0.18 165) r g b / 0.5)` 92, 221, 163 in both. Skia's
+legacy blit onto an sRGB canvas rounds the colour to a byte before it
+premultiplies, and that canvas keeps doing so.
 
 On Linux a variable face's advances move in whole font units between its
 masters, where on macOS they follow the interpolation as Chrome on macOS

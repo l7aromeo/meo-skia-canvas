@@ -1206,9 +1206,11 @@ fn every_relative_function_reads_its_channels_as_chrome_does() -> Result<()> {
             [172, 35, 23, 255],
         ),
         ("color(from red xyz calc(x / 2) y z)", [151, 125, 25, 255]),
+        // Red 148.498 exactly; Chrome 153 paints 149, 128, 19 -- see
+        // docs/browser-differences.md.
         (
             "color(from red xyz-d50 calc(x / 2) y z)",
-            [149, 128, 19, 255],
+            [148, 128, 19, 255],
         ),
         ("color(from red srgb 50% g b)", [116, 20, 12, 255]),
         ("color(from red srgb calc(r * 1%) g b)", [2, 0, 0, 255]),
@@ -1317,7 +1319,9 @@ fn absolute_colours_read_their_channels_as_chrome_does() -> Result<()> {
         ("hsl(120 calc(50% + 50%) 50%)", [117, 251, 76, 255]),
         ("hsl(120 100% calc(25% * 2))", [117, 251, 76, 255]),
         ("hsl(0 calc(150%) 50%)", [255, 18, 0, 255]),
-        ("hsl(0 -50% 50%)", [128, 127, 127, 255]),
+        // A grey of 127.5 exactly in each channel, a tie rounded up; Chrome
+        // 153 paints 128, 127, 127 -- see docs/browser-differences.md.
+        ("hsl(0 -50% 50%)", [128, 128, 128, 255]),
         // Legacy syntax holds saturation and lightness to `0%..=100%`.
         ("hsl(0, 150%, 50%)", [234, 51, 35, 255]),
         ("hwb(calc(120) 0% 0%)", [117, 251, 76, 255]),
@@ -1603,9 +1607,13 @@ fn hsl_and_hwb_evaluate_relative_channels_as_chrome_does() -> Result<()> {
         // Units, percentages and `none` where the grammar takes them.
         ("hsl(from red 120deg s l)", [117, 251, 76, 255]),
         ("hsl(from red .5turn s l)", [117, 251, 253, 255]),
-        ("hsl(from red 1e3 s l)", [156, 30, 246, 255]),
+        // Green 30.505 exactly; Chrome 153 paints 156, 30, 246 -- see
+        // docs/browser-differences.md.
+        ("hsl(from red 1e3 s l)", [156, 31, 246, 255]),
         ("hsl(from red h 50% l)", [177, 73, 69, 255]),
-        ("hwb(from red h 60% 60%)", [128, 127, 127, 255]),
+        // A grey of 127.5 exactly, as `hsl(0 -50% 50%)`; Chrome 153 paints
+        // 128, 127, 127 -- see docs/browser-differences.md.
+        ("hwb(from red h 60% 60%)", [128, 128, 128, 255]),
         ("hsl(from red none s l)", [234, 51, 35, 255]),
         ("hsl(from red h s l / 50%)", [233, 52, 36, 128]),
         ("hsl(from red h s l / none)", [0, 0, 0, 0]),

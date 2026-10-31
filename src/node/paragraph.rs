@@ -1702,9 +1702,10 @@ pub fn drawParagraph(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // In a cell because the draw is handed every recording the page keeps,
     // and painting a paragraph borrows it mutably each time.
     let held = RefCell::new((paragraph, passes));
-    // On a float page every glyph is drawn run by run in a paint made for
-    // the page -- see `Context2D::paragraph_paint`.
-    let floats = ctx.composites_in_floats();
+    // On a float page, and on one that keeps a recording for pixels, every
+    // glyph is drawn run by run in a paint made for the page -- see
+    // `Context2D::paragraph_paint`.
+    let resolved = ctx.makes_paragraph_paints();
     ctx.with_composited_canvas(|canvas, recording| {
         let at = Point::new(x, y);
         let (paragraph, passes) = &mut *held.borrow_mut();
@@ -1716,10 +1717,10 @@ pub fn drawParagraph(mut cx: FunctionContext) -> JsResult<JsUndefined> {
                 paragraph,
                 canvas,
                 at,
-                floats.then_some(&resolve as Resolve),
+                resolved.then_some(&resolve as Resolve),
             ),
             None => {
-                let paints = match floats {
+                let paints = match resolved {
                     true => plain.resolved(&resolve),
                     false => GlyphPaints::Styles,
                 };

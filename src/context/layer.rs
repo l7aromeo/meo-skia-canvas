@@ -33,8 +33,8 @@ use skia_safe::{
     ColorFilter, ColorSpace, ColorType, Contains, Data, FilterMode, IRect,
     Image, ImageFilter, ImageInfo, MaskFilter, Matrix, Paint, PaintCap,
     PaintJoin, PaintStyle, Path, PathDirection, Picture, PictureRecorder,
-    Point, Rect, RoundOut, RuntimeEffect, SamplingOptions, Shader, TileMode,
-    canvas::SaveLayerRec, color_filters, image_filters,
+    Point, Rect, RoundOut, RuntimeEffect, SamplingOptions, Shader, Surface,
+    TileMode, canvas::SaveLayerRec, color_filters, image_filters,
 };
 
 use crate::{
@@ -47,7 +47,12 @@ use crate::{
     },
     export::VectorFeatures,
     gpu::RenderingEngine,
-    node::{filter::MASK_BLUR_MAX_SIGMA, typography::RunPaint},
+    node::{
+        filter::MASK_BLUR_MAX_SIGMA,
+        typography::RunPaint,
+        utils::{color_space_name, skia_paint_color_onto_own},
+    },
+    pixels::PixelColorSpace,
     started,
 };
 
@@ -246,6 +251,156 @@ pub struct ExactColour {
     pub rgb: [f32; 3],
     /// The page's space.
     pub space: ColorSpace,
+    /// The page's space, as the one of this crate's spaces it is.
+    pub pixels: PixelColorSpace,
+    /// Whether the page composites in eight bits a channel, where a paint
+    /// of the colour is placed on the bytes it stores -- see [`Self::at`].
+    pub bytes: bool,
+}
+
+/// Half the spacing of binary16 between 0.5 and 1, in levels of a byte:
+/// its 10-bit fraction spaces values there 2^-11 apart, so rounding moves
+/// one by at most 2^-12, 0.0623 of a level. Ganesh may carry a paint's
+/// colour at half precision and its premultiplied product once more, so
+/// the bound is twice that, 0.1245.
+const GPU_HALF_ROUNDING_LEVELS: f64 = 2.0 * 255.0 / 4096.0;
+
+/// How far from its byte a placed colour may land, in Skia's own float
+/// conversion, and still store that byte on either engine: half a level,
+/// less [`GPU_HALF_ROUNDING_LEVELS`].
+const PLACED_MARGIN_LEVELS: f64 = 0.5 - GPU_HALF_ROUNDING_LEVELS;
+
+/// How many times a placed colour that lands off its byte is moved back
+/// toward it and drawn again before [`ExactColour::shader`] takes it.
+const NUDGES: usize = 3;
+
+/// The slots of the table each thread keeps its verdicts in -- see
+/// [`ExactColour::verified_paint`]. Per thread, because a verdict is found
+/// by drawing on a probe surface that thread owns, and a page is drawn on
+/// the thread that holds it. A colour is filed in the one slot
+/// [`verdict_slot`] picks, over whatever was filed there before, and a
+/// lookup compares the whole key: two colours sharing a slot only cost
+/// each other a verdict found again, never one taken for the other. Four
+/// thousand hold any palette a page repeats, a few dozen bytes each, and a
+/// page of colours never repeated costs no more than the table; with no
+/// chain to probe, a lookup is one multiplication and one comparison.
+const VERDICTS_KEPT: usize = 4096;
+
+const _: () = assert!(VERDICTS_KEPT.is_power_of_two());
+
+/// 2^64 divided by the golden ratio, rounded to odd: Knuth's multiplier for
+/// hashing by multiplication (The Art of Computer Programming, vol. 3,
+/// section 6.4), whose product carries every bit of a key into its top
+/// bits, which [`verdict_slot`] takes.
+const GOLDEN_RATIO_64: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// A placed colour's page space and the premultiplied bytes it is to store.
+type VerdictKey = (PixelColorSpace, [u8; 4]);
+
+/// The paint colour that lands a placed colour on its bytes and the space
+/// it is tagged with, or `None` where [`ExactColour::shader`] draws it.
+type Verdict = Option<(Color4f, ColorSpace)>;
+
+/// The slot of [`VERDICTS`] `key` is filed in.
+fn verdict_slot((pixels, bytes): VerdictKey) -> usize {
+    let key = u64::from(u32::from_le_bytes(bytes)) | (pixels as u64) << 32;
+    (key.wrapping_mul(GOLDEN_RATIO_64)
+        >> (u64::BITS - VERDICTS_KEPT.trailing_zeros())) as usize
+}
+
+/// The pixel [`landed`] draws a colour on for a page space: a float page of
+/// that space, one pixel in size, and the space's name in `color()` -- see
+/// [`skia_paint_color_onto_own`] -- each found once a thread.
+struct Probe {
+    pixels: PixelColorSpace,
+    surface: Surface,
+    name: Option<&'static str>,
+}
+
+thread_local! {
+    /// The verdicts this thread has found, filed by [`verdict_slot`].
+    static VERDICTS: RefCell<Vec<Option<(VerdictKey, Verdict)>>> =
+        RefCell::new(vec![None; VERDICTS_KEPT]);
+
+    /// The probe of each page space this thread has verified a colour for.
+    static PROBES: RefCell<Vec<Probe>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The paint colour that stores `want`, premultiplied bytes, on a page in
+/// `page`, of the pixels `pixels` names, and the space it is tagged with:
+/// the placed colour, or one moved toward its bytes up to [`NUDGES`] times,
+/// where a float pixel of the page's space lands within
+/// [`PLACED_MARGIN_LEVELS`] of each byte. `None` where none does.
+///
+/// The float pixel stands for an eight-bit one on either engine: a colour
+/// that lands within the margin stores its bytes on both, which
+/// `a_colour_landing_within_the_margin_stores_its_bytes_on_either_engine`
+/// holds over every colour this is asked for. Ganesh converts a paint's
+/// colour on the CPU, as the raster pipeline does, and carries it from
+/// there; a readback of a GPU surface per colour would stall its pipeline.
+fn landed(
+    page: &ColorSpace,
+    pixels: PixelColorSpace,
+    want: [u8; 4],
+) -> Verdict {
+    let stored = f64::from(want[3]);
+    let alpha = (stored / f64::from(u8::MAX)) as f32;
+    if want[3] == 0 {
+        return Some((Color4f::new(0.0, 0.0, 0.0, 0.0), page.clone()));
+    }
+    let info = ImageInfo::new(
+        (1, 1),
+        ColorType::RGBAF32,
+        AlphaType::Premul,
+        Some(page.clone()),
+    );
+    PROBES.with(|probes| {
+        let mut probes = probes.borrow_mut();
+        let at = match probes.iter().position(|probe| probe.pixels == pixels) {
+            Some(at) => at,
+            None => {
+                probes.push(Probe {
+                    pixels,
+                    surface: started::raster(&info, None, None)?,
+                    name: color_space_name(page),
+                });
+                probes.len() - 1
+            }
+        };
+        let Probe { surface, name, .. } = &mut probes[at];
+        let mut rgb = [0, 1, 2].map(|i| f64::from(want[i]) / stored);
+        for _ in 0..=NUDGES {
+            let (colour, space) = skia_paint_color_onto_own(
+                Color4f::new(
+                    rgb[0] as f32,
+                    rgb[1] as f32,
+                    rgb[2] as f32,
+                    alpha,
+                ),
+                page,
+                *name,
+            );
+            let mut paint = Paint::new(colour, Some(&space));
+            paint.set_blend_mode(BlendMode::Src);
+            surface.canvas().draw_paint(&paint);
+            let mut float = [0u8; 16];
+            if !surface.read_pixels(&info, &mut float, 16, (0, 0)) {
+                return None;
+            }
+            let (float, _) = float.as_chunks::<4>();
+            let off = [0, 1, 2].map(|i| {
+                f64::from(f32::from_le_bytes(float[i])) * f64::from(u8::MAX)
+                    - f64::from(want[i])
+            });
+            if off.iter().all(|o| o.abs() <= PLACED_MARGIN_LEVELS) {
+                return Some((colour, space));
+            }
+            for i in 0..3 {
+                rgb[i] -= off[i] / stored;
+            }
+        }
+        None
+    })
 }
 
 /// The SkSL of the step [`ExactColour::dye`] can end with: `plain` at the
@@ -326,38 +481,162 @@ fn luminance_colour(filter: &ColorFilter, plain: Color4f) -> Option<[f32; 3]> {
 }
 
 thread_local! {
+    /// A shader returning its uniform colour as it is, unconverted:
+    /// [`ExactColour::shader`] works it in the page's space, so Skia takes
+    /// what it returns as a colour in that space.
+    static FLAT_COLOUR: Option<RuntimeEffect> = RuntimeEffect::make_for_shader(
+        "uniform float4 colour; half4 main(float2 p) { return half4(colour); }",
+        None,
+    )
+    .ok();
+}
+thread_local! {
     /// [`PLAIN_UNCONVERTED_SKSL`] compiled, once per thread.
     static PLAIN_UNCONVERTED: Option<RuntimeEffect> =
         RuntimeEffect::make_for_color_filter(PLAIN_UNCONVERTED_SKSL, None).ok();
 }
 
 impl ExactColour {
-    /// A shader painting the colour: a 1x1 image in the page's space at
-    /// full float precision, repeated. Drawn onto a page in that space,
-    /// Skia converts it by the identity, so it lands exactly; a paint's
-    /// alpha scales it.
-    pub fn shader(&self) -> Option<Shader> {
-        let info = ImageInfo::new(
-            (1, 1),
-            ColorType::RGBAF32,
-            AlphaType::Premul,
-            Some(self.space.clone()),
+    /// `rgb`, a colour's exact components in `space`, for a page in that
+    /// space -- `pixels`, as the one of this crate's spaces it is -- and
+    /// `bytes` where it composites in eight bits a channel.
+    pub fn new(
+        rgb: [f64; 3],
+        space: ColorSpace,
+        pixels: PixelColorSpace,
+        bytes: bool,
+    ) -> Self {
+        Self {
+            rgb: rgb.map(|c| c as f32),
+            space,
+            pixels,
+            bytes,
+        }
+    }
+
+    /// The colour painted at `alpha`: the colour to paint and the alpha to
+    /// paint it at, which a draw hands [`Self::shader`] or [`Self::dye`] and
+    /// its paint.
+    ///
+    /// A float page takes both as they are. On an eight-bit page both are
+    /// placed on the bytes the exact product rounds to: the alpha times 255,
+    /// and each component times the alpha times 255, plus a half and
+    /// truncated in `f32`, as Skia rounds a paint's own colour
+    /// (`SkRasterPipeline::append_constant_color`). The colour handed over is
+    /// that byte over the alpha's, so that the shader's product lands on it
+    /// whole and its store -- which rounds to the nearest byte with ties to
+    /// even on aarch64 and x86-64 (`round` in SkRasterPipeline_opts.h) -- has
+    /// nothing to round. Unplaced, a tie went to the even byte:
+    /// `color(display-p3 0.00196 0.00196 0.00196)`, half a level, filled 0
+    /// where the same grey fills 1 on an sRGB page.
+    ///
+    /// The exact product and not the bytes of an sRGB page, which Skia blits
+    /// through its legacy path: it rounds the colour and the alpha to bytes
+    /// first and premultiplies those, so `color(srgb 0.8732 0.5865 0.0787 /
+    /// 0.1)` stores red 23 where the product is 22.27. A wide-gamut page
+    /// draws through the raster pipeline, which premultiplies in float and
+    /// rounds once, and so does Chrome's Display P3 canvas:
+    /// `color(a98-rgb 0.3 0.6 0.9 / 0.5)` reads back red 50 in Chrome 153 and
+    /// here, where the sRGB page's rule reads 52.
+    pub fn at(&self, alpha: f32) -> (Self, f32) {
+        if !self.bytes {
+            return (self.clone(), alpha);
+        }
+        let levels = f32::from(u8::MAX);
+        let byte = |v: f32| (v.clamp(0.0, 1.0) * levels + 0.5).trunc();
+        let stored = byte(alpha);
+        if stored == 0.0 {
+            return (self.clone(), 0.0);
+        }
+        let rgb = self.rgb.map(|c| byte(c.clamp(0.0, 1.0) * alpha) / stored);
+        let placed = Self {
+            rgb,
+            ..self.clone()
+        };
+        (placed, stored / levels)
+    }
+
+    /// `paint` in this colour, placed at its alpha -- see [`Self::at`] -- as
+    /// a plain paint colour, where Skia lands it on the placed bytes on
+    /// either engine; `None` where it does not, for [`Self::shader`] to
+    /// draw. Drawn as a paint's own colour, a flat colour takes the blit a
+    /// paint's colour takes -- 8-bit on the CPU, a uniform on the GPU --
+    /// which a shader does not.
+    ///
+    /// Skia converts a paint's colour into the page's space through an
+    /// approximation, and whether that leaves it on its byte depends on all
+    /// three channels: a dark channel beside bright ones moved up to three
+    /// levels on a Rec. 2020 page, and `color(a98-rgb 0 1 0)` one on a
+    /// Display P3 page. So each placed colour is drawn once, as a paint's
+    /// colour, onto a pixel of the page's space -- see [`landed`] -- and
+    /// taken only where it lands; the verdict is kept per thread.
+    pub fn verified_paint(&self, paint: &Paint) -> Option<Paint> {
+        let (placed, alpha) = self.at(paint.alpha_f());
+        let levels = f64::from(u8::MAX);
+        let stored = (f64::from(alpha) * levels).round();
+        let byte = |c: f32| (f64::from(c) * stored).round() as u8;
+        let key = (
+            self.pixels,
+            [
+                byte(placed.rgb[0]),
+                byte(placed.rgb[1]),
+                byte(placed.rgb[2]),
+                stored as u8,
+            ],
         );
+        let (colour, space) = VERDICTS.with(|verdicts| {
+            let mut verdicts = verdicts.borrow_mut();
+            let slot = &mut verdicts[verdict_slot(key)];
+            if let Some((filed, verdict)) = slot
+                && *filed == key
+            {
+                return verdict.clone();
+            }
+            let verdict = landed(&self.space, self.pixels, key.1);
+            *slot = Some((key, verdict.clone()));
+            verdict
+        })?;
+        let mut paint = paint.clone();
+        paint.set_color4f(colour, &space);
+        Some(paint)
+    }
+
+    /// [`Self::verified_paint`] for text in `paint`, where the placed colour
+    /// sets the glyph mask's contrast from the same bucket as `paint`'s own
+    /// colour -- see [`contrast_bucket`] -- and the paint has no colour
+    /// filter of its own; `None` otherwise, for [`Self::dye`] to draw. The
+    /// placed colour moved the bucket for 13 of 1110 colours opaque, and 47
+    /// at half alpha, on a Display P3 page.
+    pub fn verified_text_paint(&self, paint: &Paint) -> Option<Paint> {
+        if paint.color_filter().is_some() {
+            return None;
+        }
+        let placed = self.verified_paint(paint)?;
+        let bucket = |p: &Paint| {
+            let c = p.color4f();
+            contrast_bucket([c.r, c.g, c.b])
+        };
+        (bucket(&placed) == bucket(paint)).then_some(placed)
+    }
+
+    /// A shader painting the colour: [`FLAT_COLOUR`] with the colour as its
+    /// uniform at full float precision, worked in the page's space. Drawn
+    /// onto a page in that space, Skia converts its output by the
+    /// identity, so it lands exactly, and onto any other through the colour
+    /// space transform; a paint's alpha scales it, the one [`Self::at`]
+    /// gives beside it.
+    pub fn shader(&self) -> Option<Shader> {
         let [r, g, b] = self.rgb;
-        let pixel: Vec<u8> = [r, g, b, 1.0]
-            .iter()
-            .flat_map(|c| c.to_le_bytes())
+        let uniforms: Vec<u8> = [r, g, b, 1.0]
+            .into_iter()
+            .flat_map(f32::to_ne_bytes)
             .collect();
-        started::raster_from_data(
-            &info,
-            Data::new_copy(&pixel),
-            info.min_row_bytes(),
-        )?
-        .to_shader(
-            (TileMode::Repeat, TileMode::Repeat),
-            SamplingOptions::default(),
-            None,
-        )
+        let flat = FLAT_COLOUR.with(|effect| {
+            effect
+                .as_ref()?
+                .make_shader(Data::new_copy(&uniforms), &[], None)
+        })?;
+        Some(flat.with_working_color_space(self.space.clone(), None))
     }
 
     /// A colour filter replacing a draw's colour with this one, its alpha
@@ -2134,10 +2413,11 @@ impl BlurOp {
 
         let mut paint = Paint::new(self.paint.color, None);
         if target == Target::Pixels
-            && let Some(shader) =
-                self.paint.exact.as_ref().and_then(ExactColour::shader)
+            && let Some((exact, alpha)) =
+                self.paint.exact.as_ref().map(|e| e.at(self.paint.color.a))
+            && let Some(shader) = exact.shader()
         {
-            paint.set_shader(shader);
+            paint.set_shader(shader).set_alpha_f(alpha);
         }
         paint
             .set_anti_alias(self.paint.anti_alias)
@@ -2367,5 +2647,343 @@ mod tests {
             zip(got, want).all(|(got, want)| (got - want).abs() < 1e-3),
             "{got:?}, where the filter's colour is {want:?}"
         );
+    }
+}
+
+#[cfg(all(test, any(feature = "metal", feature = "vulkan")))]
+mod placed_colour_tests {
+    use super::*;
+    use crate::{
+        context::page::ExportOptions,
+        gpu::RenderingEngine,
+        node::utils::{
+            color_in_canvas_space, css_to_color4f_in_space, opt_color_space,
+            skia_paint_color_onto,
+        },
+    };
+
+    /// Colours named outside the page's gamut or far from its primaries,
+    /// whose conversion runs through extended sRGB values.
+    const SATURATED: [&str; 10] = [
+        "color(a98-rgb 0 1 0)",
+        "color(a98-rgb 1 0 0)",
+        "color(a98-rgb 0 0 1)",
+        "color(prophoto-rgb 0 1 0)",
+        "color(prophoto-rgb -0.2 0.5 1.1)",
+        "color(rec2020 0 1 0)",
+        "color(rec2020 1 0 0)",
+        "color(display-p3 0 1 0)",
+        "color(display-p3 0.002 0.9 0.95)",
+        "color(srgb-linear 0 0.001 1)",
+    ];
+
+    /// The bytes of every placed colour of the sweep -- each premultiplied
+    /// byte under each alpha byte, as a grey, beside a full and a
+    /// complementary channel, and skewed across the three -- and of
+    /// [`SATURATED`] at three alphas, on a page in `space`.
+    fn wanted(space: &ColorSpace) -> Vec<[u8; 4]> {
+        let page = PixelColorSpace::matching(space).expect("a page space");
+        let sweep = (1..=255u32).flat_map(|a| {
+            (0..=a).flat_map(move |p| {
+                [
+                    [p, p, p, a],
+                    [p, a, a - p, a],
+                    [a - p, p, (p * 7) % (a + 1), a],
+                ]
+            })
+        });
+        let saturated = SATURATED.iter().flat_map(|css| {
+            let (colour, named) =
+                css_to_color4f_in_space(css).expect("a colour");
+            let rgb =
+                color_in_canvas_space(colour, &named, page).expect("converts");
+            let exact = ExactColour::new(rgb, space.clone(), page, true);
+            [1.0, 0.5, 0.2].map(|alpha| {
+                let (placed, alpha) = exact.at(alpha);
+                let stored = (alpha * 255.0).round() as u32;
+                let [r, g, b] =
+                    placed.rgb.map(|c| (c * stored as f32).round() as u32);
+                [r, g, b, stored]
+            })
+        });
+        sweep
+            .chain(saturated)
+            .filter(|want| want[3] > 0)
+            .map(|want| want.map(|c| c as u8))
+            .collect()
+    }
+
+    /// The plain paint colour [`landed`] first tries for each of
+    /// [`wanted`].
+    fn candidates(space: &ColorSpace) -> Vec<(Color4f, ColorSpace)> {
+        wanted(space)
+            .into_iter()
+            .map(|want| {
+                let a = f32::from(want[3]);
+                let [r, g, b] = [0, 1, 2].map(|i| f32::from(want[i]) / a);
+                skia_paint_color_onto(
+                    Color4f::new(r, g, b, a / 255.0),
+                    space,
+                    space,
+                )
+            })
+            .collect()
+    }
+
+    /// Each of `colours` drawn as a paint's colour, in the space it names,
+    /// onto its own pixel of a surface in `space` of `ct` made by `make`,
+    /// read back premultiplied as `ct`'s bytes.
+    fn drawn_bytes(
+        space: &ColorSpace,
+        colours: &[(Color4f, ColorSpace)],
+        ct: ColorType,
+        make: impl Fn(&ImageInfo) -> Option<Surface>,
+    ) -> Option<Vec<u8>> {
+        let w = 256;
+        let h = colours.len().div_ceil(w);
+        let info = ImageInfo::new(
+            (w as i32, h as i32),
+            ct,
+            AlphaType::Premul,
+            Some(space.clone()),
+        );
+        let mut surface = make(&info)?;
+        for (i, (colour, named)) in colours.iter().enumerate() {
+            let mut paint = Paint::new(*colour, Some(named));
+            paint.set_blend_mode(BlendMode::Src);
+            let rect =
+                Rect::from_xywh((i % w) as f32, (i / w) as f32, 1.0, 1.0);
+            surface.canvas().draw_rect(rect, &paint);
+        }
+        let row = w * info.bytes_per_pixel();
+        let mut bytes = vec![0u8; row * h];
+        surface
+            .read_pixels(&info, &mut bytes, row, (0, 0))
+            .then_some(bytes)
+    }
+
+    /// [`drawn_bytes`] onto an F32 surface, as floats.
+    fn drawn(
+        space: &ColorSpace,
+        colours: &[(Color4f, ColorSpace)],
+        make: impl Fn(&ImageInfo) -> Option<Surface>,
+    ) -> Option<Vec<f32>> {
+        drawn_bytes(space, colours, ColorType::RGBAF32, make).map(|bytes| {
+            bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
+                .collect()
+        })
+    }
+
+    /// Every paint colour [`landed`] gives, first try or nudged, stores the
+    /// bytes it was asked for on an eight-bit page of its space on the
+    /// raster backend and on the GPU, over every placed colour of
+    /// [`wanted`]: so the float pixel alone decides a verdict. A Skia whose
+    /// eight-bit routes part from its float conversion breaks this.
+    #[test]
+    fn a_colour_landing_within_the_margin_stores_its_bytes_on_either_engine() {
+        let gpu = RenderingEngine::GPU.selectable();
+        let mut wrong = Vec::new();
+        let (mut verdicts, mut refused) = (0usize, 0usize);
+        for space in ["display-p3", "rec2020", "srgb-linear"]
+            .map(|name| opt_color_space(name).expect("a space"))
+        {
+            let page = PixelColorSpace::matching(&space).expect("a page");
+            let (wants, colours): (Vec<_>, Vec<_>) = wanted(&space)
+                .into_iter()
+                .filter_map(|want| {
+                    let verdict = landed(&space, page, want);
+                    refused += usize::from(verdict.is_none());
+                    verdict.map(|colour| (want, colour))
+                })
+                .unzip();
+            verdicts += wants.len();
+            let mut engines = vec![(
+                "cpu",
+                drawn_bytes(&space, &colours, ColorType::RGBA8888, |info| {
+                    started::raster(info, None, None)
+                })
+                .expect("a raster read"),
+            )];
+            if gpu {
+                engines.push((
+                    "gpu",
+                    drawn_bytes(
+                        &space,
+                        &colours,
+                        ColorType::RGBA8888,
+                        |info| {
+                            RenderingEngine::GPU
+                                .make_surface(info, &ExportOptions::default())
+                                .ok()
+                        },
+                    )
+                    .expect("a GPU read"),
+                ));
+            }
+            for (engine, bytes) in &engines {
+                wrong.extend(
+                    bytes
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .zip(&wants)
+                        .filter(|(got, want)| got != want)
+                        .map(|(got, want)| {
+                            format!("{page:?} {engine}: {got:?} for {want:?}")
+                        }),
+                );
+            }
+        }
+        println!("{verdicts} verdicts, {refused} refused, GPU: {gpu}");
+        assert!(verdicts > 0, "the sweep landed nothing");
+        assert!(
+            wrong.is_empty(),
+            "{} parted: {:?}",
+            wrong.len(),
+            &wrong[..wrong.len().min(5)]
+        );
+    }
+
+    /// Ganesh converts a paint's colour into the page's space as the raster
+    /// pipeline does, to within [`GPU_HALF_ROUNDING_LEVELS`] -- the bound
+    /// [`PLACED_MARGIN_LEVELS`] keeps for the GPU -- with its own rounding to
+    /// half precision included, over every placed colour of the sweep and a
+    /// saturated set: so the verifier's float pixel, drawn on the raster
+    /// backend, stands for both engines.
+    #[test]
+    fn ganesh_converts_a_paint_colour_as_the_raster_pipeline_does() {
+        if !RenderingEngine::GPU.selectable() {
+            return;
+        }
+        let mut worst = Vec::new();
+        for space in ["display-p3", "rec2020", "srgb-linear"]
+            .map(|name| opt_color_space(name).expect("a space"))
+        {
+            let colours = candidates(&space);
+            let raster = drawn(&space, &colours, |info| {
+                started::raster(info, None, None)
+            })
+            .expect("a raster read");
+            // Ganesh on Metal makes no RGBA F32 surface; an F16 one stores
+            // each value to binary16, which is the one rounding the bound
+            // already allows for.
+            let gpu = drawn(&space, &colours, |info| {
+                RenderingEngine::GPU
+                    .make_surface(
+                        &info.with_color_type(ColorType::RGBAF16),
+                        &ExportOptions::default(),
+                    )
+                    .ok()
+            })
+            .expect("a GPU read");
+            let (at, off) = raster
+                .iter()
+                .zip(&gpu)
+                .map(|(r, g)| f64::from((r - g).abs()) * 255.0)
+                .enumerate()
+                .fold(
+                    (0, 0.0f64),
+                    |(i, m), (j, d)| if d > m { (j, d) } else { (i, m) },
+                );
+            worst.push(format!("{space:?}: {off:.5} levels at {}", at / 4));
+            assert!(
+                off <= GPU_HALF_ROUNDING_LEVELS,
+                "{worst:?}: raster {:?} GPU {:?}",
+                &raster[at / 4 * 4..at / 4 * 4 + 4],
+                &gpu[at / 4 * 4..at / 4 * 4 + 4]
+            );
+        }
+        println!("{worst:#?}");
+    }
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::*;
+    use crate::node::utils::{
+        color_in_canvas_space, css_to_color4f_in_space, opt_color_space,
+        skia_paint_color_onto,
+    };
+
+    /// Two colours filed in one slot of the verdict table, drawn in turn,
+    /// each take their own verdict: a colour finds the one filed for it,
+    /// never the one filed over it.
+    #[test]
+    fn colours_sharing_a_slot_each_take_their_own_verdict() {
+        let space = opt_color_space("rec2020").expect("a space");
+        let pixels = PixelColorSpace::Rec2020;
+        let opaque = |k: u16| {
+            let [r, g] = k.to_le_bytes();
+            [r, g, 0, u8::MAX]
+        };
+        let first = opaque(0);
+        let other = (1..=u16::MAX)
+            .map(opaque)
+            .find(|&k| {
+                verdict_slot((pixels, k)) == verdict_slot((pixels, first))
+            })
+            .expect("two colours in one slot");
+        let paint = Paint::new(Color4f::new(0.0, 0.0, 0.0, 1.0), None);
+        let verified = |bytes: [u8; 4]| {
+            let rgb = [0, 1, 2].map(|i| f64::from(bytes[i]) / 255.0);
+            ExactColour::new(rgb, space.clone(), pixels, true)
+                .verified_paint(&paint)
+                .map(|paint| paint.color4f())
+        };
+        let own = |bytes: [u8; 4]| {
+            landed(&space, pixels, bytes).map(|(colour, tagged)| {
+                let mut own = paint.clone();
+                own.set_color4f(colour, &tagged);
+                own.color4f()
+            })
+        };
+        assert_ne!(own(first), own(other), "the two verdicts differ");
+        for bytes in [first, other, first, other] {
+            assert_eq!(verified(bytes), own(bytes), "{bytes:?}");
+        }
+    }
+
+    /// `css` on an eight-bit page in `page`, as the exact colour and as the
+    /// plain paint the document recording draws it with.
+    fn on_page(css: &str, page: &str) -> (ExactColour, Paint) {
+        let space = opt_color_space(page).expect("a space");
+        let (colour, named) = css_to_color4f_in_space(css).expect("a colour");
+        let canvas = PixelColorSpace::matching(&space).expect("a page space");
+        let rgb =
+            color_in_canvas_space(colour, &named, canvas).expect("converts");
+        let (plain, tagged) = skia_paint_color_onto(colour, &named, &space);
+        let mut paint = Paint::default();
+        paint.set_color4f(plain, &tagged);
+        (ExactColour::new(rgb, space, canvas, true), paint)
+    }
+
+    /// A colour Skia lands off its byte as a paint's colour, however it is
+    /// moved within the byte, is left to the shader.
+    #[test]
+    fn a_colour_skia_lands_off_its_byte_is_refused() {
+        let (exact, paint) =
+            on_page("color(rec2020 1 1 0 / 0.34901962)", "rec2020");
+        assert!(exact.verified_paint(&paint).is_none());
+        let (exact, paint) = on_page("color(rec2020 0.5 0.5 0.5)", "rec2020");
+        assert!(exact.verified_paint(&paint).is_some(), "a grey lands");
+    }
+
+    /// Text takes the placed colour only where it sets the glyph mask's
+    /// contrast from the plain colour's bucket: `color(display-p3 0.05 0.56
+    /// 0.5)` lands, but its sRGB blue moves from 127.34 to 127.87, across
+    /// the edge of a bucket, so the dye draws it.
+    #[test]
+    fn text_keeps_the_dye_where_the_placed_colour_moves_its_contrast() {
+        let (exact, paint) =
+            on_page("color(display-p3 0.05 0.56 0.5)", "display-p3");
+        assert!(exact.verified_paint(&paint).is_some());
+        assert!(exact.verified_text_paint(&paint).is_none());
+        let (exact, paint) =
+            on_page("color(display-p3 0.5 0.5 0.5)", "display-p3");
+        assert!(exact.verified_text_paint(&paint).is_some());
     }
 }
