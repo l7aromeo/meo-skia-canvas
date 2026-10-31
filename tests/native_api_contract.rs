@@ -1980,18 +1980,34 @@ fn a_run_can_be_painted_and_highlighted() -> Result<()> {
 fn text_metrics_report_the_em_box() -> Result<()> {
     // Present on the JavaScript `TextMetrics` and absent here, so a caller
     // porting a measurement from the browser found two fields missing.
+    // Oswald, whose ascent and descent are 1.48em together, so the em box
+    // cannot pass for the font's bounds.
+    let font_bytes =
+        std::fs::read("tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf")
+            .context("oswald-vf")?;
+    FontLibrary::new().register_font_from_data("EmBoxOswald", &font_bytes)?;
     let mut canvas = Canvas::new(200.0, 100.0);
     let ctx = canvas.context();
-    ctx.set_font(&Font::new("Helvetica", 32.0));
+    ctx.set_font(&Font::new("EmBoxOswald", 32.0));
     let metrics = ctx.measure_text("Hxg", None);
 
     assert!(metrics.width > 0.0, "measured nothing");
     assert!(metrics.em_height_ascent > 0.0, "no ascent");
     assert!(metrics.em_height_descent > 0.0, "no descent");
-    // The same numbers the font bounds report, which is what the binding
-    // has always answered and what Skia gives per face.
-    assert_eq!(metrics.em_height_ascent, metrics.font_bounding_box_ascent);
-    assert_eq!(metrics.em_height_descent, metrics.font_bounding_box_descent);
+    // The em square, not the font's bounds: the two halves add up to the
+    // font size, where the bounds add up to 47.4. Where it divides is pinned
+    // per face in `top_middle_and_bottom_are_the_em_squares`.
+    let em = metrics.em_height_ascent + metrics.em_height_descent;
+    assert!(
+        (em - 32.0).abs() < 1e-3,
+        "the em square is {em} high at 32px"
+    );
+    let bounds =
+        metrics.font_bounding_box_ascent + metrics.font_bounding_box_descent;
+    assert!(
+        (bounds - 32.0).abs() > 1.0,
+        "the bounds are {bounds}, not the face's"
+    );
     Ok(())
 }
 

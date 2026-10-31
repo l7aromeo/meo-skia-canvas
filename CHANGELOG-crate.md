@@ -213,6 +213,24 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **`TextBaseline::Top`, `Middle` and `Bottom` sit on the em square.** HTML
+  puts them at the top, middle and bottom of the em square; they were at the
+  face's ascent, its descent and halfway between, which lie outside the em
+  square wherever the face's ascent and descent add up to more than the font
+  size. The em square is now the font size divided at the alphabetic
+  baseline as the face's typographic ascender and descender divide it, which
+  is where Chrome 156 puts these baselines on every face measured: 100px
+  Oswald's `Top` is 80.50 above the alphabetic baseline where it was 119.30,
+  Amstelvar's 75 where it was 95. A face that states no typographic span is
+  divided as its ascent and descent divide it, as in Chrome. Text drawn,
+  stroked or outlined at these three baselines moves by the difference, and
+  `Context2D::measure_text`'s values move with the baseline they are
+  measured from. `TextMetrics::em_height_ascent` and `em_height_descent`,
+  which reported the face's ascent and descent, now report the em square,
+  adding up to the font size at every baseline. Code that offset text drawn
+  at `Top`, `Middle` or `Bottom` to make up for where it used to sit is now
+  off by that offset.
+
 - **`font_bounding_box_ascent` and `font_bounding_box_descent` are measured
   from the `TextBaseline` set.** At every baseline but `Alphabetic` they were
   a second baseline offset away: at `Top`, 96px Oswald reported an ascent of

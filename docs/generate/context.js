@@ -353,14 +353,9 @@ function metrics() {
   // apart every line of "Baseline" landed on the one above it and the whole
   // image was a single smear.
   //
-  // `ideographic` and `bottom` come out identical, and that is correct
-  // rather than a fault in the drawing. Both resolve to `-descent` -- see
-  // `Baseline::get_offset`, which follows Chromium's
-  // `TextMetrics::GetFontBaseline` and maps the two the same way. Measured
-  // here before it was believed: for a 30px run every other baseline lands
-  // somewhere distinct, and those two land on the same pixel in every font
-  // tried, with CJK text as well as Latin. The image says so, because two
-  // identical rows with no explanation read as a bug.
+  // `bottom` and `ideographic` sit close and apart: `bottom` is the foot of
+  // the em square and `ideographic` the face's descent, which on 30px
+  // Helvetica lie 1.36px apart -- see `Baseline::get_offset`.
   {
     const BASELINES = [
       "top",
@@ -402,28 +397,6 @@ function metrics() {
       ctx.fillStyle = LABEL;
       ctx.fillText(`"${baseline}"`, LEFT + wordWidth + 18, y);
     });
-
-    // Brace the two that coincide, and say why.
-    const first = 44 + 4 * STEP;
-    const second = 44 + 5 * STEP;
-    ctx.strokeStyle = "#f0883e";
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(RULE_END - 6, first);
-    ctx.lineTo(RULE_END + 4, first);
-    ctx.lineTo(RULE_END + 4, second);
-    ctx.lineTo(RULE_END - 6, second);
-    ctx.stroke();
-
-    ctx.save();
-    ctx.translate(RULE_END + 14, (first + second) / 2);
-    ctx.rotate(-Math.PI / 2);
-    ctx.font = "12px Helvetica";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillStyle = "#f0883e";
-    ctx.fillText("both = -descent", 0, 0);
-    ctx.restore();
 
     ctx.textBaseline = "alphabetic";
     save("measureTextBaselines", canvas);

@@ -6,7 +6,10 @@ use crate::{
     cache_map::{CacheMap, CacheSet},
     context::{State, faint::Faint, typesetting::Typography},
     css::{FontUnits, is_font_relative, parse_length, without_comments},
-    font::{FontFamily, ObliqueAngle, leans_as_asked, variation_axes},
+    font::{
+        FontFamily, ObliqueAngle, leans_as_asked, typo_ascent_share,
+        variation_axes,
+    },
     font_library::{FontEpoch, FontLibrary, base_face},
     node::{
         decorate::{self, FaceLines, Layer, LinePaint, Thickness},
@@ -2328,6 +2331,8 @@ impl<'a> Typesetter<'a> {
         let hang = Baseline::Hanging.get_offset(self.char_style()) - shift;
         let norm = Baseline::Alphabetic.get_offset(self.char_style()) - shift;
         let ideo = Baseline::Ideographic.get_offset(self.char_style()) - shift;
+        // The em square's top, above the alphabetic baseline.
+        let em_top = Baseline::Top.get_offset(self.char_style());
 
         // The laid-out box of each line horizontally, which is what the
         // Canvas API's `width` measures, so trailing whitespace counts.
@@ -2425,6 +2430,8 @@ impl<'a> Typesetter<'a> {
             line_details: vec![],
             font_ascent,
             font_descent,
+            em_ascent: em_top + norm,
+            em_descent: self.char_style().font_size() - em_top - norm,
             alphabetic: norm,
             hanging: hang,
             ideographic: ideo,
@@ -2994,6 +3001,15 @@ pub fn from_text_baseline(mode: CrateTextBaseline) -> String {
 }
 
 impl Baseline {
+    /// How far the baseline is above the alphabetic one, in pixels: negative
+    /// below it.
+    ///
+    /// `top`, `middle` and `bottom` are the top, middle and bottom of the em
+    /// square, as the HTML standard names them, divided at the alphabetic
+    /// baseline as the face's typographic metrics divide it -- see
+    /// [`typo_ascent_share`]. The others are the face's own: `hanging` at
+    /// four fifths of its ascent and `ideographic` at its descent, as Chrome
+    /// places them.
     pub fn get_offset(&self, style: &TextStyle) -> f32 {
         let FontMetrics {
             mut ascent,
@@ -3003,16 +3019,38 @@ impl Baseline {
         ascent -= style.baseline_shift(); // offsets are defined relative to the alphabetic baseline, so
         descent -= style.baseline_shift(); // compensate for any other textBaseline setting
 
-        // see TextMetrics::GetFontBaseline from Chromium for reference:
-        // https://github.com/chromium/chromium/blob/main/third_party/blink/renderer/core/html/canvas/text_metrics.cc#L34
         match self {
-            Baseline::Top => -ascent,
+            Baseline::Top => em_top(style, ascent, descent),
             Baseline::Hanging => -ascent * 0.8,
-            Baseline::Middle => -(ascent + descent) / 2.0,
+            Baseline::Middle => {
+                em_top(style, ascent, descent) - style.font_size() / 2.0
+            }
             Baseline::Alphabetic => 0.0,
-            Baseline::Bottom | Baseline::Ideographic => -descent,
+            Baseline::Bottom => {
+                em_top(style, ascent, descent) - style.font_size()
+            }
+            Baseline::Ideographic => -descent,
         }
     }
+}
+
+/// How far the em square's top is above the alphabetic baseline, for
+/// `style`'s face at its size.
+///
+/// A face that states no typographic span divides the em as its ascent and
+/// descent do, `ascent` and `descent` being those -- Chrome's answer for a
+/// face whose typographic ascender and descender are zero, 79.17 of 100px
+/// for one whose `hhea` gives 1900 and 500. A face with neither span puts
+/// the whole em above the alphabetic baseline, where its glyphs stand.
+fn em_top(style: &TextStyle, ascent: f32, descent: f32) -> f32 {
+    let share = style
+        .typeface()
+        .and_then(|face| typo_ascent_share(&face))
+        .unwrap_or_else(|| match descent - ascent {
+            span if span > 0.0 => -ascent / span,
+            _ => 1.0,
+        });
+    style.font_size() * share
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -3361,6 +3399,10 @@ pub struct TextExtents {
     pub font_ascent: f32,
     /// Distance the face can reach below the baseline, positive.
     pub font_descent: f32,
+    /// Distance from the selected baseline up to the em square's top.
+    pub em_ascent: f32,
+    /// Distance from the selected baseline down to the em square's bottom.
+    pub em_descent: f32,
     /// Offset of the alphabetic baseline from the selected one.
     pub alphabetic: f32,
     /// Offset of the hanging baseline from the selected one.
@@ -3441,8 +3483,8 @@ const METRIC_FIELDS: &[Field<TextExtents>] = &[
     Field::plain("width", |m| m.width as f64),
     Field::plain("fontBoundingBoxAscent", |m| m.font_ascent as f64),
     Field::plain("fontBoundingBoxDescent", |m| m.font_descent as f64),
-    Field::plain("emHeightAscent", |m| m.font_ascent as f64),
-    Field::plain("emHeightDescent", |m| m.font_descent as f64),
+    Field::plain("emHeightAscent", |m| m.em_ascent as f64),
+    Field::plain("emHeightDescent", |m| m.em_descent as f64),
     Field::plain("hangingBaseline", |m| m.hanging as f64),
     Field::plain("alphabeticBaseline", |m| m.alphabetic as f64),
     Field::plain("ideographicBaseline", |m| m.ideographic as f64),
