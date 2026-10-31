@@ -1689,7 +1689,7 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 ### Known, and not fixed here
 
 - **On macOS a GPU draw can be dropped when the shader compiler is slow, in
-  a crate build.** The Skia skia-bindings 0.153.3 downloads waits one second
+  a crate build.** The Skia skia-bindings 0.156.0 downloads waits one second
   for each Metal shader and pipeline it compiles and then draws nothing, so
   on a loaded machine a process's first image draw, blend mode or gradient
   can come back missing. The npm package's macOS binary is built without
