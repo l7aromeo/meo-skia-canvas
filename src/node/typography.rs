@@ -683,8 +683,12 @@ impl RunPaint {
     /// -- so that a wrapped line's underline lies over the line above's
     /// descenders, as in Chrome.
     ///
-    /// The blobs are built for this draw: one built for another paint is
-    /// not drawn again -- see `LaidOut::blobs`.
+    /// The blobs are built for this draw rather than kept from another:
+    /// Skia's GPU backend draws a blob again in another plain colour
+    /// unlike a fresh one -- see `LaidOut::blobs` -- for a cause not known.
+    /// A run drawn again through an image's shader, as a canvas's pattern
+    /// replays one, did not part that way in any of 49 pairs of patterns,
+    /// but nothing shows it cannot, so the blobs are not kept for it either.
     pub fn paint(
         &self,
         canvas: &Canvas,

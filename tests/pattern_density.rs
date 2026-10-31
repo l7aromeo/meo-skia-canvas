@@ -675,70 +675,71 @@ fn every_way_a_run_is_drawn_is_dyed_as_the_pixels_pattern_dyes_it() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
-/// A run dyed by a canvas's pattern, drawn again on the GPU in another
-/// pattern and alpha after any other and with the canvas read back in
-/// between, draws what a fresh canvas draws: a replayed run builds its
-/// blobs for each draw rather than drawing again blobs built for another
-/// paint, which Skia's GPU backend draws unlike fresh ones -- see
-/// `LaidOut`'s blobs.
+/// An alpha under half of one 255th, which Skia's eight-bit rounding of a
+/// paint's alpha takes to zero, so that a draw at it reaches a float page
+/// only through `Faint::drawable`: `0.5 / 255` is about 0.00196.
+const FAINT: f32 = 0.001;
+
+/// A faint path dyed by a canvas's pattern on a float page paints what the
+/// same path dyed by a pattern of the canvas's pixels paints there, to the
+/// byte, and paints something: a path kept whole for the pattern is drawn
+/// through `Faint::drawable`, as a path is drawn any other way.
 #[test]
-fn a_run_replayed_on_the_gpu_draws_as_a_fresh_one() {
-    FontLibrary::new()
-        .use_paths(Some(OSWALD_FAMILY), [OSWALD])
-        .expect("bundled Oswald registers");
-    let colours = [
-        ("#000000", 1.0),
-        ("#203040", 1.0),
-        ("green", 1.0),
-        ("green", 0.5),
-        ("#c03010", 1.0),
-        ("#808080", 1.0),
-        ("#ffffff", 1.0),
-    ];
+fn a_faint_path_dyed_by_it_on_a_float_page_paints_as_the_pixels_pattern_does() {
+    let mut source = source(Source::Path70);
+    let pixels = pixels_pattern(&mut source, 1);
     let mut holder = Canvas::new(WIDTH, HEIGHT);
-    let patterns: Vec<(Pattern, f32)> = colours
-        .iter()
-        .map(|&(colour, alpha)| {
-            let mut source = Canvas::new(20.0, 20.0);
-            let tile = source.context();
-            tile.set_fill_style_css(colour).expect("a colour");
-            tile.fill_rect(0.0, 0.0, 20.0, 20.0);
-            let pattern = holder
-                .context()
-                .create_pattern_from_canvas(&mut source, PatternRepeat::Repeat);
-            (pattern, alpha)
-        })
-        .collect();
-    let draw = |canvas: &mut Canvas, (pattern, alpha): &(Pattern, f32)| {
+    let made = holder
+        .context()
+        .create_pattern_from_canvas(&mut source, PatternRepeat::Repeat);
+    let faint = |pattern: &Pattern, depth: PixelDepth, gpu: bool| {
+        let mut canvas = Canvas::with_options(
+            WIDTH,
+            HEIGHT,
+            CanvasOptions {
+                color_type: depth,
+                gpu,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas");
         let ctx = canvas.context();
-        ctx.clear_rect(0.0, 0.0, WIDTH, HEIGHT);
-        ctx.set_global_alpha(*alpha);
+        ctx.set_global_alpha(FAINT);
         ctx.set_fill_pattern(pattern);
-        ctx.fill_text("Hamburgefonstiv fi AV", 10.0, 70.0, None);
-        pixels(canvas, 1)
-    };
-    let canvas = || {
-        let mut canvas = Canvas::new(WIDTH, HEIGHT);
-        canvas.set_gpu(true);
-        assert!(
-            canvas
-                .context()
-                .set_font_css(&format!("28px {OSWALD_FAMILY}"))
-        );
+        triangle(ctx, 60.0, 30.0);
         canvas
+            .context()
+            .get_image_data_as(
+                0.0,
+                0.0,
+                WIDTH,
+                HEIGHT,
+                PixelExportOptions {
+                    depth: PixelDepth::F32,
+                    premultiplied: true,
+                    ..PixelExportOptions::default()
+                },
+            )
+            .expect("pixels")
+            .pixels()
+            .to_vec()
     };
-    let mut differing = vec![];
-    for (second, colour) in patterns.iter().zip(colours) {
-        let wanted = draw(&mut canvas(), second);
-        for (first, before) in patterns.iter().zip(colours) {
-            // Twice in the first, for the run to be kept.
-            let mut again = canvas();
-            draw(&mut again, first);
-            draw(&mut again, first);
-            if draw(&mut again, second) != wanted {
-                differing.push(format!("{before:?} then {colour:?}"));
+    let mut failures = vec![];
+    for depth in [PixelDepth::F16, PixelDepth::F32] {
+        for gpu in [false, true] {
+            let want = faint(&pixels, depth, gpu);
+            let strongest = want
+                .chunks(16)
+                .map(|p| f32::from_le_bytes([p[12], p[13], p[14], p[15]]))
+                .fold(0.0, f32::max);
+            assert!(
+                strongest > 0.0,
+                "{depth:?} gpu {gpu}: the reference paints nothing"
+            );
+            if faint(&made, depth, gpu) != want {
+                failures.push(format!("{depth:?} gpu {gpu}"));
             }
         }
     }
-    assert!(differing.is_empty(), "{differing:#?}");
+    assert!(failures.is_empty(), "{failures:#?}");
 }
