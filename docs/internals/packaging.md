@@ -59,8 +59,12 @@ Linux `containers/skia-brotli-sources.patch` and the atlas-size cap. The brotli
 patch adds the two sources Skia's build list leaves out since M156, without
 which a `freetype` build fails to link on `kCmdLut` and
 `BrotliDecoderEnsureStaticInit`. It is
-fetched once, about 1 GB, into `$XDG_CACHE_HOME/meo-skia-canvas`, under a name
-that carries the version and a digest of the platform's patches. Once a new tree
+made once into `$XDG_CACHE_HOME/meo-skia-canvas`, under a name that carries the
+version and a digest of the platform's patches: fetched, about 1 GB, when the
+cache holds no tree for the version, and otherwise derived from one -- copied
+copy-on-write, its sources restored by git and checked against the tag and
+the commits Skia's DEPS pins, then patched -- in seconds, with nothing
+downloaded. A tree that fails a check is named on stderr and passed over. Once a new tree
 is ready the others are removed, except any a worktree of the repository still
 locks: the cache is shared by every worktree on the machine. A bare
 `cargo build` or `bun run build` outside `just` sets nothing, downloads the

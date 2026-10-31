@@ -7,8 +7,10 @@ const {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } = require("fs");
 const { tmpdir } = require("os");
@@ -263,6 +265,50 @@ describe("skia-source's git acts on its own checkout inside a hook", () => {
   });
 });
 
+describe("skia-source's git writes a repository's bytes", () => {
+  let run;
+  let saved;
+  beforeEach(async () => {
+    ({ run } = await import(pathToFileURL(SCRIPT).href));
+    saved = { ...process.env };
+  });
+  afterEach(() => {
+    for (const name of Object.keys(process.env))
+      if (!(name in saved)) delete process.env[name];
+    Object.assign(process.env, saved);
+  });
+
+  // The fetch's clone, under the config Windows's git is installed with.
+  test("a clone under core.autocrlf=true checks out LF as committed", (t) => {
+    const dir = scratch(t);
+    const upstream = repository(join(dir, "upstream"), { "a.cc": "a\nb\n" });
+    const config = join(dir, "gitconfig");
+    writeFileSync(config, "[core]\n\tautocrlf = true\n");
+    process.env.GIT_CONFIG_GLOBAL = config;
+
+    run("git", ["clone", "--quiet", upstream, join(dir, "checkout")]);
+    assert.equal(readFileSync(join(dir, "checkout", "a.cc"), "utf8"), "a\nb\n");
+  });
+
+  // The other route to CRLF: a machine's own attributes marking every file
+  // text, with CRLF as its line ending.
+  test("a clone under core.eol=crlf and a global text attribute checks out LF", (t) => {
+    const dir = scratch(t);
+    const upstream = repository(join(dir, "upstream"), { "a.cc": "a\nb\n" });
+    const attributes = join(dir, "gitattributes");
+    writeFileSync(attributes, "* text=auto\n");
+    const config = join(dir, "gitconfig");
+    writeFileSync(
+      config,
+      `[core]\n\teol = crlf\n\tattributesFile = ${attributes.replaceAll("\\", "/")}\n`,
+    );
+    process.env.GIT_CONFIG_GLOBAL = config;
+
+    run("git", ["clone", "--quiet", upstream, join(dir, "checkout")]);
+    assert.equal(readFileSync(join(dir, "checkout", "a.cc"), "utf8"), "a\nb\n");
+  });
+});
+
 /**
  * The cache name `prepare` gives the tree for `version` and this platform's
  * patches holding `contents`, in order.
@@ -417,5 +463,277 @@ describe("skia-source stands aside for a local rust-skia checkout", () => {
       '[dependencies]\nskia-safe = "0.156.0"\nskia-bindings = "0.156.0"\n',
     );
     assert.equal(usesLocalSkia(root), false);
+  });
+});
+
+/**
+ * A prepared tree for `version` under `cache`, named `name`, built the way
+ * `prepare` builds one but from local repositories: rust-skia at the
+ * version's tag with Skia as its submodule, one dependency DEPS pins checked
+ * out at its pin, and a gn. `src/a.cc` is the file a patch changes; `patched`
+ * leaves it changed, as a tree with a different patch list would be.
+ */
+function preparedTree(dir, cache, name, version, { patched = true } = {}) {
+  const sources = join(dir, `sources-${name}`);
+  const dependency = repository(join(sources, "dep"), { "dep.c": "dep\n" });
+  const pin = git(dependency, "rev-parse", "HEAD").trim();
+  const skia = repository(join(sources, "skia"), {
+    // A URL, as a real DEPS names its repositories: a Windows path in a
+    // Python string reads `\U` as the start of an escape.
+    DEPS: `deps = {"third_party/externals/dep": "${pathToFileURL(dependency).href}@${pin}"}\n`,
+    "src/a.cc": "pristine\n",
+  });
+  const rustSkia = repository(join(sources, "rust-skia"), { README: "r\n" });
+  const local = ["-c", "protocol.file.allow=always"];
+  git(
+    rustSkia,
+    ...local,
+    "submodule",
+    "add",
+    "--quiet",
+    skia,
+    "skia-bindings/skia",
+  );
+  git(rustSkia, "commit", "--quiet", "--message", "skia");
+  git(rustSkia, "tag", version);
+
+  const tree = join(cache, name);
+  const checkout = join(tree, "rust-skia");
+  git(
+    dir,
+    ...local,
+    "clone",
+    "--quiet",
+    "--recurse-submodules",
+    "--branch",
+    version,
+    rustSkia,
+    checkout,
+  );
+  const source = join(checkout, "skia-bindings", "skia");
+  git(
+    dir,
+    "clone",
+    "--quiet",
+    dependency,
+    join(source, "third_party", "externals", "dep"),
+  );
+  mkdirSync(join(source, "bin"), { recursive: true });
+  writeFileSync(join(source, "bin", "gn"), "gn\n");
+  if (patched) writeFileSync(join(source, "src", "a.cc"), "patched\n");
+  writeFileSync(join(tree, ".ready"), `${version}\n`);
+  return {
+    tree,
+    checkout,
+    source,
+    dependency: join(source, "third_party", "externals", "dep"),
+  };
+}
+
+// A changed patch list names a new tree, and `prepare` fetched every new tree
+// from the network -- rust-skia, Skia's DEPS and gn, about 1 GB -- though every
+// tree for a version holds the same checkout and dependencies and differs only
+// in the patches applied to tracked files.
+describe("skia-source derives a tree from another of its version", () => {
+  let derive, patchCreates, copyTree;
+  beforeEach(async () => {
+    ({ derive, patchCreates, copyTree } = await import(
+      pathToFileURL(SCRIPT).href
+    ));
+  });
+
+  test("a patched tree is copied with its sources restored and nothing fetched", (t) => {
+    const dir = scratch(t);
+    const cache = join(dir, "cache");
+    const base = preparedTree(dir, cache, "skia-1.0.0-aaaa", "1.0.0");
+    const partial = join(cache, "skia-1.0.0-bbbb.partial");
+    t.mock.method(console, "error", () => {});
+
+    assert.equal(derive(cache, partial, "1.0.0"), "skia-1.0.0-aaaa");
+    const source = join(partial, "rust-skia", "skia-bindings", "skia");
+    assert.equal(
+      readFileSync(join(source, "src", "a.cc"), "utf8"),
+      "pristine\n",
+    );
+    assert.equal(readFileSync(join(source, "bin", "gn"), "utf8"), "gn\n");
+    assert.equal(
+      readFileSync(
+        join(source, "third_party", "externals", "dep", "dep.c"),
+        "utf8",
+      ),
+      "dep\n",
+    );
+    assert.ok(
+      !existsSync(join(partial, ".ready")),
+      "the caller marks it ready",
+    );
+    // The base is left as it was.
+    assert.equal(
+      readFileSync(join(base.source, "src", "a.cc"), "utf8"),
+      "patched\n",
+    );
+  });
+
+  // Windows's git is installed with core.autocrlf true, so a restore that
+  // follows the machine's config wrote Skia's sources with CRLF: not the bytes
+  // a tree is named for, and an LF patch then fails to apply at `-F0`.
+  test("a restore under core.autocrlf=true writes the repository's bytes", (t) => {
+    const dir = scratch(t);
+    const cache = join(dir, "cache");
+    preparedTree(dir, cache, "skia-1.0.0-aaaa", "1.0.0");
+    const partial = join(cache, "skia-1.0.0-bbbb.partial");
+    t.mock.method(console, "error", () => {});
+    const config = join(dir, "gitconfig");
+    writeFileSync(config, "[core]\n\tautocrlf = true\n");
+    const before = process.env.GIT_CONFIG_GLOBAL;
+    t.after(() => {
+      if (before === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+      else process.env.GIT_CONFIG_GLOBAL = before;
+    });
+    process.env.GIT_CONFIG_GLOBAL = config;
+
+    assert.equal(derive(cache, partial, "1.0.0"), "skia-1.0.0-aaaa");
+    const source = join(partial, "rust-skia", "skia-bindings", "skia");
+    assert.equal(
+      readFileSync(join(source, "src", "a.cc"), "utf8"),
+      "pristine\n",
+    );
+  });
+
+  // Each way a base can fail to be a whole preparation, and what `derive`
+  // must say about it. None may leave a partial tree behind.
+  const defects = [
+    [
+      "its dependency off its pin",
+      ({ dependency }) => {
+        writeFileSync(join(dependency, "dep.c"), "moved\n");
+        git(dependency, "commit", "--quiet", "--all", "--message", "moved");
+      },
+      /is not at the commit DEPS pins/,
+    ],
+    [
+      "its dependency edited",
+      ({ dependency }) => {
+        writeFileSync(join(dependency, "dep.c"), "edited\n");
+      },
+      /has been edited/,
+    ],
+    ["no gn", ({ source }) => rmSync(join(source, "bin", "gn"))],
+    [
+      "a DEPS Python cannot read",
+      ({ source }) => {
+        writeFileSync(join(source, "DEPS"), 'deps = {"x": "C:\\Users\\x@0"}\n');
+      },
+      /its DEPS could not be read: .*SyntaxError/,
+    ],
+    [
+      "a ready mark for another version",
+      ({ tree }) => {
+        writeFileSync(join(tree, ".ready"), "0.9.0\n");
+      },
+      /not a finished tree/,
+    ],
+    [
+      "no ready mark",
+      ({ tree }) => rmSync(join(tree, ".ready")),
+      /not a finished tree/,
+    ],
+    [
+      "its checkout moved off the tag",
+      ({ checkout }) => {
+        writeFileSync(join(checkout, "README"), "moved\n");
+        git(checkout, "commit", "--quiet", "--all", "--message", "moved");
+      },
+      /not at the 1.0.0 tag/,
+    ],
+    [
+      "Skia moved off the commit rust-skia records",
+      ({ source }) => {
+        git(source, "commit", "--quiet", "--allow-empty", "--message", "moved");
+      },
+      /not at the commit rust-skia records/,
+    ],
+  ].map(([what, damage, reason = /no gn/]) => ({ what, damage, reason }));
+
+  for (const { what, damage, reason } of defects)
+    test(`a base with ${what} is refused`, (t) => {
+      const dir = scratch(t);
+      const cache = join(dir, "cache");
+      damage(preparedTree(dir, cache, "skia-1.0.0-aaaa", "1.0.0"));
+      const partial = join(cache, "skia-1.0.0-bbbb.partial");
+      const said = [];
+      t.mock.method(console, "error", (line) => said.push(line));
+
+      assert.equal(derive(cache, partial, "1.0.0"), null);
+      assert.ok(!existsSync(partial), "nothing is left behind");
+      assert.match(said.join("\n"), reason);
+    });
+
+  test("a base that holds a file a patch creates is refused", (t) => {
+    const dir = scratch(t);
+    const cache = join(dir, "cache");
+    const { checkout } = preparedTree(dir, cache, "skia-1.0.0-aaaa", "1.0.0");
+    writeFileSync(join(checkout, "NEW"), "left over\n");
+    const said = [];
+    t.mock.method(console, "error", (line) => said.push(line));
+
+    const partial = join(cache, "skia-1.0.0-bbbb.partial");
+    assert.equal(derive(cache, partial, "1.0.0", ["NEW"]), null);
+    assert.match(said.join("\n"), /NEW exists, which a patch creates/);
+  });
+
+  test("a tree for another version is not considered", (t) => {
+    const dir = scratch(t);
+    const cache = join(dir, "cache");
+    preparedTree(dir, cache, "skia-0.9.0-aaaa", "0.9.0");
+    const said = [];
+    t.mock.method(console, "error", (line) => said.push(line));
+
+    assert.equal(
+      derive(cache, join(cache, "skia-1.0.0-bbbb.partial"), "1.0.0"),
+      null,
+    );
+    assert.deepEqual(said, []);
+  });
+
+  // Windows has no `cp`, so the copy there is Node's. Run here too, where it
+  // can be: what it makes has to be the tree, links included.
+  test("Windows's copy makes the tree, its links as links", (t) => {
+    const dir = scratch(t);
+    const from = join(dir, "from");
+    mkdirSync(join(from, "a", "b"), { recursive: true });
+    writeFileSync(join(from, "a", "b", "file"), "contents\n");
+    // Windows lets an account without the right make no link: the copy is
+    // still checked there, its link only where one could be made.
+    let linked = true;
+    try {
+      symlinkSync("..", join(from, "a", "up"), "dir");
+    } catch (error) {
+      if (error.code !== "EPERM") throw error;
+      linked = false;
+    }
+    copyTree(from, join(dir, "to"), "win32");
+    assert.equal(
+      readFileSync(join(dir, "to", "a", "b", "file"), "utf8"),
+      "contents\n",
+    );
+    if (linked) assert.equal(readlinkSync(join(dir, "to", "a", "up")), "..");
+  });
+
+  test("the files a patch creates are the ones it takes from /dev/null", () => {
+    const patch = [
+      "--- a/skia-bindings/skia/src/a.cc",
+      "+++ b/skia-bindings/skia/src/a.cc",
+      "@@ -1 +1 @@",
+      "-pristine",
+      "+patched",
+      "--- /dev/null",
+      "+++ b/skia-bindings/skia/src/new.cc",
+      "@@ -0,0 +1 @@",
+      "+new",
+      "",
+    ].join("\n");
+    assert.deepEqual(patchCreates(patch), ["skia-bindings/skia/src/new.cc"]);
+    assert.deepEqual(patchCreates(patch.replace("/dev/null", "a/x")), []);
   });
 });

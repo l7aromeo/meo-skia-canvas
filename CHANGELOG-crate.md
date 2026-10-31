@@ -1635,6 +1635,18 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Changed
 
+- **`node scripts/skia-source.mjs prepare` makes a tree from one it already
+  has.** docs/rust.md sends a crate build that wants the patched Skia to
+  `prepare`, which fetched every tree it made, about 1 GB, including one
+  for a new patch list over a version it already held. It now copies a
+  tree it holds for the same version, restores the copy's sources to their
+  commits, checks them and the dependencies Skia's DEPS pins, and patches
+  that: seconds rather than a download. It fetches only where no tree
+  passes those checks, and says so before it starts. Either way it writes
+  Skia's sources as they are committed: where git's config sets
+  `core.autocrlf` true, as Git for Windows installs it, they were written
+  with CRLF line endings, and the patches then failed to apply.
+
 - **`Path2D::to_svg` writes numbers exactly and conics as arcs.** Its text
   changes for any path; the geometry it describes does not. Each number is
   now the shortest decimal that reads back as the same `f32`, where Skia's
