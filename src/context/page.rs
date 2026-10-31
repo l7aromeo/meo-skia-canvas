@@ -4037,13 +4037,14 @@ impl Page {
     /// Renders a run of layers to pixels and draws the result into `canvas`.
     ///
     /// At `embedding`'s density, and composited as the page composites -- in
-    /// its space and format, played as its pixels are -- so that a blend in
-    /// the run blends where it does on the canvas: an sRGB surface put
-    /// `multiply` on a Display P3 page
-    /// up to 10 levels from the canvas's own pixels, and `screen` over
-    /// `color(display-p3 1 0 0)` up to 40. Then converted to eight-bit sRGB,
-    /// the space a document's image is read in, each channel of a colour
-    /// outside sRGB's gamut clamped as the vector side's colours are.
+    /// its space and format, played as its pixels are, its text rasterized
+    /// with the page's contrast and gamma -- so that a blend in the run
+    /// blends where it does on the canvas: an sRGB surface put `multiply` on a
+    /// Display P3 page up to 10 levels from the canvas's own pixels, and
+    /// `screen` over `color(display-p3 1 0 0)` up to 40. Then converted to
+    /// eight-bit sRGB, the space a document's image is read in, each
+    /// channel of a colour outside sRGB's gamut clamped as the vector
+    /// side's colours are.
     ///
     /// Cropped to the ink it actually laid down: a run covers a fraction of
     /// the page, and embedding the full page for each would bloat the
@@ -4058,6 +4059,7 @@ impl Page {
             density,
             space,
             color_type,
+            text: (contrast, gamma),
         } = embedding;
         let dims = self.scaled_dimensions(density);
         let info = ImageInfo::new(
@@ -4066,7 +4068,8 @@ impl Page {
             AlphaType::Premul,
             Some(space.clone()),
         );
-        let mut surface = started::raster(&info, None, None)
+        let props = text_surface_props(contrast, gamma);
+        let mut surface = started::raster(&info, None, Some(&props))
             .ok_or("Could not allocate a surface for the document fallback")?;
 
         // Drawn under the transform the document is drawing under, at the
@@ -5168,12 +5171,15 @@ impl PageSequence {
             matte,
             surface_color_space,
             surface_color_type,
+            text_contrast,
+            text_gamma,
             ..
         } = options;
         let embedding = Embedding {
             density,
             space: &surface_color_space,
             color_type: surface_color_type,
+            text: (text_contrast, text_gamma),
         };
         let metadata = pdf::Metadata {
             producer: PDF_PRODUCER.to_string(),
@@ -5717,13 +5723,27 @@ pub fn pages_arg(
 }
 
 /// How a run of a page a document embeds as pixels is made -- see
-/// [`Page::embed_raster`]: at the export's density, and in the space and
-/// pixel format the page composites in.
+/// [`Page::embed_raster`]: at the export's density, in the space and pixel
+/// format the page composites in, and with its text's contrast and gamma.
 #[derive(Clone, Copy)]
 struct Embedding<'a> {
     density: f32,
     space: &'a ColorSpace,
     color_type: ColorType,
+    /// The page's text contrast and gamma -- see [`text_surface_props`].
+    text: (f32, f32),
+}
+
+/// The surface properties a page's text is rasterized under: `contrast` and
+/// `gamma`, the canvas's -- see
+/// [`CanvasOptions::text_contrast`](crate::canvas::CanvasOptions::text_contrast).
+fn text_surface_props(contrast: f32, gamma: f32) -> SurfaceProps {
+    SurfaceProps::new_with_text_properties(
+        SurfacePropsFlags::default(),
+        PixelGeometry::Unknown,
+        contrast,
+        gamma,
+    )
 }
 
 /// What a PDF refuses of a page composited in `space`: the blends it cannot
@@ -5931,12 +5951,7 @@ impl ExportOptions {
         // The contrast reaches only unhinted text on macOS: Skia's CoreText
         // scaler sets a hinted glyph's contrast to 0, leaving its weight to
         // CoreGraphics' dilation of smoothed text, in `SkTypeface_mac_ct.cpp`.
-        SurfaceProps::new_with_text_properties(
-            SurfacePropsFlags::default(),
-            PixelGeometry::Unknown,
-            self.text_contrast,
-            self.text_gamma,
-        )
+        text_surface_props(self.text_contrast, self.text_gamma)
     }
 
     /// How a page exported with these options embeds what a document cannot
@@ -5946,6 +5961,7 @@ impl ExportOptions {
             density: self.density,
             space: &self.surface_color_space,
             color_type: self.surface_color_type,
+            text: (self.text_contrast, self.text_gamma),
         }
     }
 
@@ -7870,6 +7886,8 @@ mod tests {
                 color_space: PixelColorSpace::DisplayP3,
                 color_type: depth,
                 gpu: false,
+                text_contrast: 1.0,
+                text_gamma: 2.2,
                 ..CanvasOptions::default()
             };
             let mut canvas = Canvas::with_options(
@@ -7895,6 +7913,7 @@ mod tests {
                 .expect("a colour");
             ctx.fill_rect(2.0, 2.0, 12.0, 12.0);
             ctx.set_font_css("bold 12px sans-serif");
+            ctx.set_font_hinting(false);
             ctx.fill_text("Wg", 16.0, 12.0, None);
             ctx.set_filter_css("blur(1px)").expect("a blur");
             ctx.fill_rect(36.0, 2.0, 12.0, 12.0);
@@ -7938,6 +7957,7 @@ mod tests {
                         density: 1.0,
                         space: &p3,
                         color_type,
+                        text: ctx.inner.canvas_text,
                     },
                     None,
                 )
