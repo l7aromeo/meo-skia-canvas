@@ -471,6 +471,19 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A canvas drawn in through a source rectangle draws its edges where the
+  canvas does.** `drawCanvas()` given a source rectangle that cuts what
+  the canvas draws clipped it there, and the clip cut every path drawn
+  across it: Skia's anti-aliasing then moved the path's edges however far
+  from the cut, a triangle by up to 28 levels at 156 pixels more than two
+  inside the crop. On the GPU the clip also bounded what a blur in the
+  canvas read, so a blur lost what it spread in from past the crop. A
+  canvas drawn in so is now drawn whole and cropped by the rectangle's
+  coverage, and inside the crop draws what it draws uncropped: to the
+  byte on an empty page, and on the CPU within two levels over what a
+  page already holds, where the canvas is composited as one image. A PDF
+  or SVG writes the crop as it did.
+
 - **A `Paragraph` under a composite operation reaches an SVG, and a PDF
   composites it.** Drawn under a `globalCompositeOperation` other than
   `source-over`, a paragraph is composited as one group through a layer,

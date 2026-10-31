@@ -27,9 +27,9 @@ use std::{
 
 use skia_safe::{
     AlphaType, BlendMode, BlurStyle, Canvas as SkCanvas, ClipOp, Color4f,
-    ColorFilter, ColorSpace, ColorType, Data, FilterMode, IRect, ImageFilter,
-    ImageInfo, MaskFilter, Matrix, Paint, PaintCap, PaintJoin, PaintStyle,
-    Path, PathDirection, Picture, PictureRecorder, Rect, RoundOut,
+    ColorFilter, ColorSpace, ColorType, Contains, Data, FilterMode, IRect,
+    ImageFilter, ImageInfo, MaskFilter, Matrix, Paint, PaintCap, PaintJoin,
+    PaintStyle, Path, PathDirection, Picture, PictureRecorder, Rect, RoundOut,
     RuntimeEffect, SamplingOptions, Shader, TileMode, canvas::SaveLayerRec,
     color_filters, image_filters,
 };
@@ -630,6 +630,76 @@ impl Entries {
 }
 
 impl Group {
+    /// Confines `canvas` to the destination the group is drawn into --
+    /// `within` -- which `to_device` maps to the canvas's pixels and the
+    /// canvas carries as its transform when this is called.
+    ///
+    /// Applied as coverage where [`Self::crop`] says so, and a clip
+    /// elsewhere.
+    fn confine(&self, canvas: &SkCanvas, target: Target, to_device: &Matrix) {
+        let Some(within) = &self.within else {
+            return;
+        };
+        match self.crop(canvas, target, to_device) {
+            Some(coverage) => {
+                canvas.reset_matrix();
+                coverage.clip(canvas);
+                canvas.set_matrix(&(*to_device).into());
+            }
+            None => {
+                canvas.clip_rect(within, ClipOp::Intersect, true);
+            }
+        }
+    }
+
+    /// The destination as coverage in the canvas's pixels, which `to_device`
+    /// maps it to, where it cuts what the group draws on pixels: `None`
+    /// where it is applied as a clip.
+    ///
+    /// A clip is what bounds a draw. On a raster on the CPU it cuts every
+    /// path drawn across its edge, and Skia's analytic anti-aliasing moves
+    /// the coverage of such a path's edges however far from the cut -- see
+    /// [`CutOp`]: a triangle drawn in, cropped, parted from its source by up
+    /// to 28 levels over 156 pixels more than two from the crop. On either
+    /// engine it bounds what a blur inside the group reads, so that a blur
+    /// near the crop lost what it spread in from past it: a pixel 4 inside
+    /// a crop on the GPU at density 3 parted by 63. As coverage the draws
+    /// are made whole and only then confined. A destination that holds what
+    /// the group draws cuts nothing and stays a clip, as does every one in
+    /// a document, which writes a clip by coverage as an empty `clipPath` --
+    /// see [`clips_by_coverage`].
+    fn crop(
+        &self,
+        canvas: &SkCanvas,
+        target: Target,
+        to_device: &Matrix,
+    ) -> Option<Coverage> {
+        let within = self.within.as_ref()?;
+        let pixels = clips_by_coverage(canvas, target)
+            || (target != Target::Document && blur_mask::draws_on(canvas));
+        if !pixels || !self.crops() {
+            return None;
+        }
+        Coverage::of(&Path::rect(within, None).make_transform(to_device))
+    }
+
+    /// Whether the destination cuts what the group draws: leaves part of it
+    /// out, by the bounds its entries reach -- see [`reach_of`] -- or where
+    /// those are not known.
+    fn crops(&self) -> bool {
+        let Some(within) = &self.within else {
+            return false;
+        };
+        let destination = self.matrix.map_rect(within).0;
+        match reach_of(&self.contents.layers) {
+            Some(reach) => {
+                let drawn = self.contents_matrix.map_rect(reach).0;
+                !destination.contains(drawn)
+            }
+            None => true,
+        }
+    }
+
     /// The opacity the group composites what it holds at, where that is all
     /// it does -- see [`LayerRec::opacity`]. A document can take such a
     /// group entry by entry, writing what it can of them and embedding the
@@ -801,13 +871,10 @@ impl Group {
                     &paint,
                     |layer| {
                         let to_layer = layer.local_to_device_as_3x3();
-                        layer.set_matrix(
-                            &Matrix::concat(&to_layer, &to_space(&self.matrix))
-                                .into(),
-                        );
-                        if let Some(within) = &self.within {
-                            layer.clip_rect(within, ClipOp::Intersect, true);
-                        }
+                        let to_device =
+                            Matrix::concat(&to_layer, &to_space(&self.matrix));
+                        layer.set_matrix(&to_device.into());
+                        self.confine(layer, target, &to_device);
                         layer.set_matrix(
                             &Matrix::concat(
                                 &to_layer,
@@ -828,36 +895,77 @@ impl Group {
                 }
             }
             (Composite::Plain, target) => {
-                canvas.set_matrix(&Matrix::concat(&base, &self.matrix).into());
-                if let Some(within) = &self.within {
-                    canvas.clip_rect(within, ClipOp::Intersect, true);
+                let to_device = Matrix::concat(&base, &self.matrix);
+                canvas.set_matrix(&to_device.into());
+                match self.crop(canvas, target, &to_device) {
+                    // On the CPU, played into a layer as large as what they
+                    // draw, which cuts none of it, and the layer multiplied
+                    // by the crop rather than clipped by it: a clip shader
+                    // there would put every draw through Skia's raster
+                    // pipeline, whose blend lands a level from its legacy
+                    // blitter's on an eight-bit page, once for each draw a
+                    // pixel lies under -- three and four over `CLIPPED`.
+                    // Multiplied, a pixel the crop covers whole keeps the
+                    // bytes the draws left it. The layer composites the
+                    // draws as one, which over what the page already holds
+                    // rounds within two levels of drawing them one by one.
+                    Some(coverage) if clips_by_coverage(canvas, target) => {
+                        canvas.set_matrix(&entries.into());
+                        let reach = reach_of(&self.contents.layers);
+                        let mut rec = SaveLayerRec::default();
+                        if let Some(reach) = &reach {
+                            rec = rec.bounds(reach);
+                        }
+                        canvas.save_layer(&rec);
+                        play_entries(&self.contents.layers, canvas, target);
+                        canvas.reset_matrix();
+                        coverage.multiply(canvas);
+                        canvas.restore();
+                    }
+                    // On the GPU, whose blend a clip shader leaves as it is,
+                    // the draws are clipped by the crop's coverage, which
+                    // leaves the device's clip -- what a blur reads -- whole.
+                    Some(coverage) => {
+                        canvas.reset_matrix();
+                        coverage.clip(canvas);
+                        canvas.set_matrix(&entries.into());
+                        play_entries(&self.contents.layers, canvas, target);
+                    }
+                    None => {
+                        self.confine(canvas, target, &to_device);
+                        canvas.set_matrix(&entries.into());
+                        play_entries(&self.contents.layers, canvas, target);
+                    }
                 }
-                canvas.set_matrix(&entries.into());
-                play_entries(&self.contents.layers, canvas, target);
             }
             (Composite::Layer(rec) | Composite::Chain { rec, .. }, target) => {
-                canvas.set_matrix(&Matrix::concat(&base, &self.matrix).into());
+                let to_device = Matrix::concat(&base, &self.matrix);
+                canvas.set_matrix(&to_device.into());
                 // The destination confines what is drawn and not what the
                 // layer's filter makes of it, so under a filter it is a clip
                 // inside the layer, where a shadow can still be cast past it.
+                // Where it cuts what is drawn, the layer is multiplied by it
+                // before it closes, which is as much inside the layer, and
+                // leaves both the draws and the layer's composite whole --
+                // see `Self::crop`.
                 let filtered = rec
                     .paint
                     .as_ref()
                     .is_some_and(|paint| paint.image_filter().is_some());
-                let clip_within = |canvas: &SkCanvas| {
-                    if let Some(within) = &self.within {
-                        canvas.clip_rect(within, ClipOp::Intersect, true);
-                    }
-                };
-                if !filtered {
-                    clip_within(canvas);
+                let crop = self.crop(canvas, target, &to_device);
+                if crop.is_none() && !filtered {
+                    self.confine(canvas, target, &to_device);
                 }
                 rec.open_on(canvas, target, within);
-                if filtered {
-                    clip_within(canvas);
+                if crop.is_none() && filtered {
+                    self.confine(canvas, target, &to_device);
                 }
                 canvas.set_matrix(&entries.into());
                 play_entries(&self.contents.layers, canvas, target);
+                if let Some(crop) = crop {
+                    canvas.reset_matrix();
+                    crop.multiply(canvas);
+                }
                 canvas.restore();
             }
         }
@@ -1211,13 +1319,29 @@ impl Coverage {
     /// Clips `canvas` by the coverage, under its transform: rasterized at
     /// the density it is played at, at the device's own phase.
     pub fn clip(&self, canvas: &SkCanvas) {
-        let shader = self.picture.to_shader(
+        canvas.clip_shader(self.shader(), ClipOp::Intersect);
+    }
+
+    /// Multiplies what `canvas` holds by the coverage, under its transform:
+    /// a pixel the coverage covers whole keeps its bytes, multiplied by
+    /// one, and a pixel it misses is cleared.
+    pub fn multiply(&self, canvas: &SkCanvas) {
+        let mut paint = Paint::default();
+        paint
+            .set_shader(self.shader())
+            .set_blend_mode(BlendMode::DstIn);
+        canvas.draw_paint(&paint);
+    }
+
+    /// The coverage as a shader: the picture tiled once, transparent past
+    /// its tile.
+    fn shader(&self) -> Shader {
+        self.picture.to_shader(
             (TileMode::Decal, TileMode::Decal),
             FilterMode::Nearest,
             Some(&self.corner),
             Some(&self.tile),
-        );
-        canvas.clip_shader(shader, ClipOp::Intersect);
+        )
     }
 }
 
