@@ -649,6 +649,149 @@ fn a_blurred_draw_on_an_eight_bit_wide_gamut_canvas_stores_the_fill_s_bytes_insi
     );
 }
 
+/// A blurred path on an eight-bit Display P3 or Rec2020 canvas stores a
+/// fill's bytes where the blur leaves it whole: deep inside a circle under
+/// `blur()`, a Gaussian of full coverage is the colour itself, so the
+/// interior stores what a fill of the colour stores, on either engine, at
+/// any alpha -- an alpha of 0.3 or 0.5 puts its byte on a tie.
+#[test]
+fn a_blurred_path_on_an_eight_bit_wide_gamut_canvas_stores_the_fill_s_bytes_inside()
+ {
+    let mut failures = vec![];
+    for (gpu, page, rgb) in ENGINES.into_iter().flat_map(|gpu| {
+        [Space::DisplayP3, Space::Rec2020]
+            .into_iter()
+            .flat_map(move |page| {
+                colours()
+                    .into_iter()
+                    .step_by(5)
+                    .map(move |rgb| (gpu, page, rgb))
+            })
+    }) {
+        for a in [1.0].into_iter().chain(ALPHAS) {
+            let colour = css_at(Space::Srgb, rgb, a);
+            let fill = stored(page, 1.0, gpu, |ctx| {
+                ctx.set_fill_style_css(&colour).expect("a colour");
+                ctx.fill_rect(0.0, 0.0, 1.0, 1.0);
+            });
+            for blur in ["blur(0.5px)", "blur(2px)"] {
+                let path = stored(page, 1.0, gpu, |ctx| {
+                    ctx.set_filter_css(blur).expect("a filter");
+                    ctx.set_fill_style_css(&colour).expect("a colour");
+                    ctx.begin_path();
+                    ctx.arc(0.0, 0.0, 40.0, 0.0, std::f32::consts::TAU, false)
+                        .expect("a radius");
+                    ctx.fill(FillRule::NonZero);
+                });
+                if path != fill {
+                    failures.push(format!(
+                        "{page:?} gpu={gpu} {blur} {colour}: {path:?} for {fill:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} parted: {:#?}",
+        failures.len(),
+        &failures[..failures.len().min(8)]
+    );
+}
+
+/// Every placed colour a blurred path can take stores a fill's bytes
+/// inside it: on an eight-bit Display P3 canvas, for every alpha byte and
+/// every premultiplied byte under it, a circle under `blur(0.5px)` stores
+/// at its centre what a fill of the colour stores, on either engine -- a
+/// circle, since a rectangle takes a blur of its own. The
+/// colour is placed on its bytes and drawn opaque into a layer -- eight-bit
+/// on the CPU, half floats on the GPU -- before the alpha scales it: this
+/// holds that the alpha on its byte scales what the layer keeps back onto
+/// the byte, every time.
+#[test]
+fn every_placed_colour_a_blurred_path_takes_stores_the_fill_s_bytes() {
+    /// The circles' pitch: a blur of half a pixel reaches two pixels, so
+    /// the centre of a circle 3.5 pixels in radius, one every eight pixels,
+    /// sees neither its own edge nor its neighbours.
+    const PITCH: usize = 8;
+    let mut failures = vec![];
+    for gpu in ENGINES {
+        for a in 1..=255u32 {
+            let width = PITCH * (a as usize + 1);
+            let drawn = |blur: bool| {
+                let mut canvas = Canvas::with_options(
+                    width as f32,
+                    PITCH as f32,
+                    CanvasOptions {
+                        color_space: PixelColorSpace::DisplayP3,
+                        ..CanvasOptions::default()
+                    },
+                )
+                .expect("a canvas");
+                canvas.set_gpu(gpu);
+                let ctx = canvas.context();
+                if blur {
+                    ctx.set_filter_css("blur(0.5px)").expect("a filter");
+                }
+                for p in 0..=a {
+                    let v = f64::from(p) / f64::from(a);
+                    ctx.set_fill_style_css(&format!(
+                        "color(display-p3 {v} {v} {v} / {})",
+                        f64::from(a) / 255.0
+                    ))
+                    .expect("a colour");
+                    let half = PITCH as f32 / 2.0;
+                    ctx.begin_path();
+                    ctx.arc(
+                        (p as usize * PITCH) as f32 + half,
+                        half,
+                        half - 0.5,
+                        0.0,
+                        std::f32::consts::TAU,
+                        false,
+                    )
+                    .expect("a radius");
+                    ctx.fill(FillRule::NonZero);
+                }
+                let data = canvas
+                    .context()
+                    .get_image_data_as(
+                        0.0,
+                        0.0,
+                        width as f32,
+                        PITCH as f32,
+                        PixelExportOptions {
+                            color_space: PixelColorSpace::DisplayP3,
+                            premultiplied: true,
+                            ..PixelExportOptions::default()
+                        },
+                    )
+                    .expect("the pixels");
+                data.pixels().to_vec()
+            };
+            let (fill, blurred) = (drawn(false), drawn(true));
+            let centre = |bytes: &[u8], p: usize| {
+                let at = ((PITCH / 2) * width + p * PITCH + PITCH / 2) * 4;
+                [bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]
+            };
+            for p in 0..=a as usize {
+                let (want, got) = (centre(&fill, p), centre(&blurred, p));
+                if want != got {
+                    failures.push(format!(
+                        "gpu={gpu} {p}/{a}: {got:?} for {want:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} parted: {:#?}",
+        failures.len(),
+        &failures[..failures.len().min(8)]
+    );
+}
+
 /// A document of a Display P3 or Rec2020 canvas, eight-bit or float, writes
 /// a paragraph's colour in its exact sRGB encoding, as a document of an
 /// sRGB canvas writes a fill of it, where the paints the paragraph was built

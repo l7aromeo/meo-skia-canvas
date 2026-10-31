@@ -359,13 +359,12 @@ window be changed after it opens.** No signature moves and nothing is removed.
   stores a translucent colour -- and for a PDF or SVG in the colour's exact
   sRGB encoding, `.5 .5 .5` and `gray` where they wrote `.4999 .5 .5` and
   `#7F7F80`. A fill, a stroke, text, a `Paragraph`, a texture's mark, a
-  `drop-shadow()`, a shadow set by `Context2D::set_shadow_color_css` and a
-  blurred rectangle store a fill's bytes, translucent or not and under any
-  global alpha. An sRGB canvas is unchanged. Chrome converts a colour onto
-  such a canvas through the same approximation, so where that crosses a
-  rounding boundary Chrome is a level off and this is not -- see
-  docs/browser-differences.md. Not yet exact there: a blurred path, which
-  stores a level off a fill of its colour on an sRGB canvas too.
+  `drop-shadow()`, a shadow set by `Context2D::set_shadow_color_css`, a
+  blurred rectangle and a blurred path store a fill's bytes where they cover,
+  translucent or not and under any global alpha. An sRGB canvas is unchanged.
+  Chrome converts a colour onto such a canvas through the same approximation,
+  so where that crosses a rounding boundary Chrome is a level off and this is
+  not -- see docs/browser-differences.md.
 
   The exact colour is drawn as a plain paint colour where Skia lands it on
   its bytes, which each thread finds once per colour by drawing it onto a

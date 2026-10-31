@@ -83,13 +83,18 @@ impl Step {
 
 /// How the chain's pixels are kept where the canvas it is played onto has
 /// none of its own to copy -- a picture being recorded, which a pattern or
-/// an image draws as pixels later.
+/// an image draws as pixels later -- and, for [`Depth::Halves`], where the
+/// canvas's own are bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Depth {
     /// Eight bits a channel, as an N32 page composites.
     Bytes,
     /// Floats, as an F16 or F32 page composites; F32 holds either.
     Floats,
+    /// Half floats on a canvas of bytes, the canvas's own on one of
+    /// floats: what holds every colour placed on its bytes exactly where
+    /// the GPU blurs it -- see `BlurOp::playback`.
+    Halves,
 }
 
 /// Plays `draw` onto `canvas` through `steps`, composited through `paint`.
@@ -558,15 +563,19 @@ fn image_reach(filter: &ImageFilter, layer: &Matrix) -> Vector {
 /// one larger than the reach keeps an offset from reading as a shrink.
 const PROBE_SIDE: i32 = 1024;
 
-/// The layer's pixels: the canvas's own colour type and space, or for a
-/// canvas with none, `depth`'s type in no space at all, which is what a
-/// recorded picture's own draws are in until it is played.
+/// The layer's pixels: the canvas's own colour type and space, or half
+/// floats in its space where `depth` is [`Depth::Halves`] and the canvas
+/// holds no floats; or for a canvas with none, `depth`'s type in no space
+/// at all, which is what a recorded picture's own draws are in until it is
+/// played.
 fn layer_info(canvas: &SkCanvas, depth: Depth, region: IRect) -> ImageInfo {
     let own = canvas.image_info();
     let color_type = match (own.color_type(), depth) {
         (ColorType::Unknown, Depth::Bytes) => ColorType::N32,
         (ColorType::Unknown, Depth::Floats) => ColorType::RGBAF32,
-        (color_type, _) => color_type,
+        (ColorType::RGBAF16 | ColorType::RGBAF32, _) => own.color_type(),
+        (_, Depth::Halves) => ColorType::RGBAF16,
+        (color_type, Depth::Bytes | Depth::Floats) => color_type,
     };
     ImageInfo::new(
         region.size(),

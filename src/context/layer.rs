@@ -268,6 +268,15 @@ const GPU_HALF_ROUNDING_LEVELS: f64 = 2.0 * 255.0 / 4096.0;
 /// less [`GPU_HALF_ROUNDING_LEVELS`].
 const PLACED_MARGIN_LEVELS: f64 = 0.5 - GPU_HALF_ROUNDING_LEVELS;
 
+/// `alpha` on the byte an eight-bit page stores it on, rounded half up as
+/// Skia rounds a paint's own colour
+/// (`SkRasterPipeline::append_constant_color`): a fraction of 255, so that it
+/// multiplies onto a whole byte.
+fn byte_alpha(alpha: f32) -> f32 {
+    let levels = f32::from(u8::MAX);
+    (alpha.clamp(0.0, 1.0) * levels + 0.5).trunc() / levels
+}
+
 /// How many times a placed colour that lands off its byte is moved back
 /// toward it and drawn again before [`ExactColour::shader`] takes it.
 const NUDGES: usize = 3;
@@ -543,7 +552,7 @@ impl ExactColour {
             rgb,
             ..self.clone()
         };
-        (placed, stored / levels)
+        (placed, byte_alpha(alpha))
     }
 
     /// `paint` in this colour, placed at its alpha -- see [`Self::at`] -- as
@@ -2401,14 +2410,35 @@ impl BlurOp {
             // colour's alpha, the global alpha in it, is the chain's gain,
             // so that the blur is rounded once and not once more where the
             // draw is.
+            //
+            // A colour placed on its bytes -- see `ExactColour::at` -- takes
+            // its alpha on its byte as the gain, rounded half up as a fill's
+            // is: as given, an alpha of 0.3 or 0.7 lands on a tie the store
+            // rounds to even, and the interior stored a level under a fill.
+            // On its byte the gain multiplies the colour back onto its bytes
+            // from an eight-bit layer on the CPU: the layer is off by at most
+            // half a level, and the alpha, a byte over 255, scales that to
+            // under half. The GPU blurs and scales at lower precision, which
+            // took 68 of the 32,640 colours over the line at alphas from 235,
+            // so there the colour is drawn into a layer of half floats, which
+            // holds every one exactly.
             (Made::Result(_), Target::Pixels) => {
                 paint.set_alpha_f(1.0);
+                let placed = matches!(self.paint.faint, Faint::Dropped)
+                    && self.paint.exact.as_ref().is_some_and(|e| e.bytes);
                 let mut gain = Paint::default();
-                gain.set_alpha_f(self.paint.color.a);
+                gain.set_alpha_f(if placed {
+                    byte_alpha(self.paint.color.a)
+                } else {
+                    self.paint.color.a
+                });
                 let steps = [Step::Blur(self.paint.sigma)];
-                let depth = match self.paint.faint {
-                    Faint::Dropped => Depth::Bytes,
-                    Faint::Kept => Depth::Floats,
+                let depth = match (self.paint.faint, placed) {
+                    (Faint::Kept, _) => Depth::Floats,
+                    (Faint::Dropped, true) if blur_mask::on_gpu(canvas) => {
+                        Depth::Halves
+                    }
+                    (Faint::Dropped, _) => Depth::Bytes,
                 };
                 for path in paths() {
                     let content = self.matrix.map_rect(self.painted(&path)).0;
