@@ -10,8 +10,8 @@ use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
     ColorSpace, ColorType, Data, Document, IRect, ISize, Image as SkImage,
     ImageInfo, M44, Matrix, Paint, Path, Picture, PictureRecorder,
-    PixelGeometry, Pixmap, Point, Rect, Size, Surface, SurfaceProps,
-    SurfacePropsFlags, XYZD50Hash, annotate,
+    PixelGeometry, Pixmap, Point, Rect, SamplingOptions, Size, Surface,
+    SurfaceProps, SurfacePropsFlags, XYZD50Hash, annotate,
     canvas::SrcRectConstraint,
     image::{BitDepth, CachingHint},
     jpeg_encoder, pdf, png_encoder,
@@ -3819,7 +3819,7 @@ impl Page {
         canvas: &SkCanvas,
         backend: VectorFeatures,
         matte: Option<&Matte>,
-        density: f32,
+        embedding: Embedding<'_>,
         splices: Option<&mut Splices<'_>>,
     ) -> Result<(), String> {
         if let Some(matte) = matte {
@@ -3853,7 +3853,7 @@ impl Page {
 
         let mut index = 0;
         if let Some(last) = backdrop_end {
-            self.embed_raster(canvas, &self.layers[..=last], density)?;
+            self.embed_raster(canvas, &self.layers[..=last], embedding)?;
             index = last + 1;
         }
         self.play_as_document(
@@ -3861,7 +3861,7 @@ impl Page {
             &self.layers[index..],
             &self.features[index..],
             backend,
-            density,
+            embedding,
             splices,
         )
     }
@@ -3884,7 +3884,7 @@ impl Page {
         layers: &[Layer],
         features: &[VectorFeatures],
         backend: VectorFeatures,
-        density: f32,
+        embedding: Embedding<'_>,
         mut splices: Option<&mut Splices<'_>>,
     ) -> Result<(), String> {
         let refused = |index: usize| features[index].refused_by(backend);
@@ -3926,7 +3926,7 @@ impl Page {
                 match (group.opacity(), splices.as_deref_mut()) {
                     (Some(alpha), Some(splices)) if alpha != 1.0 => self
                         .splice_group(
-                            canvas, group, alpha, backend, density, splices,
+                            canvas, group, alpha, backend, embedding, splices,
                         )?,
                     _ => {
                         let mut played = Ok(());
@@ -3936,7 +3936,7 @@ impl Page {
                                 &entries.layers,
                                 &entries.features,
                                 backend,
-                                density,
+                                embedding,
                                 splices.as_deref_mut(),
                             );
                         });
@@ -3951,7 +3951,7 @@ impl Page {
             while index < layers.len() && refused(index) && !opens(index) {
                 index += 1;
             }
-            self.embed_raster(canvas, &layers[start..index], density)?;
+            self.embed_raster(canvas, &layers[start..index], embedding)?;
         }
         Ok(())
     }
@@ -3977,7 +3977,7 @@ impl Page {
         group: &Group,
         alpha: f32,
         backend: VectorFeatures,
-        density: f32,
+        embedding: Embedding<'_>,
         splices: &mut Splices<'_>,
     ) -> Result<(), String> {
         let Some(clip) = canvas.device_clip_bounds() else {
@@ -4020,7 +4020,7 @@ impl Page {
                 &entries.layers,
                 &entries.features,
                 backend,
-                density,
+                embedding,
                 Some(&mut inner),
             );
         });
@@ -4036,6 +4036,15 @@ impl Page {
 
     /// Renders a run of layers to pixels and draws the result into `canvas`.
     ///
+    /// At `embedding`'s density, and composited as the page composites -- in
+    /// its space and format, played as its pixels are -- so that a blend in
+    /// the run blends where it does on the canvas: an sRGB surface put
+    /// `multiply` on a Display P3 page
+    /// up to 10 levels from the canvas's own pixels, and `screen` over
+    /// `color(display-p3 1 0 0)` up to 40. Then converted to eight-bit sRGB,
+    /// the space a document's image is read in, each channel of a colour
+    /// outside sRGB's gamut clamped as the vector side's colours are.
+    ///
     /// Cropped to the ink it actually laid down: a run covers a fraction of
     /// the page, and embedding the full page for each would bloat the
     /// document by the size of a PNG per run.
@@ -4043,17 +4052,22 @@ impl Page {
         &self,
         canvas: &SkCanvas,
         layers: &[Layer],
-        density: f32,
+        embedding: Embedding<'_>,
     ) -> Result<(), String> {
+        let Embedding {
+            density,
+            space,
+            color_type,
+        } = embedding;
         let dims = self.scaled_dimensions(density);
         let info = ImageInfo::new(
             dims,
-            ColorType::RGBA8888,
+            color_type,
             AlphaType::Premul,
-            Some(ColorSpace::new_srgb()),
+            Some(space.clone()),
         );
         let mut surface = started::raster(&info, None, None)
-            .ok_or("Could not allocate a surface for the SVG fallback")?;
+            .ok_or("Could not allocate a surface for the document fallback")?;
 
         // Drawn under the transform the document is drawing under, at the
         // density, and placed back on the page untransformed: what a group's
@@ -4063,10 +4077,23 @@ impl Page {
         raster.scale((density, density));
         raster.concat(&matrix);
         for layer in layers {
-            layer.playback(raster, Target::Embedded);
+            layer.playback(raster, Target::Pixels);
         }
 
-        let image = surface.image_snapshot();
+        let srgb = info
+            .with_color_type(ColorType::RGBA8888)
+            .with_color_space(ColorSpace::new_srgb());
+        let mut embedded = started::raster(&srgb, None, None)
+            .ok_or("Could not allocate a surface for the document fallback")?;
+        let mut copy = Paint::default();
+        copy.set_blend_mode(BlendMode::Src);
+        surface.draw(
+            embedded.canvas(),
+            (0, 0),
+            SamplingOptions::default(),
+            Some(&copy),
+        );
+        let image = embedded.image_snapshot();
         let Some(ink) = self.ink_bounds(&image) else {
             return Ok(()); // the layer drew nothing visible
         };
@@ -4648,7 +4675,7 @@ impl Page {
                     canvas,
                     pdf_cannot(&options.surface_color_space),
                     matte.as_ref(),
-                    density,
+                    options.embedding(),
                     None,
                 )?;
                 document.end_page().close();
@@ -4671,7 +4698,7 @@ impl Page {
                     &canvas,
                     VectorFeatures::SVG_CANNOT,
                     matte.as_ref(),
-                    density,
+                    options.embedding(),
                     Some(&mut splices),
                 )?;
                 let written = splices.apply(
@@ -4986,8 +5013,8 @@ impl Page {
         &self,
         doc: Document<'a>,
         matte: Option<&Matte>,
-        density: f32,
         backend: VectorFeatures,
+        embedding: Embedding<'_>,
     ) -> Result<Document<'a>, String> {
         if !self.bounds.is_empty() {
             let mut doc = doc.begin_page(self.bounds.size(), None);
@@ -4996,7 +5023,7 @@ impl Page {
             // this one writes every page of a canvas, the other answers
             // `to_buffer` -- and a blend mode drawn on page two is no more
             // expressible than one drawn on a page of its own.
-            self.draw_as_document(canvas, backend, matte, density, None)?;
+            self.draw_as_document(canvas, backend, matte, embedding, None)?;
             Ok(doc.end_page())
         } else {
             Err("Width and height must be non-zero to generate a PDF page"
@@ -5139,8 +5166,15 @@ impl PageSequence {
             quality,
             density,
             matte,
+            surface_color_space,
+            surface_color_type,
             ..
         } = options;
+        let embedding = Embedding {
+            density,
+            space: &surface_color_space,
+            color_type: surface_color_type,
+        };
         let metadata = pdf::Metadata {
             producer: PDF_PRODUCER.to_string(),
             encoding_quality: Some(encoder_quality(quality) as i32),
@@ -5153,7 +5187,7 @@ impl PageSequence {
         self.pages
             .iter()
             .try_fold(pdf_document(&mut written, &metadata), |doc, page| {
-                page.append_to(doc, matte.as_ref(), density, backend)
+                page.append_to(doc, matte.as_ref(), backend, embedding)
             })
             .map(|doc| doc.close())?;
         out.write_all(&with_page_groups(written))
@@ -5682,6 +5716,16 @@ pub fn pages_arg(
     Ok(PageSequence::from(pages, engine))
 }
 
+/// How a run of a page a document embeds as pixels is made -- see
+/// [`Page::embed_raster`]: at the export's density, and in the space and
+/// pixel format the page composites in.
+#[derive(Clone, Copy)]
+struct Embedding<'a> {
+    density: f32,
+    space: &'a ColorSpace,
+    color_type: ColorType,
+}
+
 /// What a PDF refuses of a page composited in `space`: the blends it cannot
 /// write -- see [`blend_features`](crate::export::blend_features) -- and, on
 /// a page composited anywhere but sRGB, every blend, since a PDF blends in
@@ -5893,6 +5937,16 @@ impl ExportOptions {
             self.text_contrast,
             self.text_gamma,
         )
+    }
+
+    /// How a page exported with these options embeds what a document cannot
+    /// draw.
+    fn embedding(&self) -> Embedding<'_> {
+        Embedding {
+            density: self.density,
+            space: &self.surface_color_space,
+            color_type: self.surface_color_type,
+        }
     }
 
     pub fn svg_flags(&self) -> Option<skia_safe::svg::canvas::Flags> {
@@ -7773,6 +7827,180 @@ mod tests {
                 }),
                 "{drawn}"
             );
+        }
+    }
+
+    /// A run a document embeds as pixels composites as the page does, and is
+    /// converted to sRGB as the vector side's colours are, each channel
+    /// clamped. On a Display P3 page in eight bits, half floats and floats:
+    /// a translucent layer holding a fill, text, a blurred fill, a blurred
+    /// stroke and a canvas drawn in under the blur, over a backdrop that
+    /// holds `color(display-p3 1 0 0)`, outside sRGB, under `multiply` or
+    /// `screen`, opaque and at an alpha of 0.8 -- so that all of it is
+    /// embedded -- stores, embedded into a PDF's page or an SVG's, on an
+    /// sRGB page what the canvas reads back as sRGB, and on a float Display
+    /// P3 page what that readback stores there.
+    #[test]
+    fn a_blend_a_document_embeds_composites_in_the_page_s_space() {
+        use crate::{
+            canvas::{Canvas, CanvasOptions},
+            paint::BlendMode as Mode,
+            pixels::{PixelColorSpace, PixelDepth, PixelExportOptions},
+        };
+        let (width, height) = (60, 32);
+        let backdrop = [
+            "rgb(230 180 40)",
+            "rgb(40 90 200)",
+            "color(display-p3 1 0 0)",
+        ];
+        for (depth, mode, alpha) in
+            [PixelDepth::Uint8, PixelDepth::F16, PixelDepth::F32]
+                .into_iter()
+                .flat_map(|depth| {
+                    [
+                        (Mode::Multiply, 1.0),
+                        (Mode::Screen, 1.0),
+                        (Mode::Multiply, 0.8),
+                        (Mode::Screen, 0.8),
+                    ]
+                    .map(|(mode, alpha)| (depth, mode, alpha))
+                })
+        {
+            let options = CanvasOptions {
+                color_space: PixelColorSpace::DisplayP3,
+                color_type: depth,
+                gpu: false,
+                ..CanvasOptions::default()
+            };
+            let mut canvas = Canvas::with_options(
+                width as f32,
+                height as f32,
+                options.clone(),
+            )
+            .expect("a Display P3 canvas");
+            let mut inner = Canvas::with_options(8.0, 8.0, options)
+                .expect("a canvas to draw in");
+            inner
+                .context()
+                .set_fill_style_css("color(display-p3 0.2 0.6 0.3)")
+                .expect("a colour");
+            inner.context().fill_rect(0.0, 0.0, 8.0, 4.0);
+            let ctx = canvas.context();
+            for (at, css) in backdrop.iter().enumerate() {
+                ctx.set_fill_style_css(css).expect("a colour");
+                ctx.fill_rect(at as f32 * 20.0, 0.0, 20.0, height as f32);
+            }
+            ctx.save_layer_with(0.5, None, None);
+            ctx.set_fill_style_css("color(display-p3 0.3 0.25 0.75)")
+                .expect("a colour");
+            ctx.fill_rect(2.0, 2.0, 12.0, 12.0);
+            ctx.set_font_css("bold 12px sans-serif");
+            ctx.fill_text("Wg", 16.0, 12.0, None);
+            ctx.set_filter_css("blur(1px)").expect("a blur");
+            ctx.fill_rect(36.0, 2.0, 12.0, 12.0);
+            ctx.set_stroke_style_css("color(display-p3 0.9 0.4 0.1)")
+                .expect("a colour");
+            ctx.set_line_width(3.0);
+            ctx.begin_path();
+            ctx.move_to(2.0, 20.0);
+            ctx.line_to(30.0, 28.0);
+            ctx.stroke();
+            ctx.draw_canvas(&mut inner, 44.0, 20.0);
+            ctx.restore();
+            ctx.set_global_composite_operation(mode);
+            ctx.set_fill_style_css(&format!("rgb(200 40 120 / {alpha})"))
+                .expect("a colour");
+            ctx.fill_rect(10.0, 6.0, 40.0, 20.0);
+            let read = ctx
+                .get_image_data_as(
+                    0.0,
+                    0.0,
+                    width as f32,
+                    height as f32,
+                    PixelExportOptions {
+                        color_space: PixelColorSpace::Srgb,
+                        depth: PixelDepth::Uint8,
+                        ..PixelExportOptions::default()
+                    },
+                )
+                .expect("a read");
+
+            let page = ctx.inner.page();
+            let p3 = ctx.inner.canvas_color_space.clone();
+            let color_type = ctx.inner.canvas_color_type;
+            let embedded = |backend: VectorFeatures| {
+                let mut recorder = PictureRecorder::new();
+                page.draw_as_document(
+                    recorder.begin_recording(page.bounds, true),
+                    backend,
+                    None,
+                    Embedding {
+                        density: 1.0,
+                        space: &p3,
+                        color_type,
+                    },
+                    None,
+                )
+                .expect("the document's page");
+                recorder
+                    .finish_recording_as_picture(None)
+                    .expect("a picture of it")
+            };
+            let srgb = ImageInfo::new(
+                (width, height),
+                ColorType::RGBA8888,
+                AlphaType::Premul,
+                Some(ColorSpace::new_srgb()),
+            );
+            let readback = started::raster_from_data(
+                &srgb,
+                Data::new_copy(read.pixels()),
+                width as usize * 4,
+            )
+            .expect("the readback as an image");
+            for (backend, page_info) in [
+                (pdf_cannot(&p3), srgb.clone()),
+                (
+                    pdf_cannot(&p3),
+                    srgb.with_color_type(ColorType::RGBAF16)
+                        .with_color_space(p3.clone()),
+                ),
+                (VectorFeatures::SVG_CANNOT, srgb.clone()),
+            ] {
+                let embedded = embedded(backend);
+                let drawn = |draw: &dyn Fn(&SkCanvas)| {
+                    let mut surface = started::raster(&page_info, None, None)
+                        .expect("a page");
+                    draw(surface.canvas());
+                    let row = width as usize * page_info.bytes_per_pixel();
+                    let mut bytes = vec![0u8; row * height as usize];
+                    assert!(surface.read_pixels(
+                        &page_info,
+                        &mut bytes,
+                        row,
+                        (0, 0)
+                    ));
+                    bytes
+                };
+                let want = drawn(&|canvas| {
+                    canvas.draw_image(&readback, (0, 0), None);
+                });
+                let got = drawn(&|canvas| {
+                    canvas.draw_picture(&embedded, None, None);
+                });
+                let size = page_info.bytes_per_pixel();
+                let parted = want
+                    .chunks_exact(size)
+                    .zip(got.chunks_exact(size))
+                    .filter(|(a, b)| a != b)
+                    .count();
+                assert_eq!(
+                    parted,
+                    0,
+                    "{depth:?} {mode:?} at {alpha} onto {:?}, refusing {backend:?}",
+                    page_info.color_type()
+                );
+            }
         }
     }
 
