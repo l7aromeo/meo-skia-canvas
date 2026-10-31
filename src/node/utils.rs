@@ -7,7 +7,7 @@ use std::{
     cell::RefCell,
     cmp,
     collections::HashMap,
-    sync::{Arc, OnceLock},
+    sync::{Arc, LazyLock, OnceLock},
 };
 
 mod enclosure;
@@ -1311,16 +1311,6 @@ fn prophoto_encode(linear: f64) -> f64 {
     encoded.copysign(linear)
 }
 
-/// The primaries `space` is built on, by name: `"srgb"`, `"display-p3"` or
-/// `"rec2020"`, whatever its transfer function. `None` for any other.
-fn primaries(space: &ColorSpace) -> Option<&'static str> {
-    let linear = space.with_linear_gamma();
-    ["srgb", "display-p3", "rec2020"].into_iter().find(|name| {
-        opt_color_space(name).map(|named| named.with_linear_gamma())
-            == Some(linear.clone())
-    })
-}
-
 /// A colour as a paint holds it -- `color` in `space`, encoded with that
 /// space's transfer function -- as an [`RgbaLinear`]: premultiplied linear
 /// light in sRGB's primaries, unbounded, which is what `RgbaLinear` means on
@@ -1427,12 +1417,15 @@ fn srgb_to_color_function(rgb: [f64; 3], space: &str) -> Option<[f64; 3]> {
     }
 }
 
-/// The name of a color space this crate can build, by comparing against each.
+/// The name `color()` gives `space`, by comparing against each space it
+/// names.
 ///
 /// Skia keeps no record of which CICP pair made a `ColorSpace`, so the only
-/// way back to a name is to ask whether it equals one built from that name.
+/// way back to a name is to ask whether it equals one built from that name:
+/// the ones in [`NAMED_SPACES`], built once, which Skia compares by its two
+/// hashes.
 pub fn color_space_name(space: &ColorSpace) -> Option<&'static str> {
-    ["srgb", "srgb-linear", "display-p3", "rec2020"]
+    COLOR_FUNCTION_SPACES
         .into_iter()
         .find(|name| opt_color_space(name).as_ref() == Some(space))
 }
@@ -3643,9 +3636,11 @@ pub fn skia_paint_color_onto(
     let exact = destination.is_srgb()
         || PixelColorSpace::matching(destination)
             .is_some_and(PixelColorSpace::converts_exactly);
-    match exact && color_space_name(space).is_some() {
-        true => (color4f_to_srgb(color, Some(space)), ColorSpace::new_srgb()),
-        false => skia_paint_color(color, space),
+    match exact.then(|| color_space_name(space)).flatten() {
+        Some(name) => {
+            (color_function_to_srgb(color, name), ColorSpace::new_srgb())
+        }
+        None => skia_paint_color(color, space),
     }
 }
 
@@ -4951,7 +4946,54 @@ pub fn alpha_type_or_throw(
 /// unrecognised name means. Nothing should choose sRGB silently: asking for
 /// `hdr10` and getting sRGB back with no word said is the failure this
 /// replaced.
+///
+/// Each space is built once, into [`BUILT_SPACES`], and handed back as a
+/// clone of it, which counts a reference: a draw in a colour named in one of
+/// these spaces asks for its space, and built anew each time it took two
+/// to seven spaces a draw.
 pub fn opt_color_space(mode_name: &str) -> Option<ColorSpace> {
+    let name = canonical_color_space(mode_name)?;
+    let at = NAMED_SPACES.iter().position(|named| *named == name)?;
+    BUILT_SPACES[at].clone()
+}
+
+/// The canonical names [`opt_color_space`] takes, in the order
+/// [`BUILT_SPACES`] holds their spaces.
+const NAMED_SPACES: [&str; 8] = [
+    "srgb",
+    "srgb-linear",
+    "display-p3",
+    "display-p3-linear",
+    "rec2020",
+    "rec2020-linear",
+    "rec2020-pq",
+    "rec2020-hlg",
+];
+
+/// The spaces `color()` names that a canvas can be in, in the order
+/// [`color_space_name`] asks after them.
+const COLOR_FUNCTION_SPACES: [&str; 4] =
+    ["srgb", "srgb-linear", "display-p3", "rec2020"];
+
+/// The space each of [`NAMED_SPACES`] names, built once by
+/// [`built_color_space`]. A Skia colour space is immutable and its
+/// reference count atomic -- skia-safe declares it `Send` and `Sync` -- so
+/// one built here serves every thread.
+static BUILT_SPACES: LazyLock<[Option<ColorSpace>; NAMED_SPACES.len()]> =
+    LazyLock::new(|| NAMED_SPACES.map(built_color_space));
+
+#[cfg(test)]
+thread_local! {
+    /// How many spaces [`built_color_space`] has built on this thread.
+    pub(crate) static SPACES_BUILT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// The space `name`, one of [`NAMED_SPACES`], names, built from its code
+/// points.
+fn built_color_space(name: &str) -> Option<ColorSpace> {
+    #[cfg(test)]
+    SPACES_BUILT.set(SPACES_BUILT.get() + 1);
     use skia_safe::{named_primaries, named_transfer_fn};
 
     // CICP primaries
@@ -4968,36 +5010,36 @@ pub fn opt_color_space(mode_name: &str) -> Option<ColorSpace> {
     // A CICP space Skia declines to build still falls back, because that is a
     // build limitation rather than caller error -- but the name was valid, so
     // it is not reported as one.
-    match mode_name {
+    match name {
         "srgb" => Some(ColorSpace::new_srgb()),
-        "srgb-linear" | "linear" => Some(ColorSpace::new_srgb_linear()),
+        "srgb-linear" => Some(ColorSpace::new_srgb_linear()),
 
         // Display P3 (wide gamut, used by Apple devices)
-        "display-p3" | "p3" => Some(
+        "display-p3" => Some(
             ColorSpace::new_cicp(p_p3, t_srgb)
                 .unwrap_or_else(ColorSpace::new_srgb),
         ),
-        "display-p3-linear" | "p3-linear" => Some(
+        "display-p3-linear" => Some(
             ColorSpace::new_cicp(p_p3, t_linear)
                 .unwrap_or_else(ColorSpace::new_srgb_linear),
         ),
 
         // Rec. 2020 (wide gamut for UHD/HDR)
-        "rec2020" | "bt2020" => Some(
+        "rec2020" => Some(
             ColorSpace::new_cicp(p_2020, t_709)
                 .unwrap_or_else(ColorSpace::new_srgb),
         ),
-        "rec2020-linear" | "bt2020-linear" => Some(
+        "rec2020-linear" => Some(
             ColorSpace::new_cicp(p_2020, t_linear)
                 .unwrap_or_else(ColorSpace::new_srgb_linear),
         ),
 
         // HDR transfer functions with Rec.2020 gamut
-        "rec2020-pq" | "hdr10" => Some(
+        "rec2020-pq" => Some(
             ColorSpace::new_cicp(p_2020, t_pq)
                 .unwrap_or_else(ColorSpace::new_srgb),
         ),
-        "rec2020-hlg" | "hlg" => Some(
+        "rec2020-hlg" => Some(
             ColorSpace::new_cicp(p_2020, t_hlg)
                 .unwrap_or_else(ColorSpace::new_srgb),
         ),
@@ -5890,6 +5932,96 @@ pub fn from_engine(engine: RenderingEngine) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each space `opt_color_space` hands back is the one its code points
+    /// build, by both of Skia's hashes and its sRGB test, under every name
+    /// and alias it takes; and `PixelColorSpace` hands back the one its own
+    /// code points build.
+    #[test]
+    fn a_kept_space_is_the_space_its_name_builds() {
+        let same = |a: &ColorSpace, b: &ColorSpace| {
+            a.to_xyzd50_hash() == b.to_xyzd50_hash()
+                && a.transfer_fn_hash() == b.transfer_fn_hash()
+                && a.is_srgb() == b.is_srgb()
+        };
+        for name in NAMED_SPACES {
+            let built = built_color_space(name).expect("a space");
+            let kept = opt_color_space(name).expect("a kept space");
+            assert!(same(&kept, &built), "{name}");
+        }
+        for alias in [
+            "linear",
+            "p3",
+            "p3-linear",
+            "bt2020",
+            "bt2020-linear",
+            "hdr10",
+            "hlg",
+        ] {
+            let canonical = canonical_color_space(alias).expect("an alias");
+            assert!(
+                opt_color_space(alias) == opt_color_space(canonical),
+                "{alias}"
+            );
+        }
+        assert!(opt_color_space("hdr").is_none());
+        for space in PixelColorSpace::all() {
+            let traits = space.traits();
+            let built = ColorSpace::new_cicp(traits.primaries, traits.transfer)
+                .expect("a space");
+            let kept = space.to_skia_color_space().expect("a kept space");
+            assert!(same(&kept, &built), "{space:?}");
+        }
+    }
+
+    /// A draw builds no colour space once one draw has: a fill, a stroke and
+    /// text, in an sRGB colour and in one named in Display P3, on sRGB and
+    /// Display P3 pages, eight-bit and float. Each built anew took two to
+    /// ten spaces a draw.
+    #[test]
+    fn a_draw_builds_no_colour_space() {
+        use crate::{
+            canvas::{Canvas, CanvasOptions},
+            pixels::PixelDepth,
+        };
+        for (space, depth) in [
+            (PixelColorSpace::Srgb, PixelDepth::Uint8),
+            (PixelColorSpace::Srgb, PixelDepth::F32),
+            (PixelColorSpace::DisplayP3, PixelDepth::Uint8),
+            (PixelColorSpace::DisplayP3, PixelDepth::F32),
+        ] {
+            let mut canvas = Canvas::with_options(
+                64.0,
+                32.0,
+                CanvasOptions {
+                    color_space: space,
+                    color_type: depth,
+                    gpu: false,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a canvas");
+            let ctx = canvas.context();
+            ctx.set_font_css("12px sans-serif");
+            let draw = |ctx: &mut crate::context2d::Context2D, i: usize| {
+                let css = match i % 2 {
+                    0 => format!("#33{:02x}99", i % 256),
+                    _ => format!("color(display-p3 0.2 {} 0.6)", i % 100),
+                };
+                ctx.set_fill_style_css(&css).expect("a colour");
+                ctx.set_stroke_style_css(&css).expect("a colour");
+                ctx.fill_rect(1.0, 1.0, 10.0, 10.0);
+                ctx.stroke_rect(12.0, 1.0, 10.0, 10.0);
+                ctx.fill_text("Wg", 24.0, 20.0, None);
+            };
+            draw(ctx, 0);
+            let before = SPACES_BUILT.get();
+            for i in 1..=20 {
+                draw(ctx, i);
+            }
+            assert_eq!(SPACES_BUILT.get() - before, 0, "{space:?} {depth:?}");
+        }
+    }
 
     /// A colour handed over for a page in its own space is the pair
     /// [`skia_paint_color_onto`] gives, in every space a canvas holds and

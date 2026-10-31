@@ -1694,6 +1694,15 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Changed
 
+- **A draw builds no colour space.** Every fill, stroke and text draw
+  looked up the colour space its colour was named in by building each space
+  `color()` names and comparing it: two spaces a draw for an sRGB colour,
+  seven for one named in Display P3, and on a `PixelColorSpace::DisplayP3`
+  canvas one more for the canvas's own. Each space is now built once and
+  compared by Skia's hashes. The time it saves is measured at release
+  [RE-TIME vs 0.16.3: 200 fills each in its own hex colour on an eight-bit
+  sRGB canvas].
+
 - **`node scripts/skia-source.mjs prepare` makes a tree from one it already
   has.** docs/rust.md sends a crate build that wants the patched Skia to
   `prepare`, which fetched every tree it made, about 1 GB, including one
