@@ -599,6 +599,14 @@ impl PatternDraw {
             canvas.clip_rect(Rect::new_empty(), ClipOp::Intersect, false);
             return;
         };
+        // The device clip itself kept to those pixels too: a clip shader
+        // leaves the clip's bounds as they are, and the pattern painted
+        // under it would be shaded over every pixel they hold -- the whole
+        // page, for each small draw. Whole pixels, outside of which the
+        // coverage is nothing, so no pixel it reaches changes.
+        canvas.reset_matrix();
+        canvas.clip_irect(area, ClipOp::Intersect);
+        canvas.set_matrix(&to_device.into());
         let info = canvas.image_info().with_dimensions(area.size());
         let corner = Matrix::translate((area.left as f32, area.top as f32));
         let Some(mut surface) = canvas.new_surface(&info, None) else {
