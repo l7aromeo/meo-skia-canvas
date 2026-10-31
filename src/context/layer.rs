@@ -620,15 +620,17 @@ pub(crate) fn white() -> Option<Shader> {
 /// picture of it Skia rasterizes as RGBA8888 at the scale the picture was
 /// recorded at.
 ///
-/// On pixels the draw's coverage clips the canvas as a clip shader -- the
-/// technique a cut draw takes, see [`CutOp`] -- and the pattern is painted
-/// over what the coverage allows in one draw, through the draw's own alpha,
-/// blend mode and colour filter, as Skia paints a shader through the draw's
-/// path, and so in the raster a document embeds. In a document, which writes
-/// a clip by coverage as an empty `clipPath`, the draw is played as recorded
-/// with the page's picture as its pattern -- which Skia's PDF backend writes
-/// as an image, and its SVG backend drops: a canvas's pattern asks an SVG
-/// export to embed the draw -- see `Dye::vector_features`.
+/// On pixels a draw kept whole -- see [`Replay`] -- is drawn again with the
+/// pattern as its shader, through its own alpha, blend mode and colour
+/// filter, as a draw dyed by a pattern of the canvas's pixels is. Any other
+/// draw's coverage clips the canvas as a clip shader -- the technique a cut
+/// draw takes, see [`CutOp`] -- and the pattern is painted over what the
+/// coverage allows in one draw, through the same paint, as Skia paints a
+/// shader through the draw's path. Both reach the raster a document embeds. In
+/// a document, which writes a clip by coverage as an empty `clipPath`, the draw
+/// is played as recorded with the page's picture as its pattern -- which Skia's
+/// PDF backend writes as an image, and its SVG backend drops: a canvas's
+/// pattern asks an SVG export to embed the draw -- see `Dye::vector_features`.
 #[derive(Clone, Debug)]
 pub struct PatternDraw {
     pub source: Arc<TileSource>,
@@ -638,7 +640,8 @@ pub struct PatternDraw {
     pub pattern_matrix: Matrix,
     pub repeat: (TileMode, TileMode),
     /// The draw in opaque white, under the transform it was made under:
-    /// what it covers, and by how much.
+    /// what it covers, and by how much. A draw kept whole takes only its
+    /// bounds from it.
     pub covered: Picture,
     /// The draw as a document writes it.
     pub plain: Picture,
@@ -648,6 +651,22 @@ pub struct PatternDraw {
     /// The clip the draw was made under, in device pixels of the recording,
     /// where it is not a piece of a run that applies it -- see [`Clipped`].
     pub clip: Option<Data>,
+    /// The draw kept whole, where its kind can be: drawn on pixels with the
+    /// pattern as its shader, as a draw dyed by a pattern of the canvas's
+    /// pixels is. `None` where it is clipped by its coverage instead.
+    pub replay: Option<Replay>,
+}
+
+/// A draw kept whole, so that the pattern a [`PatternDraw`] makes at
+/// playback is drawn through it, as any shader is, rather than painted
+/// under a clip of its coverage: no coverage to rasterize, and nothing
+/// shaded past what the draw covers.
+#[derive(Clone, Debug)]
+pub enum Replay {
+    /// A path filled or stroked as the paint says, onto pixels that do with
+    /// a faint paint what the [`Faint`] says; serialized, as a group's clip
+    /// is, so that a page holding it can be sent to another thread.
+    Path(Data, Faint),
 }
 
 impl PatternDraw {
@@ -686,11 +705,22 @@ impl PatternDraw {
         ) else {
             return;
         };
-        self.clip_by_coverage(canvas);
         let mut paint = self.paint.clone();
         paint.set_shader(shader);
-        canvas.concat(&self.matrix);
-        canvas.draw_paint(&paint);
+        match &self.replay {
+            Some(Replay::Path(path, faint)) => {
+                let Some(path) = Path::deserialize(path) else {
+                    return;
+                };
+                canvas.concat(&self.matrix);
+                canvas.draw_path(&path, &faint.drawable(&paint));
+            }
+            None => {
+                self.clip_by_coverage(canvas);
+                canvas.concat(&self.matrix);
+                canvas.draw_paint(&paint);
+            }
+        }
     }
 
     /// Clips `canvas` by what the draw covers, rasterized as the canvas

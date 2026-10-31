@@ -65,7 +65,7 @@ use chain::{Step, canvas_reach};
 use exact_blur::REACH_SIGMAS;
 use faint::Faint;
 use layer::{
-    BlurDraw, Composite, Entries, ExactColour, Group, Layer, LayerRec,
+    BlurDraw, Composite, Entries, ExactColour, Group, Layer, LayerRec, Replay,
     holds_a_cut, reach_the_clip,
 };
 use page::{ExportOptions, Page, PageRecorder, Recording};
@@ -842,16 +842,21 @@ impl Context2D {
         })
     }
 
+    /// Records the draw `f` makes with a paint it is handed, through the
+    /// route its dye and filter take. `replay`, where the draw's kind can be
+    /// kept whole, is what a canvas's pattern is drawn through at playback
+    /// -- see [`Replay`].
     pub fn render_to_canvas<F>(
         &self,
         paint: &Paint,
         exact: Option<&Paint>,
         features: VectorFeatures,
+        replay: Option<Replay>,
         f: F,
     ) where
         F: Fn(&SkCanvas, &Paint),
     {
-        if self.files_through_pattern(paint, features, &f)
+        if self.files_through_pattern(paint, features, replay, &f)
             || self.files_through_chain(paint, exact, features, &f)
         {
             return;
@@ -946,6 +951,7 @@ impl Context2D {
         &self,
         paint: &Paint,
         features: VectorFeatures,
+        replay: Option<Replay>,
         f: &F,
     ) -> bool
     where
@@ -1031,6 +1037,7 @@ impl Context2D {
             plain: recorded,
             paint: through,
             clip: None,
+            replay,
         };
         let tile = Arc::new(tile);
         let unit = Entries::new(
@@ -1789,10 +1796,14 @@ impl Context2D {
             });
             return;
         }
+        // Kept only for a canvas's pattern, the one dye that takes it.
+        let replay = matches!(self.state.dye(style), Dye::Pattern(_))
+            .then(|| Replay::Path(path.serialize(), self.faint()));
         self.render_to_canvas(
             &paint,
             exact.as_ref(),
             features,
+            replay,
             |canvas, paint| {
                 if let Some(tile) = self.state.texture(style) {
                     // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
@@ -2196,7 +2207,7 @@ impl Context2D {
             return;
         }
 
-        self.render_to_canvas(&paint, None, features, |canvas, paint| {
+        self.render_to_canvas(&paint, None, features, None, |canvas, paint| {
             // A paint here makes Skia draw the picture through a temporary
             // layer, which is what keeps the source's own compositing to
             // itself: a `destination-out` inside it used to erase what was
@@ -2394,7 +2405,7 @@ impl Context2D {
             return;
         }
 
-        self.render_to_canvas(&paint, None, features, |canvas, paint| {
+        self.render_to_canvas(&paint, None, features, None, |canvas, paint| {
             canvas.draw_image_rect_with_sampling_options(
                 image,
                 Some((src_rect, Strict)),
@@ -2737,51 +2748,57 @@ impl Context2D {
             // a bold 40px run on a Display P3 F32 page.
             let dyed = self.exact_text_paint(&paint, style);
             let dyed = dyed.as_ref();
-            self.render_to_canvas(&paint, dyed, features, |canvas, paint| {
-                // The kept run, or, the first time a run is drawn, the run
-                // laid out for this paint -- see `Typesetter::laid_out`.
-                let run = match &kept {
-                    Some(kept) => DrawnRun::Kept(kept.clone()),
-                    None => {
-                        typesetter.drawn_once(&faint.drawable(paint), canvas)
-                    }
-                };
-                let (offset, condensation) = (run.offset(), run.condensation());
-                // In a test, an undecorated run can be laid out for this
-                // paint and drawn by `Paragraph::paint` instead, as the
-                // oracle the kept runs are held to. A decorated one is
-                // drawn from its runs either way, its
-                // lines between them.
-                #[cfg(test)]
-                let oracle = (PAINTER_OVERRIDE.get()
-                    == Some(Painter::Paragraph)
-                    && typesetter.decoration(1.0).is_none())
-                .then(|| typesetter.layout(&faint.drawable(paint)));
-                let draw = |canvas: &SkCanvas, at: Point| {
+            self.render_to_canvas(
+                &paint,
+                dyed,
+                features,
+                None,
+                |canvas, paint| {
+                    // The kept run, or, the first time a run is drawn, the run
+                    // laid out for this paint -- see `Typesetter::laid_out`.
+                    let run = match &kept {
+                        Some(kept) => DrawnRun::Kept(kept.clone()),
+                        None => typesetter
+                            .drawn_once(&faint.drawable(paint), canvas),
+                    };
+                    let (offset, condensation) =
+                        (run.offset(), run.condensation());
+                    // In a test, an undecorated run can be laid out for this
+                    // paint and drawn by `Paragraph::paint` instead, as the
+                    // oracle the kept runs are held to. A decorated one is
+                    // drawn from its runs either way, its
+                    // lines between them.
                     #[cfg(test)]
-                    if let Some(layout) = &oracle {
-                        layout.paragraph.paint(canvas, at);
-                        return reach_the_clip(canvas);
+                    let oracle = (PAINTER_OVERRIDE.get()
+                        == Some(Painter::Paragraph)
+                        && typesetter.decoration(1.0).is_none())
+                    .then(|| typesetter.layout(&faint.drawable(paint)));
+                    let draw = |canvas: &SkCanvas, at: Point| {
+                        #[cfg(test)]
+                        if let Some(layout) = &oracle {
+                            layout.paragraph.paint(canvas, at);
+                            return reach_the_clip(canvas);
+                        }
+                        run.paint(canvas, at, paint, global_alpha, faint);
+                        reach_the_clip(canvas);
+                    };
+                    match condensation {
+                        // Chrome condenses with a plain anisotropic transform
+                        // rather than a narrower face, and the pen goes with
+                        // it: at 200px with `lineWidth` 12, a half-width
+                        // `strokeText("H")` draws its stems 6 pixels wide and
+                        // its crossbar still 12. A canvas scale is that, so the
+                        // stroke needs no separate handling.
+                        1.0 => draw(canvas, origin + offset),
+                        scale => {
+                            canvas.save();
+                            canvas.translate(origin).scale((scale, 1.0));
+                            draw(canvas, offset);
+                            canvas.restore();
+                        }
                     }
-                    run.paint(canvas, at, paint, global_alpha, faint);
-                    reach_the_clip(canvas);
-                };
-                match condensation {
-                    // Chrome condenses with a plain anisotropic transform
-                    // rather than a narrower face, and the pen goes with
-                    // it: at 200px with `lineWidth` 12, a half-width
-                    // `strokeText("H")` draws its stems 6 pixels wide and
-                    // its crossbar still 12. A canvas scale is that, so the
-                    // stroke needs no separate handling.
-                    1.0 => draw(canvas, origin + offset),
-                    scale => {
-                        canvas.save();
-                        canvas.translate(origin).scale((scale, 1.0));
-                        draw(canvas, offset);
-                        canvas.restore();
-                    }
-                }
-            });
+                },
+            );
         }
     }
 
