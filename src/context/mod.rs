@@ -6,7 +6,7 @@ use skia_safe::{
     Image, ImageFilter as SkImageFilter, ImageInfo, MaskFilter as SkMaskFilter,
     Paint, PaintCap, PaintJoin, PaintStyle, Path, PathBuilder, PathFillType,
     PathOp, Picture, PictureRecorder, Point, Rect, RoundOut,
-    Shader as SkShader, Size, Typeface,
+    Shader as SkShader, Size, Typeface, Vector,
     canvas::SrcRectConstraint::Strict,
     color_filters, dash_path_effect,
     font_style::{FontStyle, Width},
@@ -62,6 +62,7 @@ use crate::{
     utils::*,
 };
 use chain::{Step, canvas_reach};
+use exact_blur::REACH_SIGMAS;
 use faint::Faint;
 use layer::{
     BlurDraw, Composite, ExactColour, Group, Layer, LayerRec, holds_a_cut,
@@ -141,6 +142,11 @@ pub struct Context2D {
     /// `PageRecorder::image_flattened`. Fixed when the canvas is built;
     /// there is no setter for it, so a copy here cannot go stale.
     pub canvas_color_type: ColorType,
+    /// The text contrast and gamma the canvas rasterizes glyphs with, fixed
+    /// when it is built: what an export or a readback of the page takes, and
+    /// what a pattern made from it rasterizes it with -- see
+    /// [`CanvasOptions::text_contrast`](crate::canvas::CanvasOptions::text_contrast).
+    pub(crate) canvas_text: (f32, f32),
     /// What the surface `canvas_color_type` composites in does with a
     /// paint too faint for eight bits, fixed with it.
     faint: Faint,
@@ -602,6 +608,7 @@ impl Context2D {
     pub fn new(
         canvas_color_space: ColorSpace,
         canvas_color_type: ColorType,
+        canvas_text: (f32, f32),
         dims: impl Into<Size>,
     ) -> Self {
         let bounds = Rect::from_size(dims);
@@ -611,6 +618,7 @@ impl Context2D {
             bounds,
             canvas_color_space,
             canvas_color_type,
+            canvas_text,
             faint: Faint::of(canvas_color_type),
             recorder: RefCell::new(PageRecorder::recording(bounds, dual)),
             exact_shader: RefCell::default(),
@@ -835,7 +843,9 @@ impl Context2D {
     ) where
         F: Fn(&SkCanvas, &Paint),
     {
-        if self.files_through_chain(paint, exact, features, &f) {
+        if self.files_through_pattern(paint, features, &f)
+            || self.files_through_chain(paint, exact, features, &f)
+        {
             return;
         }
         let paint_for = |recording: Recording| match (recording, exact) {
@@ -903,6 +913,232 @@ impl Context2D {
         };
     }
 
+    /// Files a draw dyed by a canvas's pattern as a
+    /// [`PatternDraw`](layer::PatternDraw), which rasterizes the canvas's
+    /// page where the draw is played, as the page composites itself -- see
+    /// [`TileSource`](layer::TileSource) -- and paints it where the draw
+    /// covers. Kept as Skia's picture shader, the pattern drew the page's
+    /// blurs made at the density of its picture and resampled to any other
+    /// -- a `blur(2px)` read at density 2 parted from the page by up to 16
+    /// levels -- and on a platform whose native colour type is not the
+    /// RGBA8888 Skia rasterizes the tile in, every translucent edge a level
+    /// apart.
+    ///
+    /// A draw that composites only where it lands, through no filter and
+    /// casting no shadow, is the tile alone, filed under the frame's clip as
+    /// a blur is. Any other is held in a group, which composites through the
+    /// draw's filter and blend mode as a canvas drawn through a paint does
+    /// -- see [`Self::draw_picture_costing`] -- beside a group of its own
+    /// for its shadow; under a blend that covers beyond the draw both are
+    /// held in one more, which the blend composites, as
+    /// [`Self::render_to_canvas`] holds them in one picture.
+    ///
+    /// `false`, filing nothing, for a draw dyed any other way.
+    fn files_through_pattern<F>(
+        &self,
+        paint: &Paint,
+        features: VectorFeatures,
+        f: &F,
+    ) -> bool
+    where
+        F: Fn(&SkCanvas, &Paint),
+    {
+        // An image's paint carries no dye, whatever the fill style is.
+        let Dye::Pattern(pattern) = self.state.dye(paint.style()) else {
+            return false;
+        };
+        if paint.shader().is_none() {
+            return false;
+        }
+        let Some((source, pattern_matrix, repeat)) = pattern.tiling() else {
+            return false;
+        };
+        let Some(white) = layer::white() else {
+            return false;
+        };
+        let steps = self.draw_chain();
+        let blend = self.state.global_composite_operation;
+        let beyond = covers_beyond_the_draw(blend);
+        // Drawn on its own wherever it composites only where it lands and
+        // through no filter; a shadow it casts is a group of its own beside
+        // it.
+        let alone =
+            !beyond && steps.is_none() && paint.image_filter().is_none();
+
+        // Recorded over the page and as far again as the filter and the
+        // shadow reach: a picture keeps nothing of a draw past its bounds,
+        // and a draw off the page can cast its shadow onto it.
+        let chain = steps.as_ref().map_or(Vector::default(), |steps| {
+            canvas_reach(steps, &self.state.matrix)
+        });
+        let shadow = match self.casts_shadow() {
+            true => {
+                // Its sigma is half its blur, as `paint_for_shadow` takes it.
+                let sigma = self.state.shadow_blur / 2.0;
+                let blur = REACH_SIGMAS as f32 * sigma;
+                let offset = self.state.shadow_offset;
+                Vector::new(offset.x.abs() + blur, offset.y.abs() + blur)
+            }
+            false => Vector::default(),
+        };
+        let bounds = self.bounds.with_outset(chain + shadow);
+        let record = |paint: &Paint| {
+            let mut recorder = PictureRecorder::new();
+            let canvas = recorder.begin_recording(bounds, true);
+            canvas.set_matrix(&self.state.matrix.into());
+            f(canvas, paint);
+            recorder.finish_recording_as_picture(None)
+        };
+        // The draw as a document writes it, less what a group composites
+        // through where one does: its filter, and its blend.
+        let mut plain = paint.clone();
+        plain.set_image_filter(None);
+        if !alone {
+            plain.set_blend_mode(BlendMode::SrcOver);
+        }
+        // What the draw covers. White through an image's shader rather than
+        // a colour: Skia sets a glyph mask's contrast from the luminance of
+        // the paint's colour, which a shader painting an image does not
+        // report, the pattern's included, so text covers what it covers
+        // through the pattern's paint.
+        let mut covered = plain.clone();
+        covered
+            .set_shader(white)
+            .set_color_filter(None)
+            .set_alpha_f(1.0)
+            .set_blend_mode(BlendMode::SrcOver);
+        let (Some(covered), Some(recorded)) =
+            (record(&covered), record(&plain))
+        else {
+            return false;
+        };
+        let mut through = plain;
+        through.set_shader(None);
+        let tile = layer::PatternDraw {
+            source,
+            matrix: self.state.matrix,
+            pattern_matrix,
+            repeat,
+            covered,
+            plain: recorded,
+            paint: through,
+            clip: None,
+        };
+        let tile = Arc::new(tile);
+        let unit: Arc<Vec<Layer>> =
+            Arc::new(vec![Layer::Pattern(Arc::clone(&tile))]);
+        let rec = |paint: Paint| LayerRec {
+            paint: Some(paint),
+            ..LayerRec::default()
+        };
+        // The draw's filter, and its blend where that composites only where
+        // the draw lands.
+        let mut filter = Paint::default();
+        filter
+            .set_anti_alias(true)
+            .set_image_filter(paint.image_filter());
+        if !beyond {
+            filter.set_blend_mode(blend);
+        }
+        let drawn = match steps {
+            Some(steps) => Composite::Chain {
+                steps,
+                rec: rec(filter),
+            },
+            None => Composite::Layer(rec(filter)),
+        };
+        // The shadow of what the group holds, its alpha already in it.
+        let mut cast = Paint::default();
+        cast.set_anti_alias(true);
+        let shadow = self
+            .paint_for_shadow(&cast)
+            .map(|shadow| Composite::Layer(rec(shadow)));
+        let offset = self.state.shadow_offset;
+        let identity = Matrix::new_identity();
+        // A group, which the SVG backend drops whole -- see
+        // `VectorFeatures::LAYER` -- and so rasterizes, as it does a
+        // `saveLayer`; the draw on its own asks only for what it does.
+        let grouped = features.with(VectorFeatures::LAYER);
+        self.with_recorder(|mut recorder| {
+            if !beyond {
+                if let Some(shadow) = shadow {
+                    recorder.append_group(
+                        shadow,
+                        None,
+                        identity,
+                        Arc::clone(&unit),
+                        features.with(VectorFeatures::LAYER),
+                        offset,
+                    );
+                }
+                if alone {
+                    let clip = self.state.clip.as_ref();
+                    recorder.append_tile(tile, clip, features);
+                    return;
+                }
+                recorder.append_group(
+                    drawn,
+                    None,
+                    identity,
+                    unit,
+                    grouped,
+                    Point::default(),
+                );
+                return;
+            }
+            // Held in one group the blend composites, each under the
+            // transform the draw was made under, moved as the shadow is.
+            let group = |composite: Composite, shift: Point| {
+                let shift = Matrix::translate(shift);
+                Layer::Group(Arc::new(Group {
+                    composite,
+                    matrix: Matrix::concat(&shift, &self.state.matrix),
+                    clip: None,
+                    within: None,
+                    contents_matrix: shift,
+                    contents: Arc::clone(&unit),
+                }))
+            };
+            let mut held = Vec::with_capacity(2);
+            if let Some(shadow) = shadow {
+                held.push(group(shadow, offset));
+            }
+            held.push(group(drawn, Point::default()));
+            let mut blended = Paint::default();
+            blended.set_anti_alias(true).set_blend_mode(blend);
+            recorder.append_group(
+                Composite::Layer(rec(blended)),
+                None,
+                identity,
+                Arc::new(held),
+                grouped,
+                Point::default(),
+            );
+        });
+        true
+    }
+
+    /// The filter chain a draw is run through by the crate rather than by
+    /// Skia -- see [`Self::files_through_chain`]: one holding a
+    /// `drop-shadow()` or a step run in the draw's own space, for a draw
+    /// casting no shadow of the context's own, under a blend that composites
+    /// only where it lands. A chain of blurs and colour functions alone
+    /// keeps the route its draw takes otherwise: a `BlurOp`, or Skia's
+    /// filter.
+    fn draw_chain(&self) -> Option<Arc<[Step]>> {
+        if covers_beyond_the_draw(self.state.global_composite_operation)
+            || self.casts_shadow()
+        {
+            return None;
+        }
+        self.exact_steps().filter(|steps| {
+            steps.iter().any(|step| {
+                matches!(step, Step::Shadow { .. })
+                    || step.runs_in_local_space()
+            })
+        })
+    }
+
     /// Files a draw under a `drop-shadow()` the crate runs itself -- see
     /// [`Filter::steps`] -- or under a Skia image filter on a page that
     /// composites in floats -- see [`Self::exact_steps`] -- as a group of
@@ -925,22 +1161,9 @@ impl Context2D {
     where
         F: Fn(&SkCanvas, &Paint),
     {
-        if covers_beyond_the_draw(self.state.global_composite_operation)
-            || self.casts_shadow()
-        {
-            return false;
-        }
-        let Some(steps) = self.exact_steps() else {
+        let Some(steps) = self.draw_chain() else {
             return false;
         };
-        // A chain of blurs and colour functions alone keeps the route its
-        // draw takes now: a `BlurOp`, or Skia's filter.
-        let chained = steps.iter().any(|step| {
-            matches!(step, Step::Shadow { .. }) || step.runs_in_local_space()
-        });
-        if !chained {
-            return false;
-        }
         // Recorded over the page and as far again as the chain reaches: a
         // picture keeps nothing of a draw past its bounds, and a draw off
         // the page can cast its shadow onto it.
@@ -2840,10 +3063,16 @@ impl Dye {
     /// this dye.
     ///
     /// SVG names a solid color, a linear, radial or two-point conical
-    /// gradient, and an image shader. A sweep gradient or a procedural
-    /// shader leaves it with nothing to write.
+    /// gradient, and an image shader. A sweep gradient, a procedural shader
+    /// or a canvas's pattern leaves it with nothing to write.
     pub fn vector_features(&self) -> VectorFeatures {
         match self {
+            // A canvas's pattern is a picture shader to a document, which
+            // SVG names no paint server for: a draw dyed by one wrote a bare
+            // path, black. An image's is an image shader, which it writes.
+            Dye::Pattern(pattern) if pattern.tiling().is_some() => {
+                VectorFeatures::EXOTIC_SHADER
+            }
             Dye::Color(..) | Dye::Pattern(_) | Dye::Texture(_) => {
                 VectorFeatures::PLAIN
             }
@@ -3034,11 +3263,19 @@ fn drawn_bounds(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::filter::FilterSpec;
+    use crate::{
+        canvas::{DEFAULT_TEXT_CONTRAST, DEFAULT_TEXT_GAMMA},
+        node::filter::FilterSpec,
+    };
 
     /// Builds a context the size of a small canvas, as `Canvas::new` does.
     fn context() -> Context2D {
-        Context2D::new(ColorSpace::new_srgb(), ColorType::N32, (200.0, 100.0))
+        Context2D::new(
+            ColorSpace::new_srgb(),
+            ColorType::N32,
+            (DEFAULT_TEXT_CONTRAST, DEFAULT_TEXT_GAMMA),
+            (200.0, 100.0),
+        )
     }
 
     /// A triangle reaching from x 20 to x 140.5, a third of it right of a
@@ -3336,28 +3573,6 @@ mod tests {
         Move,
     }
 
-    impl Step {
-        /// Whether the step puts pixels on the page, rather than reading,
-        /// exporting or changing the frame or the clip.
-        fn draws(self) -> bool {
-            match self {
-                Step::Fill(_)
-                | Step::Text
-                | Step::Rect
-                | Step::Blur
-                | Step::BlurPath(_)
-                | Step::Layer
-                | Step::Clear
-                | Step::Cut => true,
-                Step::Read
-                | Step::Export
-                | Step::Clip
-                | Step::Restore
-                | Step::Move => false,
-            }
-        }
-    }
-
     /// What a program drew: the page, what each `Export` step exported and
     /// what each `Read` step read.
     struct Drawn {
@@ -3627,7 +3842,7 @@ mod tests {
     }
 
     /// `steps` without their blurs: a page a document draws as vectors, and
-    /// a pattern draws as the page does.
+    /// `draw_canvas` draws through a plain paint.
     fn unblurred(steps: Vec<Step>) -> Vec<Step> {
         steps
             .into_iter()
@@ -3636,80 +3851,38 @@ mod tests {
     }
 
     /// A page drawn into another canvas -- with `draw_canvas`, or as a
-    /// pattern -- draws there what it draws itself, at densities 1 to 3,
-    /// read part way or not: a draw its clip cuts is as exact in the picture
-    /// another canvas replays as it is on the page. With its blurs the page
-    /// carries features that send `draw_canvas` through a group of its
-    /// entries whatever the paint; without them a plain paint takes the
-    /// route for a page holding a cut draw, and both are held here. A
-    /// pattern is held to it only without the blurs, which a pattern draws
-    /// other than the page does, cut draw or none, and within
-    /// [`tile_slack`] a draw, which is how far Skia's picture shader draws a
-    /// page's translucent edges from where the page draws them.
+    /// pattern -- draws there what it draws itself, to the byte, at
+    /// densities 1 to 3, read part way or not: a draw its clip cuts is as
+    /// exact in the picture another canvas replays as it is on the page, and
+    /// a pattern rasterizes the page as the page composites itself. With its
+    /// blurs the page carries features that send `draw_canvas` through a
+    /// group of its entries whatever the paint; without them a plain paint
+    /// takes the route for a page holding a cut draw, and both are held
+    /// here.
     #[test]
     fn a_page_drawn_into_another_draws_as_it_does_itself() {
         let mut programs = vec![CLIPPED.to_vec()];
         programs.extend(with_each(Step::Read));
         for steps in programs {
             for density in 1..=3 {
-                let mut source = program(&steps, false, true).canvas;
-                let direct = pixels_at(&mut source, density);
-                let (_, drawn) = drawn_in(&mut source, density);
-                assert!(drawn == direct, "drawn in, {density}x: {steps:?}");
-
-                let steps = unblurred(steps.clone());
-                let mut source = program(&steps, false, true).canvas;
-                let direct = pixels_at(&mut source, density);
-                let (_, drawn) = drawn_in(&mut source, density);
-                assert!(drawn == direct, "unblurred, {density}x: {steps:?}");
-                // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
-                // Re-check: cargo test a_picture_shader_tile_blits_as_rgba
-                // A pattern lies over its page to the byte where the
-                // platform's native colour type is the RGBA8888 Skia's
-                // picture shader rasterizes a tile in, and elsewhere --
-                // Linux -- within a premultiplied level for each draw a
-                // pixel lies under: a translucent edge blits a level apart
-                // in the tile and on the page, and a draw over it carries
-                // that on and can add its own. Measured on Linux, a lone
-                // edge parts by one, two overlapping fills by two, and
-                // `CLIPPED` by 3, 4 and 3 at densities 1 to 3. Read
-                // premultiplied, which is what the tile holds:
-                // unpremultiplied, a level at a faint edge reads as up to
-                // 128. The pattern work that rasterizes a canvas pattern in
-                // the page's own colour type is what lifts this.
-                let page = premultiplied_at(&mut source, density);
-                let pattern =
-                    premultiplied_at(&mut patterned(&mut source), density);
-                let most = farthest(&pattern, &page);
-                let draws = steps.iter().filter(|step| step.draws()).count();
-                assert!(
-                    usize::from(most) <= usize::from(tile_slack()) * draws,
-                    "a pattern, {density}x, parted by {most}: {steps:?}"
-                );
+                for (steps, how) in [
+                    (steps.clone(), "blurred"),
+                    (unblurred(steps.clone()), "unblurred"),
+                ] {
+                    let mut source = program(&steps, false, true).canvas;
+                    let direct = pixels_at(&mut source, density);
+                    let (pattern, drawn) = drawn_in(&mut source, density);
+                    assert!(
+                        drawn == direct,
+                        "{how}, drawn in, {density}x: {steps:?}"
+                    );
+                    assert!(
+                        pattern == direct,
+                        "{how}, a pattern, {density}x: {steps:?}"
+                    );
+                }
             }
         }
-    }
-
-    /// The pixels of `canvas` read at `density`, premultiplied.
-    fn premultiplied_at(
-        canvas: &mut crate::canvas::Canvas,
-        density: u32,
-    ) -> Vec<u8> {
-        canvas
-            .to_image_data(
-                None,
-                &crate::pixels::ImageDataExport {
-                    density,
-                    pixels: crate::pixels::PixelExportOptions {
-                        premultiplied: true,
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                },
-            )
-            .expect("pixels")
-            .pixels()
-            .to_vec()
     }
 
     /// The most two reads part by in any byte.
@@ -3721,18 +3894,6 @@ mod tests {
             .unwrap_or(0)
     }
 
-    /// How far, in premultiplied levels, a canvas pattern may part from its
-    /// page here for each draw a pixel lies under: none where the
-    /// platform's native colour type is the RGBA8888 Skia's picture shader
-    /// rasterizes a tile in, one elsewhere -- see
-    /// [`a_picture_shader_tile_blits_as_rgba`].
-    fn tile_slack() -> u8 {
-        match ColorType::N32 == ColorType::RGBA8888 {
-            true => 0,
-            false => 1,
-        }
-    }
-
     /// Skia's picture shader rasterizes its tile as RGBA8888 whatever the
     /// surface it fills (`SkPictureShader::CachedImageInfo::Make`), and an
     /// anti-aliased translucent edge blits a premultiplied level apart in
@@ -3742,7 +3903,8 @@ mod tests {
     /// BGRA8888, between it and RGBA8888. So a picture-shader fill draws a
     /// translucent edge as a draw onto the native surface does only where
     /// that type is RGBA8888. Fails, as the sign to look again, once the
-    /// two agree everywhere, when the slack the pattern pin allows can go.
+    /// two agree everywhere, when a canvas pattern could be Skia's picture
+    /// shader again -- see `TileSource`.
     #[test]
     fn a_picture_shader_tile_blits_as_rgba() {
         use skia_safe::{FilterMode, PictureRecorder, TileMode};
@@ -4809,5 +4971,73 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A document plays a draw dyed by a pattern made at playback as it
+    /// plays the draw dyed by the pattern's picture, at the draw's alpha
+    /// once: the group the draw is filed in composites at that alpha, and
+    /// the draw it writes for a document holds none of its own.
+    #[test]
+    fn a_document_draws_a_pattern_made_at_playback_at_its_alpha_once() {
+        use crate::{
+            node::{image::Content, pattern::CanvasPattern},
+            pattern::Pattern,
+        };
+        use skia_safe::TileMode;
+
+        let (width, height) = (60.0, 40.0);
+        let mut source = crate::canvas::Canvas::new(width, height);
+        source.set_gpu(false);
+        source
+            .context()
+            .set_filter_css("blur(2px)")
+            .expect("a filter");
+        source.context().fill_rect(10.0, 10.0, 30.0, 20.0);
+        let inner = &source.context().inner;
+        let repeat = (TileMode::Repeat, TileMode::Repeat);
+        let made = CanvasPattern::of_page(inner, repeat);
+        let identity = Matrix::new_identity();
+        assert!(made.tiling().is_some(), "made at playback");
+        let picture = inner.picture().expect("the page's picture");
+        let size = inner.bounds.size();
+        let recorded = CanvasPattern::from_parts(
+            Content::Vector(picture, size),
+            size,
+            repeat,
+            identity,
+        );
+        assert!(recorded.tiling().is_none(), "recorded");
+
+        let document = |pattern: CanvasPattern| {
+            let mut canvas = crate::canvas::Canvas::new(width, height);
+            canvas.set_gpu(false);
+            let ctx = canvas.context();
+            ctx.set_global_alpha(0.5);
+            ctx.set_fill_pattern(&Pattern::from_inner(pattern));
+            ctx.fill_rect(5.0, 5.0, 50.0, 30.0);
+            let page = ctx.inner.page();
+            let mut surface =
+                started::raster_n32_premul((width as i32, height as i32))
+                    .expect("a surface");
+            for entry in page.layers.iter() {
+                entry.playback(surface.canvas(), layer::Target::Document);
+            }
+            let info = surface.image_info();
+            let mut pixels = vec![0u8; info.compute_min_byte_size()];
+            assert!(surface.read_pixels(
+                &info,
+                &mut pixels,
+                info.min_row_bytes(),
+                (0, 0)
+            ));
+            pixels
+        };
+        let (made, recorded) = (document(made), document(recorded));
+        let most = made
+            .iter()
+            .zip(&recorded)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max();
+        assert!(most.is_some_and(|most| most <= 1), "parted by {most:?}");
     }
 }

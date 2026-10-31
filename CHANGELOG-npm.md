@@ -471,6 +471,27 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **An SVG export keeps a draw dyed by a canvas's pattern.** SVG names no
+  paint server for a canvas's pattern, and the export wrote such a draw as a
+  bare path, filled black. It now embeds the draw as pixels, as it does a
+  conic gradient. A PDF writes the pattern as it did.
+
+- **A pattern of a canvas draws the canvas as the canvas draws itself.**
+  `createPattern(canvas)` filled with Skia's picture shader, which
+  rasterizes the canvas's picture once, at the density it is first drawn at,
+  and always as RGBA8888. So a `getImageData` or an export at density 2
+  resampled the canvas's blurs, filter chains and `saveLayer()` groups from
+  density 1 -- a `blur(2px)` rectangle came out up to 16 levels from the
+  canvas's own pixels -- on a GPU canvas a `saveLayer()` under a blur parted
+  at every density, and on Linux, whose native pixels are BGRA, every
+  translucent edge in a pattern came out a level from the canvas's. A draw
+  dyed by a canvas's pattern now rasterizes the canvas as it composites
+  itself, at the density the draw is read at and on the engine it is drawn
+  on, and paints it where the draw covers through the draw's own alpha,
+  blend mode and colour filter: to the byte the pixels a pattern of the
+  canvas's own pixels at that density paints, path, stroke, text, shadow and
+  filter alike. A PDF still writes the pattern from the canvas's picture.
+
 - **A `drop-shadow()` in `ctx.filter` lands in its colour exactly on a float
   canvas.** On a canvas made with `colorType: "RGBAF16"` or `"RGBAF32"`, a
   shadow was tinted through Skia's blend filter, which converts its colour
