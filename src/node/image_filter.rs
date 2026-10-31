@@ -5,13 +5,14 @@ use crate::{
 };
 use neon::prelude::*;
 use skia_safe::{
-    Color, Color4f, IPoint, ISize, ImageFilter as SkImageFilter, Matrix,
-    Point3, SamplingOptions, image_filters,
+    Color, Color4f, ColorSpace, IPoint, ISize, ImageFilter as SkImageFilter,
+    Matrix, Point3, SamplingOptions, image_filters,
 };
 use std::cell::RefCell;
 
 use crate::{
     color_filter::{BoxedColorFilter, checkDeleted as checkColorFilterDeleted},
+    filter::onto::{Onto, PageFilter},
     utils::{
         css_to_color, css_to_color4f_in_space, enum_arg_or,
         filter_blend_mode_arg, skia_paint_color,
@@ -23,7 +24,7 @@ impl Finalize for ImageFilter {}
 
 #[derive(Clone)]
 pub struct ImageFilter {
-    pub inner: SkImageFilter,
+    pub inner: PageFilter<SkImageFilter>,
     deleted: bool,
 }
 
@@ -33,21 +34,47 @@ impl ImageFilter {
     }
 }
 
-/// Wraps an `Option<SkImageFilter>` result: `Some` -> boxed `ImageFilter`,
-/// `None` -> null.
+/// Boxes the filter `$build` makes over the optional `$input` filters,
+/// each in scope there as the Skia filter it is for `$onto`, the page it
+/// is built for -- see [`PageFilter::built`]: `Some` -> boxed
+/// `ImageFilter`, `None` -> null. `$depends` adds to what makes it depend
+/// on the page, beside its inputs.
 macro_rules! wrap_image_filter {
-    ($cx:expr, $result:expr) => {
-        match $result {
-            Some(filter) => {
+    ($cx:expr, [$($input:ident),*], |$onto:ident| $build:expr) => {
+        wrap_image_filter!($cx, false, [$($input),*], |$onto| $build)
+    };
+    ($cx:expr, $depends:expr, [$($input:ident),*], |$onto:ident| $build:expr) => {{
+        let depends = $depends
+            $(|| $input.as_ref().is_some_and(PageFilter::depends))*;
+        let built = PageFilter::built(depends, move |$onto| {
+            $(let $input = $input.as_ref().map(|f| f.on($onto));)*
+            $build
+        });
+        match built {
+            Some(inner) => {
                 let imgf = ImageFilter {
-                    inner: filter,
+                    inner,
                     deleted: false,
                 };
                 Ok($cx.boxed(RefCell::new(imgf)).upcast())
             }
             None => Ok($cx.null().upcast()),
         }
-    };
+    }};
+}
+
+/// A shadow's `color`, in `space`, as Skia is handed it for `onto` -- see
+/// [`Onto::color`] -- and with no page named, tagged with the space it was
+/// named in.
+fn shadow_color(
+    color: Color4f,
+    space: &ColorSpace,
+    onto: Option<&Onto>,
+) -> (Color4f, ColorSpace) {
+    match onto {
+        Some(onto) => onto.color(color, space),
+        None => skia_paint_color(color, space),
+    }
 }
 
 /// Parses optional input `ImageFilter` from argument at index.
@@ -162,10 +189,10 @@ pub fn makeColorFilter(mut cx: FunctionContext) -> JsResult<JsValue> {
     let cf = cx.argument::<BoxedColorFilter>(1)?;
     checkColorFilterDeleted(&mut cx, &cf)?;
     let input = opt_input_filter!(&mut cx, 2);
-    wrap_image_filter!(
-        cx,
-        image_filters::color_filter(cf.borrow().inner.clone(), input, None)
-    )
+    let cf = cf.borrow().inner.clone();
+    wrap_image_filter!(cx, cf.depends(), [input], |onto| {
+        image_filters::color_filter(cf.on(onto), input, None)
+    })
 }
 
 /// `ImageFilter.MakeCompose(outer, inner)`.
@@ -174,13 +201,13 @@ pub fn makeCompose(mut cx: FunctionContext) -> JsResult<JsValue> {
     let inner = cx.argument::<BoxedImageFilter>(2)?;
     checkDeleted(&mut cx, &outer)?;
     checkDeleted(&mut cx, &inner)?;
-    wrap_image_filter!(
-        cx,
-        image_filters::compose(
-            outer.borrow().inner.clone(),
-            inner.borrow().inner.clone()
-        )
-    )
+    let (outer, inner) = (
+        Some(outer.borrow().inner.clone()),
+        Some(inner.borrow().inner.clone()),
+    );
+    wrap_image_filter!(cx, [outer, inner], |onto| {
+        image_filters::compose(outer?, inner?)
+    })
 }
 
 /// `ImageFilter.MakeBlur(sigmaX, sigmaY, tileMode?, input?)`.
@@ -189,15 +216,12 @@ pub fn makeBlur(mut cx: FunctionContext) -> JsResult<JsValue> {
     let sigma_y = cx.argument::<JsNumber>(2)?.value(&mut cx) as f32;
     let tile_mode = parse_tile_mode(&mut cx, 3)?;
     let input = opt_input_filter!(&mut cx, 4);
-    wrap_image_filter!(
-        cx,
-        image_filters::blur(
-            (sigma_x, sigma_y),
-            tile_mode.to_skia(),
-            input,
-            None,
-        )
-    )
+    wrap_image_filter!(cx, [input], |onto| image_filters::blur(
+        (sigma_x, sigma_y),
+        tile_mode.to_skia(),
+        input,
+        None,
+    ))
 }
 
 /// `ImageFilter.MakeDropShadow(dx, dy, sigmaX, sigmaY, color, input?)`.
@@ -208,26 +232,20 @@ pub fn makeDropShadow(mut cx: FunctionContext) -> JsResult<JsValue> {
     let sigma_y = cx.argument::<JsNumber>(4)?.value(&mut cx) as f32;
     let (color, space) =
         parse_color4f!(&mut cx, 5, (Color4f::new(0.0, 0.0, 0.0, 1.0), None));
-    let (color, space) = match space {
-        Some(space) => {
-            let (color, space) = skia_paint_color(color, &space);
-            (color, Some(space))
-        }
-        None => (color, None),
-    };
+    let space = space.unwrap_or_else(ColorSpace::new_srgb);
     let input = opt_input_filter!(&mut cx, 6);
     // Args: offset, sigma, color, color_space, input, crop_rect
-    wrap_image_filter!(
-        cx,
+    wrap_image_filter!(cx, true, [input], |onto| {
+        let (color, space) = shadow_color(color, &space, onto);
         image_filters::drop_shadow(
             (dx, dy),
             (sigma_x, sigma_y),
             color,
             space,
             input,
-            None
+            None,
         )
-    )
+    })
 }
 
 /// `ImageFilter.MakeDropShadowOnly(dx, dy, sigmaX, sigmaY, color, input?)`.
@@ -238,25 +256,19 @@ pub fn makeDropShadowOnly(mut cx: FunctionContext) -> JsResult<JsValue> {
     let sigma_y = cx.argument::<JsNumber>(4)?.value(&mut cx) as f32;
     let (color, space) =
         parse_color4f!(&mut cx, 5, (Color4f::new(0.0, 0.0, 0.0, 1.0), None));
-    let (color, space) = match space {
-        Some(space) => {
-            let (color, space) = skia_paint_color(color, &space);
-            (color, Some(space))
-        }
-        None => (color, None),
-    };
+    let space = space.unwrap_or_else(ColorSpace::new_srgb);
     let input = opt_input_filter!(&mut cx, 6);
-    wrap_image_filter!(
-        cx,
+    wrap_image_filter!(cx, true, [input], |onto| {
+        let (color, space) = shadow_color(color, &space, onto);
         image_filters::drop_shadow_only(
             (dx, dy),
             (sigma_x, sigma_y),
             color,
             space,
             input,
-            None
+            None,
         )
-    )
+    })
 }
 
 /// `ImageFilter.MakeOffset(dx, dy, input?)`.
@@ -264,7 +276,11 @@ pub fn makeOffset(mut cx: FunctionContext) -> JsResult<JsValue> {
     let dx = cx.argument::<JsNumber>(1)?.value(&mut cx) as f32;
     let dy = cx.argument::<JsNumber>(2)?.value(&mut cx) as f32;
     let input = opt_input_filter!(&mut cx, 3);
-    wrap_image_filter!(cx, image_filters::offset((dx, dy), input, None))
+    wrap_image_filter!(cx, [input], |onto| image_filters::offset(
+        (dx, dy),
+        input,
+        None
+    ))
 }
 
 /// An optional `[x, y, width, height]` crop rectangle.
@@ -300,7 +316,11 @@ pub fn makeDilate(mut cx: FunctionContext) -> JsResult<JsValue> {
     let ry = cx.argument::<JsNumber>(2)?.value(&mut cx) as f32;
     let input = opt_input_filter!(&mut cx, 3);
     let crop = parse_crop(&mut cx, 4)?;
-    wrap_image_filter!(cx, image_filters::dilate((rx, ry), input, crop))
+    wrap_image_filter!(cx, [input], |onto| image_filters::dilate(
+        (rx, ry),
+        input,
+        crop
+    ))
 }
 
 /// `ImageFilter.MakeErode(radiusX, radiusY, input?)`.
@@ -309,7 +329,11 @@ pub fn makeErode(mut cx: FunctionContext) -> JsResult<JsValue> {
     let ry = cx.argument::<JsNumber>(2)?.value(&mut cx) as f32;
     let input = opt_input_filter!(&mut cx, 3);
     let crop = parse_crop(&mut cx, 4)?;
-    wrap_image_filter!(cx, image_filters::erode((rx, ry), input, crop))
+    wrap_image_filter!(cx, [input], |onto| image_filters::erode(
+        (rx, ry),
+        input,
+        crop
+    ))
 }
 
 /// `ImageFilter.MakeMerge(filters)` -- merge multiple filters.
@@ -322,7 +346,7 @@ pub fn makeErode(mut cx: FunctionContext) -> JsResult<JsValue> {
 pub fn makeMerge(mut cx: FunctionContext) -> JsResult<JsValue> {
     let arr = cx.argument::<JsArray>(1)?;
     let len = arr.len(&mut cx);
-    let mut filters: Vec<Option<SkImageFilter>> =
+    let mut filters: Vec<Option<PageFilter<SkImageFilter>>> =
         Vec::with_capacity(len as usize);
 
     for i in 0..len {
@@ -338,15 +362,20 @@ pub fn makeMerge(mut cx: FunctionContext) -> JsResult<JsValue> {
         }
     }
 
-    wrap_image_filter!(cx, image_filters::merge(filters, None))
+    let depends = filters.iter().flatten().any(PageFilter::depends);
+    wrap_image_filter!(cx, depends, [], |onto| {
+        image_filters::merge(
+            filters.iter().map(|f| f.as_ref().map(|f| f.on(onto))),
+            None,
+        )
+    })
 }
 
 /// `ImageFilter.MakeEmpty()` -- yields transparent black, erasing the input
 /// rather than passing it through.
 pub fn makeEmpty(mut cx: FunctionContext) -> JsResult<JsValue> {
-    let filter = image_filters::empty();
     let imgf = ImageFilter {
-        inner: filter,
+        inner: PageFilter::plain(image_filters::empty()),
         deleted: false,
     };
     Ok(cx.boxed(RefCell::new(imgf)).upcast())
@@ -371,7 +400,7 @@ pub fn makeTile(mut cx: FunctionContext) -> JsResult<JsValue> {
     );
 
     let input = opt_input_filter!(&mut cx, 3);
-    wrap_image_filter!(cx, image_filters::tile(src, dst, input))
+    wrap_image_filter!(cx, [input], |onto| image_filters::tile(src, dst, input))
 }
 
 pub fn repr(mut cx: FunctionContext) -> JsResult<JsString> {
@@ -453,10 +482,9 @@ pub fn makeBlend(mut cx: FunctionContext) -> JsResult<JsValue> {
     let mode = filter_blend_mode_arg(&mut cx, 1, "mode")?;
     let background = opt_input_filter!(&mut cx, 2);
     let foreground = opt_input_filter!(&mut cx, 3);
-    wrap_image_filter!(
-        cx,
+    wrap_image_filter!(cx, [background, foreground], |onto| {
         image_filters::blend(mode.to_skia(), background, foreground, None)
-    )
+    })
 }
 
 /// `ImageFilter.MakeArithmetic(k1, k2, k3, k4, enforcePMColor, background?,
@@ -473,8 +501,7 @@ pub fn makeArithmetic(mut cx: FunctionContext) -> JsResult<JsValue> {
         .unwrap_or(true);
     let background = opt_input_filter!(&mut cx, 6);
     let foreground = opt_input_filter!(&mut cx, 7);
-    wrap_image_filter!(
-        cx,
+    wrap_image_filter!(cx, [background, foreground], |onto| {
         image_filters::arithmetic(
             k1,
             k2,
@@ -483,9 +510,9 @@ pub fn makeArithmetic(mut cx: FunctionContext) -> JsResult<JsValue> {
             enforce_pm_color,
             background,
             foreground,
-            None
+            None,
         )
-    )
+    })
 }
 
 /// `ImageFilter.MakeDisplacementMap(xChannel, yChannel, scale, displacement?,
@@ -496,16 +523,15 @@ pub fn makeDisplacementMap(mut cx: FunctionContext) -> JsResult<JsValue> {
     let scale = cx.argument::<JsNumber>(3)?.value(&mut cx) as f32;
     let displacement = opt_input_filter!(&mut cx, 4);
     let color = opt_input_filter!(&mut cx, 5);
-    wrap_image_filter!(
-        cx,
+    wrap_image_filter!(cx, [displacement, color], |onto| {
         image_filters::displacement_map(
             (x_channel.to_skia(), y_channel.to_skia()),
             scale,
             displacement,
             color,
-            None
+            None,
         )
-    )
+    })
 }
 
 /// `ImageFilter.MakeMatrixConvolution(kernelSize, kernel, gain, bias,
@@ -548,20 +574,17 @@ pub fn makeMatrixConvolution(mut cx: FunctionContext) -> JsResult<JsValue> {
     let input = opt_input_filter!(&mut cx, 8);
     let crop = parse_crop(&mut cx, 9)?;
 
-    wrap_image_filter!(
-        cx,
-        image_filters::matrix_convolution(
-            kernel_size,
-            &kernel,
-            gain,
-            bias,
-            kernel_offset,
-            tile_mode.to_skia(),
-            convolve_alpha,
-            input,
-            crop
-        )
-    )
+    wrap_image_filter!(cx, [input], |onto| image_filters::matrix_convolution(
+        kernel_size,
+        &kernel,
+        gain,
+        bias,
+        kernel_offset,
+        tile_mode.to_skia(),
+        convolve_alpha,
+        input,
+        crop
+    ))
 }
 
 /// `ImageFilter.MakeMatrixTransform(matrix, sampling?, input?)`.
@@ -610,10 +633,9 @@ pub fn makeMatrixTransform(mut cx: FunctionContext) -> JsResult<JsValue> {
     let sampling = parse_sampling(&mut cx, 2)?;
 
     let input = opt_input_filter!(&mut cx, 3);
-    wrap_image_filter!(
-        cx,
-        image_filters::matrix_transform(&matrix, sampling, input)
-    )
+    wrap_image_filter!(cx, [input], |onto| image_filters::matrix_transform(
+        &matrix, sampling, input
+    ))
 }
 
 /// `ImageFilter.MakeMagnifier(lensBounds, zoomAmount, inset, sampling?,
@@ -634,17 +656,14 @@ pub fn makeMagnifier(mut cx: FunctionContext) -> JsResult<JsValue> {
     let sampling = parse_sampling(&mut cx, 4)?;
 
     let input = opt_input_filter!(&mut cx, 5);
-    wrap_image_filter!(
-        cx,
-        image_filters::magnifier(
-            lens_bounds,
-            zoom_amount,
-            inset,
-            sampling,
-            input,
-            None
-        )
-    )
+    wrap_image_filter!(cx, [input], |onto| image_filters::magnifier(
+        lens_bounds,
+        zoom_amount,
+        inset,
+        sampling,
+        input,
+        None
+    ))
 }
 
 /// `ImageFilter.MakeCrop(rect, tileMode?, input?)`.
@@ -658,10 +677,11 @@ pub fn makeCrop(mut cx: FunctionContext) -> JsResult<JsValue> {
     );
     let tile_mode = parse_tile_mode(&mut cx, 2)?;
     let input = opt_input_filter!(&mut cx, 3);
-    wrap_image_filter!(
-        cx,
-        image_filters::crop(rect, tile_mode.to_skia(), input)
-    )
+    wrap_image_filter!(cx, [input], |onto| image_filters::crop(
+        rect,
+        tile_mode.to_skia(),
+        input
+    ))
 }
 
 // ==================== Lighting ImageFilter methods ====================
@@ -674,17 +694,14 @@ pub fn makeDistantLitDiffuse(mut cx: FunctionContext) -> JsResult<JsValue> {
     let surface_scale = cx.argument::<JsNumber>(3)?.value(&mut cx) as f32;
     let kd = cx.argument::<JsNumber>(4)?.value(&mut cx) as f32;
     let input = opt_input_filter!(&mut cx, 5);
-    wrap_image_filter!(
-        cx,
-        image_filters::distant_lit_diffuse(
-            direction,
-            light_color,
-            surface_scale,
-            kd,
-            input,
-            None
-        )
-    )
+    wrap_image_filter!(cx, [input], |onto| image_filters::distant_lit_diffuse(
+        direction,
+        light_color,
+        surface_scale,
+        kd,
+        input,
+        None
+    ))
 }
 
 /// `ImageFilter.MakePointLitDiffuse(location, lightColor, surfaceScale, kd,
@@ -695,17 +712,14 @@ pub fn makePointLitDiffuse(mut cx: FunctionContext) -> JsResult<JsValue> {
     let surface_scale = cx.argument::<JsNumber>(3)?.value(&mut cx) as f32;
     let kd = cx.argument::<JsNumber>(4)?.value(&mut cx) as f32;
     let input = opt_input_filter!(&mut cx, 5);
-    wrap_image_filter!(
-        cx,
-        image_filters::point_lit_diffuse(
-            location,
-            light_color,
-            surface_scale,
-            kd,
-            input,
-            None
-        )
-    )
+    wrap_image_filter!(cx, [input], |onto| image_filters::point_lit_diffuse(
+        location,
+        light_color,
+        surface_scale,
+        kd,
+        input,
+        None
+    ))
 }
 
 /// `ImageFilter.MakeSpotLitDiffuse(location, target, falloffExponent,
@@ -720,20 +734,17 @@ pub fn makeSpotLitDiffuse(mut cx: FunctionContext) -> JsResult<JsValue> {
     let surface_scale = cx.argument::<JsNumber>(6)?.value(&mut cx) as f32;
     let kd = cx.argument::<JsNumber>(7)?.value(&mut cx) as f32;
     let input = opt_input_filter!(&mut cx, 8);
-    wrap_image_filter!(
-        cx,
-        image_filters::spot_lit_diffuse(
-            location,
-            target,
-            falloff_exponent,
-            cutoff_angle,
-            light_color,
-            surface_scale,
-            kd,
-            input,
-            None
-        )
-    )
+    wrap_image_filter!(cx, [input], |onto| image_filters::spot_lit_diffuse(
+        location,
+        target,
+        falloff_exponent,
+        cutoff_angle,
+        light_color,
+        surface_scale,
+        kd,
+        input,
+        None
+    ))
 }
 
 /// `ImageFilter.MakeDistantLitSpecular(direction, lightColor, surfaceScale, ks,
@@ -745,18 +756,15 @@ pub fn makeDistantLitSpecular(mut cx: FunctionContext) -> JsResult<JsValue> {
     let ks = cx.argument::<JsNumber>(4)?.value(&mut cx) as f32;
     let shininess = cx.argument::<JsNumber>(5)?.value(&mut cx) as f32;
     let input = opt_input_filter!(&mut cx, 6);
-    wrap_image_filter!(
-        cx,
-        image_filters::distant_lit_specular(
-            direction,
-            light_color,
-            surface_scale,
-            ks,
-            shininess,
-            input,
-            None
-        )
-    )
+    wrap_image_filter!(cx, [input], |onto| image_filters::distant_lit_specular(
+        direction,
+        light_color,
+        surface_scale,
+        ks,
+        shininess,
+        input,
+        None
+    ))
 }
 
 /// `ImageFilter.MakePointLitSpecular(location, lightColor, surfaceScale, ks,
@@ -768,18 +776,15 @@ pub fn makePointLitSpecular(mut cx: FunctionContext) -> JsResult<JsValue> {
     let ks = cx.argument::<JsNumber>(4)?.value(&mut cx) as f32;
     let shininess = cx.argument::<JsNumber>(5)?.value(&mut cx) as f32;
     let input = opt_input_filter!(&mut cx, 6);
-    wrap_image_filter!(
-        cx,
-        image_filters::point_lit_specular(
-            location,
-            light_color,
-            surface_scale,
-            ks,
-            shininess,
-            input,
-            None
-        )
-    )
+    wrap_image_filter!(cx, [input], |onto| image_filters::point_lit_specular(
+        location,
+        light_color,
+        surface_scale,
+        ks,
+        shininess,
+        input,
+        None
+    ))
 }
 
 /// `ImageFilter.MakeSpotLitSpecular(location, target, falloffExponent,
@@ -795,19 +800,16 @@ pub fn makeSpotLitSpecular(mut cx: FunctionContext) -> JsResult<JsValue> {
     let ks = cx.argument::<JsNumber>(7)?.value(&mut cx) as f32;
     let shininess = cx.argument::<JsNumber>(8)?.value(&mut cx) as f32;
     let input = opt_input_filter!(&mut cx, 9);
-    wrap_image_filter!(
-        cx,
-        image_filters::spot_lit_specular(
-            location,
-            target,
-            falloff_exponent,
-            cutoff_angle,
-            light_color,
-            surface_scale,
-            ks,
-            shininess,
-            input,
-            None
-        )
-    )
+    wrap_image_filter!(cx, [input], |onto| image_filters::spot_lit_specular(
+        location,
+        target,
+        falloff_exponent,
+        cutoff_angle,
+        light_color,
+        surface_scale,
+        ks,
+        shininess,
+        input,
+        None
+    ))
 }

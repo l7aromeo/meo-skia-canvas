@@ -1,11 +1,13 @@
 use skia_safe::{
     BlendMode as SkBlendMode, BlurStyle as SkBlurStyle, Color as SkColor,
     Color4f, ColorChannel as SkColorChannel, ColorFilter as SkColorFilter,
-    ColorMatrix as SkColorMatrix, ImageFilter as SkImageFilter,
+    ColorMatrix as SkColorMatrix, ColorSpace, ImageFilter as SkImageFilter,
     MaskFilter as SkMaskFilter, Point as SkPoint, Point3 as SkPoint3,
     Rect as SkRect, TileMode as SkTileMode, color_filters, image_filters,
     luma_color_filter,
 };
+
+pub(crate) mod onto;
 
 use crate::{
     color::{
@@ -21,6 +23,7 @@ use crate::{
     paint::BlendMode,
     pixels::SamplingMode,
 };
+use onto::{Onto, PageFilter};
 
 /// A filter that scales each colour channel by `multiply` and then adds
 /// `add`, both gamma-encoded sRGB coefficients, leaving alpha alone and
@@ -144,7 +147,7 @@ impl Point3 {
 /// Composed by `Paint` and applied to draws.
 #[derive(Clone)]
 pub struct ImageFilter {
-    pub(crate) inner: SkImageFilter,
+    pub(crate) inner: PageFilter<SkImageFilter>,
 }
 
 impl std::fmt::Debug for ImageFilter {
@@ -349,7 +352,7 @@ impl From<[f32; 20]> for ColorMatrix {
 /// `ImageFilter::from_color_filter`.
 #[derive(Clone)]
 pub struct ColorFilter {
-    pub(crate) inner: SkColorFilter,
+    pub(crate) inner: PageFilter<SkColorFilter>,
 }
 
 impl std::fmt::Debug for ColorFilter {
@@ -435,6 +438,41 @@ fn lit(color: RgbaLinear) -> SkColor {
     rgba_linear_to_skia_color(color)
 }
 
+/// Whether any of `inputs` depends on the page it is drawn onto -- see
+/// [`PageFilter::depends`].
+fn depends(inputs: &[&Option<ImageFilter>]) -> bool {
+    inputs
+        .iter()
+        .flat_map(|input| input.as_ref())
+        .any(|f| f.inner.depends())
+}
+
+/// `input` as `onto` draws it -- see [`PageFilter::on`].
+fn on(
+    input: &Option<ImageFilter>,
+    onto: Option<&Onto>,
+) -> Option<SkImageFilter> {
+    input.as_ref().map(|f| f.inner.on(onto))
+}
+
+/// A shadow's `color` as Skia is handed it for `onto`: linear-light sRGB
+/// as every [`RgbaLinear`] is, tagged so, since Skia reads an untagged
+/// colour as sRGB-encoded and decodes it, darkening the shadow; and for a
+/// page, handed over as a fill colour is -- see [`Onto::color`].
+fn shadow_color(
+    color: RgbaLinear,
+    onto: Option<&Onto>,
+) -> (Color4f, ColorSpace) {
+    let (color, space) = (
+        rgba_linear_to_unpremul_color4f(color),
+        linear_srgb_color_space(),
+    );
+    match onto {
+        Some(onto) => onto.color(color, &space),
+        None => (color, space),
+    }
+}
+
 impl ImageFilter {
     /// A rectangle in Skia's terms.
     fn skia_rect(rect: Rect) -> SkRect {
@@ -447,9 +485,15 @@ impl ImageFilter {
             .map_or(image_filters::CropRect::NO_CROP_RECT, Into::into)
     }
 
-    /// Wraps a Skia filter, naming `what` if Skia declined to build it.
-    fn built(filter: Option<SkImageFilter>, what: &str) -> Result<Self, Error> {
-        filter
+    /// The filter `build` makes, for each page it is drawn onto where
+    /// `depends` -- see [`PageFilter::built`] -- naming `what` if Skia
+    /// declined to build it.
+    fn built(
+        depends: bool,
+        build: impl Fn(Option<&Onto>) -> Option<SkImageFilter> + 'static,
+        what: &str,
+    ) -> Result<Self, Error> {
+        PageFilter::built(depends, build)
             .map(|inner| Self { inner })
             .ok_or_else(|| Error::FilterCreate {
                 reason: format!("{what} failed"),
@@ -482,16 +526,19 @@ impl ImageFilter {
         crop: Option<Rect>,
     ) -> Result<Self, Error> {
         Self::built(
-            image_filters::arithmetic(
-                k1,
-                k2,
-                k3,
-                k4,
-                enforce_premultiplied,
-                background.map(|f| f.inner),
-                foreground.map(|f| f.inner),
-                Self::crop_of(crop),
-            ),
+            depends(&[&background, &foreground]),
+            move |onto| {
+                image_filters::arithmetic(
+                    k1,
+                    k2,
+                    k3,
+                    k4,
+                    enforce_premultiplied,
+                    on(&background, onto),
+                    on(&foreground, onto),
+                    Self::crop_of(crop),
+                )
+            },
             "arithmetic",
         )
     }
@@ -511,12 +558,15 @@ impl ImageFilter {
         crop: Option<Rect>,
     ) -> Result<Self, Error> {
         Self::built(
-            image_filters::blend(
-                mode.to_skia(),
-                background.map(|f| f.inner),
-                foreground.map(|f| f.inner),
-                Self::crop_of(crop),
-            ),
+            depends(&[&background, &foreground]),
+            move |onto| {
+                image_filters::blend(
+                    mode.to_skia(),
+                    on(&background, onto),
+                    on(&foreground, onto),
+                    Self::crop_of(crop),
+                )
+            },
             "blend",
         )
     }
@@ -532,11 +582,14 @@ impl ImageFilter {
         input: Option<ImageFilter>,
     ) -> Result<Self, Error> {
         Self::built(
-            image_filters::crop(
-                Self::skia_rect(rect),
-                tile_mode.to_skia(),
-                input.map(|f| f.inner),
-            ),
+            depends(&[&input]),
+            move |onto| {
+                image_filters::crop(
+                    Self::skia_rect(rect),
+                    tile_mode.to_skia(),
+                    on(&input, onto),
+                )
+            },
             "crop",
         )
     }
@@ -557,11 +610,14 @@ impl ImageFilter {
         crop: Option<Rect>,
     ) -> Result<Self, Error> {
         Self::built(
-            image_filters::dilate(
-                (radius_x, radius_y),
-                input.map(|f| f.inner),
-                Self::crop_of(crop),
-            ),
+            depends(&[&input]),
+            move |onto| {
+                image_filters::dilate(
+                    (radius_x, radius_y),
+                    on(&input, onto),
+                    Self::crop_of(crop),
+                )
+            },
             "dilate",
         )
     }
@@ -581,11 +637,14 @@ impl ImageFilter {
         crop: Option<Rect>,
     ) -> Result<Self, Error> {
         Self::built(
-            image_filters::erode(
-                (radius_x, radius_y),
-                input.map(|f| f.inner),
-                Self::crop_of(crop),
-            ),
+            depends(&[&input]),
+            move |onto| {
+                image_filters::erode(
+                    (radius_x, radius_y),
+                    on(&input, onto),
+                    Self::crop_of(crop),
+                )
+            },
             "erode",
         )
     }
@@ -609,13 +668,16 @@ impl ImageFilter {
         crop: Option<Rect>,
     ) -> Result<Self, Error> {
         Self::built(
-            image_filters::displacement_map(
-                (x_channel.to_skia(), y_channel.to_skia()),
-                scale,
-                displacement.map(|f| f.inner),
-                color.map(|f| f.inner),
-                Self::crop_of(crop),
-            ),
+            depends(&[&displacement, &color]),
+            move |onto| {
+                image_filters::displacement_map(
+                    (x_channel.to_skia(), y_channel.to_skia()),
+                    scale,
+                    on(&displacement, onto),
+                    on(&color, onto),
+                    Self::crop_of(crop),
+                )
+            },
             "displacement_map",
         )
     }
@@ -641,14 +703,17 @@ impl ImageFilter {
         crop: Option<Rect>,
     ) -> Result<Self, Error> {
         Self::built(
-            image_filters::distant_lit_diffuse(
-                direction.to_skia(),
-                lit(light_color),
-                surface_scale,
-                kd,
-                input.map(|f| f.inner),
-                Self::crop_of(crop),
-            ),
+            depends(&[&input]),
+            move |onto| {
+                image_filters::distant_lit_diffuse(
+                    direction.to_skia(),
+                    lit(light_color),
+                    surface_scale,
+                    kd,
+                    on(&input, onto),
+                    Self::crop_of(crop),
+                )
+            },
             "distant_lit_diffuse",
         )
     }
@@ -673,15 +738,18 @@ impl ImageFilter {
         crop: Option<Rect>,
     ) -> Result<Self, Error> {
         Self::built(
-            image_filters::distant_lit_specular(
-                direction.to_skia(),
-                lit(light_color),
-                surface_scale,
-                ks,
-                shininess,
-                input.map(|f| f.inner),
-                Self::crop_of(crop),
-            ),
+            depends(&[&input]),
+            move |onto| {
+                image_filters::distant_lit_specular(
+                    direction.to_skia(),
+                    lit(light_color),
+                    surface_scale,
+                    ks,
+                    shininess,
+                    on(&input, onto),
+                    Self::crop_of(crop),
+                )
+            },
             "distant_lit_specular",
         )
     }
@@ -704,14 +772,17 @@ impl ImageFilter {
         crop: Option<Rect>,
     ) -> Result<Self, Error> {
         Self::built(
-            image_filters::point_lit_diffuse(
-                location.to_skia(),
-                lit(light_color),
-                surface_scale,
-                kd,
-                input.map(|f| f.inner),
-                Self::crop_of(crop),
-            ),
+            depends(&[&input]),
+            move |onto| {
+                image_filters::point_lit_diffuse(
+                    location.to_skia(),
+                    lit(light_color),
+                    surface_scale,
+                    kd,
+                    on(&input, onto),
+                    Self::crop_of(crop),
+                )
+            },
             "point_lit_diffuse",
         )
     }
@@ -733,15 +804,18 @@ impl ImageFilter {
         crop: Option<Rect>,
     ) -> Result<Self, Error> {
         Self::built(
-            image_filters::point_lit_specular(
-                location.to_skia(),
-                lit(light_color),
-                surface_scale,
-                ks,
-                shininess,
-                input.map(|f| f.inner),
-                Self::crop_of(crop),
-            ),
+            depends(&[&input]),
+            move |onto| {
+                image_filters::point_lit_specular(
+                    location.to_skia(),
+                    lit(light_color),
+                    surface_scale,
+                    ks,
+                    shininess,
+                    on(&input, onto),
+                    Self::crop_of(crop),
+                )
+            },
             "point_lit_specular",
         )
     }
@@ -767,17 +841,20 @@ impl ImageFilter {
         crop: Option<Rect>,
     ) -> Result<Self, Error> {
         Self::built(
-            image_filters::spot_lit_diffuse(
-                location.to_skia(),
-                target.to_skia(),
-                falloff_exponent,
-                cutoff_angle,
-                lit(light_color),
-                surface_scale,
-                kd,
-                input.map(|f| f.inner),
-                Self::crop_of(crop),
-            ),
+            depends(&[&input]),
+            move |onto| {
+                image_filters::spot_lit_diffuse(
+                    location.to_skia(),
+                    target.to_skia(),
+                    falloff_exponent,
+                    cutoff_angle,
+                    lit(light_color),
+                    surface_scale,
+                    kd,
+                    on(&input, onto),
+                    Self::crop_of(crop),
+                )
+            },
             "spot_lit_diffuse",
         )
     }
@@ -802,24 +879,27 @@ impl ImageFilter {
         crop: Option<Rect>,
     ) -> Result<Self, Error> {
         Self::built(
-            image_filters::spot_lit_specular(
-                location.to_skia(),
-                target.to_skia(),
-                falloff_exponent,
-                cutoff_angle,
-                lit(light_color),
-                surface_scale,
-                ks,
-                shininess,
-                input.map(|f| f.inner),
-                Self::crop_of(crop),
-            ),
+            depends(&[&input]),
+            move |onto| {
+                image_filters::spot_lit_specular(
+                    location.to_skia(),
+                    target.to_skia(),
+                    falloff_exponent,
+                    cutoff_angle,
+                    lit(light_color),
+                    surface_scale,
+                    ks,
+                    shininess,
+                    on(&input, onto),
+                    Self::crop_of(crop),
+                )
+            },
             "spot_lit_specular",
         )
     }
 
     /// The shadow [`drop_shadow`](Self::drop_shadow) casts, without the
-    /// thing casting it.
+    /// thing casting it, in `color` as that one's.
     ///
     /// For drawing the shadow separately -- under other content, or with its
     /// own blend mode.
@@ -838,14 +918,18 @@ impl ImageFilter {
         crop: Option<Rect>,
     ) -> Result<Self, Error> {
         Self::built(
-            image_filters::drop_shadow_only(
-                (dx, dy),
-                (sigma_x, sigma_y),
-                rgba_linear_to_unpremul_color4f(color),
-                linear_srgb_color_space(),
-                input.map(|f| f.inner),
-                Self::crop_of(crop),
-            ),
+            true,
+            move |onto| {
+                let (color, space) = shadow_color(color, onto);
+                image_filters::drop_shadow_only(
+                    (dx, dy),
+                    (sigma_x, sigma_y),
+                    color,
+                    space,
+                    on(&input, onto),
+                    Self::crop_of(crop),
+                )
+            },
             "drop_shadow_only",
         )
     }
@@ -857,7 +941,7 @@ impl ImageFilter {
     /// [`drop_shadow_only`](Self::drop_shadow_only) is drawn on its own.
     pub fn empty() -> Self {
         Self {
-            inner: image_filters::empty(),
+            inner: PageFilter::plain(image_filters::empty()),
         }
     }
 
@@ -878,14 +962,17 @@ impl ImageFilter {
         crop: Option<Rect>,
     ) -> Result<Self, Error> {
         Self::built(
-            image_filters::magnifier(
-                Self::skia_rect(lens_bounds),
-                zoom,
-                inset,
-                sampling.to_skia(),
-                input.map(|f| f.inner),
-                Self::crop_of(crop),
-            ),
+            depends(&[&input]),
+            move |onto| {
+                image_filters::magnifier(
+                    Self::skia_rect(lens_bounds),
+                    zoom,
+                    inset,
+                    sampling.to_skia(),
+                    on(&input, onto),
+                    Self::crop_of(crop),
+                )
+            },
             "magnifier",
         )
     }
@@ -947,18 +1034,22 @@ impl ImageFilter {
                 ),
             });
         }
+        let kernel = kernel.to_vec();
         Self::built(
-            image_filters::matrix_convolution(
-                (kernel_width, kernel_height),
-                kernel,
-                gain,
-                bias,
-                (kernel_offset_x, kernel_offset_y),
-                tile_mode.to_skia(),
-                convolve_alpha,
-                input.map(|f| f.inner),
-                Self::crop_of(crop),
-            ),
+            depends(&[&input]),
+            move |onto| {
+                image_filters::matrix_convolution(
+                    (kernel_width, kernel_height),
+                    &kernel,
+                    gain,
+                    bias,
+                    (kernel_offset_x, kernel_offset_y),
+                    tile_mode.to_skia(),
+                    convolve_alpha,
+                    on(&input, onto),
+                    Self::crop_of(crop),
+                )
+            },
             "matrix_convolution",
         )
     }
@@ -974,11 +1065,14 @@ impl ImageFilter {
         input: Option<ImageFilter>,
     ) -> Result<Self, Error> {
         Self::built(
-            image_filters::matrix_transform(
-                &affine_to_matrix(transform),
-                sampling.to_skia(),
-                input.map(|f| f.inner),
-            ),
+            depends(&[&input]),
+            move |onto| {
+                image_filters::matrix_transform(
+                    &affine_to_matrix(transform),
+                    sampling.to_skia(),
+                    on(&input, onto),
+                )
+            },
             "matrix_transform",
         )
     }
@@ -996,10 +1090,13 @@ impl ImageFilter {
         crop: Option<Rect>,
     ) -> Result<Self, Error> {
         Self::built(
-            image_filters::merge(
-                filters.into_iter().map(|f| f.map(|f| f.inner)),
-                Self::crop_of(crop),
-            ),
+            filters.iter().any(|f| depends(&[f])),
+            move |onto| {
+                image_filters::merge(
+                    filters.iter().map(|f| on(f, onto)),
+                    Self::crop_of(crop),
+                )
+            },
             "merge",
         )
     }
@@ -1016,11 +1113,14 @@ impl ImageFilter {
         crop: Option<Rect>,
     ) -> Result<Self, Error> {
         Self::built(
-            image_filters::offset(
-                (dx, dy),
-                input.map(|f| f.inner),
-                Self::crop_of(crop),
-            ),
+            depends(&[&input]),
+            move |onto| {
+                image_filters::offset(
+                    (dx, dy),
+                    on(&input, onto),
+                    Self::crop_of(crop),
+                )
+            },
             "offset",
         )
     }
@@ -1036,11 +1136,14 @@ impl ImageFilter {
         input: Option<ImageFilter>,
     ) -> Result<Self, Error> {
         Self::built(
-            image_filters::tile(
-                Self::skia_rect(src),
-                Self::skia_rect(dst),
-                input.map(|f| f.inner),
-            ),
+            depends(&[&input]),
+            move |onto| {
+                image_filters::tile(
+                    Self::skia_rect(src),
+                    Self::skia_rect(dst),
+                    on(&input, onto),
+                )
+            },
             "tile",
         )
     }
@@ -1070,20 +1173,26 @@ impl ImageFilter {
         crop: Option<Rect>,
     ) -> Result<Self, Error> {
         Self::built(
-            image_filters::blur(
-                (sigma_x, sigma_y),
-                tile_mode.map(TileMode::to_skia),
-                input.map(|f| f.inner),
-                Self::crop_of(crop),
-            ),
+            depends(&[&input]),
+            move |onto| {
+                image_filters::blur(
+                    (sigma_x, sigma_y),
+                    tile_mode.map(TileMode::to_skia),
+                    on(&input, onto),
+                    Self::crop_of(crop),
+                )
+            },
             &format!("blur({sigma_x}, {sigma_y})"),
         )
     }
 
     /// Builds a drop shadow at `(dx, dy)` with separable blur sigmas.
     ///
-    /// `color` is read as every [`RgbaLinear`] is, so the shadow is the color
-    /// a fill of the same value paints, on any canvas.
+    /// `color` is read as every [`RgbaLinear`] is, and handed to Skia for
+    /// the canvas the filter is drawn onto as a fill's colour is, so on a
+    /// float canvas in sRGB the shadow lands where a fill of the same value
+    /// does. On an eight-bit canvas Skia rounds it otherwise than a fill's,
+    /// up to two levels off at some values.
     ///
     /// # Errors
     ///
@@ -1098,18 +1207,19 @@ impl ImageFilter {
         input: Option<ImageFilter>,
         crop: Option<Rect>,
     ) -> Result<Self, Error> {
-        // Tag the shadow color as linear-light sRGB. Without an
-        // explicit color space, Skia treats the value as
-        // sRGB-encoded and gamma-decodes it -- darkening the shadow.
         Self::built(
-            image_filters::drop_shadow(
-                skia_safe::Vector::new(dx, dy),
-                (sigma_x, sigma_y),
-                rgba_linear_to_unpremul_color4f(color),
-                Some(linear_srgb_color_space()),
-                input.map(|f| f.inner),
-                Self::crop_of(crop),
-            ),
+            true,
+            move |onto| {
+                let (color, space) = shadow_color(color, onto);
+                image_filters::drop_shadow(
+                    skia_safe::Vector::new(dx, dy),
+                    (sigma_x, sigma_y),
+                    color,
+                    Some(space),
+                    on(&input, onto),
+                    Self::crop_of(crop),
+                )
+            },
             &format!("drop_shadow({dx}, {dy})"),
         )
     }
@@ -1140,11 +1250,14 @@ impl ImageFilter {
         // function's own `Result` was still unreachable.
         ColorFilter::finite(&matrix, "color_matrix")?;
         Self::built(
-            image_filters::color_filter(
-                color_filters::matrix_row_major(&matrix, None),
-                input.map(|f| f.inner),
-                Self::crop_of(crop),
-            ),
+            depends(&[&input]),
+            move |onto| {
+                image_filters::color_filter(
+                    color_filters::matrix_row_major(&matrix, None),
+                    on(&input, onto),
+                    Self::crop_of(crop),
+                )
+            },
             "color_matrix",
         )
     }
@@ -1162,11 +1275,14 @@ impl ImageFilter {
         crop: Option<Rect>,
     ) -> Result<Self, Error> {
         Self::built(
-            image_filters::color_filter(
-                color_filter.inner,
-                input.map(|f| f.inner),
-                Self::crop_of(crop),
-            ),
+            depends(&[&input]) || color_filter.inner.depends(),
+            move |onto| {
+                image_filters::color_filter(
+                    color_filter.inner.on(onto),
+                    on(&input, onto),
+                    Self::crop_of(crop),
+                )
+            },
             "from_color_filter",
         )
     }
@@ -1181,11 +1297,14 @@ impl ImageFilter {
         outer: ImageFilter,
         inner: ImageFilter,
     ) -> Result<Self, Error> {
-        image_filters::compose(outer.inner, inner.inner)
-            .map(|f| ImageFilter { inner: f })
-            .ok_or_else(|| Error::FilterCreate {
-                reason: "image filter compose failed".to_string(),
-            })
+        let depends = outer.inner.depends() || inner.inner.depends();
+        PageFilter::built(depends, move |onto| {
+            image_filters::compose(outer.inner.on(onto), inner.inner.on(onto))
+        })
+        .map(|inner| ImageFilter { inner })
+        .ok_or_else(|| Error::FilterCreate {
+            reason: "image filter compose failed".to_string(),
+        })
     }
 }
 
@@ -1197,7 +1316,7 @@ impl ColorFilter {
     /// path, where luminance becomes the alpha mask.
     pub fn luma() -> Self {
         Self {
-            inner: luma_color_filter::new(),
+            inner: PageFilter::plain(luma_color_filter::new()),
         }
     }
 
@@ -1207,14 +1326,14 @@ impl ColorFilter {
     /// Used to bridge linear-light pipelines to gamma-coded readers.
     pub fn linear_to_srgb_gamma() -> Self {
         Self {
-            inner: color_filters::linear_to_srgb_gamma(),
+            inner: PageFilter::plain(color_filters::linear_to_srgb_gamma()),
         }
     }
 
     /// Inverse of `linear_to_srgb_gamma`.
     pub fn srgb_to_linear_gamma() -> Self {
         Self {
-            inner: color_filters::srgb_to_linear_gamma(),
+            inner: PageFilter::plain(color_filters::srgb_to_linear_gamma()),
         }
     }
 
@@ -1224,18 +1343,26 @@ impl ColorFilter {
     /// the same blend, applied to a draw's own colours rather than between
     /// a draw and the canvas under it. `color` is linear-light sRGB, as every
     /// [`RgbaLinear`] is, and reaches Skia in floating point, so a wide
-    /// colour blends as itself on a wide canvas.
+    /// colour blends as itself on a wide canvas; it is handed over for the
+    /// canvas the filter is drawn onto as a fill's colour is, so on a float
+    /// canvas in sRGB it lands where a fill of it does.
     ///
     /// # Errors
     ///
     /// Returns [`Error::FilterCreate`] when Skia declines the mode, which it
     /// does for the ones that need a destination it does not have here.
     pub fn blend(color: RgbaLinear, mode: BlendMode) -> Result<Self, Error> {
-        color_filters::blend_with_color_space(
+        let (color, space) = (
             rgba_linear_to_unpremul_color4f(color),
             linear_srgb_color_space(),
-            mode.to_skia(),
-        )
+        );
+        PageFilter::built(true, move |onto| {
+            let (color, space) = match onto {
+                Some(onto) => onto.color(color, &space),
+                None => (color, space.clone()),
+            };
+            color_filters::blend_with_color_space(color, space, mode.to_skia())
+        })
         .map(|inner| Self { inner })
         .ok_or_else(|| Error::FilterCreate {
             reason: format!("no color filter for blend mode {mode:?}"),
@@ -1266,7 +1393,9 @@ impl ColorFilter {
     pub fn matrix(matrix: [f32; 20]) -> Result<Self, Error> {
         Self::finite(&matrix, "matrix")?;
         Ok(Self {
-            inner: color_filters::matrix_row_major(&matrix, None),
+            inner: PageFilter::plain(color_filters::matrix_row_major(
+                &matrix, None,
+            )),
         })
     }
 
@@ -1300,7 +1429,7 @@ impl ColorFilter {
     pub fn hsla_matrix(matrix: [f32; 20]) -> Result<Self, Error> {
         Self::finite(&matrix, "hsla_matrix")?;
         Ok(Self {
-            inner: color_filters::hsla_matrix(&matrix),
+            inner: PageFilter::plain(color_filters::hsla_matrix(&matrix)),
         })
     }
 
@@ -1317,11 +1446,14 @@ impl ColorFilter {
         from: ColorFilter,
         to: ColorFilter,
     ) -> Result<Self, Error> {
-        color_filters::lerp(weight, from.inner, to.inner)
-            .map(|inner| Self { inner })
-            .ok_or_else(|| Error::FilterCreate {
-                reason: "color filter lerp failed".to_string(),
-            })
+        let depends = from.inner.depends() || to.inner.depends();
+        PageFilter::built(depends, move |onto| {
+            color_filters::lerp(weight, from.inner.on(onto), to.inner.on(onto))
+        })
+        .map(|inner| Self { inner })
+        .ok_or_else(|| Error::FilterCreate {
+            reason: "color filter lerp failed".to_string(),
+        })
     }
 
     /// A filter that multiplies by `multiply` and then adds `add`.
@@ -1345,7 +1477,9 @@ impl ColorFilter {
             rgba_linear_to_srgb_coefficients(multiply),
             rgba_linear_to_srgb_coefficients(add),
         )
-        .map(|inner| Self { inner })
+        .map(|inner| Self {
+            inner: PageFilter::plain(inner),
+        })
         .ok_or_else(|| Error::FilterCreate {
             reason: "lighting coefficients must be finite".to_string(),
         })
@@ -1362,7 +1496,9 @@ impl ColorFilter {
     /// Returns [`Error::FilterCreate`] when Skia declines to build it.
     pub fn table(table: [u8; 256]) -> Result<Self, Error> {
         color_filters::table(&table)
-            .map(|inner| Self { inner })
+            .map(|inner| Self {
+                inner: PageFilter::plain(inner),
+            })
             .ok_or_else(|| Error::FilterCreate {
                 reason: "table color filter failed".to_string(),
             })
@@ -1388,7 +1524,9 @@ impl ColorFilter {
             green.as_ref(),
             blue.as_ref(),
         )
-        .map(|inner| Self { inner })
+        .map(|inner| Self {
+            inner: PageFilter::plain(inner),
+        })
         .ok_or_else(|| Error::FilterCreate {
             reason: "table color filter failed".to_string(),
         })
@@ -1404,11 +1542,14 @@ impl ColorFilter {
         outer: ColorFilter,
         inner: ColorFilter,
     ) -> Result<Self, Error> {
-        color_filters::compose(outer.inner, inner.inner)
-            .map(|f| ColorFilter { inner: f })
-            .ok_or_else(|| Error::FilterCreate {
-                reason: "color filter compose failed".to_string(),
-            })
+        let depends = outer.inner.depends() || inner.inner.depends();
+        PageFilter::built(depends, move |onto| {
+            color_filters::compose(outer.inner.on(onto), inner.inner.on(onto))
+        })
+        .map(|inner| ColorFilter { inner })
+        .ok_or_else(|| Error::FilterCreate {
+            reason: "color filter compose failed".to_string(),
+        })
     }
 }
 
@@ -1970,7 +2111,7 @@ mod color_filter_tests {
             RgbaLinear::from_srgb(0.0, 0.0, 0.0, 1.0),
         )
         .expect("lighting");
-        let bytes = lit_bytes(&doubled.inner);
+        let bytes = lit_bytes(&doubled.inner.on(None));
         // Red input runs 0..=255 along the row: 64 doubles to 128, and 200
         // to past the top, which the filter clamps.
         assert_eq!(lit_channel(&bytes, 0, 64), 128, "red doubled");
@@ -1980,7 +2121,7 @@ mod color_filter_tests {
             RgbaLinear::from_srgb(-0.25, 0.0, 0.0, 1.0),
         )
         .expect("lighting");
-        let bytes = lit_bytes(&darkened.inner);
+        let bytes = lit_bytes(&darkened.inner.on(None));
         assert_eq!(lit_channel(&bytes, 0, 128), 64, "red lowered by a quarter");
         assert_eq!(lit_channel(&bytes, 0, 32), 0, "and floored");
     }
@@ -2013,7 +2154,7 @@ mod color_filter_tests {
                 )
                 .expect("Skia's lighting");
                 assert!(
-                    lit_bytes(&ours.inner) == lit_bytes(&skias),
+                    lit_bytes(&ours.inner.on(None)) == lit_bytes(&skias),
                     "multiply {:?} add {:?}",
                     (mr, mg, mb),
                     (ar, ag, ab)

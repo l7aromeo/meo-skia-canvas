@@ -578,6 +578,25 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   handed to Skia where nothing converts it again, so a shadow is its fill to
   the bit, in sRGB, `srgb-linear`, Display P3 and Rec. 2020 canvases alike.
 
+- **A `CanvasTexture`, and the colour in a CanvasKit filter, land exactly on a
+  float canvas.** On a canvas made with `colorType: "RGBAF16"` or
+  `"RGBAF32"`, a `CanvasTexture`'s mark, a `"blend"` `ColorFilter` and the
+  shadow of a `"drop-shadow"` or `"drop-shadow-only"` `ImageFilter` were
+  handed to Skia in the colour they were built with, before the canvas was
+  known, and Skia converted it through an approximate transfer function: a
+  colour named in `srgb-linear` landed 6.3e-5 from a fill of it on an sRGB
+  F32 canvas, up to 1.8e-4 on `"srgb-linear"`, `"display-p3"` and
+  `"rec2020"` ones, and a whole half-float step on `"RGBAF16"`. A texture's
+  mark is now coloured for the canvas it is drawn onto, as a fill is, and is
+  a fill of its colour to the bit on every such canvas. A filter holding a
+  colour is built again for the canvas it is drawn onto, and so is any filter
+  composed, merged, offset or interpolated over one, set as `ctx.colorFilter`,
+  `ctx.imageFilter` or a `saveLayer` backdrop; on a float canvas in `"srgb"`
+  it lands as a fill of its colour does, and on the others it keeps up to
+  1.8e-4. On an eight-bit canvas nothing changes, so its PDF still writes
+  such a colour as Skia converts it, as it does a paragraph's; a PDF or SVG of
+  a float canvas in `"srgb"` writes it as it writes a fill of the colour.
+
 - **A filter set through `ctx.imageFilter` keeps a float canvas's floats.** On
   a canvas made with `colorType: "RGBAF16"` or `"RGBAF32"`, a draw through a
   CanvasKit image filter came back in eight bits: Skia draws a filtered draw

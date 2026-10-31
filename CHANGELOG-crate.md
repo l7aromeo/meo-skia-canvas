@@ -316,6 +316,25 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `FilterOp::DropShadow` is held in an `RgbaLinear`, whose linear-light `f32`
   lands it within a unit in the last place.
 
+- **A texture, and the colour in a CanvasKit filter, land exactly on a float
+  canvas.** On a canvas made with `PixelDepth::F16` or `PixelDepth::F32`, a
+  `Texture`'s mark, a `ColorFilter::blend` and the shadow of
+  `ImageFilter::drop_shadow` or `ImageFilter::drop_shadow_only` were handed to
+  Skia in the colour they were built with, before the canvas was known, and
+  Skia converted it through an approximate transfer function: each landed
+  6.3e-5 from a fill of its colour on an sRGB F32 canvas, up to 1.8e-4 on
+  `SrgbLinear`, `DisplayP3` and `Rec2020` ones, and a whole half-float step on
+  F16. A texture's mark is now coloured for the canvas it is drawn onto, as a
+  fill is, and is a fill of its colour to the bit on every such canvas. A
+  filter holding a colour is built again for the canvas it is drawn onto, and
+  so is any filter composed, merged, offset or interpolated over one, set by
+  `set_color_filter`, `set_image_filter` or as a layer's backdrop; on a float
+  canvas in sRGB it lands as a fill of its colour does, and on the others it
+  keeps up to 1.8e-4. On an eight-bit canvas nothing changes, so its PDF
+  still writes such a colour as Skia converts it, as it does a paragraph's; a
+  PDF or SVG of a float canvas in sRGB writes it as it writes a fill of the
+  colour.
+
 - **A filter set by `Context2D::set_image_filter` keeps a float canvas's
   floats.** On a canvas made with `PixelDepth::F16` or `PixelDepth::F32`, a
   draw through an `ImageFilter` came back in eight bits: Skia draws a filtered
