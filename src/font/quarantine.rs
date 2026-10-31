@@ -20,12 +20,19 @@ use skia_safe::Data;
 /// mistaken for another font's while CoreText may still remember it.
 pub(crate) fn font_data(bytes: &[u8]) -> Data {
     #[cfg(target_os = "macos")]
-    if let Some(data) = mac::FontBytes::new(bytes, mac::shared(), None)
-        .map(Data::new_with_owner)
-    {
-        return data;
-    }
+    return data_or_copy(
+        bytes,
+        mac::FontBytes::new(bytes, mac::shared(), None),
+    );
+    #[cfg(not(target_os = "macos"))]
     Data::new_copy(bytes)
+}
+
+/// `bytes` as `mapped` holds them, or copied where the system would not map
+/// them -- as many faces as before, only without the quarantine.
+#[cfg(target_os = "macos")]
+fn data_or_copy(bytes: &[u8], mapped: Option<mac::FontBytes>) -> Data {
+    mapped.map_or_else(|| Data::new_copy(bytes), Data::new_with_owner)
 }
 
 #[cfg(target_os = "macos")]
@@ -109,6 +116,12 @@ mod mac {
         #[cfg(test)]
         pub(crate) fn held(&self) -> usize {
             self.held.len()
+        }
+
+        /// How many loads have been counted.
+        #[cfg(test)]
+        pub(crate) fn loads(&self) -> u64 {
+            self.loads
         }
     }
 
@@ -264,7 +277,8 @@ mod mac {
         use parking_lot::Mutex;
         use skia_safe::{Data, FontMgr, FourByteTag, Typeface};
 
-        use super::{FontBytes, QUARANTINE_LOADS, Quarantine};
+        use super::{FontBytes, Mapping, QUARANTINE_LOADS, Quarantine};
+        use crate::font::quarantine::data_or_copy;
 
         const AMSTELVAR: &str = "tests/assets/fonts/AmstelvarAlpha-VF.ttf";
         const OSWALD: &str =
@@ -405,6 +419,74 @@ mod mac {
             let (face_b, at_b) = face(&shipped, quarantine, Some(at));
             drop(kept);
             (at_b == at).then(|| typo(&face_b) == AMSTELVAR_TYPO)
+        }
+
+        /// A mapping the system refuses is `None`, and the bytes are then
+        /// copied as they always were; mapped, the data is the mapping.
+        #[test]
+        fn a_font_that_cannot_be_mapped_is_copied() {
+            assert!(Mapping::new(usize::MAX, None).is_none(), "mmap refused");
+            let bytes = fs::read(OSWALD).expect(OSWALD);
+            let copied = data_or_copy(&bytes, None);
+            assert_eq!(copied.as_bytes(), &bytes[..]);
+            let mapped =
+                FontBytes::new(&bytes, quarantine(QUARANTINE_LOADS), None)
+                    .expect("mapped");
+            let at = mapped.address().expect("an address");
+            let data = data_or_copy(&bytes, Some(mapped));
+            assert_eq!(data.as_bytes(), &bytes[..]);
+            assert_eq!(data.as_bytes().as_ptr(), at.as_ptr().cast_const());
+        }
+
+        /// Loads and releases on two threads at once are each counted once,
+        /// and what is held stays within the quarantine's span.
+        #[test]
+        fn loads_on_two_threads_are_each_counted() {
+            /// Loads each thread makes.
+            const EACH: u64 = 200;
+            /// Loads a mapping is held for in the second half: few enough
+            /// that most are given up while the threads still run.
+            const SHORT: u64 = 8;
+            let bytes: &'static [u8] = &[0, 1, 0, 0, 0, 0, 0, 0];
+            for (hold_for, check) in [(4 * EACH, "kept"), (SHORT, "given up")] {
+                let quarantine = quarantine(hold_for);
+                let threads: Vec<_> = (0..2)
+                    .map(|_| {
+                        std::thread::spawn(move || {
+                            for _ in 0..EACH {
+                                drop(
+                                    FontBytes::new(bytes, quarantine, None)
+                                        .expect("mapped"),
+                                );
+                            }
+                        })
+                    })
+                    .collect();
+                threads
+                    .into_iter()
+                    .for_each(|thread| thread.join().expect("joined"));
+                let quarantine = quarantine.lock();
+                assert_eq!(
+                    quarantine.loads(),
+                    2 * EACH,
+                    "{check}: every load counted"
+                );
+                if hold_for > 2 * EACH {
+                    assert_eq!(
+                        quarantine.held() as u64,
+                        2 * EACH,
+                        "{check}: every mapping held"
+                    );
+                } else {
+                    // Held past the last load are at most the mappings live
+                    // then, one a thread, and those dropped in the span since.
+                    assert!(
+                        quarantine.held() as u64 <= SHORT + 2,
+                        "{check}: {} held",
+                        quarantine.held()
+                    );
+                }
+            }
         }
 
         /// What the quarantine is for, and its re-check. With nothing held,
