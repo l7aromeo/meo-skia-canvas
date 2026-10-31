@@ -415,3 +415,63 @@ fn a_paragraph_lands_in_its_colours_as_a_fill_does_on_a_float_page() {
         wrong.join("\n")
     );
 }
+
+/// The eight-bit pages that keep a recording for pixels.
+const EIGHT_BIT_WIDE_PAGES: [PixelColorSpace; 3] = [
+    PixelColorSpace::SrgbLinear,
+    PixelColorSpace::DisplayP3,
+    PixelColorSpace::Rec2020,
+];
+
+/// On every eight-bit page that keeps a recording for pixels, every colour
+/// a paragraph's style names lands as a fill of that colour lands: greys
+/// on a tie between two bytes once sRGB-encoded, which a conversion off by
+/// any amount moves a level on the Display P3 page, and colours across the
+/// gamut. Drawn in the paints it was built with, the paragraph took Skia's
+/// conversion where a fill takes the exact one.
+#[test]
+fn a_paragraph_lands_in_its_colours_as_a_fill_does_on_an_eight_bit_wide_gamut_page()
+ {
+    let ties = (0..255).step_by(9).map(|k| {
+        let encoded = (k as f32 + 0.5) / 255.0;
+        let linear = match encoded <= 0.04045 {
+            true => encoded / 12.92,
+            false => ((encoded + 0.055) / 1.055).powf(2.4),
+        };
+        RgbaLinear::new_premultiplied(linear, linear, linear, 1.0)
+    });
+    let spread = (1..=10).map(|i| {
+        let v = i as f32 / 11.0;
+        RgbaLinear::new_premultiplied(v, v * 0.5, 1.0 - v, 1.0)
+    });
+    let colours: Vec<RgbaLinear> = ties.chain(spread).collect();
+    let mut wrong = Vec::new();
+    for space in EIGHT_BIT_WIDE_PAGES {
+        for (name, site) in SITES {
+            for &colour in &colours {
+                let mut fill = page(space, PixelDepth::Uint8);
+                fill.context().set_fill_style(colour);
+                fill.context().fill_rect(0.0, 0.0, PAGE, PAGE);
+                let want = covered(&mut fill, space)[0];
+                let (style, y) = site(colour);
+                let paragraph = letter(style, true);
+                let mut drawn = page(space, PixelDepth::Uint8);
+                drawn.context().draw_paragraph(&paragraph, -5.0, y);
+                let got = covered(&mut drawn, space);
+                if got.is_empty() {
+                    wrong.push(format!("{space:?} {name}: nothing covered"));
+                } else if let Some(px) = got.iter().find(|px| **px != want) {
+                    wrong.push(format!(
+                        "{space:?} {name} {colour:?}: {px:?} against {want:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} missed:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}

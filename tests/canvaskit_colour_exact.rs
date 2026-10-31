@@ -131,9 +131,9 @@ fn misses_against(
 fn assert_none(missed: Vec<String>) {
     assert!(
         missed.is_empty(),
-        "{} missed, first {}",
+        "{} missed:\n{}",
         missed.len(),
-        missed[0]
+        missed.join("\n")
     );
 }
 
@@ -161,6 +161,34 @@ fn a_texture_s_mark_lands_as_a_fill_of_its_colour() {
             ctx.set_fill_texture(&solid_texture(colour, outline));
             ctx.fill_rect(0.0, 0.0, SIDE, SIDE);
         }));
+    }
+}
+
+/// The eight-bit pages that keep a recording for pixels, and so land a fill
+/// exactly: a space other than sRGB that a colour converts into exactly.
+const EIGHT_BIT_DUAL: [PixelColorSpace; 3] = [
+    PixelColorSpace::SrgbLinear,
+    PixelColorSpace::DisplayP3,
+    PixelColorSpace::Rec2020,
+];
+
+/// A texture's mark lands as a fill of its colour on an eight-bit page that
+/// keeps a recording for pixels too, translucent marks included, whose
+/// colour and alpha the page places on the bytes their exact product rounds
+/// to as it does a fill's.
+#[test]
+fn a_texture_s_mark_lands_as_a_fill_of_its_colour_on_an_eight_bit_dual_page() {
+    for outline in [false, true] {
+        assert_none(misses_against(
+            &EIGHT_BIT_DUAL,
+            &[PixelDepth::Uint8],
+            SIDE / 2.0,
+            fill,
+            |ctx, colour| {
+                ctx.set_fill_texture(&solid_texture(colour, outline));
+                ctx.fill_rect(0.0, 0.0, SIDE, SIDE);
+            },
+        ));
     }
 }
 

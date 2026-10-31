@@ -405,6 +405,16 @@ read the math functions and every length unit.
 
 ### Fixed
 
+- **`font_bounding_box_ascent` and `font_bounding_box_descent` are measured
+  from the `TextBaseline` set.** At every baseline but `Alphabetic` they were
+  a second baseline offset away: at `Top`, 96px Oswald reported an ascent of
+  -114.5 and a descent of 256.8, where the box runs from 0 to 142.3. Each
+  value at a baseline is now its `Alphabetic` value moved by that baseline's
+  `alphabetic_baseline`, which is how Chrome 156 reports all six.
+  `actual_bounding_box_ascent` and `actual_bounding_box_descent`, and the
+  path `Context2D::outline_text` returns, are measured and placed the same
+  way, as the text is drawn.
+
 - **A canvas drawn in through a source rectangle draws its edges where the
   canvas does.** `Context2D::draw_canvas_region` given a source rectangle
   that cuts what the canvas draws clipped it there, and the clip cut every
@@ -489,11 +499,41 @@ read the math functions and every length unit.
   the canvas from the colour as the style named it, so a paragraph's
   `color`, `foreground_color`, `background_color`, `TextShadow` colour,
   `decoration_color` and stroke are a fill of their colour to the bit. A
-  colour font's glyphs keep their own colours. On an eight-bit canvas
+  colour font's glyphs keep their own colours. On an eight-bit sRGB canvas
   nothing changes, so its PDF still writes a paragraph's colour as Skia
   converts it, `.0785 .4706 .8628` for `rgb(20 120 220)` where a fill
   writes `.0784 .4706 .8627`; on a float sRGB canvas the paragraph's is now
   the fill's.
+
+- **Colours land exactly on an eight-bit wide-gamut canvas.** On a canvas made
+  with `PixelColorSpace::DisplayP3`, `DisplayP3Linear`, `Rec2020`,
+  `Rec2020Linear` or `SrgbLinear` and `PixelDepth::Uint8`, Skia converted a
+  flat colour to sRGB and back through an approximate transfer function, and a
+  channel landed a level off wherever that crossed a rounding boundary:
+  `color(display-p3 0.5 0.5 0.5)` filled 127 where an sRGB canvas fills the
+  same grey 128, and `color(srgb 0.5 0.5 0.5)` filled 128, 127, 127. Such a
+  canvas now records each draw twice, as a float canvas in those spaces
+  already does: for its pixels in the colour converted exactly and stored as
+  its exact premultiplied product, rounded, as Chrome's Display P3 canvas
+  stores a translucent colour -- and for a PDF or SVG in the colour's exact
+  sRGB encoding, `.5 .5 .5` and `gray` where they wrote `.4999 .5 .5` and
+  `#7F7F80`. A fill, a stroke, text, a `Paragraph`, a texture's mark, a
+  `drop-shadow()`, a shadow set by `Context2D::set_shadow_color_css` and a
+  blurred rectangle store a fill's bytes, translucent or not and under any
+  global alpha. An sRGB canvas is unchanged. Chrome converts a colour onto
+  such a canvas through the same approximation, so where that crosses a
+  rounding boundary Chrome is a level off and this is not -- see
+  docs/browser-differences.md. Not yet exact there: a blurred path, which
+  stores a level off a fill of its colour on an sRGB canvas too.
+
+  The exact colour is drawn as a plain paint colour where Skia lands it on
+  its bytes, which each thread finds once per colour by drawing it onto a
+  pixel of the canvas's space and keeps for the colours a page repeats, and
+  through a shader where Skia does not. So the cost falls on colours not
+  drawn before: 5000 rectangles each in a colour of its own take about 1.3
+  times what recording twice costs alone, on either engine, where a palette,
+  text in a few colours and shadows cost about what recording twice does,
+  which is up to about 1.15 times what one recording took [RE-TIME vs 0.16.3].
 
 - **A `drop-shadow()` set by `Context2D::set_filter_css` lands in its colour
   exactly on a float canvas.** On a canvas made with `PixelDepth::F16` or
@@ -522,7 +562,7 @@ read the math functions and every length unit.
   so is any filter composed, merged, offset or interpolated over one, set by
   `set_color_filter`, `set_image_filter` or as a layer's backdrop; on a float
   canvas in sRGB it lands as a fill of its colour does, and on the others it
-  keeps up to 1.8e-4. On an eight-bit canvas nothing changes, so its PDF
+  keeps up to 1.8e-4. On an eight-bit sRGB canvas nothing changes, so its PDF
   still writes such a colour as Skia converts it, as it does a paragraph's; a
   PDF or SVG of a float canvas in sRGB writes it as it writes a fill of the
   colour.

@@ -3613,7 +3613,12 @@ pub fn skia_paint_color(
 /// converts sRGB into the page's space at the draw, both through skcms's
 /// approximate transfer function. Onto an sRGB page the second conversion is
 /// the identity, so a colour in a space this crate names is encoded into
-/// sRGB here, in `f64`, and handed over as sRGB: it lands as named. Onto any
+/// sRGB here, in `f64`, and handed over as sRGB: it lands as named. So it is
+/// onto a page in any space a flat colour converts into exactly here --
+/// see [`PixelColorSpace::converts_exactly`] -- whose pixels take the
+/// colour exactly by a recording of their own, so that what this paint
+/// carries is a document's colour, written in sRGB: a PDF of a Display P3
+/// canvas wrote `color(display-p3 0.5 0.5 0.5)` as `.4999 .5 .5`. Onto any
 /// other page the draw approximates whatever it is handed, and the colour
 /// goes as [`skia_paint_color`] gives it, which measured closer there -- a
 /// mean error of 5.0e-5 against 7.7e-5 over a sweep of reds on a linear F32
@@ -3633,10 +3638,33 @@ pub fn skia_paint_color_onto(
     // linear colour on an sRGB F32 page read back up to 9.6e-5 from its
     // encoding. On a page in another space the draw-time conversion has the
     // same grid, which no colour handed over can avoid: worked around for
-    // sRGB pages only.
-    match destination.is_srgb() && color_space_name(space).is_some() {
+    // sRGB pages here, and for the documents of the pages whose pixels take
+    // the colour by a recording of their own -- see `ExactColour`.
+    let exact = destination.is_srgb()
+        || PixelColorSpace::matching(destination)
+            .is_some_and(PixelColorSpace::converts_exactly);
+    match exact && color_space_name(space).is_some() {
         true => (color4f_to_srgb(color, Some(space)), ColorSpace::new_srgb()),
         false => skia_paint_color(color, space),
+    }
+}
+
+/// [`skia_paint_color_onto`] for a colour named in the page's own space,
+/// `destination`, given that space's name in `color()` -- what
+/// [`color_space_name`] gives for it -- found once by the caller rather than
+/// at every call, where it builds each space this crate names to compare
+/// against. The same pair: a space with such a name is one a flat colour
+/// converts into exactly.
+pub fn skia_paint_color_onto_own(
+    color: Color4f,
+    destination: &ColorSpace,
+    name: Option<&'static str>,
+) -> (Color4f, ColorSpace) {
+    match name {
+        Some(name) => {
+            (color_function_to_srgb(color, name), ColorSpace::new_srgb())
+        }
+        None => skia_paint_color(color, destination),
     }
 }
 
@@ -5862,6 +5890,37 @@ pub fn from_engine(engine: RenderingEngine) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A colour handed over for a page in its own space is the pair
+    /// [`skia_paint_color_onto`] gives, in every space a canvas holds and
+    /// converts exactly, the linear ones among them, which `color()` does
+    /// not name.
+    #[test]
+    fn a_colour_onto_its_own_page_is_handed_over_as_onto_any() {
+        for name in [
+            "srgb",
+            "srgb-linear",
+            "display-p3",
+            "display-p3-linear",
+            "rec2020",
+            "rec2020-linear",
+        ] {
+            let page = opt_color_space(name).expect("a space");
+            let own = color_space_name(&page);
+            for colour in [
+                Color4f::new(0.5, 0.5, 0.5, 1.0),
+                Color4f::new(0.0, 1.0, 0.25, 0.4),
+                Color4f::new(1.2, -0.1, 0.7, 0.9),
+            ] {
+                let (want, wanted_in) =
+                    skia_paint_color_onto(colour, &page, &page);
+                let (got, got_in) =
+                    skia_paint_color_onto_own(colour, &page, own);
+                assert_eq!(got, want, "{name}: {colour:?}");
+                assert!(got_in == wanted_in, "{name}: the space it is tagged");
+            }
+        }
+    }
 
     /// FNV-1a over every input [`hex_and_named_colours_read_as_they_did`]
     /// reads, a byte saying whether it was read, and the `f32` bits it reads

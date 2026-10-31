@@ -2375,18 +2375,20 @@ impl<'a> Typesetter<'a> {
         };
 
         // Font extents describe what the face can reach for any string, so
-        // they come from the first line's metrics rather than these glyphs --
-        // and they are relative to the selected baseline, which is why `norm`
-        // appears. An empty run has no line metrics and falls back to the
+        // they come from the first line's metrics rather than these glyphs.
+        // They are relative to the selected baseline as they stand: the
+        // style's baseline shift is in SkParagraph's line metrics and in
+        // `TextStyle::font_metrics`, which add it to the ascent and the
+        // descent. An empty run has no line metrics and falls back to the
         // style's own. Skia's ascent is negative above the baseline.
         let (font_ascent, font_descent) = paragraph
             .get_line_metrics_at(0)
-            .map(|line| (norm + line.ascent as f32, line.descent as f32 - norm))
+            .map(|line| (line.ascent as f32, line.descent as f32))
             .unwrap_or_else(|| {
                 let FontMetrics {
                     ascent, descent, ..
                 } = self.char_style().font_metrics();
-                (norm - ascent, descent - norm)
+                (-ascent, descent)
             });
 
         // UPSTREAM: FreeType 2.14.3 -- unfiled -- not worked around
@@ -2449,12 +2451,13 @@ impl<'a> Typesetter<'a> {
             condensation,
             ..
         } = self.layout(&Paint::default());
-        let headroom = self.char_style().font_metrics().ascent
-            + paragraph.alphabetic_baseline();
-        let offset = self.baseline.get_offset(self.char_style());
+        // Where a draw puts the paragraph: the anchor plus the layout's
+        // offset, as `fillText` draws it. The runs are read from the blobs
+        // `Paragraph::paint` draws, which SkParagraph places at each line's
+        // baseline with the style's baseline shift added, so the shift the
+        // selected `textBaseline` sets is already in them.
         let anchor: Point = point.into();
         origin += anchor;
-        origin.y -= headroom - offset;
 
         // Built a run at a time from `glyph_runs` rather than taken from
         // `Paragraph::get_path_at`, which places each glyph half its own
@@ -3195,8 +3198,10 @@ impl Measured {
                 // Canvas API asks for the box of the text as drawn, and that
                 // is this one. Chrome does not round here and so reports
                 // 0.039 more ascent at 48px; the difference is in the
-                // drawing, not the measurement.
-                let at = info.origin() + origin - Point::new(0.0, norm);
+                // drawing, not the measurement. The baseline shift the
+                // selected `textBaseline` sets is in it too: SkParagraph adds
+                // the style's shift to the blob's offset.
+                let at = info.origin() + origin;
                 // One call for the run: each call looks the glyphs' cache up
                 // again, so asking glyph by glyph costs more than every box.
                 let mut reported = vec![Rect::new_empty(); info.glyphs().len()];

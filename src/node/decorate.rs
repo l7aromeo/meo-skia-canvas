@@ -342,8 +342,8 @@ pub(crate) struct Decoration {
     /// In extended sRGB, unpremultiplied.
     pub(crate) color: Option<Color4f>,
     /// The same colour as it was named, in the space it was named in,
-    /// where that is known: what a float page draws the lines in, made for
-    /// the page -- see `node::oblique::Resolve`.
+    /// where that is known: what a page making its own paints draws the
+    /// lines in -- see `node::oblique::Resolve`.
     pub(crate) named: Option<NamedColour>,
     /// What a named colour's alpha is multiplied by: a canvas's global
     /// alpha, which the text's own paint carries and a named colour does

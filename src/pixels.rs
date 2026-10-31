@@ -105,6 +105,14 @@ pub enum PixelColorSpace {
 }
 
 impl PixelColorSpace {
+    /// Whether a flat colour named in a space this crate names is converted
+    /// into this one exactly here, in `f64` -- see
+    /// `node::utils::color_in_canvas_space`: every space but PQ's and HLG's,
+    /// whose curves this crate does not evaluate.
+    pub(crate) fn converts_exactly(self) -> bool {
+        !matches!(self, Self::Rec2020Pq | Self::Rec2020Hlg)
+    }
+
     /// The name a caller writes for this space.
     ///
     /// The `ColorSpace` union in `lib/index.d.ts` is the authority; where it

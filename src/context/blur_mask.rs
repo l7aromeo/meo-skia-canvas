@@ -392,10 +392,14 @@ impl Baked {
             // interior on float pixels is not dropped either -- see the
             // UPSTREAM note on `context::faint::Faint::drawable`.
             let mut paint = Paint::default();
-            match exact.and_then(ExactColour::shader) {
-                // On a float page, where a paint's alpha is not dropped.
-                Some(shader) => {
-                    paint.set_shader(shader).set_alpha_f(fill.a);
+            match exact
+                .map(|exact| exact.at(fill.a))
+                .and_then(|(exact, alpha)| Some((exact.shader()?, alpha)))
+            {
+                // On a page that keeps a recording for pixels, where on
+                // floats a paint's alpha is not dropped.
+                Some((shader, alpha)) => {
+                    paint.set_shader(shader).set_alpha_f(alpha);
                 }
                 None => {
                     paint.set_shader(shaders::color_in_space(
@@ -906,13 +910,16 @@ fn draw_on_gpu(
     };
     let reach = (FLOAT_PRECISION.tail_sigmas * sigma).ceil() as f32 + 1.0;
     let mut paint = Paint::default();
-    match exact.and_then(ExactColour::shader) {
+    match exact
+        .map(|exact| exact.at(color.a))
+        .and_then(|(exact, alpha)| Some((exact.shader()?, alpha)))
+    {
         // The exact colour where the coverage is: `SrcIn` keeps the
         // colour's shader at the coverage's alpha.
-        Some(colour) => {
+        Some((colour, alpha)) => {
             paint
                 .set_shader(shaders::blend(BlendMode::SrcIn, shader, colour))
-                .set_alpha_f(color.a);
+                .set_alpha_f(alpha);
         }
         None => {
             paint.set_shader(shader);

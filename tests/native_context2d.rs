@@ -1549,6 +1549,74 @@ fn text_baseline_moves_the_run_vertically() {
     );
 }
 
+/// A `textBaseline` moves where the run sits, and so every vertical value
+/// measured from the line it selects: the outline, the ink box and the font
+/// box move by the alphabetic baseline's offset from it, as they do in
+/// Chrome 156, which holds each of these relations exactly. The outline and
+/// both boxes sat a second baseline offset away at every baseline but
+/// `Alphabetic`, the shift SkParagraph applies added again here.
+#[test]
+fn text_baseline_moves_the_outline_and_both_boxes_with_the_run() {
+    let family = oswald();
+    let measured = |baseline: TextBaseline| {
+        let mut canvas = Canvas::new(400.0, 600.0);
+        let ctx = canvas.context();
+        ctx.set_font(&Font::new(family, 96.0));
+        ctx.set_text_baseline(baseline);
+        (
+            ctx.measure_text("Hxg&", None),
+            ctx.outline_text("Hxg&", None).bounds(),
+        )
+    };
+    let (alphabetic, at_alphabetic) = measured(TextBaseline::Alphabetic);
+    for baseline in [
+        TextBaseline::Top,
+        TextBaseline::Hanging,
+        TextBaseline::Middle,
+        TextBaseline::Alphabetic,
+        TextBaseline::Ideographic,
+        TextBaseline::Bottom,
+    ] {
+        let (m, outline) = measured(baseline);
+        // How far the alphabetic baseline is above the selected one; below
+        // it is negative, so the run moves down by it.
+        let by = m.alphabetic_baseline;
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        assert!(
+            near(outline.top, at_alphabetic.top - by)
+                && near(outline.bottom, at_alphabetic.bottom - by),
+            "{baseline:?}: the outline spans {} to {}, where the run moved by {by} from {} to {}",
+            outline.top,
+            outline.bottom,
+            at_alphabetic.top,
+            at_alphabetic.bottom,
+        );
+        assert!(
+            near(-m.actual_bounding_box_ascent, outline.top)
+                && near(m.actual_bounding_box_descent, outline.bottom),
+            "{baseline:?}: the ink box is {} to {}, the outline {} to {}",
+            -m.actual_bounding_box_ascent,
+            m.actual_bounding_box_descent,
+            outline.top,
+            outline.bottom,
+        );
+        assert!(
+            near(
+                m.font_bounding_box_ascent,
+                alphabetic.font_bounding_box_ascent + by
+            ) && near(
+                m.font_bounding_box_descent,
+                alphabetic.font_bounding_box_descent - by
+            ),
+            "{baseline:?}: the font box is {} up and {} down, from {} and {} moved by {by}",
+            m.font_bounding_box_ascent,
+            m.font_bounding_box_descent,
+            alphabetic.font_bounding_box_ascent,
+            alphabetic.font_bounding_box_descent,
+        );
+    }
+}
+
 #[test]
 fn reset_clears_the_page_and_the_state() {
     let mut canvas = Canvas::new(10.0, 10.0);

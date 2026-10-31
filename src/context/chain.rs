@@ -21,7 +21,7 @@ use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, Color, Color4f, ColorFilter,
     ColorSpace, ColorType, Data, FilterMode, IRect, Image, ImageFilter,
     ImageInfo, Matrix, MipmapMode, Paint, Rect, RoundOut, SamplingOptions,
-    Surface, Vector, color_filters,
+    Shader, Surface, Vector, color_filters,
     image::{CachingHint, RequiredProperties},
     image_filter::MapDirection,
     image_filters,
@@ -33,7 +33,11 @@ use skia_safe::{Recorder, gpu};
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 use crate::context::exact_blur_gpu;
 use crate::{
-    context::exact_blur::{self, REACH_SIGMAS},
+    context::{
+        exact_blur::{self, REACH_SIGMAS},
+        keeps_two_recordings,
+        layer::ExactColour,
+    },
     node::utils::color_in_canvas_space,
     pixels::PixelColorSpace,
     started,
@@ -862,9 +866,11 @@ fn tint(
     let pixel = layer.with_dimensions((1, 1));
     let mut surface = started::raster(&pixel, None, None)?;
     surface.canvas().clear(Color::TRANSPARENT);
-    surface
-        .canvas()
-        .draw_paint(&Paint::new(colour, Some(space)));
+    let mut fill = Paint::new(colour, Some(space));
+    if let Some((shader, alpha)) = exact_fill(colour, space, layer) {
+        fill.set_shader(shader).set_alpha_f(alpha);
+    }
+    surface.canvas().draw_paint(&fill);
     // Read back unpremultiplied, in floats, in the layer's own space: the
     // filled bytes divided out exactly enough that the tint multiplies them
     // back to the same bytes.
@@ -890,6 +896,27 @@ fn tint(
         layer.color_space(),
         BlendMode::SrcIn,
     )
+}
+
+/// A shader painting `colour`, unpremultiplied in `space`, exactly on an
+/// eight-bit page in `layer`'s space, where that page keeps a recording for
+/// pixels and so paints a flat colour exactly -- see [`ExactColour`] -- and
+/// the alpha it paints at: placed as a fill's colour is, so that it stores
+/// a fill's bytes.
+fn exact_fill(
+    colour: Color4f,
+    space: &ColorSpace,
+    layer: &ImageInfo,
+) -> Option<(Shader, f32)> {
+    let working = layer.color_space()?;
+    if !keeps_two_recordings(&working) {
+        return None;
+    }
+    let canvas = PixelColorSpace::matching(&working)?;
+    let rgb = color_in_canvas_space(colour, space, canvas)?;
+    let (exact, alpha) =
+        ExactColour::new(rgb, working, canvas, true).at(colour.a);
+    Some((exact.shader()?, alpha))
 }
 
 /// [`tint`] on a float layer in a space this crate converts: the colour
