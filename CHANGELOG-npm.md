@@ -471,6 +471,33 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **`textBaseline` `top`, `middle` and `bottom` sit on the em square.** HTML
+  puts them at the top, middle and bottom of the em square; they were at the
+  face's ascent, its descent and halfway between, which lie outside the em
+  square wherever the face's ascent and descent add up to more than the font
+  size. The em square is now the font size divided at the alphabetic
+  baseline as the face's typographic ascender and descender divide it, which
+  is where Chrome 156 puts these baselines on every face measured: 100px
+  Oswald's `top` is 80.50 above the alphabetic baseline where it was 119.30,
+  Amstelvar's 75 where it was 95. A face that states no typographic span is
+  divided as its ascent and descent divide it, as in Chrome. Text drawn,
+  stroked or outlined at these three baselines moves by the difference, and
+  `measureText`'s values move with the baseline they are measured from.
+  `emHeightAscent` and `emHeightDescent`, which reported the face's ascent
+  and descent, now report the em square, adding up to the font size at every
+  baseline. Code that offset text drawn at `top`, `middle` or `bottom` to
+  make up for where it used to sit is now off by that offset.
+
+- **`fontBoundingBoxAscent` and `fontBoundingBoxDescent` are measured from
+  the `textBaseline` set.** At every baseline but `alphabetic` they were a
+  second baseline offset away: at `top`, 96px Oswald reported an ascent of
+  -114.5 and a descent of 256.8, where the box runs from 0 to 142.3. Each
+  value at a baseline is now its `alphabetic` value moved by that
+  baseline's `alphabeticBaseline`, which is how Chrome 156 reports all six.
+  `actualBoundingBoxAscent` and `actualBoundingBoxDescent`, and the path
+  `outlineText` returns, are measured and placed the same way, as the text
+  is drawn.
+
 - **A canvas drawn in through a source rectangle draws its edges where the
   canvas does.** `drawCanvas()` given a source rectangle that cuts what
   the canvas draws clipped it there, and the clip cut every path drawn
@@ -2062,6 +2089,14 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
   channel with zero, and is therefore black.
 
 ### Changed
+
+- **A draw builds no colour space.** Every fill, stroke and text draw
+  looked up the colour space its colour was named in by building each space
+  `color()` names and comparing it: two spaces a draw for an sRGB colour,
+  seven for one named in `"display-p3"`, and on a `"display-p3"` canvas one
+  more for the canvas's own. Each space is now built once and compared by
+  Skia's hashes. The time it saves is measured at release [RE-TIME vs 6.0.2:
+  200 fills each in its own hex colour on an eight-bit sRGB canvas].
 
 - **`Path2D.d` writes numbers exactly and arcs as arcs.** Its text changes
   for any path; the geometry it describes does not. Each number is now the

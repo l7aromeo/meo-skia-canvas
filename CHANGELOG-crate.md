@@ -213,6 +213,34 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **`TextBaseline::Top`, `Middle` and `Bottom` sit on the em square.** HTML
+  puts them at the top, middle and bottom of the em square; they were at the
+  face's ascent, its descent and halfway between, which lie outside the em
+  square wherever the face's ascent and descent add up to more than the font
+  size. The em square is now the font size divided at the alphabetic
+  baseline as the face's typographic ascender and descender divide it, which
+  is where Chrome 156 puts these baselines on every face measured: 100px
+  Oswald's `Top` is 80.50 above the alphabetic baseline where it was 119.30,
+  Amstelvar's 75 where it was 95. A face that states no typographic span is
+  divided as its ascent and descent divide it, as in Chrome. Text drawn,
+  stroked or outlined at these three baselines moves by the difference, and
+  `Context2D::measure_text`'s values move with the baseline they are
+  measured from. `TextMetrics::em_height_ascent` and `em_height_descent`,
+  which reported the face's ascent and descent, now report the em square,
+  adding up to the font size at every baseline. Code that offset text drawn
+  at `Top`, `Middle` or `Bottom` to make up for where it used to sit is now
+  off by that offset.
+
+- **`font_bounding_box_ascent` and `font_bounding_box_descent` are measured
+  from the `TextBaseline` set.** At every baseline but `Alphabetic` they were
+  a second baseline offset away: at `Top`, 96px Oswald reported an ascent of
+  -114.5 and a descent of 256.8, where the box runs from 0 to 142.3. Each
+  value at a baseline is now its `Alphabetic` value moved by that baseline's
+  `alphabetic_baseline`, which is how Chrome 156 reports all six.
+  `actual_bounding_box_ascent` and `actual_bounding_box_descent`, and the
+  path `Context2D::outline_text` returns, are measured and placed the same
+  way, as the text is drawn.
+
 - **A canvas drawn in through a source rectangle draws its edges where the
   canvas does.** `Context2D::draw_canvas_region` given a source rectangle
   that cuts what the canvas draws clipped it there, and the clip cut every
@@ -1698,6 +1726,15 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `Image::from_url` takes `data:` URLs through it.
 
 ### Changed
+
+- **A draw builds no colour space.** Every fill, stroke and text draw
+  looked up the colour space its colour was named in by building each space
+  `color()` names and comparing it: two spaces a draw for an sRGB colour,
+  seven for one named in Display P3, and on a `PixelColorSpace::DisplayP3`
+  canvas one more for the canvas's own. Each space is now built once and
+  compared by Skia's hashes. The time it saves is measured at release
+  [RE-TIME vs 0.16.3: 200 fills each in its own hex colour on an eight-bit
+  sRGB canvas].
 
 - **`node scripts/skia-source.mjs prepare` makes a tree from one it already
   has.** docs/rust.md sends a crate build that wants the patched Skia to
