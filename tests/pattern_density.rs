@@ -430,3 +430,150 @@ fn an_svg_rasterizes_a_draw_dyed_by_it() {
     assert!(svg.contains("<image"), "the draw is in the SVG: {svg}");
     assert!(!svg.contains("<path"), "the draw is a bare path: {svg}");
 }
+
+/// `text` in `font` at (`x`, `y`), dyed by `pattern` where `pattern` is
+/// `Some`, or not drawn at all, over the band [`dyed`] draws, read at
+/// `density`.
+fn dyed_text(
+    pattern: Option<&Pattern>,
+    font: &str,
+    text: &str,
+    density: u32,
+) -> Vec<u8> {
+    let mut canvas = Canvas::new(WIDTH, HEIGHT);
+    canvas.set_gpu(false);
+    let ctx = canvas.context();
+    ctx.set_fill_style_css("rgb(250 200 0)").expect("a colour");
+    ctx.fill_rect(0.0, 0.0, WIDTH, 40.0);
+    if let Some(pattern) = pattern {
+        ctx.set_font_css(font);
+        ctx.set_fill_pattern(pattern);
+        ctx.fill_text(text, TEXT_AT.0, TEXT_AT.1, None);
+    }
+    premultiplied(&mut canvas, density)
+}
+
+/// Where [`dyed_text`] draws: off the pixel grid, so that the edges of the
+/// ink fall part way across pixels.
+const TEXT_AT: (f32, f32) = (20.3, 70.6);
+
+/// Text whose ink at density 2 lies past the box it measures -- the rows a
+/// text's reach is kept to the clip for, since hinting at the density a page
+/// is read at puts the ink where the bounds recorded at 1x do not -- is
+/// dyed out to those rows. A pattern clipped to less than the text covers
+/// at that density leaves them as they were, and parts from the draw dyed by
+/// the pixels' pattern there.
+#[test]
+fn text_inked_past_its_measured_box_is_dyed_to_its_edge() {
+    let density = 2;
+    let scale = density as f32;
+    // A blur wide enough to leave no pixel of the tile transparent, so that
+    // every pixel the text covers is one the pattern changes.
+    let mut source = source(Source::Path70);
+    let pixels = pixels_pattern(&mut source, density);
+    let mut holder = Canvas::new(WIDTH, HEIGHT);
+    let made = holder
+        .context()
+        .create_pattern_from_canvas(&mut source, PatternRepeat::Repeat);
+    let bare = dyed_text(None, "", "", density);
+    let width = (WIDTH * scale) as usize;
+    let (mut past, mut failures) = (0, vec![]);
+    for size in (12..=80).map(|half| half as f32 / 2.0) {
+        for text in ["Q|", "Éjy"] {
+            let font = format!("{size}px serif");
+            let mut probe = Canvas::new(WIDTH, HEIGHT);
+            probe.context().set_font_css(&font);
+            let m = probe.context().measure_text(text, None);
+            let (x, y) = TEXT_AT;
+            let left = ((x - m.actual_bounding_box_left) * scale).floor();
+            let right = ((x + m.actual_bounding_box_right) * scale).ceil();
+            let top = ((y - m.actual_bounding_box_ascent) * scale).floor();
+            let bottom = ((y + m.actual_bounding_box_descent) * scale).ceil();
+            let want = dyed_text(Some(&pixels), &font, text, density);
+            // The pixels outside the measured box the text paints.
+            let outside = want
+                .chunks(4)
+                .zip(bare.chunks(4))
+                .enumerate()
+                .filter(|(at, (dyed, bare))| {
+                    let (col, row) = ((at % width) as f32, (at / width) as f32);
+                    dyed != bare
+                        && (!(left..right).contains(&col)
+                            || !(top..bottom).contains(&row))
+                })
+                .count();
+            if outside == 0 {
+                continue;
+            }
+            past += 1;
+            let got = dyed_text(Some(&made), &font, text, density);
+            if got != want {
+                failures.push(format!(
+                    "{font} {text:?}: {outside} px past the box, {:?}",
+                    parting(&got, &want)
+                ));
+            }
+        }
+    }
+    assert!(past > 0, "no text inked past its measured box");
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// One GPU page drawing two patterns, and one of them at two densities,
+/// paints each draw as a page drawing it alone does: each pattern and each
+/// density rasterizes a tile of its own, however many draws on the page
+/// share one.
+#[test]
+fn a_gpu_page_draws_each_pattern_at_each_density_from_its_own_tile() {
+    let mut holder = Canvas::new(WIDTH, HEIGHT);
+    // The first with sharp edges, which a tile at the wrong density shows.
+    let mut first = source_on(Source::Shadow, true);
+    let mut second = source_on(Source::Path70, true);
+    let first = holder
+        .context()
+        .create_pattern_from_canvas(&mut first, PatternRepeat::Repeat);
+    let second = holder
+        .context()
+        .create_pattern_from_canvas(&mut second, PatternRepeat::Repeat);
+    // Each a pattern, the scale it is drawn under, and the left edge and
+    // width of the band it fills. None overlaps another, and each lies on
+    // whole device pixels; under a scale of 2 the first pattern is
+    // rasterized at twice the density.
+    let draws = [
+        (&first, 1.0, 0.0, 60.0),
+        (&second, 1.0, 60.0, 60.0),
+        (&first, 2.0, 60.0, 20.0),
+    ];
+    let page = |draws: &[(&Pattern, f32, f32, f32)]| {
+        let mut canvas = Canvas::new(WIDTH, HEIGHT);
+        canvas.set_gpu(true);
+        let ctx = canvas.context();
+        for &(pattern, scale, x, width) in draws {
+            ctx.save();
+            ctx.scale(scale, scale);
+            ctx.set_fill_pattern(pattern);
+            ctx.fill_rect(x, 0.0, width, HEIGHT / scale);
+            ctx.restore();
+        }
+        pixels(&mut canvas, 1)
+    };
+    let together = page(&draws);
+    let alone: Vec<Vec<u8>> = draws
+        .iter()
+        .map(|draw| page(std::slice::from_ref(draw)))
+        .collect();
+    // Each pixel as the one page that drew there has it, and transparent
+    // where none did.
+    let merged: Vec<u8> = (0..together.len())
+        .step_by(4)
+        .flat_map(|at| {
+            alone
+                .iter()
+                .map(|pixels| &pixels[at..at + 4])
+                .find(|pixel| pixel[3] != 0)
+                .unwrap_or(&[0; 4])
+                .to_vec()
+        })
+        .collect();
+    assert_eq!(parting(&together, &merged), (0, 0));
+}

@@ -39,8 +39,8 @@ use crate::{
         faint::composited,
         layer::{
             BlurDraw, BlurOp, ClipData, Clipped, Composite, Coverage, CutOp,
-            Group, Layer, LayerRec, PatternDraw, Target, holds_a_cut,
-            play_entries,
+            Group, Layer, LayerRec, PatternDraw, Target, TileScope,
+            holds_a_cut, play_entries,
         },
     },
     encode::{
@@ -2651,6 +2651,7 @@ impl RecordingSurface {
         let page_size = page.scaled_dimensions(opts.density);
         let target = page.layers.len();
 
+        let _tiles = TileScope::open();
         for origin in wanted {
             let rect = Self::tile_rect(*origin, page_size);
             if rect.is_empty() {
@@ -2988,6 +2989,7 @@ impl RecordingSurface {
             // density. Inside a save, since the scale is the canvas's own
             // state: left on it, every later update multiplied it again, and
             // a page read twice at density two drew its new layers at four.
+            let _tiles = TileScope::open();
             canvas.save();
             canvas.scale((self.density, self.density));
             for pict in page.layers.iter().skip(self.depth) {
@@ -3124,6 +3126,7 @@ impl RecordingSurface {
                 drawn: 0,
             });
         }
+        let _tiles = TileScope::open();
         for (at, raster) in self.layers.iter_mut().enumerate() {
             let entries = &open[at].entries;
             if raster.drawn == entries.len() {
@@ -3263,6 +3266,7 @@ impl RecordingSurface {
             }
             canvas.draw_image(surface.image_snapshot(), (0, 0), Some(&copy));
             if let Some(over) = over {
+                let _tiles = TileScope::open();
                 canvas.scale((density, density));
                 over.playback(canvas, Target::Pixels);
             }
@@ -3733,6 +3737,7 @@ impl Page {
         let img_dims = self.scaled_dimensions(options.density);
         let img_scale =
             M44::from(Matrix::scale((options.density, options.density)));
+        let _tiles = TileScope::open();
         let mut surface = make_compositing_surface(
             &engine,
             options,
@@ -4053,6 +4058,7 @@ impl Page {
         let img_scale =
             M44::from(Matrix::scale((options.density, options.density)));
         let draw = || -> Result<Surface, String> {
+            let _tiles = TileScope::open();
             let mut surface = make_compositing_surface(
                 &engine,
                 options,

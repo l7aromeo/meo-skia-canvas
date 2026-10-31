@@ -20,8 +20,10 @@
 
 use std::{
     borrow::Cow,
+    cell::RefCell,
     f32::consts::SQRT_2,
     iter,
+    marker::PhantomData,
     sync::{Arc, OnceLock},
 };
 
@@ -30,9 +32,9 @@ use skia_safe::{
     AlphaType, BlendMode, BlurStyle, Canvas as SkCanvas, ClipOp, Color4f,
     ColorFilter, ColorSpace, ColorType, Data, FilterMode, IRect, Image,
     ImageFilter, ImageInfo, MaskFilter, Matrix, Paint, PaintCap, PaintJoin,
-    PaintStyle, Path, PathDirection, Picture, PictureRecorder, Rect, RoundOut,
-    RuntimeEffect, SamplingOptions, Shader, TileMode, canvas::SaveLayerRec,
-    color_filters, image_filters,
+    PaintStyle, Path, PathDirection, Picture, PictureRecorder, Pixmap, Rect,
+    RoundOut, RuntimeEffect, SamplingOptions, Shader, TileMode,
+    canvas::SaveLayerRec, color_filters, image_filters,
 };
 
 use crate::{
@@ -163,6 +165,111 @@ pub(crate) fn reach_of(entries: &[Layer]) -> Option<Rect> {
             all.join(entry.reach()?);
             Some(all)
         })
+}
+
+thread_local! {
+    /// The tiles rasterized on the GPU in the playback under way on this
+    /// thread -- see [`TileScope`].
+    static GPU_TILES: RefCell<GpuTiles> = RefCell::default();
+}
+
+/// See [`TileScope`].
+#[derive(Default)]
+struct GpuTiles {
+    /// How many scopes are open.
+    open: usize,
+    /// Each tile under its source's address and its density.
+    tiles: Vec<((usize, u32), Image)>,
+}
+
+/// Keeps each tile a GPU playback rasterizes for the rest of that playback,
+/// so that a pattern drawn many times on a page rasterizes its source once
+/// rather than at each draw: 200 small fills dyed by one pattern made a
+/// GPU surface and played the source's page onto it 200 times.
+///
+/// Opened where a page is played onto pixels, and let go there when the
+/// playback ends: a GPU image lives on its thread's context and has to
+/// be let go on that thread, and a playback whose draws the GPU discarded
+/// is drawn again on a fresh surface with tiles of its own. A source is
+/// filed by its address, which stays its own while the page that holds it
+/// is played. Outside a scope nothing is kept.
+pub(crate) struct TileScope(PhantomData<*const ()>);
+
+impl TileScope {
+    /// Opens a scope on this thread, with no tile kept yet: a scope opened
+    /// inside another starts afresh, and the outer one rasterizes again what
+    /// it needs.
+    pub(crate) fn open() -> Self {
+        GPU_TILES.with_borrow_mut(|held| {
+            held.open += 1;
+            held.tiles.clear();
+        });
+        Self(PhantomData)
+    }
+
+    fn held(key: (usize, u32)) -> Option<Image> {
+        GPU_TILES.with_borrow(|held| {
+            held.tiles
+                .iter()
+                .find(|(at, _)| *at == key)
+                .map(|(_, image)| image.clone())
+        })
+    }
+
+    fn hold(key: (usize, u32), image: &Image) {
+        GPU_TILES.with_borrow_mut(|held| {
+            if held.open > 0 {
+                held.tiles.push((key, image.clone()));
+            }
+        });
+    }
+}
+
+impl Drop for TileScope {
+    fn drop(&mut self) {
+        GPU_TILES.with_borrow_mut(|held| {
+            held.open -= 1;
+            if held.open == 0 {
+                held.tiles.clear();
+            }
+        });
+    }
+}
+
+/// The smallest rectangle holding every pixel of `pixels` that is not
+/// all zero bytes -- transparent, in any premultiplied colour type -- or
+/// `None` where every pixel is.
+fn inked(pixels: &Pixmap) -> Option<IRect> {
+    let bytes = pixels.bytes()?;
+    let pixel = pixels.info().bytes_per_pixel();
+    let width = pixels.width() as usize * pixel;
+    let rows = || bytes.chunks(pixels.row_bytes()).map(|row| &row[..width]);
+    // Or-ed whole rather than searched, so that the loop has no exit to
+    // keep it from being vectorized: most rows of a text's coverage over
+    // the clip are empty, and each of those is read to its end either way.
+    let holds_ink =
+        |row: &[u8]| row.iter().fold(0, |all, byte| all | byte) != 0;
+    let top = rows().position(holds_ink)?;
+    let bottom = rows().rposition(holds_ink)?;
+    let (left, right) = rows().take(bottom + 1).skip(top).fold(
+        (usize::MAX, 0),
+        |(left, right), row| {
+            let first = row.iter().position(|&byte| byte != 0);
+            let last = row.iter().rposition(|&byte| byte != 0);
+            match (first, last) {
+                (Some(first), Some(last)) => {
+                    (left.min(first / pixel), right.max(last / pixel + 1))
+                }
+                _ => (left, right),
+            }
+        },
+    );
+    Some(IRect::from_ltrb(
+        left as i32,
+        top as i32,
+        right as i32,
+        bottom as i32 + 1,
+    ))
 }
 
 /// A flat colour held exactly in a page's own space, for the recording a
@@ -390,8 +497,9 @@ const SCALE_SLACK: f32 = 1.0 / 1024.0;
 /// drawn on and in the page's own colour type -- as a canvas drawn into
 /// another plays its page there. On the CPU the raster is kept for the
 /// density asked for last; on the GPU it is a texture of the context
-/// drawing it, made for each draw and gone with it, so that nothing here
-/// holds a texture past the draw that made it.
+/// drawing it, kept for the rest of the playback that made it and gone with
+/// it -- see [`TileScope`] -- so that nothing here holds a texture past the
+/// playback.
 ///
 /// Not a picture shader of the page's picture, which Skia rasterizes once
 /// at the scale it is first drawn at and always as RGBA8888: a blur the
@@ -427,6 +535,10 @@ impl TileSource {
         // through Skia's picture shader, whose tile is RGBA8888 whatever
         // the page -- see the type's note.
         if blur_mask::on_gpu(canvas) {
+            let key = (self as *const Self as usize, density);
+            if let Some(image) = TileScope::held(key) {
+                return Some(image);
+            }
             let dims = self.page.scaled_dimensions(density as f32);
             let info = self
                 .options
@@ -440,7 +552,9 @@ impl TileSource {
             for entry in self.page.layers.iter() {
                 entry.playback(tile, Target::Pixels);
             }
-            return Some(surface.image_snapshot());
+            let image = surface.image_snapshot();
+            TileScope::hold(key, &image);
+            return Some(image);
         }
         let mut held = self.raster.lock();
         if let Some((at, image)) = held.as_ref()
@@ -599,17 +713,20 @@ impl PatternDraw {
             canvas.clip_rect(Rect::new_empty(), ClipOp::Intersect, false);
             return;
         };
-        // The device clip itself kept to those pixels too: a clip shader
-        // leaves the clip's bounds as they are, and the pattern painted
-        // under it would be shaded over every pixel they hold -- the whole
-        // page, for each small draw. Whole pixels, outside of which the
-        // coverage is nothing, so no pixel it reaches changes.
-        canvas.reset_matrix();
-        canvas.clip_irect(area, ClipOp::Intersect);
-        canvas.set_matrix(&to_device.into());
+        // The device clip itself kept to the pixels the coverage holds: a
+        // clip shader leaves the clip's bounds as they are, and the pattern
+        // painted under it would be shaded over every pixel they hold -- the
+        // whole page, for each small draw. Whole pixels, outside of which
+        // the coverage is nothing, so no pixel it reaches changes.
+        let clip_to = |canvas: &SkCanvas, pixels: IRect| {
+            canvas.reset_matrix();
+            canvas.clip_irect(pixels, ClipOp::Intersect);
+            canvas.set_matrix(&to_device.into());
+        };
         let info = canvas.image_info().with_dimensions(area.size());
         let corner = Matrix::translate((area.left as f32, area.top as f32));
         let Some(mut surface) = canvas.new_surface(&info, None) else {
+            clip_to(canvas, area);
             // A picture shader puts its tile's corner at the origin, so the
             // tile is the whole pixels the draw reaches, moved back to
             // where they lie.
@@ -636,6 +753,20 @@ impl PatternDraw {
             .into(),
         );
         self.covered.playback(onto);
+        // Text reaches the whole clip -- see `reach_the_clip` -- so the
+        // pixels it covers are found in the coverage itself where it can be
+        // read, on the CPU. A GPU surface keeps the area: reading it would
+        // wait on the GPU, where shading the area costs little.
+        let inked = match surface.peek_pixels() {
+            Some(pixels) => inked(&pixels)
+                .map(|inked| inked.with_offset((area.left, area.top))),
+            None => Some(area),
+        };
+        let Some(inked) = inked else {
+            canvas.clip_rect(Rect::new_empty(), ClipOp::Intersect, false);
+            return;
+        };
+        clip_to(canvas, inked);
         let Some(shader) = surface.image_snapshot().to_shader(
             (TileMode::Decal, TileMode::Decal),
             SamplingOptions::from(FilterMode::Nearest),
