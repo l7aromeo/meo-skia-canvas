@@ -3225,8 +3225,18 @@ impl Context2D {
         // Composited, not bare: the paragraph carries its own paints, so
         // without this wrapper the context's alpha and blend mode would be
         // silently dropped.
-        self.inner.with_composited_canvas(|canvas| {
-            layout.paint(canvas, SkPoint::new(x, y));
+        // On a float page every glyph is drawn run by run in a paint made
+        // for the page, where SkParagraph would draw the paint the
+        // paragraph was built with -- see `Inner::paragraph_paint`.
+        let floats = self.inner.composites_in_floats();
+        let at = SkPoint::new(x, y);
+        self.inner.with_composited_canvas(|canvas, recording| {
+            match floats {
+                true => layout.paint_resolved(canvas, at, &|paint, colour| {
+                    self.inner.paragraph_paint(paint, colour, recording)
+                }),
+                false => layout.paint(canvas, at),
+            }
             reach_the_clip(canvas);
         });
     }

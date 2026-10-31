@@ -524,6 +524,24 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   `reset()` and setting the canvas's `width` or `height` now clear them too,
   along with what was saved.
 
+- **A `Paragraph` lands in its colours exactly on a float canvas.** On a
+  canvas made with `colorType: "RGBAF16"` or `"RGBAF32"`, SkParagraph
+  painted a paragraph's glyphs, background, shadows and decoration in the
+  paints its styles were built with, whose colours Skia holds converted to
+  sRGB through an approximate transfer function:
+  `color(display-p3 0.3 0.6 0.2)` landed 2.4e-4 from a fill of it on an sRGB
+  F32 canvas, other colours up to 2.19e-4 on `"srgb-linear"`, `"display-p3"`
+  and `"rec2020"` ones, and a whole half-float step on `"RGBAF16"`. On such
+  a canvas every run is now drawn here, in a paint made for the canvas from
+  the colour as the style named it, so a paragraph's `color`,
+  `foregroundColor`, `backgroundColor`, shadow colour, `decorationColor` and
+  `strokeWidth` outline are a fill of their colour to the bit. A colour
+  font's glyphs keep their own colours. On an eight-bit canvas nothing
+  changes, so its PDF still writes a paragraph's colour as Skia converts it,
+  `.0785 .4706 .8628` for `rgb(20 120 220)` where a fill writes
+  `.0784 .4706 .8627`; on a float sRGB canvas the paragraph's is now the
+  fill's.
+
 - **A `drop-shadow()` in `ctx.filter` lands in its colour exactly on a float
   canvas.** On a canvas made with `colorType: "RGBAF16"` or `"RGBAF32"`, a
   shadow was tinted through Skia's blend filter, which converts its colour
@@ -752,9 +770,8 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   weighs by the luminance of the paint's colour. The cost is memory: about
   1.35x an sRGB canvas's recording for a run of fills in one colour, 2.4x for
   fills each in a colour of its own. Not yet exact there: a shadow, which Skia
-  draws through an eight-bit layer, a `Paragraph`'s own colours, the colours
-  in a filter, a colour filter or a texture, and the `"rec2020-pq"` and
-  `"rec2020-hlg"` spaces.
+  draws through an eight-bit layer, the colours in a filter, a colour filter
+  or a texture, and the `"rec2020-pq"` and `"rec2020-hlg"` spaces.
 
 - **A text decoration's colour is painted at the precision it names, as a
   fill's is.** The colour in `ctx.textDecoration` was rounded to eight bits of

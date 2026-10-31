@@ -31,8 +31,10 @@
 use crate::{
     cache_map::CacheMap,
     context::faint::Faint,
+    css::NamedColour,
     node::{
         font_library::FontEpoch,
+        oblique::Resolve,
         typography::{GlyphRun, GlyphRunRef},
     },
 };
@@ -339,6 +341,10 @@ pub(crate) struct Decoration {
     /// paint holds it, wide-gamut and with any global alpha already in it.
     /// In extended sRGB, unpremultiplied.
     pub(crate) color: Option<Color4f>,
+    /// The same colour as it was named, in the space it was named in,
+    /// where that is known: what a float page draws the lines in, made for
+    /// the page -- see `node::oblique::Resolve`.
+    pub(crate) named: Option<NamedColour>,
     /// What a named colour's alpha is multiplied by: a canvas's global
     /// alpha, which the text's own paint carries and a named colour does
     /// not. 1 where the paint is composited through a layer that applies it.
@@ -490,20 +496,36 @@ pub(crate) fn spans(
     spans.finish()
 }
 
-/// Paints `layer`'s lines of every span, offset by `origin`, on `base` --
-/// the glyphs' paint, so that a canvas's compositing, filter and shadow
-/// reach the lines as they reach the text -- in the box's named colour, its
-/// alpha times the box's `opacity`, or in `base`'s own colour where none was
-/// named -- onto pixels that do with a faint paint what `faint` says.
+/// How [`paint`] makes a line's paint.
+#[derive(Clone, Copy)]
+pub(crate) struct LinePaint<'a> {
+    /// The glyphs' paint, which each line's is made from, so that a
+    /// canvas's compositing, filter and shadow reach the lines as they
+    /// reach the text.
+    pub(crate) base: &'a Paint,
+    /// What the pixels do with a faint paint.
+    pub(crate) faint: Faint,
+    /// What makes each line's paint for the page from the colour its box
+    /// named, where the page needs paints of its own.
+    pub(crate) resolve: Option<Resolve<'a>>,
+}
+
+/// Paints `layer`'s lines of every span, offset by `origin`, on `pen`'s
+/// base, in the box's named colour, its alpha times the box's `opacity`, or
+/// in the base's own colour where none was named.
 pub(crate) fn paint(
     canvas: &Canvas,
     spans: &[Span],
     boxes: &[Decoration],
     origin: Point,
     layer: Layer,
-    base: &Paint,
-    faint: Faint,
+    pen: LinePaint,
 ) {
+    let LinePaint {
+        base,
+        faint,
+        resolve,
+    } = pen;
     for span in spans {
         let decoration = &boxes[span.box_index];
         for kind in layer.kinds() {
@@ -512,14 +534,21 @@ pub(crate) fn paint(
                     color.a *= decoration.opacity;
                     color
                 });
+                let paint = line_paint(base, color);
+                let paint = match resolve {
+                    Some(resolve) => {
+                        let named = decoration.named.clone().map(
+                            |(mut color, space)| {
+                                color.a *= decoration.opacity;
+                                (color, space)
+                            },
+                        );
+                        resolve(&paint, named.as_ref())
+                    }
+                    None => paint,
+                };
                 draw_line(
-                    canvas,
-                    decoration,
-                    *kind,
-                    span,
-                    origin,
-                    &line_paint(base, color),
-                    faint,
+                    canvas, decoration, *kind, span, origin, &paint, faint,
                 );
             }
         }
@@ -1443,7 +1472,9 @@ pub(crate) fn box_at(
 
 #[cfg(test)]
 mod tests {
-    use super::{Decoration, FaceLines, Layer, Span, Thickness, paint, wave};
+    use super::{
+        Decoration, FaceLines, Layer, LinePaint, Span, Thickness, paint, wave,
+    };
     use crate::{context::faint::Faint, started};
     use skia_safe::{
         Color, Color4f, Paint, PictureRecorder, Point, Rect,
@@ -1466,6 +1497,7 @@ mod tests {
             style,
             thickness: Thickness::Pixels(t),
             color: Some(Color4f::from(Color::BLACK)),
+            named: None,
             opacity: 1.0,
             face,
         }];
@@ -1486,8 +1518,11 @@ mod tests {
             &boxes,
             Point::new(0.0, 0.0),
             Layer::Beneath,
-            &Paint::default(),
-            Faint::Dropped,
+            LinePaint {
+                base: &Paint::default(),
+                faint: Faint::Dropped,
+                resolve: None,
+            },
         );
         recorder
             .finish_recording_as_picture(None)

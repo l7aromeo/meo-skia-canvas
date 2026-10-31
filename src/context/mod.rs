@@ -36,7 +36,7 @@ pub mod typesetting;
 use crate::node::typography::Painter;
 use crate::{
     context2d::{FontKerning, TextRendering, font_spec_from_css},
-    css::{FontUnits, ROOT_FONT_PX},
+    css::{FontUnits, NamedColour, ROOT_FONT_PX},
     export::VectorFeatures,
     font::GenericFamily,
     font_library::{FontLibrary, ResolvedFont, generic_name, text_hinting},
@@ -788,7 +788,19 @@ impl Context2D {
         if paint.shader().is_some() {
             return None;
         }
-        let exact = self.exact_colour(style)?;
+        self.exact_text_paint_in(paint, self.exact_colour(style)?)
+    }
+
+    /// [`Self::exact_text_paint`] in `exact`, the colour held exactly in the
+    /// page's own space.
+    fn exact_text_paint_in(
+        &self,
+        paint: &Paint,
+        exact: ExactColour,
+    ) -> Option<Paint> {
+        if paint.shader().is_some() {
+            return None;
+        }
         let mut opaque = paint.color4f();
         opaque.a = 1.0;
         let dye = match paint.color_filter() {
@@ -822,6 +834,55 @@ impl Context2D {
         ));
         paint.set_color_filter(dye);
         Some(paint)
+    }
+
+    /// `paint`, built with a paragraph before the page it lands on was
+    /// known, as this page draws it in `recording`, given `colour`, what
+    /// it paints as its style named it -- see
+    /// `node::oblique::Resolve`. On a page that keeps a recording for
+    /// pixels, that recording paints the colour held exactly in the page's
+    /// space, as text in a fill colour does; on a float page that keeps one,
+    /// the colour sRGB-encoded on this side, which Skia then converts by
+    /// the identity onto sRGB -- see [`skia_paint_color_onto`]. Every other
+    /// page and recording draws `paint` as it was built.
+    pub(crate) fn paragraph_paint(
+        &self,
+        paint: &Paint,
+        colour: Option<&NamedColour>,
+        recording: Recording,
+    ) -> Paint {
+        let Some((colour, named_in)) = colour else {
+            return paint.clone();
+        };
+        match recording {
+            Recording::Pixels => {
+                PixelColorSpace::matching(&self.canvas_color_space)
+                    .and_then(|canvas| {
+                        color_in_canvas_space(*colour, named_in, canvas)
+                    })
+                    .and_then(|rgb| {
+                        let exact = ExactColour {
+                            rgb: rgb.map(|c| c as f32),
+                            space: self.canvas_color_space.clone(),
+                        };
+                        let mut plain = paint.clone();
+                        plain.set_color4f(*colour, Some(named_in));
+                        self.exact_text_paint_in(&plain, exact)
+                    })
+                    .unwrap_or_else(|| paint.clone())
+            }
+            Recording::Shared if self.composites_in_floats() => {
+                let (colour, space) = skia_paint_color_onto(
+                    *colour,
+                    named_in,
+                    &self.canvas_color_space,
+                );
+                let mut paint = paint.clone();
+                paint.set_color4f(colour, Some(&space));
+                paint
+            }
+            _ => paint.clone(),
+        }
     }
 
     /// The flat colour `style` dyes with, held exactly in the page's own
@@ -1302,13 +1363,13 @@ impl Context2D {
     /// there is nothing to apply, so the common case costs no offscreen.
     pub fn with_composited_canvas<F>(&self, f: F)
     where
-        F: Fn(&SkCanvas),
+        F: Fn(&SkCanvas, Recording),
     {
         let alpha = self.state.global_alpha as f32;
         let blend = self.state.global_composite_operation;
 
         if alpha == 1.0 && blend == BlendMode::SrcOver {
-            self.with_canvas(|canvas, _| f(canvas));
+            self.with_canvas(f);
             return;
         }
 
@@ -1322,18 +1383,19 @@ impl Context2D {
         // opacity in a document -- see `LayerRec::open_on`. The draw is
         // recorded under the transform it is made under; the group applies
         // the clip.
-        let record = || {
+        let record = |recording: Recording| {
             let mut recorder = PictureRecorder::new();
             let canvas = recorder.begin_recording(self.bounds, true);
             canvas.set_matrix(&self.state.matrix.into());
-            f(canvas);
+            f(canvas, recording);
             recorder.finish_recording_as_picture(None)
         };
-        // Once for each recording the page keeps, as every draw is.
+        // Once for each recording the page keeps, as every draw is: the
+        // pixels' first, as `Layer::Targeted` holds them.
         let entry = match self.recorder.borrow().dual() {
-            false => record().map(Layer::Picture),
-            true => record()
-                .zip(record())
+            false => record(Recording::Shared).map(Layer::Picture),
+            true => record(Recording::Pixels)
+                .zip(record(Recording::Document))
                 .map(|pictures| Layer::Targeted(Arc::new(pictures))),
         };
         // What it draws with its own paints, which ask for nothing.
@@ -1374,16 +1436,18 @@ impl Context2D {
     /// sharp shadows as vectors, where it writes nothing of a layer.
     pub(crate) fn draw_with_shadows<F>(&self, casts: &[ShadowCast], draw: F)
     where
-        F: Fn(&SkCanvas, ShadowPart),
+        F: Fn(&SkCanvas, ShadowPart, Recording),
     {
         if self.state.global_alpha == 1.0
             && self.state.global_composite_operation == BlendMode::SrcOver
         {
-            self.with_canvas(|canvas, _| draw(canvas, ShadowPart::Beneath));
+            self.with_canvas(|canvas, recording| {
+                draw(canvas, ShadowPart::Beneath, recording);
+            });
             for (index, cast) in casts.iter().enumerate() {
                 if !cast.blurs() {
-                    self.with_canvas(|canvas, _| {
-                        draw(canvas, ShadowPart::Sharp(index));
+                    self.with_canvas(|canvas, recording| {
+                        draw(canvas, ShadowPart::Sharp(index), recording);
                     });
                 } else if let Some(group) =
                     self.shadow_group(cast, index, &draw)
@@ -1396,25 +1460,34 @@ impl Context2D {
                     });
                 }
             }
-            self.with_canvas(|canvas, _| draw(canvas, ShadowPart::Over));
+            self.with_canvas(|canvas, recording| {
+                draw(canvas, ShadowPart::Over, recording);
+            });
             return;
         }
         let mut paint = Paint::default();
         paint.set_alpha_f(self.state.global_alpha as f32);
         paint.set_blend_mode(self.state.global_composite_operation);
         let paint = self.faint().drawable(&paint).into_owned();
-        let record = |part: ShadowPart| {
+        let record = |part: ShadowPart, recording: Recording| {
             let mut recorder = PictureRecorder::new();
             let canvas = recorder.begin_recording(self.bounds, true);
             canvas.set_matrix(&self.state.matrix.into());
-            draw(canvas, part);
+            draw(canvas, part, recording);
             recorder.finish_recording_as_picture(None)
         };
+        let dual = self.recorder.borrow().dual();
+        // The recording a pair's pixels and its document are each drawn for:
+        // the page's two where it keeps two, and its one otherwise.
+        let (pixels, document) = match dual {
+            true => (Recording::Pixels, Recording::Document),
+            false => (Recording::Shared, Recording::Shared),
+        };
         // Once for each recording the page keeps, as every draw is.
-        let entry = |part: ShadowPart| match self.recorder.borrow().dual() {
-            false => record(part).map(Layer::Picture),
-            true => record(part)
-                .zip(record(part))
+        let entry = |part: ShadowPart| match dual {
+            false => record(part, Recording::Shared).map(Layer::Picture),
+            true => record(part, pixels)
+                .zip(record(part, document))
                 .map(|pictures| Layer::Targeted(Arc::new(pictures))),
         };
         // The parts drawn sharp ask for nothing, and a blurred shadow for
@@ -1473,17 +1546,23 @@ impl Context2D {
         draw: &F,
     ) -> Option<Group>
     where
-        F: Fn(&SkCanvas, ShadowPart),
+        F: Fn(&SkCanvas, ShadowPart, Recording),
     {
-        let record = |part: ShadowPart| {
+        let record = |part: ShadowPart, recording: Recording| {
             let mut recorder = PictureRecorder::new();
             let canvas = recorder.begin_recording(self.bounds, true);
             canvas.set_matrix(&self.state.matrix.into());
-            draw(canvas, part);
+            draw(canvas, part, recording);
             recorder.finish_recording_as_picture(None)
         };
-        let drawn = record(ShadowPart::Sharp(index))
-            .zip(record(ShadowPart::Masked(index)))?;
+        // The recording a pair's pixels and its document are each drawn for:
+        // the page's two where it keeps two, and its one otherwise.
+        let (pixels, document) = match self.recorder.borrow().dual() {
+            true => (Recording::Pixels, Recording::Document),
+            false => (Recording::Shared, Recording::Shared),
+        };
+        let drawn = record(ShadowPart::Sharp(index), pixels)
+            .zip(record(ShadowPart::Masked(index), document))?;
         Some(Group {
             composite: Composite::Chain {
                 steps: Arc::from([Step::Blur(cast.sigma)]),
@@ -3030,7 +3109,7 @@ impl Context2D {
     /// Whether the page composites in floats, `F16` or `F32`: a page whose
     /// Skia image filters the crate runs itself, as Skia's layer would
     /// round them to eight bits -- see [`Step::Image`].
-    fn composites_in_floats(&self) -> bool {
+    pub(crate) fn composites_in_floats(&self) -> bool {
         matches!(
             self.canvas_color_type,
             ColorType::RGBAF16 | ColorType::RGBAF16Norm | ColorType::RGBAF32

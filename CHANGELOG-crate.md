@@ -259,6 +259,23 @@ window be changed after it opens.** No signature moves and nothing is removed.
   changed with nothing in the drawing changed. Clip paths are numbered in
   the order the document declares them now, from `cl_0`.
 
+- **A `Paragraph` lands in its colours exactly on a float canvas.** On a
+  canvas made with `PixelDepth::F16` or `PixelDepth::F32`, SkParagraph
+  painted a paragraph's glyphs, background, shadows and decoration in the
+  paints its styles were built with, whose colours Skia holds converted to
+  sRGB through an approximate transfer function: a `TextStyle::color`
+  landed 7.14e-5 from a fill of it on an sRGB F32 canvas, up to 2.19e-4 on
+  `SrgbLinear`, `DisplayP3` and `Rec2020` ones, and a whole half-float step
+  on F16. On such a canvas every run is now drawn here, in a paint made for
+  the canvas from the colour as the style named it, so a paragraph's
+  `color`, `foreground_color`, `background_color`, `TextShadow` colour,
+  `decoration_color` and stroke are a fill of their colour to the bit. A
+  colour font's glyphs keep their own colours. On an eight-bit canvas
+  nothing changes, so its PDF still writes a paragraph's colour as Skia
+  converts it, `.0785 .4706 .8628` for `rgb(20 120 220)` where a fill
+  writes `.0784 .4706 .8627`; on a float sRGB canvas the paragraph's is now
+  the fill's.
+
 - **A `drop-shadow()` set by `Context2D::set_filter_css` lands in its colour
   exactly on a float canvas.** On a canvas made with `PixelDepth::F16` or
   `PixelDepth::F32`, a shadow was tinted through Skia's blend filter, which
@@ -482,8 +499,8 @@ window be changed after it opens.** No signature moves and nothing is removed.
   luminance of the paint's colour. The cost is memory: about 1.35x an sRGB
   canvas's recording for a run of fills in one colour, 2.4x for fills each in
   a colour of its own. Not yet exact there: a shadow, which Skia draws through
-  an eight-bit layer, a `Paragraph`'s own colours, the colours in a filter, a
-  colour filter or a texture, and `Rec2020Pq` and `Rec2020Hlg`.
+  an eight-bit layer, the colours in a filter, a colour filter or a texture,
+  and `Rec2020Pq` and `Rec2020Hlg`.
 
 - **A text decoration's colour is painted at the precision it names, as a
   fill's is.** The colour named in `Context2D::set_text_decoration_css` or

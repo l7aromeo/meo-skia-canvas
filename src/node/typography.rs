@@ -9,7 +9,7 @@ use crate::{
     font::{FontFamily, ObliqueAngle, leans_as_asked, variation_axes},
     font_library::{FontEpoch, FontLibrary, base_face},
     node::{
-        decorate::{self, FaceLines, Layer, Thickness},
+        decorate::{self, FaceLines, Layer, LinePaint, Thickness},
         lru::{Lru, LruId},
     },
     text::{
@@ -721,29 +721,18 @@ impl RunPaint {
             opacity: global_alpha,
             ..decoration.clone()
         }];
+        let pen = LinePaint {
+            base: paint,
+            faint,
+            resolve: None,
+        };
         for line in 0..self.lines {
             let spans = decorate::on_line(&self.spans, line);
             let start = self.runs.partition_point(|run| run.line < line);
             let end = self.runs.partition_point(|run| run.line <= line);
-            decorate::paint(
-                canvas,
-                spans,
-                &boxes,
-                origin,
-                Layer::Beneath,
-                paint,
-                faint,
-            );
+            decorate::paint(canvas, spans, &boxes, origin, Layer::Beneath, pen);
             self.draw_runs(canvas, origin, paint, start..end, blobs, faint);
-            decorate::paint(
-                canvas,
-                spans,
-                &boxes,
-                origin,
-                Layer::Over,
-                paint,
-                faint,
-            );
+            decorate::paint(canvas, spans, &boxes, origin, Layer::Over, pen);
         }
     }
 }
@@ -756,7 +745,7 @@ pub enum DrawnRun {
     /// Laid out for the draw's paint and drawn by `Paragraph::paint`.
     Plain(TextLayout),
     /// Laid out for the draw's paint and drawn from its runs.
-    Runs(LaidOut),
+    Runs(Box<LaidOut>),
 }
 
 impl DrawnRun {
@@ -2018,6 +2007,7 @@ impl<'a> Typesetter<'a> {
                 .map_or(Thickness::Font, Thickness::Pixels),
             color: self.text_decoration().color,
             opacity: global_alpha,
+            named: None,
             face,
         })
     }
@@ -2087,7 +2077,9 @@ impl<'a> Typesetter<'a> {
         let plain = !may_draw_outlines(canvas, FAKE_ITALIC_SKEW);
         match (self.decoration(1.0), self.oblique) {
             (None, None) if plain => DrawnRun::Plain(layout),
-            (decoration, _) => DrawnRun::Runs(LaidOut::new(layout, decoration)),
+            (decoration, _) => {
+                DrawnRun::Runs(Box::new(LaidOut::new(layout, decoration)))
+            }
         }
     }
 
