@@ -2894,3 +2894,130 @@ describe("a quoted generic keyword is a family name", () => {
     FontLibrary.reset();
   });
 });
+
+describe("textBaseline moves measureText and outlineText as it moves fillText", () => {
+  // SkParagraph places a run the baseline shift sets off its line, in the
+  // text blobs `Paragraph::paint` draws and in the line metrics, and the
+  // outline and the ink box are read from those blobs. Each also added the
+  // shift itself, so at every baseline but `alphabetic` the outline and the
+  // `actualBoundingBox` and `fontBoundingBox` values sat a second shift away:
+  // 96px Oswald's `&` outlined at `top` from 151.1 below the anchor where it
+  // fills from 37.7.
+  //
+  // The sign tests above hold through that, and every test drawing an
+  // outline did so at the default baseline, where the shift is 0.
+  FontLibrary.use("BaselineOswald", [
+    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+  ]);
+  const BASELINES = [
+    "top",
+    "hanging",
+    "middle",
+    "alphabetic",
+    "ideographic",
+    "bottom",
+  ];
+  const TEXT = "Hxg&";
+  const W = 400,
+    H = 600,
+    AT = 300;
+  // Unhinted, so that what fills is the outline as designed: macOS dilates a
+  // hinted glyph's mask, which reached two rows past the outline here.
+  const ctx = (baseline) => {
+    const c = new Canvas(W, H).getContext("2d");
+    c.font = "96px BaselineOswald";
+    c.fontHinting = false;
+    c.textBaseline = baseline;
+    return c;
+  };
+  /** The rows `draw` inks, relative to the anchor's y: first and past-the-last. */
+  const rows = (c, draw) => {
+    c.clearRect(0, 0, W, H);
+    c.fillStyle = "black";
+    draw();
+    const d = c.getImageData(0, 0, W, H).data;
+    let top = -1,
+      bottom = -1;
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++)
+        if (d[(y * W + x) * 4 + 3] > 0) {
+          if (top < 0) top = y;
+          bottom = y + 1;
+          break;
+        }
+    return [top - AT, bottom - AT];
+  };
+
+  test("the outline fills where the text fills, at every baseline", () => {
+    for (const baseline of BASELINES) {
+      const c = ctx(baseline);
+      const drawn = rows(c, () => c.fillText(TEXT, 20, AT));
+      const path = c.outlineText(TEXT);
+      const filled = rows(c, () => {
+        c.save();
+        c.translate(20, AT);
+        c.fill(path);
+        c.restore();
+      });
+      // A glyph's mask and a path filled from its outline antialias apart,
+      // by a row at an edge.
+      assert.ok(
+        Math.abs(filled[0] - drawn[0]) <= 1 &&
+          Math.abs(filled[1] - drawn[1]) <= 1,
+        `${baseline}: the outline fills rows ${filled}, the text ${drawn}`,
+      );
+    }
+  });
+
+  test("the ink box is the outline's, at every baseline", () => {
+    // Both are the glyphs' outlines where the text draws them, so they agree
+    // to the float; the test above holds the outline to the drawn rows.
+    for (const baseline of BASELINES) {
+      const c = ctx(baseline);
+      const m = c.measureText(TEXT),
+        { top, bottom } = c.outlineText(TEXT).bounds;
+      assert.ok(
+        Math.abs(-m.actualBoundingBoxAscent - top) < 1e-3,
+        `${baseline}: ink top ${-m.actualBoundingBoxAscent} against the outline's ${top}`,
+      );
+      assert.ok(
+        Math.abs(m.actualBoundingBoxDescent - bottom) < 1e-3,
+        `${baseline}: ink bottom ${m.actualBoundingBoxDescent} against the outline's ${bottom}`,
+      );
+    }
+  });
+
+  test("each value moves by the alphabetic baseline's offset, as in Chrome", () => {
+    // What a baseline changes is where the line a value is measured from
+    // sits, so each value at baseline b is its value at `alphabetic` moved
+    // by `alphabeticBaseline` at b: up for the ascents and the other
+    // baselines, down for the descents. Chrome 156 holds every one of these
+    // exactly, on 96px Oswald and on 140px and 48px Helvetica -- at `top`
+    // its 96px Oswald `fontBoundingBoxAscent` is 37.72, which is 115 less
+    // 77.28. Where it puts `top`, `middle` and `bottom` is its own question;
+    // these hold wherever they are.
+    const up = [
+      "actualBoundingBoxAscent",
+      "fontBoundingBoxAscent",
+      "hangingBaseline",
+      "ideographicBaseline",
+    ];
+    const down = ["actualBoundingBoxDescent", "fontBoundingBoxDescent"];
+    const alphabetic = ctx("alphabetic").measureText(TEXT);
+    for (const baseline of BASELINES) {
+      const m = ctx(baseline).measureText(TEXT);
+      const by = m.alphabeticBaseline;
+      for (const field of up)
+        assert.ok(
+          Math.abs(m[field] - (alphabetic[field] + by)) < 1e-3,
+          `${baseline}: ${field} ${m[field]} against ${alphabetic[field]} + ${by}`,
+        );
+      for (const field of down)
+        assert.ok(
+          Math.abs(m[field] - (alphabetic[field] - by)) < 1e-3,
+          `${baseline}: ${field} ${m[field]} against ${alphabetic[field]} - ${by}`,
+        );
+    }
+    FontLibrary.reset();
+  });
+});

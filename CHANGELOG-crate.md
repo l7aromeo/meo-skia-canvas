@@ -213,6 +213,16 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
+- **`font_bounding_box_ascent` and `font_bounding_box_descent` are measured
+  from the `TextBaseline` set.** At every baseline but `Alphabetic` they were
+  a second baseline offset away: at `Top`, 96px Oswald reported an ascent of
+  -114.5 and a descent of 256.8, where the box runs from 0 to 142.3. Each
+  value at a baseline is now its `Alphabetic` value moved by that baseline's
+  `alphabetic_baseline`, which is how Chrome 156 reports all six.
+  `actual_bounding_box_ascent` and `actual_bounding_box_descent`, and the
+  path `Context2D::outline_text` returns, are measured and placed the same
+  way, as the text is drawn.
+
 - **A canvas drawn in through a source rectangle draws its edges where the
   canvas does.** `Context2D::draw_canvas_region` given a source rectangle
   that cuts what the canvas draws clipped it there, and the clip cut every
