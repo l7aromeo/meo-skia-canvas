@@ -734,18 +734,24 @@ thread_local! {
 /// A recording or a vector document has no pixels for the blur to be made
 /// in, and takes the blur its caller would otherwise make.
 pub(crate) fn draws_on(canvas: &SkCanvas) -> bool {
-    on_gpu(canvas) || canvas.image_info().color_type() != ColorType::Unknown
+    on_gpu(canvas) || draws_on_cpu(canvas)
+}
+
+/// Whether `canvas` is a raster surface on the CPU: one with pixels that no
+/// GPU draws, which a recording and a vector document are not.
+pub(crate) fn draws_on_cpu(canvas: &SkCanvas) -> bool {
+    !on_gpu(canvas) && canvas.image_info().color_type() != ColorType::Unknown
 }
 
 /// Whether `canvas` draws on the GPU. A build without a GPU backend has no
 /// such canvas.
 #[cfg(any(feature = "metal", feature = "vulkan"))]
-fn on_gpu(canvas: &SkCanvas) -> bool {
+pub(crate) fn on_gpu(canvas: &SkCanvas) -> bool {
     canvas.recording_context().is_some()
 }
 
 #[cfg(not(any(feature = "metal", feature = "vulkan")))]
-fn on_gpu(_canvas: &SkCanvas) -> bool {
+pub(crate) fn on_gpu(_canvas: &SkCanvas) -> bool {
     false
 }
 

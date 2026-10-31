@@ -3,14 +3,17 @@ use neon::prelude::*;
 use skia_safe::{ColorFilter as SkColorFilter, color_filters};
 use std::cell::RefCell;
 
-use crate::{filter::lighting_color_filter, utils::*};
+use crate::{
+    filter::{lighting_color_filter, onto::PageFilter},
+    utils::*,
+};
 
 pub type BoxedColorFilter = JsBox<RefCell<ColorFilter>>;
 impl Finalize for ColorFilter {}
 
 #[derive(Clone)]
 pub struct ColorFilter {
-    pub inner: SkColorFilter,
+    pub inner: PageFilter<SkColorFilter>,
     deleted: bool,
 }
 
@@ -24,11 +27,28 @@ impl ColorFilter {
 macro_rules! box_color_filter {
     ($cx:expr, $filter:expr) => {{
         let cf = ColorFilter {
-            inner: $filter,
+            inner: PageFilter::plain($filter),
             deleted: false,
         };
         Ok($cx.boxed(RefCell::new(cf)).upcast())
     }};
+}
+
+/// Boxes a `ColorFilter` built for each page -- see [`PageFilter::built`]:
+/// `Some` -> boxed, `None` -> null.
+macro_rules! wrap_page_color_filter {
+    ($cx:expr, $result:expr) => {
+        match $result {
+            Some(inner) => {
+                let cf = ColorFilter {
+                    inner,
+                    deleted: false,
+                };
+                Ok($cx.boxed(RefCell::new(cf)).upcast())
+            }
+            None => Ok($cx.null().upcast()),
+        }
+    };
 }
 
 /// Wraps `Option<ColorFilter>`: `Some` -> boxed, `None` -> null.
@@ -61,12 +81,7 @@ pub fn makeMatrix(mut cx: FunctionContext) -> JsResult<JsValue> {
         // SAFETY: `float_array_arg` validated the length is exactly 20.
         .expect("float_array_arg should have validated length");
 
-    let filter = color_filters::matrix_row_major(&matrix, None);
-    let cf = ColorFilter {
-        inner: filter,
-        deleted: false,
-    };
-    Ok(cx.boxed(RefCell::new(cf)).upcast())
+    box_color_filter!(cx, color_filters::matrix_row_major(&matrix, None))
 }
 
 /// `ColorFilter.MakeSRGBToLinearGamma()`.
@@ -82,18 +97,20 @@ pub fn makeLinearToSRGBGamma(mut cx: FunctionContext) -> JsResult<JsValue> {
 /// `ColorFilter.MakeBlend(color, mode)` -- blend with a solid color.
 pub fn makeBlend(mut cx: FunctionContext) -> JsResult<JsValue> {
     let (color, space) = color4f_arg(&mut cx, 1, "color")?;
-    let (color, space) = skia_paint_color(color, &space);
-    let mode = filter_blend_mode_arg(&mut cx, 2, "mode")?;
+    let mode = filter_blend_mode_arg(&mut cx, 2, "mode")?.to_skia();
 
     // Tagged with the space it was named in, so a colour outside sRGB
-    // reaches a wide canvas rather than being clipped on the way in.
-    wrap_color_filter!(
+    // reaches a wide canvas rather than being clipped on the way in, and
+    // handed over for each page as a fill colour is.
+    wrap_page_color_filter!(
         cx,
-        color_filters::blend_with_color_space(
-            color,
-            Some(space),
-            mode.to_skia()
-        )
+        PageFilter::built(true, move |onto| {
+            let (color, space) = match onto {
+                Some(onto) => onto.color(color, &space),
+                None => skia_paint_color(color, &space),
+            };
+            color_filters::blend_with_color_space(color, Some(space), mode)
+        })
     )
 }
 
@@ -104,12 +121,13 @@ pub fn makeCompose(mut cx: FunctionContext) -> JsResult<JsValue> {
     checkDeleted(&mut cx, &outer)?;
     checkDeleted(&mut cx, &inner)?;
 
-    wrap_color_filter!(
+    let (outer, inner) =
+        (outer.borrow().inner.clone(), inner.borrow().inner.clone());
+    wrap_page_color_filter!(
         cx,
-        color_filters::compose(
-            outer.borrow().inner.clone(),
-            inner.borrow().inner.clone()
-        )
+        PageFilter::built(outer.depends() || inner.depends(), move |onto| {
+            color_filters::compose(outer.on(onto), inner.on(onto))
+        })
     )
 }
 
@@ -121,13 +139,12 @@ pub fn makeLerp(mut cx: FunctionContext) -> JsResult<JsValue> {
     checkDeleted(&mut cx, &dst)?;
     checkDeleted(&mut cx, &src)?;
 
-    wrap_color_filter!(
+    let (dst, src) = (dst.borrow().inner.clone(), src.borrow().inner.clone());
+    wrap_page_color_filter!(
         cx,
-        color_filters::lerp(
-            t,
-            dst.borrow().inner.clone(),
-            src.borrow().inner.clone()
-        )
+        PageFilter::built(dst.depends() || src.depends(), move |onto| {
+            color_filters::lerp(t, dst.on(onto), src.on(onto))
+        })
     )
 }
 

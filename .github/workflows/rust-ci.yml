@@ -139,7 +139,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/meo-skia-canvas
-          key: ${{ runner.os == 'macOS' && format('skia-source-{0}', hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch')) || format('skia-source-linux-{0}', hashFiles('Cargo.lock', 'containers/skia-brotli-sources.patch')) }}
+          key: ${{ runner.os == 'macOS' && format('skia-source-{0}', hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch', 'containers/skia-atlas-size.patch')) || format('skia-source-linux-{0}', hashFiles('Cargo.lock', 'containers/skia-brotli-sources.patch', 'containers/skia-atlas-size.patch')) }}
           lookup-only: true
       - name: Prepare the Skia source
         if: steps.cache.outputs.cache-hit != 'true'
@@ -259,6 +259,11 @@ jobs:
       # the brotli sources Skia's build list leaves out, which a `freetype`
       # link needs. It also keeps any `just` recipe here from fetching one.
       - uses: ./.github/actions/skia-source
+      # poppler's `pdftoppm`, which `tests/pdf_blend.rs` renders the PDF's
+      # blends with; the test fails on CI where it is missing, rather than
+      # skip and stop guarding them. The runner's own distribution package.
+      - name: Install poppler (apt)
+        run: .github/scripts/apt-install.sh poppler-utils
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: test-freetype-fetch
@@ -379,7 +384,18 @@ jobs:
       - name: Check the declarations against the built addon
         run: just check-dts-surface
 
+      # `MEO_SKIA_CANVAS_REQUIRE_GPU` names the device tests/gpu_path_coverage.rs
+      # and tests/gpu_crowded_flush.rs have to draw on, lavapipe's `llvmpipe`,
+      # so a green run says they drew there rather than skipped for want of a
+      # GPU.
+      # poppler's `pdftoppm`, which `tests/pdf_blend.rs` renders the PDF's
+      # blends with; the test fails on CI where it is missing, rather than
+      # skip and stop guarding them. The runner's own distribution package.
+      - name: Install poppler (apt)
+        run: .github/scripts/apt-install.sh poppler-utils
       - name: Test the engine against the same build
+        env:
+          MEO_SKIA_CANVAS_REQUIRE_GPU: llvmpipe
         run: |
           cargo test \
             --no-default-features \

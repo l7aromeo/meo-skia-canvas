@@ -777,6 +777,86 @@ describe("Canvas", () => {
       );
     });
 
+    test("a cut draw drawn into another canvas is exact by every route", () => {
+      // A fill a clip cuts is drawn whole on a CPU canvas and multiplied by
+      // the clip; Skia rasterizes it against the clip instead, which moves
+      // pixels along the fill's own edges, far from the cut. Drawn into
+      // another canvas -- by `drawCanvas` through any paint, by `drawImage`,
+      // as a pattern, or from a source that has itself drawn a canvas -- it
+      // is drawn as the source draws it.
+      let page = (drawFirst) => {
+        let canvas = new Canvas(200, 120);
+        canvas.gpu = false;
+        let ctx = canvas.getContext("2d");
+        if (drawFirst) {
+          let inner = new Canvas(4, 4);
+          inner.getContext("2d").fillRect(0, 0, 4, 4);
+          ctx.drawCanvas(inner, 196, 116);
+        }
+        ctx.beginPath();
+        ctx.arc(90.3, 60.2, 45.3, 0, 2 * Math.PI);
+        ctx.clip();
+        ctx.fillStyle = "rgb(200 40 90)";
+        ctx.beginPath();
+        ctx.moveTo(20, 80);
+        ctx.lineTo(80, 15.25);
+        ctx.lineTo(140.5, 85);
+        ctx.closePath();
+        ctx.fill();
+        return canvas;
+      };
+      let pixels = (canvas, density = 1) =>
+        canvas.getContext("2d").getImageData(0, 0, 200, 120, { density }).data;
+      let into = (source, verb, op = "source-over") => {
+        let canvas = new Canvas(200, 120);
+        canvas.gpu = false;
+        let ctx = canvas.getContext("2d");
+        ctx.globalCompositeOperation = op;
+        if (verb == "pattern") {
+          ctx.fillStyle = ctx.createPattern(source, "no-repeat");
+          ctx.fillRect(0, 0, 200, 120);
+        } else ctx[verb](source, 0, 0);
+        return canvas;
+      };
+      let differing = (a, b) => {
+        let count = 0;
+        for (let i = 0; i < a.length; i += 4)
+          if (a.slice(i, i + 4).some((v, k) => v !== b[i + k])) count++;
+        return count;
+      };
+
+      for (let drawFirst of [false, true]) {
+        let source = page(drawFirst);
+        let direct = pixels(source);
+        for (let [verb, op] of [
+          ["drawCanvas", "source-over"],
+          ["drawCanvas", "xor"],
+          ["drawImage", "source-over"],
+          ["drawImage", "xor"],
+          ["pattern", "source-over"],
+        ])
+          assert.equal(
+            differing(pixels(into(source, verb, op)), direct),
+            0,
+            `${verb} under ${op}${drawFirst ? ", a source that drew a canvas" : ""}`,
+          );
+      }
+
+      // A vector source keeps its vectors at any density; an image is its
+      // source's pixels at density 1, and is held to them there alone.
+      let source = page(false);
+      for (let density of [2, 3])
+        for (let verb of ["drawCanvas", "pattern"])
+          assert.equal(
+            differing(
+              pixels(into(source, verb), density),
+              pixels(source, density),
+            ),
+            0,
+            `${verb} at density ${density}`,
+          );
+    });
+
     test("a clipped nested draw costs the region, not the page", () => {
       // Rasterizing the visible region drew the source's deferred image into
       // a region-sized surface, and Skia answers that by materializing the
@@ -2988,5 +3068,43 @@ describe("a canvas's text gamma and contrast", () => {
         () => new Canvas(1, 1, options),
         JSON.stringify(options),
       );
+  });
+});
+
+// A PDF writes a composite operation as the blend it is, on a page whose
+// transparency group blends in DeviceRGB -- see `export::pdf` -- however it
+// is exported: a page on its own, a file, or every page at once.
+describe("a PDF export", () => {
+  const GROUP = "/Group <</S /Transparency /CS /DeviceRGB>>";
+  const count = (/** @type {Buffer} */ pdf, /** @type {string} */ text) =>
+    pdf.toString("latin1").split(text).length - 1;
+  const multiplied = (pages = 1) => {
+    const canvas = new Canvas(200, 120);
+    for (let page = 0; page < pages; page++) {
+      const ctx = page ? canvas.newPage(200, 120) : canvas.getContext("2d");
+      ctx.fillStyle = "rgb(230 180 40)";
+      ctx.fillRect(0, 0, 200, 120);
+      ctx.globalCompositeOperation = "multiply";
+      ctx.fillStyle = "rgb(200 40 120 / 0.8)";
+      ctx.fillRect(50, 30, 100, 60);
+    }
+    return canvas;
+  };
+
+  test("writes a blend into a page's transparency group", () => {
+    const pdf = multiplied().toBufferSync("pdf");
+    assert.equal(count(pdf, GROUP), 1);
+    assert.equal(count(pdf, "/BM /Multiply"), 1);
+    assert.equal(count(pdf, "/Subtype /Image"), 0, "nothing embedded");
+  });
+
+  test("gives every page and every file its group", () => {
+    const canvas = multiplied(3);
+    assert.equal(count(canvas.toBufferSync("pdf"), GROUP), 3);
+    const dir = tmp.dirSync().name;
+    canvas.toFileSync(`${dir}/pages.pdf`);
+    assert.equal(count(fs.readFileSync(`${dir}/pages.pdf`), GROUP), 3);
+    multiplied().toFileSync(`${dir}/page.pdf`);
+    assert.equal(count(fs.readFileSync(`${dir}/page.pdf`), GROUP), 1);
   });
 });

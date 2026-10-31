@@ -914,6 +914,127 @@ level at densities 1 and 2. One played into a picture -- a canvas used as a
 pattern -- has no pixels for the closed form, and is blurred on its result,
 by the exact Gaussian of the entry above.
 
+**A fill or stroke a clip cuts is drawn whole and multiplied by the clip on
+the CPU engine, and Chrome's CPU canvas is not.** Where a clip covers part of
+a path, Skia's analytic anti-aliasing builds the path's edges against the
+clip (`containedInClip` in `SkScan_AAAPath.cpp`), and the edges it adds at
+the cut split the strips every other edge in those rows is stepped in, so
+pixels far from the cut change. A triangle from (20, 80) through
+(80, 15.25) to (140.5, 85), clipped at x 82, drew 60 pixels more than two
+pixels inside the clip differently from the same triangle unclipped, by up to
+17 levels, and Chrome 156's headless CPU canvas measures as Skia does. The
+mean error over the pixels left partly covered, in levels from the exact area
+of the triangle within the clip, at densities 1, 2 and 3:
+
+        clip                  x1      x2      x3
+        none                1.57    1.58    1.59
+        cut at x 82
+          Skia, Chrome      4.60    5.90    2.96
+          here              1.55    1.55    1.56
+        cut at x 82.5
+          Skia              4.85    4.15    2.88
+          here              1.42    1.56    1.35
+        rectangle, edges between pixels
+          Skia              5.79    6.39    3.79
+          here              2.02    2.30    2.13
+        circle of radius 45.3
+          Skia              6.70    8.85   13.65
+          here              3.38    3.65    5.23
+
+Chrome was measured at density 1 under the cut at x 82 only. Here the draw is
+recorded as a `CutOp` and played back on a CPU raster under the clip as a clip
+shader -- a picture of the clip filled, rasterized at the density it is
+played at -- so the path is drawn unclipped and the clip multiplies its
+coverage. More than two pixels inside the clip the coverage is the unclipped
+draw's, byte for byte, at every density, for fills, strokes, dashed strokes
+and marker strokes alike, in a layer or not, where Skia moved up to 273 of
+them by up to 92 levels -- for a draw the page's edge does not also cut, as
+below; at the clip's edge the error left is the clip's own rasterization and
+the product of the two coverages where both edges cross a pixel.
+`tests/clip_cut.rs` holds both. The GPU engine is unchanged: its multisampled
+coverage is not moved by the clip, and the clip shader would move 50 bytes of
+a circle-clipped draw there. A PDF or SVG export is unchanged too, clipped by
+the clip's path as before.
+
+The coverage is the unclipped draw's; the blend is not always its bytes. A
+clip shader takes the draw onto Skia's raster pipeline (`SkBlitter::Choose`
+takes it whenever there is a clip shader), and on an eight-bit canvas in sRGB
+an unclipped fill in a flat colour is blended by Skia's legacy blitter
+instead, which rounds differently. So there a coloured or translucent fill,
+or one over earlier content, lands within a level of a premultiplied channel
+of the unclipped fill, and of Chrome's, whose CPU canvas blends either the
+legacy way: along the edges, and at full coverage too for a translucent fill
+over translucent content. 0.33 black over `rgba(200 40 90 / 0.6)` lays down
+alpha 187 inside the triangle where the unclipped fill lays down 186. Read
+back unpremultiplied, which divides by the alpha, a level grows where the
+alpha is low. On a canvas in another space or at a float
+depth the unclipped fill takes the pipeline already, and the two blend alike.
+
+The pipeline runs at low precision, holding the paint's colour at eight bits
+as the legacy blitter does, and on ARM its divide by 255 rounds exactly, so
+there the cut fill is the nearer of the two to exact source-over: 187 against
+an exact 186.6, a mean error of 0.294 levels a premultiplied channel over the
+triangle's interior against 0.344. Elsewhere that divide is `(v + 255) / 256`,
+as much as a level high (`div255` in `SkRasterPipeline_opts.h`), and which is
+nearer is not measured here. `tests/clip_cut.rs` holds the bound of a level,
+the eight-bit colour, the pages that blend alike, and on ARM the figures.
+
+A draw goes this way only when the clip cuts it: one wholly inside or outside
+the clip, an axis-aligned rectangle filled, text, an image, a texture fill,
+and a draw with a shadow, a filter or a blend that reaches past it are clipped
+as Skia clips them. One inside a `saveLayer` goes this way among the layer's
+entries. The layer is made to hold what the draw paints before the clip, and on
+a CPU raster is opened under its own clip as a clip shader too, since a layer
+opened under a clip path is no larger than the clip's bounds: Skia's
+anti-aliasing builds edges against the layer's bounds as against a clip, and
+either way a triangle cut at x 82 moved 57 pixels inside the clip.
+
+A canvas drawn into another, used as a pattern or drawn as an image, draws its
+cut draws on the CPU as it draws them itself, at densities 1 to 3 -- an image
+at density 1, where its pixels are the canvas's own. The recording Skia
+rasterizes for an image applies the clip as a clip shader, a pattern
+rasterizes the canvas as the canvas composites itself, and `drawCanvas` keeps
+a canvas holding a cut draw as its entries, which each target clips its own
+way. A PDF or SVG export keeps such a canvas drawn in with `drawCanvas` as
+vectors clipped by the path, as before: Skia's SVG device cannot write a clip
+shader and writes an empty clip in its place, which hides the draw. The raster
+a PDF embeds for an image or a pattern of the canvas, and an SVG for an image,
+is exact at the cut. On the GPU engine an image of such a canvas is rasterized
+with the clip shader too: under the circle above, with a stroke beside the
+triangle, 50 pixels change, 288 differ from the GPU's own draw of the page
+where 244 did, and their mean distance from the CPU's exact draw falls from
+22.96 levels to 21.09. One drawn in with `drawCanvas`, or used as a pattern,
+draws there as the GPU draws the page.
+`a_page_drawn_into_another_draws_as_it_does_itself` and its neighbours in
+`src/context/mod.rs` hold it.
+
+A canvas drawn in through a source rectangle that cuts what it draws --
+`drawCanvas` with a crop -- is drawn whole and cropped by the rectangle's
+coverage on pixels, on both engines, rather than clipped by it, which on
+the CPU moved its paths' edges as any clip does: a triangle by up to 28
+levels at 156 pixels more than two inside the crop. On the GPU the clip moved
+no edge, but bounded what a blur in the canvas read: a pixel four inside the
+crop parted by 63 at density 3. On the CPU a canvas composited plainly is
+drawn into a layer, which the crop multiplies before it closes. That keeps
+every draw on Skia's legacy blitter -- a clip shader would put each through
+its raster pipeline, a level off for each draw a pixel lies under -- and
+composites the canvas as one image, as `drawImage` does. Over what the page already holds it lands
+within two levels of the same canvas drawn in uncropped, which blends each
+of its draws onto the page in turn: 72 pixels at density 1 over a band of
+colour. On an empty page, through a layer -- at an alpha, under a blend --
+and on the GPU it is that canvas's draw to the byte.
+`a_page_drawn_in_cropped_draws_its_own_pixels_inside_the_crop` holds it. A
+PDF or SVG writes the crop as a clip, as before.
+
+A draw the page's edge also cuts is not exact here either. The route plays the
+draw back on a raster of the page, whose edge cuts it as the next entry
+describes: a triangle from (-30, 80) through (60, 15.25) to (140.5, 95) under a
+clip at x 82 moved 158, 315 and 266 pixels inside the clip at densities 1, 2
+and 3, as far as 79 pixels from the edge.
+`the_page_edge_moves_pixels_far_inside_the_page` in `tests/clip_cut.rs` holds
+it with the unclipped draw beside it, and goes red when Skia draws a path the
+page cuts as it draws one the page contains.
+
 **A `drop-shadow()` is the exact Gaussian blur of what casts it, and
 Chrome's is not.** Filter Effects Module Level 1 defines the shadow as the
 draw's alpha in the shadow's colour, blurred by a Gaussian whose standard
@@ -990,3 +1111,39 @@ and none is:
   `SkScan::AAAFillPath` (`SkScan_AntiPath.cpp` line 130); its other branch, at
   lines 87 and 88, fills a path too large for anti-aliasing without it. This
   Skia has no supersampling converter and no setting that selects one.
+
+**A PDF's blend modes render as the canvas's in poppler, and macOS's
+CoreGraphics renders a few of them otherwise.** A composite operation on an
+sRGB canvas is written into the PDF as the blend mode it is, on a page whose
+transparency group blends in DeviceRGB, the space the page's colours are
+written in (`export::pdf`). `lighter`, `xor`, and `destination-atop` under a
+source that may be translucent are not -- PDF has no mode for the first two,
+and Skia's PDF backend writes the third 35 levels off -- so they are embedded
+as pixels with what lies beneath them, as every blend is on a canvas in any
+other colour space. Measured with a rectangle and a circle in
+`rgb(200 40 120)` over two opaque colours, opaque and at an alpha of 0.8,
+against the canvas drawn at four times the size: poppler 26.10 (`pdftoppm`)
+comes within 2 levels of the canvas for every mode the PDF writes, wherever
+the source covers a pixel whole. CoreGraphics, rendering through `sips` on
+macOS 27.2, does too, except:
+
+- `soft-light`, 16 levels off with an opaque source and 14 at 0.8, on every
+  pixel the source covers.
+- At 0.8, `color-burn` 35, `color-dodge` 11 and `source-atop` 5, over the 6
+  levels CoreGraphics puts a translucent `source-over` fill off by with no
+  blend at all.
+- Along an antialiased edge, `color-dodge` and `color-burn` up to 215 and 200
+  levels, on the edge's partly covered pixels.
+
+poppler's figures are held by `tests/pdf_blend.rs`, which renders every
+blend a PDF writes with `pdftoppm` and runs on CI. CoreGraphics' are a
+manual check on macOS: `sips -s format png -Z 800 page.pdf --out page.png`,
+then `sips -m "/System/Library/ColorSync/Profiles/sRGB Profile.icc"
+page.png`, since `sips` renders into Display P3, compared with the canvas
+exported at density 4.
+
+Without a page group CoreGraphics chose a blending space of its own and put
+every separable mode 10 to 51 levels off. Before blends were written natively
+the whole backdrop was embedded as one JPEG at the export's density, and the
+blended source came out 8 to 38 levels off in poppler, on 7,900 to 46,000 of
+its pixels at four times the size.

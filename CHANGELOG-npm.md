@@ -17,7 +17,7 @@ sent that way may have reached that host and should be rotated.** `redirect` and
 `integrity`, which were ignored, are honoured, and `follow-redirects` moves past
 three advisories; the Security section has each.
 
-Thirty-two changes can break working code, each under Breaking with what to
+Thirty-three changes can break working code, each under Breaking with what to
 change. Values that were taken are refused or ignored: a text gamma of 4 or
 above and a contrast or gamma that is not finite; a `ParagraphBuilder` option of
 the wrong kind, a numeric code outside its set, and a `textDirection` or
@@ -26,18 +26,18 @@ the wrong kind, a numeric code outside its set, and a `textDirection` or
 `hwba()`, `hsv()` and hex without `#`, whitespace CSS does not define, and an
 enumerated name in another case; `@0x`; a `data:` URL `fetch` rejects; and a
 twenty-first redirect. Values read back differently: `ctx.font`, `ctx.filter`,
-`fillStyle` and the other colours, a `DOMMatrix` read from a string,
+`fillStyle` and the other colours, a `DOMMatrix` read from a string, `Path2D.d`,
 `TextMetrics`, whose values move to its prototype, text widths, line metrics and
 rects, which are no longer rounded to hundredths, and `ctx.fontHinting`, which
 reads `true` until it is set. Some values mean something else: a `[r, g, b, a]`
 colour array is sRGB on every canvas, `color(rec2020 ...)` decodes by a 2.4
 gamma, a quoted generic keyword in `ctx.font` is a family name, `sans-serif` is
-the face Chrome draws it in, `wordSpacing` is added after every word
-separator, and a `Paragraph` style's text shadows paint the first listed on
-top. And two calls do what they say rather than what they happened to do:
-`FontLibrary.use()` registers every font it is given or none, and an `@2x` in a
-`toFile` name is read whatever `format` says. One file is removed: `lib/fonts`,
-the fontconfig configuration a Linux machine without one was pointed at through
+the face Chrome draws it in, `wordSpacing` is added after every word separator,
+and a `Paragraph` style's text shadows paint the first listed on top. And two
+calls do what they say rather than what they happened to do: `FontLibrary.use()`
+registers every font it is given or none, and an `@2x` in a `toFile` name is
+read whatever `format` says. One file is removed: `lib/fonts`, the fontconfig
+configuration a Linux machine without one was pointed at through
 `FONTCONFIG_PATH`, which the addon no longer sets.
 
 Wrong pixels are fixed: `getImageData` after an export drew the exported page
@@ -410,6 +410,22 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   width, so `skewY(1.07rad)` agrees with Chrome to the last place where it
   differed in the seventh.
 
+- **`Path2D.d` writes numbers exactly and arcs as arcs.** Its text changes for
+  any path; the geometry it describes does not. Each number is now the shortest
+  decimal that reads back as the same single-precision value, where it was
+  rounded to eight significant digits: `123.400024` was written `123.40002`,
+  which reads back one step lower, so a path set from its own `d` could move.
+  The arcs `arc`, `ellipse` and `roundRect` draw were written as 32 quadratics
+  each, an ellipse taking about 5,080 characters; they are now SVG `A` commands,
+  about 220, which read back as the same kind of curve within about a thousandth
+  of a pixel. Filled at 1200x1200 on the CPU, a 500x450 ellipse set from its old
+  `d` differed from the original at 3,519 pixels by up to 107 levels, and from
+  its new one at 65 pixels by up to 6; on the GPU the new `d` draws every
+  ellipse tested exactly as the original. A hyperbolic `conicCurveTo`, a weight
+  above 1, still comes out as quadratics, the same ones as before. Code that
+  compares `d` text, or reads an arc out of it as quadratics, reads the new
+  numbers and `A` commands; compare paths by what they draw.
+
 - **An `@2x` in a `toFile` name is read from the name less its own
   extension, whatever `format` says.** With a `format` option, the format's
   name was stripped from the end instead, so naming the format the extension
@@ -737,6 +753,103 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A canvas drawn in through a source rectangle draws its edges where the
+  canvas does.** `drawCanvas()` given a source rectangle that cuts what
+  the canvas draws clipped it there, and the clip cut every path drawn
+  across it: Skia's anti-aliasing then moved the path's edges however far
+  from the cut, a triangle by up to 28 levels at 156 pixels more than two
+  inside the crop. On the GPU the clip also bounded what a blur in the
+  canvas read, so a blur lost what it spread in from past the crop. A
+  canvas drawn in so is now drawn whole and cropped by the rectangle's
+  coverage, and inside the crop draws what it draws uncropped: to the
+  byte on an empty page, and on the CPU within two levels over what a
+  page already holds, where the canvas is composited as one image. A PDF
+  or SVG writes the crop as it did.
+
+- **An SVG export keeps a draw dyed by a canvas's pattern.** SVG names no
+  paint server for a canvas's pattern, and the export wrote such a draw as a
+  bare path, filled black. It now embeds the draw as pixels, as it does a
+  conic gradient. A PDF writes the pattern as it did.
+
+- **A pattern of a canvas draws the canvas as the canvas draws itself.**
+  `createPattern(canvas)` filled with Skia's picture shader, which
+  rasterizes the canvas's picture once, at the density it is first drawn at,
+  and always as RGBA8888. So a `getImageData` or an export at density 2
+  resampled the canvas's blurs, filter chains and `saveLayer()` groups from
+  density 1 -- a `blur(2px)` rectangle came out up to 16 levels from the
+  canvas's own pixels -- on a GPU canvas a `saveLayer()` under a blur parted
+  at every density, and on Linux, whose native pixels are BGRA, every
+  translucent edge in a pattern came out a level from the canvas's. A draw
+  dyed by a canvas's pattern now rasterizes the canvas as it composites
+  itself, at the density the draw is read at and on the engine it is drawn
+  on, and paints it where the draw covers through the draw's own alpha,
+  blend mode and colour filter: to the byte the pixels a pattern of the
+  canvas's own pixels at that density paints, path, stroke, text, shadow and
+  filter alike. A PDF still writes the pattern from the canvas's picture.
+
+- **A `Paragraph` under a composite operation reaches an SVG.** Drawn under a
+  `globalCompositeOperation` other than `source-over`, a paragraph is
+  composited as one group through a layer, which Skia's SVG backend drops
+  whole, so the SVG held nothing of it. It now embeds the paragraph and what
+  lies beneath it as pixels, as it embeds any other blended draw; a PDF writes
+  the blend itself -- see below.
+
+- **A PDF writes a composite operation as the blend it is.** `toBuffer("pdf")`
+  embedded every draw under a `globalCompositeOperation` other than
+  `source-over` as pixels, with everything beneath it, as one JPEG at the
+  export's density, which came out 8 to 38 levels off over the blended source
+  when the page was viewed at four times its size. On a canvas in `"srgb"`, a
+  blend is now written into the PDF as the blend mode it is, on a page whose
+  transparency group blends in DeviceRGB, the space its colours are written
+  in; poppler renders every such mode within 2 levels of the canvas, and macOS
+  Preview all but the few docs/browser-differences.md lists. `lighter`, `xor`,
+  and `destination-atop` from a source that may be translucent, which PDF has
+  no blend mode for or Skia's PDF backend writes wrongly, are still embedded,
+  and so is every blend on a canvas in any other colour space, since a PDF
+  blends in sRGB where the canvas blends in its own.
+
+- **An SVG of a page with nothing on it is well-formed XML.**
+  `toBuffer("svg")` wrote an empty page's root as
+  `<svg ... height="40"/ viewBox="0 0 80 40">`: Skia writes an empty
+  document's root self-closed, and the `viewBox` this library adds went in
+  after its `/`, so no XML parser read the file. The `viewBox` goes before
+  the `/>` now.
+
+- **An SVG export comes out the same each time.**
+  `toBuffer("svg")` named each clip path after a counter Skia's SVG writer
+  shares across the whole process, so the same canvas exported twice, with
+  any other export between, came out under other clip ids, and a file kept
+  under version control or compared by hash changed with nothing in the
+  drawing changed. Clip paths are numbered in the order the document
+  declares them now, from `cl_0`.
+
+- **`restore()` brings back the filters and object styles `save()` saved.**
+  Since 6.0.0, after `save()`, a change and `restore()`, reading
+  `maskFilter`, `imageFilter` or `colorFilter` returned the filter set inside
+  the save, and so did `fillStyle` or `strokeStyle` where the saved style and
+  the one set inside were both a gradient, pattern, texture or shader. Drawing
+  used the restored state; only what the properties read back was wrong.
+  `reset()` and setting the canvas's `width` or `height` now clear them too,
+  along with what was saved.
+
+- **A `Paragraph` lands in its colours exactly on a float canvas.** On a
+  canvas made with `colorType: "RGBAF16"` or `"RGBAF32"`, SkParagraph
+  painted a paragraph's glyphs, background, shadows and decoration in the
+  paints its styles were built with, whose colours Skia holds converted to
+  sRGB through an approximate transfer function:
+  `color(display-p3 0.3 0.6 0.2)` landed 2.4e-4 from a fill of it on an sRGB
+  F32 canvas, other colours up to 2.19e-4 on `"srgb-linear"`, `"display-p3"`
+  and `"rec2020"` ones, and a whole half-float step on `"RGBAF16"`. On such
+  a canvas every run is now drawn here, in a paint made for the canvas from
+  the colour as the style named it, so a paragraph's `color`,
+  `foregroundColor`, `backgroundColor`, shadow colour, `decorationColor` and
+  `strokeWidth` outline are a fill of their colour to the bit. A colour
+  font's glyphs keep their own colours. On an eight-bit canvas nothing
+  changes, so its PDF still writes a paragraph's colour as Skia converts it,
+  `.0785 .4706 .8628` for `rgb(20 120 220)` where a fill writes
+  `.0784 .4706 .8627`; on a float sRGB canvas the paragraph's is now the
+  fill's.
+
 - **A `drop-shadow()` in `ctx.filter` lands in its colour exactly on a float
   canvas.** On a canvas made with `colorType: "RGBAF16"` or `"RGBAF32"`, a
   shadow was tinted through Skia's blend filter, which converts its colour
@@ -746,6 +859,25 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   whole half-float step on F16. The colour is converted on this side now and
   handed to Skia where nothing converts it again, so a shadow is its fill to
   the bit, in sRGB, `srgb-linear`, Display P3 and Rec. 2020 canvases alike.
+
+- **A `CanvasTexture`, and the colour in a CanvasKit filter, land exactly on a
+  float canvas.** On a canvas made with `colorType: "RGBAF16"` or
+  `"RGBAF32"`, a `CanvasTexture`'s mark, a `"blend"` `ColorFilter` and the
+  shadow of a `"drop-shadow"` or `"drop-shadow-only"` `ImageFilter` were
+  handed to Skia in the colour they were built with, before the canvas was
+  known, and Skia converted it through an approximate transfer function: a
+  colour named in `srgb-linear` landed 6.3e-5 from a fill of it on an sRGB
+  F32 canvas, up to 1.8e-4 on `"srgb-linear"`, `"display-p3"` and
+  `"rec2020"` ones, and a whole half-float step on `"RGBAF16"`. A texture's
+  mark is now coloured for the canvas it is drawn onto, as a fill is, and is
+  a fill of its colour to the bit on every such canvas. A filter holding a
+  colour is built again for the canvas it is drawn onto, and so is any filter
+  composed, merged, offset or interpolated over one, set as `ctx.colorFilter`,
+  `ctx.imageFilter` or a `saveLayer` backdrop; on a float canvas in `"srgb"`
+  it lands as a fill of its colour does, and on the others it keeps up to
+  1.8e-4. On an eight-bit canvas nothing changes, so its PDF still writes
+  such a colour as Skia converts it, as it does a paragraph's; a PDF or SVG of
+  a float canvas in `"srgb"` writes it as it writes a fill of the colour.
 
 - **A filter set through `ctx.imageFilter` keeps a float canvas's floats.** On
   a canvas made with `colorType: "RGBAF16"` or `"RGBAF32"`, a draw through a
@@ -766,7 +898,9 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   2515 pixels off the exact blur of its sharp shadow on the CPU engine. Each
   style's run of text on a line now casts its shadow as one, blurred whole
   by the exact Gaussian on either engine, the runs' shadows composited in
-  document order beneath all the text. A PDF or SVG keeps the mask filter.
+  document order beneath all the text. A PDF keeps Skia's mask filter, and
+  an SVG, which has no blur to write, embeds the shadow as pixels beneath
+  the text it keeps as vectors.
 
 - **A `drop-shadow()` is the exact Gaussian blur of what casts it.** A draw
   under a `ctx.filter` holding a `drop-shadow()` went through Skia's filter
@@ -887,35 +1021,34 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   MB to 1435. 6.0.2 has the same unwrapped read, by its source.
 
 - **A fill or stroke a clip cuts is drawn whole on the CPU engine, and the clip
-  multiplies it.** Where a clip covered part of a path, Skia rasterized the
-  path against the clip, and the edges that added at the cut changed pixels far
-  from it: a triangle clipped at x 82 drew 60 pixels more than two inside the
-  clip unlike the same triangle unclipped, by up to 17 levels, and across
-  fills, strokes and dashed strokes up to 273 pixels moved, by up to 92 levels.
-  Chrome's CPU canvas draws it as Skia does. Such a draw is now played back on
-  a CPU raster through a clip shader of the clip, at the density of the read or
+  multiplies it.** Where a clip covered part of a path, Skia rasterized the path
+  against the clip, and the edges that added at the cut changed pixels far from
+  it: a triangle clipped at x 82 drew 60 pixels more than two inside the clip
+  unlike the same triangle unclipped, by up to 17 levels, and across fills,
+  strokes and dashed strokes up to 273 pixels moved, by up to 92 levels.
+  Chrome's CPU canvas draws it as Skia does. Such a draw is now played back on a
+  CPU raster through a clip shader of the clip, at the density of the read or
   export, so inside the clip its coverage is the unclipped draw's byte for byte
   and at the clip's edge the triangle's mean error from its exact coverage is
   1.55 levels where it was 4.60. That holds for a draw the page's edge does not
   also cut: Skia rasterizes against the page's bounds as against a clip, so a
   draw crossing the page's edge still moves inside the clip as it does with no
   clip. On an eight-bit sRGB canvas the clip shader also takes the blend onto
-  Skia's raster pipeline, so a coloured or translucent fill lands within a
-  level of a premultiplied channel of the unclipped one. The GPU engine and PDF
-  and SVG exports clip as before. A draw inside an open `saveLayer()` takes the
-  same route, and so does one in a canvas drawn into another with
-  `ctx.drawCanvas()` or `ctx.drawImage()` or used as a pattern: exact there at
-  any density for `drawCanvas()` and a pattern, and at density 1 for an image,
-  which is that canvas's pixels. On the GPU engine an image or a pattern of such
-  a canvas is clipped by the same coverage, which moves 50 pixels of a
-  circle-clipped triangle and stroke there -- see docs/browser-differences.md.
-  What it costs [RE-TIME vs 6.0.2], against the same code without it: a frame
-  drawn under a clip costs 1.20 times as much, 0.20 µs, and a draw the clip
-  cuts 0.50 µs more to record. Rasterizing costs less than it did: 60px
-  triangles under a clip that cuts half of them in 0.45 of the time, and a
-  canvas holding cut draws drawn into another in 0.57 of it with
-  `drawCanvas()`, 0.84 with `drawImage()` and 0.98 as a pattern. Draws the clip
-  does not cut cost what they did.
+  Skia's raster pipeline, so a coloured or translucent fill lands within a level
+  of a premultiplied channel of the unclipped one. The GPU engine and PDF and
+  SVG exports clip as before. A draw inside an open `saveLayer()` takes the same
+  route, and so does one in a canvas drawn into another with `ctx.drawCanvas()`
+  or `ctx.drawImage()` or used as a pattern: exact there at any density for
+  `drawCanvas()` and a pattern, and at density 1 for an image, which is that
+  canvas's pixels. On the GPU engine an image or a pattern of such a canvas is
+  clipped by the same coverage, which moves 50 pixels of a circle-clipped
+  triangle and stroke there -- see docs/browser-differences.md. What it costs
+  [RE-TIME], against the same code without it: a frame drawn under a clip costs
+  1.20 times as much, 0.20 µs, and a draw the clip cuts 0.50 µs more to record.
+  Rasterizing costs less than it did: 60px triangles under a clip that cuts half
+  of them in 0.45 of the time, and a canvas holding cut draws drawn into another
+  in 0.57 of it with `drawCanvas()`, 0.84 with `drawImage()` and 0.98 as a
+  pattern. Draws the clip does not cut cost what they did.
 
 - **A PDF or SVG writes a clip once for the draws under it, whatever is read or
   exported between them.** A `getImageData()` or an export between two draws
@@ -953,12 +1086,16 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 - **An SVG export keeps what a `saveLayer` holds.** Skia's SVG backend has
   no layers and dropped whatever was drawn inside one: a red square in
   `ctx.saveLayer()`, in a translucent or nested layer, or a paragraph drawn
-  in one, exported as a page without it. A layer holding a draw is now
-  rasterized into the SVG on its own and the rest of the page stays
-  vector; a filtered draw inside a layer, which rasterized the whole page,
-  now rasterizes only its layer as well, and a layer that holds nothing
-  leaves the page vector. PDF drew all of these correctly and stays
-  vector.
+  in one, exported as a page without it. A layer that composites what it
+  holds as it stands -- `ctx.saveLayer()` itself -- keeps its draws as
+  vectors and embeds as pixels only those an SVG cannot write. One under an
+  alpha alone, as a translucent layer is, is written as an SVG group at
+  that opacity, `<g opacity="0.5">`, its draws taken the same way inside
+  it. Any other layer holding a draw is rasterized into the SVG on its own
+  and the rest of the page stays vector; a filtered draw inside a layer,
+  which rasterized the whole page, now rasterizes only its layer as well,
+  and a layer that holds nothing leaves the page vector. PDF drew all of
+  these correctly and stays vector.
 
 - **A read inside a `saveLayer` no longer ends it.** `getImageData()`,
   `toBuffer()` or any export taken while a layer was open closed the layer
@@ -990,27 +1127,26 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 - **A flat colour lands exactly on a float canvas in another space.** On a
   canvas made with `colorType: "RGBAF16"` or `"RGBAF32"` and `colorSpace`
   `"srgb-linear"`, `"display-p3"`, `"display-p3-linear"`, `"rec2020"` or
-  `"rec2020-linear"`, a fill, stroke, blurred draw or text in a flat colour
-  read back as much as 2.3e-4 off the colour named: Skia converts a paint's
-  colour through an approximate transfer function whose results lie 64 ulps
-  apart, so no colour handed to it lands exactly there. Such a canvas now
-  records each draw twice: for its pixels painting a flat colour through a
-  shader, and text through a colour filter, that holds it in the canvas's own
-  space; and as a plain colour for a PDF or SVG of it, which still write it as
-  one. Its pixels hold the colour as named, to the precision of the half float
-  on `"RGBAF16"`. Text keeps the edges the plain colour gives it, which Skia
-  weighs by the luminance of the paint's colour. The cost is memory, and time
-  for text and blurred draws. The recording takes about 1.35x an sRGB
-  canvas's for a run of fills in one colour, 2.4x for fills each in a colour
-  of its own. `fillText` takes about 1.35 times as long as on an sRGB canvas
-  with its colour kept, and 1.55 times with the colour changing on every call
-  [RE-TIME vs 6.0.2]. The CPU engine blurs the pixels of every float canvas,
-  sRGB included, in `f64` so that a blurred colour lands exactly, which costs
-  a blurred draw there [RE-TIME vs 6.0.2]; an eight-bit canvas's blur is
-  unaffected. Not yet exact there: a shadow, which Skia
-  draws through an eight-bit layer, a `Paragraph`'s own colours, the colours
-  in a filter, a colour filter or a texture, and the `"rec2020-pq"` and
-  `"rec2020-hlg"` spaces.
+  `"rec2020-linear"`, a fill, stroke, blurred draw or text in a flat colour read
+  back as much as 2.3e-4 off the colour named: Skia converts a paint's colour
+  through an approximate transfer function whose results lie 64 ulps apart, so
+  no colour handed to it lands exactly there. Such a canvas now records each
+  draw twice: for its pixels painting a flat colour through a shader, and text
+  through a colour filter, that holds it in the canvas's own space; and as a
+  plain colour for a PDF or SVG of it, which still write it as one. Its pixels
+  hold the colour as named, to the precision of the half float on `"RGBAF16"`.
+  Text keeps the edges the plain colour gives it, which Skia weighs by the
+  luminance of the paint's colour. The cost is memory, and time for text and
+  blurred draws. The recording takes about 1.35x an sRGB canvas's for a run of
+  fills in one colour, 2.4x for fills each in a colour of its own. `fillText`
+  takes about 1.35 times as long as on an sRGB canvas with its colour kept, and
+  1.55 times with the colour changing on every call [RE-TIME vs 6.0.2]. The CPU
+  engine blurs the pixels of every float canvas, sRGB included, in `f64` so that
+  a blurred colour lands exactly, which costs a blurred draw there [RE-TIME vs
+  6.0.2]; an eight-bit canvas's blur is unaffected. Not yet exact there: a
+  shadow, which Skia draws through an eight-bit layer, a colour in a filter on a
+  float canvas outside `"srgb"`, which keeps up to 1.8e-4, and the
+  `"rec2020-pq"` and `"rec2020-hlg"` spaces.
 
 - **A text decoration's colour is painted at the precision it names, as a
   fill's is.** The colour in `ctx.textDecoration` was rounded to eight bits of
@@ -1047,9 +1183,11 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   `colorFilter`.** `ctx.drawImage(canvas, ...)` under a `globalAlpha` below
   1 left the SVG without the canvas at all: Skia's SVG backend draws such a
   picture through a layer, which it does not have, and dropped it whole.
-  The draw is now rasterized into the SVG, as a shadow or a filter already
-  is, and a canvas drawn with nothing to carry stays vector. PDF drew all
-  of these correctly and is unchanged.
+  Under a `globalAlpha` alone the canvas is now written as an SVG group at
+  that opacity, what it drew kept as vectors where the SVG has them; under
+  a `colorFilter` it is rasterized into the SVG, as a shadow or a filter
+  already is; and a canvas drawn with nothing to carry stays vector. PDF
+  drew all of these correctly and is unchanged.
 
 - **A large blur exported at a high density keeps its width.** A `blur()` on a
   flat-colour shape is drawn by Skia's coverage blur up to a sigma it chose at
@@ -1171,12 +1309,11 @@ false` now takes effect, and its default is on, at Slight, as Chrome draws
   skia-safe this release builds on.
 
 - **An empty `fontFamilies` list lays out in the default families.**
-  `ParagraphBuilder` handed it to Skia as it stood, and skia-safe 0.153.3
-  builds a slice from a null pointer for an empty list: a debug build of
-  the addon aborted the process, `Make({ textStyle: { fontFamilies: [] } })`
-  included, and a release build passed the null slice on. An empty list in
-  a text style, a pushed style or a strut now names no family, as leaving
-  the option out does.
+  `ParagraphBuilder` handed it to Skia as it stood, and skia-safe 0.156.0 builds
+  a slice from a null pointer for an empty list: a debug build of the addon
+  aborted the process, `Make({ textStyle: { fontFamilies: [] } })` included, and
+  a release build passed the null slice on. An empty list in a text style, a
+  pushed style or a strut now names no family, as leaving the option out does.
 
 - **`shadowColor`, a texture's `color` and an export's `matte` keep a
   colour outside sRGB.** Each went through eight-bit sRGB, so
@@ -1750,6 +1887,47 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   Not changed: right-to-left text, for which nothing has been measured in
   Chrome.
 
+- **A path drawn on the GPU covers each pixel as it would in a flush of
+  its own.** Skia's atlas path renderer, on macOS and Linux alike, could
+  move a pixel of an anti-aliased path a step up or down where it placed
+  the path at row 512 or more of the atlas it rasterises paths into, and
+  where a path lands depends on everything else the same flush draws. On a
+  page of 2000 small filled stars, 28 pixels read 51 levels of alpha above
+  or below what the stars reaching them draw on their own, 19 above and 9
+  below. An eyelash of `examples/node/animated-eye.js`, drawn after blurred
+  shapes whose masks were rasterised in the same flush, lost the pixel at
+  its tip: it read the alpha of what lay under it alone, 24 where the two
+  composite to 77. When those masks were already cached it did not, so the
+  same page exported differently depending on the pages exported before
+  it. The atlas is capped at 512 by 512 now, so no path is
+  placed there; a full atlas starts another, and a path with a side past 512
+  pixels goes to Skia's next path renderer. Why row 512 is unknown. Not
+  every frame is order-independent yet -- see Known, and not fixed here.
+
+  The cap costs time where a page holds enough small paths to fill more than one
+  atlas. Drawn on the GPU and read back, on an M4 Pro on Metal, the mean of
+  three runs' medians in a release build: 2000 small stars on a 1280 by 960 page
+  take 6.78 ms against 6.29, 7.8% more; 400 stroked curves on the same page 2.94
+  ms against 2.88, within the runs' spread; the eyelash page 1.69 ms against
+  1.73, no difference [RE-TIME against the same code without it]. The same stars
+  on the CPU, which the cap does not touch, read 1.5% apart between the two
+  builds.
+
+- **An animated GIF is the same file on any machine.** Each frame's palette was
+  chosen by quantette's parallel k-means, which draws its samples from one
+  random stream per worker thread and adds its colour histogram in whatever
+  order the threads finish: the same animation written with one thread and with
+  two came out in different colours, so the file depended on the core count and
+  on `SKIA_CANVAS_THREADS`. The refinement now runs on a pool of its own with a
+  fixed eight threads, started the first time a GIF is written, and the one
+  stage whose sums depended on scheduling, Wu's starting palette, runs on one
+  thread: `examples/node/animated-eye.js` exports the same GIF, byte for byte,
+  at one thread, two and the default. It is faster too. On a 14-core M4 Pro,
+  640x500 frames of noise over a gradient encode in 12.9 ms for one frame
+  against 22.3 before, 57.1 ms for six against 128.7, and 212.4 ms for 24
+  against 512.0, the mean of three runs' medians [RE-TIME against the same code
+  without it].
+
 ### Added
 
 - **CSS Color 4's system colours**, in any case, wherever a colour string
@@ -2000,16 +2178,16 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
   of it is let go when the registered fonts change and by the idle
   release. Nothing drawn changes.
 
-- **On the GPU, an exact blur draws into a second target the page's size.**
-  To draw what it blurs exactly as the page draws it, the GPU engine
-  draws it into a layer the page's size, at the page's sample count: a
-  multisampled target of about 17 MB for a 1200x900 canvas at four samples
-  and 384 MB for 6000x4000. Skia keeps it for the next blurred draw while
-  its GPU cache is within budget, and lets it go once the draw's GPU work
-  has run where it is not. A blurred draw takes about 0.15 ms longer at
-  1200x900 and 1.5 ms at 6000x4000 than in a layer the size of the blur,
-  which drew edges otherwise -- up to 0.13 of a level past a tie -- at some
-  positions on pages from 1408 pixels wide or 3000 tall.
+- **On the GPU, an exact blur draws into a second target the page's size.** To
+  draw what it blurs exactly as the page draws it, the GPU engine draws it into
+  a layer the page's size, at the page's sample count: a multisampled target of
+  about 17 MB for a 1200x900 canvas at four samples and 384 MB for 6000x4000.
+  Skia keeps it for the next blurred draw while its GPU cache is within budget,
+  and lets it go once the draw's GPU work has run where it is not. A blurred
+  draw takes about 0.15 ms longer at 1200x900 and 1.5 ms at 6000x4000 than in a
+  layer the size of the blur, which drew edges otherwise -- up to 0.13 of a
+  level past a tie -- at some positions on pages from 1408 pixels wide or 3000
+  tall [RE-TIME against the same code without it].
 
 - **`oblique` draws as CSS Fonts 4 matches it, superseding 6.0.0's
   "`oblique` renders as the italic face".** `oblique` and
@@ -2106,6 +2284,16 @@ obliqueAngle: 10 }` now draws what `oblique 10deg` text on a canvas
   as it was; on macOS every step moves it. Chrome on Linux takes its advances
   from the same scaler and is expected to step alike; it was not measured.
   docs/browser-differences.md has the measurements.
+
+- **On macOS a GPU frame can still differ by a level at a few pixels with
+  what the GPU drew before it.** Skia's atlas path renderer, again: a
+  blurred shape whose mask is rasterised in the same flush as another
+  blurred fill moves that fill by one level at a handful of pixels, and a
+  mask already cached from an earlier page does not. In
+  `examples/node/animated-eye.js` the first frame's iris differs at 15
+  pixels depending on whether a page with the same shading was exported
+  before it. The cached render is the right one. The cause is not known;
+  this release does not work around it.
 
 ## 📦 ⟩ [v6.0.2] (npm) ⟩ September 16, 2026
 

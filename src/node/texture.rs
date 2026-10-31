@@ -6,7 +6,7 @@ use skia_safe::{
 };
 use std::{cell::RefCell, rc::Rc};
 
-use crate::utils::*;
+use crate::{filter::onto::Onto, utils::*};
 
 struct Texture {
     path: Option<Path>,
@@ -34,6 +34,24 @@ impl Default for Texture {
             scale: (1.0, 1.0),
             shift: (0.0, 0.0),
         }
+    }
+}
+
+impl Texture {
+    /// The mark's colour at `alpha` as Skia is handed it for `onto` -- see
+    /// [`Onto::color`] -- or with no page named, in the space it was named
+    /// in.
+    fn color_onto(
+        &self,
+        alpha: f32,
+        onto: Option<&Onto>,
+    ) -> (Color4f, ColorSpace) {
+        let (mut color, space) = match onto {
+            Some(onto) => onto.color(self.color.0, &self.color.1),
+            None => skia_paint_color(self.color.0, &self.color.1),
+        };
+        color.a *= alpha;
+        (color, space)
     }
 }
 
@@ -104,6 +122,7 @@ impl CanvasTexture {
         alpha: f32,
         magnify: f32,
         device_pixel: f32,
+        onto: Option<&Onto>,
     ) -> f32 {
         let tile = self.texture.borrow();
 
@@ -161,8 +180,7 @@ impl CanvasTexture {
             paint.set_style(PaintStyle::Fill);
         }
 
-        let (mut color, space) = skia_paint_color(tile.color.0, &tile.color.1);
-        color.a *= alpha;
+        let (color, space) = tile.color_onto(alpha, onto);
         paint.set_color4f(color, &space);
 
         thinned
@@ -203,11 +221,20 @@ impl CanvasTexture {
         })
     }
 
-    pub fn to_color4f(&self, alpha: f32) -> (Color4f, Option<ColorSpace>) {
-        let tile = self.texture.borrow();
-        let (mut color, space) = skia_paint_color(tile.color.0, &tile.color.1);
-        color.a *= alpha;
-        (color, Some(space))
+    /// The mark's colour at `alpha`, as Skia is handed it for `onto`, the
+    /// float page it is drawn onto, or as named where there is none.
+    pub fn to_color4f(
+        &self,
+        alpha: f32,
+        onto: Option<&Onto>,
+    ) -> (Color4f, ColorSpace) {
+        self.texture.borrow().color_onto(alpha, onto)
+    }
+
+    /// The mark's colour as it was named: unpremultiplied, in the space it
+    /// is tagged with.
+    pub fn color(&self) -> (Color4f, ColorSpace) {
+        self.texture.borrow().color.clone()
     }
 }
 

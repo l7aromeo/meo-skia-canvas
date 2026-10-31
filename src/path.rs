@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use skia_safe::{
     Path as SkPath, PathBuilder as SkPathBuilder, PathDirection, PathEffect,
     PathFillType, PathOp as SkPathOp, Point as SkPoint, RRect, Rect as SkRect,
@@ -224,9 +226,65 @@ impl Path2D {
     /// This path's geometry as SVG path data.
     ///
     /// The inverse of [`from_svg`](Self::from_svg), and the same syntax an
-    /// SVG `d=""` attribute takes.
+    /// SVG `d=""` attribute takes, in absolute commands. Every number is the
+    /// shortest decimal that reads back as the same `f32`, so the points of
+    /// lines, quadratics and cubics survive [`from_svg`](Self::from_svg)
+    /// exactly.
+    ///
+    /// A conic -- what `arc`, `ellipse` and `roundRect` draw -- has no SVG
+    /// command, and is written as the one that rebuilds it: an elliptical
+    /// arc `A`, which [`from_svg`](Self::from_svg) turns back into a conic,
+    /// its points within about a thousandth of a pixel of the original's.
+    /// [`PathBuilder::conic_curve_to`] at weight 1 makes a quadratic, which is
+    /// written as one. A conic of weight above 1, a hyperbola, which only
+    /// [`PathBuilder::conic_curve_to`] can make, has no SVG equivalent at all
+    /// and is written as the quadratics Skia approximates it by, to 1/1024 of
+    /// a pixel.
     pub fn to_svg(&self) -> String {
-        self.inner.to_svg()
+        let mut out = String::new();
+        let (mut current, mut start) = ((0.0, 0.0), (0.0, 0.0));
+        for segment in self.edges() {
+            match segment {
+                PathSegment::MoveTo { x, y } => {
+                    write_command(&mut out, 'M', &[x, y]);
+                    (current, start) = ((x, y), (x, y));
+                }
+                PathSegment::LineTo { x, y } => {
+                    write_command(&mut out, 'L', &[x, y]);
+                    current = (x, y);
+                }
+                PathSegment::QuadraticCurveTo { cx, cy, x, y } => {
+                    write_command(&mut out, 'Q', &[cx, cy, x, y]);
+                    current = (x, y);
+                }
+                PathSegment::BezierCurveTo {
+                    c1x,
+                    c1y,
+                    c2x,
+                    c2y,
+                    x,
+                    y,
+                } => {
+                    write_command(&mut out, 'C', &[c1x, c1y, c2x, c2y, x, y]);
+                    current = (x, y);
+                }
+                PathSegment::ConicCurveTo {
+                    cx,
+                    cy,
+                    x,
+                    y,
+                    weight,
+                } => {
+                    write_conic(&mut out, current, (cx, cy), (x, y), weight);
+                    current = (x, y);
+                }
+                PathSegment::ClosePath => {
+                    out.push('Z');
+                    current = start;
+                }
+            }
+        }
+        out
     }
 
     /// Whether `(x, y)` falls inside the path, under its fill rule.
@@ -397,6 +455,169 @@ impl Path2D {
             .map(|(mut builder, _)| Self::from_inner(builder.detach()))
             .unwrap_or_else(|| self.clone())
     }
+}
+
+/// How near the quadratics [`Path2D::to_svg`] writes for a hyperbolic conic
+/// come to it, in pixels: the tolerance Skia's own SVG writer chops conics at
+/// (`SkParsePath::ToSVGString`), so such a segment is written as it always
+/// was.
+const HYPERBOLA_TOLERANCE: f32 = 1.0 / 1024.0;
+
+/// The most times a conic is halved into quadratics: 2^5, 32 of them, the
+/// cap Skia's `SkConic::computeQuadPOW2` sets.
+const MAX_QUAD_HALVINGS: usize = 5;
+
+/// Appends `command` and `values` the way Skia's SVG writer spaces them --
+/// the letter, then the numbers one space apart -- each as the shortest
+/// decimal that reads back as the same `f32`.
+fn write_command(out: &mut String, command: char, values: &[f32]) {
+    out.push(command);
+    for (i, value) in values.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        // SAFETY: writing to a `String` cannot fail.
+        write!(out, "{value}").expect("a String takes any text");
+    }
+}
+
+/// Appends the conic from `p0` through control `p1` to `p2` as the SVG
+/// command that rebuilds it, or as the nearest one SVG has.
+///
+/// A path holds a conic only for a finite weight above 0 other than 1:
+/// Skia's `SkPathBuilder::conicTo` stores weight 1 as the quadratic it is, a
+/// weight of 0 or less as a line, and an infinite one as two lines.
+fn write_conic(
+    out: &mut String,
+    p0: (f32, f32),
+    p1: (f32, f32),
+    p2: (f32, f32),
+    weight: f32,
+) {
+    if let Some(arc) = elliptical_arc(p0, p1, p2, weight) {
+        let EllipticalArc {
+            rx,
+            ry,
+            rotation,
+            sweep,
+        } = arc;
+        // Never the large arc: a conic of positive weight turns through
+        // less than half a turn.
+        let sweep = if sweep { 1.0 } else { 0.0 };
+        write_command(out, 'A', &[rx, ry, rotation, 0.0, sweep, p2.0, p2.1]);
+        return;
+    }
+    let halvings = quad_halvings(p0, p1, p2, weight);
+    let mut points = vec![SkPoint::default(); 1 + 2 * (1 << halvings)];
+    // SAFETY: `points` holds the 1 + 2 * 2^halvings points that many
+    // quadratics take, which is the one length the conversion refuses
+    // below.
+    let quads = SkPath::convert_conic_to_quads(
+        p0,
+        p1,
+        p2,
+        weight,
+        &mut points,
+        halvings,
+    )
+    .expect("room for every quadratic");
+    for quad in points[1..].as_chunks::<2>().0.iter().take(quads) {
+        write_command(out, 'Q', &[quad[0].x, quad[0].y, quad[1].x, quad[1].y]);
+    }
+}
+
+/// How many times Skia halves a conic into quadratics to come within
+/// [`HYPERBOLA_TOLERANCE`] of it: the distance between the conic and its one
+/// quadratic, by the bound `SkConic::computeQuadPOW2` uses, shrinks fourfold
+/// a halving. Computed in `f32` in the same order, so the count is the one
+/// Skia's own writer reaches.
+fn quad_halvings(
+    p0: (f32, f32),
+    p1: (f32, f32),
+    p2: (f32, f32),
+    weight: f32,
+) -> usize {
+    let finite = [p0.0, p0.1, p1.0, p1.1, p2.0, p2.1, weight]
+        .iter()
+        .all(|v| v.is_finite());
+    if !finite || weight < 0.0 {
+        return 0;
+    }
+    let a = weight - 1.0;
+    let k = a / (4.0 * (2.0 + a));
+    let x = k * (p0.0 - 2.0 * p1.0 + p2.0);
+    let y = k * (p0.1 - 2.0 * p1.1 + p2.1);
+    let mut error = (x * x + y * y).sqrt();
+    for halvings in 0..MAX_QUAD_HALVINGS {
+        if error <= HYPERBOLA_TOLERANCE {
+            return halvings;
+        }
+        error *= 0.25;
+    }
+    MAX_QUAD_HALVINGS
+}
+
+/// An SVG `A` command's shape: the radii, the x-axis rotation in degrees,
+/// and whether it turns the positive-angle way.
+struct EllipticalArc {
+    rx: f32,
+    ry: f32,
+    rotation: f32,
+    sweep: bool,
+}
+
+/// The elliptical arc a conic of weight between 0 and 1 traces, or `None`
+/// for one that is not an arc SVG can state: any other weight, a conic that
+/// ends where it starts (an `A` with equal ends draws nothing), or a flat
+/// one, whose ellipse has no width.
+///
+/// Such a conic is the affine image of a circular arc of half-angle
+/// `acos(weight)`: centred at `c = (m - w^2 p1) / (1 - w^2)`, `m` the chord's
+/// midpoint, with `p0 - c` and `(p1 - p0) * w / sqrt(1 - w^2)` as conjugate
+/// semi-diameters. The radii and rotation are that pair's singular values
+/// and the angle of the first, and the sweep is the sign of its determinant.
+fn elliptical_arc(
+    p0: (f32, f32),
+    p1: (f32, f32),
+    p2: (f32, f32),
+    weight: f32,
+) -> Option<EllipticalArc> {
+    let elliptic = weight > 0.0 && weight < 1.0;
+    if !elliptic || p0 == p2 {
+        return None;
+    }
+    let point = |p: (f32, f32)| (f64::from(p.0), f64::from(p.1));
+    let (p0, p1, p2) = (point(p0), point(p1), point(p2));
+    let w = f64::from(weight);
+    let w2 = w * w;
+    let mid = ((p0.0 + p2.0) / 2.0, (p0.1 + p2.1) / 2.0);
+    let centre = (
+        (mid.0 - w2 * p1.0) / (1.0 - w2),
+        (mid.1 - w2 * p1.1) / (1.0 - w2),
+    );
+    let tangent = (1.0 - w2).sqrt() / w;
+    let a = (p0.0 - centre.0, p0.1 - centre.1);
+    let b = ((p1.0 - p0.0) / tangent, (p1.1 - p0.1) / tangent);
+
+    // The 2x2 singular value decomposition of the columns `a`, `b`.
+    let e = (a.0 + b.1) / 2.0;
+    let f = (a.0 - b.1) / 2.0;
+    let g = (a.1 + b.0) / 2.0;
+    let h = (a.1 - b.0) / 2.0;
+    let q = e.hypot(h);
+    let r = f.hypot(g);
+    let (rx, ry) = (q + r, (q - r).abs());
+    let rotation = (h.atan2(e) + g.atan2(f)) / 2.0;
+    let wide = ry > rx * f64::EPSILON;
+    if !wide || !rx.is_finite() || !rotation.is_finite() {
+        return None;
+    }
+    Some(EllipticalArc {
+        rx: rx as f32,
+        ry: ry as f32,
+        rotation: rotation.to_degrees() as f32,
+        sweep: a.0 * b.1 - b.0 * a.1 > 0.0,
+    })
 }
 
 /// One iterator step as a [`PathSegment`], or `None` for a verb that carries
@@ -1072,5 +1293,169 @@ mod path_operation_tests {
         // even-odd drew.
         let unwound = bowtie.unwind();
         assert_eq!(unwound.fill_rule(), FillRule::NonZero);
+    }
+}
+
+#[cfg(test)]
+mod svg_data_tests {
+    use std::f32::consts::TAU;
+
+    use super::*;
+
+    /// A coordinate eight significant digits cannot name: Skia's `%.8g`
+    /// writes it as `123.40002`, which reads back as the `f32` below it.
+    const NINE_DIGITS: f32 = 123.400_024;
+
+    /// Paths whose curves are conics: whole ellipses at several sizes and
+    /// rotations, an elliptical wedge, a circular arc drawn counterclockwise
+    /// past a half turn, and a rounded rectangle.
+    fn conic_paths() -> Vec<Path2D> {
+        let ellipses = [
+            (36.0, 82.0, 0.1),
+            (200.0, 120.0, 0.3),
+            (500.0, 450.0, 0.7),
+            (5.0, 3.0, 0.0),
+        ];
+        let mut paths: Vec<Path2D> = ellipses
+            .iter()
+            .map(|&(rx, ry, rotation)| {
+                let mut builder = PathBuilder::new();
+                builder
+                    .ellipse(600.3, 600.7, rx, ry, rotation, 0.0, TAU, false)
+                    .expect("an ellipse");
+                builder.build(FillRule::NonZero)
+            })
+            .collect();
+        let mut wedge = PathBuilder::new();
+        wedge.move_to(600.0, 600.0);
+        wedge
+            .ellipse(600.0, 600.0, 300.0, 200.0, 0.4, 0.3, 2.5, false)
+            .expect("an arc");
+        wedge.close_path();
+        paths.push(wedge.build(FillRule::NonZero));
+        let mut arc = PathBuilder::new();
+        arc.arc(600.0, 600.0, 100.0, 0.0, 4.0, true)
+            .expect("an arc");
+        arc.close_path();
+        paths.push(arc.build(FillRule::NonZero));
+        let mut rounded = PathBuilder::new();
+        rounded
+            .round_rect(400.2, 450.6, 400.0, 300.0, [40.0; 4])
+            .expect("a rounded rectangle");
+        paths.push(rounded.build(FillRule::NonZero));
+        paths
+    }
+
+    #[test]
+    fn lines_quadratics_and_cubics_read_back_at_the_same_points() {
+        // The instrument: eight digits do not name this coordinate.
+        let eight: f32 = format!("{NINE_DIGITS:.5}").parse().expect("a number");
+        assert_ne!(eight, NINE_DIGITS, "the coordinate needs nine digits");
+
+        let mut builder = PathBuilder::new();
+        builder.move_to(NINE_DIGITS, 1.5);
+        builder.line_to(200.25, NINE_DIGITS);
+        builder.quadratic_curve_to(NINE_DIGITS, -7.0, 0.1, 0.2);
+        builder.bezier_curve_to(1e-7, NINE_DIGITS, 3e5, 4.75, NINE_DIGITS, 9.0);
+        builder.close_path();
+        let path = builder.build(FillRule::NonZero);
+
+        let svg = path.to_svg();
+        let back =
+            Path2D::from_svg(&svg, FillRule::NonZero).expect("its own output");
+        assert_eq!(back.edges(), path.edges(), "{svg}");
+    }
+
+    #[test]
+    fn a_conic_reads_back_as_the_same_conic() {
+        for path in conic_paths() {
+            let svg = path.to_svg();
+            assert!(svg.contains('A') && !svg.contains('Q'), "{svg}");
+            let back = Path2D::from_svg(&svg, FillRule::NonZero)
+                .expect("its own output");
+            let (before, after) = (path.edges(), back.edges());
+            assert_eq!(before.len(), after.len(), "{svg}");
+            for (a, b) in before.iter().zip(&after) {
+                match (a, b) {
+                    (
+                        PathSegment::ConicCurveTo {
+                            cx,
+                            cy,
+                            x,
+                            y,
+                            weight,
+                        },
+                        PathSegment::ConicCurveTo {
+                            cx: cx2,
+                            cy: cy2,
+                            x: x2,
+                            y: y2,
+                            weight: weight2,
+                        },
+                    ) => {
+                        let drift = [cx - cx2, cy - cy2, x - x2, y - y2]
+                            .iter()
+                            .fold(0.0f32, |most, d| most.max(d.abs()));
+                        assert!(drift < 2e-3, "{a:?} came back as {b:?}");
+                        assert!(
+                            (weight - weight2).abs() < 1e-5,
+                            "{a:?} came back as {b:?}"
+                        );
+                    }
+                    _ => assert_eq!(
+                        std::mem::discriminant(a),
+                        std::mem::discriminant(b),
+                        "{svg}"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_conic_of_weight_one_is_written_as_a_quadratic() {
+        let mut builder = PathBuilder::new();
+        builder.move_to(0.0, 0.0);
+        builder.conic_curve_to(5.0, 10.0, 10.0, 0.0, 1.0);
+        assert_eq!(builder.build(FillRule::NonZero).to_svg(), "M0 0Q5 10 10 0");
+    }
+
+    #[test]
+    fn a_hyperbola_is_written_as_the_quadratics_skia_chops_it_into() {
+        let mut builder = PathBuilder::new();
+        builder.move_to(0.0, 0.0);
+        builder.conic_curve_to(50.0, 80.0, 100.0, 0.0, 3.0);
+        let path = builder.build(FillRule::NonZero);
+
+        // Skia's own writer, which prints eight digits: the commands must be
+        // the same, and the numbers the same to that precision.
+        let commands = |svg: &str| {
+            svg.split(|c: char| c.is_ascii_alphabetic())
+                .skip(1)
+                .zip(svg.matches(|c: char| c.is_ascii_alphabetic()))
+                .map(|(numbers, letter)| {
+                    let values: Vec<f32> = numbers
+                        .split_whitespace()
+                        .map(|n| n.parse().expect("a number"))
+                        .collect();
+                    (letter.to_string(), values)
+                })
+                .collect::<Vec<_>>()
+        };
+        let (ours, skias) = (path.to_svg(), path.inner.to_svg());
+        let (ours, skias) = (commands(&ours), commands(&skias));
+        assert!(skias.len() > 2, "chopped into more than one quadratic");
+        assert_eq!(ours.len(), skias.len());
+        for ((letter, values), (skia_letter, skia_values)) in
+            ours.iter().zip(&skias)
+        {
+            assert_eq!(letter, skia_letter);
+            for (v, s) in values.iter().zip(skia_values) {
+                assert!(
+                    (v - s).abs() <= s.abs() * 1e-7 + 1e-6,
+                    "{v} against {s}"
+                );
+            }
+        }
     }
 }

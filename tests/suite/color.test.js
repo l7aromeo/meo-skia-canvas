@@ -3,7 +3,7 @@
 "use strict";
 
 const { assert, describe, test } = require("../runner"),
-  { Canvas, ParagraphBuilder } = require("../../lib");
+  { Canvas, FontLibrary, ParagraphBuilder } = require("../../lib");
 
 describe("createImageData", () => {
   test("inherits the canvas's colour space", () => {
@@ -378,5 +378,100 @@ describe("a wide CSS colour", () => {
       [255, 0, 0, 255],
       "an export's matte",
     );
+  });
+});
+
+describe("a paragraph on a float canvas", () => {
+  // SkParagraph paints in the paints it was built with, which Skia holds
+  // converted to sRGB through an approximate transfer function: on an sRGB
+  // F32 canvas `color(display-p3 0.3 0.6 0.2)` landed 2.4e-4 from a fill of
+  // it.
+  test("lands in its colours as a fill does", () => {
+    FontLibrary.use("ColourOswald", [
+      "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    ]);
+    let side = 120;
+    let page = (colorSpace) => {
+      let canvas = new Canvas(side, side, { colorType: "RGBAF32", colorSpace });
+      canvas.gpu = false;
+      return canvas.getContext("2d");
+    };
+    // Every pixel covered whole, premultiplied floats in the page's space.
+    let covered = (ctx, colorSpace) => {
+      let { data } = ctx.getImageData(0, 0, side, side, {
+        colorType: "RGBAF32",
+        colorSpace,
+      });
+      let floats = new Float32Array(
+        data.buffer,
+        data.byteOffset,
+        data.length / 4,
+      );
+      let whole = [];
+      for (let i = 0; i < floats.length; i += 4)
+        if (floats[i + 3] == 1)
+          whole.push(Array.from(floats.subarray(i, i + 4)));
+      return whole;
+    };
+    let clear = "transparent";
+    // Each of a style's colours, drawn so that it alone covers some of the
+    // page whole, and how far up the paragraph is drawn.
+    let sites = {
+      color: (c) => [{ color: c }, -20],
+      // An outline thick enough to cover some of the page whole.
+      strokeWidth: (c) => [{ color: c, strokeWidth: 40 }, -20],
+      foregroundColor: (c) => [{ color: "red", foregroundColor: c }, -20],
+      backgroundColor: (c) => [{ color: clear, backgroundColor: c }, -20],
+      shadow: (c) => [
+        { color: clear, shadows: [{ color: c, offset: [0, 400] }] },
+        -420,
+      ],
+      decorationColor: (c) => [
+        {
+          color: clear,
+          decoration: 1,
+          decorationColor: c,
+          decorationThickness: 30,
+        },
+        -80,
+      ],
+    };
+    let wrong = [];
+    for (let space of ["srgb", "display-p3"]) {
+      for (let colour of [
+        "rgb(20 120 220)",
+        "color(display-p3 0.3 0.6 0.2)",
+        "color(srgb-linear 0.5 0.25 0.75)",
+      ]) {
+        let fill = page(space);
+        fill.fillStyle = colour;
+        fill.fillRect(0, 0, side, side);
+        let want = covered(fill, space)[0];
+        for (let [name, site] of Object.entries(sites)) {
+          let [style, y] = site(colour);
+          let pb = ParagraphBuilder.Make({
+            textStyle: {
+              fontFamilies: ["ColourOswald"],
+              fontSize: 140,
+              fontWeight: 700,
+              ...style,
+            },
+          });
+          pb.addText("M");
+          let built = pb.build();
+          built.layout(1000);
+          let ctx = page(space);
+          ctx.drawParagraph(built, -10, y);
+          let got = covered(ctx, space);
+          if (got.length == 0)
+            wrong.push(`${space} ${colour} ${name}: nothing covered`);
+          else if (got.some((p) => p.some((v, i) => v !== want[i])))
+            wrong.push(
+              `${space} ${colour} ${name}: ${got.find((p) => p.some((v, i) => v !== want[i]))} for ${want}`,
+            );
+        }
+      }
+    }
+    assert.deepEqual(wrong, []);
   });
 });

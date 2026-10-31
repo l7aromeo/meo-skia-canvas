@@ -9,7 +9,7 @@ use crate::{
     font::{FontFamily, ObliqueAngle, leans_as_asked, variation_axes},
     font_library::{FontEpoch, FontLibrary, base_face},
     node::{
-        decorate::{self, FaceLines, Layer, Thickness},
+        decorate::{self, FaceLines, Layer, LinePaint, Thickness},
         lru::{Lru, LruId},
     },
     text::{
@@ -41,6 +41,7 @@ use std::{
     iter::{successors, zip},
     ops::Range,
     rc::Rc,
+    sync::Arc,
 };
 
 thread_local! {
@@ -437,13 +438,14 @@ pub enum Painter {
 
 /// A run laid out once, and painted from then on with whatever paint a draw
 /// brings: its glyph runs, read off the paragraph when it was laid out, and
-/// the spans and box its decoration lines are drawn from.
+/// the spans and box its decoration lines are drawn from -- see
+/// [`RunPaint`].
 ///
 /// Laid out with no paint, because nothing about where a glyph or a line
 /// goes depends on the paint: a draw in another colour, a gradient or
 /// another alpha paints the same runs and the same lines, which is what lets
 /// a run be kept across them. The glyphs are drawn as the blobs
-/// [`Self::built_blobs`] builds, whose pixels are `Paragraph::paint`'s --
+/// [`RunPaint::built_blobs`] builds, whose pixels are `Paragraph::paint`'s --
 /// or, sheared past what FreeType draws, from their outlines -- see
 /// [`drawn_as_outlines`] -- and the lines by [`decorate::paint`] in the
 /// colour the draw's paint gives them.
@@ -453,10 +455,9 @@ pub enum Painter {
 /// its runs back another 633 of the run painter's 1172.
 pub struct LaidOut {
     layout: TextLayout,
-    /// The glyph runs, read off the paragraph once.
-    runs: Vec<GlyphRun>,
-    /// The shear each run is drawn under -- see [`run_shear`].
-    shears: Vec<Shear>,
+    /// What the run draws, shared, so that a draw replaying it later can
+    /// hold it -- see [`Self::drawn`].
+    drawn: Arc<RunPaint>,
     /// The runs' blobs, kept by the paint they were built for, at most
     /// [`BLOB_PAINTS`] paints' worth, the most recently built last.
     ///
@@ -474,15 +475,27 @@ pub struct LaidOut {
     /// Re-check: cargo test a_run_drawn_again_on_the_gpu_draws_as_a_fresh_one
     /// with `PaintedBlobs::matches` answering `true` for every paint
     blobs: RefCell<Vec<PaintedBlobs>>,
+    /// What this costs to keep, by [`laid_out_bytes`]'s estimate.
+    bytes: usize,
+}
+
+/// What a laid-out run draws, apart from the paragraph it was read off: its
+/// glyph runs, the shear each is drawn under, and the box and spans its
+/// lines are drawn from. Holds nothing tied to a thread, so that a page can
+/// keep it and draw it again wherever the page is played -- as a draw dyed
+/// by a canvas's pattern is, see `layer::Replay`.
+pub struct RunPaint {
+    /// The glyph runs, read off the paragraph once.
+    runs: Vec<GlyphRun>,
+    /// The shear each run is drawn under -- see [`run_shear`].
+    shears: Vec<Shear>,
     /// The run's one decorating box, or `None` where it has no lines. Its
-    /// opacity is set by each draw -- see [`LaidOut::paint`].
+    /// opacity is set by each draw -- see [`Self::paint`].
     decoration: Option<decorate::Decoration>,
     /// What each line of the box covers, by [`decorate::spans`].
     spans: Vec<decorate::Span>,
     /// How many lines the runs are on.
     lines: usize,
-    /// What this costs to keep, by [`laid_out_bytes`]'s estimate.
-    bytes: usize,
 }
 
 impl LaidOut {
@@ -505,14 +518,22 @@ impl LaidOut {
         let glyphs = runs.iter().map(|run| run.glyphs.len()).sum();
         Self {
             layout,
-            runs,
-            shears,
+            drawn: Arc::new(RunPaint {
+                runs,
+                shears,
+                decoration,
+                spans,
+                lines,
+            }),
             blobs: RefCell::new(Vec::new()),
-            decoration,
-            spans,
-            lines,
             bytes: laid_out_bytes(glyphs),
         }
+    }
+
+    /// What the run draws, to draw again where this run cannot be kept --
+    /// see [`RunPaint`].
+    pub fn drawn(&self) -> Arc<RunPaint> {
+        Arc::clone(&self.drawn)
     }
 
     /// The runs' blobs for `paint`: the ones kept for it, or built now and
@@ -532,7 +553,7 @@ impl LaidOut {
                 }
                 kept.push(PaintedBlobs {
                     paint: paint.clone(),
-                    blobs: self.built_blobs(),
+                    blobs: self.drawn.built_blobs(),
                 });
                 kept.len() - 1
             }
@@ -540,6 +561,59 @@ impl LaidOut {
         Some(RefMut::map(kept, |kept| kept[at].blobs.as_mut_slice()))
     }
 
+    /// Where to paint the run, relative to the anchor -- see
+    /// [`TextLayout::offset`].
+    pub fn offset(&self) -> Point {
+        self.layout.offset
+    }
+
+    /// The horizontal factor the run is squeezed by -- see
+    /// [`TextLayout::condensation`].
+    pub fn condensation(&self) -> f32 {
+        self.layout.condensation
+    }
+
+    /// Paints the run with its anchor at `origin` in `paint` -- see
+    /// [`RunPaint::paint`] -- from the blobs kept for `paint`.
+    pub fn paint(
+        &self,
+        canvas: &Canvas,
+        origin: Point,
+        paint: &Paint,
+        global_alpha: f32,
+        faint: Faint,
+    ) {
+        let built;
+        let kept = self.kept_blobs(paint);
+        let blobs: &[Option<TextBlob>] = match &kept {
+            Some(kept) => kept,
+            None => {
+                built = self.drawn.built_blobs();
+                &built
+            }
+        };
+        self.drawn.paint_from(
+            canvas,
+            origin,
+            paint,
+            global_alpha,
+            faint,
+            blobs,
+        );
+    }
+}
+
+impl fmt::Debug for RunPaint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RunPaint")
+            .field("runs", &self.runs.len())
+            .field("lines", &self.lines)
+            .field("decorated", &self.decoration.is_some())
+            .finish()
+    }
+}
+
+impl RunPaint {
     /// Each run as a text blob in its own font, sheared as `shears`
     /// says, to draw at the run's origin, or `None` where it draws nothing.
     ///
@@ -598,18 +672,6 @@ impl LaidOut {
         }
     }
 
-    /// Where to paint the run, relative to the anchor -- see
-    /// [`TextLayout::offset`].
-    pub fn offset(&self) -> Point {
-        self.layout.offset
-    }
-
-    /// The horizontal factor the run is squeezed by -- see
-    /// [`TextLayout::condensation`].
-    pub fn condensation(&self) -> f32 {
-        self.layout.condensation
-    }
-
     /// Paints the run with its anchor at `origin` in `paint`, a named line
     /// colour's alpha multiplied by `global_alpha`, as
     /// [`Typesetter::decoration`] takes it, onto pixels that do with a faint
@@ -620,6 +682,13 @@ impl LaidOut {
     /// glyphs, line-through over them -- CSS Text Decoration 4, section 5.1
     /// -- so that a wrapped line's underline lies over the line above's
     /// descenders, as in Chrome.
+    ///
+    /// The blobs are built for this draw rather than kept from another:
+    /// Skia's GPU backend draws a blob again in another plain colour
+    /// unlike a fresh one -- see `LaidOut::blobs` -- for a cause not known.
+    /// A run drawn again through an image's shader, as a canvas's pattern
+    /// replays one, did not part that way in any of 49 pairs of patterns,
+    /// but nothing shows it cannot, so the blobs are not kept for it either.
     pub fn paint(
         &self,
         canvas: &Canvas,
@@ -628,15 +697,21 @@ impl LaidOut {
         global_alpha: f32,
         faint: Faint,
     ) {
-        let built;
-        let kept = self.kept_blobs(paint);
-        let blobs: &[Option<TextBlob>] = match &kept {
-            Some(kept) => kept,
-            None => {
-                built = self.built_blobs();
-                &built
-            }
-        };
+        let blobs = self.built_blobs();
+        self.paint_from(canvas, origin, paint, global_alpha, faint, &blobs);
+    }
+
+    /// [`Self::paint`] from `blobs`, the blobs of every run, built by
+    /// [`Self::built_blobs`] for `paint` or kept from a draw in it.
+    fn paint_from(
+        &self,
+        canvas: &Canvas,
+        origin: Point,
+        paint: &Paint,
+        global_alpha: f32,
+        faint: Faint,
+        blobs: &[Option<TextBlob>],
+    ) {
         let Some(decoration) = &self.decoration else {
             let all = 0..self.runs.len();
             self.draw_runs(canvas, origin, paint, all, blobs, faint);
@@ -646,29 +721,18 @@ impl LaidOut {
             opacity: global_alpha,
             ..decoration.clone()
         }];
+        let pen = LinePaint {
+            base: paint,
+            faint,
+            resolve: None,
+        };
         for line in 0..self.lines {
             let spans = decorate::on_line(&self.spans, line);
             let start = self.runs.partition_point(|run| run.line < line);
             let end = self.runs.partition_point(|run| run.line <= line);
-            decorate::paint(
-                canvas,
-                spans,
-                &boxes,
-                origin,
-                Layer::Beneath,
-                paint,
-                faint,
-            );
+            decorate::paint(canvas, spans, &boxes, origin, Layer::Beneath, pen);
             self.draw_runs(canvas, origin, paint, start..end, blobs, faint);
-            decorate::paint(
-                canvas,
-                spans,
-                &boxes,
-                origin,
-                Layer::Over,
-                paint,
-                faint,
-            );
+            decorate::paint(canvas, spans, &boxes, origin, Layer::Over, pen);
         }
     }
 }
@@ -681,7 +745,7 @@ pub enum DrawnRun {
     /// Laid out for the draw's paint and drawn by `Paragraph::paint`.
     Plain(TextLayout),
     /// Laid out for the draw's paint and drawn from its runs.
-    Runs(LaidOut),
+    Runs(Box<LaidOut>),
 }
 
 impl DrawnRun {
@@ -1943,6 +2007,7 @@ impl<'a> Typesetter<'a> {
                 .map_or(Thickness::Font, Thickness::Pixels),
             color: self.text_decoration().color,
             opacity: global_alpha,
+            named: None,
             face,
         })
     }
@@ -1980,6 +2045,28 @@ impl<'a> Typesetter<'a> {
         }
     }
 
+    /// What the run draws, to draw again later -- see [`RunPaint`] -- with
+    /// where it is painted relative to the anchor and the factor it is
+    /// squeezed by: from `kept` where the run is kept, or laid out now, with
+    /// no paint, as a kept run is.
+    pub fn replayed(
+        &self,
+        kept: Option<&LaidOut>,
+    ) -> (Arc<RunPaint>, Point, f32) {
+        let laid_out;
+        let run = match kept {
+            Some(kept) => kept,
+            None => {
+                laid_out = LaidOut::new(
+                    self.layout(&Paint::default()),
+                    self.decoration(1.0),
+                );
+                &laid_out
+            }
+        };
+        (run.drawn(), run.offset(), run.condensation())
+    }
+
     /// The run laid out for one draw in `paint` on `canvas` and not kept, as
     /// a run is drawn the first time: by `Paragraph::paint` where nothing
     /// needs its runs, and from its runs, lines between them, where it is
@@ -1990,7 +2077,9 @@ impl<'a> Typesetter<'a> {
         let plain = !may_draw_outlines(canvas, FAKE_ITALIC_SKEW);
         match (self.decoration(1.0), self.oblique) {
             (None, None) if plain => DrawnRun::Plain(layout),
-            (decoration, _) => DrawnRun::Runs(LaidOut::new(layout, decoration)),
+            (decoration, _) => {
+                DrawnRun::Runs(Box::new(LaidOut::new(layout, decoration)))
+            }
         }
     }
 

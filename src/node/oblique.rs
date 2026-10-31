@@ -26,16 +26,24 @@
 //! as it is filled in, and painted by `Paragraph::paint` alone, but on a
 //! canvas that shears its glyphs past what FreeType draws -- see
 //! [`paint_glyphs`].
+//!
+//! On a page whose colours land in floats, every run is drawn in a paint
+//! made for the page from the colour its style named -- see [`Resolve`]:
+//! by [`Passes`] where the paragraph has them, and by [`paint_glyphs`] from
+//! what SkParagraph keeps of its styles where it has none -- see
+//! [`PlainPaints`].
 
 use crate::{
     context::{
         Context2D, ShadowCast, ShadowPart, faint::Faint, layer::reach_the_clip,
     },
+    css::NamedColour,
     font::leans_as_asked,
     font_library::text_hinting,
     node::{
         decorate::{
-            self, Decoration, FaceLines, Layer, Span, Spans, Thickness,
+            self, Decoration, FaceLines, Layer, LinePaint, Span, Spans,
+            Thickness,
         },
         font_library::FontEpoch,
         typography::{
@@ -195,6 +203,10 @@ enum Step {
 /// an edge, noted as they are added, leave a grapheme cluster across it
 /// possible.
 pub(crate) struct ParagraphRecipe {
+    /// The text as it was asked for, before any edge moved, kept between
+    /// [`Self::built`] and [`Self::passes`] for the tests' as-asked copy.
+    #[cfg(test)]
+    asked_text: Option<String>,
     builder: ParagraphBuilder,
     style: ParagraphStyle,
     collection: FontCollection,
@@ -206,6 +218,9 @@ pub(crate) struct ParagraphRecipe {
     steps: Vec<Step>,
     /// What was taken off the paragraph style's own text style, its slot 0.
     base_taken: Taken,
+    /// The paragraph's own style's colour as it named it -- see
+    /// [`StyleColours::foreground`].
+    base_colour: Option<NamedColour>,
     /// Each style pushed, in slot 1 and on, at its index plus 1: one list
     /// rather than one for each thing kept of it. Taken, with `steps`, from
     /// what the last recipe on the thread handed back, since every
@@ -293,6 +308,7 @@ impl ParagraphRecipe {
                         &mut base,
                         &mut collection,
                         epoch.as_ref(),
+                        colours.background.clone(),
                     )
                     .map(Box::new);
                     style.set_text_style(&base);
@@ -313,6 +329,8 @@ impl ParagraphRecipe {
             steps.reserve(8);
         }
         Self {
+            #[cfg(test)]
+            asked_text: None,
             builder: ParagraphBuilder::new(&style, &collection),
             style,
             collection,
@@ -323,6 +341,7 @@ impl ParagraphRecipe {
                 shadows,
                 background,
             },
+            base_colour: colours.foreground.clone(),
             pushed,
             length: 0,
             base_oblique,
@@ -360,6 +379,7 @@ impl ParagraphRecipe {
             &mut style,
             &mut self.collection,
             self.epoch.as_ref(),
+            colours.background.clone(),
         )
         .map(Box::new);
         let taken = Taken {
@@ -367,7 +387,7 @@ impl ParagraphRecipe {
             shadows,
             background,
         };
-        self.push(style, oblique, taken);
+        self.push(style, oblique, taken, colours.foreground.clone());
     }
 
     /// Pushes `style`, as [`Self::push_style`] does, where the caller knows
@@ -377,6 +397,7 @@ impl ParagraphRecipe {
         &mut self,
         mut style: TextStyle,
         oblique: Option<f32>,
+        colour: Option<NamedColour>,
     ) {
         style.set_font_hinting(text_hinting(true));
         debug_assert!(
@@ -388,11 +409,17 @@ impl ParagraphRecipe {
             shadows: Vec::new(),
             background: None,
         };
-        self.push(style, oblique, taken);
+        self.push(style, oblique, taken, colour);
     }
 
     /// Pushes `style`, with `taken` taken off it.
-    fn push(&mut self, style: TextStyle, oblique: Option<f32>, taken: Taken) {
+    fn push(
+        &mut self,
+        style: TextStyle,
+        oblique: Option<f32>,
+        taken: Taken,
+        colour: Option<NamedColour>,
+    ) {
         self.builder.push_style(&style);
         self.oblique |= oblique.is_some();
         self.half_leading |= style.half_leading();
@@ -400,6 +427,7 @@ impl ParagraphRecipe {
         self.pushed.push(Pushed {
             parent: self.top,
             style,
+            colour,
             oblique,
             taken,
         });
@@ -466,13 +494,71 @@ impl ParagraphRecipe {
         self.half_leading.then(|| self.collection.clone())
     }
 
-    /// The paragraph, not yet laid out, and what paints it where it has an
-    /// oblique range, a decoration, a shadow or a background, or a colour
-    /// change that a layout may find inside a ligature -- see [`Passes`]. A
-    /// paragraph with none of these is painted by [`paint_glyphs`], which is
-    /// `Paragraph::paint` but on a canvas that shears it past what FreeType
-    /// draws.
-    pub(crate) fn build(mut self) -> (Paragraph, Option<Passes>) {
+    /// The paragraph, not yet laid out, and its [`Passes`] where it has
+    /// them -- see [`Self::build_drawable`].
+    pub(crate) fn build(self) -> (Paragraph, Option<Passes>) {
+        let Built {
+            paragraph, passes, ..
+        } = self.build_drawable();
+        (paragraph, passes)
+    }
+
+    /// The paragraph, not yet laid out, and what paints it: [`Passes`],
+    /// which draws it here where it has an oblique range, a decoration, a
+    /// shadow or a background, or a colour change that a layout may find
+    /// inside a ligature, and leaves it to [`paint_glyphs`] otherwise --
+    /// `Paragraph::paint`, but on a canvas that shears it past what FreeType
+    /// draws. A paragraph without passes keeps what a page that needs paints
+    /// of its own resolves them from -- see [`PlainPaints`].
+    pub(crate) fn build_drawable(mut self) -> Built {
+        let (paragraph, drawn, edges) = self.built();
+        match edges {
+            Some(edges) => Built {
+                paragraph,
+                passes: Some(self.passes(drawn, edges)),
+                plain: PlainPaints::default(),
+            },
+            None => {
+                let base = self.base_colour.take();
+                // Where every style names the paragraph's own colour -- one
+                // style, or several in one paint -- every glyph resolves
+                // from it, and no list is kept for the others.
+                let one_colour =
+                    self.pushed.iter().all(|pushed| pushed.colour == base);
+                let plain = match one_colour {
+                    true => PlainPaints {
+                        base,
+                        ..PlainPaints::default()
+                    },
+                    false => {
+                        let mut slots = self.slot_ranges();
+                        slots.shrink_to_fit();
+                        PlainPaints {
+                            base,
+                            pushed: self
+                                .pushed
+                                .iter_mut()
+                                .map(|pushed| pushed.colour.take())
+                                .collect(),
+                            slots,
+                        }
+                    }
+                };
+                Built {
+                    paragraph,
+                    passes: None,
+                    plain,
+                }
+            }
+        }
+    }
+
+    /// The paragraph, whether [`Passes`] draws it whatever the page, and the
+    /// edges between styles shaped as one a layout may find inside a
+    /// ligature -- see [`Passes::ligature_edges`] -- or `None` where the
+    /// paragraph has no passes, drawing nothing of its own and no edge
+    /// lying inside a cluster.
+    fn built(&mut self) -> (Paragraph, bool, Option<Vec<usize>>) {
         // Asked of what was taken off rather than of the boxes, which are
         // collected only for a paragraph that has passes to hand them to.
         let drawn = self.oblique
@@ -483,7 +569,7 @@ impl ParagraphRecipe {
             });
         // With one style there is no edge to fall inside a cluster.
         if !drawn && self.pushed.is_empty() {
-            return (self.builder.build(), None);
+            return (self.builder.build(), drawn, None);
         }
         #[cfg(test)]
         let full = FULL_GRAPHEMES.get();
@@ -496,7 +582,7 @@ impl ParagraphRecipe {
         // In one paint, with every edge between two clusters, nothing moves
         // and no edge is a paint edge -- see `Self::new`.
         if !drawn && one_paint && self.ascii_edges && !full {
-            return (self.builder.build(), None);
+            return (self.builder.build(), drawn, None);
         }
         // Read back and copied only where an edge may fall inside a
         // grapheme cluster, the one thing the text is read for here -- see
@@ -515,9 +601,16 @@ impl ParagraphRecipe {
             (true, Some(text)) => self.replay(text, |_, _, _| None),
             _ => self.builder.build(),
         };
-        if !drawn && edges.is_empty() {
-            return (paragraph, None);
+        #[cfg(test)]
+        {
+            self.asked_text = Some(asked_text);
         }
+        let edges = (drawn || !edges.is_empty()).then_some(edges);
+        (paragraph, drawn, edges)
+    }
+
+    /// The passes for a paragraph [`Self::built`] made.
+    fn passes(&mut self, drawn: bool, edges: Vec<usize>) -> Passes {
         let (boxes, box_slots) = self.boxes();
         let slots = self.slot_ranges();
         let style_edges = slots
@@ -547,13 +640,21 @@ impl ParagraphRecipe {
             .into_iter()
             .map(|decorated| decorated.decoration)
             .collect();
-        let passes = Passes {
+        #[cfg(test)]
+        let asked_text = self
+            .asked_text
+            .take()
+            .unwrap_or_else(|| self.builder.get_text().to_owned());
+        Passes {
             #[cfg(test)]
             as_asked: self.as_asked(&asked_text),
             box_ranges: remap(&slots, &box_slots),
             box_of_slot: box_slots,
             background_ranges: remap(&slots, &background_slots),
             slots,
+            colours: once(self.base_colour.clone())
+                .chain(self.pushed.iter().map(|pushed| pushed.colour.clone()))
+                .collect(),
             paints,
             sheared,
             shadows: once(mem::take(&mut self.base_taken.shadows))
@@ -577,12 +678,12 @@ impl ParagraphRecipe {
             style_edges,
             skia_glyphs: false,
             followed: false,
+            runs_followed: false,
             #[cfg(any(test, debug_assertions))]
             follows: 0,
             #[cfg(test)]
             per_line_only: false,
-        };
-        (paragraph, Some(passes))
+        }
     }
 
     /// The style in `slot`: the paragraph's own at 0, and each pushed one at
@@ -636,26 +737,7 @@ impl ParagraphRecipe {
     /// The text each slot's style covers, in UTF-8 offsets into the
     /// paragraph's text, in order, with the slot.
     fn slot_ranges(&self) -> Vec<(Range<usize>, usize)> {
-        let mut stack = Vec::with_capacity(self.pushed.len() + 1);
-        stack.push(0);
-        let mut ranges: Vec<(Range<usize>, usize)> =
-            Vec::with_capacity(self.steps.len());
-        for step in &self.steps {
-            match step {
-                Step::Push(at) => stack.push(at + 1),
-                Step::Pop if stack.len() > 1 => {
-                    stack.pop();
-                }
-                Step::Pop | Step::Placeholder(_) => {}
-                Step::Text(bytes) => {
-                    // SAFETY: `stack` starts with the base style's slot and a
-                    // pop never takes it, so it is never empty.
-                    let index = *stack.last().unwrap();
-                    push_range(&mut ranges, bytes.clone(), index);
-                }
-            }
-        }
-        ranges
+        slot_ranges(&self.steps, self.pushed.len() + 1)
     }
 
     /// The paragraph as its caller asked for it, its shadows and
@@ -898,6 +980,9 @@ struct Pushed {
     /// The slot of the style it was pushed over, which a pop returns to.
     parent: usize,
     style: TextStyle,
+    /// Its glyphs' colour as the style named it -- see
+    /// [`StyleColours::foreground`].
+    colour: Option<NamedColour>,
     oblique: Option<f32>,
     taken: Taken,
 }
@@ -1113,6 +1198,10 @@ pub(crate) struct Shadow {
     shadow: TextShadow,
     /// In extended sRGB, unpremultiplied.
     color: Color4f,
+    /// The colour as the style named it, in the space it named it in, where
+    /// it is known: what a float page draws the shadow in -- see
+    /// [`StyleColours::shadows_named`].
+    named: Option<NamedColour>,
 }
 
 impl Shadow {
@@ -1125,6 +1214,7 @@ impl Shadow {
             .enumerate()
             .map(|(at, shadow)| Self {
                 shadow: *shadow,
+                named: colours.shadows_named.get(at).cloned(),
                 color: colours
                     .shadows
                     .get(at)
@@ -1141,10 +1231,20 @@ impl Shadow {
 /// Empty where the caller has none to give, which leaves SkParagraph's.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct StyleColours {
+    /// The glyphs' colour, as the style named it and in the space it named
+    /// it in: what a float page draws them in, made for the page -- see
+    /// [`Passes::paint`].
+    pub(crate) foreground: Option<NamedColour>,
+    /// The background's colour, as the style named it.
+    pub(crate) background: Option<NamedColour>,
     /// The decoration's colour.
     pub(crate) decoration: Option<Color4f>,
+    /// The same, as the style named it, in the space it named it in.
+    pub(crate) decoration_named: Option<NamedColour>,
     /// One for each of the style's text shadows, in its order.
     pub(crate) shadows: Vec<Color4f>,
+    /// The same, as the style named them, in the space it named them in.
+    pub(crate) shadows_named: Vec<NamedColour>,
 }
 
 /// `style` with `shadows` given back, where it has any.
@@ -1178,6 +1278,9 @@ fn foreground(style: &TextStyle) -> Paint {
 #[derive(Clone)]
 struct StyleBackground {
     paint: Paint,
+    /// The colour as the style named it, where it is known -- see
+    /// [`StyleColours::background`].
+    colour: Option<NamedColour>,
     face: FaceLines,
 }
 
@@ -1191,6 +1294,7 @@ impl StyleBackground {
         style: &mut TextStyle,
         collection: &mut FontCollection,
         epoch: Option<&Rc<FontEpoch>>,
+        colour: Option<NamedColour>,
     ) -> Option<Self> {
         if !style.has_background() {
             return None;
@@ -1207,7 +1311,11 @@ impl StyleBackground {
             style.font_size(),
             style.font_arguments(),
         )?;
-        Some(Self { paint, face })
+        Some(Self {
+            paint,
+            colour,
+            face,
+        })
     }
 }
 
@@ -1259,6 +1367,7 @@ impl StyleDecoration {
                 color: Some(colours.decoration.unwrap_or_else(|| {
                     Color4f::from(style.decoration_color())
                 })),
+                named: colours.decoration_named.clone(),
                 // `drawParagraph` applies a canvas's global alpha to the
                 // whole paragraph through a layer.
                 opacity: 1.0,
@@ -1304,6 +1413,23 @@ pub(crate) fn without_paragraph_cache<T>(
     laid_out
 }
 
+/// What makes a paint built with the paragraph into the paint its page
+/// draws, once the page is known, given the colour it paints as its style
+/// named it, where that is known -- see [`Passes::paint`]. A paint's own
+/// colour is no stand-in: Skia holds it converted to sRGB through an
+/// approximate transfer function.
+///
+/// SkParagraph paints every glyph in the paint its style was built with,
+/// and `Paragraph::updateForegroundPaint`, which would swap it for the
+/// page's after layout, is not bound -- so where a page needs paints of its
+/// own, [`Passes`] draws every run itself.
+///
+/// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+/// Re-check: grep for `update_foreground_paint` in skia-safe's
+/// `src/modules/paragraph/paragraph.rs`. While it is absent, a float page
+/// cannot have SkParagraph paint in its colours and the runs are drawn here.
+pub(crate) type Resolve<'a> = &'a dyn Fn(&Paint, Option<&NamedColour>) -> Paint;
+
 /// What paints a paragraph that has an oblique range, a decoration, a shadow
 /// or a background, or a ligature in two colours -- see
 /// [`Self::ligature_edges`]: SkParagraph lays it out, and this draws every
@@ -1324,9 +1450,11 @@ pub(crate) struct Passes {
     /// The text each style covers, in UTF-8 offsets into the paragraph's
     /// text, in order, with its slot -- see [`ParagraphRecipe::shadows`].
     slots: Vec<(Range<usize>, usize)>,
-    /// Each slot's glyph paint, whether it asks for oblique, and its text
-    /// shadows.
+    /// Each slot's glyph paint, its colour as named where it is known --
+    /// see [`StyleColours::foreground`] -- whether it asks for oblique, and
+    /// its text shadows.
     paints: Vec<Paint>,
+    colours: Vec<Option<NamedColour>>,
     sheared: Vec<Option<f32>>,
     shadows: Vec<Vec<Shadow>>,
     /// Each decorated style's decoration, by box, and the text each box
@@ -1365,6 +1493,9 @@ pub(crate) struct Passes {
     /// one: false from each layout until the first paint after it follows
     /// the paragraph.
     followed: bool,
+    /// Whether [`Self::runs`] holds the glyph runs of the last layout, which
+    /// [`Self::follow`] finds only where it draws them here.
+    runs_followed: bool,
     /// How many times a layout has been followed, for the tests to hold
     /// that one laid out and never painted is followed never, and one
     /// painted again is not followed again.
@@ -1498,6 +1629,7 @@ impl Passes {
             as_asked.layout(_width);
         }
         self.followed = false;
+        self.runs_followed = false;
         self.runs = Vec::new();
         self.spans = Vec::new();
         self.background_spans = Vec::new();
@@ -1566,6 +1698,22 @@ impl Passes {
             self.lines = lines;
             return;
         }
+        self.collect_runs(paragraph);
+    }
+
+    /// Follows `paragraph` as [`Self::follow`] does, and finds its glyph
+    /// runs whatever that decided, for a paint that draws them all here --
+    /// see [`Self::paint`].
+    pub(crate) fn follow_runs(&mut self, paragraph: &mut Paragraph) {
+        self.follow(paragraph);
+        if !self.runs_followed {
+            self.collect_runs(paragraph);
+        }
+    }
+
+    /// Finds the glyph runs of `paragraph`, as last laid out, and the
+    /// decorations' and backgrounds' spans along them.
+    fn collect_runs(&mut self, paragraph: &mut Paragraph) {
         let mut spans = Spans::default();
         let mut background_spans = Spans::default();
         let mut runs = Vec::new();
@@ -1592,6 +1740,7 @@ impl Passes {
         self.background_spans = background_spans.finish();
         self.runs = runs;
         self.lines = lines;
+        self.runs_followed = true;
     }
 
     /// Whether `paragraph`, just laid out, can have its glyphs drawn by
@@ -1706,9 +1855,25 @@ impl Passes {
         paragraph: &mut Paragraph,
         canvas: &Canvas,
         origin: Point,
+        resolve: Option<Resolve>,
     ) {
-        self.follow(paragraph);
-        self.paint_followed(paragraph, canvas, origin);
+        match resolve {
+            None => {
+                self.follow(paragraph);
+                self.paint_followed(paragraph, canvas, origin);
+            }
+            Some(resolve) => {
+                self.follow_runs(paragraph);
+                self.paint_backgrounds(canvas, origin, Some(resolve));
+                for cast in self.casts() {
+                    if let Some(paint) = shadow_paint(cast.shadow, canvas) {
+                        let paint = resolve(&paint, cast.named());
+                        cast.draw(self, canvas, origin, &paint);
+                    }
+                }
+                self.paint_over(canvas, origin, Some(resolve));
+            }
+        }
     }
 
     /// Paints `paragraph`, whose layout this has followed, at `origin`, a
@@ -1729,8 +1894,13 @@ impl Passes {
             return;
         }
         let base = Paint::default();
+        let pen = LinePaint {
+            base: &base,
+            faint: PARAGRAPH_FAINT,
+            resolve: None,
+        };
         if self.skia_glyphs {
-            self.paint_backgrounds(canvas, origin);
+            self.paint_backgrounds(canvas, origin, None);
             for line in 0..self.lines {
                 let spans = decorate::on_line(&self.spans, line);
                 decorate::paint(
@@ -1739,8 +1909,7 @@ impl Passes {
                     &self.boxes,
                     origin,
                     Layer::Beneath,
-                    &base,
-                    PARAGRAPH_FAINT,
+                    pen,
                 );
             }
             paint_glyphs(paragraph, canvas, origin, glyphs);
@@ -1752,13 +1921,12 @@ impl Passes {
                     &self.boxes,
                     origin,
                     Layer::Over,
-                    &base,
-                    PARAGRAPH_FAINT,
+                    pen,
                 );
             }
             return;
         }
-        self.paint_backgrounds(canvas, origin);
+        self.paint_backgrounds(canvas, origin, None);
         // Every shadow before any glyph, each style's run on a line casting
         // its own -- see `Self::casts`. Here, on a canvas this does not
         // record, each glyph is blurred by a mask filter; a context draws
@@ -1768,13 +1936,24 @@ impl Passes {
                 cast.draw(self, canvas, origin, &paint);
             }
         }
-        self.paint_over(canvas, origin);
+        self.paint_over(canvas, origin, None);
     }
 
     /// Every line's glyphs and decorations, in CSS 2.1 Appendix E's order
-    /// for a line box -- see [`Passes`].
-    fn paint_over(&self, canvas: &Canvas, origin: Point) {
+    /// for a line box -- see [`Passes`] -- each run's glyphs in its style's
+    /// paint, made for the page by `resolve` where there is one.
+    fn paint_over(
+        &self,
+        canvas: &Canvas,
+        origin: Point,
+        resolve: Option<Resolve>,
+    ) {
         let base = Paint::default();
+        let pen = LinePaint {
+            base: &base,
+            faint: PARAGRAPH_FAINT,
+            resolve,
+        };
         for line in 0..self.lines {
             let spans = decorate::on_line(&self.spans, line);
             decorate::paint(
@@ -1783,11 +1962,18 @@ impl Passes {
                 &self.boxes,
                 origin,
                 Layer::Beneath,
-                &base,
-                PARAGRAPH_FAINT,
+                pen,
             );
             for run in self.runs_on(line) {
-                run.draw(canvas, origin, &self.paints[run.slot]);
+                let paint = &self.paints[run.slot];
+                match resolve {
+                    Some(resolve) => run.draw(
+                        canvas,
+                        origin,
+                        &resolve(paint, self.colours[run.slot].as_ref()),
+                    ),
+                    None => run.draw(canvas, origin, paint),
+                }
             }
             decorate::paint(
                 canvas,
@@ -1795,8 +1981,7 @@ impl Passes {
                 &self.boxes,
                 origin,
                 Layer::Over,
-                &base,
-                PARAGRAPH_FAINT,
+                pen,
             );
         }
     }
@@ -1805,7 +1990,12 @@ impl Passes {
 impl Passes {
     /// Every line's backgrounds, over the content area of the face each
     /// one's style first has -- see [`StyleBackground`].
-    fn paint_backgrounds(&self, canvas: &Canvas, origin: Point) {
+    fn paint_backgrounds(
+        &self,
+        canvas: &Canvas,
+        origin: Point,
+        resolve: Option<Resolve>,
+    ) {
         for line in 0..self.lines {
             for span in decorate::on_line(&self.background_spans, line) {
                 let background = &self.backgrounds[span.box_index];
@@ -1817,9 +2007,94 @@ impl Passes {
                         origin.x + span.right,
                         baseline + background.face.descent,
                     ),
-                    &background.paint,
+                    &match resolve {
+                        Some(resolve) => resolve(
+                            &background.paint,
+                            background.colour.as_ref(),
+                        ),
+                        None => background.paint.clone(),
+                    },
                 );
             }
+        }
+    }
+}
+
+/// Which slot each range of the text built from `steps` is in, of `styles`
+/// slots: the paragraph's own style at 0 and each pushed one after it.
+fn slot_ranges(steps: &[Step], styles: usize) -> Vec<(Range<usize>, usize)> {
+    let mut stack = Vec::with_capacity(styles);
+    stack.push(0);
+    let mut ranges: Vec<(Range<usize>, usize)> =
+        Vec::with_capacity(steps.len());
+    for step in steps {
+        match step {
+            Step::Push(at) => stack.push(at + 1),
+            Step::Pop if stack.len() > 1 => {
+                stack.pop();
+            }
+            Step::Pop | Step::Placeholder(_) => {}
+            Step::Text(bytes) => {
+                // SAFETY: `stack` starts with the base style's slot and a
+                // pop never takes it, so it is never empty.
+                let index = *stack.last().unwrap();
+                push_range(&mut ranges, bytes.clone(), index);
+            }
+        }
+    }
+    ranges
+}
+
+/// A paragraph as [`ParagraphRecipe::build_drawable`] builds it.
+pub(crate) struct Built {
+    pub(crate) paragraph: Paragraph,
+    pub(crate) passes: Option<Passes>,
+    pub(crate) plain: PlainPaints,
+}
+
+/// What a paragraph without [`Passes`] keeps for a page that needs paints
+/// of its own: its own style's colour as named, and where another style
+/// names another, each style's and which slot each range of its text is in.
+/// SkParagraph keeps every other thing a run is painted from -- the style each
+/// glyph's text is in, and its paint -- but holds that paint's colour as Skia
+/// converted it -- see [`Resolve`]. Empty for a paragraph with passes,
+/// which keep their own.
+#[derive(Default)]
+pub(crate) struct PlainPaints {
+    /// The paragraph's own style's colour, slot 0's.
+    base: Option<NamedColour>,
+    /// Each pushed style's, slot 1's on; empty where each names `base`.
+    pushed: Vec<Option<NamedColour>>,
+    /// Which slot each range of the text is in; empty where each style
+    /// names `base`, which every glyph then resolves from.
+    slots: Vec<(Range<usize>, usize)>,
+}
+
+impl PlainPaints {
+    /// What [`paint_glyphs`] paints each glyph in where `resolve` makes its
+    /// paints for the page.
+    pub(crate) fn resolved<'a>(
+        &'a self,
+        resolve: Resolve<'a>,
+    ) -> GlyphPaints<'a> {
+        GlyphPaints::Resolved {
+            paints: self,
+            resolve,
+        }
+    }
+
+    /// The bytes this holds on the heap, as its lists' capacities.
+    #[cfg(test)]
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.pushed.capacity() * size_of::<Option<NamedColour>>()
+            + self.slots.capacity() * size_of::<(Range<usize>, usize)>()
+    }
+
+    /// The colour named for `slot`.
+    fn colour(&self, slot: usize) -> Option<&NamedColour> {
+        match slot {
+            0 => self.base.as_ref(),
+            _ => self.pushed.get(slot - 1).and_then(Option::as_ref),
         }
     }
 }
@@ -1834,6 +2109,13 @@ pub(crate) enum GlyphPaints<'a> {
     /// The paint of the style SkParagraph reports the glyph's text in on its
     /// line, for a paragraph built without [`Passes`].
     Styles,
+    /// That paint as `resolve` makes it for the page, from the colour named
+    /// for the slot whose text the glyph is from, or for the glyph before
+    /// on its line where it is from none -- see [`PlainPaints`].
+    Resolved {
+        paints: &'a PlainPaints,
+        resolve: Resolve<'a>,
+    },
 }
 
 /// Paints `paragraph`, whose styles draw nothing but glyphs, at `origin` on
@@ -1850,7 +2132,8 @@ pub(crate) fn paint_glyphs(
     origin: Point,
     paints: GlyphPaints<'_>,
 ) {
-    if !may_draw_outlines(canvas, FAKE_ITALIC_SKEW) {
+    let resolving = matches!(paints, GlyphPaints::Resolved { .. });
+    if !resolving && !may_draw_outlines(canvas, FAKE_ITALIC_SKEW) {
         paragraph.paint(canvas, origin);
         return;
     }
@@ -1858,7 +2141,7 @@ pub(crate) fn paint_glyphs(
     // the runs are, since both borrow the paragraph.
     let styles: Vec<Vec<(usize, Paint)>> = match paints {
         GlyphPaints::Slots(..) => Vec::new(),
-        GlyphPaints::Styles => paragraph
+        GlyphPaints::Styles | GlyphPaints::Resolved { .. } => paragraph
             .get_line_metrics()
             .iter()
             .map(|line| {
@@ -1873,31 +2156,42 @@ pub(crate) fn paint_glyphs(
     // The slot the last glyph took, and the line it is on.
     let mut last = (usize::MAX, 0);
     for run in glyph_runs(paragraph) {
-        let glyph_paints: Vec<&Paint> = run
+        // Each glyph's paint as built, and the slot whose colour resolves
+        // it where that matters.
+        let glyph_paints: Vec<(&Paint, usize)> = run
             .starts
             .iter()
-            .map(|&start| match paints {
-                GlyphPaints::Slots(slots, paints) => {
-                    if last.0 != run.line {
-                        last = (run.line, 0);
-                    }
-                    last.1 = decorate::box_at(slots, start as usize)
-                        .unwrap_or(last.1);
-                    &paints[last.1]
-                }
-                GlyphPaints::Styles => {
+            .map(|&start| {
+                let start = start as usize;
+                let styled = || {
                     let line =
                         styles.get(run.line).map_or(&[][..], Vec::as_slice);
-                    let after =
-                        line.partition_point(|(at, _)| *at <= start as usize);
+                    let after = line.partition_point(|(at, _)| *at <= start);
                     line.get(after.saturating_sub(1))
                         .map_or(&unstyled, |(_, paint)| paint)
+                };
+                match paints {
+                    GlyphPaints::Slots(slots, paints) => {
+                        (&paints[slot_at(slots, start, run.line, &mut last)], 0)
+                    }
+                    GlyphPaints::Styles => (styled(), 0),
+                    GlyphPaints::Resolved { paints, .. } => (
+                        styled(),
+                        slot_at(&paints.slots, start, run.line, &mut last),
+                    ),
                 }
             })
             .collect();
         let mut from = 0;
         for piece in glyph_paints.chunk_by(|a, b| a == b) {
             let to = from + piece.len();
+            let (paint, slot) = piece[0];
+            let resolved = match paints {
+                GlyphPaints::Resolved { paints, resolve } => {
+                    Some(resolve(paint, paints.colour(slot)))
+                }
+                _ => None,
+            };
             draw_glyphs(
                 canvas,
                 &run.font,
@@ -1905,11 +2199,27 @@ pub(crate) fn paint_glyphs(
                 &run.positions[from..to],
                 &Shear::None,
                 origin + run.origin,
-                piece[0],
+                resolved.as_ref().unwrap_or(paint),
             );
             from = to;
         }
     }
+}
+
+/// The slot of `slots` whose text the glyph at the UTF-8 offset `start` on
+/// `line` is from, or the one the glyph before it on its line took where it
+/// is from none -- `last`, which this keeps.
+fn slot_at(
+    slots: &[(Range<usize>, usize)],
+    start: usize,
+    line: usize,
+    last: &mut (usize, usize),
+) -> usize {
+    if last.0 != line {
+        *last = (line, 0);
+    }
+    last.1 = decorate::box_at(slots, start).unwrap_or(last.1);
+    last.1
 }
 
 impl Passes {
@@ -1987,14 +2297,24 @@ impl Passes {
 
     /// Paints the layout's backgrounds, with the paragraph's top-left
     /// corner at `origin`: what lies beneath its shadows.
-    pub(crate) fn paint_beneath(&self, canvas: &Canvas, origin: Point) {
-        self.paint_backgrounds(canvas, origin);
+    pub(crate) fn paint_beneath(
+        &self,
+        canvas: &Canvas,
+        origin: Point,
+        resolve: Option<Resolve>,
+    ) {
+        self.paint_backgrounds(canvas, origin, resolve);
     }
 
     /// Paints the layout's glyphs and decorations, without its shadows or
     /// its backgrounds: what lies over its shadows.
-    pub(crate) fn paint_text(&self, canvas: &Canvas, origin: Point) {
-        self.paint_over(canvas, origin);
+    pub(crate) fn paint_text(
+        &self,
+        canvas: &Canvas,
+        origin: Point,
+        resolve: Option<Resolve>,
+    ) {
+        self.paint_over(canvas, origin, resolve);
     }
 }
 
@@ -2023,21 +2343,34 @@ pub(crate) fn draw_shadowed(
             bounds: cast.bounds(passes, at),
         })
         .collect();
-    context.draw_with_shadows(&shadows, |canvas, part| match part {
-        ShadowPart::Beneath => passes.paint_beneath(canvas, at),
-        ShadowPart::Sharp(index) => {
-            let mut paint = Paint::default();
-            paint.set_color4f(casts[index].color(), None);
-            casts[index].draw(passes, canvas, at, &paint);
-        }
-        ShadowPart::Masked(index) => {
-            if let Some(paint) = shadow_paint(casts[index].shadow, canvas) {
-                casts[index].draw(passes, canvas, at, &paint);
+    // On a float page every paint is made for the page, the shadows' and
+    // the backgrounds' as well as the glyphs' -- see `Passes::paint`.
+    let floats = context.composites_in_floats();
+    context.draw_with_shadows(&shadows, |canvas, part, recording| {
+        let page = |paint: &Paint, colour: Option<&NamedColour>| {
+            context.paragraph_paint(paint, colour, recording)
+        };
+        let resolve = floats.then_some(&page as Resolve);
+        let made = |paint: Paint, index: usize| match resolve {
+            Some(resolve) => resolve(&paint, casts[index].named()),
+            None => paint,
+        };
+        match part {
+            ShadowPart::Beneath => passes.paint_beneath(canvas, at, resolve),
+            ShadowPart::Sharp(index) => {
+                let mut paint = Paint::default();
+                paint.set_color4f(casts[index].color(), None);
+                casts[index].draw(passes, canvas, at, &made(paint, index));
             }
-        }
-        ShadowPart::Over => {
-            passes.paint_text(canvas, at);
-            reach_the_clip(canvas);
+            ShadowPart::Masked(index) => {
+                if let Some(paint) = shadow_paint(casts[index].shadow, canvas) {
+                    casts[index].draw(passes, canvas, at, &made(paint, index));
+                }
+            }
+            ShadowPart::Over => {
+                passes.paint_text(canvas, at, resolve);
+                reach_the_clip(canvas);
+            }
         }
     });
     true
@@ -2074,6 +2407,12 @@ impl Cast<'_> {
     /// unpremultiplied.
     pub(crate) fn color(&self) -> Color4f {
         self.shadow.color
+    }
+
+    /// The shadow's colour as its style named it, in the space it named it
+    /// in, where that is known.
+    pub(crate) fn named(&self) -> Option<&NamedColour> {
+        self.shadow.named.as_ref()
     }
 
     /// Whether the shadow casts anything: SkParagraph's rule, a colour with
@@ -2179,7 +2518,7 @@ impl PaintedRun {
 /// wide in pixels at density 2 as at 1 while its text doubled. A transform
 /// that maps no length to a positive one keeps the device sigma.
 fn shadow_paint(shadow: &Shadow, canvas: &Canvas) -> Option<Paint> {
-    let Shadow { shadow, color } = shadow;
+    let Shadow { shadow, color, .. } = shadow;
     if !shadow.has_shadow() {
         return None;
     }
@@ -2695,7 +3034,7 @@ mod tests {
         let origin = Point::new(MARGIN, MARGIN);
         match &mut sheared {
             Some(sheared) => {
-                sheared.paint(&mut paragraph, surface.canvas(), origin);
+                sheared.paint(&mut paragraph, surface.canvas(), origin, None);
             }
             None => paragraph.paint(surface.canvas(), origin),
         }
@@ -3070,6 +3409,7 @@ mod tests {
             &mut paragraph,
             surface.canvas(),
             Point::new(MARGIN, MARGIN),
+            None,
         );
         let info = ImageInfo::new_n32_premul((w, h), None);
         let mut pixels = vec![0u8; (w * h * 4) as usize];
@@ -3655,7 +3995,7 @@ mod tests {
         match passes {
             Some(mut passes) => {
                 passes.lay_out(WIDTH);
-                passes.paint(&mut paragraph, surface.canvas(), origin);
+                passes.paint(&mut paragraph, surface.canvas(), origin, None);
             }
             None => paragraph.paint(surface.canvas(), origin),
         }
@@ -3730,7 +4070,16 @@ mod tests {
         let made = |ops: &[EdgeOp]| {
             let before = BOXES_MADE.get();
             let (_, passes) = edge_recipe(ops).build();
-            (BOXES_MADE.get() - before, passes.is_some())
+            // Whether its passes have anything of their own to do: draw it,
+            // or follow it for an edge inside a ligature.
+            let busy = passes.is_some_and(|passes| {
+                passes.drawn
+                    || passes
+                        .ligature_edges
+                        .as_ref()
+                        .is_some_and(|e| !e.is_empty())
+            });
+            (BOXES_MADE.get() - before, busy)
         };
         for ops in [
             &[EdgeOp::Text("Hamburgefonstiv")][..],

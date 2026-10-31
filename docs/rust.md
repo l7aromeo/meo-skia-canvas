@@ -189,6 +189,8 @@ WebP, GIF and APNG take the canvas's pages as their frames, timed by three `Enco
 - `frame_delays: Vec<u32>` overrides `fps` with a duration in milliseconds per page. It must be empty or hold exactly one entry per page; any other length is `Error::InvalidExportOption` rather than a silent retiming. This is the field `Image::frame_delays()` feeds directly, which is what makes re-encoding an animation possible.
 - `loops: Option<u32>` is how many times it plays, `0` meaning forever, as both GIF and APNG spell it. `1` is the count GIF cannot state outright -- its loop block's zero already means forever, so a single play is spelled by omitting the block, and decoders may report either answer.
 
+A GIF's palettes are refined on a rayon pool of the crate's own, a fixed eight threads started the first time a GIF is encoded, rather than in the pool the caller encodes from. The refinement's result depends on how many threads it runs on, so a fixed count is what makes the same frames encode to the same file on every machine. A caller whose global pool has one thread, or who sets `RAYON_NUM_THREADS=1`, still gets those eight threads while a GIF is encoded: on a 14-core M4 Pro, one 640x500 frame took 29.6 ms that way, against 12.9 ms with the default pool.
+
 The three are read only by the formats that animate. Setting them on a PNG or a PDF does nothing here, where the JavaScript binding refuses the call: a Rust caller building `EncodeOptions` from a default and reusing it across formats would otherwise have to strip fields per format. `fps` is still validated as a positive number, and `frame_delays` as one entry per page, whatever the format.
 
 ## Windows
@@ -245,7 +247,9 @@ Swap `metal` for `vulkan` on Linux and Windows.
 
 On macOS, the Skia that skia-bindings 0.156.0 downloads waits at most one second for each Metal shader and pipeline it compiles, then drops the draw. On a loaded machine a process's first image draw, blend mode or gradient can come back missing, with only a line on stderr ("Compilation took longer than 1000 ms"). The npm package's macOS binary is built without that limit, but a crate build uses whatever Skia skia-bindings gives it.
 
-To build without it, compile Skia from source with this repository's patch, `containers/skia-metal-untimed-compile.patch`. `node scripts/skia-source.mjs prepare`, run in a checkout of this repository, fetches rust-skia at the matching tag, applies the patch and prints the directory to set as `SKIA_SOURCE_DIR` for your build. It is about 1 GB, and the build compiles Skia, which takes a few minutes.
+The same Skia's atlas path renderer can also move a pixel of an anti-aliased path's coverage a step up or down, about 50 of 255 levels of alpha, on Metal and on Vulkan alike: it does to a path it places at an atlas row of 512 or more, and where a path lands depends on everything else the same flush draws. The npm package's macOS and Linux binaries cap the atlas at 512 by 512, so no path is placed there; a crate build does not.
+
+To build without either, compile Skia from source with this repository's patches: on macOS `containers/skia-metal-untimed-compile.patch` and `containers/skia-atlas-size.patch`, on Linux the second of those with `containers/skia-brotli-sources.patch`. `node scripts/skia-source.mjs prepare`, run in a checkout of this repository, fetches rust-skia at the matching tag, applies them and prints the directory to set as `SKIA_SOURCE_DIR` for your build. It is about 1 GB the first time; a later patch list for the same version is made from that tree without downloading anything. The build compiles Skia, which takes a few minutes.
 
 ## Paint
 
@@ -258,6 +262,7 @@ To build without it, compile Skia from source with this repository's patch, `con
 ## Paths
 
 - `Path2D::from_svg(svg_data, FillRule::{NonZero, EvenOdd})` parses SVG path data (the `d=""` form). Invalid input returns `Error::InvalidSvgPath`.
+- `Path2D::to_svg()` writes it back in absolute commands, each number the shortest decimal that reads back as the same `f32`, so lines, quadratics and cubics round-trip exactly. A conic -- what `arc`, `ellipse` and `round_rect` make -- is written as an SVG `A` arc, which `from_svg` rebuilds as a conic within about a thousandth of a pixel; a conic of weight above 1, which SVG cannot state, as quadratics within 1/1024 of a pixel.
 - `PathBuilder` builds one segment by segment: `move_to`, `line_to`, `bezier_curve_to`, `quadratic_curve_to`, `conic_curve_to`, `arc`, `ellipse`, `arc_to`, `rect`, `round_rect`, `round_rect_elliptical`, `add_path`, `close_path`. Same names, arguments and semantics as the `Context2D` methods, minus the current transform, which belongs to a context. `build(fill_rule)` snapshots without ending the build; `PathBuilder::from_path` starts one from an existing `Path2D`.
 - A negative width or height reverses the winding of `rect` and `round_rect`, as it does in a browser, so a reversed rectangle inside another punches a hole under `NonZero`. Two negatives cancel.
 - `arc_to` and the `round_rect` pair return `Error::InvalidRect` for a negative or non-finite radius.

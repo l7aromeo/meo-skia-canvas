@@ -19,13 +19,14 @@ use skia_safe::{
 use crate::node::oblique::style_copies;
 use crate::{
     context::layer::reach_the_clip,
+    css::NamedColour,
     font::{FontFamily, ObliqueAngle},
     font_library::{FontLibrary, instance_coordinates},
     node::{
         oblique::{
-            GlyphPaints, ParagraphRecipe, Passes, StyleColours, add_slnt,
-            draw_shadowed, match_oblique, paint_glyphs, set_coordinates,
-            without_paragraph_cache,
+            Built, GlyphPaints, ParagraphRecipe, Passes, PlainPaints, Resolve,
+            StyleColours, add_slnt, draw_shadowed, match_oblique, paint_glyphs,
+            set_coordinates, without_paragraph_cache,
         },
         typography::{paragraph_style, with_style_axes},
     },
@@ -64,6 +65,9 @@ pub struct ParagraphWrap {
     /// What draws the paragraph's oblique ranges and its decorations,
     /// where it has any.
     pub passes: Option<Passes>,
+    /// What a page that needs paints of its own paints a paragraph without
+    /// passes from -- see `oblique::PlainPaints`.
+    pub plain: PlainPaints,
     /// The collection whose paragraph cache a layout goes without -- see
     /// `oblique::without_paragraph_cache`.
     pub uncached: Option<FontCollection>,
@@ -697,6 +701,7 @@ fn parse_text_style<'a>(
         let (paint_color, paint_space) = skia_paint_color(color4f, &cs);
         paint.set_color4f(paint_color, Some(&paint_space));
         style.set_foreground_paint(&paint);
+        colours.foreground = Some((color4f, cs.clone()));
         text_color = Some(color4f_to_skia_color(color4f, &cs));
         text_srgb = Some(color4f_to_srgb(color4f, Some(&cs)));
     }
@@ -707,6 +712,7 @@ fn parse_text_style<'a>(
         let (paint_color, paint_space) = skia_paint_color(color4f, &cs);
         paint.set_color4f(paint_color, Some(&paint_space));
         style.set_foreground_paint(&paint);
+        colours.foreground = Some((color4f, cs.clone()));
         text_color = Some(color4f_to_skia_color(color4f, &cs));
         text_srgb = Some(color4f_to_srgb(color4f, Some(&cs)));
     }
@@ -719,6 +725,7 @@ fn parse_text_style<'a>(
         let (paint_color, paint_space) = skia_paint_color(color4f, &cs);
         paint.set_color4f(paint_color, Some(&paint_space));
         style.set_background_paint(&paint);
+        colours.background = Some((color4f, cs.clone()));
     }
 
     // fontStyle: { weight, width, slant }
@@ -838,13 +845,17 @@ fn parse_text_style<'a>(
     // what `color4f_to_skia_color` makes of them.
     let mut decoration_color = None;
     let mut decoration_srgb = None;
+    let mut decoration_named = None;
     if let Some((color4f, cs)) =
         colour_option(cx, obj, prefix, "decorationColor")?
     {
         decoration_color = Some(color4f_to_skia_color(color4f, &cs));
         decoration_srgb = Some(color4f_to_srgb(color4f, Some(&cs)));
+        decoration_named = Some((color4f, cs.clone()));
     }
     colours.decoration = decoration_srgb.or(text_srgb);
+    colours.decoration_named =
+        decoration_named.or_else(|| colours.foreground.clone());
     // Fall back to the text color, as CSS's `currentcolor` does and as the
     // native TextStyle documents, and to the style's own colour where none
     // was named at all, which is the black the text is drawn in. Skia
@@ -879,6 +890,7 @@ fn parse_text_style<'a>(
             let inner = format!("{prefix}{key}.");
             let mut color = Color::BLACK;
             let mut srgb = Color4f::from(Color::BLACK);
+            let mut named = (srgb, ColorSpace::new_srgb());
             let mut offset = Point::new(0.0, 0.0);
             let mut blur = 0.0;
             if let Some(shadow_obj) = shadow_obj {
@@ -888,6 +900,7 @@ fn parse_text_style<'a>(
                 {
                     color = color4f_to_skia_color(c, &cs);
                     srgb = color4f_to_srgb(c, Some(&cs));
+                    named = (c, cs.clone());
                 }
 
                 if let Some(offset_val) =
@@ -918,6 +931,7 @@ fn parse_text_style<'a>(
 
             style.add_shadow(TextShadow::new(color, offset, blur as f64));
             colours.shadows.push(srgb);
+            colours.shadows_named.push(named);
         }
     }
 
@@ -1393,10 +1407,15 @@ pub fn build(mut cx: FunctionContext) -> JsResult<BoxedParagraph> {
     match this.recipe.take() {
         Some(recipe) => {
             let uncached = recipe.uncached();
-            let (paragraph, passes) = recipe.build();
+            let Built {
+                paragraph,
+                passes,
+                plain,
+            } = recipe.build_drawable();
             Ok(cx.boxed(RefCell::new(ParagraphWrap {
                 paragraph,
                 passes,
+                plain,
                 uncached,
             })))
         }
@@ -1419,6 +1438,7 @@ pub fn layout(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         paragraph,
         passes,
         uncached,
+        ..
     } = &mut *this;
     without_paragraph_cache(uncached.as_ref(), || {
         paragraph.layout(width);
@@ -1664,7 +1684,10 @@ pub fn drawParagraph(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
     let mut para = para.borrow_mut();
     let ParagraphWrap {
-        paragraph, passes, ..
+        paragraph,
+        passes,
+        plain,
+        ..
     } = &mut *para;
     let ctx = ctx.borrow();
     if let Some(passes) = passes.as_mut()
@@ -1679,12 +1702,29 @@ pub fn drawParagraph(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // In a cell because the draw is handed every recording the page keeps,
     // and painting a paragraph borrows it mutably each time.
     let held = RefCell::new((paragraph, passes));
-    ctx.with_composited_canvas(|canvas| {
+    // On a float page every glyph is drawn run by run in a paint made for
+    // the page -- see `Context2D::paragraph_paint`.
+    let floats = ctx.composites_in_floats();
+    ctx.with_composited_canvas(|canvas, recording| {
         let at = Point::new(x, y);
         let (paragraph, passes) = &mut *held.borrow_mut();
+        let resolve = |paint: &Paint, colour: Option<&NamedColour>| {
+            ctx.paragraph_paint(paint, colour, recording)
+        };
         match passes {
-            Some(passes) => passes.paint(paragraph, canvas, at),
-            None => paint_glyphs(paragraph, canvas, at, GlyphPaints::Styles),
+            Some(passes) => passes.paint(
+                paragraph,
+                canvas,
+                at,
+                floats.then_some(&resolve as Resolve),
+            ),
+            None => {
+                let paints = match floats {
+                    true => plain.resolved(&resolve),
+                    false => GlyphPaints::Styles,
+                };
+                paint_glyphs(paragraph, canvas, at, paints);
+            }
         }
         reach_the_clip(canvas);
     });

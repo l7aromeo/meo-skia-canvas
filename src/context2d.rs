@@ -19,7 +19,6 @@ use std::{
     hash::{Hash, Hasher},
     iter::{self, Peekable},
     str::CharIndices,
-    sync::Arc,
 };
 
 use skia_safe::{
@@ -45,7 +44,7 @@ use crate::{
     },
     context::{
         Context2D as Inner, Dye, initial_root_face,
-        layer::{Layer, reach_the_clip},
+        layer::{Entries, reach_the_clip},
         page::{ExportOptions, Matte},
     },
     css::{
@@ -1543,11 +1542,6 @@ pub struct Context2D {
     /// The canvas's, as a browser does: `getImageData()` on a Display P3
     /// canvas hands back P3 components rather than converting them down.
     pub(crate) canvas_space: PixelColorSpace,
-    /// The text contrast and gamma glyphs are rasterized with in a readback:
-    /// the canvas's, as an export takes them, so that `get_image_data` hands
-    /// back the pixels the canvas exports -- see
-    /// [`CanvasOptions::text_contrast`].
-    pub(crate) canvas_text: (f32, f32),
 }
 
 impl Context2D {
@@ -1563,7 +1557,6 @@ impl Context2D {
             gpu,
             canvas_depth: options.color_type,
             canvas_space: options.color_space,
-            canvas_text: (options.text_contrast, options.text_gamma),
         }
     }
 
@@ -1700,7 +1693,13 @@ impl Context2D {
     /// The tile is captured as vectors rather than rasterized, so it stays
     /// sharp under a transform and survives export to
     /// [`Pdf`](crate::export::ImageFormat::Pdf) and
-    /// [`Svg`](crate::export::ImageFormat::Svg).
+    /// [`Svg`](crate::export::ImageFormat::Svg). A page holding what the
+    /// crate composites itself -- a blur it makes, a filter chain it runs, a
+    /// [`save_layer`](Self::save_layer) -- is kept as well, and a draw the
+    /// pattern dyes paints the page as it draws itself at the density the
+    /// draw is read at: rasterized at the smallest whole density at or
+    /// above the scale the pattern is drawn at, which a scale that is not a
+    /// whole number resamples.
     ///
     /// Takes `source` by `&mut` because capturing the page closes its
     /// current recording.
@@ -1709,29 +1708,9 @@ impl Context2D {
         source: &mut Canvas,
         repeat: PatternRepeat,
     ) -> Pattern {
-        let context = source.context();
-        let dims = context.inner.bounds.size();
-        // The same rule as `capture` above, for the same reason: a pattern
-        // made from a page that is itself painted through a pattern of an
-        // earlier page doubles the rasterization each round.
-        let content = match context.inner.replay_cost() > 0 {
-            true => context
-                .inner
-                .source_image(true)
-                .map(Content::Bitmap)
-                .unwrap_or_default(),
-            false => context
-                .inner
-                .picture()
-                .map(|picture| Content::Vector(picture, dims))
-                .unwrap_or_default(),
-        };
-
-        Pattern::from_inner(CanvasPattern::from_parts(
-            content,
-            dims,
+        Pattern::from_inner(CanvasPattern::of_page(
+            &source.context().inner,
             repeat.to_skia(),
-            SkMatrix::new_identity(),
         ))
     }
 
@@ -2063,6 +2042,7 @@ impl Context2D {
         self.inner = Inner::new(
             self.inner.canvas_color_space.clone(),
             self.canvas_depth.to_skia_color_type(),
+            self.inner.canvas_text,
             (width, height),
         );
     }
@@ -3245,8 +3225,18 @@ impl Context2D {
         // Composited, not bare: the paragraph carries its own paints, so
         // without this wrapper the context's alpha and blend mode would be
         // silently dropped.
-        self.inner.with_composited_canvas(|canvas| {
-            layout.paint(canvas, SkPoint::new(x, y));
+        // On a float page every glyph is drawn run by run in a paint made
+        // for the page, where SkParagraph would draw the paint the
+        // paragraph was built with -- see `Inner::paragraph_paint`.
+        let floats = self.inner.composites_in_floats();
+        let at = SkPoint::new(x, y);
+        self.inner.with_composited_canvas(|canvas, recording| {
+            match floats {
+                true => layout.paint_resolved(canvas, at, &|paint, colour| {
+                    self.inner.paragraph_paint(paint, colour, recording)
+                }),
+                false => layout.paint(canvas, at),
+            }
             reach_the_clip(canvas);
         });
     }
@@ -4230,8 +4220,8 @@ impl Context2D {
             matte: export.matte.map(Matte::from_rgba_linear),
             msaa: export.msaa,
             // Glyphs are rasterized as the canvas's export rasterizes them.
-            text_contrast: self.canvas_text.0,
-            text_gamma: self.canvas_text.1,
+            text_contrast: self.inner.canvas_text.0,
+            text_gamma: self.inner.canvas_text.1,
             ..ExportOptions::default()
         };
         let engine = self.engine();
@@ -4388,7 +4378,7 @@ struct Captured {
     /// The source page's own entries where the content is its picture, so a
     /// draw through a paint holds the page as recorded -- see
     /// `Inner::draw_picture_costing`.
-    entries: Option<Arc<Vec<Layer>>>,
+    entries: Option<Entries>,
 }
 
 fn capture(source: &mut Canvas) -> Option<Captured> {
@@ -5703,7 +5693,7 @@ mod recording_tests {
                     }
                 }
                 Layer::Group(group) if group.within.is_none() => {
-                    wrong(&group.contents, dual, out)
+                    wrong(&group.contents.layers, dual, out)
                 }
                 _ => {}
             }

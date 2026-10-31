@@ -7284,9 +7284,10 @@ fn a_color_filter_reaches_a_canvas_drawn_into_another() {
 /// An SVG export of a canvas drawn into another through a paint -- a
 /// colour filter, a global alpha -- carries what it drew. The SVG backend
 /// draws a picture with a paint through a layer it does not have and
-/// dropped it whole, leaving the page without the canvas; such a draw is
-/// rasterized into the document instead, and one with nothing to carry
-/// stays vector.
+/// dropped it whole, leaving the page without the canvas. Under a colour
+/// filter the draw is rasterized into the document; under an alpha alone
+/// it is written as a group at that opacity; with nothing to carry it stays
+/// vector.
 #[test]
 fn an_svg_keeps_a_canvas_drawn_into_another_through_a_paint() {
     let svg = |set: &dyn Fn(&mut Context2D)| {
@@ -7314,23 +7315,30 @@ fn an_svg_keeps_a_canvas_drawn_into_another_through_a_paint() {
         !svg(&|_| {}).contains("<image"),
         "a canvas drawn with nothing to carry stays vector",
     );
-    for (what, drawn) in [
+    for (what, held, drawn) in [
         (
             "a colour filter",
+            "<image",
             svg(&|ctx| ctx.set_color_filter(Some(&luma))),
         ),
-        ("a global alpha", svg(&|ctx| ctx.set_global_alpha(0.5))),
+        (
+            "a global alpha",
+            "<g opacity=\"0.5\"",
+            svg(&|ctx| ctx.set_global_alpha(0.5)),
+        ),
     ] {
-        assert!(drawn.contains("<image"), "the canvas under {what} is gone");
+        assert!(drawn.contains(held), "the canvas under {what} is gone");
     }
 }
 
 /// An SVG export keeps what a `saveLayer` holds. The SVG backend has no
 /// layers and dropped their contents whole -- a plain layer, a translucent
 /// one, one nested in another and one holding a paragraph all exported as
-/// a page without them -- so a page with a draw inside a layer is
-/// rasterized into the SVG, and one whose layer holds nothing is not. A
-/// PDF draws layers itself, as the raster export does, and stays vector.
+/// a page without them. A layer that composites what it holds as it stands
+/// is taken entry by entry, its square and its paragraph written as
+/// vectors; a translucent one is written as a group at its opacity; one
+/// that holds nothing leaves the page vector. A PDF draws layers itself, as the
+/// raster export does, and stays vector.
 #[test]
 fn an_export_keeps_what_a_layer_holds() {
     let library = FontLibrary::new();
@@ -7380,33 +7388,34 @@ fn an_export_keeps_what_a_layer_holds() {
         "a page whose layer holds nothing stays vector",
     );
     type Draw<'a> = &'a dyn Fn(&mut Context2D);
-    let layered: [(&str, Draw); 4] = [
-        ("a plain layer", &|ctx| {
+    // Each case with what its SVG holds the layer's contents as.
+    let layered: [(&str, &str, Draw); 4] = [
+        ("a plain layer", "<path", &|ctx| {
             ctx.save_layer();
             square(ctx);
             ctx.restore();
         }),
-        ("a translucent layer", &|ctx| {
+        ("a translucent layer", "<g opacity", &|ctx| {
             ctx.save_layer_with(0.5, None, None);
             square(ctx);
             ctx.restore();
         }),
-        ("a nested layer", &|ctx| {
+        ("a nested layer", "<g opacity", &|ctx| {
             ctx.save_layer_with(0.5, None, None);
             ctx.save_layer();
             square(ctx);
             ctx.restore();
             ctx.restore();
         }),
-        ("a layer holding a paragraph", &|ctx| {
+        ("a layer holding a paragraph", "<text", &|ctx| {
             ctx.save_layer();
             ctx.draw_paragraph(&paragraph, 8.0, -4.0);
             ctx.restore();
         }),
     ];
-    for (what, draw) in layered {
+    for (what, held, draw) in layered {
         assert!(
-            has(&export(ImageFormat::Svg, draw), "<image"),
+            has(&export(ImageFormat::Svg, draw), held),
             "the SVG of {what} lost it",
         );
         assert!(
@@ -12384,12 +12393,12 @@ fn an_animated_webp_carries_the_canvas_colour_space() {
 /// its own.
 ///
 /// SVG drops sweep gradients, procedural shaders, filters, shadows and blend
-/// modes alike; PDF renders every one of those correctly and mishandles
-/// blend modes only. Measured, not assumed -- a conic gradient, a shadow and
-/// a `blur()` each come out of a PDF pixel-identical to the raster export,
-/// while a `multiply` moves a fifth of the page. Rasterizing a shadowed page
-/// for PDF because SVG could not draw it would cost fidelity and size for
-/// nothing.
+/// modes alike; PDF renders every one of those correctly but for three
+/// blends it has no counterpart for -- see `export::blend_features`.
+/// Measured, not assumed -- a conic gradient, a shadow and a `blur()` each
+/// come out of a PDF pixel-identical to the raster export. Rasterizing a
+/// shadowed page for PDF because SVG could not draw it would cost fidelity
+/// and size for nothing.
 #[test]
 fn a_pdf_rasterizes_only_the_blend_modes_it_cannot_draw() {
     fn pdf_of(build: impl Fn(&mut Context2D)) -> Vec<u8> {
@@ -12474,7 +12483,9 @@ fn a_pdf_rasterizes_only_the_blend_modes_it_cannot_draw() {
 /// `destination-out` on a canvas of its own. Replayed into a PDF it came out
 /// as a partial shape with straight edges and a rectangular bite: the
 /// picture is flattened before it travels, so the destination has to be told
-/// what was in it.
+/// what was in it. It does, and a PDF writes `destination-out` as it is: the
+/// nested canvas stays vector, and poppler renders the ring within 3 levels
+/// of the canvas at four times its size.
 #[test]
 fn a_pdf_keeps_a_nested_canvas_that_used_a_blend_mode() {
     let mut logo = Canvas::new(120.0, 120.0);
@@ -12498,8 +12509,8 @@ fn a_pdf_keeps_a_nested_canvas_that_used_a_blend_mode() {
         .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
         .expect("encodes");
     assert!(
-        pdf.windows(15).any(|w| w == b"/Subtype /Image"),
-        "the nested canvas goes in as pixels rather than as a mangled path"
+        !pdf.windows(15).any(|w| w == b"/Subtype /Image"),
+        "the nested canvas stays vector"
     );
 }
 
