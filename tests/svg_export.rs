@@ -691,6 +691,61 @@ fn a_canvas_drawn_in_under_alpha_embeds_in_place() {
     assert_eq!(parted, 0);
 }
 
+/// A canvas holding a draw its clip cuts, drawn into another, is written
+/// as what it holds: the cut triangle as a path under its clip, through no
+/// layer, and, where the source also holds a shadowed square and is drawn
+/// through a layer for it, that alone as pixels.
+#[test]
+fn a_canvas_holding_a_cut_draw_is_drawn_in_as_its_entries() {
+    for shadowed in [false, true] {
+        let mut source = Canvas::new(WIDTH, HEIGHT);
+        source.set_gpu(false);
+        {
+            let ctx = source.context();
+            ctx.save();
+            ctx.begin_path();
+            ctx.rect(0.0, 0.0, 40.5, HEIGHT);
+            ctx.clip(FillRule::NonZero);
+            ctx.begin_path();
+            ctx.move_to(10.0, 35.0);
+            ctx.line_to(45.0, 5.0);
+            ctx.line_to(70.0, 35.0);
+            ctx.close_path();
+            ctx.fill(FillRule::NonZero);
+            ctx.restore();
+            if shadowed {
+                shadowed_square(ctx, 50.0);
+            }
+        }
+        let (svg, _) =
+            exported_svg(|ctx| ctx.draw_canvas(&mut source, 0.0, 0.0));
+        assert_eq!(count(&svg, "path"), 1, "shadowed {shadowed}: the triangle");
+        assert_eq!(count(&svg, "image"), usize::from(shadowed));
+        assert!(count(&svg, "clipPath") > 0, "the triangle under its clip");
+    }
+}
+
+/// Inside a layer, a draw an SVG embeds and then, under a clip, a plain one:
+/// the plain draw stays a path, filed apart from the embedded one though
+/// the frame's run it was recorded in closes into the layer's recording.
+#[test]
+fn a_plain_draw_after_an_embedded_one_in_a_layer_stays_vector() {
+    let (svg, parted) = exported_svg(|ctx| {
+        ctx.save_layer();
+        shadowed_square(ctx, 40.0);
+        ctx.save();
+        ctx.begin_path();
+        ctx.rect(2.0, 2.0, 30.0, 30.0);
+        ctx.clip(FillRule::NonZero);
+        ctx.fill_rect(5.0, 5.0, 20.0, 20.0);
+        ctx.restore();
+        ctx.restore();
+    });
+    assert_eq!(count(&svg, "path"), 1, "the plain draw");
+    assert_eq!(count(&svg, "image"), 1, "the shadowed one");
+    assert_eq!(parted, 0);
+}
+
 /// A paragraph under a global alpha inside a clip is clipped once, as the
 /// same paragraph without the alpha is.
 #[test]
