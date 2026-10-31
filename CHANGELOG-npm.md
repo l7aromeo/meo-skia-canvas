@@ -484,6 +484,27 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   page already holds, where the canvas is composited as one image. A PDF
   or SVG writes the crop as it did.
 
+- **An SVG export keeps a draw dyed by a canvas's pattern.** SVG names no
+  paint server for a canvas's pattern, and the export wrote such a draw as a
+  bare path, filled black. It now embeds the draw as pixels, as it does a
+  conic gradient. A PDF writes the pattern as it did.
+
+- **A pattern of a canvas draws the canvas as the canvas draws itself.**
+  `createPattern(canvas)` filled with Skia's picture shader, which
+  rasterizes the canvas's picture once, at the density it is first drawn at,
+  and always as RGBA8888. So a `getImageData` or an export at density 2
+  resampled the canvas's blurs, filter chains and `saveLayer()` groups from
+  density 1 -- a `blur(2px)` rectangle came out up to 16 levels from the
+  canvas's own pixels -- on a GPU canvas a `saveLayer()` under a blur parted
+  at every density, and on Linux, whose native pixels are BGRA, every
+  translucent edge in a pattern came out a level from the canvas's. A draw
+  dyed by a canvas's pattern now rasterizes the canvas as it composites
+  itself, at the density the draw is read at and on the engine it is drawn
+  on, and paints it where the draw covers through the draw's own alpha,
+  blend mode and colour filter: to the byte the pixels a pattern of the
+  canvas's own pixels at that density paints, path, stroke, text, shadow and
+  filter alike. A PDF still writes the pattern from the canvas's picture.
+
 - **A `Paragraph` under a composite operation reaches an SVG, and a PDF
   composites it.** Drawn under a `globalCompositeOperation` other than
   `source-over`, a paragraph is composited as one group through a layer,
@@ -1747,6 +1768,21 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   on the same page 2.94 ms against 2.88, within the runs' spread; the
   eyelash page 1.69 ms against 1.73, no difference. The same stars on the
   CPU, which the cap does not touch, read 1.5% apart between the two builds.
+
+- **An animated GIF is the same file on any machine.** Each frame's palette
+  was chosen by quantette's parallel k-means, which draws its samples from
+  one random stream per worker thread and adds its colour histogram in
+  whatever order the threads finish: the same animation written with one
+  thread and with two came out in different colours, so the file depended
+  on the core count and on `SKIA_CANVAS_THREADS`. The refinement now runs
+  on a pool of its own with a fixed eight threads, started the first time
+  a GIF is written, and the one stage whose sums depended on scheduling,
+  Wu's starting palette, runs on one thread: `examples/node/animated-eye.js`
+  exports the same GIF, byte for byte, at one thread, two and the default.
+  It is faster too. On a 14-core M4 Pro, 640x500 frames of noise over a
+  gradient encode in 12.9 ms for one frame against 22.3 before, 57.1 ms
+  for six against 128.7, and 212.4 ms for 24 against 512.0, the mean of
+  three runs' medians.
 
 ### Added
 

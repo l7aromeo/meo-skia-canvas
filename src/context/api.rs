@@ -621,6 +621,7 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedContext2D> {
     let this = RefCell::new(Context2D::new(
         parent.color_space.clone(),
         parent.color_type,
+        (parent.text_contrast as f32, parent.text_gamma as f32),
         (parent.width, parent.height),
     ));
 

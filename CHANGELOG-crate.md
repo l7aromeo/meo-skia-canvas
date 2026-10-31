@@ -226,6 +226,28 @@ window be changed after it opens.** No signature moves and nothing is removed.
   levels over what a page already holds, where the canvas is composited
   as one image. A PDF or SVG writes the crop as it did.
 
+- **An SVG export keeps a draw dyed by a canvas's pattern.** SVG names no
+  paint server for a pattern made by `create_pattern_from_canvas`, and the
+  export wrote such a draw as a bare path, filled black. It now embeds the
+  draw as pixels, as it does a conic gradient. A PDF writes the pattern as
+  it did.
+
+- **A pattern of a canvas draws the canvas as the canvas draws itself.**
+  `Context2D::create_pattern_from_canvas` filled with Skia's picture shader,
+  which rasterizes the canvas's picture once, at the density it is first
+  drawn at, and always as RGBA8888. So a read or an export at `density: 2`
+  resampled the canvas's blurs, filter chains and `save_layer` groups from
+  density 1 -- a `blur(2px)` rectangle came out up to 16 levels from the
+  canvas's own pixels -- on the GPU engine a `save_layer` under a blur parted
+  at every density, and on Linux, whose native pixels are BGRA, every
+  translucent edge in a pattern came out a level from the canvas's. A draw
+  dyed by a canvas's pattern now rasterizes the canvas as it composites
+  itself, at the density the draw is read at and on the engine it is drawn
+  on, and paints it where the draw covers through the draw's own alpha,
+  blend mode and colour filter: to the byte the pixels a pattern of the
+  canvas's own pixels at that density paints, path, stroke, text, shadow and
+  filter alike. A PDF still writes the pattern from the canvas's picture.
+
 - **A `Paragraph` under a composite operation reaches an SVG, and a PDF
   composites it.** Drawn under a composite operation other than
   `source-over`, set by `Context2D::set_global_composite_operation`, a
@@ -1236,6 +1258,19 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `set_text_wrap(true)` keeps hanging its trailing spaces, as CSS lines do.
   Not changed: right-to-left text, for which nothing has been measured in
   Chrome.
+
+- **An animated GIF is the same file on any machine.** Each frame's palette
+  was chosen by quantette's parallel k-means, which draws its samples from
+  one random stream per thread of the current rayon pool and adds its
+  colour histogram in whatever order the threads finish: the same frames
+  encoded in a pool of one thread and of two came out in different
+  colours. The k-means refinement now runs on a rayon pool of its own with a
+  fixed eight threads, started the first time a GIF is written, and Wu's
+  starting palette, whose parallel sums depended on scheduling, runs on one
+  thread, so the encoded GIF is the same whatever pool the caller encodes
+  in. It is faster too: on a 14-core M4 Pro a 640x500 frame of noise over a
+  gradient encodes in 12.9 ms against 22.3, and 24 of them in 212.4 ms
+  against 512.0.
 
 ### Added
 
