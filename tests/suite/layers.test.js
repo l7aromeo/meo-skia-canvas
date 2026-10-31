@@ -676,6 +676,49 @@ describe("state kept on the JavaScript side", () => {
     }
   });
 
+  test("a frame that sets a value twice puts back what it had before", () => {
+    for (const [prop, make, initial] of all()) {
+      ctx.reset();
+      ctx.save();
+      ctx[prop] = make();
+      ctx[prop] = make();
+      ctx.restore();
+      assert.equal(ctx[prop], initial, prop);
+    }
+  });
+
+  test("frames that set nothing pass a value through to the one that did", () => {
+    for (const [prop, make, initial] of all()) {
+      ctx.reset();
+      const [b, c, d] = [make(), make(), make()];
+      ctx.save();
+      ctx[prop] = b;
+      ctx.saveLayer();
+      ctx.save();
+      ctx[prop] = c;
+      ctx.restore();
+      assert.equal(ctx[prop], b, `${prop} closing the third frame`);
+      ctx.restore();
+      assert.equal(
+        ctx[prop],
+        b,
+        `${prop} closing the second, which set nothing`,
+      );
+
+      // A later frame at the same depth keeps its own value to put back.
+      ctx.save();
+      ctx.save();
+      ctx[prop] = d;
+      ctx.restore();
+      assert.equal(ctx[prop], b, `${prop} closing a later third frame`);
+      ctx.restore();
+
+      ctx[prop] = c;
+      ctx.restore();
+      assert.equal(ctx[prop], initial, `${prop} closing the first frame`);
+    }
+  });
+
   test("saveLayer() saves as save() does", () => {
     for (const [prop, make, initial] of all()) {
       ctx.reset();
@@ -698,8 +741,14 @@ describe("state kept on the JavaScript side", () => {
         ctx[prop] = make();
         clear();
         assert.equal(ctx[prop], initial, `${prop} after clearing`);
+        const kept = make();
+        ctx[prop] = kept;
         ctx.restore();
-        assert.equal(ctx[prop], initial, `${prop}: nothing left to restore`);
+        assert.equal(ctx[prop], kept, `${prop}: nothing left to restore`);
+        ctx.save();
+        ctx[prop] = make();
+        ctx.restore();
+        assert.equal(ctx[prop], kept, `${prop}: a frame after clearing`);
       }
     }
   });
