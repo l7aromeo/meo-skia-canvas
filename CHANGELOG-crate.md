@@ -1224,6 +1224,15 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   Not changed: right-to-left text, for which nothing has been measured in
   Chrome.
 
+- **An animated GIF is the same file on any machine.** Each frame's palette
+  was chosen by quantette's parallel k-means, which draws its samples from
+  one random stream per thread of the current rayon pool and adds its
+  colour histogram in whatever order the threads finish: the same frames
+  encoded in a pool of one thread and of two came out in different
+  colours. Each frame's palette is now chosen on one thread from that
+  frame's pixels alone, and the frames of a batch are quantized in parallel
+  instead, so the encoded GIF is the same at any thread count.
+
 ### Added
 
 - **CSS Color 4's system colours** in the CSS colours the crate reads,

@@ -1735,6 +1735,16 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   eyelash page 1.69 ms against 1.73, no difference. The same stars on the
   CPU, which the cap does not touch, read 1.5% apart between the two builds.
 
+- **An animated GIF is the same file on any machine.** Each frame's palette
+  was chosen by quantette's parallel k-means, which draws its samples from
+  one random stream per worker thread and adds its colour histogram in
+  whatever order the threads finish: the same animation written with one
+  thread and with two came out in different colours, so the file depended
+  on the core count and on `RAYON_NUM_THREADS`. Each frame's palette is now
+  chosen on one thread from that frame's pixels alone, and the frames of a
+  batch are quantized in parallel instead: `examples/node/animated-eye.js`
+  exports the same GIF, byte for byte, at one thread, two and the default.
+
 ### Added
 
 - **CSS Color 4's system colours**, in any case, wherever a colour string

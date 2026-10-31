@@ -146,21 +146,19 @@ impl GifSink<'_> {
         (0, 0, u32::from(self.width), u32::from(self.height))
     }
 
-    /// Writes the held-back frame, now that its disposal is known.
+    /// Takes the held-back frame, now that its disposal is known, and cuts
+    /// out the rectangle it will carry.
     ///
     /// `cleared` says the frame after this one needs a clear canvas, which is
     /// the one case a rectangle cannot serve: disposing to the background
     /// clears only what this frame covered, so to clear the canvas this frame
     /// has to have been the canvas.
-    fn flush(&mut self, cleared: bool) -> Result<(), String> {
-        let Some(pending) = self.pending.take() else {
-            return Ok(());
-        };
+    fn settle(&mut self, cleared: bool) -> Option<Settled> {
+        let pending = self.pending.take()?;
         let region = match cleared {
             true => self.whole(),
             false => pending.region,
         };
-        let (x, y, width, height) = region;
 
         // Quantized against the rectangle rather than the page. A palette
         // chosen for the part that moved describes it better than one
@@ -175,37 +173,72 @@ impl GifSink<'_> {
                 region,
             ),
         };
-        let (palette, indices, transparent) = quantize(width, height, &cropped);
-
-        let mut written = GifFrame {
-            left: x as u16,
-            top: y as u16,
-            width: width as u16,
-            height: height as u16,
-            palette: Some(palette),
-            buffer: indices.into(),
+        Some(Settled {
+            cropped,
+            region,
             delay: pending.delay,
-            // Keep what is under this frame, so that everything outside its
-            // rectangle survives into the next one. That is the whole point
-            // of sending a rectangle, and the same answer `apng.rs` and
-            // `webp.rs` give.
-            //
-            // Background only where the next frame has a pixel to erase and
-            // no way to erase it. Every frame took this branch once, when
-            // each covered the whole canvas and the choice cost nothing:
-            // clearing a canvas about to be painted over completely is the
-            // same picture.
-            dispose: match cleared {
-                true => DisposalMethod::Background,
-                false => DisposalMethod::Keep,
-            },
-            ..GifFrame::default()
-        };
-        written.transparent = transparent;
-        self.encoder
-            .write_frame(&written)
-            .map_err(|e| format!("Could not write a GIF frame: {e}"))
+            cleared,
+        })
     }
+
+    /// Writes `settled` in order, their palettes chosen in parallel.
+    ///
+    /// A frame at a time across the batch, not the threads inside one frame:
+    /// each palette is a function of its frame's pixels alone, so the file is
+    /// the same whatever the batch size or the thread count. See [`quantize`].
+    fn write_settled(&mut self, settled: Vec<Settled>) -> Result<(), String> {
+        let quantized = settled
+            .par_iter()
+            .map(|frame| {
+                let (_, _, width, height) = frame.region;
+                quantize(width, height, &frame.cropped)
+            })
+            .collect::<Vec<_>>();
+
+        for (frame, (palette, indices, transparent)) in
+            settled.into_iter().zip(quantized)
+        {
+            let (x, y, width, height) = frame.region;
+            let mut written = GifFrame {
+                left: x as u16,
+                top: y as u16,
+                width: width as u16,
+                height: height as u16,
+                palette: Some(palette),
+                buffer: indices.into(),
+                delay: frame.delay,
+                // Keep what is under this frame, so that everything outside
+                // its rectangle survives into the next one. That is the whole
+                // point of sending a rectangle, and the same answer `apng.rs`
+                // and `webp.rs` give.
+                //
+                // Background only where the next frame has a pixel to erase
+                // and no way to erase it. Every frame took this branch once,
+                // when each covered the whole canvas and the choice cost
+                // nothing: clearing a canvas about to be painted over
+                // completely is the same picture.
+                dispose: match frame.cleared {
+                    true => DisposalMethod::Background,
+                    false => DisposalMethod::Keep,
+                },
+                ..GifFrame::default()
+            };
+            written.transparent = transparent;
+            self.encoder
+                .write_frame(&written)
+                .map_err(|e| format!("Could not write a GIF frame: {e}"))?;
+        }
+        Ok(())
+    }
+}
+
+/// A frame whose disposal is known, cut to the rectangle it carries and
+/// waiting for its palette.
+struct Settled {
+    cropped: Vec<u8>,
+    region: (u32, u32, u32, u32),
+    delay: u16,
+    cleared: bool,
 }
 
 impl FrameSink for GifSink<'_> {
@@ -213,7 +246,8 @@ impl FrameSink for GifSink<'_> {
         self.write_batch(slice::from_ref(frame))
     }
 
-    /// Places the batch's frames, then writes them a frame behind.
+    /// Places the batch's frames in order, then quantizes and writes them a
+    /// frame behind.
     ///
     /// Placing is where the work went: a frame carries the rectangle it
     /// differs from its predecessor in, so the quantizing and the LZW that
@@ -235,6 +269,7 @@ impl FrameSink for GifSink<'_> {
             .map(|frame| frame.eight().into_owned())
             .collect::<Vec<_>>();
 
+        let mut settled = Vec::with_capacity(frames.len());
         for (frame, eight) in frames.iter().zip(narrowed) {
             let whole = (0, 0, frame.width, frame.height);
 
@@ -258,7 +293,7 @@ impl FrameSink for GifSink<'_> {
                 ),
             };
 
-            self.flush(cleared)?;
+            settled.extend(self.settle(cleared));
             self.pending = Some(Pending {
                 eight,
                 width: frame.width,
@@ -271,13 +306,14 @@ impl FrameSink for GifSink<'_> {
                 },
             });
         }
-        Ok(())
+        self.write_settled(settled)
     }
 
     fn finish(mut self: Box<Self>) -> Result<(), String> {
         // Nothing follows the last frame, so nothing needs a clear canvas
         // after it.
-        self.flush(false)?;
+        let last = self.settle(false).into_iter().collect();
+        self.write_settled(last)?;
         // GIF's trailer is written when the encoder drops, and dropping is
         // where a write error would otherwise be swallowed. `into_inner`
         // writes it now and hands the error back.
@@ -459,7 +495,15 @@ fn quantize(
         // gives LZW noise to encode and moves every pixel rather than the
         // ones that needed it.
         .quantize_method(QuantizeMethod::kmeans())
-        .parallel(true)
+        // Serial, so that the palette is a function of the pixels alone.
+        // quantette's parallel mode splits each stage into one chunk per
+        // thread of the current pool -- k-means draws its samples from one
+        // random stream per chunk, and Wu's histogram adds its chunks in
+        // whatever tree rayon's work stealing builds -- so the same frame
+        // came out with different colours on a machine with a different
+        // number of cores. The parallelism is across frames instead: see
+        // `GifSink::write_settled`.
+        .parallel(false)
         .input_image(image)
         .output_srgb8_indexed_image();
 
@@ -981,5 +1025,108 @@ mod tests {
         assert_eq!(repeat(Some(4)), Repeat::Finite(3));
         // Nobody means "zero plays", and reading it as one beats a panic.
         assert_eq!(repeat(Some(0)), Repeat::Finite(0));
+    }
+
+    /// Four frames of a gradient under per-pixel noise, with a square that
+    /// moves: thousands of colours, so the palette is chosen rather than
+    /// found, and a rectangle that changes from frame to frame.
+    fn busy_frames() -> Vec<Frame> {
+        let (width, height) = (192u32, 144u32);
+        let mut state = 0x9E37_79B9_u32;
+        let mut noise = move || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 24) as u8 / 8
+        };
+        (0..4)
+            .map(|n| {
+                let pixels = (0..height)
+                    .flat_map(|y| (0..width).map(move |x| (x, y)))
+                    .flat_map(|(x, y)| {
+                        let inside = (x / 32 == n + 1) && (y / 32 == 2);
+                        let r = (x * 255 / width) as u8;
+                        let g = (y * 255 / height) as u8;
+                        let b = if inside { 40 } else { 200 };
+                        [r, g, b]
+                    })
+                    .collect::<Vec<_>>()
+                    .chunks(3)
+                    .flat_map(|c| {
+                        [
+                            c[0].saturating_add(noise()),
+                            c[1].saturating_add(noise()),
+                            c[2].saturating_sub(noise()),
+                            255,
+                        ]
+                    })
+                    .collect();
+                Frame {
+                    pixels: Pixels::Eight(pixels),
+                    width,
+                    height,
+                    delay_ms: 40,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_file_does_not_depend_on_how_many_threads_wrote_it() {
+        // The palette was chosen by k-means sampling one random stream per
+        // worker thread, so the same frames written on a machine with more
+        // cores came out with different colours.
+        let frames = busy_frames();
+        let written = |threads: usize, batched: bool| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("a thread pool")
+                .install(|| match batched {
+                    true => {
+                        let first = &frames[0];
+                        let spec = SequenceSpec {
+                            chroma: ChromaSampling::Full,
+                            lossless: false,
+                            width: first.width,
+                            height: first.height,
+                            frames: frames.len(),
+                            loops: None,
+                            quality: 90.0,
+                            density: 1.0,
+                            color: ColorProfile::of(PixelColorSpace::Srgb),
+                            space: PixelColorSpace::Srgb,
+                            depth: FrameDepth::Eight,
+                            bits: None,
+                        };
+                        let mut bytes = Cursor::new(Vec::new());
+                        {
+                            let mut sink = super::super::start(
+                                ImageFormat::Gif,
+                                &spec,
+                                &mut bytes,
+                            )
+                            .expect("the spec is well formed");
+                            sink.write_batch(&frames).expect("a batch");
+                            sink.finish().expect("the encoder closes");
+                        }
+                        bytes.into_inner()
+                    }
+                    false => encoded(&frames, None),
+                })
+        };
+        let one = written(1, false);
+        for (threads, batched) in [(1, true), (2, false), (2, true), (8, true)]
+        {
+            let other = written(threads, batched);
+            assert_eq!(
+                decoded(&other),
+                decoded(&one),
+                "{threads} threads, batched {batched}: decoded frames differ \
+                 from one thread's"
+            );
+            assert!(
+                other == one,
+                "{threads} threads, batched {batched}: the bytes differ"
+            );
+        }
     }
 }
