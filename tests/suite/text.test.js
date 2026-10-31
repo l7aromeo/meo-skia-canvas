@@ -2,7 +2,7 @@
 
 "use strict";
 
-const { assert, describe, test } = require("../runner"),
+const { assert, describe, test, beforeEach } = require("../runner"),
   { Canvas, FontLibrary, ParagraphBuilder } = require("../../lib");
 
 // The families the machine itself holds, captured before any test registers
@@ -3037,12 +3037,6 @@ describe("top, middle and bottom are the em square's", () => {
     os = require("os"),
     path = require("path");
   const AMSTELVAR = "tests/assets/fonts/AmstelvarAlpha-VF.ttf";
-  FontLibrary.use("EmOswald", [
-    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
-  ]);
-  // Its `hhea` puts 1900 above and 500 below, its typographic metrics 1500
-  // and 500: 79.17 against 75, which tells the two rules apart.
-  FontLibrary.use("EmAmstelvar", [AMSTELVAR]);
   // The same face with its typographic ascender and descender zeroed, which
   // Chrome divides as the face's ascent and descent divide it.
   const zeroed = Buffer.from(fs.readFileSync(AMSTELVAR));
@@ -3058,7 +3052,18 @@ describe("top, middle and bottom are the em square's", () => {
     "amstelvar-zero-typo.ttf",
   );
   fs.writeFileSync(zeroedPath, zeroed);
-  FontLibrary.use("EmZeroTypo", [zeroedPath]);
+  // Registered before each test rather than once: tests elsewhere in this
+  // file call `FontLibrary.reset()`, which would leave these resolving to
+  // the default face.
+  beforeEach(() => {
+    FontLibrary.use("EmOswald", [
+      "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    ]);
+    // Its `hhea` puts 1900 above and 500 below, its typographic metrics 1500
+    // and 500: 79.17 against 75, which tells the two rules apart.
+    FontLibrary.use("EmAmstelvar", [AMSTELVAR]);
+    FontLibrary.use("EmZeroTypo", [zeroedPath]);
+  });
 
   // Chrome 156: how far each baseline is above the alphabetic one.
   const CHROME = {
