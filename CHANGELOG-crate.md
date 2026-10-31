@@ -1705,7 +1705,9 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   draws -- so the same page can export differently depending on what was
   drawn before it. The npm package's macOS and Linux binaries
   cap the atlas at 512 by 512; docs/rust.md says how to build Skia with that
-  patch. Why row 512 is unknown.
+  patch. Why row 512 is unknown. Building with it costs up to about 8% of a
+  GPU page dense with small paths -- 2000 small stars at 1280 by 960, 6.78
+  ms against 6.29 on an M4 Pro -- and nothing measurable on a typical page.
 
 - **On macOS a GPU frame can differ by a level at a few pixels with what
   the GPU drew before it, in any build.** The same renderer: a blurred

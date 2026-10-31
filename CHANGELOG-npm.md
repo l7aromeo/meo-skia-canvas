@@ -1687,6 +1687,14 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   pixels goes to Skia's next path renderer. Why row 512 is unknown. Not
   every frame is order-independent yet -- see Known, and not fixed here.
 
+  The cap costs time where a page holds enough small paths to fill more
+  than one atlas. Drawn on the GPU and read back, on an M4 Pro on Metal,
+  the mean of three runs' medians in a release build: 2000 small stars on a
+  1280 by 960 page take 6.78 ms against 6.29, 7.8% more; 400 stroked curves
+  on the same page 2.94 ms against 2.88, within the runs' spread; the
+  eyelash page 1.69 ms against 1.73, no difference. The same stars on the
+  CPU, which the cap does not touch, read 1.5% apart between the two builds.
+
 ### Added
 
 - **CSS Color 4's system colours**, in any case, wherever a colour string
