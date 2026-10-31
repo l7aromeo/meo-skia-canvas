@@ -471,6 +471,16 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **`fontBoundingBoxAscent` and `fontBoundingBoxDescent` are measured from
+  the `textBaseline` set.** At every baseline but `alphabetic` they were a
+  second baseline offset away: at `top`, 96px Oswald reported an ascent of
+  -114.5 and a descent of 256.8, where the box runs from 0 to 142.3. Each
+  value at a baseline is now its `alphabetic` value moved by that
+  baseline's `alphabeticBaseline`, which is how Chrome 156 reports all six.
+  `actualBoundingBoxAscent` and `actualBoundingBoxDescent`, and the path
+  `outlineText` returns, are measured and placed the same way, as the text
+  is drawn.
+
 - **A canvas drawn in through a source rectangle draws its edges where the
   canvas does.** `drawCanvas()` given a source rectangle that cuts what
   the canvas draws clipped it there, and the clip cut every path drawn
