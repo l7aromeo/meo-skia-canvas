@@ -1,12 +1,16 @@
 //! GIF, which Skia can read and cannot write.
 
-use std::slice;
+use std::{slice, sync::OnceLock};
 
-use rayon::prelude::*;
+use rayon::{ThreadPool, ThreadPoolBuilder, prelude::*};
 
 use gif::{DisposalMethod, Encoder, Frame as GifFrame, Repeat};
 use quantette::{
-    ImageRef, PaletteSize, Pipeline, QuantizeMethod, deps::palette::Srgb,
+    ImageRef, PaletteSize,
+    color_space::{oklab_to_srgb8, srgb8_to_oklab_par},
+    deps::palette::Srgb,
+    kmeans::{Kmeans, KmeansOptions},
+    wu::{BinnerF32x3, WuF32x3},
 };
 
 use super::{
@@ -33,6 +37,46 @@ const OPAQUE_AT: u8 = 128;
 /// The last, so the quantizer is asked for the other 255 and its own indices
 /// need no shifting.
 const TRANSPARENT: u8 = 255;
+
+/// How many threads a frame's palette is refined on, whatever the machine.
+///
+/// Fixed rather than taken from the global pool, because quantette's
+/// parallel k-means cuts each batch of samples into one chunk per thread of
+/// the pool it runs in and draws each chunk from its own random stream: the
+/// palette is a function of the pixels and of this number. A number that
+/// followed the core count, `SKIA_CANVAS_THREADS` or `RAYON_NUM_THREADS`,
+/// would make the file follow it too, which is the one thing a GIF written
+/// twice must not do.
+///
+/// Eight by measurement, on a 14-core M4 Pro encoding 640x500 frames of
+/// noise over a gradient, the mean of three rounds' medians at 4, 8 and 16
+/// threads: 24 frames in 240.9, 212.4 and 205.3 ms; 6 frames in 62.9, 57.1
+/// and 55.9; one frame in 12.9, 12.9 and 12.7. Sixteen is at most 3% faster
+/// than eight, inside the rounds' spread, for twice the threads; four is 10%
+/// to 13% slower on the frames of an animation.
+///
+/// On a machine with fewer cores than this the palette is the same and the
+/// refinement's threads share the cores there are: oversubscribed, not
+/// wrong. That case has not been timed.
+const PALETTE_THREADS: usize = 8;
+
+/// The pool [`PALETTE_THREADS`] names, made the first time a GIF is written,
+/// so a process that never writes one never starts it.
+static PALETTE_POOL: OnceLock<Result<ThreadPool, String>> = OnceLock::new();
+
+/// [`PALETTE_POOL`], started on first use.
+fn palette_pool() -> Result<&'static ThreadPool, String> {
+    PALETTE_POOL
+        .get_or_init(|| {
+            ThreadPoolBuilder::new()
+                .num_threads(PALETTE_THREADS)
+                .thread_name(|index| format!("gif-palette-{index}"))
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map_err(|e| format!("Could not start the GIF palette's threads: {e}"))
+}
 
 /// Milliseconds in the hundredth of a second GIF89a counts a frame delay in.
 ///
@@ -183,9 +227,10 @@ impl GifSink<'_> {
 
     /// Writes `settled` in order, their palettes chosen in parallel.
     ///
-    /// A frame at a time across the batch, not the threads inside one frame:
-    /// each palette is a function of its frame's pixels alone, so the file is
-    /// the same whatever the batch size or the thread count. See [`quantize`].
+    /// The frames of the batch in parallel, and the stages inside each frame
+    /// as [`quantize`] places them: each palette is a function of its frame's
+    /// pixels and of [`PALETTE_THREADS`] alone, so the file is the same
+    /// whatever the batch size or the caller's thread count.
     fn write_settled(&mut self, settled: Vec<Settled>) -> Result<(), String> {
         let quantized = settled
             .par_iter()
@@ -193,7 +238,7 @@ impl GifSink<'_> {
                 let (_, _, width, height) = frame.region;
                 quantize(width, height, &frame.cropped)
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
 
         for (frame, (palette, indices, transparent)) in
             settled.into_iter().zip(quantized)
@@ -426,6 +471,10 @@ fn repeat(loops: Option<u32>) -> Repeat {
     }
 }
 
+/// A frame quantized: its palette as RGB triples, each pixel's index into it,
+/// and the index reserved for transparency where the frame has one.
+type Quantized = (Vec<u8>, Vec<u8>, Option<u8>);
+
 /// A palette and one index per pixel, in k-means-refined Oklab.
 ///
 /// The transparent pixels keep whatever colour they carry while the palette
@@ -446,7 +495,7 @@ fn quantize(
     width: u32,
     height: u32,
     eight: &[u8],
-) -> (Vec<u8>, Vec<u8>, Option<u8>) {
+) -> Result<Quantized, String> {
     let transparent = transparent_index(eight);
     let opaque: Vec<Srgb<u8>> = eight
         .as_chunks::<BYTES_PER_PIXEL>()
@@ -456,56 +505,82 @@ fn quantize(
         .collect();
 
     let image = ImageRef::new(width, height, &opaque).unwrap_or_default();
+    let palette_size = match transparent {
+        Some(_) => PaletteSize::from_u8_clamped(TRANSPARENT),
+        None => PaletteSize::MAX,
+    };
 
-    let quantized = Pipeline::new()
-        .palette_size(match transparent {
-            Some(_) => PaletteSize::from_u8_clamped(TRANSPARENT),
-            None => PaletteSize::MAX,
-        })
-        // k-means, which the pipeline runs in Oklab.
-        //
-        // Wu's method alone is the fast path, and "visibly coarser on a
-        // gradient" was the whole of the reason given for not taking it.
-        // Measured since, on three 1200x900 pages against the pixels that
-        // were drawn -- root-mean-square error a channel, and the file the
-        // choice produces:
-        //
-        //           k-means            Wu
-        //   grad    18.5ms  73.9KB  rms 2.25    16.7ms  73.4KB  rms 2.85
-        //   chart   16.0    18.1        0.56    11.9    18.1        0.53
-        //   photo   22.1   201.7        8.19    14.8   218.8        9.07
-        //
-        // So the coarseness is real and it is not only the gradient: the
-        // photographic page is both further from its pixels and 17 KB
-        // larger under Wu. Wu is 35% to 50% faster and marginally better on
-        // a flat chart, which is the one drawing that has few enough colours
-        // for the refinement to have nothing to do.
-        //
-        // The sample budget is left at the crate's own 262144 pixels. It is
-        // already at the knee: doubling it changes no error in the second
-        // decimal and costs 22% to 34% of the time, and halving it is 6% to
-        // 16% faster for the photographic page's 8.10 becoming 8.19 -- a cut
-        // on the one axis k-means is here for.
-        //
-        // No ditherer, which is a choice rather than an omission. Floyd-
-        // Steinberg roughly doubles the file -- measured on the same three
-        // drawings at 600x450, the gradient 30.8 KB to 65.7 and the
-        // photographic page 58.8 to 134.5 -- and raises the error on all
-        // three at once, 2.17 to 2.58, 1.13 to 1.32 and 8.19 to 9.99. It
-        // gives LZW noise to encode and moves every pixel rather than the
-        // ones that needed it.
-        .quantize_method(QuantizeMethod::kmeans())
-        // Serial, so that the palette is a function of the pixels alone.
-        // quantette's parallel mode splits each stage into one chunk per
-        // thread of the current pool -- k-means draws its samples from one
-        // random stream per chunk, and Wu's histogram adds its chunks in
-        // whatever tree rayon's work stealing builds -- so the same frame
-        // came out with different colours on a machine with a different
-        // number of cores. The parallelism is across frames instead: see
-        // `GifSink::write_settled`.
-        .parallel(false)
-        .input_image(image)
-        .output_srgb8_indexed_image();
+    // k-means, run in Oklab, from Wu's palette as its starting centroids:
+    // the stages quantette's own pipeline runs, called one by one so that
+    // each runs where its result cannot depend on the thread count.
+    //
+    // Wu's method alone is the fast path, and "visibly coarser on a
+    // gradient" was the whole of the reason given for not taking it.
+    // Measured since, on three 1200x900 pages against the pixels that were
+    // drawn -- root-mean-square error a channel, and the file the choice
+    // produces:
+    //
+    //           k-means            Wu
+    //   grad    18.5ms  73.9KB  rms 2.25    16.7ms  73.4KB  rms 2.85
+    //   chart   16.0    18.1        0.56    11.9    18.1        0.53
+    //   photo   22.1   201.7        8.19    14.8   218.8        9.07
+    //
+    // So the coarseness is real and it is not only the gradient: the
+    // photographic page is both further from its pixels and 17 KB larger
+    // under Wu. Wu is 35% to 50% faster and marginally better on a flat
+    // chart, which is the one drawing that has few enough colours for the
+    // refinement to have nothing to do.
+    //
+    // The sample budget is left at the crate's own 262144 pixels. It is
+    // already at the knee: doubling it changes no error in the second
+    // decimal and costs 22% to 34% of the time, and halving it is 6% to 16%
+    // faster for the photographic page's 8.10 becoming 8.19 -- a cut on the
+    // one axis k-means is here for.
+    //
+    // No ditherer, which is a choice rather than an omission. Floyd-
+    // Steinberg roughly doubles the file -- measured on the same three
+    // drawings at 600x450, the gradient 30.8 KB to 65.7 and the
+    // photographic page 58.8 to 134.5 -- and raises the error on all three
+    // at once, 2.17 to 2.58, 1.13 to 1.32 and 8.19 to 9.99. It gives LZW
+    // noise to encode and moves every pixel rather than the ones that
+    // needed it.
+    //
+    // Where each stage runs:
+    //
+    // - The conversion to Oklab and the final mapping of each pixel to its
+    //   nearest palette entry are one function a pixel, so they run on the
+    //   global pool: however they are split, every pixel gets the same answer.
+    // - Wu's histogram runs on one thread. quantette's parallel version adds
+    //   its f64 moments with `reduce_with`, in whatever tree rayon's work
+    //   stealing builds, so its sums -- and the palette -- could differ run to
+    //   run. It is the cheapest stage, about 1% of a frame.
+    // - The k-means refinement runs in [`PALETTE_POOL`]: quantette's minibatch
+    //   k-means, whose only dependence on the pool is how many threads it has,
+    //   and that is [`PALETTE_THREADS`] everywhere. The serial alternative is a
+    //   different algorithm, online k-means, one update a sample: on one thread
+    //   it spent 14.3 ms of a 640x500 frame where minibatch spent 11.7.
+    let oklab = image.map_ref(srgb8_to_oklab_par);
+    let quantized = match WuF32x3::run_image(
+        oklab.as_ref(),
+        BinnerF32x3::oklab_from_srgb8(),
+    ) {
+        Some(wu) => {
+            let centroids = wu.palette(palette_size);
+            let kmeans = palette_pool()?.install(|| {
+                Kmeans::run_image_par(
+                    oklab.as_ref(),
+                    centroids,
+                    KmeansOptions::new(),
+                )
+            });
+            oklab
+                .as_ref()
+                .map_to_indexed(kmeans.into_parallel_color_map())
+                .map(|palette| oklab_to_srgb8(&palette))
+        }
+        // No pixels: an empty frame quantizes to nothing.
+        None => Default::default(),
+    };
 
     let mut palette: Vec<u8> = quantized
         .palette()
@@ -529,7 +604,7 @@ fn quantize(
 
     // Handed back rather than recomputed by the caller, which was the second
     // full alpha scan.
-    (palette, indices, transparent)
+    Ok((palette, indices, transparent))
 }
 
 #[cfg(test)]
@@ -950,7 +1025,8 @@ mod tests {
             delay_ms: 100,
         };
         let (palette, indices, _) =
-            quantize(frame.width, frame.height, &frame.eight());
+            quantize(frame.width, frame.height, &frame.eight())
+                .expect("the palette pool starts");
         assert_eq!(
             palette.len(),
             (TRANSPARENT as usize + 1) * 3,
@@ -965,7 +1041,8 @@ mod tests {
             ..frame
         };
         let (palette, indices, _) =
-            quantize(opaque.width, opaque.height, &opaque.eight());
+            quantize(opaque.width, opaque.height, &opaque.eight())
+                .expect("the palette pool starts");
         let highest = *indices.iter().max().expect("two pixels");
         assert!(
             (highest as usize + 1) * 3 <= palette.len(),

@@ -189,6 +189,8 @@ WebP, GIF and APNG take the canvas's pages as their frames, timed by three `Enco
 - `frame_delays: Vec<u32>` overrides `fps` with a duration in milliseconds per page. It must be empty or hold exactly one entry per page; any other length is `Error::InvalidExportOption` rather than a silent retiming. This is the field `Image::frame_delays()` feeds directly, which is what makes re-encoding an animation possible.
 - `loops: Option<u32>` is how many times it plays, `0` meaning forever, as both GIF and APNG spell it. `1` is the count GIF cannot state outright -- its loop block's zero already means forever, so a single play is spelled by omitting the block, and decoders may report either answer.
 
+A GIF's palettes are refined on a rayon pool of the crate's own, a fixed eight threads started the first time a GIF is encoded, rather than in the pool the caller encodes from. The refinement's result depends on how many threads it runs on, so a fixed count is what makes the same frames encode to the same file on every machine. A caller whose global pool has one thread, or who sets `RAYON_NUM_THREADS=1`, still gets those eight threads while a GIF is encoded: on a 14-core M4 Pro, one 640x500 frame took 29.6 ms that way, against 12.9 ms with the default pool.
+
 The three are read only by the formats that animate. Setting them on a PNG or a PDF does nothing here, where the JavaScript binding refuses the call: a Rust caller building `EncodeOptions` from a default and reusing it across formats would otherwise have to strip fields per format. `fps` is still validated as a positive number, and `frame_delays` as one entry per page, whatever the format.
 
 ## Windows
