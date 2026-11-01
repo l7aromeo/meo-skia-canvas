@@ -1763,6 +1763,81 @@ fn an_instances_em_square_follows_its_mvar() {
     }
 }
 
+/// The font box is the first available font's ascent and descent, as Chrome
+/// 156 reports them: `hhea`'s, or the typographic ones under
+/// `USE_TYPO_METRICS`, without the line gap, and whatever face a fallback
+/// draws in. Chrome rounds to whole pixels and this does not, so each is held
+/// within half a pixel of Chrome's figure, `hanging` within four fifths of it.
+#[test]
+fn the_font_box_is_the_first_available_fonts_own() {
+    /// Half a pixel: the most Chrome's rounding to whole pixels moves one.
+    const ROUNDING: f32 = 0.5;
+    let amstelvar = std::fs::read("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+        .expect("bundled Amstelvar");
+    // A line gap of 200 of 2000 in `hhea`, and optionally `USE_TYPO_METRICS`,
+    // whose typographic metrics carry a gap of 400.
+    let gapped = |use_typo: bool| {
+        let mut font = amstelvar.clone();
+        let tables = u16::from_be_bytes([font[4], font[5]]) as usize;
+        for entry in (0..tables).map(|i| 12 + 16 * i) {
+            let at = u32::from_be_bytes(
+                font[entry + 8..entry + 12].try_into().expect("an offset"),
+            ) as usize;
+            match &font[entry..entry + 4] {
+                b"hhea" => {
+                    font[at + 8..at + 10].copy_from_slice(&200i16.to_be_bytes())
+                }
+                b"OS/2" if use_typo => font[at + 63] |= 0x80,
+                _ => {}
+            }
+        }
+        font
+    };
+    let library = FontLibrary::new();
+    library
+        .register_font_from_data("RustBoxGap", &gapped(false))
+        .expect("registers");
+    library
+        .register_font_from_data("RustBoxGapTypo", &gapped(true))
+        .expect("registers");
+    let measure = |family: &str, text: &str| {
+        let mut canvas = Canvas::new(10.0, 10.0);
+        let ctx = canvas.context();
+        ctx.set_font(&Font::new(family, 100.0));
+        ctx.measure_text(text, None)
+    };
+    // Chrome 156: ascent, descent, hanging, ideographic.
+    let chrome = [
+        ("RustBoxGap", [95.0, 25.0, 76.0, -25.0]),
+        ("RustBoxGapTypo", [75.0, 25.0, 60.0, -25.0]),
+        (oswald(), [119.0, 29.0, 95.2, -29.0]),
+    ];
+    for (family, [ascent, descent, hanging, ideographic]) in chrome {
+        let m = measure(family, "H");
+        for (what, got, want, limit) in [
+            ("ascent", m.font_bounding_box_ascent, ascent, ROUNDING),
+            ("descent", m.font_bounding_box_descent, descent, ROUNDING),
+            ("hanging", m.hanging_baseline, hanging, 0.8 * ROUNDING),
+            ("ideographic", m.ideographic_baseline, ideographic, ROUNDING),
+        ] {
+            assert!(
+                (got - want).abs() <= limit,
+                "{family} {what}: {got} against Chrome's {want}"
+            );
+        }
+    }
+    let (alone, fallback) =
+        (measure(oswald(), "H"), measure(oswald(), "H\u{6f22}"));
+    assert_eq!(
+        fallback.font_bounding_box_ascent,
+        alone.font_bounding_box_ascent
+    );
+    assert_eq!(
+        fallback.font_bounding_box_descent,
+        alone.font_bounding_box_descent
+    );
+}
+
 #[test]
 fn reset_clears_the_page_and_the_state() {
     let mut canvas = Canvas::new(10.0, 10.0);

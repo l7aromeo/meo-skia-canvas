@@ -161,27 +161,22 @@ pub struct TextMetrics {
     /// Taken from the face's own metrics rather than the drawn glyphs, so a
     /// run of `"x"` reports the same value as one with ascenders.
     ///
-    /// The value is the font's `hhea` ascender over its units per em, on
-    /// every platform. Skia reaches fonts through CoreText on macOS,
-    /// FreeType on Linux and DirectWrite on Windows, and a font may carry
-    /// three different answers -- `hhea`, `OS/2` `sTypo*` and `OS/2`
-    /// `usWin*` disagree in most files. Reporting `hhea` everywhere is what
-    /// makes a line box computed on one machine correct on another, and
-    /// `tests/suite/context2d.test.js` asserts it against two fonts chosen
-    /// so that only `hhea` satisfies both.
+    /// The value is the first available font's own ascent at the font size:
+    /// `hhea`'s ascender, or `OS/2`'s typographic ascender where the face
+    /// sets `USE_TYPO_METRICS`, without the line gap, and the same whatever
+    /// face a fallback draws any of the glyphs in -- what Chrome 156 reports,
+    /// less its rounding to whole pixels. Skia reaches fonts through CoreText
+    /// on macOS, FreeType on Linux and DirectWrite on Windows; CoreText
+    /// and Skia's FreeType scaler both read those two tables by that rule.
     ///
-    /// A browser is entitled to a different answer and usually gives one:
-    /// CSS 2.1 §10.8.1 leaves `line-height: normal` to the user agent and
-    /// only recommends 1.0 to 1.2. Chrome on macOS reports 0.9199em of
-    /// ascent for Helvetica, which is no table in the file -- it comes from
-    /// the platform text stack -- against the 0.7700em `hhea` holds. A
-    /// design ported from a browser will lay out tighter here for that
-    /// reason, and the difference is in the ascent.
+    /// Chrome on macOS adds about 15% to the ascent of faces whose family is
+    /// Helvetica, Times or Courier -- 92 of 100px for Helvetica, whose
+    /// `hhea` gives 77 -- which is in no table of the file. This reports the
+    /// face's own; docs/browser-differences.md has the figures.
     pub font_bounding_box_ascent: f32,
     /// Distance below the baseline the font can reach, string-independent.
     ///
-    /// The font's `hhea` descender over its units per em, with the same
-    /// cross-platform guarantee as
+    /// The first available font's own descent, by the same rule as
     /// [`font_bounding_box_ascent`](Self::font_bounding_box_ascent).
     pub font_bounding_box_descent: f32,
     /// Distance from the selected baseline up to the top of the em square.
