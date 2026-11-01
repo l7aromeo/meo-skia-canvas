@@ -208,6 +208,21 @@ pub(crate) fn blend_features(
 /// from it.
 pub(crate) const NOMINAL_DPI: f32 = 72.0;
 
+/// The quality a lossy encoder takes where none is given: JPEG, WebP and
+/// AVIF, and a PDF's images where a quality below 1 asks for JPEG.
+///
+/// The value Chrome's `toDataURL` and `toBlob` use for `image/jpeg` and
+/// `image/webp` when the argument is left out; the HTML Standard leaves the
+/// default to the user agent.
+pub(crate) const DEFAULT_QUALITY: f32 = 0.92;
+
+/// The `encoding_quality` that has Skia's PDF backend write every image it
+/// encodes losslessly, Flate-compressed: above 100, where 100 or under is
+/// the quality of a JPEG for an opaque image (`SkPDFBitmap.cpp`,
+/// `serialize_image`; `SkPDFDocument.h`, `fEncodingQuality`). An image that
+/// already holds JPEG bytes is written as those bytes either way.
+pub(crate) const LOSSLESS_PDF_ENCODING_QUALITY: i32 = 101;
+
 /// The top of the quality scale the encoders take.
 ///
 /// A hundred, because they speak in percent while this crate's public dial
@@ -835,7 +850,7 @@ pub enum ChromaSampling {
 /// use meo_skia_canvas::prelude::*;
 ///
 /// let options = EncodeOptions {
-///     quality: 0.8,
+///     quality: Some(0.8),
 ///     density: 2.0,
 ///     ..EncodeOptions::default()
 /// };
@@ -843,8 +858,13 @@ pub enum ChromaSampling {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EncodeOptions {
     /// Lossy-encoder quality, from `0.0` to `1.0`. Ignored by the lossless
-    /// formats. Defaults to `0.92`, and is clamped into range.
-    pub quality: f32,
+    /// formats. `None`, the default, is each format's own: 0.92 for JPEG,
+    /// WebP and AVIF, and lossless for the pixels a PDF holds. A PDF writes
+    /// its images as JPEG only at an explicit quality below `1.0` -- the
+    /// pixels it embeds for what it cannot draw as vectors at full chroma
+    /// unless [`jpeg_downsample`](Self::jpeg_downsample) is set -- and a JPEG
+    /// file drawn onto the page keeps its own bytes whatever this says.
+    pub quality: Option<f32>,
     /// Scale applied while rasterizing, so `2.0` yields a double-resolution
     /// image from the same drawing. Defaults to `1.0`.
     pub density: f32,
@@ -957,7 +977,9 @@ pub struct EncodeOptions {
     /// into it on the way out.
     pub color_space: Option<PixelColorSpace>,
     /// Whether the JPEG encoder subsamples chroma. Defaults to `false`,
-    /// which keeps full chroma resolution at a larger file size.
+    /// which keeps full chroma resolution at a larger file size. A PDF at an
+    /// explicit [`quality`](Self::quality) below `1.0` takes it for the
+    /// pixels it embeds.
     pub jpeg_downsample: bool,
     /// Multisample count for the rasterizing pass, or `None` for the
     /// backend's default.
@@ -1053,7 +1075,7 @@ pub struct EncodeOptions {
 impl Default for EncodeOptions {
     fn default() -> Self {
         Self {
-            quality: 0.92,
+            quality: None,
             density: 1.0,
             matte: None,
             outline: false,
@@ -1168,13 +1190,12 @@ impl EncodeOptions {
             }
         }
 
-        if !self.quality.is_finite() || !(0.0..=1.0).contains(&self.quality) {
+        if let Some(quality) = self.quality
+            && (!quality.is_finite() || !(0.0..=1.0).contains(&quality))
+        {
             return refuse(
                 "quality",
-                format!(
-                    "expected a number from 0.0 to 1.0, got {}",
-                    self.quality
-                ),
+                format!("expected a number from 0.0 to 1.0, got {quality}"),
             );
         }
         if !self.density.is_finite() || self.density <= 0.0 {
