@@ -3413,9 +3413,16 @@ impl Dye {
         match self {
             // A canvas's pattern is a picture shader to a document, which
             // SVG names no paint server for: a draw dyed by one wrote a bare
-            // path, black. An image's is an image shader, which it writes.
+            // path, black. Skia's PDF backend rasterizes one at the wrong
+            // scale and in the wrong space -- see
+            // `VectorFeatures::CANVAS_PATTERN`. An image's is an image
+            // shader, which both write.
+            // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+            // Re-check: cargo test a_pdf_pattern_is_embedded_at_the_density
+            // with `CANVAS_PATTERN` left out of `PDF_CANNOT`.
             Dye::Pattern(pattern) if pattern.tiling().is_some() => {
                 VectorFeatures::EXOTIC_SHADER
+                    .with(VectorFeatures::CANVAS_PATTERN)
             }
             Dye::Color(..) | Dye::Pattern(_) | Dye::Texture(_) => {
                 VectorFeatures::PLAIN

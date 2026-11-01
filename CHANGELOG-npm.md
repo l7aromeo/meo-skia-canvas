@@ -885,6 +885,8 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 - **A PDF embeds a `saveLayer()` composited by an operation it cannot write, such as `xor` or `lighter`, as pixels instead of drawing it wrong.** ([#439](https://github.com/l7aromeo/meo-skia-canvas/issues/439))
 
+- **A canvas pattern in a PDF is drawn at the export's `density`, and on a Display P3 canvas blends as the canvas does.** ([#442](https://github.com/l7aromeo/meo-skia-canvas/issues/442), [#443](https://github.com/l7aromeo/meo-skia-canvas/issues/443))
+
 - **An SVG of a page with nothing on it is well-formed XML.**
   `toBuffer("svg")` wrote an empty page's root as
   `<svg ... height="40"/ viewBox="0 0 80 40">`: Skia writes an empty
