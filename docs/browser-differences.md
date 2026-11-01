@@ -211,6 +211,17 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   Oswald the ascent is 119.30 here and 119 in Chrome, the descent 28.90
   against 29, the hanging baseline 95.44 against 95.20; Georgia's ascent is
   91.70 against 92.
+- _Helvetica, Times and Courier report the ascent their tables give._
+  Chrome 156 on macOS adds about 15% of the font size to the
+  `fontBoundingBoxAscent` of a face whose own family is Helvetica, Times or
+  Courier -- matched by the font's family name, so the same Helvetica bytes
+  loaded as a web font under another name are adjusted too -- and its
+  `hangingBaseline`, four fifths of that ascent, follows. Nothing in the
+  files says so, and CoreText itself reports the tables' figure. This
+  library reports each face's own ascent. At 100px: Helvetica 77 here and 92
+  in Chrome, Times 75 against 90, Courier 75.39 against 90; Helvetica's
+  hanging baseline 61.60 against 73.60. The descents agree. Arial, Georgia,
+  Menlo, Helvetica Neue and Times New Roman are not adjusted.
 - _The em square that places `top`, `middle` and `bottom` is not snapped to
   a 64th of a pixel._ Both divide the font size at the alphabetic baseline
   as the face's typographic ascender and descender divide it, whether or not
