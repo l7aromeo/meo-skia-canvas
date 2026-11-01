@@ -5710,7 +5710,7 @@ mod recording_tests {
             (PixelColorSpace::DisplayP3, PixelDepth::F32, true),
             (PixelColorSpace::Srgb, PixelDepth::F32, false),
             (PixelColorSpace::DisplayP3, PixelDepth::Uint8, true),
-            (PixelColorSpace::Srgb, PixelDepth::Uint8, false),
+            (PixelColorSpace::Srgb, PixelDepth::Uint8, true),
             (PixelColorSpace::Rec2020Pq, PixelDepth::F32, false),
         ];
         let mut problems = Vec::new();

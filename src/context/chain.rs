@@ -134,8 +134,8 @@ pub(crate) enum Depth {
     /// Floats, as an F16 or F32 page composites; F32 holds either.
     Floats,
     /// Half floats on a canvas of bytes, the canvas's own on one of
-    /// floats: what holds every colour placed on its bytes exactly where
-    /// the GPU blurs it -- see `BlurOp::playback`.
+    /// floats: what holds every translucent colour placed on its bytes
+    /// exactly where the GPU blurs it -- see `BlurOp::playback`.
     ///
     /// What it costs: 256 blurred circles on an eight-bit Display P3 page,
     /// read back, take 1.15 to 1.21 times as long on the GPU as through a

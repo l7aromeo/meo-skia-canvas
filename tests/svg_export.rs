@@ -1133,3 +1133,75 @@ fn every_draw_under_every_state_reaches_the_svg_and_the_pdf() {
     }
     assert!(lost.is_empty(), "{}", lost.join("\n"));
 }
+
+/// The `fill` colours an SVG writes, in the order it writes them.
+fn fills(svg: &[u8]) -> Vec<String> {
+    let mut reader = Reader::from_reader(svg);
+    let mut found = vec![];
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e) | Event::Empty(e)) => found.extend(
+                e.attributes()
+                    .flatten()
+                    .filter(|a| a.key.into_inner() == "fill")
+                    .map(|a| a.value.to_string()),
+            ),
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    found
+}
+
+/// A canvas drawn into another writes the colours its own SVG does, on a
+/// page that keeps a recording for pixels apart from its document: the
+/// pixels recording holds each colour placed on the bytes its product
+/// stores, `color(display-p3 0.2 0.4 0.8 / 0.05)` as `#2D63CB` where the
+/// page's own SVG writes `#1B68D3`, and a document is written from the
+/// colours as they were named.
+#[test]
+fn a_canvas_drawn_in_writes_its_own_colours_into_an_svg() {
+    let page = |space| {
+        Canvas::with_options(
+            40.0,
+            40.0,
+            CanvasOptions {
+                color_space: space,
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas")
+    };
+    let mut failures = vec![];
+    for space in [PixelColorSpace::Srgb, PixelColorSpace::DisplayP3] {
+        for css in [
+            "color(display-p3 0.2 0.4 0.8 / 0.7)",
+            "color(display-p3 0.2 0.4 0.8 / 0.05)",
+            "rgb(30 60 200 / 0.7)",
+        ] {
+            let mut source = page(space);
+            source.context().set_fill_style_css(css).expect("a colour");
+            source.context().fill_rect(5.0, 5.0, 30.0, 30.0);
+            let own = source
+                .to_buffer(ImageFormat::Svg, &EncodeOptions::default())
+                .expect("an SVG");
+            let mut into = page(space);
+            into.context().draw_canvas(&mut source, 0.0, 0.0);
+            let nested = into
+                .to_buffer(ImageFormat::Svg, &EncodeOptions::default())
+                .expect("an SVG");
+            assert!(!fills(&own).is_empty(), "{space:?} {css}: a fill");
+            if fills(&own) != fills(&nested) {
+                failures.push(format!(
+                    "{space:?} {css}: own {:?}, drawn in {:?}",
+                    fills(&own),
+                    fills(&nested)
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}

@@ -9167,8 +9167,22 @@ fn a_translucent_fill_composites_the_way_a_browser_does() {
     // Canvas composites in the sRGB values themselves, not in linear light,
     // which is why the mix below is a plain interpolation of the encoded
     // channels. The four exact rows were read off Chrome 141 for the same
-    // draw; the sweep around them allows two levels for Skia's rounding.
+    // draw, given as CSS as Chrome was given it; the sweep around them
+    // allows two levels for Skia's rounding.
     let backdrop = [40u8, 90, 160];
+    let css = |[r, g, b]: [u8; 3], alpha: f32| {
+        let mut canvas = Canvas::new(4.0, 4.0);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        ctx.set_fill_style_css("rgb(40 90 160)").expect("a colour");
+        ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+        ctx.set_fill_style_css(&format!("rgb({r} {g} {b} / {alpha})"))
+            .expect("a colour");
+        ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+        let data = ctx.get_image_data(0.0, 0.0, 1.0, 1.0).expect("readback");
+        let px = data.pixels();
+        [px[0], px[1], px[2], px[3]]
+    };
     let painted = |source: [u8; 3], alpha: f32| {
         let mut canvas = Canvas::new(4.0, 4.0);
         // Pinned to the raster backend: a GPU rounds a level differently and
@@ -9191,14 +9205,24 @@ fn a_translucent_fill_composites_the_way_a_browser_does() {
         [px[0], px[1], px[2], px[3]]
     };
 
+    // Blue at an alpha of 0.05 is a tie, 1.5 levels premultiplied, which
+    // rounds up as Chrome stores it. Through `RgbaLinear`, whose linear f32
+    // holds 30/255 a few units in the last place low, the product lands just
+    // under the tie and rounds down, a level from Chrome's 153; the sweep
+    // below holds that draw to its two levels.
+    //
+    // At 0.75 the canvas stores the exact product, blue 22.5 levels rounded
+    // up to 23, where Chrome's CPU canvas rounds the colour and the alpha to
+    // bytes first, 30 at 191, and stores 22: over the backdrop's 40 that is
+    // 63 here and 62 there -- see docs/browser-differences.md.
     for (alpha, browser) in [
         (0.05, [47u8, 88, 153, 255]),
         (0.25, [80, 82, 128, 255]),
         (0.5, [120, 75, 95, 255]),
-        (0.75, [160, 67, 62, 255]),
+        (0.75, [160, 67, 63, 255]),
     ] {
         assert_eq!(
-            painted([200, 60, 30], alpha),
+            css([200, 60, 30], alpha),
             browser,
             "alpha {alpha} against the browser"
         );

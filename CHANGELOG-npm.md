@@ -904,6 +904,14 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 - **A canvas pattern in a PDF is written as one tile repeated, rather than as an image of the whole draw, where each tile lands on whole device pixels at a whole `density`.** ([#451](https://github.com/l7aromeo/meo-skia-canvas/issues/451))
 
+- **A translucent colour on an sRGB canvas stores the exact product of its colour and its alpha, on either engine, as every other eight-bit canvas does; Chrome's CPU canvas rounds first.** ([#440](https://github.com/l7aromeo/meo-skia-canvas/issues/440))
+
+- **On the GPU engine, a translucent stroke or `createTexture()` fill on an eight-bit sRGB canvas stores the exact product of its colour and its alpha, as a fill does.** ([#447](https://github.com/l7aromeo/meo-skia-canvas/issues/447))
+
+- **On the GPU engine, an opaque fill covering a whole eight-bit sRGB canvas rounds a colour halfway between two levels up, as a smaller fill does.** ([#458](https://github.com/l7aromeo/meo-skia-canvas/issues/458))
+
+- **A canvas drawn into another writes its own colours into an SVG or a PDF, not the ones placed for its pixels.** ([#452](https://github.com/l7aromeo/meo-skia-canvas/issues/452))
+
 - **An SVG of a page with nothing on it is well-formed XML.**
   `toBuffer("svg")` wrote an empty page's root as
   `<svg ... height="40"/ viewBox="0 0 80 40">`: Skia writes an empty

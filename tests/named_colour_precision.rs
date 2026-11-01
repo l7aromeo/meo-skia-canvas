@@ -215,18 +215,13 @@ const OFF_CANVAS: f32 = 100.0;
 /// The middle of the canvas, which the shadow covers whole.
 const MIDDLE: f32 = SIDE / 2.0;
 
-/// The colour a CPU fill still rounds before it multiplies by its alpha,
-/// where a shadow stores the exact product: green 0.5 at 0.3 is 38.25
-/// levels and stores 38, where the fill rounds 0.5 to 128 and stores 39 of
-/// 77. #440 makes the fill store the product, and this is then empty.
-const FILL_ROUNDS_TWICE: &str = "color(srgb 0.25 0.5 0.75 / 0.3)";
-
 /// An sRGB colour's channels in levels, and its alpha.
 type Levels = ([f64; 3], f64);
 
 /// An eight-bit canvas draws a drop-shadow in the bytes its colour's exact
-/// product rounds to, and in a fill's bytes wherever a fill stores that
-/// product.
+/// product rounds to, which a fill of the colour stores too: green 0.5 at
+/// 0.3 is 38.25 levels and both store 38, where rounding 0.5 to 128 first
+/// would store 39 of 77.
 #[test]
 fn an_eight_bit_drop_shadow_stores_its_colour_s_exact_product() {
     // Each colour with its channels in levels and its alpha, where it names
@@ -237,7 +232,10 @@ fn an_eight_bit_drop_shadow_stores_its_colour_s_exact_product() {
         ("rgb(10.5 20.4 30.6 / 0.3)", Some(([10.5, 20.4, 30.6], 0.3))),
         ("color(display-p3 0 1 0)", None),
         ("#336699", Some(([51.0, 102.0, 153.0], 1.0))),
-        (FILL_ROUNDS_TWICE, Some(([63.75, 127.5, 191.25], 0.3))),
+        (
+            "color(srgb 0.25 0.5 0.75 / 0.3)",
+            Some(([63.75, 127.5, 191.25], 0.3)),
+        ),
         ("rgb(255 128 1 / 0.5)", Some(([255.0, 128.0, 1.0], 0.5))),
     ];
     let pixel = |canvas: &mut Canvas, premultiplied: bool| {
@@ -270,12 +268,7 @@ fn an_eight_bit_drop_shadow_stores_its_colour_s_exact_product() {
                 .collect::<Vec<_>>();
             assert_eq!(pixel(&mut shadow, true), product, "{css}");
         }
-        assert_eq!(
-            pixel(&mut shadow, false) != pixel(&mut fill, false),
-            css == FILL_ROUNDS_TWICE,
-            "{css}: the shadow and a fill should differ only where the fill \
-             rounds twice",
-        );
+        assert_eq!(pixel(&mut shadow, false), pixel(&mut fill, false), "{css}");
     }
 }
 

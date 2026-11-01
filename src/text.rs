@@ -1573,7 +1573,8 @@ impl ParagraphBuilder {
 thread_local! {
     /// Set by a test to paint each paragraph as its caller asked for it,
     /// its shadows SkParagraph's to draw: the control for what
-    /// `node::oblique::Passes` draws in their place.
+    /// `node::oblique::Passes` draws in their place, on a page that makes
+    /// its paragraphs' paints as on one that does not.
     pub(crate) static PAINT_AS_ASKED: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
 }
@@ -1670,6 +1671,10 @@ impl Paragraph {
         origin: SkPoint,
         resolve: Resolve,
     ) {
+        #[cfg(test)]
+        if PAINT_AS_ASKED.get() {
+            return self.paint(canvas, origin);
+        }
         let mut paragraph = self.paragraph.borrow_mut();
         match self.passes.borrow_mut().as_mut() {
             Some(passes) => {

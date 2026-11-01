@@ -2,14 +2,12 @@
 //! colour and its alpha, rounded once, on whichever engine draws the
 //! canvas: `shadowColor`, a CSS `drop-shadow()`, a CanvasKit drop shadow,
 //! and a CanvasKit blend filter over an opaque fill, each cast by or drawn
-//! over an opaque shape -- the blend on the GPU; on the raster backend it is
-//! a fill, and stores what a fill does until #440. The product is the byte
-//! 7.0 stores for a translucent flat colour on such a canvas; the raster
-//! backend's fill rounds the colour and its alpha to bytes first and
-//! premultiplies the bytes, and the two part on about one case in eight
-//! here. The CSS shadow, run by this crate on the raster backend, stored
-//! that rounded fill's 69 for `color(srgb-linear 0.25 0.25 0.25 / 0.5)`
-//! where the product is 68.
+//! over an opaque shape. The product is the byte 7.0 stores for a
+//! translucent flat colour on such a canvas. Skia's legacy blit rounds the
+//! colour and its alpha to bytes first and premultiplies the bytes, and the
+//! two part on about one case in eight here: the CSS shadow, run by this
+//! crate on the raster backend, stored that rounded fill's 69 for
+//! `color(srgb-linear 0.25 0.25 0.25 / 0.5)` where the product is 68.
 //!
 //! The cases lie off the bytes -- see [`OFF_BYTE`] -- since on whole bytes
 //! the two rules store the same, and a sweep of bytes, kept here as the
@@ -148,19 +146,6 @@ fn row(canvas: &mut Canvas, gpu: bool) -> Vec<u8> {
         .to_vec()
 }
 
-/// Whether `route` read on `engine` is held out of the exact sweep: a
-/// CanvasKit blend filter over a fill on the raster backend, which Skia
-/// folds into the paint's colour and blits as it blits any fill, rounding
-/// the colour and its alpha to bytes before the product -- 8,186 of the
-/// 65,536 off-byte cases store a level off it. That is the raster
-/// backend's fill rule, which #440 changes; until then
-/// [`a_blend_filter_over_a_fill_on_the_cpu_misses_until_440`] holds the
-/// count. Asked of the engine the read runs on, not the one it asked for:
-/// a machine with no GPU reads a canvas set to it on the raster backend.
-fn known_miss(route: Route, engine: EngineKind) -> bool {
-    matches!(route, Route::CanvasKitBlend) && engine == EngineKind::Cpu
-}
-
 /// What `routes` store for every grey at every alpha, at the offsets `at`,
 /// against the exact product: each drawn with every engine in `drawn` and
 /// read with every engine in `read`, a row of canvas per alpha, so that no
@@ -233,11 +218,12 @@ fn engines() -> Vec<EngineKind> {
 
 /// Every grey at every alpha, off the bytes, cast or filtered by every
 /// route, stores the exact product, on both engines, drawn with either and
-/// read with either -- but for the one route [`known_miss`] holds out.
+/// read with either.
 #[test]
 fn every_shadow_stores_the_exact_product() {
     println!("engines {:?}", engines());
-    let missed = misses(&Route::ALL, OFF_BYTE, &ENGINES, &ENGINES, known_miss);
+    let missed =
+        misses(&Route::ALL, OFF_BYTE, &ENGINES, &ENGINES, |_, _| false);
     assert!(
         missed.is_empty(),
         "{} missed, first {:#?}",
@@ -262,26 +248,6 @@ fn a_shadow_of_whole_bytes_stores_their_product() {
         missed.is_empty(),
         "{} missed, first {:#?}",
         missed.len(),
-        &missed[..missed.len().min(4)]
-    );
-}
-
-/// The route [`known_miss`] holds out, held to the count it misses by now:
-/// a change to it in either direction fails here, and #440 replaces this
-/// with the route in the exact sweep.
-#[test]
-fn a_blend_filter_over_a_fill_on_the_cpu_misses_until_440() {
-    let missed = misses(
-        &[Route::CanvasKitBlend],
-        OFF_BYTE,
-        &[false],
-        &[false],
-        |_, _| false,
-    );
-    assert_eq!(
-        missed.len(),
-        8186,
-        "the raster backend's blend over a fill, until #440; first {:#?}",
         &missed[..missed.len().min(4)]
     );
 }
