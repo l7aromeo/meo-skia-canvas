@@ -8202,6 +8202,171 @@ mod tests {
         }
     }
 
+    /// A draw dyed by a canvas's pattern paints in a PDF what the page
+    /// composites at the density -- the tile at the scale the draw is
+    /// played at, its repeat, its phase -- embedded as the page composites
+    /// it, to a level: a pixel the draw covers in part is composited into the
+    /// embedded image over nothing and the image over the page, rounded
+    /// twice, as any embedded run with no blend in it is; every other pixel
+    /// to the byte. Cases: under a scale of 3
+    /// at a density of 2, rotated, from a tile 7.5 pixels a side at 2.5,
+    /// under a transform of the pattern's own, and under each repetition.
+    /// Played into a page canvas scaled by the density, as Skia's PDF
+    /// backend scales one.
+    #[test]
+    fn a_pattern_in_a_document_paints_as_the_page_does() {
+        use crate::{
+            canvas::{Canvas, CanvasOptions},
+            context2d::Context2D,
+            geometry::Affine,
+            pattern::PatternRepeat,
+            pixels::PixelColorSpace,
+        };
+        let srgb = ColorSpace::new_srgb();
+        let options = || CanvasOptions {
+            color_space: PixelColorSpace::Srgb,
+            gpu: false,
+            ..CanvasOptions::default()
+        };
+        let none = Affine::IDENTITY;
+        let own =
+            Affine::scale(1.5, 1.5).multiply(&Affine::rotation_radians(0.4));
+        type Case<'a> = (
+            &'a str,
+            f32,
+            f32,
+            PatternRepeat,
+            Affine,
+            &'a dyn Fn(&mut Context2D),
+        );
+        let cases: [Case; 8] = [
+            (
+                "scaled by 3",
+                2.0,
+                10.0,
+                PatternRepeat::Repeat,
+                none,
+                &|ctx| ctx.scale(3.0, 3.0),
+            ),
+            ("rotated", 2.0, 10.0, PatternRepeat::Repeat, none, &|ctx| {
+                ctx.rotate(0.3)
+            }),
+            (
+                "a 7.5-pixel tile",
+                2.5,
+                7.5,
+                PatternRepeat::Repeat,
+                none,
+                &|_| {},
+            ),
+            (
+                "its own transform",
+                2.0,
+                10.0,
+                PatternRepeat::Repeat,
+                own,
+                &|_| {},
+            ),
+            ("repeat", 2.0, 10.0, PatternRepeat::Repeat, none, &|ctx| {
+                ctx.translate(3.0, 5.0)
+            }),
+            (
+                "repeat-x",
+                2.0,
+                10.0,
+                PatternRepeat::RepeatX,
+                none,
+                &|ctx| ctx.translate(3.0, 5.0),
+            ),
+            (
+                "repeat-y",
+                2.0,
+                10.0,
+                PatternRepeat::RepeatY,
+                none,
+                &|ctx| ctx.translate(3.0, 5.0),
+            ),
+            (
+                "no-repeat",
+                2.0,
+                10.0,
+                PatternRepeat::NoRepeat,
+                none,
+                &|ctx| ctx.translate(3.0, 5.0),
+            ),
+        ];
+        for (name, density, side, repeat, pattern_transform, transform) in cases
+        {
+            let mut tile =
+                Canvas::with_options(side, side, options()).expect("a tile");
+            let t = tile.context();
+            t.set_fill_style_css("rgb(200 40 120)").expect("a colour");
+            t.fill_rect(0.0, 0.0, side / 2.0, side);
+            t.set_fill_style_css("rgb(20 160 90)").expect("a colour");
+            t.fill_rect(side / 2.0, 0.0, side / 2.0, side / 3.0);
+            let mut canvas =
+                Canvas::with_options(60.0, 40.0, options()).expect("a page");
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(230 180 40)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, 60.0, 40.0);
+            let mut pattern = ctx.create_pattern_from_canvas(&mut tile, repeat);
+            pattern.set_transform(pattern_transform);
+            transform(ctx);
+            ctx.set_fill_pattern(&pattern);
+            ctx.fill_rect(0.0, 0.0, 60.0, 40.0);
+            let page = ctx.inner.page();
+            let export = ExportOptions {
+                density,
+                color_space: srgb.clone(),
+                surface_color_space: srgb.clone(),
+                surface_color_type: ctx.inner.canvas_color_type,
+                text_contrast: ctx.inner.canvas_text.0,
+                text_gamma: ctx.inner.canvas_text.1,
+                ..ExportOptions::default()
+            };
+            let dims = page.scaled_dimensions(density);
+            let info = ImageInfo::new(
+                dims,
+                ColorType::RGBA8888,
+                AlphaType::Premul,
+                Some(srgb.clone()),
+            );
+            let want = page
+                .composite_into(&export, RenderingEngine::CPU, &info)
+                .expect("the page at the density");
+            let mut recorder = PictureRecorder::new();
+            let document =
+                recorder.begin_recording(Rect::from_isize(dims), true);
+            document.scale((density, density));
+            page.draw_as_document(
+                document,
+                pdf_cannot(&srgb, density),
+                None,
+                export.embedding(),
+                None,
+            )
+            .expect("the document's page");
+            let played = recorder
+                .finish_recording_as_picture(None)
+                .expect("a picture of it");
+            let mut surface =
+                started::raster(&info, None, None).expect("a page");
+            surface.canvas().draw_picture(&played, None, None);
+            let row = info.min_row_bytes();
+            let mut got = vec![0u8; row * info.height() as usize];
+            assert!(surface.read_pixels(&info, &mut got, row, (0, 0)));
+            let worst = want
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(got.as_chunks::<4>().0)
+                .flat_map(|(a, b)| (0..4).map(|k| a[k].abs_diff(b[k])))
+                .max()
+                .unwrap_or(0);
+            assert!(worst <= 1, "{name} at a density of {density}: {worst}");
+        }
+    }
+
     /// A group in a document is written as it was, covering its clip: a
     /// PDF of a group holding a square is the PDF the group writes with no
     /// rectangle to keep to.

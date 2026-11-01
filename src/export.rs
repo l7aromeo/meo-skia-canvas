@@ -52,6 +52,15 @@ pub(crate) struct VectorFeatures(u16);
 impl VectorFeatures {
     /// A blend mode past source-over.
     pub(crate) const BLEND_MODE: Self = Self(1 << 3);
+    /// A canvas's pattern, which a document is handed as a picture shader.
+    /// Skia's PDF backend cannot write one and rasterizes it in
+    /// `make_fallback_shader` (`SkPDFShader.cpp`): at the PDF device's
+    /// unscaled size, so at any density it was a raster at 1, and in no
+    /// colour space, so a tile on a Display P3 page blended in sRGB's
+    /// numbers. Embedded instead, as the page composites it -- see
+    /// `context::page::Page::embed_raster`. Never without
+    /// [`Self::EXOTIC_SHADER`].
+    pub(crate) const CANVAS_PATTERN: Self = Self(1 << 9);
     /// A sweep gradient, a gradient mixed in a working space of its own, a
     /// procedural shader, or a canvas's pattern, which is a picture shader.
     /// SVG names four paint servers and none of these is among them.
@@ -73,13 +82,16 @@ impl VectorFeatures {
     /// a page scaled by a density other than 1 otherwise -- see
     /// `context::page::pdf_cannot`. Never without [`Self::BLEND_MODE`].
     pub(crate) const NESTED_MASKED_BLEND: Self = Self(1 << 8);
-    /// What the PDF backend gets wrong, which is a few blend modes and
-    /// nothing else: a conic gradient, a shadow and a `blur()` all come out
-    /// of it pixel-identical to the raster export -- see [`blend_features`]
+    /// What the PDF backend gets wrong, which is a few blend modes and a
+    /// canvas's pattern: a conic gradient, a shadow and a `blur()` all come
+    /// out of it pixel-identical to the raster export -- see [`blend_features`]
     /// for which blends. On a page composited outside sRGB every blend is
     /// refused as well, and at a density other than 1 a blend written
     /// through a soft mask inside a group -- see `context::page::pdf_cannot`.
-    pub(crate) const PDF_CANNOT: Self = Self::UNMATCHED_BLEND;
+    /// And a canvas's pattern, which it rasterizes at the wrong scale and in
+    /// the wrong space -- see [`Self::CANVAS_PATTERN`].
+    pub(crate) const PDF_CANNOT: Self =
+        Self(Self::UNMATCHED_BLEND.0 | Self::CANVAS_PATTERN.0);
     /// A canvas drawn into another through a paint -- a global alpha, a
     /// blend mode or a colour filter -- which reaches its picture through a
     /// layer. The SVG backend has no layers and drops the picture whole.

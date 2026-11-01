@@ -528,6 +528,8 @@ read the math functions and every length unit.
 
 - **A PDF embeds a `Context2D::save_layer` composited by an operation it cannot write, such as `Xor` or `Lighter`, as pixels instead of drawing it wrong.** ([#439](https://github.com/l7aromeo/meo-skia-canvas/issues/439))
 
+- **A canvas pattern in a PDF is drawn at the export's density, and on a Display P3 canvas blends as the canvas does.** ([#442](https://github.com/l7aromeo/meo-skia-canvas/issues/442), [#443](https://github.com/l7aromeo/meo-skia-canvas/issues/443))
+
 - **An SVG of a page with nothing on it is well-formed XML.**
   `Canvas::to_buffer` with `ImageFormat::Svg` wrote an empty page's root as
   `<svg ... height="40"/ viewBox="0 0 80 40">`: Skia writes an empty

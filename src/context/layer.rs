@@ -845,11 +845,10 @@ impl TileSource {
 /// On pixels, and so in the raster a document embeds, the draw is kept
 /// whole -- see [`Replay`] -- and drawn again with the pattern as its
 /// shader, through its own alpha, blend mode and colour filter, as a draw
-/// dyed by a pattern of the canvas's pixels is. In a document the draw is
-/// played as recorded, with the page's picture as its pattern -- which
-/// Skia's PDF backend writes as an image, and its SVG backend drops: a
-/// canvas's pattern asks an SVG export to embed the draw -- see
-/// `Dye::vector_features`.
+/// dyed by a pattern of the canvas's pixels is. Both document backends
+/// embed such a draw -- see `VectorFeatures::CANVAS_PATTERN` -- so a
+/// document plays it as recorded, with the page's picture as its pattern,
+/// only where it was handed it as vector.
 #[derive(Clone, Debug)]
 pub struct PatternDraw {
     pub source: Arc<TileSource>,

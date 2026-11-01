@@ -549,3 +549,140 @@ fn every_blend_a_pdf_writes_renders_as_the_canvas_in_poppler() {
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
+
+/// A 40-pixel tile holding a square with a smaller one composited onto it
+/// by `operation`, as a repeating pattern over most of a page in `space`.
+fn patterned(space: PixelColorSpace, operation: BlendMode) -> Canvas {
+    let mut tile = Canvas::with_options(
+        40.0,
+        40.0,
+        CanvasOptions {
+            color_space: space,
+            gpu: false,
+            ..CanvasOptions::default()
+        },
+    )
+    .expect("a canvas");
+    let t = tile.context();
+    t.set_fill_style(RgbaLinear::from_srgb8(200, 40, 120, 1.0));
+    t.fill_rect(0.0, 0.0, 30.0, 30.0);
+    t.set_global_composite_operation(operation);
+    t.set_fill_style(RgbaLinear::from_srgb8(20, 160, 90, 1.0));
+    t.fill_rect(10.0, 10.0, 25.0, 25.0);
+    let mut canvas = backdrop(space);
+    let ctx = canvas.context();
+    let pattern =
+        ctx.create_pattern_from_canvas(&mut tile, PatternRepeat::Repeat);
+    ctx.set_fill_pattern(&pattern);
+    ctx.fill_rect(20.0, 20.0, 160.0, 80.0);
+    canvas
+}
+
+/// The colour images in `pdf` -- not their soft masks -- each as its width
+/// and its pixels, RGB, inflated from the stream Skia's PDF backend writes.
+fn colour_images(pdf: &[u8]) -> Vec<(usize, Vec<[u8; 3]>)> {
+    use std::io::Read;
+    let text = |range: &[u8]| String::from_utf8_lossy(range).into_owned();
+    let field = |dict: &str, name: &str| -> Option<usize> {
+        let at = dict.find(name)? + name.len();
+        dict[at..].split_whitespace().next()?.parse().ok()
+    };
+    let mut images = Vec::new();
+    let mut from = 0;
+    while let Some(at) = pdf[from..]
+        .windows(15)
+        .position(|w| w == b"/Subtype /Image")
+        .map(|i| i + from)
+    {
+        from = at + 15;
+        let start = pdf[..at].windows(2).rposition(|w| w == b"<<").expect("<<");
+        let end =
+            at + pdf[at..].windows(2).position(|w| w == b">>").expect(">>");
+        let dict = text(&pdf[start..end]);
+        if dict.contains("/DeviceGray") {
+            continue;
+        }
+        let (width, length) = (
+            field(&dict, "/Width").expect("a width"),
+            field(&dict, "/Length").expect("a length"),
+        );
+        let body = end
+            + pdf[end..]
+                .windows(6)
+                .position(|w| w == b"stream")
+                .expect("a stream")
+            + 6;
+        let body = body + usize::from(pdf[body] == b'\r') + 1;
+        let mut raw = Vec::new();
+        flate2::read::ZlibDecoder::new(&pdf[body..body + length])
+            .read_to_end(&mut raw)
+            .expect("a Flate stream");
+        images.push((width, raw.as_chunks::<3>().0.to_vec()));
+    }
+    images
+}
+
+/// A draw dyed by a canvas's pattern is embedded in a PDF as the page
+/// composites it, at the export's density: one image of the draw, 160 by 80
+/// pixels at a density of 1 and that times the density beyond -- not
+/// Skia's PDF backend's raster of a picture shader, made at the unscaled
+/// page's size whatever the density.
+#[test]
+fn a_pdf_pattern_is_embedded_at_the_density() {
+    for density in [1.0f32, 2.0, 3.0] {
+        let pdf = patterned(PixelColorSpace::Srgb, BlendMode::SourceOver)
+            .to_buffer(
+                ImageFormat::Pdf,
+                &EncodeOptions {
+                    density,
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("a PDF");
+        let widths: Vec<usize> =
+            colour_images(&pdf).iter().map(|(w, _)| *w).collect();
+        assert_eq!(
+            widths,
+            [(160.0 * density) as usize],
+            "at a density of {density}"
+        );
+    }
+}
+
+/// A pattern tile on a Display P3 page is composited in the page's space,
+/// as the canvas composites it -- `multiply` of two colours there is not
+/// `multiply` of their sRGB bytes -- and embedded in eight-bit sRGB: the
+/// embedded draw's pixels are the canvas's own read as sRGB, to a level,
+/// in a tile's base, its overlap and its second square.
+#[test]
+fn a_pattern_tile_on_a_display_p3_page_blends_in_its_space_in_a_pdf() {
+    let mut canvas = patterned(PixelColorSpace::DisplayP3, BlendMode::Multiply);
+    let pdf = pdf_of(&mut canvas);
+    let images = colour_images(&pdf);
+    let [(width, pixels)] = images.as_slice() else {
+        panic!("{} colour images for one draw", images.len());
+    };
+    let mut wrong = Vec::new();
+    // Page positions; the draw, and so the image, starts at (20, 20).
+    for (x, y) in [(45usize, 45usize), (25, 25), (72, 72)] {
+        let data = canvas
+            .context()
+            .get_image_data_as(
+                x as f32,
+                y as f32,
+                1.0,
+                1.0,
+                PixelExportOptions {
+                    color_space: PixelColorSpace::Srgb,
+                    ..PixelExportOptions::default()
+                },
+            )
+            .expect("a pixel");
+        let want = &data.pixels()[..3];
+        let got = pixels[(y - 20) * width + (x - 20)];
+        if (0..3).any(|k| want[k].abs_diff(got[k]) > 1) {
+            wrong.push(format!("({x}, {y}): {got:?} for {want:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
