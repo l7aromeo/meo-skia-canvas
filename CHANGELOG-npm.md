@@ -753,6 +753,8 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A blurred path on an eight-bit wide-gamut canvas stores a fill's bytes inside it.** ([#433](https://github.com/l7aromeo/meo-skia-canvas/issues/433))
+
 - **`fontBoundingBoxAscent` and `fontBoundingBoxDescent` are the first
   available font's own.** They were SkParagraph's line box, which spreads
   half the face's line gap above the ascent and half below the descent, and
@@ -946,9 +948,7 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   fill's bytes, translucent or not and under any `globalAlpha`. An sRGB canvas
   is unchanged. Chrome converts a colour onto such a canvas through the same
   approximation, so where that crosses a rounding boundary Chrome is a level
-  off and this is not -- see docs/browser-differences.md. Not yet exact there:
-  a blurred path, which stores a level off a fill of its colour on an sRGB
-  canvas too.
+  off and this is not -- see docs/browser-differences.md.
 
   The exact colour is drawn as a plain paint colour where Skia lands it on
   its bytes, which each thread finds once per colour by drawing it onto a
