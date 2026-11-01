@@ -922,6 +922,18 @@ pub enum Replay {
     },
 }
 
+impl Replay {
+    /// The draw at full alpha: a run's named line colour no longer
+    /// multiplied by a `globalAlpha`, which a path's replay does not hold.
+    pub fn opaque(&self) -> Self {
+        let mut replay = self.clone();
+        if let Replay::Text { global_alpha, .. } = &mut replay {
+            *global_alpha = 1.0;
+        }
+        replay
+    }
+}
+
 impl PatternDraw {
     fn playback(&self, canvas: &SkCanvas, target: Target) {
         canvas.save();

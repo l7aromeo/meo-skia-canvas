@@ -32,6 +32,7 @@ use skia_safe::{
 };
 
 use crate::{
+    context::layer::ExactColour,
     node::utils::{
         color_in_canvas_space, skia_paint_color, skia_paint_color_onto,
     },
@@ -46,6 +47,10 @@ pub(crate) struct Onto {
     /// Whether the filter is built for a page's pixels recording, with its
     /// colours converted here and held unconverted -- see [`Self::exact`].
     pub exact: bool,
+    /// Whether the page stores eight bits a channel, where a shadow's
+    /// colour is placed on the bytes its exact product rounds to -- see
+    /// [`Self::bytes`].
+    pub bytes: bool,
 }
 
 impl Onto {
@@ -55,6 +60,18 @@ impl Onto {
         Self {
             destination,
             exact: false,
+            bytes: false,
+        }
+    }
+
+    /// A filter drawn onto an eight-bit sRGB page in `destination`, its
+    /// colours handed over as a fill's are, and a shadow's placed on the
+    /// bytes its exact product rounds to -- see [`Self::placed`].
+    pub fn bytes(destination: ColorSpace) -> Self {
+        Self {
+            destination,
+            exact: false,
+            bytes: true,
         }
     }
 
@@ -65,7 +82,33 @@ impl Onto {
         Self {
             destination,
             exact: true,
+            bytes: false,
         }
+    }
+
+    /// `color` in `space` placed for a shadow on a page built
+    /// [`Self::bytes`], in the page's space: on the bytes the exact product
+    /// of the colour and its alpha rounds to -- see [`ExactColour::at`] --
+    /// so that its premultiplied colour is a whole byte and the shadow has
+    /// nothing to round. Unplaced, Ganesh's shadow moved a product lying
+    /// within a few thousandths of a level of a half across it:
+    /// `rgb(173 173 173 / 14/255)` cast 10 where the product is 9.498 and a
+    /// fill stores 9. `None` on any other page.
+    pub fn placed(
+        &self,
+        color: Color4f,
+        space: &ColorSpace,
+    ) -> Option<(Color4f, ColorSpace)> {
+        if !self.bytes {
+            return None;
+        }
+        let pixels = PixelColorSpace::matching(&self.destination)?;
+        let rgb = color_in_canvas_space(color, space, pixels)?;
+        let exact =
+            ExactColour::new(rgb, self.destination.clone(), pixels, true);
+        let (placed, alpha) = exact.at(color.a);
+        let [r, g, b] = placed.rgb;
+        Some((Color4f::new(r, g, b, alpha), self.destination.clone()))
     }
 
     /// `color` in `space` as Skia is handed it in a filter drawn onto this
@@ -153,7 +196,9 @@ pub(crate) fn shadow_filter(
         };
     }
     let (color, space) = match onto {
-        Some(onto) => onto.color(color, space),
+        Some(onto) => onto
+            .placed(color, space)
+            .unwrap_or_else(|| onto.color(color, space)),
         None => skia_paint_color(color, space),
     };
     match only {
