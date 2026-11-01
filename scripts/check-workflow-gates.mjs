@@ -18,6 +18,12 @@
 // leaves a job unguarded, and an aggregate without `always()` is itself skipped
 // when a dependency skips -- which is the original defect wearing the fix's
 // clothes.
+//
+// A trigger's own `paths:` filter is refused for the same reason from the
+// other side: it skips the whole run, aggregate included, so the required
+// context never reports -- and it is a second copy of the list file that
+// nothing reads back. rust-ci's push trigger carried one that had drifted to
+// omit `Cargo.lock` and `build.rs`.
 import { execFileSync } from "child_process";
 import { readFileSync } from "fs";
 import { parse } from "yaml";
@@ -49,8 +55,15 @@ const DIR = ".github/workflows";
 // version, and neither was in the list this replaces.
 const MUST_COVER = {
   "rust-ci.txt": {
-    reason: "they compile into the Rust build or pin what it builds against",
-    specs: [":(glob)**/*.rs", "Cargo.toml", "Cargo.lock", "rustfmt.toml"],
+    reason:
+      "they compile into the Rust build, pin what it builds against, or state what links",
+    specs: [
+      ":(glob)**/*.rs",
+      "Cargo.toml",
+      "Cargo.lock",
+      "rustfmt.toml",
+      "THIRD-PARTY-NOTICES.md",
+    ],
   },
   "docs.txt": {
     reason: "the published reference is generated from them",
@@ -93,6 +106,29 @@ export function auditCoverage(list, mustSpecs, watchSpecs, ls = trackedFiles) {
     `${list} does not watch ${uncovered.map((f) => `\`${f}\``).join(", ")}, ` +
       `and a change to one of those would skip this workflow's jobs while its ` +
       `aggregate reported success`,
+  ];
+}
+
+/**
+ * Triggers that filter by `paths:`. The filter takes only a literal list, so
+ * it is a second copy of the workflow's list file that nothing here can
+ * check, and it skips a whole run where the `changes` job would skip jobs
+ * and still report. `paths-ignore` is not refused: it can only widen what
+ * runs past a list, never narrow it.
+ */
+export function auditTriggers(file, text) {
+  const on = parse(text)?.on;
+  if (on === null || typeof on !== "object" || Array.isArray(on)) return [];
+  const filtered = Object.entries(on)
+    .filter(([, spec]) => spec !== null && typeof spec === "object")
+    .filter(([, spec]) => "paths" in spec)
+    .map(([event]) => event);
+  if (filtered.length === 0) return [];
+  return [
+    `${file}: ${filtered.map((e) => `\`${e}\``).join(", ")} ` +
+      `${filtered.length === 1 ? "filters" : "filter"} by \`paths:\`, a copy ` +
+      `of the workflow's list that can drift from it -- let the \`changes\` ` +
+      `job read the list instead`,
   ];
 }
 
@@ -246,12 +282,43 @@ function selfTest() {
   cover("nothing required is vacuously covered", [], ["a.rs"], 0);
   cover("watching more than required is fine", ["a.rs"], ["a.rs", "z.txt"], 0);
 
-  const n = 15;
+  const trigger = (label, text, expected) => {
+    const got = auditTriggers("w.yml", text).length;
+    if (got !== expected) {
+      console.error(
+        `  self-test FAILED: ${label} -- expected ${expected}, got ${got}`,
+      );
+      bad += 1;
+    }
+  };
+  trigger(
+    "unfiltered triggers pass",
+    "on:\n  push:\n    branches: [main]\n  pull_request:\n",
+    0,
+  );
+  trigger(
+    "a push path filter is named",
+    "on:\n  push:\n    paths: [a.rs]\n",
+    1,
+  );
+  trigger(
+    "two filtered triggers are one problem",
+    "on:\n  push:\n    paths: [a]\n  pull_request:\n    paths: [a]\n",
+    1,
+  );
+  trigger(
+    "an ignore list is allowed",
+    "on:\n  push:\n    paths-ignore: [docs/**]\n",
+    0,
+  );
+  trigger("a bare event name passes", "on: push\n", 0);
+
+  const n = 20;
   if (bad === 0) {
     console.log(
       `self-test: ${n} cases, an uncovered job, a phantom dependency, a ` +
-        `missing always() and a required path outside a list are each caught, ` +
-        `and a complete workflow passes`,
+        `missing always(), a required path outside a list and a trigger's own ` +
+        `path filter are each caught, and a complete workflow passes`,
     );
   }
   return bad;
@@ -262,9 +329,10 @@ if (process.argv.includes("--self-test")) {
 }
 
 const problems = [
-  ...Object.entries(GATED).flatMap(([file, id]) =>
-    auditWorkflow(file, id, readFileSync(`${DIR}/${file}`, "utf8")),
-  ),
+  ...Object.entries(GATED).flatMap(([file, id]) => {
+    const text = readFileSync(`${DIR}/${file}`, "utf8");
+    return [...auditWorkflow(file, id, text), ...auditTriggers(file, text)];
+  }),
   ...Object.entries(MUST_COVER).flatMap(([list, { specs }]) =>
     auditCoverage(
       list,
@@ -279,8 +347,8 @@ if (problems.length > 0) {
   for (const p of problems) console.error(`  ${p}`);
   console.error(
     "\nAn aggregate is the only context a ruleset requires for its workflow, " +
-      "so a job outside it is ungated and a path outside its list skips it " +
-      "silently.",
+      "so a job outside it is ungated, a path outside its list skips it " +
+      "silently, and a trigger's own path filter skips the whole run.",
   );
   process.exit(1);
 }
