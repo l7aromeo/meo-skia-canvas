@@ -770,8 +770,8 @@ pub(crate) fn on_gpu(_canvas: &SkCanvas) -> bool {
 /// flat colour in -- see [`ExactColour`]. Converted from sRGB instead, it
 /// lands on the 64-ulp grid Skia's conversion leaves it on. On the CPU the
 /// exact colour is baked as the surface's own components, so it is taken
-/// only on a surface in its space: a page played onto another, as onto the
-/// eight-bit sRGB raster an SVG embeds, is painted `color` converted into
+/// only on a surface in its space: a page played onto another, as a canvas
+/// drawn into one in another space is, is painted `color` converted into
 /// that one.
 pub(crate) fn draw_rect(
     canvas: &SkCanvas,

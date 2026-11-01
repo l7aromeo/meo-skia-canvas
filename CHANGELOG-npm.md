@@ -553,6 +553,20 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   and so is every blend on a canvas in any other colour space, since a PDF
   blends in sRGB where the canvas blends in its own.
 
+- **A PDF or SVG embeds pixels composited as the canvas composites them.** A
+  PDF embeds every draw under a `globalCompositeOperation` other than
+  `source-over` as pixels on a canvas in any colour space but `"srgb"`, with
+  everything beneath it, and an SVG embeds that and what else it cannot write
+  -- filters, shadows, a translucent layer -- on every canvas. Those pixels
+  were composited in eight-bit sRGB whatever the canvas's space and
+  `colorType`, so on a `"display-p3"` canvas `multiply` came out up to 10
+  levels from the canvas's own pixels, `screen` over
+  `color(display-p3 1 0 0)` up to 40, and a float canvas's were rounded to
+  eight bits as they were composited. They are now composited in the canvas's
+  colour space and `colorType`, then converted to sRGB as the vector colours
+  beside them are, each channel of a colour outside sRGB clamped: they store
+  what `getImageData` reads back as sRGB, to the byte.
+
 - **An SVG of a page with nothing on it is well-formed XML.**
   `toBuffer("svg")` wrote an empty page's root as
   `<svg ... height="40"/ viewBox="0 0 80 40">`: Skia writes an empty
