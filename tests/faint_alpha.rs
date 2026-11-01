@@ -463,17 +463,17 @@ fn an_eight_bit_canvas_draws_a_faint_fill_as_before() {
     assert_eq!(read(&mut canvas, PixelDepth::Uint8), before);
 }
 
-/// An eight-bit canvas's shadow takes the global alpha through the shape,
-/// as it did: the shape at 0.3 is 77/255 in the filter's layer, and half of
-/// that rounds to 39, where 0.3 times a half taken together would round to
-/// 38.
+/// An eight-bit canvas's shadow takes the global alpha into its colour, so
+/// the two are rounded once: 0.3 times a half is 38.25/255 and stores 38.
+/// Taken through the shape, 0.3 is 77/255 in the filter's layer and half of
+/// that rounds to 39.
 #[test]
-fn an_eight_bit_canvas_casts_a_shadow_as_before() {
+fn an_eight_bit_canvas_casts_a_shadow_under_global_alpha_as_one_product() {
     let mut canvas = canvas(PixelDepth::Uint8);
     let ctx = canvas.context();
     ctx.set_shadow_color(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.5));
     ctx.set_shadow_offset(OFF_CANVAS, 0.0);
     ctx.set_global_alpha(0.3);
     ctx.fill_rect(-OFF_CANVAS, 0.0, SIDE, SIDE);
-    assert_eq!(read(&mut canvas, PixelDepth::Uint8)[3], 39);
+    assert_eq!(read(&mut canvas, PixelDepth::Uint8)[3], 38);
 }

@@ -1126,18 +1126,20 @@ impl Context2D {
     /// Records the draw `f` makes with a paint it is handed, through the
     /// route its dye and filter take. `replay`, where the draw's kind can be
     /// kept whole, is what a canvas's pattern is drawn through at playback
-    /// -- see [`Replay`].
+    /// -- see [`Replay`]. `lines` where the draw is a run naming a line
+    /// colour; `f` is told which [`Pass`] it draws.
     pub fn render_to_canvas<F>(
         &self,
         paint: &Paint,
         exact: Option<&Paint>,
         features: VectorFeatures,
         replay: Option<Replay>,
+        lines: bool,
         f: F,
     ) where
-        F: Fn(&SkCanvas, &Paint),
+        F: Fn(&SkCanvas, &Paint, Pass),
     {
-        if self.files_through_pattern(paint, features, replay, &f)
+        if self.files_through_pattern(paint, features, replay, lines, &f)
             || self.files_through_chain(paint, exact, features, &f)
         {
             return;
@@ -1148,15 +1150,15 @@ impl Context2D {
         };
         let render_shadow =
             |canvas: &SkCanvas, paint: &Paint, recording: Recording| {
-                if let Some(shadow_paint) =
-                    self.paint_for_shadow_in(paint, recording)
+                if let Some((shadow_paint, pass)) =
+                    self.paint_for_shadow_in(paint, recording, lines)
                 {
                     canvas.save();
                     canvas.set_matrix(
                         &Matrix::translate(self.state.shadow_offset).into(),
                     );
                     canvas.concat(&self.state.matrix);
-                    f(canvas, &shadow_paint);
+                    f(canvas, &shadow_paint, pass);
                     canvas.restore();
                 }
             };
@@ -1177,7 +1179,7 @@ impl Context2D {
                         render_shadow(layer, &layer_paint, recording);
                         // draw normally
                         layer.set_matrix(&self.state.matrix.into());
-                        f(layer, &layer_paint);
+                        f(layer, &layer_paint, Pass::Draw);
                     }
 
                     // transfer the picture contents to the canvas in a
@@ -1204,7 +1206,7 @@ impl Context2D {
                     // draw the dropshadow (if applicable)
                     render_shadow(canvas, paint, recording);
                     // draw with the normal paint
-                    f(canvas, paint_for(recording));
+                    f(canvas, paint_for(recording), Pass::Draw);
                 });
             }
         };
@@ -1226,8 +1228,10 @@ impl Context2D {
     /// a blur is. Any other is held in a group, which composites through the
     /// draw's filter and blend mode as a canvas drawn through a paint does
     /// -- see [`Self::draw_picture_costing`] -- beside a group of its own
-    /// for its shadow; under a blend that covers beyond the draw both are
-    /// held in one more, which the blend composites, as
+    /// for its shadow, whose pixels on an eight-bit sRGB page hold the draw
+    /// without the `globalAlpha` its shadow's colour takes; under a blend
+    /// that covers beyond the draw both are held in one more, which the
+    /// blend composites, as
     /// [`Self::render_to_canvas`] holds them in one picture.
     ///
     /// `false`, filing nothing, for a draw dyed any other way.
@@ -1236,10 +1240,11 @@ impl Context2D {
         paint: &Paint,
         features: VectorFeatures,
         replay: Option<Replay>,
+        lines: bool,
         f: &F,
     ) -> bool
     where
-        F: Fn(&SkCanvas, &Paint),
+        F: Fn(&SkCanvas, &Paint, Pass),
     {
         // An image's paint carries no dye, whatever the fill style is.
         let Dye::Pattern(pattern) = self.state.dye(paint.style()) else {
@@ -1286,7 +1291,7 @@ impl Context2D {
             let mut recorder = PictureRecorder::new();
             let canvas = recorder.begin_recording(bounds, true);
             canvas.set_matrix(&self.state.matrix.into());
-            f(canvas, paint);
+            f(canvas, paint, Pass::Draw);
             recorder.finish_recording_as_picture(None)
         };
         // The draw as a document writes it, less what a group composites
@@ -1301,21 +1306,58 @@ impl Context2D {
         };
         let mut through = plain;
         through.set_shader(None);
-        let tile = layer::PatternDraw {
-            source,
-            matrix: self.state.matrix,
-            pattern_matrix,
-            repeat,
-            plain: recorded,
-            paint: through,
-            clip: None,
-            replay,
+        let unit_of = |paint: Paint, replay: Replay| {
+            let tile = Arc::new(layer::PatternDraw {
+                source: Arc::clone(&source),
+                matrix: self.state.matrix,
+                pattern_matrix,
+                repeat,
+                plain: recorded.clone(),
+                paint,
+                clip: None,
+                replay,
+            });
+            let unit = Entries::new(
+                vec![Layer::Pattern(Arc::clone(&tile))],
+                vec![features],
+            );
+            (tile, unit)
         };
-        let tile = Arc::new(tile);
-        let unit = Entries::new(
-            vec![Layer::Pattern(Arc::clone(&tile))],
-            vec![features],
-        );
+        // On an eight-bit sRGB page the pixels of a shadow under a
+        // `globalAlpha` are cast from the draw without the alpha the
+        // shadow's colour takes -- see `paint_for_shadow_in` -- a run's named
+        // line colour without its `globalAlpha`, so that the two are rounded
+        // once, as they are for a draw dyed any other way. Cast from the draw
+        // at its alpha, the shape was rounded to a byte before the
+        // shadow's colour multiplied it: a pattern of a canvas cast up
+        // to a level from a pattern of its pixels. A document plays the
+        // draw as recorded, at its alpha, under the shadow as named.
+        let moves = self.casts_shadow()
+            && through.alpha_f() < 1.0
+            && through.color_filter().is_none()
+            && self.onto().is_some_and(|onto| onto.bytes);
+        // The shadow's pixels paint, and the group of the draw it is cast
+        // from, holding whatever alpha the shadow's colour did not take.
+        let moved = moves
+            .then(|| {
+                let mut cast = Paint::default();
+                cast.set_anti_alias(true).set_alpha_f(through.alpha_f());
+                self.paint_for_shadow_in(&cast, Recording::Shared, lines)
+            })
+            .flatten()
+            .map(|(mut shadow, pass)| {
+                let mut held = through.clone();
+                held.set_alpha_f(shadow.alpha_f());
+                shadow.set_alpha_f(1.0);
+                let replay = match pass {
+                    Pass::AlphaInShadow => replay.opaque(),
+                    Pass::Draw => replay.clone(),
+                };
+                (shadow, unit_of(held, replay).1)
+            });
+        let (pixels_shadow, shadow_unit) = moved.unzip();
+        let (tile, unit) = unit_of(through, replay);
+        let shadow_unit = shadow_unit.unwrap_or_else(|| unit.clone());
         let rec = |paint: Paint| LayerRec {
             paint: Some(paint),
             ..LayerRec::default()
@@ -1336,12 +1378,17 @@ impl Context2D {
             },
             None => Composite::Layer(rec(filter)),
         };
-        // The shadow of what the group holds, its alpha already in it.
+        // The shadow of what its group holds, its alpha already in it; on
+        // pixels where the shadow's colour took it, the draw without it.
         let mut cast = Paint::default();
         cast.set_anti_alias(true);
-        let shadow = self
-            .paint_for_shadow(&cast)
-            .map(|shadow| Composite::Layer(rec(shadow)));
+        let shadow = self.paint_for_shadow(&cast).map(|shadow| {
+            Composite::Layer(LayerRec {
+                paint: Some(shadow),
+                pixels_paint: pixels_shadow,
+                ..LayerRec::default()
+            })
+        });
         let offset = self.state.shadow_offset;
         let identity = Matrix::new_identity();
         // A group, which the SVG backend drops whole -- see
@@ -1355,7 +1402,7 @@ impl Context2D {
                         shadow,
                         None,
                         identity,
-                        unit.clone(),
+                        shadow_unit.clone(),
                         features.with(VectorFeatures::LAYER),
                         offset,
                     );
@@ -1377,7 +1424,7 @@ impl Context2D {
             }
             // Held in one group the blend composites, each under the
             // transform the draw was made under, moved as the shadow is.
-            let group = |composite: Composite, shift: Point| {
+            let group = |composite: Composite, contents: &Entries, shift| {
                 let shift = Matrix::translate(shift);
                 Layer::Group(Arc::new(Group {
                     composite,
@@ -1386,14 +1433,14 @@ impl Context2D {
                     entries_clipped: false,
                     within: None,
                     contents_matrix: shift,
-                    contents: unit.clone(),
+                    contents: contents.clone(),
                 }))
             };
             let mut held = Vec::with_capacity(2);
             if let Some(shadow) = shadow {
-                held.push(group(shadow, offset));
+                held.push(group(shadow, &shadow_unit, offset));
             }
-            held.push(group(drawn, Point::default()));
+            held.push(group(drawn, &unit, Point::default()));
             let mut blended = Paint::default();
             blended.set_anti_alias(true).set_blend_mode(blend);
             recorder.append_group(
@@ -1449,7 +1496,7 @@ impl Context2D {
         f: &F,
     ) -> bool
     where
-        F: Fn(&SkCanvas, &Paint),
+        F: Fn(&SkCanvas, &Paint, Pass),
     {
         let Some(steps) = self.draw_chain() else {
             return false;
@@ -1471,7 +1518,7 @@ impl Context2D {
             let mut recorder = PictureRecorder::new();
             let canvas = recorder.begin_recording(bounds, true);
             canvas.set_matrix(&self.state.matrix.into());
-            f(canvas, &paint);
+            f(canvas, &paint, Pass::Draw);
             recorder.finish_recording_as_picture(None)
         };
         let entry = match self.recorder.borrow().dual() {
@@ -2109,7 +2156,8 @@ impl Context2D {
             exact.as_ref(),
             features,
             replay,
-            |canvas, paint| {
+            false,
+            |canvas, paint, _| {
                 if let Some(tile) = self.state.texture(style) {
                     // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
                     // Re-check: mix the PathEffect into the paint and draw
@@ -2545,7 +2593,8 @@ impl Context2D {
             pixels.as_ref(),
             features,
             None,
-            |canvas, paint| {
+            false,
+            |canvas, paint, _| {
                 // A paint here makes Skia draw the picture through a temporary
                 // layer, which is what keeps the source's own compositing to
                 // itself: a `destination-out` inside it used to erase what was
@@ -2761,7 +2810,8 @@ impl Context2D {
             pixels.as_ref(),
             features,
             None,
-            |canvas, paint| {
+            false,
+            |canvas, paint, _| {
                 canvas.draw_image_rect_with_sampling_options(
                     image,
                     Some((src_rect, Strict)),
@@ -3124,7 +3174,8 @@ impl Context2D {
                 dyed,
                 features,
                 replay,
-                |canvas, paint| {
+                typesetter.names_a_line_colour(),
+                |canvas, paint, pass| {
                     // The kept run, or, the first time a run is drawn, the run
                     // laid out for this paint -- see `Typesetter::laid_out`.
                     let run = match &kept {
@@ -3150,7 +3201,13 @@ impl Context2D {
                             layout.paragraph.paint(canvas, at);
                             return reach_the_clip(canvas);
                         }
-                        run.paint(canvas, at, paint, global_alpha, faint);
+                        // A shadow whose colour took the `globalAlpha` draws
+                        // a named line colour without it.
+                        let lines = match pass {
+                            Pass::Draw => global_alpha,
+                            Pass::AlphaInShadow => 1.0,
+                        };
+                        run.paint(canvas, at, paint, lines, faint);
                         reach_the_clip(canvas);
                     };
                     match condensation {
@@ -3406,12 +3463,21 @@ impl Context2D {
     }
 
     /// The page a CanvasKit filter or a texture drawn here is built for --
-    /// see [`PageFilter::on`] -- on a page that composites in floats. An
-    /// eight-bit page draws them as built, whose colours Skia's conversion
-    /// moves by less than a byte.
+    /// see [`PageFilter::on`] -- on a page that composites in floats, and on
+    /// an eight-bit sRGB page: their colours handed over as a fill's are --
+    /// see [`Onto::color`] -- and a shadow's placed -- see [`Onto::placed`].
+    /// Handed over as built, a colour went through Skia's approximate
+    /// conversion, which moved a product sitting on a half a level: on the
+    /// GPU a blend filter over a fill of `rgb(77 179 51 / 0.5)` stored blue
+    /// 26 where the fill stores 25. Any other eight-bit page draws them as
+    /// built.
     pub(crate) fn onto(&self) -> Option<Onto> {
-        self.composites_in_floats()
-            .then(|| Onto::shared(self.canvas_color_space.clone()))
+        let space = self.canvas_color_space.clone();
+        match self.composites_in_floats() {
+            true => Some(Onto::shared(space)),
+            false => (self.canvas_pixels == Some(PixelColorSpace::Srgb))
+                .then(|| Onto::bytes(space)),
+        }
     }
 
     /// The page a CanvasKit filter drawn into this page's pixels recording
@@ -3447,7 +3513,8 @@ impl Context2D {
     }
 
     pub fn paint_for_shadow(&self, base_paint: &Paint) -> Option<Paint> {
-        self.paint_for_shadow_in(base_paint, Recording::Shared)
+        self.paint_for_shadow_in(base_paint, Recording::Shared, false)
+            .map(|(paint, _)| paint)
     }
 
     /// [`Self::paint_for_shadow`] in `recording`. On an eight-bit page that
@@ -3459,11 +3526,16 @@ impl Context2D {
     /// a fiftieth of a level. Converted from sRGB instead, the shadow of a
     /// rectangle in `color(display-p3 0.00196 0.00196 0.00196)` stored
     /// 1, 0, 0 where the fill stores 1, 1, 1.
+    ///
+    /// `lines` where the draw is a run naming a line colour, which holds
+    /// the `globalAlpha` apart from the paint -- see [`Pass`]. With it, the
+    /// [`Pass`] says how the shadow is to be drawn.
     fn paint_for_shadow_in(
         &self,
         base_paint: &Paint,
         recording: Recording,
-    ) -> Option<Paint> {
+        lines: bool,
+    ) -> Option<(Paint, Pass)> {
         let (shadow_color, shadow_space) = &self.state.shadow_color;
         let mut shadow_blur = self.state.shadow_blur;
         if !self.casts_shadow() {
@@ -3495,32 +3567,51 @@ impl Context2D {
             }
         }
         let mut paint = base_paint.clone();
-        let placed = match recording {
-            Recording::Pixels if !self.composites_in_floats() => {
-                self.placed_colour(*shadow_color, shadow_space)
+        // The paint's alpha moves into the shadow's colour, which the filter
+        // applies to the shape at the page's own precision, so that the two
+        // are one product: on an eight-bit sRGB page rounded once, as a fill
+        // under a `globalAlpha` rounds them, the colour placed -- see
+        // `Onto::placed`; on float pixels kept in float, where Skia's raster
+        // backend brings a filtered layer back in steps of one 255th, so a
+        // `globalAlpha` of 0.5 cast a shadow of 128/255 and one of 0.001
+        // none at all. Through a colour filter, which sees the alpha before
+        // the shadow does, it stays on the paint. A run naming a line colour
+        // moves only the `globalAlpha`, which its line colour holds too, and
+        // its line is drawn without it: moved whole, the line's shadow took
+        // the alpha twice, half of `underline rgb(0 90 200 / 0.6)` under a
+        // `globalAlpha` of 0.5.
+        let bytes = self.onto().filter(|onto| onto.bytes);
+        let mut named = *shadow_color;
+        let mut pass = Pass::Draw;
+        if (bytes.is_some() || self.faint() == Faint::Kept)
+            && paint.color_filter().is_none()
+        {
+            let global = self.state.global_alpha as f32;
+            let moved = match lines {
+                true => global,
+                false => paint.alpha_f(),
+            };
+            if moved > 0.0 {
+                named.a *= moved;
+                paint.set_alpha_f(paint.alpha_f() / moved);
+                pass = Pass::AlphaInShadow;
             }
-            _ => None,
-        };
-        let (mut shadow_color, shadow_space) = placed.unwrap_or_else(|| {
-            skia_paint_color_onto(
-                *shadow_color,
-                shadow_space,
-                &self.canvas_color_space,
-            )
-        });
-        // On float pixels the paint's own alpha moves into the shadow's
-        // colour, which the filter applies to the shape in float: the shape
-        // is drawn into the filter's layer, and on Skia's raster backend a
-        // filtered layer on an F16 or F32 page comes back in steps of one
-        // 255th, so a `globalAlpha` of 0.5 cast a shadow of 128/255 and one
-        // of 0.001 none at all. The two are one product whatever order they
-        // are taken in -- the shadow is the shape's alpha times its colour
-        // -- except through a colour filter, which sees the alpha before
-        // the shadow does and is left to have it there.
-        if self.faint() == Faint::Kept && paint.color_filter().is_none() {
-            shadow_color.a *= paint.alpha_f();
-            paint.set_alpha_f(1.0);
         }
+        // A document keeps the colour as named, as a fill's is; the pixels
+        // of a page that records them apart are placed as a wide-gamut
+        // page places them, or as an sRGB page does.
+        let on_bytes = |onto: Onto| onto.placed(named, shadow_space);
+        let placed = match recording {
+            Recording::Document => None,
+            _ if self.composites_in_floats() => None,
+            Recording::Pixels => self
+                .placed_colour(named, shadow_space)
+                .or_else(|| bytes.clone().and_then(on_bytes)),
+            Recording::Shared => bytes.clone().and_then(on_bytes),
+        };
+        let (shadow_color, shadow_space) = placed.unwrap_or_else(|| {
+            skia_paint_color_onto(named, shadow_space, &self.canvas_color_space)
+        });
         paint.set_image_filter(image_filters::drop_shadow_only(
             (0.0, 0.0),
             (sigma.x, sigma.y),
@@ -3529,8 +3620,21 @@ impl Context2D {
             None,
             None,
         ));
-        Some(paint)
+        Some((paint, pass))
     }
+}
+
+/// What a draw handed to [`Context2D::render_to_canvas`] is drawing, which
+/// a run naming a line colour needs: the line holds the `globalAlpha` apart
+/// from the paint -- see `Context2D::paint_for_shadow_in`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pass {
+    /// The draw, or a shadow of it holding the `globalAlpha` where the draw
+    /// does.
+    Draw,
+    /// A shadow whose colour took the `globalAlpha`, which a named line
+    /// colour is drawn without.
+    AlphaInShadow,
 }
 
 //

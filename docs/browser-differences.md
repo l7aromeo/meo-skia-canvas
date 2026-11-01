@@ -1141,6 +1141,30 @@ transform's scale and the filtered draw is turned onto the page. On an F16
 or F32 page that is a layer of the page's own floats, where Skia's would be
 eight bits a channel; beside a CSS filter it is Skia's layer on any page.
 
+**On an eight-bit sRGB canvas a shadow stores the exact product of its colour
+and its alpha, on either engine, and Chrome's do not all.** `shadowColor`, a
+CSS `drop-shadow()` and a CanvasKit drop shadow store the product rounded
+once, as a translucent fill does, and so does a CanvasKit blend filter over a
+fill. Chrome for Testing 156.0.8078.4 headless, measured on 205 colours,
+rounds the colour and its alpha to bytes and premultiplies those on its
+raster canvas, for fills and both shadows alike, so that 35 of the 205 store
+a level off the product; on its GPU canvas a fill and a `shadowColor` shadow
+store the product, and a `drop-shadow()` its raster canvas's bytes, a level
+off its own fill on 34 of them: `color(srgb-linear 0.25 0.25 0.25 / 0.5)`
+fills 68 there and casts 69, where both are 68 here. On the GPU, Skia's own
+shadow filter moved a product lying within a few thousandths of a level of
+a half across it, on 654 of the 65,536 greys and alphas:
+`rgb(173 173 173 / 14/255)` cast 10 where the product is 9.498 and the fill
+stores 9. So here the colour is placed on the bytes its product rounds to
+first -- see `ExactColour::at` -- which leaves nothing for the filter to
+round. `tests/eight_bit_shadow_colours.rs` holds every grey at
+every alpha, and under a `globalAlpha`, to the product, on both engines and
+across a change of `canvas.gpu` between drawing and reading. One shadow is
+still a level off it: that of a run filled in a translucent colour and
+naming a line colour, whose glyphs are rounded at the fill's alpha before
+the shadow multiplies them by the `globalAlpha`, as
+`tests/named_colour_precision.rs` holds.
+
 **A fill or stroke the page's edge cuts is drawn differently far inside the
 page on the CPU engine.** The page's edge cuts a path as a clip does: Skia's
 analytic anti-aliasing builds a path's edges against the raster's bounds where

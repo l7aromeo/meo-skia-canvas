@@ -405,6 +405,9 @@ read the math functions and every length unit.
 
 ### Fixed
 
+- A shadow on an eight-bit sRGB canvas stores the exact product of its colour and alpha on both engines, including under `globalAlpha`, so some shadow bytes move by one level ([#441](https://github.com/l7aromeo/meo-skia-canvas/issues/441)).
+- A text decoration in a named colour casts its shadow under `globalAlpha` at its own alpha, not that alpha twice, on F16 and F32 canvases ([#455](https://github.com/l7aromeo/meo-skia-canvas/issues/455)).
+
 - A CanvasKit filter holding a colour lands as a fill of that colour on every float canvas, in every blend mode ([#418](https://github.com/l7aromeo/meo-skia-canvas/pull/418)).
 
 - **`TextMetrics::font_bounding_box_ascent` and `font_bounding_box_descent`

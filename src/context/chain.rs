@@ -879,14 +879,19 @@ fn shadowed(
 
 /// The colour filter a shadow in `colour`, unpremultiplied in `space`, is
 /// tinted through onto a layer like `layer`: the colour, in the alpha of
-/// what it is tinting. On a layer of eight bits a channel it is the colour a
-/// fill of it paints there, read back from a pixel filled with it, so that
-/// a shadow's bytes are a fill's: Skia rounds a fill's colour to the layer's
-/// bytes and premultiplies by the rounded alpha, and
-/// `color(srgb 0.25 0.5 0.75 / 0.3)` fills green at 39 of 255 where 0.5 of
-/// 0.3 is 38.25. A float layer takes the colour as named, converted
-/// exactly by [`exact_tint`] where the layer is in a space this crate
-/// converts, and through Skia's blend otherwise.
+/// what it is tinting.
+///
+/// A layer the page places its colours on -- eight bits a channel in a
+/// space other than sRGB, see [`exact_fill`] -- takes the colour a fill of
+/// it paints there, read back from a pixel filled with it, so that a
+/// shadow's bytes are the placed fill's. Any other layer takes the colour
+/// as named, converted exactly by [`exact_tint`] where the layer is in a
+/// space this crate converts, and through Skia's blend otherwise: on an
+/// eight-bit sRGB layer [`rounded_once`] then rounds the product of the
+/// colour and its alpha once, on either engine, where a pixel filled on the
+/// raster backend rounds the colour to bytes and premultiplies the bytes --
+/// the shadow of `color(srgb-linear 0.25 0.25 0.25 / 0.5)` stored 69 that
+/// way, where the product is 68.
 fn tint(
     colour: Color4f,
     space: &ColorSpace,
@@ -896,7 +901,10 @@ fn tint(
         layer.color_type(),
         ColorType::RGBA8888 | ColorType::BGRA8888
     );
-    if !bytes {
+    let placed = layer
+        .color_space()
+        .is_some_and(|working| keeps_two_recordings(&working));
+    if !(bytes && placed) {
         return exact_tint(colour, space, layer).or_else(|| {
             color_filters::blend_with_color_space(
                 colour,
