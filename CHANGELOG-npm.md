@@ -753,7 +753,7 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
-- **A blurred path on an eight-bit wide-gamut canvas stores a fill's bytes inside it.** ([#428](https://github.com/l7aromeo/meo-skia-canvas/pull/428))
+- **A blurred path on an eight-bit wide-gamut canvas stores a fill's bytes inside it.** ([#433](https://github.com/l7aromeo/meo-skia-canvas/issues/433))
 
 - **On macOS, a font registered after another was let go reads its own
   metrics.** CoreText remembers each font made from data by the address and
