@@ -1182,6 +1182,25 @@ macOS 27.2, does too, except:
 - Along an antialiased edge, `color-dodge` and `color-burn` up to 215 and 200
   levels, on the edge's partly covered pixels.
 
+**A blend Skia writes through a soft mask goes wrong in CoreGraphics inside a
+group on a scaled page, so there it is embedded.** Skia's PDF backend writes
+`source-in`, `source-out`, `source-atop`, `destination-in`, `destination-out`,
+`destination-atop`, `copy` and `clearRect` through a soft mask made from the
+draw's shape (`needShape` in `SkPDFDevice.cpp`). Inside a group -- a canvas
+drawn into another, which is drawn through a layer once it holds a blend, or a
+`saveLayer` -- on a page exported at a density other than 1, which scales the
+page's content, CoreGraphics renders it otherwise: a canvas holding a square
+cut by `destination-out`, drawn into a page over two opaque colours and
+exported at density 2.5, came out with 20,000 of its 150,000 pixels more than
+8 levels off the canvas, up to 160, in `sips` on macOS 27.2, where poppler
+renders it right. So at a density other than 1 such a group is embedded as
+pixels with what lies beneath it (`context::page::pdf_cannot`); that page then
+comes out with 2,985 pixels over 8 levels, up to 89 -- the embedded image as
+CoreGraphics draws it, which poppler draws 3,833 pixels apart from on the same
+file. A masked blend on the page itself, and one in a group at a density of 1,
+stay vector, since CoreGraphics renders both as the canvas does: the
+reproduction at density 1 comes out within a level.
+
 poppler's figures are held by `tests/pdf_blend.rs`, which renders every
 blend a PDF writes with `pdftoppm` and runs on CI. CoreGraphics' are a
 manual check on macOS: `sips -s format png -Z 800 page.pdf --out page.png`,

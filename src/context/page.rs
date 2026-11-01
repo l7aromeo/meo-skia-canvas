@@ -1237,12 +1237,13 @@ impl PageRecorder {
     /// of the layer around it.
     ///
     /// The group asks a vector backend for [`VectorFeatures::LAYER`] and
-    /// whatever its contents asked, so that an SVG export rasterizes the
-    /// layer and leaves the rest of the page vector -- or, for a layer that
-    /// composites what it holds as it stands, takes it entry by entry, and
-    /// for one at an opacity alone writes it as a group at that opacity:
-    /// see [`Group::opacity`]. One holding nothing that would change nothing
-    /// is dropped.
+    /// whatever its contents asked, a blend through a soft mask among them as
+    /// [`VectorFeatures::NESTED_MASKED_BLEND`] as well, so that an SVG export
+    /// rasterizes the layer and leaves the rest of the page vector -- or,
+    /// for a layer that composites what it holds as it stands, takes it
+    /// entry by entry, and for one at an opacity alone writes it as a group
+    /// at that opacity: see [`Group::opacity`]. One holding nothing that
+    /// would change nothing is dropped.
     pub fn close_layer(&mut self) {
         if self.open.is_empty() {
             return;
@@ -1263,7 +1264,8 @@ impl PageRecorder {
                 contents_matrix: Matrix::new_identity(),
                 contents: Entries::new(layer.entries, layer.entry_features),
             };
-            self.file_group(group, layer.features.with(VectorFeatures::LAYER));
+            let features = layer.features.with(layer.features.nested());
+            self.file_group(group, features.with(VectorFeatures::LAYER));
         }
         self.restore();
     }
@@ -1392,7 +1394,8 @@ impl PageRecorder {
                     contents_matrix: Matrix::new_identity(),
                     contents: Entries::new(contents, features),
                 }));
-                Some((group, layer.features.with(VectorFeatures::LAYER)))
+                let features = layer.features.with(layer.features.nested());
+                Some((group, features.with(VectorFeatures::LAYER)))
             })
             .map(|(group, _)| group)
     }
@@ -1400,9 +1403,11 @@ impl PageRecorder {
     /// What the open layers ask of a vector backend, as the page they are
     /// drawn into by [`Self::open_layers_entry`] has to.
     fn open_layer_features(&self) -> VectorFeatures {
-        self.open
+        let all = self
+            .open
             .iter()
-            .fold(VectorFeatures::LAYER, |all, layer| all.with(layer.features))
+            .fold(VectorFeatures::LAYER, |all, layer| all.with(layer.features));
+        all.with(all.nested())
     }
 
     pub fn pixels(
@@ -4685,7 +4690,7 @@ impl Page {
                 let canvas = document.canvas();
                 self.draw_as_document(
                     canvas,
-                    pdf_cannot(&options.surface_color_space),
+                    pdf_cannot(&options.surface_color_space, density),
                     matte.as_ref(),
                     options.embedding(),
                     None,
@@ -5173,7 +5178,7 @@ impl PageSequence {
         options: ExportOptions,
     ) -> Result<(), String> {
         options.check_timing()?;
-        let backend = pdf_cannot(&options.surface_color_space);
+        let backend = pdf_cannot(&options.surface_color_space, options.density);
         let color_type = options.compositing_color_type();
         let ExportOptions {
             quality,
@@ -5763,14 +5768,29 @@ fn text_surface_props(contrast: f32, gamma: f32) -> SurfaceProps {
     )
 }
 
-/// What a PDF refuses of a page composited in `space`: the blends it cannot
-/// write -- see [`blend_features`](crate::export::blend_features) -- and, on
-/// a page composited anywhere but sRGB, every blend, since a PDF blends in
-/// its page group's sRGB rather than in the canvas's own space.
-fn pdf_cannot(space: &ColorSpace) -> VectorFeatures {
-    match space.is_srgb() {
+/// What a PDF refuses of a page composited in `space` and exported at
+/// `density`: the blends it cannot write -- see
+/// [`blend_features`](crate::export::blend_features); on a page composited
+/// anywhere but sRGB, every blend, since a PDF blends in its page group's
+/// sRGB rather than in the canvas's own space; and at a density other than
+/// 1, a blend written through a soft mask inside a group, which
+/// CoreGraphics renders otherwise under the page's scale.
+///
+/// A masked blend at the top of the page, or anywhere at a density of 1,
+/// stays vector: CoreGraphics renders those as the canvas does, and the
+/// raster costs fidelity and size where nothing needs it.
+fn pdf_cannot(space: &ColorSpace, density: f32) -> VectorFeatures {
+    // UPSTREAM: CoreGraphics macOS 27.2 -- unfiled -- worked around
+    // Re-check: leave the nested masked blend vector, export the drawn-canvas
+    // `destination-out` page docs/browser-differences.md describes at density
+    // 2.5, and render it with sips against the canvas at that density.
+    let blends = match space.is_srgb() {
         true => VectorFeatures::PDF_CANNOT,
         false => VectorFeatures::PDF_CANNOT.with(VectorFeatures::BLEND_MODE),
+    };
+    match density == 1.0 {
+        true => blends,
+        false => blends.with(VectorFeatures::NESTED_MASKED_BLEND),
     }
 }
 
@@ -8005,9 +8025,9 @@ mod tests {
             )
             .expect("the readback as an image");
             for (backend, page_info) in [
-                (pdf_cannot(&p3), srgb.clone()),
+                (pdf_cannot(&p3, 1.0), srgb.clone()),
                 (
-                    pdf_cannot(&p3),
+                    pdf_cannot(&p3, 1.0),
                     srgb.with_color_type(ColorType::RGBAF16)
                         .with_color_space(p3.clone()),
                 ),
@@ -8097,10 +8117,13 @@ mod tests {
             text_gamma: gamma,
             ..ExportOptions::default()
         };
-        for (backend, scaled) in
-            [(pdf_cannot(&p3), true), (VectorFeatures::SVG_CANNOT, false)]
-        {
+        // A PDF's page is scaled by the density and an SVG's is not.
+        for pdf in [true, false] {
             for density in [1.0f32, 2.0, 2.5, 4.0] {
+                let (backend, scaled) = match pdf {
+                    true => (pdf_cannot(&p3, density), true),
+                    false => (VectorFeatures::SVG_CANNOT, false),
+                };
                 let options = export(density);
                 let dims = page.scaled_dimensions(density);
                 let info = ImageInfo::new(

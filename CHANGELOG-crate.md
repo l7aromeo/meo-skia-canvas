@@ -522,6 +522,8 @@ read the math functions and every length unit.
 
 - **A PDF exported at a density other than 1 places the pixels it embeds where they belong.** ([#437](https://github.com/l7aromeo/meo-skia-canvas/issues/437))
 
+- **A PDF exported at a density other than 1 renders a canvas drawn into another as it should in macOS Preview and Safari.** ([#438](https://github.com/l7aromeo/meo-skia-canvas/issues/438))
+
 - **An SVG of a page with nothing on it is well-formed XML.**
   `Canvas::to_buffer` with `ImageFormat::Svg` wrote an empty page's root as
   `<svg ... height="40"/ viewBox="0 0 80 40">`: Skia writes an empty

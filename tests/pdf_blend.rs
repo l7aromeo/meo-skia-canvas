@@ -60,6 +60,16 @@ fn embeds_an_image(pdf: &[u8]) -> bool {
 /// A rectangle in `rgb(200 40 120)` at `alpha`, composited by `operation`
 /// over two opaque colours, on a canvas in `space`.
 fn blended(space: PixelColorSpace, operation: BlendMode, alpha: f32) -> Canvas {
+    let mut canvas = backdrop(space);
+    let ctx = canvas.context();
+    ctx.set_global_composite_operation(operation);
+    ctx.set_fill_style(RgbaLinear::from_srgb8(200, 40, 120, alpha));
+    ctx.fill_rect(50.0, 30.0, 100.0, 60.0);
+    canvas
+}
+
+/// Two opaque colours side by side, on a canvas in `space`.
+fn backdrop(space: PixelColorSpace) -> Canvas {
     let mut canvas = Canvas::with_options(
         200.0,
         120.0,
@@ -75,9 +85,6 @@ fn blended(space: PixelColorSpace, operation: BlendMode, alpha: f32) -> Canvas {
     ctx.fill_rect(0.0, 0.0, 100.0, 120.0);
     ctx.set_fill_style(RgbaLinear::from_srgb8(40, 90, 200, 1.0));
     ctx.fill_rect(100.0, 0.0, 100.0, 120.0);
-    ctx.set_global_composite_operation(operation);
-    ctx.set_fill_style(RgbaLinear::from_srgb8(200, 40, 120, alpha));
-    ctx.fill_rect(50.0, 30.0, 100.0, 60.0);
     canvas
 }
 
@@ -136,6 +143,132 @@ fn a_pdf_of_a_canvas_outside_srgb_embeds_every_blend() {
         let plain = pdf_of(&mut blended(space, BlendMode::SourceOver, 1.0));
         assert!(!embeds_an_image(&plain), "{space:?}: nothing to embed");
     }
+}
+
+/// The composite operations Skia's PDF backend writes through a soft mask
+/// made from the draw's shape -- `needShape` in its `SkPDFDevice.cpp` --
+/// with `clearRect`, which is `Clear`, beside them.
+const MASKED: [(&str, Option<BlendMode>); 8] = [
+    ("source-in", Some(BlendMode::SourceIn)),
+    ("source-out", Some(BlendMode::SourceOut)),
+    ("source-atop", Some(BlendMode::SourceAtop)),
+    ("destination-in", Some(BlendMode::DestinationIn)),
+    ("destination-out", Some(BlendMode::DestinationOut)),
+    ("destination-atop", Some(BlendMode::DestinationAtop)),
+    ("copy", Some(BlendMode::Copy)),
+    ("clearRect", None),
+];
+
+/// Where a masked draw lies: inside a canvas drawn in whole, inside one
+/// drawn in cropped -- a group of its own -- inside a `saveLayer`, inside
+/// one still open when the page is exported, or on the page itself.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Placement {
+    Drawn,
+    Cropped,
+    Layer,
+    Open,
+    Page,
+}
+
+/// Over two opaque colours, a square in `rgb(200 40 120)` with a smaller
+/// one composited onto it by `operation` -- or cleared, for `None` -- placed
+/// as `placement` says.
+fn masked(operation: Option<BlendMode>, placement: Placement) -> Canvas {
+    let mut canvas = backdrop(PixelColorSpace::Srgb);
+    let draw = |ctx: &mut Context2D| {
+        ctx.set_fill_style(RgbaLinear::from_srgb8(200, 40, 120, 1.0));
+        ctx.fill_rect(0.0, 0.0, 80.0, 80.0);
+        match operation {
+            Some(operation) => {
+                ctx.set_global_composite_operation(operation);
+                ctx.set_fill_style(RgbaLinear::from_srgb8(20, 160, 90, 1.0));
+                ctx.fill_rect(20.0, 20.0, 40.0, 40.0);
+            }
+            None => ctx.clear_rect(20.0, 20.0, 40.0, 40.0),
+        }
+    };
+    let mut logo = Canvas::with_options(
+        80.0,
+        80.0,
+        CanvasOptions {
+            gpu: false,
+            ..CanvasOptions::default()
+        },
+    )
+    .expect("a canvas");
+    draw(logo.context());
+    let ctx = canvas.context();
+    match placement {
+        Placement::Drawn => ctx.draw_canvas(&mut logo, 60.0, 20.0),
+        Placement::Cropped => ctx.draw_canvas_region(
+            &mut logo, 10.0, 10.0, 60.0, 60.0, 70.0, 30.0, 60.0, 60.0,
+        ),
+        Placement::Layer => {
+            ctx.save();
+            ctx.translate(60.0, 20.0);
+            ctx.save_layer();
+            draw(ctx);
+            ctx.restore();
+            ctx.restore();
+        }
+        Placement::Open => {
+            ctx.translate(60.0, 20.0);
+            ctx.save_layer();
+            draw(ctx);
+        }
+        Placement::Page => {
+            ctx.translate(60.0, 20.0);
+            draw(ctx);
+        }
+    }
+    canvas
+}
+
+/// A blend written through a soft mask inside a group -- a canvas drawn in
+/// through a layer, or a `saveLayer` -- is embedded as pixels in a PDF
+/// exported at a density other than 1, which CoreGraphics renders otherwise
+/// under the page's scale: see docs/browser-differences.md. At a density of
+/// 1, and on the page itself at any density, it stays vector, as a blend
+/// written without a mask does inside a group at any density.
+#[test]
+fn a_masked_blend_in_a_group_is_embedded_under_a_density() {
+    let placements = [
+        Placement::Drawn,
+        Placement::Cropped,
+        Placement::Layer,
+        Placement::Open,
+        Placement::Page,
+    ];
+    let mut wrong = Vec::new();
+    for density in [1.0, 2.5] {
+        let options = EncodeOptions {
+            density,
+            ..EncodeOptions::default()
+        };
+        let pdf = |canvas: &mut Canvas| {
+            canvas.to_buffer(ImageFormat::Pdf, &options).expect("a PDF")
+        };
+        for placement in placements {
+            for (name, operation) in MASKED {
+                let embedded =
+                    embeds_an_image(&pdf(&mut masked(operation, placement)));
+                let want = density != 1.0 && placement != Placement::Page;
+                if embedded != want {
+                    wrong.push(format!(
+                        "{name} {placement:?} at {density}: embedded {embedded}"
+                    ));
+                }
+            }
+            let multiply = Some(BlendMode::Multiply);
+            if embeds_an_image(&pdf(&mut masked(multiply, placement))) {
+                wrong.push(format!(
+                    "multiply {placement:?} at {density}: embedded"
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 /// Every page of a PDF has a transparency group naming DeviceRGB, through
