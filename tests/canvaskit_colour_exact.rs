@@ -115,13 +115,25 @@ fn misses_against(
     reference: impl Fn(&mut Context2D, RgbaLinear),
     draw: impl Fn(&mut Context2D, RgbaLinear),
 ) -> Vec<String> {
+    misses_over(spaces, depths, x, |_| colours().collect(), reference, draw)
+}
+
+/// [`misses_against`] over the colours `over` names for each space.
+fn misses_over(
+    spaces: &[PixelColorSpace],
+    depths: &[PixelDepth],
+    x: f32,
+    over: impl Fn(PixelColorSpace) -> Vec<RgbaLinear>,
+    reference: impl Fn(&mut Context2D, RgbaLinear),
+    draw: impl Fn(&mut Context2D, RgbaLinear),
+) -> Vec<String> {
     let mut missed = Vec::new();
     for (&space, depth, gpu) in spaces.iter().flat_map(|space| {
         depths
             .iter()
             .flat_map(move |&depth| ENGINES.map(|gpu| (space, depth, gpu)))
     }) {
-        for colour in colours() {
+        for colour in over(space) {
             let mut want = page(space, depth, gpu);
             reference(want.context(), colour);
             let want = read_at(&mut want, space, SIDE / 2.0);
@@ -199,6 +211,143 @@ fn a_texture_s_mark_lands_as_a_fill_of_its_colour_on_an_eight_bit_dual_page() {
                 ctx.set_fill_texture(&solid_texture(colour, outline));
                 ctx.fill_rect(0.0, 0.0, SIDE, SIDE);
             },
+        ));
+    }
+}
+
+/// The levels of the sRGB colours [`off_its_bytes`] adds, a sixth of the
+/// range apart.
+const SRGB_LEVELS: [u8; 6] = [0, 51, 102, 153, 204, 255];
+
+/// [`colours`] and every sRGB colour on [`SRGB_LEVELS`], opaque and at half
+/// alpha: colours a page outside sRGB stores off its own bytes.
+fn off_its_bytes(_: PixelColorSpace) -> Vec<RgbaLinear> {
+    let srgb = [1.0f32, 0.5].into_iter().flat_map(|alpha| {
+        SRGB_LEVELS.into_iter().flat_map(move |r| {
+            SRGB_LEVELS.into_iter().flat_map(move |g| {
+                SRGB_LEVELS
+                    .into_iter()
+                    .map(move |b| RgbaLinear::from_srgb8(r, g, b, alpha))
+            })
+        })
+    });
+    colours().chain(srgb).collect()
+}
+
+/// Colours on `space`'s own bytes, a fifth of the range apart, opaque and at
+/// an alpha of 153 levels, which a fill and a filter store alike whatever
+/// rounds them.
+fn on_its_bytes(space: PixelColorSpace) -> Vec<RgbaLinear> {
+    let levels = [0u8, 51, 102, 153, 204, 255];
+    let level = |v: u8| v as f32 / 255.0;
+    [255u8, 153]
+        .into_iter()
+        .flat_map(|a| {
+            levels.into_iter().flat_map(move |r| {
+                levels.into_iter().flat_map(move |g| {
+                    levels.into_iter().map(move |b| {
+                        RgbaLinear::from_css(&format!(
+                            "color({} {} {} {} / {})",
+                            space.as_str(),
+                            level(r),
+                            level(g),
+                            level(b),
+                            level(a)
+                        ))
+                        .expect("a colour")
+                    })
+                })
+            })
+        })
+        .collect()
+}
+
+/// A way of drawing a colour through a filter onto a page.
+type Route = Box<dyn Fn(&mut Context2D, RgbaLinear)>;
+
+/// The routes a CanvasKit filter holding a colour takes, each with where it
+/// is read: a blend in `copy` on the context, one in `source-in` wrapped as
+/// an image filter, and a drop shadow alone and cast clear of its shape.
+fn holding_a_colour() -> [(f32, Route); 4] {
+    [
+        (
+            SIDE / 2.0,
+            Box::new(|ctx, colour| {
+                let filter = ColorFilter::blend(colour, BlendMode::Copy);
+                ctx.set_color_filter(Some(&filter.expect("a filter")));
+                white(ctx);
+            }),
+        ),
+        (
+            SIDE / 2.0,
+            Box::new(|ctx, colour| {
+                let filter = ColorFilter::blend(colour, BlendMode::SourceIn)
+                    .and_then(|cf| {
+                        ImageFilter::from_color_filter(cf, None, None)
+                    });
+                ctx.set_image_filter(Some(&filter.expect("a filter")));
+                white(ctx);
+            }),
+        ),
+        (
+            SIDE / 2.0,
+            Box::new(|ctx, colour| {
+                let filter = ImageFilter::drop_shadow_only(
+                    0.0, 0.0, 0.0, 0.0, colour, None, None,
+                );
+                ctx.set_image_filter(Some(&filter.expect("a filter")));
+                white(ctx);
+            }),
+        ),
+        (
+            SIDE * 1.5,
+            Box::new(|ctx, colour| {
+                let filter = ImageFilter::drop_shadow(
+                    SIDE, 0.0, 0.0, 0.0, colour, None, None,
+                );
+                ctx.set_image_filter(Some(&filter.expect("a filter")));
+                white(ctx);
+            }),
+        ),
+    ]
+}
+
+/// A CanvasKit filter holding a colour lands as a fill of it on an
+/// eight-bit page that keeps a recording for pixels, on both engines: the
+/// pixels place its colour on the bytes a fill of it stores, as they do a
+/// texture's. Converted by Skia instead, a product near a half rounded the
+/// other way from a fill's -- on Display P3 31 of these colours a level off
+/// in a `copy` on the CPU, 21 on the GPU -- and a linear-sRGB grey of 0.7,
+/// 178.5 levels, stored 178 where a fill stores 179.
+#[test]
+fn a_filter_holding_a_colour_lands_as_a_fill_of_it_on_an_eight_bit_dual_page() {
+    for (x, draw) in holding_a_colour() {
+        assert_none(misses_over(
+            &EIGHT_BIT_DUAL,
+            &[PixelDepth::Uint8],
+            x,
+            off_its_bytes,
+            fill,
+            draw,
+        ));
+    }
+}
+
+/// A colour on the page's own bytes, which nothing has to round, lands as a
+/// fill of it through every route on an eight-bit dual page. Through Skia's
+/// own conversion it did not where a Rec. 2020 channel is 0, near which the
+/// conversion moved it up to 3 levels in a `copy`, on 16 of these colours
+/// on the CPU and 15 on the GPU.
+#[test]
+fn a_filter_holding_a_colour_on_the_page_s_bytes_lands_as_a_fill_of_it() {
+    for (x, draw) in holding_a_colour() {
+        assert_none(misses_over(
+            &EIGHT_BIT_DUAL,
+            &[PixelDepth::Uint8],
+            x,
+            on_its_bytes,
+            fill,
+            draw,
         ));
     }
 }

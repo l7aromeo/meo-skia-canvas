@@ -65,8 +65,11 @@ impl Onto {
     }
 
     /// A filter drawn onto an eight-bit sRGB page in `destination`, its
-    /// colours handed over as a fill's are, and a shadow's placed on the
-    /// bytes its exact product rounds to -- see [`Self::placed`].
+    /// colours handed over as a fill's are and a shadow's placed on the
+    /// bytes its exact product rounds to -- see [`Self::placed`]; or into the
+    /// pixels recording of an eight-bit page in another space, every colour
+    /// placed and held where Skia does not convert it -- see
+    /// [`Self::exact_color`].
     pub fn bytes(destination: ColorSpace) -> Self {
         Self {
             destination,
@@ -111,6 +114,14 @@ impl Onto {
         Some((Color4f::new(r, g, b, alpha), self.destination.clone()))
     }
 
+    /// Whether the page is an eight-bit one outside sRGB, which Skia would
+    /// convert a filter's colour into.
+    fn converts(&self) -> bool {
+        self.bytes
+            && PixelColorSpace::matching(&self.destination)
+                .is_some_and(|pixels| pixels != PixelColorSpace::Srgb)
+    }
+
     /// `color` in `space` as Skia is handed it in a filter drawn onto this
     /// page -- see [`skia_paint_color_onto`].
     pub fn color(
@@ -122,13 +133,28 @@ impl Onto {
     }
 
     /// `color` in `space`, unpremultiplied, converted exactly into the
-    /// page's space, for a filter built [`Self::exact`]. `None` for any
-    /// other, and where the page's space is not one this crate converts.
+    /// page's space, for a filter built [`Self::exact`]; and for the pixels
+    /// of an eight-bit page outside sRGB, placed too, on the bytes its exact
+    /// product rounds to -- see [`Self::placed`] -- where a fill of it
+    /// lands. `None` for any other, and where the page's space is not one
+    /// this crate converts.
+    ///
+    /// Held by Skia's own filter there, the colour was converted through
+    /// skcms's approximate transfer function on the way, which moved a
+    /// product near a half across it from a fill's -- on a Display P3 page
+    /// a `copy` of a colour a fill stores blue 101 in stored 100, on 31 of
+    /// 474 colours -- and moved a Rec. 2020 channel of 0 up to 3 levels.
+    /// Placed and held where Skia does not convert it, its bytes are what
+    /// the exact blend makes on either engine: Ganesh's half precision
+    /// holds a whole byte to within 0.07 of a level.
     fn exact_color(
         &self,
         color: Color4f,
         space: &ColorSpace,
     ) -> Option<Color4f> {
+        if self.converts() {
+            return self.placed(color, space).map(|(placed, _)| placed);
+        }
         if !self.exact {
             return None;
         }
@@ -141,8 +167,8 @@ impl Onto {
 
 /// A filter blending `color`, unpremultiplied in `space`, with what it
 /// filters through `mode`, built for `onto`: exactly where it is built for
-/// a page's pixels -- see [`exact_blend`] -- and as Skia's own blend filter
-/// otherwise, handed the colour as a fill's is.
+/// a page's pixels -- see [`exact_blend`] and [`Onto::exact_color`] -- and
+/// as Skia's own blend filter otherwise, handed the colour as a fill's is.
 pub(crate) fn blend_filter(
     onto: Option<&Onto>,
     color: Color4f,

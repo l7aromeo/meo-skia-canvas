@@ -778,7 +778,13 @@ impl Context2D {
         let Some(exact) = self.exact_colour(style) else {
             return filtered;
         };
+        // Through a filter built for the pixels, the colour is painted by
+        // its shader and the filter folded into it, as on a float page: over
+        // a plain paint colour Skia folds the filter in itself, through its
+        // own conversion, and on a Rec. 2020 page a `copy` of a colour on a
+        // channel of 0 stored up to 3 levels there.
         if exact.bytes
+            && filtered.is_none()
             && matches!(self.state.dye(style), Dye::Color(..))
             && let Some(placed) = exact.verified_paint(paint)
         {
@@ -848,18 +854,31 @@ impl Context2D {
     /// [`Self::pixels_onto`]. `None` where there is no such filter, or it
     /// holds no colour, so that the pixels draw `paint` as it is.
     ///
-    /// The paint's image filter is not rebuilt: a float page runs a
-    /// CanvasKit image filter through its chain, built for the pixels by
-    /// [`Self::exact_steps`], and reaches the paint's only beside a CSS
-    /// filter, on Skia's eight-bit layer, where no colour is exact.
+    /// On an eight-bit page its CanvasKit image filter is rebuilt for the
+    /// pixels too, which Skia runs on the paint; a float page runs one
+    /// through its chain, built for the pixels by [`Self::exact_steps`].
+    /// Beside a CSS filter it is composed into the paint's, and left as it
+    /// is there.
     pub fn pixels_paint(&self, paint: &Paint) -> Option<Paint> {
-        let filter = self.state.skia_color_filter.as_ref()?;
-        if !filter.depends() {
+        let onto = self.pixels_onto()?;
+        let colour = self
+            .state
+            .skia_color_filter
+            .as_ref()
+            .filter(|filter| filter.depends());
+        let image = self.state.skia_image_filter.as_ref().filter(|filter| {
+            filter.depends() && onto.bytes && self.state.filter.is_none()
+        });
+        if colour.is_none() && image.is_none() {
             return None;
         }
-        let onto = self.pixels_onto()?;
         let mut paint = paint.clone();
-        paint.set_color_filter(filter.on(Some(&onto)));
+        if let Some(filter) = colour {
+            paint.set_color_filter(filter.on(Some(&onto)));
+        }
+        if let Some(filter) = image {
+            paint.set_image_filter(filter.on(Some(&onto)));
+        }
         Some(paint)
     }
 
@@ -3469,8 +3488,9 @@ impl Context2D {
     /// Handed over as built, a colour went through Skia's approximate
     /// conversion, which moved a product sitting on a half a level: on the
     /// GPU a blend filter over a fill of `rgb(77 179 51 / 0.5)` stored blue
-    /// 26 where the fill stores 25. Any other eight-bit page draws them as
-    /// built.
+    /// 26 where the fill stores 25. Any other eight-bit page's document
+    /// draws them as built; its pixels place them -- see
+    /// [`Self::pixels_onto`].
     pub(crate) fn onto(&self) -> Option<Onto> {
         let space = self.canvas_color_space.clone();
         match self.composites_in_floats() {
@@ -3481,16 +3501,23 @@ impl Context2D {
     }
 
     /// The page a CanvasKit filter drawn into this page's pixels recording
-    /// is built for, where it keeps one -- see `page::Recorders` -- built
-    /// [`Onto::exact`]. Only on a float page the CPU draws, which is every
-    /// float page while the GPU cannot composite one -- see
-    /// [`floats_draw_on_the_cpu`] -- since the CPU alone draws the exact blend
-    /// to the bit.
+    /// is built for, where it keeps one -- see `page::Recorders`. On a float
+    /// page the CPU draws, which is every float page while the GPU cannot
+    /// composite one -- see [`floats_draw_on_the_cpu`] -- built
+    /// [`Onto::exact`], since the CPU alone draws the exact blend to the
+    /// bit in floats; on an eight-bit page, built [`Onto::bytes`], its
+    /// colours placed on the bytes a fill of them stores, which either
+    /// engine's exact blend lands on.
     pub(crate) fn pixels_onto(&self) -> Option<Onto> {
-        (self.recorder.borrow().dual()
-            && self.composites_in_floats()
-            && floats_draw_on_the_cpu(self.canvas_color_type))
-        .then(|| Onto::exact(self.canvas_color_space.clone()))
+        if !self.recorder.borrow().dual() {
+            return None;
+        }
+        let space = self.canvas_color_space.clone();
+        match self.composites_in_floats() {
+            true => floats_draw_on_the_cpu(self.canvas_color_type)
+                .then(|| Onto::exact(space)),
+            false => Some(Onto::bytes(space)),
+        }
     }
 
     /// Whether the page composites in floats, `F16` or `F32`: a page whose
