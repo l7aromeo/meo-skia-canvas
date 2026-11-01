@@ -1515,21 +1515,39 @@ impl Group {
                     },
                     false => Matrix::new_identity(),
                 };
-                // What is drawn is bounded by `within`, or for a single
-                // picture by what it was recorded within.
+                // What is drawn is bounded by `within`, or by what the
+                // entries can draw in where each of them knows -- see
+                // `reach_of` -- so that the chain's layer is the draw's and
+                // not the page's. Bounded by a single picture alone, a draw
+                // on a page that keeps a recording for pixels, which files
+                // it as a pair, filtered the whole page: 50 rects under a
+                // drop shadow took 1.75 s on an F16 Display P3 page against
+                // 26 ms on an sRGB one.
                 let to_space = |matrix: &Matrix| Matrix::concat(&back, matrix);
-                let content =
-                    match (&self.within, self.contents.layers.as_slice()) {
-                        (Some(within), _) => {
-                            Some(to_space(&self.matrix).map_rect(within).0)
-                        }
-                        (None, [Layer::Picture(picture)]) => Some(
-                            to_space(&self.contents_matrix)
-                                .map_rect(picture.cull_rect())
-                                .0,
-                        ),
-                        (None, _) => None,
-                    };
+                let content = match &self.within {
+                    Some(within) => {
+                        Some(to_space(&self.matrix).map_rect(within).0)
+                    }
+                    None => reach_of(&self.contents.layers).map(|reach| {
+                        to_space(&self.contents_matrix).map_rect(reach).0
+                    }),
+                };
+                // A group holding an entry whose reach is not known -- a
+                // blurred draw, or a group through a chain of its own -- would
+                // be bounded by the clip alone, and that layer moves an
+                // anti-aliased edge: a fill's coverage of 0.6 at an alpha of
+                // 0.9 landed 0.5365 through an unblurred shadow, where it
+                // makes 0.54. No group of a chain holds such an entry, so no
+                // draw takes that route, and a debug build fails where one
+                // does, for the route to be made exact before it is taken.
+                debug_assert!(
+                    content.is_some(),
+                    "a chain's group holds an entry with no reach, which \
+                     bounds its layer by the clip alone"
+                );
+                #[cfg(test)]
+                let content = content
+                    .filter(|_| !UNBOUNDED_CHAIN.with(std::cell::Cell::get));
                 // A group a canvas drawn into another brings with it is played
                 // once for each time that canvas is, and its chain is run the
                 // first of those -- see `chain_cache`.
@@ -1691,6 +1709,10 @@ pub struct Clipped {
 
 #[cfg(test)]
 thread_local! {
+    /// Whether a group's chain runs over a layer the clip alone bounds on
+    /// this thread, rather than one bounded by what the group's entries
+    /// reach: the reference a bounded chain is held to.
+    pub(crate) static UNBOUNDED_CHAIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Whether a run's pieces played into a recording bound for pixels have
     /// their clip bounded by what they draw on this thread: off, the clip
     /// covers its own bounds, the reference a bounded clip is held to.
