@@ -2411,23 +2411,25 @@ impl BlurOp {
             // so that the blur is rounded once and not once more where the
             // draw is.
             //
-            // A colour placed on its bytes -- see `ExactColour::at` -- takes
-            // its alpha on its byte as the gain, rounded half up as a fill's
-            // is: as given, an alpha of 0.3 or 0.7 lands on a tie the store
-            // rounds to even, and the interior stored a level under a fill.
-            // On its byte the gain multiplies the colour back onto its bytes
-            // from an eight-bit layer on the CPU: the layer is off by at most
-            // half a level, and the alpha, a byte over 255, scales that to
-            // under half. The GPU blurs and scales at lower precision, which
-            // took 68 of the 32,640 colours over the line at alphas from 235,
-            // so there the colour is drawn into a layer of half floats, which
-            // holds every one exactly.
+            // On an eight-bit page the gain is the alpha on its byte, rounded
+            // half up as a fill's is, so that the blur scales the colour the
+            // page stores: as given, an alpha of 0.3 or 0.7 lands on a tie
+            // the store rounds to even, and the interior stored a level under
+            // a fill. On its byte the gain multiplies a colour placed on its
+            // bytes -- see `ExactColour::at` -- back onto them from an
+            // eight-bit layer on the CPU: the layer is off by at most half a
+            // level, and the alpha, a byte over 255, scales that to under
+            // half. The GPU blurs and scales at lower precision, which took
+            // 68 of the 32,640 placed colours over the line at alphas from
+            // 235, so there a placed colour is drawn into a layer of half
+            // floats, which holds every one exactly.
             (Made::Result(_), Target::Pixels) => {
                 paint.set_alpha_f(1.0);
-                let placed = matches!(self.paint.faint, Faint::Dropped)
-                    && self.paint.exact.as_ref().is_some_and(|e| e.bytes);
+                let bytes = matches!(self.paint.faint, Faint::Dropped);
+                let placed =
+                    bytes && self.paint.exact.as_ref().is_some_and(|e| e.bytes);
                 let mut gain = Paint::default();
-                gain.set_alpha_f(if placed {
+                gain.set_alpha_f(if bytes {
                     byte_alpha(self.paint.color.a)
                 } else {
                     self.paint.color.a

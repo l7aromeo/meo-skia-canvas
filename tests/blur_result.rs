@@ -220,14 +220,22 @@ fn faded_triangle(
 #[test]
 fn a_blurred_path_at_an_alpha_is_rounded_once() {
     // The global alpha and the colour's own scale what is drawn, and the
-    // blur of that is the blur of the opaque draw scaled by them: the
-    // reference is the path drawn opaque, blurred, then scaled. At 0.5
-    // every odd level of a draw rounded before its blur is a tie.
+    // blur of that is the blur of the opaque draw scaled by them, the alpha
+    // on the byte an eight-bit page stores it on, as a fill's is: the
+    // reference is the path drawn opaque, blurred, then scaled by that byte
+    // over 255, so that the interior stores what a fill stores. At 0.5
+    // every odd level of a draw rounded before its blur is a tie, and 0.3
+    // is itself a tie, 76.5 of a byte, which a fill rounds up to 77.
+    let on_its_byte =
+        |alpha: f64| (alpha * f64::from(u8::MAX) + 0.5).floor() / 255.0;
     for gpu in [false, true] {
         for sigma in [2.0f32, 8.0] {
-            for (colour, global) in
-                [("black", 0.5f32), ("rgb(0 0 0 / 0.5)", 1.0)]
-            {
+            for (colour, global, scale) in [
+                ("black", 0.5f32, on_its_byte(0.5)),
+                ("rgb(0 0 0 / 0.5)", 1.0, on_its_byte(0.5)),
+                ("black", 0.3, on_its_byte(0.3)),
+                ("rgb(0 0 0 / 0.3)", 1.0, on_its_byte(0.3)),
+            ] {
                 let (Some(mut drawn), Some(mut blurred)) = (
                     faded_triangle(gpu, "none", "black", 1.0),
                     faded_triangle(
@@ -246,7 +254,7 @@ fn a_blurred_path_at_an_alpha_is_rounded_once() {
                 let reference: Vec<f64> =
                     sampled(&drawn, SIZE.0 as usize, f64::from(sigma))
                         .into_iter()
-                        .map(|v| v * 0.5)
+                        .map(|v| v * scale)
                         .collect();
                 let misses = misses(&alpha(&mut blurred), &reference);
                 assert!(
