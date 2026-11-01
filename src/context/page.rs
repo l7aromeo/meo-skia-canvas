@@ -1236,9 +1236,10 @@ impl PageRecorder {
     /// a [`Group`] where it was opened: on the page, or among the contents
     /// of the layer around it.
     ///
-    /// The group asks a vector backend for [`VectorFeatures::LAYER`] and
+    /// The group asks a vector backend for [`VectorFeatures::LAYER`], for
     /// whatever its contents asked, a blend through a soft mask among them as
-    /// [`VectorFeatures::NESTED_MASKED_BLEND`] as well, so that an SVG export
+    /// [`VectorFeatures::NESTED_MASKED_BLEND`] as well, and for how it
+    /// composites -- see [`LayerRec::vector_features`] -- so that an SVG export
     /// rasterizes the layer and leaves the rest of the page vector -- or,
     /// for a layer that composites what it holds as it stands, takes it
     /// entry by entry, and for one at an opacity alone writes it as a group
@@ -1255,6 +1256,7 @@ impl PageRecorder {
         };
         self.surface.forget_layers_past(self.open.len());
         if !layer.entries.is_empty() || layer.rec.marks_when_empty() {
+            let rec_features = layer.rec.vector_features();
             let group = Group {
                 composite: Composite::Layer(layer.rec),
                 matrix: layer.matrix,
@@ -1264,7 +1266,10 @@ impl PageRecorder {
                 contents_matrix: Matrix::new_identity(),
                 contents: Entries::new(layer.entries, layer.entry_features),
             };
-            let features = layer.features.with(layer.features.nested());
+            let features = layer
+                .features
+                .with(layer.features.nested())
+                .with(rec_features);
             self.file_group(group, features.with(VectorFeatures::LAYER));
         }
         self.restore();
@@ -1394,20 +1399,36 @@ impl PageRecorder {
                     contents_matrix: Matrix::new_identity(),
                     contents: Entries::new(contents, features),
                 }));
-                let features = layer.features.with(layer.features.nested());
+                let features = layer
+                    .features
+                    .with(layer.features.nested())
+                    .with(layer.rec.vector_features());
                 Some((group, features.with(VectorFeatures::LAYER)))
             })
             .map(|(group, _)| group)
     }
 
     /// What the open layers ask of a vector backend, as the page they are
-    /// drawn into by [`Self::open_layers_entry`] has to.
+    /// drawn into by [`Self::open_layers_entry`] has to: what each holds,
+    /// how each composites -- see [`LayerRec::vector_features`] -- and, for
+    /// all but the outermost, which is on the page, that inside a group.
     fn open_layer_features(&self) -> VectorFeatures {
-        let all = self
+        let rec = |layer: &OpenLayer| layer.rec.vector_features();
+        let held = self
             .open
             .iter()
-            .fold(VectorFeatures::LAYER, |all, layer| all.with(layer.features));
-        all.with(all.nested())
+            .fold(VectorFeatures::PLAIN, |all, layer| all.with(layer.features));
+        let inner = self
+            .open
+            .iter()
+            .skip(1)
+            .fold(VectorFeatures::PLAIN, |all, layer| all.with(rec(layer)));
+        let outer = self.open.first().map_or(VectorFeatures::PLAIN, rec);
+        let grouped = held.with(inner);
+        VectorFeatures::LAYER
+            .with(grouped)
+            .with(grouped.nested())
+            .with(outer)
     }
 
     pub fn pixels(

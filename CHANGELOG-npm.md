@@ -866,6 +866,8 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 - **A PDF exported at a `density` other than 1 renders a canvas drawn into another as it should in macOS Preview and Safari.** ([#438](https://github.com/l7aromeo/meo-skia-canvas/issues/438))
 
+- **A PDF embeds a `saveLayer()` composited by an operation it cannot write, such as `xor` or `lighter`, as pixels instead of drawing it wrong.** ([#439](https://github.com/l7aromeo/meo-skia-canvas/issues/439))
+
 - **An SVG of a page with nothing on it is well-formed XML.**
   `toBuffer("svg")` wrote an empty page's root as
   `<svg ... height="40"/ viewBox="0 0 80 40">`: Skia writes an empty

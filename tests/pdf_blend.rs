@@ -271,6 +271,111 @@ fn a_masked_blend_in_a_group_is_embedded_under_a_density() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+/// Over two opaque colours, a `saveLayer` composited by `operation`
+/// holding two overlapping rectangles drawn `source-over`, on a canvas in
+/// `space`; left open at the export where `open`.
+fn layer_composited(
+    space: PixelColorSpace,
+    operation: BlendMode,
+    open: bool,
+) -> Canvas {
+    let mut canvas = backdrop(space);
+    let ctx = canvas.context();
+    ctx.set_global_composite_operation(operation);
+    ctx.save_layer();
+    ctx.set_global_composite_operation(BlendMode::SourceOver);
+    ctx.set_fill_style(RgbaLinear::from_srgb8(200, 40, 120, 1.0));
+    ctx.fill_rect(50.0, 30.0, 60.0, 60.0);
+    ctx.fill_rect(90.0, 40.0, 60.0, 40.0);
+    if !open {
+        ctx.restore();
+    }
+    canvas
+}
+
+/// A `saveLayer` composited by an operation a PDF cannot write is embedded
+/// with what lies beneath it, as a draw composited by it is: `lighter`,
+/// `xor`, and `destination-atop`, since what a layer holds may be
+/// translucent -- and on a canvas outside sRGB, every blend. The rest are
+/// written as the blends they are. Closed, and still open at the export.
+///
+/// `source-out` over the opaque page leaves nothing anywhere, so outside
+/// sRGB the raster it is embedded as holds no ink and nothing is written.
+#[test]
+fn a_layer_composited_by_a_blend_a_pdf_cannot_write_is_embedded() {
+    let mut wrong = Vec::new();
+    for space in [PixelColorSpace::Srgb, PixelColorSpace::DisplayP3] {
+        for (name, operation, _) in OPERATIONS {
+            for open in [false, true] {
+                let pdf = pdf_of(&mut layer_composited(space, operation, open));
+                let embedded = match space {
+                    PixelColorSpace::Srgb => matches!(
+                        operation,
+                        BlendMode::Lighter
+                            | BlendMode::Xor
+                            | BlendMode::DestinationAtop
+                    ),
+                    _ => !matches!(
+                        operation,
+                        BlendMode::SourceOver | BlendMode::SourceOut
+                    ),
+                };
+                if embeds_an_image(&pdf) != embedded {
+                    wrong.push(format!(
+                        "{name} on {space:?}, open {open}: embedded {}",
+                        !embedded
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// A `saveLayer` composited by a blend written through a soft mask is a
+/// masked blend at the top of the page, kept vector at any density; inside
+/// another `saveLayer` it is one inside a group, embedded at a density
+/// other than 1 -- see `a_masked_blend_in_a_group_is_embedded_under_a_density`.
+/// Closed, and both left open at the export.
+#[test]
+fn a_layer_composited_by_a_masked_blend_inside_another_is_nested() {
+    let mut wrong = Vec::new();
+    for density in [1.0, 2.5] {
+        let options = EncodeOptions {
+            density,
+            ..EncodeOptions::default()
+        };
+        for (inside, open) in [(false, false), (true, false), (true, true)] {
+            let mut canvas = backdrop(PixelColorSpace::Srgb);
+            let ctx = canvas.context();
+            if inside {
+                ctx.save_layer();
+            }
+            ctx.set_global_composite_operation(BlendMode::DestinationOut);
+            ctx.save_layer();
+            ctx.set_global_composite_operation(BlendMode::SourceOver);
+            ctx.set_fill_style(RgbaLinear::from_srgb8(200, 40, 120, 1.0));
+            ctx.fill_rect(50.0, 30.0, 60.0, 60.0);
+            if !open {
+                ctx.restore();
+                if inside {
+                    ctx.restore();
+                }
+            }
+            let pdf =
+                canvas.to_buffer(ImageFormat::Pdf, &options).expect("a PDF");
+            let want = inside && density != 1.0;
+            if embeds_an_image(&pdf) != want {
+                wrong.push(format!(
+                    "inside {inside}, open {open} at {density}: embedded {}",
+                    !want
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 /// Every page of a PDF has a transparency group naming DeviceRGB, through
 /// `to_buffer` and through a file, once.
 #[test]
