@@ -1236,13 +1236,15 @@ impl PageRecorder {
     /// a [`Group`] where it was opened: on the page, or among the contents
     /// of the layer around it.
     ///
-    /// The group asks a vector backend for [`VectorFeatures::LAYER`] and
-    /// whatever its contents asked, so that an SVG export rasterizes the
-    /// layer and leaves the rest of the page vector -- or, for a layer that
-    /// composites what it holds as it stands, takes it entry by entry, and
-    /// for one at an opacity alone writes it as a group at that opacity:
-    /// see [`Group::opacity`]. One holding nothing that would change nothing
-    /// is dropped.
+    /// The group asks a vector backend for [`VectorFeatures::LAYER`], for
+    /// whatever its contents asked, a blend through a soft mask among them as
+    /// [`VectorFeatures::NESTED_MASKED_BLEND`] as well, and for how it
+    /// composites -- see [`LayerRec::vector_features`] -- so that an SVG export
+    /// rasterizes the layer and leaves the rest of the page vector -- or,
+    /// for a layer that composites what it holds as it stands, takes it
+    /// entry by entry, and for one at an opacity alone writes it as a group
+    /// at that opacity: see [`Group::opacity`]. One holding nothing that
+    /// would change nothing is dropped.
     pub fn close_layer(&mut self) {
         if self.open.is_empty() {
             return;
@@ -1254,6 +1256,7 @@ impl PageRecorder {
         };
         self.surface.forget_layers_past(self.open.len());
         if !layer.entries.is_empty() || layer.rec.marks_when_empty() {
+            let rec_features = layer.rec.vector_features();
             let group = Group {
                 composite: Composite::Layer(layer.rec),
                 matrix: layer.matrix,
@@ -1263,7 +1266,11 @@ impl PageRecorder {
                 contents_matrix: Matrix::new_identity(),
                 contents: Entries::new(layer.entries, layer.entry_features),
             };
-            self.file_group(group, layer.features.with(VectorFeatures::LAYER));
+            let features = layer
+                .features
+                .with(layer.features.nested())
+                .with(rec_features);
+            self.file_group(group, features.with(VectorFeatures::LAYER));
         }
         self.restore();
     }
@@ -1392,17 +1399,36 @@ impl PageRecorder {
                     contents_matrix: Matrix::new_identity(),
                     contents: Entries::new(contents, features),
                 }));
-                Some((group, layer.features.with(VectorFeatures::LAYER)))
+                let features = layer
+                    .features
+                    .with(layer.features.nested())
+                    .with(layer.rec.vector_features());
+                Some((group, features.with(VectorFeatures::LAYER)))
             })
             .map(|(group, _)| group)
     }
 
     /// What the open layers ask of a vector backend, as the page they are
-    /// drawn into by [`Self::open_layers_entry`] has to.
+    /// drawn into by [`Self::open_layers_entry`] has to: what each holds,
+    /// how each composites -- see [`LayerRec::vector_features`] -- and, for
+    /// all but the outermost, which is on the page, that inside a group.
     fn open_layer_features(&self) -> VectorFeatures {
-        self.open
+        let rec = |layer: &OpenLayer| layer.rec.vector_features();
+        let held = self
+            .open
             .iter()
-            .fold(VectorFeatures::LAYER, |all, layer| all.with(layer.features))
+            .fold(VectorFeatures::PLAIN, |all, layer| all.with(layer.features));
+        let inner = self
+            .open
+            .iter()
+            .skip(1)
+            .fold(VectorFeatures::PLAIN, |all, layer| all.with(rec(layer)));
+        let outer = self.open.first().map_or(VectorFeatures::PLAIN, rec);
+        let grouped = held.with(inner);
+        VectorFeatures::LAYER
+            .with(grouped)
+            .with(grouped.nested())
+            .with(outer)
     }
 
     pub fn pixels(
@@ -3825,6 +3851,10 @@ impl Page {
         if let Some(matte) = matte {
             matte.paint(canvas);
         }
+        let embedding = Embedding {
+            page: canvas.local_to_device_as_3x3(),
+            ..embedding
+        };
 
         // A blend mode is the one refusal that cannot be rasterized on its
         // own. The others -- an exotic shader, an image filter, a mask filter
@@ -4060,6 +4090,7 @@ impl Page {
             space,
             color_type,
             text: (contrast, gamma),
+            page,
         } = embedding;
         let dims = self.scaled_dimensions(density);
         let info = ImageInfo::new(
@@ -4072,13 +4103,23 @@ impl Page {
         let mut surface = started::raster(&info, None, Some(&props))
             .ok_or("Could not allocate a surface for the document fallback")?;
 
-        // Drawn under the transform the document is drawing under, at the
-        // density, and placed back on the page untransformed: what a group's
-        // entries are played under where it maps another page onto this one.
-        let matrix = canvas.local_to_device_as_3x3();
+        // Drawn under the transform the document is drawing under, relative
+        // to its page -- what a group's entries are played under where it
+        // maps another page onto this one -- at the density, and placed back
+        // under the page's own transform. The page's own transform is not
+        // the identity where the backend scales its page canvas: drawn under
+        // it as well, a PDF at a density of 4 rasterized the run at 16 times
+        // its scale, and placed with no transform at all, in page units, the
+        // image covered a quarter of its place.
+        let within = Matrix::concat(
+            &page
+                .invert()
+                .ok_or("The document's page cannot be inverted")?,
+            &canvas.local_to_device_as_3x3(),
+        );
         let raster = surface.canvas();
         raster.scale((density, density));
-        raster.concat(&matrix);
+        raster.concat(&within);
         for layer in layers {
             layer.playback(raster, Target::Pixels);
         }
@@ -4108,16 +4149,10 @@ impl Page {
             ink.bottom as f32 / density,
         );
         let src = Some((&Rect::from_irect(ink), SrcRectConstraint::Strict));
-        match matrix.is_identity() {
-            true => canvas.draw_image_rect(&image, src, dst, &Paint::default()),
-            false => {
-                canvas.save();
-                canvas.reset_matrix();
-                canvas.draw_image_rect(&image, src, dst, &Paint::default());
-                canvas.restore();
-                canvas
-            }
-        };
+        canvas.save();
+        canvas.set_matrix(&M44::from(page));
+        canvas.draw_image_rect(&image, src, dst, &Paint::default());
+        canvas.restore();
         Ok(())
     }
 
@@ -4676,7 +4711,7 @@ impl Page {
                 let canvas = document.canvas();
                 self.draw_as_document(
                     canvas,
-                    pdf_cannot(&options.surface_color_space),
+                    pdf_cannot(&options.surface_color_space, density),
                     matte.as_ref(),
                     options.embedding(),
                     None,
@@ -5164,7 +5199,7 @@ impl PageSequence {
         options: ExportOptions,
     ) -> Result<(), String> {
         options.check_timing()?;
-        let backend = pdf_cannot(&options.surface_color_space);
+        let backend = pdf_cannot(&options.surface_color_space, options.density);
         let color_type = options.compositing_color_type();
         let ExportOptions {
             quality,
@@ -5180,6 +5215,7 @@ impl PageSequence {
             space: &surface_color_space,
             color_type,
             text: (text_contrast, text_gamma),
+            page: Matrix::new_identity(),
         };
         let metadata = pdf::Metadata {
             producer: PDF_PRODUCER.to_string(),
@@ -5733,6 +5769,12 @@ struct Embedding<'a> {
     color_type: ColorType,
     /// The page's text contrast and gamma -- see [`text_surface_props`].
     text: (f32, f32),
+    /// The document page canvas's own transform, which
+    /// [`Page::draw_as_document`] takes as it starts: the identity for an
+    /// SVG, and for a PDF the density as a scale, by which Skia's PDF
+    /// backend scales its page canvas to its raster DPI. The identity until
+    /// then.
+    page: Matrix,
 }
 
 /// The surface properties a page's text is rasterized under: `contrast` and
@@ -5747,14 +5789,29 @@ fn text_surface_props(contrast: f32, gamma: f32) -> SurfaceProps {
     )
 }
 
-/// What a PDF refuses of a page composited in `space`: the blends it cannot
-/// write -- see [`blend_features`](crate::export::blend_features) -- and, on
-/// a page composited anywhere but sRGB, every blend, since a PDF blends in
-/// its page group's sRGB rather than in the canvas's own space.
-fn pdf_cannot(space: &ColorSpace) -> VectorFeatures {
-    match space.is_srgb() {
+/// What a PDF refuses of a page composited in `space` and exported at
+/// `density`: the blends it cannot write -- see
+/// [`blend_features`](crate::export::blend_features); on a page composited
+/// anywhere but sRGB, every blend, since a PDF blends in its page group's
+/// sRGB rather than in the canvas's own space; and at a density other than
+/// 1, a blend written through a soft mask inside a group, which
+/// CoreGraphics renders otherwise under the page's scale.
+///
+/// A masked blend at the top of the page, or anywhere at a density of 1,
+/// stays vector: CoreGraphics renders those as the canvas does, and the
+/// raster costs fidelity and size where nothing needs it.
+fn pdf_cannot(space: &ColorSpace, density: f32) -> VectorFeatures {
+    // UPSTREAM: CoreGraphics macOS 27.2 -- unfiled -- worked around
+    // Re-check: leave the nested masked blend vector, export the drawn-canvas
+    // `destination-out` page docs/browser-differences.md describes at density
+    // 2.5, and render it with sips against the canvas at that density.
+    let blends = match space.is_srgb() {
         true => VectorFeatures::PDF_CANNOT,
         false => VectorFeatures::PDF_CANNOT.with(VectorFeatures::BLEND_MODE),
+    };
+    match density == 1.0 {
+        true => blends,
+        false => blends.with(VectorFeatures::NESTED_MASKED_BLEND),
     }
 }
 
@@ -5963,6 +6020,7 @@ impl ExportOptions {
             space: &self.surface_color_space,
             color_type: self.compositing_color_type(),
             text: (self.text_contrast, self.text_gamma),
+            page: Matrix::new_identity(),
         }
     }
 
@@ -7966,6 +8024,7 @@ mod tests {
                         space: &p3,
                         color_type,
                         text: ctx.inner.canvas_text,
+                        page: Matrix::new_identity(),
                     },
                     None,
                 )
@@ -7987,9 +8046,9 @@ mod tests {
             )
             .expect("the readback as an image");
             for (backend, page_info) in [
-                (pdf_cannot(&p3), srgb.clone()),
+                (pdf_cannot(&p3, 1.0), srgb.clone()),
                 (
-                    pdf_cannot(&p3),
+                    pdf_cannot(&p3, 1.0),
                     srgb.with_color_type(ColorType::RGBAF16)
                         .with_color_space(p3.clone()),
                 ),
@@ -8027,6 +8086,117 @@ mod tests {
                     0,
                     "{depth:?} {mode:?} at {alpha} onto {:?}, refusing {backend:?}",
                     page_info.color_type()
+                );
+            }
+        }
+    }
+
+    /// A run a document embeds lands on its place at any density: a page
+    /// holding a blend, embedded whole, stores what the page composites at
+    /// that density, at densities 1, 2, 2.5 and 4. In a PDF, into a page
+    /// canvas scaled by the density as Skia's PDF backend scales one to its
+    /// raster DPI; in an SVG, into an unscaled one, drawn under the density.
+    /// An embed placed in page units under a PDF's scale covered a quarter of
+    /// its place at 4.
+    #[test]
+    fn a_run_embedded_at_a_density_lands_on_its_place() {
+        use crate::{
+            canvas::{Canvas, CanvasOptions},
+            paint::BlendMode as Mode,
+            pixels::PixelColorSpace,
+        };
+        let (width, height) = (40.0f32, 24.0f32);
+        let mut canvas = Canvas::with_options(
+            width,
+            height,
+            CanvasOptions {
+                color_space: PixelColorSpace::DisplayP3,
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a Display P3 canvas");
+        let ctx = canvas.context();
+        for (at, css) in
+            ["rgb(230 180 40)", "rgb(40 90 200)"].iter().enumerate()
+        {
+            ctx.set_fill_style_css(css).expect("a colour");
+            ctx.fill_rect(at as f32 * 20.0, 0.0, 20.0, height);
+        }
+        ctx.set_global_composite_operation(Mode::Multiply);
+        ctx.set_fill_style_css("rgb(200 40 120)").expect("a colour");
+        ctx.fill_rect(10.0, 6.0, 20.0, 12.0);
+        let page = ctx.inner.page();
+        let p3 = ctx.inner.canvas_color_space.clone();
+        let (contrast, gamma) = ctx.inner.canvas_text;
+        let export = |density: f32| ExportOptions {
+            density,
+            color_space: ColorSpace::new_srgb(),
+            surface_color_space: p3.clone(),
+            surface_color_type: ctx.inner.canvas_color_type,
+            text_contrast: contrast,
+            text_gamma: gamma,
+            ..ExportOptions::default()
+        };
+        // A PDF's page is scaled by the density and an SVG's is not.
+        for pdf in [true, false] {
+            for density in [1.0f32, 2.0, 2.5, 4.0] {
+                let (backend, scaled) = match pdf {
+                    true => (pdf_cannot(&p3, density), true),
+                    false => (VectorFeatures::SVG_CANNOT, false),
+                };
+                let options = export(density);
+                let dims = page.scaled_dimensions(density);
+                let info = ImageInfo::new(
+                    dims,
+                    ColorType::RGBA8888,
+                    AlphaType::Premul,
+                    Some(ColorSpace::new_srgb()),
+                );
+                let want = page
+                    .composite_into(&options, RenderingEngine::CPU, &info)
+                    .expect("the page at the density");
+                let mut recorder = PictureRecorder::new();
+                let document = recorder.begin_recording(
+                    match scaled {
+                        true => Rect::from_isize(dims),
+                        false => page.bounds,
+                    },
+                    true,
+                );
+                if scaled {
+                    document.scale((density, density));
+                }
+                page.draw_as_document(
+                    document,
+                    backend,
+                    None,
+                    options.embedding(),
+                    None,
+                )
+                .expect("the document's page");
+                let embedded = recorder
+                    .finish_recording_as_picture(None)
+                    .expect("a picture of it");
+                let mut surface =
+                    started::raster(&info, None, None).expect("a page");
+                if !scaled {
+                    surface.canvas().scale((density, density));
+                }
+                surface.canvas().draw_picture(&embedded, None, None);
+                let row = info.min_row_bytes();
+                let mut got = vec![0u8; row * info.height() as usize];
+                assert!(surface.read_pixels(&info, &mut got, row, (0, 0)));
+                let parted = want
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(got.as_chunks::<4>().0)
+                    .filter(|(a, b)| a != b)
+                    .count();
+                assert_eq!(
+                    parted, 0,
+                    "at a density of {density}, refusing {backend:?}"
                 );
             }
         }

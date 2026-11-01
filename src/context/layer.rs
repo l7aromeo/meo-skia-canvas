@@ -45,7 +45,7 @@ use crate::{
         faint::{Faint, composited},
         page::{ExportOptions, Page},
     },
-    export::VectorFeatures,
+    export::{VectorFeatures, blend_features},
     gpu::RenderingEngine,
     node::{
         filter::MASK_BLUR_MAX_SIGMA,
@@ -1084,6 +1084,23 @@ impl LayerRec {
         let blend = self.paint.as_ref().and_then(Paint::as_blend_mode);
         self.backdrop.is_some()
             || !matches!(blend, None | Some(BlendMode::SrcOver))
+    }
+
+    /// What compositing the layer onto what lies beneath it asks of a
+    /// vector backend: its paint's blend -- see [`blend_features`] -- with
+    /// what it holds taken for translucent, since a layer may hold anything.
+    /// A blender that is no blend mode, which no document can write, asks
+    /// for a blend it cannot match.
+    pub(crate) fn vector_features(&self) -> VectorFeatures {
+        let Some(paint) = &self.paint else {
+            return VectorFeatures::PLAIN;
+        };
+        match paint.as_blend_mode() {
+            Some(mode) => blend_features(mode, false),
+            None => {
+                VectorFeatures::BLEND_MODE.with(VectorFeatures::UNMATCHED_BLEND)
+            }
+        }
     }
 
     /// The opacity the layer composites what it holds at, where that is
