@@ -437,7 +437,8 @@ fn contrast_bucket(rgb: [f32; 3]) -> [u8; 3] {
 
 /// The colour Skia sets a glyph mask's contrast from, for a paint in
 /// `plain` whose colour filter is `filter`: `filterColor4f(plain, nullptr,
-/// nullptr)`, as `SkPaintPriv::ComputeLuminanceColor` asks it.
+/// nullptr)`, as `SkPaintPriv::ComputeLuminanceColor` asks it,
+/// unpremultiplied.
 ///
 /// Read by drawing, as skia-safe's `filter_color4f` cannot give it: a
 /// paint with no shader has its colour filter folded into its colour by
@@ -467,7 +468,14 @@ fn luminance_colour(filter: &ColorFilter, plain: Color4f) -> Option<[f32; 3]> {
         .read_pixels(&info, &mut pixel, info.min_row_bytes(), (0, 0))
         .then_some(())?;
     let (channels, _) = pixel.as_chunks::<4>();
-    Some([0, 1, 2].map(|c| f32::from_le_bytes(channels[c])))
+    let [r, g, b, a] = [0, 1, 2, 3].map(|c| f32::from_le_bytes(channels[c]));
+    // Unpremultiplied, as `filterColor4f` answers: a filter leaving the
+    // colour translucent -- a `copy` blend of a colour at half alpha --
+    // reads back premultiplied here.
+    Some(match a > 0.0 {
+        true => [r / a, g / a, b / a],
+        false => [r, g, b],
+    })
 }
 
 thread_local! {
@@ -661,6 +669,24 @@ impl ExactColour {
         plain: Color4f,
     ) -> Option<ColorFilter> {
         self.keeping_plain_luminance(self.replacement()?, plain)
+    }
+
+    /// `filtered`, the dye followed by a colour filter built for a page's
+    /// pixels, with the glyph contrast Skia sets for `plain` through
+    /// `plain_filter`, the filter as a document draws it: the filter built
+    /// for the pixels holds its colour in the page's space, which Skia reads
+    /// as sRGB where it sets the contrast -- see [`luminance_colour`] -- and
+    /// a gray of 0.05 named in sRGB, replaced by a `copy` blend filter of
+    /// itself on a Rec. 2020 page, took the next bucket, its glyph edges up
+    /// to 24 levels from the plain text's.
+    pub fn keeping_luminance_of(
+        &self,
+        filtered: ColorFilter,
+        plain_filter: &ColorFilter,
+        plain: Color4f,
+    ) -> Option<ColorFilter> {
+        let [r, g, b] = luminance_colour(plain_filter, plain)?;
+        self.keeping_plain_luminance(filtered, Color4f::new(r, g, b, 1.0))
     }
 
     /// The colour as a colour filter: see [`Self::dye`].
@@ -996,6 +1022,13 @@ pub struct LayerRec {
     pub paint: Option<Paint>,
     pub bounds: Option<Rect>,
     pub backdrop: Option<ImageFilter>,
+    /// The paint a page's pixels open the layer with in place of `paint`,
+    /// where a CanvasKit colour filter in it is built for those pixels --
+    /// see `Context2D::pixels_paint`.
+    pub pixels_paint: Option<Paint>,
+    /// The backdrop a page's pixels open the layer with in place of
+    /// `backdrop`, built for those pixels -- see `Context2D::pixels_onto`.
+    pub pixels_backdrop: Option<ImageFilter>,
 }
 
 impl LayerRec {
@@ -1006,7 +1039,13 @@ impl LayerRec {
     /// opacity and keeps vector. Confined to `within` where that is `Some`:
     /// a rectangle in device pixels -- see [`Self::footprint`].
     fn open_on(&self, canvas: &SkCanvas, target: Target, within: Option<Rect>) {
-        let paint = match (&self.paint, target) {
+        let own = match target {
+            Target::Pixels => {
+                self.pixels_paint.as_ref().or(self.paint.as_ref())
+            }
+            Target::Document => self.paint.as_ref(),
+        };
+        let paint = match (own, target) {
             (Some(paint), Target::Pixels) => Some(composited(paint)),
             (Some(paint), Target::Document) => Some(Cow::Borrowed(paint)),
             (None, _) => None,
@@ -1038,7 +1077,13 @@ impl LayerRec {
         if let Some(bounds) = within.as_ref().or(self.bounds.as_ref()) {
             rec = rec.bounds(bounds);
         }
-        if let Some(backdrop) = &self.backdrop {
+        let backdrop = match target {
+            Target::Pixels => {
+                self.pixels_backdrop.as_ref().or(self.backdrop.as_ref())
+            }
+            Target::Document => self.backdrop.as_ref(),
+        };
+        if let Some(backdrop) = backdrop {
             rec = rec.backdrop(backdrop);
         }
         canvas.save_layer(&rec);
@@ -1482,9 +1527,14 @@ impl Group {
                     canvas.restore();
                     return;
                 }
+                // A page's pixels run the chain's filters built for them.
+                let pixels = match target {
+                    Target::Pixels => Step::for_pixels(steps),
+                    Target::Document => None,
+                };
                 let outcome = chain::run(
                     canvas,
-                    steps,
+                    pixels.as_deref().unwrap_or(steps),
                     content,
                     Depth::Floats,
                     &paint,
