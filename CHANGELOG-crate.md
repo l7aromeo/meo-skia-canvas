@@ -428,14 +428,16 @@ read the math functions and every length unit.
   is where Chrome 156 puts these baselines on every face measured: 100px
   Oswald's `Top` is 80.50 above the alphabetic baseline where it was 119.30,
   Amstelvar's 75 where it was 95. A face that states no typographic span is
-  divided as its ascent and descent divide it, as in Chrome. Text drawn,
-  stroked or outlined at these three baselines moves by the difference, and
-  `Context2D::measure_text`'s values move with the baseline they are
-  measured from. `TextMetrics::em_height_ascent` and `em_height_descent`,
-  which reported the face's ascent and descent, now report the em square,
-  adding up to the font size at every baseline. Code that offset text drawn
-  at `Top`, `Middle` or `Bottom` to make up for where it used to sit is now
-  off by that offset.
+  divided as its ascent and descent divide it, as in Chrome. On a variable
+  face whose `MVAR` varies the typographic ascender and descender, the em
+  square is divided as the instance's are, where Chrome 156 keeps the stored
+  values. Text drawn, stroked or outlined at these three baselines moves by
+  the difference, and `Context2D::measure_text`'s values move with the
+  baseline they are measured from. `TextMetrics::em_height_ascent` and
+  `em_height_descent`, which reported the face's ascent and descent, now
+  report the em square, adding up to the font size at every baseline. Code
+  that offset text drawn at `Top`, `Middle` or `Bottom` to make up for where
+  it used to sit is now off by that offset.
 
 - **`font_bounding_box_ascent` and `font_bounding_box_descent` are measured
   from the `TextBaseline` set.** At every baseline but `Alphabetic` they were

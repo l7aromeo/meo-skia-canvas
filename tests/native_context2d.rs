@@ -1690,6 +1690,79 @@ fn top_middle_and_bottom_are_the_em_squares() {
     }
 }
 
+/// A variable face's `MVAR` can move the typographic ascender and descender
+/// from one instance to the next; the em square is divided as the instance's
+/// own are, where Chrome 156 keeps the stored values. Amstelvar's `MVAR`
+/// varies `stro` and `xhgt` along `YTLC`; renamed `hasc` and `hdsc` and moved
+/// onto `wght`, its deltas take the stored 1500 and -500 to 1434 and -610 at
+/// weight 100 and to 1620 and -300 at 900. Amstelvar as shipped keeps 1500
+/// and -500 at every weight.
+#[test]
+fn an_instances_em_square_follows_its_mvar() {
+    /// `wght`'s and `YTLC`'s indices among Amstelvar's axes.
+    const WGHT: usize = 1;
+    const YTLC: usize = 10;
+    let shipped = std::fs::read("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+        .expect("bundled Amstelvar");
+    let mut font = shipped.clone();
+    let be16 =
+        |b: &[u8], at: usize| u16::from_be_bytes([b[at], b[at + 1]]) as usize;
+    let be32 = |b: &[u8], at: usize| {
+        u32::from_be_bytes(b[at..at + 4].try_into().expect("a word")) as usize
+    };
+    for entry in (0..be16(&font, 4)).map(|i| 12 + 16 * i) {
+        if &font[entry..entry + 4] != b"MVAR" {
+            continue;
+        }
+        let mvar = be32(&font, entry + 8);
+        font[mvar + 12..mvar + 16].copy_from_slice(b"hasc");
+        font[mvar + 20..mvar + 24].copy_from_slice(b"hdsc");
+        let store = mvar + be16(&font, mvar + 10);
+        let list = store + be32(&font, store + 2);
+        let (axes, regions) = (be16(&font, list), be16(&font, list + 2));
+        for region in 0..regions {
+            let at = |axis: usize| list + 4 + (region * axes + axis) * 6;
+            if font[at(YTLC) + 2..at(YTLC) + 4] == [0, 0] {
+                continue;
+            }
+            let ytlc = font[at(YTLC)..at(YTLC) + 6].to_vec();
+            font[at(WGHT)..at(WGHT) + 6].copy_from_slice(&ytlc);
+            font[at(YTLC)..at(YTLC) + 6].fill(0);
+        }
+    }
+    let library = FontLibrary::new();
+    library
+        .register_font_from_data("EmMvar", &font)
+        .expect("the retagged Amstelvar registers");
+    library
+        .register_font_from_data("EmMvarShipped", &shipped)
+        .expect("Amstelvar registers");
+    let top = |family: &str, weight: u16| {
+        let mut canvas = Canvas::new(10.0, 10.0);
+        let ctx = canvas.context();
+        ctx.set_font(&Font::new(family, 100.0).weight(weight));
+        ctx.set_text_baseline(TextBaseline::Top);
+        -ctx.measure_text("H", None).alphabetic_baseline
+    };
+    for (weight, ascender, descender) in [
+        (100, 1434.0, -610.0),
+        (400, 1500.0, -500.0),
+        (900, 1620.0, -300.0),
+    ] {
+        let expected = 100.0 * ascender / (ascender - descender);
+        let measured = top("EmMvar", weight);
+        assert!(
+            (measured - expected).abs() < 1e-3,
+            "weight {weight}: top {measured} against {expected}"
+        );
+        let stored = top("EmMvarShipped", weight);
+        assert!(
+            (stored - 75.0).abs() < 1e-3,
+            "shipped Amstelvar at weight {weight}: top {stored}"
+        );
+    }
+}
+
 #[test]
 fn reset_clears_the_page_and_the_state() {
     let mut canvas = Canvas::new(10.0, 10.0);

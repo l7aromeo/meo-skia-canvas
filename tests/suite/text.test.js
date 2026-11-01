@@ -3140,3 +3140,94 @@ describe("top, middle and bottom are the em square's", () => {
     FontLibrary.reset();
   });
 });
+
+describe("an instance's em square follows its MVAR", () => {
+  // A variable face's `MVAR` can move the typographic ascender and descender
+  // from one instance to the next (`hasc`, `hdsc`). Chrome 156 keeps the
+  // stored values at every instance; this library divides the em as the
+  // instance's own do. Amstelvar's `MVAR` varies `stro` and `xhgt` along
+  // `YTLC`; renamed `hasc` and `hdsc` and moved onto `wght`, its deltas take
+  // the stored 1500 and -500 to 1434 and -610 at weight 100 and to 1620 and
+  // -300 at 900.
+  const fs = require("fs"),
+    os = require("os"),
+    path = require("path");
+  const AMSTELVAR = "tests/assets/fonts/AmstelvarAlpha-VF.ttf";
+  /** `wght`'s and `YTLC`'s indices among Amstelvar's axes. */
+  const WGHT = 1,
+    YTLC = 10;
+  const font = Buffer.from(fs.readFileSync(AMSTELVAR));
+  const tables = font.readUInt16BE(4);
+  for (let i = 0; i < tables; i++) {
+    const entry = 12 + 16 * i;
+    if (font.toString("latin1", entry, entry + 4) !== "MVAR") continue;
+    const mvar = font.readUInt32BE(entry + 8),
+      length = font.readUInt32BE(entry + 12);
+    font.write("hasc", mvar + 12, "latin1");
+    font.write("hdsc", mvar + 20, "latin1");
+    const store = mvar + font.readUInt16BE(mvar + 10);
+    const list = store + font.readUInt32BE(store + 2);
+    const axes = font.readUInt16BE(list),
+      regions = font.readUInt16BE(list + 2);
+    for (let r = 0; r < regions; r++) {
+      const at = (axis) => list + 4 + (r * axes + axis) * 6;
+      if (font.readInt16BE(at(YTLC) + 2) === 0) continue;
+      font.copy(font, at(WGHT), at(YTLC), at(YTLC) + 6);
+      font.fill(0, at(YTLC), at(YTLC) + 6);
+    }
+    let sum = 0;
+    for (let k = 0; k < length; k += 4) {
+      const word = Buffer.alloc(4);
+      font.copy(word, 0, mvar + k, Math.min(mvar + k + 4, mvar + length));
+      sum = (sum + word.readUInt32BE(0)) >>> 0;
+    }
+    font.writeUInt32BE(sum, entry + 4);
+  }
+  const retagged = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), "em-mvar-")),
+    "amstelvar-typo-mvar.ttf",
+  );
+  fs.writeFileSync(retagged, font);
+  beforeEach(() => {
+    FontLibrary.use("EmMvar", [retagged]);
+    FontLibrary.use("EmMvarShipped", [AMSTELVAR]);
+  });
+
+  const measure = (font, text = "H") => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = font;
+    ctx.textBaseline = "top";
+    return ctx.measureText(text);
+  };
+
+  test("top sits where the instance's typographic metrics put it", () => {
+    const ARITHMETIC = {
+      100: (100 * 1434) / (1434 + 610),
+      400: (100 * 1500) / (1500 + 500),
+      900: (100 * 1620) / (1620 + 300),
+    };
+    for (const [weight, top] of Object.entries(ARITHMETIC)) {
+      const measured = -measure(`${weight} 100px EmMvar`).alphabeticBaseline;
+      assert.ok(
+        Math.abs(measured - top) < 1e-3,
+        `weight ${weight}: top ${measured} above the alphabetic baseline against ${top}`,
+      );
+    }
+    // The weight reached the face: its text widens with it.
+    const width = (weight) =>
+      measure(`${weight} 100px EmMvar`, "Hamburg").width;
+    assert.ok(width(900) > width(400) && width(400) > width(100));
+  });
+
+  test("a face whose MVAR varies other metrics keeps the stored ones", () => {
+    for (const weight of [100, 900]) {
+      const measured = -measure(`${weight} 100px EmMvarShipped`)
+        .alphabeticBaseline;
+      assert.ok(
+        Math.abs(measured - 75) < 1e-3,
+        `weight ${weight}: top ${measured}, where Amstelvar stores 1500 and -500`,
+      );
+    }
+    FontLibrary.reset();
+  });
+});
