@@ -1350,7 +1350,15 @@ export interface RenderOptions {
  * @category Exporting
  */
 export interface ExportOptions extends RenderOptions {
-  /** Quality for lossy encodings like JPEG & WEBP (0.0–1.0) */
+  /**
+   * Quality for lossy encodings like JPEG & WEBP (0.0–1.0), defaulting to
+   * `0.92`.
+   *
+   * A PDF writes the pixels it holds losslessly unless this is given below
+   * `1`: then as JPEG at this quality, at full chroma unless
+   * {@link downsample} is set. A JPEG file drawn onto a page keeps its own
+   * bytes either way.
+   */
   quality?: number;
 
   /**
@@ -1372,7 +1380,10 @@ export interface ExportOptions extends RenderOptions {
   /** Optionally convert text to bézier paths (SVG only) */
   outline?: boolean;
 
-  /** Optionally use 4:2:0 chroma subsampling (JPEG only) */
+  /**
+   * Optionally use 4:2:0 chroma subsampling: for a JPEG, and for the pixels a
+   * PDF embeds as JPEG at a {@link quality} below `1`.
+   */
   downsample?: boolean;
 
   /**

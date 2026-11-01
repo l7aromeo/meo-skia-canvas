@@ -3098,6 +3098,27 @@ describe("a PDF export", () => {
     assert.equal(count(pdf, "/Subtype /Image"), 0, "nothing embedded");
   });
 
+  test("embeds pixels losslessly unless a quality below 1 asks for JPEG", () => {
+    // `lighter` has no PDF blend mode, so the page is embedded as pixels.
+    const lit = () => {
+      const canvas = new Canvas(200, 120);
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "rgb(230 180 40)";
+      ctx.fillRect(0, 0, 200, 120);
+      ctx.globalCompositeOperation = "lighter";
+      ctx.fillStyle = "rgb(200 40 120)";
+      ctx.fillRect(50, 30, 100, 60);
+      return canvas;
+    };
+    const lossless = lit().toBufferSync("pdf");
+    assert.equal(count(lossless, "/Subtype /Image"), 1, "one image");
+    assert.equal(count(lossless, "/DCTDecode"), 0, "no JPEG by default");
+    const one = lit().toBufferSync("pdf", { quality: 1 });
+    assert.equal(count(one, "/DCTDecode"), 0, "none at a quality of 1");
+    const jpeg = lit().toBufferSync("pdf", { quality: 0.8 });
+    assert.equal(count(jpeg, "/DCTDecode"), 1, "a JPEG at 0.8");
+  });
+
   test("gives every page and every file its group", () => {
     const canvas = multiplied(3);
     assert.equal(count(canvas.toBufferSync("pdf"), GROUP), 3);

@@ -329,6 +329,17 @@ thread_local! {
 /// bit on the CPU, and on Ganesh within a level of eight bits -- see
 /// `context::floats_draw_on_the_cpu`. `None` where the effect does not
 /// compile.
+///
+/// What it costs: Skia lowers the effect into raster-pipeline stages for
+/// every blit (`SkRuntimeColorFilter::appendStages`) and runs them where its
+/// own filter runs one blend stage, about half the cost each. 200 rects of a
+/// linear gradient through a `multiply` filter took 1.13 times what Skia's
+/// own filter takes on an F16 Display P3 page and 1.16 times on F32 Rec.
+/// 2020; a flat colour does not pay it, being folded instead -- see
+/// `context::fold`. Skia's own filter cannot be handed an sRGB colour its
+/// conversion lands on the exact one: skcms's approximate transfer function
+/// steps over most values, so of a grid of 4913 colours such an input
+/// existed for 27 on linear sRGB, 26 on Display P3 and 3 on Rec. 2020.
 pub(crate) fn exact_blend(
     colour: Color4f,
     mode: BlendMode,

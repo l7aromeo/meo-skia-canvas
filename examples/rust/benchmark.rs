@@ -452,7 +452,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         ("svg", ImageFormat::Svg, None),
     ] {
         let options = EncodeOptions {
-            quality: quality.unwrap_or(EncodeOptions::default().quality),
+            quality,
             ..EncodeOptions::default()
         };
         let elapsed = time(iterations, warmup, || {

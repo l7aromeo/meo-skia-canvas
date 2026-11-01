@@ -19,7 +19,7 @@ independently of the npm package.
 
 ## 📦 ⟩ [v0.17.0] (crate) ⟩ Unreleased
 
-**A breaking release. Twenty-eight changes can break working code, each under
+**A breaking release. Twenty-nine changes can break working code, each under
 Breaking with what to change.**
 
 Signatures and types change: `FontSlant::Oblique` and `TextSlant::Oblique` carry
@@ -61,6 +61,8 @@ an opt-in `fetch` feature, `set_font_kerning`, `set_text_rendering`,
 read the math functions and every length unit.
 
 ### Breaking
+
+- **`EncodeOptions::quality` is an `Option<f32>`, `None` meaning each format's own default: 0.92 for JPEG, WebP and AVIF, lossless for a PDF's pixels.** ([#444](https://github.com/l7aromeo/meo-skia-canvas/issues/444)) Write `quality: Some(0.8)` where you wrote `quality: 0.8`.
 
 - **A paragraph style's text shadows paint the first listed on top.** A
   `TextStyle`'s `shadows` were painted in the order given, the first lowest,
@@ -409,6 +411,8 @@ read the math functions and every length unit.
 - A text decoration in a named colour casts its shadow under `globalAlpha` at its own alpha, not that alpha twice, on F16 and F32 canvases ([#455](https://github.com/l7aromeo/meo-skia-canvas/issues/455)).
 
 - A CanvasKit filter holding a colour lands as a fill of that colour on every float canvas, in every blend mode ([#418](https://github.com/l7aromeo/meo-skia-canvas/pull/418)).
+
+- **A PDF holds the pixels it embeds losslessly unless an explicit `EncodeOptions::quality` below 1 asks for JPEG, which is then full-chroma unless `jpeg_downsample` is set.** ([#444](https://github.com/l7aromeo/meo-skia-canvas/issues/444)) Flat graphics embedded this way grow by up to about a fifth, photographs inside an embedded run by 5 to 12 times.
 
 - **`TextMetrics::font_bounding_box_ascent` and `font_bounding_box_descent`
   are the first available font's own.** They were SkParagraph's line box,
