@@ -148,16 +148,17 @@ fn row(canvas: &mut Canvas, gpu: bool) -> Vec<u8> {
         .to_vec()
 }
 
-/// Whether `route` drawn and read on `gpu` is held out of the exact sweep:
-/// a CanvasKit blend filter over a fill on the raster backend, which Skia
+/// Whether `route` read on `engine` is held out of the exact sweep: a
+/// CanvasKit blend filter over a fill on the raster backend, which Skia
 /// folds into the paint's colour and blits as it blits any fill, rounding
 /// the colour and its alpha to bytes before the product -- 8,186 of the
 /// 65,536 off-byte cases store a level off it. That is the raster
 /// backend's fill rule, which #440 changes; until then
 /// [`a_blend_filter_over_a_fill_on_the_cpu_misses_until_440`] holds the
-/// count.
-fn known_miss(route: Route, gpu: bool) -> bool {
-    matches!(route, Route::CanvasKitBlend) && !gpu
+/// count. Asked of the engine the read runs on, not the one it asked for:
+/// a machine with no GPU reads a canvas set to it on the raster backend.
+fn known_miss(route: Route, engine: EngineKind) -> bool {
+    matches!(route, Route::CanvasKitBlend) && engine == EngineKind::Cpu
 }
 
 /// What `routes` store for every grey at every alpha, at the offsets `at`,
@@ -165,13 +166,14 @@ fn known_miss(route: Route, gpu: bool) -> bool {
 /// read with every engine in `read`, a row of canvas per alpha, so that no
 /// canvas holds more than 256 filtered draws -- Ganesh's playback of a
 /// page's filtered draws grows faster than their number. `held_out` names
-/// the (route, reading engine) pairs left out. The misses, described.
+/// the (route, engine read on) pairs left out, the engine the one the
+/// canvas reports. The misses, described.
 fn misses(
     routes: &[Route],
     at: (f64, f64),
     drawn: &[bool],
     read: &[bool],
-    held_out: impl Fn(Route, bool) -> bool,
+    held_out: impl Fn(Route, EngineKind) -> bool,
 ) -> Vec<String> {
     let mut missed = vec![];
     for &route in routes {
@@ -188,7 +190,8 @@ fn misses(
                     route.draw(canvas.context(), c as f32, &grey(c, a, at));
                 }
                 for &read in read {
-                    if held_out(route, read) {
+                    canvas.set_gpu(read);
+                    if held_out(route, canvas.engine_kind()) {
                         continue;
                     }
                     let pixels = row(&mut canvas, read);
