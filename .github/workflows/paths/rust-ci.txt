@@ -24,6 +24,9 @@ rustfmt.toml
 # built even when no source moves.
 build.rs
 Cargo.lock
+# The `licenses` job checks the counts this file states against the graph
+# `Cargo.lock` resolves, so an edit to either has to run it.
+THIRD-PARTY-NOTICES.md
 
 # The Skia patches name the tree every source build compiles from, and the
 # action restores it, so a change to either changes what is built.
