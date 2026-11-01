@@ -1195,6 +1195,7 @@ dependencies = [
  "foldhash 0.2.0",
  "gif",
  "libaom-sys",
+ "libc",
  "libloading",
  "libm",
  "little_exif",
