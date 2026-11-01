@@ -47,11 +47,20 @@ use crate::{
 /// perfectly, and rasterizing it because SVG could not would cost fidelity
 /// and size for nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct VectorFeatures(u8);
+pub(crate) struct VectorFeatures(u16);
 
 impl VectorFeatures {
     /// A blend mode past source-over.
     pub(crate) const BLEND_MODE: Self = Self(1 << 3);
+    /// A canvas's pattern, which a document is handed as a picture shader.
+    /// Skia's PDF backend cannot write one and rasterizes it in
+    /// `make_fallback_shader` (`SkPDFShader.cpp`): at the PDF device's
+    /// unscaled size, so at any density it was a raster at 1, and in no
+    /// colour space, so a tile on a Display P3 page blended in sRGB's
+    /// numbers. Embedded instead, as the page composites it -- see
+    /// `context::page::Page::embed_raster`. Never without
+    /// [`Self::EXOTIC_SHADER`].
+    pub(crate) const CANVAS_PATTERN: Self = Self(1 << 9);
     /// A sweep gradient, a gradient mixed in a working space of its own, a
     /// procedural shader, or a canvas's pattern, which is a picture shader.
     /// SVG names four paint servers and none of these is among them.
@@ -63,14 +72,26 @@ impl VectorFeatures {
     /// blend. The SVG backend has none: it drops whatever is drawn inside
     /// one, plain, translucent or nested.
     pub(crate) const LAYER: Self = Self(1 << 5);
+    /// A blend Skia's PDF backend writes through a soft mask -- see
+    /// [`blend_features`]. Never without [`Self::BLEND_MODE`].
+    pub(crate) const MASKED_BLEND: Self = Self(1 << 7);
     /// A mask filter.
     pub(crate) const MASK_FILTER: Self = Self(1 << 2);
-    /// What the PDF backend gets wrong, which is a few blend modes and
-    /// nothing else: a conic gradient, a shadow and a `blur()` all come out
-    /// of it pixel-identical to the raster export -- see [`blend_features`]
+    /// A blend written through a soft mask, inside a group: a `saveLayer`,
+    /// or a canvas drawn in through a layer. CoreGraphics renders one under
+    /// a page scaled by a density other than 1 otherwise -- see
+    /// `context::page::pdf_cannot`. Never without [`Self::BLEND_MODE`].
+    pub(crate) const NESTED_MASKED_BLEND: Self = Self(1 << 8);
+    /// What the PDF backend gets wrong, which is a few blend modes and a
+    /// canvas's pattern: a conic gradient, a shadow and a `blur()` all come
+    /// out of it pixel-identical to the raster export -- see [`blend_features`]
     /// for which blends. On a page composited outside sRGB every blend is
-    /// refused as well -- see `context::page::pdf_cannot`.
-    pub(crate) const PDF_CANNOT: Self = Self::UNMATCHED_BLEND;
+    /// refused as well, and at a density other than 1 a blend written
+    /// through a soft mask inside a group -- see `context::page::pdf_cannot`.
+    /// And a canvas's pattern, which it rasterizes at the wrong scale and in
+    /// the wrong space -- see [`Self::CANVAS_PATTERN`].
+    pub(crate) const PDF_CANNOT: Self =
+        Self(Self::UNMATCHED_BLEND.0 | Self::CANVAS_PATTERN.0);
     /// A canvas drawn into another through a paint -- a global alpha, a
     /// blend mode or a colour filter -- which reaches its picture through a
     /// layer. The SVG backend has no layers and drops the picture whole.
@@ -108,6 +129,19 @@ impl VectorFeatures {
     pub(crate) fn refused_by(self, backend: Self) -> bool {
         self.0 & backend.0 != 0
     }
+
+    /// What a group asks of a vector backend for holding draws that ask for
+    /// this: [`Self::NESTED_MASKED_BLEND`] where one of them blends through
+    /// a soft mask, at any depth, and nothing else. What the group asks for
+    /// itself, and what its contents ask beside that, are the caller's to
+    /// add.
+    pub(crate) fn nested(self) -> Self {
+        let masked = Self::MASKED_BLEND.with(Self::NESTED_MASKED_BLEND);
+        match self.refused_by(masked) {
+            true => Self::NESTED_MASKED_BLEND.with(Self::BLEND_MODE),
+            false => Self::PLAIN,
+        }
+    }
 }
 
 /// What a draw composited by `operation` asks of a vector backend, its
@@ -129,19 +163,34 @@ impl VectorFeatures {
 ///
 /// The figures are poppler's, for a rectangle in `rgb(200 40 120)` over two
 /// opaque colours.
+///
+/// The Porter-Duff operators PDF has no blend mode for, and `modulate`, the
+/// backend writes through a soft mask made from the draw's shape --
+/// `needShape` in Skia's `SkPDFDevice.cpp` -- and each of those is
+/// [`VectorFeatures::MASKED_BLEND`] as well.
 pub(crate) fn blend_features(
     operation: BlendMode,
     opaque: bool,
 ) -> VectorFeatures {
     let blend = VectorFeatures::BLEND_MODE;
+    let masked = blend.with(VectorFeatures::MASKED_BLEND);
     match operation {
         BlendMode::SrcOver => VectorFeatures::PLAIN,
         BlendMode::Plus | BlendMode::Xor => {
             blend.with(VectorFeatures::UNMATCHED_BLEND)
         }
         BlendMode::DstATop if !opaque => {
-            blend.with(VectorFeatures::UNMATCHED_BLEND)
+            masked.with(VectorFeatures::UNMATCHED_BLEND)
         }
+        BlendMode::Clear
+        | BlendMode::Src
+        | BlendMode::SrcIn
+        | BlendMode::SrcOut
+        | BlendMode::DstIn
+        | BlendMode::DstOut
+        | BlendMode::SrcATop
+        | BlendMode::DstATop
+        | BlendMode::Modulate => masked,
         _ => blend,
     }
 }

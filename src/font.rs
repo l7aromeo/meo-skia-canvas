@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     fmt::{self, Write as _},
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
@@ -10,6 +11,9 @@ use skia_safe::{
     FontMgr, FourByteTag, Typeface,
     font_arguments::variation_position::Coordinate,
     font_parameters::variation::Axis, textlayout::TypefaceFontProvider,
+};
+use ttf_parser::{
+    Face as TtfFace, RawFaceTables, Tag, avar::Table as AvarTable,
 };
 
 // The process-wide registry the JavaScript `FontLibrary.use()` writes to.
@@ -298,10 +302,55 @@ const FIXED_ONE: f32 = (1u32 << 16) as f32;
 /// same table.
 const OS2_TYPO_ASCENDER_AT: usize = 68;
 
+/// The `MVAR` value tag of the typographic ascender's variation, in the
+/// OpenType specification's "MVAR -- Metrics Variations Table".
+const MVAR_TYPO_ASCENDER: [u8; 4] = *b"hasc";
+
+/// The `MVAR` value tag of the typographic descender's variation, by the
+/// same table.
+const MVAR_TYPO_DESCENDER: [u8; 4] = *b"hdsc";
+
+/// The byte offset of `valueRecordSize` in `MVAR`'s header, with
+/// `valueRecordCount` and the 16-bit `itemVariationStoreOffset` after it,
+/// and the value records themselves at [`MVAR_RECORDS_AT`].
+const MVAR_RECORD_SIZE_AT: usize = 6;
+
+/// The byte offset of `MVAR`'s first value record: a tag, then the outer and
+/// inner indices of its delta set.
+const MVAR_RECORDS_AT: usize = 12;
+
+/// The byte offset, in an item variation store, of the 32-bit offset to its
+/// region list, with `itemVariationDataCount` and the data offsets after
+/// it: the OpenType specification's "OpenType Font Variations Common Table
+/// Formats", Item Variation Store.
+const IVS_REGION_LIST_AT: usize = 2;
+
+/// The byte offset, in an item variation data subtable, of
+/// `regionIndexCount`, with the region indices after it, by the same
+/// section.
+const IVD_REGION_INDEX_COUNT_AT: usize = 4;
+
+/// `avar` version 1.0, the major and minor version as the table stores
+/// them: the one version ttf-parser maps coordinates through.
+const AVAR_VERSION_1_0: [u8; 4] = [0, 1, 0, 0];
+
+/// The byte offset of `avar`'s `axisCount`, with the segment maps from
+/// [`AVAR_SEGMENT_MAPS_AT`]: the OpenType specification's "avar -- Axis
+/// Variations Table", version 1.0.
+const AVAR_AXIS_COUNT_AT: usize = 6;
+
+/// The byte offset of `avar`'s first segment map: a count, then that many
+/// pairs of `F2Dot14` from and to coordinates.
+const AVAR_SEGMENT_MAPS_AT: usize = 8;
+
+/// One in `F2Dot14`, the normalised coordinate of an axis's maximum.
+const F2DOT14_ONE: i16 = 1 << 14;
+
 /// The share of the em square above the alphabetic baseline: `face`'s
 /// typographic ascender over its typographic ascender and descender
-/// together, or `None` where the face states no such span -- no `OS/2`
-/// table, or a typographic ascender and descender of zero.
+/// together, at the instance `face` is, or `None` where the face states no
+/// such span -- no `OS/2` table, or a typographic ascender and descender of
+/// zero.
 ///
 /// This is how Chrome 156 divides the em square for a canvas's `top`,
 /// `middle` and `bottom` baselines, measured rather than read: on seven
@@ -311,19 +360,261 @@ const OS2_TYPO_ASCENDER_AT: usize = 68;
 /// snaps the result to its 1/64 px layout unit, which this does not; see
 /// docs/browser-differences.md.
 ///
-/// The values are the ones the table stores. An `MVAR` table can vary them
-/// per instance (`hasc`, `hdsc`), and Chrome does not apply it: a face whose
-/// `MVAR` moves them along `wght` keeps the stored share at every weight.
+/// An instance's values are the stored ones moved by `MVAR`'s `hasc` and
+/// `hdsc` at its position, as [`typo_variation`] finds them. Chrome 156
+/// keeps the stored values at every instance; this follows the instance,
+/// which is what the face says its em square is there.
+///
+/// Read once per face and kept, by [`TypoShares`].
 pub(crate) fn typo_ascent_share(face: &Typeface) -> Option<f32> {
+    KNOWN_TYPO_SHARES.with(|shares| shares.borrow_mut().of(face))
+}
+
+/// [`typo_ascent_share`], worked out afresh.
+fn read_typo_ascent_share(face: &Typeface) -> Option<f32> {
     let mut os2 = [0u8; OS2_TYPO_ASCENDER_AT + 4];
-    let read = face.get_table_data(*OS2, &mut os2);
+    if face.get_table_data(*OS2, &mut os2) != os2.len() {
+        return None;
+    }
     let at = |offset: usize| {
         i16::from_be_bytes([os2[offset], os2[offset + 1]]) as f32
     };
-    let (ascender, descender) =
-        (at(OS2_TYPO_ASCENDER_AT), at(OS2_TYPO_ASCENDER_AT + 2));
+    let (ascent, descent) = instance_typo_variation(face).unwrap_or_default();
+    let ascender = at(OS2_TYPO_ASCENDER_AT) + ascent;
+    let descender = at(OS2_TYPO_ASCENDER_AT + 2) + descent;
     let span = ascender - descender;
-    (read == os2.len() && span > 0.0).then(|| ascender / span)
+    (span > 0.0).then(|| ascender / span)
+}
+
+/// How far `MVAR` moves `face`'s typographic ascender and descender at the
+/// instance it is, in font units, by [`typo_variation`]. `None` where the
+/// face is no instance of a variable face, or the tables refuse.
+fn instance_typo_variation(face: &Typeface) -> Option<(f32, f32)> {
+    let position = face
+        .variation_design_position()
+        .filter(|position| !position.is_empty())?;
+    let table = |tag: &[u8; 4]| face.copy_table_data(u32::from_be_bytes(*tag));
+    let mvar = table(b"MVAR")?;
+    let (head, hhea, maxp) =
+        (table(b"head")?, table(b"hhea")?, table(b"maxp")?);
+    let (fvar, avar) = (table(b"fvar"), table(b"avar"));
+    let tables = RawFaceTables {
+        head: head.as_bytes(),
+        hhea: hhea.as_bytes(),
+        maxp: maxp.as_bytes(),
+        fvar: fvar.as_deref(),
+        avar: avar.as_deref(),
+        mvar: Some(mvar.as_bytes()),
+        ..RawFaceTables::default()
+    };
+    let position = position.iter().map(|coordinate| {
+        let axis = coordinate.axis;
+        (
+            Tag::from_bytes(&[axis.a(), axis.b(), axis.c(), axis.d()]),
+            coordinate.value,
+        )
+    });
+    typo_variation(tables, position)
+}
+
+/// How far `MVAR` moves the typographic ascender and descender at the
+/// design `position`, given axis by axis, in font units: `hasc` and `hdsc`
+/// evaluated through the item variation store at the position normalised
+/// and mapped through `avar`, as the OpenType specification's "Algorithm
+/// for interpolation of instance values" sets out. A tag the table does not
+/// list varies nothing.
+///
+/// `None`, so that the stored values stand, where the tables cannot be
+/// taken at their word:
+///
+/// - an `MVAR` that does not parse, or a record of either tag whose delta set
+///   is missing, or names a region the store does not hold, or sits in a store
+///   whose regions span other than the font's axes;
+/// - an `avar` other than version 1.0, which ttf-parser does not read and so
+///   would leave the coordinates unmapped -- version 2.0 maps them through a
+///   variation store of its own, which nothing here evaluates -- and a version
+///   1.0 that [`avar_segment_maps`] refuses.
+fn typo_variation(
+    tables: RawFaceTables<'_>,
+    position: impl IntoIterator<Item = (Tag, f32)>,
+) -> Option<(f32, f32)> {
+    let mvar = tables.mvar?;
+    let avar = match tables.avar {
+        Some(avar) => Some(avar_segment_maps(avar)?),
+        None => None,
+    };
+    // Without `avar`, so that the position is normalised and left unmapped:
+    // `Face::set_variation` maps it through `avar` itself, and goes on
+    // unmapped where that fails.
+    let mut face = TtfFace::from_raw_tables(RawFaceTables {
+        avar: None,
+        ..tables
+    })
+    .ok()?;
+    let table = face.tables().mvar?;
+    position.into_iter().for_each(|(axis, value)| {
+        face.set_variation(axis, value);
+    });
+    let mut coordinates = face.variation_coordinates().to_vec();
+    if let Some(avar) = avar {
+        (0..coordinates.len())
+            .try_for_each(|axis| avar.map_coordinate(&mut coordinates, axis))?;
+    }
+    let coordinates = coordinates.as_slice();
+    let delta = |tag: [u8; 4]| match mvar_delta_set(mvar, tag) {
+        None => Some(0.0),
+        Some(set) => {
+            regions_in_range(mvar, set, coordinates.len())?;
+            table
+                .metric_offset(Tag::from_bytes(&tag), coordinates)
+                .filter(|delta| delta.is_finite())
+        }
+    };
+    Some((delta(MVAR_TYPO_ASCENDER)?, delta(MVAR_TYPO_DESCENDER)?))
+}
+
+/// `avar` as ttf-parser maps coordinates through it, where it is version
+/// 1.0 and every segment map is one the specification allows: none at all,
+/// or one running from -1 to -1, through 0 to 0, to 1 to 1, in order of its
+/// from coordinates, every coordinate within -1 to 1.
+///
+/// Checked here rather than left to ttf-parser.
+// UPSTREAM: ttf-parser 0.25.1 -- unfiled -- worked around
+// Re-check: cargo test an_avar_this_cannot_map_through_keeps_the_stored_values
+// `avar::Table::parse` reads only the header, so a map cut short parses and
+// fails when a coordinate is mapped, which `Face::set_variation` ignores,
+// leaving the coordinate unmapped. `map_value` adds and subtracts the map's
+// coordinates in `i16`, which a map outside -1 to 1 overflows: a panic with
+// overflow checks on.
+fn avar_segment_maps(avar: &[u8]) -> Option<AvarTable<'_>> {
+    if avar.get(..4) != Some(&AVAR_VERSION_1_0) {
+        return None;
+    }
+    let axes = u16_at(avar, AVAR_AXIS_COUNT_AT)?;
+    let mut at = AVAR_SEGMENT_MAPS_AT;
+    for _ in 0..axes {
+        let count = usize::from(u16_at(avar, at)?);
+        let map = (0..count)
+            .map(|pair| {
+                let pair = at + 2 + 4 * pair;
+                Some((i16_at(avar, pair)?, i16_at(avar, pair + 2)?))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let within = |value: i16| (-F2DOT14_ONE..=F2DOT14_ONE).contains(&value);
+        let allowed = map.is_empty()
+            || (map.first() == Some(&(-F2DOT14_ONE, -F2DOT14_ONE))
+                && map.contains(&(0, 0))
+                && map.last() == Some(&(F2DOT14_ONE, F2DOT14_ONE))
+                && map.iter().all(|&(from, to)| within(from) && within(to))
+                && map.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+        if !allowed {
+            return None;
+        }
+        at += 2 + 4 * count;
+    }
+    AvarTable::parse(avar)
+}
+
+/// The big-endian `i16` at `at` in `bytes`, or `None` past the end.
+fn i16_at(bytes: &[u8], at: usize) -> Option<i16> {
+    Some(i16::from_be_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
+}
+
+/// The big-endian `u16` at `at` in `bytes`, or `None` past the end.
+fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_be_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
+}
+
+/// The big-endian `u32` at `at` in `bytes`, or `None` past the end.
+fn u32_at(bytes: &[u8], at: usize) -> Option<usize> {
+    let word = u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?);
+    usize::try_from(word).ok()
+}
+
+/// The outer and inner delta-set indices `mvar` lists for `tag`, or `None`
+/// where it lists none. A record cut off by the table's end lists nothing.
+fn mvar_delta_set(mvar: &[u8], tag: [u8; 4]) -> Option<(u16, u16)> {
+    let size = usize::from(u16_at(mvar, MVAR_RECORD_SIZE_AT)?);
+    let count = usize::from(u16_at(mvar, MVAR_RECORD_SIZE_AT + 2)?);
+    (0..count)
+        .map(|record| MVAR_RECORDS_AT + record * size)
+        .find(|&at| mvar.get(at..at + 4) == Some(&tag))
+        .and_then(|at| Some((u16_at(mvar, at + 4)?, u16_at(mvar, at + 6)?)))
+}
+
+/// `Some` where every region the delta set `(outer, _)` of `mvar`'s item
+/// variation store draws on is one the store's region list holds, and the
+/// list spans `axes` axes, the font's: what the specification requires of
+/// the store, and what ttf-parser needs to evaluate it.
+///
+/// Checked here rather than left to ttf-parser.
+// UPSTREAM: ttf-parser 0.25.1 -- unfiled -- worked around
+// Re-check: cargo test an_mvar_region_past_the_list_keeps_the_stored_values
+// `VariationRegionList::evaluate_region` indexes regions as `index *
+// axis_count + axis` in `u16` with the index read from the font, so an index
+// past the list overflows: a panic with overflow checks on, a wrong region
+// without them. A store whose axis count is not the font's reads one region
+// into the next.
+fn regions_in_range(
+    mvar: &[u8],
+    (outer, _): (u16, u16),
+    axes: usize,
+) -> Option<()> {
+    let store =
+        mvar.get(usize::from(u16_at(mvar, MVAR_RECORD_SIZE_AT + 4)?)..)?;
+    let list = store.get(u32_at(store, IVS_REGION_LIST_AT)?..)?;
+    let (axis_count, region_count) = (u16_at(list, 0)?, u16_at(list, 2)?);
+    let data_count = u16_at(store, IVS_REGION_LIST_AT + 4)?;
+    if outer >= data_count || usize::from(axis_count) != axes {
+        return None;
+    }
+    let data_at = IVS_REGION_LIST_AT + 6 + 4 * usize::from(outer);
+    let data = store.get(u32_at(store, data_at)?..)?;
+    let indices = usize::from(u16_at(data, IVD_REGION_INDEX_COUNT_AT)?);
+    (0..indices)
+        .map(|index| u16_at(data, IVD_REGION_INDEX_COUNT_AT + 2 + 2 * index))
+        .all(|region| region.is_some_and(|region| region < region_count))
+        .then_some(())
+}
+
+/// The typographic shares of the faces already asked about, by
+/// `Typeface::unique_id`, as [`typo_ascent_share`] gives them.
+///
+/// A face's tables and position are fixed when it is made, so an entry is
+/// never wrong, and reading them copies `MVAR` and four other tables out of
+/// the platform. Bounded at [`KNOWN_AXES`], as [`KnownAxes`] is and for the
+/// same reason: an instance is a face of its own.
+#[derive(Debug, Default)]
+pub(crate) struct TypoShares {
+    shares: CacheMap<u32, Option<f32>>,
+    /// How many times a face's tables were read.
+    #[cfg(test)]
+    pub(crate) read: usize,
+}
+
+impl TypoShares {
+    /// `face`'s share, as [`typo_ascent_share`] describes it.
+    pub(crate) fn of(&mut self, face: &Typeface) -> Option<f32> {
+        let id = face.unique_id();
+        if let Some(share) = self.shares.get(&id) {
+            return *share;
+        }
+        if self.shares.len() >= KNOWN_AXES {
+            self.shares.clear();
+        }
+        #[cfg(test)]
+        {
+            self.read += 1;
+        }
+        let share = read_typo_ascent_share(face);
+        self.shares.insert(id, share);
+        share
+    }
+}
+
+thread_local! {
+    /// The shares [`typo_ascent_share`] has read on this thread.
+    static KNOWN_TYPO_SHARES: RefCell<TypoShares> = RefCell::default();
 }
 
 /// The oblique angle `face` is drawn at by its own design, in CSS degrees --
@@ -1096,16 +1387,24 @@ impl FontLibrary {
 mod tests {
     use std::fs;
 
-    use skia_safe::{Data, FontMgr, FourByteTag};
+    use skia_safe::{FontMgr, FourByteTag};
+
+    use skia_safe::{
+        FontArguments,
+        font_arguments::{VariationPosition, variation_position::Coordinate},
+    };
+    use ttf_parser::{RawFaceTables, Tag};
 
     use super::{
-        FontAxisTag, KNOWN_AXES, KnownAxes, optical_size, variation_axes,
+        FontAxisTag, KNOWN_AXES, KnownAxes, TypoShares, optical_size,
+        quarantine::font_data, read_typo_ascent_share, typo_variation,
+        variation_axes,
     };
 
     fn face(path: &str) -> skia_safe::Typeface {
         let bytes = fs::read(path).expect(path);
         FontMgr::new()
-            .new_from_data(Data::new_copy(&bytes), None)
+            .new_from_data(font_data(&bytes), None)
             .expect(path)
     }
 
@@ -1190,5 +1489,349 @@ mod tests {
         }
         known.clear();
         assert_eq!(known.len(), 0);
+    }
+
+    const AMSTELVAR: &str = "tests/assets/fonts/AmstelvarAlpha-VF.ttf";
+
+    /// `wght`'s index among Amstelvar's axes, and `YTLC`'s, whose regions
+    /// its `MVAR` varies.
+    const WGHT: usize = 1;
+    const YTLC: usize = 10;
+
+    /// The tables of an sfnt, by tag, in the order its directory lists them.
+    fn tables(font: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
+        let count = u16::from_be_bytes([font[4], font[5]]) as usize;
+        (0..count)
+            .map(|i| {
+                let entry = &font[12 + 16 * i..28 + 16 * i];
+                let at = |k: usize| {
+                    u32::from_be_bytes(entry[k..k + 4].try_into().expect("u32"))
+                        as usize
+                };
+                let tag: [u8; 4] = entry[..4].try_into().expect("tag");
+                (tag, font[at(8)..at(8) + at(12)].to_vec())
+            })
+            .collect()
+    }
+
+    /// An sfnt holding `tables`, each four-byte aligned and checksummed.
+    fn sfnt(tables: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let mut font = vec![0, 1, 0, 0];
+        font.extend((tables.len() as u16).to_be_bytes());
+        font.extend([0; 6]);
+        let mut at = 12 + 16 * tables.len();
+        let mut body = vec![];
+        for (tag, bytes) in tables {
+            let mut padded = bytes.clone();
+            padded.resize(bytes.len().next_multiple_of(4), 0);
+            let sum = padded.chunks(4).fold(0u32, |sum, word| {
+                sum.wrapping_add(u32::from_be_bytes(
+                    word.try_into().expect("word"),
+                ))
+            });
+            font.extend(tag);
+            font.extend(sum.to_be_bytes());
+            font.extend((at as u32).to_be_bytes());
+            font.extend((bytes.len() as u32).to_be_bytes());
+            at += padded.len();
+            body.extend(padded);
+        }
+        font.extend(body);
+        font
+    }
+
+    /// The table `tag` of `tables`, to edit.
+    fn table<'a>(
+        tables: &'a mut [([u8; 4], Vec<u8>)],
+        tag: &[u8; 4],
+    ) -> &'a mut Vec<u8> {
+        &mut tables
+            .iter_mut()
+            .find(|(t, _)| t == tag)
+            .expect("a table")
+            .1
+    }
+
+    /// The byte offset of `MVAR`'s region list, its axis count first.
+    fn region_list(mvar: &[u8]) -> usize {
+        let store = u16::from_be_bytes([mvar[10], mvar[11]]) as usize;
+        store
+            + u32::from_be_bytes(
+                mvar[store + 2..store + 6].try_into().expect("u32"),
+            ) as usize
+    }
+
+    /// Amstelvar's tables with its `MVAR` turned to the typographic
+    /// metrics: its two records, `stro` and `xhgt`, renamed `hasc` and
+    /// `hdsc` -- the order the table must keep -- and their regions moved
+    /// from `YTLC` onto `wght`. Amstelvar stores 1500 and -500, and the two
+    /// delta sets then move them by -66 and -110 at the lightest weight and
+    /// by 120 and 200 at the heaviest: 1434 and -610 at `wght` 100, 1620 and
+    /// -300 at 900.
+    fn typo_mvar_tables() -> Vec<([u8; 4], Vec<u8>)> {
+        let mut tables = tables(&fs::read(AMSTELVAR).expect(AMSTELVAR));
+        let mvar = table(&mut tables, b"MVAR");
+        assert_eq!(&mvar[12..16], b"stro", "Amstelvar's first MVAR record");
+        assert_eq!(&mvar[20..24], b"xhgt", "and its second");
+        mvar[12..16].copy_from_slice(b"hasc");
+        mvar[20..24].copy_from_slice(b"hdsc");
+        let list = region_list(mvar);
+        let axes = u16::from_be_bytes([mvar[list], mvar[list + 1]]) as usize;
+        let regions =
+            u16::from_be_bytes([mvar[list + 2], mvar[list + 3]]) as usize;
+        for region in 0..regions {
+            let axis = |axis: usize| list + 4 + (region * axes + axis) * 6;
+            let ytlc = mvar[axis(YTLC)..axis(YTLC) + 6].to_vec();
+            if ytlc[2..4] != [0, 0] {
+                let wght = axis(WGHT);
+                mvar[wght..wght + 6].copy_from_slice(&ytlc);
+                mvar[axis(YTLC)..axis(YTLC) + 6].fill(0);
+            }
+        }
+        tables
+    }
+
+    /// An `avar` 1.0 for Amstelvar's 17 axes, every one mapped as itself
+    /// but `wght`, whose normalised 0.5 -- `wght` 650 -- goes to 1, the
+    /// position of `wght` 900.
+    fn avar_wght_half_to_full() -> Vec<u8> {
+        const ONE: i16 = 1 << 14;
+        let identity: [(i16, i16); 3] = [(-ONE, -ONE), (0, 0), (ONE, ONE)];
+        let wght = [(-ONE, -ONE), (0, 0), (ONE / 2, ONE), (ONE, ONE)];
+        let mut avar = vec![0, 1, 0, 0, 0, 0];
+        avar.extend(17u16.to_be_bytes());
+        for axis in 0..17 {
+            let map: &[(i16, i16)] =
+                if axis == WGHT { &wght } else { &identity };
+            avar.extend((map.len() as u16).to_be_bytes());
+            map.iter().for_each(|(from, to)| {
+                avar.extend(from.to_be_bytes());
+                avar.extend(to.to_be_bytes());
+            });
+        }
+        avar
+    }
+
+    /// [`typo_variation`] over `tables` at `wght`, the other axes at their
+    /// defaults.
+    fn variation_at(
+        tables: &[([u8; 4], Vec<u8>)],
+        wght: f32,
+    ) -> Option<(f32, f32)> {
+        let find = |tag: &[u8; 4]| {
+            tables
+                .iter()
+                .find(|(t, _)| t == tag)
+                .map(|(_, b)| b.as_slice())
+        };
+        let raw = RawFaceTables {
+            head: find(b"head").expect("head"),
+            hhea: find(b"hhea").expect("hhea"),
+            maxp: find(b"maxp").expect("maxp"),
+            fvar: find(b"fvar"),
+            avar: find(b"avar"),
+            mvar: find(b"MVAR"),
+            ..RawFaceTables::default()
+        };
+        typo_variation(raw, [(Tag::from_bytes(b"wght"), wght)])
+    }
+
+    /// The share at `wght` of a face made from `font`, through Skia.
+    fn share_at(font: &[u8], wght: f32) -> Option<f32> {
+        let base = FontMgr::new()
+            .new_from_data(font_data(font), None)
+            .expect("the font loads");
+        let coordinates = [Coordinate {
+            axis: FourByteTag::from_chars('w', 'g', 'h', 't'),
+            value: wght,
+        }];
+        let instance = base
+            .clone_with_arguments(
+                &FontArguments::new().set_variation_design_position(
+                    VariationPosition {
+                        coordinates: &coordinates,
+                    },
+                ),
+            )
+            .expect("an instance");
+        read_typo_ascent_share(&instance)
+    }
+
+    fn close(share: Option<f32>, expected: f32, what: &str) {
+        let share = share.unwrap_or_else(|| panic!("{what}: no share"));
+        assert!(
+            (share - expected).abs() < 1e-6,
+            "{what}: {share} where the arithmetic gives {expected}"
+        );
+    }
+
+    /// An instance divides the em as its own typographic metrics do: the
+    /// stored 1500 and -500 moved by `MVAR`, by the specification's
+    /// arithmetic at each weight. Amstelvar as shipped varies `stro` and
+    /// `xhgt` there instead, and keeps 1500 and -500 at every weight.
+    #[test]
+    fn an_instance_divides_the_em_as_its_mvar_moves_the_typo_metrics() {
+        let font = sfnt(&typo_mvar_tables());
+        close(share_at(&font, 100.0), 1434.0 / 2044.0, "wght 100");
+        close(share_at(&font, 400.0), 1500.0 / 2000.0, "wght 400");
+        close(share_at(&font, 900.0), 1620.0 / 1920.0, "wght 900");
+        let shipped = fs::read(AMSTELVAR).expect(AMSTELVAR);
+        close(share_at(&shipped, 900.0), 0.75, "shipped Amstelvar at 900");
+    }
+
+    /// `avar` maps the position before `MVAR` is read: a map sending `wght`
+    /// 650's normalised 0.5 to 1 reads the deltas of `wght` 900, where
+    /// without it 650 reads half of them, 1560 and -400.
+    #[test]
+    fn avar_maps_the_position_before_mvar_is_read() {
+        let mut tables = typo_mvar_tables();
+        assert_eq!(variation_at(&tables, 650.0), Some((60.0, 100.0)));
+        tables.push((*b"avar", avar_wght_half_to_full()));
+        assert_eq!(variation_at(&tables, 650.0), Some((120.0, 200.0)));
+        close(share_at(&sfnt(&tables), 650.0), 1620.0 / 1920.0, "wght 650");
+    }
+
+    /// An `avar` that cannot be mapped through leaves the stored values:
+    /// version 2.0, which maps through a variation store of its own; a
+    /// version 1.0 cut short, which ttf-parser parses and then leaves the
+    /// position unmapped; and one whose map runs outside -1 to 1, which
+    /// overflows ttf-parser's `i16` arithmetic. Read past them, `MVAR` would
+    /// be evaluated at positions `avar` was meant to move.
+    #[test]
+    fn an_avar_this_cannot_map_through_keeps_the_stored_values() {
+        let mut two = avar_wght_half_to_full();
+        two[1] = 2;
+        // `axisIndexMapOffset` and `varStoreOffset`, both none.
+        two.extend([0; 8]);
+        let mut short = avar_wght_half_to_full();
+        short.truncate(20);
+        // `wght`'s map, the second, as one pair from -2 to 2.
+        let mut outside = avar_wght_half_to_full();
+        let wght = 8 + (2 + 3 * 4);
+        let rest = outside.split_off(wght + 2 + 4 * 4);
+        outside.truncate(wght);
+        outside.extend(1u16.to_be_bytes());
+        outside.extend(i16::MIN.to_be_bytes());
+        outside.extend(i16::MAX.to_be_bytes());
+        outside.extend(rest);
+        for (avar, what) in [
+            (two, "avar 2.0"),
+            (short, "avar 1.0 cut short"),
+            (outside, "a map outside -1 to 1"),
+        ] {
+            let mut tables = typo_mvar_tables();
+            tables.push((*b"avar", avar));
+            assert_eq!(variation_at(&tables, 650.0), None, "{what}");
+            close(share_at(&sfnt(&tables), 650.0), 0.75, what);
+        }
+    }
+
+    /// Each way an `MVAR` can be malformed leaves the stored values, and
+    /// none of them panics.
+    #[test]
+    fn a_malformed_mvar_keeps_the_stored_values() {
+        type Edit = fn(&mut Vec<u8>);
+        let cases: [(&str, Edit); 6] = [
+            ("cut inside its header", |mvar| mvar.truncate(8)),
+            ("cut inside its records", |mvar| mvar.truncate(18)),
+            ("a record of a delta set the store does not hold", |mvar| {
+                mvar[16..18].copy_from_slice(&7u16.to_be_bytes());
+            }),
+            ("a record of an item past its delta set", |mvar| {
+                mvar[18..20].copy_from_slice(&900u16.to_be_bytes());
+            }),
+            ("a store offset past the table", |mvar| {
+                let past = mvar.len() as u16 + 4;
+                mvar[10..12].copy_from_slice(&past.to_be_bytes());
+            }),
+            (
+                "a region list spanning one axis fewer than the font",
+                |mvar| {
+                    let list = region_list(mvar);
+                    let axes = u16::from_be_bytes([mvar[list], mvar[list + 1]]);
+                    mvar[list..list + 2]
+                        .copy_from_slice(&(axes - 1).to_be_bytes());
+                },
+            ),
+        ];
+        for (what, edit) in cases {
+            let mut tables = typo_mvar_tables();
+            edit(table(&mut tables, b"MVAR"));
+            assert_eq!(variation_at(&tables, 900.0), None, "{what}");
+            close(share_at(&sfnt(&tables), 900.0), 0.75, what);
+        }
+    }
+
+    /// A delta set naming a region past the store's list leaves the stored
+    /// values. ttf-parser multiplies the index out in `u16`, which with
+    /// overflow checks on is a panic.
+    #[test]
+    fn an_mvar_region_past_the_list_keeps_the_stored_values() {
+        let mut tables = typo_mvar_tables();
+        let mvar = table(&mut tables, b"MVAR");
+        let store = u16::from_be_bytes([mvar[10], mvar[11]]) as usize;
+        let data = store
+            + u32::from_be_bytes(
+                mvar[store + 8..store + 12].try_into().expect("u32"),
+            ) as usize;
+        // The first region index of the only delta set, after
+        // `itemCount`, `wordDeltaCount` and `regionIndexCount`.
+        mvar[data + 6..data + 8].copy_from_slice(&u16::MAX.to_be_bytes());
+        assert_eq!(variation_at(&tables, 900.0), None);
+    }
+
+    /// Whatever single byte of `MVAR` is overwritten, the answer is the
+    /// stored values or a share inside the em, never a panic.
+    #[test]
+    fn no_single_byte_of_mvar_panics() {
+        let tables = typo_mvar_tables();
+        let length = tables
+            .iter()
+            .find(|(t, _)| t == b"MVAR")
+            .expect("MVAR")
+            .1
+            .len();
+        for at in 0..length {
+            for byte in [0x00, 0x7f, 0x80, 0xff] {
+                let mut tables = tables.clone();
+                table(&mut tables, b"MVAR")[at] = byte;
+                if let Some((ascent, descent)) = variation_at(&tables, 900.0) {
+                    assert!(
+                        ascent.is_finite() && descent.is_finite(),
+                        "byte {at} as {byte:#x}: {ascent}, {descent}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A face's tables are read once for its share, however often it is
+    /// asked, a static face's included.
+    #[test]
+    fn a_face_is_read_for_its_share_once() {
+        let font = sfnt(&typo_mvar_tables());
+        let base = FontMgr::new()
+            .new_from_data(font_data(&font), None)
+            .expect("the font loads");
+        let coordinates = [Coordinate {
+            axis: FourByteTag::from_chars('w', 'g', 'h', 't'),
+            value: 900.0,
+        }];
+        let heavy = base
+            .clone_with_arguments(
+                &FontArguments::new().set_variation_design_position(
+                    VariationPosition {
+                        coordinates: &coordinates,
+                    },
+                ),
+            )
+            .expect("an instance");
+        let monoton = face("tests/assets/fonts/Monoton-Regular.woff2");
+        let mut shares = TypoShares::default();
+        for _ in 0..3 {
+            close(shares.of(&heavy), 1620.0 / 1920.0, "wght 900");
+            assert_eq!(shares.of(&monoton), read_typo_ascent_share(&monoton));
+        }
+        assert_eq!(shares.read, 2, "once for each face");
     }
 }

@@ -1489,7 +1489,8 @@ impl Context2D {
         let drawn = features.without(
             VectorFeatures::IMAGE_FILTER
                 .with(VectorFeatures::BLEND_MODE)
-                .with(VectorFeatures::UNMATCHED_BLEND),
+                .with(VectorFeatures::UNMATCHED_BLEND)
+                .with(VectorFeatures::MASKED_BLEND),
         );
         let contents = entry.map(|entry| (entry, drawn)).into_iter().collect();
         self.with_recorder(|mut recorder| {
@@ -2457,9 +2458,10 @@ impl Context2D {
         // The picture carries the source canvas's own features: a conic
         // gradient drawn on one canvas and replayed into another is still a
         // conic gradient when a backend comes to write it out, and a
-        // `destination-out` inside it is still a blend mode. And where it is
-        // drawn through its paint, it is drawn through a layer -- see
-        // `carries` below -- which a backend may not have.
+        // `destination-out` inside it is still a blend mode -- one inside a
+        // group, since a source holding a blend is drawn through a layer.
+        // And where it is drawn through its paint, it is drawn through a
+        // layer -- see `carries` below -- which a backend may not have.
         let carried = match carries(source, &paint) {
             true => VectorFeatures::PICTURE_PAINT,
             false => VectorFeatures::PLAIN,
@@ -2467,6 +2469,7 @@ impl Context2D {
         let features = self
             .vector_features(&paint, None)
             .with(source)
+            .with(source.nested())
             .with(carried);
 
         // Drawn through its paint as a group of our own, which composites
@@ -3608,9 +3611,16 @@ impl Dye {
         match self {
             // A canvas's pattern is a picture shader to a document, which
             // SVG names no paint server for: a draw dyed by one wrote a bare
-            // path, black. An image's is an image shader, which it writes.
+            // path, black. Skia's PDF backend rasterizes one at the wrong
+            // scale and in the wrong space -- see
+            // `VectorFeatures::CANVAS_PATTERN`. An image's is an image
+            // shader, which both write.
+            // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+            // Re-check: cargo test a_pdf_pattern_is_embedded_at_the_density
+            // with `CANVAS_PATTERN` left out of `PDF_CANNOT`.
             Dye::Pattern(pattern) if pattern.tiling().is_some() => {
                 VectorFeatures::EXOTIC_SHADER
+                    .with(VectorFeatures::CANVAS_PATTERN)
             }
             Dye::Color(..) | Dye::Pattern(_) | Dye::Texture(_) => {
                 VectorFeatures::PLAIN

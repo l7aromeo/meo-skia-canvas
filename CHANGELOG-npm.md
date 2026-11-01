@@ -755,6 +755,21 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 - A CanvasKit filter holding a colour lands as a fill of that colour on every float canvas, in every blend mode ([#418](https://github.com/l7aromeo/meo-skia-canvas/pull/418)).
 
+- **`fontBoundingBoxAscent` and `fontBoundingBoxDescent` are the first
+  available font's own.** They were SkParagraph's line box, which spreads
+  half the face's line gap above the ascent and half below the descent, and
+  takes in every face a fallback draws in: 100px Arial reported 92.16 and
+  22.83 where its `hhea` gives 90.53 and 21.19 and Chrome 91 and 21, a face
+  with `USE_TYPO_METRICS` and a typographic line gap of 400 of 2000 reported
+  85 and 35 against Chrome's 75 and 25, and `"H漢"` in Arial reported 106
+  and 34, the fallback face's. They are now the first available font's
+  ascent and descent -- `hhea`'s, or the typographic ones under
+  `USE_TYPO_METRICS` -- with no line gap and whatever face draws the glyphs,
+  as Chrome reports them less its rounding to whole pixels.
+  `hangingBaseline` and `ideographicBaseline`, four fifths of that ascent and
+  that descent, move with them, as does the em square of a face that states
+  no typographic span.
+
 - **On macOS, a font registered after another was let go reads its own
   metrics.** CoreText remembers each font made from data by the address and
   length of its bytes, and keeps that after the bytes are freed, so a font
@@ -777,13 +792,15 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   is where Chrome 156 puts these baselines on every face measured: 100px
   Oswald's `top` is 80.50 above the alphabetic baseline where it was 119.30,
   Amstelvar's 75 where it was 95. A face that states no typographic span is
-  divided as its ascent and descent divide it, as in Chrome. Text drawn,
-  stroked or outlined at these three baselines moves by the difference, and
-  `measureText`'s values move with the baseline they are measured from.
-  `emHeightAscent` and `emHeightDescent`, which reported the face's ascent
-  and descent, now report the em square, adding up to the font size at every
-  baseline. Code that offset text drawn at `top`, `middle` or `bottom` to
-  make up for where it used to sit is now off by that offset.
+  divided as its ascent and descent divide it, as in Chrome. On a variable
+  face whose `MVAR` varies the typographic ascender and descender, the em
+  square is divided as the instance's are, where Chrome 156 keeps the stored
+  values. Text drawn, stroked or outlined at these three baselines moves by
+  the difference, and `measureText`'s values move with the baseline they are
+  measured from. `emHeightAscent` and `emHeightDescent`, which reported the
+  face's ascent and descent, now report the em square, adding up to the font
+  size at every baseline. Code that offset text drawn at `top`, `middle` or
+  `bottom` to make up for where it used to sit is now off by that offset.
 
 - **`fontBoundingBoxAscent` and `fontBoundingBoxDescent` are measured from
   the `textBaseline` set.** At every baseline but `alphabetic` they were a
@@ -863,6 +880,14 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   colour space and `colorType`, then converted to sRGB as the vector colours
   beside them are, each channel of a colour outside sRGB clamped: they store
   what `getImageData` reads back as sRGB, to the byte.
+
+- **A PDF exported at a `density` other than 1 places the pixels it embeds where they belong.** ([#437](https://github.com/l7aromeo/meo-skia-canvas/issues/437))
+
+- **A PDF exported at a `density` other than 1 renders a canvas drawn into another as it should in macOS Preview and Safari.** ([#438](https://github.com/l7aromeo/meo-skia-canvas/issues/438))
+
+- **A PDF embeds a `saveLayer()` composited by an operation it cannot write, such as `xor` or `lighter`, as pixels instead of drawing it wrong.** ([#439](https://github.com/l7aromeo/meo-skia-canvas/issues/439))
+
+- **A canvas pattern in a PDF is drawn at the export's `density`, and on a Display P3 canvas blends as the canvas does.** ([#442](https://github.com/l7aromeo/meo-skia-canvas/issues/442), [#443](https://github.com/l7aromeo/meo-skia-canvas/issues/443))
 
 - **An SVG of a page with nothing on it is well-formed XML.**
   `toBuffer("svg")` wrote an empty page's root as

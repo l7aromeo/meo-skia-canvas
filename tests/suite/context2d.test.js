@@ -4408,14 +4408,15 @@ describe("measureText's return shape", () => {
     return ctx;
   };
 
-  test("vertical metrics come from hhea on every platform", () => {
+  test("vertical metrics come from hhea, not usWin, on every platform", () => {
     // The value a caller builds a line box from, and it has to be the same
     // everywhere or a layout computed on one machine is wrong on another.
     // Skia reaches fonts through CoreText on macOS, FreeType on Linux and
     // DirectWrite on Windows, and those do not have to agree about which
-    // table a font's vertical metrics come from -- a browser on macOS
-    // answers 0.9199em for Helvetica's ascent, which is no table in the
-    // file at all.
+    // table a font's vertical metrics come from. A face that sets
+    // `USE_TYPO_METRICS` reports its typographic metrics instead, and none
+    // reports a line gap: text.test.js, "the font box is the first
+    // available font's own", holds both to Chrome.
     //
     // Two fonts, because one cannot isolate the source. Amstelvar's hhea
     // and usWin agree with each other and differ from sTypo; Oswald's hhea
