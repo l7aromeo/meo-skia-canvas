@@ -755,6 +755,8 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 - **A blurred path on an eight-bit wide-gamut canvas stores a fill's bytes inside it.** ([#433](https://github.com/l7aromeo/meo-skia-canvas/issues/433))
 
+- **A PDF holds the pixels it embeds losslessly unless a `quality` below 1 asks for JPEG, which is then full-chroma unless `downsample` is set.** ([#444](https://github.com/l7aromeo/meo-skia-canvas/issues/444)) Flat graphics embedded this way grow by up to about a fifth, photographs inside an embedded run by 5 to 12 times.
+
 - **`fontBoundingBoxAscent` and `fontBoundingBoxDescent` are the first
   available font's own.** They were SkParagraph's line box, which spreads
   half the face's line gap above the ascent and half below the descent, and

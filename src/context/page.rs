@@ -53,9 +53,10 @@ use crate::{
         },
     },
     export::{
-        ChromaSampling, Content, EncoderKind, ImageFormat, NOMINAL_DPI,
-        QUALITY_SCALE, VectorFeatures, dots_per_inch, encoder_quality,
-        pdf::with_page_groups, pixels_per_metre,
+        ChromaSampling, Content, DEFAULT_QUALITY, EncoderKind, ImageFormat,
+        LOSSLESS_PDF_ENCODING_QUALITY, NOMINAL_DPI, QUALITY_SCALE,
+        VectorFeatures, dots_per_inch, encoder_quality, pdf::with_page_groups,
+        pixels_per_metre,
     },
     gpu::{
         RenderingEngine,
@@ -4091,6 +4092,7 @@ impl Page {
             color_type,
             text: (contrast, gamma),
             page,
+            jpeg,
         } = embedding;
         let dims = self.scaled_dimensions(density);
         let info = ImageInfo::new(
@@ -4148,10 +4150,18 @@ impl Page {
             ink.right as f32 / density,
             ink.bottom as f32 / density,
         );
-        let src = Some((&Rect::from_irect(ink), SrcRectConstraint::Strict));
         canvas.save();
         canvas.set_matrix(&M44::from(page));
-        canvas.draw_image_rect(&image, src, dst, &Paint::default());
+        match jpeg.and_then(|jpeg| as_jpeg(&image, ink, jpeg)) {
+            Some(encoded) => {
+                canvas.draw_image_rect(&encoded, None, dst, &Paint::default());
+            }
+            None => {
+                let src =
+                    Some((&Rect::from_irect(ink), SrcRectConstraint::Strict));
+                canvas.draw_image_rect(&image, src, dst, &Paint::default());
+            }
+        }
         canvas.restore();
         Ok(())
     }
@@ -4630,7 +4640,7 @@ impl Page {
                 height: frame.height,
                 frames: 1,
                 loops: options.loops,
-                quality: encoder_quality(options.quality),
+                quality: encoder_quality(options.lossy_quality()),
                 density: options.density,
                 color: options.encoded_color_profile(),
                 space: options.encoded_pixel_space(),
@@ -4651,7 +4661,6 @@ impl Page {
 
         let ExportOptions {
             format,
-            quality,
             density,
             ref matte,
             color_type,
@@ -4666,7 +4675,7 @@ impl Page {
         // [`Self::composite`], which builds its surface from
         // `surface_color_space` and converts out of it, the way a browser's
         // canvas does.
-        let img_quality = encoder_quality(quality) as u32;
+        let img_quality = encoder_quality(options.lossy_quality()) as u32;
 
         // Before the rasterizer, because raw pixels are not an encoding: the
         // caller wants the bytes, and going by way of an image means the page
@@ -4702,7 +4711,7 @@ impl Page {
                 let mut pdf_bytes = Vec::new();
                 let metadata = pdf::Metadata {
                     producer: PDF_PRODUCER.to_string(),
-                    encoding_quality: Some(encoder_quality(quality) as i32),
+                    encoding_quality: Some(options.pdf_encoding_quality()),
                     raster_dpi: Some(density * NOMINAL_DPI),
                     ..Default::default()
                 };
@@ -4713,7 +4722,7 @@ impl Page {
                     canvas,
                     pdf_cannot(&options.surface_color_space, density),
                     matte.as_ref(),
-                    options.embedding(),
+                    options.pdf_embedding(),
                     None,
                 )?;
                 document.end_page().close();
@@ -5145,7 +5154,7 @@ impl PageSequence {
             height: dims.height.max(0) as u32,
             frames: count,
             loops: options.loops,
-            quality: encoder_quality(options.quality),
+            quality: encoder_quality(options.lossy_quality()),
             density: options.density,
             color: options.encoded_color_profile(),
             space: options.encoded_pixel_space(),
@@ -5200,27 +5209,11 @@ impl PageSequence {
     ) -> Result<(), String> {
         options.check_timing()?;
         let backend = pdf_cannot(&options.surface_color_space, options.density);
-        let color_type = options.compositing_color_type();
-        let ExportOptions {
-            quality,
-            density,
-            matte,
-            surface_color_space,
-            text_contrast,
-            text_gamma,
-            ..
-        } = options;
-        let embedding = Embedding {
-            density,
-            space: &surface_color_space,
-            color_type,
-            text: (text_contrast, text_gamma),
-            page: Matrix::new_identity(),
-        };
+        let embedding = options.pdf_embedding();
         let metadata = pdf::Metadata {
             producer: PDF_PRODUCER.to_string(),
-            encoding_quality: Some(encoder_quality(quality) as i32),
-            raster_dpi: Some(density * NOMINAL_DPI),
+            encoding_quality: Some(options.pdf_encoding_quality()),
+            raster_dpi: Some(options.density * NOMINAL_DPI),
             ..Default::default()
         };
         // Held whole rather than streamed into `out`: the page groups are
@@ -5229,7 +5222,7 @@ impl PageSequence {
         self.pages
             .iter()
             .try_fold(pdf_document(&mut written, &metadata), |doc, page| {
-                page.append_to(doc, matte.as_ref(), backend, embedding)
+                page.append_to(doc, options.matte.as_ref(), backend, embedding)
             })
             .map(|doc| doc.close())?;
         out.write_all(&with_page_groups(written))
@@ -5775,6 +5768,43 @@ struct Embedding<'a> {
     /// backend scales its page canvas to its raster DPI. The identity until
     /// then.
     page: Matrix,
+    /// What a PDF encodes an opaque embedded run as: a JPEG this crate
+    /// writes itself, which Skia's PDF backend embeds as its bytes, so that
+    /// its chroma follows [`ExportOptions::jpeg_downsample`] where Skia's own
+    /// JPEG is always 4:2:0. `None` leaves the run to the backend, which
+    /// writes it losslessly at [`LOSSLESS_PDF_ENCODING_QUALITY`].
+    jpeg: Option<EmbeddedJpeg>,
+}
+
+/// A JPEG an embedded run is written as -- see [`Embedding::jpeg`].
+#[derive(Clone, Copy, Debug)]
+struct EmbeddedJpeg {
+    /// On the encoders' scale -- see [`encoder_quality`].
+    quality: u32,
+    /// 4:2:0 rather than full chroma.
+    downsample: bool,
+}
+
+/// `ink` of `image` encoded as `jpeg` says, as an image holding those bytes,
+/// which Skia's PDF backend writes into a document as they are; `None` where
+/// any pixel of it is not opaque -- the backend writes a soft mask for such
+/// an image, losslessly, whatever the quality -- or where it cannot be
+/// encoded.
+fn as_jpeg(image: &SkImage, ink: IRect, jpeg: EmbeddedJpeg) -> Option<SkImage> {
+    let pixels = image.peek_pixels()?.extract_subset(ink)?;
+    if !pixels.compute_is_opaque() {
+        return None;
+    }
+    let options = jpeg_encoder::Options {
+        quality: jpeg.quality,
+        downsample: match jpeg.downsample {
+            true => jpeg_encoder::Downsample::BothDirections,
+            false => jpeg_encoder::Downsample::No,
+        },
+        ..jpeg_encoder::Options::default()
+    };
+    let data = jpeg_encoder::encode_pixmap(&pixels, &options)?;
+    started::deferred_from_encoded_data(&data, None)
 }
 
 /// The surface properties a page's text is rasterized under: `contrast` and
@@ -5901,7 +5931,9 @@ impl PartialEq for FilterChoice {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExportOptions {
     pub format: ImageFormat,
-    pub quality: f32,
+    /// The quality asked for, or `None` for each format's own -- see
+    /// [`EncodeOptions::quality`](crate::export::EncodeOptions::quality).
+    pub quality: Option<f32>,
     pub density: f32,
     pub outline: bool,
     pub matte: Option<Matte>,
@@ -5977,7 +6009,7 @@ impl Default for ExportOptions {
     fn default() -> Self {
         Self {
             format: ImageFormat::Raw,
-            quality: 0.92,
+            quality: None,
             density: 1.0,
             matte: None,
             jpeg_downsample: false,
@@ -6021,7 +6053,42 @@ impl ExportOptions {
             color_type: self.compositing_color_type(),
             text: (self.text_contrast, self.text_gamma),
             page: Matrix::new_identity(),
+            jpeg: None,
         }
+    }
+
+    /// [`Self::embedding`] for a PDF, whose embedded pixels are JPEG at an
+    /// explicit quality below 1 -- see [`Self::pdf_jpeg`].
+    fn pdf_embedding(&self) -> Embedding<'_> {
+        Embedding {
+            jpeg: self.pdf_jpeg(),
+            ..self.embedding()
+        }
+    }
+
+    /// The quality a lossy encoder takes: the one asked for, or
+    /// [`DEFAULT_QUALITY`].
+    pub(crate) fn lossy_quality(&self) -> f32 {
+        self.quality.unwrap_or(DEFAULT_QUALITY)
+    }
+
+    /// The JPEG a PDF writes its images as: at an explicit quality below 1,
+    /// at full chroma unless [`Self::jpeg_downsample`] asks for 4:2:0;
+    /// `None`, lossless, otherwise.
+    fn pdf_jpeg(&self) -> Option<EmbeddedJpeg> {
+        self.quality
+            .filter(|quality| *quality < 1.0)
+            .map(|quality| EmbeddedJpeg {
+                quality: encoder_quality(quality) as u32,
+                downsample: self.jpeg_downsample,
+            })
+    }
+
+    /// The `encoding_quality` a PDF is written at: the JPEG's -- see
+    /// [`Self::pdf_jpeg`] -- or [`LOSSLESS_PDF_ENCODING_QUALITY`].
+    fn pdf_encoding_quality(&self) -> i32 {
+        self.pdf_jpeg()
+            .map_or(LOSSLESS_PDF_ENCODING_QUALITY, |jpeg| jpeg.quality as i32)
     }
 
     pub fn svg_flags(&self) -> Option<skia_safe::svg::canvas::Flags> {
@@ -8025,6 +8092,7 @@ mod tests {
                         color_type,
                         text: ctx.inner.canvas_text,
                         page: Matrix::new_identity(),
+                        jpeg: None,
                     },
                     None,
                 )

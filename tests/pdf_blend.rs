@@ -686,3 +686,155 @@ fn a_pattern_tile_on_a_display_p3_page_blends_in_its_space_in_a_pdf() {
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
+
+/// Each colour image in `pdf` -- not a soft mask -- as its filter's name and
+/// its stream's raw bytes.
+fn image_streams(pdf: &[u8]) -> Vec<(String, Vec<u8>)> {
+    let text = |range: &[u8]| String::from_utf8_lossy(range).into_owned();
+    let field = |dict: &str, name: &str| -> Option<String> {
+        let at = dict.find(name)? + name.len();
+        Some(dict[at..].split_whitespace().next()?.to_string())
+    };
+    let mut images = Vec::new();
+    let mut from = 0;
+    while let Some(at) = pdf[from..]
+        .windows(15)
+        .position(|w| w == b"/Subtype /Image")
+        .map(|i| i + from)
+    {
+        from = at + 15;
+        let start = pdf[..at].windows(2).rposition(|w| w == b"<<").expect("<<");
+        let end =
+            at + pdf[at..].windows(2).position(|w| w == b">>").expect(">>");
+        let dict = text(&pdf[start..end]);
+        if dict.contains("/DeviceGray") {
+            continue;
+        }
+        let filter = field(&dict, "/Filter").expect("a filter");
+        let length: usize = field(&dict, "/Length")
+            .and_then(|l| l.parse().ok())
+            .expect("a length");
+        let body = end
+            + pdf[end..]
+                .windows(6)
+                .position(|w| w == b"stream")
+                .expect("a stream")
+            + 6;
+        let body = body + usize::from(pdf[body] == b'\r') + 1;
+        images.push((filter, pdf[body..body + length].to_vec()));
+    }
+    images
+}
+
+/// The horizontal and vertical sampling factors of each component of the
+/// JPEG `bytes`, from its baseline frame header (ITU-T T.81, B.2.2): 1 and
+/// 1 for each at full chroma, 2 and 2 for luma at 4:2:0.
+fn sampling(bytes: &[u8]) -> Vec<(u8, u8)> {
+    let sof = bytes
+        .windows(2)
+        .position(|w| w == [0xFF, 0xC0])
+        .expect("a baseline frame header");
+    let count = usize::from(bytes[sof + 9]);
+    (0..count)
+        .map(|c| {
+            let factors = bytes[sof + 10 + c * 3 + 1];
+            (factors >> 4, factors & 0x0F)
+        })
+        .collect()
+}
+
+/// A page whose blend a PDF cannot write over an opaque backdrop, so that
+/// the PDF embeds it, opaque, with what lies beneath it.
+fn opaque_run() -> Canvas {
+    blended(PixelColorSpace::Srgb, BlendMode::Lighter, 1.0)
+}
+
+/// A PDF exported with no quality given writes the pixels it embeds
+/// losslessly: one image, Flate-compressed, holding the canvas's own pixels
+/// to the byte -- where it wrote them as a JPEG at 0.92 before, 65 levels
+/// off along colour edges in PDFium.
+#[test]
+fn a_pdf_s_embedded_pixels_are_lossless_by_default() {
+    let mut canvas = opaque_run();
+    let pdf = canvas
+        .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
+        .expect("a PDF");
+    let streams = image_streams(&pdf);
+    let filters: Vec<&str> = streams.iter().map(|(f, _)| f.as_str()).collect();
+    assert_eq!(filters, ["/FlateDecode"]);
+    let images = colour_images(&pdf);
+    let [(width, pixels)] = images.as_slice() else {
+        panic!("{} colour images", images.len());
+    };
+    assert_eq!(*width, 200, "the whole page, embedded");
+    let page = canvas
+        .context()
+        .get_image_data(0.0, 0.0, 200.0, 120.0)
+        .expect("the page");
+    let want: Vec<[u8; 3]> = page
+        .pixels()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| [p[0], p[1], p[2]])
+        .collect();
+    let parted = want.iter().zip(pixels).filter(|(a, b)| a != b).count();
+    assert_eq!(parted, 0, "pixels parted from the canvas");
+}
+
+/// A quality below 1 asks for JPEG: the run is embedded as one, at full
+/// chroma as the JPEG exporter writes, or at 4:2:0 with `jpeg_downsample`.
+/// A quality of 1 is lossless.
+#[test]
+fn a_pdf_at_a_quality_below_1_embeds_a_jpeg_at_the_jpeg_exporter_s_chroma() {
+    let pdf = |quality: f32, jpeg_downsample: bool| {
+        opaque_run()
+            .to_buffer(
+                ImageFormat::Pdf,
+                &EncodeOptions {
+                    quality: Some(quality),
+                    jpeg_downsample,
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("a PDF")
+    };
+    let full = image_streams(&pdf(0.8, false));
+    let [(filter, bytes)] = full.as_slice() else {
+        panic!("{} colour images", full.len());
+    };
+    assert_eq!(filter, "/DCTDecode");
+    assert_eq!(sampling(bytes), [(1, 1), (1, 1), (1, 1)], "full chroma");
+    let halved = image_streams(&pdf(0.8, true));
+    assert_eq!(halved[0].0, "/DCTDecode");
+    assert_eq!(sampling(&halved[0].1), [(2, 2), (1, 1), (1, 1)], "4:2:0");
+    let lossless = image_streams(&pdf(1.0, false));
+    assert_eq!(lossless[0].0, "/FlateDecode", "a quality of 1");
+}
+
+/// A JPEG file drawn onto a page is written into its PDF as its own bytes,
+/// whatever the quality: nothing is decoded and encoded again.
+#[test]
+fn a_jpeg_drawn_onto_a_page_keeps_its_bytes_in_a_pdf() {
+    let file = std::fs::read("tests/assets/images/globe.jpg").expect("a JPEG");
+    let image = Image::from_encoded(&file).expect("decoded");
+    for quality in [None, Some(0.8)] {
+        let mut canvas = backdrop(PixelColorSpace::Srgb);
+        canvas
+            .context()
+            .draw_image_sized(&image, 20.0, 10.0, 100.0, 100.0);
+        let pdf = canvas
+            .to_buffer(
+                ImageFormat::Pdf,
+                &EncodeOptions {
+                    quality,
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("a PDF");
+        assert!(
+            contains(&pdf, &file),
+            "the file's bytes, at a quality of {quality:?}"
+        );
+    }
+}

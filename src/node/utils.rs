@@ -5254,7 +5254,7 @@ pub fn export_options_arg(
             ));
         }
     };
-    let quality = float_for_key(cx, &opts, "quality")?;
+    let quality = opt_float_for_key(cx, &opts, "quality");
     let density = float_for_key(cx, &opts, "density")?;
     let jpeg_downsample = bool_for_key(cx, &opts, "downsample")?;
     let matte = opt_matte_for_key(cx, &opts, "matte");

@@ -2267,7 +2267,7 @@ fn avif_pages(pages: usize) -> Result<(Vec<u8>, Vec<Vec<u8>>)> {
     }
 
     let options = EncodeOptions {
-        quality: 1.0,
+        quality: Some(1.0),
         fps: (pages > 1).then_some(10.0),
         ..EncodeOptions::default()
     };
@@ -2511,7 +2511,7 @@ fn transparency_arriving_late_still_gets_an_alpha_track() -> Result<()> {
     let encoded = canvas.to_buffer(
         ImageFormat::Avif,
         &EncodeOptions {
-            quality: 1.0,
+            quality: Some(1.0),
             fps: Some(10.0),
             ..EncodeOptions::default()
         },
@@ -2598,7 +2598,7 @@ fn an_animated_avif_keeps_its_transparency() -> Result<()> {
     let encoded = canvas.to_buffer(
         ImageFormat::Avif,
         &EncodeOptions {
-            quality: 1.0,
+            quality: Some(1.0),
             fps: Some(10.0),
             ..EncodeOptions::default()
         },
@@ -2893,7 +2893,7 @@ fn a_lossless_avif_returns_exactly_what_was_drawn() -> Result<()> {
     let lossy = canvas.to_buffer(
         ImageFormat::Avif,
         &EncodeOptions {
-            quality: 0.5,
+            quality: Some(0.5),
             ..EncodeOptions::default()
         },
     )?;
@@ -2960,7 +2960,7 @@ fn avif_chroma_sampling_is_the_callers_choice() -> Result<()> {
         Ok(canvas.to_buffer(
             ImageFormat::Avif,
             &EncodeOptions {
-                quality: 1.0,
+                quality: Some(1.0),
                 chroma: Some(chroma),
                 ..EncodeOptions::default()
             },
