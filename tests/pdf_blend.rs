@@ -60,6 +60,16 @@ fn embeds_an_image(pdf: &[u8]) -> bool {
 /// A rectangle in `rgb(200 40 120)` at `alpha`, composited by `operation`
 /// over two opaque colours, on a canvas in `space`.
 fn blended(space: PixelColorSpace, operation: BlendMode, alpha: f32) -> Canvas {
+    let mut canvas = backdrop(space);
+    let ctx = canvas.context();
+    ctx.set_global_composite_operation(operation);
+    ctx.set_fill_style(RgbaLinear::from_srgb8(200, 40, 120, alpha));
+    ctx.fill_rect(50.0, 30.0, 100.0, 60.0);
+    canvas
+}
+
+/// Two opaque colours side by side, on a canvas in `space`.
+fn backdrop(space: PixelColorSpace) -> Canvas {
     let mut canvas = Canvas::with_options(
         200.0,
         120.0,
@@ -75,9 +85,6 @@ fn blended(space: PixelColorSpace, operation: BlendMode, alpha: f32) -> Canvas {
     ctx.fill_rect(0.0, 0.0, 100.0, 120.0);
     ctx.set_fill_style(RgbaLinear::from_srgb8(40, 90, 200, 1.0));
     ctx.fill_rect(100.0, 0.0, 100.0, 120.0);
-    ctx.set_global_composite_operation(operation);
-    ctx.set_fill_style(RgbaLinear::from_srgb8(200, 40, 120, alpha));
-    ctx.fill_rect(50.0, 30.0, 100.0, 60.0);
     canvas
 }
 
@@ -136,6 +143,237 @@ fn a_pdf_of_a_canvas_outside_srgb_embeds_every_blend() {
         let plain = pdf_of(&mut blended(space, BlendMode::SourceOver, 1.0));
         assert!(!embeds_an_image(&plain), "{space:?}: nothing to embed");
     }
+}
+
+/// The composite operations Skia's PDF backend writes through a soft mask
+/// made from the draw's shape -- `needShape` in its `SkPDFDevice.cpp` --
+/// with `clearRect`, which is `Clear`, beside them.
+const MASKED: [(&str, Option<BlendMode>); 8] = [
+    ("source-in", Some(BlendMode::SourceIn)),
+    ("source-out", Some(BlendMode::SourceOut)),
+    ("source-atop", Some(BlendMode::SourceAtop)),
+    ("destination-in", Some(BlendMode::DestinationIn)),
+    ("destination-out", Some(BlendMode::DestinationOut)),
+    ("destination-atop", Some(BlendMode::DestinationAtop)),
+    ("copy", Some(BlendMode::Copy)),
+    ("clearRect", None),
+];
+
+/// Where a masked draw lies: inside a canvas drawn in whole, inside one
+/// drawn in cropped -- a group of its own -- inside a `saveLayer`, inside
+/// one still open when the page is exported, or on the page itself.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Placement {
+    Drawn,
+    Cropped,
+    Layer,
+    Open,
+    Page,
+}
+
+/// Over two opaque colours, a square in `rgb(200 40 120)` with a smaller
+/// one composited onto it by `operation` -- or cleared, for `None` -- placed
+/// as `placement` says.
+fn masked(operation: Option<BlendMode>, placement: Placement) -> Canvas {
+    let mut canvas = backdrop(PixelColorSpace::Srgb);
+    let draw = |ctx: &mut Context2D| {
+        ctx.set_fill_style(RgbaLinear::from_srgb8(200, 40, 120, 1.0));
+        ctx.fill_rect(0.0, 0.0, 80.0, 80.0);
+        match operation {
+            Some(operation) => {
+                ctx.set_global_composite_operation(operation);
+                ctx.set_fill_style(RgbaLinear::from_srgb8(20, 160, 90, 1.0));
+                ctx.fill_rect(20.0, 20.0, 40.0, 40.0);
+            }
+            None => ctx.clear_rect(20.0, 20.0, 40.0, 40.0),
+        }
+    };
+    let mut logo = Canvas::with_options(
+        80.0,
+        80.0,
+        CanvasOptions {
+            gpu: false,
+            ..CanvasOptions::default()
+        },
+    )
+    .expect("a canvas");
+    draw(logo.context());
+    let ctx = canvas.context();
+    match placement {
+        Placement::Drawn => ctx.draw_canvas(&mut logo, 60.0, 20.0),
+        Placement::Cropped => ctx.draw_canvas_region(
+            &mut logo, 10.0, 10.0, 60.0, 60.0, 70.0, 30.0, 60.0, 60.0,
+        ),
+        Placement::Layer => {
+            ctx.save();
+            ctx.translate(60.0, 20.0);
+            ctx.save_layer();
+            draw(ctx);
+            ctx.restore();
+            ctx.restore();
+        }
+        Placement::Open => {
+            ctx.translate(60.0, 20.0);
+            ctx.save_layer();
+            draw(ctx);
+        }
+        Placement::Page => {
+            ctx.translate(60.0, 20.0);
+            draw(ctx);
+        }
+    }
+    canvas
+}
+
+/// A blend written through a soft mask inside a group -- a canvas drawn in
+/// through a layer, or a `saveLayer` -- is embedded as pixels in a PDF
+/// exported at a density other than 1, which CoreGraphics renders otherwise
+/// under the page's scale: see docs/browser-differences.md. At a density of
+/// 1, and on the page itself at any density, it stays vector, as a blend
+/// written without a mask does inside a group at any density.
+#[test]
+fn a_masked_blend_in_a_group_is_embedded_under_a_density() {
+    let placements = [
+        Placement::Drawn,
+        Placement::Cropped,
+        Placement::Layer,
+        Placement::Open,
+        Placement::Page,
+    ];
+    let mut wrong = Vec::new();
+    for density in [1.0, 2.5] {
+        let options = EncodeOptions {
+            density,
+            ..EncodeOptions::default()
+        };
+        let pdf = |canvas: &mut Canvas| {
+            canvas.to_buffer(ImageFormat::Pdf, &options).expect("a PDF")
+        };
+        for placement in placements {
+            for (name, operation) in MASKED {
+                let embedded =
+                    embeds_an_image(&pdf(&mut masked(operation, placement)));
+                let want = density != 1.0 && placement != Placement::Page;
+                if embedded != want {
+                    wrong.push(format!(
+                        "{name} {placement:?} at {density}: embedded {embedded}"
+                    ));
+                }
+            }
+            let multiply = Some(BlendMode::Multiply);
+            if embeds_an_image(&pdf(&mut masked(multiply, placement))) {
+                wrong.push(format!(
+                    "multiply {placement:?} at {density}: embedded"
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// Over two opaque colours, a `saveLayer` composited by `operation`
+/// holding two overlapping rectangles drawn `source-over`, on a canvas in
+/// `space`; left open at the export where `open`.
+fn layer_composited(
+    space: PixelColorSpace,
+    operation: BlendMode,
+    open: bool,
+) -> Canvas {
+    let mut canvas = backdrop(space);
+    let ctx = canvas.context();
+    ctx.set_global_composite_operation(operation);
+    ctx.save_layer();
+    ctx.set_global_composite_operation(BlendMode::SourceOver);
+    ctx.set_fill_style(RgbaLinear::from_srgb8(200, 40, 120, 1.0));
+    ctx.fill_rect(50.0, 30.0, 60.0, 60.0);
+    ctx.fill_rect(90.0, 40.0, 60.0, 40.0);
+    if !open {
+        ctx.restore();
+    }
+    canvas
+}
+
+/// A `saveLayer` composited by an operation a PDF cannot write is embedded
+/// with what lies beneath it, as a draw composited by it is: `lighter`,
+/// `xor`, and `destination-atop`, since what a layer holds may be
+/// translucent -- and on a canvas outside sRGB, every blend. The rest are
+/// written as the blends they are. Closed, and still open at the export.
+///
+/// `source-out` over the opaque page leaves nothing anywhere, so outside
+/// sRGB the raster it is embedded as holds no ink and nothing is written.
+#[test]
+fn a_layer_composited_by_a_blend_a_pdf_cannot_write_is_embedded() {
+    let mut wrong = Vec::new();
+    for space in [PixelColorSpace::Srgb, PixelColorSpace::DisplayP3] {
+        for (name, operation, _) in OPERATIONS {
+            for open in [false, true] {
+                let pdf = pdf_of(&mut layer_composited(space, operation, open));
+                let embedded = match space {
+                    PixelColorSpace::Srgb => matches!(
+                        operation,
+                        BlendMode::Lighter
+                            | BlendMode::Xor
+                            | BlendMode::DestinationAtop
+                    ),
+                    _ => !matches!(
+                        operation,
+                        BlendMode::SourceOver | BlendMode::SourceOut
+                    ),
+                };
+                if embeds_an_image(&pdf) != embedded {
+                    wrong.push(format!(
+                        "{name} on {space:?}, open {open}: embedded {}",
+                        !embedded
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// A `saveLayer` composited by a blend written through a soft mask is a
+/// masked blend at the top of the page, kept vector at any density; inside
+/// another `saveLayer` it is one inside a group, embedded at a density
+/// other than 1 -- see `a_masked_blend_in_a_group_is_embedded_under_a_density`.
+/// Closed, and both left open at the export.
+#[test]
+fn a_layer_composited_by_a_masked_blend_inside_another_is_nested() {
+    let mut wrong = Vec::new();
+    for density in [1.0, 2.5] {
+        let options = EncodeOptions {
+            density,
+            ..EncodeOptions::default()
+        };
+        for (inside, open) in [(false, false), (true, false), (true, true)] {
+            let mut canvas = backdrop(PixelColorSpace::Srgb);
+            let ctx = canvas.context();
+            if inside {
+                ctx.save_layer();
+            }
+            ctx.set_global_composite_operation(BlendMode::DestinationOut);
+            ctx.save_layer();
+            ctx.set_global_composite_operation(BlendMode::SourceOver);
+            ctx.set_fill_style(RgbaLinear::from_srgb8(200, 40, 120, 1.0));
+            ctx.fill_rect(50.0, 30.0, 60.0, 60.0);
+            if !open {
+                ctx.restore();
+                if inside {
+                    ctx.restore();
+                }
+            }
+            let pdf =
+                canvas.to_buffer(ImageFormat::Pdf, &options).expect("a PDF");
+            let want = inside && density != 1.0;
+            if embeds_an_image(&pdf) != want {
+                wrong.push(format!(
+                    "inside {inside}, open {open} at {density}: embedded {}",
+                    !want
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 /// Every page of a PDF has a transparency group naming DeviceRGB, through
@@ -308,6 +546,143 @@ fn every_blend_a_pdf_writes_renders_as_the_canvas_in_poppler() {
         .unwrap_or(0);
     if off > 3 {
         wrong.push(format!("the punched-out ring: {off} levels"));
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// A 40-pixel tile holding a square with a smaller one composited onto it
+/// by `operation`, as a repeating pattern over most of a page in `space`.
+fn patterned(space: PixelColorSpace, operation: BlendMode) -> Canvas {
+    let mut tile = Canvas::with_options(
+        40.0,
+        40.0,
+        CanvasOptions {
+            color_space: space,
+            gpu: false,
+            ..CanvasOptions::default()
+        },
+    )
+    .expect("a canvas");
+    let t = tile.context();
+    t.set_fill_style(RgbaLinear::from_srgb8(200, 40, 120, 1.0));
+    t.fill_rect(0.0, 0.0, 30.0, 30.0);
+    t.set_global_composite_operation(operation);
+    t.set_fill_style(RgbaLinear::from_srgb8(20, 160, 90, 1.0));
+    t.fill_rect(10.0, 10.0, 25.0, 25.0);
+    let mut canvas = backdrop(space);
+    let ctx = canvas.context();
+    let pattern =
+        ctx.create_pattern_from_canvas(&mut tile, PatternRepeat::Repeat);
+    ctx.set_fill_pattern(&pattern);
+    ctx.fill_rect(20.0, 20.0, 160.0, 80.0);
+    canvas
+}
+
+/// The colour images in `pdf` -- not their soft masks -- each as its width
+/// and its pixels, RGB, inflated from the stream Skia's PDF backend writes.
+fn colour_images(pdf: &[u8]) -> Vec<(usize, Vec<[u8; 3]>)> {
+    use std::io::Read;
+    let text = |range: &[u8]| String::from_utf8_lossy(range).into_owned();
+    let field = |dict: &str, name: &str| -> Option<usize> {
+        let at = dict.find(name)? + name.len();
+        dict[at..].split_whitespace().next()?.parse().ok()
+    };
+    let mut images = Vec::new();
+    let mut from = 0;
+    while let Some(at) = pdf[from..]
+        .windows(15)
+        .position(|w| w == b"/Subtype /Image")
+        .map(|i| i + from)
+    {
+        from = at + 15;
+        let start = pdf[..at].windows(2).rposition(|w| w == b"<<").expect("<<");
+        let end =
+            at + pdf[at..].windows(2).position(|w| w == b">>").expect(">>");
+        let dict = text(&pdf[start..end]);
+        if dict.contains("/DeviceGray") {
+            continue;
+        }
+        let (width, length) = (
+            field(&dict, "/Width").expect("a width"),
+            field(&dict, "/Length").expect("a length"),
+        );
+        let body = end
+            + pdf[end..]
+                .windows(6)
+                .position(|w| w == b"stream")
+                .expect("a stream")
+            + 6;
+        let body = body + usize::from(pdf[body] == b'\r') + 1;
+        let mut raw = Vec::new();
+        flate2::read::ZlibDecoder::new(&pdf[body..body + length])
+            .read_to_end(&mut raw)
+            .expect("a Flate stream");
+        images.push((width, raw.as_chunks::<3>().0.to_vec()));
+    }
+    images
+}
+
+/// A draw dyed by a canvas's pattern is embedded in a PDF as the page
+/// composites it, at the export's density: one image of the draw, 160 by 80
+/// pixels at a density of 1 and that times the density beyond -- not
+/// Skia's PDF backend's raster of a picture shader, made at the unscaled
+/// page's size whatever the density.
+#[test]
+fn a_pdf_pattern_is_embedded_at_the_density() {
+    for density in [1.0f32, 2.0, 3.0] {
+        let pdf = patterned(PixelColorSpace::Srgb, BlendMode::SourceOver)
+            .to_buffer(
+                ImageFormat::Pdf,
+                &EncodeOptions {
+                    density,
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("a PDF");
+        let widths: Vec<usize> =
+            colour_images(&pdf).iter().map(|(w, _)| *w).collect();
+        assert_eq!(
+            widths,
+            [(160.0 * density) as usize],
+            "at a density of {density}"
+        );
+    }
+}
+
+/// A pattern tile on a Display P3 page is composited in the page's space,
+/// as the canvas composites it -- `multiply` of two colours there is not
+/// `multiply` of their sRGB bytes -- and embedded in eight-bit sRGB: the
+/// embedded draw's pixels are the canvas's own read as sRGB, to a level,
+/// in a tile's base, its overlap and its second square.
+#[test]
+fn a_pattern_tile_on_a_display_p3_page_blends_in_its_space_in_a_pdf() {
+    let mut canvas = patterned(PixelColorSpace::DisplayP3, BlendMode::Multiply);
+    let pdf = pdf_of(&mut canvas);
+    let images = colour_images(&pdf);
+    let [(width, pixels)] = images.as_slice() else {
+        panic!("{} colour images for one draw", images.len());
+    };
+    let mut wrong = Vec::new();
+    // Page positions; the draw, and so the image, starts at (20, 20).
+    for (x, y) in [(45usize, 45usize), (25, 25), (72, 72)] {
+        let data = canvas
+            .context()
+            .get_image_data_as(
+                x as f32,
+                y as f32,
+                1.0,
+                1.0,
+                PixelExportOptions {
+                    color_space: PixelColorSpace::Srgb,
+                    ..PixelExportOptions::default()
+                },
+            )
+            .expect("a pixel");
+        let want = &data.pixels()[..3];
+        let got = pixels[(y - 20) * width + (x - 20)];
+        if (0..3).any(|k| want[k].abs_diff(got[k]) > 1) {
+            wrong.push(format!("({x}, {y}): {got:?} for {want:?}"));
+        }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }

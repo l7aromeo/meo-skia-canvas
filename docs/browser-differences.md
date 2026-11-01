@@ -211,6 +211,17 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   Oswald the ascent is 119.30 here and 119 in Chrome, the descent 28.90
   against 29, the hanging baseline 95.44 against 95.20; Georgia's ascent is
   91.70 against 92.
+- _Helvetica, Times and Courier report the ascent their tables give._
+  Chrome 156 on macOS adds about 15% of the font size to the
+  `fontBoundingBoxAscent` of a face whose own family is Helvetica, Times or
+  Courier -- matched by the font's family name, so the same Helvetica bytes
+  loaded as a web font under another name are adjusted too -- and its
+  `hangingBaseline`, four fifths of that ascent, follows. Nothing in the
+  files says so, and CoreText itself reports the tables' figure. This
+  library reports each face's own ascent. At 100px: Helvetica 77 here and 92
+  in Chrome, Times 75 against 90, Courier 75.39 against 90; Helvetica's
+  hanging baseline 61.60 against 73.60. The descents agree. Arial, Georgia,
+  Menlo, Helvetica Neue and Times New Roman are not adjusted.
 - _The em square that places `top`, `middle` and `bottom` is not snapped to
   a 64th of a pixel._ Both divide the font size at the alphabetic baseline
   as the face's typographic ascender and descender divide it, whether or not
@@ -219,9 +230,16 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   most 1/128 px. At 100px Georgia the top is 77.722 here and 77.71875 in
   Chrome, Arial 77.575 against 77.578125, Times New Roman 76.262 against
   76.265625. A face whose typographic ascender and descender are zero is
-  divided as its ascent and descent divide it, in both. An `MVAR` table that
-  varies the typographic ascender and descender per instance moves neither:
-  the stored values place it at every instance.
+  divided as its ascent and descent divide it, in both.
+- _An instance's em square follows its `MVAR`._ A variable face's `MVAR`
+  table can vary the typographic ascender and descender from one instance to
+  the next (`hasc`, `hdsc`). Chrome 156 keeps the stored values at every
+  instance; this library divides the em as the instance's own do, which is
+  what the face says its em square is there. Amstelvar, its `MVAR` turned so
+  that it moves them along `wght`, puts `top` 75 above the alphabetic
+  baseline of 100px at weights 100, 400 and 900 in Chrome, while its text
+  widens with the weight; here it is 70.16, 75 and 84.375, the stored 1500
+  and -500 moved to 1434 and -610 at 100 and to 1620 and -300 at 900.
 
 - _`imageSmoothingQuality = "high"` picks its sampler from the device-space
   scale._ The Chrome mapping this ports, and why one unconditional cubic is
@@ -1181,6 +1199,25 @@ macOS 27.2, does too, except:
   blend at all.
 - Along an antialiased edge, `color-dodge` and `color-burn` up to 215 and 200
   levels, on the edge's partly covered pixels.
+
+**A blend Skia writes through a soft mask goes wrong in CoreGraphics inside a
+group on a scaled page, so there it is embedded.** Skia's PDF backend writes
+`source-in`, `source-out`, `source-atop`, `destination-in`, `destination-out`,
+`destination-atop`, `copy` and `clearRect` through a soft mask made from the
+draw's shape (`needShape` in `SkPDFDevice.cpp`). Inside a group -- a canvas
+drawn into another, which is drawn through a layer once it holds a blend, or a
+`saveLayer` -- on a page exported at a density other than 1, which scales the
+page's content, CoreGraphics renders it otherwise: a canvas holding a square
+cut by `destination-out`, drawn into a page over two opaque colours and
+exported at density 2.5, came out with 20,000 of its 150,000 pixels more than
+8 levels off the canvas, up to 160, in `sips` on macOS 27.2, where poppler
+renders it right. So at a density other than 1 such a group is embedded as
+pixels with what lies beneath it (`context::page::pdf_cannot`); that page then
+comes out with 2,985 pixels over 8 levels, up to 89 -- the embedded image as
+CoreGraphics draws it, which poppler draws 3,833 pixels apart from on the same
+file. A masked blend on the page itself, and one in a group at a density of 1,
+stay vector, since CoreGraphics renders both as the canvas does: the
+reproduction at density 1 comes out within a level.
 
 poppler's figures are held by `tests/pdf_blend.rs`, which renders every
 blend a PDF writes with `pdftoppm` and runs on CI. CoreGraphics' are a

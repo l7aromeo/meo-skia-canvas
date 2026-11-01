@@ -3140,3 +3140,173 @@ describe("top, middle and bottom are the em square's", () => {
     FontLibrary.reset();
   });
 });
+
+describe("an instance's em square follows its MVAR", () => {
+  // A variable face's `MVAR` can move the typographic ascender and descender
+  // from one instance to the next (`hasc`, `hdsc`). Chrome 156 keeps the
+  // stored values at every instance; this library divides the em as the
+  // instance's own do. Amstelvar's `MVAR` varies `stro` and `xhgt` along
+  // `YTLC`; renamed `hasc` and `hdsc` and moved onto `wght`, its deltas take
+  // the stored 1500 and -500 to 1434 and -610 at weight 100 and to 1620 and
+  // -300 at 900.
+  const fs = require("fs"),
+    os = require("os"),
+    path = require("path");
+  const AMSTELVAR = "tests/assets/fonts/AmstelvarAlpha-VF.ttf";
+  /** `wght`'s and `YTLC`'s indices among Amstelvar's axes. */
+  const WGHT = 1,
+    YTLC = 10;
+  const font = Buffer.from(fs.readFileSync(AMSTELVAR));
+  const tables = font.readUInt16BE(4);
+  for (let i = 0; i < tables; i++) {
+    const entry = 12 + 16 * i;
+    if (font.toString("latin1", entry, entry + 4) !== "MVAR") continue;
+    const mvar = font.readUInt32BE(entry + 8),
+      length = font.readUInt32BE(entry + 12);
+    font.write("hasc", mvar + 12, "latin1");
+    font.write("hdsc", mvar + 20, "latin1");
+    const store = mvar + font.readUInt16BE(mvar + 10);
+    const list = store + font.readUInt32BE(store + 2);
+    const axes = font.readUInt16BE(list),
+      regions = font.readUInt16BE(list + 2);
+    for (let r = 0; r < regions; r++) {
+      const at = (axis) => list + 4 + (r * axes + axis) * 6;
+      if (font.readInt16BE(at(YTLC) + 2) === 0) continue;
+      font.copy(font, at(WGHT), at(YTLC), at(YTLC) + 6);
+      font.fill(0, at(YTLC), at(YTLC) + 6);
+    }
+    let sum = 0;
+    for (let k = 0; k < length; k += 4) {
+      const word = Buffer.alloc(4);
+      font.copy(word, 0, mvar + k, Math.min(mvar + k + 4, mvar + length));
+      sum = (sum + word.readUInt32BE(0)) >>> 0;
+    }
+    font.writeUInt32BE(sum, entry + 4);
+  }
+  const retagged = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), "em-mvar-")),
+    "amstelvar-typo-mvar.ttf",
+  );
+  fs.writeFileSync(retagged, font);
+  beforeEach(() => {
+    FontLibrary.use("EmMvar", [retagged]);
+    FontLibrary.use("EmMvarShipped", [AMSTELVAR]);
+  });
+
+  const measure = (font, text = "H") => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = font;
+    ctx.textBaseline = "top";
+    return ctx.measureText(text);
+  };
+
+  test("top sits where the instance's typographic metrics put it", () => {
+    const ARITHMETIC = {
+      100: (100 * 1434) / (1434 + 610),
+      400: (100 * 1500) / (1500 + 500),
+      900: (100 * 1620) / (1620 + 300),
+    };
+    for (const [weight, top] of Object.entries(ARITHMETIC)) {
+      const measured = -measure(`${weight} 100px EmMvar`).alphabeticBaseline;
+      assert.ok(
+        Math.abs(measured - top) < 1e-3,
+        `weight ${weight}: top ${measured} above the alphabetic baseline against ${top}`,
+      );
+    }
+    // The weight reached the face: its text widens with it.
+    const width = (weight) =>
+      measure(`${weight} 100px EmMvar`, "Hamburg").width;
+    assert.ok(width(900) > width(400) && width(400) > width(100));
+  });
+
+  test("a face whose MVAR varies other metrics keeps the stored ones", () => {
+    for (const weight of [100, 900]) {
+      const measured = -measure(`${weight} 100px EmMvarShipped`)
+        .alphabeticBaseline;
+      assert.ok(
+        Math.abs(measured - 75) < 1e-3,
+        `weight ${weight}: top ${measured}, where Amstelvar stores 1500 and -500`,
+      );
+    }
+    FontLibrary.reset();
+  });
+});
+
+describe("the font box is the first available font's own", () => {
+  // `fontBoundingBoxAscent` and `fontBoundingBoxDescent` are the ascent and
+  // descent of the first available font, as Chrome 156 reports them: `hhea`'s,
+  // or the typographic ones where the face sets `USE_TYPO_METRICS`, with no
+  // line gap and whatever face a fallback draws in. Chrome rounds them to
+  // whole pixels, which this library does not (docs/browser-differences.md),
+  // so each is held to Chrome's figure within half a pixel, and `hanging`,
+  // four fifths of the ascent, within four fifths of that.
+  const fs = require("fs"),
+    os = require("os"),
+    path = require("path");
+  const OSWALD = "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf";
+  const AMSTELVAR = "tests/assets/fonts/AmstelvarAlpha-VF.ttf";
+  /** Amstelvar given a line gap of 200 of 2000 in `hhea`, and optionally
+   * `USE_TYPO_METRICS`, whose typographic metrics carry a gap of 400. */
+  const gapped = (useTypo) => {
+    const font = Buffer.from(fs.readFileSync(AMSTELVAR));
+    for (let i = 0, n = font.readUInt16BE(4); i < n; i++) {
+      const entry = 12 + 16 * i,
+        tag = font.toString("latin1", entry, entry + 4),
+        at = font.readUInt32BE(entry + 8);
+      // `hhea`'s lineGap, and `OS/2`'s fsSelection bit 7.
+      if (tag === "hhea") font.writeInt16BE(200, at + 8);
+      if (tag === "OS/2" && useTypo) font[at + 63] |= 0x80;
+    }
+    const file = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), "font-box-")),
+      `amstelvar-gap${useTypo ? "-typo" : ""}.ttf`,
+    );
+    fs.writeFileSync(file, font);
+    return file;
+  };
+  const GAP = gapped(false),
+    GAP_TYPO = gapped(true);
+  beforeEach(() => {
+    FontLibrary.use("BoxGap", [GAP]);
+    FontLibrary.use("BoxGapTypo", [GAP_TYPO]);
+    FontLibrary.use("BoxOswald", [OSWALD]);
+  });
+
+  // Chrome 156 at 100px: the box, and the hanging and ideographic baselines.
+  const CHROME = {
+    BoxGap: { ascent: 95, descent: 25, hanging: 76, ideographic: -25 },
+    BoxGapTypo: { ascent: 75, descent: 25, hanging: 60, ideographic: -25 },
+    BoxOswald: { ascent: 119, descent: 29, hanging: 95.2, ideographic: -29 },
+  };
+  /** Half a pixel: the most Chrome's rounding to whole pixels moves one. */
+  const ROUNDING = 0.5;
+  const measure = (font, text = "H") => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = font;
+    return ctx.measureText(text);
+  };
+
+  test("it is the face's ascent and descent, without the line gap", () => {
+    for (const [family, at] of Object.entries(CHROME)) {
+      const m = measure(`100px ${family}`);
+      for (const [key, got, limit] of [
+        ["ascent", m.fontBoundingBoxAscent, ROUNDING],
+        ["descent", m.fontBoundingBoxDescent, ROUNDING],
+        ["hanging", m.hangingBaseline, 0.8 * ROUNDING],
+        ["ideographic", m.ideographicBaseline, ROUNDING],
+      ])
+        assert.ok(
+          Math.abs(got - at[key]) <= limit,
+          `${family} ${key}: ${got} against Chrome's ${at[key]}`,
+        );
+    }
+  });
+
+  test("a fallback face does not widen it", () => {
+    const alone = measure("100px BoxOswald"),
+      fallback = measure("100px BoxOswald", "H\u6f22");
+    assert.equal(fallback.fontBoundingBoxAscent, alone.fontBoundingBoxAscent);
+    assert.equal(fallback.fontBoundingBoxDescent, alone.fontBoundingBoxDescent);
+    FontLibrary.reset();
+  });
+});

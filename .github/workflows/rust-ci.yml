@@ -1,26 +1,16 @@
 name: Rust CI
 
 on:
+  # No path filter on either trigger. A required check that never reports is
+  # unmet rather than absent, and a filtered-out trigger produces no run at
+  # all, so nothing inside it -- an aggregate with `always()` included -- can
+  # report. And a `paths:` filter takes only a literal list, so it would be a
+  # second copy of `paths/rust-ci.txt` -- the copy this trigger carried had
+  # neither `Cargo.lock` nor `build.rs`, so a merge touching only those ran no
+  # Rust CI on main. The `changes` job below reads the one list for both
+  # events and skips the work instead, which leaves something to report.
   push:
     branches: [main]
-    paths:
-      - "src/**"
-      - "scripts/**"
-      - "lib/**"
-      - "package.json"
-      - "tests/**"
-      - "examples/**"
-      - "docs/rust.md"
-      - "Cargo.toml"
-      - "rustfmt.toml"
-      - ".github/workflows/rust-ci.yml"
-      - "containers/skia-*.patch"
-      - ".github/actions/**"
-  # No path filter here, unlike `push` above. A required check that never
-  # reports is unmet rather than absent, and a filtered-out trigger produces no
-  # run at all, so nothing inside it -- an aggregate with `always()` included --
-  # can report. The `changes` job below carries the same list and skips the work
-  # instead, which costs the same and leaves something to report.
   pull_request:
 
 # One run per ref at a time. Superseded pull-request runs are cancelled; runs on
@@ -37,8 +27,8 @@ permissions:
   contents: read
 
 jobs:
-  # The list the pull request trigger used to carry, in git's pathspec
-  # spelling. `:(glob)` keeps `*` from crossing a directory separator, so
+  # Whether anything in `paths/rust-ci.txt` moved, for both triggers, in git's
+  # pathspec spelling. `:(glob)` keeps `*` from crossing a directory separator, so
   # `docs/rust.md` stays the single page it names.
   changes:
     name: changes
@@ -52,11 +42,15 @@ jobs:
           fetch-depth: 0
       - id: scan
         env:
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
+          # A pull request compares its base with its head; a push to main
+          # compares the commit it moved from with the one it moved to.
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          # A push reaching this has already passed the trigger's own filter.
-          if [ -z "$BASE" ]; then
+          # No earlier commit to compare with -- a ref created by this push
+          # reports all zeros, and one rewritten by a force-push may name a
+          # commit this clone does not have. Run everything rather than guess.
+          if [ -z "$BASE" ] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -613,6 +607,28 @@ jobs:
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       - run: just check-changelog
 
+  # The notices file states how many crate versions link into a released
+  # binary, and `just licenses` refuses when the graph disagrees. A dependency
+  # update that adds a crate changes that count without touching any source,
+  # so without this job it merged green and failed the next `just ci` on main.
+  # It reads the dependency graph and builds nothing: no Skia, no cache.
+  licenses:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    name: licenses (notices match what links)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      - run: just licenses
+
   # The crate and npm surfaces against the manifest that records how they
   # correspond. Its own job rather than a step in `binding`, because the
   # rustdoc pass runs under the pinned nightly while that job builds on stable,
@@ -768,6 +784,7 @@ jobs:
         msrv,
         public-api,
         changelog,
+        licenses,
         parity,
         docs,
         doc-anchors,

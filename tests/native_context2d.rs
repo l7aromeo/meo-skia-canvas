@@ -1690,6 +1690,154 @@ fn top_middle_and_bottom_are_the_em_squares() {
     }
 }
 
+/// A variable face's `MVAR` can move the typographic ascender and descender
+/// from one instance to the next; the em square is divided as the instance's
+/// own are, where Chrome 156 keeps the stored values. Amstelvar's `MVAR`
+/// varies `stro` and `xhgt` along `YTLC`; renamed `hasc` and `hdsc` and moved
+/// onto `wght`, its deltas take the stored 1500 and -500 to 1434 and -610 at
+/// weight 100 and to 1620 and -300 at 900. Amstelvar as shipped keeps 1500
+/// and -500 at every weight.
+#[test]
+fn an_instances_em_square_follows_its_mvar() {
+    /// `wght`'s and `YTLC`'s indices among Amstelvar's axes.
+    const WGHT: usize = 1;
+    const YTLC: usize = 10;
+    let shipped = std::fs::read("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+        .expect("bundled Amstelvar");
+    let mut font = shipped.clone();
+    let be16 =
+        |b: &[u8], at: usize| u16::from_be_bytes([b[at], b[at + 1]]) as usize;
+    let be32 = |b: &[u8], at: usize| {
+        u32::from_be_bytes(b[at..at + 4].try_into().expect("a word")) as usize
+    };
+    for entry in (0..be16(&font, 4)).map(|i| 12 + 16 * i) {
+        if &font[entry..entry + 4] != b"MVAR" {
+            continue;
+        }
+        let mvar = be32(&font, entry + 8);
+        font[mvar + 12..mvar + 16].copy_from_slice(b"hasc");
+        font[mvar + 20..mvar + 24].copy_from_slice(b"hdsc");
+        let store = mvar + be16(&font, mvar + 10);
+        let list = store + be32(&font, store + 2);
+        let (axes, regions) = (be16(&font, list), be16(&font, list + 2));
+        for region in 0..regions {
+            let at = |axis: usize| list + 4 + (region * axes + axis) * 6;
+            if font[at(YTLC) + 2..at(YTLC) + 4] == [0, 0] {
+                continue;
+            }
+            let ytlc = font[at(YTLC)..at(YTLC) + 6].to_vec();
+            font[at(WGHT)..at(WGHT) + 6].copy_from_slice(&ytlc);
+            font[at(YTLC)..at(YTLC) + 6].fill(0);
+        }
+    }
+    let library = FontLibrary::new();
+    library
+        .register_font_from_data("EmMvar", &font)
+        .expect("the retagged Amstelvar registers");
+    library
+        .register_font_from_data("EmMvarShipped", &shipped)
+        .expect("Amstelvar registers");
+    let top = |family: &str, weight: u16| {
+        let mut canvas = Canvas::new(10.0, 10.0);
+        let ctx = canvas.context();
+        ctx.set_font(&Font::new(family, 100.0).weight(weight));
+        ctx.set_text_baseline(TextBaseline::Top);
+        -ctx.measure_text("H", None).alphabetic_baseline
+    };
+    for (weight, ascender, descender) in [
+        (100, 1434.0, -610.0),
+        (400, 1500.0, -500.0),
+        (900, 1620.0, -300.0),
+    ] {
+        let expected = 100.0 * ascender / (ascender - descender);
+        let measured = top("EmMvar", weight);
+        assert!(
+            (measured - expected).abs() < 1e-3,
+            "weight {weight}: top {measured} against {expected}"
+        );
+        let stored = top("EmMvarShipped", weight);
+        assert!(
+            (stored - 75.0).abs() < 1e-3,
+            "shipped Amstelvar at weight {weight}: top {stored}"
+        );
+    }
+}
+
+/// The font box is the first available font's ascent and descent, as Chrome
+/// 156 reports them: `hhea`'s, or the typographic ones under
+/// `USE_TYPO_METRICS`, without the line gap, and whatever face a fallback
+/// draws in. Chrome rounds to whole pixels and this does not, so each is held
+/// within half a pixel of Chrome's figure, `hanging` within four fifths of it.
+#[test]
+fn the_font_box_is_the_first_available_fonts_own() {
+    /// Half a pixel: the most Chrome's rounding to whole pixels moves one.
+    const ROUNDING: f32 = 0.5;
+    let amstelvar = std::fs::read("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+        .expect("bundled Amstelvar");
+    // A line gap of 200 of 2000 in `hhea`, and optionally `USE_TYPO_METRICS`,
+    // whose typographic metrics carry a gap of 400.
+    let gapped = |use_typo: bool| {
+        let mut font = amstelvar.clone();
+        let tables = u16::from_be_bytes([font[4], font[5]]) as usize;
+        for entry in (0..tables).map(|i| 12 + 16 * i) {
+            let at = u32::from_be_bytes(
+                font[entry + 8..entry + 12].try_into().expect("an offset"),
+            ) as usize;
+            match &font[entry..entry + 4] {
+                b"hhea" => {
+                    font[at + 8..at + 10].copy_from_slice(&200i16.to_be_bytes())
+                }
+                b"OS/2" if use_typo => font[at + 63] |= 0x80,
+                _ => {}
+            }
+        }
+        font
+    };
+    let library = FontLibrary::new();
+    library
+        .register_font_from_data("RustBoxGap", &gapped(false))
+        .expect("registers");
+    library
+        .register_font_from_data("RustBoxGapTypo", &gapped(true))
+        .expect("registers");
+    let measure = |family: &str, text: &str| {
+        let mut canvas = Canvas::new(10.0, 10.0);
+        let ctx = canvas.context();
+        ctx.set_font(&Font::new(family, 100.0));
+        ctx.measure_text(text, None)
+    };
+    // Chrome 156: ascent, descent, hanging, ideographic.
+    let chrome = [
+        ("RustBoxGap", [95.0, 25.0, 76.0, -25.0]),
+        ("RustBoxGapTypo", [75.0, 25.0, 60.0, -25.0]),
+        (oswald(), [119.0, 29.0, 95.2, -29.0]),
+    ];
+    for (family, [ascent, descent, hanging, ideographic]) in chrome {
+        let m = measure(family, "H");
+        for (what, got, want, limit) in [
+            ("ascent", m.font_bounding_box_ascent, ascent, ROUNDING),
+            ("descent", m.font_bounding_box_descent, descent, ROUNDING),
+            ("hanging", m.hanging_baseline, hanging, 0.8 * ROUNDING),
+            ("ideographic", m.ideographic_baseline, ideographic, ROUNDING),
+        ] {
+            assert!(
+                (got - want).abs() <= limit,
+                "{family} {what}: {got} against Chrome's {want}"
+            );
+        }
+    }
+    let (alone, fallback) =
+        (measure(oswald(), "H"), measure(oswald(), "H\u{6f22}"));
+    assert_eq!(
+        fallback.font_bounding_box_ascent,
+        alone.font_bounding_box_ascent
+    );
+    assert_eq!(
+        fallback.font_bounding_box_descent,
+        alone.font_bounding_box_descent
+    );
+}
+
 #[test]
 fn reset_clears_the_page_and_the_state() {
     let mut canvas = Canvas::new(10.0, 10.0);
