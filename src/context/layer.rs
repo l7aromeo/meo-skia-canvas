@@ -100,9 +100,7 @@ impl Layer {
             Layer::Group(group) => group.playback(canvas, target),
             Layer::Targeted(pictures) => match target {
                 Target::Pixels => pictures.0.playback(canvas),
-                Target::Embedded | Target::Document => {
-                    pictures.1.playback(canvas)
-                }
+                Target::Document => pictures.1.playback(canvas),
             },
             Layer::Cut(op) => op.playback(canvas, target),
             Layer::Clipped(piece) => piece.playback(canvas, target),
@@ -932,7 +930,7 @@ impl PatternDraw {
             canvas.clip_path(&clip, ClipOp::Intersect, true);
         }
         match target {
-            Target::Pixels | Target::Embedded => self.paint_onto(canvas),
+            Target::Pixels => self.paint_onto(canvas),
             Target::Document => self.plain.playback(canvas),
         }
         canvas.restore();
@@ -1008,15 +1006,11 @@ impl PatternDraw {
 /// composites.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
-    /// Pixels: a raster or GPU surface, or a picture Skia itself will draw
-    /// as pixels -- a pattern's or an image's.
+    /// Pixels: a raster or GPU surface, a picture Skia itself will draw as
+    /// pixels -- a pattern's or an image's -- or the raster a document embeds
+    /// for what it cannot write as vectors, which is composited in the
+    /// page's space as the page is -- see `Page::embed_raster`.
     Pixels,
-    /// Pixels a document embeds for what it cannot write as vectors: an
-    /// eight-bit sRGB raster, composited as pixels are, in the colours the
-    /// document holds. Played from a pair's document recording: from its
-    /// pixels recording, with text drawn through its dye, the raster an SVG
-    /// embeds parted from an eight-bit page's in all 41 colours swept.
-    Embedded,
     /// A document backend writing vectors: PDF, and SVG for what it does not
     /// rasterize.
     Document,
@@ -1050,12 +1044,10 @@ impl LayerRec {
             Target::Pixels => {
                 self.pixels_paint.as_ref().or(self.paint.as_ref())
             }
-            Target::Embedded | Target::Document => self.paint.as_ref(),
+            Target::Document => self.paint.as_ref(),
         };
         let paint = match (own, target) {
-            (Some(paint), Target::Pixels | Target::Embedded) => {
-                Some(composited(paint))
-            }
+            (Some(paint), Target::Pixels) => Some(composited(paint)),
             (Some(paint), Target::Document) => Some(Cow::Borrowed(paint)),
             (None, _) => None,
         };
@@ -1090,7 +1082,7 @@ impl LayerRec {
             Target::Pixels => {
                 self.pixels_backdrop.as_ref().or(self.backdrop.as_ref())
             }
-            Target::Embedded | Target::Document => self.backdrop.as_ref(),
+            Target::Document => self.backdrop.as_ref(),
         };
         if let Some(backdrop) = backdrop {
             rec = rec.backdrop(backdrop);
@@ -1470,10 +1462,7 @@ impl Group {
             }
         }
         match (&self.composite, target) {
-            (
-                Composite::Chain { steps, rec },
-                Target::Pixels | Target::Embedded,
-            ) => {
+            (Composite::Chain { steps, rec }, Target::Pixels) => {
                 let mut paint = rec.paint.clone().unwrap_or_default();
                 paint.set_image_filter(None);
                 // The chain's lengths are in the pixels of the canvas the
@@ -1525,7 +1514,7 @@ impl Group {
                 // A page's pixels run the chain's filters built for them.
                 let pixels = match target {
                     Target::Pixels => Step::for_pixels(steps),
-                    Target::Embedded | Target::Document => None,
+                    Target::Document => None,
                 };
                 let outcome = chain::run(
                     canvas,
@@ -2462,7 +2451,7 @@ impl BlurOp {
             // colour's alpha, the global alpha in it, is the chain's gain,
             // so that the blur is rounded once and not once more where the
             // draw is.
-            (Made::Result(_), Target::Pixels | Target::Embedded) => {
+            (Made::Result(_), Target::Pixels) => {
                 paint.set_alpha_f(1.0);
                 let mut gain = Paint::default();
                 gain.set_alpha_f(self.paint.color.a);

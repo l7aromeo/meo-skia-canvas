@@ -2,7 +2,7 @@
 
 "use strict";
 
-const { assert, describe, test } = require("../runner"),
+const { assert, describe, test, beforeEach } = require("../runner"),
   { Canvas, FontLibrary, ParagraphBuilder } = require("../../lib");
 
 // The families the machine itself holds, captured before any test registers
@@ -2891,6 +2891,252 @@ describe("a quoted generic keyword is a family name", () => {
       registered,
       "paragraph, lower case",
     );
+    FontLibrary.reset();
+  });
+});
+
+describe("textBaseline moves measureText and outlineText as it moves fillText", () => {
+  // SkParagraph places a run the baseline shift sets off its line, in the
+  // text blobs `Paragraph::paint` draws and in the line metrics, and the
+  // outline and the ink box are read from those blobs. Each also added the
+  // shift itself, so at every baseline but `alphabetic` the outline and the
+  // `actualBoundingBox` and `fontBoundingBox` values sat a second shift away:
+  // 96px Oswald's `&` outlined at `top` from 151.1 below the anchor where it
+  // fills from 37.7.
+  //
+  // The sign tests above hold through that, and every test drawing an
+  // outline did so at the default baseline, where the shift is 0.
+  FontLibrary.use("BaselineOswald", [
+    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+  ]);
+  const BASELINES = [
+    "top",
+    "hanging",
+    "middle",
+    "alphabetic",
+    "ideographic",
+    "bottom",
+  ];
+  const TEXT = "Hxg&";
+  const W = 400,
+    H = 600,
+    AT = 300;
+  // Unhinted, so that what fills is the outline as designed: macOS dilates a
+  // hinted glyph's mask, which reached two rows past the outline here.
+  const ctx = (baseline) => {
+    const c = new Canvas(W, H).getContext("2d");
+    c.font = "96px BaselineOswald";
+    c.fontHinting = false;
+    c.textBaseline = baseline;
+    return c;
+  };
+  /** The rows `draw` inks, relative to the anchor's y: first and past-the-last. */
+  const rows = (c, draw) => {
+    c.clearRect(0, 0, W, H);
+    c.fillStyle = "black";
+    draw();
+    const d = c.getImageData(0, 0, W, H).data;
+    let top = -1,
+      bottom = -1;
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++)
+        if (d[(y * W + x) * 4 + 3] > 0) {
+          if (top < 0) top = y;
+          bottom = y + 1;
+          break;
+        }
+    return [top - AT, bottom - AT];
+  };
+
+  test("the outline fills where the text fills, at every baseline", () => {
+    for (const baseline of BASELINES) {
+      const c = ctx(baseline);
+      const drawn = rows(c, () => c.fillText(TEXT, 20, AT));
+      const path = c.outlineText(TEXT);
+      const filled = rows(c, () => {
+        c.save();
+        c.translate(20, AT);
+        c.fill(path);
+        c.restore();
+      });
+      // A glyph's mask and a path filled from its outline antialias apart,
+      // by a row at an edge.
+      assert.ok(
+        Math.abs(filled[0] - drawn[0]) <= 1 &&
+          Math.abs(filled[1] - drawn[1]) <= 1,
+        `${baseline}: the outline fills rows ${filled}, the text ${drawn}`,
+      );
+    }
+  });
+
+  test("the ink box is the outline's, at every baseline", () => {
+    // Both are the glyphs' outlines where the text draws them, so they agree
+    // to the float; the test above holds the outline to the drawn rows.
+    for (const baseline of BASELINES) {
+      const c = ctx(baseline);
+      const m = c.measureText(TEXT),
+        { top, bottom } = c.outlineText(TEXT).bounds;
+      assert.ok(
+        Math.abs(-m.actualBoundingBoxAscent - top) < 1e-3,
+        `${baseline}: ink top ${-m.actualBoundingBoxAscent} against the outline's ${top}`,
+      );
+      assert.ok(
+        Math.abs(m.actualBoundingBoxDescent - bottom) < 1e-3,
+        `${baseline}: ink bottom ${m.actualBoundingBoxDescent} against the outline's ${bottom}`,
+      );
+    }
+  });
+
+  test("each value moves by the alphabetic baseline's offset, as in Chrome", () => {
+    // What a baseline changes is where the line a value is measured from
+    // sits, so each value at baseline b is its value at `alphabetic` moved
+    // by `alphabeticBaseline` at b: up for the ascents and the other
+    // baselines, down for the descents. Chrome 156 holds every one of these
+    // exactly, on 96px Oswald and on 140px and 48px Helvetica -- at `top`
+    // its 96px Oswald `fontBoundingBoxAscent` is 37.72, which is 115 less
+    // 77.28. Where it puts `top`, `middle` and `bottom` is its own question;
+    // these hold wherever they are.
+    const up = [
+      "actualBoundingBoxAscent",
+      "fontBoundingBoxAscent",
+      "hangingBaseline",
+      "ideographicBaseline",
+    ];
+    const down = ["actualBoundingBoxDescent", "fontBoundingBoxDescent"];
+    const alphabetic = ctx("alphabetic").measureText(TEXT);
+    for (const baseline of BASELINES) {
+      const m = ctx(baseline).measureText(TEXT);
+      const by = m.alphabeticBaseline;
+      for (const field of up)
+        assert.ok(
+          Math.abs(m[field] - (alphabetic[field] + by)) < 1e-3,
+          `${baseline}: ${field} ${m[field]} against ${alphabetic[field]} + ${by}`,
+        );
+      for (const field of down)
+        assert.ok(
+          Math.abs(m[field] - (alphabetic[field] - by)) < 1e-3,
+          `${baseline}: ${field} ${m[field]} against ${alphabetic[field]} - ${by}`,
+        );
+    }
+    FontLibrary.reset();
+  });
+});
+
+describe("top, middle and bottom are the em square's", () => {
+  // HTML puts `top`, `middle` and `bottom` at the top, middle and bottom of
+  // the em square. They were the face's ascent, its descent and their middle,
+  // which sit apart from the em square wherever the face's ascent and
+  // descent do not add up to the font size.
+  //
+  // The em square's top is the font size times the face's typographic
+  // ascender over its typographic ascender and descender: what Chrome 156
+  // measures on every face tried, `USE_TYPO_METRICS` set or not. The figures
+  // below are Chrome's for 100px "H". Chrome snaps the top to its 1/64 px
+  // layout unit and this library does not, so the two part by up to 1/128.
+  const fs = require("fs"),
+    os = require("os"),
+    path = require("path");
+  const AMSTELVAR = "tests/assets/fonts/AmstelvarAlpha-VF.ttf";
+  // The same face with its typographic ascender and descender zeroed, which
+  // Chrome divides as the face's ascent and descent divide it.
+  const zeroed = Buffer.from(fs.readFileSync(AMSTELVAR));
+  for (let i = 0, n = zeroed.readUInt16BE(4); i < n; i++) {
+    const entry = 12 + 16 * i;
+    if (zeroed.toString("latin1", entry, entry + 4) !== "OS/2") continue;
+    const table = zeroed.readUInt32BE(entry + 8);
+    zeroed.writeInt16BE(0, table + 68);
+    zeroed.writeInt16BE(0, table + 70);
+  }
+  const zeroedPath = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), "em-square-")),
+    "amstelvar-zero-typo.ttf",
+  );
+  fs.writeFileSync(zeroedPath, zeroed);
+  // Registered before each test rather than once: tests elsewhere in this
+  // file call `FontLibrary.reset()`, which would leave these resolving to
+  // the default face.
+  beforeEach(() => {
+    FontLibrary.use("EmOswald", [
+      "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    ]);
+    // Its `hhea` puts 1900 above and 500 below, its typographic metrics 1500
+    // and 500: 79.17 against 75, which tells the two rules apart.
+    FontLibrary.use("EmAmstelvar", [AMSTELVAR]);
+    FontLibrary.use("EmZeroTypo", [zeroedPath]);
+  });
+
+  // Chrome 156: how far each baseline is above the alphabetic one.
+  const CHROME = {
+    EmOswald: { top: 80.5, middle: 30.5, bottom: -19.5 },
+    EmAmstelvar: { top: 75, middle: 25, bottom: -25 },
+    EmZeroTypo: { top: 79.171875, middle: 29.171875, bottom: -20.828125 },
+  };
+  /** Half Chrome's 1/64 px layout unit: the most its snapping can move one. */
+  const SNAP = 1 / 128;
+  const measure = (family, baseline) => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = `100px ${family}`;
+    ctx.textBaseline = baseline;
+    return ctx.measureText("H");
+  };
+
+  test("each sits where Chrome puts it", () => {
+    for (const [family, at] of Object.entries(CHROME))
+      for (const [baseline, above] of Object.entries(at)) {
+        // `alphabeticBaseline` is the alphabetic baseline's height above the
+        // selected one, so the selected one is that far below it.
+        const measured = -measure(family, baseline).alphabeticBaseline;
+        assert.ok(
+          Math.abs(measured - above) <= SNAP,
+          `${family} ${baseline}: ${measured} above the alphabetic baseline against Chrome's ${above}`,
+        );
+      }
+  });
+
+  test("the text is drawn there", () => {
+    // The ink moves with the baseline: "H" drawn at `top` inks from 75
+    // rows below where it does at `alphabetic` in Amstelvar, its em top.
+    const rowOfInk = (baseline) => {
+      const ctx = new Canvas(200, 400).getContext("2d");
+      ctx.font = "100px EmAmstelvar";
+      ctx.fontHinting = false;
+      ctx.textBaseline = baseline;
+      ctx.fillText("H", 10, 200);
+      const d = ctx.getImageData(0, 0, 200, 400).data;
+      for (let y = 0; y < 400; y++)
+        for (let x = 0; x < 200; x++) if (d[(y * 200 + x) * 4 + 3]) return y;
+      return -1;
+    };
+    const moved = rowOfInk("top") - rowOfInk("alphabetic");
+    assert.ok(
+      Math.abs(moved - 75) <= 1,
+      `the ink moved ${moved} rows, where the em top is 75 above the alphabetic baseline`,
+    );
+  });
+
+  test("emHeightAscent and emHeightDescent span the em square", () => {
+    for (const family of Object.keys(CHROME))
+      for (const baseline of [
+        "top",
+        "hanging",
+        "middle",
+        "alphabetic",
+        "ideographic",
+        "bottom",
+      ]) {
+        const m = measure(family, baseline),
+          top = -measure(family, "top").alphabeticBaseline;
+        // From the selected baseline: the em top is `top` above the
+        // alphabetic baseline, which is `alphabeticBaseline` above this one.
+        assert.ok(
+          Math.abs(m.emHeightAscent - (top + m.alphabeticBaseline)) < 1e-3,
+          `${family} ${baseline}: emHeightAscent ${m.emHeightAscent}`,
+        );
+        assert.ok(
+          Math.abs(m.emHeightAscent + m.emHeightDescent - 100) < 1e-3,
+          `${family} ${baseline}: the em square is ${m.emHeightAscent + m.emHeightDescent} high`,
+        );
+      }
     FontLibrary.reset();
   });
 });

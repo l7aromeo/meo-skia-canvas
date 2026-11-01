@@ -204,12 +204,16 @@ pub(crate) fn put(key: Key, outcome: Outcome) {
 /// Drops every result. Called with the page cache's release, when rendering
 /// has been idle.
 pub(crate) fn release_cached_chains() {
-    let mut cache = CHAINS.lock();
-    cache.entries.clear();
-    cache.bytes = 0;
+    CHAINS.lock().release();
 }
 
 impl ChainCache {
+    /// Drops every result -- see [`release_cached_chains`].
+    fn release(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
+
     fn get(&mut self, key: &Key) -> Option<Outcome> {
         let entry = self.entries.get_mut(key)?;
         entry.used = CHAIN_USES.fetch_add(1, Ordering::Relaxed);
@@ -398,16 +402,23 @@ mod tests {
         assert_eq!(cache.bytes, 0);
     }
 
+    /// The idle release empties a cache: a result filed is found until it,
+    /// and gone after it, its bytes with it. Asked of a cache of the test's
+    /// own, which [`release_cached_chains`] releases the shared one with:
+    /// in the shared one any other thread's release -- the test beside this
+    /// one runs one every ten milliseconds -- can fall between filing a
+    /// result and finding it.
     #[test]
     fn the_idle_release_empties_the_chain_cache() {
-        // The shared cache, which other tests fill as they draw; only that a
-        // result this test filed is gone afterwards is its to assert.
         let one = group();
         let key = key(&one, &n32(), &Matrix::new_identity(), clip());
-        put(key.clone(), Outcome::blank(8));
-        assert!(get(&key).is_some());
-        release_cached_chains();
-        assert!(get(&key).is_none());
+        let mut cache = ChainCache::default();
+        cache.put(key.clone(), Outcome::blank(8));
+        assert!(cache.get(&key).is_some());
+        assert!(cache.bytes > 0);
+        cache.release();
+        assert!(cache.get(&key).is_none());
+        assert_eq!(cache.bytes, 0);
     }
 
     /// How many chains drawing a 300-pixel page into itself `rounds` times

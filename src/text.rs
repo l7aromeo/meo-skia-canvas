@@ -184,18 +184,17 @@ pub struct TextMetrics {
     /// cross-platform guarantee as
     /// [`font_bounding_box_ascent`](Self::font_bounding_box_ascent).
     pub font_bounding_box_descent: f32,
-    /// Distance above the baseline to the top of the em square.
+    /// Distance from the selected baseline up to the top of the em square.
     ///
-    /// The same number the JavaScript binding has always reported, and the
-    /// same one `font_bounding_box_ascent` carries: Skia gives one ascent
-    /// per face, and the Canvas specification's distinction between the em
-    /// square and the font's own bounds needs metrics Skia does not expose
-    /// separately. Reported rather than omitted because a caller porting
-    /// from the browser reads it, and reporting the ascent is what every
-    /// engine does here in practice.
+    /// The em square is the font size high, divided at the alphabetic
+    /// baseline as the face's typographic ascender and descender divide it
+    /// -- or its ascent and descent, where it states no typographic span --
+    /// and the `Top`, `Middle` and `Bottom` baselines are its top, middle and
+    /// bottom. With [`em_height_descent`](Self::em_height_descent) it sums to
+    /// the font size at every baseline.
     pub em_height_ascent: f32,
-    /// Distance below the baseline to the bottom of the em square. As
-    /// [`em_height_ascent`](Self::em_height_ascent).
+    /// Distance from the selected baseline down to the bottom of the em
+    /// square. As [`em_height_ascent`](Self::em_height_ascent).
     pub em_height_descent: f32,
     /// Offset from the selected baseline to the alphabetic one.
     pub alphabetic_baseline: f32,
