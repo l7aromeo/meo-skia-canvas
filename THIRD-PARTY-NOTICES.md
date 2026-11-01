@@ -5,7 +5,7 @@ require their copyright notices to travel with binary distributions, so those no
 here rather than left in the source trees they came from.
 
 Everything below is under a permissive licence, and no component is copyleft. Audited 2026-11-01
-with `just licenses` over the **243** crate versions that link into a released binary — the union
+with `just licenses` over the **244** crate versions that link into a released binary — the union
 across every target in `lib/targets.json`, normal dependencies only. The terms found were 0BSD,
 Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause, BSD-3-Clause, ISC, MIT, Unicode-3.0,
 Unlicense and Zlib.
