@@ -3231,3 +3231,82 @@ describe("an instance's em square follows its MVAR", () => {
     FontLibrary.reset();
   });
 });
+
+describe("the font box is the first available font's own", () => {
+  // `fontBoundingBoxAscent` and `fontBoundingBoxDescent` are the ascent and
+  // descent of the first available font, as Chrome 156 reports them: `hhea`'s,
+  // or the typographic ones where the face sets `USE_TYPO_METRICS`, with no
+  // line gap and whatever face a fallback draws in. Chrome rounds them to
+  // whole pixels, which this library does not (docs/browser-differences.md),
+  // so each is held to Chrome's figure within half a pixel, and `hanging`,
+  // four fifths of the ascent, within four fifths of that.
+  const fs = require("fs"),
+    os = require("os"),
+    path = require("path");
+  const OSWALD = "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf";
+  const AMSTELVAR = "tests/assets/fonts/AmstelvarAlpha-VF.ttf";
+  /** Amstelvar given a line gap of 200 of 2000 in `hhea`, and optionally
+   * `USE_TYPO_METRICS`, whose typographic metrics carry a gap of 400. */
+  const gapped = (useTypo) => {
+    const font = Buffer.from(fs.readFileSync(AMSTELVAR));
+    for (let i = 0, n = font.readUInt16BE(4); i < n; i++) {
+      const entry = 12 + 16 * i,
+        tag = font.toString("latin1", entry, entry + 4),
+        at = font.readUInt32BE(entry + 8);
+      // `hhea`'s lineGap, and `OS/2`'s fsSelection bit 7.
+      if (tag === "hhea") font.writeInt16BE(200, at + 8);
+      if (tag === "OS/2" && useTypo) font[at + 63] |= 0x80;
+    }
+    const file = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), "font-box-")),
+      `amstelvar-gap${useTypo ? "-typo" : ""}.ttf`,
+    );
+    fs.writeFileSync(file, font);
+    return file;
+  };
+  const GAP = gapped(false),
+    GAP_TYPO = gapped(true);
+  beforeEach(() => {
+    FontLibrary.use("BoxGap", [GAP]);
+    FontLibrary.use("BoxGapTypo", [GAP_TYPO]);
+    FontLibrary.use("BoxOswald", [OSWALD]);
+  });
+
+  // Chrome 156 at 100px: the box, and the hanging and ideographic baselines.
+  const CHROME = {
+    BoxGap: { ascent: 95, descent: 25, hanging: 76, ideographic: -25 },
+    BoxGapTypo: { ascent: 75, descent: 25, hanging: 60, ideographic: -25 },
+    BoxOswald: { ascent: 119, descent: 29, hanging: 95.2, ideographic: -29 },
+  };
+  /** Half a pixel: the most Chrome's rounding to whole pixels moves one. */
+  const ROUNDING = 0.5;
+  const measure = (font, text = "H") => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = font;
+    return ctx.measureText(text);
+  };
+
+  test("it is the face's ascent and descent, without the line gap", () => {
+    for (const [family, at] of Object.entries(CHROME)) {
+      const m = measure(`100px ${family}`);
+      for (const [key, got, limit] of [
+        ["ascent", m.fontBoundingBoxAscent, ROUNDING],
+        ["descent", m.fontBoundingBoxDescent, ROUNDING],
+        ["hanging", m.hangingBaseline, 0.8 * ROUNDING],
+        ["ideographic", m.ideographicBaseline, ROUNDING],
+      ])
+        assert.ok(
+          Math.abs(got - at[key]) <= limit,
+          `${family} ${key}: ${got} against Chrome's ${at[key]}`,
+        );
+    }
+  });
+
+  test("a fallback face does not widen it", () => {
+    const alone = measure("100px BoxOswald"),
+      fallback = measure("100px BoxOswald", "H\u6f22");
+    assert.equal(fallback.fontBoundingBoxAscent, alone.fontBoundingBoxAscent);
+    assert.equal(fallback.fontBoundingBoxDescent, alone.fontBoundingBoxDescent);
+    FontLibrary.reset();
+  });
+});

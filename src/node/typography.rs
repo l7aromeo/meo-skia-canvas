@@ -2379,22 +2379,15 @@ impl<'a> Typesetter<'a> {
             false => 0.0,
         };
 
-        // Font extents describe what the face can reach for any string, so
-        // they come from the first line's metrics rather than these glyphs.
-        // They are relative to the selected baseline as they stand: the
-        // style's baseline shift is in SkParagraph's line metrics and in
-        // `TextStyle::font_metrics`, which add it to the ascent and the
-        // descent. An empty run has no line metrics and falls back to the
-        // style's own. Skia's ascent is negative above the baseline.
-        let (font_ascent, font_descent) = paragraph
-            .get_line_metrics_at(0)
-            .map(|line| (line.ascent as f32, line.descent as f32))
-            .unwrap_or_else(|| {
-                let FontMetrics {
-                    ascent, descent, ..
-                } = self.char_style().font_metrics();
-                (-ascent, descent)
-            });
+        // The font box is the first available font's ascent and descent,
+        // whatever the glyphs and whatever face a fallback draws them in, as
+        // the Canvas standard defines it; moved to the selected baseline by
+        // the style's baseline shift.
+        let (font_ascent, font_descent) = {
+            let (ascent, descent) = face_extent(self.char_style());
+            let shift = self.char_style().baseline_shift();
+            (ascent - shift, descent + shift)
+        };
 
         // UPSTREAM: FreeType 2.14.3 -- unfiled -- not worked around
         // Re-check: bun run test:suite --test-name-pattern fraction
@@ -3011,13 +3004,8 @@ impl Baseline {
     /// four fifths of its ascent and `ideographic` at its descent, as Chrome
     /// places them.
     pub fn get_offset(&self, style: &TextStyle) -> f32 {
-        let FontMetrics {
-            mut ascent,
-            mut descent,
-            ..
-        } = style.font_metrics();
-        ascent -= style.baseline_shift(); // offsets are defined relative to the alphabetic baseline, so
-        descent -= style.baseline_shift(); // compensate for any other textBaseline setting
+        let (above, below) = face_extent(style);
+        let (ascent, descent) = (-above, below);
 
         match self {
             Baseline::Top => em_top(style, ascent, descent),
@@ -3032,6 +3020,34 @@ impl Baseline {
             Baseline::Ideographic => -descent,
         }
     }
+}
+
+/// How far `style`'s first available font reaches above and below the
+/// alphabetic baseline at its size, both positive: the face's own ascent and
+/// descent, as Skia reads them -- `hhea`'s, or the typographic ones where the
+/// face sets `USE_TYPO_METRICS` -- without the line gap.
+///
+/// Not `TextStyle::font_metrics`, which spreads half the line gap above the
+/// ascent and half below the descent for SkParagraph's line boxes, and adds
+/// the style's baseline shift: Chrome's font box has neither, so 100px Arial,
+/// whose `hhea` gap is 67 of 2048, reaches 90.53 and 21.19 rather than 92.16
+/// and 22.83.
+fn face_extent(style: &TextStyle) -> (f32, f32) {
+    let mut font = match style.typeface() {
+        Some(face) => Font::from_typeface(face, style.font_size()),
+        None => Font::default()
+            .with_size(style.font_size())
+            .unwrap_or_default(),
+    };
+    font.set_subpixel(style.subpixel());
+    font.set_hinting(style.font_hinting());
+    let (
+        _,
+        FontMetrics {
+            ascent, descent, ..
+        },
+    ) = font.metrics();
+    (-ascent, descent)
 }
 
 /// How far the em square's top is above the alphabetic baseline, for

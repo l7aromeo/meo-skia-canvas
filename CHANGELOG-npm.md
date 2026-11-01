@@ -753,6 +753,21 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **`fontBoundingBoxAscent` and `fontBoundingBoxDescent` are the first
+  available font's own.** They were SkParagraph's line box, which spreads
+  half the face's line gap above the ascent and half below the descent, and
+  takes in every face a fallback draws in: 100px Arial reported 92.16 and
+  22.83 where its `hhea` gives 90.53 and 21.19 and Chrome 91 and 21, a face
+  with `USE_TYPO_METRICS` and a typographic line gap of 400 of 2000 reported
+  85 and 35 against Chrome's 75 and 25, and `"H漢"` in Arial reported 106
+  and 34, the fallback face's. They are now the first available font's
+  ascent and descent -- `hhea`'s, or the typographic ones under
+  `USE_TYPO_METRICS` -- with no line gap and whatever face draws the glyphs,
+  as Chrome reports them less its rounding to whole pixels.
+  `hangingBaseline` and `ideographicBaseline`, four fifths of that ascent and
+  that descent, move with them, as does the em square of a face that states
+  no typographic span.
+
 - **On macOS, a font registered after another was let go reads its own
   metrics.** CoreText remembers each font made from data by the address and
   length of its bytes, and keeps that after the bytes are freed, so a font
