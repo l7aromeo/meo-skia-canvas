@@ -216,6 +216,11 @@ pub(crate) fn run(
     let region = region(canvas, steps, content, &layer, &rest)?;
     #[cfg(test)]
     RUNS.with(|runs| runs.set(runs.get() + 1));
+    #[cfg(test)]
+    LARGEST_REGION.with(|largest| {
+        let area = i64::from(region.width()) * i64::from(region.height());
+        largest.set(largest.get().max(area));
+    });
     let on_gpu = is_on_gpu(canvas);
     let (region, drawn) = placed(canvas, region, rest.is_identity(), on_gpu);
     // The region alone where Skia refuses a layer from the device's origin,
@@ -319,6 +324,10 @@ thread_local! {
     /// refuses one too large, so that a test can reach the region-sized
     /// fallback on a page small enough to compare against.
     pub(crate) static REFUSE_PLACED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// The most pixels a chain [`run`] on this thread has worked on, which
+    /// the tests of a chain's layer size count by.
+    pub(crate) static LARGEST_REGION: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
 }
 
 /// `base` as `rest * layer`: `layer` the scale from canvas pixels to the
@@ -1261,6 +1270,380 @@ mod tests {
                 "{off} pixels off the page at {at:?} on {size:?}"
             );
             assert!(page.iter().any(|a| *a > 0), "the blur drew nothing");
+        }
+    }
+
+    /// The pages a group's chain is held on: every float space that keeps a
+    /// recording for pixels, and an sRGB float page and two eight-bit pages
+    /// beside them, which record a draw as one picture.
+    const CHAIN_PAGES: [(PixelDepth, PixelColorSpace); 7] = [
+        (PixelDepth::F16, PixelColorSpace::DisplayP3),
+        (PixelDepth::F32, PixelColorSpace::DisplayP3),
+        (PixelDepth::F32, PixelColorSpace::Rec2020),
+        (PixelDepth::F32, PixelColorSpace::SrgbLinear),
+        (PixelDepth::F32, PixelColorSpace::Srgb),
+        (PixelDepth::Uint8, PixelColorSpace::DisplayP3),
+        (PixelDepth::Uint8, PixelColorSpace::Srgb),
+    ];
+
+    /// The side of the pages a chain is held on.
+    const CHAIN_SIDE: (f32, f32) = (160.0, 120.0);
+
+    const OSWALD: &str =
+        "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf";
+
+    /// A filter a draw's chain runs, set on the context.
+    fn chain_filter(ctx: &mut Context2D, which: usize) {
+        let colour = RgbaLinear::new_premultiplied(0.12, 0.2, 0.28, 0.4);
+        match which {
+            0 => ctx.set_image_filter(Some(
+                &ImageFilter::drop_shadow(
+                    5.0, 4.0, 3.0, 3.0, colour, None, None,
+                )
+                .expect("a shadow"),
+            )),
+            1 => ctx.set_image_filter(Some(
+                &ImageFilter::blur(2.5, 2.5, None, None, None).expect("a blur"),
+            )),
+            _ => {
+                ctx.set_filter_css(
+                    "drop-shadow(4px 3px 2px rgb(0 40 200 / 0.6)) blur(1px)",
+                )
+                .expect("a CSS filter");
+            }
+        }
+    }
+
+    /// What is drawn through the chain: a fill off the pixel grid, a wide
+    /// stroke, text whose ink passes its box, a fill a clip cuts, a run of
+    /// draws in a `saveLayer`, and a canvas drawn in.
+    fn chain_draws(ctx: &mut Context2D, which: usize) {
+        ctx.set_fill_style_css("rgb(200 120 40 / 0.9)")
+            .expect("a colour");
+        ctx.set_stroke_style_css("rgb(20 160 90 / 0.8)")
+            .expect("a colour");
+        match which {
+            0 => ctx.fill_rect(20.3, 17.6, 15.0, 12.0),
+            1 => {
+                ctx.set_line_width(9.0);
+                ctx.stroke_rect(30.5, 30.5, 40.0, 30.0);
+            }
+            2 => {
+                FontLibrary::new()
+                    .use_paths(Some("ChainOswald"), [OSWALD])
+                    .expect("Oswald");
+                assert!(ctx.set_font_css("italic 40px ChainOswald"));
+                ctx.fill_text("Wfg", 20.0, 70.0, None);
+            }
+            3 => {
+                ctx.begin_path();
+                ctx.rect(25.0, 20.0, 50.0, 40.0);
+                ctx.clip(FillRule::NonZero);
+                ctx.begin_path();
+                ctx.move_to(10.0, 10.0);
+                ctx.line_to(110.0, 35.0);
+                ctx.line_to(40.0, 90.0);
+                ctx.close_path();
+                ctx.fill(FillRule::NonZero);
+            }
+            4 => {
+                ctx.save_layer();
+                ctx.fill_rect(15.0, 15.0, 20.0, 20.0);
+                ctx.set_line_width(4.0);
+                ctx.stroke_rect(60.0, 50.0, 30.0, 25.0);
+                ctx.restore();
+            }
+            _ => {
+                let mut source = Canvas::new(40.0, 30.0);
+                let inner = source.context();
+                inner
+                    .set_fill_style_css("rgb(40 90 220 / 0.85)")
+                    .expect("a colour");
+                inner.fill_rect(2.0, 3.0, 30.0, 20.0);
+                ctx.draw_canvas(&mut source, 50.5, 40.25);
+            }
+        }
+    }
+
+    /// The pixels of `page` with `draw` drawn through `filter`, read as F32
+    /// premultiplied in the page's space, with the chain's layer bounded by
+    /// what its group reaches, or by the clip alone where `unbounded`.
+    fn chained(
+        (depth, space): (PixelDepth, PixelColorSpace),
+        gpu: bool,
+        filter: usize,
+        draw: usize,
+        unbounded: bool,
+    ) -> Vec<u8> {
+        crate::context::layer::UNBOUNDED_CHAIN.with(|flag| flag.set(unbounded));
+        let (width, height) = CHAIN_SIDE;
+        let mut canvas = Canvas::with_options(
+            width,
+            height,
+            CanvasOptions {
+                color_type: depth,
+                color_space: space,
+                gpu,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas");
+        chain_filter(canvas.context(), filter);
+        chain_draws(canvas.context(), draw);
+        let pixels = canvas
+            .context()
+            .get_image_data_as(
+                0.0,
+                0.0,
+                width,
+                height,
+                PixelExportOptions {
+                    depth: PixelDepth::F32,
+                    color_space: space,
+                    premultiplied: true,
+                    ..PixelExportOptions::default()
+                },
+            )
+            .expect("pixels")
+            .pixels()
+            .to_vec();
+        crate::context::layer::UNBOUNDED_CHAIN.with(|flag| flag.set(false));
+        pixels
+    }
+
+    /// The alpha of `canvas` at `(x, y)`, premultiplied in F32.
+    fn alpha_at(
+        canvas: &mut Canvas,
+        space: PixelColorSpace,
+        x: f32,
+        y: f32,
+    ) -> f32 {
+        let data = canvas
+            .context()
+            .get_image_data_as(
+                x,
+                y,
+                1.0,
+                1.0,
+                PixelExportOptions {
+                    depth: PixelDepth::F32,
+                    color_space: space,
+                    premultiplied: true,
+                    ..PixelExportOptions::default()
+                },
+            )
+            .expect("a pixel");
+        f32::from_le_bytes(data.pixels()[12..16].try_into().expect("an alpha"))
+    }
+
+    /// The alphas a draw through a chain lands where they can be worked out:
+    /// a fill of `rgb(200 120 40 / 0.9)` over 20.3 to 35.3 by 17.6 to 29.6,
+    /// through an unblurred CSS shadow at 0.6 moved by (4, 3), and through a
+    /// CanvasKit `source-in` blend at 0.8. Each is the fill's own alpha
+    /// there, as the page draws the fill through no filter, over the
+    /// shadow's: inside the fill, on row 29 it covers in part -- 0.6 of it on
+    /// the CPU, and what Ganesh's coverage makes of that on the GPU -- where
+    /// the shadow alone lies, and where the two overlap. Held to the clip
+    /// alone, the chain moved the edge's 0.54 to 0.5365 on an F32 sRGB page.
+    #[test]
+    fn a_chain_lands_the_alphas_its_draw_and_filter_make() {
+        let shadow = 0.6 * 0.9;
+        let over = |top: f32, beneath: f32| top + beneath * (1.0 - top);
+        // (x, y, the shadow beneath the fill there.)
+        let points = [
+            (21.0, 29.0, 0.0),
+            (22.0, 20.0, 0.0),
+            (36.0, 25.0, shadow),
+            (25.0, 22.0, shadow),
+        ];
+        let mut missed = vec![];
+        for (depth, space) in CHAIN_PAGES {
+            // An eight-bit page stores a level, and F16 about a thousandth.
+            let tolerance = match depth {
+                PixelDepth::Uint8 => 1.0 / 255.0,
+                PixelDepth::F16 => 1e-3,
+                _ => 1e-5,
+            };
+            for gpu in [false, true] {
+                let page = |canvas: &mut Canvas| {
+                    let ctx = canvas.context();
+                    ctx.set_fill_style_css("rgb(200 120 40 / 0.9)")
+                        .expect("a colour");
+                    ctx.fill_rect(20.3, 17.6, 15.0, 12.0);
+                };
+                let (width, height) = CHAIN_SIDE;
+                let options = CanvasOptions {
+                    color_type: depth,
+                    color_space: space,
+                    gpu,
+                    ..CanvasOptions::default()
+                };
+                let mut plain =
+                    Canvas::with_options(width, height, options.clone())
+                        .expect("a canvas");
+                page(&mut plain);
+                for blend in [false, true] {
+                    let mut canvas =
+                        Canvas::with_options(width, height, options.clone())
+                            .expect("a canvas");
+                    let ctx = canvas.context();
+                    match blend {
+                        false => {
+                            ctx.set_filter_css(
+                                "drop-shadow(4px 3px 0px rgb(0 40 200 / 0.6))",
+                            )
+                            .expect("a CSS filter");
+                        }
+                        true => ctx.set_image_filter(Some(
+                            &ColorFilter::blend(
+                                RgbaLinear::new_premultiplied(
+                                    0.08, 0.16, 0.4, 0.8,
+                                ),
+                                BlendMode::SourceIn,
+                            )
+                            .and_then(|cf| {
+                                ImageFilter::from_color_filter(cf, None, None)
+                            })
+                            .expect("a filter"),
+                        )),
+                    }
+                    page(&mut canvas);
+                    for (x, y, beneath) in points {
+                        let drawn = alpha_at(&mut plain, space, x, y);
+                        let want = match blend {
+                            true => 0.8 * drawn,
+                            false => over(drawn, beneath),
+                        };
+                        let got = alpha_at(&mut canvas, space, x, y);
+                        if (got - want).abs() > tolerance {
+                            missed.push(format!(
+                                "{depth:?} {space:?} gpu {gpu} blend {blend} at \
+                                 ({x}, {y}): {got} for {want}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            missed.is_empty(),
+            "{} missed:\n{}",
+            missed.len(),
+            missed.join("\n")
+        );
+    }
+
+    /// Where `alphas` of a `CHAIN_SIDE` page are not zero, as the first and
+    /// last column and row.
+    fn inked(alphas: &[f32]) -> Option<(usize, usize, usize, usize)> {
+        let width = CHAIN_SIDE.0 as usize;
+        alphas.iter().enumerate().filter(|(_, a)| **a != 0.0).fold(
+            None,
+            |found, (i, _)| {
+                let (x, y) = (i % width, i / width);
+                Some(match found {
+                    None => (x, x, y, y),
+                    Some((l, r, t, b)) => {
+                        (l.min(x), r.max(x), t.min(y), b.max(y))
+                    }
+                })
+            },
+        )
+    }
+
+    /// A level of eight bits, and the float error a level read back from
+    /// one carries.
+    const LEVEL: f32 = 1.0 / 255.0 + 1e-6;
+
+    /// A group's chain bounded by what its entries reach takes in all that
+    /// it filters and all that it shows, on every page and both engines,
+    /// through a CanvasKit drop shadow and blur and a CSS chain, for every
+    /// kind of draw a group holds -- a stroke's width and a glyph's overhang
+    /// included: it inks the pixels a chain the clip alone bounds inks, and
+    /// lands within a level of it. Not to the bit: Skia's own blur makes
+    /// values up to 0.9 of a level apart on a smaller layer, each as far
+    /// from the exact Gaussian -- 0.48 of a level, through a blur of 2.5 on
+    /// an F32 sRGB page -- and the clip-bounded chain moves an anti-aliased
+    /// edge -- see `a_chain_lands_the_alphas_its_draw_and_filter_make`.
+    #[test]
+    fn a_chain_bounded_by_its_group_s_reach_takes_in_what_it_filters() {
+        let alphas = |pixels: Vec<u8>| -> Vec<f32> {
+            pixels
+                .chunks(16)
+                .map(|p| {
+                    f32::from_le_bytes(p[12..16].try_into().expect("an alpha"))
+                })
+                .collect()
+        };
+        let mut missed = vec![];
+        for page in CHAIN_PAGES {
+            for gpu in [false, true] {
+                for filter in 0..3 {
+                    for draw in 0..6 {
+                        let bounded =
+                            alphas(chained(page, gpu, filter, draw, false));
+                        let clip_bounded =
+                            alphas(chained(page, gpu, filter, draw, true));
+                        let apart = bounded
+                            .iter()
+                            .zip(&clip_bounded)
+                            .map(|(a, b)| (a - b).abs())
+                            .fold(0.0, f32::max);
+                        if inked(&bounded) != inked(&clip_bounded)
+                            || apart > LEVEL
+                        {
+                            missed.push(format!(
+                                "{page:?} gpu {gpu} filter {filter} draw {draw}: inked \
+                                 {:?} for {:?}, {apart} apart",
+                                inked(&bounded),
+                                inked(&clip_bounded)
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            missed.is_empty(),
+            "{} missed:\n{}",
+            missed.len(),
+            missed.join("\n")
+        );
+    }
+
+    /// A shadowed rect's chain on a page that keeps a recording for pixels
+    /// works on as many pixels as on the sRGB page of its depth, which keeps
+    /// one, and not on the whole page: the draw is filed as a pair, which a
+    /// bound taken from a single picture alone did not know, and 50 of them
+    /// took 1.75 s on F16 Display P3 against 26 ms on F16 sRGB.
+    #[test]
+    fn a_shadowed_draw_s_chain_on_a_dual_page_works_on_the_draw_alone() {
+        let worked_on = |page: (PixelDepth, PixelColorSpace)| {
+            super::LARGEST_REGION.with(|largest| largest.set(0));
+            chained(page, false, 0, 0, false);
+            super::LARGEST_REGION.with(std::cell::Cell::get)
+        };
+        for (dual, single) in [
+            (
+                (PixelDepth::F16, PixelColorSpace::DisplayP3),
+                (PixelDepth::F16, PixelColorSpace::Srgb),
+            ),
+            (
+                (PixelDepth::F32, PixelColorSpace::Rec2020),
+                (PixelDepth::F32, PixelColorSpace::Srgb),
+            ),
+            (
+                (PixelDepth::F32, PixelColorSpace::SrgbLinear),
+                (PixelDepth::F32, PixelColorSpace::Srgb),
+            ),
+        ] {
+            let (dual_pixels, single_pixels) =
+                (worked_on(dual), worked_on(single));
+            assert!(single_pixels > 0, "{single:?}: no chain ran");
+            assert_eq!(
+                dual_pixels, single_pixels,
+                "{dual:?} against {single:?}"
+            );
         }
     }
 }
