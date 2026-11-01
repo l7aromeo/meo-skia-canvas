@@ -424,7 +424,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     ] {
         let file = out.join(format!("report.{extension}"));
         let options = EncodeOptions {
-            quality: quality.unwrap_or(EncodeOptions::default().quality),
+            quality,
             ..EncodeOptions::default()
         };
         canvas.to_file(&file, &options)?;

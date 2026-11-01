@@ -11326,7 +11326,7 @@ fn an_export_option_the_binding_refuses_is_refused_here_too() {
     for quality in [1.5, -0.1, f32::NAN] {
         assert_eq!(
             refused(EncodeOptions {
-                quality,
+                quality: Some(quality),
                 ..EncodeOptions::default()
             }),
             "quality",
@@ -11348,11 +11348,11 @@ fn an_export_option_the_binding_refuses_is_refused_here_too() {
     // refuse what they are aimed at rather than a range around it.
     for options in [
         EncodeOptions {
-            quality: 0.0,
+            quality: Some(0.0),
             ..EncodeOptions::default()
         },
         EncodeOptions {
-            quality: 1.0,
+            quality: Some(1.0),
             ..EncodeOptions::default()
         },
         EncodeOptions {
@@ -11871,7 +11871,7 @@ fn an_avif_is_smaller_than_the_lossless_formats_and_answers_to_quality() {
             .to_buffer(
                 ImageFormat::Avif,
                 &EncodeOptions {
-                    quality,
+                    quality: Some(quality),
                     ..EncodeOptions::default()
                 },
             )
@@ -12591,7 +12591,7 @@ fn an_animated_webp_keeps_alpha_lossy_or_lossless() {
             .to_buffer(
                 ImageFormat::Webp,
                 &EncodeOptions {
-                    quality,
+                    quality: Some(quality),
                     ..EncodeOptions::default()
                 },
             )
@@ -12833,7 +12833,7 @@ fn an_animated_webp_sends_only_what_moved() {
                 // Lossless, so the decoded frames can be compared exactly:
                 // any difference is this encoder's arithmetic rather than
                 // VP8's.
-                quality: 1.0,
+                quality: Some(1.0),
                 ..EncodeOptions::default()
             },
         )

@@ -755,6 +755,8 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 - A CanvasKit filter holding a colour lands as a fill of that colour on every float canvas, in every blend mode ([#418](https://github.com/l7aromeo/meo-skia-canvas/pull/418)).
 
+- **A PDF holds the pixels it embeds losslessly unless a `quality` below 1 asks for JPEG, which is then full-chroma unless `downsample` is set.** ([#444](https://github.com/l7aromeo/meo-skia-canvas/issues/444)) Flat graphics embedded this way grow by up to about a fifth, photographs inside an embedded run by 5 to 12 times.
+
 - **`fontBoundingBoxAscent` and `fontBoundingBoxDescent` are the first
   available font's own.** They were SkParagraph's line box, which spreads
   half the face's line gap above the ascent and half below the descent, and
