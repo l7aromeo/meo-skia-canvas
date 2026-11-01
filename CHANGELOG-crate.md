@@ -17,11 +17,48 @@ independently of the npm package.
 > tarball carries them: `CHANGELOG-npm.md` is not in `Cargo.toml`'s
 > `include` list and is not there to be pointed at.
 
-## 📦 ⟩ [v0.16.4] (crate) ⟩ October 19, 2026
+## 📦 ⟩ [v0.17.0] (crate) ⟩ Unreleased
 
-**A patch fixing a Vulkan GPU that went unused on a Vulkan 1.4 loader and two
-CSS colour spellings that resolved to the wrong colour, and letting a Rust
-window be changed after it opens.** No signature moves and nothing is removed.
+**A breaking release. Twenty-eight changes can break working code, each under
+Breaking with what to change.**
+
+Signatures and types change: `FontSlant::Oblique` and `TextSlant::Oblique` carry
+an `ObliqueAngle`; a family list is `Vec<FontFamily>`, so a quoted generic
+keyword is a family name, and the details `family_details` returns are
+`FontFamilyDetails`; `TextStyle::font_variations` is a `FontVariationSettings`;
+`UiEvent::Input` carries a `TextInputType`; and `Error` is `#[non_exhaustive]`.
+Values that were taken are refused: a text contrast or gamma outside Skia's
+range, from `Canvas::with_options`; a `ColorFilter::lighting` coefficient that
+is not finite; a blank string in `set_filter_css`, which cleared the filter; a
+number ending in a point; and colour, font, filter and spacing strings Chrome
+153 refuses, a space before `(`, legacy commas CSS Color 4 does not allow and
+`hwba()`, `hsv()` and hex without `#` among them. Values read back differently:
+`Context2D::font()` as CSSOM serializes a font, `filter()` as the chain was
+written, `Path2D::to_svg` as the shortest numbers and SVG arcs, `fill_style()`
+and `stroke_style()` as the colour that paints, text widths, line metrics and
+rects, which are no longer rounded to hundredths, and `font_hinting()`, which is
+`true` until it is set. And some values mean something else: an `RgbaLinear` is
+linear-light sRGB on every canvas, `color(rec2020 ...)` decodes by a 2.4 gamma,
+`has_font` and `family_details` match a family name in any case, `sans-serif` is
+the face Chrome draws it in, `set_word_spacing` is added after every word
+separator, and a `TextStyle`'s text shadows paint the first listed on top. On
+Linux the crate no longer sets `FONTCONFIG_PATH`.
+
+Wrong pixels are fixed: a read after an export drew the cached page onto the
+surface again; a read or export inside a `save_layer` ended the layer; on the
+CPU engine a translucent layer composited up to 1.5 levels off; on the GPU
+engine a translucent pixel read back up to a level low; on the CPU engine a path
+a clip cut drew differently far from the cut; and on Metal a GPU recovery could
+hand back blank or stale pixels as success, which is now drawn again and
+otherwise an `Error::Render`. Text is drawn as Chrome draws it: with Chrome's
+contrast and gamma, `set_font_hinting` taking effect, decorations where the font
+puts them and beneath the glyphs, a family with no italic or bold face slanted
+or emboldened, `FontSlant::Oblique` as CSS Fonts 4 matches it, and a variable
+font at the weight asked and at the optical size of its font size.
+`Image::from_url` and `ImageData::from_url` load over `http` and `https` behind
+an opt-in `fetch` feature, `set_font_kerning`, `set_text_rendering`,
+`color-mix()` and CSS Color 4's system colours are added, and the CSS strings
+read the math functions and every length unit.
 
 ### Breaking
 
@@ -58,7 +95,8 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `has_font("STRASSE")` finds a family registered as `"Straße"`, and
   `FontFamilyDetails::family` is the family as it was registered or as the
   system lists it, not the name it was asked for. A name nothing registered
-  or listed is still asked of the platform as it is.
+  or listed is still asked of the platform as it is. Drawing a registered
+  family in another case is under Fixed.
 
 - **`Canvas::with_options` refuses a text contrast or gamma outside Skia's
   range.** `CanvasOptions::text_contrast` and `text_gamma` were handed to
@@ -78,7 +116,8 @@ window be changed after it opens.** No signature moves and nothing is removed.
 
   Migrate: where the old `false` was taken to mean unhinted text, read it as
   hinted, which is what was drawn; call `set_font_hinting(false)` to have
-  the outlines as designed.
+  the outlines as designed. That the setting now takes effect is under
+  Fixed.
 
 - **An `RgbaLinear` is linear-light sRGB on every canvas.** It meant
   linear light in the canvas's own primaries for a fill, a stroke and a
@@ -135,7 +174,8 @@ window be changed after it opens.** No signature moves and nothing is removed.
   these painted here and is refused by Chrome 153: numbers and percentages
   mixed, `rgb(255, 0%, 0)`; separators mixed, `rgb(255,0 0)`; `hsl()` with
   bare numbers, `hsl(120, 100, 50)`; `none` in a channel,
-  `rgb(none, 0, 0)`; and commas in a function with no legacy syntax,
+  `rgb(none, 0, 0)`, or as the alpha, `rgb(255, 0, 0, none)`, which
+  painted transparent; and commas in a function with no legacy syntax,
   `hwb(120, 0%, 0%)`, `lab(50, 40, 30)`, `oklch(0.6, 0.2, 30)` and
   `color(srgb 1, 0, 0)`. Each `set_*_css` setter now returns its colour
   error for them and leaves the style as it was, and `RgbaLinear::from_css`
@@ -158,6 +198,158 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `hsv(h s v)` with `s` and `v` out of 100 is
   `hwb(h calc((100 - s) * v / 100) calc(100 - v))`, and `hwba()` is
   `hwb()`.
+
+- **`FontSlant::Oblique` and `TextSlant::Oblique` carry their angle, an
+  `ObliqueAngle`.** A `Font` and a paragraph `TextStyle` could ask for
+  oblique only at 14deg, so `Font::from_css("oblique 10deg 16px X")` set
+  with `set_font` drew at 14deg where `set_font_css` drew at 10, and read
+  back as `oblique 16px "X"`. The variant now holds the angle: from -90deg
+  to 90deg, `ObliqueAngle::new` returning `Error::InvalidObliqueAngle`
+  outside it, and `ObliqueAngle::DEFAULT` the 14deg `oblique` means alone.
+  A font or a paragraph range draws at its angle, 0deg upright, and
+  `font()` reads it back. In your code, match `FontSlant::Oblique(_)` and
+  `TextSlant::Oblique(_)` where you matched the bare variant, and write
+  `FontSlant::OBLIQUE` or `TextSlant::OBLIQUE` where you constructed it.
+
+- **`Font::families`, `TextStyle::font_families` and
+  `StrutStyle::font_families` are `Vec<FontFamily>`, so a quoted generic
+  keyword is a family name.** A family list was strings, so `"serif"` in
+  quotes -- a family named serif, by CSS Fonts 4, which says a generic
+  keyword "must not be quoted" -- was the generic `serif` once parsed, and
+  read back unquoted. `FontFamily` is `Named(String)` or
+  `Generic(GenericFamily)`, the thirteen CSS generics. The shorthand keeps
+  the quoting: `16px "serif"` reads back as itself, and `16px serif` as the
+  generic. It draws as itself too: a quoted keyword reaches a family by that
+  name, registered or installed, and with none the list moves on, where
+  fontconfig had answered `serif`, `sans-serif` and `monospace` with the
+  generic's faces. A string converts as CSS reads an unquoted name, a generic
+  keyword in any case becoming the generic, so `Font::new("serif", 16.0)`
+  is unchanged; `FontFamily::Named("serif".into())` names the family. In your code,
+  write `vec!["Helvetica".into(), "serif".into()]` where you wrote
+  `vec!["Helvetica".to_string(), "serif".to_string()]`, and compare against
+  `FontFamily` values rather than strings.
+
+- **`FontFamily`, the details `FontLibrary::family_details` returns, is
+  `FontFamilyDetails`.** The name is `FontFamily`'s above, the entry in a
+  family list, and the two cannot share it. The fields are unchanged. In
+  your code, rename the type where you name it.
+
+- **`set_filter_css` leaves the filter as it was for a blank string.**
+  `set_filter_css("")`, and a string of only whitespace, cleared the
+  filter. It now returns `Error::InvalidFilter` and changes nothing, as
+  HTML's `filter` setter, Chrome 152 and the JavaScript `ctx.filter` do: a
+  blank string is not a `<filter-value-list>`. To clear a filter, pass
+  `"none"` or call `set_filter(&[])`.
+
+- **`UiEvent::Input` names its input type as a `TextInputType`.** The
+  second field was a `String` holding one of five DOM `inputType` values,
+  so a handler matched string literals with nothing to catch a typo. It is
+  now `TextInputType`: `InsertText`, `InsertLineBreak`,
+  `InsertCompositionText`, `DeleteContentBackward` and
+  `DeleteContentForward`, the five npm's `TextInputType` names, and
+  `#[non_exhaustive]` since the DOM defines more. What JavaScript receives
+  is unchanged. In your code, match on the variants instead of the strings
+  -- `UiEvent::Input(data, TextInputType::InsertText)` for
+  `UiEvent::Input(data, t) if t == "insertText"` -- and add a `_` arm.
+
+- **`Error` is `#[non_exhaustive]`.** A release can now add a failure kind
+  to it without breaking anyone, which is what kept the URL loader's errors
+  and the window-id refusal in types of their own until now. A `match` on
+  `Error` outside this crate stops compiling until it has a `_` arm: add
+  one, or bind the rest as `other =>`.
+
+- **`TextStyle::font_variations` is a `FontVariationSettings`, so a span
+  can reset its axes.** It was a `Vec<FontVariation>` in which empty meant
+  "inherit the base style's", so a rich-text span or a pushed style could
+  return an axis to the face's default only by naming the default value.
+  `FontVariationSettings` has CSS `font-variation-settings`' three states:
+  `Inherit`, the default, takes the base style's axes; `Normal` takes none,
+  so the face's own defaults apply, with `font_weight` and `font_size` still
+  supplying `wght` and `opsz`; and `Axes(..)` replaces the base style's. On
+  a base style `Inherit` is `Normal`, and an empty `Axes` list is `Normal`.
+  In your code, write `font_variations: vec![..].into()` where you wrote
+  `vec![..]`; `..TextStyle::default()` and `Vec::new()`, which inherited,
+  are now `FontVariationSettings::Inherit`; and a span that named an axis's
+  default to reset it can use `FontVariationSettings::Normal`.
+
+- **`Context2D::fill_style()` and `stroke_style()` report a colour set
+  from CSS as the colour it paints.** They handed back the components
+  `set_fill_style_css` held, sRGB-encoded in the space the colour was named
+  in, as if they were linear light, which is what an `RgbaLinear` is. So `"rebeccapurple"` read back as 0.4, 0.2, 0.6,
+  and passing that to `set_fill_style` painted 170, 124, 203 where the CSS
+  had painted 102, 51, 153; on a Display P3 canvas even `rgb(255 0 0 / 50%)`
+  came back off. The report is now converted into linear-light sRGB, the
+  frame an `RgbaLinear` is in: it is `RgbaLinear::from_css`, and on both an
+  sRGB and a Display P3 canvas,
+  seven colours named in sRGB, linear sRGB, P3 and Rec. 2020 repaint
+  byte-identical from their report. A colour set through `set_fill_style`
+  reads back unchanged, as before.
+
+- **`Font::parse` reads the font shorthand Chrome reads.** It took a size
+  in `px` and nothing else, refusing `12pt`, `1em`, `150%`, `2rem`, the
+  size keywords, `larger`, `calc()`, a line height written as a number or
+  a percentage, `small-caps`, `bolder` and `lighter`, and any keyword or
+  unit in upper case. It accepted a negative size, an unquoted number as a family
+  (`16px 12`), a CSS-wide keyword as one (`16px inherit`), an empty name
+  between commas or after a trailing one, a style or weight given twice,
+  and more than four tokens before the size, all of which Chrome ignores.
+  A quoted name is unescaped now, so `'A\\B'` is the family `A\B`. Relative
+  sizes resolve as in a browser canvas: `em` and `%` of 10px, `rem` of
+  16px. The error is still `Error::FontRegister`, which is kept so a match
+  on it keeps working; `Font::from_css` reads the same grammar and answers
+  with an `Option`.
+
+- **`Context2D::font()` reports a font as CSSOM serializes it**, in the
+  form HTML and CSS Fonts 4 give it: style, `small-caps`, weight, width,
+  size and family, in that order, each left out at its initial value. A
+  stretch keyword is kept, `oblique` reads as `oblique` with its angle
+  where it is not the default 14deg, a weight is its number (`700`, not
+  `bold`), a size is the shortest number to six decimals (`2cm` is
+  `75.59055px`, the nearest `f32`), and a family name is a quoted string,
+  with a `"` or `\` inside escaped, where a generic family is its keyword.
+  So `condensed 16px X` reads back as `condensed 16px "X"` and
+  `oblique 10deg 16px X` as `oblique 10deg 16px "X"`. Chrome differs in
+  each, and docs/browser-differences.md lists how.
+
+- **`set_filter_css`, `set_letter_spacing_css` and `set_word_spacing_css`
+  read a value as Chrome reads it.** Checked against 99 filters and 19
+  spacings measured in Chrome 152, which the JavaScript `ctx.filter`,
+  `letterSpacing` and `wordSpacing` are tested against too. Refused now: a
+  space before a unit or a `%`, as `blur(5 px)` and `brightness(50 %)`; a
+  space around a spacing, as `" 5px "`; and a negative blur, shadow radius
+  or amount, as `blur(-2px)`, `drop-shadow(2px 2px -3px)` and
+  `brightness(-1)`. Taken now: function names in any case, as
+  `BLUR(5px)`; functions with no space between them, as
+  `blur(2px)brightness(2)`; an argument left out, which takes its
+  default -- `blur()` and `hue-rotate()` are zero, `brightness()` and the
+  other amounts 1; and a bare `0` as an angle, as `hue-rotate(0)`, which
+  transforms already took.
+
+- **A number ending in a point is refused.** CSS Syntax needs a digit after
+  a `.`, and Chrome refuses `translate(5.px)`, `scale(2.)` and
+  `blur(5.px)`; `Affine::from_css`, `set_filter_css` and the other CSS
+  string setters read each as the number before the point. A transform
+  number also took `inf` and `NaN`, which are Rust's spellings and not
+  CSS's, so `matrix(NaN, 0, 0, 1, 0, 0)` gave a matrix of NaN rather than
+  `None`. Three of these lists are in the transform table both surfaces are
+  tested against.
+
+- **`Context2D::filter()` reports a chain set through `set_filter_css`
+  exactly as it was written**, as Chrome and the JavaScript `filter` getter
+  do. Surrounding whitespace was trimmed and `"NONE"` or `" none "` read back
+  as `"none"`; now each reads back as written. The parse still trims, so
+  nothing draws differently.
+
+- **`Path2D::to_svg` writes numbers exactly and conics as arcs.** Its text
+  changes for any path; the geometry it describes does not. Each number is now
+  the shortest decimal that reads back as the same `f32`, where Skia's writer
+  rounded to eight significant digits, so `from_svg` of the output rebuilds
+  lines, quadratics and cubics exactly. A conic -- what `arc`, `ellipse` and
+  `round_rect` make -- was written as 32 quadratics and is now an SVG `A` arc,
+  which `from_svg` rebuilds as a conic within about a thousandth of a pixel. A
+  conic of weight above 1 is written as the quadratics it was before. Code that
+  compares `to_svg` text, or reads a conic out of it as quadratics, reads the
+  new numbers and `A` commands; compare paths by what they draw.
 
 - **Text widths, line metrics, rects and hit-testing are no longer rounded
   to hundredths, and a paragraph wraps at the width it is given rather than
@@ -388,7 +580,7 @@ window be changed after it opens.** No signature moves and nothing is removed.
   drawn before: 5000 rectangles each in a colour of its own take about 1.3
   times what recording twice costs alone, on either engine, where a palette,
   text in a few colours and shadows cost about what recording twice does,
-  which is up to about 1.15 times what one recording took [RE-TIME vs 0.16.3].
+  which is up to about 1.15 times what one recording took [RE-TIME].
 
 - **A `drop-shadow()` set by `Context2D::set_filter_css` lands in its colour
   exactly on a float canvas.** On a canvas made with `PixelDepth::F16` or
@@ -417,7 +609,7 @@ window be changed after it opens.** No signature moves and nothing is removed.
   so is any filter composed, merged, offset or interpolated over one, set by
   `set_color_filter`, `set_image_filter` or as a layer's backdrop; on a float
   canvas in sRGB it lands as a fill of its colour does, and on the others it
-  keeps up to 1.8e-4. On an eight-bit canvas nothing changes, so its PDF
+  keeps up to 1.8e-4. On an eight-bit sRGB canvas nothing changes, so its PDF
   still writes such a colour as Skia converts it, as it does a paragraph's; a
   PDF or SVG of a float canvas in sRGB writes it as it writes a fill of the
   colour.
@@ -552,6 +744,47 @@ window be changed after it opens.** No signature moves and nothing is removed.
   resident until the process ended. The read now runs in a pool of its own,
   as an export does.
 
+- **A fill or stroke a clip cuts is drawn whole on the CPU engine, and the clip
+  multiplies it.** Where a clip covered part of a path, Skia rasterized the path
+  against the clip, and the edges that added at the cut changed pixels far from
+  it: a triangle clipped at x 82 drew 60 pixels more than two inside the clip
+  unlike the same triangle unclipped, by up to 17 levels, and across fills,
+  strokes and dashed strokes up to 273 pixels moved, by up to 92 levels. Such a
+  draw is now played back on a CPU raster through a clip shader of the clip, at
+  the density of the read or export, so inside the clip its coverage is the
+  unclipped draw's byte for byte and at the clip's edge the triangle's mean
+  error from its exact coverage is 1.55 levels where it was 4.60. That holds for
+  a draw the page's edge does not also cut: Skia rasterizes against the page's
+  bounds as against a clip, so a draw crossing the page's edge still moves
+  inside the clip as it does with no clip. On an eight-bit sRGB canvas the clip
+  shader also takes the blend onto Skia's raster pipeline, so a coloured or
+  translucent fill lands within a level of a premultiplied channel of the
+  unclipped one. The GPU engine and PDF and SVG exports clip as before. A draw
+  inside an open `save_layer` takes the same route, and so does one in a canvas
+  drawn into another with `Context2D::draw_canvas` or used as a pattern through
+  `Context2D::create_pattern_from_canvas`: exact there at any density. On the
+  GPU engine a pattern of such a canvas is clipped by the same coverage, which
+  moves 50 pixels of a circle-clipped triangle and stroke there -- see
+  docs/browser-differences.md. What it costs [RE-TIME], against the same code
+  without it: a frame drawn under a clip costs 1.20 times as much, 0.20 µs, and
+  a draw the clip cuts 0.50 µs more to record. Rasterizing costs less than it
+  did: 60px triangles under a clip that cuts half of them in 0.45 of the time,
+  and a canvas holding cut draws drawn into another in 0.57 of it with
+  `Context2D::draw_canvas` and 0.98 as a pattern. Draws the clip does not cut
+  cost what they did.
+
+- **A PDF or SVG writes a clip once for the draws under it, whatever is read or
+  exported between them.** A `Context2D::get_image_data` or an export between
+  two draws under one clip, or a draw the clip cuts, made a PDF or SVG of the
+  page write the clip again for the draws after it: one clipped frame of three
+  fills and a run of text came out at 10900 bytes of SVG with two clip paths
+  where it was 5740 with one, and at 16121 with three with a cut draw among
+  them. What is drawn under a clip is now recorded without it while the clip
+  and the transform last, and the clip is applied around it once, so the
+  document is the one the page makes with nothing read. A blurred draw under a
+  clip no longer splits it either. A `save_layer`, and a draw an SVG rasterizes
+  on its own, still do, as before.
+
 - **A colour lands exactly on an sRGB float canvas.** On a canvas made with
   `PixelDepth::F32` in `PixelColorSpace::Srgb`, a fill, stroke or matte in
   an `RgbaLinear` -- or in a CSS colour named in another space -- read back
@@ -628,12 +861,18 @@ window be changed after it opens.** No signature moves and nothing is removed.
   through a colour filter, that holds it in the canvas's own space; and as a
   plain colour for a PDF or SVG of it, which still write it as one. Its pixels
   hold the colour as named, to the precision of the half float on `F16`. Text
-  keeps the edges the plain colour gives it, which Skia weighs by the
-  luminance of the paint's colour. The cost is memory: about 1.35x an sRGB
-  canvas's recording for a run of fills in one colour, 2.4x for fills each in
-  a colour of its own. Not yet exact there: a shadow, which Skia draws through
-  an eight-bit layer, the colours in a filter, a colour filter or a texture,
-  and `Rec2020Pq` and `Rec2020Hlg`.
+  keeps the edges the plain colour gives it, which Skia weighs by the luminance
+  of the paint's colour. The cost is memory, and time for text and blurred
+  draws. The recording takes about 1.35x an sRGB canvas's for a run of fills in
+  one colour, 2.4x for fills each in a colour of its own. `Context2D::fill_text`
+  takes about 1.35 times as long as on an sRGB canvas with its colour kept, and
+  1.55 times with the colour changing on every call [RE-TIME vs 0.16.3]. The CPU
+  engine blurs the pixels of every float canvas, sRGB included, in `f64` so that
+  a blurred colour lands exactly, which costs a blurred draw there [RE-TIME vs
+  0.16.3]; an eight-bit canvas's blur is unaffected. Not yet exact there: a
+  shadow, which Skia draws through an eight-bit layer, a colour in a filter on a
+  float canvas outside sRGB, which keeps up to 1.8e-4, and `Rec2020Pq` and
+  `Rec2020Hlg`.
 
 - **A text decoration's colour is painted at the precision it names, as a
   fill's is.** The colour named in `Context2D::set_text_decoration_css` or
@@ -677,15 +916,14 @@ window be changed after it opens.** No signature moves and nothing is removed.
   a filter already is; and a canvas drawn with nothing to carry stays
   vector. PDF drew all of these correctly and is unchanged.
 
-- **A large blur exported at a high density keeps its width.** A
-  `blur()` on a flat-colour shape is drawn by Skia's coverage blur up to a
-  sigma chosen at density 1, and that blur stops at 128 output pixels: a
-  `blur(40px)` rectangle exported at `density: 4` in `ImageDataExport` or
-  `EncodeOptions`, 160 pixels, came out at 128 and read 49 levels off on the
-  CPU, 41 on the GPU. Which blur a draw gets is now decided where the page
-  is drawn, at the size it is drawn at, and past that limit it takes the
-  blur that reaches it -- within the 7 and 5 levels that blur is off at any
-  density.
+- **A large blur exported at a high density keeps its width.** A `blur()` on a
+  flat-colour shape is drawn by Skia's coverage blur up to a sigma chosen at
+  density 1, and that blur stops at 128 output pixels: a `blur(40px)` rectangle
+  exported at `density: 4` in `ImageDataExport` or `EncodeOptions`, 160 pixels,
+  came out at 128 and read 49 levels off on the CPU, 41 on the GPU. Which blur
+  a draw gets is now decided where the page is drawn, at the size it is drawn
+  at, and past that limit it takes the exact blur of the result -- see "A
+  blurred path is the exact Gaussian blur of what it draws".
 
 - **A paragraph's text shadow keeps its blur at every export density.** A
   `TextShadow`'s `blur_sigma` was sized in output pixels, so a paragraph
@@ -800,7 +1038,8 @@ window be changed after it opens.** No signature moves and nothing is removed.
   where 13px text draws more than a third lighter, and unhinted under
   FreeType on Linux. No text moves either way, and what is drawn by default
   does not change. A paragraph from `TextEngine`, which has no hinting
-  setting, is drawn hinted, as it was.
+  setting, is drawn hinted, as it was. That `font_hinting` now reads `true`
+  until it is set is under Breaking.
 
 - **Text is drawn with Chrome's text contrast and gamma for the platform.**
   Glyph coverage was corrected with a gamma of 1.4 and no contrast by
@@ -827,7 +1066,8 @@ window be changed after it opens.** No signature moves and nothing is removed.
   Chrome 156 folds only one character to one, so it does not match `ß` to
   `SS`. A generic keyword is still matched in ASCII case alone, so
   registering `"ſerif"`, with a long s, does not take over the generic
-  `serif`.
+  `serif`. `has_font` and `family_details` matching the same way is under
+  Breaking.
 
 - **A font's line height spaces wrapped lines by its pixels.**
   `Font::line_height` takes pixels, as does the line height in a shorthand
@@ -906,11 +1146,11 @@ window be changed after it opens.** No signature moves and nothing is removed.
   as it is.** Its multiply and add reached Skia as eight-bit colours, so
   each sRGB component was clamped to `0..=1` and quantized to a 255th: a
   multiply of `RgbaLinear::from_srgb(2.0, 1.0, 0.5, 1.0)` left red as it
-  was, and a negative add component was taken as zero. Each component is now the scale or offset it names, in
-  floating point, with the result clamped to the displayable range as
-  before, and a multiply and add an eight-bit colour can hold draw byte
-  for byte as they did. A coefficient that is not finite is refused --
-  see Breaking.
+  was, and a negative add component was taken as zero. Each component is
+  now the scale or offset it names, in floating point, with the result
+  clamped to the displayable range as before, and a multiply and add an
+  eight-bit colour can hold draw byte for byte as they did. A coefficient
+  that is not finite is refused -- see Breaking.
 
 - **`outline_text` and the ink box put every glyph where `fill_text` draws
   it.** A glyph the shaper moves off its advance -- a mark stacked over
@@ -1014,12 +1254,6 @@ window be changed after it opens.** No signature moves and nothing is removed.
   states an `sxHeight`, or has an `x` to measure, reads as before. Chrome
   takes Skia's figure; docs/browser-differences.md records the difference.
 
-- **`Context2D::filter()` reports a chain set through `set_filter_css`
-  exactly as it was written**, as Chrome and the JavaScript `filter` getter
-  do. Surrounding whitespace was trimmed and `"NONE"` or `" none "` read back
-  as `"none"`; now each reads back as written. The parse still trims, so
-  nothing draws differently.
-
 - **A `drop-shadow` colour in `set_filter_css`, and a decoration colour in
   `set_text_decoration_css`, draw the colour they name.** Both read the
   CSS colour's sRGB-encoded components as linear light and encoded them a
@@ -1032,19 +1266,6 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `set_filter` and `set_text_decoration`, which take an `RgbaLinear`, were
   not affected.
 
-- **`Context2D::fill_style()` and `stroke_style()` report a colour set
-  from CSS as the colour it paints.** They handed back the components
-  `set_fill_style_css` held, sRGB-encoded in the space the colour was named
-  in, as if they were linear light, which is what an `RgbaLinear` is. So `"rebeccapurple"` read back as 0.4, 0.2, 0.6,
-  and passing that to `set_fill_style` painted 170, 124, 203 where the CSS
-  had painted 102, 51, 153; on a Display P3 canvas even `rgb(255 0 0 / 50%)`
-  came back off. The report is now converted into linear-light sRGB, the
-  frame an `RgbaLinear` is in: it is `RgbaLinear::from_css`, and on both an
-  sRGB and a Display P3 canvas,
-  seven colours named in sRGB, linear sRGB, P3 and Rec. 2020 repaint
-  byte-identical from their report. A colour set through `set_fill_style`
-  reads back unchanged, as before.
-
 - **`set_text_decoration_css` reads a colour function that holds spaces.**
   `"underline hsl(120 50% 50%)"` was split at every space and refused; a
   function's parentheses now hold it together, as in `set_filter_css`.
@@ -1052,12 +1273,6 @@ window be changed after it opens.** No signature moves and nothing is removed.
 - **A filter left unclosed at the end is taken**, as in Chrome, which
   closes it: `set_filter_css("blur(2px")` is `blur(2px)`. It returned
   `Error::InvalidFilter`.
-
-- **`Context2D::filter()` reports a chain set through `set_filter_css`
-  exactly as it was written**, as Chrome and the JavaScript `filter` getter
-  do. Surrounding whitespace was trimmed and `"NONE"` or `" none "` read back
-  as `"none"`; now each reads back as written. The parse still trims, so
-  nothing draws differently.
 
 - **A family with no italic face is slanted, and a static family with no
   bold face is emboldened, where Chrome does both.** Text drawn or measured
@@ -1252,11 +1467,6 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `color(DISPLAY-P3 1 0 0)`, were refused too; CSS names are
   case-insensitive, and both now parse.
 
-- **A `none` alpha in legacy syntax is refused.** `rgb(255, 0, 0, none)`,
-  `rgba(255, 0, 0, none)` and `hsl(0, 100%, 50%, none)` painted
-  transparent. Legacy syntax has no `none`, Chrome 153 refuses each, and
-  so does every `set_*_css` setter now.
-
 - **An absolute colour takes a math function and every alpha, as Chrome
   does.** `rgb(calc(255) 0 0)`, `hsl(120 calc(50% + 50%) 50%)`,
   `lab(calc(50) 40 30)`, `oklch(calc(0.6) 0.2 30)` and
@@ -1323,55 +1533,6 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   356.6 or 23.7 degrees off its own rounding instead.
   `docs/browser-differences.md` has the measurements.
 
-- **`Font::parse` reads the font shorthand Chrome reads.** It took a size
-  in `px` and nothing else, refusing `12pt`, `1em`, `150%`, `2rem`, the
-  size keywords, `larger`, `calc()`, a line height written as a number or
-  a percentage, `small-caps`, `bolder` and `lighter`, and any keyword or
-  unit in upper case. It accepted a negative size, an unquoted number as a family
-  (`16px 12`), a CSS-wide keyword as one (`16px inherit`), an empty name
-  between commas or after a trailing one, a style or weight given twice,
-  and more than four tokens before the size, all of which Chrome ignores.
-  A quoted name is unescaped now, so `'A\\B'` is the family `A\B`. Relative
-  sizes resolve as in a browser canvas: `em` and `%` of 10px, `rem` of
-  16px. The error is still `Error::FontRegister`, which is kept so a match
-  on it keeps working; `Font::from_css` reads the same grammar and answers
-  with an `Option`.
-
-- **`Context2D::font()` reports a font as CSSOM serializes it**, in the
-  form HTML and CSS Fonts 4 give it: style, `small-caps`, weight, width,
-  size and family, in that order, each left out at its initial value. A
-  stretch keyword is kept, `oblique` reads as `oblique` with its angle
-  where it is not the default 14deg, a weight is its number (`700`, not
-  `bold`), a size is the shortest number to six decimals (`2cm` is
-  `75.59055px`, the nearest `f32`), and a family name is a quoted string,
-  with a `"` or `\` inside escaped, where a generic family is its keyword.
-  So `condensed 16px X` reads back as `condensed 16px "X"` and
-  `oblique 10deg 16px X` as `oblique 10deg 16px "X"`. Chrome differs in
-  each, and docs/browser-differences.md lists how.
-
-- **`set_filter_css`, `set_letter_spacing_css` and `set_word_spacing_css`
-  read a value as Chrome reads it.** Checked against 99 filters and 19
-  spacings measured in Chrome 152, which the JavaScript `ctx.filter`,
-  `letterSpacing` and `wordSpacing` are tested against too. Refused now: a
-  space before a unit or a `%`, as `blur(5 px)` and `brightness(50 %)`; a
-  space around a spacing, as `" 5px "`; and a negative blur, shadow radius
-  or amount, as `blur(-2px)`, `drop-shadow(2px 2px -3px)` and
-  `brightness(-1)`. Taken now: function names in any case, as
-  `BLUR(5px)`; functions with no space between them, as
-  `blur(2px)brightness(2)`; an argument left out, which takes its
-  default -- `blur()` and `hue-rotate()` are zero, `brightness()` and the
-  other amounts 1; and a bare `0` as an angle, as `hue-rotate(0)`, which
-  transforms already took.
-
-- **A number ending in a point is refused.** CSS Syntax needs a digit after
-  a `.`, and Chrome refuses `translate(5.px)`, `scale(2.)` and
-  `blur(5.px)`; `Affine::from_css`, `set_filter_css` and the other CSS
-  string setters read each as the number before the point. A transform
-  number also took `inf` and `NaN`, which are Rust's spellings and not
-  CSS's, so `matrix(NaN, 0, 0, 1, 0, 0)` gave a matrix of NaN rather than
-  `None`. Three of these lists are in the transform table both surfaces are
-  tested against.
-
 - **Text no longer wraps early at a fractional width.** A paragraph laid
   out at 200.7 broke as if it were 200 wide, and line widths were compared
   rounded to hundredths; text now fits where Chrome fits it, to within the
@@ -1396,18 +1557,18 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   Not changed: right-to-left text, for which nothing has been measured in
   Chrome.
 
-- **An animated GIF is the same file on any machine.** Each frame's palette
-  was chosen by quantette's parallel k-means, which draws its samples from
-  one random stream per thread of the current rayon pool and adds its
-  colour histogram in whatever order the threads finish: the same frames
-  encoded in a pool of one thread and of two came out in different
-  colours. The k-means refinement now runs on a rayon pool of its own with a
-  fixed eight threads, started the first time a GIF is written, and Wu's
-  starting palette, whose parallel sums depended on scheduling, runs on one
-  thread, so the encoded GIF is the same whatever pool the caller encodes
-  in. It is faster too: on a 14-core M4 Pro a 640x500 frame of noise over a
-  gradient encodes in 12.9 ms against 22.3, and 24 of them in 212.4 ms
-  against 512.0.
+- **An animated GIF is the same file on any machine.** Each frame's palette was
+  chosen by quantette's parallel k-means, which draws its samples from one
+  random stream per thread of the current rayon pool and adds its colour
+  histogram in whatever order the threads finish: the same frames encoded in a
+  pool of one thread and of two came out in different colours. The k-means
+  refinement now runs on a rayon pool of its own with a fixed eight threads,
+  started the first time a GIF is written, and Wu's starting palette, whose
+  parallel sums depended on scheduling, runs on one thread, so the encoded GIF
+  is the same whatever pool the caller encodes in. It is faster too: on a
+  14-core M4 Pro a 640x500 frame of noise over a gradient encodes in 12.9 ms
+  against 22.3, and 24 of them in 212.4 ms against 512.0 [RE-TIME against the
+  same code without it].
 
 ### Added
 
@@ -1741,14 +1902,90 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Changed
 
-- **A draw builds no colour space.** Every fill, stroke and text draw
-  looked up the colour space its colour was named in by building each space
-  `color()` names and comparing it: two spaces a draw for an sRGB colour,
-  seven for one named in Display P3, and on a `PixelColorSpace::DisplayP3`
-  canvas one more for the canvas's own. Each space is now built once and
-  compared by Skia's hashes. The time it saves is measured at release
-  [RE-TIME vs 0.16.3: 200 fills each in its own hex colour on an eight-bit
-  sRGB canvas].
+- **Text costs less to lay out, draw and measure, a colour less to look up,
+  blurred shapes less to record and export, and a repeated read of a GPU
+  canvas less to wait for.** Each figure below is from one release-prep
+  window [RE-TIME: the window and its load].
+  - A line of text a `Context2D` draws a second time in the same settings
+    is kept as laid out, and every later draw of it, in any paint and
+    oblique included, is drawn from what was kept rather than laid out
+    afresh: a kept line is laid out and recorded about 14 times faster
+    [RE-TIME vs 0.16.3]. Text drawn once is not kept and not slowed
+    [RE-TIME vs 0.16.3]; a line drawn exactly twice, kept on its second
+    draw, costs about 9% more over its two draws [RE-TIME vs 0.16.3].
+  - Setting a font, spacing, alignment or another text setting on a
+    `Context2D` to the value it already holds no longer throws that layout
+    away, so a loop that sets its font before every draw keeps the
+    benefit: 200 labels redrawn every frame with the font set before each
+    are laid out and recorded about 10 times faster, and laid out,
+    recorded and drawn to pixels about 4 times faster [RE-TIME vs 0.16.3].
+  - The faces and collection a font resolves to are remembered for each
+    family list and style while the registered fonts stand, a `TextEngine`
+    remembers the faces each family list matched and spells a list's names
+    once, and the caches holding these hash their keys with foldhash
+    rather than SipHash: setting a font and drawing costs [RE-TIME vs
+    0.16.3] of what it did.
+  - `Context2D::set_font` with a `Font` it has been given before neither
+    lowers it to a font specification again nor looks it up: setting one
+    of two alternating fonts costs [RE-TIME vs 0.16.3] of what it did. The
+    fonts resolved this way are kept under the library's existing bound
+    and let go when the registered fonts change.
+  - A paragraph from `TextEngine` in several styles reads its text for a
+    grapheme cluster crossing an edge between them only where the bytes
+    either side of the edge do not rule one out, and its base style is no
+    longer copied to set its hinting [RE-TIME vs 0.16.3].
+  - A `TextEngine` paragraph is built with fewer lookups, walks and
+    allocations, taking the font library's lock once, asking the platform
+    for a face's variation axes once, leaving a face drawn at its own
+    position uninstanced, and answering a style it has instanced before with
+    one hash of the style rather than through the font library. One with
+    nothing to draw of its own no longer collects its styles' decorations to
+    find that out, a style's Skia text style is filled where it is kept
+    rather than copied there, and one whose spans are all in its own paint
+    is built without walking the edges between them for a ligature in two
+    paints. A paragraph in one style builds as fast as 0.16.3's [RE-TIME vs
+    0.16.3]; one with spans still costs more [RE-TIME vs 0.16.3], for work
+    0.16.3 did not do: the recipe each paragraph keeps so that its
+    decorations, shadows, backgrounds and oblique ranges are drawn as CSS
+    places them, and a variable face instanced at each style's own axes.
+  - A page of cards, each drawn over its own shadow blurred through a
+    `blur()` filter, records about 31% faster on either engine and exports
+    about 5% faster on the GPU, and a page of blurred rectangles alone
+    records as fast as before and exports about 3.5% faster on the CPU
+    [RE-TIME vs 0.16.3]. A blurred flat-colour draw is recorded without
+    the filter paint it never uses, and consecutive rectangles blurred
+    alike in one frame are kept as one operation, each still drawn on its
+    own. A flat-colour rectangle under a `blur()` filter is drawn as its
+    exact blur in [RE-TIME vs 0.16.3] of the time 0.16.3 took to draw
+    Skia's.
+  - Every `Context2D::get_image_data`, export and window frame takes a
+    snapshot of the page, and the snapshot no longer copies the list of
+    what the page has recorded, so a canvas read again and again without
+    being cleared no longer costs more with each read: 10x10 rectangles
+    read back every 200 draws cost the same per draw over a run eight
+    times as long, and [RE-TIME vs 0.16.3] of what they did.
+  - A repeated `Context2D::get_image_data` of a region within one
+    256-pixel tile of a GPU canvas, that tile unchanged since the last
+    read, no longer waits on the GPU to confirm it [RE-TIME vs 0.16.3]. A
+    read of the whole canvas, and a small one after something has
+    composited the whole canvas since the last draw -- a full read or an
+    export -- still waits each time.
+  - A draw builds no colour space. Every fill, stroke and text draw
+    looked up the colour space its colour was named in by building each
+    space `color()` names and comparing it: two spaces a draw for an sRGB
+    colour, seven for one named in Display P3, and on a
+    `PixelColorSpace::DisplayP3` canvas one more for the canvas's own.
+    Each space is now built once and compared by Skia's hashes [RE-TIME vs
+    0.16.3: 200 fills each in its own hex colour on an eight-bit sRGB
+    canvas].
+
+  What is kept costs memory, and each part of it is bounded. Each thread
+  keeps up to 512 lines of text or an estimated 8 MiB of them, the least
+  recently drawn let go first, 256 first-available faces for decorations
+  and 256 KiB of wave chunks; the font library and each `TextEngine`
+  remember 256 family lists and styles. Past its bound each of the last
+  three is dropped whole. All of it is let go when the registered fonts
+  change. Nothing drawn changes.
 
 - **`node scripts/skia-source.mjs prepare` makes a tree from one it already
   has.** docs/rust.md sends a crate build that wants the patched Skia to
@@ -1762,99 +1999,16 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `core.autocrlf` true, as Git for Windows installs it, they were written
   with CRLF line endings, and the patches then failed to apply.
 
-- **`Path2D::to_svg` writes numbers exactly and conics as arcs.** Its text
-  changes for any path; the geometry it describes does not. Each number is
-  now the shortest decimal that reads back as the same `f32`, where Skia's
-  writer rounded to eight significant digits, so `from_svg` of the output
-  rebuilds lines, quadratics and cubics exactly. A conic -- what `arc`,
-  `ellipse` and `round_rect` make -- was written as 32 quadratics and is now
-  an SVG `A` arc, which `from_svg` rebuilds as a conic within about a
-  thousandth of a pixel. A conic of weight above 1 is written as the
-  quadratics it was before.
-
-- **On the GPU, an exact blur draws into a second target the page's size.**
-  To draw what it blurs exactly as the page draws it, the GPU engine
-  draws it into a layer the page's size, at the page's sample count: a
-  multisampled target of about 17 MB for a 1200x900 canvas at four samples
-  and 384 MB for 6000x4000. Skia keeps it for the next blurred draw while
-  its GPU cache is within budget, and lets it go once the draw's GPU work
-  has run where it is not. A blurred draw takes about 0.15 ms longer at
-  1200x900 and 1.5 ms at 6000x4000 than in a layer the size of the blur,
-  which drew edges otherwise -- up to 0.13 of a level past a tie -- at some
-  positions on pages from 1408 pixels wide or 3000 tall.
-
-- **`FontSlant::Oblique` and `TextSlant::Oblique` carry their angle, an
-  `ObliqueAngle`.** A `Font` and a paragraph `TextStyle` could ask for
-  oblique only at 14deg, so `Font::from_css("oblique 10deg 16px X")` set
-  with `set_font` drew at 14deg where `set_font_css` drew at 10, and read
-  back as `oblique 16px "X"`. The variant now holds the angle: from -90deg
-  to 90deg, `ObliqueAngle::new` returning `Error::InvalidObliqueAngle`
-  outside it, and `ObliqueAngle::DEFAULT` the 14deg `oblique` means alone.
-  A font or a paragraph range draws at its angle, 0deg upright, and
-  `font()` reads it back. In your code, match `FontSlant::Oblique(_)` and
-  `TextSlant::Oblique(_)` where you matched the bare variant, and write
-  `FontSlant::OBLIQUE` or `TextSlant::OBLIQUE` where you constructed it.
-
-- **`Font::families`, `TextStyle::font_families` and
-  `StrutStyle::font_families` are `Vec<FontFamily>`, so a quoted generic
-  keyword is a family name.** A family list was strings, so `"serif"` in
-  quotes -- a family named serif, by CSS Fonts 4, which says a generic
-  keyword "must not be quoted" -- was the generic `serif` once parsed, and
-  read back unquoted. `FontFamily` is `Named(String)` or
-  `Generic(GenericFamily)`, the thirteen CSS generics. The shorthand keeps
-  the quoting: `16px "serif"` reads back as itself, and `16px serif` as the
-  generic. It draws as itself too: a quoted keyword reaches a family by that
-  name, registered or installed, and with none the list moves on, where
-  fontconfig had answered `serif`, `sans-serif` and `monospace` with the
-  generic's faces. A string converts as CSS reads an unquoted name, a generic
-  keyword in any case becoming the generic, so `Font::new("serif", 16.0)`
-  is unchanged; `FontFamily::Named("serif".into())` names the family. In your code,
-  write `vec!["Helvetica".into(), "serif".into()]` where you wrote
-  `vec!["Helvetica".to_string(), "serif".to_string()]`, and compare against
-  `FontFamily` values rather than strings.
-
-- **`FontFamily`, the details `FontLibrary::family_details` returns, is
-  `FontFamilyDetails`.** The name is `FontFamily`'s above, the entry in a
-  family list, and the two cannot share it. The fields are unchanged. In
-  your code, rename the type where you name it.
-
-- **`set_filter_css` leaves the filter as it was for a blank string.**
-  `set_filter_css("")`, and a string of only whitespace, cleared the
-  filter. It now returns `Error::InvalidFilter` and changes nothing, as
-  HTML's `filter` setter, Chrome 152 and the JavaScript `ctx.filter` do: a
-  blank string is not a `<filter-value-list>`. To clear a filter, pass
-  `"none"` or call `set_filter(&[])`.
-
-- **`UiEvent::Input` names its input type as a `TextInputType`.** The
-  second field was a `String` holding one of five DOM `inputType` values,
-  so a handler matched string literals with nothing to catch a typo. It is
-  now `TextInputType`: `InsertText`, `InsertLineBreak`,
-  `InsertCompositionText`, `DeleteContentBackward` and
-  `DeleteContentForward`, the five npm's `TextInputType` names, and
-  `#[non_exhaustive]` since the DOM defines more. What JavaScript receives
-  is unchanged. In your code, match on the variants instead of the strings
-  -- `UiEvent::Input(data, TextInputType::InsertText)` for
-  `UiEvent::Input(data, t) if t == "insertText"` -- and add a `_` arm.
-
-- **`Error` is `#[non_exhaustive]`.** A release can now add a failure kind
-  to it without breaking anyone, which is what kept the URL loader's errors
-  and the window-id refusal in types of their own until now. A `match` on
-  `Error` outside this crate stops compiling until it has a `_` arm: add
-  one, or bind the rest as `other =>`.
-
-- **`TextStyle::font_variations` is a `FontVariationSettings`, so a span
-  can reset its axes.** It was a `Vec<FontVariation>` in which empty meant
-  "inherit the base style's", so a rich-text span or a pushed style could
-  return an axis to the face's default only by naming the default value.
-  `FontVariationSettings` has CSS `font-variation-settings`' three states:
-  `Inherit`, the default, takes the base style's axes; `Normal` takes none,
-  so the face's own defaults apply, with `font_weight` and `font_size` still
-  supplying `wght` and `opsz`; and `Axes(..)` replaces the base style's. On
-  a base style `Inherit` is `Normal`, and an empty `Axes` list is `Normal`.
-  In your code, write `font_variations: vec![..].into()` where you wrote
-  `vec![..]`; `..TextStyle::default()` and `Vec::new()`, which inherited,
-  are now `FontVariationSettings::Inherit`; and a span that named an axis's
-  default to reset it can use `FontVariationSettings::Normal`.
+- **On the GPU, an exact blur draws into a second target the page's size.** To
+  draw what it blurs exactly as the page draws it, the GPU engine draws it into
+  a layer the page's size, at the page's sample count: a multisampled target of
+  about 17 MB for a 1200x900 canvas at four samples and 384 MB for 6000x4000.
+  Skia keeps it for the next blurred draw while its GPU cache is within budget,
+  and lets it go once the draw's GPU work has run where it is not. A blurred
+  draw takes about 0.15 ms longer at 1200x900 and 1.5 ms at 6000x4000 than in a
+  layer the size of the blur, which drew edges otherwise -- up to 0.13 of a
+  level past a tie -- at some positions on pages from 1408 pixels wide or 3000
+  tall [RE-TIME against the same code without it].
 
 - **`FontSlant::Oblique` and `TextSlant::Oblique` draw as CSS Fonts 4
   matches them, superseding 0.16.0's "`TextSlant::Oblique` now renders the
@@ -1880,13 +2034,14 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   nothing and has no ink or outline, and advances as it would upright.
 
   An oblique run is drawn a glyph run at a time so that each can be
-  sheared or not, which costs more than an upright one. In a release
-  build on macOS, measured through the Node addon, filling
-  `"Hamburgefonstiv"` in `oblique 10deg 32px Oswald` takes about 5.3 µs on
-  the CPU engine where the previous release took 3.1 drawing the italic
-  face, and 5.7 underlined where it took 3.9; on the GPU engine, 5.2 and
-  5.7 where it took 3.1 and 3.8. Upright text is unchanged, at 3.3 µs
-  before and after.
+  sheared or not, which costs more than an upright one. In a release build
+  on macOS, measured through the Node addon, filling `"Hamburgefonstiv"`
+  in `oblique 10deg 32px Oswald` into a 256 by 96 canvas read back every
+  50 draws takes about 3.9 µs a draw on the CPU engine where the previous
+  release took 3.6 drawing the italic face, and 4.4 underlined where it
+  took 4.3; on the GPU engine, 10.6 and 12.2 where it took 9.4 and 11.7.
+  Upright text takes 3.2 µs on the CPU engine where it took 5.1, and 9.3
+  on the GPU where it took 8.7 [RE-TIME vs 0.16.3].
 
   A paragraph with an oblique range reads its runs back for drawing at its
   first draw after a layout, so one only laid out or measured pays for no
@@ -1911,6 +2066,12 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   keeps fonts of its own, does not. The font caches themselves are emptied
   at idle by the npm addon alone, which can post the release to the
   JavaScript thread that owns them; a Rust program's are kept as before.
+
+- **A consumer who also depends on `skia-safe` directly must move to 0.156.**
+  This crate exposes no `skia_safe` type in any public signature, so there is
+  no type conflict to resolve -- but Cargo will happily resolve two versions of
+  the crate and link two copies of the Skia native library. Invisible until it
+  is a build error.
 
 - **Skia M153 to M156**, by way of `skia-safe` 0.156.0. Every workaround for
   a Skia defect was re-checked against it and is still needed, but for two
@@ -1946,17 +2107,27 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   docs/rust.md, "Metal and skia-bindings' prebuilt Skia", says how to build
   Skia from source with the patch that removes it.
 
-- **A GPU path can have a pixel's coverage moved a step, in a crate
-  build.** The Skia skia-bindings provides has an atlas path renderer that
-  can move a pixel of an anti-aliased path placed at row 512 or more of its
-  atlas up or down by about 50 of 255 levels of alpha, on Metal and on
-  Vulkan, and where a path lands depends on everything else the same flush
-  draws -- so the same page can export differently depending on what was
-  drawn before it. The npm package's macOS and Linux binaries
-  cap the atlas at 512 by 512; docs/rust.md says how to build Skia with that
-  patch. Why row 512 is unknown. Building with it costs up to about 8% of a
-  GPU page dense with small paths -- 2000 small stars at 1280 by 960, 6.78
-  ms against 6.29 on an M4 Pro -- and nothing measurable on a typical page.
+- **On Linux, text is laid out at its size truncated to a 64th of a pixel.**
+  Skia's FreeType scaler sets a face's size in 26.6 fixed point, truncating,
+  and corrects only sizes below 1px, so widths grow in steps with the font
+  size while the font's metrics take the size asked for. In Oswald,
+  `measure_text("Hamburgefonstiv")` at 17.3px measures as at 17.296875px, and
+  of the 100 steps of a hundredth from 17.00px to 18.00px, 36 leave the width
+  as it was; on macOS every step moves it. Chrome on Linux takes its advances
+  from the same scaler and is expected to step alike; it was not measured.
+  docs/browser-differences.md has the measurements.
+
+- **A GPU path can have a pixel's coverage moved a step, in a crate build.** The
+  Skia skia-bindings provides has an atlas path renderer that can move a pixel
+  of an anti-aliased path placed at row 512 or more of its atlas up or down by
+  about 50 of 255 levels of alpha, on Metal and on Vulkan, and where a path
+  lands depends on everything else the same flush draws -- so the same page can
+  export differently depending on what was drawn before it. The npm package's
+  macOS and Linux binaries cap the atlas at 512 by 512; docs/rust.md says how to
+  build Skia with that patch. Why row 512 is unknown. Building with it costs up
+  to about 8% of a GPU page dense with small paths -- 2000 small stars at 1280
+  by 960, 6.78 ms against 6.29 on an M4 Pro -- and nothing measurable on a
+  typical page [RE-TIME against the same code without it].
 
 - **On macOS a GPU frame can differ by a level at a few pixels with what
   the GPU drew before it, in any build.** The same renderer: a blurred
