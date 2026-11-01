@@ -317,6 +317,11 @@ rustfft = "6.4.1"
 
 # `font_library` subsets WOFF and WOFF2 faces here because Windows has no
 # system API that reads them; the other platforms hand the bytes to the OS.
+# `mmap` and `madvise` for the mappings fonts made from data live in on macOS
+# -- see `font::quarantine`.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 allsorts = { version = "0.17", features = [
     "flate2_zlib",

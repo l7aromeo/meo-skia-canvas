@@ -471,6 +471,19 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **On macOS, a font registered after another was let go reads its own
+  metrics.** CoreText remembers each font made from data by the address and
+  length of its bytes, and keeps that after the bytes are freed, so a font
+  registered with `FontLibrary.use` after `FontLibrary.reset()`, whose bytes
+  happened to land where a released font's had been and were the same
+  length, was read through the released font's table layout: its x-height,
+  strikeout and every value read from a table came from the wrong offsets.
+  At 100px, Amstelvar measured an x-height of 78.55 where its own is 50, and
+  no strikeout at all. Each font's bytes now get memory of their own, whose
+  address is not reused until enough other fonts have loaded for CoreText to
+  have forgotten it; its pages go back to the system as soon as the font is
+  let go. Glyphs, advances and shaping were not affected.
+
 - **`textBaseline` `top`, `middle` and `bottom` sit on the em square.** HTML
   puts them at the top, middle and bottom of the em square; they were at the
   face's ascent, its descent and halfway between, which lie outside the em

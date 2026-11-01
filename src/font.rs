@@ -7,7 +7,7 @@ use std::{
 
 use parking_lot::Mutex;
 use skia_safe::{
-    Data, FontMgr, FourByteTag, Typeface,
+    FontMgr, FourByteTag, Typeface,
     font_arguments::variation_position::Coordinate,
     font_parameters::variation::Axis, textlayout::TypefaceFontProvider,
 };
@@ -23,6 +23,7 @@ use crate::{
 };
 
 pub(crate) mod caseless;
+pub(crate) mod quarantine;
 
 /// One entry in a font's family list: a family by name, or a generic family.
 ///
@@ -769,7 +770,7 @@ impl FontLibrary {
         let mut inner = self.inner.lock();
         let typeface = inner
             .font_mgr
-            .new_from_data(Data::new_copy(bytes), None)
+            .new_from_data(quarantine::font_data(bytes), None)
             .ok_or_else(|| Error::FontRegister {
                 reason: format!(
                     "could not parse typeface for family {family:?}"
@@ -958,7 +959,7 @@ impl FontLibrary {
         self.inner
             .lock()
             .font_mgr
-            .new_from_data(Data::new_copy(bytes), None)
+            .new_from_data(quarantine::font_data(bytes), None)
             .ok_or_else(|| Error::FontRegister {
                 reason: format!("could not parse a typeface in {source}"),
             })
