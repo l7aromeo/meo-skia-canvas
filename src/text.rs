@@ -188,9 +188,10 @@ pub struct TextMetrics {
     ///
     /// The em square is the font size high, divided at the alphabetic
     /// baseline as the face's typographic ascender and descender divide it
-    /// -- or its ascent and descent, where it states no typographic span --
-    /// and the `Top`, `Middle` and `Bottom` baselines are its top, middle and
-    /// bottom. With [`em_height_descent`](Self::em_height_descent) it sums to
+    /// at the instance drawn, `MVAR` applied -- or its ascent and descent,
+    /// where it states no typographic span -- and the `Top`, `Middle` and
+    /// `Bottom` baselines are its top, middle and bottom. With
+    /// [`em_height_descent`](Self::em_height_descent) it sums to
     /// the font size at every baseline.
     pub em_height_ascent: f32,
     /// Distance from the selected baseline down to the bottom of the em

@@ -219,9 +219,16 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   most 1/128 px. At 100px Georgia the top is 77.722 here and 77.71875 in
   Chrome, Arial 77.575 against 77.578125, Times New Roman 76.262 against
   76.265625. A face whose typographic ascender and descender are zero is
-  divided as its ascent and descent divide it, in both. An `MVAR` table that
-  varies the typographic ascender and descender per instance moves neither:
-  the stored values place it at every instance.
+  divided as its ascent and descent divide it, in both.
+- _An instance's em square follows its `MVAR`._ A variable face's `MVAR`
+  table can vary the typographic ascender and descender from one instance to
+  the next (`hasc`, `hdsc`). Chrome 156 keeps the stored values at every
+  instance; this library divides the em as the instance's own do, which is
+  what the face says its em square is there. Amstelvar, its `MVAR` turned so
+  that it moves them along `wght`, puts `top` 75 above the alphabetic
+  baseline of 100px at weights 100, 400 and 900 in Chrome, while its text
+  widens with the weight; here it is 70.16, 75 and 84.375, the stored 1500
+  and -500 moved to 1434 and -610 at 100 and to 1620 and -300 at 900.
 
 - _`imageSmoothingQuality = "high"` picks its sampler from the device-space
   scale._ The Chrome mapping this ports, and why one unconditional cubic is
