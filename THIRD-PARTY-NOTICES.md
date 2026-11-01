@@ -4,8 +4,8 @@ The published `skia.node` is a statically linked binary. Several of the projects
 require their copyright notices to travel with binary distributions, so those notices are collected
 here rather than left in the source trees they came from.
 
-Everything below is under a permissive licence, and no component is copyleft. Audited 2026-10-29
-with `just licenses` over the **242** crate versions that link into a released binary — the union
+Everything below is under a permissive licence, and no component is copyleft. Audited 2026-11-01
+with `just licenses` over the **243** crate versions that link into a released binary — the union
 across every target in `lib/targets.json`, normal dependencies only. The terms found were 0BSD,
 Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause, BSD-3-Clause, ISC, MIT, Unicode-3.0,
 Unlicense and Zlib.
@@ -26,8 +26,8 @@ Counts here are easy to get wrong in two directions at once, so the recipe pins 
 taken. A bare `cargo metadata` reports more, because it counts build and dev dependencies and every
 platform's targets — and _fewer_, because it resolves only the default features and so misses
 everything reached through `node-addon`, `metal` and `window`. It is neither a subset nor a
-superset. The count is also of name-and-version pairs rather than names, because six crates appear
-in the graph at two versions. An earlier version of this file said 135 without saying which
+superset. The count is also of name-and-version pairs rather than names, because fifteen crates
+appear in the graph at two versions. An earlier version of this file said 135 without saying which
 measurement it meant, and it went stale with no way to tell what to re-run.
 
 Most of the graph is `MIT OR Apache-2.0`, taken under MIT. The sections below are the components
@@ -212,7 +212,8 @@ rest of the graph rather than through the image formats:
 | `alloc-no-stdlib`, `alloc-stdlib` | BSD-3-Clause                             | allocator shims for those two            |
 | `encoding_rs`                     | (Apache-2.0 or MIT) **and** BSD-3-Clause | legacy text encodings, via `winit`       |
 | `glyph-names`                     | BSD-3-Clause                             | mapping glyph names to code points       |
-| `libloading`                      | ISC                                      | loading the platform's graphics driver   |
+| `libloading` 0.9                  | ISC                                      | finding a Node-API function in the host  |
+| `libloading` 0.8                  | ISC                                      | the same, for `neon`'s own bindings      |
 | `unicode-ident`                   | (MIT or Apache-2.0) **and** Unicode-3.0  | identifier tables, from the Unicode data |
 
 Each ships its licence text with its source. The bolded `and`s are not a choice: both sets of terms
@@ -257,8 +258,8 @@ packages that actually link — which is the set this file describes, and not wh
 `cargo metadata` returns.
 
 The difference matters. `cargo metadata --all-features` reports every package Cargo knows about,
-including build and dev dependencies and every platform's targets, which is **361** against the
-**242** that link. Either number is defensible; quoting one and computing the other is how the count
+including build and dev dependencies and every platform's targets, which is **362** against the
+**243** that link. Either number is defensible; quoting one and computing the other is how the count
 in this file went stale without anyone noticing. `just licenses` now reads both numbers back out of
 this file and fails when what it counted disagrees, so the two cannot drift apart again silently.
 
