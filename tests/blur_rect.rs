@@ -41,6 +41,13 @@ fn rounded(gpu: bool) -> f64 {
     }
 }
 
+/// How far an 8-bit colour channel may lie from the exact blur on the GPU
+/// engine: half a level for rounding to a level, and Ganesh may carry the
+/// colour at half precision and its product with the coverage once more,
+/// each moving a value just under 1 by 2^-12 of it, a sixteenth of a level.
+/// The alpha is carried once, which [`GPU_ROUNDED`] holds.
+const GPU_COLOUR_ROUNDED: f64 = 0.5 + 2.0 * 255.0 / 4096.0;
+
 /// How far an F16 alpha may lie from the exact blur, as a fraction of one:
 /// half a unit in the last place of a half-precision float just below 1,
 /// 2^-12, and a little over.
@@ -345,44 +352,6 @@ fn a_faint_blur_keeps_its_coverage_in_floats() {
     }
 }
 
-/// Whether a case of [`a_rectangle_drawn_after_another_is_its_own_blur`] is
-/// held out: the translucent one on the CPU. An eight-bit sRGB canvas
-/// places a blurred draw's colour on the alpha's byte, 128 of 0.5, and the
-/// case is held to that byte, as a fill of the colour stores it, which the
-/// GPU's rectangle blur lands on; the CPU's blurs at the alpha as given and
-/// lands a level from it. Until #473 is fixed
-/// [`a_translucent_rectangle_on_the_cpu_misses_until_473`] holds the miss.
-fn known_miss(what: &str, gpu: bool) -> bool {
-    !gpu && what == "colour"
-}
-
-/// The case [`known_miss`] holds out still misses: this fails once #473 is
-/// fixed, and then the hold-out and this test go.
-#[test]
-fn a_translucent_rectangle_on_the_cpu_misses_until_473() {
-    let (size, sigma) = ((160.0f32, 120.0f32), 6.0f32);
-    let [x, y, w, h] = [40.75f32, 30.5, 51.0, 30.0];
-    let Some(mut canvas) = canvas(size, false) else {
-        return;
-    };
-    let ctx = canvas.context();
-    ctx.set_fill_style_css("rgba(0, 0, 0, 0.5)")
-        .expect("a colour");
-    ctx.set_filter_css(&format!("blur({sigma}px)"))
-        .expect("a filter");
-    ctx.fill_rect(x, y, w, h);
-    let data = canvas
-        .to_image_data(None, &ImageDataExport::default())
-        .expect("pixels");
-    let want = expected(
-        (size.0 as usize, size.1 as usize),
-        [x, y, w, h].map(f64::from),
-        f64::from(sigma),
-    );
-    let off = worst(&alpha(&data), &want, alpha_byte(TRANSLUCENT));
-    assert!(off > rounded(false), "{off:.3} levels -- #473 looks fixed");
-}
-
 #[test]
 fn a_rectangle_drawn_after_another_is_its_own_blur() {
     // Blurred rectangles are kept between draws; each of these differs from
@@ -407,9 +376,6 @@ fn a_rectangle_drawn_after_another_is_its_own_blur() {
             continue;
         };
         for (what, [x, y, w, h], sigma, colour) in cases {
-            if known_miss(what, gpu) {
-                continue;
-            }
             let ctx = canvas.context();
             ctx.clear_rect(0.0, 0.0, size.0, size.1);
             ctx.set_fill_style_css(colour).expect("a colour");
@@ -419,8 +385,8 @@ fn a_rectangle_drawn_after_another_is_its_own_blur() {
             let data = canvas
                 .to_image_data(None, &ImageDataExport::default())
                 .expect("pixels");
-            // A translucent colour is held to its alpha's byte -- see
-            // `known_miss`.
+            // A translucent colour is held to its alpha's byte, 128 of 0.5,
+            // as a fill of it stores it.
             let opacity = match colour {
                 "black" => f64::from(u8::MAX),
                 _ => alpha_byte(TRANSLUCENT),
@@ -693,5 +659,259 @@ fn a_rectangle_blurred_past_any_length_draws_nothing() {
             .to_image_data(None, &ImageDataExport::default())
             .expect("pixels");
         assert!(alpha(&data).iter().all(|a| *a == 0.0), "gpu {gpu}");
+    }
+}
+
+/// The eight-bit spaces a blurred rectangle's colour is held on the bytes
+/// a fill stores in, each with its CSS name.
+const EIGHT_BIT_SPACES: [(PixelColorSpace, &str); 4] = [
+    (PixelColorSpace::Srgb, "srgb"),
+    (PixelColorSpace::SrgbLinear, "srgb-linear"),
+    (PixelColorSpace::DisplayP3, "display-p3"),
+    (PixelColorSpace::Rec2020, "rec2020"),
+];
+
+/// How far off the byte grid a channel and the alpha are named, in levels:
+/// far enough from a byte that rounding first moves the product, and apart
+/// from each other so that the two offsets do not cancel.
+const OFF_GRID: (f64, f64) = (0.37, 0.61);
+
+/// The levels of an eight-bit channel.
+const LEVELS: f64 = 255.0;
+
+/// The alphas the sweeps draw at: every byte, where rounding first and the
+/// exact product agree; every byte plus [`OFF_GRID`]'s alpha offset, where
+/// they do not; and 0.3, 0.5 and 0.7, whose products are ties.
+fn sweep_alphas() -> Vec<f64> {
+    let bytes = (1..=u8::MAX).map(|a| f64::from(a) / LEVELS);
+    let off = (0..u8::MAX).map(|a| (f64::from(a) + OFF_GRID.1) / LEVELS);
+    bytes.chain(off).chain([0.3, 0.5, 0.7]).collect()
+}
+
+/// A colour off the byte grid in every channel, which moves with `i` so that
+/// the sweep is not one colour at many alphas.
+fn off_grid_colour(i: usize) -> [f64; 3] {
+    [7, 101, 193].map(|step| ((i * step) % 255) as f64 + OFF_GRID.0)
+}
+
+/// `rgb`, in levels, at `alpha`, named in `space`.
+fn css_in(space: &str, rgb: [f64; 3], alpha: f64) -> String {
+    let [r, g, b] = rgb.map(|c| c / LEVELS);
+    format!("color({space} {r} {g} {b} / {alpha})")
+}
+
+/// An eight-bit canvas of `size` in `space` on `gpu`, or `None` where that
+/// engine is absent.
+fn page(size: (f32, f32), space: PixelColorSpace, gpu: bool) -> Option<Canvas> {
+    let mut canvas = Canvas::with_options(
+        size.0,
+        size.1,
+        CanvasOptions {
+            color_space: space,
+            ..CanvasOptions::default()
+        },
+    )
+    .expect("a canvas");
+    canvas.set_gpu(gpu);
+    (!gpu || canvas.engine_kind() == EngineKind::Gpu).then_some(canvas)
+}
+
+/// The premultiplied bytes of `canvas` in its own `space`, row by row.
+fn stored(canvas: &mut Canvas, space: PixelColorSpace) -> Vec<u8> {
+    canvas
+        .to_image_data(
+            None,
+            &ImageDataExport {
+                pixels: PixelExportOptions {
+                    color_space: space,
+                    premultiplied: true,
+                    ..PixelExportOptions::default()
+                },
+                ..ImageDataExport::default()
+            },
+        )
+        .expect("pixels")
+        .pixels()
+        .to_vec()
+}
+
+#[test]
+fn a_blurred_rectangles_interior_stores_what_a_fill_of_its_colour_does() {
+    // A rectangle wide against its blur, whose middle is drawn at full
+    // coverage, beside a fill of the same colour: the two store the same
+    // bytes, on every eight-bit space, at every alpha byte and off the byte
+    // grid, where the alpha as given lands a level from the fill's bytes.
+    let size = (40.0f32, 20.0f32);
+    let width = size.0 as usize;
+    let (blurred, filled) = ((10, 10), (30, 10));
+    for gpu in [false, true] {
+        for (space, name) in EIGHT_BIT_SPACES {
+            let Some(mut canvas) = page(size, space, gpu) else {
+                continue;
+            };
+            let mut misses = Vec::new();
+            for (i, alpha) in sweep_alphas().into_iter().enumerate() {
+                let css = css_in(name, off_grid_colour(i), alpha);
+                let ctx = canvas.context();
+                ctx.clear_rect(0.0, 0.0, size.0, size.1);
+                ctx.set_fill_style_css(&css).expect("a colour");
+                ctx.set_filter_css("blur(0.5px)").expect("a filter");
+                ctx.fill_rect(2.0, 2.0, 16.0, 16.0);
+                ctx.set_filter_css("none").expect("no filter");
+                ctx.fill_rect(22.0, 2.0, 16.0, 16.0);
+                let pixels = stored(&mut canvas, space);
+                let at = |(x, y): (usize, usize)| {
+                    let i = (y * width + x) * 4;
+                    [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+                };
+                if at(blurred) != at(filled) {
+                    misses.push(format!(
+                        "{css}: {:?} against {:?}",
+                        at(blurred),
+                        at(filled)
+                    ));
+                }
+            }
+            assert!(
+                misses.is_empty(),
+                "gpu {gpu}, {name}: {} of {} missed, first {:?}",
+                misses.len(),
+                sweep_alphas().len(),
+                &misses[..misses.len().min(4)]
+            );
+        }
+    }
+}
+
+#[test]
+fn a_blurred_rectangle_is_a_fills_bytes_times_its_blur_inside_and_out() {
+    // Narrow against its blur, so the interior's coverage is well under one:
+    // the frame baked around it and the interior filled in it scale the
+    // same bytes, a fill's, and each pixel lies within rounding of those
+    // times the exact blur. A frame and an interior scaling different
+    // colours meet at a step.
+    let (size, sigma) = ((48.0f32, 56.0f32), 3.0f32);
+    let [x, y, w, h] = [20.25f32, 10.5, 6.0, 34.0];
+    let want = expected(
+        (size.0 as usize, size.1 as usize),
+        [x, y, w, h].map(f64::from),
+        f64::from(sigma),
+    );
+    for gpu in [false, true] {
+        for (space, name) in EIGHT_BIT_SPACES {
+            let Some(mut canvas) = page(size, space, gpu) else {
+                continue;
+            };
+            let mut worst_off = 0.0f64;
+            let mut at = String::new();
+            for (i, alpha) in [0.3, 0.5, 0.7, 129.49 / LEVELS, 200.49 / LEVELS]
+                .into_iter()
+                .enumerate()
+            {
+                let rgb = off_grid_colour(i + 1);
+                let css = css_in(name, rgb, alpha);
+                let ctx = canvas.context();
+                ctx.clear_rect(0.0, 0.0, size.0, size.1);
+                ctx.set_fill_style_css(&css).expect("a colour");
+                ctx.set_filter_css(&format!("blur({sigma}px)"))
+                    .expect("a filter");
+                ctx.fill_rect(x, y, w, h);
+                let blurred = stored(&mut canvas, space);
+                // A fill's bytes, read from a fill of the colour.
+                let ctx = canvas.context();
+                ctx.clear_rect(0.0, 0.0, size.0, size.1);
+                ctx.set_filter_css("none").expect("no filter");
+                ctx.fill_rect(0.0, 0.0, size.0, size.1);
+                let fill = stored(&mut canvas, space);
+                let bytes = [fill[0], fill[1], fill[2], fill[3]].map(f64::from);
+                for (p, coverage) in blurred.chunks(4).zip(&want) {
+                    for (got, byte) in p.iter().zip(bytes) {
+                        let off = (f64::from(*got) - byte * coverage).abs();
+                        if off > worst_off {
+                            worst_off = off;
+                            at = css.clone();
+                        }
+                    }
+                }
+            }
+            let tolerance = match gpu {
+                true => GPU_COLOUR_ROUNDED,
+                false => ROUNDED,
+            };
+            assert!(
+                worst_off <= tolerance,
+                "gpu {gpu}, {name}: {worst_off:.3} levels from a fill's bytes \
+                 times the exact blur, at {at}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_blurred_rectangle_on_float_pixels_keeps_its_alpha_as_given() {
+    // Float pixels hold an alpha of 0.5 as itself: the blur scales it, not
+    // the 128 255ths an eight-bit page stores, which lies 0.002 from it. In
+    // sRGB, which keeps no exact colour on floats, and in Display P3, which
+    // does.
+    let sigma = 3.0f32;
+    let size = extent(sigma);
+    let [x, y, w, h] = placed(sigma);
+    let want = expected(
+        (size.0 as usize, size.1 as usize),
+        [x, y, w, h].map(f64::from),
+        f64::from(sigma),
+    );
+    for gpu in [false, true] {
+        for (space, depth) in
+            [PixelColorSpace::Srgb, PixelColorSpace::DisplayP3]
+                .into_iter()
+                .flat_map(|s| [(s, PixelDepth::F16), (s, PixelDepth::F32)])
+        {
+            let mut canvas = Canvas::with_options(
+                size.0,
+                size.1,
+                CanvasOptions {
+                    color_type: depth,
+                    color_space: space,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a canvas");
+            canvas.set_gpu(gpu);
+            if gpu && canvas.engine_kind() != EngineKind::Gpu {
+                continue;
+            }
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgba(0, 0, 0, 0.5)")
+                .expect("a colour");
+            ctx.set_filter_css(&format!("blur({sigma}px)"))
+                .expect("a filter");
+            ctx.fill_rect(x, y, w, h);
+            let data = canvas
+                .to_image_data(
+                    None,
+                    &ImageDataExport {
+                        pixels: PixelExportOptions {
+                            depth: PixelDepth::F32,
+                            ..PixelExportOptions::default()
+                        },
+                        ..ImageDataExport::default()
+                    },
+                )
+                .expect("pixels");
+            let got: Vec<f64> = data
+                .pixels()
+                .chunks(16)
+                .map(|p| {
+                    f64::from(f32::from_ne_bytes([p[12], p[13], p[14], p[15]]))
+                })
+                .collect();
+            let off = worst(&got, &want, TRANSLUCENT);
+            assert!(
+                off <= HALF_FLOAT,
+                "gpu {gpu}, {space:?} {depth:?}: {off:e} from the exact blur \
+                 at 0.5"
+            );
+        }
     }
 }
