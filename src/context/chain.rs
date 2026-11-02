@@ -225,16 +225,17 @@ pub(crate) fn run(
 ) -> Option<Outcome> {
     let base = canvas.local_to_device_as_3x3();
     let (layer, rest) = split(&base)?;
-    let region = region(canvas, steps, content, &layer, &rest)?;
+    let (to_draw, worked) = region(canvas, steps, content, &layer, &rest)?;
+    let on_gpu = is_on_gpu(canvas);
+    let (region, drawn) = placed(canvas, to_draw, rest.is_identity(), on_gpu);
+    let worked = IRect::join(&worked, &region);
     #[cfg(test)]
     RUNS.with(|runs| runs.set(runs.get() + 1));
     #[cfg(test)]
     LARGEST_REGION.with(|largest| {
-        let area = i64::from(region.width()) * i64::from(region.height());
+        let area = i64::from(worked.width()) * i64::from(worked.height());
         largest.set(largest.get().max(area));
     });
-    let on_gpu = is_on_gpu(canvas);
-    let (region, drawn) = placed(canvas, region, rest.is_identity(), on_gpu);
     // The region alone where Skia refuses a layer from the device's origin,
     // as `placed` says.
     let (mut surface, drawn) = std::iter::once(drawn)
@@ -264,6 +265,9 @@ pub(crate) fn run(
         true => Some(snapshot),
         false => subset(&snapshot, context.as_mut(), read),
     }?;
+    if worked != region {
+        image = padded(context.as_mut(), &image, region, worked)?;
+    }
 
     let scale = (layer.scale_x().abs(), layer.scale_y().abs());
     let last = steps.len().saturating_sub(1);
@@ -304,9 +308,26 @@ pub(crate) fn run(
     }
     Some(Outcome {
         image,
-        region,
+        region: worked,
         rest,
     })
+}
+
+/// `image`, which holds `region` of the layer, with nothing around it out
+/// to `worked`: the pixels the chain works on that nothing is painted in.
+fn padded(
+    context: Option<&mut Gpu>,
+    image: &Image,
+    region: IRect,
+    worked: IRect,
+) -> Option<Image> {
+    let info = image.image_info().with_dimensions(worked.size());
+    let mut surface = make_surface(context, &info)?;
+    let canvas = surface.canvas();
+    canvas.clear(Color::TRANSPARENT);
+    let at = (region.left - worked.left, region.top - worked.top);
+    canvas.draw_image(image, (at.0 as f32, at.1 as f32), None);
+    Some(surface.image_snapshot())
 }
 
 #[cfg(test)]
@@ -474,26 +495,35 @@ fn layer_surface(
         .or_else(|| started::raster(&info, None, None))
 }
 
-/// The layer's bounds, in its own pixels: the pixels a visible result is
-/// made from, and the visible result itself. With the clip mapped back onto
-/// the layer and `content` the bounds of what is painted, that is what is
-/// painted within the chain's reach of the clip, and the clip within reach
-/// of what is painted -- and so what lies between the two, which a chain
-/// of several blurs passes through. Where nothing bounds what is painted,
-/// the clip widened by the reach. `None` where nothing would show.
+/// The layer's bounds, in its own pixels: the region drawn into, and the
+/// region the chain works on, which holds it. With the clip mapped back
+/// onto the layer and `content` the bounds of what is painted, what is
+/// drawn is what is painted within the chain's reach of the clip, and the
+/// clip within reach of what is painted -- and so what lies between the
+/// two. The chain works on that and what [`worked_on`] adds past both:
+/// nothing is painted there, but a step's output there can reach what is
+/// shown -- a drop shadow's offset brings in the blur made past the page's
+/// edge. Cut at what is drawn, a shadow 2 pixels down blurred by 8 lost up
+/// to 1.56 levels of its tail along the top of the page. Where nothing
+/// bounds what is painted, both are the clip widened by the reach. `None`
+/// where nothing would show.
 ///
-/// Bounded this tightly rather than by the clip widened by the reach,
-/// which held the same result, for the layer's size, and on the GPU for
-/// where it starts: there [`placed`] keeps the layer where the region puts
-/// it, and a layer starting where the page does, as it does for a draw
-/// within reach of the page's edge, draws the edge as the page does.
+/// What is drawn is not widened to what the chain works on, because where
+/// the layer starts decides how Skia draws into it -- see [`placed`]: a
+/// rounded rectangle 30 pixels from the top of the page, drawn into a layer
+/// starting above the page for a blur of 8, rounded 28 pixels of the blur
+/// to the other side of a half-level from the blur of what the page draws.
+///
+/// Bounded by what is painted as well as the clip, for the layer's size:
+/// a 15 by 12 rect under a drop shadow works on 30 by 27 pixels rather
+/// than a page's worth.
 fn region(
     canvas: &SkCanvas,
     steps: &[Step],
     content: Option<Rect>,
     layer: &Matrix,
     rest: &Matrix,
-) -> Option<IRect> {
+) -> Option<(IRect, IRect)> {
     // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
     // Re-check: cargo test skia_rasterises_a_path_its_clip_cuts_another_way
     //
@@ -532,25 +562,148 @@ fn region(
         Step::Shadow { .. } => true,
         Step::Image { filter, .. } => filter.can_compute_fast_bounds(),
     });
-    let region = match content.filter(|_| bounded) {
+    let (drawn, worked) = match content.filter(|_| bounded) {
         Some(content) => {
             // A pixel either side for anti-aliasing.
             let painted = layer.map_rect(content).0.with_outset((1.0, 1.0));
             let meet = |mut a: Rect, b: Rect| a.intersect(b).then_some(a);
-            let read = meet(painted, clip.with_outset(reach));
-            let shown = meet(clip, painted.with_outset(reach));
-            match (read, shown) {
-                (Some(mut read), Some(shown)) => {
-                    read.join(shown);
-                    read
-                }
-                _ => return None,
+            let read = meet(painted, clip.with_outset(reach))?;
+            let shown = meet(clip, painted.with_outset(reach))?;
+            let mut drawn = read;
+            drawn.join(shown);
+            let worked =
+                worked_on(steps, layer, painted, clip).unwrap_or(drawn);
+            (drawn, worked)
+        }
+        None => (clip.with_outset(reach), clip.with_outset(reach)),
+    };
+    let (drawn, worked): (IRect, IRect) =
+        (drawn.round_out(), worked.round_out());
+    (!drawn.is_empty()).then_some((drawn, worked))
+}
+
+/// What one step does to where pixels lie, in layer pixels.
+#[derive(Clone, Copy)]
+enum Spread {
+    /// Each pixel reaches as far as this along each axis, either way.
+    Grow(Vector),
+    /// What came in stays, and a copy of it grown by `grow` is moved by
+    /// `by`: a drop shadow.
+    Cast { grow: Vector, by: Vector },
+}
+
+impl Spread {
+    /// How `step` moves pixels on a layer scaled by `layer`: a blur out to
+    /// [`REACH_SIGMAS`] of its sigmas, as [`reach`] counts it.
+    fn of(step: &Step, layer: &Matrix) -> Self {
+        let (sx, sy) = (layer.scale_x().abs(), layer.scale_y().abs());
+        let taps =
+            |sigma: f32, scale: f32| match sigma.is_finite() && sigma > 0.0 {
+                true => (REACH_SIGMAS * f64::from(sigma * scale)).ceil() as f32,
+                false => 0.0,
+            };
+        match step {
+            Step::Blur(sigma) => {
+                Spread::Grow(Vector::new(taps(*sigma, sx), taps(*sigma, sy)))
+            }
+            Step::Colour(_) => Spread::Grow(Vector::default()),
+            // A pixel either side for an offset off the pixel grid, which
+            // the shadow is moved by with linear sampling.
+            Step::Shadow { offset, sigma, .. } => Spread::Cast {
+                grow: Vector::new(
+                    taps(*sigma, sx) + 1.0,
+                    taps(*sigma, sy) + 1.0,
+                ),
+                by: Vector::new(offset.x * sx, offset.y * sy),
+            },
+            Step::Image { filter, .. } => {
+                Spread::Grow(image_reach(filter, layer))
             }
         }
-        None => clip.with_outset(reach),
-    };
-    let region: IRect = region.round_out();
-    (!region.is_empty()).then_some(region)
+    }
+
+    /// `rect` after the step: where what lay in it can lie.
+    fn forward(self, rect: Rect) -> Rect {
+        match self {
+            Spread::Grow(grow) => rect.with_outset(grow),
+            Spread::Cast { grow, by } => {
+                Rect::join2(rect, rect.with_outset(grow).with_offset(by))
+            }
+        }
+    }
+
+    /// `rect` before the step: where what lands in it can come from.
+    fn backward(self, rect: Rect) -> Rect {
+        match self {
+            Spread::Grow(grow) => rect.with_outset(grow),
+            Spread::Cast { grow, by } => {
+                Rect::join2(rect, rect.with_offset(-by).with_outset(grow))
+            }
+        }
+    }
+}
+
+/// The pixels a chain of `steps` works on, given what is `painted` and the
+/// `clip`: at every stage, where what is painted can lie by then and where
+/// what is shown can still come from, met and joined. That holds the
+/// pixels a drop shadow brings onto the page from past it, where nothing
+/// is painted and nothing is shown, and no farther: a shadow moved 1e38
+/// pixels away meets nothing shown, where the reach would be 1e38 either
+/// way.
+///
+/// `None` where nothing meets, or where the region is past what a layer's
+/// size can hold, as only steps on either side of a stage that each reach
+/// that far ask for -- two blurs of 1e38, say, which leave nothing a level
+/// could show; the chain then works on what is drawn.
+fn worked_on(
+    steps: &[Step],
+    layer: &Matrix,
+    painted: Rect,
+    clip: Rect,
+) -> Option<Rect> {
+    let spreads: Vec<Spread> =
+        steps.iter().map(|step| Spread::of(step, layer)).collect();
+    /// `start`, then where it lies after each of `order` in turn.
+    fn stages(
+        start: Rect,
+        step: fn(Spread, Rect) -> Rect,
+        order: impl Iterator<Item = Spread>,
+    ) -> Vec<Rect> {
+        std::iter::once(start)
+            .chain(order.scan(start, move |at, spread| {
+                *at = step(spread, *at);
+                Some(*at)
+            }))
+            .collect()
+    }
+    let lies = stages(painted, Spread::forward, spreads.iter().copied());
+    let mut comes =
+        stages(clip, Spread::backward, spreads.iter().rev().copied());
+    comes.reverse();
+    let meet = |mut a: Rect, b: Rect| a.intersect(b).then_some(a);
+    // Within a drop shadow, its blur before the offset moves it: what is
+    // painted grown, and what is shown moved back.
+    let shadows = spreads.iter().enumerate().filter_map(|(i, spread)| {
+        let Spread::Cast { grow, by } = *spread else {
+            return None;
+        };
+        meet(lies[i].with_outset(grow), comes[i + 1].with_offset(-by))
+    });
+    let worked = lies
+        .iter()
+        .zip(&comes)
+        .filter_map(|(lies, comes)| meet(*lies, *comes))
+        .chain(shadows)
+        .reduce(|mut all, rect| {
+            all.join(rect);
+            all
+        })?;
+    // Half of `i32::MAX`, so that a width across the origin still fits.
+    let holds = |at: f32| at.is_finite() && at.abs() < (i32::MAX / 2) as f32;
+    [worked.left, worked.top, worked.right, worked.bottom]
+        .into_iter()
+        .all(holds)
+        .then_some(worked)
 }
 
 /// How far, in canvas pixels along each axis, the chain's steps together
@@ -1116,12 +1269,67 @@ fn to_raster(context: Option<&Gpu>, image: &Image) -> Option<Image> {
 #[cfg(test)]
 mod tests {
     use skia_safe::{
-        Color, ImageInfo, Matrix, Paint, PathBuilder, PictureRecorder, Rect,
-        Surface,
+        Color, Color4f, ColorSpace, ImageInfo, Matrix, Paint, PathBuilder,
+        PictureRecorder, Rect, Surface, Vector,
     };
 
-    use super::{Depth, REFUSE_PLACED, Step, apply};
+    use super::{Depth, REFUSE_PLACED, Step, apply, worked_on};
     use crate::{prelude::*, started};
+
+    /// A drop shadow in black, moved by `(dx, dy)` and blurred by `sigma`.
+    fn shadow(dx: f32, dy: f32, sigma: f32) -> Step {
+        Step::Shadow {
+            offset: Vector::new(dx, dy),
+            sigma,
+            colour: Color4f::new(0.0, 0.0, 0.0, 1.0),
+            space: ColorSpace::new_srgb(),
+        }
+    }
+
+    /// A triangle's bounds 15 pixels from the top of a 160 by 100 page.
+    const NEAR_THE_TOP: Rect = Rect {
+        left: 19.0,
+        top: 14.0,
+        right: 142.0,
+        bottom: 86.0,
+    };
+
+    /// The 160 by 100 page [`NEAR_THE_TOP`] lies on.
+    const PAGE: Rect = Rect {
+        left: 0.0,
+        top: 0.0,
+        right: 160.0,
+        bottom: 100.0,
+    };
+
+    #[test]
+    fn a_shadow_s_chain_works_on_its_blur_past_the_page() {
+        // The shadow's rows 0 and 1 are its blur's rows -2 and -1.
+        let steps = [shadow(3.0, 2.0, 8.0)];
+        let id = Matrix::new_identity();
+        let worked =
+            worked_on(&steps, &id, NEAR_THE_TOP, PAGE).expect("a region");
+        assert!(worked.top <= -2.0, "{worked:?}");
+        assert!(worked.left <= -3.0, "{worked:?}");
+    }
+
+    #[test]
+    fn a_shadow_moved_far_away_adds_nothing_to_what_a_chain_works_on() {
+        let steps = [shadow(1e38, 2.0, 8.0)];
+        let id = Matrix::new_identity();
+        let worked =
+            worked_on(&steps, &id, NEAR_THE_TOP, PAGE).expect("a region");
+        assert!(worked.right < 200.0, "{worked:?}");
+    }
+
+    #[test]
+    fn a_chain_past_any_layer_works_on_what_is_drawn() {
+        // Two blurs each reaching past what an `i32` holds: the region
+        // between them is that wide.
+        let steps = [Step::Blur(1e38), Step::Blur(1e38)];
+        let id = Matrix::new_identity();
+        assert_eq!(worked_on(&steps, &id, NEAR_THE_TOP, PAGE), None);
+    }
 
     /// A side whose square of F32 pixels passes the `i32::MAX` bytes Skia
     /// allows a raster surface, so that no layer from the origin of a
