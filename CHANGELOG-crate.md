@@ -407,6 +407,8 @@ read the math functions and every length unit.
 
 ### Fixed
 
+- **A blurred path on an eight-bit wide-gamut canvas stores a fill's bytes inside it.** ([#433](https://github.com/l7aromeo/meo-skia-canvas/issues/433))
+
 - A drop shadow keeps the tail of its blur along the edge of the `Canvas` its offset moves it away from, on every `Canvas` and either engine ([#454](https://github.com/l7aromeo/meo-skia-canvas/issues/454)).
 
 - A filtered draw on an F16 or F32 canvas outside sRGB filters what it covers rather than the whole canvas: 50 rects under a drop shadow drew in about 26 ms rather than 1.7 s on F16 Display P3 ([#461](https://github.com/l7aromeo/meo-skia-canvas/issues/461)).
@@ -612,8 +614,7 @@ read the math functions and every length unit.
   global alpha. An sRGB canvas is unchanged. Chrome converts a colour onto
   such a canvas through the same approximation, so where that crosses a
   rounding boundary Chrome is a level off and this is not -- see
-  docs/browser-differences.md. Not yet exact there: a blurred path, which
-  stores a level off a fill of its colour on an sRGB canvas too.
+  docs/browser-differences.md.
 
   The exact colour is drawn as a plain paint colour where Skia lands it on
   its bytes, which each thread finds once per colour by drawing it onto a
