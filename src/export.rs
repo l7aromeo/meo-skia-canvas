@@ -59,8 +59,20 @@ impl VectorFeatures {
     /// colour space, so a tile on a Display P3 page blended in sRGB's
     /// numbers. Embedded instead, as the page composites it -- see
     /// `context::page::Page::embed_raster`. Never without
-    /// [`Self::EXOTIC_SHADER`].
+    /// [`Self::EXOTIC_SHADER`], and never with
+    /// [`Self::CANVAS_PATTERN_ALIGNED`].
     pub(crate) const CANVAS_PATTERN: Self = Self(1 << 9);
+    /// A canvas's pattern whose tiles land on whole device pixels where it
+    /// is drawn -- see `context::layer::TileSource::lands_whole`. A PDF
+    /// paints it from the tile rasterized at the scale it is played at,
+    /// which Skia writes as PDF tiling: one tile however far the draw
+    /// repeats it, where an embedded draw grows with its area and the
+    /// density. Whether its tiles still land whole in the document -- at the
+    /// export's density, under a canvas it is drawn into, at full size --
+    /// is asked again there, and where they do not it is embedded as
+    /// [`Self::CANVAS_PATTERN`] is -- see `context::layer::tiles_exactly`.
+    /// Never without [`Self::EXOTIC_SHADER`].
+    pub(crate) const CANVAS_PATTERN_ALIGNED: Self = Self(1 << 10);
     /// A sweep gradient, a gradient mixed in a working space of its own, a
     /// procedural shader, or a canvas's pattern, which is a picture shader.
     /// SVG names four paint servers and none of these is among them.
@@ -119,6 +131,11 @@ impl VectorFeatures {
     /// This, less what `other` names.
     pub(crate) fn without(self, other: Self) -> Self {
         Self(self.0 & !other.0)
+    }
+
+    /// Whether this names everything `other` does.
+    pub(crate) fn holds(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
     }
 
     pub(crate) fn any(self) -> bool {

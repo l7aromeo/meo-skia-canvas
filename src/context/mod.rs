@@ -1288,6 +1288,22 @@ impl Context2D {
         // it.
         let alone =
             !beyond && steps.is_none() && paint.image_filter().is_none();
+        // Painted in a document from the tile where that lands on whole
+        // device pixels and nothing composites the draw but its own alpha
+        // and blend mode -- see `PatternDraw::aligned`.
+        let aligned = alone
+            && !self.casts_shadow()
+            && paint.color_filter().is_none()
+            && source.lands_whole(
+                &Matrix::concat(&self.state.matrix, &pattern_matrix),
+                repeat,
+            );
+        let features = match aligned {
+            true => features
+                .without(VectorFeatures::CANVAS_PATTERN)
+                .with(VectorFeatures::CANVAS_PATTERN_ALIGNED),
+            false => features,
+        };
 
         // Recorded over the page and as far again as the filter and the
         // shadow reach: a picture keeps nothing of a draw past its bounds,
@@ -1335,6 +1351,7 @@ impl Context2D {
                 paint,
                 clip: None,
                 replay,
+                aligned,
             });
             let unit = Entries::new(
                 vec![Layer::Pattern(Arc::clone(&tile))],
@@ -3744,8 +3761,10 @@ impl Dye {
             // SVG names no paint server for: a draw dyed by one wrote a bare
             // path, black. Skia's PDF backend rasterizes one at the wrong
             // scale and in the wrong space -- see
-            // `VectorFeatures::CANVAS_PATTERN`. An image's is an image
-            // shader, which both write.
+            // `VectorFeatures::CANVAS_PATTERN`. A draw whose tiles land on
+            // whole device pixels asks for `CANVAS_PATTERN_ALIGNED` in its
+            // place -- see `Self::files_through_pattern`. An image's is an
+            // image shader, which both write.
             // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
             // Re-check: cargo test a_pdf_pattern_is_embedded_at_the_density
             // with `CANVAS_PATTERN` left out of `PDF_CANNOT`.
