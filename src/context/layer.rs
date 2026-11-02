@@ -2912,7 +2912,9 @@ impl BlurOp {
     /// Draws the run exactly where it is one [`blur_mask::draw_rect`] takes:
     /// anti-aliased filled rectangles, undithered, that `canvas`'s transform
     /// keeps rectangles, on a canvas with pixels. Returns whether it drew;
-    /// `false` leaves `canvas` as it found it.
+    /// `false` leaves `canvas` as it found it. On an eight-bit page an exact
+    /// colour is blurred on the bytes a fill of it stores, as the chain's
+    /// gain blurs a path's in [`Self::playback`].
     ///
     /// Dithering is left to the blur that honours it: the exact blur is a
     /// gradient rounded once, and a dither would be noise added on top that

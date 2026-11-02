@@ -972,7 +972,9 @@ has a closed form, and a flat-colour rectangle that stays one on the device is
 drawn here as exactly that, averaged over each pixel: within half a level on
 8-bit pixels on the CPU engine, within 0.56 of one on the GPU engine, whose
 fragments hand the value on as a half float, and to the surface's precision on
-F16 and F32. Chrome 152 approximates it, and its two canvases approximate it
+F16 and F32. On an 8-bit canvas the blur scales the bytes a fill of the colour
+stores, as a blurred path's does, so that its interior stores what the fill
+does: 128 of `rgba(0, 0, 0, 0.5)`, where the alpha as given stored 127. Chrome 152 approximates it, and its two canvases approximate it
 differently. A black 60 by 40 rectangle at a fractional position, worst levels
 from the exact blur:
 

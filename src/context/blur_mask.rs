@@ -366,7 +366,8 @@ impl Baked {
     }
 
     /// Draws the rectangle with its extent's origin at `origin` in device
-    /// pixels, the interior in `color`.
+    /// pixels, the interior in `color`, or in `exact` placed at its alpha as
+    /// [`draw_rect`] bakes it.
     fn draw(
         &self,
         canvas: &SkCanvas,
@@ -391,15 +392,20 @@ impl Baked {
             // bake. The shader's paint keeps an alpha of one, so a faint
             // interior on float pixels is not dropped either -- see the
             // UPSTREAM note on `context::faint::Faint::drawable`.
+            //
+            // The exact colour is placed at the draw's alpha, as the bands
+            // were baked in it, and scaled by the coverage after: placed at
+            // the coverage's alpha instead, it rounds apart from the bands
+            // beside it wherever the interior is not at full coverage.
             let mut paint = Paint::default();
             match exact
-                .map(|exact| exact.at(fill.a))
+                .map(|exact| exact.at(color.a))
                 .and_then(|(exact, alpha)| Some((exact.shader()?, alpha)))
             {
                 // On a page that keeps a recording for pixels, where on
                 // floats a paint's alpha is not dropped.
                 Some((shader, alpha)) => {
-                    paint.set_shader(shader).set_alpha_f(alpha);
+                    paint.set_shader(shader).set_alpha_f(alpha * coverage);
                 }
                 None => {
                     paint.set_shader(shaders::color_in_space(
@@ -765,9 +771,11 @@ pub(crate) fn on_gpu(_canvas: &SkCanvas) -> bool {
 /// `false`, having drawn nothing, where a surface or a shader could not be
 /// made.
 ///
-/// With `exact`, the colour is that, held in the page's own space, at
-/// `color`'s alpha: what a page that keeps a recording for pixels paints a
-/// flat colour in -- see [`ExactColour`]. Converted from sRGB instead, it
+/// With `exact`, the colour is that, held in the page's own space and placed
+/// at `color`'s alpha by [`ExactColour::at`] -- on an eight-bit page on the
+/// bytes a fill of it stores, as the GPU places it too: what a page that
+/// keeps a recording for pixels paints a flat colour in -- see
+/// [`ExactColour`]. Converted from sRGB instead, it
 /// lands on the 64-ulp grid Skia's conversion leaves it on. On the CPU the
 /// exact colour is baked as the surface's own components, so it is taken
 /// only on a surface in its space: a page played onto another, as a canvas
@@ -841,10 +849,18 @@ pub(crate) fn draw_rect(
                 Axis::within(rect.left, rect.right, sigma, precision, cols);
             let down =
                 Axis::within(rect.top, rect.bottom, sigma, precision, rows);
+            // An exact colour placed at its alpha, as a fill of it is: on an
+            // eight-bit page, on the bytes the fill stores, so that the blur
+            // scales those, as a blurred path's does -- see
+            // `layer::BlurOp::playback` -- and the interior stores what the
+            // fill does. Scaled at the alpha as given, the interior of
+            // `rgba(0, 0, 0, 0.5)` lay just under 127.5 and stored 127, where
+            // a fill stores 128.
             let premul = match exact {
                 Some(exact) => {
-                    let [r, g, b] = exact.rgb.map(|c| c * color.a);
-                    Some([r, g, b, color.a])
+                    let (placed, alpha) = exact.at(color.a);
+                    let [r, g, b] = placed.rgb.map(|c| c * alpha);
+                    Some([r, g, b, alpha])
                 }
                 None => premultiplied(color, &target),
             };

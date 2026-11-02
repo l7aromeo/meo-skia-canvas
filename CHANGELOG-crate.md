@@ -409,6 +409,8 @@ read the math functions and every length unit.
 
 - **A blurred path on an eight-bit wide-gamut canvas stores a fill's bytes inside it.** ([#433](https://github.com/l7aromeo/meo-skia-canvas/issues/433))
 
+- A blurred rectangle on an eight-bit `Canvas` blurs the bytes a fill of its colour stores, as a blurred path does: `rgba(0, 0, 0, 0.5)` no longer lands a level under the fill's 128 on the CPU engine ([#473](https://github.com/l7aromeo/meo-skia-canvas/issues/473)).
+
 - A drop shadow keeps the tail of its blur along the edge of the `Canvas` its offset moves it away from, on every `Canvas` and either engine ([#454](https://github.com/l7aromeo/meo-skia-canvas/issues/454)).
 
 - A filtered draw on an F16 or F32 canvas outside sRGB filters what it covers rather than the whole canvas: 50 rects under a drop shadow drew in about 26 ms rather than 1.7 s on F16 Display P3 ([#461](https://github.com/l7aromeo/meo-skia-canvas/issues/461)).
