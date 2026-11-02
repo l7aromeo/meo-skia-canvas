@@ -1916,8 +1916,8 @@ impl Clipped {
 /// `canvas` for `target`, in order: each as [`Layer::playback`] plays it,
 /// but for consecutive pieces of one run played into a document or a
 /// recording, which it plays under their clip once -- see [`Clipped`] --
-/// all but a recording's cut draws. On the GPU it counts the image-filtered
-/// draws it plays, so that the playback flushes every so many -- see
+/// all but a recording's cut draws. On the GPU it counts the layers it
+/// renders offscreen, so that the playback flushes every so many -- see
 /// [`pacing`].
 ///
 /// A recording is what a canvas drawn into another, or used as a pattern,
@@ -1955,7 +1955,7 @@ pub(crate) fn play_entries(
             entry => {
                 entry.playback(canvas, target);
                 if let Some(features) = features.get(at).filter(|_| paced) {
-                    pacing::played(canvas, filtered_draws(entry, *features));
+                    pacing::played(canvas, offscreen_layers(entry, *features));
                 }
                 at += 1;
                 continue;
@@ -1977,17 +1977,18 @@ pub(crate) fn play_entries(
     }
 }
 
-/// The image-filtered draws `entry`, asking for `features` of a vector
-/// backend, holds, as a GPU playback paces its flushes by them -- see
-/// [`pacing`]: none where it asks for no image filter, a picture's ops,
-/// which bound its draws from above -- a filled rectangle under an image
-/// filter records one, under a shadow five -- and one for any other entry,
-/// whose own entries a playback counts as it plays them.
-fn filtered_draws(entry: &Layer, features: VectorFeatures) -> usize {
-    if !features.refused_by(VectorFeatures::IMAGE_FILTER) {
-        return 0;
-    }
+/// The layers a GPU renders offscreen for `entry`, asking for `features` of
+/// a vector backend, besides those of the entries it holds, which a playback
+/// counts as it plays them, as it paces its flushes by them -- see
+/// [`pacing`]: one for a group, which opens a layer on the GPU unless it is
+/// [`Composite::Plain`], counted all the same; for an image-filtered picture
+/// its ops, which bound its draws from above -- a filled rectangle under an
+/// image filter records one, under a shadow five -- and one for any other
+/// image-filtered entry; and none for any other.
+fn offscreen_layers(entry: &Layer, features: VectorFeatures) -> usize {
     match entry {
+        Layer::Group(_) => 1,
+        _ if !features.refused_by(VectorFeatures::IMAGE_FILTER) => 0,
         Layer::Picture(picture) => picture.approximate_op_count_nested(true),
         Layer::Targeted(pictures) => {
             pictures.0.approximate_op_count_nested(true)
