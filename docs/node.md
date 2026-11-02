@@ -14,10 +14,6 @@ This document covers the Node addon path. For the Rust crate, see the project [R
   <a href="https://github.com/l7aromeo/meo-skia-canvas/issues">Discussion Forum</a>
 </div>
 
-> The links above point at the upstream skia-canvas project, whose API this package follows. Report
-> issues specific to this fork at
-> [l7aromeo/meo-skia-canvas](https://github.com/l7aromeo/meo-skia-canvas/issues) instead.
-
 ---
 
 Skia Canvas is a Node.js implementation of the HTML Canvas drawing [API](https://developer.mozilla.org/en-US/docs/Web/API/Canvas_API) for both on- and off-screen rendering. Since it uses Google's [Skia](https://skia.org) graphics engine, its output is very similar to Chrome's [`<canvas>`](https://html.spec.whatwg.org/multipage/canvas.html) element -- though it's also capable of things the browser's Canvas still can't achieve.
@@ -407,10 +403,10 @@ are serial.
 round-trip, and `@napi-rs/canvas` does not export PDF. `canvaskit-wasm` wins Complex shapes with an
 asterisk — it renders the shapes but positions them incorrectly.
 
-**This fork tracks upstream `skia-canvas` within measurement noise**, between −6.4% and +1.3% across
+**This fork tracked upstream `skia-canvas` within measurement noise**, between −6.4% and +1.3% across
 the ten tests. That is the expected result and the reason there is no performance section here
 claiming otherwise: this fork changed correctness, not hot paths. Where it differs from the other
-libraries, it differs for the same reasons upstream does.
+libraries, it differed for the same reasons upstream did.
 
 ### Startup
 
@@ -427,7 +423,7 @@ cache before the timer starts and the test reports a cache hit — 0.35 ms here,
 a genuine first import in the same process. Measured directly instead, a fresh `require` of each
 package's CommonJS entry costs **11.7–13.8 ms** for `skia-canvas` and **20.5–20.9 ms** for this
 fork. The `dlopen` of the native binary is identical at 2.9 ms; the difference is this fork's larger
-JavaScript module graph — the filter, shader and paragraph classes upstream does not ship. It
+JavaScript module graph — the filter, shader and paragraph classes upstream did not ship. It
 matters for short-lived processes such as Lambda and not at all for a long-running server.
 
 For this library's own numbers — GPU against CPU, what a float `colorType` costs, encode times and
