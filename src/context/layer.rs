@@ -442,6 +442,25 @@ fn landed(
     })
 }
 
+/// The verdict [`landed`] finds for `want`, premultiplied bytes, on an sRGB
+/// page, found without its draw: Skia hands an sRGB paint colour over to an
+/// sRGB page unconverted, so the colour `landed` tries first lands within
+/// `f32` rounding of its bytes, and it takes that one as it handed it over.
+/// `an_srgb_verdict_is_the_one_the_probe_finds` holds the two equal at every
+/// alpha byte, with each channel at every byte it can store.
+fn unconverted(want: [u8; 4]) -> Verdict {
+    let stored = f64::from(want[3]);
+    let alpha = (stored / f64::from(u8::MAX)) as f32;
+    if want[3] == 0 {
+        return Some((
+            Color4f::new(0.0, 0.0, 0.0, 0.0),
+            ColorSpace::new_srgb(),
+        ));
+    }
+    let [r, g, b] = [0, 1, 2].map(|i| (f64::from(want[i]) / stored) as f32);
+    Some((Color4f::new(r, g, b, alpha), ColorSpace::new_srgb()))
+}
+
 /// The SkSL of the step [`ExactColour::dye`] can end with: `plain` at the
 /// source's alpha where Skia left `probe` as it was handed over, and the
 /// source unchanged where it converted it. Skia converts a `layout(color)`
@@ -608,7 +627,9 @@ impl ExactColour {
     /// levels on a Rec. 2020 page, and `color(a98-rgb 0 1 0)` one on a
     /// Display P3 page. So each placed colour is drawn once, as a paint's
     /// colour, onto a pixel of the page's space -- see [`landed`] -- and
-    /// taken only where it lands; the verdict is kept per thread.
+    /// taken only where it lands; the verdict is kept per thread. An sRGB
+    /// page converts nothing, and takes the placed colour without the draw
+    /// -- see [`unconverted`].
     pub fn verified_paint(&self, paint: &Paint) -> Option<Paint> {
         let (placed, alpha) = self.at(paint.alpha_f());
         let levels = f64::from(u8::MAX);
@@ -623,18 +644,21 @@ impl ExactColour {
                 stored as u8,
             ],
         );
-        let (colour, space) = VERDICTS.with(|verdicts| {
-            let mut verdicts = verdicts.borrow_mut();
-            let slot = &mut verdicts[verdict_slot(key)];
-            if let Some((filed, verdict)) = slot
-                && *filed == key
-            {
-                return verdict.clone();
-            }
-            let verdict = landed(&self.space, self.pixels, key.1);
-            *slot = Some((key, verdict.clone()));
-            verdict
-        })?;
+        let (colour, space) = match self.pixels {
+            PixelColorSpace::Srgb => unconverted(key.1),
+            _ => VERDICTS.with(|verdicts| {
+                let mut verdicts = verdicts.borrow_mut();
+                let slot = &mut verdicts[verdict_slot(key)];
+                if let Some((filed, verdict)) = slot
+                    && *filed == key
+                {
+                    return verdict.clone();
+                }
+                let verdict = landed(&self.space, self.pixels, key.1);
+                *slot = Some((key, verdict.clone()));
+                verdict
+            }),
+        }?;
         let mut paint = paint.clone();
         paint.set_color4f(colour, &space);
         Some(paint)
@@ -672,9 +696,9 @@ impl ExactColour {
     /// interior stores the exact product and its edges take the contrast of
     /// the next bucket.
     ///
-    /// The colour is handed over as it is, without the draw
-    /// [`Self::verified_paint`] makes to find where it lands: Skia lands an
-    /// sRGB paint colour on an sRGB page unconverted. `None` on any other
+    /// The colour is handed over as it is, as [`Self::verified_paint`] hands
+    /// its own over on such a page: Skia lands an sRGB paint colour on an
+    /// sRGB page unconverted -- see [`unconverted`]. `None` on any other
     /// page, and for a paint with a colour filter of its own.
     pub fn nearest_text_paint(&self, paint: &Paint) -> Option<Paint> {
         if !self.bytes
@@ -3305,6 +3329,30 @@ mod verdict_tests {
         for bytes in [first, other, first, other] {
             assert_eq!(verified(bytes), own(bytes), "{bytes:?}");
         }
+    }
+
+    /// An sRGB page takes the verdict [`landed`]'s draw would find, at every
+    /// alpha byte, with each channel in turn at every byte it can store
+    /// there.
+    #[test]
+    fn an_srgb_verdict_is_the_one_the_probe_finds() {
+        let srgb = ColorSpace::new_srgb();
+        let wants = (0..=u8::MAX).flat_map(|a| {
+            (0..=a).flat_map(move |v| {
+                let (w, m) = (a - v, v / 2 + (a - v) / 2);
+                [[v, w, m, a], [m, v, w, a], [w, m, v, a]]
+            })
+        });
+        let mut checked = 0;
+        for want in wants {
+            assert_eq!(
+                unconverted(want),
+                landed(&srgb, PixelColorSpace::Srgb, want),
+                "{want:?}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 3 * 256 * 257 / 2);
     }
 
     /// `css` on an eight-bit page in `page`, as the exact colour and as the
