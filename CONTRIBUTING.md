@@ -5,10 +5,10 @@
 Much of this code is inherited from [skia-canvas](https://github.com/samizdatco/skia-canvas), by way
 of [phyron-skia-canvas](https://github.com/phyrondev/phyron-skia-canvas).
 
-Send it here. This fork used to point general fixes upstream, which no longer makes sense: phyron is
-dormant, and samizdatco is far enough behind on `skia-safe` that this tree does not merge from them
-— anything worth taking arrives by cherry-pick. A change with no home upstream and no home here has
-no home at all, so if it is right for this tree, open it against this tree.
+Send it here. This tree does not merge from the projects it forked from: a fix there is
+cherry-picked on its own merits and rewritten against this tree's `skia-safe`, whose version
+`Cargo.toml` names, since theirs may differ. If a change is right for this tree, open it against
+this tree.
 
 If your change would also help samizdatco's users, sending it to them as well is welcome. It is not
 a condition of it landing here.

@@ -165,7 +165,7 @@ Against `canvas`, `@napi-rs/canvas`, `canvaskit-wasm` and upstream `skia-canvas`
 2026-08-12 with samizdatco's [canvas-benchmarks] harness: ten drawing and export tests, each
 library rendering the identical seeded scene in a fresh process.
 
-This fork tracks upstream `skia-canvas` within measurement noise. Against the rest it is the fastest
+This fork tracked upstream `skia-canvas` within measurement noise. Against the rest it is the fastest
 of all five on bezier stroking, SVG export, PDF export and image scaling, and beats
 `@napi-rs/canvas` on seven of the ten tests — `@napi-rs/canvas` takes the three lightest scenes, by
 6–8%. Only this library and `canvas` export PDF at all.
@@ -174,7 +174,7 @@ Run asynchronously, where iterations resolve on the worker pool, it is several t
 serial result here; no other library in the comparison offers that mode.
 
 **[Full tables, method and caveats](node.md#benchmarks)** — including what the numbers do not say,
-and why the startup figure upstream publishes cannot be measured by that harness.
+and why that harness could not measure upstream's startup.
 
 For this library on its own — GPU against CPU, what a float `colorType` costs, encode times and
 memory per canvas — run `just bench`.

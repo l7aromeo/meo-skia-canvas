@@ -132,31 +132,13 @@ and quietly agrees with whatever you already believed. Too tight, and it returns
 nothing -- which reads as "the tree is clean" rather than "the pattern is
 broken", and that is the direction that ends a sweep early.
 
-So before acting on a result: run the pattern against something it **must**
-match, and against something it **must not**. If you cannot make it hit a case
-you know is there, the pattern is wrong and the empty result means nothing. If
-it hits a case you know is absent, so does everything else it reported.
-
-Four ways this has actually gone wrong here, all in one sweep:
-
-- **The pattern matched the tool's own output.** `grep -n` prefixes each line
-  with `file:line:`, and a pattern looking for `\.(rs|js):[0-9]+` matched that
-  prefix rather than anything in the file, so every line "matched".
-- **A substring where a word was meant.** `grep "eight"` matches `Height`. The
-  sweep for a stale count came back full of hits about eight-bit colour. `-w`
-  is the difference.
-- **A character class that stopped early.** `as [A-Z][A-Za-z]*` does not match
-  `FillPath2D`, because the class stops at the digit -- so a survey of declared
-  verbs silently omitted every name carrying a number, and the conclusion drawn
-  from it was wrong.
-- **A count pattern that also matches the negative case.** `[1-9][0-9]* failed`
-  looks like it finds failures, and matches `10 passed; 0 failed` on the `10`.
-
-Prefer the tool that understands the structure over the one matching text:
-`git grep -w`, `--fixed-strings`, the language's own parser, or a script that
-walks the items rather than the lines. When only text will do, **say what the
-pattern would print under the opposite hypothesis** before you run it. If the
-answer is "the same thing", it is not an instrument.
+So before acting on a result, run the pattern against something it **must**
+match and something it **must not**, and say what it would print under the
+opposite hypothesis: if the answer is "the same thing", it is not an
+instrument. Prefer the tool that understands the structure -- `git grep -w`,
+`--fixed-strings`, the language's own parser -- over the one matching text.
+The ways patterns have failed here are in
+[docs/internals/testing.md](docs/internals/testing.md#search-patterns).
 
 **Say what you checked and what you did not.** A sweep that reports only
 findings cannot be told from one that never ran. Name the negative results and
@@ -166,6 +148,10 @@ the parts you judged rather than verified.
 decisive line. If a step was skipped, say which. A green that does not cover
 the change is worth less than a red that does -- see the note on `ci.yml`
 skipping its rendering suite below.
+
+How these are kept in practice -- controls, mutants, benchmarks, comparing
+with Chrome, and running the suites outside `just` -- is in
+[docs/internals/testing.md](docs/internals/testing.md).
 
 ---
 
@@ -185,26 +171,21 @@ just test-js       # the JavaScript half alone
 just build         # debug build of the native module
 ```
 
-A recipe's name says what it covers. `test` runs both languages because a
-recipe called `test` that ran one of them is how the Rust suite went unrun
-inside `just ci` for a while, and the halves are `test-rust` and `test-js`.
-The two API gates are named for what they check rather than for each other:
-`check-rust-api` fails when a public Rust signature leaks a type from a crate
-the API hides -- the list is `FORBIDDEN` in `scripts/check-public-api.mjs` --
-and `check-dts-surface` fails when `lib/index.d.ts` disagrees with what the
-built addon exposes. They are unrelated checks and were previously a
-word apart, which cost time more than once.
+**A recipe's name says what it covers.** `test` runs both languages, and the
+halves are `test-rust` and `test-js`. The two API gates are named for what they
+check: `check-rust-api` fails when a public Rust signature leaks a type from a
+crate the API hides -- the list is `FORBIDDEN` in
+`scripts/check-public-api.mjs` -- and `check-dts-surface` fails when
+`lib/index.d.ts` disagrees with what the built addon exposes
+([why](docs/decisions.md#2026-09-07-the-rust-suite-went-unrun-inside-just-ci)).
 
 **A bare `node --test` does not test what you just built.** An installed
-platform package outranks `lib/skia.node` in `loadSkiaNode`, so it loads the
-_published_ binary and your change appears to have done nothing. Nothing
-announces the difference.
-
-`npm test` and `just test` both handle it. `just test` sets
-`MEO_SKIA_CANVAS_BINARY`; `npm test` runs `scripts/test.mjs`, which points the
-same variable at `lib/skia.node` when there is one, falls back to the installed
-binary when there is not, and prints which of the two the run is against. Only
-a direct `node --test` is still silent about it.
+platform package outranks `lib/skia.node`, so it loads the _published_ binary
+and your change appears to have done nothing; nothing announces the
+difference. `just test` and `npm test` point the run at the local build, and
+`npm test` prints which binary it ran against. How the binary is chosen, and
+how to run the Rust suite outside `just`, is in
+[docs/internals/testing.md](docs/internals/testing.md#which-binary-a-test-runs).
 
 **Never build `--release` unless asked.** Debug builds are faster and are what
 development wants.
@@ -339,10 +320,8 @@ the caller nothing, the other costs them the operation.
   **Those file names are shorthand for the relationship, and where the two come
   apart the relationship governs.** A method elsewhere that genuinely mirrors a
   `getX()` method, or that is half of an exported accessor pair, keeps its
-  prefix. One sitting in those files that is neither drops it. Reading the list
-  as the rule is how nine plain readers in `src/context/` kept a prefix for a
-  reason that did not apply to them: no `set_` counterpart, no collision, and
-  no `getX()` to mirror.
+  prefix. One sitting in those files that is neither drops it
+  ([why](docs/decisions.md#2026-09-08-nine-readers-kept-a-get_-prefix-for-a-reason-that-did-not-apply)).
 
 - **Tests:** never a `test_` prefix or suffix. `#[test]` already says so.
 
@@ -354,13 +333,9 @@ unexplained literal cannot be reviewed. The reader has no way to tell a correct
 value from a plausible one, and neither does the person who wrote it six months
 later.
 
-This has cost real time. A BMP header carried `0x7357_696E` under a comment
-reading `// "sRGB "`. Those four bytes spell `sWin` -- the front of `LCS_sRGB`
-welded to the back of `LCS_WINDOWS_COLOR_SPACE`, a value the format does not
-define. It shipped and survived review, because readers ignore that field and
-every viewer showed the right picture. A named constant whose doc comment states
-what `wingdi.h` calls it is a claim that can be checked; a literal under a
-comment is a claim that cannot.
+A named constant whose doc comment says where its value is from is a claim
+anyone can check; a literal under a comment is not
+([why](docs/decisions.md#2026-08-14-a-bmp-header-said-srgb-and-wrote-swin)).
 
 - **Name it, and say where it is from** -- the specification, the section, the
   header, the registry. Enough to look up without guessing.
@@ -394,24 +369,17 @@ before the last change, and not what some other project does. A comment left
 describing previous behaviour is worse than none, because nothing marks it as
 stale.
 
-**Change the code and change its comments in the same commit.** This is not
-housekeeping to be caught later. The class does not rot slowly: it rots at the
-moment of the change that invalidates it, and every hour it survives is an hour
-someone can read it and believe it. A sweep of this tree found most of its wrong
-statements had been written the same day, by the work that had just moved the
-code underneath them -- including two in a header whose own author did not
-revisit it after a later change of theirs falsified it.
+**Change the code and change its comments in the same commit.** A comment
+rots at the moment of the change that invalidates it, not slowly, and every
+hour it survives is an hour someone can read it and believe it. A missed one is
+cheap to fix at the keyboard and costs a whole-tree sweep to find afterwards
+([why](docs/decisions.md#2026-09-07-comments-went-stale-the-day-they-were-written)).
 
 The reason a careful reader still misses these is mechanical: **the comment that
 goes stale is usually not in the diff.** A doc block sits above a function; a
 default `git diff` shows three lines of context, so an edit inside that function
 shows nothing of the prose describing it. Read the whole item you touched, or
 widen the context (`git diff -U20`), rather than reviewing the hunk alone.
-
-The cost of not doing it is measured in whole-tree sweeps. One missed comment is
-cheap to fix at the keyboard and expensive to find afterwards, because nothing
-distinguishes it from the maintained kind and the only way back is to re-read
-every area again.
 
 - **Past tense describes the alternative, never this code.** What the code does
   is present tense. Past tense is legal where it names something the code is
@@ -466,8 +434,8 @@ Four things, because each is one somebody would otherwise have to reconstruct:
   no release carries the fix yet -- `master@fe46d319`.
 - **The issue, or the word `unfiled`.** Unfiled is a legitimate state and
   belongs on the page rather than being inferred from an absence. Do not write
-  "filed upstream" without the reference: that sentence stopped a re-check
-  once here, because nothing had been filed and the tree said otherwise. A
+  "filed upstream" without the reference
+  ([why](docs/decisions.md#2026-09-08-filed-upstream-with-nothing-filed)). A
   tracker that is not GitHub takes a full URL -- Skia's own bugs live at
   issues.skia.org and have no `owner/repo#n` form. The scheme is required, so
   that the field cannot quietly become prose.
@@ -506,11 +474,9 @@ since the sentence above quotes the marker in prose without being one.
 
 What the gate does not do is find a workaround nobody marked. Its green says
 every marker is well-formed; it never says every workaround is marked, and no
-amount of tightening the form will move that line. **That is not a theoretical
-hole**: a change adding workarounds has already gone through with none of them
-marked and the gate silent, because a gate that validates markers has nothing
-to say about their absence. The markers arrived in a later commit, from someone
-reading the diff.
+amount of tightening the form will move that line, and a change has already
+gone through with its workarounds unmarked and the gate silent
+([why](docs/decisions.md#2026-09-08-workarounds-landed-unmarked-and-the-gate-said-nothing)).
 
 **The reason on a `not worked around` marker is a claim, and it has to have
 been checked rather than inferred.** The marker exists to stop the next reader
@@ -518,16 +484,9 @@ re-deriving it, so a wrong reason is not a note that ages -- it is a durable
 record of a mistake, shielded from the accident that would otherwise have
 corrected it.
 
-Not hypothetical. A marker drafted for #169's descendant half said the lengths
-were not reachable from Rust, inherited from a comment saying the fix needed a
-dpi `skia-safe` does not expose. Both of those are true and the conclusion does
-not follow: the fix rewrites lengths to `px` and never needed the dpi, and
-`skia-safe`'s `svg::Rect` declares `x`, `y`, `width` and `height` with setters
-as well as getters. Two true premises, a false disposition, and the marker
-would have published it as a decision somebody had made. **So check the
-inference, not only the facts** -- and where the reason came from a comment
-already in the tree, check that comment too, because that is where this one
-came from.
+**So check the inference, not only the facts** -- and where the reason came
+from a comment already in the tree, check that comment too
+([why](docs/decisions.md#2026-09-08-a-not-worked-around-reason-was-an-inference)).
 
 **When the defect is fixed, delete the workaround** -- or keep it and say what
 it now earns, which is a different note and not this one.
@@ -703,9 +662,14 @@ and what LFS cost -- is in
 
 `samizdatco/skia-canvas` sits on the `upstream` remote with its push URL set to
 `DISABLED`. It is not a reference and not a destination for work; this tree
-decides its own behaviour by the rule at the top of this file. If a fix there is
-ever worth taking, cherry-pick it on its own merits -- their `skia-safe` is old
-enough that anything shaped by those bindings is a downgrade here.
+decides its own behaviour by the rule at the top of this file, and does not
+merge from it. A fix there worth taking is cherry-picked on its own merits and
+rewritten against this tree's `skia-safe`, whose version `Cargo.toml` names,
+since the bindings it was written for may differ.
+
+Say nothing here, or anywhere in the tree, about another project's current
+version or activity: it changes without this tree changing, and the sentence
+goes on reading as true.
 
 ---
 
