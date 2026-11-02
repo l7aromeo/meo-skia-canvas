@@ -363,7 +363,7 @@ pub struct PageRecorder {
     isolated: Option<VectorFeatures>,
     /// The image-filtered draws `current` has recorded since it began, so
     /// that a run of them is filed in entries of at most
-    /// [`pacing::FILTERED_DRAWS_PER_FLUSH`] -- see
+    /// [`pacing::LAYERS_PER_FLUSH`] -- see
     /// [`PageRecorder::append_isolated`].
     filtered: usize,
     /// Set when `matrix` or `clip` has moved but the recording canvas has
@@ -1745,7 +1745,7 @@ impl PageRecorder {
     /// a playback plays an entry whole: a run of thousands of shadowed draws
     /// held in one was played onto a GPU surface with no flush between them,
     /// and Ganesh's flush grows with the square of what it holds -- see
-    /// [`pacing`]. Filed every [`pacing::FILTERED_DRAWS_PER_FLUSH`], a run
+    /// [`pacing`]. Filed every [`pacing::LAYERS_PER_FLUSH`], a run
     /// leaves the playback a place to flush; consecutive entries asking for
     /// the same features are one image in a document -- see
     /// `Page::play_as_document` -- and the same draws, in the same order, on
@@ -1759,7 +1759,7 @@ impl PageRecorder {
             return false;
         }
         self.filtered += 1;
-        self.filtered >= pacing::FILTERED_DRAWS_PER_FLUSH
+        self.filtered >= pacing::LAYERS_PER_FLUSH
     }
 
     /// Records `draw` as a [`BlurOp`], so that its blur is made where the
@@ -4264,8 +4264,7 @@ impl Page {
 
     /// Plays the layers `range` names onto `canvas` as pixels, in order --
     /// none where it reaches past the page -- with the canvas's GPU context
-    /// flushed every so many image-filtered draws among them: see
-    /// [`pacing`].
+    /// flushed every so many layers they render offscreen: see [`pacing`].
     pub(crate) fn play_layers(&self, range: Range<usize>, canvas: &SkCanvas) {
         let Some(layers) = self.layers.get(range.clone()) else {
             return;
@@ -6485,6 +6484,8 @@ mod tests {
         context2d::Context2D,
         filter::ImageFilter,
         gpu::completion::DISCARDED,
+        paint::BlendMode as CompositeOperation,
+        pattern::PatternRepeat,
         pixels::ImageDataExport,
     };
     use parking_lot::Mutex;
@@ -9608,7 +9609,13 @@ mod tests {
     /// page of [`PACED_SIDE`]: 0, rects under a CanvasKit drop shadow; 1,
     /// under `shadowBlur`; 2, the first with a plain rect after each, off
     /// the pixel grid, whose edges the next shadow lands on; 3, the first
-    /// inside a translucent `saveLayer`.
+    /// inside a translucent `saveLayer`; 4, plain rects each in a
+    /// translucent `saveLayer` of its own; 5, those inside one more; 6,
+    /// rects filled with a canvas's pattern under `shadowBlur`, which a page
+    /// files as the shadow's group, holding the pattern's draw, and the
+    /// draw, each asking for an image filter; 7, those under `source-in`
+    /// and no shadow, which a page files in two groups each, one inside the
+    /// other, asking for none.
     fn paced_draws(ctx: &mut Context2D, scene: usize, n: usize) {
         let colour = RgbaLinear::new_premultiplied(0.05, 0.1, 0.35, 0.6);
         let shadow =
@@ -9616,32 +9623,66 @@ mod tests {
                 .expect("a shadow");
         ctx.set_fill_style_css("rgb(200 120 40 / 0.9)")
             .expect("a colour");
+        let grouped = matches!(scene, 4 | 5);
         match scene {
-            1 => {
+            1 | 6 => {
                 ctx.set_shadow_color_css("rgb(20 60 200 / 0.6)")
                     .expect("a colour");
                 ctx.set_shadow_blur(4.0);
                 ctx.set_shadow_offset(3.0, 3.0);
             }
+            4 | 5 | 7 => {}
             _ => ctx.set_image_filter(Some(&shadow)),
         }
-        if scene == 3 {
+        if scene == 7 {
+            ctx.set_global_composite_operation(CompositeOperation::SourceIn);
+        }
+        if matches!(scene, 6 | 7) {
+            let mut tile = Canvas::with_options(
+                6.0,
+                6.0,
+                CanvasOptions {
+                    gpu: false,
+                    ..Default::default()
+                },
+            )
+            .expect("a tile");
+            let t = tile.context();
+            t.set_fill_style_css("rgb(200 40 120)").expect("a colour");
+            t.fill_rect(0.0, 0.0, 3.0, 6.0);
+            t.set_fill_style_css("rgb(20 160 90 / 0.7)")
+                .expect("a colour");
+            t.fill_rect(3.0, 0.0, 3.0, 2.0);
+            let pattern = ctx
+                .create_pattern_from_canvas(&mut tile, PatternRepeat::Repeat);
+            ctx.set_fill_pattern(&pattern);
+        }
+        if matches!(scene, 3 | 5) {
             ctx.save_layer_with(0.8, None, None);
         }
         let (side, _) = PACED_SIDE;
         for i in 0..n {
             let (x, y) = ((i * 17) % (side - 12), (i * 11) % (side - 10));
+            if grouped {
+                ctx.save_layer_with(0.8, None, None);
+            }
             ctx.fill_rect(x as f32 + 0.3, y as f32 + 0.6, 10.0, 8.0);
+            if grouped {
+                ctx.restore();
+            }
             if scene == 2 {
                 ctx.set_image_filter(None);
                 ctx.fill_rect(x as f32 + 4.5, y as f32 + 2.25, 6.0, 5.0);
                 ctx.set_image_filter(Some(&shadow));
             }
         }
-        if scene == 3 {
+        if matches!(scene, 3 | 5) {
             ctx.restore();
         }
     }
+
+    /// The scenes of [`paced_draws`].
+    const PACED_SCENES: usize = 8;
 
     /// The page the periodic flush is pinned on: small enough to read in
     /// one tile, and dense enough that every draw overlaps others.
@@ -9689,24 +9730,28 @@ mod tests {
     }
 
     /// A GPU playback of a long run of image-filtered draws flushes every
-    /// [`pacing::FILTERED_DRAWS_PER_FLUSH`] of the ops filtered entries
-    /// hold: three times for three of them and a few over, where the run is
-    /// one entry the recorder split, under a CanvasKit filter or a shadow,
-    /// or the contents of a layer. Where each filtered draw is an entry of
-    /// its own, between plain ones, each entry also holds the ops of its
-    /// frame, and it flushes more often, but no more than five times as
-    /// often. Twice the draws make twice the flushes, within one, and a page
-    /// of a few never flushes before its read.
+    /// [`pacing::LAYERS_PER_FLUSH`] of the ops filtered entries hold: three
+    /// times for three of them and a few over, where the run is one entry
+    /// the recorder split, under a CanvasKit filter or a shadow, or the
+    /// contents of a layer. Where each filtered draw is an entry of its own,
+    /// between plain ones, each entry also holds the ops of its frame, and
+    /// it flushes more often, but no more than five times as often. A page
+    /// of `saveLayer` groups flushes every so many groups, inside one more
+    /// group as well, and a page of pattern fills every so many of the
+    /// layers each is filed as: three under a shadow, the shadow's group
+    /// and the two image-filtered draws, and two under `source-in`, its two
+    /// groups. Twice the draws make twice the flushes, within one, and a
+    /// page of a few never flushes before its read.
     #[test]
-    fn a_gpu_playback_flushes_every_so_many_filtered_draws() {
-        let per = pacing::FILTERED_DRAWS_PER_FLUSH;
+    fn a_gpu_playback_flushes_every_so_many_offscreen_layers() {
+        let per = pacing::LAYERS_PER_FLUSH;
         let flushed = |scene, n| {
             let (_, page, engine) = paced(scene, n, true, None, false);
             let flushes = pacing::tests::flushes(page);
             assert!(!flushes.is_empty(), "scene {scene}: no playback paced");
             (flushes.iter().sum::<usize>(), engine)
         };
-        for scene in 0..4 {
+        for scene in 0..PACED_SCENES {
             let n = 3 * per + 10;
             let (once, engine) = flushed(scene, n);
             if engine != EngineKind::Gpu {
@@ -9718,6 +9763,8 @@ mod tests {
                     (n / per..=5 * n / per).contains(&once),
                     "scene {scene}: {once}"
                 ),
+                6 => assert_eq!(once, 3 * n / per, "scene {scene}"),
+                7 => assert_eq!(once, 2 * n / per, "scene {scene}"),
                 _ => assert_eq!(once, n / per, "scene {scene}"),
             }
             let (twice, _) = flushed(scene, 2 * n);
@@ -9749,7 +9796,7 @@ mod tests {
         }
         let page = canvas.context().inner.recorder.borrow_mut().page().id;
         pacing::tests::fail_flushes(page);
-        paced_draws(canvas.context(), 0, 2 * pacing::FILTERED_DRAWS_PER_FLUSH);
+        paced_draws(canvas.context(), 0, 2 * pacing::LAYERS_PER_FLUSH);
         let read = canvas.to_image_data(None, &ImageDataExport::default());
         let flushes = pacing::tests::flushes(page);
         assert!(flushes.iter().sum::<usize>() > 0, "flushed: {flushes:?}");
@@ -9763,40 +9810,43 @@ mod tests {
 
     /// What `UPSTREAM:` at `pacing::played` bets on: unpaced, a GPU
     /// playback's time a draw grows with the draws, since Ganesh's flush
-    /// clusters its tasks pairwise -- 8,192 shadowed rects took more than
-    /// twice the time a rect that 1,024 did, where the bet is lost and the
-    /// workaround can go once they take about the same. Timed, so ignored:
-    /// run it in a release build, on a quiet machine.
+    /// clusters its tasks pairwise -- 8,192 shadowed rects, and 8,192
+    /// `saveLayer` groups, each took more than twice the time a draw that
+    /// 1,024 did, where the bet is lost and the workaround can go once they
+    /// take about the same. Timed, so ignored: run it in a release build, on
+    /// a quiet machine.
     #[test]
     #[ignore = "a timing, for re-checking the UPSTREAM note at pacing::played"]
     fn ganesh_clusters_a_flush_s_tasks_quadratically() {
-        let per_draw = |n: usize| {
+        let per_draw = |scene: usize, n: usize| {
             let started = Instant::now();
-            let (_, _, engine) = paced(0, n, true, None, true);
+            let (_, _, engine) = paced(scene, n, true, None, true);
             assert_eq!(engine, EngineKind::Gpu, "the bet is about the GPU");
             started.elapsed().as_secs_f64() / n as f64
         };
-        per_draw(256);
-        let (few, many) = (per_draw(1024), per_draw(8192));
-        eprintln!(
-            "unpaced: {:.1} us a draw at 1,024, {:.1} at 8,192",
-            few * 1e6,
-            many * 1e6
-        );
-        assert!(
-            many > 2.0 * few,
-            "Ganesh's flush no longer grows: {few} {many}"
-        );
+        for (scene, name) in [(0, "shadowed rects"), (4, "groups")] {
+            per_draw(scene, 256);
+            let (few, many) = (per_draw(scene, 1024), per_draw(scene, 8192));
+            eprintln!(
+                "unpaced {name}: {:.1} us a draw at 1,024, {:.1} at 8,192",
+                few * 1e6,
+                many * 1e6
+            );
+            assert!(
+                many > 2.0 * few,
+                "Ganesh's flush no longer grows for {name}: {few} {many}"
+            );
+        }
     }
 
-    /// What a page of image-filtered draws reads is the same with the run
-    /// split and the playback flushed every so many as with neither: on the
-    /// GPU at Skia's default multisampling and with none, and on the CPU,
-    /// which splits the run and has nothing to flush.
+    /// What a page of image-filtered draws or groups reads is the same with
+    /// a run split and the playback flushed every so many as with neither:
+    /// on the GPU at Skia's default multisampling and with none, and on the
+    /// CPU, which splits a run and has nothing to flush.
     #[test]
     fn a_paced_playback_reads_what_an_unpaced_one_reads() {
-        let n = 2 * pacing::FILTERED_DRAWS_PER_FLUSH + 40;
-        for scene in 0..4 {
+        let n = 2 * pacing::LAYERS_PER_FLUSH + 40;
+        for scene in 0..PACED_SCENES {
             for (gpu, msaa) in [(true, None), (true, Some(0)), (false, None)] {
                 let (paced_pixels, page, engine) =
                     paced(scene, n, gpu, msaa, false);
