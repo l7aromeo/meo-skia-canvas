@@ -1614,6 +1614,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
 
 ### Added
 
+- **`just bench` runs the npm and crate benchmarks over the same cases, drawing on sRGB, Display P3 and half-float pages, and writes a dated report of each to `target/bench/`.** ([#468](https://github.com/l7aromeo/meo-skia-canvas/issues/468))
+
 - **CSS Color 4's system colours** in the CSS colours the crate reads,
   with the values Chrome 156 gives a canvas in its light scheme, and the
   deprecated names as the colours they compute to. `AccentColor` and

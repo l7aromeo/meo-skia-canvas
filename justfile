@@ -26,6 +26,10 @@ set dotenv-command := "node scripts/skia-source.mjs env"
 
 lib := justfile_directory() / "lib" / "skia.node"
 linux_features := "vulkan,window,freetype"
+# What the Rust suite builds with -- see `test-rust`. `check-bench-parity`
+# builds the crate's benchmark with the same set, so that it reuses the build
+# the suite makes rather than starting one of its own.
+test_features := if os() == "macos" { "metal,window,freetype,fetch" } else { linux_features + ",fetch" }
 # The GPU backend this machine can actually compile, with the binding and the
 # URL loader on top, which is the set the `clippy` matrix in rust-ci.yml runs
 # for this platform. Kept apart from `linux_features` because that set is
@@ -91,7 +95,7 @@ default:
 # genuinely re-ran, and at the end of the list the same failure would cost the
 # whole run to reach.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-release-tags check-upstream-notes check-markdown-links check-fetch-deps check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
+ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-release-tags check-upstream-notes check-markdown-links check-fetch-deps check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity check-bench-parity docs licenses test build
 
 # Installs when node_modules is missing *or* no longer matches bun.lock, which
 # a rebase or merge can move under a warm worktree. scripts/install-deps.mjs
@@ -626,7 +630,7 @@ test-js: ensure-binary
 # suite is the larger of the two.
 [doc("The Rust suite alone. `test` runs this and `test-js` together.")]
 test-rust: ensure-deps
-    node scripts/gpu-events.mjs --run -- cargo test --features "{{ if os() == "macos" { "metal,window,freetype" } else { linux_features } }},fetch"
+    node scripts/gpu-events.mjs --run -- cargo test --features "{{ test_features }}"
 
 # Every target, tests included, linted as a release build compiles it.
 #
@@ -866,12 +870,38 @@ check-rust-api: ensure-deps
       -- -Z unstable-options --output-format json
     node scripts/check-public-api.mjs target/doc/meo_skia_canvas.json
 
+# Both benchmarks, one after the other. Each writes a dated report to
+# target/bench/, and the two run the same cases in the same order -- see
+# `check-bench-parity` -- so their rows line up and the ratio between them is
+# what the Node binding costs. `--quick` runs each case once, with no warmup:
+# a smoke test, not a measurement. `--only PREFIX` narrows both to the cases
+# whose id starts with it.
+[doc("Run the npm and crate benchmarks, each writing a dated report to target/bench/.")]
+bench *flags: (bench-npm flags) (bench-crate flags)
+
 # Depends on build-release on purpose. A dev binary leaves the Rust glue
 # unoptimized, which moves the per-call overhead without touching Skia, so the
 # ratios come out right and the milliseconds do not.
-[doc("Measure timing and memory against the release binary.")]
-bench: build-release
-    MEO_SKIA_CANVAS_BINARY="{{ lib }}" node --expose-gc examples/node/benchmark.js
+[doc("Run the npm benchmark against the release binary.")]
+bench-npm *flags: build-release
+    MEO_SKIA_CANVAS_BINARY="{{ lib }}" node --expose-gc examples/node/benchmark.js {{ flags }}
+
+# Release for the reason `bench-npm` gives, and with the feature set
+# `build-release` compiles the addon with -- `CARGO_FEATURES` in
+# lib/prebuild.mjs, read from there -- so that the two reuse one release
+# Skia rather than building a second.
+[doc("Run the crate benchmark, release-built.")]
+bench-crate *flags: ensure-deps
+    cargo run --release --example benchmark --features "$(node --input-type=module -e 'import { CARGO_FEATURES } from "./lib/prebuild.mjs"; console.log(CARGO_FEATURES)')" -- {{ flags }}
+
+# The npm and crate benchmarks list the same case ids in the same order. Each
+# prints its ids with `--list` and times nothing, so this costs a debug build
+# of the example, which `test-rust` makes as well. The self-test runs first,
+# for the reason `check-upstream-notes` runs one.
+[doc("Fail when the npm and crate benchmarks do not run the same cases.")]
+check-bench-parity: ensure-deps
+    node scripts/check-bench-parity.mjs --self-test
+    node scripts/check-bench-parity.mjs --features "{{ test_features }}"
 
 # Remove the compiled binary.
 clean:
