@@ -177,7 +177,9 @@ serial result here; no other library in the comparison offers that mode.
 and why that harness could not measure upstream's startup.
 
 For this library on its own — GPU against CPU, what a float `colorType` costs, encode times and
-memory per canvas — run `just bench`.
+memory per canvas — see [Performance and memory](performance.md), whose figures `just bench`
+reproduces. [Colour and precision](colour.md) covers the colour spaces, the pixel depths and what
+each export format carries.
 
 [canvas-benchmarks]: https://github.com/samizdatco/canvas-benchmarks
 

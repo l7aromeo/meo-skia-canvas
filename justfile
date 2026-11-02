@@ -55,11 +55,12 @@ fmt_toolchain := "nightly-2026-09-04"
 # from a tag.
 changelog_version_prefix := "v"
 # The files whose `meo-skia-canvas = { version = "..."` lines pin the crate:
-# README's quick start and the Rust guide's `fetch` example. Every such line
+# the quick starts in README and the crates.io page, and the Rust guide's
+# `fetch` example. Every such line
 # in them is held to Cargo.toml's major.minor by `check-release-guards` and
 # moved by `sync-crate-pins`, so a pin added to either file is covered, and a
 # file added here is covered by both.
-crate_pin_files := "README.md docs/rust.md"
+crate_pin_files := "README.md docs/readme/crate.md docs/rust.md"
 
 # Default: show available recipes.
 default:
@@ -95,7 +96,7 @@ default:
 # genuinely re-ran, and at the end of the list the same failure would cost the
 # whole run to reach.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-release-tags check-upstream-notes check-markdown-links check-fetch-deps check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity check-bench-parity docs licenses test build
+ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-release-tags check-upstream-notes check-markdown-links check-readme-facts check-fetch-deps check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity check-bench-parity docs licenses test build
 
 # Installs when node_modules is missing *or* no longer matches bun.lock, which
 # a rebase or merge can move under a warm worktree. scripts/install-deps.mjs
@@ -281,6 +282,18 @@ check-markdown-links:
     node scripts/check-markdown-links.mjs --self-test
     node scripts/check-markdown-links.mjs
 
+# The three READMEs repeat facts set elsewhere -- the Node and Rust floors,
+# the platforms, the Cargo features, the Skia version, the Linux symbol
+# ceilings -- and each copy goes stale in silence when its source moves. This
+# compares every statement with its source, and maps absolute links into this
+# repository back to tracked paths, which check-markdown-links does not
+# follow. The self-test runs first, for the same reason the checks above run
+# one.
+[doc("Fail when a README states a fact its source disagrees with, or links into this repository at nothing.")]
+check-readme-facts:
+    node scripts/check-readme-facts.mjs --self-test
+    node scripts/check-readme-facts.mjs
+
 # The `fetch` feature's two promises about the dependency graph: no HTTP client
 # or TLS stack without it, and no aws-lc with it. The script says why each
 # matters; it reads every target, not just this host's.
@@ -424,12 +437,14 @@ check-release-guards:
     # patched source; the self-test keeps that check able to refuse.
     node scripts/check-patched-skia.mjs --self-test
 
-[doc("Fail when a changelog's prose disagrees with the entries it counts.")]
+[doc("Fail when a changelog's prose disagrees with the entries it counts, or an entry from 7.0.0 / 0.17.0 is not one linked line.")]
 check-changelog:
     #!/usr/bin/env bash
     set -euo pipefail
     node scripts/check-changelog-counts.mjs --self-test
     node scripts/check-changelog-counts.mjs
+    node scripts/check-changelog-entries.mjs --self-test
+    node scripts/check-changelog-entries.mjs
 
 # Fail when a capability exists on one surface and is neither on the other nor
 # registered in `parity.toml`.

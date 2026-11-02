@@ -573,6 +573,37 @@ shader painted nothing over what that claim had thrown away.
 
 ---
 
+## Changelog entries
+
+**From npm 7.0.0 and crate 0.17.0 on, an entry is one line**: a bold title
+saying what changed, in the terms of someone who hits it, and the pull request
+and issue it came from.
+
+```markdown
+- **A drop shadow keeps its blur's tail along the canvas edge its offset moves it away from.** ([#467](https://github.com/l7aromeo/meo-skia-canvas/pull/467), [#454](https://github.com/l7aromeo/meo-skia-canvas/issues/454))
+```
+
+A Breaking entry adds one indented line saying what to change:
+
+```markdown
+- **`EncodeOptions::quality` is an `Option<f32>`, `None` meaning each format's own default.** ([#456](https://github.com/l7aromeo/meo-skia-canvas/pull/456), [#444](https://github.com/l7aromeo/meo-skia-canvas/issues/444))
+  Write `quality: Some(0.8)` where you wrote `quality: 0.8`.
+```
+
+A section's entries are one tight list, with no blank line between them. The
+reasoning, the measurements and what was rejected belong in the pull request
+and the commit message, which stay attached to the change; a paragraph here
+goes stale against the code under it. A change that reaches both surfaces gets
+an entry in each file, written for that file's reader. A speed change with no
+change in output joins the release's one entry saying what costs less, rather
+than taking an entry of its own.
+
+`scripts/check-changelog-entries.mjs`, run by `just ci`, refuses an entry that
+runs longer, links nothing, or sits in a loose list. It checks the shape, not
+whether the title is true or the link the right one.
+
+---
+
 ## Writing for people
 
 - Be concise. Simple sentences. Technical jargon is fine.
