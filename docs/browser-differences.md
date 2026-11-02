@@ -1243,6 +1243,29 @@ file. A masked blend on the page itself, and one in a group at a density of 1,
 stay vector, since CoreGraphics renders both as the canvas does: the
 reproduction at density 1 comes out within a level.
 
+**A canvas's pattern is written as PDF tiling where its tiles land on whole
+device pixels, and poppler draws seams between the tiles.** A draw dyed by a
+pattern of a canvas -- repeated both ways, the canvas whole pixels across,
+composited only where it lands with no filter, colour filter or shadow, and
+played in the document under a transform that scales both axes by the same
+whole number and moves by whole pixels, the export's density and any canvas
+it is drawn into included -- is painted from the canvas rasterized at that
+scale, which Skia writes as a PDF tiling pattern
+(`context::layer::tiles_exactly`). Any other is embedded as pixels as the page
+composites it, and so is one whose canvas is too large to rasterize whole at
+that scale, which a renderer would resample with a filter of its own. Measured over flat and busy tiles 7, 10 and
+40 pixels a side, plain, scaled by 2, moved, at an alpha and under `multiply`,
+`screen` and `source-atop`, at densities 1, 2 and 3, against the canvas and
+against the same draws embedded: PDFium 153 within 2 levels, as it draws them
+embedded; CoreGraphics no further off than it draws them embedded, up to 19
+levels; poppler 26.10 a seam a pixel wide along tile edges, up to 210 levels,
+over fewer pixels than it misdraws the embedded image -- 3,420 against 6,264
+for a 10-pixel tile at density 1. The draw's alpha is put into the tile and
+the pattern painted at full alpha, since PDFium paints a pattern fill at the
+alpha the pattern cell's own graphics state sets, which Skia writes as 1, and
+drew a `globalAlpha` of 0.6 up to 84 levels off. pdf.js and Acrobat are not
+measured.
+
 poppler's figures are held by `tests/pdf_blend.rs`, which renders every
 blend a PDF writes with `pdftoppm` and runs on CI. CoreGraphics' are a
 manual check on macOS: `sips -s format png -Z 800 page.pdf --out page.png`,

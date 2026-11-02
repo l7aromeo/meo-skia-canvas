@@ -557,6 +557,8 @@ read the math functions and every length unit.
 
 - **A canvas pattern in a PDF is drawn at the export's density, and on a Display P3 canvas blends as the canvas does.** ([#442](https://github.com/l7aromeo/meo-skia-canvas/issues/442), [#443](https://github.com/l7aromeo/meo-skia-canvas/issues/443))
 
+- **A canvas pattern in a PDF is written as one tile repeated, rather than as an image of the whole draw, where each tile lands on whole device pixels at a whole density.** ([#451](https://github.com/l7aromeo/meo-skia-canvas/issues/451))
+
 - **An SVG of a page with nothing on it is well-formed XML.**
   `Canvas::to_buffer` with `ImageFormat::Svg` wrote an empty page's root as
   `<svg ... height="40"/ viewBox="0 0 80 40">`: Skia writes an empty
