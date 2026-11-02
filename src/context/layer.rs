@@ -46,7 +46,7 @@ use crate::{
         page::{ExportOptions, Page},
     },
     export::{VectorFeatures, blend_features},
-    gpu::RenderingEngine,
+    gpu::{RenderingEngine, pacing},
     node::{
         filter::MASK_BLUR_MAX_SIGMA,
         typography::RunPaint,
@@ -1616,7 +1616,12 @@ impl Group {
                             rec = rec.bounds(reach);
                         }
                         canvas.save_layer(&rec);
-                        play_entries(&self.contents.layers, canvas, target);
+                        play_entries(
+                            &self.contents.layers,
+                            &self.contents.features,
+                            canvas,
+                            target,
+                        );
                         canvas.reset_matrix();
                         coverage.multiply(canvas);
                         canvas.restore();
@@ -1628,12 +1633,22 @@ impl Group {
                         canvas.reset_matrix();
                         coverage.clip(canvas);
                         canvas.set_matrix(&entries.into());
-                        play_entries(&self.contents.layers, canvas, target);
+                        play_entries(
+                            &self.contents.layers,
+                            &self.contents.features,
+                            canvas,
+                            target,
+                        );
                     }
                     None => {
                         self.confine(canvas, target, &to_device);
                         canvas.set_matrix(&entries.into());
-                        play_entries(&self.contents.layers, canvas, target);
+                        play_entries(
+                            &self.contents.layers,
+                            &self.contents.features,
+                            canvas,
+                            target,
+                        );
                     }
                 }
             }
@@ -1660,7 +1675,12 @@ impl Group {
                     self.confine(canvas, target, &to_device);
                 }
                 canvas.set_matrix(&entries.into());
-                play_entries(&self.contents.layers, canvas, target);
+                play_entries(
+                    &self.contents.layers,
+                    &self.contents.features,
+                    canvas,
+                    target,
+                );
                 if let Some(crop) = crop {
                     canvas.reset_matrix();
                     crop.multiply(canvas);
@@ -1883,10 +1903,13 @@ impl Clipped {
     }
 }
 
-/// Plays `entries` onto `canvas` for `target`, in order: each as
-/// [`Layer::playback`] plays it, but for consecutive pieces of one run
-/// played into a document or a recording, which it plays under their clip
-/// once -- see [`Clipped`] -- all but a recording's cut draws.
+/// Plays `entries`, each asking for `features` at the same index, onto
+/// `canvas` for `target`, in order: each as [`Layer::playback`] plays it,
+/// but for consecutive pieces of one run played into a document or a
+/// recording, which it plays under their clip once -- see [`Clipped`] --
+/// all but a recording's cut draws. On the GPU it counts the image-filtered
+/// draws it plays, so that the playback flushes every so many -- see
+/// [`pacing`].
 ///
 /// A recording is what a canvas drawn into another, or used as a pattern,
 /// is replayed into, and Skia rasterizes it later, where every clip applied
@@ -1898,9 +1921,12 @@ impl Clipped {
 /// own clip.
 pub(crate) fn play_entries(
     entries: &[Layer],
+    features: &[VectorFeatures],
     canvas: &SkCanvas,
     target: Target,
 ) {
+    debug_assert_eq!(entries.len(), features.len(), "one feature set a layer");
+    let paced = target == Target::Pixels && blur_mask::on_gpu(canvas);
     let grouped = target == Target::Document || !blur_mask::draws_on(canvas);
     let coverage = clips_by_coverage(canvas, target);
     // Only on a page holding a cut draw: a document walks the picture of a
@@ -1919,6 +1945,9 @@ pub(crate) fn play_entries(
             Layer::Clipped(piece) if shares_the_clip(piece) => piece.run,
             entry => {
                 entry.playback(canvas, target);
+                if let Some(features) = features.get(at).filter(|_| paced) {
+                    pacing::played(canvas, filtered_draws(entry, *features));
+                }
                 at += 1;
                 continue;
             }
@@ -1936,6 +1965,25 @@ pub(crate) fn play_entries(
             .collect();
         at += pieces.len();
         Clipped::play_run(&pieces, &pieces[0].clip, canvas, target, bounded);
+    }
+}
+
+/// The image-filtered draws `entry`, asking for `features` of a vector
+/// backend, holds, as a GPU playback paces its flushes by them -- see
+/// [`pacing`]: none where it asks for no image filter, a picture's ops,
+/// which bound its draws from above -- a filled rectangle under an image
+/// filter records one, under a shadow five -- and one for any other entry,
+/// whose own entries a playback counts as it plays them.
+fn filtered_draws(entry: &Layer, features: VectorFeatures) -> usize {
+    if !features.refused_by(VectorFeatures::IMAGE_FILTER) {
+        return 0;
+    }
+    match entry {
+        Layer::Picture(picture) => picture.approximate_op_count_nested(true),
+        Layer::Targeted(pictures) => {
+            pictures.0.approximate_op_count_nested(true)
+        }
+        _ => 1,
     }
 }
 

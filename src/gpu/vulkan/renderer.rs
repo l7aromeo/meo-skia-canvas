@@ -1,9 +1,6 @@
 use super::skia_max_api_version;
 use crate::{
-    context::{
-        layer::{Target, TileScope},
-        page::Page,
-    },
+    context::{layer::TileScope, page::Page},
     gpu::{RenderCache, RenderState::Resizing},
 };
 use ash::vk::Handle;
@@ -243,12 +240,10 @@ impl VulkanRenderer {
                 // draw newly added vector layers
                 canvas.scale((dpr, dpr)).clip_rect(clip, None, Some(true));
                 let _tiles = TileScope::open();
-                for layer in page.layers.iter().skip(self.cache.depth()) {
-                    canvas.save();
-                    canvas.concat(&matrix);
-                    layer.playback(canvas, Target::Pixels);
-                    canvas.restore();
-                }
+                canvas.save();
+                canvas.concat(&matrix);
+                page.play_layers(self.cache.depth()..page.layers.len(), canvas);
+                canvas.restore();
             })
         {
             self.cache.update(frame, page, matte, dpr, clip);

@@ -43,6 +43,8 @@ use skia_safe::Surface;
 use skia_safe::gpu::SyncCpu;
 
 use crate::Error;
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+use crate::gpu::pacing;
 
 /// How many times a page's draw is attempted before its failure is reported:
 /// the draw, and one retry on a fresh surface. A GPU recovery discards the
@@ -91,8 +93,9 @@ pub(crate) fn draws_ran(surface: &mut Surface, page: usize) -> bool {
     let Some(mut context) = surface.direct_context() else {
         return true;
     };
-    // A flush that failed left the draws unrun, whatever the submit says.
-    let flushed = context.flush(None).is_ok();
+    // A flush that failed left the draws unrun, whatever the submit says:
+    // this one, or one the playback made on the way -- see `pacing`.
+    let flushed = context.flush(None).is_ok() && !pacing::take_failed();
     let ran = context.submit(SyncCpu::Yes);
     flushed && ran && !seam::discards(page)
 }

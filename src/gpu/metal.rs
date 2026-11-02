@@ -254,10 +254,7 @@ impl MetalContext {
 #[cfg(feature = "window")]
 use {
     super::{RenderCache, RenderState::Resizing},
-    crate::context::{
-        layer::{Target, TileScope},
-        page::Page,
-    },
+    crate::context::{layer::TileScope, page::Page},
     objc2_core_foundation::CGSize,
     objc2_foundation::NSString,
     objc2_metal::{MTLCommandBuffer, MTLCommandQueue, MTLPixelFormat},
@@ -416,12 +413,10 @@ impl MetalRenderer {
                 // draw newly added vector layers
                 canvas.scale((dpr, dpr)).clip_rect(clip, None, Some(true));
                 let _tiles = TileScope::open();
-                for layer in page.layers.iter().skip(self.cache.depth()) {
-                    canvas.save();
-                    canvas.concat(&matrix);
-                    layer.playback(canvas, Target::Pixels);
-                    canvas.restore();
-                }
+                canvas.save();
+                canvas.concat(&matrix);
+                page.play_layers(self.cache.depth()..page.layers.len(), canvas);
+                canvas.restore();
             },
         );
 
