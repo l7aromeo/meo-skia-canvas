@@ -1,0 +1,46 @@
+name: Documentation
+description: Something in the documentation is wrong, missing or unclear
+labels: [documentation, needs triage]
+body:
+  - type: checkboxes
+    id: before
+    attributes:
+      label: Before you file
+      options:
+        - label: I searched the existing issues and found none for this.
+          required: true
+
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where
+      options:
+        - a README
+        - a page under docs/
+        - the JavaScript API reference
+        - docs.rs
+        - a changelog
+    validations:
+      required: true
+
+  - type: input
+    id: link
+    attributes:
+      label: Link or path
+      description: The page, and the section where it helps.
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What is wrong or missing
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested change
+    validations:
+      required: false

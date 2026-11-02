@@ -1,0 +1,56 @@
+name: Feature request
+description: Something the library should do that it does not
+labels: [enhancement, needs triage]
+body:
+  - type: checkboxes
+    id: before
+    attributes:
+      label: Before you file
+      options:
+        - label: I searched the existing issues and found none for this.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do, and what stops you today.
+    validations:
+      required: true
+
+  - type: textarea
+    id: api
+    attributes:
+      label: Proposed API
+      description: |
+        One source tree ships both surfaces, so a proposal names both spellings: the JavaScript
+        call and its Rust counterpart, `fillRect` and `fill_rect`.
+      render: text
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - npm package
+        - Rust crate
+        - both
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What else would solve it, and why the proposal is the better one.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: compatibility
+    attributes:
+      label: Compatibility
+      options:
+        - label: This would change what existing code gets.
