@@ -136,6 +136,13 @@ pub(crate) enum Depth {
     /// Half floats on a canvas of bytes, the canvas's own on one of
     /// floats: what holds every colour placed on its bytes exactly where
     /// the GPU blurs it -- see `BlurOp::playback`.
+    ///
+    /// What it costs: 256 blurred circles on an eight-bit Display P3 page,
+    /// read back, take 1.15 to 1.21 times as long on the GPU as through a
+    /// layer of bytes, which does not hold them exactly -- 17 to 24
+    /// microseconds a draw. The CPU takes no such layer. Half floats rather
+    /// than floats because they are the cheaper: an F32 layer took 1.05 to
+    /// 1.35 times as long as this one.
     Halves,
 }
 
