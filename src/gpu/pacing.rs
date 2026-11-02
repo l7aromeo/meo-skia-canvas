@@ -1,59 +1,65 @@
-//! Flushing a GPU playback every so many image-filtered draws.
+//! Flushing a GPU playback every so many layers it renders offscreen.
 //!
 //! Ganesh, Skia's GPU backend, holds a page's draws as render tasks until its
 //! context is flushed, and a flush first reorders every task it holds
 //! (`GrDrawingManager::reorderTasks`) by clustering them
 //! (`GrClusterRenderTasks`), which walks each task against what the others
-//! depend on: the work grows with the square of the tasks in one flush. An
-//! image-filtered draw makes tasks of its own -- what it filters, the
-//! filter's passes, and its return to the page -- so a page of them played
-//! onto a GPU surface and flushed once, at the read, grew quadratically. On
-//! an Apple M4 Pro, N rects under a drop shadow drawn and read back took 84
-//! microseconds a draw at 256 and 2.1 milliseconds a draw at 16,384, every
-//! working sample inside that one flush's clustering, where the CPU stays
-//! near 15 microseconds a draw.
+//! depend on: the work grows with the square of the tasks in one flush. A
+//! layer Ganesh renders offscreen is a task of its own, which the page's
+//! task then depends on: a `saveLayer`'s, and an image filter's -- what it
+//! filters, the filter's passes. So a page of many of either, played onto a
+//! GPU surface and flushed once, at the read, grew quadratically. On an Apple
+//! M4 Pro, N rects under a drop shadow drawn and read back took 84 microseconds
+//! a draw at 256 and 2.1 milliseconds a draw at 16,384, and N `saveLayer`
+//! groups of one rect each 37 microseconds a group at 1,024 and 654 at 16,384,
+//! nearly every working sample inside that one flush's clustering, where the
+//! CPU stays near 15 microseconds a draw and 3 a group.
 //!
-//! So a playback flushes its context once it has played
-//! [`FILTERED_DRAWS_PER_FLUSH`] image-filtered draws since the last flush,
-//! and each flush clusters a bounded number of tasks. It counts an entry's
-//! ops rather than its draws, which a page does not keep -- see
-//! `layer::filtered_draws` -- and the ops bound the draws from above: about
-//! one a draw in a long run under a CanvasKit filter, five under a shadow,
-//! and a few more where each draw is an entry of its own, which holds the
-//! ops of its frame too. So a playback can flush several times as often as
-//! the count says, and still a fixed number of times a draw, which keeps
-//! the growth linear: what the count is for. It
-//! flushes without submitting: the work is recorded into the command buffer the
-//! read's confirmation waits on -- see `completion::draws_ran` -- so that wait
-//! still covers every draw, and a flush that fails, which leaves its draws
-//! unrun, fails the confirmation that follows it -- see [`take_failed`].
+//! So a playback flushes its context once it has played [`LAYERS_PER_FLUSH`]
+//! such layers since the last flush, and each flush clusters a bounded number
+//! of tasks. It counts a group as one, and the draws it holds as they are
+//! played; and an image-filtered entry by its ops rather than its draws,
+//! which a page does not keep -- see `layer::offscreen_layers` -- and the ops
+//! bound the draws from above: about one a draw in a long run under a
+//! CanvasKit filter, five under a shadow, and a few more where each draw is
+//! an entry of its own, which holds the ops of its frame too. So a playback
+//! can flush several times as often as the count says, and still a fixed
+//! number of times a draw, which keeps the growth linear: what the count is
+//! for. It flushes without submitting: the work is recorded into the
+//! command buffer the read's confirmation waits on -- see
+//! `completion::draws_ran` -- so that wait still covers every draw, and a
+//! flush that fails, which leaves its draws unrun, fails the confirmation that
+//! follows it -- see [`take_failed`].
 //!
-//! A page records a run of filtered draws as one entry, which a playback
-//! plays whole, so the recorder files such a run in entries of at most
-//! [`FILTERED_DRAWS_PER_FLUSH`] draws -- see `PageRecorder::append_isolated`
-//! -- and a playback can flush between them.
+//! Every `saveLayer` is an entry of its own, but a page records a run of
+//! filtered draws as one entry, which a playback plays whole, so the recorder
+//! files such a run in entries of at most [`LAYERS_PER_FLUSH`] draws -- see
+//! `PageRecorder::append_isolated` -- and a playback can flush between them.
 
 use std::cell::Cell;
 
 use skia_safe::Canvas as SkCanvas;
 
-/// How many image-filtered draws a page files in one entry, and how many a
-/// GPU playback counts -- by their ops -- between flushes.
+/// How many layers a GPU playback renders offscreen between flushes, counted
+/// as `layer::offscreen_layers` counts them, and how many image-filtered draws
+/// a page files in one entry, each of which renders at least one.
 ///
-/// Counted in ops, a playback flushes more often than once every this many
-/// draws -- five times as often under a shadow, and more where each draw is
-/// an entry of its own -- but still a fixed number of times a draw, so its
-/// time stays linear in the draws.
+/// Counted in ops, a playback of filtered draws flushes more often than once
+/// every this many draws -- five times as often under a shadow, and more
+/// where each draw is an entry of its own -- and counts every group as one,
+/// a plain one that opens no layer on the GPU included. Each overcounts by a
+/// fixed number a draw or a group, so a playback flushes more often than the
+/// layers it renders call for, and its time stays linear in them.
 ///
 /// Chosen, not fixed: small enough that one flush's clustering stays cheap
 /// -- 256 shadowed rects drawn and read back took 84 microseconds a draw,
 /// against 245 at 4,096 -- and large enough that a page of a few filtered
-/// draws, the common case, never flushes before its read.
-pub(crate) const FILTERED_DRAWS_PER_FLUSH: usize = 256;
+/// draws or groups, the common case, never flushes before its read.
+pub(crate) const LAYERS_PER_FLUSH: usize = 256;
 
 thread_local! {
-    /// The image-filtered draws played on this thread since its playback
-    /// last flushed, or began.
+    /// The layers rendered offscreen on this thread since its playback last
+    /// flushed, or began.
     static SINCE_FLUSH: Cell<usize> = const { Cell::new(0) };
     /// Whether a flush made on this thread failed since a confirmation last
     /// asked -- see [`take_failed`].
@@ -93,16 +99,16 @@ pub(crate) fn end(page: usize) {
     let _ = page;
 }
 
-/// Counts `filtered` image-filtered draws just played onto `canvas` -- see
-/// `layer::filtered_draws` -- and flushes its GPU context once
-/// [`FILTERED_DRAWS_PER_FLUSH`] have been counted since the last flush. A
-/// canvas with no GPU context has nothing to flush.
-pub(crate) fn played(canvas: &SkCanvas, filtered: usize) {
-    if filtered == 0 {
+/// Counts `layers` layers just rendered offscreen onto `canvas` -- see
+/// `layer::offscreen_layers` -- and flushes its GPU context once
+/// [`LAYERS_PER_FLUSH`] have been counted since the last flush. A canvas with
+/// no GPU context has nothing to flush.
+pub(crate) fn played(canvas: &SkCanvas, layers: usize) {
+    if layers == 0 {
         return;
     }
-    let since = SINCE_FLUSH.get() + filtered;
-    if since < FILTERED_DRAWS_PER_FLUSH {
+    let since = SINCE_FLUSH.get() + layers;
+    if since < LAYERS_PER_FLUSH {
         SINCE_FLUSH.set(since);
         return;
     }
