@@ -753,6 +753,8 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- **A blurred path on an eight-bit wide-gamut canvas stores a fill's bytes inside it.** ([#433](https://github.com/l7aromeo/meo-skia-canvas/issues/433))
+
 - A drop shadow keeps the tail of its blur along the edge of the canvas its offset moves it away from, on every canvas and either engine ([#454](https://github.com/l7aromeo/meo-skia-canvas/issues/454)).
 
 - A filtered draw on an F16 or F32 canvas outside sRGB filters what it covers rather than the whole canvas: 50 rects under a drop shadow drew in about 26 ms rather than 1.7 s on F16 Display P3 ([#461](https://github.com/l7aromeo/meo-skia-canvas/issues/461)).
@@ -900,6 +902,8 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 - **A canvas pattern in a PDF is drawn at the export's `density`, and on a Display P3 canvas blends as the canvas does.** ([#442](https://github.com/l7aromeo/meo-skia-canvas/issues/442), [#443](https://github.com/l7aromeo/meo-skia-canvas/issues/443))
 
+- **A canvas pattern in a PDF is written as one tile repeated, rather than as an image of the whole draw, where each tile lands on whole device pixels at a whole `density`.** ([#451](https://github.com/l7aromeo/meo-skia-canvas/issues/451))
+
 - **An SVG of a page with nothing on it is well-formed XML.**
   `toBuffer("svg")` wrote an empty page's root as
   `<svg ... height="40"/ viewBox="0 0 80 40">`: Skia writes an empty
@@ -959,9 +963,7 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
   fill's bytes, translucent or not and under any `globalAlpha`. An sRGB canvas
   is unchanged. Chrome converts a colour onto such a canvas through the same
   approximation, so where that crosses a rounding boundary Chrome is a level
-  off and this is not -- see docs/browser-differences.md. Not yet exact there:
-  a blurred path, which stores a level off a fill of its colour on an sRGB
-  canvas too.
+  off and this is not -- see docs/browser-differences.md.
 
   The exact colour is drawn as a plain paint colour where Skia lands it on
   its bytes, which each thread finds once per colour by drawing it onto a
@@ -2054,6 +2056,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   without it].
 
 ### Added
+
+- **`just bench` runs the npm and crate benchmarks over the same cases, drawing on sRGB, Display P3 and half-float pages, and writes a dated report of each to `target/bench/`.** ([#468](https://github.com/l7aromeo/meo-skia-canvas/issues/468))
 
 - **CSS Color 4's system colours**, in any case, wherever a colour string
   goes: `Canvas`, `CanvasText`, `ButtonFace`, `Highlight`, `LinkText` and

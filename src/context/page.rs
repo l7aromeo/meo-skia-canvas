@@ -10,8 +10,8 @@ use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
     ColorSpace, ColorType, Data, Document, IRect, ISize, Image as SkImage,
     ImageInfo, M44, Matrix, Paint, Path, Picture, PictureRecorder,
-    PixelGeometry, Pixmap, Point, Rect, SamplingOptions, Size, Surface,
-    SurfaceProps, SurfacePropsFlags, XYZD50Hash, annotate,
+    PixelGeometry, Pixmap, Point, Rect, Size, Surface, SurfaceProps,
+    SurfacePropsFlags, XYZD50Hash, annotate,
     canvas::SrcRectConstraint,
     image::{BitDepth, CachingHint},
     jpeg_encoder, pdf, png_encoder,
@@ -43,7 +43,7 @@ use crate::{
         layer::{
             BlurDraw, BlurOp, ClipData, Clipped, Composite, Coverage, CutOp,
             Entries, Group, Layer, LayerRec, PatternDraw, Target, TileScope,
-            holds_a_cut, play_entries,
+            holds_a_cut, in_document_space, play_entries, tiles_exactly,
         },
     },
     encode::{
@@ -3956,7 +3956,15 @@ impl Page {
         embedding: Embedding<'_>,
         mut splices: Option<&mut Splices<'_>>,
     ) -> Result<(), String> {
-        let refused = |index: usize| features[index].refused_by(backend);
+        // A canvas's pattern painted from its tile is refused where, played
+        // here, its tiles would not land on whole device pixels -- see
+        // `tiles_exactly`.
+        let refused = |index: usize| {
+            features[index].refused_by(backend)
+                || (features[index]
+                    .holds(VectorFeatures::CANVAS_PATTERN_ALIGNED)
+                    && !tiles_exactly(&layers[index], canvas))
+        };
         let splicing = splices.is_some();
         // A group composited at an opacity alone is opened where that is 1,
         // and written as a group of its own at any other where the document
@@ -4169,20 +4177,8 @@ impl Page {
             layer.playback(raster, Target::Pixels);
         }
 
-        let srgb = info
-            .with_color_type(ColorType::RGBA8888)
-            .with_color_space(ColorSpace::new_srgb());
-        let mut embedded = started::raster(&srgb, None, None)
+        let image = in_document_space(&surface.image_snapshot(), 1.0)
             .ok_or("Could not allocate a surface for the document fallback")?;
-        let mut copy = Paint::default();
-        copy.set_blend_mode(BlendMode::Src);
-        surface.draw(
-            embedded.canvas(),
-            (0, 0),
-            SamplingOptions::default(),
-            Some(&copy),
-        );
-        let image = embedded.image_snapshot();
         let Some(ink) = self.ink_bounds(&image) else {
             return Ok(()); // the layer drew nothing visible
         };
