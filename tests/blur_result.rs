@@ -64,13 +64,15 @@ fn triangle(
     filter: &str,
     clip: Option<f32>,
 ) -> Option<Canvas> {
-    triangle_in(PixelDepth::Uint8, gpu, at, filter, clip, false)
+    let srgb = PixelColorSpace::Srgb;
+    triangle_in(PixelDepth::Uint8, srgb, gpu, at, filter, clip, false)
 }
 
-/// [`triangle`] on a canvas whose pixels are `depth`, drawn inside a
-/// `saveLayer` where `layered` says so.
+/// [`triangle`] on a canvas whose pixels are `depth` in `space`, drawn
+/// inside a `saveLayer` where `layered` says so.
 fn triangle_in(
     depth: PixelDepth,
+    space: PixelColorSpace,
     gpu: bool,
     at: [(f32, f32); 3],
     filter: &str,
@@ -82,6 +84,7 @@ fn triangle_in(
         SIZE.1,
         CanvasOptions {
             color_type: depth,
+            color_space: space,
             gpu,
             ..CanvasOptions::default()
         },
@@ -327,44 +330,72 @@ const F32_NOISE: f64 = 1e-6;
 /// What a draw of `alpha`, `width` pixels wide, casts and is drawn over
 /// through `drop-shadow(dx dy sigma)` in its own colour: its alpha blurred
 /// by the exact Gaussian and moved by whole pixels, with the draw over it.
+///
+/// The blur is taken over the image with a margin of nothing around it, so
+/// that a pixel the offset brings in from past the image's edge holds the
+/// tail of the blur spread there, as a shadow cast near the canvas's edge
+/// does, rather than nothing.
 fn over_its_shadow(
     alpha: &[f64],
     width: usize,
     (dx, dy): (i64, i64),
     sigma: f64,
 ) -> Vec<f64> {
-    let blurred = sampled(alpha, width, sigma);
     let height = alpha.len() / width;
+    let margin = dx.unsigned_abs().max(dy.unsigned_abs()) as usize;
+    let wide = width + 2 * margin;
+    let padded: Vec<f64> = (0..wide * (height + 2 * margin))
+        .map(|i| {
+            let (x, y) = (i % wide, i / wide);
+            match (x.checked_sub(margin), y.checked_sub(margin)) {
+                (Some(x), Some(y)) if x < width && y < height => {
+                    alpha[y * width + x]
+                }
+                _ => 0.0,
+            }
+        })
+        .collect();
+    let blurred = sampled(&padded, wide, sigma);
     (0..alpha.len())
         .map(|i| {
-            let (x, y) = ((i % width) as i64 - dx, (i / width) as i64 - dy);
-            let inside = (0..width as i64).contains(&x)
-                && (0..height as i64).contains(&y);
-            let shadow = match inside {
-                true => blurred[(y * width as i64 + x) as usize],
-                false => 0.0,
-            };
+            let x = (i % width) as i64 - dx + margin as i64;
+            let y = (i / width) as i64 - dy + margin as i64;
+            let shadow = blurred[(y * wide as i64 + x) as usize];
             alpha[i] + shadow * (1.0 - alpha[i])
         })
         .collect()
 }
+
+/// The pages the drop-shadow sweeps run on: sRGB, which keeps one
+/// recording below eight bits, and Display P3, which keeps a recording for
+/// its pixels apart from its document, on either engine.
+const SHADOW_PAGES: [(PixelColorSpace, bool); 4] = [
+    (PixelColorSpace::Srgb, false),
+    (PixelColorSpace::Srgb, true),
+    (PixelColorSpace::DisplayP3, false),
+    (PixelColorSpace::DisplayP3, true),
+];
 
 #[test]
 fn a_drop_shadow_is_the_exact_gaussian_of_what_casts_it() {
     // Through Skia's layer the shadow was Skia's blur, which approximates
     // the Gaussian; it is made from the draw's own pixels now, blurred
     // exactly and composited under it in floats, and rounded once.
-    for gpu in [false, true] {
+    let mut wrong = vec![];
+    for (space, gpu) in SHADOW_PAGES {
         for (offset, sigma) in [((0, 0), 2.0f32), ((3, 2), 2.0), ((3, 2), 8.0)]
         {
             let filter = format!(
                 "drop-shadow({}px {}px {sigma}px black)",
                 offset.0, offset.1
             );
-            let (Some(mut drawn), Some(mut shadowed)) = (
-                triangle(gpu, WIDE, "none", None),
-                triangle(gpu, WIDE, &filter, None),
-            ) else {
+            let page = |filter| {
+                let depth = PixelDepth::Uint8;
+                triangle_in(depth, space, gpu, WIDE, filter, None, false)
+            };
+            let (Some(mut drawn), Some(mut shadowed)) =
+                (page("none"), page(&filter))
+            else {
                 continue;
             };
             let drawn: Vec<f64> = alpha(&mut drawn)
@@ -378,15 +409,16 @@ fn a_drop_shadow_is_the_exact_gaussian_of_what_casts_it() {
                 f64::from(sigma),
             );
             let misses = misses(&alpha(&mut shadowed), &reference);
-            assert!(
-                misses.is_empty(),
-                "gpu {gpu}, {filter}: {} pixels off the exact shadow, first \
-                 {:?}",
-                misses.len(),
-                &misses[..misses.len().min(4)],
-            );
+            if !misses.is_empty() {
+                wrong.push(format!(
+                    "{space:?} gpu {gpu}, {filter}: {} pixels off, first {:?}",
+                    misses.len(),
+                    &misses[..misses.len().min(4)],
+                ));
+            }
         }
     }
+    assert!(wrong.is_empty(), "off the exact shadow: {wrong:#?}");
 }
 
 #[test]
@@ -422,17 +454,20 @@ fn a_drop_shadowed_image_at_an_alpha_is_rounded_once() {
 
 #[test]
 fn a_drop_shadow_on_float_pixels_is_the_exact_gaussian_unrounded() {
+    let mut wrong = vec![];
     for (depth, rounding) in [
         (PixelDepth::F16, F16_ROUNDING),
         (PixelDepth::F32, F32_ROUNDING),
     ] {
-        for gpu in [false, true] {
+        for (space, gpu) in SHADOW_PAGES {
             for sigma in [2.0f32, 8.0] {
                 let filter = format!("drop-shadow(3px 2px {sigma}px black)");
-                let (Some(mut drawn), Some(mut shadowed)) = (
-                    triangle_in(depth, gpu, WIDE, "none", None, false),
-                    triangle_in(depth, gpu, WIDE, &filter, None, false),
-                ) else {
+                let page = |filter| {
+                    triangle_in(depth, space, gpu, WIDE, filter, None, false)
+                };
+                let (Some(mut drawn), Some(mut shadowed)) =
+                    (page("none"), page(&filter))
+                else {
                     continue;
                 };
                 let reference = over_its_shadow(
@@ -447,14 +482,18 @@ fn a_drop_shadow_on_float_pixels_is_the_exact_gaussian_unrounded() {
                     .zip(&reference)
                     .map(|(g, r)| (g - r).abs() / (r * rounding + F32_NOISE))
                     .fold(0.0, f64::max);
-                assert!(
-                    worst <= 1.0,
-                    "{depth:?} gpu {gpu}, {filter}: {worst:.2} times as far \
-                     off the exact shadow as allowed"
-                );
+                if worst > 1.0 {
+                    wrong.push(format!(
+                        "{depth:?} {space:?} gpu {gpu}, {filter}: {worst:.2}"
+                    ));
+                }
             }
         }
     }
+    assert!(
+        wrong.is_empty(),
+        "times as far off the exact shadow as allowed: {wrong:#?}"
+    );
 }
 
 #[test]
@@ -467,12 +506,13 @@ fn a_blurred_path_on_float_pixels_is_the_exact_gaussian_unrounded() {
         // `RenderingEngine::can_composite` refuses float pages and the canvas
         // is drawn on the CPU; it runs where a backend composites
         // float.
+        let srgb = PixelColorSpace::Srgb;
         for gpu in [false, true] {
             for sigma in [2.0f32, 8.0, 30.0] {
                 let filter = format!("blur({sigma}px)");
                 let (Some(mut drawn), Some(mut blurred)) = (
-                    triangle_in(depth, gpu, WIDE, "none", None, false),
-                    triangle_in(depth, gpu, WIDE, &filter, None, false),
+                    triangle_in(depth, srgb, gpu, WIDE, "none", None, false),
+                    triangle_in(depth, srgb, gpu, WIDE, &filter, None, false),
                 ) else {
                     continue;
                 };
@@ -530,6 +570,7 @@ fn a_blurred_path_exported_at_a_density_is_the_exact_gaussian_there() {
                 triangle(gpu, WIDE, "none", None),
                 triangle_in(
                     PixelDepth::Uint8,
+                    PixelColorSpace::Srgb,
                     gpu,
                     WIDE,
                     &filter,

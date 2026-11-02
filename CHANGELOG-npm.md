@@ -753,6 +753,8 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- A drop shadow keeps the tail of its blur along the edge of the canvas its offset moves it away from, on every canvas and either engine ([#454](https://github.com/l7aromeo/meo-skia-canvas/issues/454)).
+
 - A filtered draw on an F16 or F32 canvas outside sRGB filters what it covers rather than the whole canvas: 50 rects under a drop shadow drew in about 26 ms rather than 1.7 s on F16 Display P3 ([#461](https://github.com/l7aromeo/meo-skia-canvas/issues/461)).
 - On the GPU, a page of many image-filtered draws is drawn in time that grows with the draws rather than their square: 16,384 rects under a drop shadow drew and read back in 1.3 s rather than 31 s ([#463](https://github.com/l7aromeo/meo-skia-canvas/issues/463)).
 - On the GPU, a page of many `saveLayer` groups is drawn in time that grows with the groups rather than their square: 16,384 groups of one rect drew and read back in 0.43 s rather than 10.7 s ([#464](https://github.com/l7aromeo/meo-skia-canvas/issues/464)).
