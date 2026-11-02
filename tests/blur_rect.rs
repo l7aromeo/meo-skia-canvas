@@ -671,6 +671,14 @@ const EIGHT_BIT_SPACES: [(PixelColorSpace, &str); 4] = [
     (PixelColorSpace::Rec2020, "rec2020"),
 ];
 
+/// The eight-bit spaces whose pages hold no exact colour, each with the
+/// space its colours are named in: CSS has no `color()` in either, so they
+/// are named in sRGB.
+const UNPLACED_SPACES: [(PixelColorSpace, &str); 2] = [
+    (PixelColorSpace::Rec2020Pq, "srgb"),
+    (PixelColorSpace::Rec2020Hlg, "srgb"),
+];
+
 /// How far off the byte grid a channel and the alpha are named, in levels:
 /// far enough from a byte that rounding first moves the product, and apart
 /// from each other so that the two offsets do not cancel.
@@ -740,12 +748,15 @@ fn a_blurred_rectangles_interior_stores_what_a_fill_of_its_colour_does() {
     // A rectangle wide against its blur, whose middle is drawn at full
     // coverage, beside a fill of the same colour: the two store the same
     // bytes, on every eight-bit space, at every alpha byte and off the byte
-    // grid, where the alpha as given lands a level from the fill's bytes.
+    // grid, where the alpha as given lands a level from the fill's bytes --
+    // and on pages with no exact colour, where the GPU's blur took the
+    // colour by another route than a fill and rounded near-ties apart.
     let size = (40.0f32, 20.0f32);
     let width = size.0 as usize;
     let (blurred, filled) = ((10, 10), (30, 10));
     for gpu in [false, true] {
-        for (space, name) in EIGHT_BIT_SPACES {
+        for (space, name) in EIGHT_BIT_SPACES.into_iter().chain(UNPLACED_SPACES)
+        {
             let Some(mut canvas) = page(size, space, gpu) else {
                 continue;
             };
@@ -774,7 +785,7 @@ fn a_blurred_rectangles_interior_stores_what_a_fill_of_its_colour_does() {
             }
             assert!(
                 misses.is_empty(),
-                "gpu {gpu}, {name}: {} of {} missed, first {:?}",
+                "gpu {gpu}, {space:?}: {} of {} missed, first {:?}",
                 misses.len(),
                 sweep_alphas().len(),
                 &misses[..misses.len().min(4)]
