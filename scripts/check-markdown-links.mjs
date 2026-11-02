@@ -19,6 +19,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { posix } from "node:path";
+import { pathToFileURL } from "node:url";
 
 // Third-party sources are not ours to fix, and their links point into trees we
 // do not carry.
@@ -476,5 +477,8 @@ function main() {
   );
 }
 
-if (process.argv.includes("--self-test")) selfTest();
-else main();
+// Run only as a script: check-readme-facts imports `linkTargets` from here.
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  if (process.argv.includes("--self-test")) selfTest();
+  else main();
+}

@@ -21,6 +21,9 @@ edition = "2024"
 # colour alike. The format would have shipped either way; the pictures would
 # not have.
 rust-version = "1.90"
+# The crates.io page. The repository's README.md links relatively, which a
+# page read away from the repository cannot follow.
+readme = "docs/readme/crate.md"
 repository = "https://github.com/l7aromeo/meo-skia-canvas"
 documentation = "https://docs.rs/meo-skia-canvas"
 keywords = ["canvas", "skia", "graphics", "gpu", "rendering"]
@@ -35,7 +38,7 @@ include = [
     "/Cargo.toml",
     "/build.rs",
     "/LICENSE",
-    "/README.md",
+    "/docs/readme/crate.md",
     # One changelog, and it holds this channel's entries. The repository keeps
     # three files; `crates-io-publish.yml` moves `CHANGELOG-crate.md` over
     # `CHANGELOG.md` on the runner before packaging, so what a Rust consumer

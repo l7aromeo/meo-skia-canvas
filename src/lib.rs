@@ -369,6 +369,15 @@ pub mod js_names {
     };
 }
 
+/// The crates.io page, compiled: its `rust` fences run as doctests, so an
+/// example naming an item that moved fails the build rather than the reader.
+/// Its example is `no_run`, since it writes a file, and is compiled all the
+/// same. `docs/readme/crate.md` is the page Cargo.toml's `readme` names, not
+/// the repository's README.
+#[cfg(doctest)]
+#[doc = include_str!("../docs/readme/crate.md")]
+pub struct CrateReadme;
+
 // Shared internal infrastructure (not part of the public API).
 pub(crate) mod context;
 pub(crate) mod gpu;
