@@ -35,47 +35,57 @@ impl MetalEngine {
         Some("Metal".to_string())
     }
 
+    /// Whether this engine has a GPU context to draw with, as probed once
+    /// for the process -- see [`Self::probed`]. Read in place rather than
+    /// through a clone of the status: a page that keeps a recording for its
+    /// pixels asks it for every draw -- see `context::floats_draw_on_the_cpu`.
     pub fn supported() -> bool {
-        Self::status()["renderer"] == "GPU"
+        Self::probed()["renderer"] == "GPU"
     }
 
     pub fn status() -> Value {
-        MTL_STATUS
-            .get_or_init(|| {
-                // test whether a context can be created and do some one-time
-                // init if so
-                match MetalContext::new() {
-                    Some(context) => {
-                        Self::spawn_idle_watcher(); // watch for inactive contexts and deallocate them
+        Self::probed().clone()
+    }
 
-                        let device_name = format!(
-                            "{} ({})",
-                            match context.device.location() {
-                                MTLDeviceLocation::BuiltIn => "Integrated GPU",
-                                MTLDeviceLocation::Slot => "Discrete GPU",
-                                MTLDeviceLocation::External => "External GPU",
-                                _ => "Other GPU",
-                            },
-                            context.device.name()
-                        );
+    /// The status, probed the first time it is asked for: whether a context
+    /// can be made, and what it runs on. Set once and never written again
+    /// -- `MTL_STATUS` is a `OnceLock` nothing else touches -- so what it says
+    /// holds for the process.
+    fn probed() -> &'static Value {
+        MTL_STATUS.get_or_init(|| {
+            // test whether a context can be created and do some one-time
+            // init if so
+            match MetalContext::new() {
+                Some(context) => {
+                    Self::spawn_idle_watcher(); // watch for inactive contexts and deallocate them
 
-                        json!({
-                            "renderer": "GPU",
-                            "api": "Metal",
-                            "device": device_name,
-                            "threads": rayon::current_num_threads(),
-                        })
-                    }
-                    None => json!({
-                        "renderer": "CPU",
+                    let device_name = format!(
+                        "{} ({})",
+                        match context.device.location() {
+                            MTLDeviceLocation::BuiltIn => "Integrated GPU",
+                            MTLDeviceLocation::Slot => "Discrete GPU",
+                            MTLDeviceLocation::External => "External GPU",
+                            _ => "Other GPU",
+                        },
+                        context.device.name()
+                    );
+
+                    json!({
+                        "renderer": "GPU",
                         "api": "Metal",
-                        "device": "CPU-based renderer (Fallback)",
+                        "device": device_name,
                         "threads": rayon::current_num_threads(),
-                        "error": "GPU initialization failed",
-                    }),
+                    })
                 }
-            })
-            .clone()
+                None => json!({
+                    "renderer": "CPU",
+                    "api": "Metal",
+                    "device": "CPU-based renderer (Fallback)",
+                    "threads": rayon::current_num_threads(),
+                    "error": "GPU initialization failed",
+                }),
+            }
+        })
     }
 
     fn spawn_idle_watcher() {
@@ -244,10 +254,7 @@ impl MetalContext {
 #[cfg(feature = "window")]
 use {
     super::{RenderCache, RenderState::Resizing},
-    crate::context::{
-        layer::{Target, TileScope},
-        page::Page,
-    },
+    crate::context::{layer::TileScope, page::Page},
     objc2_core_foundation::CGSize,
     objc2_foundation::NSString,
     objc2_metal::{MTLCommandBuffer, MTLCommandQueue, MTLPixelFormat},
@@ -406,12 +413,10 @@ impl MetalRenderer {
                 // draw newly added vector layers
                 canvas.scale((dpr, dpr)).clip_rect(clip, None, Some(true));
                 let _tiles = TileScope::open();
-                for layer in page.layers.iter().skip(self.cache.depth()) {
-                    canvas.save();
-                    canvas.concat(&matrix);
-                    layer.playback(canvas, Target::Pixels);
-                    canvas.restore();
-                }
+                canvas.save();
+                canvas.concat(&matrix);
+                page.play_layers(self.cache.depth()..page.layers.len(), canvas);
+                canvas.restore();
             },
         );
 

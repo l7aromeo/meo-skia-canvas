@@ -409,6 +409,14 @@ read the math functions and every length unit.
 
 - **A blurred path on an eight-bit wide-gamut canvas stores a fill's bytes inside it.** ([#433](https://github.com/l7aromeo/meo-skia-canvas/issues/433))
 
+- A filtered draw on an F16 or F32 canvas outside sRGB filters what it covers rather than the whole canvas: 50 rects under a drop shadow drew in about 26 ms rather than 1.7 s on F16 Display P3 ([#461](https://github.com/l7aromeo/meo-skia-canvas/issues/461)).
+- On the GPU, a page of many image-filtered draws is drawn in time that grows with the draws rather than their square: 16,384 rects under a drop shadow drew and read back in 1.3 s rather than 31 s ([#463](https://github.com/l7aromeo/meo-skia-canvas/issues/463)).
+- A shadow on an eight-bit sRGB canvas stores the exact product of its colour and alpha on both engines, including under `globalAlpha`, so some shadow bytes move by one level ([#441](https://github.com/l7aromeo/meo-skia-canvas/issues/441)).
+- A text decoration in a named colour casts its shadow under `globalAlpha` at its own alpha, not that alpha twice, on F16 and F32 canvases ([#455](https://github.com/l7aromeo/meo-skia-canvas/issues/455)).
+- A CanvasKit filter holding a colour stores it as a fill of that colour does on an eight-bit canvas in linear sRGB, Display P3 or Rec. 2020, where it was a level off on up to 7% of colours ([#459](https://github.com/l7aromeo/meo-skia-canvas/issues/459)).
+
+- A CanvasKit filter holding a colour lands as a fill of that colour on every float canvas, in every blend mode ([#418](https://github.com/l7aromeo/meo-skia-canvas/pull/418)).
+
 - **A PDF holds the pixels it embeds losslessly unless an explicit `EncodeOptions::quality` below 1 asks for JPEG, which is then full-chroma unless `jpeg_downsample` is set.** ([#444](https://github.com/l7aromeo/meo-skia-canvas/issues/444)) Flat graphics embedded this way grow by up to about a fifth, photographs inside an embedded run by 5 to 12 times.
 
 - **`TextMetrics::font_bounding_box_ascent` and `font_bounding_box_descent`
@@ -637,9 +645,12 @@ read the math functions and every length unit.
   fill is, and is a fill of its colour to the bit on every such canvas. A
   filter holding a colour is built again for the canvas it is drawn onto, and
   so is any filter composed, merged, offset or interpolated over one, set by
-  `set_color_filter`, `set_image_filter` or as a layer's backdrop; on a float
-  canvas in sRGB it lands as a fill of its colour does, and on the others it
-  keeps up to 1.8e-4. On an eight-bit sRGB canvas nothing changes, so its PDF
+  `set_color_filter`, `set_image_filter` or as a layer's backdrop, and lands
+  as a fill of its colour does on every such canvas, in every blend mode. On
+  a canvas in another space than sRGB it is drawn into the canvas's pixels
+  through a filter of this crate's, which holds the colour converted on this
+  side, and a PDF or SVG of it writes the filter as before. On an eight-bit
+  sRGB canvas nothing changes, so its PDF
   still writes such a colour as Skia converts it, as it does a paragraph's; a
   PDF or SVG of a float canvas in sRGB writes it as it writes a fill of the
   colour.

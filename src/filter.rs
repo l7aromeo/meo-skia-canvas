@@ -1,10 +1,10 @@
 use skia_safe::{
     BlendMode as SkBlendMode, BlurStyle as SkBlurStyle, Color as SkColor,
     Color4f, ColorChannel as SkColorChannel, ColorFilter as SkColorFilter,
-    ColorMatrix as SkColorMatrix, ColorSpace, ImageFilter as SkImageFilter,
+    ColorMatrix as SkColorMatrix, ImageFilter as SkImageFilter,
     MaskFilter as SkMaskFilter, Point as SkPoint, Point3 as SkPoint3,
-    Rect as SkRect, TileMode as SkTileMode, color_filters, image_filters,
-    luma_color_filter,
+    Rect as SkRect, TileMode as SkTileMode, Vector, color_filters,
+    image_filters, luma_color_filter,
 };
 
 pub(crate) mod onto;
@@ -23,7 +23,7 @@ use crate::{
     paint::BlendMode,
     pixels::SamplingMode,
 };
-use onto::{Onto, PageFilter};
+use onto::{Onto, PageFilter, blend_filter, shadow_filter};
 
 /// A filter that scales each colour channel by `multiply` and then adds
 /// `add`, both gamma-encoded sRGB coefficients, leaving alpha alone and
@@ -453,24 +453,6 @@ fn on(
     onto: Option<&Onto>,
 ) -> Option<SkImageFilter> {
     input.as_ref().map(|f| f.inner.on(onto))
-}
-
-/// A shadow's `color` as Skia is handed it for `onto`: linear-light sRGB
-/// as every [`RgbaLinear`] is, tagged so, since Skia reads an untagged
-/// colour as sRGB-encoded and decodes it, darkening the shadow; and for a
-/// page, handed over as a fill colour is -- see [`Onto::color`].
-fn shadow_color(
-    color: RgbaLinear,
-    onto: Option<&Onto>,
-) -> (Color4f, ColorSpace) {
-    let (color, space) = (
-        rgba_linear_to_unpremul_color4f(color),
-        linear_srgb_color_space(),
-    );
-    match onto {
-        Some(onto) => onto.color(color, &space),
-        None => (color, space),
-    }
 }
 
 impl ImageFilter {
@@ -920,14 +902,15 @@ impl ImageFilter {
         Self::built(
             true,
             move |onto| {
-                let (color, space) = shadow_color(color, onto);
-                image_filters::drop_shadow_only(
-                    (dx, dy),
+                shadow_filter(
+                    onto,
+                    Vector::new(dx, dy),
                     (sigma_x, sigma_y),
-                    color,
-                    space,
+                    rgba_linear_to_unpremul_color4f(color),
+                    &linear_srgb_color_space(),
                     on(&input, onto),
                     Self::crop_of(crop),
+                    true,
                 )
             },
             "drop_shadow_only",
@@ -1190,9 +1173,9 @@ impl ImageFilter {
     ///
     /// `color` is read as every [`RgbaLinear`] is, and handed to Skia for
     /// the canvas the filter is drawn onto as a fill's colour is, so on a
-    /// float canvas in sRGB the shadow lands where a fill of the same value
-    /// does. On an eight-bit canvas Skia rounds it otherwise than a fill's,
-    /// up to two levels off at some values.
+    /// float canvas the shadow lands where a fill of the same value does.
+    /// On an eight-bit canvas Skia rounds it otherwise than a fill's, up to
+    /// two levels off at some values.
     ///
     /// # Errors
     ///
@@ -1210,14 +1193,15 @@ impl ImageFilter {
         Self::built(
             true,
             move |onto| {
-                let (color, space) = shadow_color(color, onto);
-                image_filters::drop_shadow(
-                    skia_safe::Vector::new(dx, dy),
+                shadow_filter(
+                    onto,
+                    Vector::new(dx, dy),
                     (sigma_x, sigma_y),
-                    color,
-                    Some(space),
+                    rgba_linear_to_unpremul_color4f(color),
+                    &linear_srgb_color_space(),
                     on(&input, onto),
                     Self::crop_of(crop),
+                    false,
                 )
             },
             &format!("drop_shadow({dx}, {dy})"),
@@ -1345,7 +1329,7 @@ impl ColorFilter {
     /// [`RgbaLinear`] is, and reaches Skia in floating point, so a wide
     /// colour blends as itself on a wide canvas; it is handed over for the
     /// canvas the filter is drawn onto as a fill's colour is, so on a float
-    /// canvas in sRGB it lands where a fill of it does.
+    /// canvas it lands where a fill of it does, blended in `mode`.
     ///
     /// # Errors
     ///
@@ -1357,11 +1341,7 @@ impl ColorFilter {
             linear_srgb_color_space(),
         );
         PageFilter::built(true, move |onto| {
-            let (color, space) = match onto {
-                Some(onto) => onto.color(color, &space),
-                None => (color, space.clone()),
-            };
-            color_filters::blend_with_color_space(color, space, mode.to_skia())
+            blend_filter(onto, color, &space, mode.to_skia())
         })
         .map(|inner| Self { inner })
         .ok_or_else(|| Error::FilterCreate {

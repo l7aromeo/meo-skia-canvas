@@ -402,6 +402,101 @@ fn a_draw_dyed_by_it_paints_the_canvas_at_every_density() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
+/// A path dyed by a canvas's pattern casts its shadow under a `globalAlpha`
+/// as the one product of the two alphas, as a path dyed any other way does:
+/// half of `rgb(200 0 0 / 0.8)` lands where a whole `rgb(200 0 0 / 0.4)`
+/// does. Cast from the path at its alpha, the shape was rounded to a byte
+/// before the shadow's colour multiplied it, and parted from the whole one
+/// by a level on 116 pixels at density 1 and 427 at density 2.
+#[test]
+fn a_path_dyed_by_it_casts_its_shadow_under_an_alpha_once_rounded() {
+    let cast = |pattern: &Pattern, alpha: f32, color: &str, density: u32| {
+        let mut canvas = Canvas::new(WIDTH, HEIGHT);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        ctx.set_fill_pattern(pattern);
+        ctx.set_shadow_blur(4.0);
+        ctx.set_shadow_offset(-OFF_CANVAS, 3.0);
+        ctx.set_shadow_color_css(color).expect("a colour");
+        ctx.set_global_alpha(alpha);
+        ctx.begin_path();
+        ctx.move_to(OFF_CANVAS + 40.3, 20.7);
+        ctx.line_to(OFF_CANVAS + 95.8, 39.95);
+        ctx.line_to(OFF_CANVAS + 57.3, 68.2);
+        ctx.close_path();
+        ctx.fill(FillRule::NonZero);
+        premultiplied(&mut canvas, density)
+    };
+    let mut failures = vec![];
+    for density in DENSITIES {
+        let mut source = source(Source::Shadow);
+        let pixels = pixels_pattern(&mut source, density);
+        let mut holder = Canvas::new(WIDTH, HEIGHT);
+        let made = holder
+            .context()
+            .create_pattern_from_canvas(&mut source, PatternRepeat::Repeat);
+        for (name, pattern) in [("canvas", &made), ("pixels", &pixels)] {
+            let (n, most) = parting(
+                &cast(pattern, 0.5, "rgb(200 0 0 / 0.8)", density),
+                &cast(pattern, 1.0, "rgb(200 0 0 / 0.4)", density),
+            );
+            if most > 0 {
+                failures.push(format!("{name} {density}x: {n} px, {most}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// A run of text dyed by a canvas's pattern casts its shadow under a
+/// `globalAlpha` as the one product of the two alphas, its named line
+/// colour's included: half of `rgb(200 0 0 / 0.8)` lands where a whole
+/// `rgb(200 0 0 / 0.4)` does, as it does for the pattern of the canvas's
+/// pixels.
+#[test]
+fn a_run_dyed_by_it_casts_its_shadow_under_an_alpha_once_rounded() {
+    FontLibrary::new()
+        .use_paths(Some(OSWALD_FAMILY), [OSWALD])
+        .expect("Oswald");
+    let cast = |pattern: &Pattern, alpha: f32, color: &str, density: u32| {
+        let mut canvas = Canvas::new(WIDTH, HEIGHT);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        ctx.set_fill_pattern(pattern);
+        ctx.set_shadow_blur(4.0);
+        ctx.set_shadow_offset(-OFF_CANVAS, 3.0);
+        ctx.set_shadow_color_css(color).expect("a colour");
+        ctx.set_global_alpha(alpha);
+        assert!(ctx.set_font_css(&format!("40px {OSWALD_FAMILY}")));
+        ctx.set_text_decoration_css("underline rgb(0 90 200 / 0.6)")
+            .expect("a decoration");
+        ctx.fill_text("IHg", OFF_CANVAS + 30.3, 70.6, None);
+        premultiplied(&mut canvas, density)
+    };
+    let mut failures = vec![];
+    for density in DENSITIES {
+        let mut source = source(Source::Shadow);
+        let pixels = pixels_pattern(&mut source, density);
+        let mut holder = Canvas::new(WIDTH, HEIGHT);
+        let made = holder
+            .context()
+            .create_pattern_from_canvas(&mut source, PatternRepeat::Repeat);
+        for (name, pattern) in [("canvas", &made), ("pixels", &pixels)] {
+            let half = cast(pattern, 0.5, "rgb(200 0 0 / 0.8)", density);
+            let whole = cast(pattern, 1.0, "rgb(200 0 0 / 0.4)", density);
+            assert!(whole.iter().any(|&byte| byte > 0), "no shadow landed");
+            let (n, most) = parting(&half, &whole);
+            if most > 0 {
+                failures.push(format!("{name} {density}x: {n} px, {most}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// How far a shape is drawn off the canvas for only its shadow to land.
+const OFF_CANVAS: f32 = 1000.0;
+
 /// An SVG export embeds a draw dyed by a canvas's pattern as pixels: SVG
 /// names no paint server for the picture the pattern is to a document, and
 /// Skia's SVG backend wrote the draw as a bare path, black.

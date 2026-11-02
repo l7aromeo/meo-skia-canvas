@@ -1976,6 +1976,15 @@ impl<'a> Typesetter<'a> {
         }
     }
 
+    /// Whether the run's lines are drawn in a colour of their own, which
+    /// takes the `globalAlpha` apart from the glyphs' paint -- see
+    /// [`Self::decoration`].
+    pub fn names_a_line_colour(&self) -> bool {
+        let decoration = self.text_decoration();
+        decoration.decoration.ty != TextDecoration::NO_DECORATION
+            && decoration.color.is_some()
+    }
+
     /// The run's decoration, or `None` where it has no lines: in its own
     /// colour where it names one, its alpha times `global_alpha` as the
     /// text's paint has it, and otherwise in the text's paint's colour.

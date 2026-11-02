@@ -46,7 +46,7 @@ use crate::{
         page::{ExportOptions, Page},
     },
     export::{VectorFeatures, blend_features},
-    gpu::RenderingEngine,
+    gpu::{RenderingEngine, pacing},
     node::{
         filter::MASK_BLUR_MAX_SIGMA,
         typography::RunPaint,
@@ -446,7 +446,8 @@ fn contrast_bucket(rgb: [f32; 3]) -> [u8; 3] {
 
 /// The colour Skia sets a glyph mask's contrast from, for a paint in
 /// `plain` whose colour filter is `filter`: `filterColor4f(plain, nullptr,
-/// nullptr)`, as `SkPaintPriv::ComputeLuminanceColor` asks it.
+/// nullptr)`, as `SkPaintPriv::ComputeLuminanceColor` asks it,
+/// unpremultiplied.
 ///
 /// Read by drawing, as skia-safe's `filter_color4f` cannot give it: a
 /// paint with no shader has its colour filter folded into its colour by
@@ -476,7 +477,14 @@ fn luminance_colour(filter: &ColorFilter, plain: Color4f) -> Option<[f32; 3]> {
         .read_pixels(&info, &mut pixel, info.min_row_bytes(), (0, 0))
         .then_some(())?;
     let (channels, _) = pixel.as_chunks::<4>();
-    Some([0, 1, 2].map(|c| f32::from_le_bytes(channels[c])))
+    let [r, g, b, a] = [0, 1, 2, 3].map(|c| f32::from_le_bytes(channels[c]));
+    // Unpremultiplied, as `filterColor4f` answers: a filter leaving the
+    // colour translucent -- a `copy` blend of a colour at half alpha --
+    // reads back premultiplied here.
+    Some(match a > 0.0 {
+        true => [r / a, g / a, b / a],
+        false => [r, g, b],
+    })
 }
 
 thread_local! {
@@ -670,6 +678,24 @@ impl ExactColour {
         plain: Color4f,
     ) -> Option<ColorFilter> {
         self.keeping_plain_luminance(self.replacement()?, plain)
+    }
+
+    /// `filtered`, the dye followed by a colour filter built for a page's
+    /// pixels, with the glyph contrast Skia sets for `plain` through
+    /// `plain_filter`, the filter as a document draws it: the filter built
+    /// for the pixels holds its colour in the page's space, which Skia reads
+    /// as sRGB where it sets the contrast -- see [`luminance_colour`] -- and
+    /// a gray of 0.05 named in sRGB, replaced by a `copy` blend filter of
+    /// itself on a Rec. 2020 page, took the next bucket, its glyph edges up
+    /// to 24 levels from the plain text's.
+    pub fn keeping_luminance_of(
+        &self,
+        filtered: ColorFilter,
+        plain_filter: &ColorFilter,
+        plain: Color4f,
+    ) -> Option<ColorFilter> {
+        let [r, g, b] = luminance_colour(plain_filter, plain)?;
+        self.keeping_plain_luminance(filtered, Color4f::new(r, g, b, 1.0))
     }
 
     /// The colour as a colour filter: see [`Self::dye`].
@@ -905,6 +931,18 @@ pub enum Replay {
     },
 }
 
+impl Replay {
+    /// The draw at full alpha: a run's named line colour no longer
+    /// multiplied by a `globalAlpha`, which a path's replay does not hold.
+    pub fn opaque(&self) -> Self {
+        let mut replay = self.clone();
+        if let Replay::Text { global_alpha, .. } = &mut replay {
+            *global_alpha = 1.0;
+        }
+        replay
+    }
+}
+
 impl PatternDraw {
     fn playback(&self, canvas: &SkCanvas, target: Target) {
         canvas.save();
@@ -1005,6 +1043,13 @@ pub struct LayerRec {
     pub paint: Option<Paint>,
     pub bounds: Option<Rect>,
     pub backdrop: Option<ImageFilter>,
+    /// The paint a page's pixels open the layer with in place of `paint`,
+    /// where a CanvasKit colour filter in it is built for those pixels --
+    /// see `Context2D::pixels_paint`.
+    pub pixels_paint: Option<Paint>,
+    /// The backdrop a page's pixels open the layer with in place of
+    /// `backdrop`, built for those pixels -- see `Context2D::pixels_onto`.
+    pub pixels_backdrop: Option<ImageFilter>,
 }
 
 impl LayerRec {
@@ -1015,7 +1060,13 @@ impl LayerRec {
     /// opacity and keeps vector. Confined to `within` where that is `Some`:
     /// a rectangle in device pixels -- see [`Self::footprint`].
     fn open_on(&self, canvas: &SkCanvas, target: Target, within: Option<Rect>) {
-        let paint = match (&self.paint, target) {
+        let own = match target {
+            Target::Pixels => {
+                self.pixels_paint.as_ref().or(self.paint.as_ref())
+            }
+            Target::Document => self.paint.as_ref(),
+        };
+        let paint = match (own, target) {
             (Some(paint), Target::Pixels) => Some(composited(paint)),
             (Some(paint), Target::Document) => Some(Cow::Borrowed(paint)),
             (None, _) => None,
@@ -1047,7 +1098,13 @@ impl LayerRec {
         if let Some(bounds) = within.as_ref().or(self.bounds.as_ref()) {
             rec = rec.bounds(bounds);
         }
-        if let Some(backdrop) = &self.backdrop {
+        let backdrop = match target {
+            Target::Pixels => {
+                self.pixels_backdrop.as_ref().or(self.backdrop.as_ref())
+            }
+            Target::Document => self.backdrop.as_ref(),
+        };
+        if let Some(backdrop) = backdrop {
             rec = rec.backdrop(backdrop);
         }
         canvas.save_layer(&rec);
@@ -1467,21 +1524,39 @@ impl Group {
                     },
                     false => Matrix::new_identity(),
                 };
-                // What is drawn is bounded by `within`, or for a single
-                // picture by what it was recorded within.
+                // What is drawn is bounded by `within`, or by what the
+                // entries can draw in where each of them knows -- see
+                // `reach_of` -- so that the chain's layer is the draw's and
+                // not the page's. Bounded by a single picture alone, a draw
+                // on a page that keeps a recording for pixels, which files
+                // it as a pair, filtered the whole page: 50 rects under a
+                // drop shadow took 1.75 s on an F16 Display P3 page against
+                // 26 ms on an sRGB one.
                 let to_space = |matrix: &Matrix| Matrix::concat(&back, matrix);
-                let content =
-                    match (&self.within, self.contents.layers.as_slice()) {
-                        (Some(within), _) => {
-                            Some(to_space(&self.matrix).map_rect(within).0)
-                        }
-                        (None, [Layer::Picture(picture)]) => Some(
-                            to_space(&self.contents_matrix)
-                                .map_rect(picture.cull_rect())
-                                .0,
-                        ),
-                        (None, _) => None,
-                    };
+                let content = match &self.within {
+                    Some(within) => {
+                        Some(to_space(&self.matrix).map_rect(within).0)
+                    }
+                    None => reach_of(&self.contents.layers).map(|reach| {
+                        to_space(&self.contents_matrix).map_rect(reach).0
+                    }),
+                };
+                // A group holding an entry whose reach is not known -- a
+                // blurred draw, or a group through a chain of its own -- would
+                // be bounded by the clip alone, and that layer moves an
+                // anti-aliased edge: a fill's coverage of 0.6 at an alpha of
+                // 0.9 landed 0.5365 through an unblurred shadow, where it
+                // makes 0.54. No group of a chain holds such an entry, so no
+                // draw takes that route, and a debug build fails where one
+                // does, for the route to be made exact before it is taken.
+                debug_assert!(
+                    content.is_some(),
+                    "a chain's group holds an entry with no reach, which \
+                     bounds its layer by the clip alone"
+                );
+                #[cfg(test)]
+                let content = content
+                    .filter(|_| !UNBOUNDED_CHAIN.with(std::cell::Cell::get));
                 // A group a canvas drawn into another brings with it is played
                 // once for each time that canvas is, and its chain is run the
                 // first of those -- see `chain_cache`.
@@ -1491,9 +1566,14 @@ impl Group {
                     canvas.restore();
                     return;
                 }
+                // A page's pixels run the chain's filters built for them.
+                let pixels = match target {
+                    Target::Pixels => Step::for_pixels(steps),
+                    Target::Document => None,
+                };
                 let outcome = chain::run(
                     canvas,
-                    steps,
+                    pixels.as_deref().unwrap_or(steps),
                     content,
                     Depth::Floats,
                     &paint,
@@ -1545,7 +1625,12 @@ impl Group {
                             rec = rec.bounds(reach);
                         }
                         canvas.save_layer(&rec);
-                        play_entries(&self.contents.layers, canvas, target);
+                        play_entries(
+                            &self.contents.layers,
+                            &self.contents.features,
+                            canvas,
+                            target,
+                        );
                         canvas.reset_matrix();
                         coverage.multiply(canvas);
                         canvas.restore();
@@ -1557,12 +1642,22 @@ impl Group {
                         canvas.reset_matrix();
                         coverage.clip(canvas);
                         canvas.set_matrix(&entries.into());
-                        play_entries(&self.contents.layers, canvas, target);
+                        play_entries(
+                            &self.contents.layers,
+                            &self.contents.features,
+                            canvas,
+                            target,
+                        );
                     }
                     None => {
                         self.confine(canvas, target, &to_device);
                         canvas.set_matrix(&entries.into());
-                        play_entries(&self.contents.layers, canvas, target);
+                        play_entries(
+                            &self.contents.layers,
+                            &self.contents.features,
+                            canvas,
+                            target,
+                        );
                     }
                 }
             }
@@ -1589,7 +1684,12 @@ impl Group {
                     self.confine(canvas, target, &to_device);
                 }
                 canvas.set_matrix(&entries.into());
-                play_entries(&self.contents.layers, canvas, target);
+                play_entries(
+                    &self.contents.layers,
+                    &self.contents.features,
+                    canvas,
+                    target,
+                );
                 if let Some(crop) = crop {
                     canvas.reset_matrix();
                     crop.multiply(canvas);
@@ -1638,6 +1738,10 @@ pub struct Clipped {
 
 #[cfg(test)]
 thread_local! {
+    /// Whether a group's chain runs over a layer the clip alone bounds on
+    /// this thread, rather than one bounded by what the group's entries
+    /// reach: the reference a bounded chain is held to.
+    pub(crate) static UNBOUNDED_CHAIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Whether a run's pieces played into a recording bound for pixels have
     /// their clip bounded by what they draw on this thread: off, the clip
     /// covers its own bounds, the reference a bounded clip is held to.
@@ -1808,10 +1912,13 @@ impl Clipped {
     }
 }
 
-/// Plays `entries` onto `canvas` for `target`, in order: each as
-/// [`Layer::playback`] plays it, but for consecutive pieces of one run
-/// played into a document or a recording, which it plays under their clip
-/// once -- see [`Clipped`] -- all but a recording's cut draws.
+/// Plays `entries`, each asking for `features` at the same index, onto
+/// `canvas` for `target`, in order: each as [`Layer::playback`] plays it,
+/// but for consecutive pieces of one run played into a document or a
+/// recording, which it plays under their clip once -- see [`Clipped`] --
+/// all but a recording's cut draws. On the GPU it counts the image-filtered
+/// draws it plays, so that the playback flushes every so many -- see
+/// [`pacing`].
 ///
 /// A recording is what a canvas drawn into another, or used as a pattern,
 /// is replayed into, and Skia rasterizes it later, where every clip applied
@@ -1823,9 +1930,12 @@ impl Clipped {
 /// own clip.
 pub(crate) fn play_entries(
     entries: &[Layer],
+    features: &[VectorFeatures],
     canvas: &SkCanvas,
     target: Target,
 ) {
+    debug_assert_eq!(entries.len(), features.len(), "one feature set a layer");
+    let paced = target == Target::Pixels && blur_mask::on_gpu(canvas);
     let grouped = target == Target::Document || !blur_mask::draws_on(canvas);
     let coverage = clips_by_coverage(canvas, target);
     // Only on a page holding a cut draw: a document walks the picture of a
@@ -1844,6 +1954,9 @@ pub(crate) fn play_entries(
             Layer::Clipped(piece) if shares_the_clip(piece) => piece.run,
             entry => {
                 entry.playback(canvas, target);
+                if let Some(features) = features.get(at).filter(|_| paced) {
+                    pacing::played(canvas, filtered_draws(entry, *features));
+                }
                 at += 1;
                 continue;
             }
@@ -1861,6 +1974,25 @@ pub(crate) fn play_entries(
             .collect();
         at += pieces.len();
         Clipped::play_run(&pieces, &pieces[0].clip, canvas, target, bounded);
+    }
+}
+
+/// The image-filtered draws `entry`, asking for `features` of a vector
+/// backend, holds, as a GPU playback paces its flushes by them -- see
+/// [`pacing`]: none where it asks for no image filter, a picture's ops,
+/// which bound its draws from above -- a filled rectangle under an image
+/// filter records one, under a shadow five -- and one for any other entry,
+/// whose own entries a playback counts as it plays them.
+fn filtered_draws(entry: &Layer, features: VectorFeatures) -> usize {
+    if !features.refused_by(VectorFeatures::IMAGE_FILTER) {
+        return 0;
+    }
+    match entry {
+        Layer::Picture(picture) => picture.approximate_op_count_nested(true),
+        Layer::Targeted(pictures) => {
+            pictures.0.approximate_op_count_nested(true)
+        }
+        _ => 1,
     }
 }
 

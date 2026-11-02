@@ -17,6 +17,8 @@ use std::sync::OnceLock;
 pub(crate) mod completion;
 /// The one thread that owns a GPU context for exporting.
 pub mod owner;
+/// Flushing a GPU playback every so many image-filtered draws.
+pub(crate) mod pacing;
 
 /// A marker making its holder `!Send`, for state that belongs to one thread.
 ///

@@ -6,16 +6,17 @@ use crate::{
 use neon::prelude::*;
 use skia_safe::{
     Color, Color4f, ColorSpace, IPoint, ISize, ImageFilter as SkImageFilter,
-    Matrix, Point3, SamplingOptions, image_filters,
+    Matrix, Point3, SamplingOptions, Vector, image_filters,
+    image_filters::CropRect,
 };
 use std::cell::RefCell;
 
 use crate::{
     color_filter::{BoxedColorFilter, checkDeleted as checkColorFilterDeleted},
-    filter::onto::{Onto, PageFilter},
+    filter::onto::{PageFilter, shadow_filter},
     utils::{
         css_to_color, css_to_color4f_in_space, enum_arg_or,
-        filter_blend_mode_arg, skia_paint_color,
+        filter_blend_mode_arg,
     },
 };
 
@@ -61,20 +62,6 @@ macro_rules! wrap_image_filter {
             None => Ok($cx.null().upcast()),
         }
     }};
-}
-
-/// A shadow's `color`, in `space`, as Skia is handed it for `onto` -- see
-/// [`Onto::color`] -- and with no page named, tagged with the space it was
-/// named in.
-fn shadow_color(
-    color: Color4f,
-    space: &ColorSpace,
-    onto: Option<&Onto>,
-) -> (Color4f, ColorSpace) {
-    match onto {
-        Some(onto) => onto.color(color, space),
-        None => skia_paint_color(color, space),
-    }
 }
 
 /// Parses optional input `ImageFilter` from argument at index.
@@ -236,14 +223,15 @@ pub fn makeDropShadow(mut cx: FunctionContext) -> JsResult<JsValue> {
     let input = opt_input_filter!(&mut cx, 6);
     // Args: offset, sigma, color, color_space, input, crop_rect
     wrap_image_filter!(cx, true, [input], |onto| {
-        let (color, space) = shadow_color(color, &space, onto);
-        image_filters::drop_shadow(
-            (dx, dy),
+        shadow_filter(
+            onto,
+            Vector::new(dx, dy),
             (sigma_x, sigma_y),
             color,
-            space,
+            &space,
             input,
-            None,
+            CropRect::NO_CROP_RECT,
+            false,
         )
     })
 }
@@ -259,14 +247,15 @@ pub fn makeDropShadowOnly(mut cx: FunctionContext) -> JsResult<JsValue> {
     let space = space.unwrap_or_else(ColorSpace::new_srgb);
     let input = opt_input_filter!(&mut cx, 6);
     wrap_image_filter!(cx, true, [input], |onto| {
-        let (color, space) = shadow_color(color, &space, onto);
-        image_filters::drop_shadow_only(
-            (dx, dy),
+        shadow_filter(
+            onto,
+            Vector::new(dx, dy),
             (sigma_x, sigma_y),
             color,
-            space,
+            &space,
             input,
-            None,
+            CropRect::NO_CROP_RECT,
+            true,
         )
     })
 }

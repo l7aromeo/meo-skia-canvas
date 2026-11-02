@@ -23,6 +23,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::{BufWriter, Cursor, Write},
+    ops::Range,
     path::Path as FilePath,
     sync::{
         Arc, OnceLock, Weak,
@@ -61,7 +62,7 @@ use crate::{
     gpu::{
         RenderingEngine,
         completion::{DRAW_ATTEMPTS, discarded, draws_ran},
-        owner,
+        owner, pacing,
     },
     node::{
         canvas::BoxedCanvas,
@@ -360,6 +361,11 @@ pub struct PageRecorder {
     /// isolated draws asking for the same features share it; anything else
     /// closes it. See [`PageRecorder::append_isolated`].
     isolated: Option<VectorFeatures>,
+    /// The image-filtered draws `current` has recorded since it began, so
+    /// that a run of them is filed in entries of at most
+    /// [`pacing::FILTERED_DRAWS_PER_FLUSH`] -- see
+    /// [`PageRecorder::append_isolated`].
+    filtered: usize,
     /// Set when `matrix` or `clip` has moved but the recording canvas has
     /// not been rebuilt to match. See [`PageRecorder::settle`].
     state_dirty: bool,
@@ -821,6 +827,7 @@ impl PageRecorder {
             features: Arc::default(),
             changed: false,
             isolated: None,
+            filtered: 0,
             state_dirty: false,
             frame: 0,
             blur_run: None,
@@ -966,6 +973,7 @@ impl PageRecorder {
         self.features = Arc::default();
         self.changed = false;
         self.isolated = None;
+        self.filtered = 0;
         self.state_dirty = false;
         self.matrix = Matrix::default();
         self.clip = None;
@@ -1356,6 +1364,7 @@ impl PageRecorder {
         layer.current_features = VectorFeatures::PLAIN;
         self.current.begin(self.bounds);
         self.changed = false;
+        self.filtered = 0;
         self.reframe();
     }
 
@@ -1632,6 +1641,7 @@ impl PageRecorder {
         // resume recording
         self.current.begin(self.bounds);
         self.changed = false;
+        self.filtered = 0;
         self.reframe();
     }
 
@@ -1685,6 +1695,9 @@ impl PageRecorder {
                     }
                     self.current.each(f);
                     self.changed = true;
+                    if self.filled_with_filtered(features) {
+                        self.file_current();
+                    }
                 }
             }
             return;
@@ -1718,6 +1731,35 @@ impl PageRecorder {
 
         self.current.each(f);
         self.changed = true;
+        if self.filled_with_filtered(features) {
+            self.close_run();
+            self.flush();
+        }
+    }
+
+    /// Counts a draw just recorded into `current` asking for `features`,
+    /// answering whether `current` now holds as many image-filtered draws
+    /// as one entry is filed with.
+    ///
+    /// Consecutive draws asking for the same features share one entry, and
+    /// a playback plays an entry whole: a run of thousands of shadowed draws
+    /// held in one was played onto a GPU surface with no flush between them,
+    /// and Ganesh's flush grows with the square of what it holds -- see
+    /// [`pacing`]. Filed every [`pacing::FILTERED_DRAWS_PER_FLUSH`], a run
+    /// leaves the playback a place to flush; consecutive entries asking for
+    /// the same features are one image in a document -- see
+    /// `Page::play_as_document` -- and the same draws, in the same order, on
+    /// a raster.
+    fn filled_with_filtered(&mut self, features: VectorFeatures) -> bool {
+        if !features.refused_by(VectorFeatures::IMAGE_FILTER) {
+            return false;
+        }
+        #[cfg(test)]
+        if pacing::tests::UNSPLIT.with(Cell::get) {
+            return false;
+        }
+        self.filtered += 1;
+        self.filtered >= pacing::FILTERED_DRAWS_PER_FLUSH
     }
 
     /// Records `draw` as a [`BlurOp`], so that its blur is made where the
@@ -2833,9 +2875,7 @@ impl RecordingSurface {
             // commands shifted by its own origin and lets Skia cull the rest.
             canvas.translate((-origin.0 as f32, -origin.1 as f32));
             canvas.scale((self.density, self.density));
-            for pict in page.layers.iter().skip(played) {
-                pict.playback(canvas, Target::Pixels);
-            }
+            page.play_layers(played..page.layers.len(), canvas);
             canvas.restore();
             tile.depth = Some(target);
             // Redrawn, so the copy describes a tile that is no longer there.
@@ -3124,9 +3164,7 @@ impl RecordingSurface {
             let _tiles = TileScope::open();
             canvas.save();
             canvas.scale((self.density, self.density));
-            for pict in page.layers.iter().skip(self.depth) {
-                pict.playback(canvas, Target::Pixels);
-            }
+            page.play_layers(self.depth..page.layers.len(), canvas);
             canvas.restore();
             self.depth = page.layers.len();
         }
@@ -3948,7 +3986,12 @@ impl Page {
                 while index < layers.len() && !refused(index) {
                     index += 1;
                 }
-                play_entries(&layers[start..index], canvas, Target::Document);
+                play_entries(
+                    &layers[start..index],
+                    &features[start..index],
+                    canvas,
+                    Target::Document,
+                );
                 continue;
             }
             if let Layer::Group(group) = &layers[index]
@@ -4219,8 +4262,24 @@ impl Page {
         // pattern as an image whichever form the picture holds: the same
         // file either way, measured. A run's pieces between its cut draws
         // share their clip here -- see `play_entries`.
-        play_entries(&self.layers, output, Target::Pixels);
+        play_entries(&self.layers, &self.features, output, Target::Pixels);
         compositor.finish_recording_as_picture(None)
+    }
+
+    /// Plays the layers `range` names onto `canvas` as pixels, in order --
+    /// none where it reaches past the page -- with the canvas's GPU context
+    /// flushed every so many image-filtered draws among them: see
+    /// [`pacing`].
+    pub(crate) fn play_layers(&self, range: Range<usize>, canvas: &SkCanvas) {
+        let Some(layers) = self.layers.get(range.clone()) else {
+            return;
+        };
+        // Index-aligned with the layers, so never short of them; were it,
+        // the layers would still be drawn, unpaced.
+        let features = self.features.get(range).unwrap_or_default();
+        pacing::begin(self.id);
+        play_entries(layers, features, canvas, Target::Pixels);
+        pacing::end(self.id);
     }
 
     /// This page's layers composited into one image in main memory.
@@ -4311,9 +4370,7 @@ impl Page {
             .as_ref()
             .filter(|filed| filed.depth > cache_depth && !options.single_use);
         let split = prefix.map_or(cache_depth, |filed| filed.depth);
-        for pict in self.layers.iter().take(split).skip(cache_depth) {
-            pict.playback(canvas, Target::Pixels);
-        }
+        self.play_layers(cache_depth..split, canvas);
         if let Some(filed) = prefix {
             // A snapshot, which Skia keeps as it stood while the open layers
             // draw over the surface next: an entry holding them would show
@@ -4323,9 +4380,7 @@ impl Page {
             PageCache::set(&filed.owner, image, options, filed.depth);
         }
         let canvas = surface.canvas();
-        for pict in self.layers.iter().skip(split.max(cache_depth)) {
-            pict.playback(canvas, Target::Pixels);
-        }
+        self.play_layers(split.max(cache_depth)..self.layers.len(), canvas);
 
         Ok((surface, cache_depth))
     }
@@ -4588,9 +4643,7 @@ impl Page {
                 matte.paint(canvas);
             }
             canvas.set_matrix(&img_scale);
-            for pict in self.layers.iter() {
-                pict.playback(canvas, Target::Pixels);
-            }
+            self.play_layers(0..self.layers.len(), canvas);
             Ok(surface)
         };
         let mut surface = None;
@@ -6426,9 +6479,17 @@ mod unpremultiply_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::{
-        faint::Faint,
-        layer::{reach_of, reach_the_clip},
+    use crate::{
+        Error,
+        canvas::{Canvas, CanvasOptions, EngineKind},
+        context::{
+            faint::Faint,
+            layer::{reach_of, reach_the_clip},
+        },
+        context2d::Context2D,
+        filter::ImageFilter,
+        gpu::completion::DISCARDED,
+        pixels::ImageDataExport,
     };
     use parking_lot::Mutex;
     use skia_safe::{
@@ -6437,7 +6498,7 @@ mod tests {
         gradient::{Colors, Gradient, Interpolation, shaders},
         image_filters,
     };
-    use std::{collections::BTreeSet, ptr, thread};
+    use std::{collections::BTreeSet, ptr, thread, time::Instant};
 
     /// Serialises the tests that assert on the process-wide page cache.
     ///
@@ -9545,5 +9606,229 @@ mod tests {
                 r##"<rect fill="url(#elsewhere)"/></g>"##,
             )
         );
+    }
+
+    /// The draws the GPU's periodic flush is held to, `n` of each, on a
+    /// page of [`PACED_SIDE`]: 0, rects under a CanvasKit drop shadow; 1,
+    /// under `shadowBlur`; 2, the first with a plain rect after each, off
+    /// the pixel grid, whose edges the next shadow lands on; 3, the first
+    /// inside a translucent `saveLayer`.
+    fn paced_draws(ctx: &mut Context2D, scene: usize, n: usize) {
+        let colour = RgbaLinear::new_premultiplied(0.05, 0.1, 0.35, 0.6);
+        let shadow =
+            ImageFilter::drop_shadow(3.0, 3.0, 2.0, 2.0, colour, None, None)
+                .expect("a shadow");
+        ctx.set_fill_style_css("rgb(200 120 40 / 0.9)")
+            .expect("a colour");
+        match scene {
+            1 => {
+                ctx.set_shadow_color_css("rgb(20 60 200 / 0.6)")
+                    .expect("a colour");
+                ctx.set_shadow_blur(4.0);
+                ctx.set_shadow_offset(3.0, 3.0);
+            }
+            _ => ctx.set_image_filter(Some(&shadow)),
+        }
+        if scene == 3 {
+            ctx.save_layer_with(0.8, None, None);
+        }
+        let (side, _) = PACED_SIDE;
+        for i in 0..n {
+            let (x, y) = ((i * 17) % (side - 12), (i * 11) % (side - 10));
+            ctx.fill_rect(x as f32 + 0.3, y as f32 + 0.6, 10.0, 8.0);
+            if scene == 2 {
+                ctx.set_image_filter(None);
+                ctx.fill_rect(x as f32 + 4.5, y as f32 + 2.25, 6.0, 5.0);
+                ctx.set_image_filter(Some(&shadow));
+            }
+        }
+        if scene == 3 {
+            ctx.restore();
+        }
+    }
+
+    /// The page the periodic flush is pinned on: small enough to read in
+    /// one tile, and dense enough that every draw overlaps others.
+    const PACED_SIDE: (usize, usize) = (96, 80);
+
+    /// `scene` of [`paced_draws`] drawn `n` times, read back on the GPU or
+    /// the CPU at `msaa` samples -- or with neither the recording split nor
+    /// the playback flushed, where `reference` -- with the page's id.
+    fn paced(
+        scene: usize,
+        n: usize,
+        gpu: bool,
+        msaa: Option<usize>,
+        reference: bool,
+    ) -> (Vec<u8>, usize, EngineKind) {
+        let (width, height) = PACED_SIDE;
+        let mut canvas = Canvas::with_options(
+            width as f32,
+            height as f32,
+            CanvasOptions {
+                gpu,
+                ..Default::default()
+            },
+        )
+        .expect("a canvas");
+        let page = canvas.context().inner.recorder.borrow_mut().page().id;
+        if reference {
+            pacing::tests::unpaced(page);
+        }
+        pacing::tests::UNSPLIT.with(|unsplit| unsplit.set(reference));
+        paced_draws(canvas.context(), scene, n);
+        pacing::tests::UNSPLIT.with(|unsplit| unsplit.set(false));
+        let pixels = canvas
+            .to_image_data(
+                None,
+                &ImageDataExport {
+                    msaa,
+                    ..Default::default()
+                },
+            )
+            .expect("pixels")
+            .pixels()
+            .to_vec();
+        (pixels, page, canvas.engine_kind())
+    }
+
+    /// A GPU playback of a long run of image-filtered draws flushes every
+    /// [`pacing::FILTERED_DRAWS_PER_FLUSH`] of the ops filtered entries
+    /// hold: three times for three of them and a few over, where the run is
+    /// one entry the recorder split, under a CanvasKit filter or a shadow,
+    /// or the contents of a layer. Where each filtered draw is an entry of
+    /// its own, between plain ones, each entry also holds the ops of its
+    /// frame, and it flushes more often, but no more than five times as
+    /// often. Twice the draws make twice the flushes, within one, and a page
+    /// of a few never flushes before its read.
+    #[test]
+    fn a_gpu_playback_flushes_every_so_many_filtered_draws() {
+        let per = pacing::FILTERED_DRAWS_PER_FLUSH;
+        let flushed = |scene, n| {
+            let (_, page, engine) = paced(scene, n, true, None, false);
+            let flushes = pacing::tests::flushes(page);
+            assert!(!flushes.is_empty(), "scene {scene}: no playback paced");
+            (flushes.iter().sum::<usize>(), engine)
+        };
+        for scene in 0..4 {
+            let n = 3 * per + 10;
+            let (once, engine) = flushed(scene, n);
+            if engine != EngineKind::Gpu {
+                eprintln!("no GPU here: the flush has nothing to flush");
+                return;
+            }
+            match scene {
+                2 => assert!(
+                    (n / per..=5 * n / per).contains(&once),
+                    "scene {scene}: {once}"
+                ),
+                _ => assert_eq!(once, n / per, "scene {scene}"),
+            }
+            let (twice, _) = flushed(scene, 2 * n);
+            assert!(twice.abs_diff(2 * once) <= 1, "scene {scene}: {twice}");
+            let (few, _) = flushed(scene, per / 8);
+            assert_eq!(few, 0, "scene {scene}: a few");
+        }
+    }
+
+    /// A flush a GPU playback makes on the way that fails leaves its draws
+    /// unrun, and the read after it refuses the pixels rather than hand back
+    /// a page missing them: the playback is drawn again, and fails again,
+    /// and the read reports the discard.
+    #[test]
+    fn a_failed_flush_on_the_way_fails_the_read() {
+        let (width, height) = PACED_SIDE;
+        let mut canvas = Canvas::with_options(
+            width as f32,
+            height as f32,
+            CanvasOptions {
+                gpu: true,
+                ..Default::default()
+            },
+        )
+        .expect("a canvas");
+        if canvas.engine_kind() != EngineKind::Gpu {
+            eprintln!("no GPU here: the flush has nothing to flush");
+            return;
+        }
+        let page = canvas.context().inner.recorder.borrow_mut().page().id;
+        pacing::tests::fail_flushes(page);
+        paced_draws(canvas.context(), 0, 2 * pacing::FILTERED_DRAWS_PER_FLUSH);
+        let read = canvas.to_image_data(None, &ImageDataExport::default());
+        let flushes = pacing::tests::flushes(page);
+        assert!(flushes.iter().sum::<usize>() > 0, "flushed: {flushes:?}");
+        match read {
+            Err(Error::Render { reason }) => {
+                assert!(reason.starts_with(DISCARDED), "{reason}");
+            }
+            other => panic!("read a page whose flush failed: {other:?}"),
+        }
+    }
+
+    /// What `UPSTREAM:` at `pacing::played` bets on: unpaced, a GPU
+    /// playback's time a draw grows with the draws, since Ganesh's flush
+    /// clusters its tasks pairwise -- 8,192 shadowed rects took more than
+    /// twice the time a rect that 1,024 did, where the bet is lost and the
+    /// workaround can go once they take about the same. Timed, so ignored:
+    /// run it in a release build, on a quiet machine.
+    #[test]
+    #[ignore = "a timing, for re-checking the UPSTREAM note at pacing::played"]
+    fn ganesh_clusters_a_flush_s_tasks_quadratically() {
+        let per_draw = |n: usize| {
+            let started = Instant::now();
+            let (_, _, engine) = paced(0, n, true, None, true);
+            assert_eq!(engine, EngineKind::Gpu, "the bet is about the GPU");
+            started.elapsed().as_secs_f64() / n as f64
+        };
+        per_draw(256);
+        let (few, many) = (per_draw(1024), per_draw(8192));
+        eprintln!(
+            "unpaced: {:.1} us a draw at 1,024, {:.1} at 8,192",
+            few * 1e6,
+            many * 1e6
+        );
+        assert!(
+            many > 2.0 * few,
+            "Ganesh's flush no longer grows: {few} {many}"
+        );
+    }
+
+    /// What a page of image-filtered draws reads is the same with the run
+    /// split and the playback flushed every so many as with neither: on the
+    /// GPU at Skia's default multisampling and with none, and on the CPU,
+    /// which splits the run and has nothing to flush.
+    #[test]
+    fn a_paced_playback_reads_what_an_unpaced_one_reads() {
+        let n = 2 * pacing::FILTERED_DRAWS_PER_FLUSH + 40;
+        for scene in 0..4 {
+            for (gpu, msaa) in [(true, None), (true, Some(0)), (false, None)] {
+                let (paced_pixels, page, engine) =
+                    paced(scene, n, gpu, msaa, false);
+                let (reference, unpaced, _) = paced(scene, n, gpu, msaa, true);
+                let on_gpu = engine == EngineKind::Gpu;
+                // The comparison is between two different playbacks, or
+                // it holds nothing.
+                assert_eq!(
+                    pacing::tests::flushes(page).iter().sum::<usize>() > 0,
+                    on_gpu,
+                    "scene {scene}, gpu {gpu}, msaa {msaa:?}: flushed"
+                );
+                assert_eq!(
+                    pacing::tests::flushes(unpaced).iter().sum::<usize>(),
+                    0,
+                    "scene {scene}: the reference flushed"
+                );
+                let differing = paced_pixels
+                    .iter()
+                    .zip(&reference)
+                    .filter(|(a, b)| a != b)
+                    .count();
+                assert_eq!(
+                    differing, 0,
+                    "scene {scene}, gpu {gpu} ({engine:?}), msaa {msaa:?}: \
+                     bytes differ"
+                );
+            }
+        }
     }
 }

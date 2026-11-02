@@ -337,11 +337,23 @@ impl VulkanEngine {
         Some("Vulkan".to_string())
     }
 
+    /// Whether this engine has a GPU context to draw with, as probed once
+    /// for the process -- see [`Self::probed`]. Read in place rather than
+    /// through a clone of the status: a page that keeps a recording for its
+    /// pixels asks it for every draw -- see `context::floats_draw_on_the_cpu`.
     pub fn supported() -> bool {
-        Self::status()["renderer"] == "GPU"
+        Self::probed()["renderer"] == "GPU"
     }
 
     pub fn status() -> Value {
+        Self::probed().clone()
+    }
+
+    /// The status, probed the first time it is asked for: whether a context
+    /// can be made, and what it runs on. Set once and never written again
+    /// -- `VK_STATUS` is a `OnceLock` nothing else touches -- so what it says
+    /// holds for the process.
+    fn probed() -> &'static Value {
         VK_STATUS.get_or_init(||{
             // test whether a context can be created and do some one-time init if so
             let context = VulkanContext::new()
@@ -384,7 +396,7 @@ impl VulkanEngine {
                     "error": msg,
                 })
             }
-        }).clone()
+        })
     }
 
     fn spawn_idle_watcher() {
