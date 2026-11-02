@@ -753,6 +753,7 @@ oswaldx"` drew the family and `has("oswaldx")` was `false`, `family("oswaldx")`
 
 ### Fixed
 
+- A filtered draw on an F16 or F32 canvas outside sRGB filters what it covers rather than the whole canvas: 50 rects under a drop shadow drew in about 26 ms rather than 1.7 s on F16 Display P3 ([#461](https://github.com/l7aromeo/meo-skia-canvas/issues/461)).
 - A shadow on an eight-bit sRGB canvas stores the exact product of its colour and alpha on both engines, including under `globalAlpha`, so some shadow bytes move by one level ([#441](https://github.com/l7aromeo/meo-skia-canvas/issues/441)).
 - A text decoration in a named colour casts its shadow under `globalAlpha` at its own alpha, not that alpha twice, on F16 and F32 canvases ([#455](https://github.com/l7aromeo/meo-skia-canvas/issues/455)).
 - A CanvasKit filter holding a colour stores it as a fill of that colour does on an eight-bit canvas in linear sRGB, Display P3 or Rec. 2020, where it was a level off on up to 7% of colours ([#459](https://github.com/l7aromeo/meo-skia-canvas/issues/459)).
