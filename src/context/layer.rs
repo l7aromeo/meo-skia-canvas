@@ -20,7 +20,7 @@
 
 use std::{
     borrow::Cow,
-    cell::RefCell,
+    cell::{Cell, RefCell},
     f32::consts::SQRT_2,
     iter,
     marker::PhantomData,
@@ -860,6 +860,38 @@ impl TileSource {
         let fits = (TILE_AREA_MAX / (size.width * size.height)).sqrt().floor();
         wanted.min(fits).max(1.0) as u32
     }
+
+    /// Whether a pattern of this page, mapped onto the device by
+    /// `to_device` and repeated as `repeat` says, lands each tile on whole
+    /// device pixels: repeated on both axes, a page whole pixels across,
+    /// and a transform that moves by whole pixels and scales both axes by
+    /// the density the tile is rasterized at -- see [`Self::density_for`],
+    /// which is whole, and lowered to fit [`TILE_AREA_MAX`]. A renderer
+    /// drawing it as PDF tiling then has the tile's pixels on the device's
+    /// and nothing to resample. A tile under a rotation, a skew, a
+    /// fractional scale or step, or repeated on one axis alone does not,
+    /// nor one too large to rasterize at its scale, and is embedded as the
+    /// page composites it.
+    ///
+    /// Asked of the transform a draw is made under, and again of the one it
+    /// is played under in a document -- see [`tiles_exactly`].
+    pub(crate) fn lands_whole(
+        &self,
+        to_device: &Matrix,
+        repeat: (TileMode, TileMode),
+    ) -> bool {
+        let whole = |v: f32| v.fract() == 0.0;
+        let size = self.page.bounds.size();
+        let scale = to_device.scale_x();
+        repeat == (TileMode::Repeat, TileMode::Repeat)
+            && whole(size.width)
+            && whole(size.height)
+            && to_device.is_scale_translate()
+            && to_device.scale_y() == scale
+            && whole(to_device.translate_x())
+            && whole(to_device.translate_y())
+            && self.density_for(to_device) as f32 == scale
+    }
 }
 
 /// A draw dyed by a canvas pattern, the pattern made where the draw is
@@ -871,10 +903,12 @@ impl TileSource {
 /// On pixels, and so in the raster a document embeds, the draw is kept
 /// whole -- see [`Replay`] -- and drawn again with the pattern as its
 /// shader, through its own alpha, blend mode and colour filter, as a draw
-/// dyed by a pattern of the canvas's pixels is. Both document backends
-/// embed such a draw -- see `VectorFeatures::CANVAS_PATTERN` -- so a
-/// document plays it as recorded, with the page's picture as its pattern,
-/// only where it was handed it as vector.
+/// dyed by a pattern of the canvas's pixels is. In a document, an
+/// [`aligned`](Self::aligned) draw is drawn the same way from the tile in
+/// eight-bit sRGB, which a PDF writes as tiling; both document backends
+/// embed any other -- see `VectorFeatures::CANVAS_PATTERN` -- so a document
+/// plays it as recorded, with the page's picture as its pattern, only where
+/// it was handed it as vector.
 #[derive(Clone, Debug)]
 pub struct PatternDraw {
     pub source: Arc<TileSource>,
@@ -895,6 +929,16 @@ pub struct PatternDraw {
     /// The draw kept whole, to draw on pixels with the pattern as its
     /// shader, as a draw dyed by a pattern of the canvas's pixels is.
     pub replay: Replay,
+    /// Whether a document paints the draw from the tile as pixels do: the
+    /// pattern lands on whole device pixels under the transform it was made
+    /// under -- see [`TileSource::lands_whole`] -- and the draw is
+    /// composited only where it lands, through no filter, colour filter or
+    /// shadow, so that what a document writes of it is the draw's shape, its
+    /// alpha and blend mode, and the tile.
+    /// `VectorFeatures::CANVAS_PATTERN_ALIGNED` where it is; a document
+    /// embeds it all the same where, played there, its tiles do not land
+    /// whole -- see [`tiles_exactly`].
+    pub aligned: bool,
 }
 
 /// A draw kept whole, so that the pattern a [`PatternDraw`] makes at
@@ -941,14 +985,41 @@ impl PatternDraw {
             canvas.clip_path(&clip, ClipOp::Intersect, true);
         }
         match target {
-            Target::Pixels => self.paint_onto(canvas),
+            Target::Pixels => self.paint_onto(canvas, target),
+            // Asked by `tiles_exactly`: whether the tile lands whole here,
+            // drawing nothing.
+            Target::Document if self.aligned && TILE_PROBE.get().is_some() => {
+                if !self.lands_whole_on(canvas) {
+                    TILE_PROBE.set(Some(false));
+                }
+            }
+            Target::Document if self.aligned => {
+                self.paint_onto(canvas, target);
+            }
             Target::Document => self.plain.playback(canvas),
         }
         canvas.restore();
     }
 
-    /// Paints the pattern onto `canvas` where the draw covers it.
-    fn paint_onto(&self, canvas: &SkCanvas) {
+    /// Whether the pattern lands each tile on whole device pixels drawn on
+    /// `canvas`, under the transform it carries, the export's density among
+    /// it -- see [`TileSource::lands_whole`].
+    fn lands_whole_on(&self, canvas: &SkCanvas) -> bool {
+        let to_device = Matrix::concat(
+            &Matrix::concat(&canvas.local_to_device_as_3x3(), &self.matrix),
+            &self.pattern_matrix,
+        );
+        self.source.lands_whole(&to_device, self.repeat)
+    }
+
+    /// Paints the pattern onto `canvas` where the draw covers it, from the
+    /// tile as `target` takes it: as the page composites it on pixels, and
+    /// in eight-bit sRGB in a document.
+    ///
+    /// The tile is rasterized at the scale `canvas` maps the page by, which
+    /// in a PDF includes the export density: Skia scales a PDF page's
+    /// canvas by it and undoes the scale in the device.
+    fn paint_onto(&self, canvas: &SkCanvas, target: Target) {
         let to_draw =
             Matrix::concat(&canvas.local_to_device_as_3x3(), &self.matrix);
         let density = self
@@ -956,6 +1027,28 @@ impl PatternDraw {
             .density_for(&Matrix::concat(&to_draw, &self.pattern_matrix));
         let Some(image) = self.source.raster(canvas, density) else {
             return;
+        };
+        let mut paint = self.paint.clone();
+        let image = match target {
+            Target::Pixels => image,
+            Target::Document => {
+                // UPSTREAM: PDFium 153 -- unfiled -- worked around
+                // Re-check: leave the alpha on the paint, export a pattern
+                // fill at a `globalAlpha` of 0.6 as PDF tiling, and render
+                // it with pypdfium2 against the canvas.
+                // The draw's alpha goes into the tile and the pattern is
+                // painted at full alpha: PDFium paints a pattern fill at the
+                // alpha of the pattern cell's own graphics state, which Skia
+                // writes as 1, where poppler and CoreGraphics take the
+                // fill's, and so drew a `globalAlpha` of 0.6 up to 84
+                // levels from the canvas.
+                let alpha = paint.alpha_f();
+                paint.set_alpha_f(1.0);
+                match in_document_space(&image, alpha) {
+                    Some(image) => image,
+                    None => return,
+                }
+            }
         };
         // The raster back to the page's own size, which its pixels cover.
         let size = self.source.page.bounds.size();
@@ -970,7 +1063,6 @@ impl PatternDraw {
         ) else {
             return;
         };
-        let mut paint = self.paint.clone();
         paint.set_shader(shader);
         match &self.replay {
             Replay::Path(path, faint) => {
@@ -1011,6 +1103,52 @@ impl PatternDraw {
     fn reach(&self) -> Rect {
         self.plain.cull_rect()
     }
+}
+
+thread_local! {
+    /// Whether a [`tiles_exactly`] probe is under way on this thread, and
+    /// what it has found: `Some(false)` once a pattern's tiles would not
+    /// land whole.
+    static TILE_PROBE: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// Whether every canvas pattern `entry` paints from its tile in a document
+/// lands each tile on whole device pixels played on `canvas`, under the
+/// transform and density it carries -- see [`PatternDraw::aligned`]. Where
+/// one does not, the document embeds the entry as the page composites it.
+///
+/// Decided by playing `entry` for a document onto a recording under that
+/// transform, each such pattern answering for itself and drawing nothing:
+/// a pattern inside a canvas drawn into another lands where that canvas's
+/// transform puts it, which a recorded draw cannot know -- a 10-pixel tile
+/// drawn in under a scale of 1.5 steps 15 pixels -- and the density, and so
+/// whether its tile has to be lowered to fit, is the export's.
+pub(crate) fn tiles_exactly(entry: &Layer, canvas: &SkCanvas) -> bool {
+    let Some(clip) = canvas.device_clip_bounds() else {
+        return true; // nothing of it is drawn
+    };
+    let mut recorder = PictureRecorder::new();
+    let probe = recorder.begin_recording(Rect::from(clip), false);
+    probe.set_matrix(&canvas.local_to_device());
+    let outer = TILE_PROBE.replace(Some(true));
+    entry.playback(probe, Target::Document);
+    TILE_PROBE.replace(outer) != Some(false)
+}
+
+/// `image` at `alpha`, in eight-bit sRGB, the space a document reads an
+/// image in, each channel of a colour outside sRGB's gamut clamped -- as
+/// `Page::embed_raster` converts the run it embeds. `None` where no surface
+/// could be made.
+pub(crate) fn in_document_space(image: &Image, alpha: f32) -> Option<Image> {
+    let info = image
+        .image_info()
+        .with_color_type(ColorType::RGBA8888)
+        .with_color_space(ColorSpace::new_srgb());
+    let mut surface = started::raster(&info, None, None)?;
+    let mut copy = Paint::default();
+    copy.set_blend_mode(BlendMode::Src).set_alpha_f(alpha);
+    surface.canvas().draw_image(image, (0, 0), Some(&copy));
+    Some(surface.image_snapshot())
 }
 
 /// What a page is played back onto, which decides how a [`Group`]
