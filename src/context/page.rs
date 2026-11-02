@@ -558,7 +558,8 @@ impl Recorders {
         Self::new_with(bounds, dual, true)
     }
 
-    /// As [`Self::new`], with a bounding hierarchy where `bbh` asks for one.
+    /// As [`Self::new`], the pixels recording with a bounding hierarchy where
+    /// `bbh` asks for one -- see [`Self::begin_with`].
     fn new_with(bounds: Rect, dual: bool, bbh: bool) -> Self {
         let mut recorders = Recorders {
             pixels: PictureRecorder::new(),
@@ -596,12 +597,19 @@ impl Recorders {
         self.begin_with(bounds, true);
     }
 
-    /// Begins every recording in `bounds`, with a bounding hierarchy where
-    /// `bbh` asks for one.
+    /// Begins every recording in `bounds`: the pixels with a bounding
+    /// hierarchy where `bbh` asks for one, and the document without.
+    ///
+    /// Nothing reads a document recording's bounds -- [`Layer::reach`] and
+    /// `CutOp::reach` take the pixels' -- so a hierarchy would buy it only
+    /// culling at playback, which the canvas it is played onto does itself,
+    /// draw by draw against its own clip, and would cost a bounds pass over
+    /// every draw when it is finished: 3% of the CPU's time on a page of
+    /// translucent fills.
     fn begin_with(&mut self, bounds: Rect, bbh: bool) {
         self.pixels.begin_recording(bounds, bbh);
         if let Some(document) = &mut self.document {
-            document.begin_recording(bounds, bbh);
+            document.begin_recording(bounds, false);
         }
     }
 
@@ -673,14 +681,15 @@ struct Run {
     shape: Option<ClipData>,
     /// The clip as coverage, made once, where the run holds a cut draw.
     coverage: Option<Arc<Coverage>>,
-    /// Whether the run records with a bounding hierarchy, which it does
-    /// inside an open `saveLayer`. Without one its picture is bounded by the
-    /// page, and so by the clip's bounds where it is played under the clip,
-    /// rather than by what it draws, and finishing it skips computing the
-    /// bounds of every operation. Inside a layer those bounds are what the
-    /// layer is confined to -- see [`LayerRec::footprint`] -- and a layer the
-    /// size of the clip around one small draw cost a page of translucent
-    /// layers under a large clip some fifteen times what it did.
+    /// Whether the run's pixels record with a bounding hierarchy, which they
+    /// do inside an open `saveLayer`. Without one its picture is bounded by
+    /// the page, and so by the clip's bounds where it is played under the
+    /// clip, rather than by what it draws, and finishing it skips
+    /// computing the bounds of every operation. Inside a layer those
+    /// bounds are what the layer is confined to -- see
+    /// [`LayerRec::footprint`] -- and a layer the size of the clip around
+    /// one small draw cost a page of translucent layers under a large clip
+    /// some fifteen times what it did.
     bbh: bool,
 }
 
