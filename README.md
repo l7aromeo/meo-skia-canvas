@@ -283,14 +283,20 @@ arrive in the right space.
 
 ## Performance and memory
 
-`just bench` runs [`examples/node/benchmark.js`](examples/node/benchmark.js) and prints all of
-this. Figures are one machine — an Apple M4 Pro on Metal, 1200×900. **Treat the ratios as the
-transferable part and the milliseconds as local colour.**
+`just bench` runs [`examples/node/benchmark.js`](examples/node/benchmark.js) through the Node
+binding and [`examples/rust/benchmark.rs`](examples/rust/benchmark.rs) through the crate, over the
+same cases in the same order: drawing on the CPU and the GPU on sRGB, Display P3 and half-float
+Display P3 pages, decoding and encoding every format, animations, PDF and SVG export, pixel reads,
+antialiasing and memory. Each writes a dated Markdown and JSON report to `target/bench/` with the
+median, p10 and p90 of every case and the binary, commit, machine and load it was taken on, and the
+two line up row by row, so their ratio is what the binding costs. `just bench-npm` and
+`just bench-crate` run one; `--quick` runs every case once as a smoke test, and `--only PREFIX` the
+cases whose id starts with it. Figures are one machine — an Apple M4 Pro on Metal, 1200×900.
+**Treat the ratios as the transferable part and the milliseconds as local colour.**
 
-`just bench` builds release first, which matters: run the script directly and it measures whatever
+Both build release first, which matters: run the script directly and it measures whatever
 `lib/skia.node` happens to be, and `just ci` ends by leaving a dev build there. The two differ by
-more than a little — AVIF is 788 ms against 90 — and nothing in the output says which one you
-measured.
+more than a little — AVIF is 788 ms against 90 — and the report names the binary it measured.
 
 **Drawing.** A mixed vector scene — 300 bezier strokes, 60 shadowed rounded panels, 40 lines of
 text — takes 2.4 ms on the GPU against 4.1 on the CPU. What a float canvas costs runs in both

@@ -3,13 +3,30 @@
 //
 // Run from a checkout:
 //
-//     just build            # or: npm run build
-//     just bench            # or: node --expose-gc examples/node/benchmark.js
+//     just bench-npm        # builds release first, then runs this file
+//     just bench            # this and examples/rust/benchmark.rs, one after the other
 //
-// Reports the median of N runs after a warmup, because the first draw on a
-// backend pays for shader compilation and surface allocation and is not what
-// a caller experiences in steady state. Every figure is one machine and one
-// GPU; treat the ratios as the transferable part, not the milliseconds.
+// Flags:
+//
+//     --list         print every case id, one a line, and time nothing
+//     --quick        one run of each case and no warmup: a smoke test, not a measurement
+//     --only PREFIX  run only the cases whose id starts with PREFIX
+//     --out DIR      where the report goes (default target/bench)
+//
+// Every case has an id, and `examples/rust/benchmark.rs` runs the same ids in
+// the same order through the crate, so the two reports line up row by row and
+// their ratio is what the binding costs. `scripts/check-bench-parity.mjs`
+// holds the two lists equal; `just ci` runs it.
+//
+// Each run writes `<date>-<commit>-npm.md` and `.json` to the report
+// directory: per case the median, p10 and p90 of its runs, and for the run the
+// binary, the commit, the machine and the load average at both ends -- what a
+// figure needs before anyone compares it with another.
+//
+// The median of N runs after a warmup, because the first draw on a backend
+// pays for shader compilation and surface allocation and is not what a caller
+// experiences in steady state. Every figure is one machine and one GPU; treat
+// the ratios as the transferable part, not the milliseconds.
 //
 // The require below is relative because the repo is not linked to itself.
 // In your own project it is:  require("meo-skia-canvas")
@@ -18,30 +35,143 @@
 const os = require("os");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const { execFileSync } = require("child_process");
-const { Canvas, Image } = require("../../lib");
 const { BINARY_OVERRIDE } = require("../../lib/binary.js");
+
+// Loaded after `--list` has had its turn, which names the cases without
+// touching the native module, so the parity check in `just ci` needs no
+// build of it.
+let Canvas, Image;
+const loadLibrary = () => ({ Canvas, Image } = require("../../lib"));
 
 const W = 1200;
 const H = 900;
 const DEPTHS = ["RGBA8888", "RGBAF16", "RGBAF32"];
 const BYTES = { RGBA8888: 4, RGBAF16: 8, RGBAF32: 16 };
 
-const median = (xs) => {
-  const s = [...xs].sort((a, b) => a - b);
-  return s[s.length >> 1];
+// The pages every drawing case runs on: the default, and the two where 7.0's
+// accepted costs live -- an eight-bit wide-gamut page, whose colours are held
+// exactly in their own space, and a half-float one.
+const SPACES = [
+  ["srgb", {}],
+  ["p3", { colorSpace: "display-p3" }],
+  ["p3-f16", { colorSpace: "display-p3", colorType: "RGBAF16" }],
+];
+const ENGINES = [
+  ["cpu", { gpu: false }],
+  ["gpu", { gpu: true }],
+];
+
+// Runs and warmups. `--quick` takes one run and no warmup everywhere, which
+// proves every case still runs and measures nothing.
+const RUNS = { runs: 8, warmup: 2 };
+const LONG_RUNS = { runs: 5, warmup: 1 };
+
+const args = process.argv.slice(2);
+const flag = (name) => args.includes(name);
+const option = (name) => {
+  const at = args.indexOf(name);
+  return at >= 0 ? args[at + 1] : undefined;
+};
+const QUICK = flag("--quick");
+const ONLY = option("--only");
+const OUT = option("--out") || path.resolve(__dirname, "../../target/bench");
+
+// ── measurement ────────────────────────────────────────────────────────────
+
+const sorted = (xs) => [...xs].sort((a, b) => a - b);
+// The upper middle on an even count, as `examples/rust/benchmark.rs` takes
+// it: averaging the two would invent a duration nothing actually took.
+const quantile = (xs, q) => {
+  const s = sorted(xs);
+  return s[Math.min(s.length - 1, Math.floor(q * s.length))];
 };
 
-function time(fn, iterations = 10, warmup = 3) {
-  for (let i = 0; i < warmup; i++) fn();
-  const runs = [];
-  for (let i = 0; i < iterations; i++) {
+function time(fn, { runs, warmup } = RUNS) {
+  const n = QUICK ? 1 : runs;
+  for (let i = 0; i < (QUICK ? 0 : warmup); i++) fn();
+  const samples = [];
+  for (let i = 0; i < n; i++) {
     const started = performance.now();
     fn();
-    runs.push(performance.now() - started);
+    samples.push(performance.now() - started);
   }
-  return median(runs);
+  return {
+    unit: "ms",
+    median: quantile(samples, 0.5),
+    p10: quantile(samples, 0.1),
+    p90: quantile(samples, 0.9),
+    runs: n,
+  };
 }
+
+// A measured value that is not a duration: a fidelity in decibels, an error
+// in levels, a residency in megabytes.
+const value = (unit, v) => ({ unit, median: v, p10: null, p90: null, runs: 1 });
+
+// Reading one pixel back forces the recording to rasterize. Without it the
+// timing measures how fast commands are appended to a picture, not drawing.
+const rasterize = (canvas) => canvas.getContext("2d").getImageData(0, 0, 1, 1);
+
+function draw(options, paint) {
+  const canvas = new Canvas(W, H, options);
+  paint(canvas.getContext("2d"));
+  rasterize(canvas);
+}
+
+// Scatters `i` across `span` without a random number generator, which would
+// make one run's timing incomparable with the next. The strides are the ones
+// `examples/rust/benchmark.rs` uses.
+const scatter = (i, stride, span) => (i * stride) % span;
+
+// ── what is drawn ──────────────────────────────────────────────────────────
+
+const curves = (ctx, count = 300) => {
+  for (let i = 0; i < count; i++) {
+    ctx.beginPath();
+    ctx.moveTo(scatter(i, 37, W), scatter(i, 53, H));
+    ctx.bezierCurveTo(
+      scatter(i, 71, W),
+      scatter(i, 29, H),
+      scatter(i, 13, W),
+      scatter(i, 97, H),
+      scatter(i, 41, W),
+      scatter(i, 61, H),
+    );
+    ctx.strokeStyle = `hsl(${(i * 7) % 360} 70% 60%)`;
+    ctx.lineWidth = 1 + (i % 4);
+    ctx.stroke();
+  }
+};
+
+const panels = (ctx, shadow) => {
+  for (let i = 0; i < 60; i++) {
+    ctx.save();
+    if (shadow) {
+      ctx.shadowColor = "rgba(0,0,0,0.5)";
+      ctx.shadowBlur = 12;
+    }
+    ctx.fillStyle = `hsl(${(i * 13) % 360} 60% 55%)`;
+    ctx.beginPath();
+    ctx.roundRect(
+      20 + scatter(i, 19, W - 140),
+      20 + scatter(i, 31, H - 90),
+      120,
+      70,
+      10,
+    );
+    ctx.fill();
+    ctx.restore();
+  }
+};
+
+const lines = (ctx, count = 40) => {
+  ctx.font = "600 28px Helvetica";
+  ctx.fillStyle = "#e6edf3";
+  for (let i = 0; i < count; i++)
+    ctx.fillText(`Throughput sample ${i}`, 40, 40 + i * 21);
+};
 
 // A mixed vector scene: curves, shadowed panels and text, in the proportions
 // a chart or report actually draws them.
@@ -51,168 +181,353 @@ function scene(ctx) {
   bg.addColorStop(1, "#1b2b45");
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, W, H);
+  curves(ctx);
+  panels(ctx, true);
+  lines(ctx);
+}
 
-  for (let i = 0; i < 300; i++) {
-    ctx.beginPath();
-    ctx.moveTo((i * 37) % W, (i * 53) % H);
-    ctx.bezierCurveTo(
-      (i * 71) % W,
-      (i * 29) % H,
-      (i * 13) % W,
-      (i * 97) % H,
-      (i * 41) % W,
-      (i * 61) % H,
-    );
-    ctx.strokeStyle = `hsl(${(i * 7) % 360} 70% 60%)`;
-    ctx.lineWidth = 1 + (i % 4);
-    ctx.stroke();
-  }
+const PARAGRAPH =
+  "Benchmarks measure what they draw and nothing else, so a paragraph that " +
+  "wraps is its own case: breaking lines, shaping each and laying them out " +
+  "is work a single line of text never asks for. ";
 
+// Each the same 60 rectangles, so the cases differ in what fills them.
+const rects = (ctx, style) => {
   for (let i = 0; i < 60; i++) {
-    ctx.save();
-    ctx.shadowColor = "rgba(0,0,0,0.5)";
-    ctx.shadowBlur = 12;
-    ctx.fillStyle = `hsl(${(i * 13) % 360} 60% 55%)`;
+    ctx.fillStyle = style(i);
+    ctx.fillRect(scatter(i, 19, W - 160), scatter(i, 31, H - 120), 160, 120);
+  }
+};
+
+const gradient = (ctx, i, interpolation) => {
+  const x = scatter(i, 19, W - 160);
+  const y = scatter(i, 31, H - 120);
+  const g =
+    i % 3 === 0
+      ? ctx.createLinearGradient(x, y, x + 160, y + 120)
+      : i % 3 === 1
+        ? ctx.createRadialGradient(x + 80, y + 60, 4, x + 80, y + 60, 90)
+        : ctx.createConicGradient(i / 10, x + 80, y + 60);
+  if (interpolation) g.interpolation = interpolation;
+  g.addColorStop(0, `hsl(${(i * 13) % 360} 80% 50%)`);
+  g.addColorStop(0.5, "#f0e6d2");
+  g.addColorStop(1, `hsl(${(i * 13 + 180) % 360} 80% 40%)`);
+  return g;
+};
+
+// A 64-pixel tile: four quadrants and a disc, so a pattern of it has edges.
+function tile() {
+  const t = new Canvas(64, 64, { gpu: false });
+  const c = t.getContext("2d");
+  c.fillStyle = "#c82878";
+  c.fillRect(0, 0, 32, 32);
+  c.fillStyle = "#14a05a";
+  c.fillRect(32, 32, 32, 32);
+  c.fillStyle = "rgba(30 60 220 / 0.8)";
+  c.beginPath();
+  c.arc(34, 30, 18, 0, 2 * Math.PI);
+  c.fill();
+  return t;
+}
+
+// A canvas holding 200 rectangles, drawn into the page whole.
+function innerPage() {
+  const inner = new Canvas(600, 450, { gpu: false });
+  const ic = inner.getContext("2d");
+  ic.fillStyle = "#0b0e14";
+  ic.fillRect(0, 0, 600, 450);
+  for (let i = 0; i < 200; i++) {
+    ic.fillStyle = `hsl(${(i * 9) % 360} 70% 50%)`;
+    ic.fillRect(scatter(i, 31, 600), scatter(i, 17, 450), 130, 70);
+  }
+  return inner;
+}
+
+// Fixtures a case reads but does not time, made once and on first use.
+const once = (make) => {
+  let made;
+  return () => (made ??= make());
+};
+const tileCanvas = once(tile);
+const tileImage = once(() => new Image(tileCanvas().toBufferSync("png")));
+const innerCanvas = once(innerPage);
+const photoImage = once(() => {
+  const p = new Canvas(256, 256, { gpu: false });
+  const c = p.getContext("2d");
+  const g = c.createLinearGradient(0, 0, 256, 256);
+  g.addColorStop(0, "#205080");
+  g.addColorStop(1, "#e0a040");
+  c.fillStyle = g;
+  c.fillRect(0, 0, 256, 256);
+  curves(c, 40);
+  return new Image(p.toBufferSync("png"));
+});
+
+// What each drawing case paints, by name. The two layer workloads pull in
+// opposite directions on a float page -- blending translucent layers against
+// filling opaque ones -- so a single "float costs Nx" figure would be false
+// either way.
+const DRAWS = [
+  ["scene", scene],
+  ["curves", (ctx) => curves(ctx)],
+  [
+    "dashes",
+    (ctx) => {
+      ctx.setLineDash([12, 6]);
+      ctx.lineWidth = 2;
+      for (let i = 0; i < 200; i++) {
+        ctx.strokeStyle = `hsl(${(i * 11) % 360} 70% 55%)`;
+        ctx.beginPath();
+        ctx.moveTo(scatter(i, 37, W), scatter(i, 53, H));
+        ctx.lineTo(scatter(i, 71, W), scatter(i, 29, H));
+        ctx.stroke();
+      }
+    },
+  ],
+  ["text", (ctx) => lines(ctx, 120)],
+  [
+    "wrapped-text",
+    (ctx) => {
+      ctx.font = "18px Helvetica";
+      ctx.fillStyle = "#1b2b45";
+      ctx.textWrap = true;
+      for (let i = 0; i < 6; i++)
+        ctx.fillText(PARAGRAPH.repeat(4), 20, 30 + i * 140, W - 40);
+    },
+  ],
+  ["gradients", (ctx) => rects(ctx, (i) => gradient(ctx, i))],
+  ["gradients-oklab", (ctx) => rects(ctx, (i) => gradient(ctx, i, "oklab"))],
+  [
+    "pattern-image",
+    (ctx) => {
+      ctx.fillStyle = ctx.createPattern(tileImage(), "repeat");
+      ctx.fillRect(0, 1, W, H - 1);
+    },
+  ],
+  [
+    "pattern-canvas",
+    (ctx) => {
+      ctx.fillStyle = ctx.createPattern(tileCanvas(), "repeat");
+      ctx.fillRect(0, 1, W, H - 1);
+    },
+  ],
+  [
+    "blur",
+    (ctx) => {
+      ctx.filter = "blur(4px)";
+      rects(ctx, (i) => `hsl(${(i * 13) % 360} 60% 55%)`);
+    },
+  ],
+  ["shadows", (ctx) => panels(ctx, true)],
+  [
+    "clip",
+    (ctx) => {
+      ctx.beginPath();
+      ctx.arc(W / 2, H / 2, 380, 0, 2 * Math.PI);
+      ctx.clip();
+      curves(ctx, 150);
+      rects(ctx, (i) => `hsl(${(i * 13) % 360} 60% 55%)`);
+    },
+  ],
+  [
+    "nested",
+    (ctx) => {
+      for (let i = 0; i < 8; i++)
+        ctx.drawCanvas(
+          innerCanvas(),
+          scatter(i, 97, 600),
+          scatter(i, 61, 450),
+          300,
+          225,
+        );
+    },
+  ],
+  [
+    "images",
+    (ctx) => {
+      for (let i = 0; i < 100; i++)
+        ctx.drawImage(
+          photoImage(),
+          scatter(i, 37, W - 128),
+          scatter(i, 53, H - 128),
+          128,
+          128,
+        );
+    },
+  ],
+  [
+    "translucent",
+    (ctx) => {
+      for (let i = 0; i < 120; i++) {
+        ctx.globalAlpha = 0.02;
+        ctx.fillStyle = i % 2 ? "#ff8844" : "#4488ff";
+        ctx.fillRect(0, 0, W, H);
+      }
+    },
+  ],
+  // Inset by a pixel on purpose. An opaque fill that covers the whole page
+  // lets Skia discard everything recorded under it, so a loop of them
+  // measures the cull rather than the fill: 1200 of them came in at 2 ms,
+  // which is not 1200 fills of anything. One pixel short and every layer is
+  // drawn.
+  [
+    "opaque",
+    (ctx) => {
+      for (let i = 0; i < 120; i++) {
+        ctx.fillStyle = i % 2 ? "#ff8844" : "#4488ff";
+        ctx.fillRect(0, 1, W, H - 1);
+      }
+    },
+  ],
+];
+
+// ── the page every encoder and decoder is handed ───────────────────────────
+
+const page = once(() => {
+  const p = new Canvas(W, H, { gpu: false });
+  scene(p.getContext("2d"));
+  return p;
+});
+
+// The 256-pixel page an icon can hold: ICO stores nothing larger.
+const iconPage = once(() => {
+  const p = new Canvas(256, 256, { gpu: false });
+  scene(p.getContext("2d"));
+  return p;
+});
+
+// A still background with a moving foreground, which is what a
+// dirty-rectangle encoder is actually asked to compress. A scene where the
+// whole page moves would make every rectangle the whole page and measure
+// something nobody exports.
+const reel = once(() => {
+  const r = new Canvas(W, H, { gpu: false });
+  for (let f = 0; f < 30; f++) {
+    const ctx = f ? r.newPage() : r.getContext("2d");
+    scene(ctx);
+    ctx.fillStyle = "#f6c453";
     ctx.beginPath();
-    ctx.roundRect(
-      20 + ((i * 19) % (W - 140)),
-      20 + ((i * 31) % (H - 90)),
-      120,
-      70,
-      10,
-    );
+    ctx.arc(100 + ((W - 200) * f) / 29, H / 2, 80, 0, 2 * Math.PI);
     ctx.fill();
-    ctx.restore();
   }
+  return r;
+});
 
-  ctx.font = "600 28px Helvetica";
-  ctx.fillStyle = "#e6edf3";
-  for (let i = 0; i < 40; i++)
-    ctx.fillText(`Throughput sample ${i}`, 40, 40 + i * 21);
-}
+// A page holding what a document has to work hardest at: a canvas pattern,
+// blurred and shadowed shapes, gradients and text.
+const heavyPage = once(() => {
+  const p = new Canvas(W, H, { gpu: false });
+  const ctx = p.getContext("2d");
+  scene(ctx);
+  ctx.save();
+  ctx.fillStyle = ctx.createPattern(tileCanvas(), "repeat");
+  ctx.fillRect(40, 40, 500, 300);
+  ctx.filter = "blur(3px)";
+  rects(ctx, (i) => gradient(ctx, i));
+  ctx.restore();
+  return p;
+});
 
-// Reading one pixel back forces the recording to rasterize. Without it the
-// timing measures how fast commands are appended to a picture, not drawing.
-const rasterize = (canvas) => canvas.getContext("2d").getImageData(0, 0, 1, 1);
+const ENCODES = [
+  ["png", "png", {}, page],
+  ["jpeg", "jpg", { quality: 0.92 }, page],
+  ["webp", "webp", { quality: 0.9 }, page],
+  ["avif", "avif", { quality: 0.92 }, page],
+  ["gif", "gif", {}, page],
+  ["apng", "apng", {}, page],
+  ["tiff", "tiff", {}, page],
+  ["bmp", "bmp", {}, page],
+  ["ico", "ico", {}, iconPage],
+  ["pdf", "pdf", {}, page],
+  ["svg", "svg", {}, page],
+  // AVIF's own dials, the one format here whose choices move both time and
+  // size: subsampling buys bytes on a photograph and nothing on a page like
+  // this one, and lossless spends them for exactness.
+  ["avif-q0.5", "avif", { quality: 0.5 }, page],
+  ["avif-q1", "avif", { quality: 1 }, page],
+  ["avif-422", "avif", { quality: 0.92, chromaSampling: "4:2:2" }, page],
+  ["avif-420", "avif", { quality: 0.92, chromaSampling: "4:2:0" }, page],
+  ["avif-lossless", "avif", { lossless: true }, page],
+];
 
-// Child mode for the memory table below: measure one depth in this otherwise
-// untouched process and print the bytes per canvas. Nothing else in this file
-// runs, which is the entire point.
-if (process.argv[2] === "--memory-probe") {
-  const depth = process.argv[3];
-  // A read of the whole page composites the surface and hands a copy to the
-  // caller, so it pays for both; a one-pixel read composites the tile it
-  // lands in and nothing else. The two are the range a canvas can occupy.
-  const whole = process.argv[4] === "whole";
-  global.gc?.();
-  const before = process.memoryUsage().rss;
-  const held = [];
-  for (let i = 0; i < 20; i++) {
-    const canvas = new Canvas(W, H, { gpu: false, colorType: depth });
-    const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "#345";
-    ctx.fillRect(0, 0, W, H);
-    if (whole) ctx.getImageData(0, 0, W, H);
-    else rasterize(canvas);
-    held.push(canvas);
+const ANIMATIONS = [
+  ["webp", { quality: 0.9, fps: 30 }],
+  ["apng", { fps: 30 }],
+  ["gif", { fps: 30 }],
+  ["avif", { quality: 0.92, fps: 30 }],
+];
+
+// Each decoder handed a page its own encoder wrote. AVIF and APNG are this
+// library's own code -- Skia reads neither -- and the rest are Skia's.
+const DECODES = [
+  ["png", "png", {}, page],
+  ["jpeg", "jpg", { quality: 0.92 }, page],
+  ["webp", "webp", { quality: 0.9 }, page],
+  ["avif", "avif", { quality: 0.92 }, page],
+  ["gif", "gif", {}, page],
+  ["apng", "apng", {}, page],
+  ["bmp", "bmp", {}, page],
+  ["ico", "ico", {}, iconPage],
+];
+
+// User units, no `font-family`, no text: the document where the walk this
+// library makes before Skia parses -- absolute lengths, text positions,
+// generic families, the `font-size` cascade -- finds nothing to rewrite, so
+// the row measures the cost of looking. Two sizes, because the walk is per
+// element: both rising together is a uniform slowdown, the large one rising
+// alone is something that scales worse than linearly.
+const svgDoc = (elements) => {
+  let body = "";
+  for (let i = 0; i < elements; i++) {
+    body +=
+      `<rect x="${(i * 7) % 900}" y="${(i * 13) % 700}" ` +
+      `width="20" height="14" fill="#3a7"/>`;
   }
-  process.stdout.write(
-    String((process.memoryUsage().rss - before) / held.length),
+  return Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="800">` +
+      `${body}</svg>`,
   );
-  process.exit(0);
-}
-
-function draw(options, paint) {
-  const canvas = new Canvas(W, H, options);
-  paint(canvas.getContext("2d"));
-  rasterize(canvas);
-}
-
-const row = (label, ms, ratio) =>
-  console.log(
-    `  ${label.padEnd(22)} ${ms.toFixed(1).padStart(7)} ms` +
-      (ratio == null ? "" : `   ${ratio.toFixed(2)}x`),
-  );
-
-// A dev binary leaves the Rust glue unoptimized. Skia is compiled either way,
-// so the drawing rows barely move while anything reaching a codec through
-// this crate's own per-pixel work multiplies -- AVIF by eight. Ratios within a
-// section survive that; milliseconds do not, and neither does a comparison
-// against numbers taken on a release build. `just bench` builds release first;
-// running this file directly does not, so it says which it loaded.
-const loadedBinary =
-  process.env[BINARY_OVERRIDE] ||
-  path.resolve(__dirname, "../../lib/skia.node");
-const binaryMB = fs.existsSync(loadedBinary)
-  ? fs.statSync(loadedBinary).size / 1048576
-  : 0;
-
-console.log(
-  `${os.cpus()[0].model} · ${os.cpus().length} cores · node ${process.version} · ${os.platform()}/${os.arch()}`,
-);
-console.log(`${path.basename(loadedBinary)} · ${binaryMB.toFixed(1)} MB`);
-if (binaryMB > 40) {
-  console.log(
-    "\n  !! this looks like a dev build. Run `just bench`, which builds\n" +
-      "     release first, or the milliseconds below mean nothing.\n",
-  );
-}
-
-// ── vector scene: GPU against CPU ──────────────────────────────────────────
-console.log("\nmixed vector scene, 1200x900");
-const gpu = time(() => draw({ gpu: true }, scene));
-const cpu = time(() => draw({ gpu: false }, scene));
-row("RGBA8888 gpu", gpu);
-row("RGBA8888 cpu", cpu, cpu / gpu);
-
-// ── float cost, two workloads that disagree ────────────────────────────────
-// Blending translucent layers and filling opaque ones pull in opposite
-// directions, so a single "float costs Nx" number would be false either way.
-const translucent = (ctx) => {
-  for (let i = 0; i < 120; i++) {
-    ctx.globalAlpha = 0.02;
-    ctx.fillStyle = i % 2 ? "#ff8844" : "#4488ff";
-    ctx.fillRect(0, 0, W, H);
-  }
-};
-// Inset by a pixel on purpose. An opaque fill that covers the whole page lets
-// Skia discard everything recorded under it, so a loop of them measures the
-// cull rather than the fill: 1200 of them came in at 2 ms, which is not 1200
-// fills of anything. One pixel short of the bounds and every layer is drawn.
-const opaque = (ctx) => {
-  for (let i = 0; i < 120; i++) {
-    ctx.fillStyle = i % 2 ? "#ff8844" : "#4488ff";
-    ctx.fillRect(0, 1, W, H - 1);
-  }
 };
 
-for (const [name, paint] of [
-  ["mixed vector scene", scene],
-  ["120 translucent layers", translucent],
-  ["120 opaque fills", opaque],
-]) {
-  console.log(`\n${name}, cpu, by pixel format`);
-  const base = time(
-    () => draw({ gpu: false, colorType: "RGBA8888" }, paint),
-    8,
-    2,
-  );
-  for (const depth of DEPTHS) {
-    const ms =
-      depth === "RGBA8888"
-        ? base
-        : time(() => draw({ gpu: false, colorType: depth }, paint), 8, 2);
-    row(depth, ms, ms / base);
-  }
-}
+// ── the cases ──────────────────────────────────────────────────────────────
 
-// ── nested sources ─────────────────────────────────────────────────────────
-//
+const cases = [];
+const add = (id, measure) => cases.push({ id, measure });
+
+for (const [name, paint] of DRAWS)
+  for (const [engine, engineOptions] of ENGINES)
+    for (const [space, spaceOptions] of SPACES)
+      add(`draw/${name}/${engine}/${space}`, () =>
+        time(() => draw({ ...engineOptions, ...spaceOptions }, paint)),
+      );
+
+// A whole page read back and written in, in the page's format: what a filter
+// or an image pipeline pays per frame.
+for (const [engine, engineOptions] of ENGINES)
+  for (const [space, spaceOptions] of SPACES) {
+    add(`pixels/get/${engine}/${space}`, () => {
+      const canvas = new Canvas(W, H, { ...engineOptions, ...spaceOptions });
+      const ctx = canvas.getContext("2d");
+      scene(ctx);
+      return time(() => ctx.getImageData(0, 0, W, H));
+    });
+    add(`pixels/put/${engine}/${space}`, () => {
+      const canvas = new Canvas(W, H, { ...engineOptions, ...spaceOptions });
+      const ctx = canvas.getContext("2d");
+      scene(ctx);
+      const data = ctx.getImageData(0, 0, W, H);
+      return time(() => {
+        ctx.putImageData(data, 0, 0);
+        rasterize(canvas);
+      });
+    });
+  }
+
 // A canvas drawn into a canvas, behind a clip that shows a sliver of it. The
 // cost belongs to the clip: the visible region is rasterized and the rest of
-// the source is culled. Two source sizes rather than one, because the failure
-// this catches is the cost tracking the *source* instead, and a single figure
-// cannot show that -- a heavy source reads as "this machine is slow".
+// the source is culled. Two source sizes, because the failure this catches
+// is the cost tracking the *source* instead, and a single figure cannot show
+// that -- a heavy source reads as "this machine is slow".
 //
 // Only a source that has itself drawn a canvas takes this path. One that has
 // only been drawn on travels as a picture and is never rasterized, so the
@@ -230,402 +545,343 @@ const nestedSource = (ops) => {
   source.getContext("2d").drawCanvas(inner, 0, 0);
   return source;
 };
-
-const clippedDraw = (source, gpu = false) => {
-  const dest = new Canvas(W, H, { gpu });
-  const ctx = dest.getContext("2d");
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(0, 0, 180, 24);
-  ctx.clip();
-  ctx.drawImage(source, 0, 0);
-  ctx.restore();
-  // Forces the rasterization, and proves it happened: a clip that misses
-  // would leave this transparent and the row would time an empty page.
-  const alpha = ctx.getImageData(0, 0, 1, 1).data[3];
-  if (alpha !== 255) throw new Error("the clipped draw painted nothing");
+const nestedSources = {
+  200: once(() => nestedSource(200)),
+  20000: once(() => nestedSource(20000)),
 };
+for (const ops of [200, 20000])
+  for (const [engine, engineOptions] of ENGINES)
+    add(`nested/clipped-${ops}/${engine}`, () =>
+      time(() => {
+        const dest = new Canvas(W, H, engineOptions);
+        const ctx = dest.getContext("2d");
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, 180, 24);
+        ctx.clip();
+        ctx.drawImage(nestedSources[ops](), 0, 0);
+        ctx.restore();
+        // Forces the rasterization, and proves it happened: a clip that
+        // misses would leave this transparent and the row would time an
+        // empty page.
+        if (ctx.getImageData(0, 0, 1, 1).data[3] !== 255)
+          throw new Error("the clipped draw painted nothing");
+      }),
+    );
 
-// Both backends, because the destination is what differs and the comparison
-// is the point: the GPU row is the higher of the two despite doing the same
-// drawing, since every round here ends in a read and reading a GPU surface
-// waits for the device. Without the second column that looks like a cost of
-// the nesting rather than a cost of the read.
-console.log("\nclipped draw of a nested source, by source size and backend");
-{
-  const light = nestedSource(200);
-  const heavy = nestedSource(20000);
-  for (const [backend, gpu] of [
-    ["cpu", false],
-    ["gpu", true],
-  ]) {
-    let lightMs, heavyMs;
-    try {
-      lightMs = time(() => clippedDraw(light, gpu), 10, 3);
-      heavyMs = time(() => clippedDraw(heavy, gpu), 10, 3);
-    } catch (err) {
-      console.log(`  ${backend.padEnd(22)} unavailable: ${err.message}`);
-      continue;
-    }
-    row(`200 ops in the source, ${backend}`, lightMs, 1);
-    row(`20000 ops in the source, ${backend}`, heavyMs, heavyMs / lightMs);
-  }
-}
+// Drawn onto a canvas rather than merely constructed. Skia hands back an
+// image whose pixels are not decoded until something asks for them, so timing
+// the constructor alone measured 0.0 ms for PNG -- the work had not happened
+// yet. The figure includes one blit as well as the decode; the blit is the
+// same in every row, so the differences between them are the decoders.
+for (const [label, format, options, source] of DECODES)
+  add(`decode/${label}/cpu`, () => {
+    const encoded = source().toBufferSync(format, options);
+    const into = new Canvas(source().width, source().height, { gpu: false });
+    const ctx = into.getContext("2d");
+    return {
+      ...time(() => {
+        ctx.drawImage(new Image(encoded), 0, 0);
+        rasterize(into);
+      }),
+      bytes: encoded.length,
+    };
+  });
 
-// ── export ─────────────────────────────────────────────────────────────────
-console.log("\nencode a drawn 1200x900 page, cpu");
-const page = new Canvas(W, H, { gpu: false });
-scene(page.getContext("2d"));
-// Every format the canvas writes, because the interesting comparisons are
-// between them: what a lossless one costs against a lossy one, and what the
-// two that carry a clock cost for a single frame.
-//
+// Every frame of a 30-frame animation, each drawn: what playing one back
+// costs, which a decode of its first frame says nothing about.
+for (const [format, options] of ANIMATIONS)
+  add(`decode/${format}-animated/cpu`, () => {
+    const encoded = reel().toBufferSync(format, options);
+    const into = new Canvas(W, H, { gpu: false });
+    const ctx = into.getContext("2d");
+    return {
+      ...time(() => {
+        const image = new Image(encoded);
+        for (let f = 0; f < image.frames; f++) {
+          ctx.drawImage(image.frame(f), 0, 0);
+          rasterize(into);
+        }
+      }, LONG_RUNS),
+      bytes: encoded.length,
+    };
+  });
+
+for (const elements of [60, 2000])
+  add(`decode/svg-${elements}/cpu`, () => {
+    const source = svgDoc(elements);
+    const into = new Canvas(1000, 800, { gpu: false });
+    const ctx = into.getContext("2d");
+    return time(() => {
+      ctx.drawImage(new Image(source), 0, 0);
+      rasterize(into);
+    });
+  });
+
 // Size beside the time, because neither figure means much alone: the fastest
 // encoder here writes the largest file and the slowest writes the smallest,
 // and a table of times would report that as a ranking.
-for (const [format, options] of [
-  ["png", {}],
-  ["jpg", { quality: 0.92 }],
-  ["webp", { quality: 0.9 }],
-  ["avif", { quality: 0.92 }],
-  ["gif", {}],
-  ["apng", {}],
-  ["tiff", {}],
-  ["bmp", {}],
-  ["pdf", {}],
-  ["svg", {}],
-]) {
-  const ms = time(() => page.toBufferSync(format, options), 8, 2);
-  const bytes = page.toBufferSync(format, options).length;
-  console.log(
-    `  ${format.padEnd(22)} ${ms.toFixed(1).padStart(7)} ms   ` +
-      `${(bytes / 1024).toFixed(1).padStart(8)} KB`,
-  );
-}
-
-// ── animate ────────────────────────────────────────────────────────────────
-// The single page above says nothing about the four formats that carry a
-// clock, because the work those do is between frames: each sends the
-// rectangle it differs from its predecessor in, and compresses frames on
-// whatever cores are free. A one-page export reaches none of that, so every
-// animated figure this file printed was the cost of the container.
-//
-// A still background with a moving foreground, which is what a
-// dirty-rectangle encoder is actually asked to compress. A scene where the
-// whole page moves would make every rectangle the whole page and measure
-// something nobody exports.
-console.log("\nencode a 30-frame 1200x900 animation, cpu");
-const reel = new Canvas(W, H, { gpu: false });
-for (let f = 0; f < 30; f++) {
-  const ctx = f ? reel.newPage() : reel.getContext("2d");
-  scene(ctx);
-  ctx.fillStyle = "#f6c453";
-  ctx.beginPath();
-  ctx.arc(100 + ((W - 200) * f) / 29, H / 2, 80, 0, 2 * Math.PI);
-  ctx.fill();
-}
-for (const [format, options] of [
-  ["webp", { quality: 0.9, fps: 30 }],
-  ["apng", { fps: 30 }],
-  ["gif", { fps: 30 }],
-  ["avif", { quality: 0.92, fps: 30 }],
-]) {
-  // Fewer iterations than the still table: these are whole animations, and
-  // the slowest is most of a second each time.
-  const ms = time(() => reel.toBufferSync(format, options), 5, 1);
-  const bytes = reel.toBufferSync(format, options).length;
-  console.log(
-    `  ${format.padEnd(22)} ${ms.toFixed(1).padStart(7)} ms   ` +
-      `${(bytes / 1024).toFixed(1).padStart(8)} KB`,
-  );
-}
-
-// ── AVIF's own dials ───────────────────────────────────────────────────────
-// The one format here with choices that move both axes at once, so the
-// numbers above say nothing about what those choices cost. Size is reported
-// beside the time because that is the trade being made: subsampling buys
-// bytes on a photograph and nothing on a page like this one, and lossless
-// spends them for exactness.
-console.log("\nencode the same page as AVIF, cpu, by option");
-for (const [label, options] of [
-  ["quality 0.5", { quality: 0.5 }],
-  ["quality 0.92", { quality: 0.92 }],
-  ["quality 1.0", { quality: 1 }],
-  ["4:2:2", { quality: 0.92, chromaSampling: "4:2:2" }],
-  ["4:2:0", { quality: 0.92, chromaSampling: "4:2:0" }],
-  ["lossless", { lossless: true }],
-]) {
-  // Fewer iterations than the rest of this file, because each of these is a
-  // quarter of a second and six options is already most of the run. Still a
-  // median of five after two warmups, which is what the encode table uses.
-  const ms = time(() => page.toBufferSync("avif", options), 5, 2);
-  const bytes = page.toBufferSync("avif", options).length;
-  console.log(
-    `  ${label.padEnd(22)} ${ms.toFixed(1).padStart(7)} ms   ` +
-      `${(bytes / 1024).toFixed(1).padStart(8)} KB`,
-  );
-}
-
-// ── decode ─────────────────────────────────────────────────────────────────
-// AVIF is the one format here Skia cannot read, so its figure is entirely
-// this crate's own path: the container parsed here, the frame handed to
-// libaom, the planes composed back to RGBA.
-//
-// Drawn onto a canvas rather than merely constructed. Skia hands back an
-// image whose pixels are not decoded until something asks for them, so
-// timing the constructor alone measured 0.0 ms for PNG -- the work had not
-// happened yet.
-//
-// That means the figure includes one 1200x900 blit as well as the decode.
-// The blit is the same for both rows, so the difference between them is the
-// decode; the absolute numbers are a little high for it.
-console.log("\ndecode a 1200x900 page, cpu");
-for (const [label, options] of [
-  ["avif", { quality: 0.92 }],
-  ["png", {}],
-  // Skia decodes JPEG, as it does PNG, so this row is the same shape as the
-  // one above it rather than a second measurement of this crate's own code.
-  // It is here because it is the format a caller is most likely to hand in
-  // and nothing measured it.
-  ["jpeg", { quality: 0.92 }],
-]) {
-  const encoded = page.toBufferSync(label, options);
-  const into = new Canvas(W, H, { gpu: false });
-  const ctx = into.getContext("2d");
-  row(
-    label,
-    time(
-      () => {
-        ctx.drawImage(new Image(encoded), 0, 0);
-        rasterize(into);
-      },
-      8,
-      2,
+for (const [label, format, options, source] of ENCODES)
+  add(`encode/${label}/cpu`, () => ({
+    ...time(
+      () => source().toBufferSync(format, options),
+      label.startsWith("avif") ? LONG_RUNS : RUNS,
     ),
-  );
-}
+    bytes: source().toBufferSync(format, options).length,
+  }));
 
-// ── svg ────────────────────────────────────────────────────────────────────
-// Loading an SVG *in*, which is a different path from the `svg` export row
-// above: that one writes a drawn page out, and nothing here used to read one.
-//
-// Two sizes rather than one, and the per-element column is why. Before Skia
-// parses anything this crate walks the whole document to rewrite absolute
-// lengths, text positions, generic families and the `font-size` cascade.
-// That walk is per element, and it dominates: the two rows report nearly the
-// same microseconds per element, which says the cost is linear and that
-// fixed setup is already lost in it at sixty elements.
-//
-// So what the pair catches is a change in *shape*. Both figures rising
-// together is a walk or a rasterise that got uniformly slower. The large row
-// rising while the small one holds is the one worth stopping for -- something
-// that scales worse than linearly, which a single row at either size reports
-// as a plain slowdown and cannot distinguish. Read the microseconds across a
-// change; the milliseconds are this machine.
-//
-// Drawn and rasterized rather than merely constructed, for the reason the
-// decode rows give: an `Image` that is never asked for its pixels has not
-// done the work yet.
-//
-// User units, no `font-family`, no text. That is not a typical document --
-// it is the document where the walk finds nothing to rewrite, so the row
-// measures the cost of looking rather than the cost of the edits. A document
-// that needed every length rewritten measured within 3% of this one, so the
-// looking is the part worth watching.
-const svgDoc = (elements) => {
-  let body = "";
-  for (let i = 0; i < elements; i++) {
-    body +=
-      `<rect x="${(i * 7) % 900}" y="${(i * 13) % 700}" ` +
-      `width="20" height="14" fill="#3a7"/>`;
-  }
-  return Buffer.from(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="800">` +
-      `${body}</svg>`,
-  );
-};
+// The four formats that carry a clock do their work between frames: each
+// sends the rectangle it differs from its predecessor in, and compresses
+// frames on whatever cores are free. A one-page export reaches none of that.
+for (const [format, options] of ANIMATIONS)
+  add(`animate/${format}/cpu`, () => ({
+    ...time(() => reel().toBufferSync(format, options), LONG_RUNS),
+    bytes: reel().toBufferSync(format, options).length,
+  }));
 
-console.log("\nload an svg, cpu");
-for (const elements of [60, 2000]) {
-  const source = svgDoc(elements);
-  const into = new Canvas(1000, 800, { gpu: false });
-  const ctx = into.getContext("2d");
-  const ms = time(
-    () => {
-      ctx.drawImage(new Image(source), 0, 0);
-      rasterize(into);
-    },
-    8,
-    2,
-  );
-  console.log(
-    `  ${String(elements).padStart(5)} elements` +
-      `${ms.toFixed(1).padStart(12)} ms` +
-      `${((ms * 1000) / elements).toFixed(1).padStart(9)} us/element`,
-  );
-}
+for (const format of ["pdf", "svg"])
+  add(`export/${format}-heavy/cpu`, () => ({
+    ...time(() => heavyPage().toBufferSync(format)),
+    bytes: heavyPage().toBufferSync(format).length,
+  }));
 
-// ── quality ────────────────────────────────────────────────────────────────
 // What the lossy encoders cost in fidelity, beside what they cost in bytes.
-//
-// The export table above ranks them by time and size, and on those two axes
-// the smallest file looks like the best one. It is not a complete comparison:
-// a lossy encoder buys its bytes with error, and an encoder that is smaller
-// *and* closer to the original has won something a size column cannot show.
-//
 // PSNR over the three colour channels, in decibels, against the page as it
-// was drawn. Alpha is skipped -- this page is opaque, so its alpha carries no
-// signal and averaging it in would flatter every encoder equally. The scale
-// is logarithmic: +6 dB is half the error, and a difference under about 1 dB
-// is not worth reading.
-//
-// The metric is worth naming rather than treating as "quality". PSNR is
+// was drawn; alpha is skipped, since this page is opaque. +6 dB is half the
+// error, and a difference under about 1 dB is not worth reading. PSNR is
 // per-pixel error and knows nothing about vision, so an encoder tuned to a
-// perceptual model scores worse than its pictures look. That is a property
-// of the number, not a fault in the encoder, and this page -- antialiased
-// diagonals and small type -- is the hardest case for exactly that.
-console.log("\nfidelity of a lossy encode, cpu, PSNR against the drawn page");
-{
-  const source = page.getContext("2d").getImageData(0, 0, W, H).data;
-  const psnr = (decoded) => {
-    let squared = 0;
-    // Three of every four bytes: R, G and B, skipping A.
-    for (let i = 0; i < source.length; i += 4) {
-      for (let c = 0; c < 3; c++) {
-        const error = source[i + c] - decoded[i + c];
-        squared += error * error;
-      }
+// perceptual model scores worse than its pictures look.
+const psnr = (source, decoded) => {
+  let squared = 0;
+  for (let i = 0; i < source.length; i += 4)
+    for (let c = 0; c < 3; c++) {
+      const error = source[i + c] - decoded[i + c];
+      squared += error * error;
     }
-    const mse = squared / ((source.length / 4) * 3);
-    // Identical buffers give an MSE of zero, which has no finite PSNR.
-    return mse === 0 ? Infinity : 10 * Math.log10((255 * 255) / mse);
-  };
-
-  for (const [format, options] of [
-    ["jpg", { quality: 0.92 }],
-    ["webp", { quality: 0.9 }],
-    ["avif", { quality: 0.92 }],
-  ]) {
-    const encoded = page.toBufferSync(format, options);
+  const mse = squared / ((source.length / 4) * 3);
+  return mse === 0 ? Infinity : 10 * Math.log10((255 * 255) / mse);
+};
+for (const [label, format, options] of [
+  ["jpeg", "jpg", { quality: 0.92 }],
+  ["webp", "webp", { quality: 0.9 }],
+  ["avif", "avif", { quality: 0.92 }],
+])
+  add(`quality/${label}`, () => {
+    const source = page().getContext("2d").getImageData(0, 0, W, H).data;
+    const encoded = page().toBufferSync(format, options);
     const into = new Canvas(W, H, { gpu: false });
     const ctx = into.getContext("2d");
     ctx.drawImage(new Image(encoded), 0, 0);
-    const db = psnr(ctx.getImageData(0, 0, W, H).data);
-    console.log(
-      `  ${format.padEnd(22)} ${db.toFixed(1).padStart(7)} dB   ` +
-        `${(encoded.length / 1024).toFixed(1).padStart(8)} KB`,
-    );
-  }
-}
+    return {
+      ...value("dB", psnr(source, ctx.getImageData(0, 0, W, H).data)),
+      bytes: encoded.length,
+    };
+  });
 
-// ── antialiasing ───────────────────────────────────────────────────────────
-// How closely each renderer's edge coverage tracks the geometry.
-//
-// A rectangle narrower than a pixel should darken that pixel in proportion
-// to how much of it the rectangle covers: a rectangle 0.25 px wide over
-// white should read 25% black. That is checkable arithmetic rather than a
-// matter of taste, so the three renderers can be scored against it instead
-// of against each other.
-//
-// The sweep runs from 0.05 px, well below where any of them resolves, up to
-// a full pixel. The rectangle is placed on a pixel boundary so that all of
-// it lands in one column and the expected coverage is exactly its width.
-//
-// Three rows, because the GPU has two answers and they fail differently.
-// MSAA takes a fixed number of samples a pixel, so its coverage can only be
-// a multiple of one over that number -- at four samples, fifths of 255 -- and
-// anything thinner than half a sample disappears. Shader-based antialiasing
-// is smooth but computes coverage from a distance field, which reads high on
-// a thin shape. The CPU renderer scan-converts and is exact to a level or so.
-//
-// Total absolute error is the sum over the sweep, in 8-bit levels, so it is
-// comparable between rows and meaningless on its own.
-console.log("\nantialiasing coverage error, 0.05 to 1.0 px, in 8-bit levels");
-{
-  const WIDTHS = [];
-  for (let w = 0.05; w <= 1.0001; w += 0.05) WIDTHS.push(Number(w.toFixed(2)));
-
-  // One tall thin canvas: the sweep needs one pixel column per width, not a
-  // page. Read back through `settings` so the GPU rows differ only in `msaa`.
-  const coverage = (options, settings) => {
-    const strip = new Canvas(WIDTHS.length * 4, 8, options);
+// How closely each renderer's edge coverage tracks the geometry: a rectangle
+// 0.25 px wide over white should read 25% black. The sweep runs from 0.05 px
+// to a full pixel, each on a pixel boundary so all of it lands in one column,
+// and the error is summed in 8-bit levels -- comparable between rows,
+// meaningless alone. Three rows, because the GPU has two answers and they
+// fail differently: MSAA's coverage is a multiple of one over its sample
+// count, and shader antialiasing reads high on a thin shape.
+const AA_WIDTHS = Array.from({ length: 20 }, (_, i) => (i + 1) / 20);
+for (const [label, options, settings] of [
+  ["cpu", { gpu: false }, undefined],
+  ["gpu-msaa4", { gpu: true }, { msaa: 4 }],
+  ["gpu-shader", { gpu: true }, { msaa: 0 }],
+])
+  add(`aa/${label}`, () => {
+    const strip = new Canvas(AA_WIDTHS.length * 4, 8, options);
     const ctx = strip.getContext("2d");
     ctx.fillStyle = "white";
     ctx.fillRect(0, 0, strip.width, strip.height);
     ctx.fillStyle = "black";
-    WIDTHS.forEach((w, i) => ctx.fillRect(i * 4, 0, w, 8));
+    AA_WIDTHS.forEach((w, i) => ctx.fillRect(i * 4, 0, w, 8));
     const px = ctx.getImageData(0, 0, strip.width, strip.height, settings).data;
     // Row 4 of 8, clear of any edge effect at the top and bottom.
     const row = 4 * strip.width * 4;
-    // White minus what was read is how much black landed in the pixel.
-    return WIDTHS.map((_, i) => 255 - px[row + i * 4 * 4]);
-  };
-
-  const rows = [
-    ["cpu", { gpu: false }, undefined],
-    ["gpu, msaa 4", { gpu: true }, { msaa: 4 }],
-    ["gpu, shader aa", { gpu: true }, { msaa: 0 }],
-  ];
-  for (const [label, options, settings] of rows) {
-    let read;
-    try {
-      read = coverage(options, settings);
-    } catch (err) {
-      // A machine with no usable GPU is a normal place to run this file.
-      console.log(`  ${label.padEnd(22)} unavailable: ${err.message}`);
-      continue;
-    }
-    const error = read.reduce(
-      (sum, level, i) => sum + Math.abs(level - WIDTHS[i] * 255),
+    const error = AA_WIDTHS.reduce(
+      (sum, w, i) => sum + Math.abs(255 - px[row + i * 16] - w * 255),
       0,
     );
-    // The levels themselves, not just the total: what separates the two GPU
-    // rows is the shape of the error, and a sum hides quantisation entirely.
-    const sampled = [0, 4, 9, 14, 19].map((i) => read[i]).join(", ");
-    console.log(
-      `  ${label.padEnd(22)} total ${error.toFixed(0).padStart(5)}   ` +
-        `at 0.05/0.25/0.50/0.75/1.00 px: ${sampled}`,
-    );
-  }
-}
+    return value("levels", error);
+  });
 
-// ── memory ─────────────────────────────────────────────────────────────────
 // Each depth in a process of its own, three of them, and the median taken.
-//
-// This used to run inline like every other section, and by the time it got
-// here the answer was meaningless: the process holds a large pool of freed
-// pages, the twenty new canvases are served out of it, and the RSS delta
-// measures the pool rather than the canvases. It reported RGBAF32 at 0.31 MB
-// against a surface of 16.48, and before the page cache was bounded it
-// reported 6.89 -- impossible either way, since a held canvas cannot cost
-// less than its own pixels.
-//
-// A fresh process has no pool to hide in, so the delta is the allocation. It
-// is still a noisy way to weigh anything -- three passes here spread 15.7 to
-// 22.4 MB on the same depth -- hence the median of three rather than one
-// reading.
-console.log("\nresident memory per 1200x900 canvas, cpu");
-if (!global.gc) console.log("  (run with --expose-gc for a stable baseline)");
-const probe = (depth, mode) => {
-  const readings = [];
-  for (let run = 0; run < 3; run++) {
-    const out = execFileSync(
-      process.execPath,
-      ["--expose-gc", __filename, "--memory-probe", depth, mode],
-      { encoding: "utf8" },
-    );
-    readings.push(Number(out.trim()));
+// Run inline, the process holds a pool of freed pages that twenty new
+// canvases are served out of, and the delta measures the pool: it reported
+// RGBAF32 at 0.31 MB against a surface of 16.48. A fresh process has nothing
+// to hide in. Two readings a depth: a one-pixel read composites the tile it
+// lands in and nothing else, a whole-page read composites the surface and
+// hands a copy back -- the range a canvas can occupy.
+const MEMORY_CANVASES = 20;
+if (args[0] === "--memory-probe") {
+  loadLibrary();
+  const [, depth, read] = args;
+  global.gc?.();
+  const before = process.memoryUsage().rss;
+  const held = [];
+  for (let i = 0; i < MEMORY_CANVASES; i++) {
+    const canvas = new Canvas(W, H, { gpu: false, colorType: depth });
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#345";
+    ctx.fillRect(0, 0, W, H);
+    if (read === "page") ctx.getImageData(0, 0, W, H);
+    else rasterize(canvas);
+    held.push(canvas);
   }
-  return median(readings);
+  process.stdout.write(
+    String((process.memoryUsage().rss - before) / held.length),
+  );
+  process.exit(0);
+}
+for (const depth of DEPTHS)
+  for (const read of ["tile", "page"])
+    add(`memory/${depth}/${read}`, () => {
+      const readings = [];
+      for (let run = 0; run < (QUICK ? 1 : 3); run++)
+        readings.push(
+          Number(
+            execFileSync(
+              process.execPath,
+              ["--expose-gc", __filename, "--memory-probe", depth, read],
+              {
+                encoding: "utf8",
+              },
+            ).trim(),
+          ),
+        );
+      return {
+        ...value("MB", quantile(readings, 0.5) / 1048576),
+        surface: (W * H * BYTES[depth]) / 1048576,
+      };
+    });
+
+// ── running them ───────────────────────────────────────────────────────────
+
+if (flag("--list")) {
+  for (const { id } of cases) console.log(id);
+  process.exit(0);
+}
+loadLibrary();
+
+// A dev binary leaves the Rust glue unoptimized. Skia is compiled either way,
+// so the drawing rows barely move while anything reaching a codec through
+// this crate's own per-pixel work multiplies -- AVIF by eight. `just
+// bench-npm` builds release first; running this file directly does not, so
+// the report names the binary it loaded.
+const binary =
+  process.env[BINARY_OVERRIDE] ||
+  path.resolve(__dirname, "../../lib/skia.node");
+// Asked of the checkout this file is in, not of wherever it was run from: a
+// report names the commit that was measured.
+const git = (...argv) => {
+  try {
+    return execFileSync("git", argv, {
+      cwd: path.resolve(__dirname, "../.."),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return null;
+  }
+};
+const gpuEngine = (() => {
+  try {
+    return new Canvas(1, 1, { gpu: true }).engine;
+  } catch {
+    return null;
+  }
+})();
+const run = {
+  benchmark: "npm",
+  date: new Date().toISOString(),
+  quick: QUICK,
+  commit: git("rev-parse", "HEAD"),
+  dirty: git("status", "--porcelain", "--untracked-files=no") !== "",
+  binary: fs.existsSync(binary)
+    ? {
+        path: binary,
+        bytes: fs.statSync(binary).size,
+        sha256: crypto
+          .createHash("sha256")
+          .update(fs.readFileSync(binary))
+          .digest("hex"),
+      }
+    : { path: binary },
+  machine: {
+    cpu: os.cpus()[0]?.model,
+    cores: os.cpus().length,
+    os: `${os.platform()} ${os.release()}`,
+    arch: os.arch(),
+    runtime: `node ${process.version}`,
+    gpu: gpuEngine,
+  },
+  load: { start: os.loadavg() },
+  cases: [],
 };
 
-for (const depth of DEPTHS) {
-  const each = probe(depth, "pixel");
-  const wholeEach = probe(depth, "whole");
-  const surface = (W * H * BYTES[depth]) / 1048576;
-  console.log(
-    `  ${depth.padEnd(22)} ${(each / 1048576).toFixed(2).padStart(6)} MB` +
-      `   whole-page read ${(wholeEach / 1048576).toFixed(2).padStart(6)} MB` +
-      `   surface alone ${surface.toFixed(2)} MB`,
-  );
+console.log(
+  `${run.machine.cpu} · ${run.machine.cores} cores · ${run.machine.runtime} · ${run.machine.os}/${run.machine.arch}`,
+);
+console.log(
+  `${path.basename(binary)} · ${((run.binary.bytes ?? 0) / 1048576).toFixed(1)} MB${QUICK ? " · quick" : ""}`,
+);
+
+const shown = (r) =>
+  r.error
+    ? `unavailable: ${r.error}`
+    : `${r.median.toFixed(r.unit === "ms" ? 2 : 1).padStart(10)} ${r.unit}` +
+      (r.p10 == null
+        ? ""
+        : `   p10 ${r.p10.toFixed(2)}  p90 ${r.p90.toFixed(2)}`) +
+      (r.bytes == null ? "" : `   ${(r.bytes / 1024).toFixed(1)} KB`);
+
+for (const { id, measure } of cases) {
+  if (ONLY && !id.startsWith(ONLY)) continue;
+  let result;
+  try {
+    result = { id, ...measure() };
+  } catch (err) {
+    // A machine with no usable GPU is a normal place to run this file.
+    result = { id, error: err.message };
+  }
+  run.cases.push(result);
+  console.log(`  ${id.padEnd(36)} ${shown(result)}`);
 }
+run.load.end = os.loadavg();
+
+// ── the report ─────────────────────────────────────────────────────────────
+
+const stamp = `${run.date.slice(0, 10)}-${(run.commit ?? "nocommit").slice(0, 8)}`;
+fs.mkdirSync(OUT, { recursive: true });
+const base = path.join(OUT, `${stamp}-npm`);
+fs.writeFileSync(`${base}.json`, `${JSON.stringify(run, null, 2)}\n`);
+const cell = (v, digits) =>
+  v == null ? "" : Number.isFinite(v) ? v.toFixed(digits) : String(v);
+fs.writeFileSync(
+  `${base}.md`,
+  [
+    `# npm benchmark, ${run.date}`,
+    "",
+    `- Commit: \`${run.commit ?? "unknown"}\`${run.dirty ? " (uncommitted changes)" : ""}`,
+    `- Binary: \`${run.binary.path}\`, ${run.binary.bytes ?? "?"} bytes, sha256 \`${run.binary.sha256 ?? "?"}\``,
+    `- Machine: ${run.machine.cpu}, ${run.machine.cores} cores, ${run.machine.os} ${run.machine.arch}, ${run.machine.runtime}`,
+    `- GPU: ${run.machine.gpu ? `${run.machine.gpu.api ?? ""} ${run.machine.gpu.device ?? ""}`.trim() : "none"}`,
+    `- Load average (1, 5, 15 min): ${run.load.start.map((l) => l.toFixed(2)).join(", ")} at the start, ${run.load.end.map((l) => l.toFixed(2)).join(", ")} at the end`,
+    run.quick
+      ? "- **Quick run: one sample a case, no warmup. Not a measurement.**"
+      : "",
+    "",
+    "| case | unit | median | p10 | p90 | runs | bytes |",
+    "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    ...run.cases.map((r) =>
+      r.error
+        ? `| ${r.id} | | unavailable: ${r.error} | | | | |`
+        : `| ${r.id} | ${r.unit} | ${cell(r.median, 3)} | ${cell(r.p10, 3)} | ${cell(r.p90, 3)} | ${r.runs} | ${r.bytes ?? ""} |`,
+    ),
+    "",
+  ].join("\n"),
+);
+console.log(`\n${base}.md\n${base}.json`);
