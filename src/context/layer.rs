@@ -74,9 +74,10 @@ pub enum Layer {
     /// blur is.
     Group(Arc<Group>),
     /// The same draws recorded twice, on a page that keeps a recording for
-    /// each kind of target -- see `page::Recording`: a flat colour held
-    /// exactly in the page's own space for pixels, and as a plain colour for
-    /// a document. Shared, so the two pictures are one pointer.
+    /// each kind of target, once a draw has forked them -- see
+    /// `page::Recorders`: a flat colour held exactly in the page's own space
+    /// for pixels, and as a plain colour for a document. Shared, so the two
+    /// pictures are one pointer.
     Targeted(Arc<(Picture, Picture)>),
     /// A fill or stroke its clip cuts, or a run of them under one clip, the
     /// clip applied at playback. Filed as a piece of the frame's run -- see
@@ -277,6 +278,38 @@ fn byte_alpha(alpha: f32) -> f32 {
     (alpha.clamp(0.0, 1.0) * levels + 0.5).trunc() / levels
 }
 
+/// How far inside the edge of a byte's span [`nearest_storing`] keeps a
+/// colour, in levels. Skia rounds a paint's colour to a byte from `f32`
+/// (`Sk4f_toL32`: `x * 255 + 0.5`, truncated), and a colour placed on the
+/// edge itself could round to the byte beside it once through `f32`.
+const BYTE_EDGE_SLACK: f64 = 1.0 / 64.0;
+
+/// The colour, in levels, nearest `plain` of those that store `product`
+/// premultiplied at the alpha byte `stored`, all three in levels, on
+/// either engine: one that Skia's legacy blit rounds to a byte `u` whose
+/// `u * stored / 255` rounds to `product` -- `SkMulDiv255Round`, which
+/// never meets a tie, 255 being odd -- and whose own product lands within
+/// [`PLACED_MARGIN_LEVELS`] of `product`, as Ganesh carries it.
+///
+/// [`ExactColour::at`]'s colour, `product * 255 / stored`, is always one of
+/// them, and is what this gives where the margins leave no span.
+fn nearest_storing(plain: f64, product: f64, stored: f64) -> f64 {
+    let levels = f64::from(u8::MAX);
+    let scale = levels / stored;
+    let first = ((product - 0.5) * scale).ceil().max(0.0);
+    let last = (((product + 0.5) * scale).ceil() - 1.0).min(levels);
+    let low = (first - 0.5 + BYTE_EDGE_SLACK)
+        .max((product - PLACED_MARGIN_LEVELS) * scale)
+        .max(0.0);
+    let high = (last + 0.5 - BYTE_EDGE_SLACK)
+        .min((product + PLACED_MARGIN_LEVELS) * scale)
+        .min(levels);
+    match low <= high {
+        true => plain.clamp(low, high),
+        false => product * scale,
+    }
+}
+
 /// How many times a placed colour that lands off its byte is moved back
 /// toward it and drawn again before [`ExactColour::shader`] takes it.
 const NUDGES: usize = 3;
@@ -410,6 +443,25 @@ fn landed(
     })
 }
 
+/// The verdict [`landed`] finds for `want`, premultiplied bytes, on an sRGB
+/// page, found without its draw: Skia hands an sRGB paint colour over to an
+/// sRGB page unconverted, so the colour `landed` tries first lands within
+/// `f32` rounding of its bytes, and it takes that one as it handed it over.
+/// `an_srgb_verdict_is_the_one_the_probe_finds` holds the two equal at every
+/// alpha byte, with each channel at every byte it can store.
+fn unconverted(want: [u8; 4]) -> Verdict {
+    let stored = f64::from(want[3]);
+    let alpha = (stored / f64::from(u8::MAX)) as f32;
+    if want[3] == 0 {
+        return Some((
+            Color4f::new(0.0, 0.0, 0.0, 0.0),
+            ColorSpace::new_srgb(),
+        ));
+    }
+    let [r, g, b] = [0, 1, 2].map(|i| (f64::from(want[i]) / stored) as f32);
+    Some((Color4f::new(r, g, b, alpha), ColorSpace::new_srgb()))
+}
+
 /// The SkSL of the step [`ExactColour::dye`] can end with: `plain` at the
 /// source's alpha where Skia left `probe` as it was handed over, and the
 /// source unchanged where it converted it. Skia converts a `layout(color)`
@@ -537,14 +589,14 @@ impl ExactColour {
     /// `color(display-p3 0.00196 0.00196 0.00196)`, half a level, filled 0
     /// where the same grey fills 1 on an sRGB page.
     ///
-    /// The exact product and not the bytes of an sRGB page, which Skia blits
-    /// through its legacy path: it rounds the colour and the alpha to bytes
-    /// first and premultiplies those, so `color(srgb 0.8732 0.5865 0.0787 /
-    /// 0.1)` stores red 23 where the product is 22.27. A wide-gamut page
-    /// draws through the raster pipeline, which premultiplies in float and
+    /// The exact product on every eight-bit page, sRGB's included, rather
+    /// than the bytes Skia's legacy blit stores there: it rounds the colour
+    /// and the alpha to bytes first and premultiplies those, so
+    /// `color(srgb 0.8732 0.5865 0.0787 / 0.1)` stored red 23 where the
+    /// product is 22.27. The raster pipeline premultiplies in float and
     /// rounds once, and so does Chrome's Display P3 canvas:
     /// `color(a98-rgb 0.3 0.6 0.9 / 0.5)` reads back red 50 in Chrome 153 and
-    /// here, where the sRGB page's rule reads 52.
+    /// here, where the legacy blit's rule reads 52.
     pub fn at(&self, alpha: f32) -> (Self, f32) {
         if !self.bytes {
             return (self.clone(), alpha);
@@ -576,7 +628,9 @@ impl ExactColour {
     /// levels on a Rec. 2020 page, and `color(a98-rgb 0 1 0)` one on a
     /// Display P3 page. So each placed colour is drawn once, as a paint's
     /// colour, onto a pixel of the page's space -- see [`landed`] -- and
-    /// taken only where it lands; the verdict is kept per thread.
+    /// taken only where it lands; the verdict is kept per thread. An sRGB
+    /// page converts nothing, and takes the placed colour without the draw
+    /// -- see [`unconverted`].
     pub fn verified_paint(&self, paint: &Paint) -> Option<Paint> {
         let (placed, alpha) = self.at(paint.alpha_f());
         let levels = f64::from(u8::MAX);
@@ -591,18 +645,21 @@ impl ExactColour {
                 stored as u8,
             ],
         );
-        let (colour, space) = VERDICTS.with(|verdicts| {
-            let mut verdicts = verdicts.borrow_mut();
-            let slot = &mut verdicts[verdict_slot(key)];
-            if let Some((filed, verdict)) = slot
-                && *filed == key
-            {
-                return verdict.clone();
-            }
-            let verdict = landed(&self.space, self.pixels, key.1);
-            *slot = Some((key, verdict.clone()));
-            verdict
-        })?;
+        let (colour, space) = match self.pixels {
+            PixelColorSpace::Srgb => unconverted(key.1),
+            _ => VERDICTS.with(|verdicts| {
+                let mut verdicts = verdicts.borrow_mut();
+                let slot = &mut verdicts[verdict_slot(key)];
+                if let Some((filed, verdict)) = slot
+                    && *filed == key
+                {
+                    return verdict.clone();
+                }
+                let verdict = landed(&self.space, self.pixels, key.1);
+                *slot = Some((key, verdict.clone()));
+                verdict
+            }),
+        }?;
         let mut paint = paint.clone();
         paint.set_color4f(colour, &space);
         Some(paint)
@@ -624,6 +681,47 @@ impl ExactColour {
             contrast_bucket([c.r, c.g, c.b])
         };
         (bucket(&placed) == bucket(paint)).then_some(placed)
+    }
+
+    /// [`Self::verified_text_paint`] on an eight-bit sRGB page, where the
+    /// plain colour's glyph contrast cannot be kept apart from the colour
+    /// drawn: Skia hands [`Self::keeping_plain_luminance`]'s probe over
+    /// unconverted onto sRGB, so that step would paint the plain colour.
+    /// Each channel is placed instead on the colour nearest the plain one
+    /// of those that store the exact product on either engine -- see
+    /// [`nearest_storing`] -- which keeps the plain colour's contrast
+    /// bucket wherever one of them is in it. Over 65,025 greys and alphas
+    /// off the byte grid, `(c + 0.37) / 255` at `(a + 0.61) / 255`,
+    /// [`Self::at`]'s colour left the bucket for 2,710 and this one for
+    /// 637, 456 of them at an alpha under 32 levels: there the glyph's
+    /// interior stores the exact product and its edges take the contrast of
+    /// the next bucket.
+    ///
+    /// The colour is handed over as it is, as [`Self::verified_paint`] hands
+    /// its own over on such a page: Skia lands an sRGB paint colour on an
+    /// sRGB page unconverted -- see [`unconverted`]. `None` on any other
+    /// page, and for a paint with a colour filter of its own.
+    pub fn nearest_text_paint(&self, paint: &Paint) -> Option<Paint> {
+        if !self.bytes
+            || self.pixels != PixelColorSpace::Srgb
+            || paint.color_filter().is_some()
+        {
+            return None;
+        }
+        let (placed, alpha) = self.at(paint.alpha_f());
+        let levels = f64::from(u8::MAX);
+        let stored = (f64::from(alpha) * levels).round();
+        if stored == 0.0 {
+            return self.verified_paint(paint);
+        }
+        let [r, g, b] = [0, 1, 2].map(|i| {
+            let product = (f64::from(placed.rgb[i]) * stored).round();
+            let plain = f64::from(self.rgb[i]) * levels;
+            (nearest_storing(plain, product, stored) / levels) as f32
+        });
+        let mut paint = paint.clone();
+        paint.set_color4f(Color4f::new(r, g, b, alpha), &self.space);
+        Some(paint)
     }
 
     /// A shader painting the colour: [`FLAT_COLOUR`] with the colour as its
@@ -1405,6 +1503,10 @@ pub(crate) struct Entries {
     pub(crate) layers: Arc<Vec<Layer>>,
     /// One for each of `layers`, in the same order.
     pub(crate) features: Arc<Vec<VectorFeatures>>,
+    /// Whether these are the entries of a page that keeps a recording for
+    /// each kind of target, whose draws may not yet have forked them --
+    /// see `page::Recorders` -- and so hold no pair to say so.
+    pub(crate) apart: bool,
 }
 
 impl FromIterator<(Layer, VectorFeatures)> for Entries {
@@ -1431,7 +1533,11 @@ impl Entries {
         features: Arc<Vec<VectorFeatures>>,
     ) -> Self {
         debug_assert_eq!(layers.len(), features.len(), "a feature per entry");
-        Self { layers, features }
+        Self {
+            layers,
+            features,
+            apart: false,
+        }
     }
 
     /// `layers` asking nothing of a vector backend.
@@ -2302,6 +2408,25 @@ pub(crate) fn holds_a_cut(entries: &[Layer]) -> bool {
     })
 }
 
+/// Whether `entries`, or a group among them, hold a pair of recordings --
+/// one for pixels and one for documents, which a page that keeps a
+/// recording for pixels files -- so that a picture of the page played for
+/// one target does not stand for the other: [`Page::picture`]'s holds the
+/// colours placed for pixels.
+pub(crate) fn holds_a_pair(entries: &[Layer]) -> bool {
+    entries.iter().any(|entry| match entry {
+        Layer::Targeted(_) => true,
+        Layer::Cut(op) => op.documents.is_some(),
+        Layer::Group(group) => holds_a_pair(&group.contents.layers),
+        Layer::Clipped(piece) => match &piece.entry {
+            Layer::Targeted(_) => true,
+            Layer::Cut(op) => op.documents.is_some(),
+            _ => false,
+        },
+        Layer::Picture(_) | Layer::Blur(_) | Layer::Pattern(_) => false,
+    })
+}
+
 impl CutOp {
     /// The draw `drawn` holds, under `clip`, in device pixels of the
     /// recording, played as pixels through `coverage`: a picture, or on a
@@ -2708,8 +2833,15 @@ impl BlurOp {
             // level, and the alpha, a byte over 255, scales that to under
             // half. The GPU blurs and scales at lower precision, which took
             // 68 of the 32,640 placed colours over the line at alphas from
-            // 235, so there a placed colour is drawn into a layer of half
-            // floats, which holds every one exactly.
+            // 235, so there a translucent placed colour is drawn into a layer
+            // of half floats, which holds every one exactly. Its edges are
+            // rounded twice, to a half float and then to a byte, and land up
+            // to a level off the exact Gaussian where a byte layer rounds them
+            // once. An opaque one takes a byte layer: its gain is 1, the
+            // layer holds the colour's bytes as they are, and interior and
+            // edges are both exact -- through half floats, 91 pixels of a
+            // black rounded rectangle under a blur of 2 left their exact
+            // Gaussian.
             (Made::Result(_), Target::Pixels) => {
                 paint.set_alpha_f(1.0);
                 let bytes = matches!(self.paint.faint, Faint::Dropped);
@@ -2724,7 +2856,10 @@ impl BlurOp {
                 let steps = [Step::Blur(self.paint.sigma)];
                 let depth = match (self.paint.faint, placed) {
                     (Faint::Kept, _) => Depth::Floats,
-                    (Faint::Dropped, true) if blur_mask::on_gpu(canvas) => {
+                    (Faint::Dropped, true)
+                        if blur_mask::on_gpu(canvas)
+                            && byte_alpha(self.paint.color.a) < 1.0 =>
+                    {
                         Depth::Halves
                     }
                     (Faint::Dropped, _) => Depth::Bytes,
@@ -3205,6 +3340,30 @@ mod verdict_tests {
         }
     }
 
+    /// An sRGB page takes the verdict [`landed`]'s draw would find, at every
+    /// alpha byte, with each channel in turn at every byte it can store
+    /// there.
+    #[test]
+    fn an_srgb_verdict_is_the_one_the_probe_finds() {
+        let srgb = ColorSpace::new_srgb();
+        let wants = (0..=u8::MAX).flat_map(|a| {
+            (0..=a).flat_map(move |v| {
+                let (w, m) = (a - v, v / 2 + (a - v) / 2);
+                [[v, w, m, a], [m, v, w, a], [w, m, v, a]]
+            })
+        });
+        let mut checked = 0;
+        for want in wants {
+            assert_eq!(
+                unconverted(want),
+                landed(&srgb, PixelColorSpace::Srgb, want),
+                "{want:?}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 3 * 256 * 257 / 2);
+    }
+
     /// `css` on an eight-bit page in `page`, as the exact colour and as the
     /// plain paint the document recording draws it with.
     fn on_page(css: &str, page: &str) -> (ExactColour, Paint) {
@@ -3243,5 +3402,32 @@ mod verdict_tests {
         let (exact, paint) =
             on_page("color(display-p3 0.5 0.5 0.5)", "display-p3");
         assert!(exact.verified_text_paint(&paint).is_some());
+    }
+
+    /// Only an sRGB page places text on the colour nearest its own: on any
+    /// other the dye keeps the plain colour's contrast, so `color(display-p3
+    /// 0.05 0.56 0.5)`, whose placed colour leaves its bucket, is left to
+    /// the dye there. On an sRGB page grey 127.37 at an alpha of 151.61
+    /// levels, whose product over the alpha's byte is 127.5 in the next
+    /// bucket, is placed on 127, in its own.
+    #[test]
+    fn only_an_srgb_page_places_text_on_its_nearest_colour() {
+        let (exact, paint) =
+            on_page("color(display-p3 0.05 0.56 0.5)", "display-p3");
+        assert!(exact.nearest_text_paint(&paint).is_none());
+        let (exact, paint) =
+            on_page("rgb(127.37 127.37 127.37 / 0.59454906)", "srgb");
+        let placed = exact.nearest_text_paint(&paint).expect("placed");
+        let bucket = |p: &Paint| {
+            let c = p.color4f();
+            contrast_bucket([c.r, c.g, c.b])
+        };
+        assert_eq!(bucket(&placed), bucket(&paint));
+        let (at, _) = exact.at(paint.alpha_f());
+        assert_ne!(
+            contrast_bucket(at.rgb),
+            bucket(&paint),
+            "a pair that moves"
+        );
     }
 }

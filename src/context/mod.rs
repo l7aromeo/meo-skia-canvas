@@ -68,7 +68,7 @@ use exact_blur::REACH_SIGMAS;
 use faint::Faint;
 use layer::{
     BlurDraw, Composite, Entries, ExactColour, Group, Layer, LayerRec, Replay,
-    holds_a_cut, reach_the_clip,
+    holds_a_cut, holds_a_pair, reach_the_clip,
 };
 use page::{ExportOptions, Page, PageRecorder, Recording};
 use typesetting::{TextSettings, Typesetting, Typography};
@@ -627,7 +627,7 @@ impl Context2D {
         dims: impl Into<Size>,
     ) -> Self {
         let bounds = Rect::from_size(dims);
-        let dual = keeps_two_recordings(&canvas_color_space);
+        let dual = records_pixels_apart(&canvas_color_space, canvas_color_type);
         let canvas_pixels = PixelColorSpace::matching(&canvas_color_space);
 
         Context2D {
@@ -689,18 +689,21 @@ impl Context2D {
 
     /// Records a draw, in a layer of its own when it carries anything a
     /// vector backend might refuse. See [`PageRecorder::append_isolated`].
+    /// `alike` where `f` records the same into each recording a page keeps,
+    /// which leaves them unforked -- see [`PageRecorder::append_alike`].
     ///
     /// [`PageRecorder::append_isolated`]: page::PageRecorder::append_isolated
-    fn append_draw<F>(&self, features: VectorFeatures, f: F)
+    /// [`PageRecorder::append_alike`]: page::PageRecorder::append_alike
+    fn append_draw<F>(&self, features: VectorFeatures, alike: bool, f: F)
     where
         F: Fn(&SkCanvas, Recording),
     {
-        match features.any() {
-            false => self.with_canvas(f),
-            true => self.with_recorder(|mut recorder| {
-                recorder.append_isolated(features, f)
-            }),
-        }
+        self.with_recorder(|mut recorder| match (features.any(), alike) {
+            (false, false) => recorder.append(f),
+            (false, true) => recorder.append_alike(f),
+            (true, false) => recorder.append_isolated(features, f),
+            (true, true) => recorder.append_isolated_alike(features, f),
+        });
     }
 
     pub fn with_matrix<F>(&mut self, f: F)
@@ -884,10 +887,12 @@ impl Context2D {
 
     /// The paint a page's pixels recording draws text in `paint` with, where
     /// the page keeps one, its CanvasKit colour filter built for those
-    /// pixels -- see [`Self::pixels_paint`]: on an eight-bit page the placed
-    /// colour as a plain paint colour where Skia lands it and the glyph
-    /// contrast stays -- see [`ExactColour::verified_text_paint`] -- and
-    /// otherwise `paint` over a colour shader of its own colour, opaque,
+    /// pixels -- see [`Self::pixels_paint`]: on an eight-bit sRGB page the
+    /// colour nearest its own that stores the exact product -- see
+    /// [`ExactColour::nearest_text_paint`] -- on any other eight-bit page the
+    /// placed colour as a plain paint colour where Skia lands it and the
+    /// glyph contrast stays -- see [`ExactColour::verified_text_paint`] --
+    /// and otherwise `paint` over a colour shader of its own colour, opaque,
     /// with [`ExactColour::dye`] replacing that colour -- or, before a
     /// colour filter `paint` already carries,
     /// [`ExactColour::dye_keeping_plain_luminance`]. Without a shader Skia
@@ -931,7 +936,9 @@ impl Context2D {
             return None;
         }
         if exact.bytes
-            && let Some(placed) = exact.verified_text_paint(paint)
+            && let Some(placed) = exact
+                .nearest_text_paint(paint)
+                .or_else(|| exact.verified_text_paint(paint))
         {
             return Some(placed);
         }
@@ -1087,8 +1094,15 @@ impl Context2D {
     /// [`Self::paragraph_paint`]: on a page that composites in floats, and
     /// on one that keeps a recording for pixels.
     pub(crate) fn makes_paragraph_paints(&self) -> bool {
-        self.composites_in_floats()
-            || keeps_two_recordings(&self.canvas_color_space)
+        self.composites_in_floats() || self.records_pixels_apart()
+    }
+
+    /// Whether this page keeps a recording for its pixels apart from its
+    /// document -- see [`records_pixels_apart`]. Asked of the page's space
+    /// and type rather than of the recorder, which a draw being recorded
+    /// holds.
+    fn records_pixels_apart(&self) -> bool {
+        records_pixels_apart(&self.canvas_color_space, self.canvas_color_type)
     }
 
     /// The flat colour `style` dyes with -- a colour, or a texture's mark --
@@ -1167,6 +1181,11 @@ impl Context2D {
             (Recording::Pixels, Some(exact)) => exact,
             _ => paint,
         };
+        // Which recording it is reaches the draw only through `paint_for`
+        // and the shadow's paint, so with no shadow and no exact paint apart
+        // from the plain one it draws the same in each -- see
+        // `PageRecorder::append_alike`.
+        let alike = !self.casts_shadow() && exact.is_none_or(|e| e == paint);
         let render_shadow =
             |canvas: &SkCanvas, paint: &Paint, recording: Recording| {
                 if let Some((shadow_paint, pass)) =
@@ -1188,7 +1207,7 @@ impl Context2D {
                 // the bounds of the object being drawn, create
                 // an intermediate picture before drawing to the canvas, one
                 // for each recording, each with that recording's paint
-                self.append_draw(features, |canvas, recording| {
+                self.append_draw(features, alike, |canvas, recording| {
                     let mut layer_paint = paint_for(recording).clone();
                     layer_paint.set_blend_mode(BlendMode::SrcOver);
                     let mut layer_recorder = PictureRecorder::new();
@@ -1221,7 +1240,7 @@ impl Context2D {
                 });
             }
             false => {
-                self.append_draw(features, |canvas, recording| {
+                self.append_draw(features, alike, |canvas, recording| {
                     // draw the dropshadow (if applicable)
                     render_shadow(canvas, paint, recording);
                     // draw with the normal paint
@@ -2481,8 +2500,10 @@ impl Context2D {
             // `Clear` is a blend mode, and Skia's SVG backend writes none
             // of those, so this lands as an opaque black rectangle unless
             // the draw is kept for rasterizing.
+            // The same in each recording: a clear knows no colour.
             false => self.append_draw(
                 blend_features(BlendMode::Clear, true),
+                true,
                 |canvas, _| {
                     let mut paint = Paint::default();
                     paint
@@ -2564,14 +2585,22 @@ impl Context2D {
         // source. A source holding a cut draw is drawn as its entries where
         // the paint has nothing to say, through no layer, so that each target
         // clips the draw its own way -- see `Composite::Plain` -- where the
-        // picture `render_to_canvas` draws holds one way for all. So is a
+        // picture `render_to_canvas` draws holds one way for all. So is one
+        // from a page that keeps a pair of recordings, so that a document is
+        // written from the source's own and not from the colours placed for
+        // its pixels, which the picture holds -- and so is such a page whose
+        // draws have not forked its recordings, so that it is drawn as it is
+        // once they have: by the picture, the transforms are composed
+        // otherwise, and a PDF wrote one coordinate an ulp apart. So is a
         // source the destination crops, so that a raster crops it by
         // coverage rather than cutting its paths -- see `Group::confine`.
         let drawn = self.faint().drawable(&paint).into_owned();
         let through_paint = carries(source, &drawn);
-        let cut = entries
-            .as_ref()
-            .is_some_and(|entries| holds_a_cut(&entries.layers));
+        let cut = entries.as_ref().is_some_and(|entries| {
+            entries.apart
+                || holds_a_cut(&entries.layers)
+                || holds_a_pair(&entries.layers)
+        });
         let crops = !dst_rect.contains(matrix.map_rect(picture.cull_rect()).0);
         if (through_paint || cut || crops)
             && !covers_beyond_the_draw(self.state.global_composite_operation)
@@ -2911,8 +2940,12 @@ impl Context2D {
     /// through a paint without flattening it -- see
     /// [`Self::draw_picture_costing`].
     pub(crate) fn entries(&self) -> Entries {
-        let page = self.recorder.borrow_mut().page();
-        Entries::shared(page.layers, page.features)
+        let mut recorder = self.recorder.borrow_mut();
+        let page = recorder.page();
+        Entries {
+            apart: recorder.dual(),
+            ..Entries::shared(page.layers, page.features)
+        }
     }
 
     /// The page flattened for another canvas to draw, with what an SVG
@@ -3541,10 +3574,7 @@ impl Context2D {
     /// Skia image filters the crate runs itself, as Skia's layer would
     /// round them to eight bits -- see [`Step::Image`].
     pub(crate) fn composites_in_floats(&self) -> bool {
-        matches!(
-            self.canvas_color_type,
-            ColorType::RGBAF16 | ColorType::RGBAF16Norm | ColorType::RGBAF32
-        )
+        composites_in_floats(self.canvas_color_type)
     }
 
     /// Whether a draw now casts a shadow: what `paint_for_shadow` answers
@@ -3850,10 +3880,12 @@ pub(crate) fn floats_draw_on_the_cpu(color_type: ColorType) -> bool {
     !(gpu.selectable() && gpu.can_composite(color_type))
 }
 
-/// Whether a canvas in `space` keeps a recording for each kind of target --
-/// see `page::Recorders`: one whose space is one a flat colour can be
-/// converted into exactly here, other than sRGB, onto which Skia lands a
-/// paint colour exactly itself.
+/// Whether a canvas in `space` keeps a recording for each kind of target at
+/// any depth -- see `page::Recorders`: one whose space is one a flat colour
+/// can be converted into exactly here, other than sRGB, onto which Skia
+/// lands a paint colour exactly itself. An eight-bit sRGB page keeps two as
+/// well, for its blit's sake rather than its space's -- see
+/// [`records_pixels_apart`], which is what a page asks.
 ///
 /// At any depth. Skia keeps a paint's colour in sRGB and converts it into
 /// the page's space at the draw, through skcms's approximate transfer
@@ -3866,6 +3898,36 @@ fn keeps_two_recordings(space: &ColorSpace) -> bool {
     PixelColorSpace::matching(space).is_some_and(|space| {
         space != PixelColorSpace::Srgb && space.converts_exactly()
     })
+}
+
+/// Whether a canvas in `space` whose pixels are `color_type` keeps a
+/// recording for its pixels apart from the one its documents are written
+/// from -- see `page::Recorders`: one in a space that keeps two at any depth
+/// -- see [`keeps_two_recordings`] -- and an sRGB page that composites in
+/// eight bits.
+///
+/// Skia lands a paint's colour on an sRGB page as itself, but blits a
+/// source-over paint with no shader onto eight-bit sRGB pixels through its
+/// legacy blitter -- see `SkBlitter::UseLegacyBlitter` -- which rounds the
+/// colour and its alpha to bytes before multiplying them. Over 65,025 grey
+/// and alpha pairs off the byte grid, `(c + 0.37) / 255` at `(a + 0.61) /
+/// 255`, that stored a level off the rounded exact product for 8,260. The
+/// pixels recording draws the colour placed on the bytes its exact product
+/// rounds to -- see `ExactColour::at` -- which that blit stores as they are.
+/// A document is written from the paint as it was set.
+fn records_pixels_apart(space: &ColorSpace, color_type: ColorType) -> bool {
+    keeps_two_recordings(space)
+        || (!composites_in_floats(color_type)
+            && PixelColorSpace::matching(space) == Some(PixelColorSpace::Srgb))
+}
+
+/// Whether a page of `color_type` composites in floats rather than in eight
+/// bits -- see `ExportOptions::compositing_color_type`.
+fn composites_in_floats(color_type: ColorType) -> bool {
+    matches!(
+        color_type,
+        ColorType::RGBAF16 | ColorType::RGBAF16Norm | ColorType::RGBAF32
+    )
 }
 
 /// Whether `blend` changes the canvas outside what a draw covers, so that
@@ -4005,8 +4067,29 @@ mod tests {
     use super::*;
     use crate::{
         canvas::{DEFAULT_TEXT_CONTRAST, DEFAULT_TEXT_GAMMA},
-        node::filter::FilterSpec,
+        node::{filter::FilterSpec, utils::opt_color_space},
     };
+
+    /// An sRGB page keeps a recording for pixels only where it composites
+    /// in eight bits, while `keeps_two_recordings` -- which places a
+    /// shadow's colour, and a chain's fill -- still says no for sRGB at any
+    /// depth; a Display P3 page keeps two at every depth.
+    #[test]
+    fn an_srgb_page_records_pixels_apart_only_in_eight_bits() {
+        let srgb = ColorSpace::new_srgb();
+        assert!(!keeps_two_recordings(&srgb));
+        assert!(records_pixels_apart(&srgb, ColorType::N32));
+        assert!(records_pixels_apart(&srgb, ColorType::RGBA8888));
+        for floats in [
+            ColorType::RGBAF16,
+            ColorType::RGBAF16Norm,
+            ColorType::RGBAF32,
+        ] {
+            assert!(!records_pixels_apart(&srgb, floats), "{floats:?}");
+        }
+        let p3 = opt_color_space("display-p3").expect("a space");
+        assert!(records_pixels_apart(&p3, ColorType::RGBAF16));
+    }
 
     /// Builds a context the size of a small canvas, as `Canvas::new` does.
     fn context() -> Context2D {
@@ -5511,7 +5594,8 @@ mod tests {
     /// A piece of a clip run records its transform and its draws and
     /// nothing else: a run's recording holds no save, so finishing it has
     /// nothing to restore. Read once between two fills, each piece holds the
-    /// transform and one fill; with a save it held four operations.
+    /// transform and one fill; with a save it held four operations. On a page
+    /// that keeps a recording for pixels, each of the piece's pair does.
     #[test]
     fn a_run_piece_records_its_transform_and_draws_alone() {
         let steps = [
@@ -5523,20 +5607,24 @@ mod tests {
         ];
         let mut canvas = program(&steps, false, true).canvas;
         let page = canvas.page(0).expect("a page").inner.page();
-        let counts: Vec<usize> = page
+        let counts: Vec<Vec<usize>> = page
             .layers
             .iter()
             .filter_map(|layer| match layer {
-                layer::Layer::Clipped(piece) => match piece.entry() {
-                    layer::Layer::Picture(picture) => {
-                        Some(picture.approximate_op_count())
-                    }
-                    _ => None,
-                },
+                layer::Layer::Clipped(piece) => Some(
+                    recordings(piece.entry())
+                        .iter()
+                        .map(|picture| picture.approximate_op_count())
+                        .collect(),
+                ),
                 _ => None,
             })
             .collect();
-        assert_eq!(counts, [2, 2], "operations in each piece");
+        assert_eq!(counts.len(), 2, "two pieces: {counts:?}");
+        assert!(
+            counts.iter().flatten().all(|&ops| ops == 2),
+            "operations in each piece: {counts:?}"
+        );
     }
 
     /// How many clips a PDF's content streams set: the `W n` and `W* n`
@@ -5797,10 +5885,21 @@ mod tests {
         }
     }
 
+    /// The recordings `entry` holds: its picture, or both of the pair a page
+    /// that keeps a recording for pixels files -- see `page::Recorders`.
+    fn recordings(entry: &layer::Layer) -> Vec<&Picture> {
+        match entry {
+            layer::Layer::Picture(picture) => vec![picture],
+            layer::Layer::Targeted(pair) => vec![&pair.0, &pair.1],
+            _ => vec![],
+        }
+    }
+
     /// A page drawn under clips that nothing cuts or reads part way keeps
     /// each frame's draws in its own picture, as a page always has: the run
     /// is drawn into the page's recording when its frame ends, and the page
-    /// is one picture however many frames it was drawn under.
+    /// is one picture however many frames it was drawn under -- or one pair
+    /// of them, on a page that keeps a recording for pixels.
     #[test]
     fn a_page_no_cut_or_read_splits_is_one_picture() {
         let steps = [
@@ -5819,10 +5918,7 @@ mod tests {
         let mut canvas = program(&steps, false, true).canvas;
         let page = canvas.page(0).expect("a page").inner.page();
         assert_eq!(page.layers.len(), 1, "the page's entries");
-        assert!(
-            matches!(page.layers[0], layer::Layer::Picture(_)),
-            "a picture"
-        );
+        assert!(!recordings(&page.layers[0]).is_empty(), "a picture");
     }
 
     #[test]
@@ -5936,5 +6032,246 @@ mod tests {
             .map(|(a, b)| a.abs_diff(*b))
             .max();
         assert!(most.is_some_and(|most| most <= 1), "parted by {most:?}");
+    }
+}
+
+#[cfg(test)]
+mod fork_tests {
+    //! A page that keeps two recordings forks them only at the first draw
+    //! that records differently in each -- see `page::Recorders::fork`.
+    //! Each scene is drawn with forks taken lazily and again with every
+    //! recording forked as it begins, as every draw was recorded twice, and
+    //! the two are held to the same pixels on either engine and the same
+    //! PDF and SVG.
+
+    use super::page::FORKS_LAZILY;
+    use crate::prelude::*;
+
+    /// What a scene leaves: its pixels, its PDF and SVG, and whether its
+    /// page holds a draw recorded apart for each kind of target.
+    #[derive(Debug, PartialEq)]
+    struct Drawn {
+        pixels: Vec<u8>,
+        pdf: Vec<u8>,
+        svg: Vec<u8>,
+        forked: bool,
+    }
+
+    /// `scene` drawn on an eight-bit sRGB page on the engine `gpu` names,
+    /// its recordings forked lazily or as they begin; `None` where no GPU
+    /// engine starts.
+    fn drawn(
+        lazy: bool,
+        gpu: bool,
+        scene: &dyn Fn(&mut Context2D),
+    ) -> Option<Drawn> {
+        FORKS_LAZILY.set(lazy);
+        let mut canvas = Canvas::new(120.0, 80.0);
+        canvas.set_gpu(gpu);
+        let started = !gpu || canvas.engine_kind() == EngineKind::Gpu;
+        if started {
+            scene(canvas.context());
+        }
+        FORKS_LAZILY.set(true);
+        if !started {
+            return None;
+        }
+        let mut bytes = |format| {
+            canvas
+                .to_buffer(format, &EncodeOptions::default())
+                .expect("encodes")
+        };
+        let (pixels, pdf, svg) = (
+            bytes(ImageFormat::Raw),
+            bytes(ImageFormat::Pdf),
+            bytes(ImageFormat::Svg),
+        );
+        // A pair is filed as one, or held by a cut draw's op beside its
+        // draws -- see `layer::CutOp`.
+        let layers = format!("{:?}", canvas.context().inner.page().layers);
+        let forked =
+            layers.contains("Targeted") || layers.contains("documents: Some");
+        Some(Drawn {
+            pixels,
+            pdf,
+            svg,
+            forked,
+        })
+    }
+
+    /// The scene drawn lazily on each engine, held to it drawn with every
+    /// recording forked as it begins; what it left lazily on each.
+    fn lazily_as_eagerly(scene: &dyn Fn(&mut Context2D)) -> Vec<Drawn> {
+        [false, true]
+            .into_iter()
+            .filter_map(|gpu| {
+                let lazy = drawn(true, gpu, scene)?;
+                let eager = drawn(false, gpu, scene).expect("started before");
+                assert!(eager.forked, "gpu {gpu}: the reference forks");
+                assert_eq!(lazy.pixels, eager.pixels, "gpu {gpu}: pixels");
+                assert_eq!(lazy.pdf, eager.pdf, "gpu {gpu}: PDF");
+                assert_eq!(lazy.svg, eager.svg, "gpu {gpu}: SVG");
+                Some(lazy)
+            })
+            .collect()
+    }
+
+    /// Fills in colours on their bytes: whole-number `rgb()`, hex and a
+    /// named colour, opaque, under a transform, a clip and a `saveLayer`,
+    /// with a stroke and a `clearRect` beside them, and a canvas of them
+    /// drawn in under a turn and two translucent layers. Not a draw a clip
+    /// cuts, which records into both whatever it paints -- see
+    /// `PageRecorder::record_cut`.
+    fn on_their_bytes(ctx: &mut Context2D) {
+        ctx.set_fill_style_css("rgb(200 40 10)").expect("a colour");
+        ctx.fill_rect(5.0, 5.0, 40.0, 30.0);
+        ctx.set_fill_style_css("#3366cc").expect("a colour");
+        ctx.save();
+        ctx.translate(10.0, 4.0);
+        ctx.rotate(0.2);
+        ctx.fill_rect(30.0, 10.0, 35.0, 25.0);
+        ctx.restore();
+        ctx.translate(4.0, 3.0);
+        ctx.save();
+        ctx.rect(20.0, 20.0, 50.0, 40.0);
+        ctx.clip(FillRule::NonZero);
+        ctx.set_fill_style_css("seagreen").expect("a colour");
+        ctx.fill_rect(0.0, 0.0, 120.0, 80.0);
+        ctx.restore();
+        ctx.save_layer();
+        ctx.set_stroke_style_css("rgb(0 0 0)").expect("a colour");
+        ctx.stroke_rect(60.0, 30.0, 30.0, 20.0);
+        ctx.restore();
+        ctx.clear_rect(8.0, 8.0, 6.0, 6.0);
+        let mut source = Canvas::new(20.0, 20.0);
+        source.context().fill_rect(0.0, 0.0, 20.0, 20.0);
+        ctx.rotate(0.2);
+        ctx.save_layer_with(0.8, None, None);
+        ctx.save_layer_with(0.6, None, None);
+        ctx.draw_canvas(&mut source, 10.0, 8.0);
+        ctx.restore();
+        ctx.restore();
+    }
+
+    /// A page whose every draw paints the same in each recording never
+    /// forks, and writes the pixels and the documents every draw recorded
+    /// twice did.
+    #[test]
+    fn a_page_of_colours_on_their_bytes_never_forks() {
+        for lazy in lazily_as_eagerly(&on_their_bytes) {
+            assert!(!lazy.forked, "recorded once");
+        }
+    }
+
+    /// A translucent fill paints a colour placed on the bytes its product
+    /// stores into the pixels and the plain colour into the document, so
+    /// the recordings fork there, on the page, inside a `saveLayer` and
+    /// under a clip, each after draws recorded alike -- and a shadow forks
+    /// them too, its colour placed as the fill's is.
+    fn forking(at: &str) -> impl Fn(&mut Context2D) + '_ {
+        move |ctx: &mut Context2D| {
+            ctx.set_fill_style_css("rgb(200 40 10)").expect("a colour");
+            ctx.fill_rect(5.0, 5.0, 40.0, 30.0);
+            ctx.translate(3.0, 2.0);
+            let translucent = |ctx: &mut Context2D| {
+                ctx.set_fill_style_css("rgb(30 90 200 / 0.37)")
+                    .expect("a colour");
+                ctx.fill_rect(20.0, 15.0, 50.0, 35.0);
+                ctx.set_fill_style_css("#3366cc").expect("a colour");
+                ctx.fill_rect(60.0, 40.0, 30.0, 20.0);
+            };
+            match at {
+                "page" => translucent(ctx),
+                "layer" => {
+                    ctx.save_layer();
+                    ctx.fill_rect(10.0, 30.0, 30.0, 20.0);
+                    translucent(ctx);
+                    ctx.restore();
+                }
+                "clip" => {
+                    ctx.save();
+                    ctx.rect(15.0, 10.0, 70.0, 50.0);
+                    ctx.clip(FillRule::NonZero);
+                    ctx.fill_rect(10.0, 30.0, 30.0, 20.0);
+                    translucent(ctx);
+                    ctx.restore();
+                }
+                "cut" => {
+                    ctx.save();
+                    ctx.begin_path();
+                    ctx.arc(
+                        55.0,
+                        38.0,
+                        28.0,
+                        0.0,
+                        std::f32::consts::TAU,
+                        false,
+                    )
+                    .expect("an arc");
+                    ctx.clip(FillRule::NonZero);
+                    // Turned, so that each fill is a path the clip cuts
+                    // rather than a rectangle Skia blits whole.
+                    ctx.rotate(0.3);
+                    ctx.fill_rect(10.0, 30.0, 60.0, 20.0);
+                    translucent(ctx);
+                    ctx.restore();
+                }
+                _ => {
+                    ctx.set_shadow_color_css("rgb(10 90 200 / 0.37)")
+                        .expect("a colour");
+                    ctx.set_shadow_offset(2.0, 1.0);
+                    ctx.fill_rect(20.0, 15.0, 50.0, 35.0);
+                    ctx.set_shadow_blur(3.0);
+                    ctx.fill_rect(40.0, 45.0, 30.0, 20.0);
+                }
+            }
+            ctx.set_fill_style_css("seagreen").expect("a colour");
+            ctx.fill_rect(70.0, 5.0, 30.0, 20.0);
+        }
+    }
+
+    /// A page whose first draw forks its recordings holds, in each, the ops
+    /// a page forked from the start does: nothing replayed, and no frame
+    /// it never set. A transform set where there was none made Skia's
+    /// bounds pass map every draw by a full matrix, half again the cost
+    /// of finishing the recording.
+    #[test]
+    fn a_page_forked_at_its_first_draw_records_what_one_forked_throughout_does()
+    {
+        let ops = |lazy: bool| {
+            FORKS_LAZILY.set(lazy);
+            let mut canvas = Canvas::new(120.0, 80.0);
+            canvas.set_gpu(false);
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(30 90 200 / 0.37)")
+                .expect("a colour");
+            ctx.fill_rect(5.0, 5.0, 40.0, 30.0);
+            ctx.fill_rect(50.0, 20.0, 40.0, 30.0);
+            let page = ctx.inner.page();
+            FORKS_LAZILY.set(true);
+            page.layers
+                .iter()
+                .map(|layer| match layer {
+                    super::layer::Layer::Targeted(pair) => [
+                        pair.0.approximate_op_count_nested(true),
+                        pair.1.approximate_op_count_nested(true),
+                    ],
+                    other => panic!("not a pair: {other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ops(true), ops(false));
+    }
+
+    /// A page that forks part way, on the page, inside a `saveLayer`, under
+    /// a clip, under a clip that cuts its draws and for a shadow, writes the
+    /// pixels and the documents every draw recorded twice did.
+    #[test]
+    fn a_page_that_forks_part_way_matches_one_forked_throughout() {
+        for at in ["page", "layer", "clip", "cut", "shadow"] {
+            for lazy in lazily_as_eagerly(&forking(at)) {
+                assert!(lazy.forked, "{at}: forked");
+            }
+        }
     }
 }

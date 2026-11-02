@@ -220,6 +220,42 @@ fn faded_triangle(
     Some(canvas)
 }
 
+/// How far a pixel of a translucent blurred path on the GPU may lie from
+/// its exact Gaussian, in levels. The GPU blurs a translucent colour placed
+/// on its bytes in a layer of half floats, so that the interior stores a
+/// fill's bytes, and rounds an edge twice, to a half float and then to a
+/// byte: 65 stored where the Gaussian is 65.52. An edge a level off is
+/// what the rule for blurred colours on an eight-bit page allows -- see
+/// docs/browser-differences.md.
+const GPU_TRANSLUCENT_EDGE_LEVELS: f64 = 1.0;
+
+/// The pixels of `alpha` more than [`GPU_TRANSLUCENT_EDGE_LEVELS`] from the
+/// reference, and those where the reference is the whole of `scale` -- the
+/// interior, which stores the fill's byte -- that are not its rounded level.
+fn gpu_translucent_misses(
+    alpha: &[u8],
+    reference: &[f64],
+    scale: f64,
+) -> Vec<(usize, u8, f64)> {
+    alpha
+        .iter()
+        .zip(reference)
+        .enumerate()
+        .filter(|(_, (a, r))| {
+            let level = **r * 255.0;
+            let interior = **r >= scale - INTERIOR_SLACK;
+            (f64::from(**a) - level).abs() > GPU_TRANSLUCENT_EDGE_LEVELS
+                || (interior && f64::from(**a) != level.round())
+        })
+        .map(|(i, (a, r))| (i, *a, r * 255.0))
+        .collect()
+}
+
+/// How far below the whole of its scale an exact Gaussian may lie and still
+/// be the interior of a blurred path: its sum of weights differs from 1 by
+/// `f64` rounding alone.
+const INTERIOR_SLACK: f64 = 1e-9;
+
 #[test]
 fn a_blurred_path_at_an_alpha_is_rounded_once() {
     // The global alpha and the colour's own scale what is drawn, and the
@@ -259,7 +295,17 @@ fn a_blurred_path_at_an_alpha_is_rounded_once() {
                         .into_iter()
                         .map(|v| v * scale)
                         .collect();
-                let misses = misses(&alpha(&mut blurred), &reference);
+                // Rounded once on the CPU. On the GPU an edge may be a level
+                // off, and the interior stores the fill's byte -- see
+                // `GPU_TRANSLUCENT_EDGE_LEVELS`.
+                let misses = match gpu {
+                    false => misses(&alpha(&mut blurred), &reference),
+                    true => gpu_translucent_misses(
+                        &alpha(&mut blurred),
+                        &reference,
+                        scale,
+                    ),
+                };
                 assert!(
                     misses.is_empty(),
                     "gpu {gpu} sigma {sigma} {colour} at {global}: {} \

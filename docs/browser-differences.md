@@ -7,12 +7,7 @@ against a browser flags one of these, it is not a regression -- read this first.
 few percent of pixels, confined to stem edges; metrics are unchanged. A contour
 of a single `moveTo` no longer survives, so `Path2D.d`, `.edges` and `.bounds`
 lose the orphan point -- no pixel effect, since a move-only contour paints
-nothing. On the GPU engine, a translucent colour can be stored one
-premultiplied step away from where the raster engine stores it, because
-Skia's GPU rasteriser rounds the premultiply differently: on an sRGB canvas
-`color(display-p3 1 0 0 / 0.1)` stores alpha 25 and reads 255, 0, 0, 25,
-where the raster engine stores 26. The read itself converts exactly on both
-engines; the step is in what was drawn.
+nothing.
 
 **Chrome's colours on a Display P3 canvas, a level off where its conversion
 crosses a rounding boundary.** Chrome converts a colour into an eight-bit
@@ -41,9 +36,31 @@ way -- the same canvas stores the green 25.5 of
 two agree, translucent colours included: Chrome's canvas premultiplies in
 float and rounds once, as this one does, so
 `color(a98-rgb 0.3 0.6 0.9 / 0.5)` reads 50, 151, 225 and
-`rgb(from oklch(0.8 0.18 165) r g b / 0.5)` 92, 221, 163 in both. Skia's
-legacy blit onto an sRGB canvas rounds the colour to a byte before it
-premultiplies, and that canvas keeps doing so.
+`rgb(from oklch(0.8 0.18 165) r g b / 0.5)` 92, 221, 163 in both. Chrome's
+sRGB canvas rounds the colour to a byte before it premultiplies, which this
+one does not -- see below.
+
+**Translucent colours on an sRGB canvas, stored as the exact product where
+Chrome's CPU canvas rounds first.** Chrome blits a flat translucent colour
+onto an eight-bit sRGB canvas through Skia's legacy blitter
+(`SkBlitter::UseLegacyBlitter`), which rounds the colour and its alpha to
+bytes and multiplies those. This canvas stores the exact product rounded
+once, a tie rounded up, on either engine, as it does on every other
+eight-bit canvas -- see `ExactColour::at`. Colours and alphas on the byte
+grid come out the same both ways; off it they part by a level. Over 65,025
+greys and alphas, `(c + 0.37) / 255` at `(a + 0.61) / 255`, Chrome's rule
+stores 8,260 a level off the product. `rgb(200 60 30 / 0.75)` over
+`rgb(40 90 160)` reads blue 63 here, the product 22.5 rounded up over the
+backdrop's 40, and 62 in Chrome 141, which stores 30 at 191 as 22.
+
+Text sets its glyph masks' contrast from the colour it is drawn in, as Skia
+does (`SkMaskGamma`), and on this canvas that colour is the one that stores
+the exact product. Each channel is drawn in the colour nearest the one named
+of those that store it on either engine -- see
+`ExactColour::nearest_text_paint` -- which keeps the named colour's contrast
+for all but 637 of the 65,025 pairs above, 456 of them at an alpha under 32
+levels. Those store the exact product inside the glyph, and their edges take
+the contrast of the bucket next to the named colour's.
 
 On Linux a variable face's advances move in whole font units between its
 masters, where on macOS they follow the interpolation as Chrome on macOS
@@ -911,12 +928,18 @@ standard deviation is the length given. A rasterised pixel is already its
 shape averaged over the pixel's box, so the blur of what a draw paints is
 those pixels convolved with the Gaussian sampled at whole-pixel offsets, and
 a flat-colour path that is not a rectangle the transform keeps one, which
-the next entry blurs in closed form, is drawn here as exactly that, rounded once at
-whatever alpha it is drawn: within half
-a level on 8-bit pixels on either engine, and on F16 and F32 to the surface's
-precision, as measured on the CPU engine, where a float canvas made for the
-GPU on macOS is drawn. Chrome 156.0.8078.4 headless approximates it, on both of its
-canvases alike. A black triangle on a 160 by 100 canvas, worst levels from
+the next entry blurs in closed form, is drawn here as exactly that, rounded once:
+within half a level on 8-bit pixels on the CPU engine, and of an opaque
+colour on the GPU engine, and on F16 and F32 to the surface's precision, as
+measured on the CPU engine, where a float canvas made for the GPU on macOS is
+drawn. On an 8-bit canvas a translucent colour scales the blur by its alpha
+on the byte a fill stores it on -- 128 of 0.5, 77 of 0.3 -- so that the
+interior stores what a fill of the colour does, as Chrome's CPU canvas does
+too. On the GPU engine such a colour is blurred through a layer of half
+floats, which keeps that interior, and its edges are rounded twice, to a half
+float and then to a byte: up to a level off the exact Gaussian, 65 where it
+is 65.52. Chrome 156.0.8078.4 headless approximates the blur, on both of
+its canvases alike. A black triangle on a 160 by 100 canvas, worst levels from
 the exact blur of Chrome's own unblurred triangle:
 
         sigma        2      8     30

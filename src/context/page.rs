@@ -369,6 +369,13 @@ pub struct PageRecorder {
     /// Set when `matrix` or `clip` has moved but the recording canvas has
     /// not been rebuilt to match. See [`PageRecorder::settle`].
     state_dirty: bool,
+    /// Whether `current` was last framed without the clip and the
+    /// transform, which a run holds instead -- see [`Self::frame_current`].
+    framed_bare: bool,
+    /// Whether `current` has been framed since it last began. A page's
+    /// first recording is not until a state is set, and records its draws
+    /// under none -- see [`Self::fork_current`].
+    framed: bool,
     /// Counts changes to `matrix` and `clip`, so that a draw can tell the
     /// frame is the one an earlier draw was made under.
     frame: u64,
@@ -516,7 +523,9 @@ pub enum Recording {
     /// target: every colour as a plain paint colour.
     Shared,
     /// The recording a page that keeps two plays as pixels: a flat colour
-    /// held exactly in the page's space, where it has one.
+    /// held exactly in the page's space, where it has one. Until a draw
+    /// forks the two, it holds the draws that paint alike in both and is
+    /// played for both -- see [`Recorders::fork`].
     Pixels,
     /// The recording a page that keeps two hands a document backend: every
     /// colour as a plain paint colour.
@@ -545,12 +554,43 @@ impl Recording {
 /// see `ExactColour::shader` -- or, at eight bits, a plain colour moved
 /// until Skia lands it on its bytes -- see `ExactColour::verified_paint`;
 /// and a document takes neither, writing the shader as a pattern and the
-/// moved colour as moved. So such a page records every draw twice, and a
+/// moved colour as moved. So such a page can record a draw twice, and a
 /// draw is handed each recording in turn to record with the paint that
 /// recording needs.
+///
+/// Twice only once a draw would record differently in the two -- see
+/// [`Self::fork`]. Until then the pixels recording holds what both would,
+/// handed every draw as [`Recording::Pixels`], and is filed as one
+/// picture for both. A colour already on its bytes -- an opaque `rgb()`
+/// of whole numbers, a hex colour -- paints the same in both, and a page
+/// of such fills paid a second recording for nothing: 11% of the CPU's
+/// time in a profile of 5000 of them.
 struct Recorders {
     pixels: PictureRecorder,
+    /// The document's recorder, on a page that keeps two; recording only
+    /// while [`Self::forked`].
     document: Option<PictureRecorder>,
+    /// Whether the document records apart from the pixels since the
+    /// recordings were last begun.
+    forked: bool,
+    /// Whether the recordings fork only when a draw asks them to rather
+    /// than as they begin -- see `PageRecorder::record_cut` for those that
+    /// do not.
+    lazy: bool,
+    /// The bounds the recordings were last begun in, and whether the
+    /// pixels kept a bounding hierarchy, for [`Self::fork`] to begin them
+    /// again with.
+    bounds: Rect,
+    bbh: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether a page's recordings fork only when a draw asks them to on
+    /// this thread: off, every one forks as it begins, as a page that keeps
+    /// two recordings records every draw into both -- the reference a lazy
+    /// fork is held to.
+    pub(crate) static FORKS_LAZILY: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
 impl Recorders {
@@ -558,11 +598,30 @@ impl Recorders {
         Self::new_with(bounds, dual, true)
     }
 
-    /// As [`Self::new`], with a bounding hierarchy where `bbh` asks for one.
+    /// As [`Self::new`], the pixels recording with a bounding hierarchy where
+    /// `bbh` asks for one -- see [`Self::begin_with`].
     fn new_with(bounds: Rect, dual: bool, bbh: bool) -> Self {
+        #[cfg(test)]
+        let lazy = FORKS_LAZILY.get();
+        #[cfg(not(test))]
+        let lazy = true;
+        Self::made(bounds, dual, bbh, lazy)
+    }
+
+    /// As [`Self::new_with`], forked as they begin: for draws filed where
+    /// a picture for each kind of target is wanted whatever they paint.
+    fn new_forked(bounds: Rect, dual: bool, bbh: bool) -> Self {
+        Self::made(bounds, dual, bbh, false)
+    }
+
+    fn made(bounds: Rect, dual: bool, bbh: bool, lazy: bool) -> Self {
         let mut recorders = Recorders {
             pixels: PictureRecorder::new(),
             document: dual.then(PictureRecorder::new),
+            forked: false,
+            lazy,
+            bounds,
+            bbh,
         };
         recorders.begin_with(bounds, bbh);
         recorders.each(|canvas, _| {
@@ -571,7 +630,9 @@ impl Recorders {
         recorders
     }
 
-    /// Hands `f` each recording's canvas, and which recording it is.
+    /// Hands `f` the canvas of each recording that is recording, and which
+    /// recording it is: the pixels' alone, as [`Recording::Pixels`] on a
+    /// page that keeps two, until they fork.
     fn each(&mut self, f: impl Fn(&SkCanvas, Recording)) {
         let shared = self.document.is_none();
         if let Some(canvas) = self.pixels.recording_canvas() {
@@ -583,6 +644,9 @@ impl Recorders {
                 },
             );
         }
+        if !self.forked {
+            return;
+        }
         if let Some(canvas) = self
             .document
             .as_mut()
@@ -592,32 +656,77 @@ impl Recorders {
         }
     }
 
+    /// Parts the document from the pixels, for a draw that records
+    /// differently in the two: what the pixels recording holds is finished
+    /// as a picture, both recordings begin again, and where `drawn` says it
+    /// holds a draw -- one recorded alike since it began -- each draws that
+    /// picture first. `false`, doing nothing, where the page keeps one
+    /// recording or the two have forked already.
+    ///
+    /// Both begin at depth 1 with no transform and no clip, whatever the
+    /// pixels recording had set: the caller frames them again where `true`
+    /// says they forked. A recording holding only its frame is not drawn
+    /// in again, so that a recording that forks at its first draw holds
+    /// what it held recorded twice from the start: a run's piece holds its
+    /// transform and its draw, and a filtered draw's entry the ops its
+    /// GPU playback is paced by.
+    fn fork(&mut self, drawn: bool) -> bool {
+        if self.forked || self.document.is_none() {
+            return false;
+        }
+        let held = self.pixels.finish_recording_as_picture(None);
+        self.pixels.begin_recording(self.bounds, self.bbh);
+        if let Some(document) = &mut self.document {
+            document.begin_recording(self.bounds, false);
+        }
+        self.forked = true;
+        if let Some(held) = held.filter(|_| drawn) {
+            self.each(|canvas, _| {
+                canvas.draw_picture(&held, None, None);
+            });
+        }
+        true
+    }
+
     fn begin(&mut self, bounds: Rect) {
         self.begin_with(bounds, true);
     }
 
-    /// Begins every recording in `bounds`, with a bounding hierarchy where
-    /// `bbh` asks for one.
+    /// Begins every recording in `bounds`: the pixels with a bounding
+    /// hierarchy where `bbh` asks for one, and the document without, where
+    /// the recordings fork as they begin -- see [`Self::fork`].
+    ///
+    /// Nothing reads a document recording's bounds -- [`Layer::reach`] and
+    /// `CutOp::reach` take the pixels' -- so a hierarchy would buy it only
+    /// culling at playback, which the canvas it is played onto does itself,
+    /// draw by draw against its own clip, and would cost a bounds pass over
+    /// every draw when it is finished: 3% of the CPU's time on a page of
+    /// translucent fills.
     fn begin_with(&mut self, bounds: Rect, bbh: bool) {
+        self.bounds = bounds;
+        self.bbh = bbh;
         self.pixels.begin_recording(bounds, bbh);
-        if let Some(document) = &mut self.document {
-            document.begin_recording(bounds, bbh);
+        self.forked = !self.lazy && self.document.is_some();
+        if self.forked
+            && let Some(document) = &mut self.document
+        {
+            document.begin_recording(bounds, false);
         }
     }
 
     /// Finishes every recording with `finish` and files what they hold as
-    /// one entry: a picture, or on a page that keeps two, both.
+    /// one entry: a picture, or where the recordings have forked, both.
     fn finish(
         &mut self,
         finish: impl Fn(&mut PictureRecorder) -> Option<Picture>,
     ) -> Option<Layer> {
         let pixels = finish(&mut self.pixels)?;
         Some(match &mut self.document {
-            None => Layer::Picture(pixels),
-            Some(document) => {
+            Some(document) if self.forked => {
                 let document = finish(document)?;
                 Layer::Targeted(Arc::new((pixels, document)))
             }
+            _ => Layer::Picture(pixels),
         })
     }
 
@@ -673,14 +782,15 @@ struct Run {
     shape: Option<ClipData>,
     /// The clip as coverage, made once, where the run holds a cut draw.
     coverage: Option<Arc<Coverage>>,
-    /// Whether the run records with a bounding hierarchy, which it does
-    /// inside an open `saveLayer`. Without one its picture is bounded by the
-    /// page, and so by the clip's bounds where it is played under the clip,
-    /// rather than by what it draws, and finishing it skips computing the
-    /// bounds of every operation. Inside a layer those bounds are what the
-    /// layer is confined to -- see [`LayerRec::footprint`] -- and a layer the
-    /// size of the clip around one small draw cost a page of translucent
-    /// layers under a large clip some fifteen times what it did.
+    /// Whether the run's pixels record with a bounding hierarchy, which they
+    /// do inside an open `saveLayer`. Without one its picture is bounded by
+    /// the page, and so by the clip's bounds where it is played under the
+    /// clip, rather than by what it draws, and finishing it skips
+    /// computing the bounds of every operation. Inside a layer those
+    /// bounds are what the layer is confined to -- see
+    /// [`LayerRec::footprint`] -- and a layer the size of the clip around
+    /// one small draw cost a page of translucent layers under a large clip
+    /// some fifteen times what it did.
     bbh: bool,
 }
 
@@ -761,6 +871,20 @@ impl Run {
         });
         Some(entry)
     }
+
+    /// Forks the run's recordings -- see [`Recorders::fork`] -- framed
+    /// again at depth 1 under the run's transform, as [`Self::open`]
+    /// frames them.
+    fn fork(&mut self) {
+        if !self.recorders.fork(self.changed) {
+            return;
+        }
+        let matrix = self.matrix;
+        self.recorders.each(|canvas, _| {
+            canvas.restore_to_count(1);
+            canvas.set_matrix(&matrix.into());
+        });
+    }
 }
 
 /// The recorders the last run closed with, recording, kept for the next run
@@ -829,6 +953,8 @@ impl PageRecorder {
             isolated: None,
             filtered: 0,
             state_dirty: false,
+            framed_bare: false,
+            framed: false,
             frame: 0,
             blur_run: None,
             cut_run: None,
@@ -852,6 +978,23 @@ impl PageRecorder {
     where
         F: Fn(&SkCanvas, Recording),
     {
+        self.append_as(false, f);
+    }
+
+    /// [`Self::append`] for a draw that records the same into each
+    /// recording -- the same paint, nothing else asking which it is -- and
+    /// so leaves them unforked -- see [`Recorders::fork`].
+    pub fn append_alike<F>(&mut self, f: F)
+    where
+        F: Fn(&SkCanvas, Recording),
+    {
+        self.append_as(true, f);
+    }
+
+    fn append_as<F>(&mut self, alike: bool, f: F)
+    where
+        F: Fn(&SkCanvas, Recording),
+    {
         // An ordinary draw cannot join an isolated layer: that layer is
         // marked for rasterization, and everything in it is rasterized with
         // it. Close it first so this draw stays a vector.
@@ -871,10 +1014,16 @@ impl PageRecorder {
         self.settle();
         match &mut self.run {
             Some(run) => {
+                if !alike {
+                    run.fork();
+                }
                 run.recorders.each(f);
                 run.changed = true;
             }
             None => {
+                if !alike {
+                    self.fork_current();
+                }
                 self.current.each(f);
                 self.changed = true;
             }
@@ -895,6 +1044,7 @@ impl PageRecorder {
             self.flush();
         }
         self.close_run();
+        self.fork_current();
         self.current.each(|canvas, recording| {
             canvas.restore_to_count(1);
             f(canvas, recording);
@@ -964,6 +1114,7 @@ impl PageRecorder {
 
         self.bounds = bounds;
         self.current.begin(bounds);
+        self.framed = false;
         self.current.each(|canvas, _| {
             canvas.save(); // start at depth 2
         });
@@ -1062,27 +1213,12 @@ impl PageRecorder {
         let keeps_runs = true;
         // An isolated layer is recorded in the page's recording as it opens
         // and rasterized whole, so it is never a run.
-        let run = self
-            .clip
-            .as_ref()
-            .filter(|_| keeps_runs && self.isolated.is_none());
-        let (matrix, clip) = (self.matrix, &self.clip);
-        self.current.each(|canvas, _| {
-            canvas.restore_to_count(1);
-            canvas.save();
-            if run.is_some() {
-                return;
-            }
-            if let Some(clip) = clip {
-                canvas.clip_path(
-                    clip,
-                    ClipOp::Intersect,
-                    true, /* antialias */
-                );
-            }
-            canvas.set_matrix(&matrix.into());
-        });
-        if let Some(clip) = run
+        self.framed_bare =
+            self.clip.is_some() && keeps_runs && self.isolated.is_none();
+        self.frame_current();
+        self.framed = true;
+        let matrix = self.matrix;
+        if let Some(clip) = self.clip.as_ref().filter(|_| self.framed_bare)
             && self.run.is_none()
         {
             let bbh = !self.open.is_empty();
@@ -1098,6 +1234,46 @@ impl PageRecorder {
                     bbh,
                 });
             self.run = Some(Run::open(self.frame, clip, matrix, spare));
+        }
+    }
+
+    /// Frames `current` at depth 2, under the clip and the transform where
+    /// no run holds them -- see [`Self::framed_bare`].
+    fn frame_current(&mut self) {
+        let (matrix, clip, bare) = (self.matrix, &self.clip, self.framed_bare);
+        self.current.each(|canvas, _| {
+            canvas.restore_to_count(1);
+            canvas.save();
+            if bare {
+                return;
+            }
+            if let Some(clip) = clip {
+                canvas.clip_path(
+                    clip,
+                    ClipOp::Intersect,
+                    true, /* antialias */
+                );
+            }
+            canvas.set_matrix(&matrix.into());
+        });
+    }
+
+    /// Forks `current` -- see [`Recorders::fork`] -- for a draw that
+    /// records differently into each recording, framed again as it was:
+    /// at depth 2 alone where it was never framed. Framed anew there, a
+    /// fresh page's recording held a transform it had never set, the
+    /// identity, under which Skia's bounds pass maps every draw by a full
+    /// matrix rather than by none: finishing 5000 fills cost 0.43 ms where
+    /// recorded twice from the start it cost 0.29.
+    fn fork_current(&mut self) {
+        if !self.current.fork(self.changed) {
+            return;
+        }
+        match self.framed {
+            true => self.frame_current(),
+            false => self.current.each(|canvas, _| {
+                canvas.save(); // start at depth 2
+            }),
         }
     }
 
@@ -1161,6 +1337,9 @@ impl PageRecorder {
                 VectorFeatures::PLAIN,
             );
             return;
+        }
+        if matches!(entry, Layer::Targeted(_)) {
+            self.fork_current();
         }
         let clip = &run.clip;
         self.current.each(|canvas, recording| {
@@ -1363,6 +1542,7 @@ impl PageRecorder {
         }
         layer.current_features = VectorFeatures::PLAIN;
         self.current.begin(self.bounds);
+        self.framed = false;
         self.changed = false;
         self.filtered = 0;
         self.reframe();
@@ -1640,6 +1820,7 @@ impl PageRecorder {
 
         // resume recording
         self.current.begin(self.bounds);
+        self.framed = false;
         self.changed = false;
         self.filtered = 0;
         self.reframe();
@@ -1659,6 +1840,26 @@ impl PageRecorder {
     /// filed -- see [`Self::close_layer`].
     pub fn append_isolated<F>(&mut self, features: VectorFeatures, f: F)
     where
+        F: Fn(&SkCanvas, Recording),
+    {
+        self.append_isolated_as(false, features, f);
+    }
+
+    /// [`Self::append_isolated`] for a draw that records the same into each
+    /// recording -- see [`Self::append_alike`].
+    pub fn append_isolated_alike<F>(&mut self, features: VectorFeatures, f: F)
+    where
+        F: Fn(&SkCanvas, Recording),
+    {
+        self.append_isolated_as(true, features, f);
+    }
+
+    fn append_isolated_as<F>(
+        &mut self,
+        alike: bool,
+        features: VectorFeatures,
+        f: F,
+    ) where
         F: Fn(&SkCanvas, Recording),
     {
         // Inside a layer a run of draws asking for the same features is one
@@ -1685,6 +1886,9 @@ impl PageRecorder {
             }
             match &mut self.run {
                 Some(run) => {
+                    if !alike {
+                        run.fork();
+                    }
                     run.recorders.each(f);
                     run.changed = true;
                     self.split_run_asking(features);
@@ -1692,6 +1896,9 @@ impl PageRecorder {
                 None => {
                     if let Some(layer) = self.open.last_mut() {
                         layer.current_features = features;
+                    }
+                    if !alike {
+                        self.fork_current();
                     }
                     self.current.each(f);
                     self.changed = true;
@@ -1729,6 +1936,9 @@ impl PageRecorder {
             self.rebuild_frame();
         }
 
+        if !alike {
+            self.fork_current();
+        }
         self.current.each(f);
         self.changed = true;
         if self.filled_with_filtered(features) {
@@ -1967,9 +2177,11 @@ impl PageRecorder {
     }
 
     /// The draw `draw` makes under `matrix`, recorded on its own for a
-    /// [`CutOp`] -- into a recording for each kind of target the page keeps
-    /// -- reusing the recorders the last cut draw finished with, as a run
-    /// reuses its own -- see [`Spare`]. Inside an open `saveLayer` with a
+    /// [`CutOp`] -- into a recording for each kind of target the page keeps,
+    /// forked as they begin, as an op on such a page holds a pair whatever
+    /// its draws paint -- see `CutOp::extend` -- reusing the recorders the
+    /// last cut draw finished with, as a run reuses its own -- see
+    /// [`Spare`]. Inside an open `saveLayer` with a
     /// bounding hierarchy, which the layer is confined by -- see
     /// [`Run::bbh`] -- and on the page without one.
     fn record_cut<F>(&mut self, matrix: &Matrix, draw: F) -> Option<Layer>
@@ -1983,7 +2195,7 @@ impl PageRecorder {
             .take()
             .filter(|spare| spare.bbh == bbh)
             .map(|spare| spare.recorders)
-            .unwrap_or_else(|| Recorders::new_with(bounds, dual, bbh));
+            .unwrap_or_else(|| Recorders::new_forked(bounds, dual, bbh));
         recorders.each(|canvas, recording| {
             canvas.restore_to_count(1);
             canvas.save();
