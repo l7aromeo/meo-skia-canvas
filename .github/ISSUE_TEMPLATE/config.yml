@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: API reference
+    url: https://l7aromeo.github.io/meo-skia-canvas/
+    about: The JavaScript API reference, published per release. The crate's is on docs.rs.
   - name: Upstream skia-canvas
     url: https://github.com/samizdatco/skia-canvas/issues
     about: The project this forked from. Only worth involving if you can reproduce the problem against upstream itself -- this tree has diverged a long way and takes fixes across by cherry-pick, not merge.

@@ -1,6 +1,6 @@
 name: Bug report (Rust crate)
-description: The crate on crates.io behaves differently than documented, or fails to build
-labels: [bug, crate]
+description: The crate does something other than what it documents or what Chrome does, or fails to build
+labels: [bug, crate, needs triage]
 body:
   - type: markdown
     attributes:
@@ -8,15 +8,25 @@ body:
         For the Rust crate. If you install through npm and call it from Node, use the
         **Bug report (Node package)** form instead.
 
-        The two ship on separate version lines and are not comparable — the npm package continues
-        the upstream `skia-canvas` numbering, the crate started at `0.1.0`. Please give the crate
+        The two ship on separate version lines that are not comparable: the npm package continues
+        upstream skia-canvas's numbering, and the crate started at 0.1.0. Please give the crate's
         version here, not the npm one.
+
+  - type: checkboxes
+    id: before
+    attributes:
+      label: Before you file
+      options:
+        - label: I searched the existing issues and found none for this.
+          required: true
+        - label: I can reproduce this on the latest release.
+          required: true
 
   - type: textarea
     id: what
     attributes:
       label: What happened
-      description: What you expected, and what you got instead. For a build failure, the error is the answer.
+      description: What you expected, and what you got instead. For a build failure, the first error.
     validations:
       required: true
 
@@ -26,7 +36,7 @@ body:
       label: Reproduction
       description: |
         The smallest program that shows it, or the manifest and command for a build failure.
-        Include the image or font if decoding is involved.
+        Attach the image or font if decoding or text is involved.
       render: rust
     validations:
       required: true
@@ -34,27 +44,42 @@ body:
   - type: input
     id: version
     attributes:
-      label: Crate version
-      description: "From `Cargo.lock`, or `cargo tree -p meo-skia-canvas -d`."
+      label: Version
+      description: "`cargo pkgid meo-skia-canvas`, run in your project."
     validations:
       required: true
 
-  - type: input
+  - type: textarea
+    id: platform
+    attributes:
+      label: Platform
+      description: |
+        OS and its version, `rustc -vV` (the crate requires 1.90 or newer), and what drew the
+        canvas: `println!("{:?}", canvas.engine_kind())`.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: chrome
+    attributes:
+      label: What Chrome does
+      description: |
+        Chrome's canvas is the reference: output that differs from it is a defect unless
+        [docs/browser-differences.md](https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/browser-differences.md)
+        lists it. The same drawing on a Chrome canvas, as a page or a screenshot, helps most.
+    validations:
+      required: false
+
+  - type: textarea
     id: features
     attributes:
       label: Enabled features
       description: |
         Cargo features are additive, so another crate in your graph can turn on more than you asked
-        for — `cargo tree -e features -p meo-skia-canvas` shows the set that was actually resolved.
-        Say which GPU backend is in play: `metal`, `vulkan`, both, or neither.
-    validations:
-      required: true
-
-  - type: input
-    id: toolchain
-    attributes:
-      label: Toolchain and target
-      description: "`rustc -vV`, which gives the version and the host triple. This crate requires 1.90 or newer."
+        for. `cargo tree -e features -i meo-skia-canvas` shows the set actually resolved, including
+        the GPU backend: `metal`, `vulkan`, both or neither.
+      render: text
     validations:
       required: true
 
@@ -63,9 +88,8 @@ body:
     attributes:
       label: Build output
       description: |
-        Only for a build failure. `cargo build` with the failing feature set is enough; the first
-        error matters more than the last. If Skia itself is being built from source, say so — that
-        path needs a Rust toolchain, ninja and about an hour.
+        Only for a build failure: `cargo build` with the failing feature set. The first error
+        matters more than the last. Say whether Skia was downloaded or built from source.
       render: shell
     validations:
       required: false

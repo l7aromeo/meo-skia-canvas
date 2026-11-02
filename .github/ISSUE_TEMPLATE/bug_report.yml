@@ -1,6 +1,6 @@
 name: Bug report (Node package)
-description: The npm package behaves differently than documented
-labels: [bug]
+description: The npm package does something other than what it documents, or what Chrome does
+labels: [bug, npm, needs triage]
 body:
   - type: markdown
     attributes:
@@ -8,10 +8,18 @@ body:
         For the npm package, called from Node. If you depend on the crate from Cargo, use the
         **Bug report (Rust crate)** form instead.
 
-        This is a fork of [skia-canvas](https://github.com/samizdatco/skia-canvas), but a distant
-        one -- `src/` has more than doubled since the split, and upstream has taken nothing back.
-        Please do not reproduce it against upstream first: the code your bug is in may not exist
-        there, and this tree does not merge from them in any case.
+        Please do not reproduce it against upstream skia-canvas first: this tree has diverged from
+        it and does not merge from it.
+
+  - type: checkboxes
+    id: before
+    attributes:
+      label: Before you file
+      options:
+        - label: I searched the existing issues and found none for this.
+          required: true
+        - label: I can reproduce this on the latest release.
+          required: true
 
   - type: textarea
     id: what
@@ -25,7 +33,7 @@ body:
     id: repro
     attributes:
       label: Reproduction
-      description: The smallest script that shows it. Include the image or font if decoding is involved.
+      description: The smallest script that shows it. Attach the image or font if decoding or text is involved.
       render: javascript
     validations:
       required: true
@@ -33,37 +41,52 @@ body:
   - type: input
     id: version
     attributes:
-      label: Package version
+      label: Version
       description: "`npm ls meo-skia-canvas`"
     validations:
       required: true
 
-  - type: input
+  - type: textarea
     id: platform
     attributes:
       label: Platform
-      description: 'OS, CPU architecture and — on Linux — glibc or musl. `node -p "process.platform + ''-'' + process.arch"`'
+      description: |
+        OS and its version, CPU architecture, and on Linux glibc or musl. Then what drew the
+        canvas: `canvas.engine` names the renderer, `"CPU"` or `"GPU"`, and the device.
+      value: |
+        node -p "process.platform + '-' + process.arch"
+        node -e "const { Canvas } = require('meo-skia-canvas'); const { renderer, api, device } = new Canvas(1, 1).engine; console.log(renderer, api, device)"
+      render: shell
     validations:
       required: true
+
+  - type: textarea
+    id: chrome
+    attributes:
+      label: What Chrome does
+      description: |
+        Chrome's canvas is the reference: output that differs from it is a defect unless
+        [docs/browser-differences.md](https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/browser-differences.md)
+        lists it. The same drawing on a Chrome canvas, as a page or a screenshot, helps most.
+    validations:
+      required: false
 
   - type: input
     id: node
     attributes:
       label: Node version
-      description: "`node -v`. This package requires 22 or newer."
+      description: "`node -v`. The package requires 22 or newer."
     validations:
       required: true
 
   - type: textarea
     id: binary
     attributes:
-      label: Install or load failure — output of these
+      label: Install or load failure
       description: |
-        Only if the module fails to install or load. On Linux the glibc line is the important one:
-        the binaries have a minimum version, and below it the module fails to load outright rather
-        than degrading.
+        Only if the module fails to install or load: the output of these. On Linux the glibc line
+        matters most -- below the binaries' minimum the module does not load at all.
       value: |
-        node -p "process.platform + '-' + process.arch"
         node -e "try { require('meo-skia-canvas'); console.log('loaded ok') } catch (e) { console.log(e.message) }"
         ls node_modules | grep '^meo-skia-canvas'
         ldd --version | head -1   # Linux only
