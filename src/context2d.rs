@@ -5595,7 +5595,7 @@ mod recording_tests {
     use super::{Canvas, CanvasOptions, Context2D};
     use crate::{
         RgbaLinear,
-        context::layer::Layer,
+        context::{layer::Layer, page::FORKS_LAZILY},
         font::FontLibrary,
         image::Image,
         pixels::{PixelColorSpace, PixelDepth, PixelExportOptions},
@@ -5703,9 +5703,13 @@ mod recording_tests {
 
     /// On a canvas that keeps a recording for each kind of target, every
     /// verb lands in both, with as many ops in each; on one that keeps one,
-    /// nothing is recorded twice, so its pixels are what they were.
+    /// nothing is recorded twice, so its pixels are what they were. The
+    /// recordings fork as they begin, so that a verb painting the same in
+    /// both -- this colour is on its bytes on an eight-bit page -- is still
+    /// handed each: lazily it records once, and the pair is never made.
     #[test]
     fn every_draw_lands_in_every_recording() {
+        FORKS_LAZILY.set(false);
         let pages = [
             (PixelColorSpace::DisplayP3, PixelDepth::F32, true),
             (PixelColorSpace::Srgb, PixelDepth::F32, false),
@@ -5736,6 +5740,7 @@ mod recording_tests {
                 );
             }
         }
+        FORKS_LAZILY.set(true);
         assert!(problems.is_empty(), "{}", problems.join("\n"));
     }
 }

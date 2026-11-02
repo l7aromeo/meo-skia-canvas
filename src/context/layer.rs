@@ -74,9 +74,10 @@ pub enum Layer {
     /// blur is.
     Group(Arc<Group>),
     /// The same draws recorded twice, on a page that keeps a recording for
-    /// each kind of target -- see `page::Recording`: a flat colour held
-    /// exactly in the page's own space for pixels, and as a plain colour for
-    /// a document. Shared, so the two pictures are one pointer.
+    /// each kind of target, once a draw has forked them -- see
+    /// `page::Recorders`: a flat colour held exactly in the page's own space
+    /// for pixels, and as a plain colour for a document. Shared, so the two
+    /// pictures are one pointer.
     Targeted(Arc<(Picture, Picture)>),
     /// A fill or stroke its clip cuts, or a run of them under one clip, the
     /// clip applied at playback. Filed as a piece of the frame's run -- see
@@ -1502,6 +1503,10 @@ pub(crate) struct Entries {
     pub(crate) layers: Arc<Vec<Layer>>,
     /// One for each of `layers`, in the same order.
     pub(crate) features: Arc<Vec<VectorFeatures>>,
+    /// Whether these are the entries of a page that keeps a recording for
+    /// each kind of target, whose draws may not yet have forked them --
+    /// see `page::Recorders` -- and so hold no pair to say so.
+    pub(crate) apart: bool,
 }
 
 impl FromIterator<(Layer, VectorFeatures)> for Entries {
@@ -1528,7 +1533,11 @@ impl Entries {
         features: Arc<Vec<VectorFeatures>>,
     ) -> Self {
         debug_assert_eq!(layers.len(), features.len(), "a feature per entry");
-        Self { layers, features }
+        Self {
+            layers,
+            features,
+            apart: false,
+        }
     }
 
     /// `layers` asking nothing of a vector backend.
