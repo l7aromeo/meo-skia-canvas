@@ -250,6 +250,47 @@ pub(crate) struct Plan {
     worked: IRect,
     /// The layer `placed` asks for first, in the same pixels as `region`.
     drawn: IRect,
+    /// Every pixel of the layer the chain's draw can touch, its
+    /// anti-aliasing included, where what it paints is known.
+    ink: Option<IRect>,
+    /// Whether the layer is on the GPU.
+    on_gpu: bool,
+}
+
+/// The most chains [`Plan::joins`] lets share one layer. Chosen, not
+/// measured: it bounds the pairwise check a batch costs, and decides only
+/// how chains are grouped, never what any of them draws.
+pub(crate) const MAX_SHARED: usize = 64;
+
+impl Plan {
+    /// Whether this chain can draw into the layer `batch`'s chains share,
+    /// and each of them still read what it would from a layer of its own.
+    ///
+    /// The layer has to be the one each would have: on the GPU, in the
+    /// device's pixels, placed at the same bounds -- the page's, which an
+    /// edge rounds against (see [`placed`]). And no chain's draw may touch a
+    /// pixel another reads: a pixel a chain reads then holds the same
+    /// samples, cleared and drawn by the same commands, as in a layer of its
+    /// own. Where what a draw paints is not known, nothing can be shown of
+    /// it, and the chain shares nothing.
+    pub(crate) fn joins(&self, batch: &[&Plan]) -> bool {
+        let Some(ink) = self.ink else {
+            return false;
+        };
+        let apart = |read: IRect, ink: IRect| !IRect::intersects(&read, &ink);
+        self.on_gpu
+            && self.rest.is_identity()
+            && batch.len() < MAX_SHARED
+            && batch.iter().all(|other| {
+                other.drawn == self.drawn
+                    && other.on_gpu
+                    && other.rest.is_identity()
+                    && other.ink.is_some_and(|other_ink| {
+                        apart(self.region, other_ink)
+                            && apart(other.region, ink)
+                    })
+            })
+    }
 }
 
 /// The plan of a chain drawn under `canvas`'s transform and clip, with
@@ -266,6 +307,17 @@ pub(crate) fn plan(
     let on_gpu = is_on_gpu(canvas);
     let (region, drawn) = placed(canvas, to_draw, rest.is_identity(), on_gpu);
     let worked = IRect::join(&worked, &region);
+    // The rectangle `region` takes as painted: a pixel either side for
+    // anti-aliasing. A rounded rectangle's coverage stays inside its bounds
+    // rounded out, so for one the pixel changes nothing; it keeps what one
+    // chain reads and what another is taken to paint the same rectangle.
+    let ink = content.map(|content| {
+        layer
+            .map_rect(content)
+            .0
+            .with_outset((1.0, 1.0))
+            .round_out()
+    });
     #[cfg(test)]
     RUNS.with(|runs| runs.set(runs.get() + 1));
     #[cfg(test)]
@@ -279,6 +331,8 @@ pub(crate) fn plan(
         region,
         worked,
         drawn,
+        ink,
+        on_gpu,
     })
 }
 
@@ -319,6 +373,8 @@ impl Drawn {
                 }
                 layer_surface(canvas, depth, at).map(|surface| (surface, at))
             })?;
+        #[cfg(test)]
+        SHARED_LAYERS.with(|layers| layers.set(layers.get() + 1));
         let context = gpu_of(&mut surface);
         let offscreen = surface.canvas();
         // Only what the chains read is cleared: the rows and columns the
@@ -459,6 +515,10 @@ thread_local! {
     /// Skia refuses one too large, so that a test can reach the region-sized
     /// fallback on a page small enough to compare against.
     pub(crate) static REFUSE_PLACED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// How many layers [`Drawn::new`] has made on this thread, which the
+    /// tests of chains sharing a layer count by.
+    pub(crate) static SHARED_LAYERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 
     /// The most pixels a chain [`plan`] on this thread has worked on, which
     /// the tests of a chain's layer size count by.
@@ -2880,5 +2940,410 @@ mod tests {
             wrong.len(),
             wrong.first()
         );
+    }
+}
+
+/// Chains sharing one layer, held to the bytes each draws in a layer of its
+/// own.
+#[cfg(all(test, any(feature = "metal", feature = "vulkan")))]
+mod shared_tests {
+    use skia_safe::{
+        AlphaType, Canvas as SkCanvas, Color, Color4f, ColorSpace, ColorType,
+        ImageInfo, Paint, RRect, Rect, Surface, Vector,
+    };
+
+    use super::{
+        Depth, Drawn, MAX_SHARED, Plan, SHARED_LAYERS, Step, apply, plan,
+    };
+    use crate::{
+        context::page::ExportOptions, gpu::RenderingEngine,
+        pixels::PixelColorSpace,
+    };
+
+    /// A rounded rectangle a chain draws, in the canvas's coordinates moved
+    /// by `at`, the paint it is drawn with, and the steps it runs where they
+    /// are not the page's.
+    struct Member {
+        rect: Rect,
+        at: Vector,
+        paint: Paint,
+        steps: Option<Vec<Step>>,
+    }
+
+    impl Member {
+        fn draw(&self, canvas: &SkCanvas) {
+            let mut paint = self.paint.clone();
+            paint.set_alpha_f(1.0);
+            paint.set_anti_alias(true);
+            canvas
+                .draw_rrect(RRect::new_rect_xy(self.rect, 12.0, 12.0), &paint);
+        }
+    }
+
+    /// A GPU surface of `info` at the page's sample count, or `None` where
+    /// there is no GPU.
+    fn page(info: &ImageInfo) -> Option<Surface> {
+        RenderingEngine::GPU
+            .make_surface(info, &ExportOptions::default())
+            .ok()
+    }
+
+    /// `surface`'s pixels, as unpremultiplied 32-bit floats, so that a float
+    /// page is compared bit for bit.
+    fn read(surface: &mut Surface) -> Vec<u8> {
+        let info = surface
+            .image_info()
+            .with_color_type(ColorType::RGBAF32)
+            .with_alpha_type(AlphaType::Premul);
+        let mut pixels = vec![0u8; info.compute_min_byte_size()];
+        assert!(surface.read_pixels(
+            &info,
+            &mut pixels,
+            info.min_row_bytes(),
+            (0, 0)
+        ));
+        pixels
+    }
+
+    /// `members` each run through `steps` on a layer of its own, as a page
+    /// plays them today.
+    fn alone(canvas: &SkCanvas, steps: &[Step], members: &[Member]) {
+        members.iter().for_each(|member| {
+            canvas.save();
+            canvas.translate(member.at);
+            apply(
+                canvas,
+                member.steps.as_deref().unwrap_or(steps),
+                Some(member.rect),
+                Depth::Floats,
+                &member.paint,
+                |layer| member.draw(layer),
+            );
+            canvas.restore();
+        });
+    }
+
+    /// `members` run in order, consecutive ones sharing a layer wherever
+    /// [`Plan::joins`] allows. Returns how many layers they were drawn in.
+    fn shared(canvas: &SkCanvas, steps: &[Step], members: &[Member]) -> usize {
+        let plans: Vec<Option<Plan>> = members
+            .iter()
+            .map(|member| {
+                canvas.save();
+                canvas.translate(member.at);
+                let steps = member.steps.as_deref().unwrap_or(steps);
+                let plan = plan(canvas, steps, Some(member.rect));
+                canvas.restore();
+                plan
+            })
+            .collect();
+        let before = SHARED_LAYERS.with(std::cell::Cell::get);
+        let mut start = 0;
+        while start < members.len() {
+            let mut batch: Vec<&Plan> = Vec::new();
+            let mut end = start;
+            while let Some(Some(next)) = plans.get(end) {
+                if !batch.is_empty() && !next.joins(&batch) {
+                    break;
+                }
+                batch.push(next);
+                end += 1;
+            }
+            if batch.is_empty() {
+                start += 1;
+                continue;
+            }
+            let mut drawn =
+                Drawn::new(canvas, Depth::Floats, &batch, |i, layer| {
+                    members[start + i].draw(layer)
+                })
+                .expect("a layer");
+            for (plan, member) in batch.iter().zip(&members[start..end]) {
+                let steps = member.steps.as_deref().unwrap_or(steps);
+                if let Some(outcome) = drawn.finish(plan, steps, &member.paint)
+                {
+                    outcome.composite(canvas, &member.paint);
+                }
+            }
+            start = end;
+        }
+        SHARED_LAYERS.with(std::cell::Cell::get) - before
+    }
+
+    /// `count` rounded rectangles 80 by 40, `gap` pixels apart in rows
+    /// across a page `width` wide, at fractions of a pixel that vary: each
+    /// drawn at the origin and moved there by its transform, so that every
+    /// chain's layer is drawn under a transform of its own.
+    fn grid(count: usize, gap: f32, width: f32, paint: &Paint) -> Vec<Member> {
+        let per_row = ((width - 40.0) / (80.0 + gap)).floor().max(1.0) as usize;
+        (0..count)
+            .map(|i| {
+                let (column, row) =
+                    ((i % per_row) as f32, (i / per_row) as f32);
+                let x = 20.0 + column * (80.0 + gap) + (i % 7) as f32 * 0.13;
+                let y = 20.0 + row * (40.0 + gap) + (i % 5) as f32 * 0.21;
+                Member {
+                    rect: Rect::from_xywh(0.0, 0.0, 80.0, 40.0),
+                    at: Vector::new(x, y),
+                    paint: paint.clone(),
+                    steps: None,
+                }
+            })
+            .collect()
+    }
+
+    fn blur(sigma: f32) -> Vec<Step> {
+        vec![Step::Blur(sigma)]
+    }
+
+    fn drop_shadow(dx: f32, dy: f32, sigma: f32) -> Vec<Step> {
+        vec![Step::Shadow {
+            offset: Vector::new(dx, dy),
+            sigma,
+            colour: Color4f::new(0.0, 0.0, 0.3, 0.6),
+            space: ColorSpace::new_srgb(),
+        }]
+    }
+
+    /// The bytes of `members` through `steps` on a page of `info`, played
+    /// alone and shared, and how many layers sharing took.
+    fn both(
+        info: &ImageInfo,
+        steps: &[Step],
+        members: &[Member],
+    ) -> Option<(Vec<u8>, Vec<u8>, usize)> {
+        let mut one = page(info)?;
+        let mut two = page(info)?;
+        for surface in [&mut one, &mut two] {
+            surface.canvas().clear(Color::WHITE);
+        }
+        alone(one.canvas(), steps, members);
+        let layers = shared(two.canvas(), steps, members);
+        Some((read(&mut one), read(&mut two), layers))
+    }
+
+    fn paints() -> [Paint; 2] {
+        let opaque = Paint::new(Color4f::new(0.1, 0.2, 0.6, 1.0), None);
+        let translucent = Paint::new(Color4f::new(0.8, 0.3, 0.1, 0.55), None);
+        [opaque, translucent]
+    }
+
+    /// Disjoint chains share one layer, and every one of them lands the
+    /// bytes it lands alone: blurs whose axes are blurred tap by tap and
+    /// decimated, and a drop shadow moved toward its neighbour, on eight-bit
+    /// sRGB and Display P3 pages and a half-float one.
+    #[test]
+    fn disjoint_chains_share_a_layer_and_draw_as_they_do_alone() {
+        let infos = [
+            ImageInfo::new_n32_premul((1200, 900), ColorSpace::new_srgb()),
+            ImageInfo::new_n32_premul(
+                (1200, 900),
+                PixelColorSpace::DisplayP3
+                    .to_skia_color_space()
+                    .expect("Display P3"),
+            ),
+            ImageInfo::new(
+                (1200, 900),
+                ColorType::RGBAF16,
+                AlphaType::Premul,
+                ColorSpace::new_srgb(),
+            ),
+        ];
+        let chains =
+            [blur(2.0), blur(8.0), blur(30.0), drop_shadow(9.0, 4.0, 5.0)];
+        let mut checked = 0;
+        for info in &infos {
+            for steps in &chains {
+                for paint in paints() {
+                    // Far enough apart that the widest reach, 6 sigma of 30
+                    // plus the layer's even-edge widening, meets nothing.
+                    let members = grid(12, 200.0, 1200.0, &paint);
+                    let Some((alone, shared, layers)) =
+                        both(info, steps, &members)
+                    else {
+                        return;
+                    };
+                    let off = alone
+                        .chunks(16)
+                        .zip(shared.chunks(16))
+                        .filter(|(a, b)| a != b)
+                        .count();
+                    assert_eq!(
+                        off,
+                        0,
+                        "{off} pixels differ sharing a layer: {:?} {steps:?}",
+                        info.color_type()
+                    );
+                    assert_eq!(
+                        layers, 1,
+                        "{steps:?}: the chains did not share"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, infos.len() * chains.len() * 2);
+    }
+
+    /// The same on a 6000 by 4000 page, where the layer each chain would
+    /// otherwise make is past the resource cache's budget.
+    #[test]
+    fn chains_share_a_layer_on_a_large_page() {
+        let info =
+            ImageInfo::new_n32_premul((6000, 4000), ColorSpace::new_srgb());
+        let members = grid(40, 60.0, 6000.0, &paints()[1]);
+        let Some((alone, shared, layers)) = both(&info, &blur(8.0), &members)
+        else {
+            return;
+        };
+        assert!(alone == shared, "sharing a layer changed the page");
+        assert_eq!(layers, 1);
+    }
+
+    /// Many identical small rounded rectangles in one layer, the case where
+    /// Ganesh can merge one chain's draw into another's op.
+    #[test]
+    fn identical_small_draws_sharing_a_layer_draw_as_they_do_alone() {
+        let info =
+            ImageInfo::new_n32_premul((1200, 900), ColorSpace::new_srgb());
+        let paint = Paint::new(Color4f::new(0.0, 0.0, 0.0, 1.0), None);
+        let members: Vec<Member> = (0..MAX_SHARED)
+            .map(|i| Member {
+                rect: Rect::from_xywh(
+                    20.0 + (i % 8) as f32 * 140.0 + 0.37,
+                    20.0 + (i / 8) as f32 * 100.0 + 0.25,
+                    24.0,
+                    16.0,
+                ),
+                at: Vector::new(0.0, 0.0),
+                paint: paint.clone(),
+                steps: None,
+            })
+            .collect();
+        let Some((alone, shared, layers)) = both(&info, &blur(3.0), &members)
+        else {
+            return;
+        };
+        assert!(alone == shared, "merged draws changed the page");
+        assert_eq!(layers, 1);
+    }
+
+    /// A chain whose draw lies in what another reads, or which reads what
+    /// another draws, gets a layer of its own -- and a page with such pairs
+    /// still lands what it lands alone.
+    #[test]
+    fn a_chain_reaching_another_does_not_share_its_layer() {
+        let info =
+            ImageInfo::new_n32_premul((1200, 900), ColorSpace::new_srgb());
+        let paint = &paints()[1];
+        // 8 sigma reaches 48 pixels: 30 apart in one row, each reads its
+        // neighbours' draws.
+        let members = grid(6, 30.0, 1200.0, paint);
+        let Some((alone, shared, layers)) = both(&info, &blur(8.0), &members)
+        else {
+            return;
+        };
+        assert!(alone == shared, "a refused share changed the page");
+        assert_eq!(layers, members.len(), "chains that meet shared a layer");
+    }
+
+    /// Two chains at every gap across the edge of sharing land the bytes
+    /// they land alone, whether they share or not: the gap where the first's
+    /// read stops meeting the second's draw, anti-aliasing included, is
+    /// where they start to share.
+    #[test]
+    fn chains_either_side_of_the_edge_of_sharing_draw_as_they_do_alone() {
+        let info =
+            ImageInfo::new_n32_premul((600, 300), ColorSpace::new_srgb());
+        let paint = &paints()[1];
+        let mut shared_at = Vec::new();
+        for steps in [blur(2.0), drop_shadow(5.0, 0.0, 2.0)] {
+            for tenths in 0..400 {
+                let gap = tenths as f32 / 10.0;
+                let members = [
+                    Member {
+                        rect: Rect::from_xywh(0.0, 0.0, 80.0, 40.0),
+                        at: Vector::new(100.3, 120.6),
+                        paint: paint.clone(),
+                        steps: None,
+                    },
+                    Member {
+                        rect: Rect::from_xywh(0.0, 0.0, 80.0, 40.0),
+                        at: Vector::new(180.3 + gap, 120.6),
+                        paint: paint.clone(),
+                        steps: None,
+                    },
+                ];
+                let Some((alone, shared, layers)) =
+                    both(&info, &steps, &members)
+                else {
+                    return;
+                };
+                assert!(
+                    alone == shared,
+                    "{steps:?} {gap} apart: sharing changed the page"
+                );
+                if layers == 1 {
+                    shared_at.push(gap);
+                }
+            }
+            let first = shared_at.first().copied();
+            assert!(
+                first.is_some_and(|gap| gap > 0.0),
+                "{steps:?}: shared from {first:?}"
+            );
+            // Once apart, farther is apart too.
+            let at = shared_at.len();
+            assert!(
+                shared_at
+                    .windows(2)
+                    .all(|w| (w[1] - w[0] - 0.1).abs() < 1e-3),
+                "{steps:?}: sharing came and went over {at} gaps"
+            );
+            shared_at.clear();
+        }
+    }
+
+    /// A chain whose wide reach takes in a later chain's draw does not share
+    /// with it, though the later chain's narrow reach meets nothing of the
+    /// first: sharing is refused either way round.
+    #[test]
+    fn a_wide_reach_into_a_later_draw_is_not_shared() {
+        let info =
+            ImageInfo::new_n32_premul((600, 300), ColorSpace::new_srgb());
+        let paint = &paints()[1];
+        let at = |x: f32, steps: Vec<Step>| Member {
+            rect: Rect::from_xywh(0.0, 0.0, 80.0, 40.0),
+            at: Vector::new(x, 120.6),
+            paint: paint.clone(),
+            steps: Some(steps),
+        };
+        // 8 sigma reaches 48 pixels and 2 sigma 12: 30 apart, the first
+        // reads the second's draw and the second reads nothing of the first.
+        for members in [
+            [at(100.3, blur(8.0)), at(210.3, blur(2.0))],
+            [at(100.3, blur(2.0)), at(210.3, blur(8.0))],
+        ] {
+            let Some((alone, shared, layers)) = both(&info, &[], &members)
+            else {
+                return;
+            };
+            assert!(alone == shared, "sharing changed the page");
+            assert_eq!(layers, 2, "chains a reach joins shared a layer");
+        }
+    }
+
+    /// A batch stops at [`MAX_SHARED`] chains.
+    #[test]
+    fn a_layer_is_shared_by_at_most_max_shared_chains() {
+        let info =
+            ImageInfo::new_n32_premul((6000, 4000), ColorSpace::new_srgb());
+        let members = grid(MAX_SHARED + 1, 60.0, 6000.0, &paints()[0]);
+        let Some((alone, shared, layers)) = both(&info, &blur(2.0), &members)
+        else {
+            return;
+        };
+        assert!(alone == shared);
+        assert_eq!(layers, 2);
     }
 }
