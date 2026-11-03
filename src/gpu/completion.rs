@@ -19,20 +19,26 @@
 //!
 //! A `getImageData` read confirms its draws with its own wait, through
 //! [`read_checked`]. The copy is asked for through Skia's asynchronous read,
-//! which encodes it in the command buffer the draws are already in, and
-//! `submit(SyncCpu::Yes)` commits that one buffer, waits for it and answers
-//! for it. In Skia M156, under the skia-bindings crate: every encode goes to
-//! `GrMtlGpu::commandBuffer`'s current buffer (`skia/src/gpu/ganesh/mtl/
-//! GrMtlGpu.mm`, line 188); `SurfaceContext::asyncReadPixels` encodes its
-//! transfer there and flushes without submitting (`skia/src/gpu/ganesh/
-//! SurfaceContext.cpp`, lines 832 and 871); `GrMtlGpu::submitCommandBuffer`
-//! commits that buffer (`GrMtlGpu.mm`, lines 212 to 245); and
-//! `GrMtlCommandBuffer::commit` waits and returns whether its status is an
-//! error (`GrMtlCommandBuffer.mm`, lines 182 to 206). So one wait confirms the
-//! draws and the copy both. Where Skia answers before anything is submitted
-//! -- it declined, or read through its own `readPixels` for want of a
-//! transfer, which commits the draws in a buffer nothing waits on -- the read
-//! is confirmed the other way.
+//! and `submit(SyncCpu::Yes)` commits the buffer it is encoded in, waits for
+//! it and answers for it. In Skia M156, under the skia-bindings crate: every
+//! encode goes to `GrMtlGpu::commandBuffer`'s current buffer (`skia/src/gpu/
+//! ganesh/mtl/GrMtlGpu.mm`, line 188); `SurfaceContext::asyncReadPixels`
+//! encodes its transfer there and flushes without submitting (`skia/src/gpu/
+//! ganesh/SurfaceContext.cpp`, lines 832 and 871); `GrMtlGpu::
+//! submitCommandBuffer` commits that buffer (`GrMtlGpu.mm`, lines 212 to 245);
+//! and `GrMtlCommandBuffer::commit` waits and returns whether its status is an
+//! error (`GrMtlCommandBuffer.mm`, lines 182 to 206).
+//!
+//! On Metal the draws are committed first, in a buffer of their own that
+//! nothing waits on, because a read that carries its draws keeps Apple's GPU
+//! at its lowest clock -- see [`read_checked`]. Skia makes that buffer, like
+//! every other, on a queue of ours, which reads its status after the one wait
+//! -- see `metal::RecordingQueue`. Elsewhere the copy is encoded in the buffer
+//! the draws are already in. Either way one wait confirms the draws and the
+//! copy both. Where Skia answers before anything is submitted -- it declined,
+//! or read through its own `readPixels` for want of a transfer, which commits
+//! the draws in a buffer nothing waits on -- the read is confirmed the other
+//! way.
 //!
 //! Every other path -- an export, a conversion, a read Skia will not make
 //! asynchronously -- flushes and waits with [`draws_ran`] first, then reads.
@@ -41,7 +47,9 @@
 //! `context::page`.
 //!
 //! **The checked read costs no wait beyond the read's own.** Counted under
-//! lldb, a read after a draw waits on the GPU once. Measured on a release
+//! lldb, a read after a draw waits on the GPU once; the queue of ours waits
+//! only for a buffer still running after that wait, which buffers committed
+//! in order on one queue have not been seen to be. Measured on a release
 //! build, Apple M4 Pro, in three interleaved passes against the wait in front
 //! of it: a `getImageData` of 8x8 pixels after a draw takes 185 to 208
 //! microseconds against 248 to 253, one of 64x48 199 to 202 against 253 to
@@ -63,20 +71,25 @@
 //! it waits on, so a fix that checks only the copy's buffer still leaves the
 //! draws to this wait.
 
+use std::cell::RefCell;
+#[cfg(all(feature = "vulkan", not(feature = "metal")))]
+use std::convert::Infallible;
 #[cfg(any(feature = "metal", feature = "vulkan"))]
-use std::{cell::RefCell, rc::Rc};
+use std::rc::Rc;
 
 use rayon::prelude::*;
 
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 use skia_safe::{
     IRect,
-    gpu::SyncCpu,
+    gpu::{DirectContext, SyncCpu},
     image::{AsyncReadResult, RescaleGamma, RescaleMode},
 };
 use skia_safe::{ImageInfo, Surface};
 
 use crate::Error;
+#[cfg(feature = "metal")]
+use crate::gpu::metal::{self, Mark};
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 use crate::gpu::pacing;
 
@@ -92,13 +105,54 @@ pub(crate) const DRAW_ATTEMPTS: usize = 2;
 pub(crate) const DISCARDED: &str = "The GPU discarded the work of";
 
 /// The error for a draw that failed [`DRAW_ATTEMPTS`] times, naming the
-/// stage it was in.
+/// stage it was in, and quoting the backend's reason where the last
+/// confirmation on this thread gave one.
 pub(crate) fn discarded(stage: &str) -> String {
+    let reason = FAILURE
+        .take()
+        .map_or_else(String::new, |reason| format!(" ({reason})"));
     format!(
         "{DISCARDED} {stage} {DRAW_ATTEMPTS} times, so its pixels are not \
-         returned. This happens when the GPU recovers from a fault, often one \
-         in another process; trying again, or using the CPU engine, avoids it"
+         returned{reason}. This happens when the GPU recovers from a fault, \
+         often one in another process; trying again, or using the CPU engine, \
+         avoids it"
     )
+}
+
+thread_local! {
+    /// Why the last confirmation on this thread failed, where the backend
+    /// said, for [`discarded`]; cleared by every confirmation that passes, so
+    /// that it never names an earlier attempt's failure. A thread's GPU
+    /// context is used on that thread alone, so the draw, its confirmation
+    /// and the error are made on one thread.
+    static FAILURE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Where a read began, for the confirmation after it: on Metal, a mark on the
+/// queue of ours; with no Metal there is no such queue, and never a mark.
+#[cfg(feature = "metal")]
+type Since = Option<Mark>;
+#[cfg(all(feature = "vulkan", not(feature = "metal")))]
+type Since = Option<Infallible>;
+
+/// Confirms every command buffer `context`'s queue of ours has seen committed,
+/// where it has one, and notes why for [`discarded`] where that fails. With
+/// `since`, where a read began, the read must have committed one. `true` with
+/// no queue of ours: Vulkan, and any context Skia makes its buffers for
+/// itself, is confirmed by Skia's wait alone.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+fn confirmed(context: &DirectContext, since: Since) -> bool {
+    #[cfg(feature = "metal")]
+    let answer =
+        metal::recording(context).map_or(Ok(()), |queue| queue.confirm(since));
+    #[cfg(not(feature = "metal"))]
+    let answer: Result<(), String> = {
+        let _ = (context, since);
+        Ok(())
+    };
+    let ok = answer.is_ok();
+    FAILURE.set(answer.err());
+    ok
 }
 
 /// `reason` as the crate's [`Error`]: [`Error::Render`] for a discarded draw
@@ -131,7 +185,7 @@ pub(crate) fn draws_ran(surface: &mut Surface, page: usize) -> bool {
     // this one, or one the playback made on the way -- see `pacing`.
     let flushed = context.flush(None).is_ok() && !pacing::take_failed();
     let ran = context.submit(SyncCpu::Yes);
-    flushed && ran && !seam::discards(page)
+    flushed && ran && confirmed(&context, None) && !seam::discards(page)
 }
 
 /// With no GPU backend compiled in every surface is raster, so there is no
@@ -210,10 +264,13 @@ impl Rows {
 /// a row, with the GPU's draws confirmed by the read's own wait rather than
 /// one in front of it.
 ///
-/// The copy is asked for through Skia's asynchronous read, which encodes it
-/// in the command buffer the draws are already in, and that one buffer is
-/// committed and waited on with `submit(SyncCpu::Yes)`, whose answer is its
-/// status: one wait, and an answer for the copy as well as the draws. A
+/// The copy is asked for through Skia's asynchronous read and committed and
+/// waited on with `submit(SyncCpu::Yes)`, whose answer is its buffer's
+/// status. On Metal the draws before it are committed first, in a buffer of
+/// their own that nothing waits on, and the queue of ours Skia made both on
+/// answers for that one -- see [`metal::RecordingQueue`]: one wait, and an
+/// answer for the draws as well as the copy. Elsewhere the copy is encoded in
+/// the buffer the draws are already in, which the one wait answers for. A
 /// raster surface reads at once and has nothing to confirm. `page` is the
 /// page the draws belong to, which only the test seam reads. `rows`, where
 /// given, converts each row as it is written.
@@ -232,6 +289,29 @@ pub(crate) fn read_checked(
             surface, info, pixels, row_bytes, at, rows,
         ));
     };
+    #[cfg(feature = "metal")]
+    let since = match metal::recording(&context) {
+        // The draws reach the GPU before the read is encoded. Committed with
+        // the copy in one buffer, they keep Apple's GPU at its lowest clock
+        // for as long as reads follow draws: over 20 s of whole 1200x900
+        // reads after a small draw on an M4 Pro, 338 MHz throughout and 723
+        // microseconds a read, against 480 MHz and 674 committed first. A
+        // buffer of ours committed at this point with no draws in it leaves
+        // the clock where it was, so it is the draws that have to go.
+        Some(queue) => {
+            let since = queue.mark();
+            let flushed = context.flush(None).is_ok() && !pacing::take_failed();
+            if !(flushed && context.submit(SyncCpu::No)) {
+                return Checked::Discarded;
+            }
+            #[cfg(test)]
+            EARLY.set(EARLY.get() + 1);
+            Some(since)
+        }
+        None => None,
+    };
+    #[cfg(all(feature = "vulkan", not(feature = "metal")))]
+    let since: Since = None;
     // The outer `None` until Skia calls back; the inner one where it declined.
     let answer: Rc<RefCell<Option<Option<AsyncReadResult>>>> = Rc::default();
     let sink = Rc::clone(&answer);
@@ -245,7 +325,8 @@ pub(crate) fn read_checked(
     // An answer before anything is submitted is Skia declining, or reading
     // through its own `readPixels` where it could not make a transfer
     // (`SurfaceContext::asyncReadPixels`), which submits the draws in a
-    // buffer of their own that nothing waits on. Neither is confirmed.
+    // buffer of their own that nothing waits on. Neither is confirmed here;
+    // the caller's `draws_ran` confirms the draws, early buffer and all.
     if answer.borrow().is_some() {
         #[cfg(test)]
         DECLINED.set(DECLINED.get() + 1);
@@ -255,7 +336,9 @@ pub(crate) fn read_checked(
     // that failed on the way.
     let flushed = context.flush(None).is_ok() && !pacing::take_failed();
     let ran = context.submit(SyncCpu::Yes);
-    if !(flushed && ran) || seam::discards(page) {
+    #[cfg(test)]
+    SYNCED.set(SYNCED.get() + 1);
+    if !(flushed && ran && confirmed(&context, since)) || seam::discards(page) {
         return Checked::Discarded;
     }
     match answer.borrow_mut().take() {
@@ -276,6 +359,15 @@ thread_local! {
     /// thread, so that a test can tell a read it confirmed from one that
     /// took the two-wait path.
     pub(crate) static DECLINED: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    /// How many times [`read_checked`] has waited on the GPU through Skia on
+    /// this thread.
+    pub(crate) static SYNCED: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    /// How many GPU reads [`read_checked`] has committed the draws for before
+    /// encoding the read, on this thread.
+    #[cfg(feature = "metal")]
+    pub(crate) static EARLY: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
 }
 
@@ -823,5 +915,253 @@ mod tests {
         assert_eq!(seam::unused(page), 2);
         // Spends what was armed, so nothing is left behind for a later test.
         let _ = png(&mut armed);
+    }
+
+    /// A read's draws, committed before the read in a buffer nothing waits
+    /// on, confirmed through the queue of ours Skia makes its buffers on.
+    #[cfg(feature = "metal")]
+    mod early {
+        use objc2::{
+            ProtocolType,
+            rc::Retained,
+            runtime::{NSObjectProtocol, ProtocolObject, Sel},
+            sel,
+        };
+        use objc2_metal::{
+            MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice,
+        };
+
+        use skia_safe::{
+            AlphaType, Color, ColorType, ImageInfo,
+            gpu::{Budgeted, SurfaceOrigin, surfaces},
+        };
+
+        use super::{DISCARDED, drawn};
+        use crate::{
+            Canvas, Error, RgbaLinear,
+            gpu::{
+                completion::{Checked, EARLY, SYNCED, draws_ran, read_checked},
+                metal::{
+                    self, BLIND, BLIND_FOR_TEST, BUFFER_DISCARDED, FINISHED,
+                    MetalEngine, RecordingQueue, WAITED,
+                },
+            },
+        };
+
+        /// The page read whole rather than from tiles, and what that read
+        /// is called when it fails.
+        const SIZE: (f32, f32) = (600.0, 300.0);
+        const STAGE: &str = "drawing the page for a read";
+
+        /// This thread's offscreen context's queue of ours.
+        fn queue() -> Retained<RecordingQueue> {
+            let mut queue = None;
+            MetalEngine::with_direct_context(|context| {
+                queue = context.and_then(|context| metal::recording(context));
+            });
+            queue.expect("the offscreen context makes its buffers on ours")
+        }
+
+        /// A drawn page whose earlier buffers are all confirmed, with a
+        /// square drawn since: the next read has draws to commit early.
+        fn ready() -> Option<Canvas> {
+            let (mut canvas, _) = drawn(SIZE.0, SIZE.1)?;
+            let ctx = canvas.context();
+            ctx.get_image_data(0.0, 0.0, SIZE.0, SIZE.1)
+                .expect("a read");
+            ctx.set_fill_style(RgbaLinear::opaque(0.9, 0.2, 0.1));
+            ctx.fill_rect(10.0, 10.0, 40.0, 40.0);
+            Some(canvas)
+        }
+
+        fn read(canvas: &mut Canvas) -> Result<Vec<u8>, Error> {
+            canvas
+                .context()
+                .get_image_data(0.0, 0.0, SIZE.0, SIZE.1)
+                .map(|data| data.pixels().to_vec())
+        }
+
+        /// That `got` is the error for a whole-page read discarded twice,
+        /// giving `because` as the reason.
+        fn assert_discarded_because(
+            got: Result<Vec<u8>, Error>,
+            because: &str,
+        ) {
+            match got {
+                Err(Error::Render { reason }) => {
+                    assert!(reason.starts_with(DISCARDED), "{reason}");
+                    assert!(reason.contains(STAGE), "{reason}");
+                    assert!(reason.contains(because), "{reason}");
+                }
+                other => panic!("expected a discarded read, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn a_discarded_early_buffer_fails_the_read() {
+            let Some(mut canvas) = ready() else {
+                return;
+            };
+            let Some(mut reference) = ready() else {
+                return;
+            };
+            let want = read(&mut reference).expect("reference");
+            // The first buffer Skia asks for after this is the early one: the
+            // last read's was committed, and drawing asks for none.
+            let queue = queue();
+            queue.fail_after(0, 1);
+            let early = EARLY.get();
+            let got = read(&mut canvas).expect("the retry succeeds");
+            assert_eq!(queue.unused_failures(), 0, "no buffer was handed out");
+            assert_eq!(
+                EARLY.get() - early,
+                2,
+                "the failed early buffer was not caught, so the page was not \
+                 drawn again"
+            );
+            assert_eq!(got, want);
+        }
+
+        #[test]
+        fn a_buffer_discarded_twice_is_an_error_quoting_metal() {
+            let Some(mut canvas) = ready() else {
+                return;
+            };
+            let queue = queue();
+            queue.fail_after(0, usize::MAX);
+            let got = read(&mut canvas);
+            queue.fail_after(0, 0);
+            assert_discarded_because(got, BUFFER_DISCARDED);
+        }
+
+        /// A read with draws before it commits two buffers, the draws' and
+        /// the copy's, and waits through Skia once.
+        #[test]
+        fn a_read_commits_its_draws_first_and_waits_once() {
+            let Some(mut canvas) = ready() else {
+                return;
+            };
+            let (early, synced, waited) =
+                (EARLY.get(), SYNCED.get(), WAITED.get());
+            read(&mut canvas).expect("a read after a draw");
+            // Reported rather than asserted: Metal does not say that a later
+            // buffer finishing means an earlier one has.
+            eprintln!(
+                "buffers waited for after Skia's wait: {}",
+                WAITED.get() - waited
+            );
+            assert_eq!(EARLY.get() - early, 1, "no early commit");
+            assert_eq!(SYNCED.get() - synced, 1, "not one wait");
+            assert_eq!(
+                FINISHED.get(),
+                2,
+                "not the draws' buffer and the copy's"
+            );
+        }
+
+        /// A read with nothing drawn since its surface's draws were confirmed
+        /// commits no early buffer, Skia committing nothing for an empty
+        /// submit (`GrMtlGpu::submitCommandBuffer`, `GrMtlGpu.mm` lines 212
+        /// to 224), and still commits the copy's: one buffer, so it never
+        /// reads as a queue that has stopped seeing buffers. Made on a bare
+        /// surface, since a page read replays the page into it first.
+        #[test]
+        fn a_read_with_nothing_drawn_still_commits_the_copy() {
+            if drawn(1.0, 1.0).is_none() {
+                return;
+            }
+            let info = ImageInfo::new(
+                (64, 48),
+                ColorType::RGBA8888,
+                AlphaType::Premul,
+                None,
+            );
+            let mut surface = None;
+            MetalEngine::with_direct_context(|context| {
+                surface = context.and_then(|context| {
+                    surfaces::render_target(
+                        context,
+                        Budgeted::Yes,
+                        &info,
+                        None,
+                        SurfaceOrigin::BottomLeft,
+                        None,
+                        false,
+                        None,
+                    )
+                });
+            });
+            let mut surface = surface.expect("a GPU surface");
+            surface.canvas().clear(Color::from_argb(255, 26, 102, 204));
+            assert!(draws_ran(&mut surface, 0), "the clear did not run");
+            let mut pixels = vec![0; info.compute_min_byte_size()];
+            let early = EARLY.get();
+            let checked = read_checked(
+                &mut surface,
+                &info,
+                &mut pixels,
+                info.min_row_bytes(),
+                (0, 0),
+                0,
+                None,
+            );
+            assert_eq!(checked, Checked::Read(true));
+            assert_eq!(EARLY.get() - early, 1, "the read was not checked");
+            assert_eq!(FINISHED.get(), 1, "not the copy's buffer alone");
+            assert_eq!(&pixels[..4], &[26, 102, 204, 255], "not the clear");
+        }
+
+        #[test]
+        fn a_queue_that_sees_no_buffers_fails_the_read() {
+            let Some(mut canvas) = ready() else {
+                return;
+            };
+            BLIND_FOR_TEST.set(true);
+            let got = read(&mut canvas);
+            BLIND_FOR_TEST.set(false);
+            assert_discarded_because(got, BLIND);
+        }
+
+        /// The queue of ours answers as Metal's does for every message of
+        /// the protocol: those Skia M156 sends (`commandBuffer`, and `label`
+        /// in its JSON dump), `commandBufferWithDescriptor:`, which Skia
+        /// sends once rust-skia stops patching out its `@available` check,
+        /// and the rest.
+        #[test]
+        fn the_queue_of_ours_answers_as_metal_s_does() {
+            let Some(device) = MTLCreateSystemDefaultDevice() else {
+                eprintln!("skipped: no Metal device");
+                return;
+            };
+            let inner = device.newCommandQueue().expect("a queue");
+            let ours = RecordingQueue::new(inner.clone());
+            let ours: &ProtocolObject<dyn MTLCommandQueue> =
+                ProtocolObject::from_ref(&*ours);
+            let protocol = <dyn MTLCommandQueue>::protocol()
+                .expect("MTLCommandQueue is registered");
+            assert!(inner.conformsToProtocol(protocol));
+            assert!(ours.conformsToProtocol(protocol));
+            let selectors: [Sel; 11] = [
+                sel!(commandBuffer),
+                sel!(commandBufferWithDescriptor:),
+                sel!(commandBufferWithUnretainedReferences),
+                sel!(label),
+                sel!(setLabel:),
+                sel!(device),
+                sel!(insertDebugCaptureBoundary),
+                sel!(addResidencySet:),
+                sel!(addResidencySets:count:),
+                sel!(removeResidencySet:),
+                sel!(removeResidencySets:count:),
+            ];
+            for selector in selectors {
+                assert_eq!(
+                    ours.respondsToSelector(selector),
+                    inner.respondsToSelector(selector),
+                    "{selector:?}"
+                );
+            }
+            assert!(ours.commandBuffer().is_some());
+        }
     }
 }

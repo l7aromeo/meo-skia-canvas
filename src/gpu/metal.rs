@@ -7,7 +7,8 @@ use serde_json::{Value, json};
 use skia_safe::{
     ImageInfo, Surface,
     gpu::{
-        Budgeted, DirectContext, SurfaceOrigin, direct_contexts, mtl, surfaces,
+        Budgeted, DirectContext, DirectContextId, SurfaceOrigin,
+        direct_contexts, mtl, surfaces,
     },
 };
 use std::{
@@ -18,10 +19,39 @@ use std::{
 
 use crate::{context::page::ExportOptions, gpu::ThreadBound};
 
+mod recording;
+
+#[cfg(test)]
+pub(crate) use recording::{
+    BLIND, BLIND_FOR_TEST, BUFFER_DISCARDED, FINISHED, MADE, WAITED,
+};
+pub(crate) use recording::{Mark, RecordingQueue};
+
 thread_local!(
     static MTL_CONTEXT: RefCell<Option<MetalContext>> =
         const { RefCell::new(None) };
+    /// This thread's offscreen context's queue of ours, and the id of the
+    /// context it belongs to. Held beside `MTL_CONTEXT` rather than in it, so
+    /// that a read reaches it without borrowing the context, which a caller
+    /// may hold.
+    static RECORDING: RefCell<
+        Option<(DirectContextId, Retained<RecordingQueue>)>,
+    > = const { RefCell::new(None) };
 );
+
+/// The queue of ours that `context`'s command buffers come from, where
+/// `context` is this thread's offscreen context. `None` for any other: a
+/// window's context makes its buffers on Metal's queue directly.
+pub(crate) fn recording(
+    context: &DirectContext,
+) -> Option<Retained<RecordingQueue>> {
+    let id = context.id();
+    RECORDING.with_borrow(|held| {
+        held.as_ref()
+            .filter(|(of, _)| *of == id)
+            .map(|(_, queue)| queue.clone())
+    })
+}
 static MTL_CONTEXT_LIFESPAN: Duration = Duration::from_secs(5);
 static MTL_STATUS: OnceLock<Value> = OnceLock::new();
 
@@ -159,8 +189,8 @@ impl MetalEngine {
 /// The pointer is handed over unretained, which is what both consumers expect:
 /// `mtl::BackendContext::new` and `mtl::TextureInfo::new` each retain what they
 /// are given and release it when they drop. So the caller is free to let its
-/// own `Retained` go -- as `MetalContext::new` does with the command queue,
-/// which the context never stores.
+/// own `Retained` go -- as `MetalContext::new` does with Metal's command
+/// queue, which only its queue of ours goes on holding.
 fn handle_of<T>(object: &T) -> mtl::Handle {
     std::ptr::from_ref(object).cast()
 }
@@ -179,7 +209,9 @@ impl MetalContext {
     fn new() -> Option<Self> {
         autoreleasepool(|_| {
             MTLCreateSystemDefaultDevice().and_then(|device| {
-                let queue = device.newCommandQueue()?;
+                // Skia makes its buffers on a queue of ours, so that a read
+                // can confirm each one -- see `recording`.
+                let queue = RecordingQueue::new(device.newCommandQueue()?);
                 // SAFETY: `handle_of` explains the contract above --
                 // `BackendContext::new` retains both handles and releases
                 // them when it drops. Device and queue are live `Retained`
@@ -204,6 +236,7 @@ impl MetalContext {
                     })
                     .collect();
                 direct_contexts::make_metal(&backend, None).map(|context| {
+                    RECORDING.set(Some((context.id(), queue)));
                     MetalContext {
                         device,
                         context,
@@ -537,5 +570,37 @@ impl MetalBackend {
         }
 
         Ok(surface.image_snapshot())
+    }
+}
+
+#[cfg(all(test, feature = "window"))]
+mod tests {
+    use objc2_quartz_core::CAMetalLayer;
+
+    use super::{MADE, MetalBackend, MetalEngine};
+    use objc2_metal::MTLCreateSystemDefaultDevice;
+
+    /// A window's context makes its buffers on Metal's queue: nothing reads
+    /// back from a drawable, so there is nothing for a queue of ours to
+    /// confirm.
+    #[test]
+    fn a_window_s_context_makes_no_queue_of_ours() {
+        if !MetalEngine::supported() {
+            eprintln!("skipped: no Metal context");
+            return;
+        }
+        let Some(device) = MTLCreateSystemDefaultDevice() else {
+            return;
+        };
+        let layer = CAMetalLayer::new();
+        layer.setDevice(Some(&device));
+        let made = MADE.get();
+        let backend = MetalBackend::for_layer(&layer);
+        assert_eq!(
+            MADE.get(),
+            made,
+            "the window's context made a queue of ours"
+        );
+        drop(backend);
     }
 }
