@@ -684,6 +684,22 @@ impl VulkanContext {
     ) -> Result<Surface, String> {
         self.last_use = Instant::now();
         let msaa = self.msaa_for_color_type(image_info.color_type());
+        // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
+        // Re-check: run a_read_between_draws_changes_no_later_pixel on Mali
+        //
+        // The page is multisampled, and a read between draws ends its render
+        // pass. Where Ganesh keeps the page's samples for the pass that
+        // follows, a read changes nothing drawn after it. Where it prefers a
+        // discardable attachment, it opens the next pass by loading the
+        // resolved pixel into every sample, and a fill drawn over an edge
+        // after a read lands up to 94 levels from the same draws unread: seen
+        // on Metal with that preference forced on (the note on `MetalContext`
+        // in `gpu::metal`). `GrVkCaps.cpp:404-418` prefers it for an
+        // ARM-vendor device with lazily allocated memory, which a Mali GPU is,
+        // so there a read is inferred, not seen, to change what follows --
+        // #503, whose reproduction is the test above. CI's Vulkan is
+        // lavapipe, which does not take that path, so the test passes there
+        // without reaching it.
         surfaces::render_target(
             &mut self.context,
             Budgeted::Yes,
