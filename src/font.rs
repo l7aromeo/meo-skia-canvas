@@ -999,7 +999,9 @@ impl FontLibrary {
         Self {
             inner: Mutex::new(FontManagerInner {
                 provider: TypefaceFontProvider::new(),
-                font_mgr: FontMgr::new(),
+                font_mgr: SharedFontRegistry::with_shared(|library| {
+                    library.system_font_mgr()
+                }),
                 families: Vec::new(),
             }),
         }

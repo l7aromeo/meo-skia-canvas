@@ -3,8 +3,7 @@
 use crate::{
     color::skia_color_to_rgba_linear,
     context::{BoxedContext2D, Context2D},
-    font_library::FontLibrary,
-    image::{Svg, decode_frame, families_named, frame_delays},
+    image::{Svg, decode_frame, frame_delays},
     node::external::External,
     started,
     utils::*,
@@ -386,19 +385,11 @@ impl ImageData {
 /// therefore the only way to change it, which is why this is a function
 /// rather than a branch: `set_data` and `set_current_color` both need it and
 /// must not drift apart.
-fn record_svg(
+pub(crate) fn record_svg(
     data: &Data,
     current_color: Option<Color>,
 ) -> Option<(Content, bool)> {
-    let dom = FontLibrary::with_shared(|lib| {
-        let generics = lib.generic_families();
-        let claimed = lib.claimed_families();
-        // The families first: the manager is built to answer them, so it
-        // cannot be built before they are known. See `families_named`.
-        let wanted = families_named(data, &generics, &claimed);
-        Svg::parse_dom(data, lib.font_mgr(&wanted), &generics, &claimed)
-    })
-    .ok()?;
+    let dom = Svg::parse_shared(data).ok()?;
     let mut parsed = Svg::from_dom(dom);
     if let Some(color) = current_color {
         parsed.set_current_color(skia_color_to_rgba_linear(color));
