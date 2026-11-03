@@ -133,6 +133,7 @@ are added, and the CSS strings read the math functions and every length unit.
 
 ### Fixed
 
+- **A `drop-shadow()` filter on an eight-bit wide-gamut canvas stores its colour's exact bytes, never a colour byte above its alpha.** ([#491](https://github.com/l7aromeo/meo-skia-canvas/issues/491))
 - **A blurred path on an eight-bit wide-gamut canvas stores a fill's bytes inside it.** ([#428](https://github.com/l7aromeo/meo-skia-canvas/pull/428), [#433](https://github.com/l7aromeo/meo-skia-canvas/issues/433))
 - **A blurred rectangle on an eight-bit canvas blurs the bytes a fill of its colour stores, as a blurred path does.** ([#478](https://github.com/l7aromeo/meo-skia-canvas/pull/478), [#473](https://github.com/l7aromeo/meo-skia-canvas/issues/473))
 - **A blurred rectangle on an eight-bit Rec. 2020 PQ or HLG canvas on the GPU engine stores a fill's bytes inside it.** ([#479](https://github.com/l7aromeo/meo-skia-canvas/issues/479))

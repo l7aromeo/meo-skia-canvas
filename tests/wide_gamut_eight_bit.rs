@@ -440,6 +440,95 @@ fn a_drop_shadow_on_an_eight_bit_wide_gamut_canvas_draws_the_fill_s_bytes() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
+/// A white drop-shadow on an eight-bit Display P3 or Rec2020 canvas stores
+/// white: each colour byte its alpha byte, wherever the shadow alone lands.
+/// A fill of white stores its alpha in every channel, and premultiplied
+/// colour above its alpha is no colour at all. Through Skia's blend filter
+/// the shadow's white was converted on the way and came out above 1, and
+/// the shadow stored `[42, 42, 41, 41]`: at one alpha in about 1,500, so
+/// the shadows here are many, of a disc placed off the pixel grid.
+#[test]
+fn a_white_drop_shadow_on_an_eight_bit_wide_gamut_canvas_stores_white() {
+    const SIZE: usize = 40;
+    let mut failures = vec![];
+    for (space, gpu) in [Space::DisplayP3, Space::Rec2020]
+        .into_iter()
+        .flat_map(|space| ENGINES.map(|gpu| (space, gpu)))
+    {
+        let mut parted = 0;
+        let mut first = None;
+        for (a, sigma, shift) in [0.3, 1.0].into_iter().flat_map(|a| {
+            [2.0, 2.5, 3.0, 4.0, 4.75, 5.0, 6.0, 8.0]
+                .into_iter()
+                .flat_map(move |sigma| {
+                    [0.0, 0.3, 0.55, 0.8].map(move |shift| (a, sigma, shift))
+                })
+        }) {
+            let disc = |ctx: &mut Context2D| {
+                ctx.set_fill_style_css("black").expect("a colour");
+                ctx.begin_path();
+                ctx.arc(20.0 + shift, 20.0 - shift, 7.0, 0.0, 7.0, false)
+                    .expect("an arc");
+                ctx.fill(FillRule::NonZero);
+            };
+            let read = |filter: Option<String>| {
+                let mut canvas = Canvas::with_options(
+                    SIZE as f32,
+                    SIZE as f32,
+                    CanvasOptions {
+                        color_space: space.pixels(),
+                        ..CanvasOptions::default()
+                    },
+                )
+                .expect("a canvas");
+                canvas.set_gpu(gpu);
+                let ctx = canvas.context();
+                if let Some(filter) = filter {
+                    ctx.set_filter_css(&filter).expect("a filter");
+                }
+                disc(ctx);
+                ctx.get_image_data_as(
+                    0.0,
+                    0.0,
+                    SIZE as f32,
+                    SIZE as f32,
+                    PixelExportOptions {
+                        color_space: space.pixels(),
+                        premultiplied: true,
+                        ..PixelExportOptions::default()
+                    },
+                )
+                .expect("the pixels")
+                .pixels()
+                .to_vec()
+            };
+            let alone = read(None);
+            let shadowed = read(Some(format!(
+                "drop-shadow({shift}px 0 {sigma}px rgb(255 255 255 / {a}))"
+            )));
+            for (i, (p, under)) in shadowed
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(alone.as_chunks::<4>().0)
+                .enumerate()
+            {
+                if under[3] == 0 && p[..3].iter().any(|&c| c != p[3]) {
+                    parted += 1;
+                    first.get_or_insert((a, sigma, shift, i, p.to_vec()));
+                }
+            }
+        }
+        if parted > 0 {
+            failures.push(format!(
+                "{space:?}, gpu {gpu}: {parted} shadow pixels not white, \
+                 first {first:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
 /// The fill colours a PDF and an SVG of `canvas` write: the operands of the
 /// PDF's `rg` and the SVG's `fill` attributes.
 fn written(canvas: &mut Canvas) -> (Vec<String>, Vec<String>) {
