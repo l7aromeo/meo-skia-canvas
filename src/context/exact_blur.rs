@@ -189,6 +189,12 @@ pub(crate) fn gaussian_sum(sigma: f64) -> f64 {
 ///
 /// A sigma that is zero, negative or not a number leaves that axis alone,
 /// and an infinite one spreads it to nothing.
+///
+/// Where both axes are summed tap by tap, a channel whose plane holds the
+/// same bits as another's is blurred once and copied, and a plane of +0.0
+/// is left as it is -- see [`Planes`]. A drop shadow in black or grey
+/// tints its colour channels to nothing or to one plane, and is blurred a
+/// plane or two at a time instead of four.
 pub(crate) fn blur(
     pixels: Vec<f32>,
     width: usize,
@@ -196,38 +202,171 @@ pub(crate) fn blur(
     sigma_x: f32,
     sigma_y: f32,
 ) -> Vec<f32> {
-    blur_in::<f64>(pixels, width, height, sigma_x, sigma_y)
+    match Planes::of(&pixels, sigma_x, sigma_y) {
+        Some(planes) => planes.blurred(pixels, width, height, sigma_x, sigma_y),
+        None => blur_in::<f64>(pixels, width, height, sigma_x, sigma_y),
+    }
+}
+
+/// The most distinct planes, other than planes of +0.0, that [`blur`]
+/// blurs one at a time: each costs a quarter of the four-channel sums and
+/// its own re-layout. Chosen, not derived: a black or grey shadow has one
+/// or two, and three or four were not measured to pay.
+const MOST_DISTINCT_PLANES: usize = 2;
+
+/// Which of an image's four channels [`blur`] can work as planes of their
+/// own: each channel either a plane of +0.0, or one with the same bits as
+/// the first channel that holds them.
+///
+/// Tap by tap, a channel's sums read that channel alone -- every weight
+/// times that channel's values, added in one order whichever lane holds it
+/// -- so two channels whose planes hold the same bits come out the same
+/// bits, and a plane of +0.0 comes out +0.0. So the key is the bits of the
+/// plane, not the colour that made it: two colours equal to the eye can
+/// tint to planes an ulp apart, and those are blurred apart. The FFT does
+/// not hold to this, since it works two channels in one transform and each
+/// takes the other's round-off, so an axis through it keeps all four.
+struct Planes {
+    /// Per channel, `None` for a plane of +0.0, or the channel holding the
+    /// same bits first.
+    source: [Option<usize>; 4],
+}
+
+impl Planes {
+    /// The planes of `pixels` where both axes are summed tap by tap and no
+    /// more than [`MOST_DISTINCT_PLANES`] are distinct, or `None`.
+    fn of(pixels: &[f32], sigma_x: f32, sigma_y: f32) -> Option<Planes> {
+        let by_taps = |sigma: f32| {
+            !(sigma.is_finite() && sigma > 0.0)
+                || method(sigma) == Method::Direct
+        };
+        if !(by_taps(sigma_x) && by_taps(sigma_y)) {
+            return None;
+        }
+        // In one pass, which channels are all +0.0 and which pairs hold
+        // the same bits, stopping as soon as no channel is either: a
+        // coloured shadow's first opaque pixel ends it.
+        let (mut zero, mut same) = ([true; 4], [[true; 4]; 4]);
+        for p in pixels.as_chunks::<4>().0 {
+            let bits = p.map(f32::to_bits);
+            let mut any = false;
+            for c in 0..4 {
+                zero[c] &= bits[c] == 0;
+                any |= zero[c];
+                for d in 0..c {
+                    same[c][d] &= bits[c] == bits[d];
+                    any |= same[c][d];
+                }
+            }
+            if !any {
+                return None;
+            }
+        }
+        let mut source = [None; 4];
+        for c in 0..4 {
+            source[c] = match zero[c] {
+                true => None,
+                false => Some(
+                    (0..c)
+                        .find(|&d| source[d] == Some(d) && same[c][d])
+                        .unwrap_or(c),
+                ),
+            };
+        }
+        let distinct = (0..4).filter(|&c| source[c] == Some(c)).count();
+        (distinct <= MOST_DISTINCT_PLANES).then_some(Planes { source })
+    }
+
+    /// `pixels` blurred plane by plane, each distinct plane once.
+    fn blurred(
+        &self,
+        mut pixels: Vec<f32>,
+        width: usize,
+        height: usize,
+        sigma_x: f32,
+        sigma_y: f32,
+    ) -> Vec<f32> {
+        let blurred: Vec<(usize, Vec<f32>)> = (0..4)
+            .filter(|&c| self.source[c] == Some(c))
+            .map(|c| {
+                let plane = pixels.iter().skip(c).step_by(4).copied();
+                let plane = blur_plane::<f64>(
+                    plane.collect(),
+                    width,
+                    height,
+                    sigma_x,
+                    sigma_y,
+                );
+                (c, plane)
+            })
+            .collect();
+        let plane_of = |c: usize| {
+            blurred
+                .iter()
+                .find(|(d, _)| *d == c)
+                .map(|(_, plane)| plane)
+        };
+        // A plane of +0.0 blurs to itself, and is left where it is.
+        for c in 0..4 {
+            if let Some(plane) = self.source[c].and_then(plane_of) {
+                pixels
+                    .iter_mut()
+                    .skip(c)
+                    .step_by(4)
+                    .zip(plane)
+                    .for_each(|(v, &b)| *v = b);
+            }
+        }
+        pixels
+    }
 }
 
 /// Blurs `alpha`, one float a pixel `width` by `height`, as [`blur_bytes`]
 /// blurs a channel, in f32, for a layer whose result is rounded to bytes,
-/// and returns it in the buffer it came in. Four rows of it go through the
-/// row pass as the four channels of one line, and four columns through the
-/// column pass, so that each is summed by the code that sums a channel, at
-/// a quarter of the work of blurring four. Tap by tap that is the alpha
-/// [`blur_in`] gives in f32, bit for bit. Through the FFT a channel shares
-/// its transform with another -- see [`fourier`] -- here a neighbouring
-/// row's or column's alpha where there it is blue, and the two differ by
-/// float rounding.
+/// and returns it in the buffer it came in -- see [`blur_plane`]. Tap by
+/// tap that is the alpha [`blur_in`] gives in f32, bit for bit. Through the
+/// FFT a channel shares its transform with another -- see [`fourier`] --
+/// here a neighbouring row's or column's alpha where there it is blue, and
+/// the two differ by float rounding.
 pub(crate) fn blur_alpha(
-    mut alpha: Vec<f32>,
+    alpha: Vec<f32>,
+    width: usize,
+    height: usize,
+    sigma_x: f32,
+    sigma_y: f32,
+) -> Vec<f32> {
+    blur_plane::<f32>(alpha, width, height, sigma_x, sigma_y)
+}
+
+/// Blurs `plane`, one float a pixel `width` by `height`, in `L`, and
+/// returns it in the buffer it came in. Four rows of it go through the row
+/// pass as the four channels of one line, and four columns through the
+/// column pass, so that each is summed by the code that sums a channel, at
+/// a quarter of the work of blurring four.
+///
+/// Keep the re-layout indexed: the same moves written as chunked copies --
+/// rows interleaved band by band, the rows put back before the columns are
+/// gathered four pixels at a time -- drew an 8-bit drop shadow 2.5 to 3.0%
+/// slower in a release build.
+fn blur_plane<L: Lane>(
+    mut plane: Vec<f32>,
     width: usize,
     height: usize,
     sigma_x: f32,
     sigma_y: f32,
 ) -> Vec<f32> {
     if width == 0 || height == 0 {
-        return alpha;
+        return plane;
     }
     // Rows `4 * band` to `4 * band + 3`, each in a channel of band `band`.
     let bands = height.div_ceil(4);
     let mut rows = vec![0.0; width * bands * 4];
-    for (y, row) in alpha.chunks(width).enumerate() {
+    for (y, row) in plane.chunks(width).enumerate() {
         for (x, &v) in row.iter().enumerate() {
             rows[(y / 4 * width + x) * 4 + y % 4] = v;
         }
     }
-    pass::<f32>(&mut rows, width, bands, sigma_x);
+    pass::<L>(&mut rows, width, bands, sigma_x);
     // Columns `4 * band` to `4 * band + 3`, each in a channel of band `band`.
     let bands = width.div_ceil(4);
     let mut columns = vec![0.0; height * bands * 4];
@@ -237,13 +376,13 @@ pub(crate) fn blur_alpha(
                 rows[(y / 4 * width + x) * 4 + y % 4];
         }
     }
-    pass::<f32>(&mut columns, height, bands, sigma_y);
-    for (y, row) in alpha.chunks_mut(width).enumerate() {
+    pass::<L>(&mut columns, height, bands, sigma_y);
+    for (y, row) in plane.chunks_mut(width).enumerate() {
         for (x, v) in row.iter_mut().enumerate() {
             *v = columns[(x / 4 * height + y) * 4 + x % 4];
         }
     }
-    alpha
+    plane
 }
 
 /// Blurs `pixels`, premultiplied RGBA bytes, as [`blur`] does but in f32,
@@ -1027,5 +1166,133 @@ mod tests {
         assert!(farthest > 0.0, "the FFT's partners never moved a value");
         assert!(farthest < FFT_PARTNER_NOISE, "{farthest} apart");
         println!("through the FFT, farthest apart {farthest}");
+    }
+
+    /// A shadow's layer `w` by `h`: an alpha of noise over a block, each
+    /// pixel's colour `tint` times its alpha, as a tint colours a shadow.
+    fn tinted(w: usize, h: usize, tint: [f32; 3]) -> Vec<f32> {
+        let mut seed = 41;
+        (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = (i % w, i / w);
+                let inside = (w / 4..3 * w / 4).contains(&x)
+                    && (h / 4..3 * h / 4).contains(&y);
+                let a = match inside {
+                    true => 0.9,
+                    false => (lcg(&mut seed) % 1000) as f32 / 4000.0,
+                };
+                [tint[0] * a, tint[1] * a, tint[2] * a, a]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_blur_by_planes_keeps_every_bit_of_four_channels() {
+        // Black, grey and coloured shadows, opaque and translucent -- the
+        // translucency is the tint's own alpha, folded into the plane --
+        // either side of the FFT, on the calling thread and split.
+        let tints = [
+            [0.0, 0.0, 0.0],
+            [0.5, 0.5, 0.5],
+            [0.25, 0.25, 0.25],
+            [0.78, 0.16, 0.35],
+            [0.0, 0.6, 0.0],
+            // A plane of -0.0, which is not a plane of nothing: its blur
+            // is +0.0 wherever a tap reaches past the edge.
+            [0.0, 0.0, -0.0],
+        ];
+        let gains = [1.0, 0.45];
+        let sigmas = [
+            (0.5, 0.5),
+            (3.0, 3.0),
+            (4.9, 4.75),
+            (4.9, 5.0),
+            (5.0, 5.0),
+            (8.0, 8.0),
+            (1.5, 0.0),
+            (0.0, 3.0),
+        ];
+        let (mut compared, mut by_planes) = (0, 0);
+        for (w, h) in [(1, 1), (7, 3), (59, 56), (400, 300)] {
+            for tint in tints {
+                for gain in gains {
+                    let mut layer = tinted(w, h, tint);
+                    layer.iter_mut().for_each(|v| *v *= gain);
+                    for sigma in sigmas {
+                        let ours = blur(layer.clone(), w, h, sigma.0, sigma.1);
+                        let four = blur_in::<f64>(
+                            layer.clone(),
+                            w,
+                            h,
+                            sigma.0,
+                            sigma.1,
+                        );
+                        let differs = ours
+                            .iter()
+                            .zip(&four)
+                            .position(|(a, b)| a.to_bits() != b.to_bits());
+                        assert_eq!(
+                            differs, None,
+                            "{w}x{h}, tint {tint:?} at {gain}, sigma {sigma:?}"
+                        );
+                        if Planes::of(&layer, sigma.0, sigma.1).is_some() {
+                            by_planes += 1;
+                        }
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 4 * 6 * 2 * 8);
+        // Black, grey, the green with no red or blue and the black with a
+        // blue of -0.0 -- two planes each -- at the five pairs summed tap
+        // by tap on both axes.
+        assert_eq!(by_planes, 4 * 5 * 2 * 5);
+    }
+
+    #[test]
+    fn the_planes_are_told_apart_by_their_bits() {
+        let black = tinted(9, 7, [0.0, 0.0, 0.0]);
+        let grey = tinted(9, 7, [0.5, 0.5, 0.5]);
+        let planes =
+            |layer: &[f32]| Planes::of(layer, 2.0, 2.0).map(|p| p.source);
+        assert_eq!(planes(&black), Some([None, None, None, Some(3)]));
+        assert_eq!(planes(&grey), Some([Some(0), Some(0), Some(0), Some(3)]));
+        let signed = tinted(9, 7, [0.0, 0.0, -0.0]);
+        assert_eq!(planes(&signed), Some([None, None, Some(2), Some(3)]));
+        // Through the FFT on either axis, all four are kept.
+        assert!(Planes::of(&black, 5.0, 2.0).is_none());
+        assert!(Planes::of(&black, 2.0, 8.0).is_none());
+        // Three distinct planes are blurred as four channels.
+        assert!(Planes::of(&tinted(9, 7, [0.1, 0.2, 0.3]), 2.0, 2.0).is_none());
+    }
+
+    #[test]
+    fn a_plane_an_ulp_from_another_is_blurred_apart() {
+        // Red an ulp above green: two colours a reader would call the same,
+        // and two planes of different bits, so red, green and alpha are
+        // three distinct planes and the image is blurred as four channels.
+        let (w, h) = (31, 23);
+        let mut layer = tinted(w, h, [0.5, 0.5, 0.0]);
+        for px in layer.as_chunks_mut::<4>().0 {
+            px[0] = f32::from_bits(px[1].to_bits() + 1);
+        }
+        assert!(Planes::of(&layer, 2.0, 3.0).is_none());
+        let ours = blur(layer.clone(), w, h, 2.0, 3.0);
+        let four = blur_in::<f64>(layer, w, h, 2.0, 3.0);
+        assert!(
+            ours.iter()
+                .zip(&four)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+        // And red does not blur to green's bits, so taking one for the
+        // other would show.
+        let apart = ours
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[0].to_bits() != p[1].to_bits())
+            .count();
+        assert!(apart > w * h / 2, "only {apart} pixels tell red from green");
     }
 }
