@@ -7321,12 +7321,6 @@ mod text_reach_tests {
             .iter()
             .zip(&clipped)
             .zip(PLAYBACKS)
-            // The CPU's playbacks alone until #511's pinned test passes: on
-            // the GPU some text is drawn one of two ways by what other text
-            // drew before it, up to 128 levels apart with no filter at all,
-            // so two placements cannot be held to each other there. What the
-            // GPU inks is held to the reach by [`inked_past`] all the same.
-            .filter(|(_, (_, on_gpu, _))| !on_gpu)
             .filter_map(|((a, b), (at, _, _))| {
                 let (a, b) = (a.as_ref()?, b.as_ref()?);
                 Some((

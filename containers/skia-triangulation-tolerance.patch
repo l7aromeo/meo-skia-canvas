@@ -1,0 +1,19 @@
+--- a/skia-bindings/skia/src/gpu/ganesh/ops/TriangulatingPathRenderer.cpp
++++ b/skia-bindings/skia/src/gpu/ganesh/ops/TriangulatingPathRenderer.cpp
+@@ -104,7 +104,15 @@
+ 
+     const TessInfo* info = static_cast<const TessInfo*>(data->data());
+ 
+-    return info->fIsLinear || info->fTolerance < 3.0f * tol;
++    // Reused only at the tolerance it was made at, rather than at any under
++    // three times this one: a triangulation left by a draw of the same path
++    // at another scale -- finer, or up to three times coarser -- made the
++    // same draw cover its edges by what the context had drawn before, by up
++    // to two samples of 4x MSAA. A direct context's createNonAAMesh draws its
++    // own triangulation when this says no, so each draw's triangles follow
++    // from its own tolerance; onPrePrepareDraws, which only a recording
++    // context reaches, can still take the cache's.
++    return info->fIsLinear || info->fTolerance == tol;
+ }
+ 
+ // Should 'challenger' replace 'incumbent' in the cache if there is a collision?
