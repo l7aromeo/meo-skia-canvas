@@ -3633,6 +3633,12 @@ pub fn skia_paint_color_onto(
     // same grid, which no colour handed over can avoid: worked around for
     // sRGB pages here, and for the documents of the pages whose pixels take
     // the colour by a recording of their own -- see `ExactColour`.
+    //
+    // A colour named in sRGB is handed over as it is either way -- sRGB
+    // encoded into sRGB is itself -- so it is not looked up by name.
+    if space.is_srgb() {
+        return (color, ColorSpace::new_srgb());
+    }
     let exact = destination.is_srgb()
         || PixelColorSpace::matching(destination)
             .is_some_and(PixelColorSpace::converts_exactly);
@@ -5971,6 +5977,34 @@ mod tests {
                 .expect("a space");
             let kept = space.to_skia_color_space().expect("a kept space");
             assert!(same(&kept, &built), "{space:?}");
+        }
+    }
+
+    /// A colour named in sRGB reaches the paint as it was named, onto a page
+    /// in any space, which is what the route through its name gave it: sRGB
+    /// encoded into sRGB is itself, and handed over unconverted it is too.
+    #[test]
+    fn a_colour_in_srgb_is_handed_over_as_named_onto_any_page() {
+        let srgb = opt_color_space("srgb").expect("a named space");
+        for page in
+            ["srgb", "srgb-linear", "display-p3", "rec2020", "rec2020-pq"]
+        {
+            let destination = opt_color_space(page).expect("a named space");
+            for colour in [
+                Color4f::new(0.0, 0.0, 0.0, 1.0),
+                Color4f::new(0.25, 0.5, 0.75, 0.4),
+                Color4f::new(1.2, -0.1, 0.5, 1.0),
+            ] {
+                let (got, space) =
+                    skia_paint_color_onto(colour, &srgb, &destination);
+                let named = color_function_to_srgb(colour, "srgb");
+                assert_eq!(
+                    [got.r, got.g, got.b, got.a].map(f32::to_bits),
+                    [named.r, named.g, named.b, named.a].map(f32::to_bits),
+                    "{page}: {colour:?}"
+                );
+                assert!(space.is_srgb(), "{page}: handed over as sRGB");
+            }
         }
     }
 

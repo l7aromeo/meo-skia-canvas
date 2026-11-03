@@ -3356,12 +3356,18 @@ impl Context2D {
         // blur to spread into. See `Filter::filters_for`. And where the
         // coverage blur differs from Chrome's or costs more, the result is
         // blurred for a flat colour too -- see `Coverage`.
-        let has_shader = !matches!(self.state.dye(style), Dye::Color(..));
-        let rendered =
-            has_shader || !self.state.filter.blurs_coverage(coverage);
-        self.state
-            .filter
-            .mix_into(&mut paint, self.state.matrix, rendered);
+        //
+        // A filter that leaves the draw untouched puts nothing on the paint,
+        // which holds no filter of its own, so it is not asked: setting none
+        // twice was 7% of what recording a plain fill cost.
+        if !self.state.filter.is_none() {
+            let has_shader = !matches!(self.state.dye(style), Dye::Color(..));
+            let rendered =
+                has_shader || !self.state.filter.blurs_coverage(coverage);
+            self.state
+                .filter
+                .mix_into(&mut paint, self.state.matrix, rendered);
+        }
 
         // 3. Compose Skia imageFilter with CSS imageFilter (if both present)
         if let Some(skia_imgf) = &self.state.skia_image_filter {
