@@ -36,7 +36,7 @@ use skia_safe::{
     ColorType, IPoint, IRect, Image, ImageInfo, Paint, Rect, shaders,
 };
 #[cfg(any(feature = "metal", feature = "vulkan"))]
-use skia_safe::{Data, RuntimeEffect, color_filters};
+use skia_safe::{ClipOp, Data, RuntimeEffect};
 
 use crate::{cache_map::CacheMap, context::layer::ExactColour, started};
 
@@ -633,8 +633,9 @@ impl MaskCache {
 
 /// The blurred rectangle, per fragment, in device pixels: `rect` is the
 /// device rectangle's left, top, right and bottom, and `k` is
-/// `sigma * sqrt(2)`. Its coverage goes out as a premultiplied white, which
-/// the paint's colour filter turns into the draw's colour.
+/// `sigma * sqrt(2)`. Its coverage goes out as a premultiplied white: under
+/// `SrcIn` with an exact colour, or as the clip shader a fill of the draw's
+/// colour is drawn through -- see [`draw_on_gpu`].
 ///
 /// `erfc` is Numerical Recipes' Chebyshev fit, whose fractional error is
 /// below 1.2e-7 everywhere -- the precision of the `float` it runs in. Each
@@ -925,6 +926,7 @@ fn draw_on_gpu(
         return false;
     };
     let reach = (FLOAT_PRECISION.tail_sigmas * sigma).ceil() as f32 + 1.0;
+    let extent = rect.with_outset((reach, reach));
     let mut paint = Paint::default();
     match exact
         .map(|exact| exact.at(color.a))
@@ -936,17 +938,22 @@ fn draw_on_gpu(
             paint
                 .set_shader(shaders::blend(BlendMode::SrcIn, shader, colour))
                 .set_alpha_f(alpha);
+            canvas.draw_rect(extent, &paint);
         }
+        // Without one, the colour is drawn as a fill draws it, as the
+        // paint's own colour, and the blur is its coverage, through a clip
+        // shader: the interior then stores a fill's bytes. Through a `SrcIn`
+        // colour filter over the coverage instead, a product within 0.05 of
+        // a tie rounded the other way from a fill's -- 9 and 14 of 510
+        // off-grid colours on 8-bit Rec. 2020 PQ and HLG pages.
         None => {
-            paint.set_shader(shader);
-            paint.set_color_filter(color_filters::blend_with_color_space(
-                color,
-                None,
-                BlendMode::SrcIn,
-            ));
+            paint.set_color4f(color, &ColorSpace::new_srgb());
+            canvas.save();
+            canvas.clip_shader(shader, ClipOp::Intersect);
+            canvas.draw_rect(extent, &paint);
+            canvas.restore();
         }
     }
-    canvas.draw_rect(rect.with_outset((reach, reach)), &paint);
     true
 }
 
