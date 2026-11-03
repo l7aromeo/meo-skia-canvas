@@ -394,7 +394,7 @@ jobs:
           cargo test \
             --no-default-features \
             --features "node-addon,vulkan,window,freetype"
-      - name: TEMPORARY full text reach sweep on FreeType
+      - name: TEMPORARY full text reach sweep on FreeType, stroked bound
         if: ${{ !cancelled() }}
         env:
           TEXT_REACH_SWEEP: full
@@ -404,21 +404,21 @@ jobs:
             --no-default-features \
             --features "node-addon,vulkan,window,freetype" \
             --lib -- text_in_a_chain_is_bounded_by_all_it_inks --nocapture
-      - name: TEMPORARY full text reach sweep on FreeType, unhinted bound
+      - name: TEMPORARY full text reach sweep on FreeType, unhinted outline bound
         if: ${{ !cancelled() }}
         env:
           TEXT_REACH_SWEEP: full
-          TEXT_REACH_BOUND: unhinted
+          TEXT_REACH_BOUND: outline-unhinted
         run: |
           cargo test \
             --no-default-features \
             --features "node-addon,vulkan,window,freetype" \
             --lib -- text_in_a_chain_is_bounded_by_all_it_inks --nocapture
-      - name: TEMPORARY full text reach sweep on FreeType, outline bound
+      - name: TEMPORARY full text reach sweep on FreeType, half-width mutant
         if: ${{ !cancelled() }}
         env:
           TEXT_REACH_SWEEP: full
-          TEXT_REACH_BOUND: outline
+          TEXT_REACH_BOUND: stroked-half-width
         run: |
           cargo test \
             --no-default-features \
