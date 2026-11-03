@@ -7,6 +7,7 @@ use std::{
     cell::RefCell,
     cmp,
     collections::HashMap,
+    hash::BuildHasher,
     sync::{Arc, LazyLock, OnceLock},
 };
 
@@ -17,6 +18,7 @@ mod enclosure;
 // how a negative component extends through zero, and nothing would check
 // that it did.
 use crate::{
+    cache_map::CacheHasher,
     color::{
         RgbaLinear, linear_to_srgb, linear_to_srgb_f64, srgb_to_linear,
         srgb_to_linear_f64,
@@ -1425,6 +1427,12 @@ fn srgb_to_color_function(rgb: [f64; 3], space: &str) -> Option<[f64; 3]> {
 /// the ones in [`NAMED_SPACES`], built once, which Skia compares by its two
 /// hashes.
 pub fn color_space_name(space: &ColorSpace) -> Option<&'static str> {
+    // sRGB first, as the list asks, by Skia's own test: every space with
+    // sRGB's code points is the one Skia keeps, so the comparison by hashes
+    // would answer the same, a handle built and dropped later.
+    if space.is_srgb() {
+        return Some("srgb");
+    }
     COLOR_FUNCTION_SPACES
         .into_iter()
         .find(|name| opt_color_space(name).as_ref() == Some(space))
@@ -3500,6 +3508,48 @@ pub fn css_to_declared(css: &str) -> Option<(Color4f, ColorSpace, Declared)> {
     None
 }
 
+/// How many colours [`css_declaration`] keeps on a thread, filed by a hash
+/// of their text: a drawing sets the same few colours again and again, and
+/// a table this size holds a palette of hundreds. A colour filed over
+/// another is read again when it is next set, which costs what reading it
+/// always did.
+const DECLARATIONS_KEPT: usize = 512;
+
+const _: () = assert!(DECLARATIONS_KEPT.is_power_of_two());
+
+/// A colour's text and what [`css_declaration`] read it as.
+type KeptDeclaration = (Box<str>, (Color4f, ColorSpace, Declaration));
+
+thread_local! {
+    /// The colours this thread has read, and the hasher that files them.
+    static DECLARATIONS: (CacheHasher, RefCell<Vec<Option<KeptDeclaration>>>) =
+        (CacheHasher::default(), RefCell::new(vec![None; DECLARATIONS_KEPT]));
+}
+
+/// [`css_to_declared`] as a style setter takes it: the colour, its space and
+/// its declaration, with the declaration's read-back cell -- kept for the
+/// same text, which declares the same colour and reads back the same.
+///
+/// Reading a colour is most of what setting one costs, and a page of fills
+/// in a few colours set each of them hundreds of times: the colours read
+/// this way are kept, so a colour set again is found rather than read.
+pub fn css_declaration(
+    css: &str,
+) -> Option<(Color4f, ColorSpace, Declaration)> {
+    DECLARATIONS.with(|(hasher, kept)| {
+        let slot = hasher.hash_one(css) as usize & (DECLARATIONS_KEPT - 1);
+        if let Some((text, read)) = &kept.borrow()[slot]
+            && **text == *css
+        {
+            return Some(read.clone());
+        }
+        let (color, space, declared) = css_to_declared(css)?;
+        let read = (color, space, Declaration::new(declared));
+        kept.borrow_mut()[slot] = Some((css.into(), read.clone()));
+        Some(read)
+    })
+}
+
 /// Converts a colour into sRGB when it was named in some other space.
 ///
 /// The drawing paths tag a paint with its color space and let Skia convert at
@@ -4097,9 +4147,10 @@ fn declared_css(declared: &Declared, figures: Figures) -> String {
 /// [`declared_to_css`] tries hundreds of spellings for a Lab, LCH, Oklab or
 /// OkLCh colour, and code reads a style far more often than it sets one --
 /// `const old = ctx.fillStyle; ...; ctx.fillStyle = old`. So the string is
-/// made once per declaration and held beside it. Every set builds a new
-/// `Declaration`, so a set is never answered with the string of the colour
-/// it replaced; a clone, which `save()` makes, shares the one cell, so a
+/// made once per declaration and held beside it. A set of a colour's text
+/// takes the declaration [`css_declaration`] keeps for that text, or a new
+/// one, so a set is never answered with the string of the colour it
+/// replaced; a clone, which `save()` makes, shares the one cell, so a
 /// restored style keeps a read-back already written.
 #[derive(Clone, Debug)]
 pub struct Declaration {
@@ -5978,6 +6029,77 @@ mod tests {
             let kept = space.to_skia_color_space().expect("a kept space");
             assert!(same(&kept, &built), "{space:?}");
         }
+    }
+
+    /// A colour set through [`css_declaration`] is what reading its text
+    /// gives -- the colour to the bit, its space and its declaration --
+    /// first time and every time after, for more colours than the table
+    /// holds, so that some are filed over others and read again; and text
+    /// that is no colour is refused every time.
+    #[test]
+    fn a_kept_colour_is_the_colour_its_text_reads_as() {
+        let texts: Vec<String> = (0..1500)
+            .map(|i| match i % 5 {
+                0 => format!("#{:06x}", i * 2711),
+                1 => format!(
+                    "rgb({} {} {} / {})",
+                    i % 256,
+                    (i * 7) % 256,
+                    (i * 13) % 256,
+                    (i % 10) as f32 / 10.0
+                ),
+                2 => format!("color(display-p3 0.{:03} 0.5 0.25)", i % 1000),
+                3 => format!("oklch(0.6 0.1 {}deg)", i % 360),
+                _ => [
+                    "red",
+                    "transparent",
+                    "currentcolor",
+                    "rgb(1 2 3 /* c */)",
+                    "#ff000080",
+                ][i % 5]
+                    .to_string(),
+            })
+            .collect();
+        let bits = |c: Color4f| [c.r, c.g, c.b, c.a].map(f32::to_bits);
+        let mut read = 0;
+        for _ in 0..2 {
+            for text in &texts {
+                let want = css_to_declared(text);
+                let got = css_declaration(text);
+                match (want, got) {
+                    (
+                        Some((colour, space, declared)),
+                        Some((kept, kept_space, kept_declared)),
+                    ) => {
+                        assert_eq!(bits(kept), bits(colour), "{text}");
+                        assert!(kept_space == space, "{text}: the space");
+                        assert_eq!(
+                            *kept_declared.declared(),
+                            declared,
+                            "{text}"
+                        );
+                        assert_eq!(
+                            kept_declared.css(),
+                            declared_to_css(&declared),
+                            "{text}"
+                        );
+                        read += 1;
+                    }
+                    (None, None) => {}
+                    (want, got) => panic!(
+                        "{text}: read {:?}, kept {:?}",
+                        want.is_some(),
+                        got.is_some()
+                    ),
+                }
+            }
+        }
+        assert!(
+            read > 2000,
+            "most of these are colours, or this asserts nothing"
+        );
+        assert!(css_declaration("not a colour").is_none());
+        assert!(css_declaration("not a colour").is_none());
     }
 
     /// A colour named in sRGB reaches the paint as it was named, onto a page

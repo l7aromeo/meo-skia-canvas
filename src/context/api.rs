@@ -80,16 +80,14 @@ verbs! {
     // this verb only when the value is a string and lets everything else cross
     // as it always did.
     set_fillStyleText as SetFillStyleText (fillStyle @ text) => |ctx| {
-        if let Some((color, space, declared)) = css_to_declared(fillStyle) {
-            ctx.state.fill_style =
-                Dye::Color(color, Some(space), Some(Declaration::new(declared)));
+        if let Some((color, space, declared)) = css_declaration(fillStyle) {
+            ctx.state.fill_style = Dye::Color(color, Some(space), Some(declared));
         }
     },
 
     set_strokeStyleText as SetStrokeStyleText (strokeStyle @ text) => |ctx| {
-        if let Some((color, space, declared)) = css_to_declared(strokeStyle) {
-            ctx.state.stroke_style =
-                Dye::Color(color, Some(space), Some(Declaration::new(declared)));
+        if let Some((color, space, declared)) = css_declaration(strokeStyle) {
+            ctx.state.stroke_style = Dye::Color(color, Some(space), Some(declared));
         }
     },
 
@@ -259,9 +257,9 @@ verbs! {
     set_shadowColorText as SetShadowColorText (shadowColor @ text) => |ctx| {
         // A colour, so the same treatment as `fillStyle`: recorded when it is
         // written as a string, and crossing when it is anything else.
-        if let Some((color, space, declared)) = css_to_declared(shadowColor) {
+        if let Some((color, space, declared)) = css_declaration(shadowColor) {
             ctx.state.shadow_color = (color, space);
-            ctx.state.shadow_declared = Some(Declaration::new(declared));
+            ctx.state.shadow_declared = Some(declared);
         }
     },
 
