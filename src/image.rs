@@ -14,6 +14,7 @@ use crate::{
     css,
     decode::bmp::space_of,
     error::Error,
+    font_library::FontLibrary as SharedFonts,
     geometry::Size,
     pixels::{ImageData, PixelColorSpace, PixelExportOptions},
     start_skia, started,
@@ -714,26 +715,45 @@ impl TryFrom<&ImageData> for Image {
 impl Svg {
     /// Parses an SVG XML document without rasterizing it.
     ///
+    /// Text in the document is set in the fonts the library holds, as it is
+    /// for a canvas: a registered family, `sans-serif` as Chrome draws it,
+    /// and the standard serif where the document names no family the library
+    /// has. JavaScript's `loadImage` parses the same way.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::DecodeImage`] if the XML cannot be parsed.
     pub fn parse(xml: &str) -> Result<Self, Error> {
         start_skia();
-        Ok(Self::from_dom(Self::parse_dom(
-            xml.as_bytes(),
-            FontMgr::new(),
-            &[],
-            &[],
-        )?))
+        Ok(Self::from_dom(Self::parse_shared(xml.as_bytes())?))
+    }
+
+    /// Parses SVG bytes against the shared font library: the font manager it
+    /// builds for the families the document names, and its generic and
+    /// claimed family lists.
+    ///
+    /// Both doors into this crate go through here -- [`Svg::parse`] and the
+    /// Neon binding's `record_svg` -- so that a document's text is set in the
+    /// same faces whichever loaded it. The library also holds the system font
+    /// manager, which costs 6.6 ms to build on macOS: a door that built its
+    /// own on every parse paid that for each document.
+    pub(crate) fn parse_shared(xml: &[u8]) -> Result<svg::Dom, Error> {
+        SharedFonts::with_shared(|lib| {
+            let generics = lib.generic_families();
+            let claimed = lib.claimed_families();
+            // The families first: the manager is built to answer them, so it
+            // cannot be built before they are known. See `families_named`.
+            let wanted = families_named(xml, &generics, &claimed);
+            Self::parse_dom(xml, lib.font_mgr(&wanted), &generics, &claimed)
+        })
     }
 
     /// Parses SVG bytes into a document, rewriting what has to be rewritten
     /// before Skia reads it.
     ///
-    /// Both doors into this crate go through here -- [`Svg::parse`] and the
-    /// Neon binding's `record_svg`, which parses its own bytes with a shared
-    /// font manager -- so that the two cannot disagree about what a document
-    /// says. They did once: the rewrite of text positioning lengths landed on
+    /// Every parse goes through here, by way of [`Svg::parse_shared`], so
+    /// that the two doors cannot disagree about what a document says. They
+    /// did once: the rewrite of text positioning lengths landed on
     /// `parse` alone would have left `loadImage` short by six per cent on
     /// exactly the documents the crate side had just fixed.
     pub(crate) fn parse_dom(
@@ -752,9 +772,8 @@ impl Svg {
 
     /// Wraps an already-parsed document, deriving its size once.
     ///
-    /// The Neon binding parses with its own shared `FontMgr` and records the
-    /// result into a `Picture` rather than a raster surface, so it needs the
-    /// sizing without [`Svg::parse`]'s font manager or [`Svg::rasterize`]'s
+    /// The Neon binding records the result into a `Picture` rather than a
+    /// raster surface, so it needs the sizing without [`Svg::rasterize`]'s
     /// surface.
     pub(crate) fn from_dom(mut dom: svg::Dom) -> Self {
         let (intrinsic, autosized) = derive_intrinsic_size(&mut dom);
@@ -2400,6 +2419,7 @@ fn labelled_bmp(image: SkImage, bytes: &[u8]) -> SkImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node::image::{Content, record_svg};
     use skia_safe::textlayout::TypefaceFontProvider;
 
     /// A one-pixel PNG, which is a still image however it is asked about.
@@ -2610,17 +2630,19 @@ mod tests {
     }
 
     /// The x-height ratio of the face a document with no family is drawn
-    /// with, read straight from the font manager.
+    /// with, read straight from the font manager a parse is given.
     ///
+    /// That manager is the shared library's, whose face for a null family is
+    /// the standard serif Chrome draws such a document in -- Times on macOS.
     /// Derived here rather than through `ex_ratio_for` so the expectations
     /// below are not the implementation restating itself, and computed rather
     /// than pinned because which face this is depends on the machine. Read
     /// unhinted, because a hinted x-height is the pixel grid's at 100px rather
-    /// than the face's -- DejaVu Sans, the fallback on a Linux machine, comes
+    /// than the face's -- DejaVu Sans, a fallback on a Linux machine, comes
     /// back 0.55 hinted and 0.546875 unhinted, because its `OS/2` table is
     /// version 1 and carries no `sxHeight`.
     fn fallback_ex_ratio() -> f32 {
-        let typeface = FontMgr::new()
+        let typeface = SharedFonts::with_shared(|lib| lib.font_mgr(&[]))
             .legacy_make_typeface(None, FontStyle::normal())
             .expect("a machine with no fonts at all cannot draw text");
         let mut font = Font::from_typeface(typeface, 100.0);
@@ -4269,6 +4291,112 @@ mod tests {
         assert!(
             (ratio - outline).abs() < 0.0005,
             "x-height {ratio}em, the x outline {outline}em",
+        );
+    }
+
+    /// The family the crate's SVG door test registers: Oswald, under a name
+    /// nothing on the system answers to.
+    const SVG_DOOR_FAMILY: &str = "SvgDoorOswald";
+
+    /// `xml` through each door into this crate -- [`Svg::rasterize`], which
+    /// [`Image::from_svg_xml`] is, and the Neon binding's `record_svg`, drawn
+    /// onto the surface `rasterize` makes -- read back as eight-bit sRGB.
+    fn through_both_doors(xml: &str, width: u32, height: u32) -> [Vec<u8>; 2] {
+        let read = |image: &SkImage| {
+            let info = ImageInfo::new(
+                (width as i32, height as i32),
+                ColorType::RGBA8888,
+                AlphaType::Unpremul,
+                ColorSpace::new_srgb(),
+            );
+            let mut bytes = vec![0; (width * height * 4) as usize];
+            assert!(image.read_pixels(
+                &info,
+                &mut bytes,
+                info.min_row_bytes(),
+                (0, 0),
+                skia_safe::image::CachingHint::Allow,
+            ));
+            bytes
+        };
+        let crate_door = Svg::parse(xml)
+            .expect("valid SVG")
+            .rasterize(width, height)
+            .expect("rasterizes");
+        let Some((Content::Vector(picture, _), _)) =
+            record_svg(&Data::new_copy(xml.as_bytes()), None)
+        else {
+            panic!("the binding records the document");
+        };
+        let info = ImageInfo::new(
+            (width as i32, height as i32),
+            ColorType::RGBAF16,
+            AlphaType::Premul,
+            ColorSpace::new_srgb_linear(),
+        );
+        let mut surface =
+            started::raster(&info, None, None).expect("a surface");
+        surface.canvas().clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
+        surface.canvas().draw_picture(&picture, None, None);
+        [read(&crate_door.inner), read(&surface.image_snapshot())]
+    }
+
+    /// SVG text drawn through the crate, and the same document loaded through
+    /// the binding, draw the same glyphs: a registered family, a generic, and
+    /// no family at all, where Chrome draws the standard serif.
+    ///
+    /// The two doors once parsed differently -- the crate with a fresh system
+    /// font manager and no family lists, the binding with the library's --
+    /// so a registered family was invisible to the crate and a document
+    /// naming none fell back to a different face. Each document is also
+    /// checked to draw something, and the registered family to draw other
+    /// than the fallback, so that two blank or two fallback images cannot
+    /// agree for the wrong reason.
+    ///
+    /// The `sans-serif` row agreed before that fix on macOS, where the
+    /// system's own `sans-serif` is the face Chrome draws; it is here for the
+    /// platforms where it is not, and is not shown to fail on any.
+    #[test]
+    fn svg_text_draws_the_same_through_the_crate_and_the_binding() {
+        crate::font::FontLibrary::new()
+            .register_font_from_path(
+                SVG_DOOR_FAMILY,
+                "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+            )
+            .expect("a bundled face registers");
+        let document = |family: &str| {
+            format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="60"><text x="8" y="44" font-size="36"{family}>Hamburgefons</text></svg>"#
+            )
+        };
+        let mut drawn = Vec::new();
+        for (label, family) in [
+            (
+                "a registered family",
+                format!(r#" font-family="{SVG_DOOR_FAMILY}""#),
+            ),
+            ("sans-serif", r#" font-family="sans-serif""#.to_string()),
+            ("no family", String::new()),
+        ] {
+            let [crate_door, binding] =
+                through_both_doors(&document(&family), 240, 60);
+            assert!(
+                crate_door
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| pixel[3] > 0),
+                "{label}: the document draws text"
+            );
+            assert!(
+                crate_door == binding,
+                "{label}: the two doors draw differently"
+            );
+            drawn.push(crate_door);
+        }
+        assert!(
+            drawn[0] != drawn[2],
+            "the registered family is not the fallback"
         );
     }
 }

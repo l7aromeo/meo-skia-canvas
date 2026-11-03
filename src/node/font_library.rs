@@ -1187,6 +1187,15 @@ impl FontLibrary {
         self.svg_font_mgr(&system, wanted)
     }
 
+    /// The platform's font manager, as this library holds it.
+    ///
+    /// Built once a thread, with the library. A new one costs 6.6 ms on
+    /// macOS, so a caller that needs the system's fonts -- a crate handle, a
+    /// text engine -- takes this one rather than building its own.
+    pub(crate) fn system_font_mgr(&self) -> FontMgr {
+        self.mgr.clone()
+    }
+
     /// The manager [`FontLibrary::font_mgr`] builds, with the system manager
     /// passed in rather than read from `self`.
     ///

@@ -607,6 +607,11 @@ for (const [format, options] of ANIMATIONS)
     };
   });
 
+// Loading an SVG and drawing it onto the page, the same operation as the
+// crate's case of this id. Each side takes its own surface's route: here the
+// document is recorded as vectors and replayed by the draw, where the crate
+// rasterizes it at the page's size first, so the two differ by what that
+// route costs and not by what was asked.
 for (const elements of [60, 2000])
   add(`decode/svg-${elements}/cpu`, () => {
     const source = svgDoc(elements);

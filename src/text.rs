@@ -9,9 +9,8 @@ use std::{
 };
 
 use skia_safe::{
-    Canvas as SkCanvas, Color4f, FontArguments, FontMgr, FontStyle,
-    FourByteTag, Paint as SkPaint, PaintStyle as SkPaintStyle,
-    Point as SkPoint, Typeface,
+    Canvas as SkCanvas, Color4f, FontArguments, FontStyle, FourByteTag,
+    Paint as SkPaint, PaintStyle as SkPaintStyle, Point as SkPoint, Typeface,
     font_arguments::{VariationPosition, variation_position::Coordinate},
     font_parameters::variation::Axis,
     font_style::{Slant, Weight},
@@ -1243,7 +1242,9 @@ impl TextEngine {
         // so once any font was registered, every lookup returned
         // it, including one that named no family at all. The Node FontLibrary
         // has always passed a name here; this mirrors it.
-        let system_fonts = FontMgr::new();
+        let system_fonts = SharedFontRegistry::with_shared(|library| {
+            library.system_font_mgr()
+        });
         let default_family = system_fonts
             .legacy_make_typeface(None, FontStyle::default())
             .map(|face| face.family_name());
@@ -1274,7 +1275,9 @@ impl TextEngine {
         // does not -- a strut naming no family measured `-inf` on a machine
         // carrying only DejaVu, where the same strut naming `DejaVu Sans`
         // measured 64.
-        let system_fonts = FontMgr::new();
+        let system_fonts = SharedFontRegistry::with_shared(|library| {
+            library.system_font_mgr()
+        });
         let default_family = system_fonts
             .legacy_make_typeface(None, FontStyle::default())
             .map(|face| face.family_name());
