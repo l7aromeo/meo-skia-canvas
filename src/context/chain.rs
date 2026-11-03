@@ -1043,9 +1043,18 @@ fn shadowed(
         draw(surface.canvas());
         Some(surface.image_snapshot())
     };
-    let source = on_floats(&|canvas| {
-        canvas.draw_image(&raster, (0, 0), None);
-    })?;
+    // The source in floats: the raster itself where it already is them,
+    // premultiplied, as an F32 page's layer is -- drawn onto a cleared
+    // surface of its own kind it would come back as itself, each value
+    // plus nothing -- and drawn into floats otherwise.
+    let source = match raster.color_type() == ColorType::RGBAF32
+        && raster.alpha_type() == AlphaType::Premul
+    {
+        true => raster.clone(),
+        false => on_floats(&|canvas| {
+            canvas.draw_image(&raster, (0, 0), None);
+        })?,
+    };
     let tint = tint(colour, space, raster.image_info())?;
     let tinted = filtered(None, &source, &tint, 1.0)?;
     let shadow = match sigma.0 > 0.0 || sigma.1 > 0.0 {
@@ -1326,14 +1335,15 @@ fn to_raster(context: Option<&Gpu>, image: &Image) -> Option<Image> {
 #[cfg(test)]
 mod tests {
     use skia_safe::{
-        AlphaType, Color, Color4f, ColorSpace, ColorType, Data, Image,
-        ImageInfo, Matrix, Paint, PathBuilder, PictureRecorder, Rect, Surface,
-        Vector, image::CachingHint,
+        AlphaType, Canvas as SkCanvas, Color, Color4f, ColorSpace, ColorType,
+        Data, FilterMode, Image, ImageInfo, Matrix, MipmapMode, Paint,
+        PathBuilder, PictureRecorder, Rect, SamplingOptions, Surface, Vector,
+        image::CachingHint,
     };
 
     use super::{
         Depth, REFUSE_PLACED, Step, apply, blurred_on_cpu, exact_blur,
-        rounded_once, worked_on,
+        filtered, rounded_once, shadowed, tint, worked_on,
     };
     use crate::{prelude::*, started};
 
@@ -2092,5 +2102,190 @@ mod tests {
             }
         }
         assert_eq!(compared, 3 * (2 * 3 * 2 + 2));
+    }
+    /// A layer of `kind` in `space` holding `scene`: 0 a shape with
+    /// anti-aliased edges, 1 premultiplied noise -- written through floats
+    /// and drawn into the layer's own kind, as a chain's layer holds a draw.
+    fn layer(
+        w: i32,
+        h: i32,
+        kind: ColorType,
+        space: &ColorSpace,
+        scene: u32,
+    ) -> Image {
+        let info =
+            ImageInfo::new((w, h), kind, AlphaType::Premul, space.clone());
+        let mut surface =
+            started::raster(&info, None, None).expect("a surface");
+        let canvas = surface.canvas();
+        canvas.clear(Color::TRANSPARENT);
+        match scene {
+            0 => {
+                let mut paint = Paint::default();
+                paint
+                    .set_anti_alias(true)
+                    .set_color4f(Color4f::new(0.8, 0.45, 0.15, 0.9), space);
+                canvas.draw_round_rect(
+                    Rect::from_xywh(
+                        w as f32 * 0.3 + 0.4,
+                        h as f32 * 0.3 + 0.7,
+                        w as f32 * 0.4,
+                        h as f32 * 0.35,
+                    ),
+                    2.5,
+                    2.5,
+                    &paint,
+                );
+            }
+            _ => {
+                canvas.draw_image(
+                    noise(w, h, ColorType::RGBAF32),
+                    (0, 0),
+                    None,
+                );
+            }
+        }
+        surface.image_snapshot()
+    }
+
+    /// `shadowed` as it was drawn before its cuts: the source drawn into
+    /// floats, tinted, blurred four channels to a pixel in f64, composed by
+    /// Skia and rounded once -- every part of it a function it still calls.
+    fn shadowed_as_drawn(
+        image: &Image,
+        offset: Vector,
+        sigma: (f32, f32),
+        (colour, space): (Color4f, &ColorSpace),
+        gain: f32,
+    ) -> Option<Image> {
+        let floats = image.image_info().with_color_type(ColorType::RGBAF32);
+        let on_floats = |draw: &dyn Fn(&SkCanvas)| {
+            let mut surface = started::raster(&floats, None, None)?;
+            surface.canvas().clear(Color::TRANSPARENT);
+            draw(surface.canvas());
+            Some(surface.image_snapshot())
+        };
+        let source = on_floats(&|canvas| {
+            canvas.draw_image(image, (0, 0), None);
+        })?;
+        let tint = tint(colour, space, image.image_info())?;
+        let tinted = filtered(None, &source, &tint, 1.0)?;
+        let shadow = match sigma.0 > 0.0 || sigma.1 > 0.0 {
+            true => blurred_on_cpu(&tinted, sigma.0, sigma.1, 1.0)?,
+            false => tinted,
+        };
+        let sampling = match offset.x.fract() == 0.0 && offset.y.fract() == 0.0
+        {
+            true => SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
+            false => SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
+        };
+        let composed = on_floats(&|canvas| {
+            canvas.draw_image_with_sampling_options(
+                &shadow,
+                (offset.x, offset.y),
+                sampling,
+                None,
+            );
+            canvas.draw_image(&source, (0, 0), None);
+        })?;
+        rounded_once(&composed, image.image_info(), gain)
+    }
+
+    /// The layers, sigmas, offsets, colours and gains a shadow's sweep runs
+    /// over: each layer kind a chain plays on -- an 8-bit sRGB page's, an
+    /// F32 sRGB page's and an F16 Display P3 page's -- with a shape and with
+    /// noise, at sigmas either side of the FFT's, whole, zero and fractional
+    /// offsets, opaque and translucent colours, and two gains.
+    fn shadow_sweep(
+        mut each: impl FnMut(
+            &str,
+            &Image,
+            Vector,
+            (f32, f32),
+            (Color4f, &ColorSpace),
+            f32,
+        ),
+    ) -> usize {
+        let srgb = ColorSpace::new_srgb();
+        let p3 = PixelColorSpace::DisplayP3
+            .to_skia_color_space()
+            .expect("Display P3");
+        let kinds = [
+            (ColorType::RGBA8888, &srgb, "8-bit sRGB"),
+            (ColorType::RGBAF32, &srgb, "F32 sRGB"),
+            (ColorType::RGBAF16, &p3, "F16 P3"),
+        ];
+        let sigmas = [
+            (0.5, 0.5),
+            (1.0, 1.0),
+            (2.0, 2.0),
+            (3.0, 3.0),
+            (5.0, 5.0),
+            (8.0, 8.0),
+            (1.5, 4.0),
+        ];
+        let offsets = [
+            Vector::new(2.0, 2.0),
+            Vector::new(0.0, 0.0),
+            Vector::new(1.5, -2.25),
+        ];
+        let colours = [
+            Color4f::new(0.0, 0.0, 0.0, 1.0),
+            Color4f::new(0.78, 0.16, 0.35, 0.6),
+            Color4f::new(0.1, 0.6, 0.9, 0.85),
+        ];
+        let mut runs = 0;
+        for (kind, space, name) in kinds {
+            for scene in 0..2 {
+                let image = layer(40, 36, kind, space, scene);
+                for sigma in sigmas {
+                    for offset in offsets {
+                        for colour in colours {
+                            for gain in [1.0, 0.7] {
+                                each(
+                                    name,
+                                    &image,
+                                    offset,
+                                    sigma,
+                                    (colour, &srgb),
+                                    gain,
+                                );
+                                runs += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        runs
+    }
+
+    #[test]
+    fn a_shadow_keeps_every_bit_it_was_drawn_with() {
+        let mut differing = Vec::new();
+        let runs = shadow_sweep(|name, image, offset, sigma, colour, gain| {
+            let ours = shadowed(None, image, offset, sigma, colour, gain)
+                .expect("a shadow");
+            let theirs = shadowed_as_drawn(image, offset, sigma, colour, gain)
+                .expect("a shadow");
+            let info = ours.image_info();
+            assert_eq!(
+                info.color_type(),
+                theirs.image_info().color_type(),
+                "{name}"
+            );
+            if bytes_of(&ours, info) != bytes_of(&theirs, info) {
+                differing.push(format!(
+                    "{name} sigma {sigma:?} offset {offset:?} gain {gain}"
+                ));
+            }
+        });
+        assert_eq!(runs, 3 * 2 * 7 * 3 * 3 * 2);
+        assert!(
+            differing.is_empty(),
+            "{} of {runs} differ, first {:?}",
+            differing.len(),
+            differing.first()
+        );
     }
 }
