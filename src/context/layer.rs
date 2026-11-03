@@ -162,6 +162,56 @@ pub(crate) fn reach_the_clip(canvas: &SkCanvas) {
     canvas.restore();
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Whether a chain's layer is bounded by the text it holds where it
+    /// says what it can ink: off, it is bounded as any other group's, by
+    /// what its entries reach, which for text is the clip -- the reference
+    /// a confined layer is held to.
+    pub(crate) static KEEPS_TEXT_REACH: Cell<bool> = const { Cell::new(true) };
+    /// The rectangle, in device pixels, the last chain played on this thread
+    /// was given to bound what it filters, where it was given one.
+    pub(crate) static CHAIN_CONTENT: Cell<Option<Rect>> = const { Cell::new(None) };
+}
+
+/// Whether [`Composite::Chain`]'s `reach` bounds its layer -- see
+/// [`KEEPS_TEXT_REACH`]; always outside a test.
+fn keeps_text_reach() -> bool {
+    #[cfg(test)]
+    let keeps = KEEPS_TEXT_REACH.get();
+    #[cfg(not(test))]
+    let keeps = true;
+    keeps
+}
+
+/// How far, in device pixels, a run of text played back at another scale
+/// than it was recorded at can ink past its reach rounded out to whole
+/// pixels -- see `RunPaint::reach` -- measured, not chosen. Over 2,160 scenes
+/// on CoreText -- Oswald, Helvetica, Times New Roman, Zapfino and Apple Color
+/// Emoji, at 8 to 96px, filled and stroked 1 and 12 wide, upright, turned,
+/// skewed and scaled, under a blur and two drop shadows -- each with its run
+/// laid out afresh and kept, at densities 1 to 3 and drawn into another
+/// canvas at 0.5 and 1.5, 6 of the 21,600 playbacks inked past the reach
+/// with no margin, each by one pixel and all one run under each filter:
+/// Oswald's 40px "😀x", whose emoji is Apple Color Emoji's bitmap, scaled 1.7
+/// and stroked 12, drawn in at 1.5, where the bitmap is resampled across the
+/// edge.
+/// `a_resampled_emoji_inks_a_pixel_past_its_reach` holds that case, and
+/// `text_in_a_chain_is_bounded_by_all_it_inks` the rest.
+pub(crate) const HINTED_INK_DRIFT: f32 = 1.0;
+
+/// `reach`, in the units `to_device` maps to the device, widened there by
+/// [`HINTED_INK_DRIFT`] device pixels and taken back.
+pub(crate) fn hinted_reach(reach: Rect, to_device: &Matrix) -> Rect {
+    let device = to_device
+        .map_rect(reach)
+        .0
+        .with_outset((HINTED_INK_DRIFT, HINTED_INK_DRIFT));
+    to_device
+        .invert()
+        .map_or(reach, |back| back.map_rect(device).0)
+}
+
 /// The rectangle everything in `entries` can draw in -- see [`Layer::reach`]
 /// -- empty where they are none, `None` where one of them is not known.
 pub(crate) fn reach_of(entries: &[Layer]) -> Option<Rect> {
@@ -1511,7 +1561,18 @@ pub enum Composite {
     /// -- see [`chain`] -- and `rec`'s paint, less its image filter, which
     /// is the chain as Skia would run it. A document opens `rec` as a layer,
     /// filter and all.
-    Chain { steps: Arc<[Step]>, rec: LayerRec },
+    ///
+    /// `reach` is what a run of text the group holds can ink, in the units
+    /// its entries are played under, at the scale they were recorded at --
+    /// see `Context2D::files_through_chain` -- which bounds the chain's
+    /// layer, widened for hinting at the scale it is played at -- see
+    /// [`hinted_reach`]. `None` for any other group, which its entries'
+    /// reach bounds.
+    Chain {
+        steps: Arc<[Step]>,
+        rec: LayerRec,
+        reach: Option<Rect>,
+    },
 }
 
 impl Composite {
@@ -1815,7 +1876,7 @@ impl Group {
             }
         }
         match (&self.composite, target) {
-            (Composite::Chain { steps, rec }, Target::Pixels) => {
+            (Composite::Chain { steps, rec, reach }, Target::Pixels) => {
                 let mut paint = rec.paint.clone().unwrap_or_default();
                 paint.set_image_filter(None);
                 // The chain's lengths are in the pixels of the canvas the
@@ -1849,11 +1910,18 @@ impl Group {
                 // drop shadow took 1.75 s on an F16 Display P3 page against
                 // 26 ms on an sRGB one.
                 let to_space = |matrix: &Matrix| Matrix::concat(&back, matrix);
-                let content = match &self.within {
-                    Some(within) => {
+                let to_device = canvas.local_to_device_as_3x3();
+                let content = match (&self.within, reach) {
+                    (Some(within), _) => {
                         Some(to_space(&self.matrix).map_rect(within).0)
                     }
-                    None => reach_of(&self.contents.layers).map(|reach| {
+                    (None, Some(reach)) if keeps_text_reach() => {
+                        Some(hinted_reach(
+                            to_space(&self.contents_matrix).map_rect(reach).0,
+                            &to_device,
+                        ))
+                    }
+                    (None, _) => reach_of(&self.contents.layers).map(|reach| {
                         to_space(&self.contents_matrix).map_rect(reach).0
                     }),
                 };
@@ -1887,6 +1955,10 @@ impl Group {
                     Target::Pixels => Step::for_pixels(steps),
                     Target::Document => None,
                 };
+                #[cfg(test)]
+                CHAIN_CONTENT.set(content.map(|content| {
+                    canvas.local_to_device_as_3x3().map_rect(content).0
+                }));
                 let outcome = chain::run(
                     canvas,
                     pixels.as_deref().unwrap_or(steps),

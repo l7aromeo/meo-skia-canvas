@@ -577,7 +577,8 @@ impl LaidOut {
     }
 
     /// Paints the run with its anchor at `origin` in `paint` -- see
-    /// [`RunPaint::paint`] -- from the blobs kept for `paint`.
+    /// [`RunPaint::paint`] -- from the blobs kept for `paint`, and answers
+    /// what it can have inked -- see [`RunPaint::reach`].
     pub fn paint(
         &self,
         canvas: &Canvas,
@@ -585,7 +586,7 @@ impl LaidOut {
         paint: &Paint,
         global_alpha: f32,
         faint: Faint,
-    ) {
+    ) -> Option<Rect> {
         let built;
         let kept = self.kept_blobs(paint);
         let blobs: &[Option<TextBlob>] = match &kept {
@@ -603,6 +604,7 @@ impl LaidOut {
             faint,
             blobs,
         );
+        self.drawn.reach(origin, &faint.drawable(paint), blobs)
     }
 }
 
@@ -673,6 +675,67 @@ impl RunPaint {
                 }
             }
         }
+    }
+
+    /// What painting the run with its anchor at `origin` in `paint` from
+    /// `blobs` can ink, in the units it is painted in, at the scale it is
+    /// recorded at -- see `layer::hinted_reach` for what a playback at
+    /// another scale adds. Each glyph's box as `Font::get_bounds` reports it
+    /// for `paint`, its stroke and embolden included -- the outline rounded
+    /// out to the pixel grid and padded, or for a glyph with no outline, a
+    /// bitmap or colour emoji, the only box it has -- joined with each run's
+    /// blob's bounds, which for a positioned run are the box the font
+    /// declares around every glyph. A font's declared box need not hold its
+    /// ink, and a glyph's reported box is rounded at one scale, so neither
+    /// is taken alone. A sheared run's boxes go through its shear, as
+    /// [`sheared_bounds`] takes them.
+    ///
+    /// `None` for a decorated run, whose lines this does not bound, and for
+    /// a paint with a path effect or a mask filter, which can ink past every
+    /// glyph's box.
+    fn reach(
+        &self,
+        origin: Point,
+        paint: &Paint,
+        blobs: &[Option<TextBlob>],
+    ) -> Option<Rect> {
+        if self.decoration.is_some()
+            || paint.path_effect().is_some()
+            || paint.mask_filter().is_some()
+        {
+            return None;
+        }
+        #[cfg(test)]
+        REACHED_FAMILIES.with_borrow_mut(Vec::clear);
+        let runs = zip(zip(&self.runs, &self.shears), blobs);
+        let reach =
+            runs.fold(Rect::new_empty(), |mut all, ((run, shear), blob)| {
+                // A run sheared flat has no blob, and inks nothing.
+                let Some(blob) = blob else {
+                    return all;
+                };
+                let at = origin + run.origin;
+                let mut boxes = vec![Rect::new_empty(); run.glyphs.len()];
+                run.font.get_bounds(&run.glyphs, &mut boxes, Some(paint));
+                #[cfg(test)]
+                REACHED_FAMILIES.with_borrow_mut(|families| {
+                    families.push(run.font.typeface().family_name());
+                });
+                for (glyph, &position) in zip(boxes, &run.positions) {
+                    if glyph.is_empty() {
+                        continue;
+                    }
+                    let placed = glyph.with_offset(position);
+                    let placed = match shear {
+                        Shear::By(shear) => shear.map_rect(placed).0,
+                        Shear::None | Shear::Flat => placed,
+                    };
+                    all.join(placed.with_offset(at));
+                }
+                all.join(blob.bounds().with_offset(at));
+                all
+            });
+        Some(reach)
     }
 
     /// Paints the run with its anchor at `origin` in `paint`, a named line
@@ -773,9 +836,12 @@ impl DrawnRun {
     }
 
     /// Paints the run with its anchor at `origin` in `paint` -- see
-    /// [`LaidOut::paint`]. A run laid out for one draw paints in the paint
-    /// it was laid out for, so a caller drawing onto pixels that keep a
-    /// faint paint lays it out for `faint.drawable(paint)`.
+    /// [`LaidOut::paint`] -- and answers what it can have inked, where that
+    /// is known -- see [`RunPaint::reach`]. A run laid out for one draw paints
+    /// in the paint it was laid out for, so a caller drawing onto pixels
+    /// that keep a faint paint lays it out for `faint.drawable(paint)`. One
+    /// `Paragraph::paint` draws is not bounded: it draws what the paragraph
+    /// holds, which this does not read.
     pub fn paint(
         &self,
         canvas: &Canvas,
@@ -783,12 +849,15 @@ impl DrawnRun {
         paint: &Paint,
         global_alpha: f32,
         faint: Faint,
-    ) {
+    ) -> Option<Rect> {
         match self {
             Self::Kept(laid_out) => {
                 laid_out.paint(canvas, origin, paint, global_alpha, faint)
             }
-            Self::Plain(layout) => layout.paragraph.paint(canvas, origin),
+            Self::Plain(layout) => {
+                layout.paragraph.paint(canvas, origin);
+                None
+            }
             Self::Runs(laid_out) => {
                 laid_out.paint(canvas, origin, paint, global_alpha, faint)
             }
@@ -1064,6 +1133,10 @@ thread_local! {
     /// Test-only: files every run under one hash, so that the chains a
     /// collision makes are walked and cut as a real one's would be.
     static COLLIDING: Cell<bool> = const { Cell::new(false) };
+    /// The family of each run the last [`RunPaint::reach`] on this thread
+    /// measured, in order: which fonts a run of text resolved to.
+    pub(crate) static REACHED_FAMILIES: RefCell<Vec<String>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 /// Lets every kept run go: called when the registered fonts change, since a
@@ -2093,6 +2166,16 @@ impl<'a> Typesetter<'a> {
                 DrawnRun::Runs(Box::new(LaidOut::new(layout, decoration)))
             }
         }
+    }
+
+    /// The run laid out for one draw in `paint` and not kept, drawn from its
+    /// runs whatever it is, which draws what `Paragraph::paint` does and
+    /// answers what it can ink -- see [`DrawnRun::paint`].
+    pub fn drawn_as_runs(&self, paint: &Paint) -> DrawnRun {
+        DrawnRun::Runs(Box::new(LaidOut::new(
+            self.layout(paint),
+            self.decoration(1.0),
+        )))
     }
 
     /// The run's advance -- every glyph and space, with the letter spacing
