@@ -216,6 +216,9 @@ impl Outcome {
 
 /// Runs the chain [`apply`] does, up to the composite. `None` where nothing
 /// would show or no layer could be made.
+///
+/// The three stages a chain runs in, here for one draw: [`plan`], then
+/// [`Drawn::new`] for the layer holding the draw, then [`Drawn::finish`].
 pub(crate) fn run(
     canvas: &SkCanvas,
     steps: &[Step],
@@ -224,6 +227,39 @@ pub(crate) fn run(
     paint: &Paint,
     draw: impl FnOnce(&SkCanvas),
 ) -> Option<Outcome> {
+    let plan = plan(canvas, steps, content)?;
+    let mut draw = Some(draw);
+    let mut drawn = Drawn::new(canvas, depth, &[&plan], |_, offscreen| {
+        if let Some(draw) = draw.take() {
+            draw(offscreen);
+        }
+    })?;
+    drawn.finish(&plan, steps, paint)
+}
+
+/// Where a chain's layer lies, settled before anything is drawn into it.
+pub(crate) struct Plan {
+    /// The scale from canvas pixels to the layer's -- see [`split`].
+    layer: Matrix,
+    /// What maps the layer onto the device -- see [`split`].
+    rest: Matrix,
+    /// What the chain reads of the layer, in the layer's pixels before the
+    /// layer is placed -- see [`placed`].
+    region: IRect,
+    /// The pixels the chain works on, which hold `region` -- see [`region`].
+    worked: IRect,
+    /// The layer `placed` asks for first, in the same pixels as `region`.
+    drawn: IRect,
+}
+
+/// The plan of a chain drawn under `canvas`'s transform and clip, with
+/// `content` bounding what it paints where that is known. `None` where
+/// nothing would show.
+pub(crate) fn plan(
+    canvas: &SkCanvas,
+    steps: &[Step],
+    content: Option<Rect>,
+) -> Option<Plan> {
     let base = canvas.local_to_device_as_3x3();
     let (layer, rest) = split(&base)?;
     let (to_draw, worked) = region(canvas, steps, content, &layer, &rest)?;
@@ -237,81 +273,146 @@ pub(crate) fn run(
         let area = i64::from(worked.width()) * i64::from(worked.height());
         largest.set(largest.get().max(area));
     });
-    // The region alone where Skia refuses a layer from the device's origin,
-    // as `placed` says.
-    let (mut surface, drawn) = std::iter::once(drawn)
-        .chain((drawn != region).then_some(region))
-        .find_map(|drawn| {
-            #[cfg(test)]
-            if drawn != region && REFUSE_PLACED.with(std::cell::Cell::get) {
-                return None;
-            }
-            layer_surface(canvas, depth, drawn).map(|surface| (surface, drawn))
-        })?;
-    let mut context = gpu_of(&mut surface);
-    let offscreen = surface.canvas();
-    // Only what the chain reads is cleared: the rows and columns the CPU's
-    // layer starts at the device's origin with lie before it, are never
-    // read, and are left untouched.
-    let read = region.with_offset((-drawn.left, -drawn.top));
-    offscreen.save();
-    offscreen.clip_irect(read, None);
-    offscreen.clear(Color::TRANSPARENT);
-    offscreen.restore();
-    let origin = Matrix::translate((-drawn.left as f32, -drawn.top as f32));
-    offscreen.set_matrix(&Matrix::concat(&origin, &layer).into());
-    draw(offscreen);
-    let snapshot = surface.image_snapshot();
-    let mut image = match read == IRect::from_size(drawn.size()) {
-        true => Some(snapshot),
-        false => subset(&snapshot, context.as_mut(), read),
-    }?;
-    if worked != region {
-        image = padded(context.as_mut(), &image, region, worked)?;
+    Some(Plan {
+        layer,
+        rest,
+        region,
+        worked,
+        drawn,
+    })
+}
+
+/// A layer holding what one or more chains draw, each under its own
+/// [`Plan`], and the GPU it is on.
+pub(crate) struct Drawn {
+    snapshot: Image,
+    /// The layer's bounds, in the pixels its plans' regions are in.
+    at: IRect,
+    context: Option<Gpu>,
+}
+
+impl Drawn {
+    /// One layer at `plans`' layer, which they share, holding what `draw`
+    /// draws for each of them: called with each plan's index in turn, onto a
+    /// canvas under that plan's transform, in a save of its own, after every
+    /// plan's region has been cleared. `None` where no layer could be made.
+    ///
+    /// A single plan's layer falls back to its region alone where Skia
+    /// refuses the one [`placed`] asks for, as `placed` says. Plans sharing a
+    /// layer have no such fallback, since a region-sized layer is one plan's.
+    pub(crate) fn new(
+        canvas: &SkCanvas,
+        depth: Depth,
+        plans: &[&Plan],
+        mut draw: impl FnMut(usize, &SkCanvas),
+    ) -> Option<Self> {
+        let first = plans.first()?;
+        let alone = (plans.len() == 1).then_some(first.region);
+        let (mut surface, at) = std::iter::once(first.drawn)
+            .chain(alone.filter(|region| *region != first.drawn))
+            .find_map(|at| {
+                #[cfg(test)]
+                if at != first.region
+                    && REFUSE_PLACED.with(std::cell::Cell::get)
+                {
+                    return None;
+                }
+                layer_surface(canvas, depth, at).map(|surface| (surface, at))
+            })?;
+        let context = gpu_of(&mut surface);
+        let offscreen = surface.canvas();
+        // Only what the chains read is cleared: the rows and columns the
+        // CPU's layer starts at the device's origin with lie before it, are
+        // never read, and are left untouched.
+        for plan in plans {
+            offscreen.save();
+            offscreen
+                .clip_irect(plan.region.with_offset((-at.left, -at.top)), None);
+            offscreen.clear(Color::TRANSPARENT);
+            offscreen.restore();
+        }
+        let origin = Matrix::translate((-at.left as f32, -at.top as f32));
+        for (i, plan) in plans.iter().enumerate() {
+            offscreen.save();
+            offscreen.set_matrix(&Matrix::concat(&origin, &plan.layer).into());
+            draw(i, offscreen);
+            offscreen.restore();
+        }
+        Some(Self {
+            snapshot: surface.image_snapshot(),
+            at,
+            context,
+        })
     }
 
-    let scale = (layer.scale_x().abs(), layer.scale_y().abs());
-    let last = steps.len().saturating_sub(1);
-    for (i, step) in steps.iter().enumerate() {
-        let gain = match i == last {
-            true => paint.alpha_f(),
-            false => 1.0,
-        };
-        let next = match step {
-            Step::Blur(sigma) => blurred(
-                context.as_mut(),
-                &image,
-                sigma * scale.0,
-                sigma * scale.1,
-                gain,
-            ),
-            Step::Colour(filter) => {
-                filtered(context.as_mut(), &image, filter, gain)
-            }
-            Step::Shadow {
-                offset,
-                sigma,
-                colour,
-                space,
-            } => shadowed(
-                context.as_mut(),
-                &image,
-                Vector::new(offset.x * scale.0, offset.y * scale.1),
-                (sigma * scale.0, sigma * scale.1),
-                (*colour, space),
-                gain,
-            ),
-            Step::Image { filter, .. } => {
-                imaged(context.as_mut(), &image, filter, &layer, gain)
-            }
-        };
-        image = next?;
+    /// Runs `plan`'s chain of `steps` on what the layer holds of its region,
+    /// up to the composite, with `paint`'s alpha taken by the last step.
+    pub(crate) fn finish(
+        &mut self,
+        plan: &Plan,
+        steps: &[Step],
+        paint: &Paint,
+    ) -> Option<Outcome> {
+        let Plan {
+            layer,
+            rest,
+            region,
+            worked,
+            ..
+        } = *plan;
+        let context = &mut self.context;
+        let read = region.with_offset((-self.at.left, -self.at.top));
+        let mut image = match read == IRect::from_size(self.at.size()) {
+            true => Some(self.snapshot.clone()),
+            false => subset(&self.snapshot, context.as_mut(), read),
+        }?;
+        if worked != region {
+            image = padded(context.as_mut(), &image, region, worked)?;
+        }
+
+        let scale = (layer.scale_x().abs(), layer.scale_y().abs());
+        let last = steps.len().saturating_sub(1);
+        for (i, step) in steps.iter().enumerate() {
+            let gain = match i == last {
+                true => paint.alpha_f(),
+                false => 1.0,
+            };
+            let next = match step {
+                Step::Blur(sigma) => blurred(
+                    context.as_mut(),
+                    &image,
+                    sigma * scale.0,
+                    sigma * scale.1,
+                    gain,
+                ),
+                Step::Colour(filter) => {
+                    filtered(context.as_mut(), &image, filter, gain)
+                }
+                Step::Shadow {
+                    offset,
+                    sigma,
+                    colour,
+                    space,
+                } => shadowed(
+                    context.as_mut(),
+                    &image,
+                    Vector::new(offset.x * scale.0, offset.y * scale.1),
+                    (sigma * scale.0, sigma * scale.1),
+                    (*colour, space),
+                    gain,
+                ),
+                Step::Image { filter, .. } => {
+                    imaged(context.as_mut(), &image, filter, &layer, gain)
+                }
+            };
+            image = next?;
+        }
+        Some(Outcome {
+            image,
+            region: worked,
+            rest,
+        })
     }
-    Some(Outcome {
-        image,
-        region: worked,
-        rest,
-    })
 }
 
 /// `image`, which holds `region` of the layer, with nothing around it out
@@ -350,16 +451,16 @@ impl Outcome {
 
 #[cfg(test)]
 thread_local! {
-    /// How many chains [`run`] has run on this thread that had a region to
-    /// work on, which the tests of a replayed group count by.
+    /// How many chains [`plan`] has planned on this thread that had a region
+    /// to work on, which the tests of a replayed group count by.
     pub(crate) static RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 
-    /// Whether [`run`] refuses the layer [`placed`] asks for first, as Skia
-    /// refuses one too large, so that a test can reach the region-sized
+    /// Whether [`Drawn::new`] refuses the layer [`placed`] asks for first, as
+    /// Skia refuses one too large, so that a test can reach the region-sized
     /// fallback on a page small enough to compare against.
     pub(crate) static REFUSE_PLACED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 
-    /// The most pixels a chain [`run`] on this thread has worked on, which
+    /// The most pixels a chain [`plan`] on this thread has worked on, which
     /// the tests of a chain's layer size count by.
     pub(crate) static LARGEST_REGION: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
 }
