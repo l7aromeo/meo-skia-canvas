@@ -4845,6 +4845,41 @@ describe("getImageData after a draw", () => {
   });
 });
 
+describe("an ImageData's buffer is its read alone", () => {
+  // Code takes `imageData.data.buffer` to transfer, slice or view it, as a
+  // browser allows: there the buffer is exactly the data, at offset 0, and no
+  // other read's. A `Buffer` can be a slice of a pool shared with other
+  // buffers, so the read is made into an `ArrayBuffer` of its own.
+  for (const gpu of [true, false]) {
+    for (const colorType of ["rgba", "RGBAF32"]) {
+      for (const [w, h] of [
+        [1, 1],
+        [64, 48],
+      ]) {
+        test(`${w}x${h} ${colorType} (gpu=${gpu})`, () => {
+          const canvas = new Canvas(64, 48);
+          canvas.gpu = gpu;
+          const ctx = canvas.getContext("2d");
+          ctx.fillStyle = "rgb(200 80 30 / 0.45)";
+          ctx.fillRect(0, 0, 64, 48);
+          const one = ctx.getImageData(0, 0, w, h, { colorType }),
+            two = ctx.getImageData(0, 0, w, h, { colorType }),
+            bytes = w * h * one.bytesPerPixel;
+          for (const { data } of [one, two]) {
+            assert.equal(data.length, bytes);
+            assert.equal(data.byteOffset, 0);
+            assert.equal(data.buffer.byteLength, bytes);
+          }
+          assert.notEqual(one.data.buffer, two.data.buffer);
+          const before = [...two.data];
+          one.data.fill(7);
+          assert.deepEqual([...two.data], before, "the reads share memory");
+        });
+      }
+    }
+  }
+});
+
 describe("the readback cache against every way pixels change", () => {
   // The cache is keyed on the layer count, which is what `update` itself
   // uses to decide what to replay. That holds only if every operation that
