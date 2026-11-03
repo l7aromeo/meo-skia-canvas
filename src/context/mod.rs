@@ -6947,11 +6947,6 @@ mod text_reach_tests {
                 match std::env::var("TEXT_REACH_BOUND").as_deref() {
                     Ok("stroked-unwidened") => ReachBound::StrokedUnwidened,
                     Ok("stroked-half-width") => ReachBound::StrokedHalfWidth,
-                    Ok("hinted") => ReachBound::Hinted,
-                    Ok("unhinted") => ReachBound::Unhinted,
-                    Ok("outline") => ReachBound::Outline,
-                    Ok("outline-unhinted") => ReachBound::OutlineUnhinted,
-                    Ok("outline-unstroked") => ReachBound::OutlineUnstroked,
                     _ => ReachBound::Stroked,
                 },
             );

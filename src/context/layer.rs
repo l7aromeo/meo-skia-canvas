@@ -186,17 +186,24 @@ fn keeps_text_reach() -> bool {
 
 /// How far, in device pixels, a run of text played back at another scale
 /// than it was recorded at can ink past its reach rounded out to whole
-/// pixels -- see `RunPaint::reach` -- measured, not chosen. Over 2,560 scenes
-/// on CoreText -- Oswald, Helvetica, Times New Roman, Zapfino, Apple Color
-/// Emoji and Monoton, at 8 to 96px, filled, hairline, stroked 1, 12 and 40
-/// wide under each join, bold, spaced, upright, turned, skewed and scaled,
-/// under a blur and two drop shadows -- each with its run laid out afresh and
-/// kept, at densities 1 to 3 and drawn into another canvas at 0.5 and 1.5, 98
-/// of the 25,600 playbacks inked past the reach with no margin, by at most
-/// 1.29 device pixels and all under a 40px stroke whose join half its width
-/// bounds exactly: the stroke's anti-aliased fringe.
-/// `a_wide_round_stroke_inks_a_pixel_past_its_reach` holds that case, and
-/// `text_in_a_chain_is_bounded_by_all_it_inks` the rest.
+/// pixels -- see `RunPaint::reach` -- measured, not chosen, by
+/// `text_in_a_chain_is_bounded_by_all_it_inks` with TEXT_REACH_SWEEP=full:
+/// text at 8 to 96px, filled, hairline, stroked 1, 12 and 40 wide under each
+/// join, bold, spaced, upright, turned, skewed and scaled, under a blur and two
+/// drop shadows, each run laid out afresh and kept, at densities 1 to 3 and
+/// drawn into another canvas at 0.5 and 1.5.
+///
+/// - On CoreText, in Oswald, Helvetica, Times New Roman, Zapfino, Apple Color
+///   Emoji and Monoton, 98 of 25,600 playbacks inked past the reach with no
+///   margin, by at most 1.29 pixels.
+/// - On FreeType, on the Linux runner, in Oswald, DejaVu Sans, Noto Color Emoji
+///   and Monoton, 142 of 16,640 did, by at most 1.70: DejaVu Sans's 13px "fj
+///   Wq", scaled 1.7 and stroked 40, at density 1.
+///
+/// None inked past the reach rounded out and widened by this, and the worst
+/// on each are strokes whose join half their width bounds exactly: the
+/// stroke's anti-aliased fringe. On CoreText that case is held by
+/// `a_wide_round_stroke_inks_a_pixel_past_its_reach`.
 pub(crate) const HINTED_INK_DRIFT: f32 = 1.0;
 
 /// `reach`, in the units `to_device` maps to the device, widened there by

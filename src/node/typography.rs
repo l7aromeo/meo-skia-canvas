@@ -35,8 +35,6 @@ use skia_safe::{
     },
     typeface::TypefaceId,
 };
-#[cfg(test)]
-use skia_safe::{FontHinting, path_utils::fill_path_with_paint};
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell, RefMut},
@@ -1222,34 +1220,21 @@ thread_local! {
     pub(crate) static REACH_INSET: Cell<f32> = const { Cell::new(0.0) };
 }
 
-/// The ways the reach sweep measures a run's glyphs, so that one run of it
-/// holds each against the same ink.
+/// The mutants of [`glyph_boxes`] the reach sweep must refuse, so that a
+/// green sweep is shown able to go red.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReachBound {
     /// [`glyph_boxes`] widened by [`stroke_reach`]: what a reach is.
     Stroked,
-    /// [`Self::Stroked`] not widened at all: a mutant the stroked scenes
-    /// must fail.
+    /// Not widened at all: the stroked scenes must fail.
     StrokedUnwidened,
-    /// [`Self::Stroked`] widened by half the stroke whatever the join: a
-    /// mutant the mitred scenes must fail.
+    /// Widened by half the stroke whatever the join: the mitred scenes
+    /// must fail.
     StrokedHalfWidth,
-    /// `Font::get_bounds` for the paint, in the run's own font.
-    Hinted,
-    /// `Font::get_bounds` for the paint, in the run's font with hinting off.
-    Unhinted,
-    /// Each glyph's outline, filled as the paint fills or strokes it; a
-    /// glyph with no outline keeps its `get_bounds` box.
-    Outline,
-    /// [`Self::Outline`] in the run's font with hinting off.
-    OutlineUnhinted,
-    /// [`Self::Outline`] with the outline's own bounds, not expanded by the
-    /// paint: a mutant the stroked scenes must fail.
-    OutlineUnstroked,
 }
 
-/// [`glyph_boxes`], or the bound [`REACH_BOUND`] names in its place.
+/// [`glyph_boxes`], or the mutant [`REACH_BOUND`] names in its place.
 #[cfg(test)]
 fn measured_boxes(
     font: &Font,
@@ -1257,69 +1242,15 @@ fn measured_boxes(
     paint: &Paint,
     boxes: &mut [Rect],
 ) {
-    let unhinted = || {
-        let mut font = font.clone();
-        font.set_hinting(FontHinting::None);
-        font
+    let reach = match REACH_BOUND.get() {
+        ReachBound::Stroked => stroke_reach(paint),
+        ReachBound::StrokedUnwidened => 0.0,
+        ReachBound::StrokedHalfWidth => match paint.style() {
+            PaintStyle::Fill => 0.0,
+            _ => paint.stroke_width() / 2.0,
+        },
     };
-    match REACH_BOUND.get() {
-        ReachBound::Stroked => {
-            glyph_boxes(font, glyphs, paint, stroke_reach(paint), boxes);
-        }
-        ReachBound::StrokedUnwidened => {
-            glyph_boxes(font, glyphs, paint, 0.0, boxes);
-        }
-        ReachBound::StrokedHalfWidth => {
-            let half = match paint.style() {
-                PaintStyle::Fill => 0.0,
-                _ => paint.stroke_width() / 2.0,
-            };
-            glyph_boxes(font, glyphs, paint, half, boxes);
-        }
-        ReachBound::Hinted => font.get_bounds(glyphs, boxes, Some(paint)),
-        ReachBound::Unhinted => {
-            unhinted().get_bounds(glyphs, boxes, Some(paint));
-        }
-        ReachBound::Outline | ReachBound::OutlineUnstroked => {
-            font.get_bounds(glyphs, boxes, Some(paint));
-            outline_boxes(font, glyphs, paint, boxes);
-        }
-        ReachBound::OutlineUnhinted => {
-            let font = unhinted();
-            font.get_bounds(glyphs, boxes, Some(paint));
-            outline_boxes(&font, glyphs, paint, boxes);
-        }
-    }
-}
-
-/// Replaces each of `boxes` with the bounds of the glyph's outline filled
-/// as `paint` fills it -- its stroke, joins and miters included -- where
-/// the glyph has an outline.
-#[cfg(test)]
-fn outline_boxes(
-    font: &Font,
-    glyphs: &[GlyphId],
-    paint: &Paint,
-    boxes: &mut [Rect],
-) {
-    let unstroked = REACH_BOUND.get() == ReachBound::OutlineUnstroked;
-    for (glyph, boxed) in zip(glyphs, boxes) {
-        let Some(outline) = font.get_path(*glyph) else {
-            continue;
-        };
-        let mut filled = SkPathBuilder::new();
-        let bounds = match !unstroked
-            && fill_path_with_paint(&outline, paint, &mut filled, None, None)
-        {
-            true => filled.compute_finite_bounds(),
-            // A hairline: its outline, and the device margin for the rest.
-            false => Some(*outline.bounds()),
-        };
-        // An outline with a point at infinity keeps the box the font gave.
-        if let Some(bounds) = bounds {
-            *boxed = bounds;
-        }
-    }
+    glyph_boxes(font, glyphs, paint, reach, boxes);
 }
 
 /// Lets every kept run go: called when the registered fonts change, since a
