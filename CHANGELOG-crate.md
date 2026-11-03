@@ -163,6 +163,7 @@ read the math functions and every length unit.
 - **A filter set by `Context2D::set_image_filter` keeps a float canvas's floats.** ([#403](https://github.com/l7aromeo/meo-skia-canvas/pull/403))
 - **A `Paragraph`'s blurred text shadow is the exact blur of its text.** ([#399](https://github.com/l7aromeo/meo-skia-canvas/pull/399))
 - **A `drop-shadow()` is the exact Gaussian blur of what casts it.** ([#400](https://github.com/l7aromeo/meo-skia-canvas/pull/400))
+- **Text under `blur()` is the exact Gaussian blur of the drawn text, as a path or an image under it is.** ([#493](https://github.com/l7aromeo/meo-skia-canvas/issues/493))
 - **A `drop-shadow()` lands where Chrome puts it under a turned or skewed transform.** ([#398](https://github.com/l7aromeo/meo-skia-canvas/pull/398))
 - **A rectangle the closed-form blur cannot take is blurred exactly.** ([#389](https://github.com/l7aromeo/meo-skia-canvas/pull/389))
 - **A blurred rounded rectangle or oval is its exact Gaussian blur.** ([#389](https://github.com/l7aromeo/meo-skia-canvas/pull/389))

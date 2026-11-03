@@ -964,6 +964,20 @@ fill or stroke the page's edge cuts, and it is not worked around for the
 same reason. Within the reach, and on the GPU engine, a blur of a draw past
 the page is the exact blur of all of it.
 
+**Text under `blur()` is the exact Gaussian blur of the drawn text, and
+Chrome's is not.** The rule is a blurred path's: the text's own glyphs, as they
+rasterise without the filter, convolved with the Gaussian sampled at whole-pixel
+offsets and rounded once, on both engines -- `tests/blur_text.rs` holds 16px
+blurred by 2, 40px by 3 and 48px by 10. Chrome 156.0.8078.4 headless draws text
+under `blur()` through Skia's image filter, which approximates the Gaussian with
+three box blurs. One 40px "Ag" in Oswald, `rgb(200 120 40)`, blurred by 3px on a
+transparent 120 by 80 canvas, came up to 12.7 levels of alpha from the exact
+blur of Chrome's own unblurred text, and 10.0, 5.7 and 2.2 in premultiplied
+red, green and blue, over 1,672 pixels more than a level off. Drawn through that
+filter this library matched it byte for byte. Text under a `drop-shadow()` is
+the same rule's, as any draw's shadow is -- see the entry on a `drop-shadow()`
+-- where Chrome's shadow of that text is 12.7 levels off.
+
 **A blurred rectangle is its exact Gaussian blur, and Chrome's is not.**
 Filter Effects Module Level 1 defines `blur()` as a Gaussian blur whose
 standard deviation is the length given. Blurring a rectangle by it gives the

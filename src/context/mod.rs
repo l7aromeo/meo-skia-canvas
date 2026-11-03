@@ -1339,7 +1339,7 @@ impl Context2D {
         let Some(replay) = replay else {
             return false;
         };
-        let steps = self.draw_chain();
+        let steps = self.draw_chain(false);
         let blend = self.state.global_composite_operation;
         let beyond = covers_beyond_the_draw(blend);
         // Drawn on its own wherever it composites only where it lands and
@@ -1553,12 +1553,15 @@ impl Context2D {
 
     /// The filter chain a draw is run through by the crate rather than by
     /// Skia -- see [`Self::files_through_chain`]: one holding a
-    /// `drop-shadow()` or a step run in the draw's own space, for a draw
-    /// casting no shadow of the context's own, under a blend that composites
-    /// only where it lands. A chain of blurs and colour functions alone
-    /// keeps the route its draw takes otherwise: a `BlurOp`, or Skia's
-    /// filter.
-    fn draw_chain(&self) -> Option<Arc<[Step]>> {
+    /// `drop-shadow()` or a step run in the draw's own space, and for a run
+    /// of text, `text`, one holding a `blur()`, for a draw casting no shadow
+    /// of the context's own, under a blend that composites only where it
+    /// lands. Any other chain of blurs and colour functions keeps the route
+    /// its draw takes otherwise: a `BlurOp`, or Skia's filter. Text has no
+    /// `BlurOp`, and Skia's filter blurs it by three box blurs, which came
+    /// up to 12.7 levels off the Gaussian on 40px text blurred by 3, as
+    /// Chrome's does.
+    fn draw_chain(&self, text: bool) -> Option<Arc<[Step]>> {
         if covers_beyond_the_draw(self.state.global_composite_operation)
             || self.casts_shadow()
         {
@@ -1568,6 +1571,7 @@ impl Context2D {
             steps.iter().any(|step| {
                 matches!(step, Step::Shadow { .. })
                     || step.runs_in_local_space()
+                    || (text && matches!(step, Step::Blur(_)))
             })
         })
     }
@@ -1595,7 +1599,7 @@ impl Context2D {
     where
         F: Fn(&SkCanvas, &Paint, Pass),
     {
-        let Some(steps) = self.draw_chain() else {
+        let Some(steps) = self.draw_chain(reached.is_some()) else {
             return false;
         };
         // Recorded over the page and as far again as the chain reaches: a
@@ -3313,7 +3317,7 @@ impl Context2D {
             // first time it is drawn it is laid out as runs to answer it,
             // which draw what `Paragraph::paint` does.
             let reached = Cell::new(None);
-            let chained = self.draw_chain().is_some();
+            let chained = self.draw_chain(true).is_some();
             self.render_to_canvas(
                 &paint,
                 dyed,
@@ -7283,15 +7287,14 @@ mod text_reach_tests {
     }
 
     /// A run of text under a filter chain is filtered in a layer the size of
-    /// what it inks, and not of the page: under a `drop-shadow()`, a 40px
-    /// word on a 300 by 220 page is given a rectangle the
+    /// what it inks, and not of the page: under a `drop-shadow()` and a
+    /// `blur()`, a 40px word on a 300 by 220 page is given a rectangle the
     /// size of the word, where one bounded by its picture -- which for text
     /// is the clip -- is given the page and as far again as the chain
     /// reaches. That was 1.7 ms a word under a drop shadow.
     #[test]
     fn text_in_a_chain_is_filtered_in_a_layer_the_size_of_its_ink() {
-        {
-            let filter = "drop-shadow(0 0 3px black)";
+        for filter in ["drop-shadow(0 0 3px black)", "blur(3px)"] {
             let scene = Scene {
                 font: "Helvetica",
                 filter,
