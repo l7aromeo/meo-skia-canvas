@@ -195,4 +195,14 @@ test running:
 
 The whole-page read stays above 6.0.2's: the rest of it is the GPU's work
 inside that wait and the exact unpremultiply, which 6.0.2 left to the GPU
-and its rounding down.
+and its rounding down. By Metal's own timestamps on every command buffer,
+the GPU works for a median of about 190–240 µs per read here against
+6.0.2's 109, and on neither does any of it finish before the wait starts:
+6.0.2's draws and copy are in two buffers, but the split buys it no
+overlap.
+
+The unpremultiply is made as each row is copied out of the buffer the
+GPU's copy lands in, rather than as a copy and then a second pass over the
+destination. A whole read of a translucent 1200x900 page after an 8x8 draw,
+same machine and method, takes 916–950 µs, against 1117–1147 µs in two
+passes.
