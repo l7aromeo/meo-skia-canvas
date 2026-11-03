@@ -297,6 +297,12 @@ fn blur_in<L: Lane>(
 
 /// The arithmetic a line is worked in: f32 for bytes, f64 for floats.
 trait Lane: FftNum {
+    /// Whether the FFT holds this lane's values to their line's range --
+    /// see [`within_reach`]. A float result is stored as it is, so its
+    /// round-off past the range would be too; an f32 lane's values are
+    /// rounded to bytes, and the cast to a byte saturates below 0 and
+    /// above 255, so the range would only repeat what the cast does.
+    const HELD_TO_REACH: bool;
     /// `v` in this arithmetic.
     fn of(v: f32) -> Self;
     /// A weight, worked out in f64, in this arithmetic.
@@ -317,6 +323,8 @@ trait Lane: FftNum {
 }
 
 impl Lane for f32 {
+    const HELD_TO_REACH: bool = false;
+
     fn of(v: f32) -> Self {
         v
     }
@@ -343,6 +351,8 @@ impl Lane for f32 {
 }
 
 impl Lane for f64 {
+    const HELD_TO_REACH: bool = true;
+
     fn of(v: f32) -> Self {
         f64::from(v)
     }
@@ -501,8 +511,9 @@ fn plan<L: FftNum>(
 /// so its spectrum is real, and two real channels share one complex
 /// transform: red with green, blue with alpha. The whole line is read into
 /// those transforms before any of it is written back, so it is worked in
-/// place, and each value written back is held to the range its line's
-/// channel allows -- see [`within_reach`].
+/// place, and in a lane that holds them -- see [`Lane::HELD_TO_REACH`] --
+/// each value written back is held to the range its line's channel allows,
+/// see [`within_reach`].
 fn fourier<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
     let r = k.len() - 1;
     let len = fast_len(n + r);
@@ -536,7 +547,7 @@ fn fourier<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
             }
             // Each channel's least and greatest value, and zero, found by
             // comparison: a NaN compares false, so it reaches neither.
-            let (lo, hi) =
+            let reach = L::HELD_TO_REACH.then(|| {
                 pixels.iter().fold(([0f32; 4], [0f32; 4]), |(lo, hi), p| {
                     (
                         array::from_fn(
@@ -546,7 +557,8 @@ fn fourier<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
                             |c| if p[c] > hi[c] { p[c] } else { hi[c] },
                         ),
                     )
-                });
+                })
+            });
             a[n..].fill(zero);
             b[n..].fill(zero);
             for buffer in [&mut *a, &mut *b] {
@@ -559,7 +571,12 @@ fn fourier<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
             }
             for (i, px) in line.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let sums = [a[i].re, a[i].im, b[i].re, b[i].im].map(L::narrow);
-                *px = array::from_fn(|c| within_reach(sums[c], lo[c], hi[c]));
+                *px = match reach {
+                    Some((lo, hi)) => {
+                        array::from_fn(|c| within_reach(sums[c], lo[c], hi[c]))
+                    }
+                    None => sums,
+                };
             }
         },
     );
