@@ -1032,8 +1032,28 @@ fn shadowed(
     image: &Image,
     offset: Vector,
     sigma: (f32, f32),
-    (colour, space): (Color4f, &ColorSpace),
+    colour: (Color4f, &ColorSpace),
     gain: f32,
+) -> Option<Image> {
+    let composed = shadow_composed(context, image, offset, sigma, colour)?;
+    rounded_once(&composed, image.image_info(), gain)
+}
+
+/// [`shadowed`]'s image over its shadow, in floats, before it is rounded.
+///
+/// On an eight-bit layer the shadow is the source's alpha alone, blurred
+/// and then tinted: the tint is the colour scaled by the alpha, and a blur
+/// is linear, so the two orders agree but for float rounding, which the
+/// bytes the result is rounded to show only where a value lies on a tie.
+/// It is a quarter of the work of blurring the tinted source's four
+/// channels. A layer of floats keeps that blur, so that its values stay the
+/// floats nearest the exact sums -- see [`exact_blur::blur`].
+fn shadow_composed(
+    context: Option<&Gpu>,
+    image: &Image,
+    offset: Vector,
+    sigma: (f32, f32),
+    (colour, space): (Color4f, &ColorSpace),
 ) -> Option<Image> {
     let raster = to_raster(context, image)?;
     let floats = raster.image_info().with_color_type(ColorType::RGBAF32);
@@ -1056,10 +1076,21 @@ fn shadowed(
         })?,
     };
     let tint = tint(colour, space, raster.image_info())?;
-    let tinted = filtered(None, &source, &tint, 1.0)?;
-    let shadow = match sigma.0 > 0.0 || sigma.1 > 0.0 {
-        true => blurred_on_cpu(&tinted, sigma.0, sigma.1, 1.0)?,
-        false => tinted,
+    let blurred = sigma.0 > 0.0 || sigma.1 > 0.0;
+    let bytes = matches!(
+        image.color_type(),
+        ColorType::RGBA8888 | ColorType::BGRA8888
+    );
+    let shadow = match (blurred, bytes) {
+        (true, true) => {
+            let alpha = blurred_alpha(&source, sigma)?;
+            filtered(None, &alpha, &tint, 1.0)?
+        }
+        (true, false) => {
+            let tinted = filtered(None, &source, &tint, 1.0)?;
+            blurred_on_cpu(&tinted, sigma.0, sigma.1, 1.0)?
+        }
+        (false, _) => filtered(None, &source, &tint, 1.0)?,
     };
     let sampling = match offset.x.fract() == 0.0 && offset.y.fract() == 0.0 {
         true => SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
@@ -1074,7 +1105,44 @@ fn shadowed(
         );
         canvas.draw_image(&source, (0, 0), None);
     })?;
-    rounded_once(&composed, image.image_info(), gain)
+    Some(composed)
+}
+
+/// `source`'s alpha, blurred by `sigma` along rows and columns -- see
+/// [`exact_blur::blur_alpha`] -- as a premultiplied F32 image of the
+/// source's size and space holding nothing but that alpha, for a tint to
+/// colour.
+fn blurred_alpha(source: &Image, sigma: (f32, f32)) -> Option<Image> {
+    let (w, h) = (source.width() as usize, source.height() as usize);
+    let info = source
+        .image_info()
+        .with_color_type(ColorType::RGBAF32)
+        .with_alpha_type(AlphaType::Premul);
+    let row_bytes = w * 4 * size_of::<f32>();
+    let mut pixels = vec![0f32; w * h * 4];
+    if !source.read_pixels(
+        &info,
+        &mut pixels,
+        row_bytes,
+        (0, 0),
+        CachingHint::Disallow,
+    ) {
+        return None;
+    }
+    let alpha: Vec<f32> =
+        pixels.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
+    drop(pixels);
+    let alpha = exact_blur::blur_alpha(alpha, w, h, sigma.0, sigma.1);
+    baked_image(&info, |out, stride| {
+        out.chunks_mut(stride)
+            .zip(alpha.chunks(w))
+            .for_each(|(row, line)| {
+                row.fill(0);
+                row.as_chunks_mut::<16>().0.iter_mut().zip(line).for_each(
+                    |(px, a)| px[12..].copy_from_slice(&a.to_ne_bytes()),
+                );
+            });
+    })
 }
 
 /// The colour filter a shadow in `colour`, unpremultiplied in `space`, is
@@ -1343,7 +1411,7 @@ mod tests {
 
     use super::{
         Depth, REFUSE_PLACED, Step, apply, blurred_on_cpu, exact_blur,
-        filtered, rounded_once, shadowed, tint, worked_on,
+        filtered, rounded_once, shadow_composed, shadowed, tint, worked_on,
     };
     use crate::{prelude::*, started};
 
@@ -2155,8 +2223,19 @@ mod tests {
         image: &Image,
         offset: Vector,
         sigma: (f32, f32),
-        (colour, space): (Color4f, &ColorSpace),
+        colour: (Color4f, &ColorSpace),
         gain: f32,
+    ) -> Option<Image> {
+        let composed = composed_as_drawn(image, offset, sigma, colour)?;
+        rounded_once(&composed, image.image_info(), gain)
+    }
+
+    /// [`shadowed_as_drawn`]'s floats, before they are rounded.
+    fn composed_as_drawn(
+        image: &Image,
+        offset: Vector,
+        sigma: (f32, f32),
+        (colour, space): (Color4f, &ColorSpace),
     ) -> Option<Image> {
         let floats = image.image_info().with_color_type(ColorType::RGBAF32);
         let on_floats = |draw: &dyn Fn(&SkCanvas)| {
@@ -2188,7 +2267,7 @@ mod tests {
             );
             canvas.draw_image(&source, (0, 0), None);
         })?;
-        rounded_once(&composed, image.image_info(), gain)
+        Some(composed)
     }
 
     /// The layers, sigmas, offsets, colours and gains a shadow's sweep runs
@@ -2286,6 +2365,125 @@ mod tests {
             "{} of {runs} differ, first {:?}",
             differing.len(),
             differing.first()
+        );
+    }
+
+    /// The most an eight-bit layer's shadow, its alpha blurred and then
+    /// tinted, may lie from the four channels of the tinted source blurred,
+    /// in levels of the byte it is rounded to: a few f32 ulps of a level at
+    /// full scale, where 1 ulp of 1.0 is 255 * 2^-23, about 3e-5 levels.
+    const TIE_NOISE_LEVELS: f32 = 1e-4;
+
+    #[test]
+    fn an_eight_bit_shadow_differs_from_its_tinted_blur_only_on_ties() {
+        let srgb = ColorSpace::new_srgb();
+        let p3 = PixelColorSpace::DisplayP3
+            .to_skia_color_space()
+            .expect("Display P3");
+        let kinds = [
+            (ColorType::RGBA8888, &srgb, "8-bit sRGB"),
+            (ColorType::BGRA8888, &srgb, "8-bit BGRA sRGB"),
+            (ColorType::RGBA8888, &p3, "8-bit Display P3"),
+        ];
+        let sigmas = [
+            (0.5, 0.5),
+            (1.0, 1.0),
+            (2.0, 2.0),
+            (3.0, 3.0),
+            (4.75, 4.75),
+            (5.0, 5.0),
+            (8.0, 8.0),
+            (1.5, 4.0),
+            (0.0, 3.0),
+            (6.0, 0.0),
+        ];
+        let offsets = [
+            Vector::new(2.0, 2.0),
+            Vector::new(0.0, 0.0),
+            Vector::new(1.5, -2.25),
+        ];
+        let colours = [
+            Color4f::new(0.0, 0.0, 0.0, 1.0),
+            Color4f::new(0.0, 0.0, 0.0, 0.5),
+            Color4f::new(0.78, 0.16, 0.35, 0.6),
+            Color4f::new(0.1, 0.6, 0.9, 0.85),
+            Color4f::new(1.0, 1.0, 1.0, 0.3),
+            Color4f::new(0.25, 0.25, 0.25, 0.5),
+        ];
+        let float_info = |image: &Image| {
+            image
+                .image_info()
+                .with_color_type(ColorType::RGBAF32)
+                .with_alpha_type(AlphaType::Premul)
+        };
+        let floats_of = |image: &Image| -> Vec<f32> {
+            bytes_of(image, &float_info(image))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&b| f32::from_ne_bytes(b))
+                .collect()
+        };
+        let (mut runs, mut values, mut flips, mut farthest) = (0, 0, 0, 0f32);
+        let mut beyond = Vec::new();
+        for (kind, space, name) in kinds {
+            for (scene, (w, h)) in [(0, (40, 36)), (1, (40, 36)), (0, (7, 61))]
+            {
+                let image = layer(w, h, kind, space, scene);
+                for sigma in sigmas {
+                    for offset in offsets {
+                        for colour in colours {
+                            let ours = shadow_composed(
+                                None,
+                                &image,
+                                offset,
+                                sigma,
+                                (colour, &srgb),
+                            )
+                            .expect("a shadow");
+                            let theirs = composed_as_drawn(
+                                &image,
+                                offset,
+                                sigma,
+                                (colour, &srgb),
+                            )
+                            .expect("a shadow");
+                            let (ours, theirs) =
+                                (floats_of(&ours), floats_of(&theirs));
+                            assert_eq!(ours.len(), theirs.len(), "{name}");
+                            for gain in [1.0, 0.7] {
+                                let level = |v: f32| v * 255.0 * gain + 0.5;
+                                for (&a, &b) in ours.iter().zip(&theirs) {
+                                    let gap = (level(a) - level(b)).abs();
+                                    farthest = farthest.max(gap);
+                                    if gap > TIE_NOISE_LEVELS {
+                                        beyond.push(format!(
+                                            "{name} sigma {sigma:?} offset \
+                                             {offset:?} {a} against {b}"
+                                        ));
+                                    }
+                                    if level(a) as u8 != level(b) as u8 {
+                                        flips += 1;
+                                    }
+                                    values += 1;
+                                }
+                                runs += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println!(
+            "{flips} of {values} values in {runs} shadows round to another \
+             byte; farthest apart {farthest} levels"
+        );
+        assert_eq!(runs, 3 * 3 * 10 * 3 * 6 * 2);
+        assert!(
+            beyond.is_empty(),
+            "{} values lie further apart than a tie, first {:?}",
+            beyond.len(),
+            beyond.first()
         );
     }
 }

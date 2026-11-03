@@ -24,7 +24,8 @@
 //! Float pixels are worked in f64 a line at a time, and bytes in f32 -- see
 //! [`Lane`]. Unrounded, a float result has to be the f32 nearest the exact
 //! sum, which f32 arithmetic misses by a few ulps; a byte is rounded to a
-//! level, which f32 holds to about 1e-4.
+//! level, which f32 holds to about 1e-4. An alpha alone is worked four rows
+//! or columns to a line, as the four channels of one -- see [`blur_alpha`].
 
 use rayon::prelude::*;
 use rustfft::{Fft, FftNum, FftPlanner, num_complex::Complex};
@@ -189,6 +190,53 @@ pub(crate) fn blur(
     sigma_y: f32,
 ) -> Vec<f32> {
     blur_in::<f64>(pixels, width, height, sigma_x, sigma_y)
+}
+
+/// Blurs `alpha`, one float a pixel `width` by `height`, as [`blur`] blurs
+/// a channel, and returns it in the buffer it came in. Four rows of it go
+/// through the row pass as the four channels of one line, and four columns
+/// through the column pass, so that each is summed by the code that sums a
+/// channel of [`blur`]'s, at a quarter of the work of blurring four. Tap by
+/// tap that is the alpha [`blur`] gives, bit for bit. Through the FFT a
+/// channel shares its transform with another -- see [`fourier`] -- here a
+/// neighbouring row's or column's alpha where there it is blue, and the two
+/// differ by float rounding, 3e-14 at most over
+/// `an_alpha_blurs_as_the_alpha_of_four_channels_does`'s images.
+pub(crate) fn blur_alpha(
+    mut alpha: Vec<f32>,
+    width: usize,
+    height: usize,
+    sigma_x: f32,
+    sigma_y: f32,
+) -> Vec<f32> {
+    if width == 0 || height == 0 {
+        return alpha;
+    }
+    // Rows `4 * band` to `4 * band + 3`, each in a channel of band `band`.
+    let bands = height.div_ceil(4);
+    let mut rows = vec![0.0; width * bands * 4];
+    for (y, row) in alpha.chunks(width).enumerate() {
+        for (x, &v) in row.iter().enumerate() {
+            rows[(y / 4 * width + x) * 4 + y % 4] = v;
+        }
+    }
+    pass::<f64>(&mut rows, width, bands, sigma_x);
+    // Columns `4 * band` to `4 * band + 3`, each in a channel of band `band`.
+    let bands = width.div_ceil(4);
+    let mut columns = vec![0.0; height * bands * 4];
+    for y in 0..height {
+        for x in 0..width {
+            columns[(x / 4 * height + y) * 4 + x % 4] =
+                rows[(y / 4 * width + x) * 4 + y % 4];
+        }
+    }
+    pass::<f64>(&mut columns, height, bands, sigma_y);
+    for (y, row) in alpha.chunks_mut(width).enumerate() {
+        for (x, v) in row.iter_mut().enumerate() {
+            *v = columns[(x / 4 * height + y) * 4 + x % 4];
+        }
+    }
+    alpha
 }
 
 /// Blurs `pixels`, premultiplied RGBA bytes, as [`blur`] does but in f32,
@@ -921,5 +969,55 @@ mod tests {
             }
         }
         assert_eq!(compared, 4 * 7 * (4 + 4));
+    }
+
+    /// The most [`blur_alpha`] may lie from the alpha [`blur`] gives through
+    /// the FFT, where each shares its transform with a different channel:
+    /// a few f32 ulps of the largest value, which is at most 1.
+    const FFT_PARTNER_NOISE: f32 = 1e-6;
+
+    #[test]
+    fn an_alpha_blurs_as_the_alpha_of_four_channels_does() {
+        let (mut compared, mut farthest) = (0, 0f32);
+        for (w, h) in [(1, 1), (7, 3), (5, 9), (59, 56), (400, 300)] {
+            for sigma in [
+                (0.5f32, 0.5f32),
+                (3.0, 1.5),
+                (4.9, 4.75),
+                (4.9, 5.0),
+                (12.0, 40.0),
+                (0.0, 2.0),
+                (3.0, f32::INFINITY),
+            ] {
+                let fft = [sigma.0, sigma.1].into_iter().any(|s| {
+                    s.is_finite() && s > 0.0 && method(s) == Method::Fourier
+                });
+                for (i, scene) in float_scenes(w, h).into_iter().enumerate() {
+                    let alpha = scene.iter().skip(3).step_by(4).copied();
+                    let ours =
+                        blur_alpha(alpha.collect(), w, h, sigma.0, sigma.1);
+                    let four = blur(scene, w, h, sigma.0, sigma.1);
+                    let four = four.iter().skip(3).step_by(4);
+                    assert_eq!(ours.len(), w * h);
+                    match fft {
+                        true => ours.iter().zip(four).for_each(|(a, b)| {
+                            farthest = farthest.max((a - b).abs());
+                        }),
+                        false => assert_eq!(
+                            ours.iter()
+                                .zip(four)
+                                .position(|(a, b)| a.to_bits() != b.to_bits()),
+                            None,
+                            "{w}x{h}, sigma {sigma:?}, scene {i}"
+                        ),
+                    }
+                    compared += 1;
+                }
+            }
+        }
+        assert_eq!(compared, 5 * 7 * 4);
+        assert!(farthest > 0.0, "the FFT's partners never moved a value");
+        assert!(farthest < FFT_PARTNER_NOISE, "{farthest} apart");
+        println!("through the FFT, farthest apart {farthest}");
     }
 }
