@@ -395,6 +395,7 @@ jobs:
             --no-default-features \
             --features "node-addon,vulkan,window,freetype"
       - name: TEMPORARY full text reach sweep on FreeType
+        if: ${{ !cancelled() }}
         env:
           TEXT_REACH_SWEEP: full
         run: |
