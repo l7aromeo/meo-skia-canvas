@@ -6898,7 +6898,10 @@ mod text_reach_tests {
     //! small -- see [`layer::KEEPS_TEXT_REACH`].
 
     use super::{TEXT_REACHED, layer::KEEPS_TEXT_REACH};
-    use crate::{node::typography::REACHED_FAMILIES, prelude::*};
+    use crate::{
+        node::typography::{REACHED_FAMILIES, UNHINTED_REACH},
+        prelude::*,
+    };
     use rayon::prelude::*;
     use skia_safe::Rect;
     use std::{
@@ -6923,9 +6926,15 @@ mod text_reach_tests {
             RefCell::new(HashMap::new());
     }
 
-    /// Registers [`OSWALD`] on this thread, once.
+    /// Registers [`OSWALD`] on this thread, once, and measures reaches by
+    /// the glyphs' unhinted outlines where `TEXT_REACH_BOUND` is `unhinted`
+    /// -- see `UNHINTED_REACH`.
     fn register() {
         if !REGISTERED.replace(true) {
+            UNHINTED_REACH.set(
+                std::env::var("TEXT_REACH_BOUND")
+                    .is_ok_and(|v| v == "unhinted"),
+            );
             FontLibrary::new()
                 .use_paths(
                     Some(OSWALD),
@@ -7425,6 +7434,11 @@ mod text_reach_tests {
             .into_iter()
             .partition(|scene| resolves(scene.font));
         if full {
+            eprintln!(
+                "reach bound: {}",
+                std::env::var("TEXT_REACH_BOUND")
+                    .unwrap_or_else(|_| "hinted".into())
+            );
             let mut absent: Vec<&str> =
                 missing.iter().map(|s| s.font).collect();
             absent.dedup();

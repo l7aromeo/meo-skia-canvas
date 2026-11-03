@@ -22,6 +22,8 @@ use crate::{
     utils::*,
 };
 use neon::prelude::*;
+#[cfg(test)]
+use skia_safe::FontHinting;
 use skia_safe::{
     Canvas, Color4f, Font, FontMetrics, FourByteTag, GlyphId, Matrix, Paint,
     Path as SkPath, PathBuilder as SkPathBuilder, Point, Rect, TextBlob,
@@ -716,7 +718,17 @@ impl RunPaint {
                 };
                 let at = origin + run.origin;
                 let mut boxes = vec![Rect::new_empty(); run.glyphs.len()];
-                run.font.get_bounds(&run.glyphs, &mut boxes, Some(paint));
+                #[cfg(test)]
+                let unhinted = UNHINTED_REACH.get().then(|| {
+                    let mut font = run.font.clone();
+                    font.set_hinting(FontHinting::None);
+                    font
+                });
+                #[cfg(test)]
+                let font = unhinted.as_ref().unwrap_or(&run.font);
+                #[cfg(not(test))]
+                let font = &run.font;
+                font.get_bounds(&run.glyphs, &mut boxes, Some(paint));
                 #[cfg(test)]
                 REACHED_FAMILIES.with_borrow_mut(|families| {
                     families.push(run.font.typeface().family_name());
@@ -1137,6 +1149,11 @@ thread_local! {
     /// measured, in order: which fonts a run of text resolved to.
     pub(crate) static REACHED_FAMILIES: RefCell<Vec<String>> =
         const { RefCell::new(Vec::new()) };
+    /// Whether [`RunPaint::reach`] measures its glyphs in the run's font with
+    /// hinting off, the outline rather than the glyph hinted at the size it
+    /// is recorded at: the bound the reach sweep measures against the
+    /// hinted one.
+    pub(crate) static UNHINTED_REACH: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Lets every kept run go: called when the registered fonts change, since a
