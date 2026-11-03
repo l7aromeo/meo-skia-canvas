@@ -37,11 +37,13 @@
 
 use skia_safe::{
     AlphaType, BlendMode, Color, ColorSpace, ColorType, Data, FilterMode,
-    Image, ImageInfo, MipmapMode, Paint, Rect, RuntimeEffect, SamplingOptions,
-    TileMode,
+    Image, ImageInfo, MipmapMode, Paint, Recorder, Rect, RuntimeEffect,
+    SamplingOptions, TileMode,
     gpu::{Budgeted, RecordingContext, SurfaceOrigin, surfaces},
     runtime_effect::ChildPtr,
 };
+
+use std::cell::RefCell;
 
 use super::exact_blur::{REACH_SIGMAS, gaussian_sum};
 
@@ -68,10 +70,13 @@ pub(crate) fn factor(sigma: f32) -> Option<usize> {
 ///   it.
 ///
 /// `source` says what the children hold: 0, a value and its remainder in
-/// levels; 1, an 8-bit image, whose byte is recovered; 2, a float image.
-/// `part` says what to write: 1 and 2, the value and its remainder in
-/// levels; 0, the value rounded to a level, for an 8-bit target; 3, the
-/// value unrounded, for a float one. Outside a texture, decal reads zero.
+/// levels; 1, an 8-bit image, whose byte is recovered; 2, a float image;
+/// 3, an alpha's value and remainder packed into the red and green of the
+/// first child, which is read into every channel. `part` says what to
+/// write: 1 and 2, the value and its remainder in levels; 0, the value
+/// rounded to a level, for an 8-bit target; 3, the value unrounded, for a
+/// float one; 4, the alpha's value and remainder packed into red and green,
+/// for the next pass to read as 3. Outside a texture, decal reads zero.
 ///
 /// The constants it names are declared ahead of it by [`source`].
 const PASS: &str = r#"
@@ -95,6 +100,10 @@ float4 snap(float4 x) {
     return sign(x) * floor(a / ulp + 0.5) * ulp;
 }
 float4 at(float2 q) {
+    if (source == 3) {
+        float4 x = float4(hi.eval(q));
+        return float4(x.r + x.g);
+    }
     float4 v = float4(hi.eval(q)) + float4(lo.eval(q));
     if (source == 1) { return floor(v * 255 + 0.5); }
     if (source == 2) { return v * 255; }
@@ -124,6 +133,7 @@ float4 main(float2 p) {
     if (part == 0) { return floor(acc + 0.5) / 255; }
     if (part == 3) { return acc / 255; }
     float4 h = snap(acc);
+    if (part == 4) { return float4(h.a, acc.a - h.a, 0, 0); }
     return part == 1 ? h : acc - h;
 }
 "#;
@@ -170,6 +180,7 @@ enum Input {
     Split = 0,
     Bytes = 1,
     Floats = 2,
+    Packed = 3,
 }
 
 /// What a pass writes, as [`PASS`]'s `part` uniform reads it.
@@ -179,6 +190,7 @@ enum Part {
     Value = 1,
     Remainder = 2,
     Unrounded = 3,
+    Packed = 4,
 }
 
 /// A pass's geometry along its axis.
@@ -258,12 +270,14 @@ pub(crate) fn blur(
     } else {
         Input::Floats
     };
+    let zero = zero(context)?;
     let mut gpu = Gpu {
         context,
         effect,
         space,
+        zero: zero.clone(),
+        packed: false,
     };
-    let zero = gpu.zero()?;
     // Along rows, into a value and its remainder; then along columns, into
     // the target.
     let (hi, lo) = gpu.axis(
@@ -293,20 +307,19 @@ pub(crate) fn blur(
 }
 
 /// The drop shadow's last pass: `src`, an 8-bit image whose byte is
-/// recovered, over its shadow -- the blurred alpha `hi + lo`, a value and
-/// its remainder in levels, tinted to `(r, g, b)` at `ca` of that alpha and
-/// moved by `(ox, oy)` -- scaled by `gain` and rounded to a level once, as
-/// the chain's `shadowed` makes it on the CPU in floats, by drawing the
-/// tinted shadow at the offset. As that draw does, the shadow covers the
-/// pixels of its `w` by `h` rectangle with each edge rounded to the nearest
-/// pixel, `floor(x + 0.5)` -- a pixel whose centre lies on an edge at a
-/// half is not covered on the left and top, and is on the right and bottom
-/// -- and nothing else; where `bilinear` is set it is resampled from its four
-/// nearest pixels, each tinted first and each held to the rectangle's edge
+/// recovered, over its shadow -- the blurred alpha, its value and remainder
+/// in levels packed into the red and green of `blurred`, tinted to `(r, g, b)`
+/// at `ca` of that alpha and moved by `(ox, oy)` -- scaled by `gain` and
+/// rounded to a level once, as the chain's `shadowed` makes it on the CPU in
+/// floats, by drawing the tinted shadow at the offset. As that draw does, the
+/// shadow covers the pixels of its `w` by `h` rectangle with each edge rounded
+/// to the nearest pixel, `floor(x + 0.5)` -- a pixel whose centre lies on an
+/// edge at a half is not covered on the left and top, and is on the right and
+/// bottom -- and nothing else; where `bilinear` is set it is resampled from its
+/// four nearest pixels, each tinted first and each held to the rectangle's edge
 /// pixels, and otherwise read at the one pixel the whole offset lands it on.
 const SHADOW: &str = r#"
-uniform shader hi;
-uniform shader lo;
+uniform shader blurred;
 uniform shader src;
 uniform float r;
 uniform float g;
@@ -319,7 +332,8 @@ uniform float gain;
 uniform float w;
 uniform float h;
 float4 tinted(float2 q) {
-    float t = ca * ((float4(hi.eval(q)) + float4(lo.eval(q))).a / 255);
+    float4 x = float4(blurred.eval(q));
+    float t = ca * ((x.r + x.g) / 255);
     return float4(float3(r, g, b) * t, t);
 }
 float4 main(float2 position) {
@@ -366,7 +380,7 @@ thread_local! {
 
 /// `image`, an 8-bit layer `(width, height)`, over its drop shadow, made on
 /// `context`: its alpha blurred by `sigma_x` along rows and `sigma_y` along
-/// columns by the passes [`blur`] makes, kept as a value and its remainder,
+/// columns by the passes [`blur`] makes, its value and remainder packed,
 /// tinted to `rgb` at `alpha` of it, moved by `offset` and composited under
 /// `image` by [`SHADOW`], scaled by `gain` and rounded once to `image`'s own
 /// 8-bit type. The bytes are those the CPU makes in floats but on exact
@@ -397,12 +411,17 @@ pub(crate) fn shadow(
     let space = image
         .color_space()
         .or_else(|| Some(ColorSpace::new_srgb()))?;
+    // The shadow needs the alpha alone, so each pass carries just its value
+    // and remainder, in one target -- half the passes of four channels'
+    // two, and the same sums in the same order.
+    let zero = zero(context)?;
     let mut gpu = Gpu {
         context,
         effect,
         space,
+        zero: zero.clone(),
+        packed: true,
     };
-    let zero = gpu.zero()?;
     let rows = gpu.axis(
         (image.clone(), zero),
         Input::Bytes,
@@ -412,8 +431,15 @@ pub(crate) fn shadow(
         sigma_x,
         None,
     )?;
-    let (hi, lo) =
-        gpu.axis(rows, Input::Split, [0.0, 1.0], height, width, sigma_y, None)?;
+    let (blurred, _) = gpu.axis(
+        rows,
+        Input::Packed,
+        [0.0, 1.0],
+        height,
+        width,
+        sigma_y,
+        None,
+    )?;
     let whole = ox.fract() == 0.0 && oy.fract() == 0.0;
     let uniforms: [f32; SHADOW_UNIFORMS] = [
         r,
@@ -437,7 +463,7 @@ pub(crate) fn shadow(
     };
     let shader = compose.make_shader(
         Data::new_copy(&uniforms),
-        &[child(&hi)?, child(&lo)?, child(image)?],
+        &[child(&blurred)?, child(image)?],
         None,
     )?;
     let info = gpu.info(width, height, out_type);
@@ -459,32 +485,58 @@ pub(crate) fn shadow(
     Some(surface.image_snapshot())
 }
 
+thread_local! {
+    /// The last [`zero`] made on this thread, kept while its context lives.
+    static ZERO: RefCell<Option<Image>> = const { RefCell::new(None) };
+}
+
+/// A 1x1 transparent image on `context`, the remainder child of a pass
+/// whose input has none: made once per thread and context and kept, rather
+/// than a target made and cleared for every blur. Transparent reads as
+/// zero in any space, so whose space it is tagged with moves nothing.
+fn zero(context: &mut RecordingContext) -> Option<Image> {
+    if let Some(kept) = ZERO.with(|z| z.borrow().clone())
+        && kept.is_valid(Some(context.as_recorder() as &mut dyn Recorder))
+    {
+        return Some(kept);
+    }
+    let info = ImageInfo::new(
+        (1, 1),
+        ColorType::RGBAF16,
+        AlphaType::Premul,
+        ColorSpace::new_srgb(),
+    );
+    let mut surface = surfaces::render_target(
+        context,
+        Budgeted::Yes,
+        &info,
+        None,
+        SurfaceOrigin::TopLeft,
+        None,
+        false,
+        None,
+    )?;
+    surface.canvas().clear(Color::TRANSPARENT);
+    let made = surface.image_snapshot();
+    ZERO.with(|z| *z.borrow_mut() = Some(made.clone()));
+    Some(made)
+}
+
 /// The passes' shared state.
 struct Gpu<'a> {
     context: &'a mut RecordingContext,
     effect: RuntimeEffect,
     space: ColorSpace,
+    /// A 1x1 transparent image, the second child of a pass whose input has
+    /// no remainder of its own.
+    zero: Image,
+    /// Whether the passes carry an alpha alone, its value and remainder
+    /// packed into one target -- see [`Part::Packed`] -- rather than four
+    /// channels in two.
+    packed: bool,
 }
 
 impl Gpu<'_> {
-    /// A 1x1 transparent image, the remainder child of a pass whose input
-    /// has none.
-    fn zero(&mut self) -> Option<Image> {
-        let info = self.info(1, 1, ColorType::RGBAF16);
-        let mut surface = surfaces::render_target(
-            self.context,
-            Budgeted::Yes,
-            &info,
-            None,
-            SurfaceOrigin::TopLeft,
-            None,
-            false,
-            None,
-        )?;
-        surface.canvas().clear(Color::TRANSPARENT);
-        Some(surface.image_snapshot())
-    }
-
     fn info(&self, w: usize, h: usize, ct: ColorType) -> ImageInfo {
         ImageInfo::new(
             (w as i32, h as i32),
@@ -557,7 +609,17 @@ impl Gpu<'_> {
         Some(surface.image_snapshot())
     }
 
-    /// Both parts of a pass, as half floats.
+    /// What a pass after the first reads: a value and its remainder, in
+    /// two targets or packed into one.
+    fn carried(&self) -> Input {
+        match self.packed {
+            true => Input::Packed,
+            false => Input::Split,
+        }
+    }
+
+    /// Both parts of a pass, as half floats: in two targets, or packed into
+    /// one beside the [`zero`] a next pass reads as its second child.
     fn split(
         &mut self,
         children: (&Image, &Image),
@@ -566,6 +628,18 @@ impl Gpu<'_> {
         taps: Taps,
         size: (usize, usize),
     ) -> Option<(Image, Image)> {
+        if self.packed {
+            let packed = self.pass(
+                children,
+                input,
+                dir,
+                taps,
+                Part::Packed,
+                size,
+                ColorType::RGBAF16,
+            )?;
+            return Some((packed, self.zero.clone()));
+        }
         Some((
             self.pass(
                 children,
@@ -672,7 +746,7 @@ impl Gpu<'_> {
         )?;
         let (h1, l1) = self.split(
             (&h0, &l0),
-            Input::Split,
+            self.carried(),
             dir,
             Taps {
                 mode: 1.0,
@@ -693,7 +767,7 @@ impl Gpu<'_> {
             sigma: a,
             norm: a * norm_of(a),
         };
-        finish(self, (&h1, &l1), Input::Split, up)
+        finish(self, (&h1, &l1), self.carried(), up)
     }
 }
 
