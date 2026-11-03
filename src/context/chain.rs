@@ -1042,12 +1042,13 @@ fn shadowed(
 /// [`shadowed`]'s image over its shadow, in floats, before it is rounded.
 ///
 /// On an eight-bit layer the shadow is the source's alpha alone, blurred
-/// and then tinted: the tint is the colour scaled by the alpha, and a blur
-/// is linear, so the two orders agree but for float rounding, which the
-/// bytes the result is rounded to show only where a value lies on a tie.
-/// It is a quarter of the work of blurring the tinted source's four
-/// channels. A layer of floats keeps that blur, so that its values stay the
-/// floats nearest the exact sums -- see [`exact_blur::blur`].
+/// in f32 and then tinted: the tint is the colour scaled by the alpha, and
+/// a blur is linear, so the two orders agree but for float rounding, which
+/// the bytes the result is rounded to show only where a value lies on a
+/// tie. It is a quarter of the sums of blurring the tinted source's four
+/// channels, each in f32 rather than f64. A layer of floats keeps that
+/// blur, so that its values stay the floats nearest the exact sums -- see
+/// [`exact_blur::blur`].
 fn shadow_composed(
     context: Option<&Gpu>,
     image: &Image,
@@ -2271,10 +2272,12 @@ mod tests {
     }
 
     /// The layers, sigmas, offsets, colours and gains a shadow's sweep runs
-    /// over: each layer kind a chain plays on -- an 8-bit sRGB page's, an
-    /// F32 sRGB page's and an F16 Display P3 page's -- with a shape and with
-    /// noise, at sigmas either side of the FFT's, whole, zero and fractional
-    /// offsets, opaque and translucent colours, and two gains.
+    /// over: each float layer kind a chain plays on -- an F32 sRGB page's
+    /// and an F16 Display P3 page's -- with a shape and with noise, at
+    /// sigmas either side of the FFT's, whole, zero and fractional offsets,
+    /// opaque and translucent colours, and two gains. An eight-bit layer's
+    /// shadow is made another way, and held to this one to within a tie by
+    /// `an_eight_bit_shadow_differs_from_its_tinted_blur_only_on_ties`.
     fn shadow_sweep(
         mut each: impl FnMut(
             &str,
@@ -2290,7 +2293,6 @@ mod tests {
             .to_skia_color_space()
             .expect("Display P3");
         let kinds = [
-            (ColorType::RGBA8888, &srgb, "8-bit sRGB"),
             (ColorType::RGBAF32, &srgb, "F32 sRGB"),
             (ColorType::RGBAF16, &p3, "F16 P3"),
         ];
@@ -2359,7 +2361,7 @@ mod tests {
                 ));
             }
         });
-        assert_eq!(runs, 3 * 2 * 7 * 3 * 3 * 2);
+        assert_eq!(runs, 2 * 2 * 7 * 3 * 3 * 2);
         assert!(
             differing.is_empty(),
             "{} of {runs} differ, first {:?}",
@@ -2368,10 +2370,12 @@ mod tests {
         );
     }
 
-    /// The most an eight-bit layer's shadow, its alpha blurred and then
-    /// tinted, may lie from the four channels of the tinted source blurred,
-    /// in levels of the byte it is rounded to: a few f32 ulps of a level at
-    /// full scale, where 1 ulp of 1.0 is 255 * 2^-23, about 3e-5 levels.
+    /// The most an eight-bit layer's shadow, its alpha blurred in f32 and
+    /// then tinted, may lie from the four channels of the tinted source
+    /// blurred in f64, in levels of the byte it is rounded to: the 1e-4 of
+    /// a level f32 holds a byte's blur to -- see [`exact_blur::blur_bytes`]
+    /// -- a few ulps at full scale, where 1 ulp of 1.0 is 255 * 2^-23,
+    /// about 3e-5 levels.
     const TIE_NOISE_LEVELS: f32 = 1e-4;
 
     #[test]

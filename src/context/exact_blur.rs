@@ -24,8 +24,9 @@
 //! Float pixels are worked in f64 a line at a time, and bytes in f32 -- see
 //! [`Lane`]. Unrounded, a float result has to be the f32 nearest the exact
 //! sum, which f32 arithmetic misses by a few ulps; a byte is rounded to a
-//! level, which f32 holds to about 1e-4. An alpha alone is worked four rows
-//! or columns to a line, as the four channels of one -- see [`blur_alpha`].
+//! level, which f32 holds to about 1e-4. An alpha alone, for a layer of
+//! bytes, is worked in f32 four rows or columns to a line, as the four
+//! channels of one -- see [`blur_alpha`].
 
 use rayon::prelude::*;
 use rustfft::{Fft, FftNum, FftPlanner, num_complex::Complex};
@@ -192,16 +193,16 @@ pub(crate) fn blur(
     blur_in::<f64>(pixels, width, height, sigma_x, sigma_y)
 }
 
-/// Blurs `alpha`, one float a pixel `width` by `height`, as [`blur`] blurs
-/// a channel, and returns it in the buffer it came in. Four rows of it go
-/// through the row pass as the four channels of one line, and four columns
-/// through the column pass, so that each is summed by the code that sums a
-/// channel of [`blur`]'s, at a quarter of the work of blurring four. Tap by
-/// tap that is the alpha [`blur`] gives, bit for bit. Through the FFT a
-/// channel shares its transform with another -- see [`fourier`] -- here a
-/// neighbouring row's or column's alpha where there it is blue, and the two
-/// differ by float rounding, 3e-14 at most over
-/// `an_alpha_blurs_as_the_alpha_of_four_channels_does`'s images.
+/// Blurs `alpha`, one float a pixel `width` by `height`, as [`blur_bytes`]
+/// blurs a channel, in f32, for a layer whose result is rounded to bytes,
+/// and returns it in the buffer it came in. Four rows of it go through the
+/// row pass as the four channels of one line, and four columns through the
+/// column pass, so that each is summed by the code that sums a channel, at
+/// a quarter of the work of blurring four. Tap by tap that is the alpha
+/// [`blur_in`] gives in f32, bit for bit. Through the FFT a channel shares
+/// its transform with another -- see [`fourier`] -- here a neighbouring
+/// row's or column's alpha where there it is blue, and the two differ by
+/// float rounding.
 pub(crate) fn blur_alpha(
     mut alpha: Vec<f32>,
     width: usize,
@@ -220,7 +221,7 @@ pub(crate) fn blur_alpha(
             rows[(y / 4 * width + x) * 4 + y % 4] = v;
         }
     }
-    pass::<f64>(&mut rows, width, bands, sigma_x);
+    pass::<f32>(&mut rows, width, bands, sigma_x);
     // Columns `4 * band` to `4 * band + 3`, each in a channel of band `band`.
     let bands = width.div_ceil(4);
     let mut columns = vec![0.0; height * bands * 4];
@@ -230,7 +231,7 @@ pub(crate) fn blur_alpha(
                 rows[(y / 4 * width + x) * 4 + y % 4];
         }
     }
-    pass::<f64>(&mut columns, height, bands, sigma_y);
+    pass::<f32>(&mut columns, height, bands, sigma_y);
     for (y, row) in alpha.chunks_mut(width).enumerate() {
         for (x, v) in row.iter_mut().enumerate() {
             *v = columns[(x / 4 * height + y) * 4 + x % 4];
@@ -971,9 +972,10 @@ mod tests {
         assert_eq!(compared, 4 * 7 * (4 + 4));
     }
 
-    /// The most [`blur_alpha`] may lie from the alpha [`blur`] gives through
-    /// the FFT, where each shares its transform with a different channel:
-    /// a few f32 ulps of the largest value, which is at most 1.
+    /// The most [`blur_alpha`] may lie from the alpha [`blur_in`] gives in
+    /// f32 through the FFT, where each shares its transform with a
+    /// different channel: a few f32 ulps of the largest value, which is at
+    /// most 1.
     const FFT_PARTNER_NOISE: f32 = 1e-6;
 
     #[test]
@@ -996,7 +998,7 @@ mod tests {
                     let alpha = scene.iter().skip(3).step_by(4).copied();
                     let ours =
                         blur_alpha(alpha.collect(), w, h, sigma.0, sigma.1);
-                    let four = blur(scene, w, h, sigma.0, sigma.1);
+                    let four = blur_in::<f32>(scene, w, h, sigma.0, sigma.1);
                     let four = four.iter().skip(3).step_by(4);
                     assert_eq!(ours.len(), w * h);
                     match fft {
