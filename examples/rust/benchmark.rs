@@ -967,6 +967,11 @@ fn cases<'a>(fixtures: &'a Fixtures, quick: bool) -> Vec<Case<'a>> {
         );
     }
 
+    // Loading an SVG and drawing it onto the page, the same operation as the
+    // npm case of this id. `Image::from_svg_xml` is the crate's route: it
+    // parses and rasterizes the document at the page's size before the draw,
+    // where the binding records it as vectors and the draw replays them, so
+    // the two differ by what each route costs and not by what was asked.
     for elements in [60, 2000] {
         add(
             format!("decode/svg-{elements}/cpu"),
