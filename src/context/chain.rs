@@ -1168,6 +1168,14 @@ fn blurred_alpha(source: &Image, sigma: (f32, f32)) -> Option<Image> {
 /// raster backend rounds the colour to bytes and premultiplies the bytes --
 /// the shadow of `color(srgb-linear 0.25 0.25 0.25 / 0.5)` stored 69 that
 /// way, where the product is 68.
+///
+/// The placed colour and the exactly converted one reach Skia through
+/// [`offset_tint`], which it does not convert. Held by Skia's blend filter
+/// instead, the read-back colour was converted from the layer's space into
+/// that same space through skcms's approximate transfer function: on an
+/// eight-bit Display P3 layer, read-back white tinted 1.54e-5 above its
+/// alpha, and a white shadow stored a colour byte one above its alpha
+/// byte, `[42, 42, 41, 41]`.
 fn tint(
     colour: Color4f,
     space: &ColorSpace,
@@ -1217,11 +1225,7 @@ fn tint(
         return None;
     }
     let [r, g, b, a] = filled;
-    color_filters::blend_with_color_space(
-        Color4f::new(r, g, b, a),
-        layer.color_space(),
-        BlendMode::SrcIn,
-    )
+    Some(offset_tint([r, g, b], a))
 }
 
 /// A shader painting `colour`, unpremultiplied in `space`, exactly on an
@@ -1245,16 +1249,10 @@ fn exact_fill(
     Some((exact.shader()?, alpha))
 }
 
-/// [`tint`] on a float layer in a space this crate converts: the colour
-/// converted to the layer's space in `f64` on this side, and handed to Skia
-/// as the offsets of a colour matrix worked in that space, its alpha the
-/// colour's alpha of what it tints. Skia converts a colour a blend filter
-/// holds through skcms's approximate transfer function, whatever space it
-/// is tagged with: a shadow in `color(srgb-linear 0.5 0.5 0.5)` landed
-/// 6.29e-5 from its encoding on an sRGB F32 page, and pre-encoded to
-/// `color(srgb ...)` it landed the same. A matrix's offsets are not
-/// converted. `None` where the layer has no space or one this crate does
-/// not convert.
+/// [`tint`] on a layer it does not place colours on, in a space this crate
+/// converts: the colour converted to the layer's space in `f64` on this
+/// side and handed to Skia by [`offset_tint`]. `None` where the layer has
+/// no space or one this crate does not convert.
 fn exact_tint(
     colour: Color4f,
     space: &ColorSpace,
@@ -1262,19 +1260,27 @@ fn exact_tint(
 ) -> Option<ColorFilter> {
     let working = layer.color_space()?;
     let canvas = PixelColorSpace::matching(&working)?;
-    let [r, g, b] =
-        color_in_canvas_space(colour, space, canvas)?.map(|c| c as f32);
+    let rgb = color_in_canvas_space(colour, space, canvas)?.map(|c| c as f32);
+    Some(offset_tint(rgb, colour.a))
+}
+
+/// A tint painting `rgb`, unpremultiplied in the space it is drawn in, at
+/// `alpha` of the alpha of what it tints: the colour handed to Skia as the
+/// offsets of a colour matrix, which it does not convert. Skia converts a
+/// colour a blend filter holds through skcms's approximate transfer
+/// function, whatever space it is tagged with and even into that same
+/// space: a shadow in `color(srgb-linear 0.5 0.5 0.5)` landed 6.29e-5 from
+/// its encoding on an sRGB F32 page, and pre-encoded to `color(srgb ...)`
+/// it landed the same.
+fn offset_tint([r, g, b]: [f32; 3], alpha: f32) -> ColorFilter {
     #[rustfmt::skip]
     let matrix = [
         0.0, 0.0, 0.0, 0.0, r,
         0.0, 0.0, 0.0, 0.0, g,
         0.0, 0.0, 0.0, 0.0, b,
-        0.0, 0.0, 0.0, colour.a, 0.0,
+        0.0, 0.0, 0.0, alpha, 0.0,
     ];
-    Some(color_filters::matrix_row_major(
-        &matrix,
-        color_filters::Clamp::No,
-    ))
+    color_filters::matrix_row_major(&matrix, color_filters::Clamp::No)
 }
 
 /// `floats`, an F32 image, scaled by `gain` into `info`'s type in memory:
