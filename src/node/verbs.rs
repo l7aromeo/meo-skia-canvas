@@ -19,6 +19,8 @@
 //! and `tests/suite/arguments.test.js` pins it. A call whose arguments no
 //! kind describes stays hand-written at its declaration site.
 
+use std::ops::Range;
+
 /// The argument kinds a declaration can ask for, beyond "a number".
 ///
 /// One check and one message per kind, shared by every verb that names it, so
@@ -193,39 +195,118 @@ impl Slot {
     }
 }
 
-/// The strings a batch carries: one string crossing for all of them, cut at
-/// each one's length in UTF-16 units, which is how JavaScript counts a
-/// string -- see `keepText` in `lib/classes/drawlist.js`.
+/// The strings a batch carries: one string crossing for all of them, as
+/// UTF-8, cut at each one's length in UTF-16 units, which is how JavaScript
+/// counts a string -- see `keepText` in `lib/classes/drawlist.js`.
 ///
-/// Cut in UTF-16 rather than in what Rust holds: one string ending in a lone
-/// high surrogate and the next beginning with its low half join into a pair,
-/// which UTF-8 would hold as one character, so cutting after conversion
-/// could not put the halves back where they were. Each piece is converted on
-/// its own instead, as reading each string out of JavaScript did, a lone
-/// surrogate becoming U+FFFD.
+/// Read as UTF-8 because that is what a string read from JavaScript on its
+/// own was, and V8 writes a one-byte string out as UTF-8 at about the cost of
+/// a copy, where widening it to UTF-16 and decoding that back cost a batch of
+/// labels more than reading each label apart had. Each piece is a range of the
+/// joined string rather than a string of its own.
+///
+/// V8 writes a lone surrogate as U+FFFD, one unit as it was. A lone high
+/// surrogate ending one text and a lone low one beginning the next join into
+/// a pair, which UTF-8 holds as one character of two units; a cut inside one
+/// gives each side U+FFFD, as reading the two texts apart did.
 pub(crate) struct Texts {
-    texts: Vec<String>,
+    joined: String,
+    pieces: Vec<Piece>,
+}
+
+/// One text of a batch: where it lies in the joined string, and whether it
+/// begins or ends with the half of a pair the cut went through, written as
+/// U+FFFD beside the range.
+enum Piece {
+    Range(Range<usize>),
+    Split(String),
 }
 
 impl Texts {
-    /// `joined` cut at `lengths`. A length running past the end takes what is
-    /// left, which is a writer's mistake, and the texts after it are empty.
-    pub(crate) fn cut(joined: &[u16], lengths: &[u32]) -> Self {
-        let mut rest = joined;
-        let texts = lengths
+    /// `joined` cut at `lengths`, in UTF-16 units. A length running past the
+    /// end takes what is left, which is a writer's mistake, and the texts
+    /// after it are empty.
+    pub(crate) fn cut(joined: String, lengths: &[u32]) -> Self {
+        let pieces = match joined.is_ascii() {
+            // A unit is a byte.
+            true => {
+                let mut at = 0_usize;
+                lengths
+                    .iter()
+                    .map(|&length| {
+                        let end = at
+                            .saturating_add(length as usize)
+                            .min(joined.len());
+                        let piece = Piece::Range(at..end);
+                        at = end;
+                        piece
+                    })
+                    .collect()
+            }
+            false => Self::walk(&joined, lengths),
+        };
+        Self { joined, pieces }
+    }
+
+    /// [`Self::cut`] for a string that is not all ASCII: its characters
+    /// walked, counting the units each takes.
+    fn walk(joined: &str, lengths: &[u32]) -> Vec<Piece> {
+        let mut chars = joined.char_indices().peekable();
+        // The cut before this text went through a pair: its first unit is the
+        // low half, already stepped over.
+        let mut low_half = false;
+        lengths
             .iter()
             .map(|&length| {
-                let (text, after) =
-                    rest.split_at((length as usize).min(rest.len()));
-                rest = after;
-                String::from_utf16_lossy(text)
+                let mut units = length as usize;
+                let opens_split = low_half && units > 0;
+                if opens_split {
+                    low_half = false;
+                    units -= 1;
+                }
+                let start = chars.peek().map_or(joined.len(), |&(at, _)| at);
+                let mut end = start;
+                let mut closes_split = false;
+                while units > 0 {
+                    let Some(&(at, c)) = chars.peek() else { break };
+                    let width = c.len_utf16();
+                    if width > units {
+                        // The cut lands between the halves of this pair.
+                        closes_split = true;
+                        low_half = true;
+                        chars.next();
+                        break;
+                    }
+                    units -= width;
+                    end = at + c.len_utf8();
+                    chars.next();
+                }
+                match (opens_split, closes_split) {
+                    (false, false) => Piece::Range(start..end),
+                    _ => Piece::Split(
+                        [
+                            opens_split.then_some(
+                                char::REPLACEMENT_CHARACTER.to_string(),
+                            ),
+                            Some(joined[start..end].to_owned()),
+                            closes_split.then_some(
+                                char::REPLACEMENT_CHARACTER.to_string(),
+                            ),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .collect(),
+                    ),
+                }
             })
-            .collect();
-        Self { texts }
+            .collect()
     }
 
     fn get(&self, ordinal: usize) -> Option<&str> {
-        self.texts.get(ordinal).map(String::as_str)
+        self.pieces.get(ordinal).map(|piece| match piece {
+            Piece::Range(range) => &self.joined[range.clone()],
+            Piece::Split(text) => text.as_str(),
+        })
     }
 }
 
@@ -607,13 +688,13 @@ macro_rules! verbs {
             // begin one.
             let texts = match cx.len() > 5 {
                 true => {
-                    let joined = cx.argument::<JsString>(4)?.to_utf16(&mut cx);
+                    let joined = cx.argument::<JsString>(4)?.value(&mut cx);
                     let lengths = cx.argument::<JsUint32Array>(5)?;
                     let lengths =
                         neon::types::buffer::TypedArray::as_slice(&*lengths, &cx);
-                    $crate::node::verbs::Texts::cut(&joined, lengths)
+                    $crate::node::verbs::Texts::cut(joined, lengths)
                 }
-                false => $crate::node::verbs::Texts::cut(&[], &[]),
+                false => $crate::node::verbs::Texts::cut(String::new(), &[]),
             };
             let values = match cx.len() > 3 {
                 true => {
@@ -742,11 +823,12 @@ pub(crate) use verbs;
 mod tests {
     use super::Texts;
 
-    /// `texts` as JavaScript hands them over: joined, with each one's length
-    /// in UTF-16 units.
-    fn crossed(texts: &[&[u16]]) -> (Vec<u16>, Vec<u32>) {
+    /// `texts` as JavaScript hands them over: joined and written out as
+    /// UTF-8 the way V8 writes a string, a lone surrogate as U+FFFD, with
+    /// each one's length in UTF-16 units.
+    fn crossed(texts: &[&[u16]]) -> (String, Vec<u32>) {
         (
-            texts.concat(),
+            String::from_utf16_lossy(&texts.concat()),
             texts.iter().map(|text| text.len() as u32).collect(),
         )
     }
@@ -766,7 +848,7 @@ mod tests {
             texts.iter().map(|text| utf16(text)).collect();
         let (joined, lengths) =
             crossed(&pieces.iter().map(Vec::as_slice).collect::<Vec<_>>());
-        let cut = Texts::cut(&joined, &lengths);
+        let cut = Texts::cut(joined, &lengths);
         for (at, text) in texts.iter().enumerate() {
             assert_eq!(cut.get(at), Some(*text), "text {at}");
         }
@@ -781,18 +863,50 @@ mod tests {
         let [high, low] = [0xD83D_u16, 0xDE00];
         let (joined, lengths) =
             crossed(&[&[u16::from(b'a'), high], &[low, u16::from(b'b')]]);
-        let cut = Texts::cut(&joined, &lengths);
+        let cut = Texts::cut(joined, &lengths);
         assert_eq!(cut.get(0), Some("a\u{FFFD}"));
         assert_eq!(cut.get(1), Some("\u{FFFD}b"));
+    }
+
+    /// The halves of a pair the join makes, each a text of its own or with an
+    /// empty text between them, and a lone half beside a whole pair: each
+    /// half is U+FFFD where it was, and the pair stays a pair.
+    #[test]
+    fn a_cut_through_a_pair_puts_each_half_where_it_was() {
+        let [high, low] = [0xD83D_u16, 0xDE00];
+        let a = u16::from(b'a');
+        let (joined, lengths) =
+            crossed(&[&[high], &[], &[low], &[high, low, high], &[low, a]]);
+        let cut = Texts::cut(joined, &lengths);
+        let want = ["\u{FFFD}", "", "\u{FFFD}", "😀\u{FFFD}", "\u{FFFD}a"];
+        for (at, text) in want.iter().enumerate() {
+            assert_eq!(cut.get(at), Some(*text), "text {at}");
+        }
+    }
+
+    /// A lone surrogate inside a text, which V8 writes as U+FFFD in three
+    /// bytes, takes one unit, so the texts after it start where they did.
+    #[test]
+    fn a_lone_surrogate_inside_a_text_takes_one_unit() {
+        let (joined, lengths) = crossed(&[
+            &[u16::from(b'x'), 0xDC00, u16::from(b'y')],
+            &utf16("next"),
+        ]);
+        let cut = Texts::cut(joined, &lengths);
+        assert_eq!(cut.get(0), Some("x\u{FFFD}y"));
+        assert_eq!(cut.get(1), Some("next"));
     }
 
     /// A length past the end takes what is left, and the texts after it are
     /// empty rather than read from somewhere else.
     #[test]
     fn a_length_past_the_end_takes_what_is_left() {
-        let cut = Texts::cut(&utf16("abc"), &[2, 5, 1]);
+        let cut = Texts::cut("abc".to_owned(), &[2, 5, 1]);
         assert_eq!(cut.get(0), Some("ab"));
         assert_eq!(cut.get(1), Some("c"));
+        assert_eq!(cut.get(2), Some(""));
+        let cut = Texts::cut("aé".to_owned(), &[1, 5, 1]);
+        assert_eq!(cut.get(1), Some("é"), "the same where it is not ASCII");
         assert_eq!(cut.get(2), Some(""));
     }
 }
