@@ -6899,7 +6899,7 @@ mod text_reach_tests {
 
     use super::{TEXT_REACHED, layer::KEEPS_TEXT_REACH};
     use crate::{
-        node::typography::{REACHED_FAMILIES, UNHINTED_REACH},
+        node::typography::{REACH_BOUND, REACHED_FAMILIES, ReachBound},
         prelude::*,
     };
     use rayon::prelude::*;
@@ -6915,6 +6915,10 @@ mod text_reach_tests {
     /// cannot be found as a system font of the same name instead.
     const OSWALD: &str = "ReachOswald";
 
+    /// The family Monoton, which has one weight and so is emboldened by
+    /// Skia where bold is asked of it, is registered under.
+    const MONOTON: &str = "ReachMonoton";
+
     thread_local! {
         /// Whether [`OSWALD`] is registered on this thread: the registry a
         /// canvas resolves a family against is the thread's own -- see
@@ -6926,19 +6930,29 @@ mod text_reach_tests {
             RefCell::new(HashMap::new());
     }
 
-    /// Registers [`OSWALD`] on this thread, once, and measures reaches by
-    /// the glyphs' unhinted outlines where `TEXT_REACH_BOUND` is `unhinted`
-    /// -- see `UNHINTED_REACH`.
+    /// Registers [`OSWALD`] and [`MONOTON`] on this thread, once, and
+    /// measures reaches the way `TEXT_REACH_BOUND` names -- see
+    /// [`ReachBound`].
     fn register() {
         if !REGISTERED.replace(true) {
-            UNHINTED_REACH.set(
-                std::env::var("TEXT_REACH_BOUND")
-                    .is_ok_and(|v| v == "unhinted"),
+            REACH_BOUND.set(
+                match std::env::var("TEXT_REACH_BOUND").as_deref() {
+                    Ok("unhinted") => ReachBound::Unhinted,
+                    Ok("outline") => ReachBound::Outline,
+                    Ok("outline-unstroked") => ReachBound::OutlineUnstroked,
+                    _ => ReachBound::Hinted,
+                },
             );
             FontLibrary::new()
                 .use_paths(
                     Some(OSWALD),
                     ["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
+                )
+                .expect("registers");
+            FontLibrary::new()
+                .use_paths(
+                    Some(MONOTON),
+                    ["tests/assets/fonts/Monoton-Regular.woff2"],
                 )
                 .expect("registers");
         }
@@ -6953,7 +6967,11 @@ mod text_reach_tests {
         {
             return found;
         }
-        let family = if font == OSWALD { "Oswald" } else { font };
+        let family = match font {
+            OSWALD => "Oswald",
+            MONOTON => "Monoton",
+            font => font,
+        };
         // A letter and an emoji, so that a text face and an emoji face are
         // each asked for a glyph they hold.
         let found = reached(&Scene {
@@ -6969,8 +6987,9 @@ mod text_reach_tests {
         found
     }
 
-    /// One scene: text in a font, at a size, under a transform, filled or
-    /// stroked, through a filter.
+    /// One scene: text in a font, at a size and weight, spaced, under a
+    /// transform, filled or stroked with a join and miter limit, through a
+    /// filter.
     #[derive(Clone, Copy)]
     struct Scene {
         font: &'static str,
@@ -6978,6 +6997,11 @@ mod text_reach_tests {
         text: &'static str,
         transform: Option<Affine>,
         stroke: Option<f32>,
+        join: StrokeJoin,
+        miter: f32,
+        bold: bool,
+        /// `letterSpacing` and `wordSpacing`, in pixels.
+        spacing: (f32, f32),
         filter: &'static str,
     }
 
@@ -6990,10 +7014,17 @@ mod text_reach_tests {
             let mut canvas = Canvas::new(SIZE.0, SIZE.1);
             canvas.set_gpu(false);
             let ctx = canvas.context();
-            if !ctx.set_font_css(&format!("{}px \"{}\"", self.size, self.font))
-            {
+            let weight = if self.bold { "bold " } else { "" };
+            if !ctx.set_font_css(&format!(
+                "{weight}{}px \"{}\"",
+                self.size, self.font
+            )) {
                 return None;
             }
+            ctx.set_letter_spacing(self.spacing.0);
+            ctx.set_word_spacing(self.spacing.1);
+            ctx.set_line_join(self.join);
+            ctx.set_miter_limit(self.miter);
             ctx.set_filter_css(self.filter).expect("a filter");
             ctx.set_fill_style_css("rgb(200 120 40)").expect("a colour");
             ctx.set_stroke_style_css("rgb(30 90 200)")
@@ -7244,6 +7275,10 @@ mod text_reach_tests {
         text: "Ag",
         transform: None,
         stroke: None,
+        join: StrokeJoin::Miter,
+        miter: 10.0,
+        bold: false,
+        spacing: (0.0, 0.0),
         filter: "drop-shadow(0 0 3px black)",
     };
 
@@ -7284,6 +7319,7 @@ mod text_reach_tests {
                                         transform,
                                         stroke,
                                         filter,
+                                        ..BASE
                                     });
                                 }
                             }
@@ -7291,6 +7327,7 @@ mod text_reach_tests {
                     }
                 }
             }
+            all.extend(edges());
             return all;
         }
         let mut some: Vec<Scene> = Vec::new();
@@ -7331,7 +7368,95 @@ mod text_reach_tests {
                 ..BASE
             },
         ]);
+        some.extend(edges().into_iter().step_by(EDGES_SAMPLED));
         some
+    }
+
+    /// One in this many of [`edges`] is played by a test run; the full
+    /// sweep plays them all.
+    const EDGES_SAMPLED: usize = 7;
+
+    /// The strokes the full sweep adds to its plain ones, as `(width, join,
+    /// miter limit)`: a hairline, which is a device pixel wide whatever the
+    /// transform, and a 40px stroke under each join, mitred at a limit that
+    /// cuts every corner and at one that cuts none.
+    const EDGE_STROKES: [(f32, StrokeJoin, f32); 5] = [
+        (0.1, StrokeJoin::Miter, 10.0),
+        (40.0, StrokeJoin::Miter, 1.0),
+        (40.0, StrokeJoin::Miter, 30.0),
+        (40.0, StrokeJoin::Round, 10.0),
+        (40.0, StrokeJoin::Bevel, 10.0),
+    ];
+
+    /// The scenes past the plain sweep's axes: hairline and wide strokes
+    /// under each join, bold drawn from a variable font's axis
+    /// ([`OSWALD`]), from a face of its own (DejaVu Sans) and emboldened by
+    /// Skia from a family with no bold ([`MONOTON`]), and letter and word
+    /// spacing, which move the glyphs within a run.
+    fn edges() -> Vec<Scene> {
+        let fonts = [OSWALD, "Helvetica", "Times New Roman", "DejaVu Sans"];
+        let texts = ["Ag", "fj Wq"];
+        let transforms = [None, Some(ROTATE), Some(SKEW), Some(SCALE)];
+        let mut all = Vec::new();
+        for font in fonts {
+            for size in [13.0, 96.0] {
+                for text in texts {
+                    for transform in transforms {
+                        for (width, join, miter) in EDGE_STROKES {
+                            all.push(Scene {
+                                font,
+                                size,
+                                text,
+                                transform,
+                                stroke: Some(width),
+                                join,
+                                miter,
+                                ..BASE
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        for font in [OSWALD, MONOTON, "DejaVu Sans"] {
+            for size in [13.0, 40.0, 96.0] {
+                for text in texts {
+                    for transform in transforms {
+                        for stroke in [None, Some(12.0)] {
+                            all.push(Scene {
+                                font,
+                                size,
+                                text,
+                                transform,
+                                stroke,
+                                bold: true,
+                                ..BASE
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        for font in [OSWALD, "Helvetica", "DejaVu Sans"] {
+            for spacing in [(5.0, 20.0), (-2.0, 0.0)] {
+                for size in [13.0, 40.0] {
+                    for transform in transforms {
+                        for stroke in [None, Some(12.0)] {
+                            all.push(Scene {
+                                font,
+                                size,
+                                text: "fj Wq",
+                                transform,
+                                stroke,
+                                spacing,
+                                ..BASE
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        all
     }
 
     /// A run of text under a filter chain is filtered in a layer the size of
@@ -7465,12 +7590,16 @@ mod text_reach_tests {
                     return None;
                 }
                 let label = format!(
-                    "{} {}px {:?} {:?} stroke {:?} {}",
+                    "{} {}px {:?} {:?} stroke {:?} {:?} miter {} bold {} spacing {:?} {}",
                     scene.font,
                     scene.size,
                     scene.text,
                     scene.transform.map(|t| [t.a, t.b, t.c, t.d]),
                     scene.stroke,
+                    scene.join,
+                    scene.miter,
+                    scene.bold,
+                    scene.spacing,
                     scene.filter
                 );
                 let (mut past, mut unwidened) = (Vec::new(), Vec::new());

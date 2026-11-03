@@ -22,8 +22,6 @@ use crate::{
     utils::*,
 };
 use neon::prelude::*;
-#[cfg(test)]
-use skia_safe::FontHinting;
 use skia_safe::{
     Canvas, Color4f, Font, FontMetrics, FourByteTag, GlyphId, Matrix, Paint,
     Path as SkPath, PathBuilder as SkPathBuilder, Point, Rect, TextBlob,
@@ -37,6 +35,8 @@ use skia_safe::{
     },
     typeface::TypefaceId,
 };
+#[cfg(test)]
+use skia_safe::{FontHinting, path_utils::fill_path_with_paint};
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell, RefMut},
@@ -719,7 +719,9 @@ impl RunPaint {
                 let at = origin + run.origin;
                 let mut boxes = vec![Rect::new_empty(); run.glyphs.len()];
                 #[cfg(test)]
-                let unhinted = UNHINTED_REACH.get().then(|| {
+                let bound = REACH_BOUND.get();
+                #[cfg(test)]
+                let unhinted = (bound == ReachBound::Unhinted).then(|| {
                     let mut font = run.font.clone();
                     font.set_hinting(FontHinting::None);
                     font
@@ -729,6 +731,13 @@ impl RunPaint {
                 #[cfg(not(test))]
                 let font = &run.font;
                 font.get_bounds(&run.glyphs, &mut boxes, Some(paint));
+                #[cfg(test)]
+                if matches!(
+                    bound,
+                    ReachBound::Outline | ReachBound::OutlineUnstroked
+                ) {
+                    outline_boxes(font, &run.glyphs, paint, &mut boxes);
+                }
                 #[cfg(test)]
                 REACHED_FAMILIES.with_borrow_mut(|families| {
                     families.push(run.font.typeface().family_name());
@@ -1149,11 +1158,58 @@ thread_local! {
     /// measured, in order: which fonts a run of text resolved to.
     pub(crate) static REACHED_FAMILIES: RefCell<Vec<String>> =
         const { RefCell::new(Vec::new()) };
-    /// Whether [`RunPaint::reach`] measures its glyphs in the run's font with
-    /// hinting off, the outline rather than the glyph hinted at the size it
-    /// is recorded at: the bound the reach sweep measures against the
-    /// hinted one.
-    pub(crate) static UNHINTED_REACH: Cell<bool> = const { Cell::new(false) };
+    /// How [`RunPaint::reach`] measures its glyphs on this thread -- see
+    /// [`ReachBound`].
+    pub(crate) static REACH_BOUND: Cell<ReachBound> =
+        const { Cell::new(ReachBound::Hinted) };
+}
+
+/// The ways the reach sweep measures a run's glyphs, so that one run of it
+/// holds each against the same ink.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReachBound {
+    /// `Font::get_bounds` for the paint, in the run's own font.
+    Hinted,
+    /// `Font::get_bounds` for the paint, in the run's font with hinting off.
+    Unhinted,
+    /// Each glyph's outline, filled as the paint fills or strokes it; a
+    /// glyph with no outline, a bitmap, keeps its `get_bounds` box.
+    Outline,
+    /// [`Self::Outline`] with the outline's own bounds, not expanded by the
+    /// paint: the mutant the stroked scenes must fail.
+    OutlineUnstroked,
+}
+
+/// Replaces each of `boxes`, `font.get_bounds` for `glyphs`, with the
+/// bounds of the glyph's outline filled as `paint` fills it -- its stroke,
+/// joins and miters included -- where the glyph has an outline.
+#[cfg(test)]
+fn outline_boxes(
+    font: &Font,
+    glyphs: &[GlyphId],
+    paint: &Paint,
+    boxes: &mut [Rect],
+) {
+    let unstroked = REACH_BOUND.get() == ReachBound::OutlineUnstroked;
+    for (glyph, boxed) in zip(glyphs, boxes) {
+        let Some(outline) = font.get_path(*glyph) else {
+            continue;
+        };
+        let mut filled = SkPathBuilder::new();
+        let bounds = match !unstroked
+            && fill_path_with_paint(&outline, paint, &mut filled, None, None)
+        {
+            true => filled.compute_finite_bounds(),
+            // A hairline, drawn a device pixel wide whatever the transform:
+            // its outline, and the device margin for the rest.
+            false => Some(*outline.bounds()),
+        };
+        // An outline with a point at infinity keeps the box the font gave.
+        if let Some(bounds) = bounds {
+            *boxed = bounds;
+        }
+    }
 }
 
 /// Lets every kept run go: called when the registered fonts change, since a
