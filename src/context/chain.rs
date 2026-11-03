@@ -1097,6 +1097,13 @@ fn shadow_composed(
         true => SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
         false => SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
     };
+    // Composed by Skia, even at a whole-pixel offset where src-over is one
+    // multiply-add a channel: done here, it has to round as Skia's raster
+    // pipeline does on every machine this ships to, and it does not. On
+    // arm64 `d.mul_add(1 - sa, s)` matched Skia's F32 src-over in all of
+    // 49,152 values and `s + d * (1 - sa)` missed 4,966; on x86 Skia picks
+    // its stages at run time, fused or not as the processor allows, so no
+    // one formula matches it there.
     let composed = on_floats(&|canvas| {
         canvas.draw_image_with_sampling_options(
             &shadow,
