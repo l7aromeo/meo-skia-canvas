@@ -43,7 +43,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -231,9 +231,41 @@ export function run(command, args, { env = {}, ...options } = {}) {
 }
 
 /**
+ * The name of the tree the worktree at `worktree` builds from, as its own
+ * `scripts/skia-source.mjs` names it -- its own patch list, which can differ
+ * from this one's: a branch that adds a patch names its tree by a digest
+ * `PATCHES` here does not know, and one without it names its tree by fewer
+ * patches than this list holds. A worktree with no script of its own predates
+ * the cache, and is named with this script's list where its lock and patches
+ * allow, and otherwise names none: `null`. Throws where its own script names
+ * no tree.
+ */
+function worktreeTreeName(worktree) {
+  const script = join(worktree, "scripts", "skia-source.mjs");
+  if (!existsSync(script)) {
+    try {
+      return treeName(worktree);
+    } catch {
+      return null;
+    }
+  }
+  const dir = execFileSync(process.execPath, [script, "dir"], {
+    cwd: worktree,
+    env: childEnv(),
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  }).trim();
+  const name = relative(cacheRoot(), dir).split(sep)[0];
+  if (!name.startsWith("skia-")) throw new Error(`${dir} is outside the cache`);
+  return name;
+}
+
+/**
  * The names of the trees some worktree of the repository at `root` builds
- * from, or null when its worktrees cannot be listed. A worktree whose checkout
- * is gone, or that has no lock or patch to name a tree by, names none.
+ * from, or null when they cannot all be known: the worktrees cannot be
+ * listed, or one whose own script is there names no tree. A worktree whose
+ * checkout is gone, or that predates the script and has no lock or patch to
+ * name a tree by, names none.
  */
 export function treesInUse(root = ROOT) {
   let listing;
@@ -248,18 +280,21 @@ export function treesInUse(root = ROOT) {
     return null;
   }
   const prefix = "worktree ";
-  return new Set(
-    listing
-      .split("\n")
-      .filter((line) => line.startsWith(prefix))
-      .flatMap((line) => {
-        try {
-          return [treeName(line.slice(prefix.length))];
-        } catch {
-          return [];
-        }
-      }),
-  );
+  const names = new Set();
+  for (const line of listing.split("\n")) {
+    if (!line.startsWith(prefix)) continue;
+    const worktree = line.slice(prefix.length);
+    if (!existsSync(worktree)) continue;
+    try {
+      const name = worktreeTreeName(worktree);
+      if (name) names.add(name);
+    } catch {
+      // Unknown is not unused: a tree removed from under a worktree costs it
+      // a fresh one, and one left behind costs only disk.
+      return null;
+    }
+  }
+  return names;
 }
 
 /**

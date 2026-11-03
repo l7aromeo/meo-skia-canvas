@@ -392,6 +392,63 @@ describe("skia-source keeps the trees a worktree builds from", () => {
     );
   });
 
+  // A branch adding a patch named every other worktree's tree by its own,
+  // longer list, failed to read the patch they lack, and removed their trees.
+  test("a worktree on another patch list keeps the tree its own script names", (t) => {
+    const dir = scratch(t);
+    const first = patchFiles(PATCHES, "first");
+    const root = repository(join(dir, "root"), {
+      "Cargo.lock": lock("0.1.0"),
+      ...first.files,
+    });
+    git(root, "worktree", "add", "--quiet", "-b", "other", join(dir, "other"));
+    for (const path of Object.keys(first.files))
+      rmSync(join(dir, "other", path));
+    mkdirSync(join(dir, "other", "scripts"), { recursive: true });
+    writeFileSync(
+      join(dir, "other", "scripts", "skia-source.mjs"),
+      `import { join } from "node:path";
+       const cache = join(process.env.XDG_CACHE_HOME, "meo-skia-canvas");
+       console.log(join(cache, "skia-0.1.0-its-own", "rust-skia", "skia-bindings", "skia"));\n`,
+    );
+    t.after(() => {
+      if (cacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = cacheHome;
+    });
+    const cacheHome = process.env.XDG_CACHE_HOME;
+    process.env.XDG_CACHE_HOME = join(dir, "cache");
+
+    assert.deepEqual(
+      treesInUse(root),
+      new Set([treeName("0.1.0", first.contents), "skia-0.1.0-its-own"]),
+    );
+  });
+
+  test("a worktree whose own script names no tree leaves the trees unknown", (t) => {
+    const dir = scratch(t);
+    const first = patchFiles(PATCHES, "first");
+    const root = repository(join(dir, "root"), {
+      "Cargo.lock": lock("0.1.0"),
+      ...first.files,
+    });
+    git(
+      root,
+      "worktree",
+      "add",
+      "--quiet",
+      "-b",
+      "broken",
+      join(dir, "broken"),
+    );
+    mkdirSync(join(dir, "broken", "scripts"), { recursive: true });
+    writeFileSync(
+      join(dir, "broken", "scripts", "skia-source.mjs"),
+      "process.exit(1);\n",
+    );
+
+    assert.equal(treesInUse(root), null);
+  });
+
   test("outside a repository the trees in use are unknown", (t) => {
     assert.equal(treesInUse(scratch(t)), null);
   });
