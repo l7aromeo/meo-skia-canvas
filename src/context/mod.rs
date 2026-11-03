@@ -170,6 +170,10 @@ pub struct Context2D {
     /// so that a run of draws in one colour holds one shader between them
     /// rather than one each -- see [`Self::exact_paint`].
     exact_shader: RefCell<Option<(ExactColour, SkShader)>>,
+    /// The last flat colour and alpha a pixels recording painted with and
+    /// what [`Self::exact_paint`] made of them, so that a run of draws in
+    /// one colour converts it once -- see [`PlacedFill`].
+    exact_fill: RefCell<Option<(FillKey, PlacedFill)>>,
     /// The same for text: the last exact colour, the plain colour beside
     /// it and their dye -- see [`Self::exact_text_paint`].
     exact_dye: RefCell<Option<(ExactColour, Color4f, SkColorFilter)>>,
@@ -639,6 +643,7 @@ impl Context2D {
             faint: Faint::of(canvas_color_type),
             recorder: RefCell::new(PageRecorder::recording(bounds, dual)),
             exact_shader: RefCell::default(),
+            exact_fill: RefCell::default(),
             exact_dye: RefCell::default(),
             path: PathBuilder::new(),
             stack: vec![],
@@ -778,7 +783,40 @@ impl Context2D {
         if paint.shader().is_some() {
             return filtered;
         }
+        // A flat colour through no filter is the case a run of fills is in,
+        // and what is made of it depends on nothing but the colour and the
+        // alpha, the page being fixed: kept for the next draw in the same.
+        let key = match self.state.dye(style) {
+            Dye::Color(colour, Some(space), _) if filtered.is_none() => {
+                Some(FillKey::of(*colour, space, paint.alpha_f()))
+            }
+            _ => None,
+        };
+        #[cfg(test)]
+        let key = key.filter(|_| KEEPS_FILLS.get());
+        if let Some(key) = &key
+            && let Some((held, fill)) = &*self.exact_fill.borrow()
+            && held == key
+        {
+            #[cfg(test)]
+            FILLS_KEPT.set(FILLS_KEPT.get() + 1);
+            match fill {
+                PlacedFill::Inexact => return filtered,
+                PlacedFill::Placed(colour, space) => {
+                    let mut paint = paint.clone();
+                    paint.set_color4f(*colour, space);
+                    return Some(paint);
+                }
+                PlacedFill::Shaded => {}
+            }
+        }
+        let keep = |fill: PlacedFill| {
+            if let Some(key) = key.clone() {
+                *self.exact_fill.borrow_mut() = Some((key, fill));
+            }
+        };
         let Some(exact) = self.exact_colour(style) else {
+            keep(PlacedFill::Inexact);
             return filtered;
         };
         // Through a filter built for the pixels, the colour is painted by
@@ -789,10 +827,15 @@ impl Context2D {
         if exact.bytes
             && filtered.is_none()
             && matches!(self.state.dye(style), Dye::Color(..))
-            && let Some(placed) = exact.verified_paint(paint)
+            && let Some((colour, space)) =
+                exact.verified_colour(paint.alpha_f())
         {
+            let mut placed = paint.clone();
+            placed.set_color4f(colour, &space);
+            keep(PlacedFill::Placed(colour, space));
             return Some(placed);
         }
+        keep(PlacedFill::Shaded);
         let (exact, alpha) = exact.at(paint.alpha_f());
         let shader = {
             let mut held = self.exact_shader.borrow_mut();
@@ -2140,7 +2183,7 @@ impl Context2D {
             && self.state.skia_color_filter.is_none()
             && self.state.skia_mask_filter.is_none()
             && self.state.filter.is_none()
-            && path.conservatively_contains_rect(self.bounds)
+            && holds(&path, self.bounds)
         {
             // ...erase existing vector content layers (but preserve CTM & clip
             // path)
@@ -2420,11 +2463,9 @@ impl Context2D {
             .as_ref()
             .unwrap_or(&Path::rect(self.bounds, None))
             .op(&clip, PathOp::Intersect)
-            .and_then(|path| {
-                match path.conservatively_contains_rect(self.bounds) {
-                    true => None,
-                    false => Some(path),
-                }
+            .and_then(|path| match holds(&path, self.bounds) {
+                true => None,
+                false => Some(path),
             });
 
         self.with_recorder(|mut recorder| {
@@ -3358,12 +3399,18 @@ impl Context2D {
         // blur to spread into. See `Filter::filters_for`. And where the
         // coverage blur differs from Chrome's or costs more, the result is
         // blurred for a flat colour too -- see `Coverage`.
-        let has_shader = !matches!(self.state.dye(style), Dye::Color(..));
-        let rendered =
-            has_shader || !self.state.filter.blurs_coverage(coverage);
-        self.state
-            .filter
-            .mix_into(&mut paint, self.state.matrix, rendered);
+        //
+        // A filter that leaves the draw untouched puts nothing on the paint,
+        // which holds no filter of its own, so it is not asked: setting none
+        // twice was 7% of what recording a plain fill cost.
+        if !self.state.filter.is_none() {
+            let has_shader = !matches!(self.state.dye(style), Dye::Color(..));
+            let rendered =
+                has_shader || !self.state.filter.blurs_coverage(coverage);
+            self.state
+                .filter
+                .mix_into(&mut paint, self.state.matrix, rendered);
+        }
 
         // 3. Compose Skia imageFilter with CSS imageFilter (if both present)
         if let Some(skia_imgf) = &self.state.skia_image_filter {
@@ -3865,6 +3912,48 @@ impl Dye {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Whether [`Context2D::exact_paint`] keeps what it made of the last flat
+    /// colour on this thread: off, every draw makes it afresh, the reference
+    /// the kept one is held to; and how many draws took it kept.
+    static KEEPS_FILLS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    static FILLS_KEPT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A flat colour, the space it is named in and the paint's alpha, as
+/// [`Context2D::exact_paint`] keeps what it made of them -- compared by bits,
+/// so that a colour is found again only where it is the same colour.
+#[derive(Clone, PartialEq)]
+struct FillKey {
+    colour: [u32; 4],
+    space: ColorSpace,
+    alpha: u32,
+}
+
+impl FillKey {
+    fn of(colour: Color4f, space: &ColorSpace, alpha: f32) -> Self {
+        Self {
+            colour: [colour.r, colour.g, colour.b, colour.a].map(f32::to_bits),
+            space: space.clone(),
+            alpha: alpha.to_bits(),
+        }
+    }
+}
+
+/// What [`Context2D::exact_paint`] made of a flat colour at an alpha:
+/// nothing, where the colour converts into the page's space inexactly or
+/// the page keeps one recording; the colour and space set on the paint,
+/// where it lands placed as a paint's own colour; or a shader, which is
+/// built again from the colour and kept as [`Context2D::exact_shader`]
+/// keeps it.
+#[derive(Clone)]
+enum PlacedFill {
+    Inexact,
+    Placed(Color4f, ColorSpace),
+    Shaded,
+}
+
 /// Whether a float page in `color_type` is drawn on the CPU whichever engine
 /// its canvas asks for: where the GPU cannot composite it, a canvas asking
 /// for the GPU is drawn on the raster backend -- see `Canvas::engine_kind`.
@@ -3987,6 +4076,24 @@ fn carries(source: VectorFeatures, paint: &Paint) -> bool {
     )
 }
 
+/// Whether `path` holds `rect`, as `Path::conservatively_contains_rect`
+/// answers -- asked of the path's bounds first.
+///
+/// Skia works out a path's convexity before anything else, afresh for every
+/// path made, so asking whether a 10x10 fill covers the page was 9% of what
+/// recording one cost. A path holds nothing its bounds do not, so a
+/// rectangle reaching past them is refused without it. The comparison is
+/// written out rather than `Rect::contains`, which refuses an empty
+/// rectangle that Skia's own test still answers for.
+fn holds(path: &Path, rect: Rect) -> bool {
+    let reach = path.bounds();
+    reach.left <= rect.left
+        && reach.top <= rect.top
+        && reach.right >= rect.right
+        && reach.bottom >= rect.bottom
+        && path.conservatively_contains_rect(rect)
+}
+
 /// What `path` covers once `matrix` puts it on the device, for choosing how
 /// to blur it: a rectangle or a rounded rectangle only while the matrix
 /// keeps it one, since Skia's cheap coverage blur for those shapes works on
@@ -4066,8 +4173,12 @@ fn drawn_bounds(
 mod tests {
     use super::*;
     use crate::{
-        canvas::{DEFAULT_TEXT_CONTRAST, DEFAULT_TEXT_GAMMA},
+        canvas::{
+            Canvas, CanvasOptions, DEFAULT_TEXT_CONTRAST, DEFAULT_TEXT_GAMMA,
+        },
+        export::{EncodeOptions, ImageFormat},
         node::{filter::FilterSpec, utils::opt_color_space},
+        pixels::PixelDepth,
     };
 
     /// An sRGB page keeps a recording for pixels only where it composites
@@ -6032,6 +6143,130 @@ mod tests {
             .map(|(a, b)| a.abs_diff(*b))
             .max();
         assert!(most.is_some_and(|most| most <= 1), "parted by {most:?}");
+    }
+
+    /// [`holds`] answers as `Path::conservatively_contains_rect` does, for
+    /// paths and rectangles either side of every edge, touching it, inside,
+    /// empty, and paths that are not convex or not closed: the bounds test
+    /// it asks first may only refuse what Skia's would.
+    #[test]
+    fn holding_a_rect_answers_as_skia_does() {
+        let page = Rect::from_wh(64.0, 48.0);
+        let mut star = PathBuilder::new();
+        star.move_to((0.0, 0.0))
+            .line_to((70.0, 24.0))
+            .line_to((0.0, 50.0))
+            .line_to((32.0, 24.0))
+            .close();
+        let mut open = PathBuilder::new();
+        open.move_to((-1.0, -1.0))
+            .line_to((70.0, -1.0))
+            .line_to((70.0, 60.0));
+        let paths = [
+            Path::rect(page, None),
+            Path::rect(page.with_outset((0.5, 0.5)), None),
+            Path::rect(page.with_inset((0.5, 0.0)), None),
+            Path::rect(page.with_offset((0.25, 0.0)), None),
+            Path::rect(Rect::from_xywh(0.0, 0.0, 10.0, 10.0), None),
+            Path::oval(page.with_outset((20.0, 20.0)), None),
+            Path::rect(Rect::new_empty(), None),
+            star.detach(),
+            open.detach(),
+        ];
+        let rects = [
+            page,
+            page.with_inset((1.0, 1.0)),
+            page.with_outset((1.0, 0.0)),
+            Rect::from_xywh(0.0, 0.0, 0.0, 0.0),
+            Rect::from_xywh(64.0, 48.0, 0.0, 0.0),
+            Rect::from_xywh(5.0, 5.0, 0.0, 10.0),
+            Rect::from_xywh(-1.0, 3.0, 2.0, 2.0),
+        ];
+        let mut agreed = 0;
+        for path in &paths {
+            for &rect in &rects {
+                assert_eq!(
+                    holds(path, rect),
+                    path.conservatively_contains_rect(rect),
+                    "{:?} holding {rect:?}",
+                    path.bounds()
+                );
+                agreed += usize::from(holds(path, rect));
+            }
+        }
+        assert!(
+            agreed > 0,
+            "some rectangle is held, or this asserts nothing"
+        );
+    }
+
+    /// A page drawn with what was made of the last flat colour kept writes
+    /// the pixels and PDF a page making it afresh every draw writes, on an
+    /// eight-bit sRGB, an eight-bit Display P3 and a half-float Display P3
+    /// page: runs in one colour, a colour named again in another space, an
+    /// alpha changed under the same colour, a colour that does not land
+    /// exactly, and strokes between fills.
+    #[test]
+    fn a_kept_fill_draws_what_a_fill_made_afresh_draws() {
+        let scene = |keep: bool, space: PixelColorSpace, depth: PixelDepth| {
+            KEEPS_FILLS.set(keep);
+            let mut canvas = Canvas::with_options(
+                40.0,
+                30.0,
+                CanvasOptions {
+                    gpu: false,
+                    color_space: space,
+                    color_type: depth,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a canvas");
+            let ctx = canvas.context();
+            let colours = [
+                "rgb(200 40 120)",
+                "rgb(200 40 120)",
+                "color(display-p3 0.3 0.6 0.9)",
+                "color(srgb 0.7843137 0.1568627 0.4705882)",
+                "color(a98-rgb 0 1 0)",
+                "#fff",
+            ];
+            for (i, colour) in colours.iter().cycle().take(36).enumerate() {
+                ctx.set_global_alpha([1.0, 0.5, 0.31][i % 3]);
+                ctx.set_fill_style_css(colour).expect("a colour");
+                ctx.set_stroke_style_css(colour).expect("a colour");
+                let at = (i % 6) as f32 * 6.0;
+                ctx.fill_rect(at, (i / 6) as f32 * 4.0, 7.0, 5.0);
+                if i % 5 == 0 {
+                    ctx.stroke_rect(at + 1.0, 2.0, 4.0, 20.0);
+                }
+            }
+            KEEPS_FILLS.set(true);
+            let pixels = ctx
+                .get_image_data(0.0, 0.0, 40.0, 30.0)
+                .expect("read")
+                .pixels()
+                .to_vec();
+            let pdf = canvas
+                .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
+                .expect("a PDF");
+            (pixels, pdf)
+        };
+        for (space, depth) in [
+            (PixelColorSpace::Srgb, PixelDepth::Uint8),
+            (PixelColorSpace::DisplayP3, PixelDepth::Uint8),
+            (PixelColorSpace::DisplayP3, PixelDepth::F16),
+        ] {
+            let kept_before = FILLS_KEPT.get();
+            let kept = scene(true, space, depth);
+            assert!(
+                FILLS_KEPT.get() > kept_before,
+                "{space:?} {depth:?}: some draw took the fill kept"
+            );
+            assert!(
+                kept == scene(false, space, depth),
+                "{space:?} {depth:?}: the same pixels and PDF"
+            );
+        }
     }
 }
 

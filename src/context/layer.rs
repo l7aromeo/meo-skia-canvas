@@ -632,7 +632,16 @@ impl ExactColour {
     /// page converts nothing, and takes the placed colour without the draw
     /// -- see [`unconverted`].
     pub fn verified_paint(&self, paint: &Paint) -> Option<Paint> {
-        let (placed, alpha) = self.at(paint.alpha_f());
+        let (colour, space) = self.verified_colour(paint.alpha_f())?;
+        let mut paint = paint.clone();
+        paint.set_color4f(colour, &space);
+        Some(paint)
+    }
+
+    /// The colour [`Self::verified_paint`] sets on a paint at `alpha`, and
+    /// the space it is set in, or `None` where it does not land.
+    pub fn verified_colour(&self, alpha: f32) -> Verdict {
+        let (placed, alpha) = self.at(alpha);
         let levels = f64::from(u8::MAX);
         let stored = (f64::from(alpha) * levels).round();
         let byte = |c: f32| (f64::from(c) * stored).round() as u8;
@@ -660,9 +669,7 @@ impl ExactColour {
                 verdict
             }),
         }?;
-        let mut paint = paint.clone();
-        paint.set_color4f(colour, &space);
-        Some(paint)
+        Some((colour, space))
     }
 
     /// [`Self::verified_paint`] for text in `paint`, where the placed colour

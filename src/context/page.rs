@@ -586,6 +586,15 @@ struct Recorders {
 
 #[cfg(test)]
 thread_local! {
+    /// How many times a page's recordings were finished on this thread --
+    /// see [`Recorders::finish`] -- and dropped and begun again instead --
+    /// see [`Recorders::restart`].
+    pub(crate) static FINISHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static RESTARTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
     /// Whether a page's recordings fork only when a draw asks them to on
     /// this thread: off, every one forks as it begins, as a page that keeps
     /// two recordings records every draw into both -- the reference a lazy
@@ -692,6 +701,24 @@ impl Recorders {
         self.begin_with(bounds, true);
     }
 
+    /// Drops what every recording holds and begins them again in `bounds`,
+    /// for a page whose content is erased.
+    ///
+    /// New recorders rather than finished ones: finishing a recording
+    /// optimizes it and bounds every draw in it, for a picture nothing would
+    /// keep. A new recorder costs about 0.1 microseconds, where finishing
+    /// one holding 200 rects cost 11.7 more than dropping it, and one holding
+    /// 2,000 cost 115 more.
+    fn restart(&mut self, bounds: Rect) {
+        #[cfg(test)]
+        RESTARTS.set(RESTARTS.get() + 1);
+        self.pixels = PictureRecorder::new();
+        if let Some(document) = &mut self.document {
+            *document = PictureRecorder::new();
+        }
+        self.begin(bounds);
+    }
+
     /// Begins every recording in `bounds`: the pixels with a bounding
     /// hierarchy where `bbh` asks for one, and the document without, where
     /// the recordings fork as they begin -- see [`Self::fork`].
@@ -720,6 +747,8 @@ impl Recorders {
         &mut self,
         finish: impl Fn(&mut PictureRecorder) -> Option<Picture>,
     ) -> Option<Layer> {
+        #[cfg(test)]
+        FINISHES.set(FINISHES.get() + 1);
         let pixels = finish(&mut self.pixels)?;
         Some(match &mut self.document {
             Some(document) if self.forked => {
@@ -1067,22 +1096,18 @@ impl PageRecorder {
 
     /// Erases the page's content, in place.
     ///
-    /// This used to be `*self = PageRecorder::new(bounds)`, which allocated a
-    /// `PictureRecorder` and claimed a new cache identity on every call. All
-    /// three callers use it to clear at the size the page already has --
+    /// All three callers clear at the size the page already has --
     /// `reset()`, an opaque fill that covers the canvas, and a `clearRect`
     /// that does -- and a resize goes through [`Self::update_bounds`]
-    /// instead, so the rebuild bought nothing. It was most of what a
-    /// full-canvas `clearRect` cost.
+    /// instead. The page keeps everything but what it recorded: its
+    /// recordings are dropped and begun again, see [`Recorders::restart`].
     ///
-    /// The identity still has to change, and reusing it was a bug: an
-    /// opaque fill covering the canvas comes through here too, so a loop
-    /// that fills and exports thirty-two times runs thirty-two generations
-    /// through one recorder. With one key between them an export in flight
-    /// was served the bitmap cached for the frame that replaced it -- the
-    /// eighth of thirty-two exports came back holding the seventh's pixels.
-    /// What is saved here is the `PictureRecorder` allocation, not the
-    /// identity.
+    /// The identity has to change where anything was recorded: an opaque
+    /// fill covering the canvas comes through here too, so a loop that fills
+    /// and exports thirty-two times runs thirty-two generations through one
+    /// page. With one key between them an export in flight would be served
+    /// the bitmap cached for the frame that replaced it -- the eighth of
+    /// thirty-two exports came back holding the seventh's pixels.
     pub fn set_bounds(&mut self, bounds: Rect) {
         // Only a generation that recorded something needs replacing. Nothing
         // has been drawn when `layers` is empty and nothing is pending, so no
@@ -1097,23 +1122,15 @@ impl PageRecorder {
             self.id = Self::mint_id();
         }
 
-        // Finish before beginning again: `flush` reuses the recorder the same
-        // way, and Skia expects the open recording closed first.
-        let _ = self
-            .current
-            .finish(|recorder| recorder.finish_recording_as_picture(None));
-
-        if let Some(mut run) = self.run.take() {
-            let _ = run
-                .recorders
-                .finish(|recorder| recorder.finish_recording_as_picture(None));
-        }
+        // Dropped rather than finished, as the page's own recordings are:
+        // what a run holds is erased with the rest.
+        self.run = None;
         // Begun at the old bounds.
         self.spare = None;
         self.cut_spare = None;
 
         self.bounds = bounds;
-        self.current.begin(bounds);
+        self.current.restart(bounds);
         self.framed = false;
         self.current.each(|canvas, _| {
             canvas.save(); // start at depth 2
@@ -6723,6 +6740,76 @@ mod tests {
     /// fails while holding this should fail alone, rather than poisoning the
     /// lock and taking the other three with it.
     static SHARED_CACHE: Mutex<()> = Mutex::new(());
+
+    /// A page cleared whole drops what it recorded rather than finishing it,
+    /// on a page that keeps one recording and on one that keeps two, and
+    /// draws afterwards as a page that never held the cleared draws does.
+    ///
+    /// Finishing bounds every draw the recording holds, for a picture that
+    /// is dropped at once: a third of the time a page cleared every 200
+    /// fills took. A clear that is not whole, which keeps what lies outside
+    /// it, is held to finishing still, so that the count can tell the two.
+    #[test]
+    fn a_page_cleared_whole_drops_its_recording_unfinished() {
+        let draw = |ctx: &mut Context2D| {
+            for i in 0..20 {
+                ctx.fill_rect(i as f32 * 3.0, 4.0, 2.0, 2.0);
+            }
+        };
+        for space in [PixelColorSpace::Srgb, PixelColorSpace::DisplayP3] {
+            let options = CanvasOptions {
+                gpu: false,
+                color_space: space,
+                ..CanvasOptions::default()
+            };
+            let mut cleared = Canvas::with_options(64.0, 64.0, options.clone())
+                .expect("a canvas");
+            let ctx = cleared.context();
+            draw(ctx);
+            let (finishes, restarts) = (FINISHES.get(), RESTARTS.get());
+            ctx.clear_rect(0.0, 0.0, 64.0, 64.0);
+            assert_eq!(
+                (FINISHES.get() - finishes, RESTARTS.get() - restarts),
+                (0, 1),
+                "{space:?}: dropped and begun again, not finished"
+            );
+            ctx.set_fill_style(RgbaLinear::from_srgb8(200, 40, 120, 0.7));
+            ctx.fill_rect(10.0, 10.0, 20.0, 20.0);
+            let after = ctx.get_image_data(0.0, 0.0, 64.0, 64.0).expect("read");
+
+            let mut fresh =
+                Canvas::with_options(64.0, 64.0, options).expect("a canvas");
+            let ctx = fresh.context();
+            ctx.set_fill_style(RgbaLinear::from_srgb8(200, 40, 120, 0.7));
+            ctx.fill_rect(10.0, 10.0, 20.0, 20.0);
+            let want = ctx.get_image_data(0.0, 0.0, 64.0, 64.0).expect("read");
+            assert_eq!(
+                after.pixels(),
+                want.pixels(),
+                "{space:?}: draws as a fresh page"
+            );
+
+            let mut part = Canvas::with_options(
+                64.0,
+                64.0,
+                CanvasOptions {
+                    gpu: false,
+                    color_space: space,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a canvas");
+            let ctx = part.context();
+            draw(ctx);
+            let restarts = RESTARTS.get();
+            ctx.clear_rect(0.0, 0.0, 32.0, 64.0);
+            assert_eq!(
+                RESTARTS.get(),
+                restarts,
+                "{space:?}: half a page is kept, not restarted"
+            );
+        }
+    }
 
     /// A deterministic image `rows` tall whose rows either repeat a noisy
     /// pattern shifted by a constant, or are unrelated noise.
