@@ -61,7 +61,9 @@ use crate::{
     },
     gpu::{
         RenderingEngine,
-        completion::{DRAW_ATTEMPTS, discarded, draws_ran},
+        completion::{
+            Checked, DRAW_ATTEMPTS, Rows, discarded, draws_ran, read_checked,
+        },
         owner, pacing,
     },
     node::{
@@ -1673,17 +1675,60 @@ impl PageRecorder {
         engine: RenderingEngine,
         alpha_type: AlphaType,
     ) -> Result<Vec<u8>, String> {
-        // return an empty buffer if the requested rect is entirely outside the
-        // canvas
-        let dst_info = ImageInfo::new(
+        let size = Self::pixels_size(crop, &opts, alpha_type)?;
+        let mut pixels = vec![0; size];
+        self.pixels_into(crop, opts, engine, alpha_type, &mut pixels)?;
+        Ok(pixels)
+    }
+
+    /// How many bytes [`Self::pixels_into`] writes for `crop` read as
+    /// `opts` and `alpha_type` describe: tightly packed rows, as `ImageData`
+    /// holds them.
+    pub(crate) fn pixels_size(
+        crop: IRect,
+        opts: &ExportOptions,
+        alpha_type: AlphaType,
+    ) -> Result<usize, String> {
+        checked_byte_size(&Self::pixels_info(crop, opts, alpha_type))
+    }
+
+    fn pixels_info(
+        crop: IRect,
+        opts: &ExportOptions,
+        alpha_type: AlphaType,
+    ) -> ImageInfo {
+        ImageInfo::new(
             (crop.width(), crop.height()),
             opts.color_type,
             alpha_type,
             opts.color_space.clone(),
-        );
+        )
+    }
 
-        let size = checked_byte_size(&dst_info)?;
-        let mut dst_buffer: Vec<u8> = vec![0; size];
+    /// [`Self::pixels_as`] into `dst_buffer`, which holds zeros and
+    /// [`Self::pixels_size`] bytes, rather than into a buffer of its own: so
+    /// that the Node binding reads straight into the `ArrayBuffer` an
+    /// `ImageData` keeps, with no copy between. Where a read leaves part of
+    /// the rectangle unwritten -- outside the canvas -- it stays the zeros it
+    /// was handed.
+    pub(crate) fn pixels_into(
+        &mut self,
+        crop: IRect,
+        opts: ExportOptions,
+        engine: RenderingEngine,
+        alpha_type: AlphaType,
+        dst_buffer: &mut [u8],
+    ) -> Result<(), String> {
+        let dst_info = Self::pixels_info(crop, &opts, alpha_type);
+        if dst_buffer.len() != checked_byte_size(&dst_info)? {
+            return Err(format!(
+                "A {}x{} read needs {} bytes, not {}",
+                crop.width(),
+                crop.height(),
+                checked_byte_size(&dst_info)?,
+                dst_buffer.len()
+            ));
+        }
 
         // `crop` is in device pixels and `bounds` is in canvas units, so the
         // two describe the same rectangle only at density 1. Compared
@@ -1698,42 +1743,33 @@ impl PageRecorder {
             self.bounds.right * opts.density,
             self.bounds.bottom * opts.density,
         );
+        // An empty read where the rectangle lies wholly outside the canvas.
         if !device_bounds.intersects(Rect::from_irect(crop)) {
-            return Ok(dst_buffer);
+            return Ok(());
         }
 
         if !self.open.is_empty() {
-            return self.pixels_in_layer(crop, &opts, &engine, &dst_info);
+            return self
+                .pixels_in_layer(crop, &opts, &engine, &dst_info, dst_buffer);
         }
 
         let page = self.page();
-        let page_size = page.scaled_dimensions(opts.density);
 
         // Small reads are served by the squares they touch, which is the
         // whole point: a hit test asked for sixty-four pixels and used to
         // composite and keep a megapixel. Anything wider than the grid is
         // worth is served by the page, as before.
-        if self.surface.try_tiled(&page, &opts, &engine, crop)? {
-            let served = self.surface.read_tiled(
-                &dst_info,
-                crop,
-                &mut dst_buffer,
-                page_size,
-            );
-            if served {
-                return Ok(dst_buffer);
-            }
+        if self
+            .surface
+            .read_tiled(&page, &opts, &engine, &dst_info, crop, dst_buffer)?
+        {
+            return Ok(());
         }
 
-        self.surface.confirmed_update(&page, &opts, &engine)?;
-
-        match self.surface.copy_pixels(
-            &dst_info,
-            crop,
-            &mut dst_buffer,
-            &engine,
-        ) {
-            true => Ok(dst_buffer),
+        match self.surface.confirmed_read(
+            &page, &opts, &engine, &dst_info, crop, dst_buffer,
+        )? {
+            true => Ok(()),
             false => Err(format!(
                 "Could not get image data (format: {:?})",
                 dst_info.color_type()
@@ -1754,13 +1790,13 @@ impl PageRecorder {
         opts: &ExportOptions,
         engine: &RenderingEngine,
         dst_info: &ImageInfo,
-    ) -> Result<Vec<u8>, String> {
+        pixels: &mut [u8],
+    ) -> Result<(), String> {
         let filed = self.filed_page();
         self.split_run();
         self.file_current();
         self.reframe();
         self.surface.confirmed_update(&filed, opts, engine)?;
-        let mut pixels = vec![0; checked_byte_size(dst_info)?];
         let origin = (crop.x(), crop.y());
         let rastered =
             self.open.iter().all(|layer| layer.rasters(opts.density))
@@ -1768,10 +1804,10 @@ impl PageRecorder {
                     &self.open,
                     opts.density,
                     (dst_info, origin),
-                    &mut pixels,
+                    pixels,
                 )?;
         if rastered {
-            return Ok(pixels);
+            return Ok(());
         }
         let whole = self.open_layers_reach_past_a_read();
         let drawn = self.open_layers_entry();
@@ -1785,9 +1821,9 @@ impl PageRecorder {
             opts.density,
             filed.id,
             read,
-            &mut pixels,
+            pixels,
         )?;
-        Ok(pixels)
+        Ok(())
     }
 
     /// Whether what the open layers draw at a pixel can depend on the page
@@ -2446,6 +2482,33 @@ struct Tile {
 }
 
 impl Tile {
+    /// The first read of this tile since it was drawn into, made by
+    /// [`read_checked`] so that its wait confirms the draws, and marking the
+    /// tile confirmed where it did. What follows it at the same state is a
+    /// repeat, which [`Self::copy_pixels`] serves.
+    fn read_confirmed(
+        &mut self,
+        info: &ImageInfo,
+        pixels: &mut [u8],
+        row_bytes: usize,
+        at: (i32, i32),
+        page: usize,
+    ) -> Checked {
+        let checked = read_converted_checked(
+            &mut self.surface,
+            info,
+            pixels,
+            row_bytes,
+            at,
+            page,
+        );
+        if let Checked::Read(_) = checked {
+            self.confirmed = true;
+            self.served_at = Some(self.depth);
+        }
+        checked
+    }
+
     /// Reads a rectangle of this tile, from its CPU copy where there is one.
     ///
     /// The page-wide read in [`RecordingSurface::copy_pixels`] spelled out
@@ -2539,17 +2602,18 @@ fn unpremultiply_table() -> &'static [[u8; 256]; 256] {
 }
 
 /// The read, in pixels, from which [`read_converted_on_cpu`] unpremultiplies
-/// its rows across threads rather than on the calling one.
+/// its rows across threads rather than on the calling one -- as they are
+/// written from the GPU's copy, or where they lie.
 ///
-/// Measured in release on Apple silicon, first GPU reads of a 1200x900 page,
-/// medians of three rounds: handing rows to the pool costs about 100
-/// microseconds a read -- a 16x16 read takes 135 to 156 on one thread and
-/// 237 to 265 across them -- and the threads earn it back only on the
-/// largest reads. At 600x600, 360,000 pixels, the two are level, 682 to 782
-/// against 746 to 777; at 800x900, 720,000, threads take 937 to 988 against
-/// 1109 to 1138, and a full read 1270 to 1317 against 1617 to 1638. So the
-/// line is drawn between those two sizes, at 2^19.
-const PARALLEL_UNPREMULTIPLY_PIXELS: usize = 1 << 19;
+/// Measured in release on Apple silicon, whole GPU reads of a translucent
+/// page after a draw, the threads against one thread, three passes, each the
+/// median of eleven rounds: at 362x362, 131,044 pixels, the pool's handover
+/// costs more than it saves, 465 to 469 microseconds against 386 to 401; at
+/// 512x512, 2^18, the two are level, 510 to 519 against 514 to 591; from
+/// 600x600 the threads win every pass, 571 to 596 against 671 to 710, and at
+/// 1024x1024 843 to 862 against 1502 to 1556. So the line is drawn at the
+/// level point, 2^18.
+pub(crate) const PARALLEL_UNPREMULTIPLY_PIXELS: usize = 1 << 18;
 
 /// Unpremultiplies one row of eight-bit pixels in place through
 /// [`unpremultiply_table`], alpha fourth.
@@ -2569,6 +2633,32 @@ fn unpremultiply_row(row: &mut [u8]) {
     }
 }
 
+/// [`unpremultiply_row`] from `from` into `to`, a row of the same length:
+/// the copy and the conversion in one pass.
+fn unpremultiply_into(from: &[u8], to: &mut [u8]) {
+    let table = unpremultiply_table();
+    let pairs = to
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(from.as_chunks::<4>().0);
+    for (out, pixel) in pairs {
+        let alpha = pixel[3];
+        *out = match alpha {
+            0 | u8::MAX => *pixel,
+            _ => {
+                let divide = &table[usize::from(alpha)];
+                [
+                    divide[usize::from(pixel[0])],
+                    divide[usize::from(pixel[1])],
+                    divide[usize::from(pixel[2])],
+                    alpha,
+                ]
+            }
+        };
+    }
+}
+
 /// Reads `surface` into `pixels` as `info` describes, with any conversion
 /// made on the CPU.
 ///
@@ -2582,15 +2672,19 @@ fn unpremultiply_row(row: &mut [u8]) {
 ///
 /// A read that differs from the surface only in wanting unpremultiplied
 /// pixels, which is what `getImageData` asks of an eight-bit canvas, reads
-/// premultiplied pixels into the destination and unpremultiplies them there
-/// through [`unpremultiply_table`]; anything else goes through Skia's CPU
-/// conversion from a copy. The cost is the GPU's: on Apple silicon a
-/// premultiplied read of a 1200x900 page costs about 0.95 milliseconds, where
-/// the GPU's own unpremultiplying read costs 0.78 and rounds down, and the
-/// table adds about 0.55 nanoseconds a pixel on one thread -- shared across
-/// threads from [`PARALLEL_UNPREMULTIPLY_PIXELS`], which brings the whole
-/// read to about 1.3 milliseconds. An 8x8 read costs about 130 microseconds
-/// against that conversion's 200.
+/// premultiplied pixels and unpremultiplies them through
+/// [`unpremultiply_table`] as they are written: from the buffer the GPU's
+/// copy lands in straight into the destination where the read is
+/// [`read_checked`]'s, and in the destination after the surface writes it
+/// otherwise. Anything else goes through Skia's CPU conversion from a copy.
+/// On Apple silicon a whole read of a translucent 1200x900 page after a draw
+/// takes 916 to 950 microseconds in release; written as a copy and then a
+/// second pass over the destination it took 1117 to 1147. The table adds about
+/// 0.35 nanoseconds a pixel on one thread -- 170 microseconds for 800x600 --
+/// shared across threads from [`PARALLEL_UNPREMULTIPLY_PIXELS`]. The same
+/// arithmetic worked lane by lane in `f32` gives the table's bytes for all
+/// 65,536 pairs and took 3.5 times as long: its divisions cost more than the
+/// table's lookups.
 fn read_converted_on_cpu(
     surface: &mut Surface,
     info: &ImageInfo,
@@ -2598,12 +2692,76 @@ fn read_converted_on_cpu(
     row_bytes: usize,
     at: (i32, i32),
 ) -> bool {
+    read_converted(
+        surface,
+        info,
+        pixels,
+        row_bytes,
+        at,
+        |s, i, p, r, a, rows| {
+            let read = s.read_pixels(i, p, r, a);
+            if let Some(rows) = rows.filter(|_| read) {
+                let height = i.height() as usize;
+                rows.convert_in_place(p, r, i.min_row_bytes(), height);
+            }
+            read
+        },
+    )
+}
+
+/// [`read_converted_on_cpu`] with its read made by [`read_checked`]: on the
+/// GPU, the draws before it and the copy confirmed by the read's own wait.
+fn read_converted_checked(
+    surface: &mut Surface,
+    info: &ImageInfo,
+    pixels: &mut [u8],
+    row_bytes: usize,
+    at: (i32, i32),
+    page: usize,
+) -> Checked {
+    let mut checked = None;
+    let read = read_converted(
+        surface,
+        info,
+        pixels,
+        row_bytes,
+        at,
+        |s, i, p, r, a, rows| match read_checked(s, i, p, r, a, page, rows) {
+            Checked::Read(read) => read,
+            other => {
+                checked = Some(other);
+                false
+            }
+        },
+    );
+    checked.unwrap_or(Checked::Read(read))
+}
+
+/// [`read_converted_on_cpu`], with the surface read by `read`, which is
+/// handed the surface, the layout to read in, the destination, its row
+/// bytes, the origin and how the rows are to be converted as they are
+/// written, and is called once.
+fn read_converted(
+    surface: &mut Surface,
+    info: &ImageInfo,
+    pixels: &mut [u8],
+    row_bytes: usize,
+    at: (i32, i32),
+    mut read: impl FnMut(
+        &mut Surface,
+        &ImageInfo,
+        &mut [u8],
+        usize,
+        (i32, i32),
+        Option<Rows>,
+    ) -> bool,
+) -> bool {
     if surface.recording_context().is_none() {
-        return surface.read_pixels(info, pixels, row_bytes, at);
+        return read(surface, info, pixels, row_bytes, at, None);
     }
     let native = surface.image_info().with_dimensions(info.dimensions());
     if &native == info {
-        return surface.read_pixels(info, pixels, row_bytes, at);
+        return read(surface, info, pixels, row_bytes, at, None);
     }
     let eight_bit = |kind: ColorType| {
         matches!(kind, ColorType::RGBA8888 | ColorType::BGRA8888)
@@ -2614,30 +2772,30 @@ fn read_converted_on_cpu(
         && native.alpha_type() == AlphaType::Premul
         && info.alpha_type() == AlphaType::Unpremul;
     if only_unpremultiplied {
-        // Premultiplied straight into the destination, in its own byte
-        // order, and unpremultiplied where it lies: one pass, no copy.
+        // Premultiplied, in the destination's own byte order, and
+        // unpremultiplied as each row is written: where the GPU's copy comes
+        // back in a buffer of its own, one pass from it into the destination;
+        // where the surface writes the destination itself, one pass over the
+        // destination after.
         let premultiplied = info.with_alpha_type(AlphaType::Premul);
-        if !surface.read_pixels(&premultiplied, pixels, row_bytes, at) {
-            return false;
-        }
-        let width = info.min_row_bytes();
-        let height = info.height() as usize;
-        let area = info.width() as usize * height;
-        match area >= PARALLEL_UNPREMULTIPLY_PIXELS {
-            true => pixels
-                .par_chunks_mut(row_bytes)
-                .take(height)
-                .for_each(|row| unpremultiply_row(&mut row[..width])),
-            false => pixels
-                .chunks_mut(row_bytes)
-                .take(height)
-                .for_each(|row| unpremultiply_row(&mut row[..width])),
-        }
-        return true;
+        let area = info.width() as usize * info.height() as usize;
+        let rows = Rows {
+            into: unpremultiply_into,
+            in_place: unpremultiply_row,
+            parallel: area >= PARALLEL_UNPREMULTIPLY_PIXELS,
+        };
+        return read(
+            surface,
+            &premultiplied,
+            pixels,
+            row_bytes,
+            at,
+            Some(rows),
+        );
     }
     let native_row_bytes = native.min_row_bytes();
     let mut held = vec![0u8; native.compute_byte_size(native_row_bytes)];
-    surface.read_pixels(&native, &mut held, native_row_bytes, at)
+    read(surface, &native, &mut held, native_row_bytes, at, None)
         && Pixmap::new(&native, &mut held, native_row_bytes).is_some_and(
             |pixmap| pixmap.read_pixels(info, pixels, row_bytes, (0, 0)),
         )
@@ -3139,7 +3297,10 @@ impl RecordingSurface {
         }
     }
 
-    /// Reads a rectangle out of the grid, one tile at a time.
+    /// Reads a rectangle out of the grid, one tile at a time: a tile drawn
+    /// into since its last confirmation through [`Tile::read_confirmed`],
+    /// and any other as [`Tile::copy_pixels`] reads it. `page` is the page
+    /// the draws belong to, which only the test seam reads.
     ///
     /// Each tile writes its own slice of the destination at the full row
     /// stride, so a read spanning four tiles lands as one image rather than
@@ -3151,7 +3312,8 @@ impl RecordingSurface {
         pixels: &mut [u8],
         page_size: ISize,
         wanted: &[(i32, i32)],
-    ) -> bool {
+        page: usize,
+    ) -> Checked {
         let row_bytes = dst_info.min_row_bytes();
         let pixel = dst_info.bytes_per_pixel();
 
@@ -3161,34 +3323,51 @@ impl RecordingSurface {
                 continue;
             };
             let Some(tile) = self.tiles.get_mut(origin) else {
-                return false;
+                return Checked::Read(false);
             };
 
             let info = dst_info.with_dimensions((part.width(), part.height()));
             let at = (part.y() - src.y()) as usize * row_bytes
                 + (part.x() - src.x()) as usize * pixel;
             let inside = (part.x() - origin.0, part.y() - origin.1);
-            let read =
-                tile.copy_pixels(&info, &mut pixels[at..], row_bytes, inside);
-            if !read {
-                return false;
+            let read = match tile.confirmed {
+                true => Checked::Read(tile.copy_pixels(
+                    &info,
+                    &mut pixels[at..],
+                    row_bytes,
+                    inside,
+                )),
+                false => tile.read_confirmed(
+                    &info,
+                    &mut pixels[at..],
+                    row_bytes,
+                    inside,
+                    page,
+                ),
+            };
+            if read != Checked::Read(true) {
+                return read;
             }
         }
-        true
+        Checked::Read(true)
     }
 
-    /// Whether the grid can serve this read, preparing it if so.
+    /// Serves `crop` of `page` out of the grid into `pixels` as `dst_info`
+    /// lays it out, preparing the tiles it touches.
     ///
     /// False when the page surface already holds a current composite -- it
     /// answers the read for nothing -- when the rectangle is wider than the
-    /// grid is worth, or when a tile could not be allocated. Every one of
-    /// those falls back to the page rather than failing.
-    pub fn try_tiled(
+    /// grid is worth, when a tile could not be allocated, or when a tile
+    /// refused the read. Every one of those falls back to the page rather
+    /// than failing.
+    pub fn read_tiled(
         &mut self,
         page: &Page,
         opts: &ExportOptions,
         engine: &RenderingEngine,
+        dst_info: &ImageInfo,
         crop: IRect,
+        pixels: &mut [u8],
     ) -> Result<bool, String> {
         if self.is_config_stale(opts)
             || self.gpu != Some(matches!(engine, RenderingEngine::GPU))
@@ -3218,8 +3397,9 @@ impl RecordingSurface {
             return Ok(false);
         }
 
-        // The tiles share this thread's context, so one wait confirms every
-        // one just drawn. A failed wait leaves them holding anything, so they
+        // A tile drawn into since its last confirmation is read by
+        // `read_checked`, whose one wait confirms the draws and the copy
+        // together. A failed wait leaves the tiles holding anything, so they
         // are dropped and drawn again from nothing. See
         // `crate::gpu::completion`.
         //
@@ -3232,37 +3412,37 @@ impl RecordingSurface {
             if !self.refresh_tiles(&wanted, page, opts, engine) {
                 return Ok(false);
             }
-            let confirmed = wanted.iter().all(|origin| {
-                self.tiles.get(origin).is_some_and(|tile| tile.confirmed)
-            });
-            let ran = confirmed
-                || wanted
-                    .first()
-                    .and_then(|origin| self.tiles.get_mut(origin))
-                    .is_none_or(|tile| draws_ran(&mut tile.surface, page.id));
-            if ran {
-                for origin in &wanted {
-                    if let Some(tile) = self.tiles.get_mut(origin) {
-                        tile.confirmed = true;
+            let checked = self.read_from_tiles(
+                dst_info, crop, pixels, page_size, &wanted, page.id,
+            );
+            match checked {
+                Checked::Read(served) => return Ok(served),
+                // The tiles share this thread's context, so one wait
+                // confirms every one just drawn.
+                Checked::Declined => {
+                    let ran = wanted
+                        .first()
+                        .and_then(|origin| self.tiles.get_mut(origin))
+                        .is_none_or(|tile| {
+                            draws_ran(&mut tile.surface, page.id)
+                        });
+                    if ran {
+                        for origin in &wanted {
+                            if let Some(tile) = self.tiles.get_mut(origin) {
+                                tile.confirmed = true;
+                            }
+                        }
+                        let served = self.read_from_tiles(
+                            dst_info, crop, pixels, page_size, &wanted, page.id,
+                        );
+                        return Ok(served == Checked::Read(true));
                     }
                 }
-                return Ok(true);
+                Checked::Discarded => {}
             }
             self.tiles.clear();
         }
         Err(discarded("drawing tiles for a read"))
-    }
-
-    /// Serves a read out of the grid prepared by [`Self::try_tiled`].
-    pub fn read_tiled(
-        &mut self,
-        dst_info: &ImageInfo,
-        src: IRect,
-        pixels: &mut [u8],
-        page_size: ISize,
-    ) -> bool {
-        let wanted = Self::tiles_covering(src, page_size);
-        self.read_from_tiles(dst_info, src, pixels, page_size, &wanted)
     }
 
     fn is_surface_stale(
@@ -3308,15 +3488,103 @@ impl RecordingSurface {
             if ran {
                 return Ok(());
             }
-            // What the surface holds is unknown, so start it again: no
-            // surface means `update` allocates one and replays every layer.
-            self.surface = None;
-            self.raster = None;
-            self.served_at = None;
-            self.depth = 0;
-            self.layers.clear();
+            self.restart();
         }
         Err(discarded("drawing the page for a read"))
+    }
+
+    /// Drops what the surface holds, which a discarded draw leaves unknown:
+    /// no surface means [`Self::update`] allocates one and replays every
+    /// layer.
+    fn restart(&mut self) {
+        self.surface = None;
+        self.raster = None;
+        self.served_at = None;
+        self.depth = 0;
+        self.layers.clear();
+    }
+
+    /// [`Self::update`] for `page`, then `src` of it read into `pixels` as
+    /// `dst_info` lays it out, with the draws confirmed by the read's own
+    /// wait -- see [`read_checked`] -- rather than by one in front of it:
+    /// drawn again on a fresh surface if the GPU discarded them, and an error
+    /// if that fails too. Where Skia will not read that way they are
+    /// confirmed as [`Self::confirmed_update`] confirms them, and read by
+    /// [`Self::copy_pixels`]. `false` where the read itself is refused.
+    pub fn confirmed_read(
+        &mut self,
+        page: &Page,
+        opts: &ExportOptions,
+        engine: &RenderingEngine,
+        dst_info: &ImageInfo,
+        src: IRect,
+        pixels: &mut [u8],
+    ) -> Result<bool, String> {
+        for _ in 0..DRAW_ATTEMPTS {
+            self.update(page, opts, engine);
+            match self.checked_pixels(dst_info, src, pixels, engine, page.id) {
+                Checked::Read(read) => return Ok(read),
+                Checked::Declined => {
+                    let ran = self
+                        .surface
+                        .as_mut()
+                        .is_none_or(|surface| draws_ran(surface, page.id));
+                    if ran {
+                        return Ok(
+                            self.copy_pixels(dst_info, src, pixels, engine)
+                        );
+                    }
+                }
+                Checked::Discarded => {}
+            }
+            self.restart();
+        }
+        Err(discarded("drawing the page for a read"))
+    }
+
+    /// [`Self::copy_pixels`] where the read is the first of the surface at
+    /// its state on the GPU: that one goes to the surface, which is where
+    /// draws not yet confirmed are, and is made by [`read_checked`]. Every
+    /// other read is one `copy_pixels` makes without the GPU's draws in
+    /// question -- a current CPU copy, a repeat read, which follows a
+    /// confirmed one at the same state, or a raster surface -- and takes it.
+    fn checked_pixels(
+        &mut self,
+        dst_info: &ImageInfo,
+        src: IRect,
+        pixels: &mut [u8],
+        engine: &RenderingEngine,
+        page: usize,
+    ) -> Checked {
+        let gpu = matches!(engine, RenderingEngine::GPU);
+        let first = self.served_at != Some(self.depth);
+        let Some(surface) = self.surface.as_mut() else {
+            return Checked::Read(false);
+        };
+        if self.raster.is_some() || !gpu || !first {
+            return Checked::Read(
+                self.copy_pixels(dst_info, src, pixels, engine),
+            );
+        }
+        let row_bytes = dst_info.min_row_bytes();
+        let origin = (src.x(), src.y());
+        match read_converted_checked(
+            surface, dst_info, pixels, row_bytes, origin, page,
+        ) {
+            Checked::Read(true) => {
+                self.served_at = Some(self.depth);
+                Checked::Read(true)
+            }
+            // Refused, with the draws confirmed: the destination formats a
+            // GPU surface will not read are the ones a CPU copy of it
+            // answers, which `copy_pixels` makes on a read it takes for a
+            // repeat.
+            Checked::Read(false) => {
+                self.served_at = Some(self.depth);
+                Checked::Read(self.copy_pixels(dst_info, src, pixels, engine))
+            }
+            other => other,
+        }
     }
 
     pub fn update(
@@ -3669,17 +3937,31 @@ impl RecordingSurface {
                 canvas.scale((density, density));
                 over.playback(canvas, Target::Pixels);
             }
-            if !draws_ran(&mut composed, page) {
-                continue;
-            }
             let row_bytes = dst_info.min_row_bytes();
-            return match read_converted_on_cpu(
+            let read = match read_converted_checked(
                 &mut composed,
                 dst_info,
                 pixels,
                 row_bytes,
                 at,
+                page,
             ) {
+                Checked::Read(read) => read,
+                Checked::Discarded => continue,
+                Checked::Declined => {
+                    if !draws_ran(&mut composed, page) {
+                        continue;
+                    }
+                    read_converted_on_cpu(
+                        &mut composed,
+                        dst_info,
+                        pixels,
+                        row_bytes,
+                        at,
+                    )
+                }
+            };
+            return match read {
                 true => Ok(()),
                 false => Err(format!(
                     "Could not get image data (format: {:?})",
@@ -4682,7 +4964,9 @@ impl Page {
                 // zeros or stale bytes as success, and nothing here can tell.
                 // The draws before it are confirmed by `confirmed_surface`;
                 // this copy is not, and it is short-lived, which is the whole
-                // of the argument for living with it. A readback seen
+                // of the argument for living with it. A `getImageData` read
+                // does not come here: `read_checked` puts its copy in the
+                // buffer it waits on, which answers for both. A readback seen
                 // transparent is told from this by running it again under
                 // `node scripts/gpu-events.mjs --run -- <command>`, which on
                 // a failure prints any GPU recovery while it ran.
@@ -6666,6 +6950,24 @@ impl ExportOptions {
 #[cfg(test)]
 mod unpremultiply_tests {
     use super::*;
+
+    #[test]
+    fn unpremultiplying_into_a_row_matches_unpremultiplying_in_place() {
+        // Every alpha against every channel value, each channel of a pixel
+        // different, so that an order or a channel mixed up shows.
+        let row: Vec<u8> = (0..256 * 256)
+            .flat_map(|i| {
+                let (alpha, channel) = ((i / 256) as u8, (i % 256) as u8);
+                [channel, u8::MAX - channel, channel / 2, alpha]
+            })
+            .collect();
+        let mut in_place = row.clone();
+        unpremultiply_row(&mut in_place);
+        let mut into = vec![0u8; row.len()];
+        unpremultiply_into(&row, &mut into);
+        assert!(in_place == into);
+        assert!(in_place != row, "nothing was unpremultiplied");
+    }
 
     #[test]
     fn unpremultiplying_matches_the_raster_pipeline() {

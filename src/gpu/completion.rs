@@ -10,37 +10,71 @@
 //! eight times during exports: 24 wrong results in 360,000, no error, and none
 //! on the CPU engine.
 //!
-//! So every path that draws a page and then reads it back confirms the draw
-//! first: flush the surface's context and wait for it with
-//! `submit(SyncCpu::Yes)`, whose answer is the status of the buffer it waited
-//! on. A draw that did not run is drawn once more on a fresh surface, and a
-//! second failure is reported with [`discarded`] rather than handed on as
-//! pixels. A read served by tiles nothing has been drawn into since their last
+//! So every path that draws a page and then reads it back confirms the draw,
+//! by a wait whose answer is the status of the buffer it waited on. A draw
+//! that did not run is drawn once more on a fresh surface, and a second
+//! failure is reported with [`discarded`] rather than handed on as pixels. A
+//! read served by tiles nothing has been drawn into since their last
 //! confirmation goes without one, since it would wait on nothing of theirs.
 //!
-//! What this cannot see is the readback's own buffer: Skia waits on it and
+//! A `getImageData` read confirms its draws with its own wait, through
+//! [`read_checked`]. The copy is asked for through Skia's asynchronous read,
+//! which encodes it in the command buffer the draws are already in, and
+//! `submit(SyncCpu::Yes)` commits that one buffer, waits for it and answers
+//! for it. In Skia M156, under the skia-bindings crate: every encode goes to
+//! `GrMtlGpu::commandBuffer`'s current buffer (`skia/src/gpu/ganesh/mtl/
+//! GrMtlGpu.mm`, line 188); `SurfaceContext::asyncReadPixels` encodes its
+//! transfer there and flushes without submitting (`skia/src/gpu/ganesh/
+//! SurfaceContext.cpp`, lines 832 and 871); `GrMtlGpu::submitCommandBuffer`
+//! commits that buffer (`GrMtlGpu.mm`, lines 212 to 245); and
+//! `GrMtlCommandBuffer::commit` waits and returns whether its status is an
+//! error (`GrMtlCommandBuffer.mm`, lines 182 to 206). So one wait confirms the
+//! draws and the copy both. Where Skia answers before anything is submitted
+//! -- it declined, or read through its own `readPixels` for want of a
+//! transfer, which commits the draws in a buffer nothing waits on -- the read
+//! is confirmed the other way.
+//!
+//! Every other path -- an export, a conversion, a read Skia will not make
+//! asynchronously -- flushes and waits with [`draws_ran`] first, then reads.
+//! What that cannot see is the readback's own buffer: Skia waits on it and
 //! drops the answer -- see the `UPSTREAM:` note at the readbacks in
 //! `context::page`.
 //!
-//! **The check costs one GPU round trip per readback after a draw.** The
-//! readback already waits for the GPU once; this adds a second wait in front of
-//! it. Measured on a release build, Apple M4 Pro: a 64x48 PNG export goes from
-//! about 380 to 500 microseconds, a raw export from 240 to 350, a
-//! `getImageData` from 220 to 300 -- 30 to 45 percent. On a 2048x1536 page the
-//! difference is inside the noise of a 4.6 to 51 ms operation, and the first
-//! operation of a process is unchanged within its spread. Flushing and
-//! submitting without waiting costs nothing measurable, which is what pins the
-//! cost on the wait.
+//! **The checked read costs no wait beyond the read's own.** Counted under
+//! lldb, a read after a draw waits on the GPU once. Measured on a release
+//! build, Apple M4 Pro, in three interleaved passes against the wait in front
+//! of it: a `getImageData` of 8x8 pixels after a draw takes 185 to 208
+//! microseconds against 248 to 253, one of 64x48 199 to 202 against 253 to
+//! 258, and one of a whole 1200x900 page 1075 to 1155 against 1237 to 1351.
+//!
+//! **The other paths' check costs one GPU round trip per readback after a
+//! draw.** The readback already waits for the GPU once; this adds a second
+//! wait in front of it. Measured on a release build, Apple M4 Pro: a 64x48
+//! PNG export goes from about 380 to 500 microseconds and a raw export from
+//! 240 to 350 -- 30 to 45 percent. On a 2048x1536 page the difference is
+//! inside the noise of a 4.6 to 51 ms operation, and the first operation of a
+//! process is unchanged within its spread. Flushing and submitting without
+//! waiting costs nothing measurable, which is what pins the cost on the wait.
 //!
 //! It is paid because the alternative is pixels that are wrong with no error.
-//! It stays until Skia reports a failed draw as well as a failed copy: its
-//! `SurfaceContext::readPixels` commits the draws in a command buffer of
-//! their own without waiting, then the copy in a second one it waits on, so a
-//! fix that checks only the copy's buffer still leaves the draws to this wait.
+//! It stays on those paths until Skia reports a failed draw as well as a
+//! failed copy: its `SurfaceContext::readPixels` commits the draws in a
+//! command buffer of their own without waiting, then the copy in a second one
+//! it waits on, so a fix that checks only the copy's buffer still leaves the
+//! draws to this wait.
 
-use skia_safe::Surface;
 #[cfg(any(feature = "metal", feature = "vulkan"))]
-use skia_safe::gpu::SyncCpu;
+use std::{cell::RefCell, rc::Rc};
+
+use rayon::prelude::*;
+
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+use skia_safe::{
+    IRect,
+    gpu::SyncCpu,
+    image::{AsyncReadResult, RescaleGamma, RescaleMode},
+};
+use skia_safe::{ImageInfo, Surface};
 
 use crate::Error;
 #[cfg(any(feature = "metal", feature = "vulkan"))]
@@ -104,6 +138,230 @@ pub(crate) fn draws_ran(surface: &mut Surface, page: usize) -> bool {
 /// draw the GPU could have discarded.
 #[cfg(not(any(feature = "metal", feature = "vulkan")))]
 pub(crate) fn draws_ran(_surface: &mut Surface, _page: usize) -> bool {
+    true
+}
+
+/// What [`read_checked`] made of a read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(any(feature = "metal", feature = "vulkan")),
+    expect(dead_code, reason = "only a GPU read is discarded or declined")
+)]
+pub(crate) enum Checked {
+    /// The pixels are read, and on the GPU the draws before the read and the
+    /// copy out are confirmed to have run. `false` where the surface refused
+    /// the read, which a GPU discard is not.
+    Read(bool),
+    /// The GPU did not run the draws or the copy, so what the destination
+    /// holds is unknown.
+    Discarded,
+    /// Skia would not read the surface this way, and nothing was confirmed:
+    /// the caller confirms the draws with [`draws_ran`] and reads as it would
+    /// without this.
+    Declined,
+}
+
+/// How a read's rows are written into the destination: converted on the way
+/// rather than copied, so that a conversion made on the CPU is one pass over
+/// the rows rather than a copy and then a pass.
+#[derive(Clone, Copy)]
+pub(crate) struct Rows {
+    /// Writes a row as read into a destination row of the same length.
+    #[cfg_attr(
+        not(any(feature = "metal", feature = "vulkan")),
+        expect(
+            dead_code,
+            reason = "only a GPU read lands in a buffer of its own"
+        )
+    )]
+    pub(crate) into: fn(&[u8], &mut [u8]),
+    /// Converts a row already in the destination where it lies, for a read
+    /// that writes the destination itself.
+    pub(crate) in_place: fn(&mut [u8]),
+    /// Whether the rows are shared across threads.
+    pub(crate) parallel: bool,
+}
+
+impl Rows {
+    /// Converts `height` rows of `width` bytes of `pixels`, `row_bytes`
+    /// apart, where they lie.
+    pub(crate) fn convert_in_place(
+        self,
+        pixels: &mut [u8],
+        row_bytes: usize,
+        width: usize,
+        height: usize,
+    ) {
+        let in_place = self.in_place;
+        match self.parallel {
+            true => pixels
+                .par_chunks_mut(row_bytes)
+                .take(height)
+                .for_each(|row| in_place(&mut row[..width])),
+            false => pixels
+                .chunks_mut(row_bytes)
+                .take(height)
+                .for_each(|row| in_place(&mut row[..width])),
+        }
+    }
+}
+
+/// Reads `info`'s rectangle at `at` of `surface` into `pixels`, `row_bytes`
+/// a row, with the GPU's draws confirmed by the read's own wait rather than
+/// one in front of it.
+///
+/// The copy is asked for through Skia's asynchronous read, which encodes it
+/// in the command buffer the draws are already in, and that one buffer is
+/// committed and waited on with `submit(SyncCpu::Yes)`, whose answer is its
+/// status: one wait, and an answer for the copy as well as the draws. A
+/// raster surface reads at once and has nothing to confirm. `page` is the
+/// page the draws belong to, which only the test seam reads. `rows`, where
+/// given, converts each row as it is written.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+pub(crate) fn read_checked(
+    surface: &mut Surface,
+    info: &ImageInfo,
+    pixels: &mut [u8],
+    row_bytes: usize,
+    at: (i32, i32),
+    page: usize,
+    rows: Option<Rows>,
+) -> Checked {
+    let Some(mut context) = surface.direct_context() else {
+        return Checked::Read(read_now(
+            surface, info, pixels, row_bytes, at, rows,
+        ));
+    };
+    // The outer `None` until Skia calls back; the inner one where it declined.
+    let answer: Rc<RefCell<Option<Option<AsyncReadResult>>>> = Rc::default();
+    let sink = Rc::clone(&answer);
+    surface.async_rescale_and_read_pixels(
+        info,
+        IRect::from_pt_size(at, info.dimensions()),
+        RescaleGamma::Src,
+        RescaleMode::Nearest,
+        move |read| *sink.borrow_mut() = Some(read),
+    );
+    // An answer before anything is submitted is Skia declining, or reading
+    // through its own `readPixels` where it could not make a transfer
+    // (`SurfaceContext::asyncReadPixels`), which submits the draws in a
+    // buffer of their own that nothing waits on. Neither is confirmed.
+    if answer.borrow().is_some() {
+        #[cfg(test)]
+        DECLINED.set(DECLINED.get() + 1);
+        return Checked::Declined;
+    }
+    // Asked as `draws_ran` asks it: every draw on the context, and a flush
+    // that failed on the way.
+    let flushed = context.flush(None).is_ok() && !pacing::take_failed();
+    let ran = context.submit(SyncCpu::Yes);
+    if !(flushed && ran) || seam::discards(page) {
+        return Checked::Discarded;
+    }
+    match answer.borrow_mut().take() {
+        Some(Some(read)) => {
+            Checked::Read(copy_rows(&read, info, pixels, row_bytes, rows))
+        }
+        _ => {
+            #[cfg(test)]
+            DECLINED.set(DECLINED.get() + 1);
+            Checked::Declined
+        }
+    }
+}
+
+#[cfg(all(test, any(feature = "metal", feature = "vulkan")))]
+thread_local! {
+    /// How many GPU reads [`read_checked`] has handed back undone on this
+    /// thread, so that a test can tell a read it confirmed from one that
+    /// took the two-wait path.
+    pub(crate) static DECLINED: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// With no GPU backend compiled in every surface is raster: read at once.
+#[cfg(not(any(feature = "metal", feature = "vulkan")))]
+pub(crate) fn read_checked(
+    surface: &mut Surface,
+    info: &ImageInfo,
+    pixels: &mut [u8],
+    row_bytes: usize,
+    at: (i32, i32),
+    _page: usize,
+    rows: Option<Rows>,
+) -> Checked {
+    Checked::Read(read_now(surface, info, pixels, row_bytes, at, rows))
+}
+
+/// A read with nothing to confirm, made by the surface into `pixels` and
+/// then converted by `rows` where they lie.
+fn read_now(
+    surface: &mut Surface,
+    info: &ImageInfo,
+    pixels: &mut [u8],
+    row_bytes: usize,
+    at: (i32, i32),
+    rows: Option<Rows>,
+) -> bool {
+    let read = surface.read_pixels(info, pixels, row_bytes, at);
+    if let Some(rows) = rows.filter(|_| read) {
+        let height = info.height() as usize;
+        rows.convert_in_place(pixels, row_bytes, info.min_row_bytes(), height);
+    }
+    read
+}
+
+/// Writes the one plane of `read`, `info`'s rows, into `pixels` at
+/// `row_bytes` a row: copied, or converted by `rows` on the way. `false` where
+/// it is not one plane of at least `info`'s width, or `pixels` cannot hold
+/// it.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+fn copy_rows(
+    read: &AsyncReadResult,
+    info: &ImageInfo,
+    pixels: &mut [u8],
+    row_bytes: usize,
+    rows: Option<Rows>,
+) -> bool {
+    let width = info.min_row_bytes();
+    let height = info.height() as usize;
+    if height == 0 {
+        return true;
+    }
+    if read.count() != 1
+        || read.row_bytes(0) < width
+        || pixels.len() < (height - 1) * row_bytes + width
+    {
+        return false;
+    }
+    let stride = read.row_bytes(0);
+    // SAFETY: Skia's result holds `height` rows of `stride` bytes laid out as
+    // the `info` it was asked for, valid while `read` lives -- the borrow
+    // here -- and the slice ends at the last row's `width` bytes, no more than
+    // its `stride`.
+    let plane = unsafe {
+        std::slice::from_raw_parts(
+            read.data(0).cast::<u8>(),
+            (height - 1) * stride + width,
+        )
+    };
+    let write = rows.map_or(
+        (|from, to| to.copy_from_slice(from)) as fn(&[u8], &mut [u8]),
+        |rows| rows.into,
+    );
+    let pairs = |(to, from): (&mut [u8], &[u8])| {
+        write(&from[..width], &mut to[..width])
+    };
+    match rows.is_some_and(|rows| rows.parallel) {
+        true => pixels
+            .par_chunks_mut(row_bytes)
+            .zip(plane.par_chunks(stride))
+            .for_each(pairs),
+        false => pixels
+            .chunks_mut(row_bytes)
+            .zip(plane.chunks(stride))
+            .for_each(pairs),
+    }
     true
 }
 
@@ -202,10 +460,12 @@ pub(crate) mod seam {
 
 #[cfg(all(test, any(feature = "metal", feature = "vulkan")))]
 mod tests {
-    use super::{DISCARDED, seam};
+    use super::{DECLINED, DISCARDED, seam};
     use crate::{
-        Canvas, Context2D, EncodeOptions, Error, ImageFormat, PixelColorSpace,
+        Canvas, CanvasOptions, Context2D, EncodeOptions, Error, FillRule,
+        ImageFormat, PixelColorSpace, PixelDepth, PixelExportOptions,
         RgbaLinear, canvas::EngineKind,
+        context::page::PARALLEL_UNPREMULTIPLY_PIXELS,
     };
 
     /// A canvas with something on it, on the GPU, and the id of its page --
@@ -350,6 +610,123 @@ mod tests {
         seam::discard(Some(page), 2);
         let read = canvas.context().get_image_data(0.0, 0.0, 8.0, 8.0);
         assert_discarded(read, "drawing tiles for a read");
+    }
+
+    /// A read after a draw, on every page kind the GPU draws and at the
+    /// depths it is read at, whole, in part and within a tile, is confirmed
+    /// by its own wait -- Skia hands none of them back to the two-wait path
+    /// -- and reads what a repeat read of the same state reads: one served
+    /// from a CPU copy of the page, made by Skia's own readback. A float
+    /// page is drawn on the CPU, which has nothing to confirm.
+    #[test]
+    fn a_read_after_a_draw_is_confirmed_by_its_own_wait() {
+        if drawn(1.0, 1.0).is_none() {
+            return;
+        }
+        let mut checked = 0;
+        for space in PixelColorSpace::all() {
+            for depth in [PixelDepth::Uint8, PixelDepth::F16, PixelDepth::F32] {
+                for read in [PixelDepth::Uint8, PixelDepth::F32] {
+                    for (x, y, w, h) in [
+                        (0.0, 0.0, 600.0, 300.0),
+                        (100.0, 50.0, 300.0, 200.0),
+                        (37.0, 11.0, 10.0, 10.0),
+                    ] {
+                        for premultiplied in [false, true] {
+                            let mut canvas = Canvas::with_options(
+                                600.0,
+                                300.0,
+                                CanvasOptions {
+                                    color_space: space,
+                                    color_type: depth,
+                                    ..CanvasOptions::default()
+                                },
+                            )
+                            .expect("a canvas");
+                            if canvas.engine_kind() != EngineKind::Gpu {
+                                continue;
+                            }
+                            let ctx = canvas.context();
+                            ctx.set_fill_style(RgbaLinear::from_srgb8(
+                                204, 77, 26, 0.45,
+                            ));
+                            ctx.fill_rect(20.0, 5.0, 500.0, 250.0);
+                            ctx.set_fill_style(RgbaLinear::from_srgb8(
+                                26, 128, 230, 0.7,
+                            ));
+                            ctx.begin_path();
+                            ctx.arc(300.0, 150.0, 110.3, 0.0, 7.0, false)
+                                .expect("an arc");
+                            ctx.fill(FillRule::NonZero);
+                            let options = PixelExportOptions {
+                                color_space: space,
+                                depth: read,
+                                premultiplied,
+                                ..PixelExportOptions::default()
+                            };
+                            let before = DECLINED.get();
+                            let first = ctx
+                                .get_image_data_as(x, y, w, h, options)
+                                .expect("a read");
+                            assert_eq!(
+                                DECLINED.get(),
+                                before,
+                                "{space:?} {depth:?} read as {read:?} at \
+                                 {x},{y} {w}x{h}, premultiplied \
+                                 {premultiplied}: Skia declined the read"
+                            );
+                            let again = ctx
+                                .get_image_data_as(x, y, w, h, options)
+                                .expect("a repeat read");
+                            assert!(
+                                first.pixels() == again.pixels(),
+                                "{space:?} {depth:?} read as {read:?} at \
+                                 {x},{y} {w}x{h}, premultiplied \
+                                 {premultiplied}: the read differs from a \
+                                 repeat of it"
+                            );
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // Each space's eight-bit page, read as eight bits and as floats.
+        assert_eq!(checked, 8 * 2 * 3 * 2);
+    }
+
+    /// A read large enough to be unpremultiplied across threads, as it is
+    /// written from the GPU's copy, lands what a repeat of it does.
+    #[test]
+    fn a_large_read_is_unpremultiplied_as_its_repeat_is() {
+        let (width, height) = (1024.0, 600.0);
+        assert!(
+            (width * height) as usize >= PARALLEL_UNPREMULTIPLY_PIXELS,
+            "the read is not large enough to be shared across threads"
+        );
+        let mut canvas = Canvas::new(width, height);
+        if canvas.engine_kind() != EngineKind::Gpu {
+            return;
+        }
+        let ctx = canvas.context();
+        ctx.set_fill_style(RgbaLinear::from_srgb8(204, 77, 26, 0.45));
+        ctx.fill_rect(20.0, 5.0, 900.0, 550.0);
+        ctx.set_fill_style(RgbaLinear::from_srgb8(26, 128, 230, 0.7));
+        ctx.begin_path();
+        ctx.arc(500.0, 300.0, 210.3, 0.0, 7.0, false)
+            .expect("an arc");
+        ctx.fill(FillRule::NonZero);
+        let before = DECLINED.get();
+        let first =
+            ctx.get_image_data(0.0, 0.0, width, height).expect("a read");
+        assert_eq!(DECLINED.get(), before, "Skia declined the read");
+        let again = ctx
+            .get_image_data(0.0, 0.0, width, height)
+            .expect("a repeat");
+        assert!(
+            first.pixels() == again.pixels(),
+            "the read differs from a repeat"
+        );
     }
 
     #[test]
