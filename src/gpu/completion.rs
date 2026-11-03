@@ -580,7 +580,7 @@ mod tests {
                             };
                             let before = DECLINED.get();
                             let first = ctx
-                                .get_image_data_as(x, y, w, h, options.clone())
+                                .get_image_data_as(x, y, w, h, options)
                                 .expect("a read");
                             assert_eq!(
                                 DECLINED.get(),
