@@ -18,7 +18,11 @@ use skia_safe::{
     shaders,
     textlayout::{StrutStyle, TextStyle},
 };
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    sync::Arc,
+};
 
 pub mod api;
 pub(crate) mod blur_mask;
@@ -1193,21 +1197,23 @@ impl Context2D {
     /// Records the draw `f` makes with a paint it is handed, through the
     /// route its dye and filter take. `replay`, where the draw's kind can be
     /// kept whole, is what a canvas's pattern is drawn through at playback
-    /// -- see [`Replay`]. `lines` where the draw is a run naming a line
-    /// colour; `f` is told which [`Pass`] it draws.
+    /// -- see [`Replay`]. `text` where the draw is a run of text -- see
+    /// [`TextRun`]; `f` is told which [`Pass`] it draws.
     pub fn render_to_canvas<F>(
         &self,
         paint: &Paint,
         exact: Option<&Paint>,
         features: VectorFeatures,
         replay: Option<Replay>,
-        lines: bool,
+        text: Option<TextRun>,
         f: F,
     ) where
         F: Fn(&SkCanvas, &Paint, Pass),
     {
+        let lines = text.as_ref().is_some_and(|text| text.lines);
+        let reached = text.map(|text| text.reached);
         if self.files_through_pattern(paint, features, replay, lines, &f)
-            || self.files_through_chain(paint, exact, features, &f)
+            || self.files_through_chain(paint, exact, features, reached, &f)
         {
             return;
         }
@@ -1333,7 +1339,7 @@ impl Context2D {
         let Some(replay) = replay else {
             return false;
         };
-        let steps = self.draw_chain();
+        let steps = self.draw_chain(false);
         let blend = self.state.global_composite_operation;
         let beyond = covers_beyond_the_draw(blend);
         // Drawn on its own wherever it composites only where it lands and
@@ -1464,6 +1470,7 @@ impl Context2D {
             Some(steps) => Composite::Chain {
                 steps,
                 rec: rec(filter),
+                reach: None,
             },
             None => Composite::Layer(rec(filter)),
         };
@@ -1546,12 +1553,15 @@ impl Context2D {
 
     /// The filter chain a draw is run through by the crate rather than by
     /// Skia -- see [`Self::files_through_chain`]: one holding a
-    /// `drop-shadow()` or a step run in the draw's own space, for a draw
-    /// casting no shadow of the context's own, under a blend that composites
-    /// only where it lands. A chain of blurs and colour functions alone
-    /// keeps the route its draw takes otherwise: a `BlurOp`, or Skia's
-    /// filter.
-    fn draw_chain(&self) -> Option<Arc<[Step]>> {
+    /// `drop-shadow()` or a step run in the draw's own space, and for a run
+    /// of text, `text`, one holding a `blur()`, for a draw casting no shadow
+    /// of the context's own, under a blend that composites only where it
+    /// lands. Any other chain of blurs and colour functions keeps the route
+    /// its draw takes otherwise: a `BlurOp`, or Skia's filter. Text has no
+    /// `BlurOp`, and Skia's filter blurs it by three box blurs, which came
+    /// up to 12.7 levels off the Gaussian on 40px text blurred by 3, as
+    /// Chrome's does.
+    fn draw_chain(&self, text: bool) -> Option<Arc<[Step]>> {
         if covers_beyond_the_draw(self.state.global_composite_operation)
             || self.casts_shadow()
         {
@@ -1561,6 +1571,7 @@ impl Context2D {
             steps.iter().any(|step| {
                 matches!(step, Step::Shadow { .. })
                     || step.runs_in_local_space()
+                    || (text && matches!(step, Step::Blur(_)))
             })
         })
     }
@@ -1582,12 +1593,13 @@ impl Context2D {
         paint: &Paint,
         exact: Option<&Paint>,
         features: VectorFeatures,
+        reached: Option<&Cell<Option<Rect>>>,
         f: &F,
     ) -> bool
     where
         F: Fn(&SkCanvas, &Paint, Pass),
     {
-        let Some(steps) = self.draw_chain() else {
+        let Some(steps) = self.draw_chain(reached.is_some()) else {
             return false;
         };
         // Recorded over the page and as far again as the chain reaches: a
@@ -1599,6 +1611,13 @@ impl Context2D {
         // The draw keeps its alpha, the colour's and the global one, as it
         // does through Skia's layer; the group composites it at one,
         // through the blend.
+        //
+        // A run of text answers what it can ink, `reached`, which bounds the
+        // chain's layer where its picture cannot: a picture of text is
+        // bounded by the clip -- see `layer::reach_the_clip` -- and a chain
+        // run over the page's every pixel took 1.7 ms a 40px word under a
+        // drop shadow. Where either recording does not say, the layer keeps
+        // what the entries reach.
         let record = |paint: &Paint| {
             let mut paint = paint.clone();
             paint
@@ -1607,15 +1626,31 @@ impl Context2D {
             let mut recorder = PictureRecorder::new();
             let canvas = recorder.begin_recording(bounds, true);
             canvas.set_matrix(&self.state.matrix.into());
+            if let Some(reached) = reached {
+                reached.set(None);
+            }
             f(canvas, &paint, Pass::Draw);
-            recorder.finish_recording_as_picture(None)
+            let reach = reached.and_then(Cell::get);
+            recorder
+                .finish_recording_as_picture(None)
+                .map(|p| (p, reach))
         };
-        let entry = match self.recorder.borrow().dual() {
-            false => record(paint).map(Layer::Picture),
-            true => record(exact.unwrap_or(paint))
-                .zip(record(paint))
-                .map(|pictures| Layer::Targeted(Arc::new(pictures))),
-        };
+        let (entry, reach) = match self.recorder.borrow().dual() {
+            false => record(paint)
+                .map(|(picture, reach)| (Layer::Picture(picture), reach)),
+            true => record(exact.unwrap_or(paint)).zip(record(paint)).map(
+                |((pixels, pixels_reach), (document, document_reach))| {
+                    let reach =
+                        pixels_reach.zip(document_reach).map(|(mut a, b)| {
+                            a.join(b);
+                            a
+                        });
+                    (Layer::Targeted(Arc::new((pixels, document))), reach)
+                },
+            ),
+        }
+        .unzip();
+        let reach = reach.flatten();
         let mut through = Paint::default();
         through
             .set_blend_mode(self.state.global_composite_operation)
@@ -1637,6 +1672,7 @@ impl Context2D {
                         paint: Some(through),
                         ..LayerRec::default()
                     },
+                    reach,
                 },
                 None,
                 Matrix::new_identity(),
@@ -1928,6 +1964,7 @@ impl Context2D {
             composite: Composite::Chain {
                 steps: Arc::from([Step::Blur(cast.sigma)]),
                 rec: LayerRec::default(),
+                reach: None,
             },
             matrix: Matrix::new_identity(),
             clip: None,
@@ -2245,7 +2282,7 @@ impl Context2D {
             exact.as_ref(),
             features,
             replay,
-            false,
+            None,
             |canvas, paint, _| {
                 if let Some(tile) = self.state.texture(style) {
                     // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
@@ -2663,7 +2700,11 @@ impl Context2D {
                         ..LayerRec::default()
                     };
                     let composite = match steps.clone().filter(|_| own) {
-                        Some(steps) => Composite::Chain { steps, rec },
+                        Some(steps) => Composite::Chain {
+                            steps,
+                            rec,
+                            reach: None,
+                        },
                         None if own && !through_paint => Composite::Plain,
                         None => Composite::Layer(rec),
                     };
@@ -2690,7 +2731,7 @@ impl Context2D {
             pixels.as_ref(),
             features,
             None,
-            false,
+            None,
             |canvas, paint, _| {
                 // A paint here makes Skia draw the picture through a temporary
                 // layer, which is what keeps the source's own compositing to
@@ -2887,6 +2928,7 @@ impl Context2D {
                             paint: Some(through),
                             ..LayerRec::default()
                         },
+                        reach: None,
                     },
                     // Unconfined: the image's own edge is where it ends,
                     // and a clip to it would take its partial pixels a
@@ -2907,7 +2949,7 @@ impl Context2D {
             pixels.as_ref(),
             features,
             None,
-            false,
+            None,
             |canvas, paint, _| {
                 canvas.draw_image_rect_with_sampling_options(
                     image,
@@ -3297,17 +3339,29 @@ impl Context2D {
                         faint,
                     }
                 });
+            // A run filed through a filter chain answers what it can ink, which
+            // bounds the chain's layer -- see `files_through_chain` -- and the
+            // first time it is drawn it is laid out as runs to answer it,
+            // which draw what `Paragraph::paint` does.
+            let reached = Cell::new(None);
+            let chained = self.draw_chain(true).is_some();
             self.render_to_canvas(
                 &paint,
                 dyed,
                 features,
                 replay,
-                typesetter.names_a_line_colour(),
+                Some(TextRun {
+                    lines: typesetter.names_a_line_colour(),
+                    reached: &reached,
+                }),
                 |canvas, paint, pass| {
                     // The kept run, or, the first time a run is drawn, the run
                     // laid out for this paint -- see `Typesetter::laid_out`.
                     let run = match &kept {
                         Some(kept) => DrawnRun::Kept(kept.clone()),
+                        None if chained => {
+                            typesetter.drawn_as_runs(&faint.drawable(paint))
+                        }
                         None => typesetter
                             .drawn_once(&faint.drawable(paint), canvas),
                     };
@@ -3335,7 +3389,15 @@ impl Context2D {
                             Pass::Draw => global_alpha,
                             Pass::AlphaInShadow => 1.0,
                         };
-                        run.paint(canvas, at, paint, lines, faint);
+                        let reach = run.paint(canvas, at, paint, lines, faint);
+                        let reach = reach.map(|reach| {
+                            canvas.local_to_device_as_3x3().map_rect(reach).0
+                        });
+                        #[cfg(test)]
+                        if reach.is_some() {
+                            TEXT_REACHED.set(reach);
+                        }
+                        reached.set(reach);
                         reach_the_clip(canvas);
                     };
                     match condensation {
@@ -3763,6 +3825,17 @@ impl Context2D {
     }
 }
 
+/// What a run of text hands [`Context2D::render_to_canvas`] beside its draw.
+pub struct TextRun<'a> {
+    /// Whether the run names a line colour -- see
+    /// `Typesetter::names_a_line_colour`.
+    pub lines: bool,
+    /// Set by the draw to what the run can ink, in the units of the canvas it
+    /// draws on, where that is known -- see
+    /// [`Context2D::files_through_chain`].
+    pub reached: &'a Cell<Option<Rect>>,
+}
+
 /// What a draw handed to [`Context2D::render_to_canvas`] is drawing, which
 /// a run naming a line colour needs: the line holds the `globalAlpha` apart
 /// from the paint -- see `Context2D::paint_for_shadow_in`.
@@ -3928,6 +4001,13 @@ impl Dye {
             }
         };
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The last reach a run of text drawn on this thread answered, in the
+    /// units of the canvas it was drawn on -- see [`Context2D::draw_text`].
+    static TEXT_REACHED: Cell<Option<Rect>> = const { Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -6835,5 +6915,871 @@ mod fork_tests {
                 assert!(lazy.forked, "{at}: forked");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod text_reach_tests {
+    //! A chain's layer bounded by the text it holds draws what one bounded
+    //! by the clip draws, over scenes chosen to find a reach that is too
+    //! small -- see [`layer::KEEPS_TEXT_REACH`].
+
+    use super::{TEXT_REACHED, layer::KEEPS_TEXT_REACH};
+    use crate::{
+        node::typography::{
+            REACH_BOUND, REACH_INSET, REACHED_FAMILIES, ReachBound,
+        },
+        prelude::*,
+    };
+    use rayon::prelude::*;
+    use skia_safe::Rect;
+    use std::{
+        cell::{Cell, RefCell},
+        collections::HashMap,
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Instant,
+    };
+
+    /// The family Oswald is registered under for these scenes, so that it
+    /// cannot be found as a system font of the same name instead.
+    const OSWALD: &str = "ReachOswald";
+
+    /// The family Monoton, which has one weight and so is emboldened by
+    /// Skia where bold is asked of it, is registered under.
+    const MONOTON: &str = "ReachMonoton";
+
+    thread_local! {
+        /// Whether [`OSWALD`] is registered on this thread: the registry a
+        /// canvas resolves a family against is the thread's own -- see
+        /// `FontLibrary::register_font_from_data` -- and the sweep plays its
+        /// scenes on rayon's threads.
+        static REGISTERED: Cell<bool> = const { Cell::new(false) };
+        /// Which of the scenes' fonts this thread found, by font.
+        static RESOLVED: RefCell<HashMap<&'static str, bool>> =
+            RefCell::new(HashMap::new());
+    }
+
+    /// Registers [`OSWALD`] and [`MONOTON`] on this thread, once, and
+    /// measures reaches the way `TEXT_REACH_BOUND` names -- see
+    /// [`ReachBound`].
+    fn register() {
+        if !REGISTERED.replace(true) {
+            REACH_INSET.set(
+                std::env::var("TEXT_REACH_INSET")
+                    .ok()
+                    .and_then(|inset| inset.parse().ok())
+                    .unwrap_or(0.0),
+            );
+            REACH_BOUND.set(
+                match std::env::var("TEXT_REACH_BOUND").as_deref() {
+                    Ok("stroked-unwidened") => ReachBound::StrokedUnwidened,
+                    Ok("stroked-half-width") => ReachBound::StrokedHalfWidth,
+                    _ => ReachBound::Stroked,
+                },
+            );
+            FontLibrary::new()
+                .use_paths(
+                    Some(OSWALD),
+                    ["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
+                )
+                .expect("registers");
+            FontLibrary::new()
+                .use_paths(
+                    Some(MONOTON),
+                    ["tests/assets/fonts/Monoton-Regular.woff2"],
+                )
+                .expect("registers");
+        }
+    }
+
+    /// Whether a run asking for `font` on this thread is drawn in it rather
+    /// than in a fallback: a family not on this machine is still a valid CSS
+    /// font, and quietly resolves to the platform's default.
+    fn resolves(font: &'static str) -> bool {
+        if let Some(found) =
+            RESOLVED.with_borrow(|known| known.get(font).copied())
+        {
+            return found;
+        }
+        let family = match font {
+            OSWALD => "Oswald",
+            MONOTON => "Monoton",
+            font => font,
+        };
+        // A letter and an emoji, so that a text face and an emoji face are
+        // each asked for a glyph they hold.
+        let found = reached(&Scene {
+            font,
+            text: "A\u{1F600}",
+            ..BASE
+        })
+        .is_some()
+            && REACHED_FAMILIES.with_borrow(|families| {
+                families.iter().any(|f| f.eq_ignore_ascii_case(family))
+            });
+        RESOLVED.with_borrow_mut(|known| known.insert(font, found));
+        found
+    }
+
+    /// One scene: text in a font, at a size and weight, spaced, under a
+    /// transform, filled or stroked with a join and miter limit, through a
+    /// filter.
+    #[derive(Clone, Copy)]
+    struct Scene {
+        font: &'static str,
+        size: f32,
+        text: &'static str,
+        transform: Option<Affine>,
+        stroke: Option<f32>,
+        join: StrokeJoin,
+        miter: f32,
+        bold: bool,
+        /// `letterSpacing` and `wordSpacing`, in pixels.
+        spacing: (f32, f32),
+        filter: &'static str,
+    }
+
+    /// Room for the largest run, its stroke and its shadow cast 90 by 60.
+    const SIZE: (f32, f32) = (300.0, 220.0);
+
+    impl Scene {
+        fn canvas(&self) -> Option<Canvas> {
+            register();
+            let mut canvas = Canvas::new(SIZE.0, SIZE.1);
+            canvas.set_gpu(false);
+            let ctx = canvas.context();
+            let weight = if self.bold { "bold " } else { "" };
+            if !ctx.set_font_css(&format!(
+                "{weight}{}px \"{}\"",
+                self.size, self.font
+            )) {
+                return None;
+            }
+            ctx.set_letter_spacing(self.spacing.0);
+            ctx.set_word_spacing(self.spacing.1);
+            ctx.set_line_join(self.join);
+            ctx.set_miter_limit(self.miter);
+            ctx.set_filter_css(self.filter).expect("a filter");
+            ctx.set_fill_style_css("rgb(200 120 40)").expect("a colour");
+            ctx.set_stroke_style_css("rgb(30 90 200)")
+                .expect("a colour");
+            ctx.translate(60.3, 110.6);
+            if let Some(transform) = self.transform {
+                ctx.transform(transform);
+            }
+            match self.stroke {
+                None => ctx.fill_text(self.text, 0.0, 0.0, None),
+                Some(width) => {
+                    ctx.set_line_width(width);
+                    ctx.stroke_text(self.text, 0.0, 0.0, None);
+                }
+            }
+            Some(canvas)
+        }
+    }
+
+    /// The playbacks a scene is held at, as `(name, on the GPU, scale)`:
+    /// exported at densities 1 to 3, and drawn into another canvas at half
+    /// and one and a half times its size, on each engine. A chain on the GPU
+    /// clears and reads only the region its reach bounds, as on the CPU, and
+    /// draws large glyphs as paths under multisampling, so the reach is held
+    /// to what each engine inks.
+    const PLAYBACKS: [(&str, bool, f32); 10] = [
+        ("cpu density 1", false, 1.0),
+        ("cpu density 2", false, 2.0),
+        ("cpu density 3", false, 3.0),
+        ("cpu drawn at 0.5", false, 0.5),
+        ("cpu drawn at 1.5", false, 1.5),
+        ("gpu density 1", true, 1.0),
+        ("gpu density 2", true, 2.0),
+        ("gpu density 3", true, 3.0),
+        ("gpu drawn at 0.5", true, 0.5),
+        ("gpu drawn at 1.5", true, 1.5),
+    ];
+
+    /// Whether a canvas on this machine can be drawn on the GPU.
+    fn gpu_available() -> bool {
+        let mut canvas = Canvas::new(1.0, 1.0);
+        canvas.set_gpu(true);
+        canvas.engine_kind() == EngineKind::Gpu
+    }
+
+    /// The pixels of `canvas` played back at each of [`PLAYBACKS`],
+    /// premultiplied; `None` for a GPU playback where there is no GPU.
+    fn played(canvas: &mut Canvas) -> Vec<Option<Vec<u8>>> {
+        let premultiplied = PixelExportOptions {
+            premultiplied: true,
+            ..PixelExportOptions::default()
+        };
+        let gpu = gpu_available();
+        PLAYBACKS
+            .iter()
+            .map(|&(_, on_gpu, scale)| {
+                if on_gpu && !gpu {
+                    return None;
+                }
+                canvas.set_gpu(on_gpu);
+                let pixels = match scale.fract() == 0.0 {
+                    true => canvas
+                        .to_image_data(
+                            None,
+                            &ImageDataExport {
+                                density: scale as u32,
+                                pixels: premultiplied,
+                                ..ImageDataExport::default()
+                            },
+                        )
+                        .expect("pixels")
+                        .pixels()
+                        .to_vec(),
+                    false => {
+                        let mut outer =
+                            Canvas::new(SIZE.0 * scale, SIZE.1 * scale);
+                        outer.set_gpu(on_gpu);
+                        outer.context().draw_canvas_sized(
+                            canvas,
+                            0.0,
+                            0.0,
+                            SIZE.0 * scale,
+                            SIZE.1 * scale,
+                        );
+                        outer
+                            .to_image_data(
+                                None,
+                                &ImageDataExport {
+                                    pixels: premultiplied,
+                                    ..ImageDataExport::default()
+                                },
+                            )
+                            .expect("pixels")
+                            .pixels()
+                            .to_vec()
+                    }
+                };
+                canvas.set_gpu(false);
+                Some(pixels)
+            })
+            .collect()
+    }
+
+    /// What the scene's run reports it can ink, drawn through its filter:
+    /// `None` where the scene's font is not on this machine or the run
+    /// answers nothing.
+    fn reached(scene: &Scene) -> Option<Rect> {
+        TEXT_REACHED.set(None);
+        scene.canvas()?;
+        TEXT_REACHED.get()
+    }
+
+    /// [`reached`] in each state a run is drawn in: laid out afresh for the
+    /// draw, as the first draw of it lays it out, and kept from draws before
+    /// -- see `Typesetter::laid_out` -- which lays it out with no paint:
+    /// `(state, reach)`.
+    fn reached_in_each_state(scene: &Scene) -> Vec<(&'static str, Rect)> {
+        crate::node::typography::forget_laid_out();
+        let fresh = reached(scene);
+        // Seen once, then kept: the third draw takes the kept run.
+        let _ = reached(scene);
+        let kept = reached(scene);
+        [("laid out afresh", fresh), ("kept", kept)]
+            .into_iter()
+            .filter_map(|(state, reach)| Some((state, reach?)))
+            .collect()
+    }
+
+    /// How many device pixels the scene's text, drawn without its filter,
+    /// inks outside its reach at each scale, past [`layer::HINTED_INK_DRIFT`]
+    /// and rounded out to whole pixels as a layer is: the `(scale, how
+    /// far)` of each that does.
+    fn inked_past(scene: &Scene, reach: Rect) -> Vec<(&'static str, f32)> {
+        inked_past_by(scene, reach, super::layer::HINTED_INK_DRIFT)
+    }
+
+    /// [`inked_past`] with the reach widened by `drift` device pixels.
+    fn inked_past_by(
+        scene: &Scene,
+        reach: Rect,
+        drift: f32,
+    ) -> Vec<(&'static str, f32)> {
+        let mut sharp = (Scene {
+            filter: "none",
+            ..*scene
+        })
+        .canvas()
+        .expect("a canvas");
+        played(&mut sharp)
+            .iter()
+            .zip(PLAYBACKS)
+            .filter_map(|(pixels, (at, _, scale))| {
+                let pixels = pixels.as_ref()?;
+                let width = (SIZE.0 * scale) as usize;
+                let held = [
+                    (reach.left * scale - drift).floor(),
+                    (reach.top * scale - drift).floor(),
+                    (reach.right * scale + drift).ceil(),
+                    (reach.bottom * scale + drift).ceil(),
+                ];
+                let past = pixels
+                    .chunks(4)
+                    .enumerate()
+                    .filter(|(_, p)| p[3] != 0)
+                    .map(|(i, _)| {
+                        let (x, y) = ((i % width) as f32, (i / width) as f32);
+                        [
+                            held[0] - x,
+                            held[1] - y,
+                            x + 1.0 - held[2],
+                            y + 1.0 - held[3],
+                        ]
+                        .into_iter()
+                        .fold(0.0, f32::max)
+                    })
+                    .fold(0.0, f32::max);
+                (past > 0.0).then_some((at, past))
+            })
+            .collect()
+    }
+
+    /// The box, in device pixels, of what the scene's text inks drawn
+    /// without its filter at `at`, one of [`PLAYBACKS`], beside its reach at
+    /// that scale: what a reading past the reach is reported with, so that
+    /// the edge it passes and by how much can be read from the failure.
+    fn ink_beside(scene: &Scene, reach: Rect, at: &str) -> String {
+        let mut sharp = (Scene {
+            filter: "none",
+            ..*scene
+        })
+        .canvas()
+        .expect("a canvas");
+        let (index, (_, _, scale)) = PLAYBACKS
+            .iter()
+            .enumerate()
+            .find(|(_, (name, _, _))| *name == at)
+            .expect("a playback");
+        let width = (SIZE.0 * scale) as usize;
+        let ink = played(&mut sharp)[index]
+            .as_ref()
+            .expect("the playback a reading was taken at")
+            .chunks(4)
+            .enumerate()
+            .filter(|(_, p)| p[3] != 0)
+            .fold(
+                [f32::MAX, f32::MAX, f32::MIN, f32::MIN],
+                |[l, t, r, b], (i, _)| {
+                    let (x, y) = ((i % width) as f32, (i / width) as f32);
+                    [l.min(x), t.min(y), r.max(x + 1.0), b.max(y + 1.0)]
+                },
+            );
+        format!(
+            "ink {ink:?}, reach {:?}",
+            [
+                reach.left * scale,
+                reach.top * scale,
+                reach.right * scale,
+                reach.bottom * scale
+            ]
+        )
+    }
+
+    /// How far, in levels of an 8-bit alpha, Skia's analytic
+    /// anti-aliasing covers a curved edge from its true coverage: 40,
+    /// measured, not chosen. The stroked "g" of Times New Roman's 96px
+    /// "Ag", 40 wide with round joins at density 3, covers (581, 245) with
+    /// an alpha of 98 where 8 by 8 samples of the same outline give 137.6,
+    /// 39.6 levels short; moved 54 device pixels it covers it with 116.
+    /// Measured on the CPU raster, which is the only anti-aliasing route
+    /// Skia 156 has for a path -- see `skia_covers_a_curve_by_where_it_lies`.
+    const AAA_COVERAGE_ERROR: u8 = 40;
+
+    /// How far two placements of the same scene may draw any pixel apart:
+    /// each covers an edge within [`AAA_COVERAGE_ERROR`] of its true
+    /// coverage, so the two lie within twice that of each other. It follows
+    /// from that error rather than from the spreads seen, which were 25
+    /// levels under a drop shadow and 32 without the filter.
+    const AAA_PLACEMENT_SPREAD: u8 = 2 * AAA_COVERAGE_ERROR;
+
+    /// The largest difference, in premultiplied levels, between the scene
+    /// drawn in a chain layer bounded by its reach and one bounded by the
+    /// clip, at each scale.
+    ///
+    /// An end-to-end check that confining the layer changes nothing past
+    /// Skia's own placement noise -- see [`AAA_PLACEMENT_SPREAD`] -- not the
+    /// guard on the reach: a reach that cuts a pixel off an anti-aliased
+    /// fringe can lose a few tens of levels, which the spread allows, and
+    /// [`inked_past`] is what refuses that. Drawn in by TEXT_REACH_INSET, in
+    /// the units the run is laid out in, the reach fails [`inked_past`] from
+    /// an inset of 1 and this from one of 11: a chain's layer is its reach
+    /// widened by as far as the chain reads, so an inset under that cuts
+    /// nothing the chain draws.
+    fn parted_from_the_clip(scene: &Scene) -> Vec<(&'static str, u8)> {
+        KEEPS_TEXT_REACH.set(true);
+        let confined = played(&mut scene.canvas().expect("a canvas"));
+        KEEPS_TEXT_REACH.set(false);
+        let clipped = played(&mut scene.canvas().expect("a canvas"));
+        KEEPS_TEXT_REACH.set(true);
+        confined
+            .iter()
+            .zip(&clipped)
+            .zip(PLAYBACKS)
+            // The CPU's playbacks alone until #511's pinned test passes: on
+            // the GPU some text is drawn one of two ways by what other text
+            // drew before it, up to 128 levels apart with no filter at all,
+            // so two placements cannot be held to each other there. What the
+            // GPU inks is held to the reach by [`inked_past`] all the same.
+            .filter(|(_, (_, on_gpu, _))| !on_gpu)
+            .filter_map(|((a, b), (at, _, _))| {
+                let (a, b) = (a.as_ref()?, b.as_ref()?);
+                Some((
+                    at,
+                    a.iter()
+                        .zip(b)
+                        .map(|(a, b)| a.abs_diff(*b))
+                        .max()
+                        .unwrap_or(0),
+                ))
+            })
+            .collect()
+    }
+
+    const ROTATE: Affine = Affine {
+        a: 0.955,
+        b: 0.296,
+        c: -0.296,
+        d: 0.955,
+        tx: 0.0,
+        ty: 0.0,
+    };
+    const SKEW: Affine = Affine {
+        a: 1.0,
+        b: 0.0,
+        c: 0.3,
+        d: 1.0,
+        tx: 0.0,
+        ty: 0.0,
+    };
+    const SCALE: Affine = Affine {
+        a: 1.7,
+        b: 0.0,
+        c: 0.0,
+        d: 1.7,
+        tx: 0.0,
+        ty: 0.0,
+    };
+
+    const BASE: Scene = Scene {
+        font: OSWALD,
+        size: 40.0,
+        text: "Ag",
+        transform: None,
+        stroke: None,
+        join: StrokeJoin::Miter,
+        miter: 10.0,
+        bold: false,
+        spacing: (0.0, 0.0),
+        filter: "drop-shadow(0 0 3px black)",
+    };
+
+    /// The scenes a test run plays: the base scene varied one way at a time,
+    /// and the ways found or expected hardest together. `full` plays every
+    /// combination, for the sweep [`layer::HINTED_INK_DRIFT`] is measured by.
+    fn sweep(full: bool) -> Vec<Scene> {
+        let fonts = [
+            OSWALD,
+            "Helvetica",
+            "Times New Roman",
+            "Zapfino",
+            "Apple Color Emoji",
+            "DejaVu Sans",
+            "Noto Color Emoji",
+        ];
+        let sizes = [8.0, 13.0, 40.0, 96.0];
+        let texts = ["Ag", "fj Wq", "\u{1F600}x"];
+        let transforms = [None, Some(ROTATE), Some(SKEW), Some(SCALE)];
+        let strokes = [None, Some(1.0), Some(12.0)];
+        let filters = [
+            "blur(3px)",
+            "drop-shadow(0 0 3px black)",
+            "drop-shadow(90px 60px 2px red)",
+        ];
+        if full {
+            let mut all = Vec::new();
+            for font in fonts {
+                for size in sizes {
+                    for text in texts {
+                        for transform in transforms {
+                            for stroke in strokes {
+                                for filter in filters {
+                                    all.push(Scene {
+                                        font,
+                                        size,
+                                        text,
+                                        transform,
+                                        stroke,
+                                        filter,
+                                        ..BASE
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            all.extend(edges());
+            return all;
+        }
+        let mut some: Vec<Scene> = Vec::new();
+        some.extend(fonts.map(|font| Scene { font, ..BASE }));
+        some.extend(sizes.map(|size| Scene { size, ..BASE }));
+        some.extend(texts.map(|text| Scene { text, ..BASE }));
+        some.extend(transforms.map(|transform| Scene { transform, ..BASE }));
+        some.extend(strokes.map(|stroke| Scene { stroke, ..BASE }));
+        some.extend(filters.map(|filter| Scene { filter, ..BASE }));
+        some.extend([
+            // The one reading the sweep found past the reach rounded out: a
+            // colour bitmap resampled at a fractional scale.
+            Scene {
+                text: "\u{1F600}x",
+                transform: Some(SCALE),
+                stroke: Some(12.0),
+                ..BASE
+            },
+            Scene {
+                font: "Zapfino",
+                size: 96.0,
+                text: "fj Wq",
+                transform: Some(ROTATE),
+                ..BASE
+            },
+            Scene {
+                size: 8.0,
+                transform: Some(SKEW),
+                stroke: Some(12.0),
+                filter: "drop-shadow(90px 60px 2px red)",
+                ..BASE
+            },
+            Scene {
+                font: "Noto Color Emoji",
+                text: "\u{1F600}x",
+                transform: Some(ROTATE),
+                filter: "drop-shadow(0 0 3px black)",
+                ..BASE
+            },
+        ]);
+        some.extend(edges().into_iter().step_by(EDGES_SAMPLED));
+        some
+    }
+
+    /// One in this many of [`edges`] is played by a test run; the full
+    /// sweep plays them all.
+    const EDGES_SAMPLED: usize = 7;
+
+    /// The strokes the full sweep adds to its plain ones, as `(width, join,
+    /// miter limit)`: a hairline, which is a device pixel wide whatever the
+    /// transform, and a 40px stroke under each join, mitred at a limit that
+    /// cuts every corner and at one that cuts none.
+    const EDGE_STROKES: [(f32, StrokeJoin, f32); 5] = [
+        (0.1, StrokeJoin::Miter, 10.0),
+        (40.0, StrokeJoin::Miter, 1.0),
+        (40.0, StrokeJoin::Miter, 30.0),
+        (40.0, StrokeJoin::Round, 10.0),
+        (40.0, StrokeJoin::Bevel, 10.0),
+    ];
+
+    /// The scenes past the plain sweep's axes: hairline and wide strokes
+    /// under each join, bold drawn from a variable font's axis
+    /// ([`OSWALD`]), from a face of its own (DejaVu Sans) and emboldened by
+    /// Skia from a family with no bold ([`MONOTON`]), and letter and word
+    /// spacing, which move the glyphs within a run.
+    fn edges() -> Vec<Scene> {
+        let fonts = [OSWALD, "Helvetica", "Times New Roman", "DejaVu Sans"];
+        let texts = ["Ag", "fj Wq"];
+        let transforms = [None, Some(ROTATE), Some(SKEW), Some(SCALE)];
+        let mut all = Vec::new();
+        for font in fonts {
+            for size in [13.0, 96.0] {
+                for text in texts {
+                    for transform in transforms {
+                        for (width, join, miter) in EDGE_STROKES {
+                            all.push(Scene {
+                                font,
+                                size,
+                                text,
+                                transform,
+                                stroke: Some(width),
+                                join,
+                                miter,
+                                ..BASE
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        for font in [OSWALD, MONOTON, "DejaVu Sans"] {
+            for size in [13.0, 40.0, 96.0] {
+                for text in texts {
+                    for transform in transforms {
+                        for stroke in [None, Some(12.0)] {
+                            all.push(Scene {
+                                font,
+                                size,
+                                text,
+                                transform,
+                                stroke,
+                                bold: true,
+                                ..BASE
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        for font in [OSWALD, "Helvetica", "DejaVu Sans"] {
+            for spacing in [(5.0, 20.0), (-2.0, 0.0)] {
+                for size in [13.0, 40.0] {
+                    for transform in transforms {
+                        for stroke in [None, Some(12.0)] {
+                            all.push(Scene {
+                                font,
+                                size,
+                                text: "fj Wq",
+                                transform,
+                                stroke,
+                                spacing,
+                                ..BASE
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        all
+    }
+
+    /// A run of text under a filter chain is filtered in a layer the size of
+    /// what it inks, and not of the page: under a `drop-shadow()` and a
+    /// `blur()`, a 40px word on a 300 by 220 page is given a rectangle the
+    /// size of the word, where one bounded by its picture -- which for text
+    /// is the clip -- is given the page and as far again as the chain
+    /// reaches. That was 1.7 ms a word under a drop shadow.
+    #[test]
+    fn text_in_a_chain_is_filtered_in_a_layer_the_size_of_its_ink() {
+        for filter in ["drop-shadow(0 0 3px black)", "blur(3px)"] {
+            let scene = Scene {
+                font: "Helvetica",
+                filter,
+                ..BASE
+            };
+            let content = |keep: bool| {
+                KEEPS_TEXT_REACH.set(keep);
+                super::layer::CHAIN_CONTENT.set(None);
+                let mut canvas = scene.canvas().expect("a canvas");
+                canvas
+                    .to_image_data(None, &ImageDataExport::default())
+                    .expect("pixels");
+                KEEPS_TEXT_REACH.set(true);
+                super::layer::CHAIN_CONTENT.get()
+            };
+            let reach = reached(&scene).expect("a reach");
+            let confined = content(true).expect("the chain's content");
+            // The margin on each side, and a pixel on each for rounding out.
+            const MARGINS: f32 = 2.0 * (super::layer::HINTED_INK_DRIFT + 1.0);
+            assert!(
+                (confined.left <= reach.left
+                    && confined.top <= reach.top
+                    && confined.right >= reach.right
+                    && confined.bottom >= reach.bottom)
+                    && confined.width() <= reach.width() + MARGINS
+                    && confined.height() <= reach.height() + MARGINS,
+                "{filter}: the layer is the reach, widened by the margin: {confined:?} against {reach:?}"
+            );
+            let page = SIZE.0 * SIZE.1;
+            let clipped =
+                content(false).map_or(page, |r| r.width() * r.height());
+            assert!(
+                clipped >= page,
+                "{filter}: the reference covers the page, or this asserts nothing"
+            );
+        }
+    }
+
+    /// The playback the margin is measured by on CoreText: a stroke whose
+    /// round join half its width bounds exactly, drawn into another canvas
+    /// at half the size, where its anti-aliased fringe inks a device pixel
+    /// past the reach rounded out. Held within [`layer::HINTED_INK_DRIFT`],
+    /// so that a fringe reaching further shows here, and on macOS to that
+    /// pixel with no margin, so that this stays the case the margin is
+    /// measured by there.
+    #[test]
+    fn a_wide_round_stroke_inks_a_pixel_past_its_reach() {
+        let scene = Scene {
+            size: 13.0,
+            stroke: Some(40.0),
+            join: StrokeJoin::Round,
+            ..BASE
+        };
+        let reach = reached(&scene).expect("a reach");
+        assert_eq!(
+            inked_past(&scene, reach),
+            Vec::new(),
+            "held within the margin"
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            inked_past_by(&scene, reach, 0.0)
+                .into_iter()
+                .filter(|(at, _)| at.starts_with("cpu"))
+                .collect::<Vec<_>>(),
+            vec![("cpu drawn at 0.5", 1.0)],
+            "a pixel past with no margin"
+        );
+    }
+
+    /// What a run of text in a filter chain reports it can ink holds all it
+    /// inks, at every scale and on each engine it is played back on, once
+    /// widened by [`layer::HINTED_INK_DRIFT`]: over a glyph whose ink passes
+    /// its font's declared box (Zapfino's swashes), colour emoji, a wide
+    /// stroke, a turn, a skew and a scale. And the chain bounded by it
+    /// draws what one bounded by the clip draws, a drop shadow cast further
+    /// than the run is long included, within [`AAA_PLACEMENT_SPREAD`]: Skia
+    /// covers a curved edge by where on the device its layer puts it.
+    #[test]
+    fn text_in_a_chain_is_bounded_by_all_it_inks() {
+        let full = std::env::var("TEXT_REACH_SWEEP").is_ok_and(|v| v == "full");
+        // Each scene on a thread of its own: the switches it is drawn under
+        // are the thread's, and nothing else of one scene reaches another.
+        // The full sweep measures the margin, which the ink alone answers;
+        // the chain against the clip-bounded one, which costs several times
+        // as much a scene, is held over the scenes a test run plays.
+        assert!(
+            resolves(OSWALD),
+            "{OSWALD} is drawn in Oswald, or the scenes asking for it test a fallback"
+        );
+        // The GPU playbacks are left out where there is no GPU, and CI names
+        // the device it has, so that they are not left out there.
+        assert!(
+            gpu_available()
+                || std::env::var_os("MEO_SKIA_CANVAS_REQUIRE_GPU").is_none(),
+            "a GPU is required and there is none"
+        );
+        let (scenes, missing): (Vec<Scene>, Vec<Scene>) = sweep(full)
+            .into_iter()
+            .partition(|scene| resolves(scene.font));
+        if full {
+            eprintln!(
+                "engines: cpu{}",
+                if gpu_available() {
+                    ", gpu"
+                } else {
+                    "; no gpu, its playbacks left out"
+                }
+            );
+            eprintln!(
+                "reach bound: {}",
+                std::env::var("TEXT_REACH_BOUND")
+                    .unwrap_or_else(|_| "stroked".into())
+            );
+            let mut absent: Vec<&str> =
+                missing.iter().map(|s| s.font).collect();
+            absent.dedup();
+            eprintln!(
+                "fonts not on this machine, their scenes left out: {absent:?}"
+            );
+        }
+        let (count, done, start) =
+            (scenes.len(), AtomicUsize::new(0), Instant::now());
+        let found: Vec<(Vec<String>, Vec<String>, Vec<String>)> = scenes
+            .into_par_iter()
+            .filter_map(|scene| {
+                let seen = done.fetch_add(1, Ordering::Relaxed) + 1;
+                if full && seen % 200 == 0 {
+                    eprintln!("{seen} of {count} scenes in {:.0?}", start.elapsed());
+                }
+                assert!(
+                    resolves(scene.font),
+                    "{} resolves on every thread a scene is drawn on",
+                    scene.font
+                );
+                let reaches = reached_in_each_state(&scene);
+                if reaches.is_empty() {
+                    return None;
+                }
+                let label = format!(
+                    "{} {}px {:?} {:?} stroke {:?} {:?} miter {} bold {} spacing {:?} {}",
+                    scene.font,
+                    scene.size,
+                    scene.text,
+                    scene.transform.map(|t| [t.a, t.b, t.c, t.d]),
+                    scene.stroke,
+                    scene.join,
+                    scene.miter,
+                    scene.bold,
+                    scene.spacing,
+                    scene.filter
+                );
+                let (mut past, mut unwidened) = (Vec::new(), Vec::new());
+                for (state, reach) in reaches {
+                    past.extend(inked_past(&scene, reach).into_iter().map(
+                        |(at, by)| {
+                            format!(
+                                "{label} {state} {at}: inks {by} px past; {}",
+                                ink_beside(&scene, reach, at)
+                            )
+                        },
+                    ));
+                    // What the margin is measured by: the ink past the reach
+                    // with none.
+                    if full {
+                        unwidened.extend(inked_past_by(&scene, reach, 0.0).into_iter().map(
+                            |(at, by)| {
+                                format!(
+                                    "{label} {state} {at}: inks {by} px past with no margin; {}",
+                                    ink_beside(&scene, reach, at)
+                                )
+                            },
+                        ));
+                    }
+                }
+                let parted = if full { Vec::new() } else { parted_from_the_clip(&scene) }
+                    .into_iter()
+                    .filter(|(_, levels)| *levels > AAA_PLACEMENT_SPREAD)
+                    .map(|(at, levels)| {
+                        format!("{label} {at}: {levels} levels from the clip-bounded chain")
+                    })
+                    .collect();
+                Some((past, parted, unwidened))
+            })
+            .collect();
+        let played = found.len();
+        let (mut past, mut parted, mut unwidened) =
+            (Vec::new(), Vec::new(), Vec::new());
+        for (a, b, c) in found {
+            past.extend(a);
+            parted.extend(b);
+            unwidened.extend(c);
+        }
+        if full {
+            eprintln!("{played} of {count} scenes answered a reach");
+            eprintln!(
+                "{} playbacks ink past the reach with no margin:",
+                unwidened.len()
+            );
+            for line in &unwidened {
+                eprintln!("  {line}");
+            }
+        }
+        assert!(
+            played > 0,
+            "some scene answered a reach, or this asserts nothing"
+        );
+        for line in past.iter().chain(&parted).take(20) {
+            eprintln!("{line}");
+        }
+        assert!(
+            past.is_empty() && parted.is_empty(),
+            "{} inked past, {} parted, of {played} scenes",
+            past.len(),
+            parted.len()
+        );
     }
 }

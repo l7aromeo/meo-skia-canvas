@@ -24,8 +24,8 @@ use crate::{
 use neon::prelude::*;
 use skia_safe::{
     Canvas, Color4f, Font, FontMetrics, FourByteTag, GlyphId, Matrix, Paint,
-    Path as SkPath, PathBuilder as SkPathBuilder, Point, Rect, TextBlob,
-    TextBlobBuilder, Typeface,
+    PaintJoin, PaintStyle, Path as SkPath, PathBuilder as SkPathBuilder, Point,
+    Rect, TextBlob, TextBlobBuilder, Typeface,
     font::Edging,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
@@ -577,7 +577,8 @@ impl LaidOut {
     }
 
     /// Paints the run with its anchor at `origin` in `paint` -- see
-    /// [`RunPaint::paint`] -- from the blobs kept for `paint`.
+    /// [`RunPaint::paint`] -- from the blobs kept for `paint`, and answers
+    /// what it can have inked -- see [`RunPaint::reach`].
     pub fn paint(
         &self,
         canvas: &Canvas,
@@ -585,7 +586,7 @@ impl LaidOut {
         paint: &Paint,
         global_alpha: f32,
         faint: Faint,
-    ) {
+    ) -> Option<Rect> {
         let built;
         let kept = self.kept_blobs(paint);
         let blobs: &[Option<TextBlob>] = match &kept {
@@ -603,6 +604,7 @@ impl LaidOut {
             faint,
             blobs,
         );
+        self.drawn.reach(origin, &faint.drawable(paint), blobs)
     }
 }
 
@@ -673,6 +675,78 @@ impl RunPaint {
                 }
             }
         }
+    }
+
+    /// What painting the run with its anchor at `origin` in `paint` from
+    /// `blobs` can ink, in the units it is painted in, at the scale it is
+    /// recorded at -- see `layer::hinted_reach` for what a playback at
+    /// another scale adds. Each glyph's box as [`glyph_boxes`] gives it --
+    /// its outline's box widened as far as `paint`'s stroke can reach, or
+    /// for a glyph with no outline, a bitmap or colour emoji, the box
+    /// `Font::get_bounds` reports -- joined with each run's blob's bounds,
+    /// which for a positioned run are the box the font declares around
+    /// every glyph. A font's declared box need not hold its ink, so it is
+    /// not taken alone; it stays as a floor under a glyph whose box is
+    /// empty and inks. A sheared run's boxes go through its shear, as
+    /// [`sheared_bounds`] takes them.
+    ///
+    /// `None` for a decorated run, whose lines this does not bound, and for
+    /// a paint with a path effect or a mask filter, which can ink past every
+    /// glyph's box.
+    fn reach(
+        &self,
+        origin: Point,
+        paint: &Paint,
+        blobs: &[Option<TextBlob>],
+    ) -> Option<Rect> {
+        if self.decoration.is_some()
+            || paint.path_effect().is_some()
+            || paint.mask_filter().is_some()
+        {
+            return None;
+        }
+        #[cfg(test)]
+        REACHED_FAMILIES.with_borrow_mut(Vec::clear);
+        let runs = zip(zip(&self.runs, &self.shears), blobs);
+        let reach =
+            runs.fold(Rect::new_empty(), |mut all, ((run, shear), blob)| {
+                // A run sheared flat has no blob, and inks nothing.
+                let Some(blob) = blob else {
+                    return all;
+                };
+                let at = origin + run.origin;
+                let mut boxes = vec![Rect::new_empty(); run.glyphs.len()];
+                #[cfg(not(test))]
+                glyph_boxes(
+                    &run.font,
+                    &run.glyphs,
+                    paint,
+                    stroke_reach(paint),
+                    &mut boxes,
+                );
+                #[cfg(test)]
+                measured_boxes(&run.font, &run.glyphs, paint, &mut boxes);
+                #[cfg(test)]
+                REACHED_FAMILIES.with_borrow_mut(|families| {
+                    families.push(run.font.typeface().family_name());
+                });
+                for (glyph, &position) in zip(boxes, &run.positions) {
+                    if glyph.is_empty() {
+                        continue;
+                    }
+                    let placed = glyph.with_offset(position);
+                    let placed = match shear {
+                        Shear::By(shear) => shear.map_rect(placed).0,
+                        Shear::None | Shear::Flat => placed,
+                    };
+                    all.join(placed.with_offset(at));
+                }
+                all.join(blob.bounds().with_offset(at));
+                all
+            });
+        #[cfg(test)]
+        let reach = reach.with_inset((REACH_INSET.get(), REACH_INSET.get()));
+        Some(reach)
     }
 
     /// Paints the run with its anchor at `origin` in `paint`, a named line
@@ -773,9 +847,12 @@ impl DrawnRun {
     }
 
     /// Paints the run with its anchor at `origin` in `paint` -- see
-    /// [`LaidOut::paint`]. A run laid out for one draw paints in the paint
-    /// it was laid out for, so a caller drawing onto pixels that keep a
-    /// faint paint lays it out for `faint.drawable(paint)`.
+    /// [`LaidOut::paint`] -- and answers what it can have inked, where that
+    /// is known -- see [`RunPaint::reach`]. A run laid out for one draw paints
+    /// in the paint it was laid out for, so a caller drawing onto pixels
+    /// that keep a faint paint lays it out for `faint.drawable(paint)`. One
+    /// `Paragraph::paint` draws is not bounded: it draws what the paragraph
+    /// holds, which this does not read.
     pub fn paint(
         &self,
         canvas: &Canvas,
@@ -783,12 +860,15 @@ impl DrawnRun {
         paint: &Paint,
         global_alpha: f32,
         faint: Faint,
-    ) {
+    ) -> Option<Rect> {
         match self {
             Self::Kept(laid_out) => {
                 laid_out.paint(canvas, origin, paint, global_alpha, faint)
             }
-            Self::Plain(layout) => layout.paragraph.paint(canvas, origin),
+            Self::Plain(layout) => {
+                layout.paragraph.paint(canvas, origin);
+                None
+            }
             Self::Runs(laid_out) => {
                 laid_out.paint(canvas, origin, paint, global_alpha, faint)
             }
@@ -1059,11 +1139,118 @@ thread_local! {
     static LAID_OUT: RefCell<LaidOutCache> = RefCell::default();
 }
 
+/// Each of `glyphs`' box in `font` for `paint`, into `boxes`: the glyph's
+/// outline's box widened by `reach` -- see [`stroke_reach`] -- or, for a
+/// glyph with no outline, a bitmap or colour emoji, the box
+/// `Font::get_bounds` gives it, which is the only one it has.
+///
+/// Not the box `Font::get_bounds` gives an outlined glyph: on FreeType that
+/// is no bound on what the glyph inks, even at the scale it is asked at --
+/// Oswald's 96px "A", upright and filled, inked 1.07 device pixels past it,
+/// and DejaVu Sans's 13px "f" scaled 1.7 and stroked 12 inked 8.2 past it.
+/// Nor the exact outline stroked: the outline `Font::get_path` gives and the
+/// one FreeType strokes part, and a miter turns a small change of angle into
+/// a long change of tip, which passed the exact stroked outline by 10
+/// device pixels under a 40px stroke mitred at 30.
+fn glyph_boxes(
+    font: &Font,
+    glyphs: &[GlyphId],
+    paint: &Paint,
+    reach: f32,
+    boxes: &mut [Rect],
+) {
+    font.get_bounds(glyphs, boxes, Some(paint));
+    for (glyph, boxed) in zip(glyphs, boxes) {
+        let Some(outline) = font.get_path(*glyph) else {
+            continue;
+        };
+        let outlined = *outline.bounds();
+        // A glyph that draws nothing, a space, has an empty outline, which
+        // a widened box would make into ink.
+        if outlined.is_empty() {
+            continue;
+        }
+        *boxed = outlined.with_outset((reach, reach));
+    }
+}
+
+/// How far, in the units a run is laid out in, a stroke of `paint` can ink
+/// past the outline it strokes: nothing for a fill, half the stroke's width
+/// under a round or bevel join, and half the width times the miter limit
+/// under a miter join.
+///
+/// A miter's tip lies `(w / 2) / sin(θ / 2)` from the corner it closes, `θ`
+/// the angle between the corner's edges, and Skia bevels a corner whose
+/// `1 / sin(θ / 2)` passes the miter limit, so no tip lies further than the
+/// limit times `w / 2` -- whatever outline the scaler strokes, which is why
+/// this is taken over the stroked outline's exact bounds. A limit below 1
+/// bevels every corner, where half the width is the furthest. A glyph's
+/// contours are closed, so a cap adds nothing.
+///
+/// A hairline, a stroke of width 0, is a device pixel wide whatever the
+/// transform, so it has no reach here and is left to the device margin --
+/// see `layer::HINTED_INK_DRIFT`.
+fn stroke_reach(paint: &Paint) -> f32 {
+    if paint.style() == PaintStyle::Fill {
+        return 0.0;
+    }
+    let half = paint.stroke_width() / 2.0;
+    match paint.stroke_join() {
+        PaintJoin::Miter => half * paint.stroke_miter().max(1.0),
+        PaintJoin::Round | PaintJoin::Bevel => half,
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     /// Test-only: files every run under one hash, so that the chains a
     /// collision makes are walked and cut as a real one's would be.
     static COLLIDING: Cell<bool> = const { Cell::new(false) };
+    /// The family of each run the last [`RunPaint::reach`] on this thread
+    /// measured, in order: which fonts a run of text resolved to.
+    pub(crate) static REACHED_FAMILIES: RefCell<Vec<String>> =
+        const { RefCell::new(Vec::new()) };
+    /// How [`RunPaint::reach`] measures its glyphs on this thread -- see
+    /// [`ReachBound`].
+    pub(crate) static REACH_BOUND: Cell<ReachBound> =
+        const { Cell::new(ReachBound::Stroked) };
+    /// How far, in the units a run is laid out in, [`RunPaint::reach`]
+    /// draws its answer in on this thread: a mutant, a reach that cuts ink,
+    /// for the checks on it to refuse.
+    pub(crate) static REACH_INSET: Cell<f32> = const { Cell::new(0.0) };
+}
+
+/// The mutants of [`glyph_boxes`] the reach sweep must refuse, so that a
+/// green sweep is shown able to go red.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReachBound {
+    /// [`glyph_boxes`] widened by [`stroke_reach`]: what a reach is.
+    Stroked,
+    /// Not widened at all: the stroked scenes must fail.
+    StrokedUnwidened,
+    /// Widened by half the stroke whatever the join: the mitred scenes
+    /// must fail.
+    StrokedHalfWidth,
+}
+
+/// [`glyph_boxes`], or the mutant [`REACH_BOUND`] names in its place.
+#[cfg(test)]
+fn measured_boxes(
+    font: &Font,
+    glyphs: &[GlyphId],
+    paint: &Paint,
+    boxes: &mut [Rect],
+) {
+    let reach = match REACH_BOUND.get() {
+        ReachBound::Stroked => stroke_reach(paint),
+        ReachBound::StrokedUnwidened => 0.0,
+        ReachBound::StrokedHalfWidth => match paint.style() {
+            PaintStyle::Fill => 0.0,
+            _ => paint.stroke_width() / 2.0,
+        },
+    };
+    glyph_boxes(font, glyphs, paint, reach, boxes);
 }
 
 /// Lets every kept run go: called when the registered fonts change, since a
@@ -2093,6 +2280,16 @@ impl<'a> Typesetter<'a> {
                 DrawnRun::Runs(Box::new(LaidOut::new(layout, decoration)))
             }
         }
+    }
+
+    /// The run laid out for one draw in `paint` and not kept, drawn from its
+    /// runs whatever it is, which draws what `Paragraph::paint` does and
+    /// answers what it can ink -- see [`DrawnRun::paint`].
+    pub fn drawn_as_runs(&self, paint: &Paint) -> DrawnRun {
+        DrawnRun::Runs(Box::new(LaidOut::new(
+            self.layout(paint),
+            self.decoration(1.0),
+        )))
     }
 
     /// The run's advance -- every glyph and space, with the letter spacing

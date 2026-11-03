@@ -162,6 +162,73 @@ pub(crate) fn reach_the_clip(canvas: &SkCanvas) {
     canvas.restore();
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Whether a chain's layer is bounded by the text it holds where it
+    /// says what it can ink: off, it is bounded as any other group's, by
+    /// what its entries reach, which for text is the clip -- the reference
+    /// a confined layer is held to.
+    pub(crate) static KEEPS_TEXT_REACH: Cell<bool> = const { Cell::new(true) };
+    /// The rectangle, in device pixels, the last chain played on this thread
+    /// was given to bound what it filters, where it was given one.
+    pub(crate) static CHAIN_CONTENT: Cell<Option<Rect>> = const { Cell::new(None) };
+}
+
+/// Whether [`Composite::Chain`]'s `reach` bounds its layer -- see
+/// [`KEEPS_TEXT_REACH`]; always outside a test.
+fn keeps_text_reach() -> bool {
+    #[cfg(test)]
+    let keeps = KEEPS_TEXT_REACH.get();
+    #[cfg(not(test))]
+    let keeps = true;
+    keeps
+}
+
+/// How far, in device pixels, a run of text played back at another scale
+/// than it was recorded at can ink past its reach -- see `RunPaint::reach` --
+/// measured, not chosen, by `text_in_a_chain_is_bounded_by_all_it_inks` with
+/// TEXT_REACH_SWEEP=full: text at 8 to 96px, filled, hairline, stroked 1, 12
+/// and 40 wide under each join, bold, spaced, upright, turned, skewed and
+/// scaled, under a blur and two drop shadows, each run laid out afresh and
+/// kept, at densities 1 to 3 and drawn into another canvas at 0.5 and 1.5.
+///
+/// - On CoreText, in Oswald, Helvetica, Times New Roman, Zapfino, Apple Color
+///   Emoji and Monoton: on the CPU raster 98 of 25,600 playbacks inked past the
+///   reach with no margin, and on Metal 92 of 25,600, each by at most 1.29
+///   pixels.
+/// - On FreeType, on the Linux runner's CPU raster, in Oswald, DejaVu Sans,
+///   Noto Color Emoji and Monoton, 142 of 16,640 did, by at most 1.70: DejaVu
+///   Sans's 13px "fj Wq", scaled 1.7 and stroked 40, at density 1. The runner's
+///   Vulkan device plays the sweep a test run plays, not the full one.
+///
+/// Two pixels, the smallest whole number at or above the worst measured,
+/// 1.70. What a reading measures is the ink's whole-pixel edge less the
+/// reach's own, `ceil(reach + s) - reach`, where `s` is how far the ink truly
+/// spills past the reach, so a reading of `o` says only `o - 1 < s <= o`; and
+/// a pixel is cut past `ceil(reach + HINTED_INK_DRIFT)`, so every phase of the
+/// reach against the pixel grid is held exactly when `s` is within this. One
+/// pixel would hold the 1.29 on CoreText at every phase -- moved through 64
+/// phases to a whole-pixel reach edge it inked no further, so no test here
+/// can hold such an edge with an overshoot between one pixel and two -- but
+/// FreeType's 1.70 bounds its spill only by 1.70, and its phases could not be
+/// swept on this machine; no reading measured needs more than one. The worst on
+/// each are strokes whose join half their width bounds exactly: the stroke's
+/// anti-aliased fringe. On CoreText that case is held by
+/// `a_wide_round_stroke_inks_a_pixel_past_its_reach`.
+pub(crate) const HINTED_INK_DRIFT: f32 = 2.0;
+
+/// `reach`, in the units `to_device` maps to the device, widened there by
+/// [`HINTED_INK_DRIFT`] device pixels and taken back.
+pub(crate) fn hinted_reach(reach: Rect, to_device: &Matrix) -> Rect {
+    let device = to_device
+        .map_rect(reach)
+        .0
+        .with_outset((HINTED_INK_DRIFT, HINTED_INK_DRIFT));
+    to_device
+        .invert()
+        .map_or(reach, |back| back.map_rect(device).0)
+}
+
 /// The rectangle everything in `entries` can draw in -- see [`Layer::reach`]
 /// -- empty where they are none, `None` where one of them is not known.
 pub(crate) fn reach_of(entries: &[Layer]) -> Option<Rect> {
@@ -1511,7 +1578,18 @@ pub enum Composite {
     /// -- see [`chain`] -- and `rec`'s paint, less its image filter, which
     /// is the chain as Skia would run it. A document opens `rec` as a layer,
     /// filter and all.
-    Chain { steps: Arc<[Step]>, rec: LayerRec },
+    ///
+    /// `reach` is what a run of text the group holds can ink, in the units
+    /// its entries are played under, at the scale they were recorded at --
+    /// see `Context2D::files_through_chain` -- which bounds the chain's
+    /// layer, widened for hinting at the scale it is played at -- see
+    /// [`hinted_reach`]. `None` for any other group, which its entries'
+    /// reach bounds.
+    Chain {
+        steps: Arc<[Step]>,
+        rec: LayerRec,
+        reach: Option<Rect>,
+    },
 }
 
 impl Composite {
@@ -1815,7 +1893,7 @@ impl Group {
             }
         }
         match (&self.composite, target) {
-            (Composite::Chain { steps, rec }, Target::Pixels) => {
+            (Composite::Chain { steps, rec, reach }, Target::Pixels) => {
                 let mut paint = rec.paint.clone().unwrap_or_default();
                 paint.set_image_filter(None);
                 // The chain's lengths are in the pixels of the canvas the
@@ -1849,11 +1927,31 @@ impl Group {
                 // drop shadow took 1.75 s on an F16 Display P3 page against
                 // 26 ms on an sRGB one.
                 let to_space = |matrix: &Matrix| Matrix::concat(&back, matrix);
-                let content = match &self.within {
-                    Some(within) => {
+                let to_device = canvas.local_to_device_as_3x3();
+                // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
+                // Re-check: cargo test skia_covers_a_curve_by_where_it_lies
+                //
+                // Skia's analytic anti-aliasing covers a curved edge by where
+                // on the device it lies, so text whose layer is bounded by its
+                // reach draws some edge pixels otherwise than in a layer
+                // bounded by the clip: Times New Roman's 96px "Ag" stroked 40
+                // wide with round joins, under a drop shadow at density 3, in
+                // 16 pixels by up to 25 levels. Neither is the edge's
+                // coverage -- 114 and 146 where 8 by 8 samples give 133.8 --
+                // and no class of origin keeps it: moved 3 or 6 device pixels
+                // the stroke is covered alike, moved 15 to 300 it is not, and
+                // an oval flips at shifts of 1 and 2.
+                let content = match (&self.within, reach) {
+                    (Some(within), _) => {
                         Some(to_space(&self.matrix).map_rect(within).0)
                     }
-                    None => reach_of(&self.contents.layers).map(|reach| {
+                    (None, Some(reach)) if keeps_text_reach() => {
+                        Some(hinted_reach(
+                            to_space(&self.contents_matrix).map_rect(reach).0,
+                            &to_device,
+                        ))
+                    }
+                    (None, _) => reach_of(&self.contents.layers).map(|reach| {
                         to_space(&self.contents_matrix).map_rect(reach).0
                     }),
                 };
@@ -1887,6 +1985,10 @@ impl Group {
                     Target::Pixels => Step::for_pixels(steps),
                     Target::Document => None,
                 };
+                #[cfg(test)]
+                CHAIN_CONTENT.set(content.map(|content| {
+                    canvas.local_to_device_as_3x3().map_rect(content).0
+                }));
                 let outcome = chain::run(
                     canvas,
                     pixels.as_deref().unwrap_or(steps),
@@ -3074,8 +3176,74 @@ impl BlurOp {
 #[cfg(test)]
 mod tests {
     use super::{Composite, Entries, Group, luminance_colour};
-    use skia_safe::{BlendMode, Color, Color4f, Matrix, color_filters};
+    use crate::started;
+    use skia_safe::{
+        AlphaType, BlendMode, Color, Color4f, ColorType, ImageInfo, Matrix,
+        Paint, Path, Rect, color_filters,
+    };
     use std::iter::zip;
+
+    /// The oval [`skia_covers_a_curve_by_where_it_lies`] fills: its corners
+    /// on the 1/64 grid, so that a whole-pixel shift moves every point
+    /// exactly.
+    const OVAL: Rect = Rect {
+        left: 40.25,
+        top: 20.5,
+        right: 470.75,
+        bottom: 300.125,
+    };
+
+    /// The raster the oval is filled on, tall enough for it shifted as far
+    /// as [`skia_covers_a_curve_by_where_it_lies`] shifts it.
+    const RASTER: (i32, i32) = (520, 380);
+
+    /// The alpha of [`OVAL`] moved `by` device pixels down, filled
+    /// anti-aliased on a CPU raster.
+    fn oval_at(by: i32) -> Vec<u8> {
+        let mut surface =
+            started::raster_n32_premul(RASTER).expect("a surface");
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        let oval = Path::oval(OVAL.with_offset((0.0, by as f32)), None);
+        surface.canvas().draw_path(&oval, &paint);
+        let info =
+            ImageInfo::new(RASTER, ColorType::Alpha8, AlphaType::Premul, None);
+        let mut alpha = vec![0u8; (RASTER.0 * RASTER.1) as usize];
+        assert!(surface.read_pixels(
+            &info,
+            &mut alpha,
+            RASTER.0 as usize,
+            (0, 0)
+        ));
+        alpha
+    }
+
+    /// Skia's anti-aliasing covers a curved edge by where on the device it
+    /// lies, not only by its shape: the same oval, moved down by a whole
+    /// number of pixels -- every point exactly, on the 1/64 grid -- is
+    /// covered differently along its edge, by up to 13 levels at a shift of
+    /// 2. Moved across it was covered alike at every shift tried, while a
+    /// larger oval further out flipped across and not down. If this fails,
+    /// a curve is covered alike wherever it lies, and the note on a chain's
+    /// layer in `Group::playback_within`, the bound `text_reach_tests` hold
+    /// two placements to, and the entry in `docs/browser-differences.md`
+    /// can go.
+    #[test]
+    fn skia_covers_a_curve_by_where_it_lies() {
+        let here = oval_at(0);
+        let width = RASTER.0 as usize;
+        let moved = (1..=70).find(|&by| {
+            let there = oval_at(by);
+            let by = by as usize;
+            (0..RASTER.1 as usize - by)
+                .flat_map(|y| (0..width).map(move |x| (x, y)))
+                .any(|(x, y)| {
+                    here[y * width + x].abs_diff(there[(y + by) * width + x])
+                        > 1
+                })
+        });
+        assert!(moved.is_some(), "the oval covered alike at every shift");
+    }
 
     /// A group through no layer composites what it holds as it is, so a
     /// document opens it at an opacity of 1. `Context2D` makes one only for

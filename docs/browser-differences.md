@@ -964,6 +964,20 @@ fill or stroke the page's edge cuts, and it is not worked around for the
 same reason. Within the reach, and on the GPU engine, a blur of a draw past
 the page is the exact blur of all of it.
 
+**Text under `blur()` is the exact Gaussian blur of the drawn text, and
+Chrome's is not.** The rule is a blurred path's: the text's own glyphs, as they
+rasterise without the filter, convolved with the Gaussian sampled at whole-pixel
+offsets and rounded once, on both engines -- `tests/blur_text.rs` holds 16px
+blurred by 2, 40px by 3 and 48px by 10. Chrome 156.0.8078.4 headless draws text
+under `blur()` through Skia's image filter, which approximates the Gaussian with
+three box blurs. One 40px "Ag" in Oswald, `rgb(200 120 40)`, blurred by 3px on a
+transparent 120 by 80 canvas, came up to 12.7 levels of alpha from the exact
+blur of Chrome's own unblurred text, and 10.0, 5.7 and 2.2 in premultiplied
+red, green and blue, over 1,672 pixels more than a level off. Drawn through that
+filter this library matched it byte for byte. Text under a `drop-shadow()` is
+the same rule's, as any draw's shadow is -- see the entry on a `drop-shadow()`
+-- where Chrome's shadow of that text is 12.7 levels off.
+
 **A blurred rectangle is its exact Gaussian blur, and Chrome's is not.**
 Filter Effects Module Level 1 defines `blur()` as a Gaussian blur whose
 standard deviation is the length given. Blurring a rectangle by it gives the
@@ -1225,6 +1239,23 @@ and none is:
   `SkScan::AAAFillPath` (`SkScan_AntiPath.cpp` line 130); its other branch, at
   lines 87 and 88, fills a path too large for anti-aliasing without it. This
   Skia has no supersampling converter and no setting that selects one.
+
+**Text under a filter is drawn with some edge pixels other than before, and
+neither placement is the edge's coverage.** A run of text under `blur()` or
+`drop-shadow()` is filtered in a layer the size of what it inks rather than the
+page's (`layer::hinted_reach`), and Skia's analytic anti-aliasing covers a
+curved edge by where on the device it lies: the same geometry, moved by a whole
+number of pixels, is covered differently. Times New Roman's 96px "Ag" stroked
+40 wide with round joins, under `drop-shadow(0 0 3px black)` at density 3, is
+drawn in 16 pixels up to 25 levels from the page-sized layer's drawing, and
+without the filter, moved 15 device pixels, in the same 16 by up to 32. At the
+worst of them the two give 114 and 146 where 8 by 8 samples of the edge give
+133.8. No origin keeps it: moved 3 or 6 device pixels the stroke is covered
+alike, moved 15 to 300 it is not, and a plain oval on the 1/64 grid flips at a
+shift of 2 (`skia_covers_a_curve_by_where_it_lies`). The same two glyphs filled
+rather than stroked, and a star of straight edges, did not move at any shift
+tried. Chrome's CPU canvas rasterizes through the same Skia converter, so it is
+inferred to place the same error by its own layers; that was not measured.
 
 **A PDF's blend modes render as the canvas's in poppler, and macOS's
 CoreGraphics renders a few of them otherwise.** A composite operation on an
