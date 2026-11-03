@@ -294,7 +294,7 @@ pub(crate) fn run(
                 colour,
                 space,
             } => shadowed(
-                context.as_ref(),
+                context.as_mut(),
                 &image,
                 Vector::new(offset.x * scale.0, offset.y * scale.1),
                 (sigma * scale.0, sigma * scale.1),
@@ -1027,16 +1027,85 @@ fn filtered(
 /// before the image is drawn over it, would be rounded again on the way.
 /// The shadow is moved unresampled where the offset is whole pixels, and
 /// bilinearly otherwise.
+///
+/// On a GPU an eight-bit layer's blurred shadow is made there instead, by
+/// [`shadowed_on_gpu`], to the same bytes but on exact ties: made on the
+/// CPU it costs a read of the layer back from the GPU each draw, which
+/// waits for the GPU to finish everything before it.
 fn shadowed(
-    context: Option<&Gpu>,
+    mut context: Option<&mut Gpu>,
     image: &Image,
     offset: Vector,
     sigma: (f32, f32),
     colour: (Color4f, &ColorSpace),
     gain: f32,
 ) -> Option<Image> {
-    let composed = shadow_composed(context, image, offset, sigma, colour)?;
+    if let Some(context) = context.as_deref_mut()
+        && let Some(on_gpu) =
+            shadowed_on_gpu(context, image, offset, sigma, colour, gain)
+    {
+        return Some(on_gpu);
+    }
+    let composed =
+        shadow_composed(context.as_deref(), image, offset, sigma, colour)?;
     rounded_once(&composed, image.image_info(), gain)
+}
+
+/// [`shadowed`] made on the GPU `image` lives on, through
+/// [`exact_blur_gpu::shadow`], or `None` for the CPU to make as before:
+///
+/// - an unblurred shadow, which is a tint and a composite alone;
+/// - a layer not of eight bits a channel, whose floats the GPU's targets do not
+///   hold;
+/// - a tint [`tint_colour`] cannot name, in a space this crate does not
+///   convert, which [`tint`] leaves to Skia's blend;
+/// - and wherever [`exact_blur_gpu::shadow`] gives `None`: a blur reaching past
+///   four times its line, a pass of more taps than its loop takes, an effect
+///   that does not compile, or a target that cannot be made.
+///
+/// The offset and sigma come in layer pixels, the chain's scale already
+/// applied, so no transform reaches the pass.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+fn shadowed_on_gpu(
+    context: &mut Gpu,
+    image: &Image,
+    offset: Vector,
+    sigma: (f32, f32),
+    (colour, space): (Color4f, &ColorSpace),
+    gain: f32,
+) -> Option<Image> {
+    let blurred = sigma.0 > 0.0 || sigma.1 > 0.0;
+    let bytes = matches!(
+        image.color_type(),
+        ColorType::RGBA8888 | ColorType::BGRA8888
+    );
+    if !(blurred && bytes) {
+        return None;
+    }
+    let tint = tint_colour(colour, space, image.image_info())?;
+    let size = (image.width() as usize, image.height() as usize);
+    exact_blur_gpu::shadow(
+        context,
+        image,
+        size,
+        sigma,
+        (offset.x, offset.y),
+        tint,
+        gain,
+    )
+}
+
+/// [`shadowed`] on a build with no GPU backend: never.
+#[cfg(not(any(feature = "metal", feature = "vulkan")))]
+fn shadowed_on_gpu(
+    context: &mut Gpu,
+    _: &Image,
+    _: Vector,
+    _: (f32, f32),
+    _: (Color4f, &ColorSpace),
+    _: f32,
+) -> Option<Image> {
+    match *context {}
 }
 
 /// [`shadowed`]'s image over its shadow, in floats, before it is rounded.
@@ -1181,6 +1250,26 @@ fn tint(
     space: &ColorSpace,
     layer: &ImageInfo,
 ) -> Option<ColorFilter> {
+    match tint_colour(colour, space, layer) {
+        Some((rgb, alpha)) => Some(offset_tint(rgb, alpha)),
+        None => color_filters::blend_with_color_space(
+            colour,
+            Some(space.clone()),
+            BlendMode::SrcIn,
+        ),
+    }
+}
+
+/// The colour [`tint`] paints through [`offset_tint`], unpremultiplied in
+/// `layer`'s space, and the alpha it paints at: the colour a fill places,
+/// on a layer [`exact_fill`] places colours on, and the colour converted
+/// by [`exact_tint`] otherwise. `None` where neither applies, which [`tint`]
+/// blends through Skia instead.
+fn tint_colour(
+    colour: Color4f,
+    space: &ColorSpace,
+    layer: &ImageInfo,
+) -> Option<([f32; 3], f32)> {
     let bytes = matches!(
         layer.color_type(),
         ColorType::RGBA8888 | ColorType::BGRA8888
@@ -1189,13 +1278,7 @@ fn tint(
         .color_space()
         .is_some_and(|working| keeps_two_recordings(&working));
     if !(bytes && placed) {
-        return exact_tint(colour, space, layer).or_else(|| {
-            color_filters::blend_with_color_space(
-                colour,
-                Some(space.clone()),
-                BlendMode::SrcIn,
-            )
-        });
+        return exact_tint(colour, space, layer);
     }
     let pixel = layer.with_dimensions((1, 1));
     let mut surface = started::raster(&pixel, None, None)?;
@@ -1225,7 +1308,7 @@ fn tint(
         return None;
     }
     let [r, g, b, a] = filled;
-    Some(offset_tint([r, g, b], a))
+    Some(([r, g, b], a))
 }
 
 /// A shader painting `colour`, unpremultiplied in `space`, exactly on an
@@ -1249,19 +1332,19 @@ fn exact_fill(
     Some((exact.shader()?, alpha))
 }
 
-/// [`tint`] on a layer it does not place colours on, in a space this crate
-/// converts: the colour converted to the layer's space in `f64` on this
-/// side and handed to Skia by [`offset_tint`]. `None` where the layer has
-/// no space or one this crate does not convert.
+/// [`tint_colour`] on a layer it does not place colours on, in a space this
+/// crate converts: the colour converted to the layer's space in `f64` on
+/// this side, for [`offset_tint`] to hand to Skia, and its alpha. `None`
+/// where the layer has no space or one this crate does not convert.
 fn exact_tint(
     colour: Color4f,
     space: &ColorSpace,
     layer: &ImageInfo,
-) -> Option<ColorFilter> {
+) -> Option<([f32; 3], f32)> {
     let working = layer.color_space()?;
     let canvas = PixelColorSpace::matching(&working)?;
     let rgb = color_in_canvas_space(colour, space, canvas)?.map(|c| c as f32);
-    Some(offset_tint(rgb, colour.a))
+    Some((rgb, colour.a))
 }
 
 /// A tint painting `rgb`, unpremultiplied in the space it is drawn in, at
@@ -2501,6 +2584,200 @@ mod tests {
             "{} values lie further apart than a tie, first {:?}",
             beyond.len(),
             beyond.first()
+        );
+    }
+
+    /// A layer of 8-bit floats, recovered in floats as the CPU composes it.
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn floats_of(image: &Image) -> Vec<f32> {
+        let info = image
+            .image_info()
+            .with_color_type(ColorType::RGBAF32)
+            .with_alpha_type(AlphaType::Premul);
+        bytes_of(image, &info)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&b| f32::from_ne_bytes(b))
+            .collect()
+    }
+
+    /// How far from a tie, in levels, a byte the GPU and the CPU round
+    /// apart may lie: the GPU's passes carry about 22 bits and float
+    /// arithmetic, the CPU's f32, so a value nearer a boundary than this
+    /// may round either way -- `exact_blur_gpu`'s tests hold its blur to
+    /// the same.
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    const GPU_TIE_LEVELS: f64 = 1e-3;
+
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    #[test]
+    fn an_eight_bit_gpu_shadow_is_the_cpus_but_on_ties() {
+        use super::shadowed_on_gpu;
+        use crate::{context::page::ExportOptions, gpu::RenderingEngine};
+        use skia_safe::BlendMode as SkBlendMode;
+        if !RenderingEngine::GPU.selectable() {
+            // A Mac always has Metal, so there a missing GPU is a failure
+            // and not a reason to pass; elsewhere -- CI's Linux runners --
+            // the test says it did not run.
+            if cfg!(target_os = "macos") {
+                panic!("no GPU on macOS");
+            }
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let srgb = ColorSpace::new_srgb();
+        let p3 = PixelColorSpace::DisplayP3
+            .to_skia_color_space()
+            .expect("Display P3");
+        let rec2020 = PixelColorSpace::Rec2020
+            .to_skia_color_space()
+            .expect("Rec. 2020");
+        let kinds = [
+            (ColorType::RGBA8888, &srgb, "8-bit sRGB"),
+            (ColorType::BGRA8888, &srgb, "8-bit BGRA sRGB"),
+            (ColorType::RGBA8888, &p3, "8-bit Display P3"),
+            (ColorType::RGBA8888, &rec2020, "8-bit Rec. 2020"),
+        ];
+        let sigmas = [
+            (0.5, 0.5),
+            (2.0, 2.0),
+            (3.0, 3.0),
+            (4.75, 4.75),
+            (6.0, 6.0),
+            (8.0, 8.0),
+            (1.5, 4.0),
+            (0.0, 3.0),
+        ];
+        let offsets = [
+            Vector::new(2.0, 2.0),
+            Vector::new(0.0, 0.0),
+            Vector::new(1.5, -2.25),
+            // A first covered pixel whose taps reach before the image's
+            // edge, which a draw holds to its edge pixels.
+            Vector::new(0.25, 0.75),
+        ];
+        let colours = [
+            Color4f::new(0.0, 0.0, 0.0, 1.0),
+            Color4f::new(0.0, 0.0, 0.0, 0.5),
+            Color4f::new(0.5, 0.5, 0.5, 1.0),
+            Color4f::new(0.78, 0.16, 0.35, 0.6),
+            Color4f::new(1.0, 1.0, 1.0, 0.3),
+        ];
+        let (mut runs, mut values, mut flips, mut nearest) = (0, 0, 0, 0f64);
+        let mut to_cpu = 0;
+        let mut wrong = Vec::new();
+        for (kind, space, name) in kinds {
+            for (scene, (w, h)) in [(0, (40, 36)), (1, (40, 36)), (0, (7, 61))]
+            {
+                let raster = layer(w, h, kind, space, scene);
+                let info = raster.image_info();
+                let mut up = RenderingEngine::GPU
+                    .make_surface(info, &ExportOptions::default())
+                    .expect("a GPU surface");
+                let mut paint = Paint::default();
+                paint.set_blend_mode(SkBlendMode::Src);
+                up.canvas().draw_image(&raster, (0, 0), Some(&paint));
+                let texture = up.image_snapshot();
+                let mut context = up.recording_context().expect("a context");
+                for sigma in sigmas {
+                    for offset in offsets {
+                        for colour in colours {
+                            for gain in [1.0, 0.7] {
+                                let Some(gpu) = shadowed_on_gpu(
+                                    &mut context,
+                                    &texture,
+                                    offset,
+                                    sigma,
+                                    (colour, &srgb),
+                                    gain,
+                                ) else {
+                                    // A blur reaching past four times its
+                                    // line is the CPU's: the 7-wide layer
+                                    // from a sigma of 4.75.
+                                    assert!(sigma.0 * 6.0 > 28.0, "{name}");
+                                    to_cpu += 1;
+                                    continue;
+                                };
+                                let mut direct = context.as_direct_context();
+                                let got = bytes_of(
+                                    &gpu.make_raster_image(
+                                        direct.as_mut(),
+                                        CachingHint::Disallow,
+                                    )
+                                    .expect("read back"),
+                                    info,
+                                );
+                                let composed = shadow_composed(
+                                    None,
+                                    &raster,
+                                    offset,
+                                    sigma,
+                                    (colour, &srgb),
+                                )
+                                .expect("a shadow");
+                                let floats = floats_of(&composed);
+                                let want = bytes_of(
+                                    &rounded_once(&composed, info, gain)
+                                        .expect("rounded"),
+                                    info,
+                                );
+                                let swap = kind == ColorType::BGRA8888;
+                                for (i, (&g, &c)) in
+                                    got.iter().zip(&want).enumerate()
+                                {
+                                    values += 1;
+                                    if g == c {
+                                        continue;
+                                    }
+                                    flips += 1;
+                                    // The float the CPU rounded, in levels.
+                                    let channel = match (swap, i % 4) {
+                                        (true, 0) => 2,
+                                        (true, 2) => 0,
+                                        (_, c) => c,
+                                    };
+                                    let v =
+                                        f64::from(floats[i / 4 * 4 + channel])
+                                            * 255.0
+                                            * f64::from(gain)
+                                            + 0.5;
+                                    let from_tie = (v - v.round()).abs();
+                                    nearest = nearest.max(from_tie);
+                                    if from_tie > GPU_TIE_LEVELS
+                                        || g.abs_diff(c) > 1
+                                    {
+                                        wrong.push(format!(
+                                            "{name} scene {scene} sigma \
+                                             {sigma:?} offset {offset:?} \
+                                             gain {gain}: {g} against {c}, \
+                                             {from_tie} from a tie"
+                                        ));
+                                    }
+                                }
+                                runs += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println!(
+            "{flips} of {values} bytes in {runs} shadows round apart, the \
+             farthest {nearest} levels from a tie"
+        );
+        assert_eq!(runs + to_cpu, 4 * 3 * 8 * 4 * 5 * 2);
+        // The GPU made every shadow but those on the 7-wide layer at sigmas
+        // 4.75, 6 and 8, on each of four kinds, which its reach refuses: a
+        // sweep that fell back to the CPU throughout would compare the CPU
+        // with itself.
+        assert_eq!(to_cpu, 4 * 3 * 4 * 5 * 2);
+        assert_eq!(runs, 4 * 3 * 8 * 4 * 5 * 2 - to_cpu);
+        assert!(
+            wrong.is_empty(),
+            "{} bytes apart off a tie, first {:?}",
+            wrong.len(),
+            wrong.first()
         );
     }
 }
