@@ -36,6 +36,7 @@ pub mod typesetting;
 #[cfg(test)]
 use crate::node::typography::Painter;
 use crate::{
+    cache_map::KeptSets,
     context2d::{FontKerning, TextRendering, font_spec_from_css},
     css::{FontUnits, NamedColour, ROOT_FONT_PX},
     export::{VectorFeatures, blend_features},
@@ -170,11 +171,6 @@ pub struct Context2D {
     /// so that a run of draws in one colour holds one shader between them
     /// rather than one each -- see [`Self::exact_paint`].
     exact_shader: RefCell<Option<(ExactColour, SkShader)>>,
-    /// The flat colours and alphas a pixels recording painted with and what
-    /// [`Self::exact_paint`] made of them, filed by [`FillKey::slot`], so
-    /// that a page of draws in a palette converts each colour once -- see
-    /// [`PlacedFill`].
-    exact_fill: RefCell<Vec<Option<(FillKey, PlacedFill)>>>,
     pub state: State,
     stack: Vec<State>,
     /// Parallel to `stack`: whether each saved frame opened a Skia layer
@@ -641,7 +637,6 @@ impl Context2D {
             faint: Faint::of(canvas_color_type),
             recorder: RefCell::new(PageRecorder::recording(bounds, dual)),
             exact_shader: RefCell::default(),
-            exact_fill: RefCell::new(vec![None; FILLS_KEPT_PER_PAGE]),
             path: PathBuilder::new(),
             stack: vec![],
             layers: vec![],
@@ -781,36 +776,48 @@ impl Context2D {
             return filtered;
         }
         // A flat colour through no filter is the case a run of fills is in,
-        // and what is made of it depends on nothing but the colour and the
-        // alpha, the page being fixed: kept for the next draw in the same.
-        let key = match self.state.dye(style) {
-            Dye::Color(colour, Some(space), _) if filtered.is_none() => {
-                Some(FillKey::of(*colour, space, paint.alpha_f()))
+        // and what is made of it depends on nothing but the colour, the
+        // alpha and the kind of page: kept on the thread for the next draw
+        // in the same, on this page or another -- see [`FILLS`]. A page
+        // keeping one recording makes nothing of it, and is not asked.
+        let key = match (self.state.dye(style), self.canvas_pixels) {
+            (Dye::Color(colour, Some(space), _), Some(page))
+                if filtered.is_none() && self.recorder.borrow().dual() =>
+            {
+                Some(FillKey::of(
+                    *colour,
+                    space,
+                    paint.alpha_f(),
+                    page,
+                    self.composites_in_floats(),
+                ))
             }
             _ => None,
         };
         #[cfg(test)]
         let key = key.filter(|_| KEEPS_FILLS.get());
         if let Some(key) = &key
-            && let Some((held, fill)) = &self.exact_fill.borrow()[key.slot()]
-            && held == key
-        {
-            #[cfg(test)]
-            FILLS_KEPT.set(FILLS_KEPT.get() + 1);
-            match fill {
-                PlacedFill::Inexact => return filtered,
-                PlacedFill::Placed(colour, space) => {
-                    let mut paint = paint.clone();
-                    paint.set_color4f(*colour, space);
-                    return Some(paint);
+            && let Some(made) = FILLS.with_borrow(|fills| {
+                let fill = fills.get(key.hash(), key)?;
+                #[cfg(test)]
+                FILLS_KEPT.set(FILLS_KEPT.get() + 1);
+                match fill {
+                    PlacedFill::Inexact => Some(None),
+                    PlacedFill::Placed(colour, space) => {
+                        let mut paint = paint.clone();
+                        paint.set_color4f(*colour, space);
+                        Some(Some(paint))
+                    }
+                    PlacedFill::Shaded => None,
                 }
-                PlacedFill::Shaded => {}
-            }
+            })
+        {
+            return made;
         }
         let keep = |fill: PlacedFill| {
             if let Some(key) = key.clone() {
-                let slot = key.slot();
-                self.exact_fill.borrow_mut()[slot] = Some((key, fill));
+                FILLS
+                    .with_borrow_mut(|fills| fills.file(key.hash(), key, fill));
             }
         };
         let Some(exact) = self.exact_colour(style) else {
@@ -3898,21 +3905,36 @@ impl Dye {
 
 #[cfg(test)]
 thread_local! {
-    /// Whether [`Context2D::exact_paint`] keeps what it made of the last flat
-    /// colour on this thread: off, every draw makes it afresh, the reference
-    /// the kept one is held to; and how many draws took it kept.
+    /// Whether [`Context2D::exact_paint`] takes what it made of a flat colour
+    /// kept in [`FILLS`]: off, every draw makes it afresh, the reference the
+    /// kept ones are held to; and how many draws took one kept.
     static KEEPS_FILLS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
     static FILLS_KEPT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// A flat colour, the space it is named in and the paint's alpha, as
-/// [`Context2D::exact_paint`] keeps what it made of them -- compared by bits,
-/// so that a colour is found again only where it is the same colour.
+/// Everything that decides what [`Context2D::exact_paint`] makes of a flat
+/// colour through no filter on a page keeping a recording for pixels, so
+/// that a colour is found again, on any page, only where it would be made
+/// the same. Compared by bits.
 #[derive(Clone, PartialEq)]
 struct FillKey {
+    /// The colour's components, unpremultiplied, in `space`: what is
+    /// converted into the page's space.
     colour: [u32; 4],
+    /// The space the colour is named in: the same components in another
+    /// space are another colour.
     space: ColorSpace,
+    /// The paint's alpha, which the colour is placed on the bytes with --
+    /// see `ExactColour::at` -- and which decides whether Skia lands that
+    /// as a plain paint colour -- see `ExactColour::verified_colour`.
     alpha: u32,
+    /// The page's space, which the colour is converted into. It names the
+    /// space whole: `PixelColorSpace::matching` takes a page's space to
+    /// one of these by its gamut and transfer function.
+    page: PixelColorSpace,
+    /// Whether the page composites in floats, where the colour is painted
+    /// by its shader rather than placed on bytes.
+    floats: bool,
 }
 
 /// 2^64 divided by the golden ratio, rounded to odd: Knuth's multiplier for
@@ -3920,33 +3942,52 @@ struct FillKey {
 /// section 6.4), as the verdicts of `layer::ExactColour` are filed by.
 const FILL_SLOT_MULTIPLIER: u64 = 0x9E37_79B9_7F4A_7C15;
 
-/// How many flat colours [`Context2D::exact_paint`] keeps for a page: a
-/// palette that size is converted once however its colours alternate, and a
-/// colour filed over another is converted again, as it was before it was
-/// kept.
-const FILLS_KEPT_PER_PAGE: usize = 64;
+/// How many sets of flat colours [`FILLS`] keeps on a thread, and how many
+/// a set holds: 1,024 colours, each 64 bytes with what was made of it,
+/// 64 KiB a thread once the first is kept. A page of 200 colours, each set
+/// once, finds them all on the next page drawn on the thread, fresh canvas
+/// or not -- `a_fresh_canvas_finds_the_colours_the_last_one_converted`;
+/// four to a set found 190 of them, the rest filed in sets they overfilled.
+/// A colour filed over another is converted again when it is next drawn,
+/// which costs what converting it always did.
+const FILL_SETS: usize = 128;
+const FILL_WAYS: usize = 8;
 
-const _: () = assert!(FILLS_KEPT_PER_PAGE.is_power_of_two());
+thread_local! {
+    /// The flat colours pixels recordings on this thread painted with and
+    /// what [`Context2D::exact_paint`] made of them -- see [`FillKey`] and
+    /// [`PlacedFill`].
+    static FILLS: RefCell<KeptSets<FillKey, PlacedFill, FILL_SETS, FILL_WAYS>> =
+        const { RefCell::new(KeptSets::new()) };
+}
 
 impl FillKey {
-    /// The slot of [`Context2D::exact_fill`] this key is filed in: its bits
-    /// folded together and multiplied by [`FILL_SLOT_MULTIPLIER`], which
-    /// carries every bit into the top ones taken.
-    fn slot(&self) -> usize {
+    /// Where [`FILLS`] files this key: its bits folded together and
+    /// multiplied by [`FILL_SLOT_MULTIPLIER`], which carries every bit into
+    /// the top ones a set is taken from.
+    fn hash(&self) -> u64 {
         let [r, g, b, a] = self.colour.map(u64::from);
         let key =
             (r ^ g.rotate_left(16) ^ b.rotate_left(32) ^ a.rotate_left(48))
-                ^ u64::from(self.alpha).rotate_left(8);
-        (key.wrapping_mul(FILL_SLOT_MULTIPLIER)
-            >> (u64::BITS - FILLS_KEPT_PER_PAGE.trailing_zeros()))
-            as usize
+                ^ u64::from(self.alpha).rotate_left(8)
+                ^ (self.page as u64) << 56
+                ^ u64::from(self.floats) << 63;
+        key.wrapping_mul(FILL_SLOT_MULTIPLIER)
     }
 
-    fn of(colour: Color4f, space: &ColorSpace, alpha: f32) -> Self {
+    fn of(
+        colour: Color4f,
+        space: &ColorSpace,
+        alpha: f32,
+        page: PixelColorSpace,
+        floats: bool,
+    ) -> Self {
         Self {
             colour: [colour.r, colour.g, colour.b, colour.a].map(f32::to_bits),
             space: space.clone(),
             alpha: alpha.to_bits(),
+            page,
+            floats,
         }
     }
 }
@@ -6351,12 +6392,113 @@ mod tests {
         }
     }
 
-    /// A page drawn with what was made of the last flat colour kept writes
-    /// the pixels and PDF a page making it afresh every draw writes, on an
-    /// eight-bit sRGB, an eight-bit Display P3 and a half-float Display P3
-    /// page: runs in one colour, a colour named again in another space, an
-    /// alpha changed under the same colour, a colour that does not land
-    /// exactly, and strokes between fills.
+    /// A page of 200 fills in a colour each, drawn twice on fresh Display
+    /// P3 canvases on one thread, converts each colour once: the second
+    /// page finds every one kept, as a canvas made for each render does.
+    #[test]
+    fn a_fresh_canvas_finds_the_colours_the_last_one_converted() {
+        let page = || {
+            let mut canvas = Canvas::with_options(
+                400.0,
+                300.0,
+                CanvasOptions {
+                    gpu: false,
+                    color_space: PixelColorSpace::DisplayP3,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a canvas");
+            let ctx = canvas.context();
+            let before = FILLS_KEPT.get();
+            for i in 0..200 {
+                ctx.set_fill_style_css(&format!("#33{i:02x}99"))
+                    .expect("a colour");
+                ctx.fill_rect(
+                    ((i * 17) % 380) as f32,
+                    ((i * 11) % 280) as f32,
+                    15.0,
+                    12.0,
+                );
+            }
+            FILLS_KEPT.get() - before
+        };
+        assert_eq!(page(), 0, "the first page converts every colour");
+        assert_eq!(page(), 200, "the second finds every one kept");
+    }
+
+    /// Each input [`FillKey`] holds keeps two fills apart: two draws that
+    /// differ in that input alone, the first on one canvas and the second
+    /// on a fresh one on the same thread, draw the second as it is drawn
+    /// with nothing kept -- the colour, the space it is named in, the alpha,
+    /// the page's space, and whether the page composites in floats.
+    #[test]
+    fn a_kept_fill_is_kept_apart_by_each_input_that_decides_it() {
+        type Draw = (PixelColorSpace, PixelDepth, &'static str, f32);
+        let p3 = PixelColorSpace::DisplayP3;
+        let srgb = PixelColorSpace::Srgb;
+        let u8 = PixelDepth::Uint8;
+        let pairs: [(&str, Draw, Draw); 5] = [
+            ("colour", (p3, u8, "#336699", 1.0), (p3, u8, "#33669a", 1.0)),
+            (
+                "space",
+                (p3, u8, "color(srgb 0.3 0.6 0.9)", 1.0),
+                (p3, u8, "color(display-p3 0.3 0.6 0.9)", 1.0),
+            ),
+            ("alpha", (p3, u8, "#336699", 1.0), (p3, u8, "#336699", 0.5)),
+            // A colour outside sRGB, which the two pages make different
+            // fills of: one in sRGB's gamut, the other the colour itself.
+            (
+                "page",
+                (srgb, u8, "color(display-p3 0 1 0)", 1.0),
+                (p3, u8, "color(display-p3 0 1 0)", 1.0),
+            ),
+            (
+                "floats",
+                (p3, u8, "#336699", 0.5),
+                (p3, PixelDepth::F16, "#336699", 0.5),
+            ),
+        ];
+        let draw = |(space, depth, colour, alpha): Draw| {
+            let mut canvas = Canvas::with_options(
+                8.0,
+                8.0,
+                CanvasOptions {
+                    gpu: false,
+                    color_space: space,
+                    color_type: depth,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a canvas");
+            let ctx = canvas.context();
+            ctx.set_global_alpha(alpha);
+            ctx.set_fill_style_css(colour).expect("a colour");
+            ctx.fill_rect(0.0, 0.0, 8.0, 8.0);
+            ctx.get_image_data(0.0, 0.0, 8.0, 8.0)
+                .expect("read")
+                .pixels()
+                .to_vec()
+        };
+        for (input, first, second) in pairs {
+            KEEPS_FILLS.set(false);
+            let afresh = draw(second);
+            KEEPS_FILLS.set(true);
+            draw(first);
+            assert!(
+                draw(second) == afresh,
+                "{input}: the second draw's own fill"
+            );
+        }
+    }
+
+    /// A page drawn with the flat colours kept on its thread writes the
+    /// pixels and PDF a page making each afresh writes, over pages drawn in
+    /// turn on one thread, two canvases of each kind -- eight-bit sRGB,
+    /// eight-bit Display P3, half-float Display P3, and half-float sRGB,
+    /// which keeps one recording and asks nothing kept: runs in one colour,
+    /// a colour named again in another space, the same components named in
+    /// two spaces, an alpha changed under the same colour, a colour that
+    /// does not land exactly, and strokes between fills.
     #[test]
     fn a_kept_fill_draws_what_a_fill_made_afresh_draws() {
         let scene = |keep: bool, space: PixelColorSpace, depth: PixelDepth| {
@@ -6380,13 +6522,14 @@ mod tests {
                 "color(srgb 0.7843137 0.1568627 0.4705882)",
                 "color(a98-rgb 0 1 0)",
                 "#fff",
+                "color(srgb 0.3 0.6 0.9)",
             ];
-            for (i, colour) in colours.iter().cycle().take(36).enumerate() {
+            for (i, colour) in colours.iter().cycle().take(42).enumerate() {
                 ctx.set_global_alpha([1.0, 0.5, 0.31][i % 3]);
                 ctx.set_fill_style_css(colour).expect("a colour");
                 ctx.set_stroke_style_css(colour).expect("a colour");
-                let at = (i % 6) as f32 * 6.0;
-                ctx.fill_rect(at, (i / 6) as f32 * 4.0, 7.0, 5.0);
+                let at = (i % 7) as f32 * 5.0;
+                ctx.fill_rect(at, (i / 7) as f32 * 4.0, 7.0, 5.0);
                 if i % 5 == 0 {
                     ctx.stroke_rect(at + 1.0, 2.0, 4.0, 20.0);
                 }
@@ -6402,21 +6545,27 @@ mod tests {
                 .expect("a PDF");
             (pixels, pdf)
         };
-        for (space, depth) in [
-            (PixelColorSpace::Srgb, PixelDepth::Uint8),
-            (PixelColorSpace::DisplayP3, PixelDepth::Uint8),
-            (PixelColorSpace::DisplayP3, PixelDepth::F16),
+        for (space, depth, dual) in [
+            (PixelColorSpace::Srgb, PixelDepth::Uint8, true),
+            (PixelColorSpace::DisplayP3, PixelDepth::Uint8, true),
+            (PixelColorSpace::DisplayP3, PixelDepth::F16, true),
+            (PixelColorSpace::Srgb, PixelDepth::F16, false),
         ] {
-            let kept_before = FILLS_KEPT.get();
-            let kept = scene(true, space, depth);
-            assert!(
-                FILLS_KEPT.get() > kept_before,
-                "{space:?} {depth:?}: some draw took the fill kept"
-            );
-            assert!(
-                kept == scene(false, space, depth),
-                "{space:?} {depth:?}: the same pixels and PDF"
-            );
+            let afresh = scene(false, space, depth);
+            for canvas in ["first", "second"] {
+                let kept_before = FILLS_KEPT.get();
+                let kept = scene(true, space, depth);
+                assert_eq!(
+                    FILLS_KEPT.get() > kept_before,
+                    dual,
+                    "{space:?} {depth:?} {canvas}: draws took fills kept \
+                     only where the page keeps a recording for pixels"
+                );
+                assert!(
+                    kept == afresh,
+                    "{space:?} {depth:?} {canvas}: the same pixels and PDF"
+                );
+            }
         }
     }
 }
