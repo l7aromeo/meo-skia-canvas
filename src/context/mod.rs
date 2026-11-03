@@ -170,10 +170,11 @@ pub struct Context2D {
     /// so that a run of draws in one colour holds one shader between them
     /// rather than one each -- see [`Self::exact_paint`].
     exact_shader: RefCell<Option<(ExactColour, SkShader)>>,
-    /// The last flat colour and alpha a pixels recording painted with and
-    /// what [`Self::exact_paint`] made of them, so that a run of draws in
-    /// one colour converts it once -- see [`PlacedFill`].
-    exact_fill: RefCell<Option<(FillKey, PlacedFill)>>,
+    /// The flat colours and alphas a pixels recording painted with and what
+    /// [`Self::exact_paint`] made of them, filed by [`FillKey::slot`], so
+    /// that a page of draws in a palette converts each colour once -- see
+    /// [`PlacedFill`].
+    exact_fill: RefCell<Vec<Option<(FillKey, PlacedFill)>>>,
     /// The same for text: the last exact colour, the plain colour beside
     /// it and their dye -- see [`Self::exact_text_paint`].
     exact_dye: RefCell<Option<(ExactColour, Color4f, SkColorFilter)>>,
@@ -643,7 +644,7 @@ impl Context2D {
             faint: Faint::of(canvas_color_type),
             recorder: RefCell::new(PageRecorder::recording(bounds, dual)),
             exact_shader: RefCell::default(),
-            exact_fill: RefCell::default(),
+            exact_fill: RefCell::new(vec![None; FILLS_KEPT_PER_PAGE]),
             exact_dye: RefCell::default(),
             path: PathBuilder::new(),
             stack: vec![],
@@ -795,7 +796,7 @@ impl Context2D {
         #[cfg(test)]
         let key = key.filter(|_| KEEPS_FILLS.get());
         if let Some(key) = &key
-            && let Some((held, fill)) = &*self.exact_fill.borrow()
+            && let Some((held, fill)) = &self.exact_fill.borrow()[key.slot()]
             && held == key
         {
             #[cfg(test)]
@@ -812,7 +813,8 @@ impl Context2D {
         }
         let keep = |fill: PlacedFill| {
             if let Some(key) = key.clone() {
-                *self.exact_fill.borrow_mut() = Some((key, fill));
+                let slot = key.slot();
+                self.exact_fill.borrow_mut()[slot] = Some((key, fill));
             }
         };
         let Some(exact) = self.exact_colour(style) else {
@@ -3931,7 +3933,33 @@ struct FillKey {
     alpha: u32,
 }
 
+/// 2^64 divided by the golden ratio, rounded to odd: Knuth's multiplier for
+/// hashing by multiplication (The Art of Computer Programming, vol. 3,
+/// section 6.4), as the verdicts of `layer::ExactColour` are filed by.
+const FILL_SLOT_MULTIPLIER: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// How many flat colours [`Context2D::exact_paint`] keeps for a page: a
+/// palette that size is converted once however its colours alternate, and a
+/// colour filed over another is converted again, as it was before it was
+/// kept.
+const FILLS_KEPT_PER_PAGE: usize = 64;
+
+const _: () = assert!(FILLS_KEPT_PER_PAGE.is_power_of_two());
+
 impl FillKey {
+    /// The slot of [`Context2D::exact_fill`] this key is filed in: its bits
+    /// folded together and multiplied by [`FILL_SLOT_MULTIPLIER`], which
+    /// carries every bit into the top ones taken.
+    fn slot(&self) -> usize {
+        let [r, g, b, a] = self.colour.map(u64::from);
+        let key =
+            (r ^ g.rotate_left(16) ^ b.rotate_left(32) ^ a.rotate_left(48))
+                ^ u64::from(self.alpha).rotate_left(8);
+        (key.wrapping_mul(FILL_SLOT_MULTIPLIER)
+            >> (u64::BITS - FILLS_KEPT_PER_PAGE.trailing_zeros()))
+            as usize
+    }
+
     fn of(colour: Color4f, space: &ColorSpace, alpha: f32) -> Self {
         Self {
             colour: [colour.r, colour.g, colour.b, colour.a].map(f32::to_bits),
@@ -6198,6 +6226,33 @@ mod tests {
             agreed > 0,
             "some rectangle is held, or this asserts nothing"
         );
+    }
+
+    /// Two colours set in turn are each converted once and then taken
+    /// kept, on a page that keeps a recording for pixels: a palette, not
+    /// only a run in one colour.
+    #[test]
+    fn colours_set_in_turn_are_each_kept() {
+        let mut canvas = Canvas::with_options(
+            20.0,
+            20.0,
+            CanvasOptions {
+                gpu: false,
+                color_space: PixelColorSpace::DisplayP3,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas");
+        let ctx = canvas.context();
+        let before = FILLS_KEPT.get();
+        for i in 0..20 {
+            ctx.set_fill_style_css(
+                ["#336699", "color(display-p3 0.3 0.6 0.9)"][i % 2],
+            )
+            .expect("a colour");
+            ctx.fill_rect(i as f32, 0.0, 1.0, 1.0);
+        }
+        assert_eq!(FILLS_KEPT.get() - before, 18, "all but the first of each");
     }
 
     /// A page drawn with what was made of the last flat colour kept writes
