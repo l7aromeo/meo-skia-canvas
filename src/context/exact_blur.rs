@@ -529,22 +529,24 @@ fn fourier<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
             )
         },
         |(forward, inverse, a, b, scratch), line| {
-            // Each channel's least and greatest value, and zero.
-            let (mut lo, mut hi) = ([0f32; 4], [0f32; 4]);
-            for (i, px @ [r, g, bl, al]) in
-                line.as_chunks::<4>().0.iter().enumerate()
-            {
+            let pixels = line.as_chunks::<4>().0;
+            for (i, [r, g, bl, al]) in pixels.iter().enumerate() {
                 a[i] = Complex::new(L::of(*r), L::of(*g));
                 b[i] = Complex::new(L::of(*bl), L::of(*al));
-                for (c, &v) in px.iter().enumerate() {
-                    if v < lo[c] {
-                        lo[c] = v;
-                    }
-                    if v > hi[c] {
-                        hi[c] = v;
-                    }
-                }
             }
+            // Each channel's least and greatest value, and zero, found by
+            // comparison: a NaN compares false, so it reaches neither.
+            let (lo, hi) =
+                pixels.iter().fold(([0f32; 4], [0f32; 4]), |(lo, hi), p| {
+                    (
+                        array::from_fn(
+                            |c| if p[c] < lo[c] { p[c] } else { lo[c] },
+                        ),
+                        array::from_fn(
+                            |c| if p[c] > hi[c] { p[c] } else { hi[c] },
+                        ),
+                    )
+                });
             a[n..].fill(zero);
             b[n..].fill(zero);
             for buffer in [&mut *a, &mut *b] {
@@ -576,14 +578,12 @@ fn fourier<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
 /// -0.0 and a NaN through untouched. The range is the line's and not zero
 /// to one: a colour outside the layer's gamut is carried as a channel below
 /// zero, and its blur is too.
+///
+/// `f32::clamp` is those two comparisons, and refuses a NaN bound or
+/// `lo > hi` by panicking; neither can happen, since both ends start at
+/// zero and move only by comparison, which a NaN never wins.
 fn within_reach(v: f32, lo: f32, hi: f32) -> f32 {
-    if v < lo {
-        lo
-    } else if v > hi {
-        hi
-    } else {
-        v
-    }
+    v.clamp(lo, hi)
 }
 
 /// The kernel's spectrum at length `len`, real since the kernel is
