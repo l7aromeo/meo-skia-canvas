@@ -18,7 +18,7 @@ mod enclosure;
 // how a negative component extends through zero, and nothing would check
 // that it did.
 use crate::{
-    cache_map::CacheHasher,
+    cache_map::{CacheHasher, KeptSets},
     color::{
         RgbaLinear, linear_to_srgb, linear_to_srgb_f64, srgb_to_linear,
         srgb_to_linear_f64,
@@ -3508,22 +3508,36 @@ pub fn css_to_declared(css: &str) -> Option<(Color4f, ColorSpace, Declared)> {
     None
 }
 
-/// How many colours [`css_declaration`] keeps on a thread, filed by a hash
-/// of their text: a drawing sets the same few colours again and again, and
-/// a table this size holds a palette of hundreds. A colour filed over
-/// another is read again when it is next set, which costs what reading it
-/// always did.
-const DECLARATIONS_KEPT: usize = 512;
-
-const _: () = assert!(DECLARATIONS_KEPT.is_power_of_two());
+/// How many sets of colours [`css_declaration`] keeps on a thread, filed by
+/// a hash of their text, and how many colours a set holds. A drawing sets
+/// the same colours again and again, and a palette set in turn misses
+/// wherever more of it falls in one set than the set holds: for 200
+/// colours hashed uniformly, a third of them in one way of 512 slots, one
+/// in 17 in two ways and about one in 1,500 in four, by simulation. A
+/// colour filed over another is read again when it is next set, which
+/// costs what reading it always did.
+const DECLARATION_SETS: usize = 512;
+const DECLARATION_WAYS: usize = 4;
 
 /// A colour's text and what [`css_declaration`] read it as.
-type KeptDeclaration = (Box<str>, (Color4f, ColorSpace, Declaration));
+type KeptDeclarations = KeptSets<
+    Box<str>,
+    (Color4f, ColorSpace, Declaration),
+    DECLARATION_SETS,
+    DECLARATION_WAYS,
+>;
+
+#[cfg(test)]
+thread_local! {
+    /// How many colours [`css_declaration`] has read on this thread rather
+    /// than found kept.
+    static DECLARATIONS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 thread_local! {
     /// The colours this thread has read, and the hasher that files them.
-    static DECLARATIONS: (CacheHasher, RefCell<Vec<Option<KeptDeclaration>>>) =
-        (CacheHasher::default(), RefCell::new(vec![None; DECLARATIONS_KEPT]));
+    static DECLARATIONS: (CacheHasher, RefCell<KeptDeclarations>) =
+        (CacheHasher::default(), RefCell::new(KeptSets::new()));
 }
 
 /// [`css_to_declared`] as a style setter takes it: the colour, its space and
@@ -3537,15 +3551,15 @@ pub fn css_declaration(
     css: &str,
 ) -> Option<(Color4f, ColorSpace, Declaration)> {
     DECLARATIONS.with(|(hasher, kept)| {
-        let slot = hasher.hash_one(css) as usize & (DECLARATIONS_KEPT - 1);
-        if let Some((text, read)) = &kept.borrow()[slot]
-            && **text == *css
-        {
+        let hash = hasher.hash_one(css);
+        if let Some(read) = kept.borrow().get(hash, css) {
             return Some(read.clone());
         }
+        #[cfg(test)]
+        DECLARATIONS_READ.set(DECLARATIONS_READ.get() + 1);
         let (color, space, declared) = css_to_declared(css)?;
         let read = (color, space, Declaration::new(declared));
-        kept.borrow_mut()[slot] = Some((css.into(), read.clone()));
+        kept.borrow_mut().file(hash, css.into(), read.clone());
         Some(read)
     })
 }
@@ -6029,6 +6043,24 @@ mod tests {
             let kept = space.to_skia_color_space().expect("a kept space");
             assert!(same(&kept, &built), "{space:?}");
         }
+    }
+
+    /// A palette of 64 colours set in turn is read once and found every
+    /// time after, however its colours fall in the table's sets. One way of
+    /// 512 files about one in nine of them over another and reads those
+    /// again on every pass: run so, this read 80 to 120 instead of 64.
+    #[test]
+    fn a_palette_set_in_turn_is_read_once() {
+        let palette: Vec<String> = (0..64)
+            .map(|i| format!("#{:02x}{:02x}55", i * 3, 255 - i))
+            .collect();
+        let before = DECLARATIONS_READ.get();
+        for _ in 0..5 {
+            for colour in &palette {
+                css_declaration(colour).expect("a colour");
+            }
+        }
+        assert_eq!(DECLARATIONS_READ.get() - before, palette.len());
     }
 
     /// A colour set through [`css_declaration`] is what reading its text

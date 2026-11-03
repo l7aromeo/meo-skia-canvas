@@ -38,6 +38,7 @@ use skia_safe::{
 };
 
 use crate::{
+    cache_map::KeptSets,
     context::{
         blur_mask,
         chain::{self, Depth, Step},
@@ -348,6 +349,30 @@ fn verdict_slot((pixels, bytes): VerdictKey) -> usize {
         >> (u64::BITS - VERDICTS_KEPT.trailing_zeros())) as usize
 }
 
+/// How many sets of dyes [`ExactColour::dye`] keeps on a thread, and how
+/// many a set holds: 256 dyes, each 48 bytes with its key, 12 KiB a
+/// thread once the first is read, for text set in a palette of a few dozen
+/// colours on pages of a few spaces. A dye filed over another is read again
+/// when it is next asked for, which costs what reading it always did.
+const DYE_SETS: usize = 64;
+const DYE_WAYS: usize = 4;
+
+/// An exact colour and the plain colour beside it, by bits, as
+/// [`ExactColour::dye`] files the dye it read for them.
+type DyeKey = (ExactColour, [u32; 4]);
+
+/// Where [`DYES`] files `key`: its bits folded together and multiplied by
+/// [`GOLDEN_RATIO_64`].
+fn dye_hash((exact, plain): &DyeKey) -> u64 {
+    let [r, g, b] = exact.rgb.map(|c| u64::from(c.to_bits()));
+    let [pr, pg, pb, pa] = plain.map(u64::from);
+    let key = (r ^ g.rotate_left(21) ^ b.rotate_left(42))
+        ^ (pr.rotate_left(11) ^ pg.rotate_left(32) ^ pb.rotate_left(53) ^ pa)
+        ^ (exact.pixels as u64) << 59
+        ^ u64::from(exact.bytes) << 63;
+    key.wrapping_mul(GOLDEN_RATIO_64)
+}
+
 /// The pixel [`landed`] draws a colour on for a page space: a float page of
 /// that space, one pixel in size, and the space's name in `color()` -- see
 /// [`skia_paint_color_onto_own`] -- each found once a thread.
@@ -357,10 +382,24 @@ struct Probe {
     name: Option<&'static str>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many dyes [`ExactColour::dye`] has read on this thread rather
+    /// than found kept.
+    pub(crate) static DYES_READ: Cell<usize> = const { Cell::new(0) };
+    /// Whether [`ExactColour::dye`] takes a dye kept: off, every dye is read
+    /// afresh, the reference the kept ones are held to.
+    pub(crate) static KEEPS_DYES: Cell<bool> = const { Cell::new(true) };
+}
+
 thread_local! {
     /// The verdicts this thread has found, filed by [`verdict_slot`].
     static VERDICTS: RefCell<Vec<Option<(VerdictKey, Verdict)>>> =
         RefCell::new(vec![None; VERDICTS_KEPT]);
+
+    /// The dyes this thread has read -- see [`ExactColour::dye`].
+    static DYES: RefCell<KeptSets<DyeKey, Option<ColorFilter>, DYE_SETS, DYE_WAYS>> =
+        const { RefCell::new(KeptSets::new()) };
 
     /// The probe of each page space this thread has verified a colour for.
     static PROBES: RefCell<Vec<Probe>> = const { RefCell::new(Vec::new()) };
@@ -761,8 +800,34 @@ impl ExactColour {
     ///
     /// Where Skia would read the glyph contrast from it in another bucket
     /// from `plain`'s, it ends in [`Self::keeping_plain_luminance`] -- see
-    /// [`luminance_colour`] for how that is read, once per colour.
+    /// [`luminance_colour`] for how that is read. The dye depends on nothing
+    /// but this colour and `plain`, so each pair is read once a thread and
+    /// kept in [`DYES`].
     pub fn dye(&self, plain: Color4f) -> Option<ColorFilter> {
+        let key = (
+            self.clone(),
+            [plain.r, plain.g, plain.b, plain.a].map(f32::to_bits),
+        );
+        let hash = dye_hash(&key);
+        #[cfg(test)]
+        let keeps = KEEPS_DYES.get();
+        #[cfg(not(test))]
+        let keeps = true;
+        if keeps
+            && let Some(dye) =
+                DYES.with_borrow(|dyes| dyes.get(hash, &key).cloned())
+        {
+            return dye;
+        }
+        #[cfg(test)]
+        DYES_READ.set(DYES_READ.get() + 1);
+        let dye = self.read_dye(plain);
+        DYES.with_borrow_mut(|dyes| dyes.file(hash, key, dye.clone()));
+        dye
+    }
+
+    /// [`Self::dye`], read rather than found kept.
+    fn read_dye(&self, plain: Color4f) -> Option<ColorFilter> {
         let replacement = self.replacement()?;
         match luminance_colour(&replacement, plain) {
             Some(lands)
@@ -3310,6 +3375,83 @@ mod verdict_tests {
         color_in_canvas_space, css_to_color4f_in_space, opt_color_space,
         skia_paint_color_onto,
     };
+    use skia_safe::shaders;
+
+    /// What a text paint in `plain` dyed by `dye` paints on one pixel of a
+    /// float page in `onto`, as the text paint in `Context2D` holds them: a
+    /// colour shader of `plain` named in sRGB, the dye its colour filter.
+    fn dyed_pixel(
+        dye: &ColorFilter,
+        plain: Color4f,
+        onto: &ColorSpace,
+    ) -> [f32; 4] {
+        let info = ImageInfo::new(
+            (1, 1),
+            ColorType::RGBAF32,
+            AlphaType::Premul,
+            Some(onto.clone()),
+        );
+        let mut surface =
+            started::raster(&info, None, None).expect("a surface");
+        let mut paint = Paint::default();
+        paint
+            .set_shader(shaders::color_in_space(plain, ColorSpace::new_srgb()));
+        paint.set_color_filter(dye.clone());
+        surface.canvas().draw_paint(&paint);
+        let mut pixel = [0u8; 16];
+        assert!(surface.read_pixels(&info, &mut pixel, 16, (0, 0)));
+        let (channels, _) = pixel.as_chunks::<4>();
+        [0, 1, 2, 3].map(|c| f32::from_le_bytes(channels[c]))
+    }
+
+    /// A dye is kept for the page and the plain colour it was read for: the
+    /// same components on a Display P3 and a Rec. 2020 page, and one exact
+    /// colour beside two plain colours in different contrast buckets, each
+    /// find their own dye after the other was kept -- the one read afresh,
+    /// by what it paints on a page where the two differ.
+    #[test]
+    fn a_dye_is_kept_for_its_page_and_its_plain_colour() {
+        let p3 = opt_color_space("display-p3").expect("a space");
+        let rec2020 = opt_color_space("rec2020").expect("a space");
+        let srgb = ColorSpace::new_srgb();
+        let rgb = [0.3, 0.6, 0.9];
+        let on_p3 =
+            ExactColour::new(rgb, p3, PixelColorSpace::DisplayP3, false);
+        let on_rec2020 = ExactColour::new(
+            rgb,
+            rec2020.clone(),
+            PixelColorSpace::Rec2020,
+            false,
+        );
+        let plain = Color4f::new(0.1235, 0.5, 0.2, 1.0);
+        let black = Color4f::new(0.0, 0.0, 0.0, 1.0);
+        // Kept first, so the second of each pair is asked for after it.
+        on_p3.dye(plain).expect("a dye");
+        on_rec2020.dye(black).expect("a dye");
+        let read = |exact: &ExactColour, plain: Color4f, onto: &ColorSpace| {
+            let kept =
+                dyed_pixel(&exact.dye(plain).expect("a dye"), plain, onto);
+            let afresh =
+                dyed_pixel(&exact.read_dye(plain).expect("a dye"), plain, onto);
+            (kept, afresh)
+        };
+        // On a Rec. 2020 page each dye paints its own colour converted there.
+        let (kept, afresh) = read(&on_rec2020, plain, &rec2020);
+        assert_eq!(kept, afresh, "the Rec. 2020 page takes its own dye");
+        let (p3_paints, _) = read(&on_p3, plain, &rec2020);
+        assert_ne!(
+            p3_paints, afresh,
+            "the two pages' dyes differ there, or this asserts nothing"
+        );
+        // On an sRGB page a dye keeping the plain colour's contrast paints it.
+        let (kept, afresh) = read(&on_p3, black, &srgb);
+        assert_eq!(kept, afresh, "black takes its own dye");
+        let (plain_paints, _) = read(&on_p3, plain, &srgb);
+        assert_ne!(
+            plain_paints, afresh,
+            "the two plain colours' dyes differ there, or this asserts nothing"
+        );
+    }
 
     /// Two colours filed in one slot of the verdict table, drawn in turn,
     /// each take their own verdict: a colour finds the one filed for it,
