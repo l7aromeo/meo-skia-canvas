@@ -179,3 +179,20 @@ measured in their pull requests, before the release-prep timing:
 - On the GPU, 16,384 `saveLayer` groups of one rect drew and read back in
   0.43 s rather than 10.7 s
   ([#469](https://github.com/l7aromeo/meo-skia-canvas/pull/469)).
+
+A read of a GPU canvas after a draw waits on the GPU once rather than twice
+([#497](https://github.com/l7aromeo/meo-skia-canvas/issues/497)): the copy
+out is encoded in the command buffer the draws are in, and the one wait
+answers for both. Medians of three interleaved passes on an Apple M4 Pro,
+against the two waits before it and against 6.0.2, with no other build or
+test running:
+
+| read after a draw   | 6.0.2      | two waits    | one wait     |
+| ------------------- | ---------- | ------------ | ------------ |
+| 8x8                 | 184–191 µs | 248–253 µs   | 185–208 µs   |
+| 64x48               | 203–224 µs | 253–258 µs   | 199–202 µs   |
+| whole 1200x900 page | 546–630 µs | 1237–1351 µs | 1075–1155 µs |
+
+The whole-page read stays above 6.0.2's: the rest of it is the GPU's work
+inside that wait and the exact unpremultiply, which 6.0.2 left to the GPU
+and its rounding down.
