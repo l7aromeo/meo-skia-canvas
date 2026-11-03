@@ -1240,6 +1240,23 @@ and none is:
   lines 87 and 88, fills a path too large for anti-aliasing without it. This
   Skia has no supersampling converter and no setting that selects one.
 
+**Text under a filter is drawn with some edge pixels other than before, and
+neither placement is the edge's coverage.** A run of text under `blur()` or
+`drop-shadow()` is filtered in a layer the size of what it inks rather than the
+page's (`layer::hinted_reach`), and Skia's analytic anti-aliasing covers a
+curved edge by where on the device it lies: the same geometry, moved by a whole
+number of pixels, is covered differently. Times New Roman's 96px "Ag" stroked
+40 wide with round joins, under `drop-shadow(0 0 3px black)` at density 3, is
+drawn in 16 pixels up to 25 levels from the page-sized layer's drawing, and
+without the filter, moved 15 device pixels, in the same 16 by up to 32. At the
+worst of them the two give 114 and 146 where 8 by 8 samples of the edge give
+133.8. No origin keeps it: moved 3 or 6 device pixels the stroke is covered
+alike, moved 15 to 300 it is not, and a plain oval on the 1/64 grid flips at a
+shift of 2 (`skia_covers_a_curve_by_where_it_lies`). The same two glyphs filled
+rather than stroked, and a star of straight edges, did not move at any shift
+tried. Chrome's CPU canvas rasterizes through the same Skia converter, so it is
+inferred to place the same error by its own layers; that was not measured.
+
 **A PDF's blend modes render as the canvas's in poppler, and macOS's
 CoreGraphics renders a few of them otherwise.** A composite operation on an
 sRGB canvas is written into the PDF as the blend mode it is, on a page whose

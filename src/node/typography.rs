@@ -746,6 +746,8 @@ impl RunPaint {
                 all.join(blob.bounds().with_offset(at));
                 all
             });
+        #[cfg(test)]
+        let reach = reach.with_inset((REACH_INSET.get(), REACH_INSET.get()));
         Some(reach)
     }
 
@@ -1214,6 +1216,10 @@ thread_local! {
     /// [`ReachBound`].
     pub(crate) static REACH_BOUND: Cell<ReachBound> =
         const { Cell::new(ReachBound::Stroked) };
+    /// How far, in the units a run is laid out in, [`RunPaint::reach`]
+    /// draws its answer in on this thread: a mutant, a reach that cuts ink,
+    /// for the checks on it to refuse.
+    pub(crate) static REACH_INSET: Cell<f32> = const { Cell::new(0.0) };
 }
 
 /// The ways the reach sweep measures a run's glyphs, so that one run of it

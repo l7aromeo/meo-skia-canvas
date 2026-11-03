@@ -6899,7 +6899,9 @@ mod text_reach_tests {
 
     use super::{TEXT_REACHED, layer::KEEPS_TEXT_REACH};
     use crate::{
-        node::typography::{REACH_BOUND, REACHED_FAMILIES, ReachBound},
+        node::typography::{
+            REACH_BOUND, REACH_INSET, REACHED_FAMILIES, ReachBound,
+        },
         prelude::*,
     };
     use rayon::prelude::*;
@@ -6935,6 +6937,12 @@ mod text_reach_tests {
     /// [`ReachBound`].
     fn register() {
         if !REGISTERED.replace(true) {
+            REACH_INSET.set(
+                std::env::var("TEXT_REACH_INSET")
+                    .ok()
+                    .and_then(|inset| inset.parse().ok())
+                    .unwrap_or(0.0),
+            );
             REACH_BOUND.set(
                 match std::env::var("TEXT_REACH_BOUND").as_deref() {
                     Ok("stroked-unwidened") => ReachBound::StrokedUnwidened,
@@ -7222,9 +7230,35 @@ mod text_reach_tests {
         )
     }
 
+    /// How far, in levels of an 8-bit alpha, Skia's analytic
+    /// anti-aliasing covers a curved edge from its true coverage: 40,
+    /// measured, not chosen. The stroked "g" of Times New Roman's 96px
+    /// "Ag", 40 wide with round joins at density 3, covers (581, 245) with
+    /// an alpha of 98 where 8 by 8 samples of the same outline give 137.6,
+    /// 39.6 levels short; moved 54 device pixels it covers it with 116.
+    /// Measured on the CPU raster, which is the only anti-aliasing route
+    /// Skia 156 has for a path -- see `skia_covers_a_curve_by_where_it_lies`.
+    const AAA_COVERAGE_ERROR: u8 = 40;
+
+    /// How far two placements of the same scene may draw any pixel apart:
+    /// each covers an edge within [`AAA_COVERAGE_ERROR`] of its true
+    /// coverage, so the two lie within twice that of each other. It follows
+    /// from that error rather than from the spreads seen, which were 25
+    /// levels under a drop shadow and 32 without the filter.
+    const AAA_PLACEMENT_SPREAD: u8 = 2 * AAA_COVERAGE_ERROR;
+
     /// The largest difference, in premultiplied levels, between the scene
     /// drawn in a chain layer bounded by its reach and one bounded by the
     /// clip, at each scale.
+    ///
+    /// An end-to-end check that confining the layer changes nothing past
+    /// Skia's own placement noise -- see [`AAA_PLACEMENT_SPREAD`] -- not the
+    /// guard on the reach: a reach that cuts a pixel off an anti-aliased
+    /// fringe can lose a few tens of levels, which the spread allows, and
+    /// [`inked_past`] is what refuses that. Drawn in by TEXT_REACH_INSET,
+    /// the reach fails [`inked_past`] from an inset of 1 and this from one
+    /// of 14: a chain's layer is its reach widened by as far as the chain
+    /// reads, so an inset under that cuts nothing the chain draws.
     fn parted_from_the_clip(scene: &Scene) -> Vec<(&'static str, u8)> {
         KEEPS_TEXT_REACH.set(true);
         let confined = played(&mut scene.canvas().expect("a canvas"));
@@ -7508,19 +7542,19 @@ mod text_reach_tests {
         }
     }
 
-    /// The one playback found inking past its reach rounded out, by a device
-    /// pixel: a colour emoji's bitmap, scaled and drawn into another canvas at
-    /// 1.5, which resamples it across the reach's edge. Held within
-    /// [`layer::HINTED_INK_DRIFT`], so that a Skia resampling further shows
-    /// here, and to the pixel with no margin, so that this stays the case the
-    /// margin is measured by.
+    /// The playback the margin is measured by on CoreText: a stroke whose
+    /// round join half its width bounds exactly, drawn into another canvas
+    /// at half the size, where its anti-aliased fringe inks a device pixel
+    /// past the reach rounded out. Held within [`layer::HINTED_INK_DRIFT`],
+    /// so that a fringe reaching further shows here, and on macOS to that
+    /// pixel with no margin, so that this stays the case the margin is
+    /// measured by there.
     #[test]
-    fn a_resampled_emoji_inks_a_pixel_past_its_reach() {
+    fn a_wide_round_stroke_inks_a_pixel_past_its_reach() {
         let scene = Scene {
-            text: "\u{1F600}x",
-            transform: Some(SCALE),
-            stroke: Some(12.0),
-            filter: "drop-shadow(0 0 3px black)",
+            size: 13.0,
+            stroke: Some(40.0),
+            join: StrokeJoin::Round,
             ..BASE
         };
         let reach = reached(&scene).expect("a reach");
@@ -7529,12 +7563,10 @@ mod text_reach_tests {
             Vec::new(),
             "held within the margin"
         );
-        // Apple Color Emoji's bitmap: another platform's emoji face is
-        // another bitmap, resampled to its own edge.
         #[cfg(target_os = "macos")]
         assert_eq!(
             inked_past_by(&scene, reach, 0.0),
-            vec![("drawn at 1.5", 1.0)],
+            vec![("drawn at 0.5", 1.0)],
             "a pixel past with no margin"
         );
     }
@@ -7545,8 +7577,8 @@ mod text_reach_tests {
     /// declared box (Zapfino's swashes), colour emoji, a wide stroke, a turn,
     /// a skew and a scale. And the chain bounded by it draws what one bounded
     /// by the clip draws, a drop shadow cast further than the run is long
-    /// included, to the level: the exact blur of a different layer rounds a
-    /// few pixels to the next level, and nothing more.
+    /// included, within [`AAA_PLACEMENT_SPREAD`]: Skia covers a curved edge
+    /// by where on the device its layer puts it.
     #[test]
     fn text_in_a_chain_is_bounded_by_all_it_inks() {
         let full = std::env::var("TEXT_REACH_SWEEP").is_ok_and(|v| v == "full");
@@ -7631,7 +7663,7 @@ mod text_reach_tests {
                 }
                 let parted = if full { Vec::new() } else { parted_from_the_clip(&scene) }
                     .into_iter()
-                    .filter(|(_, levels)| *levels > 1)
+                    .filter(|(_, levels)| *levels > AAA_PLACEMENT_SPREAD)
                     .map(|(at, levels)| {
                         format!("{label} {at}: {levels} levels from the clip-bounded chain")
                     })

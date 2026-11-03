@@ -186,17 +186,16 @@ fn keeps_text_reach() -> bool {
 
 /// How far, in device pixels, a run of text played back at another scale
 /// than it was recorded at can ink past its reach rounded out to whole
-/// pixels -- see `RunPaint::reach` -- measured, not chosen. Over 2,160 scenes
-/// on CoreText -- Oswald, Helvetica, Times New Roman, Zapfino and Apple Color
-/// Emoji, at 8 to 96px, filled and stroked 1 and 12 wide, upright, turned,
-/// skewed and scaled, under a blur and two drop shadows -- each with its run
-/// laid out afresh and kept, at densities 1 to 3 and drawn into another
-/// canvas at 0.5 and 1.5, 6 of the 21,600 playbacks inked past the reach
-/// with no margin, each by one pixel and all one run under each filter:
-/// Oswald's 40px "😀x", whose emoji is Apple Color Emoji's bitmap, scaled 1.7
-/// and stroked 12, drawn in at 1.5, where the bitmap is resampled across the
-/// edge.
-/// `a_resampled_emoji_inks_a_pixel_past_its_reach` holds that case, and
+/// pixels -- see `RunPaint::reach` -- measured, not chosen. Over 2,560 scenes
+/// on CoreText -- Oswald, Helvetica, Times New Roman, Zapfino, Apple Color
+/// Emoji and Monoton, at 8 to 96px, filled, hairline, stroked 1, 12 and 40
+/// wide under each join, bold, spaced, upright, turned, skewed and scaled,
+/// under a blur and two drop shadows -- each with its run laid out afresh and
+/// kept, at densities 1 to 3 and drawn into another canvas at 0.5 and 1.5, 98
+/// of the 25,600 playbacks inked past the reach with no margin, by at most
+/// 1.29 device pixels and all under a 40px stroke whose join half its width
+/// bounds exactly: the stroke's anti-aliased fringe.
+/// `a_wide_round_stroke_inks_a_pixel_past_its_reach` holds that case, and
 /// `text_in_a_chain_is_bounded_by_all_it_inks` the rest.
 pub(crate) const HINTED_INK_DRIFT: f32 = 1.0;
 
@@ -1911,6 +1910,19 @@ impl Group {
                 // 26 ms on an sRGB one.
                 let to_space = |matrix: &Matrix| Matrix::concat(&back, matrix);
                 let to_device = canvas.local_to_device_as_3x3();
+                // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
+                // Re-check: cargo test skia_covers_a_curve_by_where_it_lies
+                //
+                // Skia's analytic anti-aliasing covers a curved edge by where
+                // on the device it lies, so text whose layer is bounded by its
+                // reach draws some edge pixels otherwise than in a layer
+                // bounded by the clip: Times New Roman's 96px "Ag" stroked 40
+                // wide with round joins, under a drop shadow at density 3, in
+                // 16 pixels by up to 25 levels. Neither is the edge's
+                // coverage -- 114 and 146 where 8 by 8 samples give 133.8 --
+                // and no class of origin keeps it: moved 3 or 6 device pixels
+                // the stroke is covered alike, moved 15 to 300 it is not, and
+                // an oval flips at shifts of 1 and 2.
                 let content = match (&self.within, reach) {
                     (Some(within), _) => {
                         Some(to_space(&self.matrix).map_rect(within).0)
@@ -3146,8 +3158,73 @@ impl BlurOp {
 #[cfg(test)]
 mod tests {
     use super::{Composite, Entries, Group, luminance_colour};
-    use skia_safe::{BlendMode, Color, Color4f, Matrix, color_filters};
+    use skia_safe::{
+        AlphaType, BlendMode, Color, Color4f, ColorType, ImageInfo, Matrix,
+        Paint, Path, Rect, color_filters, surfaces,
+    };
     use std::iter::zip;
+
+    /// The oval [`skia_covers_a_curve_by_where_it_lies`] fills: its corners
+    /// on the 1/64 grid, so that a whole-pixel shift moves every point
+    /// exactly.
+    const OVAL: Rect = Rect {
+        left: 40.25,
+        top: 20.5,
+        right: 470.75,
+        bottom: 300.125,
+    };
+
+    /// The raster the oval is filled on, tall enough for it shifted as far
+    /// as [`skia_covers_a_curve_by_where_it_lies`] shifts it.
+    const RASTER: (i32, i32) = (520, 380);
+
+    /// The alpha of [`OVAL`] moved `by` device pixels down, filled
+    /// anti-aliased on a CPU raster.
+    fn oval_at(by: i32) -> Vec<u8> {
+        let mut surface =
+            surfaces::raster_n32_premul(RASTER).expect("a surface");
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        let oval = Path::oval(OVAL.with_offset((0.0, by as f32)), None);
+        surface.canvas().draw_path(&oval, &paint);
+        let info =
+            ImageInfo::new(RASTER, ColorType::Alpha8, AlphaType::Premul, None);
+        let mut alpha = vec![0u8; (RASTER.0 * RASTER.1) as usize];
+        assert!(surface.read_pixels(
+            &info,
+            &mut alpha,
+            RASTER.0 as usize,
+            (0, 0)
+        ));
+        alpha
+    }
+
+    /// Skia's anti-aliasing covers a curved edge by where on the device it
+    /// lies, not only by its shape: the same oval, moved down by a whole
+    /// number of pixels -- every point exactly, on the 1/64 grid -- is
+    /// covered differently along its edge, by up to 13 levels at a shift of
+    /// 2. Moved across it was covered alike at every shift tried, while a
+    /// larger oval further out flipped across and not down. If this fails,
+    /// a curve is covered alike wherever it lies, and the note on a chain's
+    /// layer in `Group::playback_within`, the bound `text_reach_tests` hold
+    /// two placements to, and the entry in `docs/browser-differences.md`
+    /// can go.
+    #[test]
+    fn skia_covers_a_curve_by_where_it_lies() {
+        let here = oval_at(0);
+        let width = RASTER.0 as usize;
+        let moved = (1..=70).find(|&by| {
+            let there = oval_at(by);
+            let by = by as usize;
+            (0..RASTER.1 as usize - by)
+                .flat_map(|y| (0..width).map(move |x| (x, y)))
+                .any(|(x, y)| {
+                    here[y * width + x].abs_diff(there[(y + by) * width + x])
+                        > 1
+                })
+        });
+        assert!(moved.is_some(), "the oval covered alike at every shift");
+    }
 
     /// A group through no layer composites what it holds as it is, so a
     /// document opens it at an opacity of 1. `Context2D` makes one only for

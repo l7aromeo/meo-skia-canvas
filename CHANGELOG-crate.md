@@ -284,6 +284,7 @@ read the math functions and every length unit.
 
 ### Known, and not fixed here
 
+- **Text under a filter can cover a curved edge's pixels up to 32 levels otherwise than before, as Skia covers a curve by where on the device it lies.** ([#504](https://github.com/l7aromeo/meo-skia-canvas/pull/504), [#507](https://github.com/l7aromeo/meo-skia-canvas/issues/507))
 - **On macOS a GPU draw can be dropped when the shader compiler is slow, in a crate build.** ([#316](https://github.com/l7aromeo/meo-skia-canvas/pull/316))
 - **On Linux, text is laid out at its size truncated to a 64th of a pixel.** ([#382](https://github.com/l7aromeo/meo-skia-canvas/pull/382))
 - **A GPU path can have a pixel's coverage moved a step, in a crate build.** ([#410](https://github.com/l7aromeo/meo-skia-canvas/pull/410))

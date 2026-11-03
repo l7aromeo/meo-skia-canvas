@@ -289,6 +289,7 @@ are added, and the CSS strings read the math functions and every length unit.
 
 ### Known, and not fixed here
 
+- **Text under a filter can cover a curved edge's pixels up to 32 levels otherwise than before, as Skia covers a curve by where on the device it lies.** ([#504](https://github.com/l7aromeo/meo-skia-canvas/pull/504), [#507](https://github.com/l7aromeo/meo-skia-canvas/issues/507))
 - **On Linux, text is laid out at its size truncated to a 64th of a pixel.** ([#382](https://github.com/l7aromeo/meo-skia-canvas/pull/382))
 - **On macOS a GPU frame can still differ by a level at a few pixels with what the GPU drew before it.** ([#410](https://github.com/l7aromeo/meo-skia-canvas/pull/410))
 
