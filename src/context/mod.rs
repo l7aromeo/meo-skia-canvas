@@ -4007,7 +4007,7 @@ impl Dye {
 thread_local! {
     /// The last reach a run of text drawn on this thread answered, in the
     /// units of the canvas it was drawn on -- see [`Context2D::draw_text`].
-    static TEXT_REACHED: std::cell::Cell<Option<Rect>> = const { std::cell::Cell::new(None) };
+    static TEXT_REACHED: Cell<Option<Rect>> = const { Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -7078,60 +7078,86 @@ mod text_reach_tests {
         }
     }
 
-    /// The scales a scene is played back at: exported at densities 1 to 3,
-    /// and drawn into another canvas at half and one and a half times its
-    /// size.
-    const SCALES: [(&str, f32); 5] = [
-        ("density 1", 1.0),
-        ("density 2", 2.0),
-        ("density 3", 3.0),
-        ("drawn at 0.5", 0.5),
-        ("drawn at 1.5", 1.5),
+    /// The playbacks a scene is held at, as `(name, on the GPU, scale)`:
+    /// exported at densities 1 to 3, and drawn into another canvas at half
+    /// and one and a half times its size, on each engine. A chain on the GPU
+    /// clears and reads only the region its reach bounds, as on the CPU, and
+    /// draws large glyphs as paths under multisampling, so the reach is held
+    /// to what each engine inks.
+    const PLAYBACKS: [(&str, bool, f32); 10] = [
+        ("cpu density 1", false, 1.0),
+        ("cpu density 2", false, 2.0),
+        ("cpu density 3", false, 3.0),
+        ("cpu drawn at 0.5", false, 0.5),
+        ("cpu drawn at 1.5", false, 1.5),
+        ("gpu density 1", true, 1.0),
+        ("gpu density 2", true, 2.0),
+        ("gpu density 3", true, 3.0),
+        ("gpu drawn at 0.5", true, 0.5),
+        ("gpu drawn at 1.5", true, 1.5),
     ];
 
-    /// The pixels of `canvas` played back at each of [`SCALES`], premultiplied.
-    fn played(canvas: &mut Canvas) -> Vec<Vec<u8>> {
+    /// Whether a canvas on this machine can be drawn on the GPU.
+    fn gpu_available() -> bool {
+        let mut canvas = Canvas::new(1.0, 1.0);
+        canvas.set_gpu(true);
+        canvas.engine_kind() == EngineKind::Gpu
+    }
+
+    /// The pixels of `canvas` played back at each of [`PLAYBACKS`],
+    /// premultiplied; `None` for a GPU playback where there is no GPU.
+    fn played(canvas: &mut Canvas) -> Vec<Option<Vec<u8>>> {
         let premultiplied = PixelExportOptions {
             premultiplied: true,
             ..PixelExportOptions::default()
         };
-        SCALES
+        let gpu = gpu_available();
+        PLAYBACKS
             .iter()
-            .map(|&(_, scale)| match scale.fract() == 0.0 {
-                true => canvas
-                    .to_image_data(
-                        None,
-                        &ImageDataExport {
-                            density: scale as u32,
-                            pixels: premultiplied,
-                            ..ImageDataExport::default()
-                        },
-                    )
-                    .expect("pixels")
-                    .pixels()
-                    .to_vec(),
-                false => {
-                    let mut outer = Canvas::new(SIZE.0 * scale, SIZE.1 * scale);
-                    outer.set_gpu(false);
-                    outer.context().draw_canvas_sized(
-                        canvas,
-                        0.0,
-                        0.0,
-                        SIZE.0 * scale,
-                        SIZE.1 * scale,
-                    );
-                    outer
+            .map(|&(_, on_gpu, scale)| {
+                if on_gpu && !gpu {
+                    return None;
+                }
+                canvas.set_gpu(on_gpu);
+                let pixels = match scale.fract() == 0.0 {
+                    true => canvas
                         .to_image_data(
                             None,
                             &ImageDataExport {
+                                density: scale as u32,
                                 pixels: premultiplied,
                                 ..ImageDataExport::default()
                             },
                         )
                         .expect("pixels")
                         .pixels()
-                        .to_vec()
-                }
+                        .to_vec(),
+                    false => {
+                        let mut outer =
+                            Canvas::new(SIZE.0 * scale, SIZE.1 * scale);
+                        outer.set_gpu(on_gpu);
+                        outer.context().draw_canvas_sized(
+                            canvas,
+                            0.0,
+                            0.0,
+                            SIZE.0 * scale,
+                            SIZE.1 * scale,
+                        );
+                        outer
+                            .to_image_data(
+                                None,
+                                &ImageDataExport {
+                                    pixels: premultiplied,
+                                    ..ImageDataExport::default()
+                                },
+                            )
+                            .expect("pixels")
+                            .pixels()
+                            .to_vec()
+                    }
+                };
+                canvas.set_gpu(false);
+                Some(pixels)
             })
             .collect()
     }
@@ -7183,8 +7209,9 @@ mod text_reach_tests {
         .expect("a canvas");
         played(&mut sharp)
             .iter()
-            .zip(SCALES)
-            .filter_map(|(pixels, (at, scale))| {
+            .zip(PLAYBACKS)
+            .filter_map(|(pixels, (at, _, scale))| {
+                let pixels = pixels.as_ref()?;
                 let width = (SIZE.0 * scale) as usize;
                 let held = [
                     (reach.left * scale - drift).floor(),
@@ -7214,7 +7241,7 @@ mod text_reach_tests {
     }
 
     /// The box, in device pixels, of what the scene's text inks drawn
-    /// without its filter at `at`, one of [`SCALES`], beside its reach at
+    /// without its filter at `at`, one of [`PLAYBACKS`], beside its reach at
     /// that scale: what a reading past the reach is reported with, so that
     /// the edge it passes and by how much can be read from the failure.
     fn ink_beside(scene: &Scene, reach: Rect, at: &str) -> String {
@@ -7224,13 +7251,15 @@ mod text_reach_tests {
         })
         .canvas()
         .expect("a canvas");
-        let (index, (_, scale)) = SCALES
+        let (index, (_, _, scale)) = PLAYBACKS
             .iter()
             .enumerate()
-            .find(|(_, (name, _))| *name == at)
-            .expect("a scale");
+            .find(|(_, (name, _, _))| *name == at)
+            .expect("a playback");
         let width = (SIZE.0 * scale) as usize;
         let ink = played(&mut sharp)[index]
+            .as_ref()
+            .expect("the playback a reading was taken at")
             .chunks(4)
             .enumerate()
             .filter(|(_, p)| p[3] != 0)
@@ -7290,16 +7319,17 @@ mod text_reach_tests {
         confined
             .iter()
             .zip(&clipped)
-            .zip(SCALES)
-            .map(|((a, b), (at, _))| {
-                (
+            .zip(PLAYBACKS)
+            .filter_map(|((a, b), (at, _, _))| {
+                let (a, b) = (a.as_ref()?, b.as_ref()?);
+                Some((
                     at,
                     a.iter()
                         .zip(b)
                         .map(|(a, b)| a.abs_diff(*b))
                         .max()
                         .unwrap_or(0),
-                )
+                ))
             })
             .collect()
     }
@@ -7587,20 +7617,23 @@ mod text_reach_tests {
         );
         #[cfg(target_os = "macos")]
         assert_eq!(
-            inked_past_by(&scene, reach, 0.0),
-            vec![("drawn at 0.5", 1.0)],
+            inked_past_by(&scene, reach, 0.0)
+                .into_iter()
+                .filter(|(at, _)| at.starts_with("cpu"))
+                .collect::<Vec<_>>(),
+            vec![("cpu drawn at 0.5", 1.0)],
             "a pixel past with no margin"
         );
     }
 
     /// What a run of text in a filter chain reports it can ink holds all it
-    /// inks, at every scale it is played back at, once widened by
-    /// [`layer::HINTED_INK_DRIFT`]: over a glyph whose ink passes its font's
-    /// declared box (Zapfino's swashes), colour emoji, a wide stroke, a turn,
-    /// a skew and a scale. And the chain bounded by it draws what one bounded
-    /// by the clip draws, a drop shadow cast further than the run is long
-    /// included, within [`AAA_PLACEMENT_SPREAD`]: Skia covers a curved edge
-    /// by where on the device its layer puts it.
+    /// inks, at every scale and on each engine it is played back on, once
+    /// widened by [`layer::HINTED_INK_DRIFT`]: over a glyph whose ink passes
+    /// its font's declared box (Zapfino's swashes), colour emoji, a wide
+    /// stroke, a turn, a skew and a scale. And the chain bounded by it
+    /// draws what one bounded by the clip draws, a drop shadow cast further
+    /// than the run is long included, within [`AAA_PLACEMENT_SPREAD`]: Skia
+    /// covers a curved edge by where on the device its layer puts it.
     #[test]
     fn text_in_a_chain_is_bounded_by_all_it_inks() {
         let full = std::env::var("TEXT_REACH_SWEEP").is_ok_and(|v| v == "full");
@@ -7613,10 +7646,25 @@ mod text_reach_tests {
             resolves(OSWALD),
             "{OSWALD} is drawn in Oswald, or the scenes asking for it test a fallback"
         );
+        // The GPU playbacks are left out where there is no GPU, and CI names
+        // the device it has, so that they are not left out there.
+        assert!(
+            gpu_available()
+                || std::env::var_os("MEO_SKIA_CANVAS_REQUIRE_GPU").is_none(),
+            "a GPU is required and there is none"
+        );
         let (scenes, missing): (Vec<Scene>, Vec<Scene>) = sweep(full)
             .into_iter()
             .partition(|scene| resolves(scene.font));
         if full {
+            eprintln!(
+                "engines: cpu{}",
+                if gpu_available() {
+                    ", gpu"
+                } else {
+                    "; no gpu, its playbacks left out"
+                }
+            );
             eprintln!(
                 "reach bound: {}",
                 std::env::var("TEXT_REACH_BOUND")
