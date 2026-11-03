@@ -7139,6 +7139,45 @@ mod text_reach_tests {
             .collect()
     }
 
+    /// The box, in device pixels, of what the scene's text inks drawn
+    /// without its filter at `at`, one of [`SCALES`], beside its reach at
+    /// that scale: what a reading past the reach is reported with, so that
+    /// the edge it passes and by how much can be read from the failure.
+    fn ink_beside(scene: &Scene, reach: Rect, at: &str) -> String {
+        let mut sharp = (Scene {
+            filter: "none",
+            ..*scene
+        })
+        .canvas()
+        .expect("a canvas");
+        let (index, (_, scale)) = SCALES
+            .iter()
+            .enumerate()
+            .find(|(_, (name, _))| *name == at)
+            .expect("a scale");
+        let width = (SIZE.0 * scale) as usize;
+        let ink = played(&mut sharp)[index]
+            .chunks(4)
+            .enumerate()
+            .filter(|(_, p)| p[3] != 0)
+            .fold(
+                [f32::MAX, f32::MAX, f32::MIN, f32::MIN],
+                |[l, t, r, b], (i, _)| {
+                    let (x, y) = ((i % width) as f32, (i / width) as f32);
+                    [l.min(x), t.min(y), r.max(x + 1.0), b.max(y + 1.0)]
+                },
+            );
+        format!(
+            "ink {ink:?}, reach {:?}",
+            [
+                reach.left * scale,
+                reach.top * scale,
+                reach.right * scale,
+                reach.bottom * scale
+            ]
+        )
+    }
+
     /// The largest difference, in premultiplied levels, between the scene
     /// drawn in a chain layer bounded by its reach and one bounded by the
     /// clip, at each scale.
@@ -7423,13 +7462,23 @@ mod text_reach_tests {
                 let (mut past, mut unwidened) = (Vec::new(), Vec::new());
                 for (state, reach) in reaches {
                     past.extend(inked_past(&scene, reach).into_iter().map(
-                        |(at, by)| format!("{label} {state} {at}: inks {by} px past"),
+                        |(at, by)| {
+                            format!(
+                                "{label} {state} {at}: inks {by} px past; {}",
+                                ink_beside(&scene, reach, at)
+                            )
+                        },
                     ));
                     // What the margin is measured by: the ink past the reach
                     // with none.
                     if full {
                         unwidened.extend(inked_past_by(&scene, reach, 0.0).into_iter().map(
-                            |(at, by)| format!("{label} {state} {at}: inks {by} px past with no margin"),
+                            |(at, by)| {
+                                format!(
+                                    "{label} {state} {at}: inks {by} px past with no margin; {}",
+                                    ink_beside(&scene, reach, at)
+                                )
+                            },
                         ));
                     }
                 }
