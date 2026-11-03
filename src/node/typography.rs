@@ -4811,6 +4811,139 @@ mod synthesis {
 }
 
 #[cfg(test)]
+mod coverage_colour {
+    use super::{Typesetter, glyph_runs};
+    use crate::{Canvas, Font as CanvasFont, FontLibrary as Library, started};
+    use skia_safe::{
+        AlphaType, Color, ColorType, ImageInfo, Matrix, Paint, Surface,
+    };
+
+    /// The bundled Oswald, under a name of these tests' own.
+    const FAMILY: &str = "CoverageOswald";
+    const TEXT: &str = "Hamburgefonstiv";
+    /// The raster the runs are drawn on: wide and tall enough for the
+    /// largest size turned.
+    const RASTER: (i32, i32) = (560, 260);
+
+    /// The colours a run is drawn in: black and white, a mid grey, the
+    /// primaries and the scenes' own orange, which span the luminances
+    /// Skia's glyph masks could be pre-blended by.
+    const COLOURS: [Color; 7] = [
+        Color::BLACK,
+        Color::WHITE,
+        Color::from_rgb(128, 128, 128),
+        Color::from_rgb(255, 0, 0),
+        Color::from_rgb(0, 255, 0),
+        Color::from_rgb(0, 0, 255),
+        Color::from_rgb(200, 120, 40),
+    ];
+
+    fn register() -> Library {
+        let library = Library::new();
+        library
+            .register_font_from_path(
+                FAMILY,
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"
+                ),
+            )
+            .expect("bundled Oswald registers");
+        library
+    }
+
+    /// The alpha `TEXT` in `family` at `size` covers, drawn the way a
+    /// canvas draws it -- its own runs, fonts and positions -- under
+    /// `matrix` on a raster of `colour_type` in `colour`.
+    fn coverage(
+        family: &str,
+        size: f32,
+        matrix: &Matrix,
+        colour_type: ColorType,
+        colour: Color,
+    ) -> Vec<u8> {
+        let mut canvas = Canvas::new(1.0, 1.0);
+        let ctx = canvas.context();
+        ctx.set_font(&CanvasFont::new(family, size));
+        let mut layout = Typesetter::new(&ctx.inner.state, TEXT, None)
+            .layout(&Paint::default());
+        let info = ImageInfo::new(RASTER, colour_type, AlphaType::Premul, None);
+        let mut surface: Surface =
+            started::raster(&info, None, None).expect("a raster");
+        let raster = surface.canvas();
+        raster.set_matrix(&(*matrix).into());
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true).set_color(colour);
+        for run in glyph_runs(&mut layout.paragraph) {
+            raster.draw_glyphs_at(
+                &run.glyphs,
+                &run.positions[..],
+                run.origin,
+                &run.font,
+                &paint,
+            );
+        }
+        let bytes = info.bytes_per_pixel();
+        let mut pixels = vec![0u8; info.compute_min_byte_size()];
+        assert!(surface.read_pixels(
+            &info,
+            &mut pixels,
+            RASTER.0 as usize * bytes,
+            (0, 0)
+        ));
+        match colour_type {
+            ColorType::Alpha8 => pixels,
+            _ => pixels.chunks(4).map(|p| p[3]).collect(),
+        }
+    }
+
+    /// A run's coverage depends on the colour it is drawn in: Skia
+    /// pre-blends glyph masks by the paint's luminance, so the same run
+    /// drawn in white covers up to 65 levels otherwise than in black, in
+    /// grey and green up to 46, in the scenes' orange up to 24, and in red
+    /// and blue, dark enough to share black's luminance, not at all -- in
+    /// an A8 plane and in a premultiplied N32 raster alike. A blurred run's
+    /// coverage is therefore drawn in the run's own colour, and kept with
+    /// it. If this fails, Skia covers a glyph alike in every colour, and the
+    /// colour can leave what a kept coverage is filed under.
+    #[test]
+    fn a_runs_coverage_depends_on_the_colour_it_is_drawn_in() {
+        let _library = register();
+        let off_grid = Matrix::translate((60.3, 110.6));
+        for size in [13.0, 40.0] {
+            for colour_type in [ColorType::Alpha8, ColorType::N32] {
+                let black = coverage(
+                    FAMILY,
+                    size,
+                    &off_grid,
+                    colour_type,
+                    Color::BLACK,
+                );
+                assert!(
+                    black.iter().any(|&a| a != 0),
+                    "{size}px: the run covers something"
+                );
+                for (colour, alike) in COLOURS.iter().map(|&colour| {
+                    let drawn =
+                        coverage(FAMILY, size, &off_grid, colour_type, colour);
+                    (colour, drawn == black)
+                }) {
+                    let dark = colour == Color::BLACK
+                        || colour == Color::from_rgb(255, 0, 0)
+                        || colour == Color::from_rgb(0, 0, 255);
+                    assert_eq!(
+                        alike,
+                        dark,
+                        "{size}px {colour_type:?} in {colour:?}: covered {} black",
+                        if alike { "as" } else { "otherwise than" }
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod hinting {
     use super::{FontLibrary, TextStyle, Typesetter, glyph_runs};
     use crate::{
