@@ -175,9 +175,6 @@ pub struct Context2D {
     /// that a page of draws in a palette converts each colour once -- see
     /// [`PlacedFill`].
     exact_fill: RefCell<Vec<Option<(FillKey, PlacedFill)>>>,
-    /// The same for text: the last exact colour, the plain colour beside
-    /// it and their dye -- see [`Self::exact_text_paint`].
-    exact_dye: RefCell<Option<(ExactColour, Color4f, SkColorFilter)>>,
     pub state: State,
     stack: Vec<State>,
     /// Parallel to `stack`: whether each saved frame opened a Skia layer
@@ -645,7 +642,6 @@ impl Context2D {
             recorder: RefCell::new(PageRecorder::recording(bounds, dual)),
             exact_shader: RefCell::default(),
             exact_fill: RefCell::new(vec![None; FILLS_KEPT_PER_PAGE]),
-            exact_dye: RefCell::default(),
             path: PathBuilder::new(),
             stack: vec![],
             layers: vec![],
@@ -1006,21 +1002,7 @@ impl Context2D {
                     None => filtered,
                 }
             }
-            None => {
-                let mut held = self.exact_dye.borrow_mut();
-                match &*held {
-                    Some((colour, plain, dye))
-                        if *colour == exact && *plain == opaque =>
-                    {
-                        dye.clone()
-                    }
-                    _ => {
-                        let dye = exact.dye(opaque)?;
-                        *held = Some((exact.clone(), opaque, dye.clone()));
-                        dye
-                    }
-                }
-            }
+            None => exact.dye(opaque)?,
         };
         let mut paint = paint.clone();
         paint.set_shader(shaders::color_in_space(
@@ -6253,6 +6235,120 @@ mod tests {
             ctx.fill_rect(i as f32, 0.0, 1.0, 1.0);
         }
         assert_eq!(FILLS_KEPT.get() - before, 18, "all but the first of each");
+    }
+
+    /// Text in a palette of sixteen colours set in turn, on a Display P3
+    /// float page, reads each colour's dye once however many times it comes
+    /// round, on one canvas and on a second canvas on the same thread.
+    #[test]
+    fn a_text_palette_set_in_turn_reads_each_dye_once() {
+        let colours: Vec<String> = (0..16)
+            .map(|k| {
+                format!(
+                    "color(display-p3 {:.2} 0.4 0.7)",
+                    0.05 + k as f32 * 0.05
+                )
+            })
+            .collect();
+        let draw = |rounds: usize| {
+            let mut canvas = Canvas::with_options(
+                64.0,
+                32.0,
+                CanvasOptions {
+                    gpu: false,
+                    color_space: PixelColorSpace::DisplayP3,
+                    color_type: PixelDepth::F32,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a canvas");
+            let ctx = canvas.context();
+            ctx.set_font_css("16px sans-serif");
+            let before = layer::DYES_READ.get();
+            for colour in colours.iter().cycle().take(16 * rounds) {
+                ctx.set_fill_style_css(colour).expect("a colour");
+                ctx.fill_text("Wg", 4.0, 20.0, None);
+            }
+            layer::DYES_READ.get() - before
+        };
+        let first = draw(3);
+        assert!(first > 0, "the dye is read at all, or this asserts nothing");
+        assert!(first <= 16, "each of 16 colours read once, not {first}");
+        assert_eq!(draw(2), 0, "a second canvas finds them all kept");
+    }
+
+    /// Text drawn with the dyes kept on this thread writes the pixels text
+    /// reading every dye afresh writes, over pages of three kinds drawn in
+    /// turn on one thread: Display P3 and Rec. 2020 at full float, and
+    /// Display P3 in eight bits. Each page is drawn in a colour named in its
+    /// own space with the same components as on the others -- an exact
+    /// colour the same but for its space -- and in sRGB colours, so a dye
+    /// found for the wrong page or the wrong plain colour shows.
+    #[test]
+    fn a_kept_dye_draws_what_a_dye_read_afresh_draws() {
+        let pages = [
+            (PixelColorSpace::DisplayP3, PixelDepth::F32, "display-p3"),
+            (PixelColorSpace::Rec2020, PixelDepth::F32, "rec2020"),
+            (PixelColorSpace::DisplayP3, PixelDepth::Uint8, "display-p3"),
+        ];
+        let scene = |keep: bool| {
+            layer::KEEPS_DYES.set(keep);
+            let shots: Vec<Vec<u8>> = pages
+                .iter()
+                .map(|&(space, depth, name)| {
+                    let mut canvas = Canvas::with_options(
+                        80.0,
+                        24.0,
+                        CanvasOptions {
+                            gpu: false,
+                            color_space: space,
+                            color_type: depth,
+                            ..CanvasOptions::default()
+                        },
+                    )
+                    .expect("a canvas");
+                    let ctx = canvas.context();
+                    ctx.set_font_css("16px sans-serif");
+                    let colours = [
+                        format!("color({name} 0.3 0.6 0.9)"),
+                        "rgb(200 40 120)".to_owned(),
+                        "color(srgb 0.1235 0.5 0.2)".to_owned(),
+                        format!("color({name} 0.05 0.05 0.05)"),
+                    ];
+                    for (i, colour) in
+                        colours.iter().cycle().take(8).enumerate()
+                    {
+                        ctx.set_global_alpha([1.0, 0.6][i / 4]);
+                        ctx.set_fill_style_css(colour).expect("a colour");
+                        ctx.fill_text("Wg", (i * 9) as f32, 18.0, None);
+                    }
+                    ctx.get_image_data(0.0, 0.0, 80.0, 24.0)
+                        .expect("read")
+                        .pixels()
+                        .to_vec()
+                })
+                .collect();
+            layer::KEEPS_DYES.set(true);
+            shots
+        };
+        let read_before = layer::DYES_READ.get();
+        let afresh = scene(false);
+        assert!(
+            layer::DYES_READ.get() > read_before,
+            "the pages read dyes at all, or this asserts nothing"
+        );
+        // Twice kept: the first fills the table, the second draws from it.
+        let _ = scene(true);
+        let read_before = layer::DYES_READ.get();
+        let kept = scene(true);
+        assert_eq!(
+            layer::DYES_READ.get(),
+            read_before,
+            "the second time every dye is found kept"
+        );
+        for (at, (kept, afresh)) in kept.iter().zip(&afresh).enumerate() {
+            assert!(kept == afresh, "page {at}: the same pixels");
+        }
     }
 
     /// A page drawn with what was made of the last flat colour kept writes
