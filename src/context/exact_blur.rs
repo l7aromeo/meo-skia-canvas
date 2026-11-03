@@ -17,6 +17,12 @@
 //! and an FFT convolution from there, which costs the same whatever the
 //! sigma.
 //!
+//! Keep the transposes for a column pass taken tap by tap, too. Gathering
+//! each column from where it lies in the rows instead, with no transpose
+//! and no second buffer, sums the same values in the same order but reads
+//! them a row apart: in release builds a drop shadow's 59 by 56 layer drew
+//! 2 to 4% slower that way, and a blurred 15 by 12 ellipse 11% slower.
+//!
 //! A pass works each line in place, from a copy of it its worker keeps, so
 //! the image and its transpose are the only buffers of its size alive at
 //! once: 32 bytes a pixel in floats.
