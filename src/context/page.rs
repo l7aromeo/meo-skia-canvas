@@ -62,7 +62,7 @@ use crate::{
     gpu::{
         RenderingEngine,
         completion::{
-            Checked, DRAW_ATTEMPTS, discarded, draws_ran, read_checked,
+            Checked, DRAW_ATTEMPTS, Rows, discarded, draws_ran, read_checked,
         },
         owner, pacing,
     },
@@ -2576,7 +2576,7 @@ fn unpremultiply_table() -> &'static [[u8; 256]; 256] {
 /// against 746 to 777; at 800x900, 720,000, threads take 937 to 988 against
 /// 1109 to 1138, and a full read 1270 to 1317 against 1617 to 1638. So the
 /// line is drawn between those two sizes, at 2^19.
-const PARALLEL_UNPREMULTIPLY_PIXELS: usize = 1 << 19;
+pub(crate) const PARALLEL_UNPREMULTIPLY_PIXELS: usize = 1 << 19;
 
 /// Unpremultiplies one row of eight-bit pixels in place through
 /// [`unpremultiply_table`], alpha fourth.
@@ -2596,6 +2596,32 @@ fn unpremultiply_row(row: &mut [u8]) {
     }
 }
 
+/// [`unpremultiply_row`] from `from` into `to`, a row of the same length:
+/// the copy and the conversion in one pass.
+fn unpremultiply_into(from: &[u8], to: &mut [u8]) {
+    let table = unpremultiply_table();
+    let pairs = to
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(from.as_chunks::<4>().0);
+    for (out, pixel) in pairs {
+        let alpha = pixel[3];
+        *out = match alpha {
+            0 | u8::MAX => *pixel,
+            _ => {
+                let divide = &table[usize::from(alpha)];
+                [
+                    divide[usize::from(pixel[0])],
+                    divide[usize::from(pixel[1])],
+                    divide[usize::from(pixel[2])],
+                    alpha,
+                ]
+            }
+        };
+    }
+}
+
 /// Reads `surface` into `pixels` as `info` describes, with any conversion
 /// made on the CPU.
 ///
@@ -2609,15 +2635,19 @@ fn unpremultiply_row(row: &mut [u8]) {
 ///
 /// A read that differs from the surface only in wanting unpremultiplied
 /// pixels, which is what `getImageData` asks of an eight-bit canvas, reads
-/// premultiplied pixels into the destination and unpremultiplies them there
-/// through [`unpremultiply_table`]; anything else goes through Skia's CPU
-/// conversion from a copy. Most of the cost is the GPU's: on Apple silicon a
-/// whole read of a 1200x900 page after a draw takes about 1.1 milliseconds,
-/// and the table adds about 0.35 nanoseconds a pixel on one thread -- 170
-/// microseconds for 800x600 -- shared across threads from
-/// [`PARALLEL_UNPREMULTIPLY_PIXELS`]. The same arithmetic worked lane by lane
-/// in `f32` gives the table's bytes for all 65,536 pairs and took 3.5 times
-/// as long: its divisions cost more than the table's lookups.
+/// premultiplied pixels and unpremultiplies them through
+/// [`unpremultiply_table`] as they are written: from the buffer the GPU's
+/// copy lands in straight into the destination where the read is
+/// [`read_checked`]'s, and in the destination after the surface writes it
+/// otherwise. Anything else goes through Skia's CPU conversion from a copy.
+/// On Apple silicon a whole read of a translucent 1200x900 page after a draw
+/// takes 916 to 950 microseconds in release; written as a copy and then a
+/// second pass over the destination it took 1117 to 1147. The table adds about
+/// 0.35 nanoseconds a pixel on one thread -- 170 microseconds for 800x600 --
+/// shared across threads from [`PARALLEL_UNPREMULTIPLY_PIXELS`]. The same
+/// arithmetic worked lane by lane in `f32` gives the table's bytes for all
+/// 65,536 pairs and took 3.5 times as long: its divisions cost more than the
+/// table's lookups.
 fn read_converted_on_cpu(
     surface: &mut Surface,
     info: &ImageInfo,
@@ -2625,9 +2655,21 @@ fn read_converted_on_cpu(
     row_bytes: usize,
     at: (i32, i32),
 ) -> bool {
-    read_converted(surface, info, pixels, row_bytes, at, |s, i, p, r, a| {
-        s.read_pixels(i, p, r, a)
-    })
+    read_converted(
+        surface,
+        info,
+        pixels,
+        row_bytes,
+        at,
+        |s, i, p, r, a, rows| {
+            let read = s.read_pixels(i, p, r, a);
+            if let Some(rows) = rows.filter(|_| read) {
+                let height = i.height() as usize;
+                rows.convert_in_place(p, r, i.min_row_bytes(), height);
+            }
+            read
+        },
+    )
 }
 
 /// [`read_converted_on_cpu`] with its read made by [`read_checked`]: on the
@@ -2647,7 +2689,7 @@ fn read_converted_checked(
         pixels,
         row_bytes,
         at,
-        |s, i, p, r, a| match read_checked(s, i, p, r, a, page) {
+        |s, i, p, r, a, rows| match read_checked(s, i, p, r, a, page, rows) {
             Checked::Read(read) => read,
             other => {
                 checked = Some(other);
@@ -2660,7 +2702,8 @@ fn read_converted_checked(
 
 /// [`read_converted_on_cpu`], with the surface read by `read`, which is
 /// handed the surface, the layout to read in, the destination, its row
-/// bytes and the origin, and is called once.
+/// bytes, the origin and how the rows are to be converted as they are
+/// written, and is called once.
 fn read_converted(
     surface: &mut Surface,
     info: &ImageInfo,
@@ -2673,14 +2716,15 @@ fn read_converted(
         &mut [u8],
         usize,
         (i32, i32),
+        Option<Rows>,
     ) -> bool,
 ) -> bool {
     if surface.recording_context().is_none() {
-        return read(surface, info, pixels, row_bytes, at);
+        return read(surface, info, pixels, row_bytes, at, None);
     }
     let native = surface.image_info().with_dimensions(info.dimensions());
     if &native == info {
-        return read(surface, info, pixels, row_bytes, at);
+        return read(surface, info, pixels, row_bytes, at, None);
     }
     let eight_bit = |kind: ColorType| {
         matches!(kind, ColorType::RGBA8888 | ColorType::BGRA8888)
@@ -2691,30 +2735,30 @@ fn read_converted(
         && native.alpha_type() == AlphaType::Premul
         && info.alpha_type() == AlphaType::Unpremul;
     if only_unpremultiplied {
-        // Premultiplied straight into the destination, in its own byte
-        // order, and unpremultiplied where it lies: one pass, no copy.
+        // Premultiplied, in the destination's own byte order, and
+        // unpremultiplied as each row is written: where the GPU's copy comes
+        // back in a buffer of its own, one pass from it into the destination;
+        // where the surface writes the destination itself, one pass over the
+        // destination after.
         let premultiplied = info.with_alpha_type(AlphaType::Premul);
-        if !read(surface, &premultiplied, pixels, row_bytes, at) {
-            return false;
-        }
-        let width = info.min_row_bytes();
-        let height = info.height() as usize;
-        let area = info.width() as usize * height;
-        match area >= PARALLEL_UNPREMULTIPLY_PIXELS {
-            true => pixels
-                .par_chunks_mut(row_bytes)
-                .take(height)
-                .for_each(|row| unpremultiply_row(&mut row[..width])),
-            false => pixels
-                .chunks_mut(row_bytes)
-                .take(height)
-                .for_each(|row| unpremultiply_row(&mut row[..width])),
-        }
-        return true;
+        let area = info.width() as usize * info.height() as usize;
+        let rows = Rows {
+            into: unpremultiply_into,
+            in_place: unpremultiply_row,
+            parallel: area >= PARALLEL_UNPREMULTIPLY_PIXELS,
+        };
+        return read(
+            surface,
+            &premultiplied,
+            pixels,
+            row_bytes,
+            at,
+            Some(rows),
+        );
     }
     let native_row_bytes = native.min_row_bytes();
     let mut held = vec![0u8; native.compute_byte_size(native_row_bytes)];
-    read(surface, &native, &mut held, native_row_bytes, at)
+    read(surface, &native, &mut held, native_row_bytes, at, None)
         && Pixmap::new(&native, &mut held, native_row_bytes).is_some_and(
             |pixmap| pixmap.read_pixels(info, pixels, row_bytes, (0, 0)),
         )
@@ -6869,6 +6913,24 @@ impl ExportOptions {
 #[cfg(test)]
 mod unpremultiply_tests {
     use super::*;
+
+    #[test]
+    fn unpremultiplying_into_a_row_matches_unpremultiplying_in_place() {
+        // Every alpha against every channel value, each channel of a pixel
+        // different, so that an order or a channel mixed up shows.
+        let row: Vec<u8> = (0..256 * 256)
+            .flat_map(|i| {
+                let (alpha, channel) = ((i / 256) as u8, (i % 256) as u8);
+                [channel, u8::MAX - channel, channel / 2, alpha]
+            })
+            .collect();
+        let mut in_place = row.clone();
+        unpremultiply_row(&mut in_place);
+        let mut into = vec![0u8; row.len()];
+        unpremultiply_into(&row, &mut into);
+        assert!(in_place == into);
+        assert!(in_place != row, "nothing was unpremultiplied");
+    }
 
     #[test]
     fn unpremultiplying_matches_the_raster_pipeline() {

@@ -66,6 +66,8 @@
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 use std::{cell::RefCell, rc::Rc};
 
+use rayon::prelude::*;
+
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 use skia_safe::{
     IRect,
@@ -159,6 +161,51 @@ pub(crate) enum Checked {
     Declined,
 }
 
+/// How a read's rows are written into the destination: converted on the way
+/// rather than copied, so that a conversion made on the CPU is one pass over
+/// the rows rather than a copy and then a pass.
+#[derive(Clone, Copy)]
+pub(crate) struct Rows {
+    /// Writes a row as read into a destination row of the same length.
+    #[cfg_attr(
+        not(any(feature = "metal", feature = "vulkan")),
+        expect(
+            dead_code,
+            reason = "only a GPU read lands in a buffer of its own"
+        )
+    )]
+    pub(crate) into: fn(&[u8], &mut [u8]),
+    /// Converts a row already in the destination where it lies, for a read
+    /// that writes the destination itself.
+    pub(crate) in_place: fn(&mut [u8]),
+    /// Whether the rows are shared across threads.
+    pub(crate) parallel: bool,
+}
+
+impl Rows {
+    /// Converts `height` rows of `width` bytes of `pixels`, `row_bytes`
+    /// apart, where they lie.
+    pub(crate) fn convert_in_place(
+        self,
+        pixels: &mut [u8],
+        row_bytes: usize,
+        width: usize,
+        height: usize,
+    ) {
+        let in_place = self.in_place;
+        match self.parallel {
+            true => pixels
+                .par_chunks_mut(row_bytes)
+                .take(height)
+                .for_each(|row| in_place(&mut row[..width])),
+            false => pixels
+                .chunks_mut(row_bytes)
+                .take(height)
+                .for_each(|row| in_place(&mut row[..width])),
+        }
+    }
+}
+
 /// Reads `info`'s rectangle at `at` of `surface` into `pixels`, `row_bytes`
 /// a row, with the GPU's draws confirmed by the read's own wait rather than
 /// one in front of it.
@@ -168,7 +215,8 @@ pub(crate) enum Checked {
 /// committed and waited on with `submit(SyncCpu::Yes)`, whose answer is its
 /// status: one wait, and an answer for the copy as well as the draws. A
 /// raster surface reads at once and has nothing to confirm. `page` is the
-/// page the draws belong to, which only the test seam reads.
+/// page the draws belong to, which only the test seam reads. `rows`, where
+/// given, converts each row as it is written.
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 pub(crate) fn read_checked(
     surface: &mut Surface,
@@ -177,9 +225,12 @@ pub(crate) fn read_checked(
     row_bytes: usize,
     at: (i32, i32),
     page: usize,
+    rows: Option<Rows>,
 ) -> Checked {
     let Some(mut context) = surface.direct_context() else {
-        return Checked::Read(surface.read_pixels(info, pixels, row_bytes, at));
+        return Checked::Read(read_now(
+            surface, info, pixels, row_bytes, at, rows,
+        ));
     };
     // The outer `None` until Skia calls back; the inner one where it declined.
     let answer: Rc<RefCell<Option<Option<AsyncReadResult>>>> = Rc::default();
@@ -209,7 +260,7 @@ pub(crate) fn read_checked(
     }
     match answer.borrow_mut().take() {
         Some(Some(read)) => {
-            Checked::Read(copy_rows(&read, info, pixels, row_bytes))
+            Checked::Read(copy_rows(&read, info, pixels, row_bytes, rows))
         }
         _ => {
             #[cfg(test)]
@@ -237,19 +288,40 @@ pub(crate) fn read_checked(
     row_bytes: usize,
     at: (i32, i32),
     _page: usize,
+    rows: Option<Rows>,
 ) -> Checked {
-    Checked::Read(surface.read_pixels(info, pixels, row_bytes, at))
+    Checked::Read(read_now(surface, info, pixels, row_bytes, at, rows))
 }
 
-/// Copies the one plane of `read`, `info`'s rows, into `pixels` at
-/// `row_bytes` a row. `false` where it is not one plane of at least `info`'s
-/// width, or `pixels` cannot hold it.
+/// A read with nothing to confirm, made by the surface into `pixels` and
+/// then converted by `rows` where they lie.
+fn read_now(
+    surface: &mut Surface,
+    info: &ImageInfo,
+    pixels: &mut [u8],
+    row_bytes: usize,
+    at: (i32, i32),
+    rows: Option<Rows>,
+) -> bool {
+    let read = surface.read_pixels(info, pixels, row_bytes, at);
+    if let Some(rows) = rows.filter(|_| read) {
+        let height = info.height() as usize;
+        rows.convert_in_place(pixels, row_bytes, info.min_row_bytes(), height);
+    }
+    read
+}
+
+/// Writes the one plane of `read`, `info`'s rows, into `pixels` at
+/// `row_bytes` a row: copied, or converted by `rows` on the way. `false` where
+/// it is not one plane of at least `info`'s width, or `pixels` cannot hold
+/// it.
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 fn copy_rows(
     read: &AsyncReadResult,
     info: &ImageInfo,
     pixels: &mut [u8],
     row_bytes: usize,
+    rows: Option<Rows>,
 ) -> bool {
     let width = info.min_row_bytes();
     let height = info.height() as usize;
@@ -267,16 +339,29 @@ fn copy_rows(
     // the `info` it was asked for, valid while `read` lives -- the borrow
     // here -- and the slice ends at the last row's `width` bytes, no more than
     // its `stride`.
-    let rows = unsafe {
+    let plane = unsafe {
         std::slice::from_raw_parts(
             read.data(0).cast::<u8>(),
             (height - 1) * stride + width,
         )
     };
-    pixels
-        .chunks_mut(row_bytes)
-        .zip(rows.chunks(stride))
-        .for_each(|(to, from)| to[..width].copy_from_slice(&from[..width]));
+    let write = rows.map_or(
+        (|from, to| to.copy_from_slice(from)) as fn(&[u8], &mut [u8]),
+        |rows| rows.into,
+    );
+    let pairs = |(to, from): (&mut [u8], &[u8])| {
+        write(&from[..width], &mut to[..width])
+    };
+    match rows.is_some_and(|rows| rows.parallel) {
+        true => pixels
+            .par_chunks_mut(row_bytes)
+            .zip(plane.par_chunks(stride))
+            .for_each(pairs),
+        false => pixels
+            .chunks_mut(row_bytes)
+            .zip(plane.chunks(stride))
+            .for_each(pairs),
+    }
     true
 }
 
@@ -380,6 +465,7 @@ mod tests {
         Canvas, CanvasOptions, Context2D, EncodeOptions, Error, FillRule,
         ImageFormat, PixelColorSpace, PixelDepth, PixelExportOptions,
         RgbaLinear, canvas::EngineKind,
+        context::page::PARALLEL_UNPREMULTIPLY_PIXELS,
     };
 
     /// A canvas with something on it, on the GPU, and the id of its page --
@@ -607,6 +693,40 @@ mod tests {
         }
         // Each space's eight-bit page, read as eight bits and as floats.
         assert_eq!(checked, 8 * 2 * 3 * 2);
+    }
+
+    /// A read large enough to be unpremultiplied across threads, as it is
+    /// written from the GPU's copy, lands what a repeat of it does.
+    #[test]
+    fn a_large_read_is_unpremultiplied_as_its_repeat_is() {
+        let (width, height) = (1024.0, 600.0);
+        assert!(
+            (width * height) as usize >= PARALLEL_UNPREMULTIPLY_PIXELS,
+            "the read is not large enough to be shared across threads"
+        );
+        let mut canvas = Canvas::new(width, height);
+        if canvas.engine_kind() != EngineKind::Gpu {
+            return;
+        }
+        let ctx = canvas.context();
+        ctx.set_fill_style(RgbaLinear::from_srgb8(204, 77, 26, 0.45));
+        ctx.fill_rect(20.0, 5.0, 900.0, 550.0);
+        ctx.set_fill_style(RgbaLinear::from_srgb8(26, 128, 230, 0.7));
+        ctx.begin_path();
+        ctx.arc(500.0, 300.0, 210.3, 0.0, 7.0, false)
+            .expect("an arc");
+        ctx.fill(FillRule::NonZero);
+        let before = DECLINED.get();
+        let first =
+            ctx.get_image_data(0.0, 0.0, width, height).expect("a read");
+        assert_eq!(DECLINED.get(), before, "Skia declined the read");
+        let again = ctx
+            .get_image_data(0.0, 0.0, width, height)
+            .expect("a repeat");
+        assert!(
+            first.pixels() == again.pixels(),
+            "the read differs from a repeat"
+        );
     }
 
     #[test]
