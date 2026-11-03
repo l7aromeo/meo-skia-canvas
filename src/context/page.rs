@@ -2566,17 +2566,18 @@ fn unpremultiply_table() -> &'static [[u8; 256]; 256] {
 }
 
 /// The read, in pixels, from which [`read_converted_on_cpu`] unpremultiplies
-/// its rows across threads rather than on the calling one.
+/// its rows across threads rather than on the calling one -- as they are
+/// written from the GPU's copy, or where they lie.
 ///
-/// Measured in release on Apple silicon, first GPU reads of a 1200x900 page,
-/// medians of three rounds: handing rows to the pool costs about 100
-/// microseconds a read -- a 16x16 read takes 135 to 156 on one thread and
-/// 237 to 265 across them -- and the threads earn it back only on the
-/// largest reads. At 600x600, 360,000 pixels, the two are level, 682 to 782
-/// against 746 to 777; at 800x900, 720,000, threads take 937 to 988 against
-/// 1109 to 1138, and a full read 1270 to 1317 against 1617 to 1638. So the
-/// line is drawn between those two sizes, at 2^19.
-pub(crate) const PARALLEL_UNPREMULTIPLY_PIXELS: usize = 1 << 19;
+/// Measured in release on Apple silicon, whole GPU reads of a translucent
+/// page after a draw, the threads against one thread, three passes, each the
+/// median of eleven rounds: at 362x362, 131,044 pixels, the pool's handover
+/// costs more than it saves, 465 to 469 microseconds against 386 to 401; at
+/// 512x512, 2^18, the two are level, 510 to 519 against 514 to 591; from
+/// 600x600 the threads win every pass, 571 to 596 against 671 to 710, and at
+/// 1024x1024 843 to 862 against 1502 to 1556. So the line is drawn at the
+/// level point, 2^18.
+pub(crate) const PARALLEL_UNPREMULTIPLY_PIXELS: usize = 1 << 18;
 
 /// Unpremultiplies one row of eight-bit pixels in place through
 /// [`unpremultiply_table`], alpha fourth.
