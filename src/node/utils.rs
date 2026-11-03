@@ -18,7 +18,7 @@ mod enclosure;
 // how a negative component extends through zero, and nothing would check
 // that it did.
 use crate::{
-    cache_map::CacheHasher,
+    cache_map::{CacheHasher, KeptSets},
     color::{
         RgbaLinear, linear_to_srgb, linear_to_srgb_f64, srgb_to_linear,
         srgb_to_linear_f64,
@@ -3519,10 +3519,13 @@ pub fn css_to_declared(css: &str) -> Option<(Color4f, ColorSpace, Declared)> {
 const DECLARATION_SETS: usize = 512;
 const DECLARATION_WAYS: usize = 4;
 
-const _: () = assert!(DECLARATION_SETS.is_power_of_two());
-
 /// A colour's text and what [`css_declaration`] read it as.
-type KeptDeclaration = (Box<str>, (Color4f, ColorSpace, Declaration));
+type KeptDeclarations = KeptSets<
+    Box<str>,
+    (Color4f, ColorSpace, Declaration),
+    DECLARATION_SETS,
+    DECLARATION_WAYS,
+>;
 
 #[cfg(test)]
 thread_local! {
@@ -3532,12 +3535,9 @@ thread_local! {
 }
 
 thread_local! {
-    /// The colours this thread has read, and the hasher that files them: a
-    /// set's ways side by side, the one last filed first.
-    static DECLARATIONS: (CacheHasher, RefCell<Vec<Option<KeptDeclaration>>>) = (
-        CacheHasher::default(),
-        RefCell::new(vec![None; DECLARATION_SETS * DECLARATION_WAYS]),
-    );
+    /// The colours this thread has read, and the hasher that files them.
+    static DECLARATIONS: (CacheHasher, RefCell<KeptDeclarations>) =
+        (CacheHasher::default(), RefCell::new(KeptSets::new()));
 }
 
 /// [`css_to_declared`] as a style setter takes it: the colour, its space and
@@ -3551,24 +3551,15 @@ pub fn css_declaration(
     css: &str,
 ) -> Option<(Color4f, ColorSpace, Declaration)> {
     DECLARATIONS.with(|(hasher, kept)| {
-        let set = hasher.hash_one(css) as usize & (DECLARATION_SETS - 1);
-        let ways = set * DECLARATION_WAYS..(set + 1) * DECLARATION_WAYS;
-        if let Some((_, read)) = kept.borrow()[ways.clone()]
-            .iter()
-            .flatten()
-            .find(|(text, _)| **text == *css)
-        {
+        let hash = hasher.hash_one(css);
+        if let Some(read) = kept.borrow().get(hash, css) {
             return Some(read.clone());
         }
         #[cfg(test)]
         DECLARATIONS_READ.set(DECLARATIONS_READ.get() + 1);
         let (color, space, declared) = css_to_declared(css)?;
         let read = (color, space, Declaration::new(declared));
-        // Filed first, the oldest of the set falling off the end.
-        let mut kept = kept.borrow_mut();
-        let set = &mut kept[ways];
-        set.rotate_right(1);
-        set[0] = Some((css.into(), read.clone()));
+        kept.borrow_mut().file(hash, css.into(), read.clone());
         Some(read)
     })
 }
