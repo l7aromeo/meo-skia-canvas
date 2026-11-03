@@ -61,7 +61,9 @@ use crate::{
     },
     gpu::{
         RenderingEngine,
-        completion::{DRAW_ATTEMPTS, discarded, draws_ran},
+        completion::{
+            Checked, DRAW_ATTEMPTS, discarded, draws_ran, read_checked,
+        },
         owner, pacing,
     },
     node::{
@@ -1707,32 +1709,30 @@ impl PageRecorder {
         }
 
         let page = self.page();
-        let page_size = page.scaled_dimensions(opts.density);
 
         // Small reads are served by the squares they touch, which is the
         // whole point: a hit test asked for sixty-four pixels and used to
         // composite and keep a megapixel. Anything wider than the grid is
         // worth is served by the page, as before.
-        if self.surface.try_tiled(&page, &opts, &engine, crop)? {
-            let served = self.surface.read_tiled(
-                &dst_info,
-                crop,
-                &mut dst_buffer,
-                page_size,
-            );
-            if served {
-                return Ok(dst_buffer);
-            }
-        }
-
-        self.surface.confirmed_update(&page, &opts, &engine)?;
-
-        match self.surface.copy_pixels(
+        if self.surface.read_tiled(
+            &page,
+            &opts,
+            &engine,
             &dst_info,
             crop,
             &mut dst_buffer,
+        )? {
+            return Ok(dst_buffer);
+        }
+
+        match self.surface.confirmed_read(
+            &page,
+            &opts,
             &engine,
-        ) {
+            &dst_info,
+            crop,
+            &mut dst_buffer,
+        )? {
             true => Ok(dst_buffer),
             false => Err(format!(
                 "Could not get image data (format: {:?})",
@@ -2446,6 +2446,33 @@ struct Tile {
 }
 
 impl Tile {
+    /// The first read of this tile since it was drawn into, made by
+    /// [`read_checked`] so that its wait confirms the draws, and marking the
+    /// tile confirmed where it did. What follows it at the same state is a
+    /// repeat, which [`Self::copy_pixels`] serves.
+    fn read_confirmed(
+        &mut self,
+        info: &ImageInfo,
+        pixels: &mut [u8],
+        row_bytes: usize,
+        at: (i32, i32),
+        page: usize,
+    ) -> Checked {
+        let checked = read_converted_checked(
+            &mut self.surface,
+            info,
+            pixels,
+            row_bytes,
+            at,
+            page,
+        );
+        if let Checked::Read(_) = checked {
+            self.confirmed = true;
+            self.served_at = Some(self.depth);
+        }
+        checked
+    }
+
     /// Reads a rectangle of this tile, from its CPU copy where there is one.
     ///
     /// The page-wide read in [`RecordingSurface::copy_pixels`] spelled out
@@ -2584,13 +2611,13 @@ fn unpremultiply_row(row: &mut [u8]) {
 /// pixels, which is what `getImageData` asks of an eight-bit canvas, reads
 /// premultiplied pixels into the destination and unpremultiplies them there
 /// through [`unpremultiply_table`]; anything else goes through Skia's CPU
-/// conversion from a copy. The cost is the GPU's: on Apple silicon a
-/// premultiplied read of a 1200x900 page costs about 0.95 milliseconds, where
-/// the GPU's own unpremultiplying read costs 0.78 and rounds down, and the
-/// table adds about 0.55 nanoseconds a pixel on one thread -- shared across
-/// threads from [`PARALLEL_UNPREMULTIPLY_PIXELS`], which brings the whole
-/// read to about 1.3 milliseconds. An 8x8 read costs about 130 microseconds
-/// against that conversion's 200.
+/// conversion from a copy. Most of the cost is the GPU's: on Apple silicon a
+/// whole read of a 1200x900 page after a draw takes about 1.1 milliseconds,
+/// and the table adds about 0.35 nanoseconds a pixel on one thread -- 170
+/// microseconds for 800x600 -- shared across threads from
+/// [`PARALLEL_UNPREMULTIPLY_PIXELS`]. The same arithmetic worked lane by lane
+/// in `f32` gives the table's bytes for all 65,536 pairs and took 3.5 times
+/// as long: its divisions cost more than the table's lookups.
 fn read_converted_on_cpu(
     surface: &mut Surface,
     info: &ImageInfo,
@@ -2598,12 +2625,62 @@ fn read_converted_on_cpu(
     row_bytes: usize,
     at: (i32, i32),
 ) -> bool {
+    read_converted(surface, info, pixels, row_bytes, at, |s, i, p, r, a| {
+        s.read_pixels(i, p, r, a)
+    })
+}
+
+/// [`read_converted_on_cpu`] with its read made by [`read_checked`]: on the
+/// GPU, the draws before it and the copy confirmed by the read's own wait.
+fn read_converted_checked(
+    surface: &mut Surface,
+    info: &ImageInfo,
+    pixels: &mut [u8],
+    row_bytes: usize,
+    at: (i32, i32),
+    page: usize,
+) -> Checked {
+    let mut checked = None;
+    let read = read_converted(
+        surface,
+        info,
+        pixels,
+        row_bytes,
+        at,
+        |s, i, p, r, a| match read_checked(s, i, p, r, a, page) {
+            Checked::Read(read) => read,
+            other => {
+                checked = Some(other);
+                false
+            }
+        },
+    );
+    checked.unwrap_or(Checked::Read(read))
+}
+
+/// [`read_converted_on_cpu`], with the surface read by `read`, which is
+/// handed the surface, the layout to read in, the destination, its row
+/// bytes and the origin, and is called once.
+fn read_converted(
+    surface: &mut Surface,
+    info: &ImageInfo,
+    pixels: &mut [u8],
+    row_bytes: usize,
+    at: (i32, i32),
+    mut read: impl FnMut(
+        &mut Surface,
+        &ImageInfo,
+        &mut [u8],
+        usize,
+        (i32, i32),
+    ) -> bool,
+) -> bool {
     if surface.recording_context().is_none() {
-        return surface.read_pixels(info, pixels, row_bytes, at);
+        return read(surface, info, pixels, row_bytes, at);
     }
     let native = surface.image_info().with_dimensions(info.dimensions());
     if &native == info {
-        return surface.read_pixels(info, pixels, row_bytes, at);
+        return read(surface, info, pixels, row_bytes, at);
     }
     let eight_bit = |kind: ColorType| {
         matches!(kind, ColorType::RGBA8888 | ColorType::BGRA8888)
@@ -2617,7 +2694,7 @@ fn read_converted_on_cpu(
         // Premultiplied straight into the destination, in its own byte
         // order, and unpremultiplied where it lies: one pass, no copy.
         let premultiplied = info.with_alpha_type(AlphaType::Premul);
-        if !surface.read_pixels(&premultiplied, pixels, row_bytes, at) {
+        if !read(surface, &premultiplied, pixels, row_bytes, at) {
             return false;
         }
         let width = info.min_row_bytes();
@@ -2637,7 +2714,7 @@ fn read_converted_on_cpu(
     }
     let native_row_bytes = native.min_row_bytes();
     let mut held = vec![0u8; native.compute_byte_size(native_row_bytes)];
-    surface.read_pixels(&native, &mut held, native_row_bytes, at)
+    read(surface, &native, &mut held, native_row_bytes, at)
         && Pixmap::new(&native, &mut held, native_row_bytes).is_some_and(
             |pixmap| pixmap.read_pixels(info, pixels, row_bytes, (0, 0)),
         )
@@ -3139,7 +3216,10 @@ impl RecordingSurface {
         }
     }
 
-    /// Reads a rectangle out of the grid, one tile at a time.
+    /// Reads a rectangle out of the grid, one tile at a time: a tile drawn
+    /// into since its last confirmation through [`Tile::read_confirmed`],
+    /// and any other as [`Tile::copy_pixels`] reads it. `page` is the page
+    /// the draws belong to, which only the test seam reads.
     ///
     /// Each tile writes its own slice of the destination at the full row
     /// stride, so a read spanning four tiles lands as one image rather than
@@ -3151,7 +3231,8 @@ impl RecordingSurface {
         pixels: &mut [u8],
         page_size: ISize,
         wanted: &[(i32, i32)],
-    ) -> bool {
+        page: usize,
+    ) -> Checked {
         let row_bytes = dst_info.min_row_bytes();
         let pixel = dst_info.bytes_per_pixel();
 
@@ -3161,34 +3242,51 @@ impl RecordingSurface {
                 continue;
             };
             let Some(tile) = self.tiles.get_mut(origin) else {
-                return false;
+                return Checked::Read(false);
             };
 
             let info = dst_info.with_dimensions((part.width(), part.height()));
             let at = (part.y() - src.y()) as usize * row_bytes
                 + (part.x() - src.x()) as usize * pixel;
             let inside = (part.x() - origin.0, part.y() - origin.1);
-            let read =
-                tile.copy_pixels(&info, &mut pixels[at..], row_bytes, inside);
-            if !read {
-                return false;
+            let read = match tile.confirmed {
+                true => Checked::Read(tile.copy_pixels(
+                    &info,
+                    &mut pixels[at..],
+                    row_bytes,
+                    inside,
+                )),
+                false => tile.read_confirmed(
+                    &info,
+                    &mut pixels[at..],
+                    row_bytes,
+                    inside,
+                    page,
+                ),
+            };
+            if read != Checked::Read(true) {
+                return read;
             }
         }
-        true
+        Checked::Read(true)
     }
 
-    /// Whether the grid can serve this read, preparing it if so.
+    /// Serves `crop` of `page` out of the grid into `pixels` as `dst_info`
+    /// lays it out, preparing the tiles it touches.
     ///
     /// False when the page surface already holds a current composite -- it
     /// answers the read for nothing -- when the rectangle is wider than the
-    /// grid is worth, or when a tile could not be allocated. Every one of
-    /// those falls back to the page rather than failing.
-    pub fn try_tiled(
+    /// grid is worth, when a tile could not be allocated, or when a tile
+    /// refused the read. Every one of those falls back to the page rather
+    /// than failing.
+    pub fn read_tiled(
         &mut self,
         page: &Page,
         opts: &ExportOptions,
         engine: &RenderingEngine,
+        dst_info: &ImageInfo,
         crop: IRect,
+        pixels: &mut [u8],
     ) -> Result<bool, String> {
         if self.is_config_stale(opts)
             || self.gpu != Some(matches!(engine, RenderingEngine::GPU))
@@ -3218,8 +3316,9 @@ impl RecordingSurface {
             return Ok(false);
         }
 
-        // The tiles share this thread's context, so one wait confirms every
-        // one just drawn. A failed wait leaves them holding anything, so they
+        // A tile drawn into since its last confirmation is read by
+        // `read_checked`, whose one wait confirms the draws and the copy
+        // together. A failed wait leaves the tiles holding anything, so they
         // are dropped and drawn again from nothing. See
         // `crate::gpu::completion`.
         //
@@ -3232,37 +3331,37 @@ impl RecordingSurface {
             if !self.refresh_tiles(&wanted, page, opts, engine) {
                 return Ok(false);
             }
-            let confirmed = wanted.iter().all(|origin| {
-                self.tiles.get(origin).is_some_and(|tile| tile.confirmed)
-            });
-            let ran = confirmed
-                || wanted
-                    .first()
-                    .and_then(|origin| self.tiles.get_mut(origin))
-                    .is_none_or(|tile| draws_ran(&mut tile.surface, page.id));
-            if ran {
-                for origin in &wanted {
-                    if let Some(tile) = self.tiles.get_mut(origin) {
-                        tile.confirmed = true;
+            let checked = self.read_from_tiles(
+                dst_info, crop, pixels, page_size, &wanted, page.id,
+            );
+            match checked {
+                Checked::Read(served) => return Ok(served),
+                // The tiles share this thread's context, so one wait
+                // confirms every one just drawn.
+                Checked::Declined => {
+                    let ran = wanted
+                        .first()
+                        .and_then(|origin| self.tiles.get_mut(origin))
+                        .is_none_or(|tile| {
+                            draws_ran(&mut tile.surface, page.id)
+                        });
+                    if ran {
+                        for origin in &wanted {
+                            if let Some(tile) = self.tiles.get_mut(origin) {
+                                tile.confirmed = true;
+                            }
+                        }
+                        let served = self.read_from_tiles(
+                            dst_info, crop, pixels, page_size, &wanted, page.id,
+                        );
+                        return Ok(served == Checked::Read(true));
                     }
                 }
-                return Ok(true);
+                Checked::Discarded => {}
             }
             self.tiles.clear();
         }
         Err(discarded("drawing tiles for a read"))
-    }
-
-    /// Serves a read out of the grid prepared by [`Self::try_tiled`].
-    pub fn read_tiled(
-        &mut self,
-        dst_info: &ImageInfo,
-        src: IRect,
-        pixels: &mut [u8],
-        page_size: ISize,
-    ) -> bool {
-        let wanted = Self::tiles_covering(src, page_size);
-        self.read_from_tiles(dst_info, src, pixels, page_size, &wanted)
     }
 
     fn is_surface_stale(
@@ -3308,15 +3407,103 @@ impl RecordingSurface {
             if ran {
                 return Ok(());
             }
-            // What the surface holds is unknown, so start it again: no
-            // surface means `update` allocates one and replays every layer.
-            self.surface = None;
-            self.raster = None;
-            self.served_at = None;
-            self.depth = 0;
-            self.layers.clear();
+            self.restart();
         }
         Err(discarded("drawing the page for a read"))
+    }
+
+    /// Drops what the surface holds, which a discarded draw leaves unknown:
+    /// no surface means [`Self::update`] allocates one and replays every
+    /// layer.
+    fn restart(&mut self) {
+        self.surface = None;
+        self.raster = None;
+        self.served_at = None;
+        self.depth = 0;
+        self.layers.clear();
+    }
+
+    /// [`Self::update`] for `page`, then `src` of it read into `pixels` as
+    /// `dst_info` lays it out, with the draws confirmed by the read's own
+    /// wait -- see [`read_checked`] -- rather than by one in front of it:
+    /// drawn again on a fresh surface if the GPU discarded them, and an error
+    /// if that fails too. Where Skia will not read that way they are
+    /// confirmed as [`Self::confirmed_update`] confirms them, and read by
+    /// [`Self::copy_pixels`]. `false` where the read itself is refused.
+    pub fn confirmed_read(
+        &mut self,
+        page: &Page,
+        opts: &ExportOptions,
+        engine: &RenderingEngine,
+        dst_info: &ImageInfo,
+        src: IRect,
+        pixels: &mut [u8],
+    ) -> Result<bool, String> {
+        for _ in 0..DRAW_ATTEMPTS {
+            self.update(page, opts, engine);
+            match self.checked_pixels(dst_info, src, pixels, engine, page.id) {
+                Checked::Read(read) => return Ok(read),
+                Checked::Declined => {
+                    let ran = self
+                        .surface
+                        .as_mut()
+                        .is_none_or(|surface| draws_ran(surface, page.id));
+                    if ran {
+                        return Ok(
+                            self.copy_pixels(dst_info, src, pixels, engine)
+                        );
+                    }
+                }
+                Checked::Discarded => {}
+            }
+            self.restart();
+        }
+        Err(discarded("drawing the page for a read"))
+    }
+
+    /// [`Self::copy_pixels`] where the read is the first of the surface at
+    /// its state on the GPU: that one goes to the surface, which is where
+    /// draws not yet confirmed are, and is made by [`read_checked`]. Every
+    /// other read is one `copy_pixels` makes without the GPU's draws in
+    /// question -- a current CPU copy, a repeat read, which follows a
+    /// confirmed one at the same state, or a raster surface -- and takes it.
+    fn checked_pixels(
+        &mut self,
+        dst_info: &ImageInfo,
+        src: IRect,
+        pixels: &mut [u8],
+        engine: &RenderingEngine,
+        page: usize,
+    ) -> Checked {
+        let gpu = matches!(engine, RenderingEngine::GPU);
+        let first = self.served_at != Some(self.depth);
+        let Some(surface) = self.surface.as_mut() else {
+            return Checked::Read(false);
+        };
+        if self.raster.is_some() || !gpu || !first {
+            return Checked::Read(
+                self.copy_pixels(dst_info, src, pixels, engine),
+            );
+        }
+        let row_bytes = dst_info.min_row_bytes();
+        let origin = (src.x(), src.y());
+        match read_converted_checked(
+            surface, dst_info, pixels, row_bytes, origin, page,
+        ) {
+            Checked::Read(true) => {
+                self.served_at = Some(self.depth);
+                Checked::Read(true)
+            }
+            // Refused, with the draws confirmed: the destination formats a
+            // GPU surface will not read are the ones a CPU copy of it
+            // answers, which `copy_pixels` makes on a read it takes for a
+            // repeat.
+            Checked::Read(false) => {
+                self.served_at = Some(self.depth);
+                Checked::Read(self.copy_pixels(dst_info, src, pixels, engine))
+            }
+            other => other,
+        }
     }
 
     pub fn update(
@@ -3669,17 +3856,31 @@ impl RecordingSurface {
                 canvas.scale((density, density));
                 over.playback(canvas, Target::Pixels);
             }
-            if !draws_ran(&mut composed, page) {
-                continue;
-            }
             let row_bytes = dst_info.min_row_bytes();
-            return match read_converted_on_cpu(
+            let read = match read_converted_checked(
                 &mut composed,
                 dst_info,
                 pixels,
                 row_bytes,
                 at,
+                page,
             ) {
+                Checked::Read(read) => read,
+                Checked::Discarded => continue,
+                Checked::Declined => {
+                    if !draws_ran(&mut composed, page) {
+                        continue;
+                    }
+                    read_converted_on_cpu(
+                        &mut composed,
+                        dst_info,
+                        pixels,
+                        row_bytes,
+                        at,
+                    )
+                }
+            };
+            return match read {
                 true => Ok(()),
                 false => Err(format!(
                     "Could not get image data (format: {:?})",
@@ -4682,7 +4883,9 @@ impl Page {
                 // zeros or stale bytes as success, and nothing here can tell.
                 // The draws before it are confirmed by `confirmed_surface`;
                 // this copy is not, and it is short-lived, which is the whole
-                // of the argument for living with it. A readback seen
+                // of the argument for living with it. A `getImageData` read
+                // does not come here: `read_checked` puts its copy in the
+                // buffer it waits on, which answers for both. A readback seen
                 // transparent is told from this by running it again under
                 // `node scripts/gpu-events.mjs --run -- <command>`, which on
                 // a failure prints any GPU recovery while it ran.
