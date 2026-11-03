@@ -392,11 +392,65 @@ fn blur_plane<L: Lane>(
 }
 
 /// Blurs `pixels`, premultiplied RGBA bytes, as [`blur`] does but in f32,
-/// scales the result by `gain` and rounds once at the end: a blurred draw
-/// composited at an alpha takes its alpha here, so that it is not rounded
-/// twice. f32 holds a level to within about 1e-4, so it decides no byte
-/// that f64 would decide otherwise but on exact ties, at about twice the
-/// speed. `pixels` is let go as soon as it is in floats.
+/// scales the result by `gain` and rounds once at the end, into the first
+/// `width * 4` bytes of each of `out`'s rows, `stride` bytes apart: a
+/// blurred draw composited at an alpha takes its alpha here, so that it is
+/// not rounded twice. f32 holds a level to within about 1e-4, so it decides
+/// no byte that f64 would decide otherwise but on exact ties, at about
+/// twice the speed. `pixels` is let go as soon as it is in floats.
+///
+/// A column pass taken tap by tap rounds each row as it sums it, straight
+/// into `out` -- see [`down_into`] -- so the result is never held in floats.
+pub(crate) fn blur_bytes_into(
+    pixels: Vec<u8>,
+    width: usize,
+    height: usize,
+    (sigma_x, sigma_y): (f32, f32),
+    gain: f32,
+    out: &mut [u8],
+    stride: usize,
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    let split = parallel(pixels.len(), COPY_PARALLEL_FROM);
+    let mut floats: Vec<f32> = match split {
+        true => pixels.par_iter().map(|&b| f32::from(b)).collect(),
+        false => pixels.iter().map(|&b| f32::from(b)).collect(),
+    };
+    drop(pixels);
+    // Each value is a weighted mean of bytes times a gain in [0, 1], so it
+    // lies in [0, 255] up to float noise; the cast saturates what noise puts
+    // outside.
+    let byte = |v: f32| (v * gain + 0.5) as u8;
+    if tapped(sigma_y) {
+        pass::<f32>(&mut floats, width, height, sigma_x);
+        return down_into::<f32, u8>(
+            &floats, width, height, sigma_y, out, stride, byte,
+        );
+    }
+    let line = width * 4;
+    let blurred = blur_in::<f32>(floats, width, height, sigma_x, sigma_y);
+    let rows = |(row, values): (&mut [u8], &[f32])| {
+        row[..line]
+            .iter_mut()
+            .zip(values)
+            .for_each(|(o, &v)| *o = byte(v));
+    };
+    match split {
+        true => out
+            .par_chunks_mut(stride)
+            .zip(blurred.par_chunks(line))
+            .for_each(rows),
+        false => out
+            .chunks_mut(stride)
+            .zip(blurred.chunks(line))
+            .for_each(rows),
+    }
+}
+
+/// [`blur_bytes_into`], into a buffer of its own with no room between rows.
+#[cfg(test)]
 pub(crate) fn blur_bytes(
     pixels: Vec<u8>,
     width: usize,
@@ -405,21 +459,17 @@ pub(crate) fn blur_bytes(
     sigma_y: f32,
     gain: f32,
 ) -> Vec<u8> {
-    let split = parallel(pixels.len(), COPY_PARALLEL_FROM);
-    let floats: Vec<f32> = match split {
-        true => pixels.par_iter().map(|&b| f32::from(b)).collect(),
-        false => pixels.iter().map(|&b| f32::from(b)).collect(),
-    };
-    drop(pixels);
-    let blurred = blur_in::<f32>(floats, width, height, sigma_x, sigma_y);
-    // Each value is a weighted mean of bytes times a gain in [0, 1], so it
-    // lies in [0, 255] up to float noise; the cast saturates what noise puts
-    // outside.
-    let byte = |v: f32| (v * gain + 0.5) as u8;
-    match split {
-        true => blurred.into_par_iter().map(byte).collect(),
-        false => blurred.into_iter().map(byte).collect(),
-    }
+    let mut out = vec![0; pixels.len()];
+    blur_bytes_into(
+        pixels,
+        width,
+        height,
+        (sigma_x, sigma_y),
+        gain,
+        &mut out,
+        width * 4,
+    );
+    out
 }
 
 /// [`blur`], with each line worked in `L`. Columns summed tap by tap are
@@ -580,18 +630,20 @@ const MOST_PAIRS: usize = (REACH_SIGMAS * FFT_FROM_SIGMA as f64) as usize;
 /// conversions, and drew a float layer's blurred ellipse 5.7% slower.
 type Pair<'a, L> = (L, &'a [L], &'a [L]);
 
-/// Sums the `N` floats of `out` from `at`: `k0` times `centre`'s, then
+/// Sums the `N` values of `out` from `at`: `k0` times `centre`'s, then
 /// each pair's weight times the sum of its two lines' values, pair by pair,
-/// in `L`, each narrowed once summed. The accumulators are an array the
+/// in `L`, each written by `put` once summed -- narrowed to a float, or
+/// rounded to a byte. The accumulators are an array the
 /// size of the tile, which the compiler keeps in registers, so a tap costs
 /// two reads a value rather than four memory moves.
 #[inline(always)]
-fn tile<L: Lane, const N: usize>(
-    out: &mut [f32],
+fn tile<L: Lane, T, const N: usize>(
+    out: &mut [T],
     at: usize,
     centre: &[L],
     k0: L,
     pairs: &[Pair<L>],
+    put: &impl Fn(L) -> T,
 ) {
     let centre = &centre[at..at + N];
     let mut acc: [L; N] = array::from_fn(|i| k0 * centre[i]);
@@ -604,18 +656,24 @@ fn tile<L: Lane, const N: usize>(
     out[at..at + N]
         .iter_mut()
         .zip(acc)
-        .for_each(|(o, v)| *o = v.narrow());
+        .for_each(|(o, v)| *o = put(v));
 }
 
-/// Sums every float of `out`, a line of RGBA pixels, as [`tile`] does:
+/// Sums every value of `out`, a line of RGBA pixels, as [`tile`] does:
 /// [`TILE`] at a time, and what is left a pixel at a time.
-fn sum_line<L: Lane>(out: &mut [f32], centre: &[L], k0: L, pairs: &[Pair<L>]) {
+fn sum_line<L: Lane, T>(
+    out: &mut [T],
+    centre: &[L],
+    k0: L,
+    pairs: &[Pair<L>],
+    put: &impl Fn(L) -> T,
+) {
     let tiled = out.len() / TILE * TILE;
     for at in (0..tiled).step_by(TILE) {
-        tile::<L, TILE>(out, at, centre, k0, pairs);
+        tile::<L, T, TILE>(out, at, centre, k0, pairs, put);
     }
     for at in (tiled..out.len()).step_by(4) {
-        tile::<L, 4>(out, at, centre, k0, pairs);
+        tile::<L, T, 4>(out, at, centre, k0, pairs, put);
     }
 }
 
@@ -656,7 +714,7 @@ fn direct<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
             {
                 *pair = (w, &padded[pad - d * 4..], &padded[pad + d * 4..]);
             }
-            sum_line(out, &padded[pad..], k[0], &pairs[..r]);
+            sum_line(out, &padded[pad..], k[0], &pairs[..r], &L::narrow);
         },
     );
 }
@@ -684,15 +742,39 @@ fn down<L: Lane>(
     height: usize,
     sigma: f32,
 ) -> Vec<f32> {
+    let mut out = vec![0.0; pixels.len()];
+    down_into::<L, f32>(
+        pixels,
+        width,
+        height,
+        sigma,
+        &mut out,
+        width * 4,
+        L::narrow,
+    );
+    out
+}
+
+/// [`down`], each value written by `put` -- see [`tile`] -- into the first
+/// `width * 4` values of each of `out`'s rows, `stride` apart.
+fn down_into<L: Lane, T: Copy + Send>(
+    pixels: &[f32],
+    width: usize,
+    height: usize,
+    sigma: f32,
+    out: &mut [T],
+    stride: usize,
+    put: impl Fn(L) -> T + Sync,
+) {
+    let line_len = width * 4;
     let k: Vec<L> = half_kernel(sigma, height - 1)
         .iter()
         .map(|&w| L::weight(w))
         .collect();
-    let stride = width * 4;
     let r = k.len() - 1;
     let lifted = L::lifted(pixels);
-    let rows: Vec<&[L]> = lifted.chunks(stride).collect();
-    let nothing = vec![L::of(0.0); stride];
+    let rows: Vec<&[L]> = lifted.chunks(line_len).collect();
+    let nothing = vec![L::of(0.0); line_len];
     let row = |y: isize| match usize::try_from(y) {
         Ok(y) if y < height => rows[y],
         _ => &nothing,
@@ -701,16 +783,22 @@ fn down<L: Lane>(
     // leave the rest out.
     let held = |row: &[f32]| row.iter().any(|v| v.to_bits() != 0);
     let span = match L::SIGNLESS_ZEROS && skips_empty_lines() {
-        true => match pixels.chunks(stride).position(held) {
+        true => match pixels.chunks(line_len).position(held) {
             Some(lo) => {
-                let below = pixels.chunks(stride).rev().position(held);
+                let below = pixels.chunks(line_len).rev().position(held);
                 Some((lo, height - 1 - below.unwrap_or(0)))
             }
-            None => return vec![0.0; pixels.len()],
+            None => {
+                let nothing = put(L::of(0.0));
+                out.chunks_mut(stride)
+                    .for_each(|row| row[..line_len].fill(nothing));
+                return;
+            }
         },
         false => None,
     };
-    let line = |pairs: &mut Vec<_>, (y, out): (usize, &mut [f32])| {
+    let line = |pairs: &mut Vec<_>, (y, out): (usize, &mut [T])| {
+        let out = &mut out[..line_len];
         pairs.clear();
         let taps = |d: usize| {
             let (y, d) = (y as isize, d as isize);
@@ -733,13 +821,13 @@ fn down<L: Lane>(
                 let ds = first.chain(seam..=*second.end());
                 pairs.extend(ds.map(|d| taps(d as usize)));
                 if pairs.is_empty() && !(lo..=hi).contains(&y) {
+                    out.fill(put(L::of(0.0)));
                     return;
                 }
             }
         }
-        sum_line(out, rows[y], k[0], pairs);
+        sum_line(out, rows[y], k[0], pairs, &put);
     };
-    let mut out = vec![0.0; pixels.len()];
     match parallel(pixels.len() * k.len(), PARALLEL_FROM) {
         true => out
             .par_chunks_mut(stride)
@@ -752,7 +840,6 @@ fn down<L: Lane>(
                 .for_each(|row| line(&mut pairs, row));
         }
     }
-    out
 }
 
 /// A length rustfft transforms quickly: the next 2^a 3^b 5^c 7^d at or above
@@ -1481,6 +1568,81 @@ mod tests {
             compared += 2;
         }
         assert_eq!(compared, 8 * 8 * (5 + 5) + 2 * 2);
+    }
+
+    #[test]
+    fn a_byte_blur_rounds_the_taps_once_into_its_rows() {
+        // Each byte against the taps summed in f32 as they define it, times
+        // the gain, rounded once; written into rows with room after each,
+        // which is left as it was. Both axes tap by tap, either through the
+        // FFT, an axis left alone, empty rows around and between, a layer
+        // of nothing, and large enough to be split over rayon's pool.
+        const ROOM: usize = 12;
+        const UNTOUCHED: u8 = 0xab;
+        let check = |src: &[u8],
+                     w: usize,
+                     h: usize,
+                     s: (f32, f32),
+                     gain: f32| {
+            let floats: Vec<f32> = src.iter().copied().map(f32::from).collect();
+            let rows = by_the_taps::<f32>(&floats, w, h, s.0, true);
+            let want: Vec<u8> = by_the_taps::<f32>(&rows, w, h, s.1, false)
+                .into_iter()
+                .map(|v| (v * gain + 0.5) as u8)
+                .collect();
+            let stride = w * 4 + ROOM;
+            for plain in [false, true] {
+                let mut out = vec![UNTOUCHED; stride * h];
+                let mut blurred = || {
+                    blur_bytes_into(
+                        src.to_vec(),
+                        w,
+                        h,
+                        s,
+                        gain,
+                        &mut out,
+                        stride,
+                    )
+                };
+                match plain {
+                    true => plainly(blurred),
+                    false => blurred(),
+                }
+                for (y, row) in out.chunks(stride).enumerate() {
+                    assert!(
+                        row[..w * 4] == want[y * w * 4..][..w * 4],
+                        "{w}x{h}, sigmas {s:?}, gain {gain}, row {y}, plain {plain}"
+                    );
+                    assert!(row[w * 4..].iter().all(|&b| b == UNTOUCHED));
+                }
+            }
+        };
+        let sigmas = [
+            (0.5, 0.5),
+            (3.0, 3.0),
+            (4.9, 1.0),
+            (3.0, 0.0),
+            (0.0, 2.0),
+            (8.0, 3.0),
+            (3.0, 8.0),
+        ];
+        let mut compared = 0;
+        for (w, h) in [(1, 1), (5, 3), (7, 130), (54, 51), (200, 7)] {
+            let empty = vec![0u8; w * h * 4];
+            for s in sigmas {
+                for scene in scenes(w, h)
+                    .into_iter()
+                    .chain([gapped(w, h), empty.clone()])
+                {
+                    for gain in [1.0, 0.6] {
+                        check(&scene, w, h, s, gain);
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        check(&scenes(400, 300)[1], 400, 300, (3.0, 3.0), 1.0);
+        assert_eq!(compared, 5 * 7 * 6 * 2);
     }
 
     #[test]

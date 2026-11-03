@@ -1135,7 +1135,8 @@ fn blurred_on_cpu(
     // Read in the image's own space, so nothing is converted; an 8-bit
     // image in its own channel order, which a blur treats alike. The result
     // is written into the image's own pixels -- see [`baked_image`] -- with
-    // no buffer between: two buffers its size alive at once, never three.
+    // no buffer between: two buffers its size alive at once, never three;
+    // an 8-bit one is rounded into them as its columns are summed.
     match bytes {
         true => {
             let info = image.image_info().with_alpha_type(AlphaType::Premul);
@@ -1149,11 +1150,15 @@ fn blurred_on_cpu(
             ) {
                 return None;
             }
-            let blurred =
-                exact_blur::blur_bytes(pixels, w, h, sigma_x, sigma_y, gain);
             baked_image(&info, |out, stride| {
-                out.chunks_mut(stride).zip(blurred.chunks(w * 4)).for_each(
-                    |(row, line)| row[..line.len()].copy_from_slice(line),
+                exact_blur::blur_bytes_into(
+                    pixels,
+                    w,
+                    h,
+                    (sigma_x, sigma_y),
+                    gain,
+                    out,
+                    stride,
                 );
             })
         }
