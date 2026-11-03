@@ -292,6 +292,173 @@ pub(crate) fn blur(
     .map(|(image, _)| image)
 }
 
+/// The drop shadow's last pass: `src`, an 8-bit image whose byte is
+/// recovered, over its shadow -- the blurred alpha `hi + lo`, a value and
+/// its remainder in levels, tinted to `(r, g, b)` at `ca` of that alpha and
+/// moved by `(ox, oy)` -- scaled by `gain` and rounded to a level once, as
+/// the chain's `shadowed` makes it on the CPU in floats, by drawing the
+/// tinted shadow at the offset. As that draw does, the shadow covers the
+/// pixels of its `w` by `h` rectangle with each edge rounded to the nearest
+/// pixel, `floor(x + 0.5)` -- a pixel whose centre lies on an edge at a
+/// half is not covered on the left and top, and is on the right and bottom
+/// -- and nothing else; where `bilinear` is set it is resampled from its four
+/// nearest pixels, each tinted first and each held to the rectangle's edge
+/// pixels, and otherwise read at the one pixel the whole offset lands it on.
+const SHADOW: &str = r#"
+uniform shader hi;
+uniform shader lo;
+uniform shader src;
+uniform float r;
+uniform float g;
+uniform float b;
+uniform float ca;
+uniform float ox;
+uniform float oy;
+uniform float bilinear;
+uniform float gain;
+uniform float w;
+uniform float h;
+float4 tinted(float2 q) {
+    float t = ca * ((float4(hi.eval(q)) + float4(lo.eval(q))).a / 255);
+    return float4(float3(r, g, b) * t, t);
+}
+float4 main(float2 position) {
+    // The pixel's centre exactly: the position a draw interpolates along a
+    // triangle's edge can land an ulp off it, and an edge's test then tips.
+    float2 p = floor(position) + 0.5;
+    float2 at = p - float2(ox, oy);
+    float2 edge = floor(float2(ox, oy) + 0.5);
+    float2 end = floor(float2(ox + w, oy + h) + 0.5);
+    float2 px = p - 0.5;
+    float4 d;
+    if (bilinear == 0) {
+        d = tinted(at);
+    } else {
+        float2 u = at - 0.5;
+        float2 f = fract(u);
+        float2 lo = float2(0.5);
+        float2 hi = float2(w, h) - 0.5;
+        float2 c0 = clamp(floor(u) + 0.5, lo, hi);
+        float2 c1 = clamp(floor(u) + 1.5, lo, hi);
+        d = (1 - f.x) * (1 - f.y) * tinted(c0)
+          + f.x * (1 - f.y) * tinted(float2(c1.x, c0.y))
+          + (1 - f.x) * f.y * tinted(float2(c0.x, c1.y))
+          + f.x * f.y * tinted(c1);
+    }
+    // Masked rather than branched on, so that every pixel reads its
+    // textures alike.
+    float2 inside = step(edge, px) * (float2(1) - step(end, px));
+    d *= inside.x * inside.y;
+    float4 s = floor(float4(src.eval(p)) * 255 + 0.5) / 255;
+    float4 v = s + d * (1 - s.a);
+    return clamp(floor(v * 255 * gain + 0.5), 0, 255) / 255;
+}
+"#;
+
+/// How many floats [`SHADOW`] declares as uniforms, in the order it declares
+/// them: `r`, `g`, `b`, `ca`, `ox`, `oy`, `bilinear`, `gain`, `w` and `h`.
+const SHADOW_UNIFORMS: usize = 10;
+
+thread_local! {
+    /// [`SHADOW`], compiled once per thread.
+    static SHADOW_EFFECT: Option<RuntimeEffect> = RuntimeEffect::make_for_shader(SHADOW, None).ok();
+}
+
+/// `image`, an 8-bit layer `(width, height)`, over its drop shadow, made on
+/// `context`: its alpha blurred by `sigma_x` along rows and `sigma_y` along
+/// columns by the passes [`blur`] makes, kept as a value and its remainder,
+/// tinted to `rgb` at `alpha` of it, moved by `offset` and composited under
+/// `image` by [`SHADOW`], scaled by `gain` and rounded once to `image`'s own
+/// 8-bit type. The bytes are those the CPU makes in floats but on exact
+/// ties. `None` for a layer that is not 8 bits a channel, and wherever
+/// [`blur`] gives `None`, all of which the CPU takes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn shadow(
+    context: &mut RecordingContext,
+    image: &Image,
+    (width, height): (usize, usize),
+    (sigma_x, sigma_y): (f32, f32),
+    (ox, oy): (f32, f32),
+    ([r, g, b], alpha): ([f32; 3], f32),
+    gain: f32,
+) -> Option<Image> {
+    let out_type = image.color_type();
+    if !matches!(out_type, ColorType::RGBA8888 | ColorType::BGRA8888) {
+        return None;
+    }
+    let reaches = |sigma: f32, n: usize| {
+        f64::from(sigma) * REACH_SIGMAS > (n * REACH_PER_LINE) as f64
+    };
+    if reaches(sigma_x, width) || reaches(sigma_y, height) {
+        return None;
+    }
+    let effect = EFFECT.with(Clone::clone)?;
+    let compose = SHADOW_EFFECT.with(Clone::clone)?;
+    let space = image
+        .color_space()
+        .or_else(|| Some(ColorSpace::new_srgb()))?;
+    let mut gpu = Gpu {
+        context,
+        effect,
+        space,
+    };
+    let zero = gpu.zero()?;
+    let rows = gpu.axis(
+        (image.clone(), zero),
+        Input::Bytes,
+        [1.0, 0.0],
+        width,
+        height,
+        sigma_x,
+        None,
+    )?;
+    let (hi, lo) =
+        gpu.axis(rows, Input::Split, [0.0, 1.0], height, width, sigma_y, None)?;
+    let whole = ox.fract() == 0.0 && oy.fract() == 0.0;
+    let uniforms: [f32; SHADOW_UNIFORMS] = [
+        r,
+        g,
+        b,
+        alpha,
+        ox,
+        oy,
+        if whole { 0.0 } else { 1.0 },
+        gain,
+        width as f32,
+        height as f32,
+    ];
+    let uniforms: Vec<u8> =
+        uniforms.iter().flat_map(|v| v.to_ne_bytes()).collect();
+    let nearest = SamplingOptions::new(FilterMode::Nearest, MipmapMode::None);
+    let child = |image: &Image| {
+        image
+            .to_shader((TileMode::Decal, TileMode::Decal), nearest, None)
+            .map(ChildPtr::from)
+    };
+    let shader = compose.make_shader(
+        Data::new_copy(&uniforms),
+        &[child(&hi)?, child(&lo)?, child(image)?],
+        None,
+    )?;
+    let info = gpu.info(width, height, out_type);
+    let mut surface = surfaces::render_target(
+        gpu.context,
+        Budgeted::Yes,
+        &info,
+        None,
+        SurfaceOrigin::TopLeft,
+        None,
+        false,
+        None,
+    )?;
+    let mut paint = Paint::default();
+    paint.set_shader(shader).set_blend_mode(BlendMode::Src);
+    surface
+        .canvas()
+        .draw_rect(Rect::from_wh(width as f32, height as f32), &paint);
+    Some(surface.image_snapshot())
+}
+
 /// The passes' shared state.
 struct Gpu<'a> {
     context: &'a mut RecordingContext,
@@ -558,6 +725,16 @@ mod tests {
         RenderingEngine::GPU
             .make_surface(&info, &ExportOptions::default())
             .ok()
+    }
+
+    #[test]
+    fn the_shadow_pass_compiles() {
+        // As for the blur's pass: a compile error reads as no GPU shadow,
+        // and the CPU makes every one.
+        let effect = RuntimeEffect::make_for_shader(SHADOW, None);
+        assert!(SHADOW_EFFECT.with(Option::is_some), "{:?}", effect.err());
+        let effect = effect.expect("compiled");
+        assert_eq!(effect.uniform_size(), SHADOW_UNIFORMS * size_of::<f32>());
     }
 
     #[test]
