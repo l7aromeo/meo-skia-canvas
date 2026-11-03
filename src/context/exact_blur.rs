@@ -36,7 +36,9 @@
 
 use rayon::prelude::*;
 use rustfft::{Fft, FftNum, FftPlanner, num_complex::Complex};
-use std::{cell::RefCell, collections::HashMap, f64::consts::TAU, sync::Arc};
+use std::{
+    array, cell::RefCell, collections::HashMap, f64::consts::TAU, sync::Arc,
+};
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -295,6 +297,12 @@ fn blur_in<L: Lane>(
 
 /// The arithmetic a line is worked in: f32 for bytes, f64 for floats.
 trait Lane: FftNum {
+    /// Whether the FFT holds this lane's values to their line's range --
+    /// see [`within_reach`]. A float result is stored as it is, so its
+    /// round-off past the range would be too; an f32 lane's values are
+    /// rounded to bytes, and the cast to a byte saturates below 0 and
+    /// above 255, so the range would only repeat what the cast does.
+    const HELD_TO_REACH: bool;
     /// `v` in this arithmetic.
     fn of(v: f32) -> Self;
     /// A weight, worked out in f64, in this arithmetic.
@@ -315,6 +323,8 @@ trait Lane: FftNum {
 }
 
 impl Lane for f32 {
+    const HELD_TO_REACH: bool = false;
+
     fn of(v: f32) -> Self {
         v
     }
@@ -341,6 +351,8 @@ impl Lane for f32 {
 }
 
 impl Lane for f64 {
+    const HELD_TO_REACH: bool = true;
+
     fn of(v: f32) -> Self {
         f64::from(v)
     }
@@ -499,7 +511,9 @@ fn plan<L: FftNum>(
 /// so its spectrum is real, and two real channels share one complex
 /// transform: red with green, blue with alpha. The whole line is read into
 /// those transforms before any of it is written back, so it is worked in
-/// place.
+/// place, and in a lane that holds them -- see [`Lane::HELD_TO_REACH`] --
+/// each value written back is held to the range its line's channel allows,
+/// see [`within_reach`].
 fn fourier<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
     let r = k.len() - 1;
     let len = fast_len(n + r);
@@ -526,12 +540,25 @@ fn fourier<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
             )
         },
         |(forward, inverse, a, b, scratch), line| {
-            for (i, [r, g, bl, al]) in
-                line.as_chunks::<4>().0.iter().enumerate()
-            {
+            let pixels = line.as_chunks::<4>().0;
+            for (i, [r, g, bl, al]) in pixels.iter().enumerate() {
                 a[i] = Complex::new(L::of(*r), L::of(*g));
                 b[i] = Complex::new(L::of(*bl), L::of(*al));
             }
+            // Each channel's least and greatest value, and zero, found by
+            // comparison: a NaN compares false, so it reaches neither.
+            let reach = L::HELD_TO_REACH.then(|| {
+                pixels.iter().fold(([0f32; 4], [0f32; 4]), |(lo, hi), p| {
+                    (
+                        array::from_fn(
+                            |c| if p[c] < lo[c] { p[c] } else { lo[c] },
+                        ),
+                        array::from_fn(
+                            |c| if p[c] > hi[c] { p[c] } else { hi[c] },
+                        ),
+                    )
+                })
+            });
             a[n..].fill(zero);
             b[n..].fill(zero);
             for buffer in [&mut *a, &mut *b] {
@@ -543,10 +570,37 @@ fn fourier<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
                 inverse.process_with_scratch(buffer, scratch);
             }
             for (i, px) in line.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-                *px = [a[i].re, a[i].im, b[i].re, b[i].im].map(L::narrow);
+                let sums = [a[i].re, a[i].im, b[i].re, b[i].im].map(L::narrow);
+                *px = match reach {
+                    Some((lo, hi)) => {
+                        array::from_fn(|c| within_reach(sums[c], lo[c], hi[c]))
+                    }
+                    None => sums,
+                };
             }
         },
     );
+}
+
+/// `v`, a value of a line's channel through the FFT, held to `[lo, hi]`:
+/// the least and greatest of that channel's values along the line, each
+/// taken with zero. Every weight of the kernel is positive and they sum to
+/// at most 1, and the line is padded with zeros, so each exact value of the
+/// blur is a weighted mean of the channel's values and zero and lies in
+/// that range. The FFT's round-off does not: a channel shares its transform
+/// with another, and a black shadow's blue took its alpha's, coming out
+/// within 1.7e-16 of 0 either side where the exact blur is 0, which a float
+/// layer stores as it is. So a value past an end is that end, and every
+/// value the exact blur can take is left as it is -- the comparisons let
+/// -0.0 and a NaN through untouched. The range is the line's and not zero
+/// to one: a colour outside the layer's gamut is carried as a channel below
+/// zero, and its blur is too.
+///
+/// `f32::clamp` is those two comparisons, and refuses a NaN bound or
+/// `lo > hi` by panicking; neither can happen, since both ends start at
+/// zero and move only by comparison, which a NaN never wins.
+fn within_reach(v: f32, lo: f32, hi: f32) -> f32 {
+    v.clamp(lo, hi)
 }
 
 /// The kernel's spectrum at length `len`, real since the kernel is
@@ -976,6 +1030,121 @@ mod tests {
             }
         }
         assert_eq!(compared, 4 * 7 * (4 + 4));
+    }
+
+    /// A layer of `w` by `h` floats, transparent but for a block in the
+    /// middle third of `colour`, premultiplied.
+    fn block_of(w: usize, h: usize, colour: [f32; 4]) -> Vec<f32> {
+        (0..h)
+            .flat_map(|y| {
+                (0..w).flat_map(move |x| {
+                    let inside = (w / 3..2 * w / 3).contains(&x)
+                        && (h / 3..2 * h / 3).contains(&y);
+                    match inside {
+                        true => colour,
+                        false => [0.0; 4],
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// The sigmas, both axes and one, at which a pass goes through the FFT.
+    const FFT_SIGMAS: [(f32, f32); 4] =
+        [(5.0, 5.0), (8.0, 8.0), (8.0, 0.0), (0.0, 5.0)];
+
+    #[test]
+    fn a_channel_of_nothing_blurs_to_nothing_through_the_fft() {
+        // A black shadow: its blue shares a transform with its alpha, and
+        // takes the alpha's round-off with it unless it is held to its
+        // line's range, which is zero alone.
+        for sigma in FFT_SIGMAS {
+            let blurred = blur(
+                block_of(60, 52, [0.0, 0.0, 0.0, 0.6]),
+                60,
+                52,
+                sigma.0,
+                sigma.1,
+            );
+            let colour =
+                blurred.as_chunks::<4>().0.iter().flat_map(|p| &p[..3]);
+            let (low, high) =
+                colour.fold((0f32, 0f32), |(l, h), &v| (l.min(v), h.max(v)));
+            assert_eq!((low, high), (0.0, 0.0), "sigma {sigma:?}");
+            assert!(blurred.iter().all(|&v| v >= 0.0), "sigma {sigma:?}");
+        }
+    }
+
+    #[test]
+    fn a_channel_below_zero_keeps_its_blur_through_the_fft() {
+        // A colour outside the layer's gamut carries its red below zero,
+        // and the blur of that red is below zero too: the exact blur's,
+        // to within float noise, and not zero.
+        let (w, h) = (60, 52);
+        for sigma in FFT_SIGMAS {
+            let layer = block_of(w, h, [-0.15, 0.4, 0.2, 0.6]);
+            let blurred = blur(layer.clone(), w, h, sigma.0, sigma.1);
+            let exact = reference_floats(&layer, w, h, sigma.0, sigma.1);
+            let lowest = blurred.iter().step_by(4).fold(0f32, |l, &v| l.min(v));
+            assert!(
+                lowest < -0.05,
+                "sigma {sigma:?}: red reached only {lowest}"
+            );
+            let farthest = blurred
+                .iter()
+                .zip(&exact)
+                .map(|(&v, &e)| (f64::from(v) - e).abs())
+                .fold(0f64, f64::max);
+            assert!(
+                farthest < 1e-6,
+                "sigma {sigma:?}: {farthest} from the exact blur"
+            );
+        }
+    }
+
+    /// `pixels`, RGBA floats, blurred tap by tap in f64 by the kernel the
+    /// blur takes, with nothing narrowed between the passes.
+    fn reference_floats(
+        pixels: &[f32],
+        w: usize,
+        h: usize,
+        sx: f32,
+        sy: f32,
+    ) -> Vec<f64> {
+        let axis = |v: &[f64],
+                    n: usize,
+                    lines: usize,
+                    step: usize,
+                    along: usize,
+                    sigma: f32| {
+            if !(sigma.is_finite() && sigma > 0.0) {
+                return v.to_vec();
+            }
+            let k = half_kernel(sigma, n - 1);
+            let mut out = v.to_vec();
+            for line in 0..lines {
+                for i in 0..n {
+                    for c in 0..4 {
+                        let at =
+                            |j: usize| v[(line * step + j * along) * 4 + c];
+                        let mut sum = k[0] * at(i);
+                        for (d, &weight) in k.iter().enumerate().skip(1) {
+                            if i >= d {
+                                sum += weight * at(i - d);
+                            }
+                            if i + d < n {
+                                sum += weight * at(i + d);
+                            }
+                        }
+                        out[(line * step + i * along) * 4 + c] = sum;
+                    }
+                }
+            }
+            out
+        };
+        let wide: Vec<f64> = pixels.iter().map(|&v| f64::from(v)).collect();
+        let rows = axis(&wide, w, h, w, 1, sx);
+        axis(&rows, h, w, 1, w, sy)
     }
 
     /// The most [`blur_alpha`] may lie from the alpha [`blur_in`] gives in
