@@ -6,10 +6,12 @@
 //   node scripts/check-patched-skia.mjs --self-test
 //
 // rust-skia's prebuilt Skia waits one second for each Metal shader compile
-// and drops the draw when it runs out, and its atlas path renderer can move a
-// pixel of a path's coverage a step up or down on Metal and on Vulkan; a binary
-// built against it passes every test that does not stall the compiler or land
-// a path where the pixel moves. Three things have to hold, and each is read from skia-bindings'
+// and drops the draw when it runs out, its atlas path renderer can move a
+// pixel of a path's coverage a step up or down on Metal and on Vulkan, and its
+// triangulating path renderer reuses a finer triangulation a larger draw of a
+// curve left; a binary built against it passes every test that does not stall
+// the compiler, land a path where the pixel moves or draw a curve at two
+// scales. Three things have to hold, and each is read from skia-bindings'
 // `output`:
 //
 // 1. It built from a source tree and did not try a download: offline from
@@ -39,6 +41,12 @@ const ATLAS_SIZE = {
   marker: "fAtlasMaxSize = 512;",
 };
 
+/// containers/skia-triangulation-tolerance.patch, on every platform.
+const TRIANGULATION = {
+  file: "src/gpu/ganesh/ops/TriangulatingPathRenderer.cpp",
+  marker: "info->fTolerance == tol",
+};
+
 /// Each file a patch for the platform changes, under Skia's source root, with
 /// what only the patched file contains. Linux's brotli patch is not here: it
 /// changes a build list rather than a compiled file, and a `freetype` build
@@ -51,8 +59,9 @@ export const PATCHED = {
       marker: "GrMtlCompilesWithoutTimeout",
     },
     ATLAS_SIZE,
+    TRIANGULATION,
   ],
-  linux: [ATLAS_SIZE],
+  linux: [ATLAS_SIZE, TRIANGULATION],
 };
 
 /** The ninja line that names `file` compiled, capturing the path it gave. */

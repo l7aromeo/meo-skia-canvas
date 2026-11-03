@@ -123,6 +123,7 @@ read the math functions and every length unit.
 
 ### Fixed
 
+- **A curve on a GPU canvas on macOS and Linux is drawn the same however the same path was drawn before it, at whatever size; it could move edge pixels by up to 128 levels after a larger or smaller draw of it.** ([#511](https://github.com/l7aromeo/meo-skia-canvas/issues/511))
 - **A `drop-shadow()` filter on an eight-bit wide-gamut `Canvas` stores its colour's exact bytes, never a colour byte above its alpha.** ([#491](https://github.com/l7aromeo/meo-skia-canvas/issues/491))
 - **SVG text from `Svg::parse` and `Image::from_svg_xml` is set in the library's fonts, as JavaScript's `loadImage` sets it, and those calls, `FontLibrary::new` and `TextEngine::new` no longer build a system font manager each.** ([#483](https://github.com/l7aromeo/meo-skia-canvas/issues/483))
 - **A blurred path on an eight-bit wide-gamut canvas stores a fill's bytes inside it.** ([#428](https://github.com/l7aromeo/meo-skia-canvas/pull/428), [#433](https://github.com/l7aromeo/meo-skia-canvas/issues/433))

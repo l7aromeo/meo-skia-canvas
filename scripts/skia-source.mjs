@@ -68,12 +68,26 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 // path with a side past 512 pixels goes to the next path renderer rather than
 // the atlas.
 const ATLAS_SIZE = join("containers", "skia-atlas-size.patch");
+// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+// Re-check: cargo test a_curve_on_the_gpu_draws_alike_after_a_larger_draw_of_it with `metal` on macOS, on a tree prepared without this patch; a curve exported at density 1 after a density-3 export of it moves 128 levels
+//
+// Ganesh's triangulating path renderer keeps a path's triangles in the
+// context's thread-safe cache, keyed by the path's shape and not by the
+// transform, and reused an entry made at any tolerance under three times the
+// draw's. A draw of a path at another scale left a triangulation, finer or up
+// to three times coarser, that a later draw of it then took, so under 4x MSAA
+// the same draw covered its edges by up to two samples' worth -- 128 levels --
+// according to what the context had drawn before. The patch reuses an entry only at the draw's own
+// tolerance. Published Windows binaries use rust-skia's prebuilt Skia, which
+// has no patches, and keep this as they keep the atlas above.
+const TRIANGULATION = join("containers", "skia-triangulation-tolerance.patch");
 
 export const PATCHES = {
   darwin: [
     // The Metal compile timeout -- see the UPSTREAM note in the justfile.
     join("containers", "skia-metal-untimed-compile.patch"),
     ATLAS_SIZE,
+    TRIANGULATION,
     // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
     // Re-check: cargo test a_blurred_mask_in_the_same_flush_moves_another_by_a_level with `metal`; it pins the defect and fails once the caustic stops moving
     //
@@ -101,6 +115,7 @@ export const PATCHES = {
     // applied.
     join("containers", "skia-brotli-sources.patch"),
     ATLAS_SIZE,
+    TRIANGULATION,
   ],
 };
 

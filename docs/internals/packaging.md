@@ -50,12 +50,25 @@ Vulkan, a path the renderer places at an atlas row of 512 or more can have a
 pixel's coverage moved a step up or down. The UPSTREAM note beside it in `PATCHES` says what is and
 is not known.
 
+Both also carry `containers/skia-triangulation-tolerance.patch`, which makes
+Ganesh's triangulating path renderer reuse a cached triangulation only at the
+tolerance a draw asks for. It reused one made at any tolerance under three
+times the draw's, finer or coarser, so a curve drawn after a draw of the same
+path at another scale -- an export at density 1 after one at density 3, or at
+density 2 after one at density 1 -- had its edges covered by up to 128 levels
+otherwise than on a fresh context.
+
+Published Windows binaries are built against rust-skia's prebuilt Skia, which
+carries none of these patches, so on Windows the atlas can move a pixel and a
+curve is drawn by what the context drew before.
+
 **Build through `just` on macOS and Linux.** The justfile's `dotenv-command`,
 `scripts/skia-source.mjs env`, sets `SKIA_SOURCE_DIR` for every recipe on macOS
 and Linux and on Windows not at all, and `ensure-deps` prepares the tree it
 names: rust-skia at the Cargo.lock tag, Skia's DEPS and gn, and the platform's
-patches from `PATCHES` applied with `-F0` -- the two above on macOS, and on
-Linux `containers/skia-brotli-sources.patch` and the atlas-size cap. The brotli
+patches from `PATCHES` applied with `-F0` -- the three above on macOS, and on
+Linux `containers/skia-brotli-sources.patch`, the atlas-size cap and the
+triangulation tolerance. The brotli
 patch adds the two sources Skia's build list leaves out since M156, without
 which a `freetype` build fails to link on `kCmdLut` and
 `BrotliDecoderEnsureStaticInit`. It is
@@ -75,7 +88,8 @@ and does nothing where the build list already has them.
 
 **The release cannot ship that binary.** `build.yml`'s mac job refuses a build
 whose skia-bindings output does not say it built offline from that tree, and
-its linux job one built from a rust-skia checkout without Linux's atlas patch.
+its linux job one built from a rust-skia checkout without Linux's atlas and
+triangulation patches.
 On the mac job, `tests/suite/metal-compile.test.js`, required there by
 `MEO_SKIA_CANVAS_REQUIRE_METAL`, stops the process's own compiler service for
 three seconds under a sandbox that hides the Metal shader cache, and reads a

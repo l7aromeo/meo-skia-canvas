@@ -84,7 +84,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/meo-skia-canvas
-          key: skia-source-${{ hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch', 'containers/skia-atlas-size.patch') }}
+          key: skia-source-${{ hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch', 'containers/skia-atlas-size.patch', 'containers/skia-triangulation-tolerance.patch') }}
 
       - name: Build module
         env:
@@ -92,12 +92,14 @@ jobs:
         run: just build-release
 
       # A binary built against rust-skia's prebuilt Skia, or from an unpatched
-      # tree, carries the one-second Metal compile timeout and the atlas that
-      # can move a pixel of a path's coverage, and passes every test that does
-      # not stall the compiler or land a path there. skia-bindings' build output says
-      # whether it built offline and names each file ninja compiled, so this
-      # refuses a build that downloaded, or whose `GrMtlUtil.mm` or
-      # `AtlasPathRenderer.cpp` is not the patched one --
+      # tree, carries the one-second Metal compile timeout, the atlas that
+      # can move a pixel of a path's coverage, and the triangulation cache that
+      # draws a curve by what the context drew before, and passes every test
+      # that does not stall the compiler or land a path there. skia-bindings'
+      # build output says whether it built offline and names each file ninja
+      # compiled, so this refuses a build that downloaded, or whose
+      # `GrMtlUtil.mm`, `AtlasPathRenderer.cpp` or
+      # `TriangulatingPathRenderer.cpp` is not the patched one --
       # scripts/check-patched-skia.mjs says how.
       - name: Check Skia was built from the patched source
         run: node scripts/check-patched-skia.mjs target/release/build
@@ -303,13 +305,16 @@ jobs:
           # Linux's patches from `PATCHES` in scripts/skia-source.mjs, in its
           # order: the brotli sources Skia's build list leaves out, without
           # which this `freetype` build fails to link on kCmdLut and
-          # BrotliDecoderEnsureStaticInit, and the atlas-size cap, without
-          # which a GPU path can have a pixel's coverage moved a step. `-F0` fails a
+          # BrotliDecoderEnsureStaticInit, the atlas-size cap, without
+          # which a GPU path can have a pixel's coverage moved a step, and the
+          # triangulation tolerance, without which a GPU curve is drawn by what
+          # the context drew before. `-F0` fails a
           # hunk that no longer matches rather than placing it by guesswork.
           # Under `use-local-skia` the justfile names no tree of its own, so
           # this checkout is what skia-bindings builds.
           patch -p1 -F0 -d rust-skia -i "$GITHUB_WORKSPACE/skia-canvas/containers/skia-brotli-sources.patch"
           patch -p1 -F0 -d rust-skia -i "$GITHUB_WORKSPACE/skia-canvas/containers/skia-atlas-size.patch"
+          patch -p1 -F0 -d rust-skia -i "$GITHUB_WORKSPACE/skia-canvas/containers/skia-triangulation-tolerance.patch"
 
       - name: Vendor Skia dependencies
         run: |
@@ -340,7 +345,8 @@ jobs:
       # package hash, so skia-bindings does a full build from the tree inside
       # it and never tries a download -- scripts/check-patched-skia.mjs reads
       # that from its output, and refuses either kind of build whose
-      # `AtlasPathRenderer.cpp` is not the patched one.
+      # `AtlasPathRenderer.cpp` or `TriangulatingPathRenderer.cpp` is not the
+      # patched one.
       - name: Check Skia was built from the patched source
         run: node skia-canvas/scripts/check-patched-skia.mjs skia-canvas/target/release/build
 
