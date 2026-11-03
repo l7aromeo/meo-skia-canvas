@@ -78,6 +78,11 @@ pub(crate) fn factor(sigma: f32) -> Option<usize> {
 /// float one; 4, the alpha's value and remainder packed into red and green,
 /// for the next pass to read as 3. Outside a texture, decal reads zero.
 ///
+/// Keep the weights as `exp` per tap. Read instead from a table in the
+/// uniforms, worked out once on the CPU, a drop shadow drew level with it
+/// on Metal -- 1.007 to 1.010 of its cost at 3px and 16px -- so the passes
+/// are bound by their texture reads and their count, not by arithmetic.
+///
 /// The constants it names are declared ahead of it by [`source`].
 const PASS: &str = r#"
 uniform shader hi;
