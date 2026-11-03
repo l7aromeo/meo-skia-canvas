@@ -404,6 +404,16 @@ jobs:
             --no-default-features \
             --features "node-addon,vulkan,window,freetype" \
             --lib -- text_in_a_chain_is_bounded_by_all_it_inks --nocapture
+      - name: TEMPORARY full text reach sweep on FreeType, unhinted bound
+        if: ${{ !cancelled() }}
+        env:
+          TEXT_REACH_SWEEP: full
+          TEXT_REACH_BOUND: unhinted
+        run: |
+          cargo test \
+            --no-default-features \
+            --features "node-addon,vulkan,window,freetype" \
+            --lib -- text_in_a_chain_is_bounded_by_all_it_inks --nocapture
       # The step above runs `window_handle` with no display, where it reports
       # a skip. Here it opens a real window: a `WindowHandle` change made on a
       # worker thread has to reach the window system. Required, so a missing
