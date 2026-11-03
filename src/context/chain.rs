@@ -21,9 +21,9 @@ use std::sync::Arc;
 
 use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, Color, Color4f, ColorFilter,
-    ColorSpace, ColorType, Data, FilterMode, IRect, Image, ImageFilter,
-    ImageInfo, Matrix, MipmapMode, Paint, Rect, RoundOut, SamplingOptions,
-    Shader, Surface, Vector, color_filters,
+    ColorSpace, ColorType, FilterMode, IRect, Image, ImageFilter, ImageInfo,
+    Matrix, MipmapMode, Paint, Rect, RoundOut, SamplingOptions, Shader,
+    Surface, Vector, color_filters,
     image::{CachingHint, RequiredProperties},
     image_filter::MapDirection,
     image_filters,
@@ -36,6 +36,7 @@ use skia_safe::{Recorder, gpu};
 use crate::context::exact_blur_gpu;
 use crate::{
     context::{
+        blur_mask::baked_image,
         exact_blur::{self, REACH_SIGMAS},
         keeps_two_recordings,
         layer::ExactColour,
@@ -926,8 +927,10 @@ fn blurred_on_cpu(
         ColorType::RGBA8888 | ColorType::BGRA8888
     );
     // Read in the image's own space, so nothing is converted; an 8-bit
-    // image in its own channel order, which a blur treats alike.
-    let (info, pixels) = match bytes {
+    // image in its own channel order, which a blur treats alike. The result
+    // is written into the image's own pixels -- see [`baked_image`] -- with
+    // no buffer between: two buffers its size alive at once, never three.
+    match bytes {
         true => {
             let info = image.image_info().with_alpha_type(AlphaType::Premul);
             let mut pixels = vec![0u8; w * h * 4];
@@ -940,10 +943,13 @@ fn blurred_on_cpu(
             ) {
                 return None;
             }
-            (
-                info,
-                exact_blur::blur_bytes(pixels, w, h, sigma_x, sigma_y, gain),
-            )
+            let blurred =
+                exact_blur::blur_bytes(pixels, w, h, sigma_x, sigma_y, gain);
+            baked_image(&info, |out, stride| {
+                out.chunks_mut(stride).zip(blurred.chunks(w * 4)).for_each(
+                    |(row, line)| row[..line.len()].copy_from_slice(line),
+                );
+            })
         }
         false => {
             let info = ImageInfo::new(
@@ -963,17 +969,24 @@ fn blurred_on_cpu(
             ) {
                 return None;
             }
-            // The floats are let go once they are bytes, before Skia copies
-            // the bytes: two buffers this size alive at once, never three.
-            let bytes = exact_blur::blur(pixels, w, h, sigma_x, sigma_y)
-                .iter()
-                .flat_map(|v| (v * gain).to_ne_bytes())
-                .collect::<Vec<u8>>();
-            (info, bytes)
+            let blurred = exact_blur::blur(pixels, w, h, sigma_x, sigma_y);
+            baked_image(&info, |out, stride| {
+                out.chunks_mut(stride)
+                    .zip(blurred.chunks(w * 4))
+                    .for_each(|(row, line)| write_floats(row, line, gain));
+            })
         }
-    };
-    let row_bytes = info.min_row_bytes();
-    started::raster_from_data(&info, Data::new_copy(&pixels), row_bytes)
+    }
+}
+
+/// Writes `line`, floats, each scaled by `gain`, into the start of `row`, as
+/// the floats' bytes in the machine's order.
+fn write_floats(row: &mut [u8], line: &[f32], gain: f32) {
+    row.as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(line)
+        .for_each(|(out, v)| *out = (v * gain).to_ne_bytes());
 }
 
 /// `image` drawn through `filter` and then scaled by `gain`, as one colour
@@ -1189,45 +1202,89 @@ fn exact_tint(
 /// colour is 77. Onto a GPU target the floats went through a narrower
 /// texture first, and an image at half alpha read a level high at 807
 /// pixels of a shadow.
+///
+/// The floats are read where they lie when `floats` holds them in memory as
+/// premultiplied F32, as a snapshot of a raster surface does, and copied
+/// out otherwise; the result is written into the image's own pixels -- see
+/// [`baked_image`].
 fn rounded_once(floats: &Image, info: &ImageInfo, gain: f32) -> Option<Image> {
     let (w, h) = (floats.width() as usize, floats.height() as usize);
-    let float_info = floats.image_info().with_alpha_type(AlphaType::Premul);
-    let mut pixels = vec![0f32; w * h * 4];
-    let row_bytes = w * 4 * size_of::<f32>();
-    if !floats.read_pixels(
-        &float_info,
-        &mut pixels,
-        row_bytes,
-        (0, 0),
-        CachingHint::Disallow,
-    ) {
-        return None;
-    }
-    let (info, bytes) = match info.color_type() {
+    // As premultiplied F32, which is what a chain hands it and what the
+    // copy below reads any other kind as.
+    let float_info = floats
+        .image_info()
+        .with_alpha_type(AlphaType::Premul)
+        .with_color_type(ColorType::RGBAF32);
+    let peeked = floats.peek_pixels().filter(|pixmap| {
+        pixmap.color_type() == ColorType::RGBAF32
+            && pixmap.alpha_type() == AlphaType::Premul
+    });
+    let copied;
+    let (source, stride): (&[u8], usize) = match &peeked {
+        Some(pixmap) => (pixmap.bytes()?, pixmap.row_bytes()),
+        None => {
+            let row_bytes = w * 4 * size_of::<f32>();
+            let mut pixels = vec![0u8; row_bytes * h];
+            if !floats.read_pixels(
+                &float_info,
+                &mut pixels,
+                row_bytes,
+                (0, 0),
+                CachingHint::Disallow,
+            ) {
+                return None;
+            }
+            copied = pixels;
+            (&copied, row_bytes)
+        }
+    };
+    // Each row of the source, as its pixels' four floats.
+    let float_pixel = 4 * size_of::<f32>();
+    let rows = source.chunks(stride).take(h).map(|row| {
+        row[..w * float_pixel].as_chunks::<16>().0.iter().map(|p| {
+            let channel = |c: usize| {
+                f32::from_ne_bytes([
+                    p[c * 4],
+                    p[c * 4 + 1],
+                    p[c * 4 + 2],
+                    p[c * 4 + 3],
+                ])
+            };
+            [channel(0), channel(1), channel(2), channel(3)]
+        })
+    });
+    match info.color_type() {
         ColorType::RGBA8888 | ColorType::BGRA8888 => {
             let swap = info.color_type() == ColorType::BGRA8888;
             let level = |v: f32| (v * 255.0 * gain + 0.5) as u8;
-            let bytes = pixels
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .flat_map(|&[r, g, b, a]| match swap {
-                    true => [level(b), level(g), level(r), level(a)],
-                    false => [level(r), level(g), level(b), level(a)],
-                })
-                .collect::<Vec<u8>>();
-            (info.with_alpha_type(AlphaType::Premul), bytes)
+            let info = info.with_alpha_type(AlphaType::Premul);
+            baked_image(&info, |out, out_stride| {
+                for (row, line) in out.chunks_mut(out_stride).zip(rows) {
+                    for (px, [r, g, b, a]) in
+                        row.as_chunks_mut::<4>().0.iter_mut().zip(line)
+                    {
+                        *px = match swap {
+                            true => [level(b), level(g), level(r), level(a)],
+                            false => [level(r), level(g), level(b), level(a)],
+                        };
+                    }
+                }
+            })
         }
-        _ => {
-            let bytes = pixels
-                .iter()
-                .flat_map(|v| (v * gain).to_ne_bytes())
-                .collect::<Vec<u8>>();
-            (float_info, bytes)
-        }
-    };
-    let row_bytes = info.min_row_bytes();
-    started::raster_from_data(&info, Data::new_copy(&bytes), row_bytes)
+        _ => baked_image(&float_info, |out, out_stride| {
+            for (row, line) in out.chunks_mut(out_stride).zip(rows) {
+                for (px, floats) in
+                    row.as_chunks_mut::<16>().0.iter_mut().zip(line)
+                {
+                    for (channel, v) in
+                        px.as_chunks_mut::<4>().0.iter_mut().zip(floats)
+                    {
+                        *channel = (v * gain).to_ne_bytes();
+                    }
+                }
+            }
+        }),
+    }
 }
 
 /// `image` drawn through `filter`, given the layer's scale as its local
@@ -1269,11 +1326,15 @@ fn to_raster(context: Option<&Gpu>, image: &Image) -> Option<Image> {
 #[cfg(test)]
 mod tests {
     use skia_safe::{
-        Color, Color4f, ColorSpace, ImageInfo, Matrix, Paint, PathBuilder,
-        PictureRecorder, Rect, Surface, Vector,
+        AlphaType, Color, Color4f, ColorSpace, ColorType, Data, Image,
+        ImageInfo, Matrix, Paint, PathBuilder, PictureRecorder, Rect, Surface,
+        Vector, image::CachingHint,
     };
 
-    use super::{Depth, REFUSE_PLACED, Step, apply, worked_on};
+    use super::{
+        Depth, REFUSE_PLACED, Step, apply, blurred_on_cpu, exact_blur,
+        rounded_once, worked_on,
+    };
     use crate::{prelude::*, started};
 
     /// A drop shadow in black, moved by `(dx, dy)` and blurred by `sigma`.
@@ -1869,5 +1930,167 @@ mod tests {
                 "{dual:?} against {single:?}"
             );
         }
+    }
+    /// A raster image of `kind` holding premultiplied noise, its pixels
+    /// written through floats so that every kind holds the same scene.
+    fn noise(w: i32, h: i32, kind: ColorType) -> Image {
+        let floats = ImageInfo::new(
+            (w, h),
+            ColorType::RGBAF32,
+            AlphaType::Premul,
+            ColorSpace::new_srgb(),
+        );
+        let mut seed: u32 = 17;
+        let mut unit = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32
+        };
+        let pixels: Vec<u8> = (0..w * h)
+            .flat_map(|_| {
+                let a = unit();
+                [unit() * a, unit() * a, unit() * a, a]
+            })
+            .flat_map(f32::to_ne_bytes)
+            .collect();
+        let image = started::raster_from_data(
+            &floats,
+            Data::new_copy(&pixels),
+            floats.min_row_bytes(),
+        )
+        .expect("an image");
+        let info = floats.with_color_type(kind);
+        let mut surface =
+            started::raster(&info, None, None).expect("a surface");
+        surface.canvas().draw_image(&image, (0, 0), None);
+        surface.image_snapshot()
+    }
+
+    /// Every byte of `image` as `info` holds it.
+    fn bytes_of(image: &Image, info: &ImageInfo) -> Vec<u8> {
+        let row = info.min_row_bytes();
+        let mut out = vec![0u8; row * image.height() as usize];
+        assert!(image.read_pixels(
+            info,
+            &mut out,
+            row,
+            (0, 0),
+            CachingHint::Disallow
+        ));
+        out
+    }
+
+    /// `rounded_once` as it was written through a copied buffer, for the
+    /// in-place one to be held to.
+    fn rounded_through_a_copy(
+        floats: &Image,
+        info: &ImageInfo,
+        gain: f32,
+    ) -> Vec<u8> {
+        let float_info = floats
+            .image_info()
+            .with_alpha_type(AlphaType::Premul)
+            .with_color_type(ColorType::RGBAF32);
+        let pixels: Vec<f32> = bytes_of(floats, &float_info)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_ne_bytes(*b))
+            .collect();
+        match info.color_type() {
+            ColorType::RGBA8888 | ColorType::BGRA8888 => {
+                let swap = info.color_type() == ColorType::BGRA8888;
+                let level = |v: f32| (v * 255.0 * gain + 0.5) as u8;
+                pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .flat_map(|&[r, g, b, a]| match swap {
+                        true => [level(b), level(g), level(r), level(a)],
+                        false => [level(r), level(g), level(b), level(a)],
+                    })
+                    .collect()
+            }
+            _ => pixels
+                .iter()
+                .flat_map(|v| (v * gain).to_ne_bytes())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_result_written_in_place_holds_the_bits_a_copied_one_did() {
+        let mut compared = 0;
+        for (w, h) in [(1, 1), (7, 3), (59, 56)] {
+            // F32, which is read where it lies, and F16, which is not and
+            // is copied out as floats.
+            for source in [ColorType::RGBAF32, ColorType::RGBAF16] {
+                let floats = noise(w, h, source);
+                for kind in [
+                    ColorType::RGBA8888,
+                    ColorType::BGRA8888,
+                    ColorType::RGBAF32,
+                ] {
+                    for gain in [1.0f32, 0.6] {
+                        let info = ImageInfo::new(
+                            (w, h),
+                            kind,
+                            AlphaType::Premul,
+                            ColorSpace::new_srgb(),
+                        );
+                        let ours = rounded_once(&floats, &info, gain)
+                            .expect("an image");
+                        let read = match kind {
+                            ColorType::RGBAF32 => ours.image_info().clone(),
+                            _ => info.clone(),
+                        };
+                        assert_eq!(
+                            bytes_of(&ours, &read),
+                            rounded_through_a_copy(&floats, &info, gain),
+                            "{w}x{h} from {source:?} into {kind:?} at {gain}"
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+            // Blurred, in floats and in bytes: the bits of the copying route,
+            // its floats scaled by the gain and its bytes as they were.
+            for kind in [ColorType::RGBAF32, ColorType::RGBA8888] {
+                let image = noise(w, h, kind);
+                let ours =
+                    blurred_on_cpu(&image, 1.5, 2.5, 0.6).expect("an image");
+                let info = ours.image_info();
+                let theirs = match kind {
+                    ColorType::RGBAF32 => {
+                        let floats: Vec<f32> = bytes_of(&image, info)
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .map(|b| f32::from_ne_bytes(*b))
+                            .collect();
+                        exact_blur::blur(
+                            floats, w as usize, h as usize, 1.5, 2.5,
+                        )
+                        .iter()
+                        .flat_map(|v| (v * 0.6).to_ne_bytes())
+                        .collect::<Vec<u8>>()
+                    }
+                    _ => exact_blur::blur_bytes(
+                        bytes_of(&image, info),
+                        w as usize,
+                        h as usize,
+                        1.5,
+                        2.5,
+                        0.6,
+                    ),
+                };
+                assert_eq!(
+                    bytes_of(&ours, info),
+                    theirs,
+                    "blurred {w}x{h} {kind:?}"
+                );
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, 3 * (2 * 3 * 2 + 2));
     }
 }
