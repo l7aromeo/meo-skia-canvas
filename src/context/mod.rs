@@ -6937,10 +6937,14 @@ mod text_reach_tests {
         if !REGISTERED.replace(true) {
             REACH_BOUND.set(
                 match std::env::var("TEXT_REACH_BOUND").as_deref() {
+                    Ok("stroked-unwidened") => ReachBound::StrokedUnwidened,
+                    Ok("stroked-half-width") => ReachBound::StrokedHalfWidth,
+                    Ok("hinted") => ReachBound::Hinted,
                     Ok("unhinted") => ReachBound::Unhinted,
                     Ok("outline") => ReachBound::Outline,
+                    Ok("outline-unhinted") => ReachBound::OutlineUnhinted,
                     Ok("outline-unstroked") => ReachBound::OutlineUnstroked,
-                    _ => ReachBound::Hinted,
+                    _ => ReachBound::Stroked,
                 },
             );
             FontLibrary::new()
@@ -7562,7 +7566,7 @@ mod text_reach_tests {
             eprintln!(
                 "reach bound: {}",
                 std::env::var("TEXT_REACH_BOUND")
-                    .unwrap_or_else(|_| "hinted".into())
+                    .unwrap_or_else(|_| "stroked".into())
             );
             let mut absent: Vec<&str> =
                 missing.iter().map(|s| s.font).collect();

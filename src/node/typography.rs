@@ -24,8 +24,8 @@ use crate::{
 use neon::prelude::*;
 use skia_safe::{
     Canvas, Color4f, Font, FontMetrics, FourByteTag, GlyphId, Matrix, Paint,
-    Path as SkPath, PathBuilder as SkPathBuilder, Point, Rect, TextBlob,
-    TextBlobBuilder, Typeface,
+    PaintJoin, PaintStyle, Path as SkPath, PathBuilder as SkPathBuilder, Point,
+    Rect, TextBlob, TextBlobBuilder, Typeface,
     font::Edging,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
@@ -682,14 +682,14 @@ impl RunPaint {
     /// What painting the run with its anchor at `origin` in `paint` from
     /// `blobs` can ink, in the units it is painted in, at the scale it is
     /// recorded at -- see `layer::hinted_reach` for what a playback at
-    /// another scale adds. Each glyph's box as `Font::get_bounds` reports it
-    /// for `paint`, its stroke and embolden included -- the outline rounded
-    /// out to the pixel grid and padded, or for a glyph with no outline, a
-    /// bitmap or colour emoji, the only box it has -- joined with each run's
-    /// blob's bounds, which for a positioned run are the box the font
-    /// declares around every glyph. A font's declared box need not hold its
-    /// ink, and a glyph's reported box is rounded at one scale, so neither
-    /// is taken alone. A sheared run's boxes go through its shear, as
+    /// another scale adds. Each glyph's box as [`glyph_boxes`] gives it --
+    /// its outline's box widened as far as `paint`'s stroke can reach, or
+    /// for a glyph with no outline, a bitmap or colour emoji, the box
+    /// `Font::get_bounds` reports -- joined with each run's blob's bounds,
+    /// which for a positioned run are the box the font declares around
+    /// every glyph. A font's declared box need not hold its ink, so it is
+    /// not taken alone; it stays as a floor under a glyph whose box is
+    /// empty and inks. A sheared run's boxes go through its shear, as
     /// [`sheared_bounds`] takes them.
     ///
     /// `None` for a decorated run, whose lines this does not bound, and for
@@ -718,26 +718,16 @@ impl RunPaint {
                 };
                 let at = origin + run.origin;
                 let mut boxes = vec![Rect::new_empty(); run.glyphs.len()];
-                #[cfg(test)]
-                let bound = REACH_BOUND.get();
-                #[cfg(test)]
-                let unhinted = (bound == ReachBound::Unhinted).then(|| {
-                    let mut font = run.font.clone();
-                    font.set_hinting(FontHinting::None);
-                    font
-                });
-                #[cfg(test)]
-                let font = unhinted.as_ref().unwrap_or(&run.font);
                 #[cfg(not(test))]
-                let font = &run.font;
-                font.get_bounds(&run.glyphs, &mut boxes, Some(paint));
+                glyph_boxes(
+                    &run.font,
+                    &run.glyphs,
+                    paint,
+                    stroke_reach(paint),
+                    &mut boxes,
+                );
                 #[cfg(test)]
-                if matches!(
-                    bound,
-                    ReachBound::Outline | ReachBound::OutlineUnstroked
-                ) {
-                    outline_boxes(font, &run.glyphs, paint, &mut boxes);
-                }
+                measured_boxes(&run.font, &run.glyphs, paint, &mut boxes);
                 #[cfg(test)]
                 REACHED_FAMILIES.with_borrow_mut(|families| {
                     families.push(run.font.typeface().family_name());
@@ -1149,6 +1139,68 @@ thread_local! {
     static LAID_OUT: RefCell<LaidOutCache> = RefCell::default();
 }
 
+/// Each of `glyphs`' box in `font` for `paint`, into `boxes`: the glyph's
+/// outline's box widened by `reach` -- see [`stroke_reach`] -- or, for a
+/// glyph with no outline, a bitmap or colour emoji, the box
+/// `Font::get_bounds` gives it, which is the only one it has.
+///
+/// Not the box `Font::get_bounds` gives an outlined glyph: on FreeType that
+/// is no bound on what the glyph inks, even at the scale it is asked at --
+/// Oswald's 96px "A", upright and filled, inked 1.07 device pixels past it,
+/// and DejaVu Sans's 13px "f" scaled 1.7 and stroked 12 inked 8.2 past it.
+/// Nor the exact outline stroked: the outline `Font::get_path` gives and the
+/// one FreeType strokes part, and a miter turns a small change of angle into
+/// a long change of tip, which passed the exact stroked outline by 10
+/// device pixels under a 40px stroke mitred at 30.
+fn glyph_boxes(
+    font: &Font,
+    glyphs: &[GlyphId],
+    paint: &Paint,
+    reach: f32,
+    boxes: &mut [Rect],
+) {
+    font.get_bounds(glyphs, boxes, Some(paint));
+    for (glyph, boxed) in zip(glyphs, boxes) {
+        let Some(outline) = font.get_path(*glyph) else {
+            continue;
+        };
+        let outlined = *outline.bounds();
+        // A glyph that draws nothing, a space, has an empty outline, which
+        // a widened box would make into ink.
+        if outlined.is_empty() {
+            continue;
+        }
+        *boxed = outlined.with_outset((reach, reach));
+    }
+}
+
+/// How far, in the units a run is laid out in, a stroke of `paint` can ink
+/// past the outline it strokes: nothing for a fill, half the stroke's width
+/// under a round or bevel join, and half the width times the miter limit
+/// under a miter join.
+///
+/// A miter's tip lies `(w / 2) / sin(θ / 2)` from the corner it closes, `θ`
+/// the angle between the corner's edges, and Skia bevels a corner whose
+/// `1 / sin(θ / 2)` passes the miter limit, so no tip lies further than the
+/// limit times `w / 2` -- whatever outline the scaler strokes, which is why
+/// this is taken over the stroked outline's exact bounds. A limit below 1
+/// bevels every corner, where half the width is the furthest. A glyph's
+/// contours are closed, so a cap adds nothing.
+///
+/// A hairline, a stroke of width 0, is a device pixel wide whatever the
+/// transform, so it has no reach here and is left to the device margin --
+/// see `layer::HINTED_INK_DRIFT`.
+fn stroke_reach(paint: &Paint) -> f32 {
+    if paint.style() == PaintStyle::Fill {
+        return 0.0;
+    }
+    let half = paint.stroke_width() / 2.0;
+    match paint.stroke_join() {
+        PaintJoin::Miter => half * paint.stroke_miter().max(1.0),
+        PaintJoin::Round | PaintJoin::Bevel => half,
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     /// Test-only: files every run under one hash, so that the chains a
@@ -1161,7 +1213,7 @@ thread_local! {
     /// How [`RunPaint::reach`] measures its glyphs on this thread -- see
     /// [`ReachBound`].
     pub(crate) static REACH_BOUND: Cell<ReachBound> =
-        const { Cell::new(ReachBound::Hinted) };
+        const { Cell::new(ReachBound::Stroked) };
 }
 
 /// The ways the reach sweep measures a run's glyphs, so that one run of it
@@ -1169,21 +1221,74 @@ thread_local! {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReachBound {
+    /// [`glyph_boxes`] widened by [`stroke_reach`]: what a reach is.
+    Stroked,
+    /// [`Self::Stroked`] not widened at all: a mutant the stroked scenes
+    /// must fail.
+    StrokedUnwidened,
+    /// [`Self::Stroked`] widened by half the stroke whatever the join: a
+    /// mutant the mitred scenes must fail.
+    StrokedHalfWidth,
     /// `Font::get_bounds` for the paint, in the run's own font.
     Hinted,
     /// `Font::get_bounds` for the paint, in the run's font with hinting off.
     Unhinted,
     /// Each glyph's outline, filled as the paint fills or strokes it; a
-    /// glyph with no outline, a bitmap, keeps its `get_bounds` box.
+    /// glyph with no outline keeps its `get_bounds` box.
     Outline,
+    /// [`Self::Outline`] in the run's font with hinting off.
+    OutlineUnhinted,
     /// [`Self::Outline`] with the outline's own bounds, not expanded by the
-    /// paint: the mutant the stroked scenes must fail.
+    /// paint: a mutant the stroked scenes must fail.
     OutlineUnstroked,
 }
 
-/// Replaces each of `boxes`, `font.get_bounds` for `glyphs`, with the
-/// bounds of the glyph's outline filled as `paint` fills it -- its stroke,
-/// joins and miters included -- where the glyph has an outline.
+/// [`glyph_boxes`], or the bound [`REACH_BOUND`] names in its place.
+#[cfg(test)]
+fn measured_boxes(
+    font: &Font,
+    glyphs: &[GlyphId],
+    paint: &Paint,
+    boxes: &mut [Rect],
+) {
+    let unhinted = || {
+        let mut font = font.clone();
+        font.set_hinting(FontHinting::None);
+        font
+    };
+    match REACH_BOUND.get() {
+        ReachBound::Stroked => {
+            glyph_boxes(font, glyphs, paint, stroke_reach(paint), boxes);
+        }
+        ReachBound::StrokedUnwidened => {
+            glyph_boxes(font, glyphs, paint, 0.0, boxes);
+        }
+        ReachBound::StrokedHalfWidth => {
+            let half = match paint.style() {
+                PaintStyle::Fill => 0.0,
+                _ => paint.stroke_width() / 2.0,
+            };
+            glyph_boxes(font, glyphs, paint, half, boxes);
+        }
+        ReachBound::Hinted => font.get_bounds(glyphs, boxes, Some(paint)),
+        ReachBound::Unhinted => {
+            unhinted().get_bounds(glyphs, boxes, Some(paint));
+        }
+        ReachBound::Outline | ReachBound::OutlineUnstroked => {
+            font.get_bounds(glyphs, boxes, Some(paint));
+            outline_boxes(font, glyphs, paint, boxes);
+        }
+        ReachBound::OutlineUnhinted => {
+            let font = unhinted();
+            font.get_bounds(glyphs, boxes, Some(paint));
+            outline_boxes(&font, glyphs, paint, boxes);
+        }
+    }
+}
+
+/// Replaces each of `boxes` with the bounds of the glyph's outline filled
+/// as `paint` fills it -- its stroke, joins and miters included -- where
+/// the glyph has an outline.
 #[cfg(test)]
 fn outline_boxes(
     font: &Font,
@@ -1201,8 +1306,7 @@ fn outline_boxes(
             && fill_path_with_paint(&outline, paint, &mut filled, None, None)
         {
             true => filled.compute_finite_bounds(),
-            // A hairline, drawn a device pixel wide whatever the transform:
-            // its outline, and the device margin for the rest.
+            // A hairline: its outline, and the device margin for the rest.
             false => Some(*outline.bounds()),
         };
         // An outline with a point at infinity keeps the box the font gave.
