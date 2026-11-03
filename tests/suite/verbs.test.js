@@ -157,6 +157,66 @@ describe("Batched verbs", () => {
     );
   });
 
+  test("carry each text to the record that names it, joined in one string", () => {
+    // Texts cross joined, each one's length in UTF-16 units beside them, and
+    // are cut apart in Rust. Held here against the values array every string
+    // crossed in before, one record at a time: a NUL inside a text, a
+    // character outside the Basic Multilingual Plane, an empty text between
+    // two others, a lone surrogate at the end of one text and the matching
+    // half at the start of the next, and a text that ends the batch.
+    const draws = [
+      ["#336699", "a\0b"],
+      ["rgb(200 40 120)", "😀x"],
+      ["rgb(200 40 120)", ""],
+      ["color(display-p3 0.3 0.6 0.9)", "é\uD83D"],
+      ["#0a0", "\uDE00end"],
+    ];
+    const shot = (apply) => {
+      const canvas = new Canvas(160, 60);
+      const ctx = canvas.getContext("2d");
+      ctx.font = "16px sans-serif";
+      apply(ctx);
+      return canvas.toBufferSync("raw").toString("base64");
+    };
+
+    const joined = shot((ctx) =>
+      draws.forEach(([colour, text], i) => {
+        ctx.fillStyle = colour;
+        ctx.fillText(text, 4 + i * 30, 30);
+      }),
+    );
+    const apart = shot((ctx) => {
+      const values = [];
+      const numbers = [];
+      draws.forEach(([colour, text], i) => {
+        numbers.push(
+          CONTEXT_VERBS.set_fillStyleText.op,
+          values.push(colour) - 1,
+        );
+        numbers.push(
+          CONTEXT_VERBS.fillTextAt.op,
+          values.push(text) - 1,
+          4 + i * 30,
+          30,
+        );
+      });
+      const buffer = new Float64Array(numbers);
+      native.CanvasRenderingContext2D_plot(
+        ctx[BOXED],
+        buffer,
+        buffer.length,
+        values,
+      );
+    });
+
+    assert.equal(joined, apart);
+    assert.notEqual(
+      joined,
+      shot(() => {}),
+      "the texts draw something",
+    );
+  });
+
   test("skip a record carrying a coordinate that cannot be used", () => {
     // The rule a single call follows: a non-finite coordinate makes the call
     // do nothing rather than fail. A batch cannot report it either, so the

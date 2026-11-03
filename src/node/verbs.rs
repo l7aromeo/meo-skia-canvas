@@ -193,6 +193,72 @@ impl Slot {
     }
 }
 
+/// The strings a batch carries: one string crossing for all of them, cut at
+/// each one's length in UTF-16 units, which is how JavaScript counts a
+/// string -- see `keepText` in `lib/classes/drawlist.js`.
+///
+/// Cut in UTF-16 rather than in what Rust holds: one string ending in a lone
+/// high surrogate and the next beginning with its low half join into a pair,
+/// which UTF-8 would hold as one character, so cutting after conversion
+/// could not put the halves back where they were. Each piece is converted on
+/// its own instead, as reading each string out of JavaScript did, a lone
+/// surrogate becoming U+FFFD.
+pub(crate) struct Texts {
+    texts: Vec<String>,
+}
+
+impl Texts {
+    /// `joined` cut at `lengths`. A length running past the end takes what is
+    /// left, which is a writer's mistake, and the texts after it are empty.
+    pub(crate) fn cut(joined: &[u16], lengths: &[u32]) -> Self {
+        let mut rest = joined;
+        let texts = lengths
+            .iter()
+            .map(|&length| {
+                let (text, after) =
+                    rest.split_at((length as usize).min(rest.len()));
+                rest = after;
+                String::from_utf16_lossy(text)
+            })
+            .collect();
+        Self { texts }
+    }
+
+    fn get(&self, ordinal: usize) -> Option<&str> {
+        self.texts.get(ordinal).map(String::as_str)
+    }
+}
+
+/// What a batch carries beside its numbers: the values array, and the texts.
+///
+/// A record names a text by -1 less its ordinal, so that it cannot be taken
+/// for an index into the values. A non-negative index naming a string reads
+/// one from the values, which a batch written by hand -- `verbs.test.js`
+/// writes its own -- can still carry.
+pub(crate) struct Slots {
+    values: Vec<Slot>,
+    texts: Texts,
+}
+
+impl Slots {
+    pub(crate) fn new(values: Vec<Slot>, texts: Texts) -> Self {
+        Self { values, texts }
+    }
+
+    /// The value at `index`.
+    pub(crate) fn get(&self, index: usize) -> Option<&Slot> {
+        self.values.get(index)
+    }
+
+    /// The string a record names at `at`.
+    pub(crate) fn text(&self, at: f64) -> Option<&str> {
+        match at < 0.0 {
+            true => self.texts.get((-1.0 - at) as usize),
+            false => self.values.get(at as usize).and_then(Slot::text),
+        }
+    }
+}
+
 /// Reads the values array a batch carries beside its numbers.
 ///
 /// Read in full before the buffer is borrowed: pulling a string out of
@@ -355,10 +421,7 @@ macro_rules! bind_arg {
         }
     };
     ($value:expr, $slots:expr, text) => {
-        match $slots
-            .get($value as usize)
-            .and_then($crate::node::verbs::Slot::text)
-        {
+        match $slots.text($value) {
             Some(text) => text,
             None => return None,
         }
@@ -440,7 +503,7 @@ macro_rules! verbs {
             op: $enum,
             target: &mut $target,
             args: &[f64],
-            #[allow(unused_variables)] slots: &[$crate::node::verbs::Slot],
+            #[allow(unused_variables)] slots: &$crate::node::verbs::Slots,
         ) -> Option<()> {
             match op {
                 $($enum::$op => {
@@ -538,13 +601,28 @@ macro_rules! verbs {
             // what a flush costs: applying nothing at all took 732 of the 797
             // nanoseconds a one-verb batch did, and the buffer's own length
             // made no difference to either.
-            let slots = match cx.len() > 3 {
+            //
+            // The texts first: they share a buffer with the next batch's, and
+            // reading a value can reach back into JavaScript, which could
+            // begin one.
+            let texts = match cx.len() > 5 {
+                true => {
+                    let joined = cx.argument::<JsString>(4)?.to_utf16(&mut cx);
+                    let lengths = cx.argument::<JsUint32Array>(5)?;
+                    let lengths =
+                        neon::types::buffer::TypedArray::as_slice(&*lengths, &cx);
+                    $crate::node::verbs::Texts::cut(&joined, lengths)
+                }
+                false => $crate::node::verbs::Texts::cut(&[], &[]),
+            };
+            let values = match cx.len() > 3 {
                 true => {
                     let values = cx.argument::<JsArray>(3)?;
                     $crate::node::verbs::read_slots(&mut cx, values)?
                 }
                 false => Vec::new(),
             };
+            let slots = $crate::node::verbs::Slots::new(values, texts);
 
             // Borrowed and released before anything can throw: the slice holds
             // `&cx`, and reporting an error needs `&mut cx`.
@@ -659,3 +737,62 @@ pub(crate) use bind_arg;
 pub(crate) use narrow;
 pub(crate) use read_arg;
 pub(crate) use verbs;
+
+#[cfg(test)]
+mod tests {
+    use super::Texts;
+
+    /// `texts` as JavaScript hands them over: joined, with each one's length
+    /// in UTF-16 units.
+    fn crossed(texts: &[&[u16]]) -> (Vec<u16>, Vec<u32>) {
+        (
+            texts.concat(),
+            texts.iter().map(|text| text.len() as u32).collect(),
+        )
+    }
+
+    fn utf16(text: &str) -> Vec<u16> {
+        text.encode_utf16().collect()
+    }
+
+    /// Each text comes back as it went in: a NUL inside one, a character
+    /// outside the Basic Multilingual Plane, an empty one between two others
+    /// and one at the end of the batch, and text that is not ASCII, whose
+    /// UTF-8 is longer than its UTF-16.
+    #[test]
+    fn joined_texts_are_cut_where_each_one_ends() {
+        let texts = ["a\0b", "😀x", "", "é", "#336699", "", "end😀"];
+        let pieces: Vec<Vec<u16>> =
+            texts.iter().map(|text| utf16(text)).collect();
+        let (joined, lengths) =
+            crossed(&pieces.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        let cut = Texts::cut(&joined, &lengths);
+        for (at, text) in texts.iter().enumerate() {
+            assert_eq!(cut.get(at), Some(*text), "text {at}");
+        }
+        assert_eq!(cut.get(texts.len()), None, "nothing past the last");
+    }
+
+    /// A text ending in the high half of a pair and the next beginning with
+    /// the low half are each a lone surrogate, as they were when each was
+    /// read on its own -- U+FFFD each -- and not the pair the join makes.
+    #[test]
+    fn a_pair_split_across_two_texts_stays_two_lone_halves() {
+        let [high, low] = [0xD83D_u16, 0xDE00];
+        let (joined, lengths) =
+            crossed(&[&[u16::from(b'a'), high], &[low, u16::from(b'b')]]);
+        let cut = Texts::cut(&joined, &lengths);
+        assert_eq!(cut.get(0), Some("a\u{FFFD}"));
+        assert_eq!(cut.get(1), Some("\u{FFFD}b"));
+    }
+
+    /// A length past the end takes what is left, and the texts after it are
+    /// empty rather than read from somewhere else.
+    #[test]
+    fn a_length_past_the_end_takes_what_is_left() {
+        let cut = Texts::cut(&utf16("abc"), &[2, 5, 1]);
+        assert_eq!(cut.get(0), Some("ab"));
+        assert_eq!(cut.get(1), Some("c"));
+        assert_eq!(cut.get(2), Some(""));
+    }
+}
