@@ -2,55 +2,20 @@
 //! the draw's own pixels convolved with the Gaussian sampled at whole-pixel
 //! offsets, rounded once. A rasterised pixel is already its shape averaged
 //! over the pixel's box, so sampling the Gaussian -- rather than averaging
-//! it over each pixel too -- applies the box once. The reference here is
-//! written apart from any code that draws a blur, in f64, reaching eight
-//! sigmas.
+//! it over each pixel too -- applies the box once. The reference,
+//! `exact::sampled`, is written apart from any code that draws a blur, in
+//! f64, reaching eight sigmas.
 
 use std::f32::consts::TAU;
 
+// Each test file uses part of it.
+#[allow(dead_code)]
+mod exact;
+
+use exact::{misses, sampled};
 use meo_skia_canvas::prelude::*;
 
 const SIZE: (f32, f32) = (160.0, 100.0);
-
-/// How far a value may sit from a half-level and still round either way:
-/// the f32 accumulation a blur is made in carries about 1e-4 of a level.
-const TIE: f64 = 1e-3;
-
-/// `image`, `width` pixels wide, blurred by `sigma` with the Gaussian
-/// sampled at whole-pixel offsets and normalised over its reach, one axis
-/// and then the other, reading outside the image as nothing.
-fn sampled(image: &[f64], width: usize, sigma: f64) -> Vec<f64> {
-    let height = image.len() / width;
-    let reach = (8.0 * sigma).ceil() as i64;
-    let raw: Vec<f64> = (-reach..=reach)
-        .map(|d| (-((d * d) as f64) / (2.0 * sigma * sigma)).exp())
-        .collect();
-    let sum: f64 = raw.iter().sum();
-    let weights: Vec<f64> = raw.iter().map(|w| w / sum).collect();
-    let pass = |source: &[f64], across: bool| -> Vec<f64> {
-        (0..source.len())
-            .map(|i| {
-                let (x, y) = ((i % width) as i64, (i / width) as i64);
-                weights
-                    .iter()
-                    .zip(-reach..)
-                    .filter_map(|(weight, d)| {
-                        let (sx, sy) = match across {
-                            true => (x + d, y),
-                            false => (x, y + d),
-                        };
-                        ((0..width as i64).contains(&sx)
-                            && (0..height as i64).contains(&sy))
-                        .then(|| {
-                            weight * source[(sy * width as i64 + sx) as usize]
-                        })
-                    })
-                    .sum()
-            })
-            .collect()
-    };
-    pass(&pass(image, true), false)
-}
 
 /// A triangle across most of the canvas.
 const WIDE: [(f32, f32); 3] = [(20.0, 80.0), (80.0, 15.25), (140.5, 85.0)];
@@ -144,23 +109,6 @@ fn float_alpha(canvas: &mut Canvas) -> Vec<f64> {
         .pixels()
         .chunks(16)
         .map(|p| f64::from(f32::from_le_bytes([p[12], p[13], p[14], p[15]])))
-        .collect()
-}
-
-/// The pixels of `alpha` that are not the reference's rounded level, but
-/// for those within [`TIE`] of a half-level that land on either neighbour.
-fn misses(alpha: &[u8], reference: &[f64]) -> Vec<(usize, u8, f64)> {
-    alpha
-        .iter()
-        .zip(reference)
-        .enumerate()
-        .filter(|(_, (a, r))| {
-            let level = **r * 255.0;
-            let tie = (level.fract() - 0.5).abs() < TIE;
-            let near = (f64::from(**a) - level).abs() < 0.5 + TIE;
-            f64::from(**a) != level.round() && !(tie && near)
-        })
-        .map(|(i, (a, r))| (i, *a, r * 255.0))
         .collect()
 }
 

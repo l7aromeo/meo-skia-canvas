@@ -163,6 +163,7 @@ read the math functions and every length unit.
 - **A filter set by `Context2D::set_image_filter` keeps a float canvas's floats.** ([#403](https://github.com/l7aromeo/meo-skia-canvas/pull/403))
 - **A `Paragraph`'s blurred text shadow is the exact blur of its text.** ([#399](https://github.com/l7aromeo/meo-skia-canvas/pull/399))
 - **A `drop-shadow()` is the exact Gaussian blur of what casts it.** ([#400](https://github.com/l7aromeo/meo-skia-canvas/pull/400))
+- **Text under `blur()` is the exact Gaussian blur of the drawn text, as a path or an image under it is.** ([#493](https://github.com/l7aromeo/meo-skia-canvas/issues/493))
 - **A `drop-shadow()` lands where Chrome puts it under a turned or skewed transform.** ([#398](https://github.com/l7aromeo/meo-skia-canvas/pull/398))
 - **A rectangle the closed-form blur cannot take is blurred exactly.** ([#389](https://github.com/l7aromeo/meo-skia-canvas/pull/389))
 - **A blurred rounded rectangle or oval is its exact Gaussian blur.** ([#389](https://github.com/l7aromeo/meo-skia-canvas/pull/389))
@@ -283,6 +284,7 @@ read the math functions and every length unit.
 
 ### Known, and not fixed here
 
+- **Text under a filter can cover a curved edge's pixels up to 32 levels otherwise than before, as Skia covers a curve by where on the device it lies.** ([#504](https://github.com/l7aromeo/meo-skia-canvas/pull/504), [#507](https://github.com/l7aromeo/meo-skia-canvas/issues/507))
 - **On macOS a GPU draw can be dropped when the shader compiler is slow, in a crate build.** ([#316](https://github.com/l7aromeo/meo-skia-canvas/pull/316))
 - **On Linux, text is laid out at its size truncated to a 64th of a pixel.** ([#382](https://github.com/l7aromeo/meo-skia-canvas/pull/382))
 - **A GPU path can have a pixel's coverage moved a step, in a crate build.** ([#410](https://github.com/l7aromeo/meo-skia-canvas/pull/410))
