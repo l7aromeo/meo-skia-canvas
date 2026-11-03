@@ -181,11 +181,12 @@ measured in their pull requests, before the release-prep timing:
   ([#469](https://github.com/l7aromeo/meo-skia-canvas/pull/469)).
 
 A read of a GPU canvas after a draw waits on the GPU once rather than twice
-([#497](https://github.com/l7aromeo/meo-skia-canvas/issues/497)): the copy
-out is encoded in the command buffer the draws are in, and the one wait
-answers for both. Medians of three interleaved passes on an Apple M4 Pro,
-against the two waits before it and against 6.0.2, with no other build or
-test running:
+([#497](https://github.com/l7aromeo/meo-skia-canvas/issues/497)): the one
+wait answers for the draws as well as the copy out. On Metal the draws are
+committed first, in a command buffer of their own, and the status of every
+buffer Skia committed is read after that wait. Medians of three interleaved
+passes on an Apple M4 Pro, against the two waits before it and against
+6.0.2, with no other build or test running:
 
 | read after a draw   | 6.0.2      | two waits    | one wait     |
 | ------------------- | ---------- | ------------ | ------------ |
@@ -193,13 +194,22 @@ test running:
 | 64x48               | 203–224 µs | 253–258 µs   | 199–202 µs   |
 | whole 1200x900 page | 546–630 µs | 1237–1351 µs | 1075–1155 µs |
 
-The whole-page read stays above 6.0.2's: the rest of it is the GPU's work
-inside that wait and the exact unpremultiply, which 6.0.2 left to the GPU
-and its rounding down. By Metal's own timestamps on every command buffer,
-the GPU works for a median of about 190–240 µs per read here against
-6.0.2's 109, and on neither does any of it finish before the wait starts:
-6.0.2's draws and copy are in two buffers, but the split buys it no
-overlap.
+The draws go first because of Apple's GPU clock. Read after read, a copy
+committed in the buffer its draws are in holds the GPU at its lowest state,
+and the same passes take longer for it; with the draws first it rises.
+powermetrics' `gpu_power` sampler, every 50 ms over 20 s of back-to-back
+whole 1200x900 reads after an 8x8 draw, same machine:
+
+| whole 1200x900 reads         | median read | GPU active frequency, median (p10–p90) |
+| ---------------------------- | ----------- | -------------------------------------- |
+| draws and copy in one buffer | 724 µs      | 338 MHz (338–338)                      |
+| draws first                  | 684 µs      | 426 MHz (351–474)                      |
+| 6.0.2                        | 620 µs      | 672 MHz (482–763)                      |
+
+The GPU is busy throughout in all three. The read stays about 65 µs above
+6.0.2's, which also runs the GPU at a higher clock, for a reason not yet
+found. The exact unpremultiply, which 6.0.2 left to the GPU and its rounding
+down, costs 34–41 µs a read on the thread pool.
 
 The unpremultiply is made as each row is copied out of the buffer the
 GPU's copy lands in, rather than as a copy and then a second pass over the
