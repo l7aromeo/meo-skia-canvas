@@ -136,7 +136,7 @@ pub(crate) enum Depth {
     Floats,
     /// Half floats on a canvas of bytes, the canvas's own on one of
     /// floats: what holds every translucent colour placed on its bytes
-    /// exactly where the GPU blurs it -- see `BlurOp::playback`.
+    /// exactly where the GPU blurs it -- see `BlurOp::result_chain`.
     ///
     /// What it costs: 256 blurred circles on an eight-bit Display P3 page,
     /// read back, take 1.15 to 1.21 times as long on the GPU as through a
@@ -227,9 +227,9 @@ pub(crate) fn run(
     paint: &Paint,
     draw: impl FnOnce(&SkCanvas),
 ) -> Option<Outcome> {
-    let plan = plan(canvas, steps, content)?;
+    let plan = plan(canvas, steps, content, depth)?;
     let mut draw = Some(draw);
-    let mut drawn = Drawn::new(canvas, depth, &[&plan], |_, offscreen| {
+    let mut drawn = Drawn::new(canvas, &[&plan], |_, offscreen| {
         if let Some(draw) = draw.take() {
             draw(offscreen);
         }
@@ -255,6 +255,8 @@ pub(crate) struct Plan {
     ink: Option<IRect>,
     /// Whether the layer is on the GPU.
     on_gpu: bool,
+    /// What the layer holds a channel in.
+    depth: Depth,
 }
 
 /// The most chains [`Plan::joins`] lets share one layer. Chosen, not
@@ -266,13 +268,13 @@ impl Plan {
     /// Whether this chain can draw into the layer `batch`'s chains share,
     /// and each of them still read what it would from a layer of its own.
     ///
-    /// The layer has to be the one each would have: on the GPU, in the
-    /// device's pixels, placed at the same bounds -- the page's, which an
-    /// edge rounds against (see [`placed`]). And no chain's draw may touch a
-    /// pixel another reads: a pixel a chain reads then holds the same
-    /// samples, cleared and drawn by the same commands, as in a layer of its
-    /// own. Where what a draw paints is not known, nothing can be shown of
-    /// it, and the chain shares nothing.
+    /// The layer has to be the one each would have: on the GPU, of the same
+    /// [`Depth`], in the device's pixels, placed at the same bounds -- the
+    /// page's, which an edge rounds against (see [`placed`]). And no chain's
+    /// draw may touch a pixel another reads: a pixel a chain reads then
+    /// holds the same samples, cleared and drawn by the same commands, as
+    /// in a layer of its own. Where what a draw paints is not known,
+    /// nothing can be shown of it, and the chain shares nothing.
     pub(crate) fn joins(&self, batch: &[&Plan]) -> bool {
         let Some(ink) = self.ink else {
             return false;
@@ -283,6 +285,7 @@ impl Plan {
             && batch.len() < MAX_SHARED
             && batch.iter().all(|other| {
                 other.drawn == self.drawn
+                    && other.depth == self.depth
                     && other.on_gpu
                     && other.rest.is_identity()
                     && other.ink.is_some_and(|other_ink| {
@@ -293,13 +296,14 @@ impl Plan {
     }
 }
 
-/// The plan of a chain drawn under `canvas`'s transform and clip, with
-/// `content` bounding what it paints where that is known. `None` where
-/// nothing would show.
+/// The plan of a chain drawn under `canvas`'s transform and clip into a
+/// layer of `depth`, with `content` bounding what it paints where that is
+/// known. `None` where nothing would show.
 pub(crate) fn plan(
     canvas: &SkCanvas,
     steps: &[Step],
     content: Option<Rect>,
+    depth: Depth,
 ) -> Option<Plan> {
     let base = canvas.local_to_device_as_3x3();
     let (layer, rest) = split(&base)?;
@@ -333,6 +337,7 @@ pub(crate) fn plan(
         drawn,
         ink,
         on_gpu,
+        depth,
     })
 }
 
@@ -346,17 +351,17 @@ pub(crate) struct Drawn {
 }
 
 impl Drawn {
-    /// One layer at `plans`' layer, which they share, holding what `draw`
-    /// draws for each of them: called with each plan's index in turn, onto a
-    /// canvas under that plan's transform, in a save of its own, after every
-    /// plan's region has been cleared. `None` where no layer could be made.
+    /// One layer at `plans`' layer, which they share, of their depth,
+    /// holding what `draw` draws for each of them: called with each plan's
+    /// index in turn, onto a canvas under that plan's transform, in a save
+    /// of its own, after every plan's region has been cleared. `None` where
+    /// no layer could be made.
     ///
     /// A single plan's layer falls back to its region alone where Skia
     /// refuses the one [`placed`] asks for, as `placed` says. Plans sharing a
     /// layer have no such fallback, since a region-sized layer is one plan's.
     pub(crate) fn new(
         canvas: &SkCanvas,
-        depth: Depth,
         plans: &[&Plan],
         mut draw: impl FnMut(usize, &SkCanvas),
     ) -> Option<Self> {
@@ -371,7 +376,8 @@ impl Drawn {
                 {
                     return None;
                 }
-                layer_surface(canvas, depth, at).map(|surface| (surface, at))
+                layer_surface(canvas, first.depth, at)
+                    .map(|surface| (surface, at))
             })?;
         #[cfg(test)]
         SHARED_LAYERS.with(|layers| layers.set(layers.get() + 1));
@@ -3032,7 +3038,8 @@ mod shared_tests {
                 canvas.save();
                 canvas.translate(member.at);
                 let steps = member.steps.as_deref().unwrap_or(steps);
-                let plan = plan(canvas, steps, Some(member.rect));
+                let plan =
+                    plan(canvas, steps, Some(member.rect), Depth::Floats);
                 canvas.restore();
                 plan
             })
@@ -3053,11 +3060,10 @@ mod shared_tests {
                 start += 1;
                 continue;
             }
-            let mut drawn =
-                Drawn::new(canvas, Depth::Floats, &batch, |i, layer| {
-                    members[start + i].draw(layer)
-                })
-                .expect("a layer");
+            let mut drawn = Drawn::new(canvas, &batch, |i, layer| {
+                members[start + i].draw(layer)
+            })
+            .expect("a layer");
             for (plan, member) in batch.iter().zip(&members[start..end]) {
                 let steps = member.steps.as_deref().unwrap_or(steps);
                 if let Some(outcome) = drawn.finish(plan, steps, &member.paint)
