@@ -30,6 +30,9 @@ use rayon::prelude::*;
 use rustfft::{Fft, FftNum, FftPlanner, num_complex::Complex};
 use std::{cell::RefCell, collections::HashMap, f64::consts::TAU, sync::Arc};
 
+#[cfg(test)]
+use std::cell::Cell;
+
 /// How many sigmas the kernel reaches either side of its centre.
 ///
 /// Measured against a reference reaching 8 sigmas, on noise, hard edges and
@@ -49,6 +52,78 @@ pub(crate) const REACH_SIGMAS: f64 = 6.0;
 /// level near 5. The crossover moves with the image's size and the thread
 /// count, so this is the measured figure at one size rather than a law.
 pub(crate) const FFT_FROM_SIGMA: f32 = 5.0;
+
+/// The multiply-adds from which a pass of the blur is split over rayon's
+/// pool rather than run on the calling thread.
+///
+/// A pass handed to the pool from outside it waits for a worker to take it
+/// up, and one split into a task per line wakes a worker for each: a 59 by
+/// 56 drop shadow at a sigma of 3 blurred in 215 microseconds on 14 threads
+/// and 100 on one. Drop shadows at a sigma of 3 on the CPU, swept over the
+/// threshold: a 40 pixel square, 0.44 million multiply-adds a pass, drew in
+/// 177 microseconds on one thread and 278 split; a 100 pixel square,
+/// 1.4 million, in 463 split and 533 on one. Each line is worked by the same
+/// code either way, so the choice moves no bit of the result.
+const PARALLEL_FROM: usize = 1 << 20;
+
+/// The floats from which a copy the blur makes -- a transpose, the bytes
+/// read into floats and rounded back -- is split over rayon's pool. A copy
+/// costs less a float than a pass, so it pays to split sooner: swept with
+/// the passes split, a 380 pixel square's drop shadow, 0.69 million floats
+/// a transpose, drew in 2,145 microseconds with them split and 2,479 with
+/// them on one thread; a 200 pixel square's, 0.22 million, in 878 split and 928
+/// on one; a 100 pixel square's, 74 thousand, in 493 split and 469 on one. The
+/// threshold lies inside that bracket and was not itself timed; the
+/// release's timing covers it.
+const COPY_PARALLEL_FROM: usize = 1 << 17;
+
+#[cfg(test)]
+thread_local! {
+    /// Whether the blur runs every step on rayon's pool and skips no line:
+    /// the plain schedule, which the defaults are held to bit for bit. Read
+    /// on the thread that calls the blur.
+    static PLAIN_SCHEDULE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether a step costing `work` is split over rayon's pool, given the work
+/// `from` which a step of its kind pays to split -- [`PARALLEL_FROM`] or
+/// [`COPY_PARALLEL_FROM`].
+fn parallel(work: usize, from: usize) -> bool {
+    #[cfg(test)]
+    if PLAIN_SCHEDULE.with(Cell::get) {
+        return true;
+    }
+    work >= from
+}
+
+/// Whether [`direct`] leaves a line of +0.0 as it is.
+fn skips_empty_lines() -> bool {
+    #[cfg(test)]
+    if PLAIN_SCHEDULE.with(Cell::get) {
+        return false;
+    }
+    true
+}
+
+/// Runs `op` on each `len`-long chunk of `data`, with a state `init` makes
+/// for each worker: across rayon's pool where `work` -- what the whole call
+/// costs -- is worth splitting, and on the calling thread otherwise -- see
+/// [`parallel`].
+fn each_chunk<S>(
+    data: &mut [f32],
+    len: usize,
+    work: usize,
+    init: impl Fn() -> S + Send + Sync,
+    op: impl Fn(&mut S, &mut [f32]) + Send + Sync,
+) {
+    match parallel(work, PARALLEL_FROM) {
+        true => data.par_chunks_mut(len).for_each_init(init, op),
+        false => {
+            let mut state = init();
+            data.chunks_mut(len).for_each(|chunk| op(&mut state, chunk));
+        }
+    }
+}
 
 /// The half-kernel `w_0..=w_r`: the Gaussian sampled at whole-pixel offsets,
 /// normalised over its whole reach, `ceil(REACH_SIGMAS * sigma)` either
@@ -130,15 +205,21 @@ pub(crate) fn blur_bytes(
     sigma_y: f32,
     gain: f32,
 ) -> Vec<u8> {
-    let floats: Vec<f32> = pixels.par_iter().map(|&b| f32::from(b)).collect();
+    let split = parallel(pixels.len(), COPY_PARALLEL_FROM);
+    let floats: Vec<f32> = match split {
+        true => pixels.par_iter().map(|&b| f32::from(b)).collect(),
+        false => pixels.iter().map(|&b| f32::from(b)).collect(),
+    };
     drop(pixels);
-    blur_in::<f32>(floats, width, height, sigma_x, sigma_y)
-        .into_par_iter()
-        // Each value is a weighted mean of bytes times a gain in [0, 1], so
-        // it lies in [0, 255] up to float noise; the cast saturates what
-        // noise puts outside.
-        .map(|v| (v * gain + 0.5) as u8)
-        .collect()
+    let blurred = blur_in::<f32>(floats, width, height, sigma_x, sigma_y);
+    // Each value is a weighted mean of bytes times a gain in [0, 1], so it
+    // lies in [0, 255] up to float noise; the cast saturates what noise puts
+    // outside.
+    let byte = |v: f32| (v * gain + 0.5) as u8;
+    match split {
+        true => blurred.into_par_iter().map(byte).collect(),
+        false => blurred.into_iter().map(byte).collect(),
+    }
 }
 
 /// [`blur`], with each line worked in `L`.
@@ -273,14 +354,27 @@ fn method(sigma: f32) -> Method {
 /// over a copy of the line padded with zeros so no tap leaves it, summed
 /// into the line's accumulator -- see [`Lane::accumulate`]. Each tap is one
 /// pass over the whole line, which the compiler vectorises.
+///
+/// A line holding nothing but +0.0 is left as it is: every tap sums to +0.0
+/// there, bit for bit, and a draw's layer is mostly such lines. A -0.0 is
+/// worked like any other value, since a sum of signed zeros need not keep
+/// its sign.
 fn direct<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
     let k: Vec<L> = k.iter().map(|&w| L::weight(w)).collect();
     let r = k.len() - 1;
     let (stride, pad) = (n * 4, r * 4);
     let zero = L::of(0.0);
-    pixels.par_chunks_mut(stride).for_each_init(
+    let work = pixels.len() * k.len();
+    let skip = skips_empty_lines();
+    each_chunk(
+        pixels,
+        stride,
+        work,
         || (vec![zero; stride + 2 * pad], Vec::new()),
         |(padded, scratch), out| {
+            if skip && out.iter().all(|v| v.to_bits() == 0) {
+                return;
+            }
             padded[pad..pad + stride]
                 .iter_mut()
                 .zip(out.iter())
@@ -357,7 +451,12 @@ fn fourier<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
     let spectrum: Vec<L> =
         spectrum(k, len).into_iter().map(L::weight).collect();
     let zero = Complex::new(L::of(0.0), L::of(0.0));
-    pixels.par_chunks_mut(n * 4).for_each_init(
+    // Two transforms each way per line, each about `len log2 len` steps.
+    let work = pixels.len() / 4 * len.ilog2() as usize * 4;
+    each_chunk(
+        pixels,
+        n * 4,
+        work,
         || {
             let (forward, inverse) = L::plans(len);
             let scratch = forward
@@ -421,21 +520,24 @@ fn transpose(src: &[f32], dst: &mut [f32], width: usize, height: usize) {
     if width == 0 || height == 0 {
         return;
     }
-    dst.par_chunks_mut(BLOCK * height * 4).enumerate().for_each(
-        |(bx, rows)| {
-            let x0 = bx * BLOCK;
-            let xs = rows.len() / (height * 4);
-            for y0 in (0..height).step_by(BLOCK) {
-                for x in 0..xs {
-                    for y in y0..(y0 + BLOCK).min(height) {
-                        let s = (y * width + x0 + x) * 4;
-                        let d = (x * height + y) * 4;
-                        rows[d..d + 4].copy_from_slice(&src[s..s + 4]);
-                    }
+    let block = |(bx, rows): (usize, &mut [f32])| {
+        let x0 = bx * BLOCK;
+        let xs = rows.len() / (height * 4);
+        for y0 in (0..height).step_by(BLOCK) {
+            for x in 0..xs {
+                for y in y0..(y0 + BLOCK).min(height) {
+                    let s = (y * width + x0 + x) * 4;
+                    let d = (x * height + y) * 4;
+                    rows[d..d + 4].copy_from_slice(&src[s..s + 4]);
                 }
             }
-        },
-    );
+        }
+    };
+    let rows = BLOCK * height * 4;
+    match parallel(dst.len(), COPY_PARALLEL_FROM) {
+        true => dst.par_chunks_mut(rows).enumerate().for_each(block),
+        false => dst.chunks_mut(rows).enumerate().for_each(block),
+    }
 }
 
 #[cfg(test)]
@@ -734,5 +836,90 @@ mod tests {
             let out = blur_bytes(pixels.clone(), w, h, sigma, sigma, 1.0);
             assert!(out.iter().all(|&v| v == 0), "{sigma}");
         }
+    }
+
+    /// Float scenes a schedule could tell apart: a block in a mostly empty
+    /// layer, as a draw's shadow is; dense noise; rows of zeros of both
+    /// signs, mixed, which sum to +0.0 where a line of +0.0 alone is left
+    /// as it is; and rows whose first pixel is empty and whose later ones
+    /// are not.
+    fn float_scenes(w: usize, h: usize) -> Vec<Vec<f32>> {
+        let mut s = 29;
+        let mut unit = move || (lcg(&mut s) % 10_000) as f32 / 10_000.0;
+        let block = (0..h)
+            .flat_map(|y| {
+                (0..w).flat_map(move |x| {
+                    let inside = (w / 3..w / 3 + w / 4 + 1).contains(&x)
+                        && (h / 3..h / 3 + h / 4 + 1).contains(&y);
+                    match inside {
+                        true => [0.25, 0.5, 0.125, 0.75],
+                        false => [0.0; 4],
+                    }
+                })
+            })
+            .collect();
+        let noise = (0..w * h * 4).map(|_| unit()).collect();
+        let signed = (0..w * h * 4)
+            .map(|i| match (i / (w * 4)) % 3 {
+                0 => 0.0,
+                1 => [0.0, -0.0][i % 2],
+                _ => -0.0,
+            })
+            .collect();
+        let late = (0..h)
+            .flat_map(|_| {
+                (0..w * 4).map(|i| match i >= w * 2 {
+                    true => 0.5,
+                    false => 0.0,
+                })
+            })
+            .collect();
+        vec![block, noise, signed, late]
+    }
+
+    /// The blur with [`PLAIN_SCHEDULE`] set: every step on rayon's pool and
+    /// no line skipped.
+    fn plainly<T>(f: impl FnOnce() -> T) -> T {
+        PLAIN_SCHEDULE.with(|plain| plain.set(true));
+        let out = f();
+        PLAIN_SCHEDULE.with(|plain| plain.set(false));
+        out
+    }
+
+    #[test]
+    fn scheduling_by_work_moves_no_bit_of_the_blur() {
+        // Small enough to run on the calling thread and large enough to be
+        // split, at sigmas taken tap by tap and through the FFT.
+        let mut compared = 0;
+        for (w, h) in [(1, 1), (7, 3), (59, 56), (400, 300)] {
+            for sigma in [0.5f32, 1.5, 3.0, 4.9, 5.0, 12.0, 40.0] {
+                for (i, scene) in float_scenes(w, h).into_iter().enumerate() {
+                    let ours = blur(scene.clone(), w, h, sigma, sigma * 0.7);
+                    let plain =
+                        plainly(|| blur(scene, w, h, sigma, sigma * 0.7));
+                    let differs = ours
+                        .iter()
+                        .zip(&plain)
+                        .position(|(a, b)| a.to_bits() != b.to_bits());
+                    assert_eq!(
+                        differs, None,
+                        "{w}x{h}, sigma {sigma}, scene {i}"
+                    );
+                    compared += 1;
+                }
+                for (i, scene) in scenes(w, h).into_iter().enumerate() {
+                    let ours =
+                        blur_bytes(scene.clone(), w, h, sigma, sigma, 0.6);
+                    let plain =
+                        plainly(|| blur_bytes(scene, w, h, sigma, sigma, 0.6));
+                    assert!(
+                        ours == plain,
+                        "bytes, {w}x{h}, sigma {sigma}, scene {i}"
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        assert_eq!(compared, 4 * 7 * (4 + 4));
     }
 }
