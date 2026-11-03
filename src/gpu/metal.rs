@@ -23,7 +23,7 @@ mod recording;
 
 #[cfg(test)]
 pub(crate) use recording::{
-    BLIND, BLIND_FOR_TEST, BUFFER_DISCARDED, FINISHED, MADE, WAITED,
+    BLIND, BLIND_FOR_TEST, BUFFER_DISCARDED, FINISHED, WAITED,
 };
 pub(crate) use recording::{Mark, RecordingQueue};
 
@@ -577,7 +577,7 @@ impl MetalBackend {
 mod tests {
     use objc2_quartz_core::CAMetalLayer;
 
-    use super::{MADE, MetalBackend, MetalEngine};
+    use super::{MetalBackend, MetalEngine, recording::MADE};
     use objc2_metal::MTLCreateSystemDefaultDevice;
 
     /// A window's context makes its buffers on Metal's queue: nothing reads
