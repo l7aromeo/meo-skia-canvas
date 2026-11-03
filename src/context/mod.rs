@@ -2140,7 +2140,7 @@ impl Context2D {
             && self.state.skia_color_filter.is_none()
             && self.state.skia_mask_filter.is_none()
             && self.state.filter.is_none()
-            && path.conservatively_contains_rect(self.bounds)
+            && holds(&path, self.bounds)
         {
             // ...erase existing vector content layers (but preserve CTM & clip
             // path)
@@ -2420,11 +2420,9 @@ impl Context2D {
             .as_ref()
             .unwrap_or(&Path::rect(self.bounds, None))
             .op(&clip, PathOp::Intersect)
-            .and_then(|path| {
-                match path.conservatively_contains_rect(self.bounds) {
-                    true => None,
-                    false => Some(path),
-                }
+            .and_then(|path| match holds(&path, self.bounds) {
+                true => None,
+                false => Some(path),
             });
 
         self.with_recorder(|mut recorder| {
@@ -3985,6 +3983,24 @@ fn carries(source: VectorFeatures, paint: &Paint) -> bool {
         ),
         (false, Some(BlendMode::SrcOver), 255, None, None)
     )
+}
+
+/// Whether `path` holds `rect`, as `Path::conservatively_contains_rect`
+/// answers -- asked of the path's bounds first.
+///
+/// Skia works out a path's convexity before anything else, afresh for every
+/// path made, so asking whether a 10x10 fill covers the page was 9% of what
+/// recording one cost. A path holds nothing its bounds do not, so a
+/// rectangle reaching past them is refused without it. The comparison is
+/// written out rather than `Rect::contains`, which refuses an empty
+/// rectangle that Skia's own test still answers for.
+fn holds(path: &Path, rect: Rect) -> bool {
+    let reach = path.bounds();
+    reach.left <= rect.left
+        && reach.top <= rect.top
+        && reach.right >= rect.right
+        && reach.bottom >= rect.bottom
+        && path.conservatively_contains_rect(rect)
 }
 
 /// What `path` covers once `matrix` puts it on the device, for choosing how
@@ -6032,6 +6048,61 @@ mod tests {
             .map(|(a, b)| a.abs_diff(*b))
             .max();
         assert!(most.is_some_and(|most| most <= 1), "parted by {most:?}");
+    }
+
+    /// [`holds`] answers as `Path::conservatively_contains_rect` does, for
+    /// paths and rectangles either side of every edge, touching it, inside,
+    /// empty, and paths that are not convex or not closed: the bounds test
+    /// it asks first may only refuse what Skia's would.
+    #[test]
+    fn holding_a_rect_answers_as_skia_does() {
+        let page = Rect::from_wh(64.0, 48.0);
+        let mut star = PathBuilder::new();
+        star.move_to((0.0, 0.0))
+            .line_to((70.0, 24.0))
+            .line_to((0.0, 50.0))
+            .line_to((32.0, 24.0))
+            .close();
+        let mut open = PathBuilder::new();
+        open.move_to((-1.0, -1.0))
+            .line_to((70.0, -1.0))
+            .line_to((70.0, 60.0));
+        let paths = [
+            Path::rect(page, None),
+            Path::rect(page.with_outset((0.5, 0.5)), None),
+            Path::rect(page.with_inset((0.5, 0.0)), None),
+            Path::rect(page.with_offset((0.25, 0.0)), None),
+            Path::rect(Rect::from_xywh(0.0, 0.0, 10.0, 10.0), None),
+            Path::oval(page.with_outset((20.0, 20.0)), None),
+            Path::rect(Rect::new_empty(), None),
+            star.detach(),
+            open.detach(),
+        ];
+        let rects = [
+            page,
+            page.with_inset((1.0, 1.0)),
+            page.with_outset((1.0, 0.0)),
+            Rect::from_xywh(0.0, 0.0, 0.0, 0.0),
+            Rect::from_xywh(64.0, 48.0, 0.0, 0.0),
+            Rect::from_xywh(5.0, 5.0, 0.0, 10.0),
+            Rect::from_xywh(-1.0, 3.0, 2.0, 2.0),
+        ];
+        let mut agreed = 0;
+        for path in &paths {
+            for &rect in &rects {
+                assert_eq!(
+                    holds(path, rect),
+                    path.conservatively_contains_rect(rect),
+                    "{:?} holding {rect:?}",
+                    path.bounds()
+                );
+                agreed += usize::from(holds(path, rect));
+            }
+        }
+        assert!(
+            agreed > 0,
+            "some rectangle is held, or this asserts nothing"
+        );
     }
 }
 
