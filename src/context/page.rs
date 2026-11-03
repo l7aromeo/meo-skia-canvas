@@ -1675,17 +1675,60 @@ impl PageRecorder {
         engine: RenderingEngine,
         alpha_type: AlphaType,
     ) -> Result<Vec<u8>, String> {
-        // return an empty buffer if the requested rect is entirely outside the
-        // canvas
-        let dst_info = ImageInfo::new(
+        let size = Self::pixels_size(crop, &opts, alpha_type)?;
+        let mut pixels = vec![0; size];
+        self.pixels_into(crop, opts, engine, alpha_type, &mut pixels)?;
+        Ok(pixels)
+    }
+
+    /// How many bytes [`Self::pixels_into`] writes for `crop` read as
+    /// `opts` and `alpha_type` describe: tightly packed rows, as `ImageData`
+    /// holds them.
+    pub(crate) fn pixels_size(
+        crop: IRect,
+        opts: &ExportOptions,
+        alpha_type: AlphaType,
+    ) -> Result<usize, String> {
+        checked_byte_size(&Self::pixels_info(crop, opts, alpha_type))
+    }
+
+    fn pixels_info(
+        crop: IRect,
+        opts: &ExportOptions,
+        alpha_type: AlphaType,
+    ) -> ImageInfo {
+        ImageInfo::new(
             (crop.width(), crop.height()),
             opts.color_type,
             alpha_type,
             opts.color_space.clone(),
-        );
+        )
+    }
 
-        let size = checked_byte_size(&dst_info)?;
-        let mut dst_buffer: Vec<u8> = vec![0; size];
+    /// [`Self::pixels_as`] into `dst_buffer`, which holds zeros and
+    /// [`Self::pixels_size`] bytes, rather than into a buffer of its own: so
+    /// that the Node binding reads straight into the `ArrayBuffer` an
+    /// `ImageData` keeps, with no copy between. Where a read leaves part of
+    /// the rectangle unwritten -- outside the canvas -- it stays the zeros it
+    /// was handed.
+    pub(crate) fn pixels_into(
+        &mut self,
+        crop: IRect,
+        opts: ExportOptions,
+        engine: RenderingEngine,
+        alpha_type: AlphaType,
+        dst_buffer: &mut [u8],
+    ) -> Result<(), String> {
+        let dst_info = Self::pixels_info(crop, &opts, alpha_type);
+        if dst_buffer.len() != checked_byte_size(&dst_info)? {
+            return Err(format!(
+                "A {}x{} read needs {} bytes, not {}",
+                crop.width(),
+                crop.height(),
+                checked_byte_size(&dst_info)?,
+                dst_buffer.len()
+            ));
+        }
 
         // `crop` is in device pixels and `bounds` is in canvas units, so the
         // two describe the same rectangle only at density 1. Compared
@@ -1700,12 +1743,14 @@ impl PageRecorder {
             self.bounds.right * opts.density,
             self.bounds.bottom * opts.density,
         );
+        // An empty read where the rectangle lies wholly outside the canvas.
         if !device_bounds.intersects(Rect::from_irect(crop)) {
-            return Ok(dst_buffer);
+            return Ok(());
         }
 
         if !self.open.is_empty() {
-            return self.pixels_in_layer(crop, &opts, &engine, &dst_info);
+            return self
+                .pixels_in_layer(crop, &opts, &engine, &dst_info, dst_buffer);
         }
 
         let page = self.page();
@@ -1714,26 +1759,17 @@ impl PageRecorder {
         // whole point: a hit test asked for sixty-four pixels and used to
         // composite and keep a megapixel. Anything wider than the grid is
         // worth is served by the page, as before.
-        if self.surface.read_tiled(
-            &page,
-            &opts,
-            &engine,
-            &dst_info,
-            crop,
-            &mut dst_buffer,
-        )? {
-            return Ok(dst_buffer);
+        if self
+            .surface
+            .read_tiled(&page, &opts, &engine, &dst_info, crop, dst_buffer)?
+        {
+            return Ok(());
         }
 
         match self.surface.confirmed_read(
-            &page,
-            &opts,
-            &engine,
-            &dst_info,
-            crop,
-            &mut dst_buffer,
+            &page, &opts, &engine, &dst_info, crop, dst_buffer,
         )? {
-            true => Ok(dst_buffer),
+            true => Ok(()),
             false => Err(format!(
                 "Could not get image data (format: {:?})",
                 dst_info.color_type()
@@ -1754,13 +1790,13 @@ impl PageRecorder {
         opts: &ExportOptions,
         engine: &RenderingEngine,
         dst_info: &ImageInfo,
-    ) -> Result<Vec<u8>, String> {
+        pixels: &mut [u8],
+    ) -> Result<(), String> {
         let filed = self.filed_page();
         self.split_run();
         self.file_current();
         self.reframe();
         self.surface.confirmed_update(&filed, opts, engine)?;
-        let mut pixels = vec![0; checked_byte_size(dst_info)?];
         let origin = (crop.x(), crop.y());
         let rastered =
             self.open.iter().all(|layer| layer.rasters(opts.density))
@@ -1768,10 +1804,10 @@ impl PageRecorder {
                     &self.open,
                     opts.density,
                     (dst_info, origin),
-                    &mut pixels,
+                    pixels,
                 )?;
         if rastered {
-            return Ok(pixels);
+            return Ok(());
         }
         let whole = self.open_layers_reach_past_a_read();
         let drawn = self.open_layers_entry();
@@ -1785,9 +1821,9 @@ impl PageRecorder {
             opts.density,
             filed.id,
             read,
-            &mut pixels,
+            pixels,
         )?;
-        Ok(pixels)
+        Ok(())
     }
 
     /// Whether what the open layers draw at a pixel can depend on the page

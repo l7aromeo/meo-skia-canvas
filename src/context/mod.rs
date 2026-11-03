@@ -3012,6 +3012,33 @@ impl Context2D {
         })
     }
 
+    /// How many bytes [`Context2D::pixels_into`] writes for `crop` read for
+    /// `opts`.
+    pub(crate) fn pixels_size(
+        crop: IRect,
+        opts: &ExportOptions,
+    ) -> Result<usize, String> {
+        PageRecorder::pixels_size(crop, opts, opts.alpha_type)
+    }
+
+    /// [`Context2D::pixels`] into `pixels`, which holds zeros and
+    /// [`Context2D::pixels_size`] bytes: the read made straight into the
+    /// caller's memory, with no buffer of its own between.
+    pub(crate) fn pixels_into(
+        &mut self,
+        crop: IRect,
+        opts: ExportOptions,
+        engine: RenderingEngine,
+        pixels: &mut [u8],
+    ) -> Result<(), String> {
+        let alpha_type = opts.alpha_type;
+        gpu::autorelease(|| {
+            self.recorder
+                .borrow_mut()
+                .pixels_into(crop, opts, engine, alpha_type, pixels)
+        })
+    }
+
     /// As [`Context2D::pixels`], with the destination alpha mode chosen
     /// by the caller.
     pub fn pixels_as(

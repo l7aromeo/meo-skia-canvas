@@ -1,5 +1,5 @@
 #![allow(non_snake_case)]
-use neon::prelude::*;
+use neon::{prelude::*, types::buffer::TypedArray};
 use skia_safe::{
     IRect, Matrix, PaintStyle,
     PaintStyle::{Fill, Stroke},
@@ -1393,7 +1393,7 @@ pub fn drawCanvas(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     }
 }
 
-pub fn getImageData(mut cx: FunctionContext) -> JsResult<JsBuffer> {
+pub fn getImageData(mut cx: FunctionContext) -> JsResult<JsArrayBuffer> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut x = float_arg(&mut cx, 1, "x")?.floor();
     let mut y = float_arg(&mut cx, 2, "y")?.floor();
@@ -1472,12 +1472,20 @@ pub fn getImageData(mut cx: FunctionContext) -> JsResult<JsBuffer> {
         IRect::new(ox as i32, oy as i32, (ox + dw) as i32, (oy + dh) as i32);
     let engine = canvas.engine();
 
+    // Read straight into the `ArrayBuffer` the `ImageData` keeps: one of
+    // exactly the pixels' length, made here and zeroed by Node, which
+    // `context.js` wraps in a view without copying -- so `data.buffer` is
+    // that read and nothing else, at offset 0, as a browser's is. A `Buffer`
+    // would be a copy of a buffer of the read's own, and may be a slice of a
+    // pool shared with other buffers.
+    let size =
+        Context2D::pixels_size(crop, &opts).or_else(|e| cx.throw_error(e))?;
+    let mut buffer = JsArrayBuffer::new(&mut cx, size)?;
     let mut this = this.borrow_mut();
-    let data = this
-        .pixels(crop, opts, engine)
-        .or_else(|e| cx.throw_error(e))?;
+    let read =
+        this.pixels_into(crop, opts, engine, buffer.as_mut_slice(&mut cx));
+    read.or_else(|e| cx.throw_error(e))?;
     this.report_resident(&mut cx);
-    let buffer = JsBuffer::from_slice(&mut cx, &data)?;
 
     Ok(buffer)
 }
