@@ -133,7 +133,14 @@ struct Entry {
 #[derive(Default)]
 pub(crate) struct ChainCache {
     entries: CacheMap<Key, Entry>,
+    /// The bytes of every entry's outcome, kept as entries come and go.
     bytes: usize,
+    /// How many entries were left by the last sweep for results whose group
+    /// has gone -- see [`ChainCache::put`].
+    swept_at: usize,
+    /// How many sweeps the cache has made, for the tests to count.
+    #[cfg(test)]
+    sweeps: usize,
 }
 
 /// Every result kept, for every thread: pages are played back on rayon
@@ -212,6 +219,25 @@ impl ChainCache {
     fn release(&mut self) {
         self.entries.clear();
         self.bytes = 0;
+        self.swept_at = 0;
+    }
+
+    /// Drops every result whose group has gone, and notes how many are left.
+    fn sweep(&mut self) {
+        let mut freed = 0;
+        self.entries.retain(|key, entry| {
+            let orphaned = key.is_orphaned();
+            if orphaned {
+                freed += entry.bytes;
+            }
+            !orphaned
+        });
+        self.bytes -= freed;
+        self.swept_at = self.entries.len();
+        #[cfg(test)]
+        {
+            self.sweeps += 1;
+        }
     }
 
     fn get(&mut self, key: &Key) -> Option<Outcome> {
@@ -223,9 +249,14 @@ impl ChainCache {
     fn put(&mut self, key: Key, outcome: Outcome) {
         // A group that has gone takes its results with it, here rather than
         // in its `Drop`, which would have to reach this lock from wherever
-        // the last reference falls.
-        self.entries.retain(|key, _| !key.is_orphaned());
-        self.bytes = self.entries.values().map(|entry| entry.bytes).sum();
+        // the last reference falls: once the entries have doubled since the
+        // last sweep, so that a sweep costs each insert a constant share of
+        // one and a gone group's results never outnumber those left by the
+        // sweep before. Swept on every insert, each filtered draw of a page
+        // walked every result kept, 9% of a page of drop shadows' time.
+        if self.entries.len() >= 2 * self.swept_at {
+            self.sweep();
+        }
         let bytes = outcome.bytes();
         if bytes > CHAIN_MAX_BYTES {
             return;
@@ -241,6 +272,10 @@ impl ChainCache {
             },
         ) {
             self.bytes -= old.bytes;
+        }
+        if self.bytes > CHAIN_CACHE_BYTES {
+            // Results whose group has gone go before any that may be used.
+            self.sweep();
         }
         if self.bytes > CHAIN_CACHE_BYTES {
             let mut order: Vec<(u64, Key, usize)> = self
@@ -537,5 +572,67 @@ mod tests {
         releaser.join().expect("the releasing thread");
         drop(own);
         assert!(runs <= 32, "16 rounds ran {runs} chains");
+    }
+    /// The bytes the cache counts, against the sum of what it holds.
+    fn counted(cache: &ChainCache) -> (usize, usize) {
+        let held = cache.entries.values().map(|entry| entry.bytes).sum();
+        (cache.bytes, held)
+    }
+
+    #[test]
+    fn the_running_total_is_what_the_cache_holds() {
+        // Results of three sizes, a third of their groups let go along the
+        // way, and enough of the large ones to pass the budget and evict.
+        let side = ((CHAIN_CACHE_BYTES / 8 / 4) as f64).sqrt() as i32;
+        let identity = Matrix::new_identity();
+        let mut cache = ChainCache::default();
+        let mut kept = Vec::new();
+        for i in 0..300 {
+            let group = group();
+            let outcome = match i % 3 {
+                0 => Outcome::blank(8),
+                1 => Outcome::blank(64),
+                _ => Outcome::blank(side),
+            };
+            cache.put(key(&group, &n32(), &identity, clip()), outcome);
+            if i % 3 != 1 {
+                kept.push(group);
+            }
+            let (counted, held) = counted(&cache);
+            assert_eq!(counted, held, "after insert {i}");
+        }
+        assert!(cache.bytes <= CHAIN_CACHE_BYTES);
+    }
+
+    #[test]
+    fn a_gone_groups_results_go_by_the_next_doubling() {
+        let identity = Matrix::new_identity();
+        let mut cache = ChainCache::default();
+        let groups: Vec<_> = (0..64).map(|_| group()).collect();
+        for group in &groups {
+            cache.put(key(group, &n32(), &identity, clip()), Outcome::blank(8));
+        }
+        drop(groups);
+        let next = group();
+        cache.put(key(&next, &n32(), &identity, clip()), Outcome::blank(8));
+        assert_eq!(cache.entries.len(), 1, "the gone groups' results stayed");
+        assert_eq!(
+            counted(&cache),
+            (Outcome::blank(8).bytes(), Outcome::blank(8).bytes())
+        );
+    }
+
+    #[test]
+    fn an_insert_sweeps_only_once_the_entries_have_doubled() {
+        // 1,024 live groups: swept at 0, 1, 2, 4 ... 512 entries, eleven
+        // times, where a sweep on every insert would make 1,024.
+        let identity = Matrix::new_identity();
+        let mut cache = ChainCache::default();
+        let groups: Vec<_> = (0..1024).map(|_| group()).collect();
+        for group in &groups {
+            cache.put(key(group, &n32(), &identity, clip()), Outcome::blank(2));
+        }
+        assert_eq!(cache.entries.len(), 1024);
+        assert_eq!(cache.sweeps, 11);
     }
 }

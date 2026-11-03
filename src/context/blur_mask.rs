@@ -479,8 +479,8 @@ fn widened(flat: IRect, across: &Axis, down: &Axis, color: [f32; 4]) -> IRect {
 /// An image of `info` whose pixels `fill` writes, given them and their row
 /// stride in bytes. Written in place and handed to Skia without a copy: a
 /// bake is up to several megabytes, and copying it again cost as much as
-/// making it.
-fn baked_image(
+/// making it; a filter chain's result is written this way too.
+pub(crate) fn baked_image(
     info: &ImageInfo,
     fill: impl FnOnce(&mut [u8], usize),
 ) -> Option<Image> {

@@ -21,9 +21,9 @@ use std::sync::Arc;
 
 use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, Color, Color4f, ColorFilter,
-    ColorSpace, ColorType, Data, FilterMode, IRect, Image, ImageFilter,
-    ImageInfo, Matrix, MipmapMode, Paint, Rect, RoundOut, SamplingOptions,
-    Shader, Surface, Vector, color_filters,
+    ColorSpace, ColorType, FilterMode, IRect, Image, ImageFilter, ImageInfo,
+    Matrix, MipmapMode, Paint, Rect, RoundOut, SamplingOptions, Shader,
+    Surface, Vector, color_filters,
     image::{CachingHint, RequiredProperties},
     image_filter::MapDirection,
     image_filters,
@@ -36,6 +36,7 @@ use skia_safe::{Recorder, gpu};
 use crate::context::exact_blur_gpu;
 use crate::{
     context::{
+        blur_mask::baked_image,
         exact_blur::{self, REACH_SIGMAS},
         keeps_two_recordings,
         layer::ExactColour,
@@ -926,8 +927,10 @@ fn blurred_on_cpu(
         ColorType::RGBA8888 | ColorType::BGRA8888
     );
     // Read in the image's own space, so nothing is converted; an 8-bit
-    // image in its own channel order, which a blur treats alike.
-    let (info, pixels) = match bytes {
+    // image in its own channel order, which a blur treats alike. The result
+    // is written into the image's own pixels -- see [`baked_image`] -- with
+    // no buffer between: two buffers its size alive at once, never three.
+    match bytes {
         true => {
             let info = image.image_info().with_alpha_type(AlphaType::Premul);
             let mut pixels = vec![0u8; w * h * 4];
@@ -940,10 +943,13 @@ fn blurred_on_cpu(
             ) {
                 return None;
             }
-            (
-                info,
-                exact_blur::blur_bytes(pixels, w, h, sigma_x, sigma_y, gain),
-            )
+            let blurred =
+                exact_blur::blur_bytes(pixels, w, h, sigma_x, sigma_y, gain);
+            baked_image(&info, |out, stride| {
+                out.chunks_mut(stride).zip(blurred.chunks(w * 4)).for_each(
+                    |(row, line)| row[..line.len()].copy_from_slice(line),
+                );
+            })
         }
         false => {
             let info = ImageInfo::new(
@@ -963,17 +969,24 @@ fn blurred_on_cpu(
             ) {
                 return None;
             }
-            // The floats are let go once they are bytes, before Skia copies
-            // the bytes: two buffers this size alive at once, never three.
-            let bytes = exact_blur::blur(pixels, w, h, sigma_x, sigma_y)
-                .iter()
-                .flat_map(|v| (v * gain).to_ne_bytes())
-                .collect::<Vec<u8>>();
-            (info, bytes)
+            let blurred = exact_blur::blur(pixels, w, h, sigma_x, sigma_y);
+            baked_image(&info, |out, stride| {
+                out.chunks_mut(stride)
+                    .zip(blurred.chunks(w * 4))
+                    .for_each(|(row, line)| write_floats(row, line, gain));
+            })
         }
-    };
-    let row_bytes = info.min_row_bytes();
-    started::raster_from_data(&info, Data::new_copy(&pixels), row_bytes)
+    }
+}
+
+/// Writes `line`, floats, each scaled by `gain`, into the start of `row`, as
+/// the floats' bytes in the machine's order.
+fn write_floats(row: &mut [u8], line: &[f32], gain: f32) {
+    row.as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(line)
+        .for_each(|(out, v)| *out = (v * gain).to_ne_bytes());
 }
 
 /// `image` drawn through `filter` and then scaled by `gain`, as one colour
@@ -1019,8 +1032,29 @@ fn shadowed(
     image: &Image,
     offset: Vector,
     sigma: (f32, f32),
-    (colour, space): (Color4f, &ColorSpace),
+    colour: (Color4f, &ColorSpace),
     gain: f32,
+) -> Option<Image> {
+    let composed = shadow_composed(context, image, offset, sigma, colour)?;
+    rounded_once(&composed, image.image_info(), gain)
+}
+
+/// [`shadowed`]'s image over its shadow, in floats, before it is rounded.
+///
+/// On an eight-bit layer the shadow is the source's alpha alone, blurred
+/// in f32 and then tinted: the tint is the colour scaled by the alpha, and
+/// a blur is linear, so the two orders agree but for float rounding, which
+/// the bytes the result is rounded to show only where a value lies on a
+/// tie. It is a quarter of the sums of blurring the tinted source's four
+/// channels, each in f32 rather than f64. A layer of floats keeps that
+/// blur, so that its values stay the floats nearest the exact sums -- see
+/// [`exact_blur::blur`].
+fn shadow_composed(
+    context: Option<&Gpu>,
+    image: &Image,
+    offset: Vector,
+    sigma: (f32, f32),
+    (colour, space): (Color4f, &ColorSpace),
 ) -> Option<Image> {
     let raster = to_raster(context, image)?;
     let floats = raster.image_info().with_color_type(ColorType::RGBAF32);
@@ -1030,19 +1064,46 @@ fn shadowed(
         draw(surface.canvas());
         Some(surface.image_snapshot())
     };
-    let source = on_floats(&|canvas| {
-        canvas.draw_image(&raster, (0, 0), None);
-    })?;
+    // The source in floats: the raster itself where it already is them,
+    // premultiplied, as an F32 page's layer is -- drawn onto a cleared
+    // surface of its own kind it would come back as itself, each value
+    // plus nothing -- and drawn into floats otherwise.
+    let source = match raster.color_type() == ColorType::RGBAF32
+        && raster.alpha_type() == AlphaType::Premul
+    {
+        true => raster.clone(),
+        false => on_floats(&|canvas| {
+            canvas.draw_image(&raster, (0, 0), None);
+        })?,
+    };
     let tint = tint(colour, space, raster.image_info())?;
-    let tinted = filtered(None, &source, &tint, 1.0)?;
-    let shadow = match sigma.0 > 0.0 || sigma.1 > 0.0 {
-        true => blurred_on_cpu(&tinted, sigma.0, sigma.1, 1.0)?,
-        false => tinted,
+    let blurred = sigma.0 > 0.0 || sigma.1 > 0.0;
+    let bytes = matches!(
+        image.color_type(),
+        ColorType::RGBA8888 | ColorType::BGRA8888
+    );
+    let shadow = match (blurred, bytes) {
+        (true, true) => {
+            let alpha = blurred_alpha(&source, sigma)?;
+            filtered(None, &alpha, &tint, 1.0)?
+        }
+        (true, false) => {
+            let tinted = filtered(None, &source, &tint, 1.0)?;
+            blurred_on_cpu(&tinted, sigma.0, sigma.1, 1.0)?
+        }
+        (false, _) => filtered(None, &source, &tint, 1.0)?,
     };
     let sampling = match offset.x.fract() == 0.0 && offset.y.fract() == 0.0 {
         true => SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
         false => SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
     };
+    // Composed by Skia, even at a whole-pixel offset where src-over is one
+    // multiply-add a channel: done here, it has to round as Skia's raster
+    // pipeline does on every machine this ships to, and it does not. On
+    // arm64 `d.mul_add(1 - sa, s)` matched Skia's F32 src-over in all of
+    // 49,152 values and `s + d * (1 - sa)` missed 4,966; on x86 Skia picks
+    // its stages at run time, fused or not as the processor allows, so no
+    // one formula matches it there.
     let composed = on_floats(&|canvas| {
         canvas.draw_image_with_sampling_options(
             &shadow,
@@ -1052,7 +1113,44 @@ fn shadowed(
         );
         canvas.draw_image(&source, (0, 0), None);
     })?;
-    rounded_once(&composed, image.image_info(), gain)
+    Some(composed)
+}
+
+/// `source`'s alpha, blurred by `sigma` along rows and columns -- see
+/// [`exact_blur::blur_alpha`] -- as a premultiplied F32 image of the
+/// source's size and space holding nothing but that alpha, for a tint to
+/// colour.
+fn blurred_alpha(source: &Image, sigma: (f32, f32)) -> Option<Image> {
+    let (w, h) = (source.width() as usize, source.height() as usize);
+    let info = source
+        .image_info()
+        .with_color_type(ColorType::RGBAF32)
+        .with_alpha_type(AlphaType::Premul);
+    let row_bytes = w * 4 * size_of::<f32>();
+    let mut pixels = vec![0f32; w * h * 4];
+    if !source.read_pixels(
+        &info,
+        &mut pixels,
+        row_bytes,
+        (0, 0),
+        CachingHint::Disallow,
+    ) {
+        return None;
+    }
+    let alpha: Vec<f32> =
+        pixels.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
+    drop(pixels);
+    let alpha = exact_blur::blur_alpha(alpha, w, h, sigma.0, sigma.1);
+    baked_image(&info, |out, stride| {
+        out.chunks_mut(stride)
+            .zip(alpha.chunks(w))
+            .for_each(|(row, line)| {
+                row.fill(0);
+                row.as_chunks_mut::<16>().0.iter_mut().zip(line).for_each(
+                    |(px, a)| px[12..].copy_from_slice(&a.to_ne_bytes()),
+                );
+            });
+    })
 }
 
 /// The colour filter a shadow in `colour`, unpremultiplied in `space`, is
@@ -1189,45 +1287,89 @@ fn exact_tint(
 /// colour is 77. Onto a GPU target the floats went through a narrower
 /// texture first, and an image at half alpha read a level high at 807
 /// pixels of a shadow.
+///
+/// The floats are read where they lie when `floats` holds them in memory as
+/// premultiplied F32, as a snapshot of a raster surface does, and copied
+/// out otherwise; the result is written into the image's own pixels -- see
+/// [`baked_image`].
 fn rounded_once(floats: &Image, info: &ImageInfo, gain: f32) -> Option<Image> {
     let (w, h) = (floats.width() as usize, floats.height() as usize);
-    let float_info = floats.image_info().with_alpha_type(AlphaType::Premul);
-    let mut pixels = vec![0f32; w * h * 4];
-    let row_bytes = w * 4 * size_of::<f32>();
-    if !floats.read_pixels(
-        &float_info,
-        &mut pixels,
-        row_bytes,
-        (0, 0),
-        CachingHint::Disallow,
-    ) {
-        return None;
-    }
-    let (info, bytes) = match info.color_type() {
+    // As premultiplied F32, which is what a chain hands it and what the
+    // copy below reads any other kind as.
+    let float_info = floats
+        .image_info()
+        .with_alpha_type(AlphaType::Premul)
+        .with_color_type(ColorType::RGBAF32);
+    let peeked = floats.peek_pixels().filter(|pixmap| {
+        pixmap.color_type() == ColorType::RGBAF32
+            && pixmap.alpha_type() == AlphaType::Premul
+    });
+    let copied;
+    let (source, stride): (&[u8], usize) = match &peeked {
+        Some(pixmap) => (pixmap.bytes()?, pixmap.row_bytes()),
+        None => {
+            let row_bytes = w * 4 * size_of::<f32>();
+            let mut pixels = vec![0u8; row_bytes * h];
+            if !floats.read_pixels(
+                &float_info,
+                &mut pixels,
+                row_bytes,
+                (0, 0),
+                CachingHint::Disallow,
+            ) {
+                return None;
+            }
+            copied = pixels;
+            (&copied, row_bytes)
+        }
+    };
+    // Each row of the source, as its pixels' four floats.
+    let float_pixel = 4 * size_of::<f32>();
+    let rows = source.chunks(stride).take(h).map(|row| {
+        row[..w * float_pixel].as_chunks::<16>().0.iter().map(|p| {
+            let channel = |c: usize| {
+                f32::from_ne_bytes([
+                    p[c * 4],
+                    p[c * 4 + 1],
+                    p[c * 4 + 2],
+                    p[c * 4 + 3],
+                ])
+            };
+            [channel(0), channel(1), channel(2), channel(3)]
+        })
+    });
+    match info.color_type() {
         ColorType::RGBA8888 | ColorType::BGRA8888 => {
             let swap = info.color_type() == ColorType::BGRA8888;
             let level = |v: f32| (v * 255.0 * gain + 0.5) as u8;
-            let bytes = pixels
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .flat_map(|&[r, g, b, a]| match swap {
-                    true => [level(b), level(g), level(r), level(a)],
-                    false => [level(r), level(g), level(b), level(a)],
-                })
-                .collect::<Vec<u8>>();
-            (info.with_alpha_type(AlphaType::Premul), bytes)
+            let info = info.with_alpha_type(AlphaType::Premul);
+            baked_image(&info, |out, out_stride| {
+                for (row, line) in out.chunks_mut(out_stride).zip(rows) {
+                    for (px, [r, g, b, a]) in
+                        row.as_chunks_mut::<4>().0.iter_mut().zip(line)
+                    {
+                        *px = match swap {
+                            true => [level(b), level(g), level(r), level(a)],
+                            false => [level(r), level(g), level(b), level(a)],
+                        };
+                    }
+                }
+            })
         }
-        _ => {
-            let bytes = pixels
-                .iter()
-                .flat_map(|v| (v * gain).to_ne_bytes())
-                .collect::<Vec<u8>>();
-            (float_info, bytes)
-        }
-    };
-    let row_bytes = info.min_row_bytes();
-    started::raster_from_data(&info, Data::new_copy(&bytes), row_bytes)
+        _ => baked_image(&float_info, |out, out_stride| {
+            for (row, line) in out.chunks_mut(out_stride).zip(rows) {
+                for (px, floats) in
+                    row.as_chunks_mut::<16>().0.iter_mut().zip(line)
+                {
+                    for (channel, v) in
+                        px.as_chunks_mut::<4>().0.iter_mut().zip(floats)
+                    {
+                        *channel = (v * gain).to_ne_bytes();
+                    }
+                }
+            }
+        }),
+    }
 }
 
 /// `image` drawn through `filter`, given the layer's scale as its local
@@ -1269,11 +1411,16 @@ fn to_raster(context: Option<&Gpu>, image: &Image) -> Option<Image> {
 #[cfg(test)]
 mod tests {
     use skia_safe::{
-        Color, Color4f, ColorSpace, ImageInfo, Matrix, Paint, PathBuilder,
-        PictureRecorder, Rect, Surface, Vector,
+        AlphaType, Canvas as SkCanvas, Color, Color4f, ColorSpace, ColorType,
+        Data, FilterMode, Image, ImageInfo, Matrix, MipmapMode, Paint,
+        PathBuilder, PictureRecorder, Rect, SamplingOptions, Surface, Vector,
+        image::CachingHint,
     };
 
-    use super::{Depth, REFUSE_PLACED, Step, apply, worked_on};
+    use super::{
+        Depth, REFUSE_PLACED, Step, apply, blurred_on_cpu, exact_blur,
+        filtered, rounded_once, shadow_composed, shadowed, tint, worked_on,
+    };
     use crate::{prelude::*, started};
 
     /// A drop shadow in black, moved by `(dx, dy)` and blurred by `sigma`.
@@ -1869,5 +2016,485 @@ mod tests {
                 "{dual:?} against {single:?}"
             );
         }
+    }
+    /// A raster image of `kind` holding premultiplied noise, its pixels
+    /// written through floats so that every kind holds the same scene.
+    fn noise(w: i32, h: i32, kind: ColorType) -> Image {
+        let floats = ImageInfo::new(
+            (w, h),
+            ColorType::RGBAF32,
+            AlphaType::Premul,
+            ColorSpace::new_srgb(),
+        );
+        let mut seed: u32 = 17;
+        let mut unit = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32
+        };
+        let pixels: Vec<u8> = (0..w * h)
+            .flat_map(|_| {
+                let a = unit();
+                [unit() * a, unit() * a, unit() * a, a]
+            })
+            .flat_map(f32::to_ne_bytes)
+            .collect();
+        let image = started::raster_from_data(
+            &floats,
+            Data::new_copy(&pixels),
+            floats.min_row_bytes(),
+        )
+        .expect("an image");
+        let info = floats.with_color_type(kind);
+        let mut surface =
+            started::raster(&info, None, None).expect("a surface");
+        surface.canvas().draw_image(&image, (0, 0), None);
+        surface.image_snapshot()
+    }
+
+    /// Every byte of `image` as `info` holds it.
+    fn bytes_of(image: &Image, info: &ImageInfo) -> Vec<u8> {
+        let row = info.min_row_bytes();
+        let mut out = vec![0u8; row * image.height() as usize];
+        assert!(image.read_pixels(
+            info,
+            &mut out,
+            row,
+            (0, 0),
+            CachingHint::Disallow
+        ));
+        out
+    }
+
+    /// `rounded_once` as it was written through a copied buffer, for the
+    /// in-place one to be held to.
+    fn rounded_through_a_copy(
+        floats: &Image,
+        info: &ImageInfo,
+        gain: f32,
+    ) -> Vec<u8> {
+        let float_info = floats
+            .image_info()
+            .with_alpha_type(AlphaType::Premul)
+            .with_color_type(ColorType::RGBAF32);
+        let pixels: Vec<f32> = bytes_of(floats, &float_info)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_ne_bytes(*b))
+            .collect();
+        match info.color_type() {
+            ColorType::RGBA8888 | ColorType::BGRA8888 => {
+                let swap = info.color_type() == ColorType::BGRA8888;
+                let level = |v: f32| (v * 255.0 * gain + 0.5) as u8;
+                pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .flat_map(|&[r, g, b, a]| match swap {
+                        true => [level(b), level(g), level(r), level(a)],
+                        false => [level(r), level(g), level(b), level(a)],
+                    })
+                    .collect()
+            }
+            _ => pixels
+                .iter()
+                .flat_map(|v| (v * gain).to_ne_bytes())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_result_written_in_place_holds_the_bits_a_copied_one_did() {
+        let mut compared = 0;
+        for (w, h) in [(1, 1), (7, 3), (59, 56)] {
+            // F32, which is read where it lies, and F16, which is not and
+            // is copied out as floats.
+            for source in [ColorType::RGBAF32, ColorType::RGBAF16] {
+                let floats = noise(w, h, source);
+                for kind in [
+                    ColorType::RGBA8888,
+                    ColorType::BGRA8888,
+                    ColorType::RGBAF32,
+                ] {
+                    for gain in [1.0f32, 0.6] {
+                        let info = ImageInfo::new(
+                            (w, h),
+                            kind,
+                            AlphaType::Premul,
+                            ColorSpace::new_srgb(),
+                        );
+                        let ours = rounded_once(&floats, &info, gain)
+                            .expect("an image");
+                        let read = match kind {
+                            ColorType::RGBAF32 => ours.image_info().clone(),
+                            _ => info.clone(),
+                        };
+                        assert_eq!(
+                            bytes_of(&ours, &read),
+                            rounded_through_a_copy(&floats, &info, gain),
+                            "{w}x{h} from {source:?} into {kind:?} at {gain}"
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+            // Blurred, in floats and in bytes: the bits of the copying route,
+            // its floats scaled by the gain and its bytes as they were.
+            for kind in [ColorType::RGBAF32, ColorType::RGBA8888] {
+                let image = noise(w, h, kind);
+                let ours =
+                    blurred_on_cpu(&image, 1.5, 2.5, 0.6).expect("an image");
+                let info = ours.image_info();
+                let theirs = match kind {
+                    ColorType::RGBAF32 => {
+                        let floats: Vec<f32> = bytes_of(&image, info)
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .map(|b| f32::from_ne_bytes(*b))
+                            .collect();
+                        exact_blur::blur(
+                            floats, w as usize, h as usize, 1.5, 2.5,
+                        )
+                        .iter()
+                        .flat_map(|v| (v * 0.6).to_ne_bytes())
+                        .collect::<Vec<u8>>()
+                    }
+                    _ => exact_blur::blur_bytes(
+                        bytes_of(&image, info),
+                        w as usize,
+                        h as usize,
+                        1.5,
+                        2.5,
+                        0.6,
+                    ),
+                };
+                assert_eq!(
+                    bytes_of(&ours, info),
+                    theirs,
+                    "blurred {w}x{h} {kind:?}"
+                );
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, 3 * (2 * 3 * 2 + 2));
+    }
+    /// A layer of `kind` in `space` holding `scene`: 0 a shape with
+    /// anti-aliased edges, 1 premultiplied noise -- written through floats
+    /// and drawn into the layer's own kind, as a chain's layer holds a draw.
+    fn layer(
+        w: i32,
+        h: i32,
+        kind: ColorType,
+        space: &ColorSpace,
+        scene: u32,
+    ) -> Image {
+        let info =
+            ImageInfo::new((w, h), kind, AlphaType::Premul, space.clone());
+        let mut surface =
+            started::raster(&info, None, None).expect("a surface");
+        let canvas = surface.canvas();
+        canvas.clear(Color::TRANSPARENT);
+        match scene {
+            0 => {
+                let mut paint = Paint::default();
+                paint
+                    .set_anti_alias(true)
+                    .set_color4f(Color4f::new(0.8, 0.45, 0.15, 0.9), space);
+                canvas.draw_round_rect(
+                    Rect::from_xywh(
+                        w as f32 * 0.3 + 0.4,
+                        h as f32 * 0.3 + 0.7,
+                        w as f32 * 0.4,
+                        h as f32 * 0.35,
+                    ),
+                    2.5,
+                    2.5,
+                    &paint,
+                );
+            }
+            _ => {
+                canvas.draw_image(
+                    noise(w, h, ColorType::RGBAF32),
+                    (0, 0),
+                    None,
+                );
+            }
+        }
+        surface.image_snapshot()
+    }
+
+    /// `shadowed` as it was drawn before its cuts: the source drawn into
+    /// floats, tinted, blurred four channels to a pixel in f64, composed by
+    /// Skia and rounded once -- every part of it a function it still calls.
+    fn shadowed_as_drawn(
+        image: &Image,
+        offset: Vector,
+        sigma: (f32, f32),
+        colour: (Color4f, &ColorSpace),
+        gain: f32,
+    ) -> Option<Image> {
+        let composed = composed_as_drawn(image, offset, sigma, colour)?;
+        rounded_once(&composed, image.image_info(), gain)
+    }
+
+    /// [`shadowed_as_drawn`]'s floats, before they are rounded.
+    fn composed_as_drawn(
+        image: &Image,
+        offset: Vector,
+        sigma: (f32, f32),
+        (colour, space): (Color4f, &ColorSpace),
+    ) -> Option<Image> {
+        let floats = image.image_info().with_color_type(ColorType::RGBAF32);
+        let on_floats = |draw: &dyn Fn(&SkCanvas)| {
+            let mut surface = started::raster(&floats, None, None)?;
+            surface.canvas().clear(Color::TRANSPARENT);
+            draw(surface.canvas());
+            Some(surface.image_snapshot())
+        };
+        let source = on_floats(&|canvas| {
+            canvas.draw_image(image, (0, 0), None);
+        })?;
+        let tint = tint(colour, space, image.image_info())?;
+        let tinted = filtered(None, &source, &tint, 1.0)?;
+        let shadow = match sigma.0 > 0.0 || sigma.1 > 0.0 {
+            true => blurred_on_cpu(&tinted, sigma.0, sigma.1, 1.0)?,
+            false => tinted,
+        };
+        let sampling = match offset.x.fract() == 0.0 && offset.y.fract() == 0.0
+        {
+            true => SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
+            false => SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
+        };
+        let composed = on_floats(&|canvas| {
+            canvas.draw_image_with_sampling_options(
+                &shadow,
+                (offset.x, offset.y),
+                sampling,
+                None,
+            );
+            canvas.draw_image(&source, (0, 0), None);
+        })?;
+        Some(composed)
+    }
+
+    /// The layers, sigmas, offsets, colours and gains a shadow's sweep runs
+    /// over: each float layer kind a chain plays on -- an F32 sRGB page's
+    /// and an F16 Display P3 page's -- with a shape and with noise, at
+    /// sigmas either side of the FFT's, whole, zero and fractional offsets,
+    /// opaque and translucent colours, and two gains. An eight-bit layer's
+    /// shadow is made another way, and held to this one to within a tie by
+    /// `an_eight_bit_shadow_differs_from_its_tinted_blur_only_on_ties`.
+    fn shadow_sweep(
+        mut each: impl FnMut(
+            &str,
+            &Image,
+            Vector,
+            (f32, f32),
+            (Color4f, &ColorSpace),
+            f32,
+        ),
+    ) -> usize {
+        let srgb = ColorSpace::new_srgb();
+        let p3 = PixelColorSpace::DisplayP3
+            .to_skia_color_space()
+            .expect("Display P3");
+        let kinds = [
+            (ColorType::RGBAF32, &srgb, "F32 sRGB"),
+            (ColorType::RGBAF16, &p3, "F16 P3"),
+        ];
+        let sigmas = [
+            (0.5, 0.5),
+            (1.0, 1.0),
+            (2.0, 2.0),
+            (3.0, 3.0),
+            (5.0, 5.0),
+            (8.0, 8.0),
+            (1.5, 4.0),
+        ];
+        let offsets = [
+            Vector::new(2.0, 2.0),
+            Vector::new(0.0, 0.0),
+            Vector::new(1.5, -2.25),
+        ];
+        let colours = [
+            Color4f::new(0.0, 0.0, 0.0, 1.0),
+            Color4f::new(0.78, 0.16, 0.35, 0.6),
+            Color4f::new(0.1, 0.6, 0.9, 0.85),
+        ];
+        let mut runs = 0;
+        for (kind, space, name) in kinds {
+            for scene in 0..2 {
+                let image = layer(40, 36, kind, space, scene);
+                for sigma in sigmas {
+                    for offset in offsets {
+                        for colour in colours {
+                            for gain in [1.0, 0.7] {
+                                each(
+                                    name,
+                                    &image,
+                                    offset,
+                                    sigma,
+                                    (colour, &srgb),
+                                    gain,
+                                );
+                                runs += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        runs
+    }
+
+    #[test]
+    fn a_shadow_keeps_every_bit_it_was_drawn_with() {
+        let mut differing = Vec::new();
+        let runs = shadow_sweep(|name, image, offset, sigma, colour, gain| {
+            let ours = shadowed(None, image, offset, sigma, colour, gain)
+                .expect("a shadow");
+            let theirs = shadowed_as_drawn(image, offset, sigma, colour, gain)
+                .expect("a shadow");
+            let info = ours.image_info();
+            assert_eq!(
+                info.color_type(),
+                theirs.image_info().color_type(),
+                "{name}"
+            );
+            if bytes_of(&ours, info) != bytes_of(&theirs, info) {
+                differing.push(format!(
+                    "{name} sigma {sigma:?} offset {offset:?} gain {gain}"
+                ));
+            }
+        });
+        assert_eq!(runs, 2 * 2 * 7 * 3 * 3 * 2);
+        assert!(
+            differing.is_empty(),
+            "{} of {runs} differ, first {:?}",
+            differing.len(),
+            differing.first()
+        );
+    }
+
+    /// The most an eight-bit layer's shadow, its alpha blurred in f32 and
+    /// then tinted, may lie from the four channels of the tinted source
+    /// blurred in f64, in levels of the byte it is rounded to: the 1e-4 of
+    /// a level f32 holds a byte's blur to -- see [`exact_blur::blur_bytes`]
+    /// -- a few ulps at full scale, where 1 ulp of 1.0 is 255 * 2^-23,
+    /// about 3e-5 levels.
+    const TIE_NOISE_LEVELS: f32 = 1e-4;
+
+    #[test]
+    fn an_eight_bit_shadow_differs_from_its_tinted_blur_only_on_ties() {
+        let srgb = ColorSpace::new_srgb();
+        let p3 = PixelColorSpace::DisplayP3
+            .to_skia_color_space()
+            .expect("Display P3");
+        let kinds = [
+            (ColorType::RGBA8888, &srgb, "8-bit sRGB"),
+            (ColorType::BGRA8888, &srgb, "8-bit BGRA sRGB"),
+            (ColorType::RGBA8888, &p3, "8-bit Display P3"),
+        ];
+        let sigmas = [
+            (0.5, 0.5),
+            (1.0, 1.0),
+            (2.0, 2.0),
+            (3.0, 3.0),
+            (4.75, 4.75),
+            (5.0, 5.0),
+            (8.0, 8.0),
+            (1.5, 4.0),
+            (0.0, 3.0),
+            (6.0, 0.0),
+        ];
+        let offsets = [
+            Vector::new(2.0, 2.0),
+            Vector::new(0.0, 0.0),
+            Vector::new(1.5, -2.25),
+        ];
+        let colours = [
+            Color4f::new(0.0, 0.0, 0.0, 1.0),
+            Color4f::new(0.0, 0.0, 0.0, 0.5),
+            Color4f::new(0.78, 0.16, 0.35, 0.6),
+            Color4f::new(0.1, 0.6, 0.9, 0.85),
+            Color4f::new(1.0, 1.0, 1.0, 0.3),
+            Color4f::new(0.25, 0.25, 0.25, 0.5),
+        ];
+        let float_info = |image: &Image| {
+            image
+                .image_info()
+                .with_color_type(ColorType::RGBAF32)
+                .with_alpha_type(AlphaType::Premul)
+        };
+        let floats_of = |image: &Image| -> Vec<f32> {
+            bytes_of(image, &float_info(image))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&b| f32::from_ne_bytes(b))
+                .collect()
+        };
+        let (mut runs, mut values, mut flips, mut farthest) = (0, 0, 0, 0f32);
+        let mut beyond = Vec::new();
+        for (kind, space, name) in kinds {
+            for (scene, (w, h)) in [(0, (40, 36)), (1, (40, 36)), (0, (7, 61))]
+            {
+                let image = layer(w, h, kind, space, scene);
+                for sigma in sigmas {
+                    for offset in offsets {
+                        for colour in colours {
+                            let ours = shadow_composed(
+                                None,
+                                &image,
+                                offset,
+                                sigma,
+                                (colour, &srgb),
+                            )
+                            .expect("a shadow");
+                            let theirs = composed_as_drawn(
+                                &image,
+                                offset,
+                                sigma,
+                                (colour, &srgb),
+                            )
+                            .expect("a shadow");
+                            let (ours, theirs) =
+                                (floats_of(&ours), floats_of(&theirs));
+                            assert_eq!(ours.len(), theirs.len(), "{name}");
+                            for gain in [1.0, 0.7] {
+                                let level = |v: f32| v * 255.0 * gain + 0.5;
+                                for (&a, &b) in ours.iter().zip(&theirs) {
+                                    let gap = (level(a) - level(b)).abs();
+                                    farthest = farthest.max(gap);
+                                    if gap > TIE_NOISE_LEVELS {
+                                        beyond.push(format!(
+                                            "{name} sigma {sigma:?} offset \
+                                             {offset:?} {a} against {b}"
+                                        ));
+                                    }
+                                    if level(a) as u8 != level(b) as u8 {
+                                        flips += 1;
+                                    }
+                                    values += 1;
+                                }
+                                runs += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println!(
+            "{flips} of {values} values in {runs} shadows round to another \
+             byte; farthest apart {farthest} levels"
+        );
+        assert_eq!(runs, 3 * 3 * 10 * 3 * 6 * 2);
+        assert!(
+            beyond.is_empty(),
+            "{} values lie further apart than a tie, first {:?}",
+            beyond.len(),
+            beyond.first()
+        );
     }
 }
