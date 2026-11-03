@@ -201,14 +201,21 @@ fn keeps_text_reach() -> bool {
 ///   Sans's 13px "fj Wq", scaled 1.7 and stroked 40, at density 1. The runner's
 ///   Vulkan device plays the sweep a test run plays, not the full one.
 ///
-/// The ink is whole pixels and the reach is widened by this before it is
-/// rounded out, so a pixel is cut only past `ceil(reach + 1)`: an overshoot of
-/// a pixel or less is always held, and one between 1 and 2 where the reach's
-/// own fraction leaves the room, as every one measured here did. The worst on
+/// Two pixels, the smallest whole number at or above the worst measured,
+/// 1.70. What a reading measures is the ink's whole-pixel edge less the
+/// reach's own, `ceil(reach + s) - reach`, where `s` is how far the ink truly
+/// spills past the reach, so a reading of `o` says only `o - 1 < s <= o`; and
+/// a pixel is cut past `ceil(reach + HINTED_INK_DRIFT)`, so every phase of the
+/// reach against the pixel grid is held exactly when `s` is within this. One
+/// pixel would hold the 1.29 on CoreText at every phase -- moved through 64
+/// phases to a whole-pixel reach edge it inked no further, so no test here
+/// can hold such an edge with an overshoot between one pixel and two -- but
+/// FreeType's 1.70 bounds its spill only by 1.70, and its phases could not be
+/// swept on this machine; no reading measured needs more than one. The worst on
 /// each are strokes whose join half their width bounds exactly: the stroke's
 /// anti-aliased fringe. On CoreText that case is held by
 /// `a_wide_round_stroke_inks_a_pixel_past_its_reach`.
-pub(crate) const HINTED_INK_DRIFT: f32 = 1.0;
+pub(crate) const HINTED_INK_DRIFT: f32 = 2.0;
 
 /// `reach`, in the units `to_device` maps to the device, widened there by
 /// [`HINTED_INK_DRIFT`] device pixels and taken back.
@@ -3169,9 +3176,10 @@ impl BlurOp {
 #[cfg(test)]
 mod tests {
     use super::{Composite, Entries, Group, luminance_colour};
+    use crate::started;
     use skia_safe::{
         AlphaType, BlendMode, Color, Color4f, ColorType, ImageInfo, Matrix,
-        Paint, Path, Rect, color_filters, surfaces,
+        Paint, Path, Rect, color_filters,
     };
     use std::iter::zip;
 
@@ -3193,7 +3201,7 @@ mod tests {
     /// anti-aliased on a CPU raster.
     fn oval_at(by: i32) -> Vec<u8> {
         let mut surface =
-            surfaces::raster_n32_premul(RASTER).expect("a surface");
+            started::raster_n32_premul(RASTER).expect("a surface");
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
         let oval = Path::oval(OVAL.with_offset((0.0, by as f32)), None);

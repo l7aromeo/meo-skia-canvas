@@ -7306,10 +7306,11 @@ mod text_reach_tests {
     /// Skia's own placement noise -- see [`AAA_PLACEMENT_SPREAD`] -- not the
     /// guard on the reach: a reach that cuts a pixel off an anti-aliased
     /// fringe can lose a few tens of levels, which the spread allows, and
-    /// [`inked_past`] is what refuses that. Drawn in by TEXT_REACH_INSET,
-    /// the reach fails [`inked_past`] from an inset of 1 and this from one
-    /// of 14: a chain's layer is its reach widened by as far as the chain
-    /// reads, so an inset under that cuts nothing the chain draws.
+    /// [`inked_past`] is what refuses that. Drawn in by TEXT_REACH_INSET, in
+    /// the units the run is laid out in, the reach fails [`inked_past`] from
+    /// an inset of 1 and this from one of 11: a chain's layer is its reach
+    /// widened by as far as the chain reads, so an inset under that cuts
+    /// nothing the chain draws.
     fn parted_from_the_clip(scene: &Scene) -> Vec<(&'static str, u8)> {
         KEEPS_TEXT_REACH.set(true);
         let confined = played(&mut scene.canvas().expect("a canvas"));
@@ -7320,6 +7321,12 @@ mod text_reach_tests {
             .iter()
             .zip(&clipped)
             .zip(PLAYBACKS)
+            // The CPU's playbacks alone until #511's pinned test passes: on
+            // the GPU some text is drawn one of two ways by what other text
+            // drew before it, up to 128 levels apart with no filter at all,
+            // so two placements cannot be held to each other there. What the
+            // GPU inks is held to the reach by [`inked_past`] all the same.
+            .filter(|(_, (_, on_gpu, _))| !on_gpu)
             .filter_map(|((a, b), (at, _, _))| {
                 let (a, b) = (a.as_ref()?, b.as_ref()?);
                 Some((
@@ -7575,13 +7582,15 @@ mod text_reach_tests {
             };
             let reach = reached(&scene).expect("a reach");
             let confined = content(true).expect("the chain's content");
+            // The margin on each side, and a pixel on each for rounding out.
+            const MARGINS: f32 = 2.0 * (super::layer::HINTED_INK_DRIFT + 1.0);
             assert!(
                 (confined.left <= reach.left
                     && confined.top <= reach.top
                     && confined.right >= reach.right
                     && confined.bottom >= reach.bottom)
-                    && confined.width() < reach.width() + 4.0
-                    && confined.height() < reach.height() + 4.0,
+                    && confined.width() <= reach.width() + MARGINS
+                    && confined.height() <= reach.height() + MARGINS,
                 "{filter}: the layer is the reach, widened by the margin: {confined:?} against {reach:?}"
             );
             let page = SIZE.0 * SIZE.1;
