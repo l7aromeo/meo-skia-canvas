@@ -198,20 +198,19 @@ impl Coverage {
     }
 }
 
-/// `blurred` composited onto `canvas` through `paint`, as the chain's
-/// result is -- see [`Outcome::composite`] -- in `rgb`, the colour placed
-/// as a fill of it is on an eight-bit page, at `gain`, the alpha on its
-/// byte: each pixel's alpha `B * gain` rounded as
-/// [`exact_blur::blur_bytes_into`] rounds, and each channel the exact
-/// product `rgb * B * gain` rounded once. `None` where no image could be
-/// made.
-pub(crate) fn composite(
+/// `blurred` coloured for `canvas` as the chain's result is, ready to
+/// composite -- see [`Outcome::composite`] -- in `rgb`, the colour placed as
+/// a fill of it is on an eight-bit page, at `gain`, the alpha on its byte:
+/// each pixel's alpha `B * gain` rounded as [`exact_blur::blur_bytes_into`]
+/// rounds, and each channel the exact product `rgb * B * gain` rounded once.
+/// The image takes `canvas`'s colour type and space, so it composites only
+/// onto a canvas of the same. `None` where no image could be made.
+pub(crate) fn coloured(
     canvas: &SkCanvas,
     blurred: &Blurred,
     rgb: [f32; 3],
     gain: f32,
-    paint: &Paint,
-) -> Option<()> {
+) -> Option<Outcome> {
     let info = layer_info(canvas, Depth::Bytes, blurred.region);
     let bgra = info.color_type() == ColorType::BGRA8888;
     let w = blurred.region.width() as usize;
@@ -231,12 +230,24 @@ pub(crate) fn composite(
             }
         }
     })?;
-    Outcome {
+    Some(Outcome {
         image,
         region: blurred.region,
         rest: blurred.rest,
-    }
-    .composite(canvas, paint);
+    })
+}
+
+/// `blurred` coloured -- see [`coloured`] -- and composited onto `canvas`
+/// through `paint`, as the chain's result is. `None` where no image could be
+/// made.
+pub(crate) fn composite(
+    canvas: &SkCanvas,
+    blurred: &Blurred,
+    rgb: [f32; 3],
+    gain: f32,
+    paint: &Paint,
+) -> Option<()> {
+    coloured(canvas, blurred, rgb, gain)?.composite(canvas, paint);
     Some(())
 }
 
