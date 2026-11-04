@@ -1020,7 +1020,8 @@ pub(crate) fn is_on_gpu(_: &SkCanvas) -> bool {
 /// hundredth of a pixel off the grid; shared, 181 to 243 pixels of a page of
 /// 12 blurred chains moved. A draw over the whole layer after each chain,
 /// which stops the merge and changes no pixel, brings both to none. No
-/// other Vulkan device has been measured, so none shares.
+/// other Vulkan device has been measured, so none shares; #524 tracks
+/// measuring them.
 // UPSTREAM: Mesa llvmpipe 25.0.7 -- unfiled -- worked around
 // Re-check: cargo test a_rounded_rect_drawn_among_others_draws_as_it_does_alone
 // run with `--ignored` in a `vulkan` build on llvmpipe, where it fails while
