@@ -979,7 +979,19 @@ blur of Chrome's own unblurred text, and 10.0, 5.7 and 2.2 in premultiplied
 red, green and blue, over 1,672 pixels more than a level off. Drawn through that
 filter this library matched it byte for byte. Text under a `drop-shadow()` is
 the same rule's, as any draw's shadow is -- see the entry on a `drop-shadow()`
--- where Chrome's shadow of that text is 12.7 levels off.
+-- where Chrome's shadow of that text is 12.7 levels off. On the CPU engine an
+8-bit page blurs a run in one flat colour from its coverage and colours it
+after, so that each premultiplied channel, and a translucent colour's alpha,
+is rounded once from the exact product of the blurred coverage, the colour and
+its alpha. Blurred from pixels already rounded to bytes, a channel could land
+a level off it: 16px blurred by 2 in `rgb(200, 80, 30)` moved by a level on
+491 of 2,322 inked pixels, and in `rgba(200, 80, 30, 0.6)` on 646 of 2,259,
+alpha among them; an opaque run's alpha is the same either way. A run blurred
+by 5 device pixels or more, which the FFT blurs, one in a gradient or a
+pattern, one whose decoration names a colour of its own, and every run on the
+GPU engine or a float page are blurred from their pixels in the chain's layer:
+48px blurred by 10 in `rgb(200, 80, 30)` lands a level off in red on 205
+pixels.
 
 **A blurred rectangle is its exact Gaussian blur, and Chrome's is not.**
 Filter Effects Module Level 1 defines `blur()` as a Gaussian blur whose
