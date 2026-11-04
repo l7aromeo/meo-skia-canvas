@@ -309,6 +309,33 @@ pub(crate) struct Rows {
     pub(crate) parallel: bool,
 }
 
+/// The bytes of rows one thread converts before the pool hands it more, where
+/// a read's rows are shared across threads.
+///
+/// A row is cheap to convert -- the exact unpremultiply takes about 0.6
+/// microseconds for a 3,200-byte row -- so a task a row leaves the pool
+/// handing work over more than doing it. Measured in release on Apple silicon
+/// (M4 Pro, 14 threads), an 800x600 page of translucent pixels unpremultiplied
+/// across the pool, median of 61 passes, three runs: a row a task 109 to 135
+/// microseconds, 4 rows 92 to 99, 16 rows 78 to 86, 38 rows 101 to 107, 150
+/// rows 149 to 152. 48 KiB rounds up to those 16 rows at that width, and other
+/// widths take the rows that make the same bytes.
+///
+/// In place, a whole `getImageData` of a GPU page after a 1-pixel draw, median
+/// of ten rounds against a row a task: 400 microseconds against 428 at
+/// 512x512, 454 against 510 at 800x600, 606 against 646 at 1200x900 and 928
+/// against 982 at 1920x1080, faster in every round at every size. 512x512 is
+/// [`PARALLEL_UNPREMULTIPLY_PIXELS`](crate::context::page::PARALLEL_UNPREMULTIPLY_PIXELS),
+/// the smallest read that reaches this; a smaller one is converted on one
+/// thread.
+pub(crate) const PARALLEL_TASK_BYTES: usize = 48 << 10;
+
+/// How many rows of `row_bytes` make a [`PARALLEL_TASK_BYTES`] task: at least
+/// one, however wide the row.
+fn rows_per_task(row_bytes: usize) -> usize {
+    PARALLEL_TASK_BYTES.div_ceil(row_bytes.max(1))
+}
+
 impl Rows {
     /// Converts `height` rows of `width` bytes of `pixels`, `row_bytes`
     /// apart, where they lie.
@@ -324,6 +351,7 @@ impl Rows {
             true => pixels
                 .par_chunks_mut(row_bytes)
                 .take(height)
+                .with_min_len(rows_per_task(row_bytes))
                 .for_each(|row| in_place(&mut row[..width])),
             false => pixels
                 .chunks_mut(row_bytes)
@@ -521,6 +549,7 @@ fn copy_rows(
         true => pixels
             .par_chunks_mut(row_bytes)
             .zip(plane.par_chunks(stride))
+            .with_min_len(rows_per_task(row_bytes))
             .for_each(pairs),
         false => pixels
             .chunks_mut(row_bytes)
@@ -625,13 +654,25 @@ pub(crate) mod seam {
 
 #[cfg(all(test, any(feature = "metal", feature = "vulkan")))]
 mod tests {
-    use super::{DECLINED, DISCARDED, seam};
+    use super::{
+        DECLINED, DISCARDED, PARALLEL_TASK_BYTES, rows_per_task, seam,
+    };
     use crate::{
         Canvas, CanvasOptions, Context2D, EncodeOptions, Error, FillRule,
         ImageFormat, PixelColorSpace, PixelDepth, PixelExportOptions,
         RgbaLinear, canvas::EngineKind,
         context::page::PARALLEL_UNPREMULTIPLY_PIXELS,
     };
+
+    /// The width the task size was measured at gets the rows measured best
+    /// there, a row wider than a task is a task of its own, and a zero width
+    /// still makes tasks of some rows.
+    #[test]
+    fn a_task_holds_the_rows_measured_best() {
+        assert_eq!(rows_per_task(800 * 4), 16);
+        assert_eq!(rows_per_task(PARALLEL_TASK_BYTES + 1), 1);
+        assert_eq!(rows_per_task(0), PARALLEL_TASK_BYTES);
+    }
 
     /// A canvas with something on it, on the GPU, and the id of its page --
     /// or `None` on a machine with no GPU engine, where nothing here can be
