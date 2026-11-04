@@ -38,17 +38,22 @@ pub(crate) struct Blurred {
 
 /// What a draw's coverage is read from. `draw` paints in the draw's own
 /// colour either way, never a stand-in. Skia pre-blends an A8 glyph mask's
-/// coverage through one of eight tables, picked by the paint colour's
-/// luminance `(54r + 183g + 19b) >> 8` taken to its top three bits
-/// (Skia M156, `SkScalerContext.cpp:79-84` and `SkMaskGamma.h:231-238`), so
-/// two colours in one bucket cover a run alike and two in different buckets
-/// can differ. Where FreeType pre-blends its A8 masks
-/// (`SK_GAMMA_APPLY_TO_A8`, `BUILD.gn:92`; `SkFontHost_FreeType.cpp:858-863`)
-/// blue shares black's bucket and red does not. CoreText first scales the
-/// colour of smoothed text (`SkTypeface_mac_ct.cpp:966-982`): by a half
-/// where CoreGraphics smooths without subpixel coverage, which puts red in
-/// black's bucket too, and by three quarters where it smooths with it, which
-/// does not.
+/// coverage through one of eight tables, and picks the table from the paint
+/// colour (Skia M156): each channel cut to its top three bits
+/// (`SkScalerContext.cpp:1104-1107`, `SkMaskGamma.h:129-134`), then the
+/// luminance `(54r + 183g + 19b) >> 8` of that (`SkScalerContext.cpp:77-87`),
+/// whose top three bits name the table (`SkMaskGamma.h:231-238`). Two
+/// colours that pick one table cover a run alike and two that pick different
+/// tables can differ. A run whose text size on the device passes 256 pixels
+/// is drawn as paths, with no pre-blend (`SkStrikeSpec::ShouldDrawAsPath`),
+/// so every colour covers it alike.
+///
+/// Where FreeType pre-blends its A8 masks (`SK_GAMMA_APPLY_TO_A8`,
+/// `BUILD.gn:92`; `SkFontHost_FreeType.cpp:858-863`) blue picks black's table
+/// and red does not. CoreText first scales the colour of smoothed text
+/// (`SkTypeface_mac_ct.cpp:966-982`): by a half where CoreGraphics smooths
+/// without subpixel coverage, which puts red on black's table too, and by
+/// three quarters where it smooths with it, which does not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Plane {
     /// An A8 surface, which holds the coverage alone. A path's coverage is
