@@ -82,7 +82,21 @@ pub(crate) fn blurred(
     plane: Plane,
     draw: impl FnOnce(&SkCanvas),
 ) -> Option<Blurred> {
-    Some(Coverage::of(canvas, sigma, content, plane, draw)?.blurred())
+    Some(sharp(canvas, sigma, content, plane, draw)?.blurred())
+}
+
+/// The coverage of what `draw` draws onto `canvas`, read from `plane` for a
+/// blur of `sigma` canvas pixels, before it is blurred -- see
+/// [`Coverage::of`]. `None` where nothing would show or no plane could be
+/// made.
+pub(crate) fn sharp(
+    canvas: &SkCanvas,
+    sigma: f32,
+    content: Option<Rect>,
+    plane: Plane,
+    draw: impl FnOnce(&SkCanvas),
+) -> Option<Coverage> {
+    Coverage::of(canvas, sigma, content, plane, draw)
 }
 
 impl Blurred {
@@ -101,7 +115,7 @@ impl Blurred {
 
 /// A draw's coverage before it is blurred: one float a pixel of `region`,
 /// a byte's value, and the device sigmas the blur takes along x and y.
-struct Coverage {
+pub(crate) struct Coverage {
     values: Vec<f32>,
     region: IRect,
     rest: Matrix,
@@ -199,8 +213,21 @@ impl Coverage {
         })
     }
 
+    /// Each pixel's coverage, a byte's value, row by row across
+    /// [`Self::region`]: the read rectangle's and +0.0 around it, out to
+    /// what the blur works on. Everything the blur reads but the sigmas.
+    pub(crate) fn values(&self) -> &[f32] {
+        &self.values
+    }
+
+    /// The device pixels [`Self::values`] cover: the read rectangle widened
+    /// by what the blur works on.
+    pub(crate) fn region(&self) -> IRect {
+        self.region
+    }
+
     /// This coverage blurred exactly, unrounded.
-    fn blurred(self) -> Blurred {
+    pub(crate) fn blurred(self) -> Blurred {
         let (w, h) =
             (self.region.width() as usize, self.region.height() as usize);
         let values = exact_blur::blur_alpha(

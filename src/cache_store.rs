@@ -1,7 +1,8 @@
 //! A cache of values counted by their bytes, kept to a [`Budget`]: the
 //! store behind the chain results of
-//! [`chain_cache`](crate::context::chain_cache) and the baked rectangles of
-//! [`blur_mask`](crate::context::blur_mask).
+//! [`chain_cache`](crate::context::chain_cache), the baked rectangles of
+//! [`blur_mask`](crate::context::blur_mask) and the blurred runs of text of
+//! [`run_mask`](crate::context::run_mask).
 //!
 //! Each cache is a [`Store`] of its own, behind a process-wide lock of its
 //! own and released by an idle release of its own. Two stores share

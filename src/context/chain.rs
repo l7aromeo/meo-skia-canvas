@@ -214,6 +214,19 @@ impl Outcome {
     pub(crate) fn bytes(&self) -> usize {
         self.image.image_info().compute_min_byte_size()
     }
+
+    /// This result composited `by` whole device pixels from where it was
+    /// made, sharing its image. `None` unless the layer was the device's own
+    /// pixels, `rest` the identity: otherwise a move on the device is not a
+    /// move of the region. The caller holds that what it composites covers
+    /// the same at the new place.
+    pub(crate) fn at(&self, by: (i32, i32)) -> Option<Outcome> {
+        self.rest.is_identity().then(|| Outcome {
+            image: self.image.clone(),
+            region: self.region.with_offset(by),
+            rest: self.rest,
+        })
+    }
 }
 
 /// Runs the chain [`apply`] does, up to the composite. `None` where nothing
