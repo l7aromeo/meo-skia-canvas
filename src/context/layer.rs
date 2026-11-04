@@ -44,6 +44,7 @@ use crate::{
         chain_cache, coverage_of, exact_blur,
         faint::{Faint, composited},
         page::{ExportOptions, Page},
+        run_mask::{self, Kept},
     },
     export::{VectorFeatures, blend_features},
     gpu::{RenderingEngine, pacing},
@@ -1632,6 +1633,10 @@ pub struct CoverageRun {
     pub exact: ExactColour,
     /// The alpha the run was drawn at.
     pub alpha: f32,
+    /// The kept run this draws and where, for the run's blur to be kept --
+    /// see [`run_mask`]. `None` the first time a run is drawn, which is not
+    /// kept.
+    pub kept: Option<Kept>,
 }
 
 impl Composite {
@@ -1962,15 +1967,17 @@ impl Group {
         // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
         // Re-check: cargo test skia_covers_a_curve_by_where_it_lies
         //
-        // Skia's analytic anti-aliasing covers a curved edge by where on the
-        // device it lies, so text whose layer is bounded by its reach draws
-        // some edge pixels otherwise than in a layer bounded by the clip:
-        // Times New Roman's 96px "Ag" stroked 40 wide with round joins, under
-        // a drop shadow at density 3, in 16 pixels by up to 25 levels.
-        // Neither is the edge's coverage -- 114 and 146 where 8 by 8 samples
-        // give 133.8 -- and no class of origin keeps it: moved 3 or 6 device
-        // pixels the stroke is covered alike, moved 15 to 300 it is not, and
-        // an oval flips at shifts of 1 and 2.
+        // Skia's analytic anti-aliasing covers a curved edge by where it lies
+        // in the plane it fills, so a layer starting elsewhere would cover a
+        // curve's edge pixels otherwise. A chain's layer starts at the
+        // device's origin whatever bounds it -- see `chain::placed` -- so
+        // text in a layer bounded by its reach is drawn where a layer
+        // bounded by the clip draws it: on the CPU, Times New Roman's 96px
+        // "Ag" stroked 40 wide with round joins, under a drop shadow at
+        // density 3, lands the same bytes either way. The same run filled,
+        // or under `blur()`, at that density -- 288 device pixels, past which
+        // Skia draws a glyph as a path (`SkStrikeSpec::ShouldDrawAsPath`) --
+        // differs on 1 to 3 bytes by a level, which is not traced.
         let content = match (&self.within, reach) {
             (Some(within), _) => {
                 Some(to_space(&self.matrix).map_rect(within).0)
@@ -2128,7 +2135,7 @@ impl Group {
                         false,
                         sigma * replay_scale(canvas),
                     )
-                    && let Some(blurred) = chain::coverage::blurred(
+                    && let Some(sharp) = chain::coverage::sharp(
                         canvas,
                         *sigma,
                         content,
@@ -2142,13 +2149,35 @@ impl Group {
                 {
                     #[cfg(test)]
                     COVERAGE_RUNS.with(|runs| runs.set(runs.get() + 1));
-                    chain::coverage::composite(
-                        canvas,
-                        &blurred,
-                        run.exact.at(run.alpha).0.rgb,
-                        byte_alpha(run.alpha),
-                        &paint,
+                    let (rgb, gain) =
+                        (run.exact.at(run.alpha).0.rgb, byte_alpha(run.alpha));
+                    // A kept run is found by where its picture is played on
+                    // the device -- see `run_mask::Placed`.
+                    let to_picture = Matrix::concat(
+                        &canvas.local_to_device_as_3x3(),
+                        &Matrix::concat(&back, &self.contents_matrix),
                     );
+                    let placed = run.kept.as_ref().and_then(|kept| {
+                        run_mask::Placed::of(
+                            kept,
+                            canvas,
+                            &to_picture,
+                            *sigma,
+                            rgb,
+                            gain,
+                        )
+                    });
+                    let outcome = run_mask::drawn(placed, sharp, |sharp| {
+                        chain::coverage::coloured(
+                            canvas,
+                            &sharp.blurred(),
+                            rgb,
+                            gain,
+                        )
+                    });
+                    if let Some(outcome) = outcome {
+                        outcome.composite(canvas, &paint);
+                    }
                     canvas.restore();
                     return;
                 }
@@ -3837,7 +3866,7 @@ mod tests {
     /// 2. Moved across it was covered alike at every shift tried, while a
     /// larger oval further out flipped across and not down. If this fails,
     /// a curve is covered alike wherever it lies, and the note on a chain's
-    /// layer in `Group::playback_within`, the bound `text_reach_tests` hold
+    /// layer in `Group::chain_content`, the bound `text_reach_tests` hold
     /// two placements to, and the entry in `docs/browser-differences.md`
     /// can go.
     #[test]

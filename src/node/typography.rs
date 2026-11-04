@@ -4,7 +4,10 @@
 use crate::context::typesetting::BUILDS;
 use crate::{
     cache_map::{CacheMap, CacheSet},
-    context::{State, faint::Faint, typesetting::Typography},
+    context::{
+        State, faint::Faint, run_mask::release_cached_runs,
+        typesetting::Typography,
+    },
     css::{FontUnits, is_font_relative, parse_length, without_comments},
     font::{
         FontFamily, ObliqueAngle, leans_as_asked, typo_ascent_share,
@@ -1255,12 +1258,15 @@ fn measured_boxes(
 
 /// Lets every kept run go: called when the registered fonts change, since a
 /// kept run holds the faces it was laid out in, and by the idle release.
+/// The blurred runs kept from them go too -- see `context::run_mask` --
+/// for every thread, since a page holding one can be played on any.
 pub(crate) fn forget_laid_out() {
     let _ = LAID_OUT.try_with(|cache| {
         if let Ok(mut cache) = cache.try_borrow_mut() {
             cache.clear();
         }
     });
+    release_cached_runs();
 }
 
 /// Test-only: `[count, bytes]`, how many runs this thread keeps for drawing

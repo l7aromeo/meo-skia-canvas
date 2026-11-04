@@ -35,6 +35,7 @@ pub(crate) mod faint;
 pub(crate) mod fold;
 pub mod layer;
 pub mod page;
+pub(crate) mod run_mask;
 pub mod typesetting;
 
 #[cfg(test)]
@@ -63,8 +64,8 @@ use crate::{
     pixels::PixelColorSpace,
     started,
     typography::{
-        Baseline, DecorationStyle, DrawnRun, FontSpec, PendingInk, Spacing,
-        TextExtents, TypesetInputs, Typesetter, paragraph_style,
+        Baseline, DecorationStyle, DrawnRun, FontSpec, PendingInk, RunPaint,
+        Spacing, TextExtents, TypesetInputs, Typesetter, paragraph_style,
     },
     utils::*,
 };
@@ -77,6 +78,7 @@ use layer::{
     reach_the_clip,
 };
 use page::{ExportOptions, Page, PageRecorder, Recording};
+use run_mask::Kept;
 use typesetting::{TextSettings, Typesetting, Typography};
 
 /// A shadow cast by one run of a paragraph's text -- see
@@ -1212,10 +1214,14 @@ impl Context2D {
         F: Fn(&SkCanvas, &Paint, Pass),
     {
         let lines = text.as_ref().is_some_and(|text| text.lines);
-        let reached = text.map(|text| text.reached);
         if self.files_through_pattern(paint, features, replay, lines, &f)
-            || self
-                .files_through_chain(paint, exact, features, reached, lines, &f)
+            || self.files_through_chain(
+                paint,
+                exact,
+                features,
+                text.as_ref(),
+                &f,
+            )
         {
             return;
         }
@@ -1596,13 +1602,14 @@ impl Context2D {
         paint: &Paint,
         exact: Option<&Paint>,
         features: VectorFeatures,
-        reached: Option<&Cell<Option<Rect>>>,
-        lines: bool,
+        text: Option<&TextRun>,
         f: &F,
     ) -> bool
     where
         F: Fn(&SkCanvas, &Paint, Pass),
     {
+        let reached = text.map(|text| text.reached);
+        let lines = text.is_some_and(|text| text.lines);
         let Some(steps) = self.draw_chain(reached.is_some()) else {
             return false;
         };
@@ -1667,6 +1674,16 @@ impl Context2D {
                                 picture,
                                 exact: colour,
                                 alpha: paint.alpha_f(),
+                                kept: text.and_then(|text| {
+                                    Kept::new(
+                                        text.kept.clone()?,
+                                        Matrix::concat(
+                                            &self.state.matrix,
+                                            &Matrix::translate(text.at),
+                                        ),
+                                        &opaque,
+                                    )
+                                }),
                             })
                         })
                     })
@@ -3395,6 +3412,8 @@ impl Context2D {
                 Some(TextRun {
                     lines: typesetter.names_a_line_colour(),
                     reached: &reached,
+                    kept: kept.as_ref().map(|kept| kept.drawn()),
+                    at: origin,
                 }),
                 |canvas, paint, pass| {
                     // The kept run, or, the first time a run is drawn, the run
@@ -3876,6 +3895,12 @@ pub struct TextRun<'a> {
     /// draws on, where that is known -- see
     /// [`Context2D::files_through_chain`].
     pub reached: &'a Cell<Option<Rect>>,
+    /// The run kept for drawing, `None` the first time it is drawn -- see
+    /// `Typesetter::laid_out` -- which a blurred run's coverage is kept
+    /// under: see [`run_mask`].
+    pub kept: Option<Arc<RunPaint>>,
+    /// Where the run is drawn, in the canvas's units under its transform.
+    pub at: Point,
 }
 
 /// What a draw handed to [`Context2D::render_to_canvas`] is drawing, which

@@ -292,6 +292,12 @@ impl<K: StoreKey, V: Stored> Store<K, V> {
         self.swept_at = 0;
     }
 
+    /// How many entries the store holds, for the tests to count.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     /// Drops every entry whose key is orphaned, and notes how many are left.
     fn sweep(&mut self) {
         let mut freed = 0;
