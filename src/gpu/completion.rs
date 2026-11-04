@@ -214,7 +214,7 @@ pub(crate) fn read_after_draws<T>(
     page: usize,
     read: impl FnOnce(&mut Surface) -> Result<T, String>,
 ) -> Option<Result<T, String>> {
-    let Some(mut context) = surface.direct_context() else {
+    let Some(context) = surface.direct_context() else {
         return Some(read(surface));
     };
     // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
@@ -229,6 +229,7 @@ pub(crate) fn read_after_draws<T>(
     // buffer's status as the queue of ours reads it.
     #[cfg(feature = "metal")]
     if let Some(queue) = metal::recording(&context) {
+        let mut context = context;
         let since = queue.mark();
         // The draws reach the GPU before the read is encoded, in a buffer of
         // their own that nothing waits on, as `read_checked` commits them and
@@ -915,13 +916,15 @@ mod tests {
     #[test]
     fn a_conversion_discarded_twice_is_an_error() {
         // A P3 export of an sRGB canvas redraws the composited page into a
-        // P3 surface, which is a second draw to confirm. The conversion is
-        // confirmed inside the read, before the composite is, so the first
-        // two draws asked about are the conversion's.
+        // P3 surface, which is a second draw to confirm. On Metal the
+        // conversion is confirmed inside the read, before the composite is,
+        // so the first two draws asked about are the conversion's; elsewhere
+        // the composite is confirmed before the read, and is let through.
         let Some((mut canvas, page)) = drawn(64.0, 48.0) else {
             return;
         };
-        seam::discard(Some(page), 2);
+        let composite_first = usize::from(!cfg!(feature = "metal"));
+        seam::discard_after(Some(page), composite_first, 2);
         let options = EncodeOptions {
             color_space: Some(PixelColorSpace::DisplayP3),
             ..EncodeOptions::default()
