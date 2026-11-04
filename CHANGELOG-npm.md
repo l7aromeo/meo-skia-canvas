@@ -133,6 +133,7 @@ are added, and the CSS strings read the math functions and every length unit.
 
 ### Fixed
 
+- **A `getImageData` read of a GPU canvas on macOS whose pixel copy the GPU discarded is read again, or reported as an error, rather than handed back as zeros or stale pixels, and a copy kept for repeat reads is kept only once the GPU ran it.** ([#533](https://github.com/l7aromeo/meo-skia-canvas/issues/533))
 - **An export from a GPU canvas on macOS whose pixel copy the GPU discarded is read again, or reported as an error, rather than handed back as zeros or stale pixels.** ([#519](https://github.com/l7aromeo/meo-skia-canvas/issues/519))
 - **A float canvas stays on the CPU when `canvas.gpu = true` is assigned, as it does when `gpu: true` is passed to the constructor; assigned, it went to the GPU and drew in eight bits, so an `RGBAF32` fill at an alpha of 0.3 read back 77/255.** ([#515](https://github.com/l7aromeo/meo-skia-canvas/issues/515))
 - **A curve on a GPU canvas on macOS and Linux is drawn the same however the same path was drawn before it, at whatever size; it could move edge pixels by up to 128 levels after a larger or smaller draw of it.** ([#511](https://github.com/l7aromeo/meo-skia-canvas/issues/511))

@@ -123,6 +123,7 @@ read the math functions and every length unit.
 
 ### Fixed
 
+- **A `get_image_data` read of a GPU canvas on macOS whose pixel copy the GPU discarded is read again, or reported as an error, rather than handed back as zeros or stale pixels, and a copy kept for repeat reads is kept only once the GPU ran it.** ([#533](https://github.com/l7aromeo/meo-skia-canvas/issues/533))
 - **An export from a GPU canvas on macOS whose pixel copy the GPU discarded is read again, or reported as an error, rather than handed back as zeros or stale pixels.** ([#519](https://github.com/l7aromeo/meo-skia-canvas/issues/519))
 - **A curve on a GPU canvas on macOS and Linux is drawn the same however the same path was drawn before it, at whatever size; it could move edge pixels by up to 128 levels after a larger or smaller draw of it.** ([#511](https://github.com/l7aromeo/meo-skia-canvas/issues/511))
 - **A `drop-shadow()` filter on an eight-bit wide-gamut `Canvas` stores its colour's exact bytes, never a colour byte above its alpha.** ([#491](https://github.com/l7aromeo/meo-skia-canvas/issues/491))

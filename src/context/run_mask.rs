@@ -29,10 +29,8 @@ use parking_lot::Mutex;
 use skia_safe::{Canvas as SkCanvas, Matrix, Paint};
 
 use crate::{
-    context::{
-        chain::{Outcome, coverage::Coverage},
-        chain_cache::{Budget, Store, StoreKey, Stored},
-    },
+    cache_store::{Budget, Store, StoreKey, Stored},
+    context::chain::{Outcome, coverage::Coverage},
     node::typography::RunPaint,
 };
 
