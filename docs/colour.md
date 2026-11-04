@@ -36,8 +36,9 @@ At eight bits every layer rounds to a whole level and the error compounds: `0.23
 `0.36078` on the GPU, which misses in the other direction. It costs twice the memory for `RGBAF16`
 and four times for `RGBAF32`; the time cost depends entirely on what you draw, and is measured under
 [Performance and memory](performance.md). Such a canvas renders on the raster backend
-whatever `gpu` says, because no GPU backend Skia ships today composites in float accurately, and
-`canvas.engine` reports which engine took it.
+whatever `gpu` says, because Skia's Ganesh backend, which the GPU engine runs on, rounds each draw's
+colour to eight bits before blending it: an `RGBAF16` page reads `0.37695` there on Metal, further
+from right than eight bits on either engine. `canvas.engine` reports which engine took it.
 
 **A `colorType` narrower than four bytes a pixel is an output format, not a compositing format.**
 Skia will build a surface in any of them; compositing in one is what costs. An opaque format loses
