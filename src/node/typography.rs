@@ -4897,45 +4897,121 @@ mod coverage_colour {
         }
     }
 
-    /// A run's coverage depends on the colour it is drawn in: Skia
-    /// pre-blends glyph masks by the paint's luminance, so the same run
-    /// drawn in white covers up to 65 levels otherwise than in black, in
-    /// grey and green up to 46, in the scenes' orange up to 24, and in red
-    /// and blue, dark enough to share black's luminance, not at all -- in
-    /// an A8 plane and in a premultiplied N32 raster alike. A blurred run's
-    /// coverage is therefore drawn in the run's own colour, and kept with
-    /// it. If this fails, Skia covers a glyph alike in every colour, and the
-    /// colour can leave what a kept coverage is filed under.
+    /// The bits of luminance Skia picks a glyph mask's pre-blend table by:
+    /// `SkMaskGamma` is `SkTMaskGamma<3, 3, 3>`
+    /// (`skia/src/core/SkScalerContext.h` under the skia-bindings crate,
+    /// line 51).
+    const LUM_BITS: u32 = 3;
+
+    /// The weights of red, green and blue in the luminance Skia computes, in
+    /// 1.8 fixed point: `SkComputeLuminance` (`skia/src/core/SkColorData.h`,
+    /// lines 124 to 129).
+    const LUM_WEIGHTS: [u32; 3] = [54, 183, 19];
+
+    /// The largest glyph, in device pixels, Skia draws from a mask: past it a
+    /// glyph is drawn as a path, which takes no pre-blend --
+    /// `SkStrikeSpec::ShouldDrawAsPath`'s `memoryLimit`
+    /// (`skia/src/core/SkStrikeSpec.cpp`, line 118).
+    const MASK_LIMIT: f32 = 256.0;
+
+    /// `value`'s top [`LUM_BITS`] bits spread back over a byte:
+    /// `sk_t_scale255` (`skia/src/core/SkMaskGamma.h`, lines 64 to 71).
+    fn spread(value: u32) -> u32 {
+        let base = (value >> (8 - LUM_BITS)) << (8 - LUM_BITS);
+        (0..8)
+            .step_by(LUM_BITS as usize)
+            .fold(0, |lum, i| lum | base >> i)
+    }
+
+    /// The pre-blend table a glyph mask drawn in `colour` takes, as Skia picks
+    /// it on this platform's scaler.
+    ///
+    /// The paint's colour is kept with each channel cut to [`LUM_BITS`] --
+    /// `SkScalerContextRec::setLuminanceColor`
+    /// (`skia/src/core/SkScalerContext.cpp`, lines 1104 to 1107). CoreText,
+    /// smoothing text without subpixel coverage as it does here, hints the
+    /// mask and halves the colour, keeping it cut again --
+    /// `SkTypeface_Mac::onFilterRec` (`skia/src/ports/SkTypeface_mac_ct.cpp`,
+    /// lines 941 to 982), which takes three quarters of it where it smooths
+    /// with subpixel coverage. FreeType leaves it as it is:
+    /// `SkTypeface_FreeType::onFilterRec`
+    /// (`skia/src/ports/SkFontHost_FreeType.cpp`, lines 833 to 863) drops
+    /// the pre-blend for an A8 mask only without `SK_GAMMA_APPLY_TO_A8`,
+    /// which `skia/BUILD.gn` defines for Skia's own sources (line 92). An A8
+    /// mask's colour is then its luminance in grey
+    /// (`SkScalerContext::PreprocessRec`, lines 77 to 87), and the table is
+    /// that grey's top bits (`SkTMaskGamma::preBlend`, `SkMaskGamma.h`, lines
+    /// 231 to 238).
+    fn table(colour: Color) -> u32 {
+        let cut = |rgb: [u32; 3]| rgb.map(spread);
+        let mut rgb = cut([colour.r(), colour.g(), colour.b()].map(u32::from));
+        if cfg!(target_os = "macos") {
+            rgb = cut(rgb.map(|c| c / 2));
+        }
+        let lum = rgb
+            .iter()
+            .zip(LUM_WEIGHTS)
+            .map(|(c, weight)| c * weight)
+            .sum::<u32>()
+            >> 8;
+        spread(lum) >> (8 - LUM_BITS)
+    }
+
+    /// A run's coverage depends on the colour it is drawn in, and only
+    /// through the pre-blend table that colour picks -- see [`table`]: two
+    /// colours picking the same table cover alike to the bit, and two
+    /// picking different ones do not, on every pair of [`COLOURS`], at sizes
+    /// drawn from masks, in an A8 plane and in a premultiplied N32 raster
+    /// alike. Past [`MASK_LIMIT`] a glyph is a path, and every colour covers
+    /// alike.
+    ///
+    /// The scalers part on which colours share a table. On CoreText, which
+    /// halves the colour, red and blue share black's and grey shares green's;
+    /// on FreeType blue alone shares black's. At 13px the run in white
+    /// covers up to 65 levels otherwise than in black on CoreText, and 99 on
+    /// FreeType.
+    ///
+    /// A blurred run's coverage is therefore drawn in the run's own colour,
+    /// and kept with it. If this fails on a scaler, the rule the colour is
+    /// kept by has moved there, and what a kept coverage is filed under
+    /// should be read again.
     #[test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "DirectWrite's pre-blend has not been measured"
+    )]
     fn a_runs_coverage_depends_on_the_colour_it_is_drawn_in() {
         let _library = register();
         let off_grid = Matrix::translate((60.3, 110.6));
-        for size in [13.0, 40.0] {
+        let tables = COLOURS.map(table);
+        assert!(
+            tables.iter().any(|&t| t != tables[0]),
+            "the colours pick more than one table, or this asserts nothing"
+        );
+        for size in [13.0, 40.0, 300.0] {
             for colour_type in [ColorType::Alpha8, ColorType::N32] {
-                let black = coverage(
-                    FAMILY,
-                    size,
-                    &off_grid,
-                    colour_type,
-                    Color::BLACK,
-                );
+                let masks = COLOURS.map(|colour| {
+                    coverage(FAMILY, size, &off_grid, colour_type, colour)
+                });
                 assert!(
-                    black.iter().any(|&a| a != 0),
+                    masks[0].iter().any(|&a| a != 0),
                     "{size}px: the run covers something"
                 );
-                for (colour, alike) in COLOURS.iter().map(|&colour| {
-                    let drawn =
-                        coverage(FAMILY, size, &off_grid, colour_type, colour);
-                    (colour, drawn == black)
-                }) {
-                    let dark = colour == Color::BLACK
-                        || colour == Color::from_rgb(255, 0, 0)
-                        || colour == Color::from_rgb(0, 0, 255);
+                for (i, j) in (0..COLOURS.len())
+                    .flat_map(|i| (i + 1..COLOURS.len()).map(move |j| (i, j)))
+                {
+                    let alike = masks[i] == masks[j];
+                    let expected = size > MASK_LIMIT || tables[i] == tables[j];
                     assert_eq!(
                         alike,
-                        dark,
-                        "{size}px {colour_type:?} in {colour:?}: covered {} black",
-                        if alike { "as" } else { "otherwise than" }
+                        expected,
+                        "{size}px {colour_type:?}: {:?} (table {}) and {:?} \
+                         (table {}) cover {}",
+                        COLOURS[i],
+                        tables[i],
+                        COLOURS[j],
+                        tables[j],
+                        if alike { "alike" } else { "otherwise" }
                     );
                 }
             }
