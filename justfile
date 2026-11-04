@@ -10,7 +10,8 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 # wins. Which patches each platform's tree carries is `PATCHES` in
 # scripts/skia-source.mjs; macOS's are the one below and the atlas-size cap
 # and triangulation tolerance noted there, Linux's the brotli build-list fix
-# and the same two.
+# and the same two, and both the Graphite bindings, which a build takes only
+# through `node scripts/skia-source.mjs cargo-patch`.
 #
 # UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
 # Re-check: node --test tests/suite/metal-compile.test.js, against a binary built without SKIA_SOURCE_DIR
@@ -97,7 +98,7 @@ default:
 # genuinely re-ran, and at the end of the list the same failure would cost the
 # whole run to reach.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-release-tags check-upstream-notes check-markdown-links check-readme-facts check-fetch-deps check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity check-bench-parity docs licenses test build
+ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-release-tags check-upstream-notes check-cargo-lock check-markdown-links check-readme-facts check-fetch-deps check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity check-bench-parity docs licenses test build
 
 # Installs when node_modules is missing *or* no longer matches bun.lock, which
 # a rebase or merge can move under a warm worktree. scripts/install-deps.mjs
@@ -151,7 +152,7 @@ typecheck: ensure-deps
 # `install-hooks` is what puts this in front of a commit; it is opt-in and
 # run once per clone.
 [doc("The pre-commit subset: formatting both languages, ESLint, featureless clippy.")]
-precommit: ensure-deps check-docs
+precommit: ensure-deps check-docs check-cargo-lock
     cargo +{{ fmt_toolchain }} fmt --all -- --check
     bun run format:check
     bun run lint
@@ -273,6 +274,13 @@ check-workflow-gates: ensure-deps
 [doc("Fail when an upstream-defect note cannot be re-checked.")]
 check-upstream-notes:
     node scripts/check-upstream-notes.mjs
+
+# Refuse a Cargo.lock that a build with `skia-source.mjs cargo-patch` left
+# pointing skia-bindings, skia-safe and skia-svg-macros at a path on this
+# machine instead of crates.io -- the script says why that cannot be committed.
+[doc("Fail when Cargo.lock builds a skia crate from a path.")]
+check-cargo-lock:
+    node scripts/check-cargo-lock.mjs
 
 # A relative link that resolves nowhere still renders, so nothing reports it;
 # the reader meets the 404. This resolves every relative link and anchor in
