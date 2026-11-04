@@ -72,8 +72,9 @@ use chain::{Step, canvas_reach};
 use exact_blur::REACH_SIGMAS;
 use faint::Faint;
 use layer::{
-    BlurDraw, Composite, Entries, ExactColour, Group, Layer, LayerRec, Replay,
-    holds_a_cut, holds_a_pair, reach_the_clip,
+    BlurDraw, Composite, CoverageRun, Entries, ExactColour, Group, Layer,
+    LayerRec, Replay, coverage_files, holds_a_cut, holds_a_pair,
+    reach_the_clip,
 };
 use page::{ExportOptions, Page, PageRecorder, Recording};
 use typesetting::{TextSettings, Typesetting, Typography};
@@ -1213,7 +1214,8 @@ impl Context2D {
         let lines = text.as_ref().is_some_and(|text| text.lines);
         let reached = text.map(|text| text.reached);
         if self.files_through_pattern(paint, features, replay, lines, &f)
-            || self.files_through_chain(paint, exact, features, reached, &f)
+            || self
+                .files_through_chain(paint, exact, features, reached, lines, &f)
         {
             return;
         }
@@ -1471,6 +1473,7 @@ impl Context2D {
                 steps,
                 rec: rec(filter),
                 reach: None,
+                coverage: None,
             },
             None => Composite::Layer(rec(filter)),
         };
@@ -1594,6 +1597,7 @@ impl Context2D {
         exact: Option<&Paint>,
         features: VectorFeatures,
         reached: Option<&Cell<Option<Rect>>>,
+        lines: bool,
         f: &F,
     ) -> bool
     where
@@ -1635,6 +1639,40 @@ impl Context2D {
                 .finish_recording_as_picture(None)
                 .map(|p| (p, reach))
         };
+        // A run of text in one flat colour that the coverage route could
+        // play is recorded once more, in its colour opaque, through the paint
+        // its pixels are drawn in -- see `layer::CoverageRun` -- before the
+        // run itself, so that what the run reaches is the run's. A run naming
+        // a line colour of its own is drawn in two colours, and keeps the
+        // chain.
+        let coverage = match exact {
+            Some(exact)
+                if reached.is_some()
+                    && !lines
+                    && paint.shader().is_none()
+                    && matches!(
+                        self.state.dye(paint.style()),
+                        Dye::Color(..)
+                    ) =>
+            {
+                self.exact_colour(paint.style())
+                    .filter(|colour| {
+                        coverage_files(&steps, colour, exact.is_dither())
+                    })
+                    .and_then(|colour| {
+                        let mut opaque = exact.clone();
+                        opaque.set_alpha_f(1.0);
+                        record(&opaque).map(|(picture, _)| {
+                            Arc::new(CoverageRun {
+                                picture,
+                                exact: colour,
+                                alpha: paint.alpha_f(),
+                            })
+                        })
+                    })
+            }
+            _ => None,
+        };
         let (entry, reach) = match self.recorder.borrow().dual() {
             false => record(paint)
                 .map(|(picture, reach)| (Layer::Picture(picture), reach)),
@@ -1673,6 +1711,7 @@ impl Context2D {
                         ..LayerRec::default()
                     },
                     reach,
+                    coverage,
                 },
                 None,
                 Matrix::new_identity(),
@@ -1965,6 +2004,7 @@ impl Context2D {
                 steps: Arc::from([Step::Blur(cast.sigma)]),
                 rec: LayerRec::default(),
                 reach: None,
+                coverage: None,
             },
             matrix: Matrix::new_identity(),
             clip: None,
@@ -2704,6 +2744,7 @@ impl Context2D {
                             steps,
                             rec,
                             reach: None,
+                            coverage: None,
                         },
                         None if own && !through_paint => Composite::Plain,
                         None => Composite::Layer(rec),
@@ -2929,6 +2970,7 @@ impl Context2D {
                             ..LayerRec::default()
                         },
                         reach: None,
+                        coverage: None,
                     },
                     // Unconfined: the image's own edge is where it ends,
                     // and a clip to it would take its partial pixels a

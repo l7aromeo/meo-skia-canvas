@@ -4811,6 +4811,233 @@ mod synthesis {
 }
 
 #[cfg(test)]
+mod coverage_colour {
+    use super::{Typesetter, glyph_runs};
+    use crate::{Canvas, Font as CanvasFont, FontLibrary as Library, started};
+    use skia_safe::{
+        AlphaType, Color, ColorType, FontHinting, ImageInfo, Matrix, Paint,
+        Surface,
+    };
+
+    /// The bundled Oswald, under a name of these tests' own.
+    const FAMILY: &str = "CoverageOswald";
+    const TEXT: &str = "Hamburgefonstiv";
+    /// The raster the runs are drawn on: wide and tall enough for the
+    /// largest size turned.
+    const RASTER: (i32, i32) = (560, 260);
+
+    /// The colours a run is drawn in: black and white, a mid grey, the
+    /// primaries and the scenes' own orange, which span the luminances
+    /// Skia's glyph masks could be pre-blended by.
+    const COLOURS: [Color; 7] = [
+        Color::BLACK,
+        Color::WHITE,
+        Color::from_rgb(128, 128, 128),
+        Color::from_rgb(255, 0, 0),
+        Color::from_rgb(0, 255, 0),
+        Color::from_rgb(0, 0, 255),
+        Color::from_rgb(200, 120, 40),
+    ];
+
+    fn register() -> Library {
+        let library = Library::new();
+        library
+            .register_font_from_path(
+                FAMILY,
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"
+                ),
+            )
+            .expect("bundled Oswald registers");
+        library
+    }
+
+    /// The alpha `TEXT` in `family` at `size` covers, drawn the way a
+    /// canvas draws it -- its own runs, fonts and positions -- with its
+    /// fonts' hinting set to `hinting`, under `matrix` on a raster of
+    /// `colour_type` in `colour`.
+    fn coverage(
+        family: &str,
+        size: f32,
+        hinting: FontHinting,
+        matrix: &Matrix,
+        colour_type: ColorType,
+        colour: Color,
+    ) -> Vec<u8> {
+        let mut canvas = Canvas::new(1.0, 1.0);
+        let ctx = canvas.context();
+        ctx.set_font(&CanvasFont::new(family, size));
+        let mut layout = Typesetter::new(&ctx.inner.state, TEXT, None)
+            .layout(&Paint::default());
+        let info = ImageInfo::new(RASTER, colour_type, AlphaType::Premul, None);
+        let mut surface: Surface =
+            started::raster(&info, None, None).expect("a raster");
+        let raster = surface.canvas();
+        raster.set_matrix(&(*matrix).into());
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true).set_color(colour);
+        for run in glyph_runs(&mut layout.paragraph) {
+            let mut font = run.font.clone();
+            font.set_hinting(hinting);
+            raster.draw_glyphs_at(
+                &run.glyphs,
+                &run.positions[..],
+                run.origin,
+                &font,
+                &paint,
+            );
+        }
+        let bytes = info.bytes_per_pixel();
+        let mut pixels = vec![0u8; info.compute_min_byte_size()];
+        assert!(surface.read_pixels(
+            &info,
+            &mut pixels,
+            RASTER.0 as usize * bytes,
+            (0, 0)
+        ));
+        match colour_type {
+            ColorType::Alpha8 => pixels,
+            _ => pixels.chunks(4).map(|p| p[3]).collect(),
+        }
+    }
+
+    /// The bits of luminance Skia picks a glyph mask's pre-blend table by:
+    /// `SkMaskGamma` is `SkTMaskGamma<3, 3, 3>`
+    /// (`skia/src/core/SkScalerContext.h` under the skia-bindings crate,
+    /// line 51).
+    const LUM_BITS: u32 = 3;
+
+    /// The weights of red, green and blue in the luminance Skia computes, in
+    /// 1.8 fixed point: `SkComputeLuminance` (`skia/src/core/SkColorData.h`,
+    /// lines 124 to 129).
+    const LUM_WEIGHTS: [u32; 3] = [54, 183, 19];
+
+    /// The largest glyph, in device pixels, Skia draws from a mask: past it a
+    /// glyph is drawn as a path, which takes no pre-blend --
+    /// `SkStrikeSpec::ShouldDrawAsPath`'s `memoryLimit`
+    /// (`skia/src/core/SkStrikeSpec.cpp`, line 118).
+    const MASK_LIMIT: f32 = 256.0;
+
+    /// What CoreText scales a hinted mask's colour by, as a fraction, under
+    /// the smoothing it reports here -- `SkCTFontSmoothBehavior::some`, which
+    /// halves it (`skia/src/ports/SkTypeface_mac_ct.cpp`, lines 967 to 972).
+    /// Under `subpixel` it takes three quarters (lines 973 to 979), which
+    /// puts red in a table of its own, and this pin then fails on red.
+    const CORETEXT_SCALE: (u32, u32) = (1, 2);
+
+    /// `value`'s top [`LUM_BITS`] bits spread back over a byte:
+    /// `sk_t_scale255` (`skia/src/core/SkMaskGamma.h`, lines 64 to 71).
+    fn spread(value: u32) -> u32 {
+        let base = (value >> (8 - LUM_BITS)) << (8 - LUM_BITS);
+        (0..8)
+            .step_by(LUM_BITS as usize)
+            .fold(0, |lum, i| lum | base >> i)
+    }
+
+    /// The pre-blend table a glyph mask drawn in `colour` with `hinting`
+    /// takes, as Skia picks it on this platform's scaler.
+    ///
+    /// The paint's colour is kept with each channel cut to [`LUM_BITS`] --
+    /// `SkScalerContextRec::setLuminanceColor`
+    /// (`skia/src/core/SkScalerContext.cpp`, lines 1104 to 1107). CoreText
+    /// scales the colour of a mask it hints by [`CORETEXT_SCALE`] and keeps
+    /// it cut again, and leaves an unhinted A8 mask's as it is --
+    /// `SkTypeface_Mac::onFilterRec` (`skia/src/ports/SkTypeface_mac_ct.cpp`,
+    /// lines 958 to 982). FreeType leaves it as it is either way:
+    /// `SkTypeface_FreeType::onFilterRec`
+    /// (`skia/src/ports/SkFontHost_FreeType.cpp`, lines 833 to 863) drops
+    /// the pre-blend for an A8 mask only without `SK_GAMMA_APPLY_TO_A8`,
+    /// which `skia/BUILD.gn` defines for Skia's own sources (line 92). An A8
+    /// mask's colour is then its luminance in grey
+    /// (`SkScalerContext::PreprocessRec`, lines 77 to 87), and the table is
+    /// that grey's top bits (`SkTMaskGamma::preBlend`, `SkMaskGamma.h`, lines
+    /// 231 to 238).
+    fn table(colour: Color, hinting: FontHinting) -> u32 {
+        let cut = |rgb: [u32; 3]| rgb.map(spread);
+        let mut rgb = cut([colour.r(), colour.g(), colour.b()].map(u32::from));
+        if cfg!(target_os = "macos") && hinting != FontHinting::None {
+            let (times, over) = CORETEXT_SCALE;
+            rgb = cut(rgb.map(|c| c * times / over));
+        }
+        let lum = rgb
+            .iter()
+            .zip(LUM_WEIGHTS)
+            .map(|(c, weight)| c * weight)
+            .sum::<u32>()
+            >> 8;
+        spread(lum) >> (8 - LUM_BITS)
+    }
+
+    /// A run's coverage depends on the colour it is drawn in, and only
+    /// through the pre-blend table that colour picks -- see [`table`]: two
+    /// colours picking the same table cover alike to the bit, and two
+    /// picking different ones do not, on every pair of [`COLOURS`], at sizes
+    /// drawn from masks, in an A8 plane and in a premultiplied N32 raster
+    /// alike. Past [`MASK_LIMIT`] a glyph is a path, and every colour covers
+    /// alike.
+    ///
+    /// The scalers part on which colours share a table. On CoreText, which
+    /// halves the colour of a run it hints, red and blue share black's and
+    /// grey shares green's there; on FreeType, and on CoreText unhinted,
+    /// blue alone shares black's. At 13px the run in white covers up to 65
+    /// levels otherwise than in black on CoreText, and 99 on FreeType.
+    ///
+    /// A blurred run's coverage is therefore drawn in the run's own colour,
+    /// and kept with it. If this fails on a scaler, the rule the colour is
+    /// kept by has moved there, and what a kept coverage is filed under
+    /// should be read again.
+    #[test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "DirectWrite's pre-blend has not been measured"
+    )]
+    fn a_runs_coverage_depends_on_the_colour_it_is_drawn_in() {
+        let _library = register();
+        let off_grid = Matrix::translate((60.3, 110.6));
+        let cases = [13.0, 40.0, 300.0].into_iter().flat_map(|size| {
+            [FontHinting::None, FontHinting::Slight, FontHinting::Full]
+                .into_iter()
+                .flat_map(move |hinting| {
+                    [ColorType::Alpha8, ColorType::N32]
+                        .map(|colour_type| (size, hinting, colour_type))
+                })
+        });
+        for (size, hinting, colour_type) in cases {
+            let tables = COLOURS.map(|colour| table(colour, hinting));
+            assert!(
+                tables.iter().any(|&t| t != tables[0]),
+                "the colours pick more than one table, or this asserts nothing"
+            );
+            let masks = COLOURS.map(|colour| {
+                coverage(FAMILY, size, hinting, &off_grid, colour_type, colour)
+            });
+            assert!(
+                masks[0].iter().any(|&a| a != 0),
+                "{size}px: the run covers something"
+            );
+            for (i, j) in (0..COLOURS.len())
+                .flat_map(|i| (i + 1..COLOURS.len()).map(move |j| (i, j)))
+            {
+                let alike = masks[i] == masks[j];
+                let expected = size > MASK_LIMIT || tables[i] == tables[j];
+                assert_eq!(
+                    alike,
+                    expected,
+                    "{size}px {hinting:?} {colour_type:?}: {:?} (table \
+                         {}) and {:?} (table {}) cover {}",
+                    COLOURS[i],
+                    tables[i],
+                    COLOURS[j],
+                    tables[j],
+                    if alike { "alike" } else { "otherwise" }
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod hinting {
     use super::{FontLibrary, TextStyle, Typesetter, glyph_runs};
     use crate::{
