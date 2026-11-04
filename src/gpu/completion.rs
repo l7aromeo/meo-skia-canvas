@@ -53,6 +53,20 @@
 //! and wait with [`draws_ran`] first, then read. What that cannot see is the
 //! readback's own buffer.
 //!
+//! A Graphite page -- see [`graphite`](crate::gpu::graphite) -- is confirmed
+//! through this thread's
+//! Graphite context, on a queue of ours as Ganesh's is. Graphite runs a page's
+//! draws only once they are committed, and its read waits for the copy and
+//! reports success whether or not the buffers ran. So a read marks the queue,
+//! commits the draws without a wait, reads, and confirms every buffer since
+//! the mark: the read's own wait is the only one, and the one confirmation
+//! answers for the draws and the copy both. Which engine holds a surface's
+//! draws is asked of the surface, and only one held by neither is taken for
+//! raster: a Graphite surface has no direct context either, and taken for
+//! raster its draws would go unconfirmed. A Graphite page reached on a thread
+//! whose context did not make it is refused rather than drawn again, since no
+//! retry on that thread reaches its draws.
+//!
 //! **The checked read costs no wait beyond the read's own.** Counted under
 //! lldb, a read after a draw waits on the GPU once; the queue of ours waits
 //! only for a buffer still running after that wait, which buffers committed
@@ -89,6 +103,8 @@ use skia_safe::{
 use skia_safe::{ImageInfo, Surface};
 
 use crate::Error;
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+use crate::gpu::graphite::{self, GraphiteRead};
 #[cfg(feature = "metal")]
 use crate::gpu::metal::{self, Mark};
 #[cfg(any(feature = "metal", feature = "vulkan"))]
@@ -151,9 +167,63 @@ fn confirmed(context: &DirectContext, since: Since) -> bool {
         let _ = (context, since);
         Ok(())
     };
+    noted(answer)
+}
+
+/// Whether `answer`, a confirmation, passed, noting why for [`discarded`]
+/// where it did not and clearing any earlier reason where it did.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+fn noted(answer: Result<(), String>) -> bool {
     let ok = answer.is_ok();
     FAILURE.set(answer.err());
     ok
+}
+
+/// What holds a surface's draws, and so what confirms them.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+enum Held {
+    /// Ganesh, through the surface's own context.
+    Ganesh(DirectContext),
+    /// Graphite, through this thread's context.
+    Graphite,
+    /// Nothing: a raster surface's draws are made as they are recorded.
+    Raster,
+}
+
+/// What holds `surface`'s draws. Raster is what is left once neither GPU
+/// engine claims the surface, not the absence of a direct context, which a
+/// Graphite surface lacks too.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+fn held(surface: &mut Surface) -> Held {
+    if let Some(context) = surface.direct_context() {
+        return Held::Ganesh(context);
+    }
+    match graphite::owns(surface) {
+        true => Held::Graphite,
+        false => Held::Raster,
+    }
+}
+
+/// Commits this thread's Graphite draws, waiting for them where `wait` says
+/// so: `Ok(true)` where they reached the GPU, and `Ok(false)` where Skia
+/// refused them, its reason noted for [`discarded`] -- drawn again, as a
+/// Ganesh flush that fails is. `Err` where this thread holds no context to
+/// commit them on: the page was made on another thread's, and no retry here
+/// would reach its draws.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+fn graphite_committed(wait: bool) -> Result<bool, String> {
+    #[cfg(test)]
+    if wait {
+        WAITED_COMMITS.set(WAITED_COMMITS.get() + 1);
+    }
+    match graphite::commit(wait) {
+        Ok(()) => Ok(true),
+        Err(GraphiteRead::Refused(why)) => {
+            FAILURE.set(Some(why));
+            Ok(false)
+        }
+        Err(other) => Err(format!("Could not read a Graphite page: {other}")),
+    }
 }
 
 /// `reason` as the crate's [`Error`]: [`Error::Render`] for a discarded draw
@@ -172,53 +242,89 @@ pub(crate) fn typed(
     }
 }
 
-/// Whether the GPU ran every draw recorded so far on `surface`'s context.
+/// Whether the GPU ran every draw recorded so far on `surface`'s context:
+/// `Ok(false)` where it did not, so that the caller draws again, and `Err`
+/// where nothing on this thread can tell -- a Graphite page made on another
+/// thread's context -- which drawing again would not change.
 ///
-/// Flushes the context and waits for it. A raster surface has no context and
-/// nothing to wait for, so it always answers yes and costs nothing. `page` is
-/// the page the draws belong to, which only the test seam reads.
+/// Flushes or commits the draws and waits for them. A raster surface has
+/// nothing to wait for, so it always answers yes and costs nothing. `page`
+/// is the page the draws belong to, which only the test seam reads.
 #[cfg(any(feature = "metal", feature = "vulkan"))]
-pub(crate) fn draws_ran(surface: &mut Surface, page: usize) -> bool {
-    let Some(mut context) = surface.direct_context() else {
-        return true;
+pub(crate) fn draws_ran(
+    surface: &mut Surface,
+    page: usize,
+) -> Result<bool, String> {
+    let ran = match held(surface) {
+        Held::Raster => return Ok(true),
+        Held::Ganesh(mut context) => {
+            // A flush that failed left the draws unrun, whatever the submit
+            // says: this one, or one the playback made on the way -- see
+            // `pacing`.
+            let flushed = context.flush(None).is_ok() && !pacing::take_failed();
+            let ran = context.submit(SyncCpu::Yes);
+            flushed && ran && confirmed(&context, None)
+        }
+        Held::Graphite => {
+            graphite_committed(true)? && noted(graphite::confirm(None))
+        }
     };
-    // A flush that failed left the draws unrun, whatever the submit says:
-    // this one, or one the playback made on the way -- see `pacing`.
-    let flushed = context.flush(None).is_ok() && !pacing::take_failed();
-    let ran = context.submit(SyncCpu::Yes);
-    flushed && ran && confirmed(&context, None) && !seam::discards(page)
+    Ok(ran && !seam::discards(page))
 }
 
 /// With no GPU backend compiled in every surface is raster, so there is no
 /// draw the GPU could have discarded.
 #[cfg(not(any(feature = "metal", feature = "vulkan")))]
-pub(crate) fn draws_ran(_surface: &mut Surface, _page: usize) -> bool {
-    true
+pub(crate) fn draws_ran(
+    _surface: &mut Surface,
+    _page: usize,
+) -> Result<bool, String> {
+    Ok(true)
 }
 
 /// `read` of what `surface` holds, made after its draws and confirmed with
 /// them: `None` where the GPU did not run the draws or the read, so that the
-/// caller draws again, and the read's own answer otherwise. `page` is the
-/// page the draws belong to, which only the test seam reads.
+/// caller draws again, and the read's own answer otherwise -- an error among
+/// them where this thread cannot confirm the read at all, as [`draws_ran`]
+/// says. `page` is the page the draws belong to, which only the test seam
+/// reads.
 ///
 /// On Metal the draws are committed without a wait, the read is made, and
 /// both are confirmed after it through the queue of ours Skia makes every
 /// buffer on. Skia's read commits the copy in a buffer of its own, waits on
 /// it and drops the answer; the queue holds the draws' buffer and the copy's
 /// and reads their status, so one confirmation after the read answers for
-/// both. Elsewhere the draws are confirmed by [`draws_ran`] before the read,
-/// which cannot see the copy.
+/// both. A Graphite page is read the same way through this thread's Graphite
+/// context, whose read reports nothing of its buffers at all. Elsewhere the
+/// draws are confirmed by [`draws_ran`] before the read, which cannot see
+/// the copy.
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 pub(crate) fn read_after_draws<T>(
     surface: &mut Surface,
     page: usize,
     read: impl FnOnce(&mut Surface) -> Result<T, String>,
 ) -> Option<Result<T, String>> {
-    // A raster surface has no context, and nothing of its read to confirm.
-    // It is the only surface without one this reaches: a Graphite surface,
-    // which has no direct context either, would be read here unconfirmed.
-    let Some(context) = surface.direct_context() else {
-        return Some(read(surface));
+    let context = match held(surface) {
+        // Nothing of a raster read to confirm.
+        Held::Raster => return Some(read(surface)),
+        Held::Graphite => {
+            let since = graphite::mark();
+            match graphite_committed(false) {
+                Ok(true) => {}
+                Ok(false) => return None,
+                Err(why) => return Some(Err(why)),
+            }
+            let answer = read(surface);
+            // As on Ganesh below: the read's own error, with its buffers
+            // confirmed all the same.
+            if answer.is_err() {
+                noted(graphite::confirm(None));
+                return Some(answer);
+            }
+            let ran = noted(graphite::confirm(since)) && !seam::discards(page);
+            return ran.then_some(answer);
+        }
+        Held::Ganesh(context) => context,
     };
     // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
     // Re-check: cargo test an_export_whose_copy_was_discarded_is_read_again
@@ -254,28 +360,31 @@ pub(crate) fn read_after_draws<T>(
         return ran.then_some(answer);
     }
     drop(context);
-    if !draws_ran(surface, page) {
-        return None;
+    match draws_ran(surface, page) {
+        Ok(true) => Some(read(surface)),
+        Ok(false) => None,
+        Err(why) => Some(Err(why)),
     }
-    Some(read(surface))
 }
 
 /// [`read_after_draws`] for a read that answers with what it made rather
 /// than why it failed: a copy of the surface, or whether a read of it was
-/// made. `None` where the GPU did not run the draws or the copy, so that the
-/// caller draws again.
+/// made. `Ok(None)` where the GPU did not run the draws or the copy, so that
+/// the caller draws again, and `Err` where this thread cannot confirm the
+/// read at all, which drawing again would not change.
 pub(crate) fn read_off_gpu<T>(
     surface: &mut Surface,
     page: usize,
     read: impl FnOnce(&mut Surface) -> T,
-) -> Option<T> {
+) -> Result<Option<T>, String> {
     match read_after_draws(surface, page, |surface| {
         Ok::<_, String>(read(surface))
     }) {
-        Some(Ok(answer)) => Some(answer),
-        // The read is handed back `Ok` whatever it made, so only a
-        // confirmation that failed answers without one.
-        Some(Err(_)) | None => None,
+        Some(Ok(answer)) => Ok(Some(answer)),
+        // The read is handed back `Ok` whatever it made, so an error is the
+        // refusal of a read nothing here can confirm.
+        Some(Err(why)) => Err(why),
+        None => Ok(None),
     }
 }
 
@@ -291,7 +400,7 @@ pub(crate) fn read_after_draws<T>(
 }
 
 /// What [`read_checked`] made of a read.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(
     not(any(feature = "metal", feature = "vulkan")),
     expect(dead_code, reason = "only a GPU read is discarded or declined")
@@ -304,10 +413,25 @@ pub(crate) enum Checked {
     /// The GPU did not run the draws or the copy, so what the destination
     /// holds is unknown.
     Discarded,
-    /// Skia would not read the surface this way, and nothing was confirmed:
-    /// the caller confirms the draws with [`draws_ran`] and reads as it would
-    /// without this.
+    /// Skia would not read the surface this way, so no read was made and none
+    /// is confirmed: the caller confirms the draws with [`draws_ran`] and
+    /// reads as it would without this.
     Declined,
+    /// Nothing on this thread can confirm the read, and drawing again would
+    /// not change that: a Graphite page made on another thread's context.
+    /// The text says why; the caller hands it on as the read's error.
+    Refused(String),
+}
+
+impl Checked {
+    /// [`read_off_gpu`]'s answer for a read that says whether it was made.
+    pub(crate) fn off_gpu(read: Result<Option<bool>, String>) -> Self {
+        match read {
+            Ok(Some(read)) => Self::Read(read),
+            Ok(None) => Self::Discarded,
+            Err(why) => Self::Refused(why),
+        }
+    }
 }
 
 /// How a read's rows are written into the destination: converted on the way
@@ -413,9 +537,10 @@ impl Rows {
 /// answers for that one -- see [`metal::RecordingQueue`]: one wait, and an
 /// answer for the draws as well as the copy. Elsewhere the copy is encoded in
 /// the buffer the draws are already in, which the one wait answers for. A
-/// raster surface reads at once and has nothing to confirm. `page` is the
-/// page the draws belong to, which only the test seam reads. `rows`, where
-/// given, converts each row as it is written.
+/// Graphite page is read through this thread's Graphite context -- see
+/// [`read_graphite`]. A raster surface reads at once and has nothing to
+/// confirm. `page` is the page the draws belong to, which only the test seam
+/// reads. `rows`, where given, converts each row as it is written.
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 pub(crate) fn read_checked(
     surface: &mut Surface,
@@ -426,10 +551,18 @@ pub(crate) fn read_checked(
     page: usize,
     rows: Option<Rows>,
 ) -> Checked {
-    let Some(mut context) = surface.direct_context() else {
-        return Checked::Read(read_now(
-            surface, info, pixels, row_bytes, at, rows,
-        ));
+    let mut context = match held(surface) {
+        Held::Raster => {
+            return Checked::Read(read_now(
+                surface, info, pixels, row_bytes, at, rows,
+            ));
+        }
+        Held::Graphite => {
+            return read_graphite(
+                surface, info, pixels, row_bytes, at, page, rows,
+            );
+        }
+        Held::Ganesh(context) => context,
     };
     #[cfg(feature = "metal")]
     let since = match metal::recording(&context) {
@@ -495,6 +628,48 @@ pub(crate) fn read_checked(
     }
 }
 
+/// [`read_checked`] for a Graphite page: the queue of ours marked, the draws
+/// committed without a wait, the read made through the context, whose own
+/// wait covers the draws, and every buffer since the mark confirmed after.
+/// Graphite's read says nothing of whether any buffer ran, so the
+/// confirmation is the only word on it. A read the context declines is
+/// [`Checked::Declined`], its buffers confirmed first, for the caller to read
+/// another way.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+fn read_graphite(
+    surface: &mut Surface,
+    info: &ImageInfo,
+    pixels: &mut [u8],
+    row_bytes: usize,
+    at: (i32, i32),
+    page: usize,
+    rows: Option<Rows>,
+) -> Checked {
+    let since = graphite::mark();
+    match graphite_committed(false) {
+        Ok(true) => {}
+        Ok(false) => return Checked::Discarded,
+        Err(why) => return Checked::Refused(why),
+    }
+    if !graphite::read_raw(surface, info, pixels, row_bytes, at) {
+        // Confirmed from no mark: a declined read may have committed no
+        // buffer, which a confirmation from the mark takes for a queue that
+        // sees none.
+        return match noted(graphite::confirm(None)) {
+            true => Checked::Declined,
+            false => Checked::Discarded,
+        };
+    }
+    if !noted(graphite::confirm(since)) || seam::discards(page) {
+        return Checked::Discarded;
+    }
+    if let Some(rows) = rows {
+        let height = info.height() as usize;
+        rows.convert_in_place(pixels, row_bytes, info.min_row_bytes(), height);
+    }
+    Checked::Read(true)
+}
+
 #[cfg(all(test, any(feature = "metal", feature = "vulkan")))]
 thread_local! {
     /// How many GPU reads [`read_checked`] has handed back undone on this
@@ -510,6 +685,10 @@ thread_local! {
     /// encoding the read, on this thread.
     #[cfg(feature = "metal")]
     pub(crate) static EARLY: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    /// How many times this thread has committed Graphite draws and waited for
+    /// them, so that a test can tell a read whose own wait is the only one.
+    pub(crate) static WAITED_COMMITS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
 }
 
@@ -1470,7 +1649,11 @@ mod tests {
             });
             let mut surface = surface.expect("a GPU surface");
             surface.canvas().clear(Color::from_argb(255, 26, 102, 204));
-            assert!(draws_ran(&mut surface, 0), "the clear did not run");
+            assert_eq!(
+                draws_ran(&mut surface, 0),
+                Ok(true),
+                "the clear did not run"
+            );
             let mut pixels = vec![0; info.compute_min_byte_size()];
             let early = EARLY.get();
             let checked = read_checked(
@@ -1904,6 +2087,292 @@ mod tests {
                     "{name}: a read after served an unconfirmed copy"
                 );
             }
+        }
+    }
+
+    /// Graphite pages, confirmed through this thread's Graphite context: each
+    /// read and wait made of [`crate::gpu::graphite`]'s operations, held to
+    /// the same answers as a Ganesh page's.
+    #[cfg(all(meo_graphite, feature = "metal"))]
+    mod graphite_pages {
+        use std::thread;
+
+        use skia_safe::{
+            AlphaType, Color4f, ColorSpace, ColorType, ImageInfo, Paint, Rect,
+            Surface,
+        };
+
+        use crate::{
+            context::page::ExportOptions,
+            gpu::{
+                completion::{
+                    Checked, WAITED_COMMITS, discarded, draws_ran,
+                    read_after_draws, read_checked, read_off_gpu,
+                },
+                graphite,
+                metal::{BLIND, BLIND_FOR_TEST, BUFFER_DISCARDED, ISSUED},
+            },
+            started,
+        };
+
+        /// The page id the reads here pass, which no seam armed elsewhere
+        /// names.
+        const PAGE: usize = usize::MAX - 537;
+
+        /// The colour each page is filled with, exactly representable in a
+        /// half as well as in `F32`: Graphite on Metal holds what it draws on
+        /// an `F32` page at half precision, so a colour only `F32` holds
+        /// would read back changed, and these tests are of the reads and
+        /// waits, not of the precision.
+        const FILL: Color4f = Color4f::new(0.25, 0.5, 0.75, 1.0);
+
+        fn info() -> ImageInfo {
+            ImageInfo::new(
+                (8, 8),
+                ColorType::RGBAF32,
+                AlphaType::Premul,
+                Some(ColorSpace::new_srgb()),
+            )
+        }
+
+        /// A Graphite page on this thread with `FILL` drawn on it and not yet
+        /// committed, or `None` where no Graphite context can be made.
+        ///
+        /// The context is settled first, every buffer it issued confirmed:
+        /// one still finishing setup work would be seen to finish after a
+        /// read's mark and stand in for the read's own buffers.
+        fn page() -> Option<Surface> {
+            if !graphite::supported() {
+                eprintln!("skipped: no Graphite context on this machine");
+                return None;
+            }
+            let mut surface =
+                graphite::make_surface(&info(), &ExportOptions::default())
+                    .expect("a Graphite page");
+            graphite::commit(true).expect("the settling commit");
+            graphite::confirm(None).expect("the settling commit ran");
+            surface
+                .canvas()
+                .draw_rect(Rect::from_wh(8.0, 8.0), &Paint::new(FILL, None));
+            Some(surface)
+        }
+
+        /// `FILL` as an `F32` page holds it, every pixel.
+        fn filled() -> Vec<u8> {
+            let pixel: Vec<u8> = FILL
+                .as_array()
+                .iter()
+                .flat_map(|channel| channel.to_le_bytes())
+                .collect();
+            pixel.repeat(64)
+        }
+
+        fn read(surface: &mut Surface, pixels: &mut [u8]) -> Checked {
+            let info = info();
+            read_checked(
+                surface,
+                &info,
+                pixels,
+                info.min_row_bytes(),
+                (0, 0),
+                PAGE,
+                None,
+            )
+        }
+
+        fn arm(skip: usize, times: usize) {
+            graphite::queue()
+                .expect("this thread's queue")
+                .fail_after(skip, times);
+        }
+
+        fn unused() -> usize {
+            graphite::queue()
+                .expect("this thread's queue")
+                .unused_failures()
+        }
+
+        /// A Graphite page reads back what was drawn on it, with the draws
+        /// and the copy committed in a buffer each and no wait beyond the
+        /// read's own.
+        #[test]
+        fn a_graphite_read_commits_its_draws_and_waits_once() {
+            let Some(mut surface) = page() else {
+                return;
+            };
+            let mut pixels = vec![0; info().compute_min_byte_size()];
+            let (waited, issued) = (WAITED_COMMITS.get(), ISSUED.get());
+            assert_eq!(read(&mut surface, &mut pixels), Checked::Read(true));
+            assert_eq!(WAITED_COMMITS.get(), waited, "a wait before the read");
+            assert_eq!(
+                ISSUED.get() - issued,
+                2,
+                "not the draws' buffer and the copy's"
+            );
+            assert!(pixels == filled(), "the read is not what was drawn");
+        }
+
+        /// A buffer that fails under a Graphite read fails it, whichever of
+        /// the read's two it is, though Graphite's read reports success. A
+        /// raster surface beside it, which nothing confirms, is not asked.
+        #[test]
+        fn a_failed_draws_or_copy_buffer_fails_the_graphite_read() {
+            for (skip, buffer) in [(0, "the draws'"), (1, "the copy's")] {
+                let Some(mut surface) = page() else {
+                    return;
+                };
+                let mut pixels = vec![0; info().compute_min_byte_size()];
+                arm(skip, 1);
+                assert_eq!(
+                    read(&mut surface, &mut pixels),
+                    Checked::Discarded,
+                    "{buffer} buffer failed and the read was not discarded"
+                );
+                assert_eq!(unused(), 0, "{buffer} buffer was not handed out");
+                let why = discarded("reading");
+                assert!(why.contains(BUFFER_DISCARDED), "{buffer}: {why}");
+            }
+
+            let Some(_settled) = page() else {
+                return;
+            };
+            let info = info();
+            let mut raster =
+                started::raster(&info, None, None).expect("raster");
+            raster.canvas().clear(FILL);
+            let mut pixels = vec![0; info.compute_min_byte_size()];
+            arm(0, 1);
+            assert_eq!(read(&mut raster, &mut pixels), Checked::Read(true));
+            assert_eq!(draws_ran(&mut raster, PAGE), Ok(true));
+            assert_eq!(unused(), 1, "a raster read consulted the queue");
+            arm(0, 0);
+        }
+
+        /// An export's read of a Graphite page, however it is made, is
+        /// confirmed with the page's draws after it, and drawn again where a
+        /// buffer under it failed.
+        #[test]
+        fn a_failed_buffer_under_a_graphite_export_is_read_again() {
+            for skip in [0, 1] {
+                let Some(mut surface) = page() else {
+                    return;
+                };
+                let info = info();
+                let read = |surface: &mut Surface| {
+                    let mut pixels = vec![0; info.compute_min_byte_size()];
+                    let row_bytes = info.min_row_bytes();
+                    match graphite::read_raw(
+                        surface,
+                        &info,
+                        &mut pixels,
+                        row_bytes,
+                        (0, 0),
+                    ) {
+                        true => Ok(pixels),
+                        false => Err("declined".to_string()),
+                    }
+                };
+                arm(skip, 1);
+                assert_eq!(
+                    read_after_draws(&mut surface, PAGE, read),
+                    None,
+                    "buffer {skip} failed under the export's read"
+                );
+                assert_eq!(unused(), 0, "buffer {skip} was not handed out");
+                assert_eq!(
+                    read_after_draws(&mut surface, PAGE, read),
+                    Some(Ok(filled())),
+                    "the read again after buffer {skip} failed"
+                );
+            }
+        }
+
+        /// A wait for a Graphite page's draws commits and waits for them,
+        /// and a buffer that failed under them is a draw to make again.
+        #[test]
+        fn a_wait_for_graphite_draws_answers_for_their_buffer() {
+            let Some(mut surface) = page() else {
+                return;
+            };
+            let waited = WAITED_COMMITS.get();
+            assert_eq!(draws_ran(&mut surface, PAGE), Ok(true));
+            assert_eq!(
+                WAITED_COMMITS.get() - waited,
+                1,
+                "not one waited commit"
+            );
+
+            surface
+                .canvas()
+                .draw_rect(Rect::from_wh(4.0, 4.0), &Paint::new(FILL, None));
+            arm(0, 1);
+            assert_eq!(draws_ran(&mut surface, PAGE), Ok(false));
+            assert_eq!(unused(), 0, "the draws' buffer was not handed out");
+        }
+
+        /// A queue that sees none of a Graphite read's buffers fails it: the
+        /// draws went unwatched, so what they left is unknown.
+        #[test]
+        fn a_graphite_queue_that_sees_no_buffers_fails_the_read() {
+            let Some(mut surface) = page() else {
+                return;
+            };
+            let mut pixels = vec![0; info().compute_min_byte_size()];
+            BLIND_FOR_TEST.set(true);
+            let checked = read(&mut surface, &mut pixels);
+            BLIND_FOR_TEST.set(false);
+            assert_eq!(checked, Checked::Discarded);
+            let why = discarded("reading");
+            assert!(why.contains(BLIND), "{why}");
+        }
+
+        /// A Graphite page reached on a thread whose context did not make it
+        /// is refused by every read and wait, never answered as a raster
+        /// page nor drawn again: no retry there would reach its draws.
+        #[test]
+        fn a_graphite_page_off_its_thread_is_refused_not_drawn_again() {
+            /// The page, carried to a thread that holds no Graphite context.
+            struct Carried(Surface);
+            // SAFETY: the page is used by one thread at a time, the other
+            // joined before it is touched again. Off its thread nothing of
+            // Graphite is called on it: `graphite::owns` reads the canvas's
+            // recorder pointer without following it, and every operation
+            // after that finds no context on the thread and stops.
+            unsafe impl Send for Carried {}
+            impl Carried {
+                // Moved whole: a closure destructuring the struct would
+                // capture the field, a `Surface`, which is not `Send`.
+                fn into_inner(self) -> Surface {
+                    self.0
+                }
+            }
+
+            let Some(surface) = page() else {
+                return;
+            };
+            let carried = Carried(surface);
+            let carried = thread::spawn(move || {
+                let mut surface = carried.into_inner();
+                let info = info();
+                let mut pixels = vec![0; info.compute_min_byte_size()];
+                assert!(graphite::mark().is_none(), "a context on the thread");
+                match read(&mut surface, &mut pixels) {
+                    Checked::Refused(why) => {
+                        assert!(why.contains("no Graphite context"), "{why}")
+                    }
+                    other => panic!("the read answered {other:?}"),
+                }
+                assert!(draws_ran(&mut surface, PAGE).is_err());
+                assert!(matches!(
+                    read_after_draws(&mut surface, PAGE, |_| Ok(())),
+                    Some(Err(_))
+                ));
+                assert!(read_off_gpu(&mut surface, PAGE, |_| ()).is_err());
+                Carried(surface)
+            })
+            .join()
+            .expect("the thread without a context");
+            drop(carried);
         }
     }
 }

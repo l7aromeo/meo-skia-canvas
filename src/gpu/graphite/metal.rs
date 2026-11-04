@@ -99,43 +99,23 @@ pub(super) fn make_surface(
 #[derive(Clone, Copy)]
 pub(crate) struct Mark(metal::Mark);
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "called only by `super::owns`")
-)]
 pub(super) fn owns(surface: &mut Surface) -> bool {
     surface.canvas().recorder().is_some()
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "called only by `super::commit`")
-)]
 pub(super) fn commit(wait: bool) -> Result<(), GraphiteRead> {
     on_context(|graphite| graphite.commit(wait))
         .unwrap_or(Err(GraphiteRead::NoContext))
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "called only by `super::mark`")
-)]
 pub(super) fn mark() -> Option<Mark> {
     on_context(|graphite| graphite.mark())
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "called only by `super::confirm`")
-)]
 pub(super) fn confirm(since: Option<Mark>) -> Result<(), String> {
     on_context(|graphite| graphite.confirm(since)).unwrap_or(Ok(()))
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "called only by `super::read_raw`")
-)]
 pub(super) fn read_raw(
     surface: &mut Surface,
     info: &ImageInfo,
@@ -145,6 +125,12 @@ pub(super) fn read_raw(
 ) -> bool {
     on_context(|graphite| graphite.read_raw(surface, info, dst, row_bytes, at))
         .unwrap_or(false)
+}
+
+/// This thread's queue of ours, for a test to arm failures on.
+#[cfg(test)]
+pub(super) fn queue() -> Option<Retained<RecordingQueue>> {
+    on_context(|graphite| graphite.queue.clone())
 }
 
 pub(super) fn probe(
@@ -180,10 +166,6 @@ pub(super) fn release_idle_context() {
 
 /// Runs `f` on this thread's context, `None` where the thread has none. Makes
 /// no context: one made here would hold none of the draws it was asked about.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "called only by the completion primitives")
-)]
 fn on_context<T>(f: impl FnOnce(&mut GraphiteContext) -> T) -> Option<T> {
     autoreleasepool(|_| GRAPHITE.with_borrow_mut(|held| held.as_mut().map(f)))
 }
