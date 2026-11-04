@@ -37,9 +37,24 @@ pub(crate) struct Blurred {
 }
 
 /// What a draw's coverage is read from. `draw` paints in the draw's own
-/// colour either way, never a stand-in: Skia's glyph masks pre-blend their
-/// coverage by the paint's luminance, so text drawn in black covers its
-/// pixels unlike text drawn in its colour.
+/// colour either way, never a stand-in. Skia pre-blends an A8 glyph mask's
+/// coverage through one of eight tables, and picks the table from the paint
+/// colour (Skia M156): each channel cut to its top three bits
+/// (`SkScalerContext.cpp:1104-1107`, `SkMaskGamma.h:129-134`), then the
+/// luminance `(54r + 183g + 19b) >> 8` of that (`SkScalerContext.cpp:77-87`),
+/// whose top three bits name the table (`SkMaskGamma.h:231-238`). Two
+/// colours that pick one table cover a run alike and two that pick different
+/// tables can differ. A run whose text size on the device passes 256 pixels
+/// is drawn as paths, with no pre-blend (`SkStrikeSpec::ShouldDrawAsPath`),
+/// so every colour covers it alike.
+///
+/// Where FreeType pre-blends its A8 masks (`SK_GAMMA_APPLY_TO_A8`,
+/// `BUILD.gn:92`; `SkFontHost_FreeType.cpp:858-863`) blue picks black's table
+/// and red does not, whatever the hinting. CoreText does the same for an
+/// unhinted A8 mask, and first scales the colour of a mask it hints
+/// (`SkTypeface_mac_ct.cpp:960-982`): by a half where CoreGraphics smooths
+/// without subpixel coverage, which puts red on black's table too, and by
+/// three quarters where it smooths with it, which does not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Plane {
     /// An A8 surface, which holds the coverage alone. A path's coverage is
@@ -198,20 +213,19 @@ impl Coverage {
     }
 }
 
-/// `blurred` composited onto `canvas` through `paint`, as the chain's
-/// result is -- see [`Outcome::composite`] -- in `rgb`, the colour placed
-/// as a fill of it is on an eight-bit page, at `gain`, the alpha on its
-/// byte: each pixel's alpha `B * gain` rounded as
-/// [`exact_blur::blur_bytes_into`] rounds, and each channel the exact
-/// product `rgb * B * gain` rounded once. `None` where no image could be
-/// made.
-pub(crate) fn composite(
+/// `blurred` coloured for `canvas` as the chain's result is, ready to
+/// composite -- see [`Outcome::composite`] -- in `rgb`, the colour placed as
+/// a fill of it is on an eight-bit page, at `gain`, the alpha on its byte:
+/// each pixel's alpha `B * gain` rounded as [`exact_blur::blur_bytes_into`]
+/// rounds, and each channel the exact product `rgb * B * gain` rounded once.
+/// The image takes `canvas`'s colour type and space, so it composites only
+/// onto a canvas of the same. `None` where no image could be made.
+pub(crate) fn coloured(
     canvas: &SkCanvas,
     blurred: &Blurred,
     rgb: [f32; 3],
     gain: f32,
-    paint: &Paint,
-) -> Option<()> {
+) -> Option<Outcome> {
     let info = layer_info(canvas, Depth::Bytes, blurred.region);
     let bgra = info.color_type() == ColorType::BGRA8888;
     let w = blurred.region.width() as usize;
@@ -231,12 +245,24 @@ pub(crate) fn composite(
             }
         }
     })?;
-    Outcome {
+    Some(Outcome {
         image,
         region: blurred.region,
         rest: blurred.rest,
-    }
-    .composite(canvas, paint);
+    })
+}
+
+/// `blurred` coloured -- see [`coloured`] -- and composited onto `canvas`
+/// through `paint`, as the chain's result is. `None` where no image could be
+/// made.
+pub(crate) fn composite(
+    canvas: &SkCanvas,
+    blurred: &Blurred,
+    rgb: [f32; 3],
+    gain: f32,
+    paint: &Paint,
+) -> Option<()> {
+    coloured(canvas, blurred, rgb, gain)?.composite(canvas, paint);
     Some(())
 }
 

@@ -23,17 +23,20 @@
 //! be let go there, and a GPU chain's layer takes the page's sample count,
 //! which a canvas does not tell without handing out its surface, which
 //! skia-safe does only unsafely.
+//!
+//! What keeps the results is a [`Store`], generic over what it files them
+//! under and what it keeps, so that another cache can be one too: with a
+//! [`Budget`], a key and an idle release of its own, behind a lock of its
+//! own. Two stores share nothing, so neither's entries can evict the
+//! other's.
 
 use std::{
     hash::{Hash, Hasher},
-    sync::{
-        Arc, LazyLock, Weak,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, LazyLock, Weak},
 };
 
 #[cfg(test)]
-use std::cell::RefCell;
+use std::{cell::RefCell, sync::atomic::Ordering};
 
 use parking_lot::Mutex;
 use skia_safe::{Canvas as SkCanvas, IRect};
@@ -62,6 +65,40 @@ const CHAIN_MAX_BYTES: usize = CHAIN_CACHE_BYTES / 2;
 /// What a fill of the cache is cut back to, as a share of
 /// [`CHAIN_CACHE_BYTES`], as the mask cache's low-water mark does.
 const CHAIN_CACHE_LOW_WATER: usize = CHAIN_CACHE_BYTES * 3 / 4;
+
+/// What the chain cache keeps its results to.
+const CHAIN_BUDGET: Budget = Budget {
+    bytes: CHAIN_CACHE_BYTES,
+    most: CHAIN_MAX_BYTES,
+    low_water: CHAIN_CACHE_LOW_WATER,
+};
+
+/// How many bytes a [`Store`] keeps, and what it cuts them back to.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Budget {
+    /// The bytes of every entry together, past which an insert evicts.
+    pub(crate) bytes: usize,
+    /// The largest single entry that is kept at all, so that one large
+    /// entry cannot push out every smaller one.
+    pub(crate) most: usize,
+    /// What an eviction cuts the entries back to, below [`Budget::bytes`]
+    /// so that the inserts after it do not each evict.
+    pub(crate) low_water: usize,
+}
+
+/// What a [`Store`] files its entries under.
+pub(crate) trait StoreKey: Clone + Eq + Hash {
+    /// Whether what the entry was made for has gone, so that nothing can
+    /// ask for it again: such entries go at the next sweep -- see
+    /// [`Store::put`].
+    fn is_orphaned(&self) -> bool;
+}
+
+/// What a [`Store`] keeps: cloned out on a hit, and counted by its bytes.
+pub(crate) trait Stored: Clone {
+    /// The bytes the entry holds, counted against its store's [`Budget`].
+    fn bytes(&self) -> usize;
+}
 
 /// What decides a group's chain result. The group is held weakly: it keeps
 /// the address the key compares by from being reused while the key lives,
@@ -117,30 +154,52 @@ impl Key {
                 .map(|s| (s.to_xyzd50_hash().0, s.transfer_fn_hash())),
         })
     }
+}
 
+impl StoreKey for Key {
     /// Whether the group the key files under is gone.
     fn is_orphaned(&self) -> bool {
         self.group.strong_count() == 0
     }
 }
 
-struct Entry {
-    outcome: Outcome,
+impl Stored for Outcome {
+    fn bytes(&self) -> usize {
+        Outcome::bytes(self)
+    }
+}
+
+struct Entry<V> {
+    value: V,
     bytes: usize,
     used: u64,
 }
 
-#[derive(Default)]
-pub(crate) struct ChainCache {
-    entries: CacheMap<Key, Entry>,
-    /// The bytes of every entry's outcome, kept as entries come and go.
+/// Entries filed under keys of `K`, kept to a [`Budget`] of their bytes:
+/// past it, an insert lets go of those whose key is orphaned, then of the
+/// least recently used down to the budget's low-water mark.
+pub(crate) struct Store<K, V> {
+    budget: Budget,
+    entries: CacheMap<K, Entry<V>>,
+    /// The bytes of every entry's value, kept as entries come and go.
     bytes: usize,
-    /// How many entries were left by the last sweep for results whose group
-    /// has gone -- see [`ChainCache::put`].
+    /// How many entries were left by the last sweep for entries whose key is
+    /// orphaned -- see [`Store::put`].
     swept_at: usize,
-    /// How many sweeps the cache has made, for the tests to count.
+    /// Ticks once per use, to order entries for eviction.
+    uses: u64,
+    /// How many sweeps the store has made, for the tests to count.
     #[cfg(test)]
     sweeps: usize,
+}
+
+/// The chain results kept -- see the module documentation.
+pub(crate) type ChainCache = Store<Key, Outcome>;
+
+impl Default for ChainCache {
+    fn default() -> Self {
+        Store::new(CHAIN_BUDGET)
+    }
 }
 
 /// Every result kept, for every thread: pages are played back on rayon
@@ -179,9 +238,6 @@ impl Drop for OwnChainCache {
     }
 }
 
-/// Ticks once per use, to order entries for eviction.
-static CHAIN_USES: AtomicU64 = AtomicU64::new(0);
-
 /// The result filed under `key`, if one is.
 pub(crate) fn get(key: &Key) -> Option<Outcome> {
     #[cfg(test)]
@@ -214,15 +270,29 @@ pub(crate) fn release_cached_chains() {
     CHAINS.lock().release();
 }
 
-impl ChainCache {
-    /// Drops every result -- see [`release_cached_chains`].
-    fn release(&mut self) {
+impl<K: StoreKey, V: Stored> Store<K, V> {
+    /// An empty store kept to `budget`.
+    pub(crate) fn new(budget: Budget) -> Self {
+        Self {
+            budget,
+            entries: CacheMap::default(),
+            bytes: 0,
+            swept_at: 0,
+            uses: 0,
+            #[cfg(test)]
+            sweeps: 0,
+        }
+    }
+
+    /// Drops every entry: what an idle release does, as
+    /// [`release_cached_chains`] does for the chain results.
+    pub(crate) fn release(&mut self) {
         self.entries.clear();
         self.bytes = 0;
         self.swept_at = 0;
     }
 
-    /// Drops every result whose group has gone, and notes how many are left.
+    /// Drops every entry whose key is orphaned, and notes how many are left.
     fn sweep(&mut self) {
         let mut freed = 0;
         self.entries.retain(|key, entry| {
@@ -240,52 +310,52 @@ impl ChainCache {
         }
     }
 
-    fn get(&mut self, key: &Key) -> Option<Outcome> {
+    /// The value filed under `key`, if one is, counted as a use.
+    pub(crate) fn get(&mut self, key: &K) -> Option<V> {
         let entry = self.entries.get_mut(key)?;
-        entry.used = CHAIN_USES.fetch_add(1, Ordering::Relaxed);
-        Some(entry.outcome.clone())
+        entry.used = self.uses;
+        self.uses += 1;
+        Some(entry.value.clone())
     }
 
-    fn put(&mut self, key: Key, outcome: Outcome) {
-        // A group that has gone takes its results with it, here rather than
-        // in its `Drop`, which would have to reach this lock from wherever
-        // the last reference falls: once the entries have doubled since the
-        // last sweep, so that a sweep costs each insert a constant share of
-        // one and a gone group's results never outnumber those left by the
-        // sweep before. Swept on every insert, each filtered draw of a page
-        // walked every result kept, 9% of a page of drop shadows' time.
+    /// Files `value` under `key`, unless it is past the budget's
+    /// [`most`](Budget::most).
+    pub(crate) fn put(&mut self, key: K, value: V) {
+        // An orphaned key's entry goes here rather than when what it was
+        // made for goes, which would have to reach this lock from wherever
+        // that happens: once the entries have doubled since the last sweep,
+        // so that a sweep costs each insert a constant share of one and the
+        // orphaned entries never outnumber those left by the sweep before.
+        // Swept on every insert, each filtered draw of a page walked every
+        // chain result kept, 9% of a page of drop shadows' time.
         if self.entries.len() >= 2 * self.swept_at {
             self.sweep();
         }
-        let bytes = outcome.bytes();
-        if bytes > CHAIN_MAX_BYTES {
+        let bytes = value.bytes();
+        if bytes > self.budget.most {
             return;
         }
-        let used = CHAIN_USES.fetch_add(1, Ordering::Relaxed);
+        let used = self.uses;
+        self.uses += 1;
         self.bytes += bytes;
-        if let Some(old) = self.entries.insert(
-            key,
-            Entry {
-                outcome,
-                bytes,
-                used,
-            },
-        ) {
+        if let Some(old) =
+            self.entries.insert(key, Entry { value, bytes, used })
+        {
             self.bytes -= old.bytes;
         }
-        if self.bytes > CHAIN_CACHE_BYTES {
-            // Results whose group has gone go before any that may be used.
+        if self.bytes > self.budget.bytes {
+            // Orphaned entries go before any that may be used.
             self.sweep();
         }
-        if self.bytes > CHAIN_CACHE_BYTES {
-            let mut order: Vec<(u64, Key, usize)> = self
+        if self.bytes > self.budget.bytes {
+            let mut order: Vec<(u64, K, usize)> = self
                 .entries
                 .iter()
                 .map(|(key, entry)| (entry.used, key.clone(), entry.bytes))
                 .collect();
             order.sort_unstable_by_key(|(used, _, _)| *used);
             for (_, key, bytes) in order {
-                if self.bytes <= CHAIN_CACHE_LOW_WATER {
+                if self.bytes <= self.budget.low_water {
                     break;
                 }
                 self.entries.remove(&key);
@@ -634,5 +704,57 @@ mod tests {
         }
         assert_eq!(cache.entries.len(), 1024);
         assert_eq!(cache.sweeps, 11);
+    }
+
+    /// A key of a store beside the chain cache, which is never orphaned.
+    #[derive(Clone, PartialEq, Eq, Hash)]
+    struct Numbered(u32);
+
+    impl StoreKey for Numbered {
+        fn is_orphaned(&self) -> bool {
+            false
+        }
+    }
+
+    /// A value of a store beside the chain cache: so many bytes.
+    #[derive(Clone)]
+    struct Held(usize);
+
+    impl Stored for Held {
+        fn bytes(&self) -> usize {
+            self.0
+        }
+    }
+
+    #[test]
+    fn a_second_store_keeps_to_its_own_budget_and_entries() {
+        // Ten entries of 100 bytes, cut back to seven and a half: an
+        // eleventh evicts the four oldest, so twenty in order leave the last
+        // eight. The chain cache's budget would keep all twenty.
+        let budget = Budget {
+            bytes: 1000,
+            most: 500,
+            low_water: 750,
+        };
+        let mut store = Store::new(budget);
+        let mut chains = ChainCache::default();
+        let one = group();
+        let chained = key(&one, &n32(), &Matrix::new_identity(), clip());
+        chains.put(chained.clone(), Outcome::blank(8));
+        for n in 0..20 {
+            store.put(Numbered(n), Held(100));
+            assert!(store.bytes <= budget.bytes, "{} after {n}", store.bytes);
+        }
+        let kept: Vec<_> = (0..20)
+            .filter(|&n| store.get(&Numbered(n)).is_some())
+            .collect();
+        assert_eq!(kept, (12..20).collect::<Vec<_>>());
+        store.put(Numbered(20), Held(budget.most + 1));
+        assert!(store.get(&Numbered(20)).is_none(), "kept past its cap");
+        assert!(chains.get(&chained).is_some(), "evicted by the other store");
+        assert_eq!(chains.entries.len(), 1);
+        chains.release();
+        assert_eq!(store.bytes, 800, "released by the other store");
+        assert!(store.get(&Numbered(19)).is_some());
     }
 }
