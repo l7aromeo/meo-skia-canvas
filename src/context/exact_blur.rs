@@ -10,22 +10,24 @@
 //! either may round either way -- and the tests hold them to that against an
 //! f64 reference.
 //!
-//! The blur is separable: a 1-D pass along every row, a transpose, the same
-//! pass along every row of the transpose (the columns), and a transpose
-//! back. Each axis takes its own sigma, since a transform can scale x and y
-//! apart. A pass is direct -- the taps summed -- below [`FFT_FROM_SIGMA`],
+//! The blur is separable: a 1-D pass along every row, then one down every
+//! column. Each axis takes its own sigma, since a transform can scale x and
+//! y apart. A pass is direct -- the taps summed -- below [`FFT_FROM_SIGMA`],
 //! and an FFT convolution from there, which costs the same whatever the
 //! sigma.
 //!
-//! Keep the transposes for a column pass taken tap by tap, too. Gathering
-//! each column from where it lies in the rows instead, with no transpose
-//! and no second buffer, sums the same values in the same order but reads
-//! them a row apart: in release builds a drop shadow's 59 by 56 layer drew
-//! 2 to 4% slower that way, and a blurred 15 by 12 ellipse 11% slower.
+//! A direct column pass sums each row of the result from whole rows of the
+//! image, a tile of values across them at a time -- see [`down`] -- so it
+//! reads every row where it lies and nothing is transposed. An FFT column
+//! pass transposes, works the columns as rows and transposes back. Do not
+//! gather a direct column's values one by one from the rows instead: that
+//! sums the same values in the same order but reads them a row apart, and
+//! in release builds a drop shadow's 59 by 56 layer drew 2 to 4% slower
+//! than through the transposes, and a blurred 15 by 12 ellipse 11% slower.
 //!
-//! A pass works each line in place, from a copy of it its worker keeps, so
-//! the image and its transpose are the only buffers of its size alive at
-//! once: 32 bytes a pixel in floats.
+//! A row pass works each line in place, from a copy of it its worker keeps,
+//! and the column pass writes a new image, so two buffers the image's size
+//! are alive at once: 32 bytes a pixel in floats.
 //!
 //! Float pixels are worked in f64 a line at a time, and bytes in f32 -- see
 //! [`Lane`]. Unrounded, a float result has to be the f32 nearest the exact
@@ -37,7 +39,8 @@
 use rayon::prelude::*;
 use rustfft::{Fft, FftNum, FftPlanner, num_complex::Complex};
 use std::{
-    array, cell::RefCell, collections::HashMap, f64::consts::TAU, sync::Arc,
+    array, borrow::Cow, cell::RefCell, collections::HashMap, f64::consts::TAU,
+    sync::Arc,
 };
 
 #[cfg(test)]
@@ -106,7 +109,8 @@ fn parallel(work: usize, from: usize) -> bool {
     work >= from
 }
 
-/// Whether [`direct`] leaves a line of +0.0 as it is.
+/// Whether [`direct`] leaves a line of +0.0 as it is, and [`down`] leaves
+/// out rows of +0.0 in a lane that may.
 fn skips_empty_lines() -> bool {
     #[cfg(test)]
     if PLAIN_SCHEDULE.with(Cell::get) {
@@ -388,11 +392,65 @@ fn blur_plane<L: Lane>(
 }
 
 /// Blurs `pixels`, premultiplied RGBA bytes, as [`blur`] does but in f32,
-/// scales the result by `gain` and rounds once at the end: a blurred draw
-/// composited at an alpha takes its alpha here, so that it is not rounded
-/// twice. f32 holds a level to within about 1e-4, so it decides no byte
-/// that f64 would decide otherwise but on exact ties, at about twice the
-/// speed. `pixels` is let go as soon as it is in floats.
+/// scales the result by `gain` and rounds once at the end, into the first
+/// `width * 4` bytes of each of `out`'s rows, `stride` bytes apart: a
+/// blurred draw composited at an alpha takes its alpha here, so that it is
+/// not rounded twice. f32 holds a level to within about 1e-4, so it decides
+/// no byte that f64 would decide otherwise but on exact ties, at about
+/// twice the speed. `pixels` is let go as soon as it is in floats.
+///
+/// A column pass taken tap by tap rounds each row as it sums it, straight
+/// into `out` -- see [`down_into`] -- so the result is never held in floats.
+pub(crate) fn blur_bytes_into(
+    pixels: Vec<u8>,
+    width: usize,
+    height: usize,
+    (sigma_x, sigma_y): (f32, f32),
+    gain: f32,
+    out: &mut [u8],
+    stride: usize,
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    let split = parallel(pixels.len(), COPY_PARALLEL_FROM);
+    let mut floats: Vec<f32> = match split {
+        true => pixels.par_iter().map(|&b| f32::from(b)).collect(),
+        false => pixels.iter().map(|&b| f32::from(b)).collect(),
+    };
+    drop(pixels);
+    // Each value is a weighted mean of bytes times a gain in [0, 1], so it
+    // lies in [0, 255] up to float noise; the cast saturates what noise puts
+    // outside.
+    let byte = |v: f32| (v * gain + 0.5) as u8;
+    if tapped(sigma_y) {
+        pass::<f32>(&mut floats, width, height, sigma_x);
+        return down_into::<f32, u8>(
+            &floats, width, height, sigma_y, out, stride, byte,
+        );
+    }
+    let line = width * 4;
+    let blurred = blur_in::<f32>(floats, width, height, sigma_x, sigma_y);
+    let rows = |(row, values): (&mut [u8], &[f32])| {
+        row[..line]
+            .iter_mut()
+            .zip(values)
+            .for_each(|(o, &v)| *o = byte(v));
+    };
+    match split {
+        true => out
+            .par_chunks_mut(stride)
+            .zip(blurred.par_chunks(line))
+            .for_each(rows),
+        false => out
+            .chunks_mut(stride)
+            .zip(blurred.chunks(line))
+            .for_each(rows),
+    }
+}
+
+/// [`blur_bytes_into`], into a buffer of its own with no room between rows.
+#[cfg(test)]
 pub(crate) fn blur_bytes(
     pixels: Vec<u8>,
     width: usize,
@@ -401,24 +459,22 @@ pub(crate) fn blur_bytes(
     sigma_y: f32,
     gain: f32,
 ) -> Vec<u8> {
-    let split = parallel(pixels.len(), COPY_PARALLEL_FROM);
-    let floats: Vec<f32> = match split {
-        true => pixels.par_iter().map(|&b| f32::from(b)).collect(),
-        false => pixels.iter().map(|&b| f32::from(b)).collect(),
-    };
-    drop(pixels);
-    let blurred = blur_in::<f32>(floats, width, height, sigma_x, sigma_y);
-    // Each value is a weighted mean of bytes times a gain in [0, 1], so it
-    // lies in [0, 255] up to float noise; the cast saturates what noise puts
-    // outside.
-    let byte = |v: f32| (v * gain + 0.5) as u8;
-    match split {
-        true => blurred.into_par_iter().map(byte).collect(),
-        false => blurred.into_iter().map(byte).collect(),
-    }
+    let mut out = vec![0; pixels.len()];
+    blur_bytes_into(
+        pixels,
+        width,
+        height,
+        (sigma_x, sigma_y),
+        gain,
+        &mut out,
+        width * 4,
+    );
+    out
 }
 
-/// [`blur`], with each line worked in `L`.
+/// [`blur`], with each line worked in `L`. Columns summed tap by tap are
+/// summed down the rows where they lie -- see [`down`] -- and only a column
+/// pass through the FFT is transposed.
 fn blur_in<L: Lane>(
     mut pixels: Vec<f32>,
     width: usize,
@@ -427,6 +483,9 @@ fn blur_in<L: Lane>(
     sigma_y: f32,
 ) -> Vec<f32> {
     pass::<L>(&mut pixels, width, height, sigma_x);
+    if tapped(sigma_y) && width > 0 && height > 0 {
+        return down::<L>(&pixels, width, height, sigma_y);
+    }
     let mut columns = vec![0.0; pixels.len()];
     transpose(&pixels, &mut columns, width, height);
     pass::<L>(&mut columns, height, width, sigma_y);
@@ -442,27 +501,29 @@ trait Lane: FftNum {
     /// rounded to bytes, and the cast to a byte saturates below 0 and
     /// above 255, so the range would only repeat what the cast does.
     const HELD_TO_REACH: bool;
+    /// Whether this lane's results lose a zero's sign, so that [`down`] may
+    /// leave out a pair of rows holding nothing but +0.0: adding +0.0
+    /// changes a sum only by turning a -0.0 to +0.0. An f32 lane's values
+    /// are rounded to bytes, which have no sign; a float result keeps it,
+    /// so its every pair is added.
+    const SIGNLESS_ZEROS: bool;
     /// `v` in this arithmetic.
     fn of(v: f32) -> Self;
     /// A weight, worked out in f64, in this arithmetic.
     fn weight(w: f64) -> Self;
     /// This value as the f32 a pixel holds.
     fn narrow(self) -> f32;
-    /// Runs `sum` over the line's accumulator, which ends in `out`: `out`
-    /// itself in f32, and in f64 `scratch`, narrowed into `out` once
-    /// `sum` is done.
-    fn accumulate(
-        out: &mut [f32],
-        scratch: &mut Vec<Self>,
-        sum: impl FnOnce(&mut [Self]),
-    );
     /// The forward and inverse plans of `len` in this arithmetic, kept per
     /// worker.
     fn plans(len: usize) -> Plans<Self>;
+    /// `values` in this arithmetic, converted once for every tap that reads
+    /// them: themselves in f32, and in f64 a copy.
+    fn lifted(values: &[f32]) -> Cow<'_, [Self]>;
 }
 
 impl Lane for f32 {
     const HELD_TO_REACH: bool = false;
+    const SIGNLESS_ZEROS: bool = true;
 
     fn of(v: f32) -> Self {
         v
@@ -476,21 +537,18 @@ impl Lane for f32 {
         self
     }
 
-    fn accumulate(
-        out: &mut [f32],
-        _: &mut Vec<Self>,
-        sum: impl FnOnce(&mut [Self]),
-    ) {
-        sum(out);
-    }
-
     fn plans(len: usize) -> Plans<Self> {
         PLANS_F32.with(|plans| plan(&mut plans.borrow_mut(), len))
+    }
+
+    fn lifted(values: &[f32]) -> Cow<'_, [Self]> {
+        Cow::Borrowed(values)
     }
 }
 
 impl Lane for f64 {
     const HELD_TO_REACH: bool = true;
+    const SIGNLESS_ZEROS: bool = false;
 
     fn of(v: f32) -> Self {
         f64::from(v)
@@ -504,20 +562,12 @@ impl Lane for f64 {
         self as f32
     }
 
-    fn accumulate(
-        out: &mut [f32],
-        scratch: &mut Vec<Self>,
-        sum: impl FnOnce(&mut [Self]),
-    ) {
-        scratch.resize(out.len(), 0.0);
-        sum(scratch);
-        out.iter_mut()
-            .zip(scratch.iter())
-            .for_each(|(o, &v)| *o = v.narrow());
-    }
-
     fn plans(len: usize) -> Plans<Self> {
         PLANS_F64.with(|plans| plan(&mut plans.borrow_mut(), len))
+    }
+
+    fn lifted(values: &[f32]) -> Cow<'_, [Self]> {
+        Cow::Owned(values.iter().map(|&v| f64::from(v)).collect())
     }
 }
 
@@ -556,10 +606,80 @@ fn method(sigma: f32) -> Method {
     }
 }
 
+/// Whether an axis blurred by `sigma` is summed tap by tap: a sigma that
+/// blurs at all, below [`FFT_FROM_SIGMA`].
+fn tapped(sigma: f32) -> bool {
+    sigma.is_finite() && sigma > 0.0 && method(sigma) == Method::Direct
+}
+
+/// The floats of a line whose sums [`tile`] works together, each in a
+/// register across every tap -- four RGBA pixels. Sixteen f32 take four
+/// 128-bit registers and sixteen f64 eight, of Arm64's 32 or x86-64's 16,
+/// which leaves room for the taps' values. Chosen to fit, not measured
+/// against other widths.
+const TILE: usize = 16;
+
+/// The most pairs of taps a line summed tap by tap takes: its reach,
+/// `ceil(REACH_SIGMAS * sigma)` -- see [`half_kernel`] -- for a sigma below
+/// [`FFT_FROM_SIGMA`].
+const MOST_PAIRS: usize = (REACH_SIGMAS * FFT_FROM_SIGMA as f64) as usize;
+
+/// One pair of taps: its weight and the two lines it weighs, each read
+/// from where the line being summed is, already in the lane -- converting
+/// a value at every tap that reads it bound an f64 tap loop by the
+/// conversions, and drew a float layer's blurred ellipse 5.7% slower.
+type Pair<'a, L> = (L, &'a [L], &'a [L]);
+
+/// Sums the `N` values of `out` from `at`: `k0` times `centre`'s, then
+/// each pair's weight times the sum of its two lines' values, pair by pair,
+/// in `L`, each written by `put` once summed -- narrowed to a float, or
+/// rounded to a byte. The accumulators are an array the
+/// size of the tile, which the compiler keeps in registers, so a tap costs
+/// two reads a value rather than four memory moves.
+#[inline(always)]
+fn tile<L: Lane, T, const N: usize>(
+    out: &mut [T],
+    at: usize,
+    centre: &[L],
+    k0: L,
+    pairs: &[Pair<L>],
+    put: &impl Fn(L) -> T,
+) {
+    let centre = &centre[at..at + N];
+    let mut acc: [L; N] = array::from_fn(|i| k0 * centre[i]);
+    for &(w, a, b) in pairs {
+        let (a, b) = (&a[at..at + N], &b[at..at + N]);
+        for i in 0..N {
+            acc[i] = acc[i] + w * (a[i] + b[i]);
+        }
+    }
+    out[at..at + N]
+        .iter_mut()
+        .zip(acc)
+        .for_each(|(o, v)| *o = put(v));
+}
+
+/// Sums every value of `out`, a line of RGBA pixels, as [`tile`] does:
+/// [`TILE`] at a time, and what is left a pixel at a time.
+fn sum_line<L: Lane, T>(
+    out: &mut [T],
+    centre: &[L],
+    k0: L,
+    pairs: &[Pair<L>],
+    put: &impl Fn(L) -> T,
+) {
+    let tiled = out.len() / TILE * TILE;
+    for at in (0..tiled).step_by(TILE) {
+        tile::<L, T, TILE>(out, at, centre, k0, pairs, put);
+    }
+    for at in (tiled..out.len()).step_by(4) {
+        tile::<L, T, 4>(out, at, centre, k0, pairs, put);
+    }
+}
+
 /// Each line tap by tap: `out[x] = k0 in[x] + sum_d k_d (in[x-d] + in[x+d])`,
-/// over a copy of the line padded with zeros so no tap leaves it, summed
-/// into the line's accumulator -- see [`Lane::accumulate`]. Each tap is one
-/// pass over the whole line, which the compiler vectorises.
+/// over a copy of the line padded with zeros so no tap leaves it, a tile of
+/// sums at a time -- see [`tile`].
 ///
 /// A line holding nothing but +0.0 is left as it is: every tap sums to +0.0
 /// there, bit for bit, and a draw's layer is mostly such lines. A -0.0 is
@@ -569,15 +689,14 @@ fn direct<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
     let k: Vec<L> = k.iter().map(|&w| L::weight(w)).collect();
     let r = k.len() - 1;
     let (stride, pad) = (n * 4, r * 4);
-    let zero = L::of(0.0);
     let work = pixels.len() * k.len();
     let skip = skips_empty_lines();
     each_chunk(
         pixels,
         stride,
         work,
-        || (vec![zero; stride + 2 * pad], Vec::new()),
-        |(padded, scratch), out| {
+        || vec![L::of(0.0); stride + 2 * pad],
+        |padded, out| {
             if skip && out.iter().all(|v| v.to_bits() == 0) {
                 return;
             }
@@ -586,19 +705,141 @@ fn direct<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
                 .zip(out.iter())
                 .for_each(|(p, &v)| *p = L::of(v));
             let padded = &*padded;
-            let line = &padded[pad..pad + stride];
-            L::accumulate(out, scratch, |acc| {
-                acc.iter_mut().zip(line).for_each(|(o, &v)| *o = k[0] * v);
-                for (d, &w) in k.iter().enumerate().skip(1) {
-                    let left = &padded[pad - d * 4..][..stride];
-                    let right = &padded[pad + d * 4..][..stride];
-                    acc.iter_mut()
-                        .zip(left.iter().zip(right))
-                        .for_each(|(o, (&a, &b))| *o = *o + w * (a + b));
-                }
-            });
+            // Held on the stack, since they borrow the worker's own copy of
+            // the line; past MOST_PAIRS the slice below refuses rather than
+            // drop a tap.
+            let mut pairs: [Pair<L>; MOST_PAIRS] = [(k[0], &[], &[]); _];
+            for (pair, (d, &w)) in
+                pairs.iter_mut().zip(k.iter().enumerate().skip(1))
+            {
+                *pair = (w, &padded[pad - d * 4..], &padded[pad + d * 4..]);
+            }
+            sum_line(out, &padded[pad..], k[0], &pairs[..r], &L::narrow);
         },
     );
+}
+
+/// The column pass of `pixels`, `height` rows of `width` RGBA pixels, tap
+/// by tap, into a new image: each row of the result summed from whole rows
+/// of `pixels` as [`direct`] sums a line from its neighbours, with a row of
+/// +0.0 past either end. Every value takes the same sums in the same order
+/// as through a transpose, and the rows are read where they lie, a tile at
+/// a time across them.
+///
+/// In a lane whose zeros carry no sign -- see [`Lane::SIGNLESS_ZEROS`] --
+/// a row's sum takes only the pairs that reach the span from the first row
+/// holding anything but +0.0 to the last, and a row outside that span that
+/// no pair reaches is left at +0.0: a layer's rows past what it draws are
+/// such rows, and so are the pairs most of its sums would add. A pair of
+/// rows of +0.0 inside the span is still added, which adds +0.0. The pairs
+/// come as at most two runs of distances, so choosing them costs no test a
+/// tap: one a tap -- two flags read and branched on, for each of 18 pairs
+/// of each of 51 rows -- took 7.8% of a blurred 15 by 12 ellipse's draw.
+/// Floats add every pair, and so turn a -0.0 to +0.0 as the sum defines.
+fn down<L: Lane>(
+    pixels: &[f32],
+    width: usize,
+    height: usize,
+    sigma: f32,
+) -> Vec<f32> {
+    let mut out = vec![0.0; pixels.len()];
+    down_into::<L, f32>(
+        pixels,
+        width,
+        height,
+        sigma,
+        &mut out,
+        width * 4,
+        L::narrow,
+    );
+    out
+}
+
+/// [`down`], each value written by `put` -- see [`tile`] -- into the first
+/// `width * 4` values of each of `out`'s rows, `stride` apart.
+fn down_into<L: Lane, T: Copy + Send>(
+    pixels: &[f32],
+    width: usize,
+    height: usize,
+    sigma: f32,
+    out: &mut [T],
+    stride: usize,
+    put: impl Fn(L) -> T + Sync,
+) {
+    let line_len = width * 4;
+    let k: Vec<L> = half_kernel(sigma, height - 1)
+        .iter()
+        .map(|&w| L::weight(w))
+        .collect();
+    let r = k.len() - 1;
+    let lifted = L::lifted(pixels);
+    let rows: Vec<&[L]> = lifted.chunks(line_len).collect();
+    let nothing = vec![L::of(0.0); line_len];
+    let row = |y: isize| match usize::try_from(y) {
+        Ok(y) if y < height => rows[y],
+        _ => &nothing,
+    };
+    // The first and last rows holding anything but +0.0, in a lane that may
+    // leave the rest out.
+    let held = |row: &[f32]| row.iter().any(|v| v.to_bits() != 0);
+    let span = match L::SIGNLESS_ZEROS && skips_empty_lines() {
+        true => match pixels.chunks(line_len).position(held) {
+            Some(lo) => {
+                let below = pixels.chunks(line_len).rev().position(held);
+                Some((lo, height - 1 - below.unwrap_or(0)))
+            }
+            None => {
+                let nothing = put(L::of(0.0));
+                out.chunks_mut(stride)
+                    .for_each(|row| row[..line_len].fill(nothing));
+                return;
+            }
+        },
+        false => None,
+    };
+    let line = |pairs: &mut Vec<_>, (y, out): (usize, &mut [T])| {
+        let out = &mut out[..line_len];
+        pairs.clear();
+        let taps = |d: usize| {
+            let (y, d) = (y as isize, d as isize);
+            (k[d as usize], row(y - d), row(y + d))
+        };
+        match span {
+            None => pairs.extend((1..=r).map(taps)),
+            Some((lo, hi)) => {
+                let (y, lo, hi, r) =
+                    (y as isize, lo as isize, hi as isize, r as isize);
+                // The distances reaching the span from above and from below,
+                // in order of distance and each once.
+                let above = (y - hi).max(1)..=(y - lo).min(r);
+                let below = (lo - y).max(1)..=(hi - y).min(r);
+                let (first, second) = match above.start() <= below.start() {
+                    true => (above, below),
+                    false => (below, above),
+                };
+                let seam = (*first.end() + 1).max(*second.start());
+                let ds = first.chain(seam..=*second.end());
+                pairs.extend(ds.map(|d| taps(d as usize)));
+                if pairs.is_empty() && !(lo..=hi).contains(&y) {
+                    out.fill(put(L::of(0.0)));
+                    return;
+                }
+            }
+        }
+        sum_line(out, rows[y], k[0], pairs, &put);
+    };
+    match parallel(pixels.len() * k.len(), PARALLEL_FROM) {
+        true => out
+            .par_chunks_mut(stride)
+            .enumerate()
+            .for_each_init(Vec::new, line),
+        false => {
+            let mut pairs = Vec::with_capacity(k.len());
+            out.chunks_mut(stride)
+                .enumerate()
+                .for_each(|row| line(&mut pairs, row));
+        }
+    }
 }
 
 /// A length rustfft transforms quickly: the next 2^a 3^b 5^c 7^d at or above
@@ -1169,6 +1410,277 @@ mod tests {
             }
         }
         assert_eq!(compared, 4 * 7 * (4 + 4));
+    }
+
+    /// One axis of the blur as its taps define it, a value at a time:
+    /// `k_0 v + sum_d k_d (v[-d] + v[+d])` in `L`, adding `d` from 1 out,
+    /// with +0.0 past either end of the line, narrowed once a value is
+    /// summed. Along rows where `rows`, down columns otherwise. Through the
+    /// FFT, or with no sigma to speak of, an axis is left to [`pass`].
+    fn by_the_taps<L: Lane>(
+        src: &[f32],
+        width: usize,
+        height: usize,
+        sigma: f32,
+        rows: bool,
+    ) -> Vec<f32> {
+        if !tapped(sigma) {
+            let mut out = src.to_vec();
+            match rows {
+                true => pass::<L>(&mut out, width, height, sigma),
+                false => {
+                    let mut columns = vec![0.0; out.len()];
+                    transpose(&out, &mut columns, width, height);
+                    pass::<L>(&mut columns, height, width, sigma);
+                    transpose(&columns, &mut out, height, width);
+                }
+            }
+            return out;
+        }
+        let n = match rows {
+            true => width,
+            false => height,
+        };
+        let k: Vec<L> = half_kernel(sigma, n - 1)
+            .into_iter()
+            .map(L::weight)
+            .collect();
+        let at = |x: usize, y: usize, c: usize, i: isize| -> L {
+            if !(0..n as isize).contains(&i) {
+                return L::of(0.0);
+            }
+            let (x, y) = match rows {
+                true => (i as usize, y),
+                false => (x, i as usize),
+            };
+            L::of(src[(y * width + x) * 4 + c])
+        };
+        (0..src.len())
+            .map(|v| {
+                let (c, x, y) = (v % 4, v / 4 % width, v / 4 / width);
+                let i = match rows {
+                    true => x,
+                    false => y,
+                } as isize;
+                let mut acc = k[0] * at(x, y, c, i);
+                for (d, &w) in k.iter().enumerate().skip(1) {
+                    let d = d as isize;
+                    acc = acc + w * (at(x, y, c, i - d) + at(x, y, c, i + d));
+                }
+                acc.narrow()
+            })
+            .collect()
+    }
+
+    /// Rows of +0.0 and -0.0 taking turns, so that a column's sum keeps a
+    /// -0.0 only where it adds every tap, the rows of +0.0 among them.
+    fn turns_of_zeros(w: usize, h: usize) -> Vec<f32> {
+        (0..w * h * 4)
+            .map(|i| match (i / (w * 4)).is_multiple_of(2) {
+                true => -0.0,
+                false => 0.0,
+            })
+            .collect()
+    }
+
+    /// Opaque rows a few apart with empty rows between, so that a column's
+    /// rows of +0.0 lie inside what it holds as well as around it.
+    fn gapped(w: usize, h: usize) -> Vec<u8> {
+        (0..w * h * 4)
+            .map(|i| match (i / (w * 4)) % 7 == 3 {
+                true => [200, 120, 40, 255][i % 4],
+                false => 0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_blur_sums_each_value_as_its_taps_define() {
+        // Every value the blur gives, against the taps summed one value at a
+        // time in the order that defines them, bit for bit: in f32, as bytes
+        // are blurred, and in f64, as floats are, with the zeros' signs. Both
+        // axes tap by tap, one or the other through the FFT, an axis left
+        // alone, on lines shorter than the reach, empty rows above, below and
+        // between what is drawn, widths that leave part of a tile, and
+        // large enough to be split over rayon's pool.
+        fn check<L: Lane>(scene: &[f32], w: usize, h: usize, s: (f32, f32)) {
+            let rows = by_the_taps::<L>(scene, w, h, s.0, true);
+            let want = by_the_taps::<L>(&rows, w, h, s.1, false);
+            for plain in [false, true] {
+                let blurred = || blur_in::<L>(scene.to_vec(), w, h, s.0, s.1);
+                let got = match plain {
+                    true => plainly(blurred),
+                    false => blurred(),
+                };
+                let differs = got
+                    .iter()
+                    .zip(&want)
+                    .position(|(g, e)| g.to_bits() != e.to_bits());
+                assert_eq!(
+                    differs,
+                    None,
+                    "{} lane, {w}x{h}, sigmas {s:?}, plain {plain}",
+                    size_of::<L>() * 8
+                );
+            }
+        }
+        let sigmas = [
+            (0.5f32, 0.5f32),
+            (1.0, 3.0),
+            (3.0, 3.0),
+            (4.9, 4.9),
+            (3.0, 0.0),
+            (0.0, 2.0),
+            (8.0, 3.0),
+            (3.0, 8.0),
+        ];
+        let mut compared = 0;
+        for (w, h) in [
+            (1usize, 1usize),
+            (1, 40),
+            (40, 1),
+            (5, 3),
+            (7, 130),
+            (54, 51),
+            (59, 56),
+            (200, 7),
+        ] {
+            for s in sigmas {
+                for scene in scenes(w, h).into_iter().chain([gapped(w, h)]) {
+                    let floats: Vec<f32> =
+                        scene.into_iter().map(f32::from).collect();
+                    check::<f32>(&floats, w, h, s);
+                    compared += 1;
+                }
+                for scene in
+                    float_scenes(w, h).into_iter().chain([turns_of_zeros(w, h)])
+                {
+                    check::<f64>(&scene, w, h, s);
+                    compared += 1;
+                }
+            }
+        }
+        for s in [(3.0, 3.0), (1.0, 4.9)] {
+            let floats: Vec<f32> =
+                scenes(400, 300)[1].iter().copied().map(f32::from).collect();
+            check::<f32>(&floats, 400, 300, s);
+            check::<f64>(&float_scenes(400, 300)[0], 400, 300, s);
+            compared += 2;
+        }
+        assert_eq!(compared, 8 * 8 * (5 + 5) + 2 * 2);
+    }
+
+    #[test]
+    fn a_byte_blur_rounds_the_taps_once_into_its_rows() {
+        // Each byte against the taps summed in f32 as they define it, times
+        // the gain, rounded once; written into rows with room after each,
+        // which is left as it was. Both axes tap by tap, either through the
+        // FFT, an axis left alone, empty rows around and between, a layer
+        // of nothing, and large enough to be split over rayon's pool.
+        const ROOM: usize = 12;
+        const UNTOUCHED: u8 = 0xab;
+        let check = |src: &[u8],
+                     w: usize,
+                     h: usize,
+                     s: (f32, f32),
+                     gain: f32| {
+            let floats: Vec<f32> = src.iter().copied().map(f32::from).collect();
+            let rows = by_the_taps::<f32>(&floats, w, h, s.0, true);
+            let want: Vec<u8> = by_the_taps::<f32>(&rows, w, h, s.1, false)
+                .into_iter()
+                .map(|v| (v * gain + 0.5) as u8)
+                .collect();
+            let stride = w * 4 + ROOM;
+            for plain in [false, true] {
+                let mut out = vec![UNTOUCHED; stride * h];
+                let mut blurred = || {
+                    blur_bytes_into(
+                        src.to_vec(),
+                        w,
+                        h,
+                        s,
+                        gain,
+                        &mut out,
+                        stride,
+                    )
+                };
+                match plain {
+                    true => plainly(blurred),
+                    false => blurred(),
+                }
+                for (y, row) in out.chunks(stride).enumerate() {
+                    assert!(
+                        row[..w * 4] == want[y * w * 4..][..w * 4],
+                        "{w}x{h}, sigmas {s:?}, gain {gain}, row {y}, plain {plain}"
+                    );
+                    assert!(row[w * 4..].iter().all(|&b| b == UNTOUCHED));
+                }
+            }
+        };
+        let sigmas = [
+            (0.5, 0.5),
+            (3.0, 3.0),
+            (4.9, 1.0),
+            (3.0, 0.0),
+            (0.0, 2.0),
+            (8.0, 3.0),
+            (3.0, 8.0),
+        ];
+        let mut compared = 0;
+        for (w, h) in [(1, 1), (5, 3), (7, 130), (54, 51), (200, 7)] {
+            let empty = vec![0u8; w * h * 4];
+            for s in sigmas {
+                for scene in scenes(w, h)
+                    .into_iter()
+                    .chain([gapped(w, h), empty.clone()])
+                {
+                    for gain in [1.0, 0.6] {
+                        check(&scene, w, h, s, gain);
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        check(&scenes(400, 300)[1], 400, 300, (3.0, 3.0), 1.0);
+        assert_eq!(compared, 5 * 7 * 6 * 2);
+    }
+
+    #[test]
+    fn a_float_zero_keeps_the_sign_its_taps_give_it() {
+        // A column of -0.0 sums to -0.0 wherever its taps stay inside it, and
+        // +0.0 where one reaches past an end, whose +0.0 takes the sign away.
+        // Rows of +0.0 and -0.0 taking turns give +0.0 everywhere: each sum
+        // adds a pair of rows of +0.0, which a pass that left those out would
+        // not, and would give -0.0. Floats keep a zero's sign; bytes do not.
+        let (w, h, sigma) = (3, 40, 1.0);
+        let reach = (REACH_SIGMAS * f64::from(sigma)).ceil() as usize;
+        let negative = vec![-0.0f32; w * h * 4];
+        let got = blur_in::<f64>(negative, w, h, 0.0, sigma);
+        for (y, row) in got.chunks(w * 4).enumerate() {
+            let inside = (reach..h - reach).contains(&y);
+            for v in row {
+                assert_eq!(
+                    v.is_sign_negative(),
+                    inside,
+                    "row {y} of a column of -0.0 gave {v:?}"
+                );
+            }
+        }
+        let got = blur_in::<f64>(turns_of_zeros(w, h), w, h, 0.0, sigma);
+        let negative = got.iter().position(|v| v.to_bits() != 0);
+        assert_eq!(negative, None, "rows of zeros taking turns");
+        // A lone row of -0.0 among rows of +0.0: its every pair is two rows
+        // of +0.0, which a pass leaving such pairs out of a float's sum would
+        // drop, and keep the -0.0.
+        let lone: Vec<f32> = (0..w * 7 * 4)
+            .map(|i| match i / (w * 4) == 3 {
+                true => -0.0,
+                false => 0.0,
+            })
+            .collect();
+        let got = blur_in::<f64>(lone, w, 7, 0.0, sigma);
+        let negative = got.iter().position(|v| v.to_bits() != 0);
+        assert_eq!(negative, None, "a lone row of -0.0");
     }
 
     /// A layer of `w` by `h` floats, transparent but for a block in the
