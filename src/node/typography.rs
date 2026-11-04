@@ -4815,7 +4815,8 @@ mod coverage_colour {
     use super::{Typesetter, glyph_runs};
     use crate::{Canvas, Font as CanvasFont, FontLibrary as Library, started};
     use skia_safe::{
-        AlphaType, Color, ColorType, ImageInfo, Matrix, Paint, Surface,
+        AlphaType, Color, ColorType, FontHinting, ImageInfo, Matrix, Paint,
+        Surface,
     };
 
     /// The bundled Oswald, under a name of these tests' own.
@@ -4853,11 +4854,13 @@ mod coverage_colour {
     }
 
     /// The alpha `TEXT` in `family` at `size` covers, drawn the way a
-    /// canvas draws it -- its own runs, fonts and positions -- under
-    /// `matrix` on a raster of `colour_type` in `colour`.
+    /// canvas draws it -- its own runs, fonts and positions -- with its
+    /// fonts' hinting set to `hinting`, under `matrix` on a raster of
+    /// `colour_type` in `colour`.
     fn coverage(
         family: &str,
         size: f32,
+        hinting: FontHinting,
         matrix: &Matrix,
         colour_type: ColorType,
         colour: Color,
@@ -4875,11 +4878,13 @@ mod coverage_colour {
         let mut paint = Paint::default();
         paint.set_anti_alias(true).set_color(colour);
         for run in glyph_runs(&mut layout.paragraph) {
+            let mut font = run.font.clone();
+            font.set_hinting(hinting);
             raster.draw_glyphs_at(
                 &run.glyphs,
                 &run.positions[..],
                 run.origin,
-                &run.font,
+                &font,
                 &paint,
             );
         }
@@ -4914,6 +4919,13 @@ mod coverage_colour {
     /// (`skia/src/core/SkStrikeSpec.cpp`, line 118).
     const MASK_LIMIT: f32 = 256.0;
 
+    /// What CoreText scales a hinted mask's colour by, as a fraction, under
+    /// the smoothing it reports here -- `SkCTFontSmoothBehavior::some`, which
+    /// halves it (`skia/src/ports/SkTypeface_mac_ct.cpp`, lines 967 to 972).
+    /// Under `subpixel` it takes three quarters (lines 973 to 979), which
+    /// puts red in a table of its own, and this pin then fails on red.
+    const CORETEXT_SCALE: (u32, u32) = (1, 2);
+
     /// `value`'s top [`LUM_BITS`] bits spread back over a byte:
     /// `sk_t_scale255` (`skia/src/core/SkMaskGamma.h`, lines 64 to 71).
     fn spread(value: u32) -> u32 {
@@ -4923,17 +4935,16 @@ mod coverage_colour {
             .fold(0, |lum, i| lum | base >> i)
     }
 
-    /// The pre-blend table a glyph mask drawn in `colour` takes, as Skia picks
-    /// it on this platform's scaler.
+    /// The pre-blend table a glyph mask drawn in `colour` with `hinting`
+    /// takes, as Skia picks it on this platform's scaler.
     ///
     /// The paint's colour is kept with each channel cut to [`LUM_BITS`] --
     /// `SkScalerContextRec::setLuminanceColor`
-    /// (`skia/src/core/SkScalerContext.cpp`, lines 1104 to 1107). CoreText,
-    /// smoothing text without subpixel coverage as it does here, hints the
-    /// mask and halves the colour, keeping it cut again --
+    /// (`skia/src/core/SkScalerContext.cpp`, lines 1104 to 1107). CoreText
+    /// scales the colour of a mask it hints by [`CORETEXT_SCALE`] and keeps
+    /// it cut again, and leaves an unhinted A8 mask's as it is --
     /// `SkTypeface_Mac::onFilterRec` (`skia/src/ports/SkTypeface_mac_ct.cpp`,
-    /// lines 941 to 982), which takes three quarters of it where it smooths
-    /// with subpixel coverage. FreeType leaves it as it is:
+    /// lines 958 to 982). FreeType leaves it as it is either way:
     /// `SkTypeface_FreeType::onFilterRec`
     /// (`skia/src/ports/SkFontHost_FreeType.cpp`, lines 833 to 863) drops
     /// the pre-blend for an A8 mask only without `SK_GAMMA_APPLY_TO_A8`,
@@ -4942,11 +4953,12 @@ mod coverage_colour {
     /// (`SkScalerContext::PreprocessRec`, lines 77 to 87), and the table is
     /// that grey's top bits (`SkTMaskGamma::preBlend`, `SkMaskGamma.h`, lines
     /// 231 to 238).
-    fn table(colour: Color) -> u32 {
+    fn table(colour: Color, hinting: FontHinting) -> u32 {
         let cut = |rgb: [u32; 3]| rgb.map(spread);
         let mut rgb = cut([colour.r(), colour.g(), colour.b()].map(u32::from));
-        if cfg!(target_os = "macos") {
-            rgb = cut(rgb.map(|c| c / 2));
+        if cfg!(target_os = "macos") && hinting != FontHinting::None {
+            let (times, over) = CORETEXT_SCALE;
+            rgb = cut(rgb.map(|c| c * times / over));
         }
         let lum = rgb
             .iter()
@@ -4966,10 +4978,10 @@ mod coverage_colour {
     /// alike.
     ///
     /// The scalers part on which colours share a table. On CoreText, which
-    /// halves the colour, red and blue share black's and grey shares green's;
-    /// on FreeType blue alone shares black's. At 13px the run in white
-    /// covers up to 65 levels otherwise than in black on CoreText, and 99 on
-    /// FreeType.
+    /// halves the colour of a run it hints, red and blue share black's and
+    /// grey shares green's there; on FreeType, and on CoreText unhinted,
+    /// blue alone shares black's. At 13px the run in white covers up to 65
+    /// levels otherwise than in black on CoreText, and 99 on FreeType.
     ///
     /// A blurred run's coverage is therefore drawn in the run's own colour,
     /// and kept with it. If this fails on a scaler, the rule the colour is
@@ -4983,37 +4995,43 @@ mod coverage_colour {
     fn a_runs_coverage_depends_on_the_colour_it_is_drawn_in() {
         let _library = register();
         let off_grid = Matrix::translate((60.3, 110.6));
-        let tables = COLOURS.map(table);
-        assert!(
-            tables.iter().any(|&t| t != tables[0]),
-            "the colours pick more than one table, or this asserts nothing"
-        );
-        for size in [13.0, 40.0, 300.0] {
-            for colour_type in [ColorType::Alpha8, ColorType::N32] {
-                let masks = COLOURS.map(|colour| {
-                    coverage(FAMILY, size, &off_grid, colour_type, colour)
-                });
-                assert!(
-                    masks[0].iter().any(|&a| a != 0),
-                    "{size}px: the run covers something"
+        let cases = [13.0, 40.0, 300.0].into_iter().flat_map(|size| {
+            [FontHinting::None, FontHinting::Slight, FontHinting::Full]
+                .into_iter()
+                .flat_map(move |hinting| {
+                    [ColorType::Alpha8, ColorType::N32]
+                        .map(|colour_type| (size, hinting, colour_type))
+                })
+        });
+        for (size, hinting, colour_type) in cases {
+            let tables = COLOURS.map(|colour| table(colour, hinting));
+            assert!(
+                tables.iter().any(|&t| t != tables[0]),
+                "the colours pick more than one table, or this asserts nothing"
+            );
+            let masks = COLOURS.map(|colour| {
+                coverage(FAMILY, size, hinting, &off_grid, colour_type, colour)
+            });
+            assert!(
+                masks[0].iter().any(|&a| a != 0),
+                "{size}px: the run covers something"
+            );
+            for (i, j) in (0..COLOURS.len())
+                .flat_map(|i| (i + 1..COLOURS.len()).map(move |j| (i, j)))
+            {
+                let alike = masks[i] == masks[j];
+                let expected = size > MASK_LIMIT || tables[i] == tables[j];
+                assert_eq!(
+                    alike,
+                    expected,
+                    "{size}px {hinting:?} {colour_type:?}: {:?} (table \
+                         {}) and {:?} (table {}) cover {}",
+                    COLOURS[i],
+                    tables[i],
+                    COLOURS[j],
+                    tables[j],
+                    if alike { "alike" } else { "otherwise" }
                 );
-                for (i, j) in (0..COLOURS.len())
-                    .flat_map(|i| (i + 1..COLOURS.len()).map(move |j| (i, j)))
-                {
-                    let alike = masks[i] == masks[j];
-                    let expected = size > MASK_LIMIT || tables[i] == tables[j];
-                    assert_eq!(
-                        alike,
-                        expected,
-                        "{size}px {colour_type:?}: {:?} (table {}) and {:?} \
-                         (table {}) cover {}",
-                        COLOURS[i],
-                        tables[i],
-                        COLOURS[j],
-                        tables[j],
-                        if alike { "alike" } else { "otherwise" }
-                    );
-                }
             }
         }
     }
