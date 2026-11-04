@@ -2477,7 +2477,9 @@ pub(crate) fn play_entries(
 /// see [`Group::shared_chain`] and [`BlurOp::shared_chain`] -- in as few
 /// layers as [`chain::Plan::joins`] lets them share, and returns how many
 /// entries that is. `None` where they run fewer than two chains, which then
-/// play as they do alone.
+/// play as they do alone. Only on Metal do any share, as
+/// [`chain::shares_layers`] says why; elsewhere each takes a layer of its
+/// own, as it would alone.
 ///
 /// Each chain is planned as it would be alone, with the content and the
 /// depth it would have, and its layer holds its own draw where it reads, so
@@ -4180,6 +4182,11 @@ mod shared_chain_tests {
     /// The page every scene is drawn on.
     const PAGE: (f32, f32) = (720.0, 480.0);
 
+    /// Whether chains share layers here: on Metal alone -- see
+    /// `chain::shares_layers` -- which is the backend wherever it is built
+    /// in, as `crate::gpu` chooses it.
+    const SHARES: bool = cfg!(feature = "metal");
+
     /// The kinds of GPU page the scenes are drawn on. A float canvas has no
     /// GPU engine here -- see `Canvas::engine_kind` -- and JavaScript's
     /// `canvas.gpu = true`, which puts one there, is held to sharing nothing
@@ -4397,6 +4404,7 @@ mod shared_chain_tests {
                 );
                 assert!(alone_layers > 1, "{}: one layer alone", scene.name);
                 let expected = match scene.sharing {
+                    _ if !SHARES => shared_layers == alone_layers,
                     Sharing::One => shared_layers == 1,
                     Sharing::Neighbours => {
                         1 < shared_layers && shared_layers < alone_layers
@@ -4485,8 +4493,10 @@ mod shared_chain_tests {
                 alone.iter().zip(&shared).filter(|(a, b)| a != b).count();
             assert_eq!(differ, 0, "rise {rise}: sharing changed the page");
             assert_eq!(
-                shared_layers, 2,
-                "rise {rise}: not two layers between them"
+                shared_layers,
+                if SHARES { 2 } else { 40 },
+                "rise {rise}: not two layers between them on Metal, or one \
+                 each elsewhere"
             );
         }
     }

@@ -253,8 +253,9 @@ pub(crate) struct Plan {
     /// Every pixel of the layer the chain's draw can touch, its
     /// anti-aliasing included, where what it paints is known.
     ink: Option<IRect>,
-    /// Whether the layer is on the GPU.
-    on_gpu: bool,
+    /// Whether the layer is on a GPU that draws a chain's contents into a
+    /// shared layer as into one of its own -- see [`shares_layers`].
+    shares: bool,
     /// What the layer holds a channel in.
     depth: Depth,
 }
@@ -268,25 +269,26 @@ impl Plan {
     /// Whether this chain can draw into the layer `batch`'s chains share,
     /// and each of them still read what it would from a layer of its own.
     ///
-    /// The layer has to be the one each would have: on the GPU, of the same
-    /// [`Depth`], in the device's pixels, placed at the same bounds -- the
-    /// page's, which an edge rounds against (see [`placed`]). And no chain's
-    /// draw may touch a pixel another reads: a pixel a chain reads then
-    /// holds the same samples, cleared and drawn by the same commands, as
-    /// in a layer of its own. Where what a draw paints is not known,
-    /// nothing can be shown of it, and the chain shares nothing.
+    /// The layer has to be the one each would have: on a GPU where
+    /// [`shares_layers`] holds, of the same [`Depth`], in the device's
+    /// pixels, placed at the same bounds -- the page's, which an edge rounds
+    /// against (see [`placed`]). And no chain's draw may touch a pixel
+    /// another reads: a pixel a chain reads then holds the same samples,
+    /// cleared and drawn by the same commands, as in a layer of its own.
+    /// Where what a draw paints is not known, nothing can be shown of it,
+    /// and the chain shares nothing.
     pub(crate) fn joins(&self, batch: &[&Plan]) -> bool {
         let Some(ink) = self.ink else {
             return false;
         };
         let apart = |read: IRect, ink: IRect| !IRect::intersects(&read, &ink);
-        self.on_gpu
+        self.shares
             && self.rest.is_identity()
             && batch.len() < MAX_SHARED
             && batch.iter().all(|other| {
                 other.drawn == self.drawn
                     && other.depth == self.depth
-                    && other.on_gpu
+                    && other.shares
                     && other.rest.is_identity()
                     && other.ink.is_some_and(|other_ink| {
                         apart(self.region, other_ink)
@@ -308,8 +310,8 @@ pub(crate) fn plan(
     let base = canvas.local_to_device_as_3x3();
     let (layer, rest) = split(&base)?;
     let (to_draw, worked) = region(canvas, steps, content, &layer, &rest)?;
-    let on_gpu = is_on_gpu(canvas);
-    let (region, drawn) = placed(canvas, to_draw, rest.is_identity(), on_gpu);
+    let (region, drawn) =
+        placed(canvas, to_draw, rest.is_identity(), is_on_gpu(canvas));
     let worked = IRect::join(&worked, &region);
     // The rectangle `region` takes as painted: a pixel either side for
     // anti-aliasing. A rounded rectangle's coverage stays inside its bounds
@@ -336,7 +338,7 @@ pub(crate) fn plan(
         worked,
         drawn,
         ink,
-        on_gpu,
+        shares: shares_layers(canvas),
         depth,
     })
 }
@@ -1000,6 +1002,42 @@ pub(crate) fn is_on_gpu(canvas: &SkCanvas) -> bool {
 /// Whether `canvas` draws on the GPU: never, in a build without a backend.
 #[cfg(not(any(feature = "metal", feature = "vulkan")))]
 pub(crate) fn is_on_gpu(_: &SkCanvas) -> bool {
+    false
+}
+
+/// Whether chains on `canvas` may share a layer: on Metal, and on no other
+/// backend.
+///
+/// Ganesh merges the draws of chains sharing a layer into one op where it
+/// can -- `FillRRectOp` combines any two compatible rounded rectangles into
+/// one instanced draw, writing each instance's data as it would alone. So a
+/// shared layer is bytes-for-bytes a layer of its own only where a merged
+/// draw rasterises as the same draw made alone. On Metal it does:
+/// `a_rounded_rect_drawn_among_others_draws_as_it_does_alone` finds no
+/// pixel apart in any of 12 rounded rectangles, and `shared_tests` none in
+/// any chain. On Mesa's llvmpipe it does not: 4 of the same 12 land up to a
+/// level apart at their corners, 4 to 8 pixels each, and 3 still do moved a
+/// hundredth of a pixel off the grid; shared, 181 to 243 pixels of a page of
+/// 12 blurred chains moved. A draw over the whole layer after each chain,
+/// which stops the merge and changes no pixel, brings both to none. No
+/// other Vulkan device has been measured, so none shares.
+// UPSTREAM: Mesa llvmpipe 25.0.7 -- unfiled -- worked around
+// Re-check: cargo test a_rounded_rect_drawn_among_others_draws_as_it_does_alone
+// run with `--ignored` in a `vulkan` build on llvmpipe, where it fails while
+// the defect stands. Worked around rather than not: nothing corrects the merged
+// draw, but the code takes another path because of it, and passing there is
+// what would let Vulkan share.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+pub(crate) fn shares_layers(canvas: &SkCanvas) -> bool {
+    canvas.recording_context().is_some_and(|context| {
+        context.backend() == gpu::ganesh::BackendApi::Metal
+    })
+}
+
+/// Whether chains on `canvas` may share a layer: never, in a build without
+/// a backend.
+#[cfg(not(any(feature = "metal", feature = "vulkan")))]
+pub(crate) fn shares_layers(_: &SkCanvas) -> bool {
     false
 }
 
@@ -2950,7 +2988,7 @@ mod tests {
 }
 
 /// Chains sharing one layer, held to the bytes each draws in a layer of its
-/// own.
+/// own -- on Metal; where chains do not share, held to sharing none.
 #[cfg(all(test, any(feature = "metal", feature = "vulkan")))]
 mod shared_tests {
     use skia_safe::{
@@ -2960,6 +2998,7 @@ mod shared_tests {
 
     use super::{
         Depth, Drawn, MAX_SHARED, Plan, SHARED_LAYERS, Step, apply, plan,
+        shares_layers,
     };
     use crate::{
         context::page::ExportOptions, gpu::RenderingEngine,
@@ -3112,7 +3151,10 @@ mod shared_tests {
     }
 
     /// The bytes of `members` through `steps` on a page of `info`, played
-    /// alone and shared, and how many layers sharing took.
+    /// alone and shared, and how many layers sharing took. `None` where
+    /// there is no GPU, and where chains do not share -- see
+    /// [`shares_layers`] -- once every chain is seen to take a layer of its
+    /// own.
     fn both(
         info: &ImageInfo,
         steps: &[Step],
@@ -3125,6 +3167,15 @@ mod shared_tests {
         }
         alone(one.canvas(), steps, members);
         let layers = shared(two.canvas(), steps, members);
+        if !shares_layers(two.canvas()) {
+            assert_eq!(
+                layers,
+                members.len(),
+                "chains shared a layer off Metal"
+            );
+            eprintln!("skipped: chains share a layer on Metal alone");
+            return None;
+        }
         Some((read(&mut one), read(&mut two), layers))
     }
 
@@ -3189,6 +3240,59 @@ mod shared_tests {
             }
         }
         assert_eq!(checked, infos.len() * chains.len() * 2);
+    }
+
+    /// 12 rounded rectangles drawn into one surface, which Ganesh merges
+    /// into one instanced op, land the bytes each lands drawn alone -- what
+    /// [`shares_layers`] rests on. Ignored where Metal is not the backend:
+    /// on llvmpipe 4 of the 12 land apart, and this is the re-check for it.
+    #[test]
+    #[cfg_attr(
+        not(feature = "metal"),
+        ignore = "fails on Mesa llvmpipe 25.0.7, where chains do not share"
+    )]
+    fn a_rounded_rect_drawn_among_others_draws_as_it_does_alone() {
+        let info =
+            ImageInfo::new_n32_premul((1200, 900), ColorSpace::new_srgb());
+        let paint = Paint::new(Color4f::new(0.1, 0.2, 0.6, 1.0), None);
+        let members = grid(12, 200.0, 1200.0, &paint);
+        let drawn = |only: Option<usize>| {
+            let mut surface = page(&info)?;
+            let canvas = surface.canvas();
+            canvas.clear(Color::TRANSPARENT);
+            for (i, member) in members.iter().enumerate() {
+                if only.is_none_or(|only| only == i) {
+                    canvas.save();
+                    canvas.translate(member.at);
+                    member.draw(canvas);
+                    canvas.restore();
+                }
+            }
+            Some(read(&mut surface))
+        };
+        let Some(together) = drawn(None) else {
+            eprintln!("skipped: no GPU");
+            return;
+        };
+        let apart: Vec<usize> = members
+            .iter()
+            .enumerate()
+            .filter(|&(i, member)| {
+                let alone = drawn(Some(i)).expect("a GPU surface");
+                let (x, y) =
+                    (member.at.x as usize - 2, member.at.y as usize - 2);
+                let rows = (y..y + 46).map(|row| {
+                    (row * 1200 + x) * 16..(row * 1200 + x + 86) * 16
+                });
+                let inked =
+                    rows.clone().any(|row| alone[row].iter().any(|&b| b != 0));
+                assert!(inked, "member {i} drew nothing alone");
+                rows.into_iter()
+                    .any(|row| together[row.clone()] != alone[row])
+            })
+            .map(|(i, _)| i)
+            .collect();
+        assert!(apart.is_empty(), "drawn among the others, {apart:?} moved");
     }
 
     /// The same on a 6000 by 4000 page, where the layer each chain would
@@ -3263,6 +3367,7 @@ mod shared_tests {
             ImageInfo::new_n32_premul((600, 300), ColorSpace::new_srgb());
         let paint = &paints()[1];
         let mut shared_at = Vec::new();
+        let mut compared = true;
         for steps in [blur(2.0), drop_shadow(5.0, 0.0, 2.0)] {
             for tenths in 0..400 {
                 let gap = tenths as f32 / 10.0;
@@ -3280,10 +3385,13 @@ mod shared_tests {
                         steps: None,
                     },
                 ];
+                // Off Metal every gap is still played, so that `both` sees
+                // each refused.
                 let Some((alone, shared, layers)) =
                     both(&info, &steps, &members)
                 else {
-                    return;
+                    compared = false;
+                    continue;
                 };
                 assert!(
                     alone == shared,
@@ -3292,6 +3400,9 @@ mod shared_tests {
                 if layers == 1 {
                     shared_at.push(gap);
                 }
+            }
+            if !compared {
+                return;
             }
             let first = shared_at.first().copied();
             assert!(
