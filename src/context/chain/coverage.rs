@@ -160,7 +160,9 @@ impl Coverage {
                         .new_surface(&info, None)
                         .or_else(|| started::raster(&info, None, None))
                 }
-                Plane::Alpha => layer_surface(canvas, Depth::Bytes, drawn),
+                // On the CPU, where no layer is kept: see `pool::key`.
+                Plane::Alpha => layer_surface(canvas, Depth::Bytes, drawn)
+                    .map(|(surface, _)| surface),
             };
             surface.map(|surface| (surface, drawn))
         };

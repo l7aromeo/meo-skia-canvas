@@ -163,3 +163,50 @@ describe("An idle process lets its font caches go", () => {
     },
   );
 });
+
+describe("An idle process lets its kept chain layers go", () => {
+  const kept = () => /** @type {number} */ (skiaNode.__keptLayers());
+  /** A GPU page of blurred shapes, read whole, as `pages` frames in a row. */
+  const blurred = (/** @type {number} */ pages) => {
+    for (let at = 0; at < pages; at++) {
+      const canvas = new Canvas(1200, 900);
+      canvas.gpu = true;
+      const ctx = canvas.getContext("2d");
+      ctx.filter = "blur(4px)";
+      for (let i = 0; i < 8; i++) {
+        ctx.beginPath();
+        ctx.roundRect(40 + i * 130.37, 40 + i * 90.25, 80, 40, 12);
+        ctx.fill();
+      }
+      ctx.getImageData(0, 0, 1200, 900);
+    }
+  };
+  const gpu = (() => {
+    const probe = new Canvas(1, 1);
+    probe.gpu = true;
+    return probe.engine.renderer === "GPU";
+  })();
+  const skip = !skiaNode.__keptLayers
+    ? "skipped: a release binary does not export __keptLayers"
+    : !gpu
+      ? "skipped: no GPU engine"
+      : false;
+
+  test(
+    "the main thread keeps a run's layers between frames and lets them go once it is quiet",
+    { skip },
+    async () => {
+      // The main thread has no GPU idle release of its own: only the watcher's
+      // post reaches it, and the layers must not outlive the quiet.
+      blurred(1);
+      assert.ok(kept() > 0, "a blurred page kept no layer for the next");
+      for (let at = 0; at < PAST_THE_INTERVAL_MS / FRAME_MS; at++) {
+        await pause(FRAME_MS);
+        blurred(1);
+        assert.ok(kept() > 0, `the layers are held through frame ${at}`);
+      }
+      await pause(PAST_THE_INTERVAL_MS);
+      assert.equal(kept(), 0, "and the quiet after the frames lets them go");
+    },
+  );
+});

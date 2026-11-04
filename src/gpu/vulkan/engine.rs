@@ -27,7 +27,10 @@ use vulkano::{
 };
 
 use super::skia_max_api_version;
-use crate::{context::page::ExportOptions, gpu::ThreadBound};
+use crate::{
+    context::{chain, page::ExportOptions},
+    gpu::ThreadBound,
+};
 
 thread_local!(
     static VK_CONTEXT: RefCell<Option<VulkanContext>> =
@@ -423,7 +426,8 @@ impl VulkanEngine {
     /// owner for itself -- see [`crate::gpu::owner`]. Owners are not `rayon`
     /// threads, so a broadcast cannot reach their thread-locals, and an
     /// owner's context would otherwise hold its resources until the process
-    /// ended. Neither set of threads holds a surface across the gap: a
+    /// ended. Neither set of threads holds a surface across the gap but the
+    /// chain layers [`chain::pool`] keeps, which are let go here first: a
     /// `RecordingSurface` keeps its `Surface` for the life of its canvas, and
     /// the thread that built that one is swept by neither.
     pub fn release_idle_context() {
@@ -431,6 +435,9 @@ impl VulkanEngine {
             if let Some(engine) = cell.as_mut()
                 && engine.last_use.elapsed() > VK_CONTEXT_LIFESPAN
             {
+                // The chain layers this thread keeps hold the context's
+                // memory as surfaces do, so they go with what it frees.
+                chain::pool::release();
                 engine.cleanup();
             }
         });

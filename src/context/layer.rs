@@ -2668,7 +2668,7 @@ fn play_shared_chains(
 /// blurred shapes along a line do, and each layer open is a snapshot the size
 /// of the page held until every chain in the run is composited, so more would
 /// hold more of them without a scene here that needs it.
-const MAX_RUN_LAYERS: usize = 2;
+pub(crate) const MAX_RUN_LAYERS: usize = 2;
 
 /// Chains of consecutive entries, each placed in the first open layer whose
 /// chains it can share with -- see [`chain::Plan::joins`] -- or in a new one,

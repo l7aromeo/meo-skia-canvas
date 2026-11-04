@@ -47,6 +47,7 @@ use crate::{
 };
 
 pub(crate) mod coverage;
+pub(crate) mod pool;
 
 /// One step of a chain, applied in order to what the step before it left.
 #[derive(Clone, Debug)]
@@ -359,12 +360,26 @@ pub(crate) fn plan(
 }
 
 /// A layer holding what one or more chains draw, each under its own
-/// [`Plan`], and the GPU it is on.
+/// [`Plan`], and the GPU it is on. A layer [`pool`] keeps goes back to it
+/// when this is dropped, after the run that drew into it.
 pub(crate) struct Drawn {
     snapshot: Image,
     /// The layer's bounds, in the pixels its plans' regions are in.
     at: IRect,
     context: Option<Gpu>,
+    /// The layer itself and what it is kept under, where it is kept.
+    kept: Option<(pool::Key, Surface)>,
+}
+
+impl Drop for Drawn {
+    // The snapshot is let go when the fields are, just after this: by the
+    // next draw onto the layer only the surface holds it, so Skia drops the
+    // snapshot rather than copying the layer to keep it.
+    fn drop(&mut self) {
+        if let Some((key, surface)) = self.kept.take() {
+            pool::keep(key, surface);
+        }
+    }
 }
 
 impl Drawn {
@@ -384,7 +399,7 @@ impl Drawn {
     ) -> Option<Self> {
         let first = plans.first()?;
         let alone = (plans.len() == 1).then_some(first.region);
-        let (mut surface, at) = std::iter::once(first.drawn)
+        let ((mut surface, key), at) = std::iter::once(first.drawn)
             .chain(alone.filter(|region| *region != first.drawn))
             .find_map(|at| {
                 #[cfg(test)]
@@ -399,8 +414,9 @@ impl Drawn {
         #[cfg(test)]
         SHARED_LAYERS.with(|layers| layers.set(layers.get() + 1));
         let context = gpu_of(&mut surface);
-        // Made just before, so in main memory it is zeros already -- see
-        // [`clear_unless_zeroed`].
+        // In main memory it was made just before, so it is zeros already --
+        // see [`clear_unless_zeroed`]; a layer taken from [`pool`] is a GPU
+        // target, never in main memory.
         let zeroed = surface.peek_pixels().is_some();
         let offscreen = surface.canvas();
         // Only what the chains read is cleared: the rows and columns the
@@ -426,6 +442,7 @@ impl Drawn {
             snapshot: surface.image_snapshot(),
             at,
             context,
+            kept: key.map(|key| (key, surface)),
         })
     }
 
@@ -547,6 +564,11 @@ thread_local! {
     /// How many layers [`Drawn::new`] has made on this thread, which the
     /// tests of chains sharing a layer count by.
     pub(crate) static SHARED_LAYERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+
+    /// How many layer surfaces [`layer_surface`] has made on this thread
+    /// rather than taken from [`pool`], which the tests of kept layers count
+    /// by.
+    pub(crate) static MADE_LAYERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 
     /// The most pixels a chain [`plan`] on this thread has worked on, which
     /// the tests of a chain's layer size count by.
@@ -684,24 +706,33 @@ pub(crate) fn clear_unless_zeroed(surface: &mut Surface) {
 /// what the page draws. A canvas recording a picture has no device to ask,
 /// and gets memory. `None` where neither makes one.
 ///
-/// A GPU layer the page's size is Skia's scratch target once let go. While
-/// the GPU still runs the commands that read it, the command buffer holds
-/// its four-sample attachment (`GrMtlGpu::resolve` files it there); once
-/// they have run, Skia drops it at once where its cache is past its budget
-/// -- a 6000 by 4000 page alone is -- and otherwise keeps it for the next
-/// layer of that size until a purge or the idle release frees it. On a
-/// 1200 by 900 page at four samples the cache held 55.5 MB against 35.4 MB
-/// for region-sized layers, and both came back to the page's 21.6 MB when
-/// purged.
+/// A GPU layer for the canvas of an open [`pool::LayerScope`] is taken from
+/// the layers [`pool`] keeps where one fits, cleared whole, and comes with
+/// the key it goes back under once its run is done; [`Drawn::new`] clears
+/// every region a chain reads before drawing besides, so what a kept layer
+/// held before is never read. Any other layer is let go after its run, to
+/// Skia's resource cache, which keeps it only while it fits the cache's budget
+/// -- see [`pool`].
 fn layer_surface(
     canvas: &SkCanvas,
     depth: Depth,
     drawn: IRect,
-) -> Option<Surface> {
+) -> Option<(Surface, Option<pool::Key>)> {
     let info = layer_info(canvas, depth, drawn);
-    canvas
-        .new_surface(&info, None)
-        .or_else(|| started::raster(&info, None, None))
+    let key = pool::key(canvas, &info);
+    if let Some(mut kept) = key.as_ref().and_then(pool::take) {
+        // Cleared whole, not only where the chains read: a pass whose target
+        // is cleared first starts from nothing, where one that keeps the
+        // target's contents loads every sample of the page-sized layer first.
+        kept.canvas().clear(Color::TRANSPARENT);
+        return Some((kept, key));
+    }
+    #[cfg(test)]
+    MADE_LAYERS.with(|made| made.set(made.get() + 1));
+    match canvas.new_surface(&info, None) {
+        Some(surface) => Some((surface, key)),
+        None => started::raster(&info, None, None).map(|raster| (raster, None)),
+    }
 }
 
 /// The layer's bounds, in its own pixels: the region drawn into, and the
