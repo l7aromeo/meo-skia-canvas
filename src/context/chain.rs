@@ -46,6 +46,8 @@ use crate::{
     started,
 };
 
+pub(crate) mod coverage;
+
 /// One step of a chain, applied in order to what the step before it left.
 #[derive(Clone, Debug)]
 pub enum Step {

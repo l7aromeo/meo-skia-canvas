@@ -41,7 +41,7 @@ use crate::{
     context::{
         blur_mask,
         chain::{self, Depth, Step},
-        chain_cache, coverage_of,
+        chain_cache, coverage_of, exact_blur,
         faint::{Faint, composited},
         page::{ExportOptions, Page},
     },
@@ -171,6 +171,11 @@ thread_local! {
     /// The rectangle, in device pixels, the last chain played on this thread
     /// was given to bound what it filters, where it was given one.
     pub(crate) static CHAIN_CONTENT: Cell<Option<Rect>> = const { Cell::new(None) };
+    /// Whether a blurred draw may take the coverage route -- see
+    /// [`chain::coverage`] -- so that a test can hold it to the chain's layer.
+    pub(crate) static COVERAGE_ROUTE: Cell<bool> = const { Cell::new(true) };
+    /// How many blurred draws played on this thread took the coverage route.
+    pub(crate) static COVERAGE_RUNS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Whether [`Composite::Chain`]'s `reach` bounds its layer -- see
@@ -3295,6 +3300,35 @@ impl BlurOp {
         match (self.made_at(&path, replay), target) {
             (Made::Result(_), Target::Pixels) => {
                 let chain = self.result_chain(canvas, paint);
+                // On an eight-bit page on the CPU a placed colour's blur is
+                // made from the draw's coverage alone -- see
+                // `chain::coverage` -- and the chain's layer is not drawn.
+                if let Some(rgb) =
+                    self.coverage_colour(canvas, self.paint.sigma * replay)
+                {
+                    for path in self.paths() {
+                        let blurred = chain::coverage::blurred(
+                            canvas,
+                            self.paint.sigma,
+                            Some(self.content(&path)),
+                            chain::coverage::Plane::Drawn,
+                            |plane| self.draw_into(plane, &path, &chain.draw),
+                        );
+                        if let Some(blurred) = blurred {
+                            #[cfg(test)]
+                            COVERAGE_RUNS.with(|runs| runs.set(runs.get() + 1));
+                            chain::coverage::composite(
+                                canvas,
+                                &blurred,
+                                rgb,
+                                chain.gain.alpha_f(),
+                                &chain.gain,
+                            );
+                        }
+                    }
+                    canvas.restore();
+                    return;
+                }
                 for path in self.paths() {
                     chain::apply(
                         canvas,
@@ -3352,6 +3386,44 @@ impl BlurOp {
             )),
             Made::Coverage(_) => None,
         }
+    }
+
+    /// The placed colour a blurred draw on `canvas` takes the coverage route
+    /// in -- see [`chain::coverage`] -- or `None` for the chain's layer:
+    ///
+    /// - a colour not placed on the bytes an eight-bit page stores, or a page
+    ///   that is not eight bits a channel in RGBA or BGRA;
+    /// - a canvas that is not a raster on the CPU: the GPU, a recording, a
+    ///   document;
+    /// - a page in another space than the colour was held in, as a canvas drawn
+    ///   into one in another space is;
+    /// - a dithered paint, whose colour varies from pixel to pixel;
+    /// - a blur of `device_sigma` through the FFT, which blurs a plane's rows
+    ///   in pairs and so rounds an alpha unlike the chain's sums.
+    fn coverage_colour(
+        &self,
+        canvas: &SkCanvas,
+        device_sigma: f32,
+    ) -> Option<[f32; 3]> {
+        #[cfg(test)]
+        if !COVERAGE_ROUTE.with(Cell::get) {
+            return None;
+        }
+        let exact = self.paint.exact.as_ref()?;
+        let placed = matches!(self.paint.faint, Faint::Dropped) && exact.bytes;
+        let eight = matches!(
+            canvas.image_info().color_type(),
+            ColorType::RGBA8888 | ColorType::BGRA8888
+        );
+        let same_space =
+            canvas.image_info().color_space().as_ref() == Some(&exact.space);
+        (placed
+            && eight
+            && same_space
+            && !self.paint.dither
+            && device_sigma < exact_blur::FFT_FROM_SIGMA
+            && blur_mask::draws_on_cpu(canvas))
+        .then(|| exact.at(self.paint.color.a).0.rgb)
     }
 
     /// The paths the op draws: its one, or each of a run's.

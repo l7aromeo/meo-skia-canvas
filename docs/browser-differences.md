@@ -935,7 +935,10 @@ measured on the CPU engine, where a float canvas made for the GPU on macOS is
 drawn. On an 8-bit canvas a translucent colour scales the blur by its alpha
 on the byte a fill stores it on -- 128 of 0.5, 77 of 0.3 -- so that the
 interior stores what a fill of the colour does, as Chrome's CPU canvas does
-too. On the GPU engine such a colour is blurred through a layer of half
+too. On the CPU engine an 8-bit page blurs such a path's coverage and colours
+it after, so that each channel is rounded once, from the exact product of the
+blurred coverage, the colour and its alpha, where a channel blurred from pixels
+already rounded to bytes could land a level off it. On the GPU engine such a colour is blurred through a layer of half
 floats, which keeps that interior, and its edges are rounded twice, to a half
 float and then to a byte: up to a level off the exact Gaussian, 65 where it
 is 65.52. Chrome 156.0.8078.4 headless approximates the blur, on both of
