@@ -16,7 +16,7 @@
 
 use skia_safe::{
     AlphaType, Canvas as SkCanvas, Color, ColorType, IRect, ImageInfo, Matrix,
-    Paint, Rect,
+    Paint, Rect, Surface,
 };
 
 use super::{
@@ -34,6 +34,92 @@ pub(crate) struct Blurred {
     values: Vec<f32>,
     region: IRect,
     rest: Matrix,
+}
+
+/// The byte an eight-bit RGBA or BGRA pixel holds its alpha in: the last of
+/// its four in either order (`kRGBA_8888_SkColorType` and
+/// `kBGRA_8888_SkColorType`, `include/core/SkColorType.h`).
+const ALPHA_BYTE_OF_8888: usize = 3;
+
+#[cfg(test)]
+thread_local! {
+    /// How many planes [`alpha_into`] has read where they lie on this
+    /// thread, for a test to tell that read from `read_pixels`.
+    static READ_IN_PLACE: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Writes the alpha of `surface`'s pixels in `read` into `rows`, one row of
+/// `read` each, as each byte's value. A raster surface's pixels are read
+/// where they lie where each holds its alpha as a byte -- an A8 plane, or a
+/// premultiplied or unpremultiplied RGBA or BGRA one -- which takes the byte
+/// `read_pixels` to A8 would copy, without its conversion or a copy of the
+/// plane. Any other surface goes through `read_pixels`. `false` where the
+/// pixels cannot be read.
+fn alpha_into<'a>(
+    surface: &mut Surface,
+    read: IRect,
+    rows: impl Iterator<Item = &'a mut [f32]>,
+) -> bool {
+    let line = read.width() as usize;
+    if let Some(pixmap) = surface.peek_pixels()
+        && let Some(bytes) = pixmap.bytes()
+    {
+        let info = pixmap.info();
+        let stride = pixmap.row_bytes();
+        let start = |step: usize| {
+            read.top as usize * stride + read.left as usize * step
+        };
+        #[cfg(test)]
+        let counted = || READ_IN_PLACE.with(|n| n.set(n.get() + 1));
+        match (info.color_type(), info.alpha_type()) {
+            (ColorType::Alpha8, _) => {
+                alpha_rows::<1, 0>(rows, &bytes[start(1)..], stride);
+                #[cfg(test)]
+                counted();
+                return true;
+            }
+            (
+                ColorType::RGBA8888 | ColorType::BGRA8888,
+                AlphaType::Premul | AlphaType::Unpremul,
+            ) => {
+                alpha_rows::<4, ALPHA_BYTE_OF_8888>(
+                    rows,
+                    &bytes[start(4)..],
+                    stride,
+                );
+                #[cfg(test)]
+                counted();
+                return true;
+            }
+            _ => {}
+        }
+    }
+    let info =
+        ImageInfo::new(read.size(), ColorType::Alpha8, AlphaType::Premul, None);
+    let mut bytes = vec![0u8; line * read.height() as usize];
+    if !surface.read_pixels(&info, &mut bytes, line, (read.left, read.top)) {
+        return false;
+    }
+    alpha_rows::<1, 0>(rows, &bytes, line);
+    true
+}
+
+/// Writes byte `AT` of each `STEP`-byte pixel of `bytes`, whose rows start
+/// `stride` bytes apart, into `rows` as its value. Each a constant, so that
+/// a row is read as fixed-size pixels and the compiler can take several at
+/// once.
+fn alpha_rows<'a, const STEP: usize, const AT: usize>(
+    rows: impl Iterator<Item = &'a mut [f32]>,
+    bytes: &[u8],
+    stride: usize,
+) {
+    rows.zip(bytes.chunks(stride)).for_each(|(row, pixels)| {
+        let (pixels, _) = pixels.as_chunks::<STEP>();
+        row.iter_mut()
+            .zip(pixels)
+            .for_each(|(v, pixel)| *v = f32::from(pixel[AT]));
+    });
 }
 
 /// What a draw's coverage is read from. `draw` paints through the draw's own
@@ -176,33 +262,18 @@ impl Coverage {
         // on: +0.0 around it, where nothing is painted.
         let (w, h) = (worked.width() as usize, worked.height() as usize);
         let read = region.with_offset((-drawn.left, -drawn.top));
-        let info = ImageInfo::new(
-            read.size(),
-            ColorType::Alpha8,
-            AlphaType::Premul,
-            None,
-        );
-        let mut bytes =
-            vec![0u8; read.width() as usize * read.height() as usize];
-        if !surface.read_pixels(
-            &info,
-            &mut bytes,
-            read.width() as usize,
-            (read.left, read.top),
-        ) {
-            return None;
-        }
         let mut values = vec![0.0f32; w * h];
         let (dx, dy) = (
             (region.left - worked.left) as usize,
             (region.top - worked.top) as usize,
         );
         let line = read.width() as usize;
-        for (y, row) in bytes.chunks(line).enumerate() {
-            values[(dy + y) * w + dx..][..line]
-                .iter_mut()
-                .zip(row)
-                .for_each(|(v, &b)| *v = f32::from(b));
+        let rows = values[dy * w..]
+            .chunks_mut(w)
+            .take(read.height() as usize)
+            .map(|row| &mut row[dx..][..line]);
+        if !alpha_into(&mut surface, read, rows) {
+            return None;
         }
         let scale = (layer.scale_x().abs(), layer.scale_y().abs());
         Some(Coverage {
@@ -301,11 +372,11 @@ pub(crate) fn composite(
 #[cfg(test)]
 mod tests {
     use skia_safe::{
-        AlphaType, ColorType, ImageInfo, Matrix, Paint, PaintStyle, Path,
-        PathBuilder, Rect,
+        AlphaType, ColorType, IRect, ImageInfo, Matrix, Paint, PaintStyle,
+        Path, PathBuilder, Rect,
     };
 
-    use super::{Coverage, composite};
+    use super::{Coverage, READ_IN_PLACE, alpha_into, composite};
     use crate::{
         canvas::{Canvas, CanvasOptions},
         context::{
@@ -314,6 +385,7 @@ mod tests {
         },
         path::FillRule,
         pixels::{ImageDataExport, PixelColorSpace, PixelExportOptions},
+        started,
     };
 
     /// A blurred shape on an eight-bit page, through the coverage route or
@@ -408,6 +480,78 @@ mod tests {
     /// Further from a half-level than float noise moves a sum: a byte that
     /// differs from the exact product nearer a tie than this is a tie.
     const TIE: f64 = 1e-3;
+
+    #[test]
+    fn a_plane_read_where_it_lies_is_its_alpha_read_to_a8() {
+        // Every layout a plane is read in place from, and one that is read
+        // through `read_pixels`, each holding every alpha level; the plane's
+        // rows are longer than its pixels, and the rectangle read starts
+        // and stops inside them, so that neither a row's length nor its
+        // first pixel is taken for the plane's.
+        let (size, read) = ((37, 23), IRect::from_ltrb(3, 2, 31, 19));
+        for (colour, alpha, in_place) in [
+            (ColorType::Alpha8, AlphaType::Premul, true),
+            (ColorType::RGBA8888, AlphaType::Premul, true),
+            (ColorType::BGRA8888, AlphaType::Premul, true),
+            (ColorType::RGBA8888, AlphaType::Unpremul, true),
+            (ColorType::RGBAF16, AlphaType::Premul, false),
+        ] {
+            let info = ImageInfo::new(size, colour, alpha, None);
+            let mut surface =
+                started::raster(&info, info.min_row_bytes() + 24, None)
+                    .expect("a plane");
+            // Premultiplied RGBA whose alpha steps through every level
+            // across the plane, its colour half of it.
+            let pixels: Vec<u8> = (0..size.0 * size.1)
+                .flat_map(|i| {
+                    let a = (i * 7 % 256) as u8;
+                    [a / 2, a / 3, a / 4, a]
+                })
+                .collect();
+            let source = ImageInfo::new(
+                size,
+                ColorType::RGBA8888,
+                AlphaType::Premul,
+                None,
+            );
+            assert!(surface.canvas().write_pixels(
+                &source,
+                &pixels,
+                source.min_row_bytes(),
+                (0, 0)
+            ));
+            let line = read.width() as usize;
+            let mut want = vec![0u8; line * read.height() as usize];
+            let a8 = ImageInfo::new(
+                read.size(),
+                ColorType::Alpha8,
+                AlphaType::Premul,
+                None,
+            );
+            assert!(surface.read_pixels(
+                &a8,
+                &mut want,
+                line,
+                (read.left, read.top)
+            ));
+            let mut got = vec![0.5f32; want.len()];
+            let before = READ_IN_PLACE.with(|n| n.get());
+            assert!(alpha_into(&mut surface, read, got.chunks_mut(line)));
+            let got: Vec<u8> = got
+                .iter()
+                .map(|&v| {
+                    assert_eq!(v.fract(), 0.0, "{colour:?}: a byte's value");
+                    v as u8
+                })
+                .collect();
+            assert_eq!(got, want, "{colour:?} {alpha:?}");
+            assert_eq!(
+                READ_IN_PLACE.with(|n| n.get()) - before,
+                usize::from(in_place),
+                "{colour:?} {alpha:?}: read where it lies"
+            );
+        }
+    }
 
     #[test]
     fn a_blurred_coverage_rounds_the_exact_product_once() {
