@@ -103,19 +103,10 @@ impl Canvas {
         // already honours the flag, so defaulting here reported GPU for a
         // canvas that was rasterizing on the CPU -- `canvas.gpu` disagreed
         // with `canvas.engine.renderer` for the object's whole life.
-        let disabled = self.gpu_disabled;
+        let asks_for_gpu = !self.gpu_disabled;
         let color_type = self.color_type;
         *self.engine.get_or_insert_with(|| {
-            if disabled {
-                return gpu::RenderingEngine::CPU;
-            }
-            let engine = gpu::RenderingEngine::default();
-            // As on the Rust side: a float canvas the GPU cannot composite
-            // is rasterised rather than silently narrowed to eight bits.
-            match engine.can_composite(color_type) {
-                true => engine,
-                false => gpu::RenderingEngine::CPU,
-            }
+            gpu::RenderingEngine::for_canvas(asks_for_gpu, color_type)
         })
     }
 
@@ -279,9 +270,16 @@ pub fn set_engine(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         && let Some(new_engine) = to_engine(&engine_name)
         && new_engine.selectable()
     {
-        this.borrow_mut().gpu_disabled =
-            matches!(new_engine, gpu::RenderingEngine::CPU);
-        this.borrow_mut().engine = Some(new_engine)
+        // The engine asked for, through the same choice the canvas makes at
+        // construction: a float canvas asking for the GPU stays on the CPU
+        // -- see `RenderingEngine::for_canvas`.
+        let mut this = this.borrow_mut();
+        let asks_for_gpu = matches!(new_engine, gpu::RenderingEngine::GPU);
+        this.gpu_disabled = !asks_for_gpu;
+        this.engine = Some(gpu::RenderingEngine::for_canvas(
+            asks_for_gpu,
+            this.color_type,
+        ));
     }
 
     Ok(cx.undefined())

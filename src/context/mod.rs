@@ -4123,8 +4123,10 @@ enum PlacedFill {
 /// be measured before it takes that filter --
 /// `float_pages_draw_on_the_cpu` fails when one does.
 pub(crate) fn floats_draw_on_the_cpu(color_type: ColorType) -> bool {
-    let gpu = RenderingEngine::GPU;
-    !(gpu.selectable() && gpu.can_composite(color_type))
+    matches!(
+        RenderingEngine::for_canvas(true, color_type),
+        RenderingEngine::CPU
+    )
 }
 
 /// Whether a canvas in `space` keeps a recording for each kind of target at

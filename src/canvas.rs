@@ -635,24 +635,10 @@ impl Canvas {
     }
 
     fn engine(&self) -> RenderingEngine {
-        if !self.gpu {
-            return RenderingEngine::CPU;
-        }
-        let engine = RenderingEngine::default();
-        // A float canvas that the GPU cannot composite goes to the raster
-        // backend rather than quietly dropping to eight bits: `colorType`
-        // means the same thing on both engines, and `engine_kind` reports
-        // which one answered. Skia's Ganesh Metal and Vulkan backends carry
-        // no 32-bit float format today, and round a draw's colour to eight
-        // bits before compositing it in an `F16` one, so this is where an
-        // `F16` or `F32` canvas changes hands -- and `can_composite` probes
-        // rather than assumes, so a Skia that composites either in float
-        // keeps the canvas on the GPU.
-        match engine.can_composite(self.options.color_type.to_skia_color_type())
-        {
-            true => engine,
-            false => RenderingEngine::CPU,
-        }
+        RenderingEngine::for_canvas(
+            self.gpu,
+            self.options.color_type.to_skia_color_type(),
+        )
     }
 
     /// The cheap half of an export, handed back so the expensive half can
