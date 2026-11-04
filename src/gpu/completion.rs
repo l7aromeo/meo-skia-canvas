@@ -40,11 +40,18 @@
 //! the draws in a buffer nothing waits on -- the read is confirmed the other
 //! way.
 //!
-//! Every other path -- an export, a conversion, a read Skia will not make
-//! asynchronously -- flushes and waits with [`draws_ran`] first, then reads.
-//! What that cannot see is the readback's own buffer: Skia waits on it and
-//! drops the answer -- see the `UPSTREAM:` note at the readbacks in
-//! `context::page`.
+//! An export commits its draws without a wait, as a `getImageData` read does
+//! and for the same reason, then reads and confirms after -- see
+//! [`read_after_draws`]. Skia's read commits the copy in a buffer of its own,
+//! waits on it and drops the answer; the queue of ours holds the draws'
+//! buffer and the copy's and reads their status, so the one confirmation
+//! after the read answers for both. Where there is no queue of ours, as on
+//! Vulkan, the draws are confirmed with [`draws_ran`] before the read, and the
+//! copy is confirmed by nothing.
+//!
+//! A conversion, and a read Skia will not make asynchronously, still flush
+//! and wait with [`draws_ran`] first, then read. What that cannot see is the
+//! readback's own buffer.
 //!
 //! **The checked read costs no wait beyond the read's own.** Counted under
 //! lldb, a read after a draw waits on the GPU once; the queue of ours waits
@@ -55,21 +62,15 @@
 //! microseconds against 248 to 253, one of 64x48 199 to 202 against 253 to
 //! 258, and one of a whole 1200x900 page 1075 to 1155 against 1237 to 1351.
 //!
-//! **The other paths' check costs one GPU round trip per readback after a
-//! draw.** The readback already waits for the GPU once; this adds a second
-//! wait in front of it. Measured on a release build, Apple M4 Pro: a 64x48
-//! PNG export goes from about 380 to 500 microseconds and a raw export from
-//! 240 to 350 -- 30 to 45 percent. On a 2048x1536 page the difference is
-//! inside the noise of a 4.6 to 51 ms operation, and the first operation of a
-//! process is unchanged within its spread. Flushing and submitting without
-//! waiting costs nothing measurable, which is what pins the cost on the wait.
-//!
-//! It is paid because the alternative is pixels that are wrong with no error.
-//! It stays on those paths until Skia reports a failed draw as well as a
-//! failed copy: its `SurfaceContext::readPixels` commits the draws in a
-//! command buffer of their own without waiting, then the copy in a second one
-//! it waits on, so a fix that checks only the copy's buffer still leaves the
-//! draws to this wait.
+//! **A wait in front of a read costs one GPU round trip.** The readback
+//! already waits for the GPU once; [`draws_ran`] adds a second wait in front
+//! of it. Measured on a release build, Apple M4 Pro, with that wait in front
+//! of an export's read: a 64x48 PNG export went from about 380 to 500
+//! microseconds and a raw export from 240 to 350 -- 30 to 45 percent. On a
+//! 2048x1536 page the difference is inside the noise of a 4.6 to 51 ms
+//! operation, and the first operation of a process is unchanged within its
+//! spread. Flushing and submitting without waiting costs nothing measurable,
+//! which is what pins the cost on the wait.
 
 use std::cell::RefCell;
 #[cfg(all(feature = "vulkan", not(feature = "metal")))]
@@ -193,6 +194,77 @@ pub(crate) fn draws_ran(surface: &mut Surface, page: usize) -> bool {
 #[cfg(not(any(feature = "metal", feature = "vulkan")))]
 pub(crate) fn draws_ran(_surface: &mut Surface, _page: usize) -> bool {
     true
+}
+
+/// `read` of what `surface` holds, made after its draws and confirmed with
+/// them: `None` where the GPU did not run the draws or the read, so that the
+/// caller draws again, and the read's own answer otherwise. `page` is the
+/// page the draws belong to, which only the test seam reads.
+///
+/// On Metal the draws are committed without a wait, the read is made, and
+/// both are confirmed after it through the queue of ours Skia makes every
+/// buffer on. Skia's read commits the copy in a buffer of its own, waits on
+/// it and drops the answer; the queue holds the draws' buffer and the copy's
+/// and reads their status, so one confirmation after the read answers for
+/// both. Elsewhere the draws are confirmed by [`draws_ran`] before the read,
+/// which cannot see the copy.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+pub(crate) fn read_after_draws<T>(
+    surface: &mut Surface,
+    page: usize,
+    read: impl FnOnce(&mut Surface) -> Result<T, String>,
+) -> Option<Result<T, String>> {
+    let Some(mut context) = surface.direct_context() else {
+        return Some(read(surface));
+    };
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+    // Re-check: cargo test an_export_whose_copy_was_discarded_is_read_again
+    // with `metal` and the confirmation below made before `read`.
+    //
+    // Skia M156's `GrMtlGpu::onReadPixels`, in `skia/src/gpu/ganesh/mtl/
+    // GrMtlGpu.mm` under the skia-bindings crate, waits on the command buffer
+    // that copies the texture out with `submitCommandBuffer(kForce_SyncQueue)`
+    // and drops the answer, so a copy the GPU discarded hands back zeros or
+    // stale bytes as success. It is told here, after the read, from the
+    // buffer's status as the queue of ours reads it.
+    #[cfg(feature = "metal")]
+    if let Some(queue) = metal::recording(&context) {
+        let since = queue.mark();
+        // The draws reach the GPU before the read is encoded, in a buffer of
+        // their own that nothing waits on, as `read_checked` commits them and
+        // for its reason: committed with the copy, they hold Apple's GPU at
+        // its lowest clock while reads follow draws.
+        let flushed = context.flush(None).is_ok() && !pacing::take_failed();
+        if !(flushed && context.submit(SyncCpu::No)) {
+            return None;
+        }
+        let answer = read(surface);
+        // A read that failed answers with its own error, which says more
+        // than a confirmation would; confirmed all the same, so that a
+        // failure the read's buffers met is not left for the next one.
+        if answer.is_err() {
+            confirmed(&context, None);
+            return Some(answer);
+        }
+        let ran = confirmed(&context, Some(since)) && !seam::discards(page);
+        return ran.then_some(answer);
+    }
+    drop(context);
+    if !draws_ran(surface, page) {
+        return None;
+    }
+    Some(read(surface))
+}
+
+/// With no GPU backend compiled in every surface is raster, so `read` is
+/// made as it is.
+#[cfg(not(any(feature = "metal", feature = "vulkan")))]
+pub(crate) fn read_after_draws<T>(
+    surface: &mut Surface,
+    _page: usize,
+    read: impl FnOnce(&mut Surface) -> Result<T, String>,
+) -> Option<Result<T, String>> {
+    Some(read(surface))
 }
 
 /// What [`read_checked`] made of a read.
@@ -843,12 +915,13 @@ mod tests {
     #[test]
     fn a_conversion_discarded_twice_is_an_error() {
         // A P3 export of an sRGB canvas redraws the composited page into a
-        // P3 surface, which is a second draw to confirm. The composite is let
-        // through so that the conversion is what fails.
+        // P3 surface, which is a second draw to confirm. The conversion is
+        // confirmed inside the read, before the composite is, so the first
+        // two draws asked about are the conversion's.
         let Some((mut canvas, page)) = drawn(64.0, 48.0) else {
             return;
         };
-        seam::discard_after(Some(page), 1, 2);
+        seam::discard(Some(page), 2);
         let options = EncodeOptions {
             color_space: Some(PixelColorSpace::DisplayP3),
             ..EncodeOptions::default()
@@ -1162,6 +1235,210 @@ mod tests {
                 );
             }
             assert!(ours.commandBuffer().is_some());
+        }
+    }
+
+    /// An export's read, confirmed after it through the queue of ours Skia
+    /// makes every buffer on: the draws' buffer and the copy's alike.
+    #[cfg(feature = "metal")]
+    mod exports {
+        use objc2::rc::Retained;
+        use skia_safe::{AlphaType, ColorType, ImageInfo};
+
+        use super::{DISCARDED, drawn};
+        use crate::{
+            Canvas,
+            context::page::{ExportOptions, Page, PageCache},
+            gpu::{
+                RenderingEngine,
+                metal::{self, ISSUED, MetalEngine, RecordingQueue},
+            },
+        };
+
+        /// The page, small enough that an export is one draw and one copy.
+        const SIZE: (f32, f32) = (64.0, 48.0);
+
+        /// This thread's offscreen context's queue of ours. The exports here
+        /// run on this thread, rather than on an owner, so that this is the
+        /// queue their buffers come from.
+        fn queue() -> Retained<RecordingQueue> {
+            let mut queue = None;
+            MetalEngine::with_direct_context(|context| {
+                queue = context.and_then(|context| metal::recording(context));
+            });
+            queue.expect("the offscreen context makes its buffers on ours")
+        }
+
+        /// A drawn page, on a machine with a GPU engine, and the canvas it
+        /// is from, which has to live for an export to file the page in the
+        /// page cache.
+        fn page() -> Option<(Canvas, Page)> {
+            let (mut canvas, _) = drawn(SIZE.0, SIZE.1)?;
+            let mut page = None;
+            canvas
+                .context()
+                .inner
+                .with_recorder(|mut recorder| page = Some(recorder.page()));
+            Some((canvas, page?))
+        }
+
+        /// How many buffers `export` of a drawn page commits: the last is the
+        /// one its copy is encoded in.
+        fn buffers(export: Export) -> usize {
+            let (_canvas, page) = page().expect("a GPU engine");
+            let before = ISSUED.get();
+            export(&page).expect("an export");
+            ISSUED.get() - before
+        }
+
+        /// An export of a page into a buffer of pixels.
+        type Export = fn(&Page) -> Result<Vec<u8>, String>;
+
+        /// The three ways an export takes a page off the GPU: as an image,
+        /// read into a buffer, and composited whole into a buffer.
+        fn exports() -> [(&'static str, Export); 3] {
+            fn info() -> ImageInfo {
+                ImageInfo::new(
+                    (SIZE.0 as i32, SIZE.1 as i32),
+                    ColorType::RGBA8888,
+                    AlphaType::Premul,
+                    None,
+                )
+            }
+            [
+                ("composite", |page| {
+                    let image = page.composite(
+                        &ExportOptions::default(),
+                        RenderingEngine::GPU,
+                    )?;
+                    let info = info();
+                    let mut pixels = vec![0; info.compute_min_byte_size()];
+                    image.read_pixels(
+                        &info,
+                        &mut pixels,
+                        info.min_row_bytes(),
+                        (0, 0),
+                        skia_safe::image::CachingHint::Disallow,
+                    );
+                    Ok(pixels)
+                }),
+                ("composite_into", |page| {
+                    page.composite_into(
+                        &ExportOptions::default(),
+                        RenderingEngine::GPU,
+                        &info(),
+                    )
+                }),
+                ("composite_pixels", |page| {
+                    page.composite_pixels(
+                        &ExportOptions::default(),
+                        RenderingEngine::GPU,
+                        &info(),
+                    )
+                }),
+            ]
+        }
+
+        /// An export whose copy Metal discarded is read again, and the
+        /// failure is answered by that export rather than left for whatever
+        /// confirms next.
+        #[test]
+        fn an_export_whose_copy_was_discarded_is_read_again() {
+            for (name, export) in exports() {
+                let (Some((_one, page)), Some((_two, reference))) =
+                    (page(), page())
+                else {
+                    return;
+                };
+                let want = export(&reference).expect("reference");
+                let copy = buffers(export) - 1;
+                let queue = queue();
+                // Every buffer before the copy's goes through; the copy's
+                // fails.
+                queue.fail_after(copy, 1);
+                let got = export(&page);
+                assert_eq!(queue.unused_failures(), 0, "{name}: no copy made");
+                let left = queue.confirm(None);
+                queue.fail_after(0, 0);
+                assert!(
+                    left.is_ok(),
+                    "{name}: the discarded copy went unnoticed by the export \
+                     and was left for the next confirmation: {left:?}"
+                );
+                assert_eq!(
+                    got.expect("the read again succeeds"),
+                    want,
+                    "{name}"
+                );
+            }
+        }
+
+        /// An export whose copies Metal discards every time is an error,
+        /// not pixels, and leaves nothing in the page cache for the next
+        /// export to start from.
+        #[test]
+        fn an_export_whose_copies_are_all_discarded_is_an_error() {
+            for (name, export) in exports() {
+                let Some((_canvas, page)) = page() else {
+                    return;
+                };
+                let cached = || {
+                    PageCache::get(
+                        page.id,
+                        &ExportOptions::default(),
+                        page.depth(),
+                    )
+                    .0
+                    .is_some()
+                };
+                assert!(!cached(), "{name}: cached before the export");
+                let copy = buffers(export) - 1;
+                let queue = queue();
+                queue.fail_after(copy, usize::MAX);
+                let got = export(&page);
+                queue.fail_after(0, 0);
+                let _ = queue.confirm(None);
+                match got {
+                    Err(reason) => {
+                        assert!(
+                            reason.starts_with(DISCARDED),
+                            "{name}: {reason}"
+                        )
+                    }
+                    Ok(_) => {
+                        panic!("{name}: discarded copies came back as pixels")
+                    }
+                }
+                assert!(!cached(), "{name}: an unconfirmed read was filed");
+            }
+        }
+
+        /// An export whose draws Metal discarded is drawn again.
+        #[test]
+        fn an_export_whose_draws_were_discarded_is_drawn_again() {
+            for (name, export) in exports() {
+                let (Some((_one, page)), Some((_two, reference))) =
+                    (page(), page())
+                else {
+                    return;
+                };
+                let want = export(&reference).expect("reference");
+                let queue = queue();
+                queue.fail_after(0, 1);
+                let got = export(&page);
+                assert_eq!(queue.unused_failures(), 0, "{name}: no draws made");
+                let left = queue.confirm(None);
+                queue.fail_after(0, 0);
+                assert!(
+                    left.is_ok(),
+                    "{name}: the discarded draws were left: {left:?}"
+                );
+                assert_eq!(
+                    got.expect("the draw again succeeds"),
+                    want,
+                    "{name}"
+                );
+            }
         }
     }
 }

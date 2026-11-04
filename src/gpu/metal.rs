@@ -23,7 +23,7 @@ mod recording;
 
 #[cfg(test)]
 pub(crate) use recording::{
-    BLIND, BLIND_FOR_TEST, BUFFER_DISCARDED, FINISHED, WAITED,
+    BLIND, BLIND_FOR_TEST, BUFFER_DISCARDED, FINISHED, ISSUED, WAITED,
 };
 pub(crate) use recording::{Mark, RecordingQueue};
 
