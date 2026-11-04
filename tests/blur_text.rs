@@ -188,3 +188,96 @@ fn blurred_text_is_the_exact_gaussian_of_the_sharp_text() {
         }
     }
 }
+
+/// Opaque colours a run is blurred in, as CSS and as their sRGB bytes. Not
+/// black: its colour channels are zero whatever the route, so it cannot tell
+/// a colour blurred with its coverage from one written after the blur. Skia
+/// covers a glyph differently in each of these (see
+/// `a_runs_coverage_depends_on_the_colour_it_is_drawn_in`), so each is
+/// compared with its own sharp text.
+const COLOURS: [(&str, [u8; 3]); 3] = [
+    ("rgb(200, 80, 30)", [200, 80, 30]),
+    ("rgb(30, 160, 220)", [30, 160, 220]),
+    ("rgb(255, 255, 255)", [255, 255, 255]),
+];
+
+/// Coloured text under `blur()` on an eight-bit CPU page is its colour
+/// times the exact blur of its own coverage, each premultiplied channel
+/// rounded once: the colour is applied to the blurred coverage, not blurred
+/// out of bytes the sharp text already rounded.
+#[test]
+fn blurred_text_is_its_colour_over_the_blurred_coverage() {
+    FontLibrary::new()
+        .use_paths(Some(FAMILY), [OSWALD])
+        .expect("registers");
+    for (em, sigma) in EXACT_CASES {
+        let margin = (MARGIN_SIGMAS * sigma).ceil();
+        for (css, rgb) in COLOURS {
+            let (sharp, width) = text_premultiplied(em, margin, "none", css);
+            let (blurred, _) = text_premultiplied(
+                em,
+                margin,
+                &format!("blur({sigma}px)"),
+                css,
+            );
+            let coverage: Vec<f64> =
+                sharp.chunks(4).map(|p| f64::from(p[3]) / 255.0).collect();
+            let spread = sampled(&coverage, width, f64::from(sigma));
+            let channel = |k: usize| -> Vec<u8> {
+                blurred.chunks(4).map(|p| p[k]).collect()
+            };
+            let alpha = misses(&channel(3), &spread);
+            assert!(
+                alpha.is_empty(),
+                "{css} {em}px blurred by {sigma}: alpha {} pixels off, first {:?}",
+                alpha.len(),
+                &alpha[..alpha.len().min(4)],
+            );
+            for (k, c) in rgb.iter().enumerate() {
+                let reference: Vec<f64> =
+                    spread.iter().map(|a| a * f64::from(*c) / 255.0).collect();
+                let off = misses(&channel(k), &reference);
+                assert!(
+                    off.is_empty(),
+                    "{css} {em}px blurred by {sigma}: channel {k} {} pixels off its colour times the blurred coverage, first {:?}",
+                    off.len(),
+                    &off[..off.len().min(4)],
+                );
+            }
+        }
+    }
+}
+
+/// `TEXT` at `em` pixels in the opaque colour `css` on a CPU canvas
+/// `margin` wider than it on every side, through `filter`, as premultiplied
+/// RGBA bytes and its width.
+fn text_premultiplied(
+    em: f32,
+    margin: f32,
+    filter: &str,
+    css: &str,
+) -> (Vec<u8>, usize) {
+    let mut probe = Canvas::new(1.0, 1.0);
+    assert!(probe.context().set_font_css(&format!("{em}px {FAMILY}")));
+    let advance = probe.context().measure_text(TEXT, None).width;
+    let (width, height) = (
+        (advance + 2.0 * margin).ceil(),
+        (2.0 * em + 2.0 * margin).ceil(),
+    );
+    let mut canvas = Canvas::new(width, height);
+    canvas.set_gpu(false);
+    let ctx = canvas.context();
+    assert!(ctx.set_font_css(&format!("{em}px {FAMILY}")));
+    ctx.set_fill_style_css(css).expect("a colour");
+    ctx.set_filter_css(filter).expect("a filter");
+    ctx.fill_text(TEXT, margin + 0.3, margin + 1.5 * em + 0.6, None);
+    let options = ImageDataExport {
+        pixels: PixelExportOptions {
+            premultiplied: true,
+            ..PixelExportOptions::default()
+        },
+        ..ImageDataExport::default()
+    };
+    let pixels = canvas.to_image_data(None, &options).expect("pixels");
+    (pixels.pixels().to_vec(), width as usize)
+}
