@@ -4847,8 +4847,8 @@ impl Page {
         match engine {
             RenderingEngine::GPU => owner::composite(self, options),
             // Not reached: `RenderingEngine::for_canvas` does not choose
-            // Graphite, whose pages are read through
-            // `gpu::graphite::read_pixels` rather than the CPU's read.
+            // Graphite. Nor is this arm a route for a Graphite page:
+            // `Surface::read_pixels` does not read one.
             RenderingEngine::CPU | RenderingEngine::Graphite => {
                 self.composite(options, engine)
             }
@@ -5342,8 +5342,8 @@ impl Page {
                     owner::composite_into(self, &options, &dst_info)
                 }
                 // Not reached: `RenderingEngine::for_canvas` does not choose
-                // Graphite, whose pages are read through
-                // `gpu::graphite::read_pixels` rather than the CPU's read.
+                // Graphite. Nor is this arm a route for a Graphite page:
+                // `Surface::read_pixels` does not read one.
                 RenderingEngine::CPU | RenderingEngine::Graphite => {
                     self.composite_into(&options, engine, &dst_info)
                 }
@@ -5638,8 +5638,8 @@ impl Page {
                 owner::composite_pixels(self, &surface_options, &dst_info)
             }
             // Not reached: `RenderingEngine::for_canvas` does not choose
-            // Graphite, whose pages are read through
-            // `gpu::graphite::read_pixels` rather than the CPU's read.
+            // Graphite. Nor is this arm a route for a Graphite page:
+            // `Surface::read_pixels` does not read one.
             RenderingEngine::CPU | RenderingEngine::Graphite => {
                 self.composite_pixels(&surface_options, engine, &dst_info)
             }

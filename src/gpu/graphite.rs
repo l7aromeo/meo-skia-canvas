@@ -10,9 +10,15 @@
 //! The cfg is set only by the patched skia-bindings that carries the bindings
 //! used here (`build.rs`). Elsewhere every function here answers as though
 //! no Graphite device exists: [`supported`] is false, a surface is refused,
-//! and [`read_pixels`] returns [`GraphiteRead::NotBuilt`]. Callers then need
-//! no cfg of their own, and a Graphite page that turns up where none can
-//! exist is refused with that cause named.
+//! no surface is a Graphite page, and [`commit`] returns
+//! [`GraphiteRead::NotBuilt`]. Callers then need no cfg of their own, and a
+//! Graphite page that turns up where none can exist is refused with that
+//! cause named.
+//!
+//! This module decides no waits or confirmations for a page's draws and
+//! reads. It gives the operations they are made of -- [`owns`], [`commit`],
+//! [`mark`], [`confirm`] and [`read_raw`] -- and leaves which a page needs to
+//! its caller, so that one place can decide them for every engine.
 //!
 //! [`RenderingEngine::for_canvas`]: super::RenderingEngine::for_canvas
 
@@ -27,6 +33,7 @@ use crate::context::page::ExportOptions;
 mod metal;
 #[cfg(not(all(meo_graphite, feature = "metal")))]
 use absent as engine;
+pub(crate) use engine::Mark;
 #[cfg(all(meo_graphite, feature = "metal"))]
 use metal as engine;
 
@@ -103,30 +110,94 @@ pub(crate) fn make_surface(
     engine::make_surface(info, opts)
 }
 
-/// Reads `surface`, a page made by [`make_surface`] on this thread, into
-/// `dst` as `info` describes it, from `at` in the page.
-///
-/// Graphite records draws and runs them only when a recording is inserted
-/// and submitted, and `Surface::read_pixels` does not read a Graphite
-/// surface at all. So this snaps the thread's recorder, inserts the recording,
-/// submits it and waits, then reads through the context. It then confirms
-/// every command buffer the draws and the read ran in, since Graphite's read
-/// reports success whether or not they ran.
+/// Whether `surface` is a Graphite page: one with a recorder rather than a
+/// recording context. Says nothing about which thread's context made it.
 #[cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "the page's reads do not dispatch on Graphite pages yet"
+        reason = "`gpu::completion` does not dispatch on Graphite pages yet"
     )
 )]
-pub(crate) fn read_pixels(
+pub(crate) fn owns(surface: &mut Surface) -> bool {
+    engine::owns(surface)
+}
+
+/// Commits the draws recorded on this thread's context: snaps the recorder,
+/// inserts the recording and submits it, waiting for the GPU to finish it
+/// where `wait` says so.
+///
+/// Graphite records draws and runs them only when a recording is inserted
+/// and submitted, so a page's draws reach the GPU only through this. A
+/// thread with no context has nothing to commit and answers
+/// [`GraphiteRead::NoContext`]: a Graphite page reached there was made on
+/// another thread, and is refused rather than retried.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "`gpu::completion` does not dispatch on Graphite pages yet"
+    )
+)]
+pub(crate) fn commit(wait: bool) -> Result<(), GraphiteRead> {
+    engine::commit(wait)
+}
+
+/// Where a confirmation begins on this thread's queue, `None` where the
+/// thread holds no context.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "`gpu::completion` does not dispatch on Graphite pages yet"
+    )
+)]
+pub(crate) fn mark() -> Option<Mark> {
+    engine::mark()
+}
+
+/// Whether every command buffer this thread's queue has seen committed ran,
+/// waiting for any still running. With `since`, from [`mark`], no buffer
+/// seen to finish since then is a failure too. `Ok` where the thread holds no
+/// context, which has committed nothing.
+///
+/// Graphite's own reads and submits report success whether or not their
+/// buffers ran, so this is the only word on whether a page's draws did.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "`gpu::completion` does not dispatch on Graphite pages yet"
+    )
+)]
+pub(crate) fn confirm(since: Option<Mark>) -> Result<(), String> {
+    engine::confirm(since)
+}
+
+/// Reads `surface`, a page made on this thread, into `dst` as `info`
+/// describes it, from `at` in the page, through the context. False where the
+/// read is declined or the thread holds no context.
+///
+/// Reads only what has been committed: the draws reach it through [`commit`]
+/// first. Graphite submits and waits for the copy itself, and with it any
+/// work submitted before, and says nothing of whether it ran -- see
+/// [`confirm`]. `Surface::read_pixels` does not read a Graphite surface at
+/// all.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "`gpu::completion` does not dispatch on Graphite pages yet"
+    )
+)]
+pub(crate) fn read_raw(
     surface: &mut Surface,
     info: &ImageInfo,
     dst: &mut [u8],
     row_bytes: usize,
     at: impl Into<IPoint>,
-) -> Result<(), GraphiteRead> {
-    engine::read_pixels(surface, info, dst, row_bytes, at.into())
+) -> bool {
+    engine::read_raw(surface, info, dst, row_bytes, at.into())
 }
 
 /// Draws `draw` on a page of `info` on a Graphite context made for this call
@@ -180,18 +251,54 @@ mod absent {
         Err(GraphiteRead::NotBuilt.to_string())
     }
 
+    /// No mark is ever made where there is no queue to make it on.
+    #[derive(Clone, Copy)]
+    pub(crate) enum Mark {}
+
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "called only by `super::read_pixels`")
+        expect(dead_code, reason = "called only by `super::owns`")
     )]
-    pub(super) fn read_pixels(
+    pub(super) fn owns(_surface: &mut Surface) -> bool {
+        false
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called only by `super::commit`")
+    )]
+    pub(super) fn commit(_wait: bool) -> Result<(), GraphiteRead> {
+        Err(GraphiteRead::NotBuilt)
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called only by `super::mark`")
+    )]
+    pub(super) fn mark() -> Option<Mark> {
+        None
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called only by `super::confirm`")
+    )]
+    pub(super) fn confirm(_since: Option<Mark>) -> Result<(), String> {
+        Ok(())
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called only by `super::read_raw`")
+    )]
+    pub(super) fn read_raw(
         _surface: &mut Surface,
         _info: &ImageInfo,
         _dst: &mut [u8],
         _row_bytes: usize,
         _at: IPoint,
-    ) -> Result<(), GraphiteRead> {
-        Err(GraphiteRead::NotBuilt)
+    ) -> bool {
+        false
     }
 
     pub(super) fn probe(
@@ -222,8 +329,8 @@ mod tests {
         )
     }
 
-    /// Without the engine, every entry point refuses and names why, rather
-    /// than reading a surface it cannot have made.
+    /// Without the engine, every entry point refuses and names why, and no
+    /// surface is taken for a Graphite page.
     #[cfg(not(all(meo_graphite, feature = "metal")))]
     #[test]
     fn a_build_without_graphite_refuses_every_graphite_page() {
@@ -235,43 +342,47 @@ mod tests {
         );
         let mut raster = surfaces::raster(&info, None, None).expect("raster");
         let mut dst = vec![0u8; info.compute_min_byte_size()];
-        assert_eq!(
-            read_pixels(
-                &mut raster,
-                &info,
-                &mut dst,
-                info.min_row_bytes(),
-                (0, 0)
-            ),
-            Err(GraphiteRead::NotBuilt)
-        );
+        assert!(!owns(&mut raster));
+        assert_eq!(commit(true), Err(GraphiteRead::NotBuilt));
+        assert!(mark().is_none());
+        assert_eq!(confirm(None), Ok(()));
+        assert!(!read_raw(
+            &mut raster,
+            &info,
+            &mut dst,
+            info.min_row_bytes(),
+            (0, 0)
+        ));
         assert_eq!(
             probe(&info, |_| {}, &info, &mut dst),
             Err(GraphiteRead::NotBuilt)
         );
     }
 
-    /// A thread that never made a Graphite context has none to read with,
-    /// and says so rather than making one that holds none of the page's
-    /// draws.
+    /// A thread that never made a Graphite context has nothing to commit,
+    /// mark, confirm or read, and says so rather than making a context that
+    /// holds none of a page's draws.
     #[cfg(all(meo_graphite, feature = "metal"))]
     #[test]
-    fn a_thread_without_a_context_refuses_the_read() {
-        let read = std::thread::spawn(|| {
+    fn a_thread_without_a_context_commits_and_reads_nothing() {
+        std::thread::spawn(|| {
             let info = f32_info();
             let mut raster =
                 surfaces::raster(&info, None, None).expect("raster");
             let mut dst = vec![0u8; info.compute_min_byte_size()];
-            read_pixels(
+            assert!(!owns(&mut raster));
+            assert_eq!(commit(false), Err(GraphiteRead::NoContext));
+            assert!(mark().is_none());
+            assert_eq!(confirm(None), Ok(()));
+            assert!(!read_raw(
                 &mut raster,
                 &info,
                 &mut dst,
                 info.min_row_bytes(),
-                (0, 0),
-            )
+                (0, 0)
+            ));
         })
         .join()
-        .expect("the reading thread");
-        assert_eq!(read, Err(GraphiteRead::NoContext));
+        .expect("the thread without a context");
     }
 }

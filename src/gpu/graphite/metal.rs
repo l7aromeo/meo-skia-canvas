@@ -27,7 +27,7 @@ use crate::{
     context::page::ExportOptions,
     gpu::{
         ThreadBound,
-        metal::{MTL_CONTEXT_LIFESPAN, RecordingQueue, device_name},
+        metal::{self, MTL_CONTEXT_LIFESPAN, RecordingQueue, device_name},
     },
 };
 
@@ -94,24 +94,57 @@ pub(super) fn make_surface(
     with_context(|graphite| graphite.surface(info, opts))
 }
 
+/// Where a confirmation begins, in the buffers this thread's queue has seen
+/// finish -- see [`RecordingQueue::mark`].
+#[derive(Clone, Copy)]
+pub(crate) struct Mark(metal::Mark);
+
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "called only by `super::read_pixels`")
+    expect(dead_code, reason = "called only by `super::owns`")
 )]
-pub(super) fn read_pixels(
+pub(super) fn owns(surface: &mut Surface) -> bool {
+    surface.canvas().recorder().is_some()
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called only by `super::commit`")
+)]
+pub(super) fn commit(wait: bool) -> Result<(), GraphiteRead> {
+    on_context(|graphite| graphite.commit(wait))
+        .unwrap_or(Err(GraphiteRead::NoContext))
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called only by `super::mark`")
+)]
+pub(super) fn mark() -> Option<Mark> {
+    on_context(|graphite| graphite.mark())
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called only by `super::confirm`")
+)]
+pub(super) fn confirm(since: Option<Mark>) -> Result<(), String> {
+    on_context(|graphite| graphite.confirm(since)).unwrap_or(Ok(()))
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called only by `super::read_raw`")
+)]
+pub(super) fn read_raw(
     surface: &mut Surface,
     info: &ImageInfo,
     dst: &mut [u8],
     row_bytes: usize,
     at: IPoint,
-) -> Result<(), GraphiteRead> {
-    autoreleasepool(|_| {
-        GRAPHITE.with_borrow_mut(|held| {
-            held.as_mut()
-                .ok_or(GraphiteRead::NoContext)?
-                .read(surface, info, dst, row_bytes, at)
-        })
-    })
+) -> bool {
+    on_context(|graphite| graphite.read_raw(surface, info, dst, row_bytes, at))
+        .unwrap_or(false)
 }
 
 pub(super) fn probe(
@@ -143,6 +176,16 @@ pub(super) fn release_idle_context() {
             graphite.last_use.elapsed() > MTL_CONTEXT_LIFESPAN
         });
     });
+}
+
+/// Runs `f` on this thread's context, `None` where the thread has none. Makes
+/// no context: one made here would hold none of the draws it was asked about.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called only by the completion primitives")
+)]
+fn on_context<T>(f: impl FnOnce(&mut GraphiteContext) -> T) -> Option<T> {
+    autoreleasepool(|_| GRAPHITE.with_borrow_mut(|held| held.as_mut().map(f)))
 }
 
 /// Runs `f` on this thread's context, making it first if the thread has none.
@@ -241,16 +284,18 @@ impl GraphiteContext {
         ))
     }
 
-    fn read(
-        &mut self,
-        surface: &mut Surface,
-        info: &ImageInfo,
-        dst: &mut [u8],
-        row_bytes: usize,
-        at: IPoint,
-    ) -> Result<(), GraphiteRead> {
+    fn mark(&self) -> Mark {
+        Mark(self.queue.mark())
+    }
+
+    fn confirm(&self, since: Option<Mark>) -> Result<(), String> {
+        self.queue.confirm(since.map(|Mark(since)| since))
+    }
+
+    /// Snaps the recorder, inserts the recording and submits it, waiting for
+    /// the GPU to finish it where `wait` says so.
+    fn commit(&mut self, wait: bool) -> Result<(), GraphiteRead> {
         self.last_use = self.last_use.max(Instant::now());
-        let since = self.queue.mark();
         let mut recording = self.recorder.snap().ok_or_else(|| {
             GraphiteRead::Refused("the recorder could not snap".to_string())
         })?;
@@ -262,17 +307,49 @@ impl GraphiteContext {
                 "the recording was not inserted ({inserted:?})"
             )));
         }
-        if !self.context.submit_and_wait() {
-            return Err(GraphiteRead::Refused(
+        let submitted = match wait {
+            true => self.context.submit_and_wait(),
+            false => self.context.submit(None),
+        };
+        match submitted {
+            true => Ok(()),
+            false => Err(GraphiteRead::Refused(
                 "the recording was not submitted".to_string(),
-            ));
+            )),
         }
-        if !self.context.read_pixels(surface, info, dst, row_bytes, at) {
+    }
+
+    /// Reads `surface` through the context. Graphite's read submits and
+    /// waits for the copy itself, and with it any work submitted before.
+    fn read_raw(
+        &mut self,
+        surface: &mut Surface,
+        info: &ImageInfo,
+        dst: &mut [u8],
+        row_bytes: usize,
+        at: IPoint,
+    ) -> bool {
+        self.last_use = self.last_use.max(Instant::now());
+        self.context.read_pixels(surface, info, dst, row_bytes, at)
+    }
+
+    /// A read of `surface` with its draws committed first and every buffer
+    /// since the mark confirmed after, for the probe: mark, commit without
+    /// waiting, read, confirm. The read's own wait covers the draws.
+    fn read(
+        &mut self,
+        surface: &mut Surface,
+        info: &ImageInfo,
+        dst: &mut [u8],
+        row_bytes: usize,
+        at: IPoint,
+    ) -> Result<(), GraphiteRead> {
+        let since = self.mark();
+        self.commit(false)?;
+        if !self.read_raw(surface, info, dst, row_bytes, at) {
             return Err(GraphiteRead::Declined);
         }
-        self.queue
-            .confirm(Some(since))
-            .map_err(GraphiteRead::Unconfirmed)
+        self.confirm(Some(since)).map_err(GraphiteRead::Unconfirmed)
     }
 }
 
@@ -284,7 +361,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::gpu::metal::BUFFER_DISCARDED;
+    use crate::gpu::{RenderingEngine, metal::BUFFER_DISCARDED};
 
     const SIDE: i32 = 16;
 
@@ -351,6 +428,24 @@ mod tests {
             .collect()
     }
 
+    /// `surface` read through this thread's primitives, in the order
+    /// [`GraphiteContext::read`] uses: mark, commit the draws without waiting,
+    /// read, confirm everything since the mark.
+    fn read_page(
+        surface: &mut Surface,
+        info: &ImageInfo,
+        dst: &mut [u8],
+        row_bytes: usize,
+    ) -> Result<(), GraphiteRead> {
+        let since = mark();
+        assert!(since.is_some(), "no mark on a thread holding a context");
+        commit(false)?;
+        if !read_raw(surface, info, dst, row_bytes, IPoint::new(0, 0)) {
+            return Err(GraphiteRead::Declined);
+        }
+        confirm(since).map_err(GraphiteRead::Unconfirmed)
+    }
+
     fn queue() -> Retained<RecordingQueue> {
         GRAPHITE.with_borrow(|held| {
             held.as_ref().expect("this thread's context").queue.clone()
@@ -364,14 +459,8 @@ mod tests {
         let info = f32_info();
         let mut surface = written();
         let mut read = vec![0u8; info.compute_min_byte_size()];
-        read_pixels(
-            &mut surface,
-            &info,
-            &mut read,
-            info.min_row_bytes(),
-            (0, 0).into(),
-        )
-        .expect("the read");
+        read_page(&mut surface, &info, &mut read, info.min_row_bytes())
+            .expect("the read");
         assert!(
             read == expected(),
             "the page read back differs from what was written and drawn"
@@ -386,13 +475,8 @@ mod tests {
         let mut surface = written();
         queue().fail_after(0, 1);
         let mut read = vec![0u8; info.compute_min_byte_size()];
-        let answer = read_pixels(
-            &mut surface,
-            &info,
-            &mut read,
-            info.min_row_bytes(),
-            (0, 0).into(),
-        );
+        let answer =
+            read_page(&mut surface, &info, &mut read, info.min_row_bytes());
         assert_eq!(
             queue().unused_failures(),
             0,
@@ -406,18 +490,86 @@ mod tests {
         }
     }
 
-    /// A read Graphite cannot make is refused as declined, not answered with
-    /// whatever `dst` held.
+    /// A queue that sees none of the read's buffers fails the confirmation
+    /// from the mark: every read commits at least the copy's, so seeing
+    /// none means the draws went unwatched.
     #[test]
-    fn a_read_graphite_declines_is_refused() {
+    fn a_read_whose_buffers_go_unseen_is_unconfirmed() {
+        // Settled first: a context still finishing buffers it issued before
+        // the seam was armed would be seen to finish them after the mark.
+        drop(written());
+        commit(true).expect("the settling commit");
+        confirm(None).expect("the settling commit ran");
+        let info = f32_info();
+        let mut surface = written();
+        let mut read = vec![0u8; info.compute_min_byte_size()];
+        metal::BLIND_FOR_TEST.set(true);
+        let answer =
+            read_page(&mut surface, &info, &mut read, info.min_row_bytes());
+        metal::BLIND_FOR_TEST.set(false);
+        assert_eq!(
+            answer,
+            Err(GraphiteRead::Unconfirmed(metal::BLIND.to_string()))
+        );
+    }
+
+    /// A read Graphite cannot make answers false, not whatever `dst` held.
+    #[test]
+    fn a_read_graphite_declines_answers_false() {
         let info = f32_info();
         let mut surface = written();
         let mut read = vec![0u8; info.compute_min_byte_size()];
         let short = info.min_row_bytes() - 1;
+        commit(false).expect("the draws committed");
+        assert!(!read_raw(
+            &mut surface,
+            &info,
+            &mut read,
+            short,
+            IPoint::new(0, 0)
+        ));
+    }
+
+    /// A waited commit leaves nothing running for the confirmation to wait
+    /// on, and a buffer that failed under it fails the confirmation.
+    #[test]
+    fn a_waited_commit_is_confirmed_with_its_failures() {
+        drop(written());
+        let waited = metal::WAITED.get();
+        commit(true).expect("the commit");
+        confirm(None).expect("the commit's buffers ran");
         assert_eq!(
-            read_pixels(&mut surface, &info, &mut read, short, (0, 0).into()),
-            Err(GraphiteRead::Declined)
+            metal::WAITED.get(),
+            waited,
+            "a waited commit left work running"
         );
+
+        drop(written());
+        queue().fail_after(0, 1);
+        commit(true).expect("the commit");
+        assert_eq!(
+            queue().unused_failures(),
+            0,
+            "the armed buffer was not handed out"
+        );
+        let why = confirm(None).expect_err("a failed buffer was confirmed");
+        assert!(why.starts_with(BUFFER_DISCARDED), "{why}");
+    }
+
+    /// A Graphite page says it is one, and pages of the other engines do not.
+    #[test]
+    fn a_graphite_page_is_told_from_the_others() {
+        assert!(owns(&mut written()));
+        let info = f32_info();
+        for engine in [RenderingEngine::CPU, RenderingEngine::GPU] {
+            let mut page = engine
+                .make_surface(
+                    &info.with_color_type(ColorType::N32),
+                    &ExportOptions::default(),
+                )
+                .expect("a page");
+            assert!(!owns(&mut page), "{engine:?}");
+        }
     }
 
     /// The context is kept while it is in use, dropped once it has gone
@@ -440,14 +592,8 @@ mod tests {
         let mut surface = written();
         assert!(held(), "no context was made for the next page");
         let mut read = vec![0u8; info.compute_min_byte_size()];
-        read_pixels(
-            &mut surface,
-            &info,
-            &mut read,
-            info.min_row_bytes(),
-            (0, 0).into(),
-        )
-        .expect("a read on the new context");
+        read_page(&mut surface, &info, &mut read, info.min_row_bytes())
+            .expect("a read on the new context");
         assert!(read == expected());
     }
 
