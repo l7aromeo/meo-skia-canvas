@@ -4100,24 +4100,24 @@ mod shared_chain_tests {
         pixels::{PixelColorSpace, PixelDepth},
         prelude::*,
     };
+    use std::f32::consts::TAU;
 
     /// The page every scene is drawn on.
     const PAGE: (f32, f32) = (720.0, 480.0);
 
-    /// The kinds of GPU page the scenes are drawn on.
-    const PAGES: [(&str, PixelColorSpace, PixelDepth); 3] = [
-        ("sRGB 8-bit", PixelColorSpace::Srgb, PixelDepth::Uint8),
-        (
-            "Display P3 8-bit",
-            PixelColorSpace::DisplayP3,
-            PixelDepth::Uint8,
-        ),
-        ("sRGB half float", PixelColorSpace::Srgb, PixelDepth::F16),
+    /// The kinds of GPU page the scenes are drawn on. A float canvas has no
+    /// GPU engine here -- see `Canvas::engine_kind` -- and JavaScript's
+    /// `canvas.gpu = true`, which puts one there, is held to sharing nothing
+    /// in `layers.test.js`.
+    const PAGES: [(&str, PixelColorSpace); 3] = [
+        ("sRGB", PixelColorSpace::Srgb),
+        ("Display P3", PixelColorSpace::DisplayP3),
+        ("Rec. 2020", PixelColorSpace::Rec2020),
     ];
 
-    /// A scene: rounded rectangles in rows, each drawn under the next of
-    /// `filters` in a colour at the next of `alphas`, `gap` apart, at
-    /// `scale`, and how its chains share layers.
+    /// A scene: rounded rectangles and every third a circle, in rows, each
+    /// drawn under the next of `filters` in a colour at the next of `alphas`,
+    /// `gap` apart, at `scale`, and how its chains share layers.
     struct Scene {
         name: &'static str,
         filters: &'static [&'static str],
@@ -4224,28 +4224,25 @@ mod shared_chain_tests {
         },
     ];
 
-    /// `scene` drawn on a fresh GPU page of `kind`, read back premultiplied,
-    /// with every chain alone where `alone` says so, and how many chain
-    /// layers the read made. `None` where there is no GPU.
+    /// `scene` drawn on a fresh GPU page in `space`, read back as
+    /// premultiplied 32-bit floats, with every chain alone where `alone` says
+    /// so, and how many chain layers the read made.
     fn drawn(
         scene: &Scene,
-        kind: (PixelColorSpace, PixelDepth),
+        space: PixelColorSpace,
         alone: bool,
-    ) -> Option<(Vec<u8>, usize)> {
+    ) -> (Vec<u8>, usize) {
         let mut canvas = Canvas::with_options(
             PAGE.0,
             PAGE.1,
             CanvasOptions {
                 gpu: true,
-                color_space: kind.0,
-                color_type: kind.1,
+                color_space: space,
                 ..CanvasOptions::default()
             },
         )
         .expect("a canvas");
-        if canvas.engine_kind() != EngineKind::Gpu {
-            return None;
-        }
+        assert_eq!(canvas.engine_kind(), EngineKind::Gpu, "a CPU page");
         let ctx = canvas.context();
         ctx.scale(scene.scale, scene.scale);
         let (w, h) = (36.0, 22.0);
@@ -4265,8 +4262,14 @@ mod shared_chain_tests {
                 ))
                 .expect("a colour");
                 ctx.begin_path();
-                ctx.round_rect(x, y, w, h, [7.0; 4])
-                    .expect("a rounded rectangle");
+                match i % 3 {
+                    2 => ctx
+                        .arc(x + w / 2.0, y + h / 2.0, h / 2.0, 0.0, TAU, false)
+                        .expect("a circle"),
+                    _ => ctx
+                        .round_rect(x, y, w, h, [7.0; 4])
+                        .expect("a rounded rectangle"),
+                }
                 ctx.fill(FillRule::NonZero);
                 x += w + scene.gap;
                 i += 1;
@@ -4275,10 +4278,14 @@ mod shared_chain_tests {
         }
         ALONE_CHAINS.with(|flag| flag.set(alone));
         let before = SHARED_LAYERS.with(std::cell::Cell::get);
-        let data = canvas.to_image_data(
-            None,
+        let data = ctx.get_image_data_with(
+            0.0,
+            0.0,
+            PAGE.0,
+            PAGE.1,
             &ImageDataExport {
                 pixels: PixelExportOptions {
+                    depth: PixelDepth::F32,
                     premultiplied: true,
                     ..PixelExportOptions::default()
                 },
@@ -4287,7 +4294,7 @@ mod shared_chain_tests {
         );
         let layers = SHARED_LAYERS.with(std::cell::Cell::get) - before;
         ALONE_CHAINS.with(|flag| flag.set(false));
-        Some((data.expect("image data").pixels().to_vec(), layers))
+        (data.expect("image data").pixels().to_vec(), layers)
     }
 
     /// Chains far enough apart share layers and land the bytes they do
@@ -4295,16 +4302,16 @@ mod shared_chain_tests {
     /// depth, land them too, in layers of their own.
     #[test]
     fn chains_sharing_a_layer_draw_as_they_do_alone() {
-        for (page, space, depth) in PAGES {
+        let mut probe = Canvas::new(1.0, 1.0);
+        probe.set_gpu(true);
+        if probe.engine_kind() != EngineKind::Gpu {
+            eprintln!("skipped: no GPU engine");
+            return;
+        }
+        for (page, space) in PAGES {
             for scene in &SCENES {
-                let Some((alone, alone_layers)) =
-                    drawn(scene, (space, depth), true)
-                else {
-                    eprintln!("skipped: no GPU engine");
-                    return;
-                };
-                let (shared, shared_layers) =
-                    drawn(scene, (space, depth), false).expect("a GPU page");
+                let (alone, alone_layers) = drawn(scene, space, true);
+                let (shared, shared_layers) = drawn(scene, space, false);
                 let differ = alone.iter().zip(&shared).filter(|(a, b)| a != b);
                 assert_eq!(
                     differ.count(),
@@ -4313,12 +4320,7 @@ mod shared_chain_tests {
                     scene.name
                 );
                 assert!(alone_layers > 1, "{}: one layer alone", scene.name);
-                // Every chain on a page of floats takes a layer of floats.
-                let sharing = match (scene.sharing, depth) {
-                    (Sharing::Never, PixelDepth::F16) => Sharing::One,
-                    (sharing, _) => sharing,
-                };
-                let expected = match sharing {
+                let expected = match scene.sharing {
                     Sharing::One => shared_layers == 1,
                     Sharing::Neighbours => {
                         shared_layers < alone_layers
