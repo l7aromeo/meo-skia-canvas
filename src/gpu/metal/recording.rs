@@ -274,6 +274,8 @@ impl RecordingQueue {
         issued.sweep();
         if let Some(buffer) = &buffer {
             #[cfg(test)]
+            ISSUED.set(ISSUED.get() + 1);
+            #[cfg(test)]
             let doomed = match &mut issued.failing {
                 (0, 0) => false,
                 (0, times) => {
@@ -368,6 +370,8 @@ impl RecordingQueue {
 thread_local! {
     /// How many queues of ours this thread has made.
     pub(crate) static MADE: Cell<usize> = const { Cell::new(0) };
+    /// How many buffers the queues on this thread have handed out.
+    pub(crate) static ISSUED: Cell<usize> = const { Cell::new(0) };
     /// How many buffers the last confirmation with a mark saw finish since it.
     pub(crate) static FINISHED: Cell<usize> = const { Cell::new(0) };
     /// How many buffers confirmations on this thread have waited for

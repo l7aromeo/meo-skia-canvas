@@ -62,7 +62,8 @@ use crate::{
     gpu::{
         RenderingEngine,
         completion::{
-            Checked, DRAW_ATTEMPTS, Rows, discarded, draws_ran, read_checked,
+            Checked, DRAW_ATTEMPTS, Rows, discarded, draws_ran,
+            read_after_draws, read_checked,
         },
         owner, pacing,
     },
@@ -4087,6 +4088,22 @@ pub(crate) struct FiledPrefix {
     owner: Weak<PageId>,
 }
 
+/// A page cache entry an export made, held until the read it came from is
+/// confirmed to have run on the GPU, so that a copy the GPU discarded is not
+/// served from the cache afterwards.
+struct Filing {
+    owner: Weak<PageId>,
+    image: SkImage,
+    depth: usize,
+}
+
+impl Filing {
+    /// Files the entry for an export made with `options`.
+    fn file(self, options: &ExportOptions) {
+        PageCache::set(&self.owner, self.image, options, self.depth);
+    }
+}
+
 impl PartialEq for Page {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id && self.depth() == other.depth()
@@ -4811,12 +4828,14 @@ impl Page {
     /// The shared half of [`Self::composite`] and [`Self::composite_into`],
     /// which differ only in how they take the pixels off the surface
     /// afterwards. Hands back the depth the cache stood in for, because
-    /// whether anything new needs caching is decided from it.
+    /// whether anything new needs caching is decided from it, and the entry
+    /// for the filed page beneath any open layers, which is filed only once
+    /// the read it came from is confirmed.
     fn composited_surface(
         &self,
         options: &ExportOptions,
         engine: RenderingEngine,
-    ) -> Result<(Surface, usize), String> {
+    ) -> Result<(Surface, usize, Option<Filing>), String> {
         let img_dims = self.scaled_dimensions(options.density);
         let img_scale =
             M44::from(Matrix::scale((options.density, options.density)));
@@ -4877,45 +4896,66 @@ impl Page {
             .filter(|filed| filed.depth > cache_depth && !options.single_use);
         let split = prefix.map_or(cache_depth, |filed| filed.depth);
         self.play_layers(cache_depth..split, canvas);
-        if let Some(filed) = prefix {
-            // A snapshot, which Skia keeps as it stood while the open layers
-            // draw over the surface next: an entry holding them would show
-            // a layer still being drawn as though it were filed.
-            let image = surface.image_snapshot();
-            let image = self.cacheable(&mut surface, image, options, engine)?;
-            PageCache::set(&filed.owner, image, options, filed.depth);
-        }
+        let filing = match prefix {
+            Some(filed) => {
+                // A snapshot, which Skia keeps as it stood while the open
+                // layers draw over the surface next: an entry holding them
+                // would show a layer still being drawn as though it were
+                // filed.
+                let image = surface.image_snapshot();
+                Some(Filing {
+                    owner: filed.owner.clone(),
+                    image: self.cacheable(
+                        &mut surface,
+                        image,
+                        options,
+                        engine,
+                    )?,
+                    depth: filed.depth,
+                })
+            }
+            None => None,
+        };
         let canvas = surface.canvas();
         self.play_layers(split.max(cache_depth)..self.layers.len(), canvas);
 
-        Ok((surface, cache_depth))
+        Ok((surface, cache_depth, filing))
     }
 
     /// Takes the composited page off `surface` as an image: converted into
-    /// the requested space if that is not the one it was drawn in, brought
-    /// back from the GPU if it is a texture, and filed in the page cache if
-    /// there is anything new to file.
+    /// the requested space if that is not the one it was drawn in, and
+    /// brought back from the GPU if it is a texture.
     ///
     /// The tail of [`Self::composite`], shared with [`Self::composite_into`],
     /// which needs it whenever it cannot take the shortcut of reading the
-    /// surface directly.
+    /// surface directly. Neither files the image until the read is confirmed
+    /// -- see [`Self::filing`].
     fn image_from(
         &self,
         surface: &mut Surface,
         options: &ExportOptions,
         engine: RenderingEngine,
-        cache_depth: usize,
     ) -> Result<SkImage, String> {
         let image = surface
             .make_temporary_image()
             .unwrap_or_else(|| surface.image_snapshot());
-        let image = self.cacheable(surface, image, options, engine)?;
+        self.cacheable(surface, image, options, engine)
+    }
 
-        if self.depth() > cache_depth && !options.single_use {
-            PageCache::set(&self.owner, image.clone(), options, self.depth());
-        }
-
-        Ok(image)
+    /// The page cache entry `image`, this page composited over a cache that
+    /// stood in for `cache_depth` layers, makes: `None` where there is
+    /// nothing new to file.
+    fn filing(
+        &self,
+        image: &SkImage,
+        options: &ExportOptions,
+        cache_depth: usize,
+    ) -> Option<Filing> {
+        (self.depth() > cache_depth && !options.single_use).then(|| Filing {
+            owner: self.owner.clone(),
+            image: image.clone(),
+            depth: self.depth(),
+        })
     }
 
     /// `image`, taken off a compositing surface, as the page cache and an
@@ -4951,32 +4991,10 @@ impl Page {
         let image = match image.is_texture_backed() {
             false => image,
             true => {
-                // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
-                // Re-check: GrMtlGpu::onReadPixels checks its submit
-                //
-                // Skia M156's `GrMtlGpu::onReadPixels`, in
-                // `skia/src/gpu/ganesh/mtl/GrMtlGpu.mm` under the
-                // skia-bindings crate, waits on the command buffer that
-                // copies the texture out with
-                // `submitCommandBuffer(kForce_SyncQueue)`, drops the answer,
-                // and copies whatever the transfer buffer holds. So a
-                // readback whose own buffer the GPU discarded hands back
-                // zeros or stale bytes as success, and nothing here can tell.
-                // The draws before it are confirmed by `confirmed_surface`;
-                // this copy is not, and it is short-lived, which is the whole
-                // of the argument for living with it. A `getImageData` read
-                // does not come here: `read_checked` puts its copy in the
-                // buffer it waits on, which answers for both. A readback seen
-                // transparent is told from this by running it again under
-                // `node scripts/gpu-events.mjs --run -- <command>`, which on
-                // a failure prints any GPU recovery while it ran.
-                //
-                // Checking that submit covers the copy only. The draws were
-                // committed earlier in a buffer of their own, by the
-                // `submit()` `SurfaceContext::readPixels` makes before the
-                // copy, and nothing waits on that one -- so
-                // `crate::gpu::completion::draws_ran` and its extra wait stay
-                // until Skia reports that buffer too.
+                // Skia's read waits on the buffer that copies the texture out
+                // and drops the answer; the caller's confirmation after the
+                // read answers for it -- see
+                // `crate::gpu::completion::read_after_draws`.
                 let mut context = surface.direct_context();
                 image.make_non_texture_image(context.as_mut()).ok_or_else(
                     || "Could not read the page back from the GPU".to_string(),
@@ -5027,26 +5045,44 @@ impl Page {
         options: &ExportOptions,
         engine: RenderingEngine,
     ) -> Result<SkImage, String> {
-        let (mut surface, cache_depth) =
-            self.confirmed_surface(options, engine)?;
-        self.image_from(&mut surface, options, engine, cache_depth)
+        self.read_composited(options, engine, |surface, cache_depth| {
+            let image = self.image_from(surface, options, engine)?;
+            let filing = self.filing(&image, options, cache_depth);
+            Ok((image, filing))
+        })
     }
 
-    /// [`Self::composited_surface`], with its draws confirmed to have run
-    /// on the GPU before anything reads them: drawn once more on a fresh
-    /// surface if they did not, and an error if that fails too. See
-    /// [`crate::gpu::completion`].
-    fn confirmed_surface(
+    /// [`Self::composited_surface`], read by `read`, which is handed the
+    /// surface and the depth the cache stood in for and answers with the
+    /// read and any cache entry it made. The read is confirmed with the
+    /// draws before it to have run on the GPU -- see [`read_after_draws`]:
+    /// drawn and read once more on a fresh surface if they did not, and an
+    /// error if that fails too. Nothing is filed in the page cache until it
+    /// is confirmed.
+    fn read_composited<T>(
         &self,
         options: &ExportOptions,
         engine: RenderingEngine,
-    ) -> Result<(Surface, usize), String> {
+        mut read: impl FnMut(
+            &mut Surface,
+            usize,
+        ) -> Result<(T, Option<Filing>), String>,
+    ) -> Result<T, String> {
         for _ in 0..DRAW_ATTEMPTS {
-            let (mut surface, cache_depth) =
+            let (mut surface, cache_depth, prefix) =
                 self.composited_surface(options, engine)?;
-            if draws_ran(&mut surface, self.id) {
-                return Ok((surface, cache_depth));
+            let Some(answer) =
+                read_after_draws(&mut surface, self.id, |surface| {
+                    read(surface, cache_depth)
+                })
+            else {
+                continue;
+            };
+            let (value, filing) = answer?;
+            for filing in prefix.into_iter().chain(filing) {
+                filing.file(options);
             }
+            return Ok(value);
         }
         Err(discarded("compositing the page"))
     }
@@ -5074,9 +5110,22 @@ impl Page {
         engine: RenderingEngine,
         dst_info: &ImageInfo,
     ) -> Result<Vec<u8>, String> {
-        let (mut surface, cache_depth) =
-            self.confirmed_surface(options, engine)?;
+        self.read_composited(options, engine, |surface, cache_depth| {
+            self.read_into(surface, options, engine, cache_depth, dst_info)
+        })
+    }
 
+    /// The read [`Self::composite_into`] makes of `surface`, composited over
+    /// a cache that stood in for `cache_depth` layers, and the cache entry it
+    /// made.
+    fn read_into(
+        &self,
+        surface: &mut Surface,
+        options: &ExportOptions,
+        engine: RenderingEngine,
+        cache_depth: usize,
+        dst_info: &ImageInfo,
+    ) -> Result<(Vec<u8>, Option<Filing>), String> {
         let stride = dst_info.min_row_bytes();
         let mut buffer: Vec<u8> = vec![0; checked_byte_size(dst_info)?];
 
@@ -5095,27 +5144,26 @@ impl Page {
         let converting = options.surface_color_space != options.color_space;
         let caching = self.depth() > cache_depth && !options.single_use;
 
-        let read = match converting || caching {
-            false => surface.read_pixels(dst_info, &mut buffer, stride, (0, 0)),
+        let (read, filing) = match converting || caching {
+            false => (
+                surface.read_pixels(dst_info, &mut buffer, stride, (0, 0)),
+                None,
+            ),
             true => {
-                let image = self.image_from(
-                    &mut surface,
-                    options,
-                    engine,
-                    cache_depth,
-                )?;
-                image.read_pixels(
+                let image = self.image_from(surface, options, engine)?;
+                let read = image.read_pixels(
                     dst_info,
                     &mut buffer,
                     stride,
                     (0, 0),
                     CachingHint::Allow,
-                )
+                );
+                (read, self.filing(&image, options, cache_depth))
             }
         };
 
         match read {
-            true => Ok(buffer),
+            true => Ok((buffer, filing)),
             false => Err(format!(
                 "Could not read pixels into destination format ({:?} / {:?})",
                 dst_info.color_type(),
@@ -5154,27 +5202,26 @@ impl Page {
             self.play_layers(0..self.layers.len(), canvas);
             Ok(surface)
         };
-        let mut surface = None;
+        let read = |surface: &mut Surface| {
+            let stride = info.min_row_bytes();
+            let mut buffer: Vec<u8> = vec![0; checked_byte_size(info)?];
+            match surface.read_pixels(info, &mut buffer, stride, (0, 0)) {
+                true => Ok(buffer),
+                false => Err(format!(
+                    "Could not read pixels into destination format ({:?} / \
+                     {:?})",
+                    info.color_type(),
+                    info.alpha_type(),
+                )),
+            }
+        };
         for _ in 0..DRAW_ATTEMPTS {
             let mut drawn = draw()?;
-            if draws_ran(&mut drawn, self.id) {
-                surface = Some(drawn);
-                break;
+            if let Some(answer) = read_after_draws(&mut drawn, self.id, read) {
+                return answer;
             }
         }
-        let mut surface =
-            surface.ok_or_else(|| discarded("compositing the page"))?;
-
-        let stride = info.min_row_bytes();
-        let mut buffer: Vec<u8> = vec![0; checked_byte_size(info)?];
-        match surface.read_pixels(info, &mut buffer, stride, (0, 0)) {
-            true => Ok(buffer),
-            false => Err(format!(
-                "Could not read pixels into destination format ({:?} / {:?})",
-                info.color_type(),
-                info.alpha_type(),
-            )),
-        }
+        Err(discarded("compositing the page"))
     }
 
     pub fn encoded_as(
@@ -5885,7 +5932,7 @@ fn space_key(space: &ColorSpace) -> ColorSpaceKey {
 }
 
 #[derive(Debug, Clone)]
-struct PageCache {
+pub(crate) struct PageCache {
     image: Option<SkImage>,
     density: f32,
     matte: Option<Matte>,
@@ -9642,7 +9689,7 @@ mod tests {
         // first did: an entry that changed as the open layer drew over it
         // would hold the layer twice.
         let again = recorder.page();
-        let (_, started) = again
+        let (_, started, _) = again
             .composited_surface(&opts, RenderingEngine::CPU)
             .expect("a raster composite of an eight-pixel page");
         assert_eq!(
