@@ -50,8 +50,9 @@ pub(crate) struct Blurred {
 ///
 /// Where FreeType pre-blends its A8 masks (`SK_GAMMA_APPLY_TO_A8`,
 /// `BUILD.gn:92`; `SkFontHost_FreeType.cpp:858-863`) blue picks black's table
-/// and red does not. CoreText first scales the colour of smoothed text
-/// (`SkTypeface_mac_ct.cpp:966-982`): by a half where CoreGraphics smooths
+/// and red does not, whatever the hinting. CoreText does the same for an
+/// unhinted A8 mask, and first scales the colour of a mask it hints
+/// (`SkTypeface_mac_ct.cpp:960-982`): by a half where CoreGraphics smooths
 /// without subpixel coverage, which puts red on black's table too, and by
 /// three quarters where it smooths with it, which does not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
