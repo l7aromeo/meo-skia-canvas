@@ -17,7 +17,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{context::page::ExportOptions, gpu::ThreadBound};
+use crate::{
+    context::page::ExportOptions,
+    gpu::{ThreadBound, graphite},
+};
 
 mod recording;
 
@@ -52,7 +55,9 @@ pub(crate) fn recording(
             .map(|(_, queue)| queue.clone())
     })
 }
-static MTL_CONTEXT_LIFESPAN: Duration = Duration::from_secs(5);
+/// How long a thread's context is kept unused before it is dropped. Graphite's
+/// context is kept as long -- see [`crate::gpu::graphite`].
+pub(super) static MTL_CONTEXT_LIFESPAN: Duration = Duration::from_secs(5);
 static MTL_STATUS: OnceLock<Value> = OnceLock::new();
 
 //
@@ -89,16 +94,7 @@ impl MetalEngine {
                 Some(context) => {
                     Self::spawn_idle_watcher(); // watch for inactive contexts and deallocate them
 
-                    let device_name = format!(
-                        "{} ({})",
-                        match context.device.location() {
-                            MTLDeviceLocation::BuiltIn => "Integrated GPU",
-                            MTLDeviceLocation::Slot => "Discrete GPU",
-                            MTLDeviceLocation::External => "External GPU",
-                            _ => "Other GPU",
-                        },
-                        context.device.name()
-                    );
+                    let device_name = device_name(&context.device);
 
                     json!({
                         "renderer": "GPU",
@@ -130,7 +126,9 @@ impl MetalEngine {
     }
 
     /// Hands back what this thread's context is holding, and drops the context
-    /// itself once it has gone unused for [`MTL_CONTEXT_LIFESPAN`].
+    /// itself once it has gone unused for [`MTL_CONTEXT_LIFESPAN`]; and the
+    /// same for the thread's Graphite context, which holds its images until
+    /// it is dropped.
     ///
     /// Called for a `rayon` worker by the broadcast above, and by an export
     /// owner for itself -- see [`crate::gpu::owner`]. The owners are not
@@ -143,6 +141,7 @@ impl MetalEngine {
                 engine.last_use.elapsed() > MTL_CONTEXT_LIFESPAN
             });
         });
+        graphite::release_idle_context();
     }
 
     pub fn with_context<T, F>(f: F) -> Result<T, String>
@@ -182,6 +181,21 @@ impl MetalEngine {
     ) -> Result<Surface, String> {
         Self::with_context(|ctx| ctx.surface(image_info, opts))
     }
+}
+
+/// `device` as `canvas.engine` names it: where it sits, then the name Metal
+/// gives it.
+pub(super) fn device_name(device: &ProtocolObject<dyn MTLDevice>) -> String {
+    format!(
+        "{} ({})",
+        match device.location() {
+            MTLDeviceLocation::BuiltIn => "Integrated GPU",
+            MTLDeviceLocation::Slot => "Discrete GPU",
+            MTLDeviceLocation::External => "External GPU",
+            _ => "Other GPU",
+        },
+        device.name()
+    )
 }
 
 /// An Objective-C object as the opaque handle Skia takes.

@@ -8,13 +8,15 @@ use crate::{
 };
 use serde_json::{Value, json};
 use skia_safe::{
-    AlphaType, Color, Color4f, ColorSpace, ColorType, Image, ImageInfo, Matrix,
-    Paint, Rect, Surface, gpu::DirectContext,
+    AlphaType, Canvas, Color, Color4f, ColorSpace, ColorType, Image, ImageInfo,
+    Matrix, Paint, Rect, Surface, gpu::DirectContext,
 };
 use std::sync::OnceLock;
 
 /// Confirming the GPU ran a page's draws before they are read back.
 pub(crate) mod completion;
+/// Graphite, the engine for pages Ganesh cannot composite.
+pub(crate) mod graphite;
 /// The one thread that owns a GPU context for exporting.
 pub mod owner;
 /// Flushing a GPU playback every so many layers it renders offscreen.
@@ -157,10 +159,33 @@ pub fn autorelease<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
-#[derive(Copy, Clone, Debug)]
+/// The alpha sixty layers at 0.006 composite to: 1 - 0.994^60, as arithmetic
+/// without rounding gives it, to five places (0.3030798 to seven).
+const SIXTY_LAYERS: f32 = 0.303_08;
+
+/// How far from [`SIXTY_LAYERS`] an `F32` page may land and still count as
+/// compositing in float.
+///
+/// Chosen to separate the two outcomes the probe sees, not tuned: an engine
+/// that rounds each draw's source to eight bits lands at 0.36078 or beyond,
+/// and one compositing in float, half floats included, within 0.002.
+const FLOAT_COMPOSITING: f32 = 0.01;
+
+/// The rasterizer a page is drawn on.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RenderingEngine {
+    /// Skia's raster backend.
     CPU,
+    /// Ganesh, Skia's GPU backend for everything it can composite: Metal on
+    /// macOS, Vulkan elsewhere.
     GPU,
+    /// Graphite on Metal, for the float pages Ganesh cannot composite.
+    ///
+    /// Present on every build, so that a match over the engines reads the
+    /// same with and without it; built only where `meo_graphite` is set on
+    /// Metal, and never constructed anywhere else -- see [`graphite`].
+    #[cfg_attr(not(all(meo_graphite, feature = "metal")), allow(dead_code))]
+    Graphite,
 }
 
 impl Default for RenderingEngine {
@@ -171,6 +196,31 @@ impl Default for RenderingEngine {
             Self::CPU
         }
     }
+}
+
+/// The engine `canvas` draws on, read from the canvas itself: Ganesh where it
+/// has a recording context, Graphite where it has a recorder, and the CPU
+/// otherwise. A surface made from a canvas's own (`Canvas::new_surface`)
+/// answers as that canvas does.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the page's reads do not dispatch on Graphite pages yet"
+    )
+)]
+pub(crate) fn engine_of(canvas: &Canvas) -> RenderingEngine {
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    if canvas.recording_context().is_some() {
+        return RenderingEngine::GPU;
+    }
+    #[cfg(all(meo_graphite, feature = "metal"))]
+    if canvas.recorder().is_some() {
+        return RenderingEngine::Graphite;
+    }
+    #[cfg(not(any(feature = "metal", feature = "vulkan")))]
+    let _ = canvas;
+    RenderingEngine::CPU
 }
 
 #[allow(dead_code)]
@@ -206,25 +256,39 @@ impl RenderingEngine {
     pub fn selectable(&self) -> bool {
         match self {
             Self::GPU => Engine::supported(),
+            Self::Graphite => graphite::supported(),
             Self::CPU => true,
         }
     }
 
     /// Whether this engine can composite a page in `color_type`.
     ///
-    /// Asked once per format and remembered, by building a one-pixel surface
-    /// and seeing whether the backend takes it. A probe rather than a table
-    /// because the answer is Skia's to give and it changes between releases:
-    /// as of Skia m150 its Ganesh Metal and Vulkan backends carry no 32-bit
-    /// float format at all -- the Metal one's list of pixel formats stops at
-    /// `RGBA16Float`, and neither declares `kRGBA_F32` -- while its GL,
-    /// raster and Graphite paths do. When that changes, or when a caller
-    /// builds against a Skia where it already has, this starts answering yes
-    /// on its own and the canvas stays on the GPU. A hardcoded rule would
-    /// still be refusing years later.
+    /// Every engine composites eight-bit formats. A float format is asked
+    /// once per engine and remembered: sixty layers at alpha 0.006 are drawn
+    /// on a one-pixel page in `color_type` and read back -- see
+    /// [`Self::composited`] -- and the answer is judged by the format.
+    ///
+    /// - `F32` is taken where the page composites in float at all, landing
+    ///   within [`FLOAT_COMPOSITING`] of the arithmetic. An engine that rounds
+    ///   the source to eight bits lands at least 0.05 away. Graphite lands
+    ///   0.00002 away, against the CPU's 0.0000002: a hundred times the CPU's
+    ///   error, and still about a tenth of one `F16` step (0.00024 at this
+    ///   alpha), so finer than any narrower float page could store.
+    /// - `F16` is taken only where the page lands no further from the
+    ///   arithmetic than the CPU's own `F16` page does, since the CPU holds the
+    ///   same format and is what the canvas gets otherwise. Graphite's
+    ///   half-float blend lands 0.00112 away, against the CPU's 0.00010, so an
+    ///   `F16` page stays on the CPU.
+    ///
+    /// A probe rather than a table because the answer is Skia's to give and
+    /// it changes between releases: as of Skia m150 its Ganesh Metal and
+    /// Vulkan backends carry no 32-bit float format at all -- the Metal one's
+    /// list of pixel formats stops at `RGBA16Float`, and neither declares
+    /// `kRGBA_F32` -- while its GL, raster and Graphite paths do. When that
+    /// changes, or when a caller builds against a Skia where it already has,
+    /// this starts answering yes on its own. A hardcoded rule would still be
+    /// refusing years later.
     pub fn can_composite(&self, color_type: ColorType) -> bool {
-        // Every backend rasterises N32, which is what everything else
-        // composites in.
         if !matches!(
             color_type,
             ColorType::RGBAF16 | ColorType::RGBAF16Norm | ColorType::RGBAF32
@@ -234,69 +298,92 @@ impl RenderingEngine {
         if matches!(self, Self::CPU) {
             return true;
         }
-
-        static F16: OnceLock<bool> = OnceLock::new();
-        static F32: OnceLock<bool> = OnceLock::new();
-        let cell = match color_type {
-            ColorType::RGBAF32 => &F32,
-            _ => &F16,
+        let Some(alpha) = self.composited(color_type) else {
+            return false;
         };
-        *cell.get_or_init(|| {
+        let error = (alpha - SIXTY_LAYERS).abs();
+        match color_type {
+            ColorType::RGBAF32 => error < FLOAT_COMPOSITING,
+            _ => Self::CPU
+                .composited(color_type)
+                .is_some_and(|cpu| error <= (cpu - SIXTY_LAYERS).abs()),
+        }
+    }
+
+    /// The alpha sixty layers at 0.006 composite to on a one-pixel page of
+    /// this engine in the float format `color_type`, asked once per engine
+    /// and format; `None` where the engine cannot make or read the page.
+    ///
+    /// The case float exists for. Ganesh rounds each draw's source colour to
+    /// eight bits before blending, whatever the surface is made of, so sixty
+    /// layers at alpha 0.006 accumulate in F16 from a source that has already
+    /// become 2/255: 0.37695 against the 0.30308 the arithmetic gives, and
+    /// further from it than eight-bit storage manages on either backend.
+    /// Feeding 2/255 itself, an alpha eight bits hold exactly, brings the GPU
+    /// to within 0.00024 of the CPU's F16 (0.37695 against 0.37671), where
+    /// 0.006 leaves them 0.074 apart -- which is what says the loss is the
+    /// source and not the accumulation. It is not the paint slot -- a colour
+    /// arriving through a shader rounds identically -- so no shader or
+    /// runtime effect escapes it. Graphite composites F32 to 0.30310 against
+    /// the CPU's 0.30308, and F16 to 0.30420 against the CPU's 0.30298.
+    fn composited(&self, color_type: ColorType) -> Option<f32> {
+        static ALPHAS: [[OnceLock<Option<f32>>; 2]; 3] =
+            [const { [const { OnceLock::new() }; 2] }; 3];
+        let engine = match self {
+            Self::CPU => 0,
+            Self::GPU => 1,
+            Self::Graphite => 2,
+        };
+        let format = match color_type {
+            ColorType::RGBAF32 => 1,
+            _ => 0,
+        };
+        *ALPHAS[engine][format].get_or_init(|| {
             let info = ImageInfo::new(
                 (1, 1),
                 color_type,
                 AlphaType::Premul,
                 Some(ColorSpace::new_srgb()),
             );
-            let Ok(mut surface) =
-                self.make_surface(&info, &ExportOptions::default())
-            else {
-                return false;
+            let draw = |canvas: &Canvas| {
+                let mut paint = Paint::default();
+                paint.set_anti_alias(false);
+                paint.set_color4f(
+                    Color4f::new(0.006, 0.006, 0.006, 0.006),
+                    &ColorSpace::new_srgb(),
+                );
+                canvas.clear(Color::TRANSPARENT);
+                for _ in 0..60 {
+                    canvas
+                        .draw_rect(Rect::from_xywh(0.0, 0.0, 1.0, 1.0), &paint);
+                }
             };
-
-            // Allocating the surface is not the question -- compositing in it
-            // is. Ganesh rounds each draw's source colour to eight bits before
-            // blending, whatever the surface is made of, so sixty layers at
-            // alpha 0.006 accumulate in F16 from a source that has already
-            // become 2/255: 0.37695 against the 0.30308 the arithmetic gives,
-            // and further from it than eight-bit storage manages on either
-            // backend. Feeding 2/255 itself, an alpha eight bits hold exactly,
-            // brings the GPU to within 0.00024 of the CPU's F16 (0.37695
-            // against 0.37671), where 0.006 leaves them 0.074 apart -- which is
-            // what says the loss is the source and not the accumulation. It is
-            // not the paint slot -- a colour arriving through a shader rounds
-            // identically -- so no shader or runtime effect escapes it. So this
-            // draws the case float exists for and checks the arithmetic.
-            let mut paint = Paint::default();
-            paint.set_anti_alias(false);
-            paint.set_color4f(
-                Color4f::new(0.006, 0.006, 0.006, 0.006),
-                &ColorSpace::new_srgb(),
-            );
-            let canvas = surface.canvas();
-            canvas.clear(Color::TRANSPARENT);
-            for _ in 0..60 {
-                canvas.draw_rect(Rect::from_xywh(0.0, 0.0, 1.0, 1.0), &paint);
-            }
-
-            let read_info = ImageInfo::new(
+            let read = ImageInfo::new(
                 (1, 1),
                 ColorType::RGBAF32,
                 AlphaType::Premul,
                 Some(ColorSpace::new_srgb()),
             );
             let mut pixels = [0u8; 16];
-            let stride = read_info.min_row_bytes();
-            if !surface.read_pixels(&read_info, &mut pixels, stride, (0, 0)) {
-                return false;
+            match self {
+                // `Surface::read_pixels` does not read a Graphite page.
+                Self::Graphite => {
+                    graphite::probe(&info, draw, &read, &mut pixels).ok()?
+                }
+                Self::CPU | Self::GPU => {
+                    let mut surface = self
+                        .make_surface(&info, &ExportOptions::default())
+                        .ok()?;
+                    draw(surface.canvas());
+                    let stride = read.min_row_bytes();
+                    surface
+                        .read_pixels(&read, &mut pixels, stride, (0, 0))
+                        .then_some(())?
+                }
             }
-            let alpha = f32::from_le_bytes([
+            Some(f32::from_le_bytes([
                 pixels[12], pixels[13], pixels[14], pixels[15],
-            ]);
-
-            // 1 - 0.994^60, the answer arithmetic without rounding gives.
-            const IDEAL: f32 = 0.303_08;
-            (alpha - IDEAL).abs() < 0.01
+            ]))
         })
     }
 
@@ -309,6 +396,10 @@ impl RenderingEngine {
             Self::GPU => {
                 start_skia();
                 Engine::make_surface(image_info, opts)
+            }
+            Self::Graphite => {
+                start_skia();
+                graphite::make_surface(image_info, opts)
             }
             Self::CPU => started::raster(
                 image_info,
@@ -330,7 +421,7 @@ impl RenderingEngine {
     ) {
         match self {
             Self::GPU => Engine::with_direct_context(f),
-            Self::CPU => f(None),
+            Self::Graphite | Self::CPU => f(None),
         }
     }
 
@@ -343,6 +434,7 @@ impl RenderingEngine {
     pub fn status(&self, is_manually_disabled: bool) -> serde_json::Value {
         match (self, is_manually_disabled) {
             (Self::GPU, _) => Engine::status(),
+            (Self::Graphite, _) => graphite::status(),
             (Self::CPU, true) => json!({
                 "renderer":"CPU",
                 "api": Engine::api(),
@@ -464,4 +556,129 @@ pub enum RenderState {
     Clean,
     Dirty,
     Resizing,
+}
+
+#[cfg(test)]
+mod tests {
+    use skia_safe::{AlphaType, ColorSpace, ColorType, ImageInfo};
+
+    use super::*;
+
+    const FLOATS: [ColorType; 3] = [
+        ColorType::RGBAF16,
+        ColorType::RGBAF16Norm,
+        ColorType::RGBAF32,
+    ];
+
+    fn info(color_type: ColorType) -> ImageInfo {
+        ImageInfo::new(
+            (4, 4),
+            color_type,
+            AlphaType::Premul,
+            Some(ColorSpace::new_srgb()),
+        )
+    }
+
+    /// Every engine composites the eight-bit format everything else is
+    /// drawn in, and the CPU every format.
+    #[test]
+    fn every_engine_composites_eight_bits_and_the_cpu_every_format() {
+        for engine in [
+            RenderingEngine::CPU,
+            RenderingEngine::GPU,
+            RenderingEngine::Graphite,
+        ] {
+            assert!(engine.can_composite(ColorType::N32), "{engine:?}");
+        }
+        for color_type in FLOATS {
+            assert!(RenderingEngine::CPU.can_composite(color_type));
+        }
+    }
+
+    /// Ganesh takes neither float format: it has no 32-bit one, and rounds
+    /// a draw's colour to eight bits before compositing it in 16.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn ganesh_takes_no_float_format() {
+        assert!(RenderingEngine::GPU.selectable());
+        for color_type in FLOATS {
+            assert!(
+                !RenderingEngine::GPU.can_composite(color_type),
+                "{color_type:?}"
+            );
+        }
+    }
+
+    /// Graphite takes `F32`, where it composites in float, and not `F16`,
+    /// where it lands further from the arithmetic than the CPU's `F16`.
+    #[cfg(all(meo_graphite, feature = "metal"))]
+    #[test]
+    fn graphite_takes_f32_and_leaves_f16_to_the_cpu() {
+        assert!(RenderingEngine::Graphite.selectable());
+        let error = |engine: RenderingEngine, color_type| {
+            (engine.composited(color_type).expect("a reading") - SIXTY_LAYERS)
+                .abs()
+        };
+        // Further than the CPU in `F32` and taken all the same, which is the
+        // case a rule of "no worse than the CPU" would refuse.
+        assert!(
+            error(RenderingEngine::Graphite, ColorType::RGBAF32)
+                > error(RenderingEngine::CPU, ColorType::RGBAF32)
+        );
+        assert!(RenderingEngine::Graphite.can_composite(ColorType::RGBAF32));
+        for color_type in [ColorType::RGBAF16, ColorType::RGBAF16Norm] {
+            // In float, so a tolerance alone would take it.
+            assert!(
+                error(RenderingEngine::Graphite, color_type)
+                    < FLOAT_COMPOSITING
+            );
+            assert!(
+                error(RenderingEngine::Graphite, color_type)
+                    > error(RenderingEngine::CPU, color_type)
+            );
+            assert!(
+                !RenderingEngine::Graphite.can_composite(color_type),
+                "{color_type:?}"
+            );
+        }
+    }
+
+    /// Without the engine Graphite is never selectable and takes no float
+    /// format.
+    #[cfg(not(all(meo_graphite, feature = "metal")))]
+    #[test]
+    fn a_build_without_graphite_gives_it_nothing() {
+        assert!(!RenderingEngine::Graphite.selectable());
+        for color_type in FLOATS {
+            assert!(!RenderingEngine::Graphite.can_composite(color_type));
+        }
+    }
+
+    /// Each kind of page answers with the engine that made it, and a page
+    /// made from its canvas answers as it does.
+    #[test]
+    fn a_canvas_answers_with_the_engine_that_made_it() {
+        let mut engines = vec![RenderingEngine::CPU];
+        if RenderingEngine::GPU.selectable() {
+            engines.push(RenderingEngine::GPU);
+        }
+        if RenderingEngine::Graphite.selectable() {
+            engines.push(RenderingEngine::Graphite);
+        }
+        #[cfg(all(meo_graphite, feature = "metal"))]
+        assert!(engines.contains(&RenderingEngine::Graphite));
+        for engine in engines {
+            let color_type = match engine {
+                RenderingEngine::Graphite => ColorType::RGBAF32,
+                RenderingEngine::CPU | RenderingEngine::GPU => ColorType::N32,
+            };
+            let info = info(color_type);
+            let mut page = engine
+                .make_surface(&info, &ExportOptions::default())
+                .expect("a page");
+            assert_eq!(engine_of(page.canvas()), engine);
+            let mut layer = page.new_surface(&info).expect("a layer");
+            assert_eq!(engine_of(layer.canvas()), engine, "a layer");
+        }
+    }
 }
