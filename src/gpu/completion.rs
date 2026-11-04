@@ -330,6 +330,25 @@ pub(crate) struct Rows {
 /// thread.
 pub(crate) const PARALLEL_TASK_BYTES: usize = 48 << 10;
 
+/// The bytes of a plain copy -- a read's rows written as Skia hands them back
+/// -- one thread makes before the pool hands it more. A copy no larger is made
+/// on the calling thread.
+///
+/// A copy runs at memory speed, so a task has to be far larger than a
+/// conversion's [`PARALLEL_TASK_BYTES`] before handing it over pays. Measured
+/// in release on Apple silicon (M4 Pro, 14 threads), a whole premultiplied
+/// `getImageData` of a GPU page after a 1-pixel draw, median of ten rounds,
+/// tasks of 1, 2 and 4 MiB against the copy on one thread: 334, 344 and 366
+/// microseconds against 362 at 800x600, 431, 478 and 460 against 486 at
+/// 1024x768, 543, 546 and 605 against 617 at 1200x900, 797, 813 and 938
+/// against 938 at 1440x1080, and 1008, 1038 and 1199 against 1222 at
+/// 1920x1080. A size that makes one task is copied on one thread, so a figure
+/// where it does is one thread's. 1 MiB is faster than one thread in every
+/// round from 800x600 up; at 512x512, one 1 MiB task, every way is one thread,
+/// 258 to 270 microseconds.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+pub(crate) const PARALLEL_COPY_TASK_BYTES: usize = 1 << 20;
+
 /// How many rows of `row_bytes` make a [`PARALLEL_TASK_BYTES`] task: at least
 /// one, however wide the row.
 fn rows_per_task(row_bytes: usize) -> usize {
@@ -508,6 +527,10 @@ fn read_now(
 /// `row_bytes` a row: copied, or converted by `rows` on the way. `false` where
 /// it is not one plane of at least `info`'s width, or `pixels` cannot hold
 /// it.
+///
+/// A plain copy is shared across threads in tasks of
+/// [`PARALLEL_COPY_TASK_BYTES`] once it makes more than one, and a conversion
+/// in tasks of [`PARALLEL_TASK_BYTES`] where `rows` says it is shared.
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 fn copy_rows(
     read: &AsyncReadResult,
@@ -545,13 +568,20 @@ fn copy_rows(
     let pairs = |(to, from): (&mut [u8], &[u8])| {
         write(&from[..width], &mut to[..width])
     };
-    match rows.is_some_and(|rows| rows.parallel) {
-        true => pixels
+    let per_task = match rows {
+        Some(rows) => rows.parallel.then(|| rows_per_task(row_bytes)),
+        None => {
+            let per = PARALLEL_COPY_TASK_BYTES.div_ceil(row_bytes.max(1));
+            (height > per).then_some(per)
+        }
+    };
+    match per_task {
+        Some(per_task) => pixels
             .par_chunks_mut(row_bytes)
             .zip(plane.par_chunks(stride))
-            .with_min_len(rows_per_task(row_bytes))
+            .with_min_len(per_task)
             .for_each(pairs),
-        false => pixels
+        None => pixels
             .chunks_mut(row_bytes)
             .zip(plane.chunks(stride))
             .for_each(pairs),
@@ -932,6 +962,62 @@ mod tests {
         assert!(
             first.pixels() == again.pixels(),
             "the read differs from a repeat"
+        );
+    }
+
+    /// A read large enough for its plain copy to be shared across threads
+    /// lands what the same rows read in three reads too small for that do.
+    #[test]
+    fn a_large_plain_read_is_its_parts_read_apart() {
+        // Three copy tasks' worth of rows, read whole and in thirds, each
+        // third one task or less.
+        let width = 1024.0;
+        let rows = 3 * super::PARALLEL_COPY_TASK_BYTES.div_ceil(1024 * 4);
+        let (height, part) = (rows as f32, (rows / 3) as f32);
+        assert!(
+            (width * height * 4.0) as usize > super::PARALLEL_COPY_TASK_BYTES
+        );
+        assert!(
+            ((width * part * 4.0) as usize) <= super::PARALLEL_COPY_TASK_BYTES
+        );
+        let mut canvas = Canvas::new(width, height);
+        if canvas.engine_kind() != EngineKind::Gpu {
+            return;
+        }
+        let ctx = canvas.context();
+        ctx.set_fill_style(RgbaLinear::from_srgb8(204, 77, 26, 0.45));
+        ctx.fill_rect(20.0, 5.0, 900.0, 550.0);
+        ctx.set_fill_style(RgbaLinear::from_srgb8(26, 128, 230, 0.7));
+        ctx.begin_path();
+        ctx.arc(500.0, 300.0, 210.3, 0.0, 7.0, false)
+            .expect("an arc");
+        ctx.fill(FillRule::NonZero);
+        let premultiplied = PixelExportOptions {
+            premultiplied: true,
+            ..PixelExportOptions::default()
+        };
+        let before = DECLINED.get();
+        let whole = ctx
+            .get_image_data_as(0.0, 0.0, width, height, premultiplied)
+            .expect("a whole read");
+        let parts: Vec<u8> = (0..3)
+            .flat_map(|i| {
+                ctx.get_image_data_as(
+                    0.0,
+                    part * i as f32,
+                    width,
+                    part,
+                    premultiplied,
+                )
+                .expect("a part")
+                .pixels()
+                .to_vec()
+            })
+            .collect();
+        assert_eq!(DECLINED.get(), before, "Skia declined a read");
+        assert!(
+            whole.pixels() == parts.as_slice(),
+            "the whole read differs from its parts"
         );
     }
 
