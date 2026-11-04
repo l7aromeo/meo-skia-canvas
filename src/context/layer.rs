@@ -2482,7 +2482,10 @@ pub(crate) fn play_entries(
 /// Each chain is planned as it would be alone, with the content and the
 /// depth it would have, and its layer holds its own draw where it reads, so
 /// it lands the bytes it would alone; its result is composited in turn, as
-/// it would be.
+/// it would be. Chains are coloured into layers -- see [`Run`] -- so that two
+/// whose reads and draws meet never share one, while chains further apart
+/// do: a row of blurred shapes each meeting the next takes two layers, not
+/// one each.
 fn play_shared_chains(
     entries: &[Layer],
     canvas: &SkCanvas,
@@ -2509,23 +2512,112 @@ fn play_shared_chains(
         return None;
     }
     let to_device = canvas.local_to_device_as_3x3();
-    let mut batch: Vec<Chained<'_>> = Vec::new();
+    let mut run = Run::default();
     for member in leading.iter().flat_map(|entry| entry.members(&to_device)) {
         let Some(plan) =
             chain::plan(canvas, member.steps, member.content, member.depth)
         else {
             continue;
         };
-        let plans: Vec<&chain::Plan> =
-            batch.iter().map(|chained| &chained.plan).collect();
-        if !batch.is_empty() && !plan.joins(&plans) {
-            play_chained(&batch, canvas, target);
-            batch.clear();
-        }
-        batch.push(Chained { member, plan });
+        let layer = match run.layer_for(&plan) {
+            Some(layer) => layer,
+            None => {
+                std::mem::take(&mut run).play(canvas, target);
+                0
+            }
+        };
+        run.push(Chained { member, plan }, layer);
     }
-    play_chained(&batch, canvas, target);
+    run.play(canvas, target);
     Some(leading.len())
+}
+
+/// The most layers a [`Run`] keeps open at once. Chosen, not measured: two
+/// takes in a row of chains each meeting the next and the one before, as
+/// blurred shapes along a line do, and each layer open is a snapshot the size
+/// of the page held until every chain in the run is composited, so more would
+/// hold more of them without a scene here that needs it.
+const MAX_RUN_LAYERS: usize = 2;
+
+/// Chains of consecutive entries, each placed in the first open layer whose
+/// chains it can share with -- see [`chain::Plan::joins`] -- or in a new one,
+/// and then all drawn, finished and composited in the order they were
+/// drawn. Each chain reads its own layer and never the page, so drawing them
+/// all before compositing any changes nothing they read; compositing them in
+/// draw order, across layers, is what keeps overlapping results stacked as
+/// they would be alone.
+#[derive(Default)]
+struct Run<'a> {
+    chains: Vec<Chained<'a>>,
+    /// Each open layer's chains, as indices into `chains`.
+    layers: Vec<Vec<usize>>,
+}
+
+impl<'a> Run<'a> {
+    /// The layer a chain planned as `plan` goes in: the first open one whose
+    /// chains it can share with, or a new one -- the index past the last --
+    /// while fewer than [`MAX_RUN_LAYERS`] are open. `None` where it shares
+    /// none and no other can be opened, so that the run is played first and
+    /// the chain starts the next.
+    fn layer_for(&self, plan: &chain::Plan) -> Option<usize> {
+        let fits = self.layers.iter().position(|layer| {
+            let plans: Vec<&chain::Plan> =
+                layer.iter().map(|&i| &self.chains[i].plan).collect();
+            plan.joins(&plans)
+        });
+        fits.or(
+            (self.layers.len() < MAX_RUN_LAYERS).then_some(self.layers.len())
+        )
+    }
+
+    /// Places `chained` in `layer` -- see [`Self::layer_for`].
+    fn push(&mut self, chained: Chained<'a>, layer: usize) {
+        if layer == self.layers.len() {
+            self.layers.push(Vec::new());
+        }
+        self.layers[layer].push(self.chains.len());
+        self.chains.push(chained);
+    }
+
+    /// Draws each layer, then finishes and composites every chain onto
+    /// `canvas` in the order they were placed -- or in a layer of its own
+    /// where Skia refuses its shared one, which then falls back as a chain
+    /// alone does.
+    fn play(self, canvas: &SkCanvas, target: Target) {
+        let Run { chains, layers } = self;
+        let mut drawn: Vec<Option<chain::Drawn>> = layers
+            .iter()
+            .map(|layer| {
+                let plans: Vec<&chain::Plan> =
+                    layer.iter().map(|&i| &chains[i].plan).collect();
+                chain::Drawn::new(canvas, &plans, |k, offscreen| {
+                    chains[layer[k]].member.draw.draw(offscreen, target);
+                })
+            })
+            .collect();
+        let mut layer_of = vec![0; chains.len()];
+        for (l, layer) in layers.iter().enumerate() {
+            for &i in layer {
+                layer_of[i] = l;
+            }
+        }
+        for (chained, l) in chains.iter().zip(layer_of) {
+            match drawn[l].as_mut() {
+                Some(drawn) => chained.finish(drawn, canvas),
+                None if layers[l].len() > 1 => {
+                    let plans = [&chained.plan];
+                    let alone =
+                        chain::Drawn::new(canvas, &plans, |_, layer| {
+                            chained.member.draw.draw(layer, target);
+                        });
+                    if let Some(mut alone) = alone {
+                        chained.finish(&mut alone, canvas);
+                    }
+                }
+                None => {}
+            }
+        }
+    }
 }
 
 /// What [`Group::shared_chain`] gives a chain that may share its layer.
@@ -2622,31 +2714,14 @@ struct Chained<'a> {
     plan: chain::Plan,
 }
 
-/// Runs `batch`'s chains in one layer they share and composites each onto
-/// `canvas` in turn -- or each in a layer of its own where Skia refuses the
-/// shared one, which then falls back as a chain alone does.
-fn play_chained(batch: &[Chained<'_>], canvas: &SkCanvas, target: Target) {
-    let plans: Vec<&chain::Plan> =
-        batch.iter().map(|chained| &chained.plan).collect();
-    let drawn = chain::Drawn::new(canvas, &plans, |i, layer| {
-        batch[i].member.draw.draw(layer, target);
-    });
-    match drawn {
-        Some(mut drawn) => {
-            for Chained { member, plan } in batch {
-                if let Some(outcome) =
-                    drawn.finish(plan, member.steps, member.paint)
-                {
-                    outcome.composite(canvas, member.paint);
-                }
-            }
+impl Chained<'_> {
+    /// Finishes this chain from `drawn`, the layer holding its draw, and
+    /// composites the result onto `canvas`.
+    fn finish(&self, drawn: &mut chain::Drawn, canvas: &SkCanvas) {
+        let Chained { member, plan } = self;
+        if let Some(outcome) = drawn.finish(plan, member.steps, member.paint) {
+            outcome.composite(canvas, member.paint);
         }
-        None if batch.len() > 1 => {
-            for chained in batch {
-                play_chained(std::slice::from_ref(chained), canvas, target);
-            }
-        }
-        None => {}
     }
 }
 
@@ -4133,12 +4208,13 @@ mod shared_chain_tests {
         /// Every chain in one layer: each is far from all the others, and
         /// all take a layer of one depth.
         One,
-        /// Each chain apart from the one drawn before it, which its reach
-        /// meets, and so in a layer of its own -- but for the first of a row,
-        /// which can join the last of the row above.
+        /// Each chain meets the ones drawn around it, so it shares a layer
+        /// only with chains further off: fewer layers than chains, and more
+        /// than one.
         Neighbours,
-        /// None: each chain's layer differs in depth from the one before it.
-        Never,
+        /// One layer for each depth: the chains alternate between two
+        /// depths, and a layer holds one.
+        ByDepth,
     }
 
     /// The colours a scene draws in, at its alphas.
@@ -4220,7 +4296,7 @@ mod shared_chain_tests {
             alphas: &[1.0, 0.7],
             gap: 80.0,
             scale: 1.0,
-            sharing: Sharing::Never,
+            sharing: Sharing::ByDepth,
         },
     ];
 
@@ -4299,7 +4375,7 @@ mod shared_chain_tests {
 
     /// Chains far enough apart share layers and land the bytes they do
     /// alone; chains whose reaches meet, and chains whose layers differ in
-    /// depth, land them too, in layers of their own.
+    /// depth, land them too, sharing only with the chains they can.
     #[test]
     fn chains_sharing_a_layer_draw_as_they_do_alone() {
         let mut probe = Canvas::new(1.0, 1.0);
@@ -4323,10 +4399,9 @@ mod shared_chain_tests {
                 let expected = match scene.sharing {
                     Sharing::One => shared_layers == 1,
                     Sharing::Neighbours => {
-                        shared_layers < alone_layers
-                            && 2 * shared_layers > alone_layers
+                        1 < shared_layers && shared_layers < alone_layers
                     }
-                    Sharing::Never => shared_layers == alone_layers,
+                    Sharing::ByDepth => shared_layers == 2,
                 };
                 assert!(
                     expected,
@@ -4335,6 +4410,84 @@ mod shared_chain_tests {
                     scene.name
                 );
             }
+        }
+    }
+
+    /// 40 rounded rectangles along a line, each 97 pixels on from the last
+    /// and `rise` pixels down, under `blur(4px)`, translucent and in turn two
+    /// colours, on a page large enough that none wraps round: a `rise` of 61
+    /// is #499's scene, the bench row's. Read as premultiplied 32-bit floats
+    /// with every chain alone or not, and how many chain layers the read
+    /// made.
+    fn along_a_line(rise: usize, alone: bool) -> (Vec<u8>, usize) {
+        const PAGE: (f32, f32) = (4000.0, 2600.0);
+        let mut canvas = Canvas::new(PAGE.0, PAGE.1);
+        canvas.set_gpu(true);
+        let ctx = canvas.context();
+        ctx.set_filter_css("blur(4px)").expect("a filter");
+        for i in 0..40 {
+            ctx.set_fill_style_css(
+                ["rgb(200 40 20 / 0.6)", "rgb(20 60 200 / 0.6)"][i % 2],
+            )
+            .expect("a colour");
+            ctx.begin_path();
+            ctx.round_rect(
+                40.0 + (i * 97) as f32 + 0.37,
+                40.0 + (i * rise) as f32 + 0.25,
+                80.0,
+                40.0,
+                [12.0; 4],
+            )
+            .expect("a rounded rectangle");
+            ctx.fill(FillRule::NonZero);
+        }
+        ALONE_CHAINS.with(|flag| flag.set(alone));
+        let before = SHARED_LAYERS.with(std::cell::Cell::get);
+        let data = ctx.get_image_data_with(
+            0.0,
+            0.0,
+            PAGE.0,
+            PAGE.1,
+            &ImageDataExport {
+                pixels: PixelExportOptions {
+                    depth: PixelDepth::F32,
+                    premultiplied: true,
+                    ..PixelExportOptions::default()
+                },
+                ..ImageDataExport::default()
+            },
+        );
+        let layers = SHARED_LAYERS.with(std::cell::Cell::get) - before;
+        ALONE_CHAINS.with(|flag| flag.set(false));
+        (data.expect("image data").pixels().to_vec(), layers)
+    }
+
+    /// Chains each meeting the next, as #499's shapes along a line do, take
+    /// two layers between them rather than one each, and land the bytes they
+    /// do alone. On #499's diagonal neighbours' results meet only corner to
+    /// corner, where both are under a level; along a row they face each
+    /// other, and their results overlap, translucent and in two colours, so
+    /// that compositing them in any order but the one they were drawn in
+    /// shows -- each still meeting only the chains either side.
+    #[test]
+    fn chains_along_a_line_share_two_layers() {
+        let mut probe = Canvas::new(1.0, 1.0);
+        probe.set_gpu(true);
+        if probe.engine_kind() != EngineKind::Gpu {
+            eprintln!("skipped: no GPU engine");
+            return;
+        }
+        for rise in [61, 0] {
+            let (alone, alone_layers) = along_a_line(rise, true);
+            let (shared, shared_layers) = along_a_line(rise, false);
+            assert_eq!(alone_layers, 40, "rise {rise}: not a layer each alone");
+            let differ =
+                alone.iter().zip(&shared).filter(|(a, b)| a != b).count();
+            assert_eq!(differ, 0, "rise {rise}: sharing changed the page");
+            assert_eq!(
+                shared_layers, 2,
+                "rise {rise}: not two layers between them"
+            );
         }
     }
 }
