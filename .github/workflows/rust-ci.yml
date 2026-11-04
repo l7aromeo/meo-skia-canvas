@@ -290,6 +290,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      # A debug build of the addon plus every test binary and example, on top
+      # of the restored cache, fills the runner's disk: the link fails with
+      # "No space left on device" before a test runs. The image's Android SDK,
+      # .NET, GHC and CodeQL bundle are nothing this job uses. `df` before and
+      # after puts the free space in the log.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
