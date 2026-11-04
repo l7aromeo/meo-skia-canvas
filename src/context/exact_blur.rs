@@ -329,7 +329,7 @@ impl Planes {
 
 /// Blurs `alpha`, one float a pixel `width` by `height`, as [`blur_bytes`]
 /// blurs a channel, in f32, for a layer whose result is rounded to bytes,
-/// and returns it in the buffer it came in -- see [`blur_plane`]. Tap by
+/// and returns it -- see [`blur_plane`]. Tap by
 /// tap that is the alpha [`blur_in`] gives in f32, bit for bit. Through the
 /// FFT a channel shares its transform with another -- see [`fourier`] --
 /// here a neighbouring row's or column's alpha where there it is blue, and
@@ -345,15 +345,21 @@ pub(crate) fn blur_alpha(
 }
 
 /// Blurs `plane`, one float a pixel `width` by `height`, in `L`, and
-/// returns it in the buffer it came in. Four rows of it go through the row
-/// pass as the four channels of one line, and four columns through the
-/// column pass, so that each is summed by the code that sums a channel, at
-/// a quarter of the work of blurring four.
+/// returns it.
 ///
-/// Keep the re-layout indexed: the same moves written as chunked copies --
-/// rows interleaved band by band, the rows put back before the columns are
-/// gathered four pixels at a time -- drew an 8-bit drop shadow 2.5 to 3.0%
-/// slower in a release build.
+/// Where each axis is summed tap by tap or left alone, the rows are summed
+/// where they lie, as lines of one value a pixel -- see [`direct`] -- and
+/// the columns down the rows -- see [`down`] -- each value by the same taps
+/// in the same order as an RGBA channel's.
+///
+/// Otherwise, for an axis through the FFT, the plane is laid out again in
+/// the buffer it came in: four rows of it go through the row pass as the
+/// four channels of one line, and four columns through the column pass, so
+/// that each is summed by the code that sums a channel, at a quarter of the
+/// work of blurring four. Keep that re-layout indexed: the same moves
+/// written as chunked copies -- rows interleaved band by band, the rows put
+/// back before the columns are gathered four pixels at a time -- drew an
+/// 8-bit drop shadow 2.5 to 3.0% slower in a release build.
 fn blur_plane<L: Lane>(
     mut plane: Vec<f32>,
     width: usize,
@@ -363,6 +369,17 @@ fn blur_plane<L: Lane>(
 ) -> Vec<f32> {
     if width == 0 || height == 0 {
         return plane;
+    }
+    let in_place = |sigma: f32| tapped(sigma) || sigma == 0.0;
+    if in_place(sigma_x) && in_place(sigma_y) {
+        if tapped(sigma_x) {
+            let k = half_kernel(sigma_x, width - 1);
+            direct::<L, 1>(&mut plane, width, &k);
+        }
+        return match tapped(sigma_y) {
+            true => down::<L, 1>(&plane, width, height, sigma_y),
+            false => plane,
+        };
     }
     // Rows `4 * band` to `4 * band + 3`, each in a channel of band `band`.
     let bands = height.div_ceil(4);
@@ -425,7 +442,7 @@ pub(crate) fn blur_bytes_into(
     let byte = |v: f32| (v * gain + 0.5) as u8;
     if tapped(sigma_y) {
         pass::<f32>(&mut floats, width, height, sigma_x);
-        return down_into::<f32, u8>(
+        return down_into::<f32, u8, 4>(
             &floats, width, height, sigma_y, out, stride, byte,
         );
     }
@@ -484,7 +501,7 @@ fn blur_in<L: Lane>(
 ) -> Vec<f32> {
     pass::<L>(&mut pixels, width, height, sigma_x);
     if tapped(sigma_y) && width > 0 && height > 0 {
-        return down::<L>(&pixels, width, height, sigma_y);
+        return down::<L, 4>(&pixels, width, height, sigma_y);
     }
     let mut columns = vec![0.0; pixels.len()];
     transpose(&pixels, &mut columns, width, height);
@@ -584,7 +601,7 @@ fn pass<L: Lane>(pixels: &mut [f32], n: usize, lines: usize, sigma: f32) {
     }
     let k = half_kernel(sigma, n - 1);
     match method(sigma) {
-        Method::Direct => direct::<L>(pixels, n, &k),
+        Method::Direct => direct::<L, 4>(pixels, n, &k),
         Method::Fourier => fourier::<L>(pixels, n, &k),
     }
 }
@@ -659,36 +676,51 @@ fn tile<L: Lane, T, const N: usize>(
         .for_each(|(o, v)| *o = put(v));
 }
 
-/// Sums every value of `out`, a line of RGBA pixels, as [`tile`] does:
-/// [`TILE`] at a time, and what is left a pixel at a time.
-fn sum_line<L: Lane, T>(
+/// Sums every value of `out`, a line of pixels of `C` values each, as
+/// [`tile`] does: [`TILE`] at a time, then what is left eight and four at a
+/// time, and the rest a pixel at a time. Every value takes the same sums in
+/// the same order whatever tile it is in; the narrower tiles keep the tail
+/// of a line of one value a pixel in registers, where a value at a time
+/// sums it in scalars.
+fn sum_line<L: Lane, T, const C: usize>(
     out: &mut [T],
     centre: &[L],
     k0: L,
     pairs: &[Pair<L>],
     put: &impl Fn(L) -> T,
 ) {
-    let tiled = out.len() / TILE * TILE;
-    for at in (0..tiled).step_by(TILE) {
+    let mut at = 0;
+    while out.len() - at >= TILE {
         tile::<L, T, TILE>(out, at, centre, k0, pairs, put);
+        at += TILE;
     }
-    for at in (tiled..out.len()).step_by(4) {
+    if out.len() - at >= 8 {
+        tile::<L, T, 8>(out, at, centre, k0, pairs, put);
+        at += 8;
+    }
+    if out.len() - at >= 4 {
         tile::<L, T, 4>(out, at, centre, k0, pairs, put);
+        at += 4;
+    }
+    for at in (at..out.len()).step_by(C) {
+        tile::<L, T, C>(out, at, centre, k0, pairs, put);
     }
 }
 
-/// Each line tap by tap: `out[x] = k0 in[x] + sum_d k_d (in[x-d] + in[x+d])`,
-/// over a copy of the line padded with zeros so no tap leaves it, a tile of
-/// sums at a time -- see [`tile`].
+/// Each line of `n` pixels of `C` values tap by tap: `out[x] = k0 in[x] +
+/// sum_d k_d (in[x-d] + in[x+d])`, a value of the pixel `d` either side, over
+/// a copy of the line padded with zeros so no tap leaves it, a tile of sums at
+/// a time -- see [`tile`]. RGBA lines take `C` of 4, and a plane of one float
+/// a pixel -- see [`blur_plane`] -- 1.
 ///
 /// A line holding nothing but +0.0 is left as it is: every tap sums to +0.0
 /// there, bit for bit, and a draw's layer is mostly such lines. A -0.0 is
 /// worked like any other value, since a sum of signed zeros need not keep
 /// its sign.
-fn direct<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
+fn direct<L: Lane, const C: usize>(pixels: &mut [f32], n: usize, k: &[f64]) {
     let k: Vec<L> = k.iter().map(|&w| L::weight(w)).collect();
     let r = k.len() - 1;
-    let (stride, pad) = (n * 4, r * 4);
+    let (stride, pad) = (n * C, r * C);
     let work = pixels.len() * k.len();
     let skip = skips_empty_lines();
     each_chunk(
@@ -712,15 +744,22 @@ fn direct<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
             for (pair, (d, &w)) in
                 pairs.iter_mut().zip(k.iter().enumerate().skip(1))
             {
-                *pair = (w, &padded[pad - d * 4..], &padded[pad + d * 4..]);
+                *pair = (w, &padded[pad - d * C..], &padded[pad + d * C..]);
             }
-            sum_line(out, &padded[pad..], k[0], &pairs[..r], &L::narrow);
+            sum_line::<L, f32, C>(
+                out,
+                &padded[pad..],
+                k[0],
+                &pairs[..r],
+                &L::narrow,
+            );
         },
     );
 }
 
-/// The column pass of `pixels`, `height` rows of `width` RGBA pixels, tap
-/// by tap, into a new image: each row of the result summed from whole rows
+/// The column pass of `pixels`, `height` rows of `width` pixels of `C`
+/// values each -- RGBA, or a plane's one float -- tap by tap, into a new
+/// image: each row of the result summed from whole rows
 /// of `pixels` as [`direct`] sums a line from its neighbours, with a row of
 /// +0.0 past either end. Every value takes the same sums in the same order
 /// as through a transpose, and the rows are read where they lie, a tile at
@@ -736,28 +775,28 @@ fn direct<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
 /// tap: one a tap -- two flags read and branched on, for each of 18 pairs
 /// of each of 51 rows -- took 7.8% of a blurred 15 by 12 ellipse's draw.
 /// Floats add every pair, and so turn a -0.0 to +0.0 as the sum defines.
-fn down<L: Lane>(
+fn down<L: Lane, const C: usize>(
     pixels: &[f32],
     width: usize,
     height: usize,
     sigma: f32,
 ) -> Vec<f32> {
     let mut out = vec![0.0; pixels.len()];
-    down_into::<L, f32>(
+    down_into::<L, f32, C>(
         pixels,
         width,
         height,
         sigma,
         &mut out,
-        width * 4,
+        width * C,
         L::narrow,
     );
     out
 }
 
 /// [`down`], each value written by `put` -- see [`tile`] -- into the first
-/// `width * 4` values of each of `out`'s rows, `stride` apart.
-fn down_into<L: Lane, T: Copy + Send>(
+/// `width * C` values of each of `out`'s rows, `stride` apart.
+fn down_into<L: Lane, T: Copy + Send, const C: usize>(
     pixels: &[f32],
     width: usize,
     height: usize,
@@ -766,7 +805,7 @@ fn down_into<L: Lane, T: Copy + Send>(
     stride: usize,
     put: impl Fn(L) -> T + Sync,
 ) {
-    let line_len = width * 4;
+    let line_len = width * C;
     let k: Vec<L> = half_kernel(sigma, height - 1)
         .iter()
         .map(|&w| L::weight(w))
@@ -826,7 +865,7 @@ fn down_into<L: Lane, T: Copy + Send>(
                 }
             }
         }
-        sum_line(out, rows[y], k[0], pairs, &put);
+        sum_line::<L, T, C>(out, rows[y], k[0], pairs, &put);
     };
     match parallel(pixels.len() * k.len(), PARALLEL_FROM) {
         true => out
@@ -1806,8 +1845,21 @@ mod tests {
 
     #[test]
     fn an_alpha_blurs_as_the_alpha_of_four_channels_does() {
+        // Summed where it lies wherever each axis is tapped or left alone,
+        // and laid out as four channels through the FFT or past every line:
+        // both against the alpha of a four-channel blur. Lines shorter than
+        // the reach, and widths and heights that leave part of a tile.
         let (mut compared, mut farthest) = (0, 0f32);
-        for (w, h) in [(1, 1), (7, 3), (5, 9), (59, 56), (400, 300)] {
+        for (w, h) in [
+            (1, 1),
+            (7, 3),
+            (5, 9),
+            (1, 40),
+            (40, 1),
+            (200, 7),
+            (59, 56),
+            (400, 300),
+        ] {
             for sigma in [
                 (0.5f32, 0.5f32),
                 (3.0, 1.5),
@@ -1815,6 +1867,7 @@ mod tests {
                 (4.9, 5.0),
                 (12.0, 40.0),
                 (0.0, 2.0),
+                (3.0, 0.0),
                 (3.0, f32::INFINITY),
             ] {
                 let fft = [sigma.0, sigma.1].into_iter().any(|s| {
@@ -1843,7 +1896,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(compared, 5 * 7 * 4);
+        assert_eq!(compared, 8 * 8 * 4);
         assert!(farthest > 0.0, "the FFT's partners never moved a value");
         assert!(farthest < FFT_PARTNER_NOISE, "{farthest} apart");
         println!("through the FFT, farthest apart {farthest}");
