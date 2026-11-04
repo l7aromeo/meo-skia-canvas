@@ -399,6 +399,9 @@ impl Drawn {
         #[cfg(test)]
         SHARED_LAYERS.with(|layers| layers.set(layers.get() + 1));
         let context = gpu_of(&mut surface);
+        // Made just before, so in main memory it is zeros already -- see
+        // [`clear_unless_zeroed`].
+        let zeroed = surface.peek_pixels().is_some();
         let offscreen = surface.canvas();
         // Only what the chains read is cleared: the rows and columns the
         // CPU's layer starts at the device's origin with lie before it, are
@@ -407,7 +410,9 @@ impl Drawn {
             offscreen.save();
             offscreen
                 .clip_irect(plan.region.with_offset((-at.left, -at.top)), None);
-            offscreen.clear(Color::TRANSPARENT);
+            if !zeroed {
+                offscreen.clear(Color::TRANSPARENT);
+            }
             offscreen.restore();
         }
         let origin = Matrix::translate((-at.left as f32, -at.top as f32));
@@ -504,8 +509,8 @@ fn padded(
 ) -> Option<Image> {
     let info = image.image_info().with_dimensions(worked.size());
     let mut surface = make_surface(context, &info)?;
+    clear_unless_zeroed(&mut surface);
     let canvas = surface.canvas();
-    canvas.clear(Color::TRANSPARENT);
     let at = (region.left - worked.left, region.top - worked.top);
     canvas.draw_image(image, (at.0 as f32, at.1 as f32), None);
     Some(surface.image_snapshot())
@@ -651,6 +656,25 @@ fn placed(
         region.bottom,
     );
     (region, drawn)
+}
+
+/// Clears `surface`, made just before by Skia -- never one wrapped around
+/// pixels of our own -- to transparent where its pixels may hold anything
+/// else. One whose pixels are in main memory holds nothing but zero bits
+/// already, by Skia's guarantee (Skia M156): `SkSurfaces::Raster`, which a
+/// raster canvas's `new_surface` also ends in (`SkBitmapDevice.cpp:651-652`),
+/// allocates them through `SkMallocPixelRef::MakeAllocate`
+/// (`SkSurface_Raster.cpp:214-219`), which callocs them
+/// (`SkMallocPixelRef.cpp:47`), and documents them as "zeroed before use"
+/// (`include/core/SkSurface.h:61-62`). Zero bits are transparent in every
+/// colour type -- +0.0 in a float one -- which is what a clear writes, so
+/// clearing such a surface again only writes the same bytes; on a float
+/// layer through Skia's raster pipeline, 12% of an 8-bit drop shadow's draw.
+/// A GPU target's texture may be a scratch one used before, and is cleared.
+pub(crate) fn clear_unless_zeroed(surface: &mut Surface) {
+    if surface.peek_pixels().is_none() {
+        surface.canvas().clear(Color::TRANSPARENT);
+    }
 }
 
 /// A layer of `drawn`'s size for `canvas`, made by the canvas's own device
@@ -1235,10 +1259,10 @@ fn filtered(
     };
     let info = image.image_info();
     let mut surface = make_surface(context, info)?;
+    clear_unless_zeroed(&mut surface);
     let mut paint = Paint::default();
     paint.set_color_filter(filter);
     let canvas = surface.canvas();
-    canvas.clear(Color::TRANSPARENT);
     canvas.draw_image(image, (0, 0), Some(&paint));
     Some(surface.image_snapshot())
 }
@@ -1355,7 +1379,7 @@ fn shadow_composed(
     let floats = raster.image_info().with_color_type(ColorType::RGBAF32);
     let on_floats = |draw: &dyn Fn(&SkCanvas)| {
         let mut surface = started::raster(&floats, None, None)?;
-        surface.canvas().clear(Color::TRANSPARENT);
+        clear_unless_zeroed(&mut surface);
         draw(surface.canvas());
         Some(surface.image_snapshot())
     };
@@ -1701,10 +1725,10 @@ fn imaged(
     let scale = Matrix::scale((layer.scale_x().abs(), layer.scale_y().abs()));
     let filter = filter.with_local_matrix(&scale)?;
     let mut surface = make_surface(context, image.image_info())?;
+    clear_unless_zeroed(&mut surface);
     let mut paint = Paint::default();
     paint.set_image_filter(filter).set_alpha_f(gain);
     let canvas = surface.canvas();
-    canvas.clear(Color::TRANSPARENT);
     canvas.draw_image(image, (0, 0), Some(&paint));
     Some(surface.image_snapshot())
 }
@@ -1737,6 +1761,81 @@ mod tests {
         filtered, rounded_once, shadow_composed, shadowed, tint, worked_on,
     };
     use crate::{prelude::*, started};
+
+    #[test]
+    fn a_raster_surface_is_made_of_zeros() {
+        // What `clear_unless_zeroed` leaves a raster surface on: every one
+        // made holds nothing but zero bits, in each colour type a chain
+        // makes, small and past the allocator's large sizes, and where it
+        // takes the memory a surface filled with white just let go -- which
+        // a surface allocated but not zeroed would show.
+        let (mut made, mut reused) = (0, 0);
+        for colour in [
+            ColorType::RGBA8888,
+            ColorType::BGRA8888,
+            ColorType::RGBAF16,
+            ColorType::RGBAF32,
+            ColorType::Alpha8,
+        ] {
+            for size in [(3, 2), (59, 56), (600, 400)] {
+                let info =
+                    ImageInfo::new(size, colour, AlphaType::Premul, None);
+                let mut white =
+                    started::raster(&info, None, None).expect("a surface");
+                white.canvas().clear(Color::WHITE);
+                let was = white.peek_pixels().expect("pixels").addr() as usize;
+                drop(white);
+                let mut fresh =
+                    started::raster(&info, None, None).expect("a surface");
+                let pixels = fresh.peek_pixels().expect("pixels");
+                reused += usize::from(pixels.addr() as usize == was);
+                let bytes = pixels.bytes().expect("bytes");
+                assert!(
+                    bytes.iter().all(|&b| b == 0),
+                    "{colour:?} {size:?} made holding something"
+                );
+                made += 1;
+            }
+        }
+        assert_eq!(made, 5 * 3);
+        assert!(reused > 0, "no surface took the memory one let go");
+    }
+
+    #[test]
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn a_gpu_target_is_cleared_whatever_it_holds() {
+        // A GPU target can hold what Skia's scratch texture held before it,
+        // so `clear_unless_zeroed` clears it, whatever is there: a target
+        // filled with white reads nothing but zeros after it. Without a GPU
+        // there is no target to ask.
+        use crate::{context::page::ExportOptions, gpu::RenderingEngine};
+        if !RenderingEngine::GPU.selectable() {
+            return;
+        }
+        let info = ImageInfo::new(
+            (64, 48),
+            ColorType::RGBA8888,
+            AlphaType::Premul,
+            ColorSpace::new_srgb(),
+        );
+        let mut page = RenderingEngine::GPU
+            .make_surface(&info, &ExportOptions::default())
+            .expect("a GPU page");
+        let mut context = super::gpu_of(&mut page).expect("its context");
+        let mut target =
+            super::make_surface(Some(&mut context), &info).expect("a target");
+        assert!(target.peek_pixels().is_none(), "a target in main memory");
+        target.canvas().clear(Color::WHITE);
+        super::clear_unless_zeroed(&mut target);
+        let mut bytes = vec![0u8; info.compute_min_byte_size()];
+        assert!(target.read_pixels(
+            &info,
+            &mut bytes,
+            info.min_row_bytes(),
+            (0, 0)
+        ));
+        assert!(bytes.iter().all(|&b| b == 0), "left holding white");
+    }
 
     /// A drop shadow in black, moved by `(dx, dy)` and blurred by `sigma`.
     fn shadow(dx: f32, dy: f32, sigma: f32) -> Step {

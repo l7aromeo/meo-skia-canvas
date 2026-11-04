@@ -15,12 +15,13 @@
 //! It costs a quarter of the chain's sums and none of its conversions.
 
 use skia_safe::{
-    AlphaType, Canvas as SkCanvas, Color, ColorType, IRect, ImageInfo, Matrix,
-    Paint, Rect,
+    AlphaType, Canvas as SkCanvas, ColorType, IRect, ImageInfo, Matrix, Paint,
+    Rect,
 };
 
 use super::{
-    Depth, Outcome, Step, layer_info, layer_surface, placed, region, split,
+    Depth, Outcome, Step, clear_unless_zeroed, layer_info, layer_surface,
+    placed, region, split,
 };
 use crate::{
     context::{blur_mask::baked_image, exact_blur},
@@ -167,8 +168,8 @@ impl Coverage {
         // made, as `run` falls back for its layer.
         let (mut surface, drawn) =
             surface(drawn).or_else(|| surface(region))?;
+        clear_unless_zeroed(&mut surface);
         let offscreen = surface.canvas();
-        offscreen.clear(Color::TRANSPARENT);
         let origin = Matrix::translate((-drawn.left as f32, -drawn.top as f32));
         offscreen.set_matrix(&Matrix::concat(&origin, &layer).into());
         draw(offscreen);
