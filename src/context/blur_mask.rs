@@ -25,10 +25,7 @@
 //! fragment by [`RECT_BLUR_SKSL`], which costs less there than uploading a
 //! texture.
 
-use std::sync::{
-    Arc, LazyLock,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::{Arc, LazyLock};
 
 use parking_lot::Mutex;
 use skia_safe::{
@@ -38,7 +35,11 @@ use skia_safe::{
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 use skia_safe::{ClipOp, Data, RuntimeEffect};
 
-use crate::{cache_map::CacheMap, context::layer::ExactColour, started};
+use crate::{
+    cache_store::{Budget, Store, StoreKey, Stored},
+    context::layer::ExactColour,
+    started,
+};
 
 /// How closely the blur is drawn on a surface: how far past each edge, and
 /// how near the middle's value a column has to be to count as the flat
@@ -97,6 +98,13 @@ const MASK_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// [`MASK_CACHE_BYTES`]: one eviction pass serves several bakes rather than
 /// one, as the page cache's low-water mark does.
 const MASK_CACHE_LOW_WATER: usize = MASK_CACHE_BYTES * 3 / 4;
+
+/// What the mask cache keeps its bakes to.
+const MASK_BUDGET: Budget = Budget {
+    bytes: MASK_CACHE_BYTES,
+    most: MASK_MAX_BYTES,
+    low_water: MASK_CACHE_LOW_WATER,
+};
 
 /// `1 / sqrt(pi)`.
 const FRAC_1_SQRT_PI: f64 = 0.564_189_583_547_756_3;
@@ -571,64 +579,37 @@ struct RectKey {
     space: Option<(u32, u32)>,
 }
 
-struct Entry {
-    baked: Arc<Baked>,
-    used: u64,
+impl StoreKey for RectKey {
+    /// Never: a key holds the rectangle by value, and nothing it names can
+    /// go.
+    fn is_orphaned(&self) -> bool {
+        false
+    }
 }
 
-#[derive(Default)]
-struct MaskCache {
-    entries: CacheMap<RectKey, Entry>,
-    bytes: usize,
+impl Stored for Arc<Baked> {
+    fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
+/// The baked rectangles kept, by what changes their pixels.
+type MaskCache = Store<RectKey, Arc<Baked>>;
+
+impl Default for MaskCache {
+    fn default() -> Self {
+        Store::new(MASK_BUDGET)
+    }
 }
 
 /// Every baked rectangle kept, for every thread: pages are played back on
 /// rayon workers.
 static MASKS: LazyLock<Mutex<MaskCache>> = LazyLock::new(Mutex::default);
 
-/// Ticks once per use, to order entries for eviction.
-static MASK_USES: AtomicU64 = AtomicU64::new(0);
-
 /// Drops every baked rectangle. Called with the page cache's release, when
 /// rendering has been idle.
 pub(crate) fn release_cached_masks() {
-    let mut cache = MASKS.lock();
-    cache.entries.clear();
-    cache.bytes = 0;
-}
-
-impl MaskCache {
-    fn get(&mut self, key: &RectKey) -> Option<Arc<Baked>> {
-        let entry = self.entries.get_mut(key)?;
-        entry.used = MASK_USES.fetch_add(1, Ordering::Relaxed);
-        Some(entry.baked.clone())
-    }
-
-    fn put(&mut self, key: RectKey, baked: Arc<Baked>) {
-        if baked.bytes > MASK_MAX_BYTES {
-            return;
-        }
-        let used = MASK_USES.fetch_add(1, Ordering::Relaxed);
-        self.bytes += baked.bytes;
-        if let Some(old) = self.entries.insert(key, Entry { baked, used }) {
-            self.bytes -= old.baked.bytes;
-        }
-        if self.bytes > MASK_CACHE_BYTES {
-            let mut order: Vec<(u64, RectKey, usize)> = self
-                .entries
-                .iter()
-                .map(|(k, e)| (e.used, *k, e.baked.bytes))
-                .collect();
-            order.sort_unstable_by_key(|(used, _, _)| *used);
-            for (_, key, bytes) in order {
-                if self.bytes <= MASK_CACHE_LOW_WATER {
-                    break;
-                }
-                self.entries.remove(&key);
-                self.bytes -= bytes;
-            }
-        }
-    }
+    MASKS.lock().release();
 }
 
 /// The blurred rectangle, per fragment, in device pixels: `rect` is the
@@ -1218,15 +1199,42 @@ mod tests {
         for n in 0..40 {
             cache.put(key(n), one.clone());
             assert!(
-                cache.bytes <= MASK_CACHE_BYTES,
+                cache.bytes() <= MASK_CACHE_BYTES,
                 "{} bytes after {n}",
-                cache.bytes
+                cache.bytes()
             );
-            assert_eq!(cache.bytes, cache.entries.len() * one.bytes);
+            assert_eq!(cache.bytes(), cache.len() * one.bytes);
             assert!(cache.get(&key(n)).is_some(), "the latest, {n}, is kept");
         }
         // Cut back to the low-water mark rather than by one: the oldest went.
         assert!(cache.get(&key(0)).is_none());
+    }
+
+    #[test]
+    fn the_mask_cache_lets_go_of_the_least_recently_used_to_its_low_water() {
+        // As many bakes as fit the budget, the first of them used again, and
+        // one more: the eviction cuts back to `kept` bakes, oldest use first,
+        // so the one used again stays where filing order would let it go.
+        let one = baked(120.0, 30.0);
+        let fit = (MASK_CACHE_BYTES / one.bytes) as u32;
+        let kept = (MASK_CACHE_LOW_WATER / one.bytes) as u32;
+        assert!(kept >= 3 && kept < fit, "{kept} of {fit}");
+        let mut cache = MaskCache::default();
+        for n in 0..fit {
+            cache.put(key(n), one.clone());
+        }
+        assert!(cache.get(&key(0)).is_some());
+        cache.put(key(fit), one.clone());
+        // The bake just filed, the one used again, and the latest filed
+        // before them.
+        let mut expected = vec![0, fit];
+        expected.extend(fit + 2 - kept..fit);
+        expected.sort_unstable();
+        let survivors: Vec<u32> = (0..=fit)
+            .filter(|&n| cache.get(&key(n)).is_some())
+            .collect();
+        assert_eq!(survivors, expected);
+        assert_eq!(cache.bytes(), kept as usize * one.bytes);
     }
 
     #[test]
@@ -1236,7 +1244,7 @@ mod tests {
         assert!(huge.bytes > MASK_MAX_BYTES, "{} bytes", huge.bytes);
         cache.put(key(1), huge);
         assert!(cache.get(&key(1)).is_none());
-        assert_eq!(cache.bytes, 0);
+        assert_eq!(cache.bytes(), 0);
     }
 
     #[test]
