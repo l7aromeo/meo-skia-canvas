@@ -26,7 +26,7 @@ use std::{
 };
 
 use parking_lot::Mutex;
-use skia_safe::{Canvas as SkCanvas, IRect, Matrix, Paint};
+use skia_safe::{Canvas as SkCanvas, Matrix, Paint};
 
 use crate::{
     context::{
@@ -136,7 +136,7 @@ impl Kept {
 /// the colour and alpha it was composited in, and the colour type and space of
 /// the page. Not the whole pixels the origin lies at: a run drawn elsewhere
 /// finds the result, and the comparison in [`drawn`] decides whether it may
-/// be used.
+/// be used. Filed with the run's region -- see [`Filed`].
 #[derive(Clone, Debug)]
 pub(crate) struct RunKey {
     run: Arc<RunPaint>,
@@ -180,7 +180,18 @@ impl Hash for RunKey {
     }
 }
 
-impl StoreKey for RunKey {
+/// A [`RunKey`] and the device pixels the run's coverage covers, relative
+/// to the whole pixels of its origin -- see
+/// `chain::coverage::Coverage::region`: what a kept result is filed under. A
+/// run whose region a clip or the device's edge cuts otherwise is filed apart,
+/// so that a run drawn there and one drawn clear of it each find their own.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Filed {
+    key: RunKey,
+    region: [i32; 4],
+}
+
+impl StoreKey for Filed {
     /// Never: the key holds the run it names.
     fn is_orphaned(&self) -> bool {
         false
@@ -242,12 +253,11 @@ impl Placed {
 }
 
 /// A kept run's result: what it composited, the coverage that was blurred
-/// to make it, and where both lay, relative to the run's origin.
+/// to make it, and the whole pixels of the origin it was drawn at.
 #[derive(Clone)]
 pub(crate) struct Mask {
     pub(crate) outcome: Outcome,
     pub(crate) coverage: Arc<[u8]>,
-    pub(crate) region: IRect,
     pub(crate) origin: (i32, i32),
 }
 
@@ -260,7 +270,7 @@ impl Stored for Mask {
 
 /// Every kept run, for every thread: pages are played back on rayon
 /// workers.
-static RUNS: LazyLock<Mutex<Store<RunKey, Mask>>> =
+static RUNS: LazyLock<Mutex<Store<Filed, Mask>>> =
     LazyLock::new(|| Mutex::new(Store::new(RUN_BUDGET)));
 
 /// Counts one run against [`MASKS`].
@@ -275,7 +285,7 @@ fn count(change: impl FnOnce(&mut Masks)) {
 thread_local! {
     /// A store of this thread's own, which [`get`] and [`put`] use in place
     /// of [`RUNS`] while an [`OwnRunCache`] lives.
-    static OWN: std::cell::RefCell<Option<Store<RunKey, Mask>>> =
+    static OWN: std::cell::RefCell<Option<Store<Filed, Mask>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -302,7 +312,7 @@ impl Drop for OwnRunCache {
 }
 
 /// The result filed under `key`, if one is.
-fn get(key: &RunKey) -> Option<Mask> {
+fn get(key: &Filed) -> Option<Mask> {
     #[cfg(test)]
     if let Some(found) =
         OWN.with_borrow_mut(|own| own.as_mut().map(|store| store.get(key)))
@@ -313,7 +323,7 @@ fn get(key: &RunKey) -> Option<Mask> {
 }
 
 /// Files `mask` under `key`.
-fn put(key: RunKey, mask: Mask) {
+fn put(key: Filed, mask: Mask) {
     #[cfg(test)]
     let Some((key, mask)) = OWN.with_borrow_mut(|own| match own {
         Some(store) => {
@@ -328,10 +338,11 @@ fn put(key: RunKey, mask: Mask) {
 }
 
 /// What a run whose coverage is `sharp` composites: the result kept for
-/// `placed` where the coverage it was blurred from is `sharp`'s to the byte
-/// and lay alike about the run's origin, moved by the whole pixels between
-/// the two origins; otherwise `colour` of `sharp`, kept for the next draw.
-/// A run with nowhere `placed` is coloured and not kept.
+/// `placed` and `sharp`'s region about the run's origin -- see [`Filed`] --
+/// where the coverage it was blurred from is `sharp`'s to the byte, moved by
+/// the whole pixels between the two origins; otherwise `colour` of `sharp`,
+/// kept for the next draw in place of the one refused. A run with nowhere
+/// `placed` is coloured and not kept.
 pub(crate) fn drawn(
     placed: Option<Placed>,
     sharp: Coverage,
@@ -346,9 +357,12 @@ pub(crate) fn drawn(
     };
     let (x, y) = placed.origin;
     let region = sharp.region().with_offset((-x, -y));
-    if let Some(mask) = get(&placed.key) {
-        let alike = mask.region == region
-            && mask.coverage.len() == sharp.values().len()
+    let filed = Filed {
+        key: placed.key,
+        region: [region.left, region.top, region.right, region.bottom],
+    };
+    if let Some(mask) = get(&filed) {
+        let alike = mask.coverage.len() == sharp.values().len()
             && mask
                 .coverage
                 .iter()
@@ -372,11 +386,10 @@ pub(crate) fn drawn(
     let coverage: Arc<[u8]> = sharp.values().iter().map(|&v| v as u8).collect();
     let outcome = colour(sharp)?;
     put(
-        placed.key,
+        filed,
         Mask {
             outcome: outcome.clone(),
             coverage,
-            region,
             origin: placed.origin,
         },
     );
@@ -399,8 +412,8 @@ fn held() -> usize {
 }
 
 /// How the runs played on a thread fared against the cache: drawn from
-/// what it kept, refused because the coverage kept was not the run's, or
-/// not found.
+/// what it kept; refused, because the coverage kept under the run's key was
+/// not the run's; and blurred afresh, the refused among them.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Masks {
@@ -677,23 +690,67 @@ mod tests {
     }
 
     #[test]
-    fn a_run_whose_coverage_differs_is_refused() {
-        // A clip cutting the run leaves the key alone and changes what the
-        // blur reads, so the result kept unclipped is found and refused --
-        // the comparison, not the key, keeps the draw exact.
+    fn a_run_cut_otherwise_is_filed_apart() {
+        // A clip cutting the run changes the region its coverage covers, so
+        // its result is filed apart from the run's unclipped one, and the
+        // run drawn clear of the clip again still finds its own.
         let cut = Draw {
             clip: Some((0.0, 0.0, 140.0, 400.0)),
             ..RUN
         };
-        let masks = alike("cut by a clip", &[RUN, RUN, cut], 1);
+        let masks = alike("cut by a clip", &[RUN, RUN, cut, RUN], 1);
         assert_eq!(
             masks,
             Masks {
-                hits: 0,
-                refused: 1,
+                hits: 1,
+                refused: 0,
                 misses: 2
             }
         );
+    }
+
+    #[test]
+    fn a_run_whose_coverage_differs_is_refused() {
+        // Far into a wide page Skia draws a path-drawn glyph's curves
+        // otherwise at some whole-pixel origins -- see `chain::placed` --
+        // so a 300px "Og" moved by whole pixels finds a result its coverage
+        // is not, which is refused and blurred afresh: the comparison, not
+        // the key, keeps the draw exact. Measured on CoreText: refused at 2
+        // of 59 moves.
+        let run = |cache: bool| {
+            let library = FontLibrary::new();
+            library
+                .use_paths(
+                    Some(OSWALD),
+                    ["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
+                )
+                .expect("registers");
+            let _own = OwnRunCache::new();
+            MASK_CACHE.set(cache);
+            MASKS.set(Masks::default());
+            let mut canvas = Canvas::new(8200.0, 420.0);
+            canvas.set_gpu(false);
+            let ctx = canvas.context();
+            ctx.set_filter_css("blur(3px)").expect("a filter");
+            ctx.set_fill_style_css(RUN.fill).expect("a colour");
+            assert!(ctx.set_font_css("300px RunMaskOswald"));
+            ctx.measure_text("Og", None);
+            for k in 0..60 {
+                ctx.fill_text("Og", 7600.3 + (k * 7) as f32, 330.6, None);
+            }
+            let pixels = canvas
+                .to_image_data(None, &ImageDataExport::default())
+                .expect("pixels")
+                .pixels()
+                .to_vec();
+            MASK_CACHE.set(true);
+            (pixels, MASKS.get())
+        };
+        let ((kept, masks), (fresh, _)) = (run(true), run(false));
+        let off = kept.iter().zip(&fresh).filter(|(a, b)| a != b).count();
+        assert_eq!(off, 0, "the cache moved {off} bytes");
+        assert!(masks.refused > 0, "nothing was refused: {masks:?}");
+        assert!(masks.hits > masks.refused, "the moves hit: {masks:?}");
     }
 
     #[test]
@@ -734,7 +791,7 @@ mod tests {
             text: "ABC",
             ..RUN
         };
-        let cases: [(&str, Vec<Draw>, u32); 10] = [
+        let cases: [(&str, Vec<Draw>, u32); 9] = [
             (
                 "near the device's origin",
                 vec![RUN, RUN, at(2.3, 30.6), at(0.3, 20.6)],
@@ -827,18 +884,6 @@ mod tests {
                 2,
             ),
             ("at a density of 3", vec![Draw { blur: 1.5, ..RUN }; 3], 3),
-            (
-                "cut by a clip it then leaves",
-                vec![
-                    RUN,
-                    Draw {
-                        clip: Some((0.0, 0.0, 140.0, 400.0)),
-                        ..RUN
-                    },
-                    RUN,
-                ],
-                1,
-            ),
         ];
         for (case, draws, density) in cases {
             let masks = alike(case, &draws, density);
