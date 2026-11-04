@@ -226,18 +226,19 @@ impl RenderingEngine {
                 return false;
             };
 
-            // Allocating the surface is not the question -- compositing in
-            // it is. A GPU rounds each draw's source colour to eight bits
-            // before blending, whatever the surface is made of, so sixty
-            // layers at alpha 0.006 accumulate in F16 from a source that has
-            // already become 2/255: 0.37695 against the 0.30308 the
-            // arithmetic gives, and further from it than eight-bit storage
-            // manages on either backend. Feeding an alpha eight bits can hold
-            // exactly makes the GPU and the CPU agree again, which is what
-            // says the loss is the source and not the accumulation. It is not
-            // the paint slot -- a colour arriving through a shader rounds
-            // identically -- so no shader or runtime effect escapes it. So
-            // this draws the case float exists for and checks the arithmetic.
+            // Allocating the surface is not the question -- compositing in it
+            // is. Ganesh rounds each draw's source colour to eight bits before
+            // blending, whatever the surface is made of, so sixty layers at
+            // alpha 0.006 accumulate in F16 from a source that has already
+            // become 2/255: 0.37695 against the 0.30308 the arithmetic gives,
+            // and further from it than eight-bit storage manages on either
+            // backend. Feeding 2/255 itself, an alpha eight bits hold exactly,
+            // brings the GPU to within 0.00024 of the CPU's F16 (0.37695
+            // against 0.37671), where 0.006 leaves them 0.074 apart -- which is
+            // what says the loss is the source and not the accumulation. It is
+            // not the paint slot -- a colour arriving through a shader rounds
+            // identically -- so no shader or runtime effect escapes it. So this
+            // draws the case float exists for and checks the arithmetic.
             let mut paint = Paint::default();
             paint.set_anti_alias(false);
             paint.set_color4f(
