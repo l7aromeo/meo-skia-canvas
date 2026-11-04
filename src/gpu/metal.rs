@@ -205,6 +205,23 @@ pub struct MetalContext {
     _thread: ThreadBound,
 }
 
+// UPSTREAM: skia-safe 0.156.0 -- rust-skia/rust-skia#1351 -- not worked around
+// Re-check: cargo test a_read_between_draws_changes_no_later_pixel
+//
+// The page `MetalContext::surface` makes is multisampled, and a read between
+// draws ends its render pass. Ganesh keeps the page's samples for the pass
+// that follows, so a read changes nothing drawn after it. It does so because
+// the Skia skia-safe builds, at rust-skia's fork commit dff0cfc969, replaces
+// `GrMtlCaps::initGPUFamily`'s `@available` test with `false`: every
+// Apple-silicon GPU is taken for a Mac of the first family, and
+// `fPreferDiscardableMSAAAttachment`, which only the Apple family sets, is
+// off. With it on, Ganesh resolves inside each pass and opens the next by
+// loading the resolved pixel into every sample. A fill drawn over an edge
+// after a read then lands up to 94 levels from the same draws unread in the
+// scenes tried, and the test fails. Keeping reads invariant costs a resolve
+// pass of its own after every pass; which of the two to have is a decision for
+// when the family is read as Skia's own code reads it.
+// `the_metal_caps_take_this_gpu_for_a_first_family_mac` reads the family.
 impl MetalContext {
     fn new() -> Option<Self> {
         autoreleasepool(|_| {
@@ -573,16 +590,43 @@ impl MetalBackend {
     }
 }
 
-#[cfg(all(test, feature = "window"))]
+#[cfg(test)]
 mod tests {
-    use objc2_quartz_core::CAMetalLayer;
-
-    use super::{MetalBackend, MetalEngine, recording::MADE};
+    #[cfg(feature = "window")]
     use objc2_metal::MTLCreateSystemDefaultDevice;
+    #[cfg(feature = "window")]
+    use objc2_quartz_core::CAMetalLayer;
+    use skia_safe::ColorType;
+
+    use super::MetalContext;
+    #[cfg(feature = "window")]
+    use super::{MetalBackend, MetalEngine, recording::MADE};
+
+    /// Ganesh's Metal caps take this GPU for a Mac of the first family --
+    /// see the `UPSTREAM:` note in `MetalContext::surface`. The family is
+    /// read where it shows: `GrMtlCaps::initFormatTable` makes
+    /// `BGR10A2Unorm` texturable only on that family, so a `BGRA1010102`
+    /// surface cannot be made, where on the Apple family and on a later Mac
+    /// one it can.
+    #[test]
+    fn the_metal_caps_take_this_gpu_for_a_first_family_mac() {
+        let Some(context) = MetalContext::new() else {
+            return;
+        };
+        assert!(
+            !context
+                .context
+                .color_type_supported_as_surface(ColorType::BGRA1010102),
+            "Ganesh can make a BGRA1010102 surface, so its Metal caps no \
+             longer take this GPU for a first-family Mac: re-check the \
+             UPSTREAM note in MetalContext::surface"
+        );
+    }
 
     /// A window's context makes its buffers on Metal's queue: nothing reads
     /// back from a drawable, so there is nothing for a queue of ours to
     /// confirm.
+    #[cfg(feature = "window")]
     #[test]
     fn a_window_s_context_makes_no_queue_of_ours() {
         if !MetalEngine::supported() {

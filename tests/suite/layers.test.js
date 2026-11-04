@@ -763,3 +763,64 @@ describe("state kept on the JavaScript side", () => {
     }
   });
 });
+
+describe("filtered draws in a row on a GPU page", () => {
+  // Consecutive filtered draws far enough apart run their filters in one
+  // layer between them -- see `play_shared_chains` -- and each lands what it
+  // would alone. Alone here is the same draws with a plain one between each,
+  // which ends the row, at a pixel none of them reaches; drawn in a row, the
+  // plain draws follow them. A float canvas asking for the GPU is drawn on
+  // the CPU, which shares nothing, so the pages here are eight-bit ones.
+  const onGpu = new Canvas(1, 1, { gpu: true }).engine?.renderer === "GPU";
+  const pages = [
+    ["sRGB", {}],
+    ["Display P3", { colorSpace: "display-p3" }],
+    ["Rec. 2020", { colorSpace: "rec2020" }],
+  ];
+  const filters = [
+    "drop-shadow(5px 4px 4px rgb(200 0 0 / 0.6))",
+    "blur(3px)",
+    "blur(2px) drop-shadow(-4px 3px 3px rgb(0 0 200 / 0.8))",
+  ];
+
+  /** `filter`'s draws on a GPU page made with `options`, read as the bytes of floats. */
+  function drawn(options, filter, apart) {
+    const canvas = new Canvas(600, 200, options);
+    canvas.gpu = true;
+    const ctx = canvas.getContext("2d");
+    const end = () => {
+      ctx.filter = "none";
+      ctx.fillStyle = "black";
+      ctx.fillRect(599, 199, 1, 1);
+    };
+    for (let i = 0; i < 8; i++) {
+      const x = 40 + (i % 4) * 150,
+        y = 50 + Math.floor(i / 4) * 100;
+      ctx.filter = filter;
+      ctx.fillStyle = `rgb(${i * 30 + 20} ${200 - i * 20} 120 / ${0.3 + (i % 4) * 0.2})`;
+      ctx.beginPath();
+      if (i % 2) ctx.arc(x, y, 11, 0, 2 * Math.PI);
+      else ctx.roundRect(x - 18, y - 11, 36, 22, 7);
+      ctx.fill();
+      if (apart) end();
+    }
+    if (!apart) for (let i = 0; i < 8; i++) end();
+    return ctx.getImageData(0, 0, 600, 200, { colorType: "RGBAF32" }).data;
+  }
+
+  for (const [name, options] of pages)
+    test(
+      `land as they do apart on an eight-bit ${name} page`,
+      { skip: !onGpu && "no GPU engine" },
+      () => {
+        for (const filter of filters) {
+          const row = drawn(options, filter, false),
+            apart = drawn(options, filter, true);
+          let differ = 0;
+          for (let i = 0; i < row.length; i++)
+            if (row[i] !== apart[i]) differ++;
+          assert.equal(differ, 0, `${filter}: ${differ} bytes of floats moved`);
+        }
+      },
+    );
+});
