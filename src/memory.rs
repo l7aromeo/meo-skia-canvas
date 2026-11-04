@@ -82,7 +82,7 @@ use std::{
 
 use crate::context::{
     blur_mask::release_cached_masks, chain_cache::release_cached_chains,
-    page::release_cached_pages,
+    page::release_cached_pages, run_mask::release_cached_runs,
 };
 #[cfg(feature = "node-addon")]
 use crate::node::idle::release_font_caches;
@@ -215,6 +215,7 @@ fn reclaim() {
     release_cached_pages();
     release_cached_masks();
     release_cached_chains();
+    release_cached_runs();
     trim();
 }
 
