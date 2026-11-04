@@ -214,6 +214,9 @@ pub(crate) fn read_after_draws<T>(
     page: usize,
     read: impl FnOnce(&mut Surface) -> Result<T, String>,
 ) -> Option<Result<T, String>> {
+    // A raster surface has no context, and nothing of its read to confirm.
+    // It is the only surface without one this reaches: a Graphite surface,
+    // which has no direct context either, would be read here unconfirmed.
     let Some(context) = surface.direct_context() else {
         return Some(read(surface));
     };
@@ -255,6 +258,25 @@ pub(crate) fn read_after_draws<T>(
         return None;
     }
     Some(read(surface))
+}
+
+/// [`read_after_draws`] for a read that answers with what it made rather
+/// than why it failed: a copy of the surface, or whether a read of it was
+/// made. `None` where the GPU did not run the draws or the copy, so that the
+/// caller draws again.
+pub(crate) fn read_off_gpu<T>(
+    surface: &mut Surface,
+    page: usize,
+    read: impl FnOnce(&mut Surface) -> T,
+) -> Option<T> {
+    match read_after_draws(surface, page, |surface| {
+        Ok::<_, String>(read(surface))
+    }) {
+        Some(Ok(answer)) => Some(answer),
+        // The read is handed back `Ok` whatever it made, so only a
+        // confirmation that failed answers without one.
+        Some(Err(_)) | None => None,
+    }
 }
 
 /// With no GPU backend compiled in every surface is raster, so `read` is
@@ -1028,12 +1050,21 @@ mod tests {
         };
         let ctx = canvas.context();
         let first = ctx.get_image_data(0.0, 0.0, 8.0, 8.0).expect("read");
-        // Nothing drawn since that read confirmed the tile, so the next read
-        // goes without asking -- and an armed discard stays unused.
-        seam::discard(Some(page), 2);
+        // Nothing drawn since that read confirmed the tile, but the repeat
+        // copies the tile off the GPU to serve later reads from, and that
+        // copy is confirmed: discarded, it is read again.
+        seam::discard(Some(page), 1);
         let again = ctx.get_image_data(0.0, 0.0, 8.0, 8.0).expect("read");
         assert_eq!(again.pixels(), first.pixels());
-        assert_eq!(seam::unused(page), 2, "an unchanged tile went unconfirmed");
+        assert_eq!(seam::unused(page), 0, "the tile's copy went unconfirmed");
+        // The read again drew the tile afresh, so the next is the repeat
+        // that makes its copy. Served from that copy, a read asks the GPU
+        // nothing -- and an armed discard stays unused.
+        ctx.get_image_data(0.0, 0.0, 8.0, 8.0).expect("read");
+        seam::discard(Some(page), 2);
+        let served = ctx.get_image_data(0.0, 0.0, 8.0, 8.0).expect("read");
+        assert_eq!(served.pixels(), first.pixels());
+        assert_eq!(seam::unused(page), 2, "a read of the tile's copy asked");
         // A draw into the tile re-arms the check, which the discards refuse.
         ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
         let read = ctx.get_image_data(0.0, 0.0, 8.0, 8.0);
@@ -1567,6 +1598,167 @@ mod tests {
                     got.expect("the draw again succeeds"),
                     want,
                     "{name}"
+                );
+            }
+        }
+    }
+
+    /// A `getImageData` read the checked read does not make, confirmed after
+    /// it as an export's is: the copy's buffer as well as the draws'.
+    #[cfg(feature = "metal")]
+    mod reads {
+        use objc2::rc::Retained;
+
+        use super::DISCARDED;
+        use crate::{
+            Canvas, Error, RgbaLinear,
+            canvas::EngineKind,
+            gpu::metal::{self, ISSUED, MetalEngine, RecordingQueue},
+        };
+
+        /// This thread's offscreen context's queue of ours, which a canvas
+        /// drawn and read on this thread makes its buffers on.
+        fn queue() -> Retained<RecordingQueue> {
+            let mut queue = None;
+            MetalEngine::with_direct_context(|context| {
+                queue = context.and_then(|context| metal::recording(context));
+            });
+            queue.expect("the offscreen context makes its buffers on ours")
+        }
+
+        /// A read of a canvas drawn as `read` draws it.
+        type Read = fn(&mut Canvas) -> Result<Vec<u8>, Error>;
+
+        /// A fresh 600 by 300 GPU canvas with a translucent fill on it, or
+        /// `None` on a machine with no GPU engine.
+        fn canvas() -> Option<Canvas> {
+            let mut canvas = Canvas::new(600.0, 300.0);
+            if canvas.engine_kind() != EngineKind::Gpu {
+                eprintln!(
+                    "skipped: no GPU engine, so no copy can be discarded"
+                );
+                return None;
+            }
+            let ctx = canvas.context();
+            ctx.set_fill_style(RgbaLinear::from_srgb8(204, 77, 26, 0.45));
+            ctx.fill_rect(20.0, 5.0, 500.0, 250.0);
+            Some(canvas)
+        }
+
+        /// The reads that copy the page off the GPU without the checked
+        /// read: one running past the page, which Skia declines to make
+        /// asynchronously, the same inside an open layer, and the repeat of
+        /// a read, which copies the whole page and keeps the copy -- or the
+        /// whole tile, for a read small enough to be served by tiles.
+        fn reads() -> [(&'static str, Read); 4] {
+            [
+                ("past the edge", |canvas| {
+                    let data = canvas
+                        .context()
+                        .get_image_data(500.0, 100.0, 300.0, 100.0)?;
+                    Ok(data.pixels().to_vec())
+                }),
+                ("in a layer", |canvas| {
+                    let ctx = canvas.context();
+                    ctx.save_layer_with(0.5, None, None);
+                    ctx.fill_rect(8.0, 8.0, 32.0, 24.0);
+                    let data = ctx.get_image_data(-4.0, -4.0, 40.0, 40.0)?;
+                    Ok(data.pixels().to_vec())
+                }),
+                ("repeated", |canvas| {
+                    let ctx = canvas.context();
+                    ctx.get_image_data(0.0, 0.0, 600.0, 300.0)?;
+                    let data = ctx.get_image_data(0.0, 0.0, 600.0, 300.0)?;
+                    Ok(data.pixels().to_vec())
+                }),
+                ("repeated tile", |canvas| {
+                    let ctx = canvas.context();
+                    ctx.get_image_data(37.0, 11.0, 8.0, 8.0)?;
+                    let data = ctx.get_image_data(37.0, 11.0, 8.0, 8.0)?;
+                    Ok(data.pixels().to_vec())
+                }),
+            ]
+        }
+
+        /// How many buffers `read` of a fresh canvas commits: the last is
+        /// the one its copy is encoded in.
+        fn buffers(read: Read) -> usize {
+            let mut canvas = canvas().expect("a GPU engine");
+            let before = ISSUED.get();
+            read(&mut canvas).expect("a read");
+            ISSUED.get() - before
+        }
+
+        /// A read whose copy Metal discarded is read again, and the failure
+        /// is answered by that read rather than left for whatever confirms
+        /// next.
+        #[test]
+        fn a_read_whose_copy_was_discarded_is_read_again() {
+            for (name, read) in reads() {
+                let (Some(mut canvas), Some(mut reference)) =
+                    (canvas(), canvas())
+                else {
+                    return;
+                };
+                let want = read(&mut reference).expect("reference");
+                let copy = buffers(read) - 1;
+                let queue = queue();
+                queue.fail_after(copy, 1);
+                let got = read(&mut canvas);
+                assert_eq!(queue.unused_failures(), 0, "{name}: no copy made");
+                let left = queue.confirm(None);
+                queue.fail_after(0, 0);
+                assert!(
+                    left.is_ok(),
+                    "{name}: the discarded copy went unnoticed by the read \
+                     and was left for the next confirmation: {left:?}"
+                );
+                assert!(
+                    got.expect("the read again succeeds") == want,
+                    "{name}: the read again differs from the reference"
+                );
+            }
+        }
+
+        /// A read whose copies Metal discards every time is an error, not
+        /// pixels, and keeps no copy for the next read to be served from.
+        #[test]
+        fn a_read_whose_copies_are_all_discarded_is_an_error() {
+            for (name, read) in reads() {
+                let (Some(mut canvas), Some(mut reference)) =
+                    (canvas(), canvas())
+                else {
+                    return;
+                };
+                read(&mut reference).expect("reference");
+                let copy = buffers(read) - 1;
+                let queue = queue();
+                queue.fail_after(copy, usize::MAX);
+                let got = read(&mut canvas);
+                queue.fail_after(0, 0);
+                let _ = queue.confirm(None);
+                match got {
+                    Err(Error::Render { reason }) => assert!(
+                        reason.starts_with(DISCARDED),
+                        "{name}: {reason}"
+                    ),
+                    other => panic!(
+                        "{name}: discarded copies came back as {other:?}"
+                    ),
+                }
+                // The same state, read once nothing fails: a copy the failed
+                // read kept would be served here.
+                let whole = |canvas: &mut Canvas| {
+                    canvas
+                        .context()
+                        .get_image_data(0.0, 0.0, 600.0, 300.0)
+                        .expect("a whole read")
+                        .pixels()
+                        .to_vec()
+                };
+                assert!(
+                    whole(&mut canvas) == whole(&mut reference),
+                    "{name}: a read after served an unconfirmed copy"
                 );
             }
         }

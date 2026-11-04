@@ -88,23 +88,33 @@ struct Kept {
 /// [`TextSettings`], readable through `Deref`, with the typography last
 /// built from them.
 ///
+/// The build is held in a slot shared with every copy made since the
+/// settings last changed -- see the `Clone` impl -- since equal settings
+/// build the same typography. So a typography built inside a `save()` is
+/// the one the outer state draws with too, and a run laid out under it is
+/// kept for both. Were each copy to build its own, every draw inside a save
+/// of its own would be a new typography, and nothing would be kept between
+/// them. A copy
+/// that changes a setting takes a slot of its own, leaving the others'.
+///
 /// There is no `DerefMut`: a change goes through [`edit`](Self::edit).
 pub struct Typesetting {
     settings: TextSettings,
-    kept: Cell<Option<Kept>>,
+    kept: Rc<Cell<Option<Kept>>>,
 }
 
 impl Typesetting {
     pub fn new(settings: TextSettings) -> Self {
         Self {
             settings,
-            kept: Cell::new(None),
+            kept: Rc::default(),
         }
     }
 
-    /// The settings, to change; whatever was built from them goes.
+    /// The settings, to change; this copy lets go of the build it shared,
+    /// which the others keep.
     pub fn edit(&mut self) -> &mut TextSettings {
-        *self.kept.get_mut() = None;
+        self.kept = Rc::default();
         &mut self.settings
     }
 
@@ -119,7 +129,7 @@ impl Typesetting {
         let slot = field(&mut self.settings);
         if *slot != value {
             *slot = value;
-            *self.kept.get_mut() = None;
+            self.kept = Rc::default();
         }
     }
 
@@ -150,14 +160,13 @@ impl Typesetting {
 }
 
 impl Clone for Typesetting {
-    /// A copy of the settings, sharing the build: a saved state is drawn
-    /// with what the current one would have built.
+    /// A copy of the settings, sharing the slot the build is held in: a
+    /// saved state is drawn with what the current one built or will build,
+    /// and what it builds first is the current one's too.
     fn clone(&self) -> Self {
-        let kept = self.kept.take();
-        self.kept.set(kept.clone());
         Self {
             settings: self.settings.clone(),
-            kept: Cell::new(kept),
+            kept: Rc::clone(&self.kept),
         }
     }
 }
@@ -201,6 +210,73 @@ mod tests {
         step(canvas.context());
         drawn(canvas);
         BUILDS.get() - before
+    }
+
+    #[test]
+    fn text_drawn_inside_saves_shares_one_typography() {
+        // Each draw inside a save of its own: one typography is built and
+        // one run kept for all of them, as for the same draws without the
+        // saves -- not one of each a draw, which `restore()` threw away.
+        use crate::node::typography::{forget_laid_out, laid_out_held};
+        const FAMILY: &str = "SavedTypography";
+        Library::new()
+            .register_font_from_path(FAMILY, OSWALD)
+            .expect("a bundled face registers");
+        forget_laid_out();
+        let mut canvas = Canvas::new(400.0, 120.0);
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css(&format!("40px {FAMILY}")));
+        let (before, kept) = (BUILDS.get(), laid_out_held().0);
+        for i in 0..50 {
+            ctx.save();
+            ctx.set_fill_style_css(if i % 2 == 0 { "red" } else { "blue" })
+                .expect("a colour");
+            ctx.fill_text("Ag", (i % 20) as f32 * 15.3, 60.6, None);
+            ctx.restore();
+        }
+        assert_eq!(BUILDS.get() - before, 1, "typographies built");
+        assert_eq!(laid_out_held().0 - kept, 1, "runs kept");
+    }
+
+    #[test]
+    fn a_setting_changed_inside_a_save_leaves_the_outer_typography() {
+        // The saved state's build is the outer one's while their settings
+        // agree, and its own once it changes one: the outer state draws in
+        // its own font after `restore()`, building nothing more.
+        const FAMILY: &str = "OuterTypography";
+        Library::new()
+            .register_font_from_path(FAMILY, OSWALD)
+            .expect("a bundled face registers");
+        let outer = format!("40px {FAMILY}");
+        let mut alone = Canvas::new(400.0, 120.0);
+        assert!(alone.context().set_font_css(&outer));
+        let want = drawn(&mut alone);
+        // A font, which goes through `Typesetting::edit`, and a single
+        // setting, which goes through `Typesetting::set`.
+        type Change = fn(&mut Context2D);
+        let changes: [(&str, Change); 2] = [
+            ("font", |ctx| assert!(ctx.set_font_css("24px serif"))),
+            ("letter spacing", |ctx| {
+                ctx.set_letter_spacing_css("7px").expect("a spacing");
+            }),
+        ];
+        for (name, change) in changes {
+            let mut canvas = Canvas::new(400.0, 120.0);
+            assert!(canvas.context().set_font_css(&outer));
+            drawn(&mut canvas);
+            let inner = builds(&mut canvas, |ctx| {
+                ctx.save();
+                change(ctx);
+            });
+            assert_eq!(inner, 1, "{name}: the changed setting builds its own");
+            let restored = builds(&mut canvas, |ctx| ctx.restore());
+            assert_eq!(restored, 0, "{name}: the outer typography was let go");
+            assert_eq!(
+                drawn(&mut canvas),
+                want,
+                "{name}: the outer state draws in its own settings"
+            );
+        }
     }
 
     #[test]

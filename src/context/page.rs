@@ -63,7 +63,7 @@ use crate::{
         RenderingEngine,
         completion::{
             Checked, DRAW_ATTEMPTS, Rows, discarded, draws_ran,
-            read_after_draws, read_checked,
+            read_after_draws, read_checked, read_off_gpu,
         },
         owner, pacing,
     },
@@ -2524,59 +2524,87 @@ impl Tile {
     /// whether the snapshot can be brought back to the CPU -- and on the
     /// raster engine `make_raster_image` hands back the image it already is,
     /// which the `is_texture_backed` test below declines before allocating.
+    ///
+    /// A read of the GPU is confirmed with the draws before it, as
+    /// [`read_off_gpu`] confirms it, and a copy is kept only once it is:
+    /// [`Checked::Discarded`] where the GPU did not run them, so that the
+    /// caller draws the tile again. `page` is the page the draws belong to,
+    /// which only the test seam reads.
     fn copy_pixels(
         &mut self,
         info: &ImageInfo,
         pixels: &mut [u8],
         row_bytes: usize,
         at: (i32, i32),
-    ) -> bool {
+        page: usize,
+    ) -> Checked {
         if let Some(raster) = self.raster.as_ref() {
-            return raster.read_pixels(
+            return Checked::Read(raster.read_pixels(
+                info,
+                pixels,
+                row_bytes,
+                at,
+                CachingHint::Disallow,
+            ));
+        }
+
+        let repeat = self.served_at == Some(self.depth);
+        if !repeat {
+            self.served_at = Some(self.depth);
+            return read_off_gpu(&mut self.surface, page, |surface| {
+                read_converted_on_cpu(surface, info, pixels, row_bytes, at)
+            })
+            .map_or(Checked::Discarded, Checked::Read);
+        }
+
+        if !self.surface.image_snapshot().is_texture_backed() {
+            // Already memory: a copy would cost an allocation and save
+            // nothing, which is the whole of what the page's engine test was
+            // deciding.
+            return Checked::Read(
+                self.surface.read_pixels(info, pixels, row_bytes, at),
+            );
+        }
+
+        match read_off_gpu(&mut self.surface, page, |surface| {
+            copied(surface, info, pixels, row_bytes, at)
+        }) {
+            Some((read, raster)) => {
+                self.raster = raster;
+                Checked::Read(read)
+            }
+            None => Checked::Discarded,
+        }
+    }
+}
+
+/// `at` of `surface` read into `pixels` through a CPU copy of the whole
+/// surface, and the copy, where Skia makes one. Where Skia declines to bring
+/// the snapshot back, the surface is read as it stands and there is no copy;
+/// that read refused is the answer, `false`, rather than a missing copy.
+///
+/// The one place a page's or a tile's pixels are taken off the GPU for a
+/// copy, so that what confirms it -- [`read_off_gpu`], at both callers --
+/// sees every such read.
+fn copied(
+    surface: &mut Surface,
+    info: &ImageInfo,
+    pixels: &mut [u8],
+    row_bytes: usize,
+    at: (i32, i32),
+) -> (bool, Option<SkImage>) {
+    match surface.image_snapshot().make_raster_image(None, None) {
+        Some(raster) => {
+            let read = raster.read_pixels(
                 info,
                 pixels,
                 row_bytes,
                 at,
                 CachingHint::Disallow,
             );
+            (read, Some(raster))
         }
-
-        let repeat = self.served_at == Some(self.depth);
-        if !repeat {
-            self.served_at = Some(self.depth);
-            return read_converted_on_cpu(
-                &mut self.surface,
-                info,
-                pixels,
-                row_bytes,
-                at,
-            );
-        }
-
-        let snapshot = self.surface.image_snapshot();
-        if !snapshot.is_texture_backed() {
-            // Already memory: a copy would cost an allocation and save
-            // nothing, which is the whole of what the page's engine test was
-            // deciding.
-            return self.surface.read_pixels(info, pixels, row_bytes, at);
-        }
-
-        match snapshot.make_raster_image(None, None) {
-            Some(raster) => {
-                let ok = raster.read_pixels(
-                    info,
-                    pixels,
-                    row_bytes,
-                    at,
-                    CachingHint::Disallow,
-                );
-                self.raster = Some(raster);
-                ok
-            }
-            // A snapshot Skia declines to bring back is not an error, just no
-            // copy: the surface still has the pixels.
-            None => self.surface.read_pixels(info, pixels, row_bytes, at),
-        }
+        None => (surface.read_pixels(info, pixels, row_bytes, at), None),
     }
 }
 
@@ -3334,12 +3362,13 @@ impl RecordingSurface {
                 + (part.x() - src.x()) as usize * pixel;
             let inside = (part.x() - origin.0, part.y() - origin.1);
             let read = match tile.confirmed {
-                true => Checked::Read(tile.copy_pixels(
+                true => tile.copy_pixels(
                     &info,
                     &mut pixels[at..],
                     row_bytes,
                     inside,
-                )),
+                    page,
+                ),
                 false => tile.read_confirmed(
                     &info,
                     &mut pixels[at..],
@@ -3420,25 +3449,21 @@ impl RecordingSurface {
             );
             match checked {
                 Checked::Read(served) => return Ok(served),
-                // The tiles share this thread's context, so one wait
-                // confirms every one just drawn.
+                // Read again as tiles nothing has been drawn into since their
+                // last confirmation are read: `Tile::copy_pixels` confirms
+                // the draws, every tile's on this thread's context, with
+                // each copy.
                 Checked::Declined => {
-                    let ran = wanted
-                        .first()
-                        .and_then(|origin| self.tiles.get_mut(origin))
-                        .is_none_or(|tile| {
-                            draws_ran(&mut tile.surface, page.id)
-                        });
-                    if ran {
-                        for origin in &wanted {
-                            if let Some(tile) = self.tiles.get_mut(origin) {
-                                tile.confirmed = true;
-                            }
+                    for origin in &wanted {
+                        if let Some(tile) = self.tiles.get_mut(origin) {
+                            tile.confirmed = true;
                         }
-                        let served = self.read_from_tiles(
-                            dst_info, crop, pixels, page_size, &wanted, page.id,
-                        );
-                        return Ok(served == Checked::Read(true));
+                    }
+                    let served = self.read_from_tiles(
+                        dst_info, crop, pixels, page_size, &wanted, page.id,
+                    );
+                    if let Checked::Read(served) = served {
+                        return Ok(served);
                     }
                 }
                 Checked::Discarded => {}
@@ -3511,9 +3536,10 @@ impl RecordingSurface {
     /// `dst_info` lays it out, with the draws confirmed by the read's own
     /// wait -- see [`read_checked`] -- rather than by one in front of it:
     /// drawn again on a fresh surface if the GPU discarded them, and an error
-    /// if that fails too. Where Skia will not read that way they are
-    /// confirmed as [`Self::confirmed_update`] confirms them, and read by
-    /// [`Self::copy_pixels`]. `false` where the read itself is refused.
+    /// if that fails too. Where Skia will not read that way -- a rectangle
+    /// running past the page -- they are read by [`Self::copy_pixels`],
+    /// which confirms them and its copy after the read. `false` where the
+    /// read itself is refused.
     pub fn confirmed_read(
         &mut self,
         page: &Page,
@@ -3527,15 +3553,12 @@ impl RecordingSurface {
             self.update(page, opts, engine);
             match self.checked_pixels(dst_info, src, pixels, engine, page.id) {
                 Checked::Read(read) => return Ok(read),
+                // `copy_pixels` confirms the draws and its own copy.
                 Checked::Declined => {
-                    let ran = self
-                        .surface
-                        .as_mut()
-                        .is_none_or(|surface| draws_ran(surface, page.id));
-                    if ran {
-                        return Ok(
-                            self.copy_pixels(dst_info, src, pixels, engine)
-                        );
+                    if let Checked::Read(read) =
+                        self.copy_pixels(dst_info, src, pixels, engine, page.id)
+                    {
+                        return Ok(read);
                     }
                 }
                 Checked::Discarded => {}
@@ -3547,10 +3570,11 @@ impl RecordingSurface {
 
     /// [`Self::copy_pixels`] where the read is the first of the surface at
     /// its state on the GPU: that one goes to the surface, which is where
-    /// draws not yet confirmed are, and is made by [`read_checked`]. Every
-    /// other read is one `copy_pixels` makes without the GPU's draws in
-    /// question -- a current CPU copy, a repeat read, which follows a
-    /// confirmed one at the same state, or a raster surface -- and takes it.
+    /// draws not yet confirmed are, and is made by [`read_checked`], whose
+    /// own wait confirms them and the copy. Every other read -- a current
+    /// CPU copy, a repeat read, which copies the whole page, a format the GPU
+    /// surface refuses, or a raster surface -- is `copy_pixels`', which
+    /// confirms any copy it takes off the GPU itself.
     fn checked_pixels(
         &mut self,
         dst_info: &ImageInfo,
@@ -3565,9 +3589,7 @@ impl RecordingSurface {
             return Checked::Read(false);
         };
         if self.raster.is_some() || !gpu || !first {
-            return Checked::Read(
-                self.copy_pixels(dst_info, src, pixels, engine),
-            );
+            return self.copy_pixels(dst_info, src, pixels, engine, page);
         }
         let row_bytes = dst_info.min_row_bytes();
         let origin = (src.x(), src.y());
@@ -3584,7 +3606,7 @@ impl RecordingSurface {
             // repeat.
             Checked::Read(false) => {
                 self.served_at = Some(self.depth);
-                Checked::Read(self.copy_pixels(dst_info, src, pixels, engine))
+                self.copy_pixels(dst_info, src, pixels, engine, page)
             }
             other => other,
         }
@@ -3952,16 +3974,14 @@ impl RecordingSurface {
                 Checked::Read(read) => read,
                 Checked::Discarded => continue,
                 Checked::Declined => {
-                    if !draws_ran(&mut composed, page) {
-                        continue;
+                    match read_off_gpu(&mut composed, page, |composed| {
+                        read_converted_on_cpu(
+                            composed, dst_info, pixels, row_bytes, at,
+                        )
+                    }) {
+                        Some(read) => read,
+                        None => continue,
                     }
-                    read_converted_on_cpu(
-                        &mut composed,
-                        dst_info,
-                        pixels,
-                        row_bytes,
-                        at,
-                    )
                 }
             };
             return match read {
@@ -3975,29 +3995,38 @@ impl RecordingSurface {
         Err(discarded("drawing the open layers for a read"))
     }
 
+    /// `src` of the page read into `pixels` as `dst_info` lays it out: from
+    /// the CPU copy where there is a current one, and otherwise from the
+    /// surface, with a copy of the whole page made on the second read at
+    /// the same state. A read of the GPU is confirmed with the draws before
+    /// it, as [`read_off_gpu`] confirms it, and the copy is kept only once it
+    /// is: [`Checked::Discarded`] where the GPU did not run them, so that the
+    /// caller draws again. `page` is the page the draws belong to, which only
+    /// the test seam reads.
     pub fn copy_pixels(
         &mut self,
         dst_info: &ImageInfo,
         src: IRect,
         pixels: &mut [u8],
         engine: &RenderingEngine,
-    ) -> bool {
+        page: usize,
+    ) -> Checked {
         let row_bytes = dst_info.min_row_bytes();
         let origin = (src.x(), src.y());
 
         // Serve from the CPU copy when there is a current one.
         if let Some(raster) = self.raster.as_ref() {
-            return raster.read_pixels(
+            return Checked::Read(raster.read_pixels(
                 dst_info,
                 pixels,
                 row_bytes,
                 origin,
                 CachingHint::Disallow,
-            );
+            ));
         }
 
         let Some(surface) = self.surface.as_mut() else {
-            return false;
+            return Checked::Read(false);
         };
 
         // The first read at a given state goes straight to the surface, and
@@ -4008,10 +4037,15 @@ impl RecordingSurface {
         let repeat = self.served_at == Some(self.depth);
         if !repeat || !gpu {
             self.served_at = Some(self.depth);
-            if read_converted_on_cpu(
-                surface, dst_info, pixels, row_bytes, origin,
-            ) {
-                return true;
+            let read = read_off_gpu(surface, page, |surface| {
+                read_converted_on_cpu(
+                    surface, dst_info, pixels, row_bytes, origin,
+                )
+            });
+            match read {
+                Some(true) => return Checked::Read(true),
+                None => return Checked::Discarded,
+                Some(false) => {}
             }
             // A GPU surface refuses destination formats that the same pixels
             // answer for once they are in main memory -- `BGR101010x` is the
@@ -4025,26 +4059,18 @@ impl RecordingSurface {
             // refuse it again through a raster copy of itself, so there is
             // nothing below worth reaching.
             if !gpu {
-                return false;
+                return Checked::Read(false);
             }
         }
 
-        let raster = surface.image_snapshot().make_raster_image(None, None);
-        match raster {
-            Some(raster) => {
-                let ok = raster.read_pixels(
-                    dst_info,
-                    pixels,
-                    row_bytes,
-                    origin,
-                    CachingHint::Disallow,
-                );
-                self.raster = Some(raster);
-                ok
+        match read_off_gpu(surface, page, |surface| {
+            copied(surface, dst_info, pixels, row_bytes, origin)
+        }) {
+            Some((read, raster)) => {
+                self.raster = raster;
+                Checked::Read(read)
             }
-            // A snapshot Skia declines to bring back to the CPU is not an
-            // error, just no cache: the surface still has the pixels.
-            None => surface.read_pixels(dst_info, pixels, row_bytes, origin),
+            None => Checked::Discarded,
         }
     }
 }
