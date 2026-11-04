@@ -84,7 +84,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/meo-skia-canvas
-          key: skia-source-${{ hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch', 'containers/skia-atlas-size.patch', 'containers/skia-triangulation-tolerance.patch') }}
+          key: skia-source-${{ hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch', 'containers/skia-atlas-size.patch', 'containers/skia-triangulation-tolerance.patch', 'containers/rust-skia-graphite-bindings.patch') }}
 
       - name: Build module
         env:
@@ -308,13 +308,15 @@ jobs:
           # BrotliDecoderEnsureStaticInit, the atlas-size cap, without
           # which a GPU path can have a pixel's coverage moved a step, and the
           # triangulation tolerance, without which a GPU curve is drawn by what
-          # the context drew before. `-F0` fails a
+          # the context drew before, and the Graphite bindings, which a float
+          # page's Graphite engine builds on. `-F0` fails a
           # hunk that no longer matches rather than placing it by guesswork.
           # Under `use-local-skia` the justfile names no tree of its own, so
           # this checkout is what skia-bindings builds.
           patch -p1 -F0 -d rust-skia -i "$GITHUB_WORKSPACE/skia-canvas/containers/skia-brotli-sources.patch"
           patch -p1 -F0 -d rust-skia -i "$GITHUB_WORKSPACE/skia-canvas/containers/skia-atlas-size.patch"
           patch -p1 -F0 -d rust-skia -i "$GITHUB_WORKSPACE/skia-canvas/containers/skia-triangulation-tolerance.patch"
+          patch -p1 -F0 -d rust-skia -i "$GITHUB_WORKSPACE/skia-canvas/containers/rust-skia-graphite-bindings.patch"
 
       - name: Vendor Skia dependencies
         run: |

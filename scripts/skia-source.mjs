@@ -34,6 +34,7 @@ import {
   constants,
   cpSync,
   existsSync,
+  mkdirSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -81,6 +82,21 @@ const ATLAS_SIZE = join("containers", "skia-atlas-size.patch");
 // tolerance. Published Windows binaries use rust-skia's prebuilt Skia, which
 // has no patches, and keep this as they keep the atlas above.
 const TRIANGULATION = join("containers", "skia-triangulation-tolerance.patch");
+// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+// Re-check: look in rust-skia's skia-safe/src/gpu/graphite for an `ImageProvider`, `fInternalMultisampleCount` and the image form of `asyncRescaleAndReadPixels`; once all three are bound, drop this patch and build against crates.io's
+//
+// Not a Skia patch: it adds to rust-skia's own sources the three Graphite
+// bindings float pages need -- a caching `ImageProvider`, without which a
+// Recorder drops every raster image; `ContextOptions::fInternalMultisampleCount`,
+// for the raster-atlas route; and reading a Graphite image back through the
+// Context. A build takes them only through the `[patch.crates-io]` config
+// `cargo-patch` writes, and the code calling them only through
+// `cfg(meo_graphite)`, which the patched skia-bindings alone turns on: a build
+// against crates.io's skia-bindings compiles none of it.
+const GRAPHITE_BINDINGS = join(
+  "containers",
+  "rust-skia-graphite-bindings.patch",
+);
 
 export const PATCHES = {
   darwin: [
@@ -88,6 +104,7 @@ export const PATCHES = {
     join("containers", "skia-metal-untimed-compile.patch"),
     ATLAS_SIZE,
     TRIANGULATION,
+    GRAPHITE_BINDINGS,
     // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
     // Re-check: cargo test a_blurred_mask_in_the_same_flush_moves_another_by_a_level with `metal`; it pins the defect and fails once the caustic stops moving
     //
@@ -116,6 +133,7 @@ export const PATCHES = {
     join("containers", "skia-brotli-sources.patch"),
     ATLAS_SIZE,
     TRIANGULATION,
+    GRAPHITE_BINDINGS,
   ],
 };
 
@@ -227,6 +245,58 @@ function childEnv() {
     GIT_CONFIG_KEY_1: "core.eol",
     GIT_CONFIG_VALUE_1: "lf",
   };
+}
+
+/** The first line of a `.cargo/config.toml` `cargo-patch` wrote, by which it
+ * tells its own file from one a developer wrote and will not replace. */
+export const CARGO_PATCH_HEADER =
+  "# Written by `node scripts/skia-source.mjs cargo-patch`; removed by `cargo-patch --remove`.";
+
+/** The crates `cargo-patch` builds from the prepared checkout, by their
+ * directories in it. */
+const PATCHED_CRATES = ["skia-bindings", "skia-safe", "skia-svg-macros"];
+
+/**
+ * The `.cargo/config.toml` that builds skia-bindings, skia-safe and their
+ * macros from the rust-skia checkout in `tree`, which carries
+ * `GRAPHITE_BINDINGS`. Cargo then drops those packages' registry source from
+ * `Cargo.lock`, which is why it is opt-in rather than written by `prepare`: a
+ * build that takes it restores the lock afterwards, and the hook refuses a
+ * commit of one changed this way.
+ */
+export function cargoPatchConfig(tree) {
+  const crates = PATCHED_CRATES.map(
+    (crate) =>
+      `${crate} = { path = ${JSON.stringify(join(tree, "rust-skia", crate))} }`,
+  );
+  return [CARGO_PATCH_HEADER, "[patch.crates-io]", ...crates, ""].join("\n");
+}
+
+/**
+ * Writes `cargoPatchConfig` for this worktree's prepared tree to
+ * `<root>/.cargo/config.toml`, or with `remove` deletes one this wrote. Refuses
+ * a file it did not write, rather than replacing a developer's own.
+ */
+export function cargoPatch(root, tree, { remove = false } = {}) {
+  const path = join(root, ".cargo", "config.toml");
+  const ours =
+    existsSync(path) &&
+    readFileSync(path, "utf8").split("\n")[0] === CARGO_PATCH_HEADER;
+  if (existsSync(path) && !ours)
+    throw new Error(
+      `${path} was not written by cargo-patch; move it aside first`,
+    );
+  if (remove) {
+    if (ours) rmSync(path);
+    return null;
+  }
+  if (!existsSync(join(tree, READY)))
+    throw new Error(
+      `${tree} is not prepared; run \`node scripts/skia-source.mjs prepare\` first`,
+    );
+  mkdirSync(join(root, ".cargo"), { recursive: true });
+  writeFileSync(path, cargoPatchConfig(tree));
+  return path;
 }
 
 /** The directory `SKIA_SOURCE_DIR` names: Skia itself, inside the checkout. */
@@ -674,8 +744,14 @@ if (
   } else if (command === "prepare") {
     const dir = prepare();
     if (dir !== null) console.log(dir);
+  } else if (command === "cargo-patch") {
+    const remove = process.argv[3] === "--remove";
+    const path = cargoPatch(ROOT, treeDir(), { remove });
+    if (path !== null) console.log(path);
   } else {
-    console.error("usage: node scripts/skia-source.mjs env|dir|prepare");
+    console.error(
+      "usage: node scripts/skia-source.mjs env|dir|prepare|cargo-patch [--remove]",
+    );
     process.exit(2);
   }
 }

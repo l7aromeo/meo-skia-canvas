@@ -133,7 +133,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/meo-skia-canvas
-          key: ${{ runner.os == 'macOS' && format('skia-source-{0}', hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch', 'containers/skia-atlas-size.patch', 'containers/skia-triangulation-tolerance.patch')) || format('skia-source-linux-{0}', hashFiles('Cargo.lock', 'containers/skia-brotli-sources.patch', 'containers/skia-atlas-size.patch', 'containers/skia-triangulation-tolerance.patch')) }}
+          key: ${{ runner.os == 'macOS' && format('skia-source-{0}', hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch', 'containers/skia-atlas-size.patch', 'containers/skia-triangulation-tolerance.patch', 'containers/rust-skia-graphite-bindings.patch')) || format('skia-source-linux-{0}', hashFiles('Cargo.lock', 'containers/skia-brotli-sources.patch', 'containers/skia-atlas-size.patch', 'containers/skia-triangulation-tolerance.patch', 'containers/rust-skia-graphite-bindings.patch')) }}
           lookup-only: true
       - name: Prepare the Skia source
         if: steps.cache.outputs.cache-hit != 'true'
@@ -227,6 +227,66 @@ jobs:
         run: |
           cargo clippy --no-default-features \
             --features "${{ matrix.backendOnly }}" --all-targets -- -D warnings
+      # No leg here runs `skia-source.mjs cargo-patch`, so each is the build a
+      # crates.io user makes: skia-bindings and skia-safe from crates.io, and
+      # `cfg(meo_graphite)` off, which is what proves the Graphite code sits
+      # wholly behind it. Asserted rather than assumed, so that a cargo config
+      # left in the tree cannot make every leg pass for the wrong reason.
+      - name: skia-bindings comes from crates.io
+        if: matrix.name == 'features off'
+        run: |
+          node scripts/check-cargo-lock.mjs
+          cargo metadata --locked --format-version 1 | node -e '
+            let text = "";
+            process.stdin.on("data", (chunk) => (text += chunk)).on("end", () => {
+              const found = JSON.parse(text).packages.filter((p) => p.name === "skia-bindings");
+              if (found.length !== 1 || !String(found[0].source).startsWith("registry+")) {
+                console.error("skia-bindings is not from crates.io:", found.map((p) => p.source));
+                process.exit(1);
+              }
+              console.log("skia-bindings from", found[0].source);
+            });'
+
+  # The Graphite bindings `containers/rust-skia-graphite-bindings.patch` adds
+  # to rust-skia, built through `skia-source.mjs cargo-patch` and held to
+  # `tests/graphite_bindings.rs` on Metal. The build has to print the notice
+  # `graphite_bindings` in build.rs prints, or `cfg(meo_graphite)` never turned
+  # on and the tests compiled to nothing; and it has to leave Cargo.lock as it
+  # found it once restored.
+  graphite-bindings:
+    needs: [changes, skia-source]
+    if: needs.changes.outputs.relevant == 'true'
+    name: graphite bindings (patched, Metal)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - name: Install Skia build dependencies (macOS)
+        run: brew install ninja
+      - uses: ./.github/actions/skia-source
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: macos-graphite-bindings
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Point the build at the patched rust-skia
+        run: node scripts/skia-source.mjs cargo-patch
+      - name: Test the bindings
+        run: |
+          cargo test --no-default-features --features "metal,skia-safe/graphite" \
+            --test graphite_bindings 2>&1 | tee graphite-bindings.log
+          test "${PIPESTATUS[0]}" -eq 0
+      - name: The patched bindings were in the build
+        run: |
+          grep -F "meo_graphite: the patched Graphite bindings are in this build" graphite-bindings.log
+      - name: Cargo.lock is restored
+        run: |
+          node scripts/skia-source.mjs cargo-patch --remove
+          git checkout -- Cargo.lock
+          node scripts/check-cargo-lock.mjs
+          git diff --exit-code
 
   test:
     needs: [changes, skia-source]
@@ -789,6 +849,7 @@ jobs:
         fmt,
         skia-source,
         clippy,
+        graphite-bindings,
         test,
         binding,
         release-tests,

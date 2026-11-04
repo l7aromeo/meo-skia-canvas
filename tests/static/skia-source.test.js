@@ -794,3 +794,66 @@ describe("skia-source derives a tree from another of its version", () => {
     assert.deepEqual(patchCreates(patch.replace("/dev/null", "a/x")), []);
   });
 });
+
+// `cargo-patch` points a build at the prepared checkout's rust-skia crates,
+// which carry the Graphite bindings, by a `.cargo/config.toml` of its own:
+// written only where asked, never over a developer's own config, and removed
+// only where it wrote one.
+describe("skia-source cargo-patch writes only its own cargo config", () => {
+  let cargoPatch;
+  let cargoPatchConfig;
+  let CARGO_PATCH_HEADER;
+  let root;
+  let tree;
+  beforeEach(async () => {
+    ({ cargoPatch, cargoPatchConfig, CARGO_PATCH_HEADER } = await import(
+      pathToFileURL(SCRIPT).href
+    ));
+    root = mkdtempSync(join(tmpdir(), "cargo-patch-root-"));
+    tree = mkdtempSync(join(tmpdir(), "cargo-patch-tree-"));
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(tree, { recursive: true, force: true });
+  });
+
+  test("the config patches the three crates from the checkout, and nothing else", () => {
+    const config = cargoPatchConfig(tree);
+    assert.strictEqual(config.split("\n")[0], CARGO_PATCH_HEADER);
+    assert.match(config, /^\[patch\.crates-io\]$/m);
+    for (const crate of ["skia-bindings", "skia-safe", "skia-svg-macros"]) {
+      const path = JSON.stringify(join(tree, "rust-skia", crate));
+      assert.ok(config.includes(`${crate} = { path = ${path} }`), crate);
+    }
+    assert.strictEqual(config.match(/ = \{ path = /g).length, 3);
+  });
+
+  test("an unprepared tree is refused, and nothing is written", () => {
+    assert.throws(() => cargoPatch(root, tree), /is not prepared/);
+    assert.ok(!existsSync(join(root, ".cargo", "config.toml")));
+  });
+
+  test("a prepared tree is written, and removed again", () => {
+    writeFileSync(join(tree, ".ready"), "");
+    const path = cargoPatch(root, tree);
+    assert.strictEqual(readFileSync(path, "utf8"), cargoPatchConfig(tree));
+    assert.strictEqual(cargoPatch(root, tree, { remove: true }), null);
+    assert.ok(!existsSync(path));
+  });
+
+  test("a developer's own config is neither replaced nor removed", () => {
+    writeFileSync(join(tree, ".ready"), "");
+    mkdirSync(join(root, ".cargo"));
+    const own = join(root, ".cargo", "config.toml");
+    writeFileSync(own, "[build]\njobs = 4\n");
+    assert.throws(
+      () => cargoPatch(root, tree),
+      /was not written by cargo-patch/,
+    );
+    assert.throws(
+      () => cargoPatch(root, tree, { remove: true }),
+      /was not written by cargo-patch/,
+    );
+    assert.strictEqual(readFileSync(own, "utf8"), "[build]\njobs = 4\n");
+  });
+});
