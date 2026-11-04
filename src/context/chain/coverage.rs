@@ -37,9 +37,18 @@ pub(crate) struct Blurred {
 }
 
 /// What a draw's coverage is read from. `draw` paints in the draw's own
-/// colour either way, never a stand-in: Skia's glyph masks pre-blend their
-/// coverage by the paint's luminance, so text drawn in black covers its
-/// pixels unlike text drawn in its colour.
+/// colour either way, never a stand-in. Skia pre-blends an A8 glyph mask's
+/// coverage through one of eight tables, picked by the paint colour's
+/// luminance `(54r + 183g + 19b) >> 8` taken to its top three bits
+/// (Skia M156, `SkScalerContext.cpp:79-84` and `SkMaskGamma.h:231-238`), so
+/// two colours in one bucket cover a run alike and two in different buckets
+/// can differ. Where FreeType pre-blends its A8 masks
+/// (`SK_GAMMA_APPLY_TO_A8`, `BUILD.gn:92`; `SkFontHost_FreeType.cpp:858-863`)
+/// blue shares black's bucket and red does not. CoreText first scales the
+/// colour of smoothed text (`SkTypeface_mac_ct.cpp:966-982`): by a half
+/// where CoreGraphics smooths without subpixel coverage, which puts red in
+/// black's bucket too, and by three quarters where it smooths with it, which
+/// does not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Plane {
     /// An A8 surface, which holds the coverage alone. A path's coverage is
