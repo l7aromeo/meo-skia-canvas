@@ -1685,27 +1685,28 @@ export interface CanvasOptions {
    * the page composites in, so blending keeps the fractions eight bits round
    * away: sixty layers at 0.6% alpha land on 0.30308 (`RGBAF32`) and 0.30298
    * (`RGBAF16`) against an arithmetic answer of 0.30308, where eight bits
-   * compound their rounding into 0.23922. It costs twice the memory for
-   * `RGBAF16` and four times for `RGBAF32`. The time cost depends on what is
-   * drawn rather than on the pixel width: 120 translucent layers are
-   * *faster* in float (0.74x and 0.77x, since an eight-bit surface converts
-   * through its transfer function on every layer and a float one does not),
-   * while 120 opaque fills cost 1.29x in `RGBAF16` and 7.58x in `RGBAF32`.
-   * Every other format composites at eight bits and converts on the way out
-   * -- an opaque or narrower one would lose more inside the page than it
-   * saves.
+   * compound their rounding into 0.23922 on the CPU and 0.36078 on the GPU. It
+   * costs twice the memory for `RGBAF16` and four times for `RGBAF32`. The
+   * time cost depends on what is drawn rather than on the pixel width: 120
+   * translucent layers are *faster* in float (0.74x and 0.77x, since an
+   * eight-bit surface converts through its transfer function on every layer
+   * and a float one does not), while 120 opaque fills cost 1.29x in `RGBAF16`
+   * and 7.58x in `RGBAF32`. Every other format composites at eight bits and
+   * converts on the way out -- an opaque or narrower one would lose more
+   * inside the page than it saves.
    *
    * On a `toBuffer` or `getImageData` call it means only the layout of the
    * buffer you receive; the page keeps the format its canvas was built with.
    *
    * A float canvas renders on the raster backend, whatever `gpu` says, and
-   * `canvas.engine` reports which one took it. No GPU can currently deliver
-   * the precision: Skia's Metal and Vulkan backends implement no 32-bit float
-   * surface at all, and while both provide `RGBAF16`, a GPU quantises the
-   * paint colour to eight bits before compositing -- the same sixty layers
-   * land on 0.235 there, further from 0.303 than the eight-bit answer of
-   * 0.361. Asking for float and being handed eight bits would be the worse
-   * trade, so the canvas changes engine instead.
+   * `canvas.engine` reports which one took it. The GPU engine cannot deliver
+   * the precision: it runs on Skia's Ganesh backend, whose Metal and Vulkan
+   * backends implement no 32-bit float surface at all, and while both provide
+   * `RGBAF16`, on Metal Ganesh rounds each draw's source colour to eight bits
+   * before blending it -- the same sixty layers land on 0.37695 there, further
+   * from 0.30308 than the eight-bit answer of either engine. Asking for float
+   * and being handed eight bits would be the worse trade, so the canvas
+   * changes engine instead.
    *
    * This is probed at runtime rather than assumed, so a Skia that grows the
    * support keeps such canvases on the GPU with no change here.
