@@ -15,12 +15,13 @@
 //! It costs a quarter of the chain's sums and none of its conversions.
 
 use skia_safe::{
-    AlphaType, Canvas as SkCanvas, Color, ColorType, IRect, ImageInfo, Matrix,
-    Paint, Rect,
+    AlphaType, Canvas as SkCanvas, ColorType, IRect, ImageInfo, Matrix, Paint,
+    Rect,
 };
 
 use super::{
-    Depth, Outcome, Step, layer_info, layer_surface, placed, region, split,
+    Depth, Outcome, Step, clear_unless_zeroed, layer_info, layer_surface,
+    placed, region, split,
 };
 use crate::{
     context::{blur_mask::baked_image, exact_blur},
@@ -36,15 +37,20 @@ pub(crate) struct Blurred {
     rest: Matrix,
 }
 
-/// What a draw's coverage is read from. `draw` paints in the draw's own
-/// colour either way, never a stand-in. Skia pre-blends an A8 glyph mask's
-/// coverage through one of eight tables, and picks the table from the paint
-/// colour (Skia M156): each channel cut to its top three bits
+/// What a draw's coverage is read from. `draw` paints through the draw's own
+/// paint either way, never a stand-in. Skia pre-blends an A8 glyph mask's
+/// coverage through one of eight tables, and picks the table from the
+/// paint's luminance colour (Skia M156, `SkPaintPriv::ComputeLuminanceColor`
+/// at `SkPaintPriv.cpp:135-159`): its colour, through its colour filter where
+/// it has one, or grey for a shader that names no colour, as a run painted
+/// through [`ExactColour::shader`](crate::context::layer::ExactColour::shader)
+/// is -- see [`CoverageRun`](crate::context::layer::CoverageRun). That
+/// colour has each channel cut to its top three bits
 /// (`SkScalerContext.cpp:1104-1107`, `SkMaskGamma.h:129-134`), then the
 /// luminance `(54r + 183g + 19b) >> 8` of that (`SkScalerContext.cpp:77-87`),
-/// whose top three bits name the table (`SkMaskGamma.h:231-238`). Two
-/// colours that pick one table cover a run alike and two that pick different
-/// tables can differ. A run whose text size on the device passes 256 pixels
+/// whose top three bits name the table (`SkMaskGamma.h:231-238`). Two paints
+/// that pick one table cover a run alike and two that pick different tables
+/// can differ. A run whose text size on the device passes 256 pixels
 /// is drawn as paths, with no pre-blend (`SkStrikeSpec::ShouldDrawAsPath`),
 /// so every colour covers it alike.
 ///
@@ -162,8 +168,8 @@ impl Coverage {
         // made, as `run` falls back for its layer.
         let (mut surface, drawn) =
             surface(drawn).or_else(|| surface(region))?;
+        clear_unless_zeroed(&mut surface);
         let offscreen = surface.canvas();
-        offscreen.clear(Color::TRANSPARENT);
         let origin = Matrix::translate((-drawn.left as f32, -drawn.top as f32));
         offscreen.set_matrix(&Matrix::concat(&origin, &layer).into());
         draw(offscreen);
