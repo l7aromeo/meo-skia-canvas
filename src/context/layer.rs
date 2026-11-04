@@ -22,7 +22,6 @@ use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
     f32::consts::SQRT_2,
-    iter,
     marker::PhantomData,
     sync::{Arc, OnceLock},
 };
@@ -227,6 +226,14 @@ pub(crate) fn hinted_reach(reach: Rect, to_device: &Matrix) -> Rect {
     to_device
         .invert()
         .map_or(reach, |back| back.map_rect(device).0)
+}
+
+/// The paint a chain composites through: `rec`'s, less its image filter,
+/// which the chain runs itself -- see [`Composite::Chain`].
+fn chain_paint(rec: &LayerRec) -> Paint {
+    let mut paint = rec.paint.clone().unwrap_or_default();
+    paint.set_image_filter(None);
+    paint
 }
 
 /// The rectangle everything in `entries` can draw in -- see [`Layer::reach`]
@@ -1861,6 +1868,125 @@ impl Group {
         Some(self.contents_matrix.map_rect(drawn).0)
     }
 
+    /// The steps the group's chain runs on `canvas`'s pixels and the paint
+    /// it composites through, where it may share its layer with the chains
+    /// beside it -- see [`chain::Plan::joins`], which decides whether it
+    /// does. Only a chain on the GPU, run in the canvas's pixels, under no
+    /// clip path and no destination of its own and bounded by what its
+    /// entries reach: a text run's reach, a clip and a destination each bound
+    /// a layer in ways no test of sharing covers yet, so those chains run
+    /// alone.
+    fn shared_chain(
+        &self,
+        canvas: &SkCanvas,
+        target: Target,
+    ) -> Option<SharedChain> {
+        let Composite::Chain {
+            steps,
+            rec,
+            reach: None,
+        } = &self.composite
+        else {
+            return None;
+        };
+        let alone = target != Target::Pixels
+            || !blur_mask::on_gpu(canvas)
+            || self.clip.is_some()
+            || self.within.is_some()
+            || steps.iter().any(Step::runs_in_local_space);
+        match alone {
+            true => None,
+            false => Some(SharedChain {
+                steps: Step::for_pixels(steps).unwrap_or_else(|| steps.clone()),
+                paint: chain_paint(rec),
+            }),
+        }
+    }
+
+    /// What the group's chain draws, in the units `back` maps the group's
+    /// own transforms into, where the canvas it is played onto maps those
+    /// to the device by `to_device`; `reach` is the chain's own -- see
+    /// [`Composite::Chain`]. A chain played alone and one sharing a layer
+    /// both take their content from here, so that each draws the same.
+    ///
+    /// What is drawn is bounded by `within`, or by what the entries can draw
+    /// in where each of them knows -- see [`reach_of`] -- so that the chain's
+    /// layer is the draw's and not the page's. Bounded by a single picture
+    /// alone, a draw on a page that keeps a recording for pixels, which
+    /// files it as a pair, filtered the whole page: 50 rects under a drop
+    /// shadow took 1.75 s on an F16 Display P3 page against 26 ms on an sRGB
+    /// one.
+    fn chain_content(
+        &self,
+        reach: Option<Rect>,
+        back: &Matrix,
+        to_device: &Matrix,
+    ) -> Option<Rect> {
+        let to_space = |matrix: &Matrix| Matrix::concat(back, matrix);
+        // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
+        // Re-check: cargo test skia_covers_a_curve_by_where_it_lies
+        //
+        // Skia's analytic anti-aliasing covers a curved edge by where on the
+        // device it lies, so text whose layer is bounded by its reach draws
+        // some edge pixels otherwise than in a layer bounded by the clip:
+        // Times New Roman's 96px "Ag" stroked 40 wide with round joins, under
+        // a drop shadow at density 3, in 16 pixels by up to 25 levels.
+        // Neither is the edge's coverage -- 114 and 146 where 8 by 8 samples
+        // give 133.8 -- and no class of origin keeps it: moved 3 or 6 device
+        // pixels the stroke is covered alike, moved 15 to 300 it is not, and
+        // an oval flips at shifts of 1 and 2.
+        let content = match (&self.within, reach) {
+            (Some(within), _) => {
+                Some(to_space(&self.matrix).map_rect(within).0)
+            }
+            (None, Some(reach)) if keeps_text_reach() => Some(hinted_reach(
+                to_space(&self.contents_matrix).map_rect(reach).0,
+                to_device,
+            )),
+            (None, _) => reach_of(&self.contents.layers)
+                .map(|reach| to_space(&self.contents_matrix).map_rect(reach).0),
+        };
+        // A group holding an entry whose reach is not known -- a blurred
+        // draw, or a group through a chain of its own -- would be bounded by
+        // the clip alone, and that layer moves an anti-aliased edge: a fill's
+        // coverage of 0.6 at an alpha of 0.9 landed 0.5365 through an
+        // unblurred shadow, where it makes 0.54. No group of a chain holds
+        // such an entry, so no draw takes that route, and a debug build fails
+        // where one does, for the route to be made exact before it is taken.
+        debug_assert!(
+            content.is_some(),
+            "a chain's group holds an entry with no reach, which bounds its \
+             layer by the clip alone"
+        );
+        #[cfg(test)]
+        if UNBOUNDED_CHAIN.with(std::cell::Cell::get) {
+            return None;
+        }
+        content
+    }
+
+    /// Draws what the group's chain filters onto `layer`, the chain's layer,
+    /// which carries the transform from canvas pixels to its own: the
+    /// entries under the group's transforms mapped by `back` -- see
+    /// [`Self::chain_content`] -- confined to `within`.
+    fn draw_chained(&self, layer: &SkCanvas, target: Target, back: &Matrix) {
+        let to_layer = layer.local_to_device_as_3x3();
+        let to_device =
+            Matrix::concat(&to_layer, &Matrix::concat(back, &self.matrix));
+        layer.set_matrix(&to_device.into());
+        self.confine(layer, target, &to_device);
+        layer.set_matrix(
+            &Matrix::concat(
+                &to_layer,
+                &Matrix::concat(back, &self.contents_matrix),
+            )
+            .into(),
+        );
+        for entry in self.contents.layers.iter() {
+            entry.playback(layer, target);
+        }
+    }
+
     /// [`Self::playback`], the layer confined to `within`, a rectangle in
     /// the coordinates the entries are played under, where it is `Some`.
     pub(crate) fn playback_within(
@@ -1894,8 +2020,7 @@ impl Group {
         }
         match (&self.composite, target) {
             (Composite::Chain { steps, rec, reach }, Target::Pixels) => {
-                let mut paint = rec.paint.clone().unwrap_or_default();
-                paint.set_image_filter(None);
+                let paint = chain_paint(rec);
                 // The chain's lengths are in the pixels of the canvas the
                 // group was drawn on, which `base` maps to the device -- or,
                 // for a chain holding a Skia image filter, in the units of
@@ -1918,59 +2043,11 @@ impl Group {
                     },
                     false => Matrix::new_identity(),
                 };
-                // What is drawn is bounded by `within`, or by what the
-                // entries can draw in where each of them knows -- see
-                // `reach_of` -- so that the chain's layer is the draw's and
-                // not the page's. Bounded by a single picture alone, a draw
-                // on a page that keeps a recording for pixels, which files
-                // it as a pair, filtered the whole page: 50 rects under a
-                // drop shadow took 1.75 s on an F16 Display P3 page against
-                // 26 ms on an sRGB one.
-                let to_space = |matrix: &Matrix| Matrix::concat(&back, matrix);
-                let to_device = canvas.local_to_device_as_3x3();
-                // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
-                // Re-check: cargo test skia_covers_a_curve_by_where_it_lies
-                //
-                // Skia's analytic anti-aliasing covers a curved edge by where
-                // on the device it lies, so text whose layer is bounded by its
-                // reach draws some edge pixels otherwise than in a layer
-                // bounded by the clip: Times New Roman's 96px "Ag" stroked 40
-                // wide with round joins, under a drop shadow at density 3, in
-                // 16 pixels by up to 25 levels. Neither is the edge's
-                // coverage -- 114 and 146 where 8 by 8 samples give 133.8 --
-                // and no class of origin keeps it: moved 3 or 6 device pixels
-                // the stroke is covered alike, moved 15 to 300 it is not, and
-                // an oval flips at shifts of 1 and 2.
-                let content = match (&self.within, reach) {
-                    (Some(within), _) => {
-                        Some(to_space(&self.matrix).map_rect(within).0)
-                    }
-                    (None, Some(reach)) if keeps_text_reach() => {
-                        Some(hinted_reach(
-                            to_space(&self.contents_matrix).map_rect(reach).0,
-                            &to_device,
-                        ))
-                    }
-                    (None, _) => reach_of(&self.contents.layers).map(|reach| {
-                        to_space(&self.contents_matrix).map_rect(reach).0
-                    }),
-                };
-                // A group holding an entry whose reach is not known -- a
-                // blurred draw, or a group through a chain of its own -- would
-                // be bounded by the clip alone, and that layer moves an
-                // anti-aliased edge: a fill's coverage of 0.6 at an alpha of
-                // 0.9 landed 0.5365 through an unblurred shadow, where it
-                // makes 0.54. No group of a chain holds such an entry, so no
-                // draw takes that route, and a debug build fails where one
-                // does, for the route to be made exact before it is taken.
-                debug_assert!(
-                    content.is_some(),
-                    "a chain's group holds an entry with no reach, which \
-                     bounds its layer by the clip alone"
+                let content = self.chain_content(
+                    *reach,
+                    &back,
+                    &canvas.local_to_device_as_3x3(),
                 );
-                #[cfg(test)]
-                let content = content
-                    .filter(|_| !UNBOUNDED_CHAIN.with(std::cell::Cell::get));
                 // A group a canvas drawn into another brings with it is played
                 // once for each time that canvas is, and its chain is run the
                 // first of those -- see `chain_cache`.
@@ -1995,23 +2072,7 @@ impl Group {
                     content,
                     Depth::Floats,
                     &paint,
-                    |layer| {
-                        let to_layer = layer.local_to_device_as_3x3();
-                        let to_device =
-                            Matrix::concat(&to_layer, &to_space(&self.matrix));
-                        layer.set_matrix(&to_device.into());
-                        self.confine(layer, target, &to_device);
-                        layer.set_matrix(
-                            &Matrix::concat(
-                                &to_layer,
-                                &to_space(&self.contents_matrix),
-                            )
-                            .into(),
-                        );
-                        for entry in self.contents.layers.iter() {
-                            entry.playback(layer, target);
-                        }
-                    },
+                    |layer| self.draw_chained(layer, target, &back),
                 );
                 if let Some(outcome) = outcome {
                     outcome.composite(canvas, &paint);
@@ -2160,6 +2221,10 @@ thread_local! {
     /// this thread, rather than one bounded by what the group's entries
     /// reach: the reference a bounded chain is held to.
     pub(crate) static UNBOUNDED_CHAIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether every group's chain runs in a layer of its own on this
+    /// thread, rather than sharing one where [`play_shared_chains`] lets it:
+    /// the reference a shared layer is held to.
+    pub(crate) static ALONE_CHAINS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Whether a run's pieces played into a recording bound for pixels have
     /// their clip bounded by what they draw on this thread: off, the clip
     /// covers its own bounds, the reference a bounded clip is held to.
@@ -2368,6 +2433,19 @@ pub(crate) fn play_entries(
     };
     let mut at = 0;
     while at < entries.len() {
+        if let Some(played) = play_shared_chains(&entries[at..], canvas, target)
+        {
+            if paced {
+                for (entry, features) in entries[at..at + played]
+                    .iter()
+                    .zip(&features[at..at + played])
+                {
+                    pacing::played(canvas, offscreen_layers(entry, *features));
+                }
+            }
+            at += played;
+            continue;
+        }
         let run = match &entries[at] {
             Layer::Clipped(piece) if shares_the_clip(piece) => piece.run,
             entry => {
@@ -2392,6 +2470,260 @@ pub(crate) fn play_entries(
             .collect();
         at += pieces.len();
         Clipped::play_run(&pieces, &pieces[0].clip, canvas, target, bounded);
+    }
+}
+
+/// Plays the entries leading `entries` whose chains may share a layer --
+/// see [`Group::shared_chain`] and [`BlurOp::shared_chain`] -- in as few
+/// layers as [`chain::Plan::joins`] lets them share, and returns how many
+/// entries that is. `None` where they run fewer than two chains, which then
+/// play as they do alone. Only on Metal do any share, as
+/// [`chain::shares_layers`] says why; elsewhere each takes a layer of its
+/// own, as it would alone.
+///
+/// Each chain is planned as it would be alone, with the content and the
+/// depth it would have, and its layer holds its own draw where it reads, so
+/// it lands the bytes it would alone; its result is composited in turn, as
+/// it would be. Chains are coloured into layers -- see [`Run`] -- so that two
+/// whose reads and draws meet never share one, while chains further apart
+/// do: a row of blurred shapes each meeting the next takes two layers, not
+/// one each.
+fn play_shared_chains(
+    entries: &[Layer],
+    canvas: &SkCanvas,
+    target: Target,
+) -> Option<usize> {
+    let leading: Vec<Leading<'_>> = entries
+        .iter()
+        .map_while(|entry| match entry {
+            Layer::Group(group) => group
+                .shared_chain(canvas, target)
+                .map(|chain| Leading::Group(group, chain)),
+            Layer::Blur(op) => op
+                .shared_chain(canvas, target)
+                .map(|(chain, paths)| Leading::Blur(op, chain, paths)),
+            _ => None,
+        })
+        .collect();
+    let chains: usize = leading.iter().map(Leading::chains).sum();
+    if chains < 2 {
+        return None;
+    }
+    #[cfg(test)]
+    if ALONE_CHAINS.with(std::cell::Cell::get) {
+        return None;
+    }
+    let to_device = canvas.local_to_device_as_3x3();
+    let mut run = Run::default();
+    for member in leading.iter().flat_map(|entry| entry.members(&to_device)) {
+        let Some(plan) =
+            chain::plan(canvas, member.steps, member.content, member.depth)
+        else {
+            continue;
+        };
+        let layer = match run.layer_for(&plan) {
+            Some(layer) => layer,
+            None => {
+                std::mem::take(&mut run).play(canvas, target);
+                0
+            }
+        };
+        run.push(Chained { member, plan }, layer);
+    }
+    run.play(canvas, target);
+    Some(leading.len())
+}
+
+/// The most layers a [`Run`] keeps open at once. Chosen, not measured: two
+/// takes in a row of chains each meeting the next and the one before, as
+/// blurred shapes along a line do, and each layer open is a snapshot the size
+/// of the page held until every chain in the run is composited, so more would
+/// hold more of them without a scene here that needs it.
+const MAX_RUN_LAYERS: usize = 2;
+
+/// Chains of consecutive entries, each placed in the first open layer whose
+/// chains it can share with -- see [`chain::Plan::joins`] -- or in a new one,
+/// and then all drawn, finished and composited in the order they were
+/// drawn. Each chain reads its own layer and never the page, so drawing them
+/// all before compositing any changes nothing they read; compositing them in
+/// draw order, across layers, is what keeps overlapping results stacked as
+/// they would be alone.
+#[derive(Default)]
+struct Run<'a> {
+    chains: Vec<Chained<'a>>,
+    /// Each open layer's chains, as indices into `chains`.
+    layers: Vec<Vec<usize>>,
+}
+
+impl<'a> Run<'a> {
+    /// The layer a chain planned as `plan` goes in: the first open one whose
+    /// chains it can share with, or a new one -- the index past the last --
+    /// while fewer than [`MAX_RUN_LAYERS`] are open. `None` where it shares
+    /// none and no other can be opened, so that the run is played first and
+    /// the chain starts the next.
+    fn layer_for(&self, plan: &chain::Plan) -> Option<usize> {
+        let fits = self.layers.iter().position(|layer| {
+            let plans: Vec<&chain::Plan> =
+                layer.iter().map(|&i| &self.chains[i].plan).collect();
+            plan.joins(&plans)
+        });
+        fits.or(
+            (self.layers.len() < MAX_RUN_LAYERS).then_some(self.layers.len())
+        )
+    }
+
+    /// Places `chained` in `layer` -- see [`Self::layer_for`].
+    fn push(&mut self, chained: Chained<'a>, layer: usize) {
+        if layer == self.layers.len() {
+            self.layers.push(Vec::new());
+        }
+        self.layers[layer].push(self.chains.len());
+        self.chains.push(chained);
+    }
+
+    /// Draws each layer, then finishes and composites every chain onto
+    /// `canvas` in the order they were placed -- or in a layer of its own
+    /// where Skia refuses its shared one, which then falls back as a chain
+    /// alone does.
+    fn play(self, canvas: &SkCanvas, target: Target) {
+        let Run { chains, layers } = self;
+        let mut drawn: Vec<Option<chain::Drawn>> = layers
+            .iter()
+            .map(|layer| {
+                let plans: Vec<&chain::Plan> =
+                    layer.iter().map(|&i| &chains[i].plan).collect();
+                chain::Drawn::new(canvas, &plans, |k, offscreen| {
+                    chains[layer[k]].member.draw.draw(offscreen, target);
+                })
+            })
+            .collect();
+        let mut layer_of = vec![0; chains.len()];
+        for (l, layer) in layers.iter().enumerate() {
+            for &i in layer {
+                layer_of[i] = l;
+            }
+        }
+        for (chained, l) in chains.iter().zip(layer_of) {
+            match drawn[l].as_mut() {
+                Some(drawn) => chained.finish(drawn, canvas),
+                None if layers[l].len() > 1 => {
+                    let plans = [&chained.plan];
+                    let alone =
+                        chain::Drawn::new(canvas, &plans, |_, layer| {
+                            chained.member.draw.draw(layer, target);
+                        });
+                    if let Some(mut alone) = alone {
+                        chained.finish(&mut alone, canvas);
+                    }
+                }
+                None => {}
+            }
+        }
+    }
+}
+
+/// What [`Group::shared_chain`] gives a chain that may share its layer.
+struct SharedChain {
+    steps: Arc<[Step]>,
+    paint: Paint,
+}
+
+/// An entry [`play_shared_chains`] plays: a group through a chain, or a
+/// blurred draw whose blur is a chain for each of its `paths`.
+enum Leading<'a> {
+    Group(&'a Group, SharedChain),
+    Blur(&'a BlurOp, BlurChain, Vec<Path>),
+}
+
+impl Leading<'_> {
+    /// How many chains the entry runs.
+    fn chains(&self) -> usize {
+        match self {
+            Leading::Group(..) => 1,
+            Leading::Blur(_, _, paths) => paths.len(),
+        }
+    }
+
+    /// The entry's chains, in the order it runs them alone, on a canvas
+    /// that maps the entry's coordinates to the device by `to_device`.
+    fn members(&self, to_device: &Matrix) -> Vec<Member<'_>> {
+        match self {
+            Leading::Group(group, SharedChain { steps, paint }) => {
+                let content = group.chain_content(
+                    None,
+                    &Matrix::new_identity(),
+                    to_device,
+                );
+                #[cfg(test)]
+                CHAIN_CONTENT
+                    .set(content.map(|content| to_device.map_rect(content).0));
+                vec![Member {
+                    draw: Draw::Group(group),
+                    steps,
+                    content,
+                    depth: Depth::Floats,
+                    paint,
+                }]
+            }
+            Leading::Blur(op, chain, paths) => paths
+                .iter()
+                .map(|path| Member {
+                    draw: Draw::Path(op, path, &chain.draw),
+                    steps: &chain.steps,
+                    content: Some(op.content(path)),
+                    depth: chain.depth,
+                    paint: &chain.gain,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// One chain [`play_shared_chains`] runs: what it draws into its layer, its
+/// steps, what bounds what it draws, the depth of its layer and the paint
+/// it composites through, whose alpha the last step takes.
+struct Member<'a> {
+    draw: Draw<'a>,
+    steps: &'a [Step],
+    content: Option<Rect>,
+    depth: Depth,
+    paint: &'a Paint,
+}
+
+/// What a [`Member`] draws into its layer: a group's entries, or one path
+/// of a blurred draw, through its paint.
+enum Draw<'a> {
+    Group(&'a Group),
+    Path(&'a BlurOp, &'a Path, &'a Paint),
+}
+
+impl Draw<'_> {
+    /// Draws onto `layer`, which carries the transform from canvas pixels to
+    /// its own.
+    fn draw(&self, layer: &SkCanvas, target: Target) {
+        match self {
+            Draw::Group(group) => {
+                group.draw_chained(layer, target, &Matrix::new_identity());
+            }
+            Draw::Path(op, path, paint) => op.draw_into(layer, path, paint),
+        }
+    }
+}
+
+/// A [`Member`] planned.
+struct Chained<'a> {
+    member: Member<'a>,
+    plan: chain::Plan,
+}
+
+impl Chained<'_> {
+    /// Finishes this chain from `drawn`, the layer holding its draw, and
+    /// composites the result onto `canvas`.
+    fn finish(&self, drawn: &mut chain::Drawn, canvas: &SkCanvas) {
+        let Chained { member, plan } = self;
+        if let Some(outcome) = drawn.finish(plan, member.steps, member.paint) {
+            outcome.composite(canvas, member.paint);
+        }
     }
 }
 
@@ -2888,6 +3220,28 @@ struct Stroke {
     join: PaintJoin,
 }
 
+/// How far a playback onto `canvas` scales a canvas pixel: the density, a
+/// nested canvas's size. A recording's own transform is not part of it,
+/// since a filter's length does not follow the canvas transform.
+fn replay_scale(canvas: &SkCanvas) -> f32 {
+    canvas
+        .local_to_device_as_3x3()
+        .map_radius(1.0)
+        .filter(|s| s.is_normal() && *s > 0.0)
+        .unwrap_or(1.0)
+}
+
+/// The chain a [`BlurOp`] blurs its result through on pixels -- see
+/// [`BlurOp::result_chain`]: its steps, the paint each path is drawn into
+/// the layer through, the paint the result composites through, whose alpha
+/// is the last step's gain, and the depth of the layer.
+struct BlurChain {
+    steps: Arc<[Step]>,
+    draw: Paint,
+    gain: Paint,
+    depth: Depth,
+}
+
 impl BlurOp {
     /// An op of `draw` alone, under `matrix` and `clip`.
     pub fn start(draw: BlurDraw, matrix: Matrix, clip: Option<&Path>) -> Self {
@@ -2932,19 +3286,96 @@ impl BlurOp {
         if let Some(clip) = self.clip.as_ref().and_then(Path::deserialize) {
             canvas.clip_path(&clip, ClipOp::Intersect, true);
         }
-        // How far the playback scales a canvas pixel: the density, a nested
-        // canvas's size. The recording's own transform is not part of it,
-        // since a filter's length does not follow the canvas transform.
-        let replay = canvas
-            .local_to_device_as_3x3()
-            .map_radius(1.0)
-            .filter(|s| s.is_normal() && *s > 0.0)
-            .unwrap_or(1.0);
+        let replay = replay_scale(canvas);
         if self.draws_exactly(canvas, replay, target) {
             canvas.restore();
             return;
         }
+        let paint = self.paint_for(target);
+        match (self.made_at(&path, replay), target) {
+            (Made::Result(_), Target::Pixels) => {
+                let chain = self.result_chain(canvas, paint);
+                for path in self.paths() {
+                    chain::apply(
+                        canvas,
+                        &chain.steps,
+                        Some(self.content(&path)),
+                        chain.depth,
+                        &chain.gain,
+                        |layer| self.draw_into(layer, &path, &chain.draw),
+                    );
+                }
+            }
+            (made, _) => {
+                let mut paint = paint;
+                canvas.concat(&self.matrix);
+                match made {
+                    Made::Coverage(filter) => paint.set_mask_filter(filter),
+                    Made::Result(filter) => paint.set_image_filter(filter),
+                };
+                let paint = self.paint.faint.drawable(&paint);
+                // Each of a run drawn on its own as it was recorded.
+                for path in self.paths() {
+                    canvas.draw_path(&path, &paint);
+                }
+            }
+        }
+        canvas.restore();
+    }
 
+    /// The chain this op's blur runs on `canvas`'s pixels for each of its
+    /// [`Self::paths`], and the paths, where it may share its layer with the
+    /// chains beside it -- see [`chain::Plan::joins`], which decides whether
+    /// it does. Only a blur of the result, on the GPU, under no clip path:
+    /// one the op draws exactly, or on its coverage, runs no chain, and a
+    /// clip bounds a layer in a way no test of sharing covers yet.
+    fn shared_chain(
+        &self,
+        canvas: &SkCanvas,
+        target: Target,
+    ) -> Option<(BlurChain, Vec<Path>)> {
+        let path = self.geometry.first().path()?;
+        if target != Target::Pixels
+            || !blur_mask::on_gpu(canvas)
+            || self.clip.is_some()
+        {
+            return None;
+        }
+        let replay = replay_scale(canvas);
+        if self.is_exact(canvas, replay) {
+            return None;
+        }
+        match self.made_at(&path, replay) {
+            Made::Result(_) => Some((
+                self.result_chain(canvas, self.paint_for(target)),
+                self.paths().collect(),
+            )),
+            Made::Coverage(_) => None,
+        }
+    }
+
+    /// The paths the op draws: its one, or each of a run's.
+    fn paths(&self) -> impl Iterator<Item = Path> + '_ {
+        self.geometry.iter().filter_map(Geometry::path)
+    }
+
+    /// What drawing `path` paints, under the op's transform: what bounds a
+    /// chain drawing it -- see [`Self::painted`].
+    fn content(&self, path: &Path) -> Rect {
+        self.matrix.map_rect(self.painted(path)).0
+    }
+
+    /// Draws `path` through `paint` onto `layer`, a chain's layer, which
+    /// carries the transform from canvas pixels to its own.
+    fn draw_into(&self, layer: &SkCanvas, path: &Path, paint: &Paint) {
+        layer.concat(&self.matrix);
+        layer.draw_path(path, paint);
+    }
+
+    /// The paint the op draws through for `target`, before any blur: on
+    /// pixels, a draw that carries an exact colour paints in it -- see
+    /// [`ExactColour`].
+    fn paint_for(&self, target: Target) -> Paint {
         let mut paint = Paint::new(self.paint.color, None);
         if target == Target::Pixels
             && let Some((exact, alpha)) =
@@ -2964,19 +3395,23 @@ impl BlurOp {
                 .set_stroke_cap(stroke.cap)
                 .set_stroke_join(stroke.join);
         }
+        paint
+    }
 
-        // The coverage blur where the recording chose it, as long as the
-        // sigma it comes to here is one it can draw: past
-        // `MASK_BLUR_MAX_SIGMA` device pixels it draws the cap instead, so
-        // `blur(40px)` exported at density 4 came out a blur of 128 pixels
-        // where 160 were asked for, and the result is blurred instead.
-        // One choice for the run: its rectangles share a coverage class.
+    /// The blur this op makes at `replay`, `path` its first: on the coverage
+    /// where the recording chose it, as long as the sigma it comes to here is
+    /// one it can draw. Past `MASK_BLUR_MAX_SIGMA` device pixels it draws the
+    /// cap instead, so `blur(40px)` exported at density 4 came out a blur of
+    /// 128 pixels where 160 were asked for, and the result is blurred
+    /// instead. One choice for the run: its rectangles share a coverage
+    /// class.
+    fn made_at(&self, path: &Path, replay: f32) -> Made {
         let device_sigma = self.paint.sigma * replay;
         let key = device_sigma.to_bits();
-        let made = match self.made.get() {
+        match self.made.get() {
             Some((at, blur)) if *at == key => blur.clone(),
             _ => {
-                let coverage = coverage_of(&path, &self.matrix)
+                let coverage = coverage_of(path, &self.matrix)
                     .blurs_alike(self.paint.sigma)
                     && device_sigma <= MASK_BLUR_MAX_SIGMA;
                 let blur = self.make(coverage);
@@ -2984,89 +3419,61 @@ impl BlurOp {
                 let _ = self.made.set((key, blur.clone()));
                 blur
             }
-        };
-        let paths = || {
-            iter::once(path.clone())
-                .chain(self.geometry.iter().skip(1).filter_map(Geometry::path))
-        };
-        match (made, target) {
-            // On pixels the result is blurred by `chain`, exactly, each
-            // geometry of a run in a layer of its own, as separate draws
-            // composite. The path is drawn opaque in its colour and the
-            // colour's alpha, the global alpha in it, is the chain's gain,
-            // so that the blur is rounded once and not once more where the
-            // draw is.
-            //
-            // On an eight-bit page the gain is the alpha on its byte, rounded
-            // half up as a fill's is, so that the blur scales the colour the
-            // page stores: as given, an alpha of 0.3 or 0.7 lands on a tie
-            // the store rounds to even, and the interior stored a level under
-            // a fill. On its byte the gain multiplies a colour placed on its
-            // bytes -- see `ExactColour::at` -- back onto them from an
-            // eight-bit layer on the CPU: the layer is off by at most half a
-            // level, and the alpha, a byte over 255, scales that to under
-            // half. The GPU blurs and scales at lower precision, which took
-            // 68 of the 32,640 placed colours over the line at alphas from
-            // 235, so there a translucent placed colour is drawn into a layer
-            // of half floats, which holds every one exactly. Its edges are
-            // rounded twice, to a half float and then to a byte, and land up
-            // to a level off the exact Gaussian where a byte layer rounds them
-            // once. An opaque one takes a byte layer: its gain is 1, the
-            // layer holds the colour's bytes as they are, and interior and
-            // edges are both exact -- through half floats, 91 pixels of a
-            // black rounded rectangle under a blur of 2 left their exact
-            // Gaussian.
-            (Made::Result(_), Target::Pixels) => {
-                paint.set_alpha_f(1.0);
-                let bytes = matches!(self.paint.faint, Faint::Dropped);
-                let placed =
-                    bytes && self.paint.exact.as_ref().is_some_and(|e| e.bytes);
-                let mut gain = Paint::default();
-                gain.set_alpha_f(if bytes {
-                    byte_alpha(self.paint.color.a)
-                } else {
-                    self.paint.color.a
-                });
-                let steps = [Step::Blur(self.paint.sigma)];
-                let depth = match (self.paint.faint, placed) {
-                    (Faint::Kept, _) => Depth::Floats,
-                    (Faint::Dropped, true)
-                        if blur_mask::on_gpu(canvas)
-                            && byte_alpha(self.paint.color.a) < 1.0 =>
-                    {
-                        Depth::Halves
-                    }
-                    (Faint::Dropped, _) => Depth::Bytes,
-                };
-                for path in paths() {
-                    let content = self.matrix.map_rect(self.painted(&path)).0;
-                    chain::apply(
-                        canvas,
-                        &steps,
-                        Some(content),
-                        depth,
-                        &gain,
-                        |layer| {
-                            layer.concat(&self.matrix);
-                            layer.draw_path(&path, &paint);
-                        },
-                    );
-                }
-            }
-            (made, _) => {
-                canvas.concat(&self.matrix);
-                match made {
-                    Made::Coverage(filter) => paint.set_mask_filter(filter),
-                    Made::Result(filter) => paint.set_image_filter(filter),
-                };
-                let paint = self.paint.faint.drawable(&paint);
-                // Each of a run drawn on its own as it was recorded.
-                for path in paths() {
-                    canvas.draw_path(&path, &paint);
-                }
-            }
         }
-        canvas.restore();
+    }
+
+    /// The chain a blur of the result runs on `canvas`'s pixels, from
+    /// `paint`, the op's paint -- see [`Self::paint_for`].
+    ///
+    /// On pixels the result is blurred by `chain`, exactly, each geometry of a
+    /// run as a chain of its own, as separate draws composite. The path is
+    /// drawn opaque in its colour and the colour's alpha, the global alpha in
+    /// it, is the chain's gain, so that the blur is rounded once and not once
+    /// more where the draw is.
+    ///
+    /// On an eight-bit page the gain is the alpha on its byte, rounded half up
+    /// as a fill's is, so that the blur scales the colour the page stores: as
+    /// given, an alpha of 0.3 or 0.7 lands on a tie the store rounds to even,
+    /// and the interior stored a level under a fill. On its byte the gain
+    /// multiplies a colour placed on its bytes -- see `ExactColour::at` -- back
+    /// onto them from an eight-bit layer on the CPU: the layer is off by at
+    /// most half a level, and the alpha, a byte over 255, scales that to under
+    /// half. The GPU blurs and scales at lower precision, which took 68 of the
+    /// 32,640 placed colours over the line at alphas from 235, so there a
+    /// translucent placed colour is drawn into a layer of half floats, which
+    /// holds every one exactly. Its edges are rounded twice, to a half float
+    /// and then to a byte, and land up to a level off the exact Gaussian where
+    /// a byte layer rounds them once. An opaque one takes a byte layer: its
+    /// gain is 1, the layer holds the colour's bytes as they are, and interior
+    /// and edges are both exact -- through half floats, 91 pixels of a black
+    /// rounded rectangle under a blur of 2 left their exact Gaussian.
+    fn result_chain(&self, canvas: &SkCanvas, mut paint: Paint) -> BlurChain {
+        paint.set_alpha_f(1.0);
+        let bytes = matches!(self.paint.faint, Faint::Dropped);
+        let placed =
+            bytes && self.paint.exact.as_ref().is_some_and(|e| e.bytes);
+        let mut gain = Paint::default();
+        gain.set_alpha_f(if bytes {
+            byte_alpha(self.paint.color.a)
+        } else {
+            self.paint.color.a
+        });
+        let depth = match (self.paint.faint, placed) {
+            (Faint::Kept, _) => Depth::Floats,
+            (Faint::Dropped, true)
+                if blur_mask::on_gpu(canvas)
+                    && byte_alpha(self.paint.color.a) < 1.0 =>
+            {
+                Depth::Halves
+            }
+            (Faint::Dropped, _) => Depth::Bytes,
+        };
+        BlurChain {
+            steps: Arc::from([Step::Blur(self.paint.sigma)]),
+            draw: paint,
+            gain,
+            depth,
+        }
     }
 
     /// What drawing `path` paints, in its own units, before any blur: its
@@ -3081,6 +3488,26 @@ impl BlurOp {
             }
             None => bounds,
         }
+    }
+
+    /// Whether the run is one [`Self::draws_exactly`] draws on `canvas` at
+    /// `replay`.
+    fn is_exact(&self, canvas: &SkCanvas, replay: f32) -> bool {
+        let sigma = self.paint.sigma * replay;
+        // A sigma that is not a positive length has no Gaussian to be exact
+        // to, and keeps the blur the recording chose.
+        let plain = self.paint.style == PaintStyle::Fill
+            && self.paint.anti_alias
+            && !self.paint.dither
+            && sigma.is_finite()
+            && sigma > 0.0
+            && matches!(self.geometry.first(), Geometry::Rect(..));
+        let device =
+            Matrix::concat(&canvas.local_to_device_as_3x3(), &self.matrix);
+        plain
+            && device.rect_stays_rect()
+            && !device.has_perspective()
+            && blur_mask::draws_on(canvas)
     }
 
     /// Draws the run exactly where it is one [`blur_mask::draw_rect`] takes:
@@ -3099,24 +3526,12 @@ impl BlurOp {
         replay: f32,
         target: Target,
     ) -> bool {
-        let sigma = self.paint.sigma * replay;
-        // A sigma that is not a positive length has no Gaussian to be exact
-        // to, and keeps the blur the recording chose.
-        let plain = self.paint.style == PaintStyle::Fill
-            && self.paint.anti_alias
-            && !self.paint.dither
-            && sigma.is_finite()
-            && sigma > 0.0
-            && matches!(self.geometry.first(), Geometry::Rect(..));
-        let device =
-            Matrix::concat(&canvas.local_to_device_as_3x3(), &self.matrix);
-        if !plain
-            || !device.rect_stays_rect()
-            || device.has_perspective()
-            || !blur_mask::draws_on(canvas)
-        {
+        if !self.is_exact(canvas, replay) {
             return false;
         }
+        let sigma = self.paint.sigma * replay;
+        let device =
+            Matrix::concat(&canvas.local_to_device_as_3x3(), &self.matrix);
         // The exact colour only where this plays as pixels, as `playback`
         // paints with it.
         let exact = self
@@ -3748,5 +4163,341 @@ mod verdict_tests {
             bucket(&paint),
             "a pair that moves"
         );
+    }
+}
+
+/// Chains a page plays one after another, sharing a GPU layer where
+/// [`play_shared_chains`] lets them, held to the bytes each draws in a layer
+/// of its own.
+#[cfg(test)]
+mod shared_chain_tests {
+    use super::ALONE_CHAINS;
+    use crate::{
+        context::chain::SHARED_LAYERS,
+        pixels::{PixelColorSpace, PixelDepth},
+        prelude::*,
+    };
+    use std::f32::consts::TAU;
+
+    /// The page every scene is drawn on.
+    const PAGE: (f32, f32) = (720.0, 480.0);
+
+    /// Whether chains share layers here: on Metal alone -- see
+    /// `chain::shares_layers` -- which is the backend wherever it is built
+    /// in, as `crate::gpu` chooses it.
+    const SHARES: bool = cfg!(feature = "metal");
+
+    /// The kinds of GPU page the scenes are drawn on. A float canvas has no
+    /// GPU engine here -- see `Canvas::engine_kind` -- and JavaScript's
+    /// `canvas.gpu = true`, which puts one there, is held to sharing nothing
+    /// in `layers.test.js`.
+    const PAGES: [(&str, PixelColorSpace); 3] = [
+        ("sRGB", PixelColorSpace::Srgb),
+        ("Display P3", PixelColorSpace::DisplayP3),
+        ("Rec. 2020", PixelColorSpace::Rec2020),
+    ];
+
+    /// A scene: rounded rectangles and every third a circle, in rows, each
+    /// drawn under the next of `filters` in a colour at the next of `alphas`,
+    /// `gap` apart, at `scale`, and how its chains share layers.
+    struct Scene {
+        name: &'static str,
+        filters: &'static [&'static str],
+        alphas: &'static [f32],
+        gap: f32,
+        scale: f32,
+        sharing: Sharing,
+    }
+
+    /// How a scene's chains share layers.
+    #[derive(Clone, Copy)]
+    enum Sharing {
+        /// Every chain in one layer: each is far from all the others, and
+        /// all take a layer of one depth.
+        One,
+        /// Each chain meets the ones drawn around it, so it shares a layer
+        /// only with chains further off: fewer layers than chains, and more
+        /// than one.
+        Neighbours,
+        /// One layer for each depth: the chains alternate between two
+        /// depths, and a layer holds one.
+        ByDepth,
+    }
+
+    /// The colours a scene draws in, at its alphas.
+    const OPAQUE: &[f32] = &[1.0];
+    const TRANSLUCENT: &[f32] = &[0.7];
+    const MIXED: &[f32] = &[1.0, 0.7, 0.45];
+
+    const SCENES: [Scene; 9] = [
+        Scene {
+            name: "drop shadows far apart",
+            filters: &["drop-shadow(6px 4px 5px rgb(200 0 0 / 0.6))"],
+            alphas: MIXED,
+            gap: 80.0,
+            scale: 1.0,
+            sharing: Sharing::One,
+        },
+        Scene {
+            name: "drop shadows far apart, scaled",
+            filters: &["drop-shadow(-4px 3px 3px rgb(0 120 0 / 0.9))"],
+            alphas: MIXED,
+            gap: 60.0,
+            scale: 1.5,
+            sharing: Sharing::One,
+        },
+        Scene {
+            name: "a blur and a shadow chained",
+            filters: &[
+                "blur(2px) drop-shadow(-5px 3px 4px rgb(0 0 200 / 0.8))",
+            ],
+            alphas: MIXED,
+            gap: 70.0,
+            scale: 1.0,
+            sharing: Sharing::One,
+        },
+        Scene {
+            name: "a shadow and a colour filter chained",
+            filters: &["drop-shadow(3px 3px 2px black) saturate(30%)"],
+            alphas: MIXED,
+            gap: 60.0,
+            scale: 1.0,
+            sharing: Sharing::One,
+        },
+        // Reaches that meet: 6 sigma of 8 is 48 pixels, past the gap.
+        Scene {
+            name: "drop shadows whose reaches meet",
+            filters: &["drop-shadow(4px 4px 8px rgb(0 0 0 / 0.7))"],
+            alphas: MIXED,
+            gap: 12.0,
+            scale: 1.0,
+            sharing: Sharing::Neighbours,
+        },
+        Scene {
+            name: "opaque blurred fills far apart",
+            filters: &["blur(4px)"],
+            alphas: OPAQUE,
+            gap: 80.0,
+            scale: 1.0,
+            sharing: Sharing::One,
+        },
+        Scene {
+            name: "translucent blurred fills far apart, scaled",
+            filters: &["blur(3px)"],
+            alphas: TRANSLUCENT,
+            gap: 60.0,
+            scale: 1.5,
+            sharing: Sharing::One,
+        },
+        Scene {
+            name: "blurred fills whose reaches meet",
+            filters: &["blur(8px)"],
+            alphas: OPAQUE,
+            gap: 12.0,
+            scale: 1.0,
+            sharing: Sharing::Neighbours,
+        },
+        Scene {
+            name: "blurred fills opaque and translucent in turn",
+            filters: &["blur(4px)"],
+            alphas: &[1.0, 0.7],
+            gap: 80.0,
+            scale: 1.0,
+            sharing: Sharing::ByDepth,
+        },
+    ];
+
+    /// `scene` drawn on a fresh GPU page in `space`, read back as
+    /// premultiplied 32-bit floats, with every chain alone where `alone` says
+    /// so, and how many chain layers the read made.
+    fn drawn(
+        scene: &Scene,
+        space: PixelColorSpace,
+        alone: bool,
+    ) -> (Vec<u8>, usize) {
+        let mut canvas = Canvas::with_options(
+            PAGE.0,
+            PAGE.1,
+            CanvasOptions {
+                gpu: true,
+                color_space: space,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas");
+        assert_eq!(canvas.engine_kind(), EngineKind::Gpu, "a CPU page");
+        let ctx = canvas.context();
+        ctx.scale(scene.scale, scene.scale);
+        let (w, h) = (36.0, 22.0);
+        let mut i = 0;
+        let mut y = 10.25;
+        while (y + h) * scene.scale < PAGE.1 {
+            let mut x = 10.5;
+            while (x + w) * scene.scale < PAGE.0 {
+                ctx.set_filter_css(scene.filters[i % scene.filters.len()])
+                    .expect("a filter");
+                let alpha = scene.alphas[i % scene.alphas.len()];
+                ctx.set_fill_style_css(&format!(
+                    "rgb({} {} {} / {alpha})",
+                    (i * 37) % 256,
+                    (i * 91) % 256,
+                    (i * 53) % 256
+                ))
+                .expect("a colour");
+                ctx.begin_path();
+                match i % 3 {
+                    2 => ctx
+                        .arc(x + w / 2.0, y + h / 2.0, h / 2.0, 0.0, TAU, false)
+                        .expect("a circle"),
+                    _ => ctx
+                        .round_rect(x, y, w, h, [7.0; 4])
+                        .expect("a rounded rectangle"),
+                }
+                ctx.fill(FillRule::NonZero);
+                x += w + scene.gap;
+                i += 1;
+            }
+            y += h + scene.gap;
+        }
+        ALONE_CHAINS.with(|flag| flag.set(alone));
+        let before = SHARED_LAYERS.with(std::cell::Cell::get);
+        let data = ctx.get_image_data_with(
+            0.0,
+            0.0,
+            PAGE.0,
+            PAGE.1,
+            &ImageDataExport {
+                pixels: PixelExportOptions {
+                    depth: PixelDepth::F32,
+                    premultiplied: true,
+                    ..PixelExportOptions::default()
+                },
+                ..ImageDataExport::default()
+            },
+        );
+        let layers = SHARED_LAYERS.with(std::cell::Cell::get) - before;
+        ALONE_CHAINS.with(|flag| flag.set(false));
+        (data.expect("image data").pixels().to_vec(), layers)
+    }
+
+    /// Chains far enough apart share layers and land the bytes they do
+    /// alone; chains whose reaches meet, and chains whose layers differ in
+    /// depth, land them too, sharing only with the chains they can.
+    #[test]
+    fn chains_sharing_a_layer_draw_as_they_do_alone() {
+        let mut probe = Canvas::new(1.0, 1.0);
+        probe.set_gpu(true);
+        if probe.engine_kind() != EngineKind::Gpu {
+            eprintln!("skipped: no GPU engine");
+            return;
+        }
+        for (page, space) in PAGES {
+            for scene in &SCENES {
+                let (alone, alone_layers) = drawn(scene, space, true);
+                let (shared, shared_layers) = drawn(scene, space, false);
+                let differ = alone.iter().zip(&shared).filter(|(a, b)| a != b);
+                assert_eq!(
+                    differ.count(),
+                    0,
+                    "{}, on a {page} page: sharing changed the page",
+                    scene.name
+                );
+                assert!(alone_layers > 1, "{}: one layer alone", scene.name);
+                let expected = match scene.sharing {
+                    _ if !SHARES => shared_layers == alone_layers,
+                    Sharing::One => shared_layers == 1,
+                    Sharing::Neighbours => {
+                        1 < shared_layers && shared_layers < alone_layers
+                    }
+                    Sharing::ByDepth => shared_layers == 2,
+                };
+                assert!(
+                    expected,
+                    "{}, on a {page} page: {shared_layers} layers shared, \
+                     {alone_layers} alone",
+                    scene.name
+                );
+            }
+        }
+    }
+
+    /// 40 rounded rectangles along a line, each 97 pixels on from the last
+    /// and `rise` pixels down, under `blur(4px)`, translucent and in turn two
+    /// colours, on a page large enough that none wraps round: a `rise` of 61
+    /// is #499's scene, the bench row's. Read as premultiplied 32-bit floats
+    /// with every chain alone or not, and how many chain layers the read
+    /// made.
+    fn along_a_line(rise: usize, alone: bool) -> (Vec<u8>, usize) {
+        const PAGE: (f32, f32) = (4000.0, 2600.0);
+        let mut canvas = Canvas::new(PAGE.0, PAGE.1);
+        canvas.set_gpu(true);
+        let ctx = canvas.context();
+        ctx.set_filter_css("blur(4px)").expect("a filter");
+        for i in 0..40 {
+            ctx.set_fill_style_css(
+                ["rgb(200 40 20 / 0.6)", "rgb(20 60 200 / 0.6)"][i % 2],
+            )
+            .expect("a colour");
+            ctx.begin_path();
+            ctx.round_rect(
+                40.0 + (i * 97) as f32 + 0.37,
+                40.0 + (i * rise) as f32 + 0.25,
+                80.0,
+                40.0,
+                [12.0; 4],
+            )
+            .expect("a rounded rectangle");
+            ctx.fill(FillRule::NonZero);
+        }
+        ALONE_CHAINS.with(|flag| flag.set(alone));
+        let before = SHARED_LAYERS.with(std::cell::Cell::get);
+        let data = ctx.get_image_data_with(
+            0.0,
+            0.0,
+            PAGE.0,
+            PAGE.1,
+            &ImageDataExport {
+                pixels: PixelExportOptions {
+                    depth: PixelDepth::F32,
+                    premultiplied: true,
+                    ..PixelExportOptions::default()
+                },
+                ..ImageDataExport::default()
+            },
+        );
+        let layers = SHARED_LAYERS.with(std::cell::Cell::get) - before;
+        ALONE_CHAINS.with(|flag| flag.set(false));
+        (data.expect("image data").pixels().to_vec(), layers)
+    }
+
+    /// Chains each meeting the next, as #499's shapes along a line do, take
+    /// two layers between them rather than one each, and land the bytes they
+    /// do alone. On #499's diagonal neighbours' results meet only corner to
+    /// corner, where both are under a level; along a row they face each
+    /// other, and their results overlap, translucent and in two colours, so
+    /// that compositing them in any order but the one they were drawn in
+    /// shows -- each still meeting only the chains either side.
+    #[test]
+    fn chains_along_a_line_share_two_layers() {
+        let mut probe = Canvas::new(1.0, 1.0);
+        probe.set_gpu(true);
+        if probe.engine_kind() != EngineKind::Gpu {
+            eprintln!("skipped: no GPU engine");
+            return;
+        }
+        for rise in [61, 0] {
+            let (alone, alone_layers) = along_a_line(rise, true);
+            let (shared, shared_layers) = along_a_line(rise, false);
+            assert_eq!(alone_layers, 40, "rise {rise}: not a layer each alone");
+            let differ =
+                alone.iter().zip(&shared).filter(|(a, b)| a != b).count();
+            assert_eq!(differ, 0, "rise {rise}: sharing changed the page");
+            assert_eq!(
+                shared_layers,
+                if SHARES { 2 } else { 40 },
+                "rise {rise}: not two layers between them on Metal, or one \
+                 each elsewhere"
+            );
+        }
     }
 }

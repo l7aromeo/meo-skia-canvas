@@ -853,7 +853,7 @@ pub(crate) fn draw_rect(
             // An exact colour placed at its alpha, as a fill of it is: on an
             // eight-bit page, on the bytes the fill stores, so that the blur
             // scales those, as a blurred path's does -- see
-            // `layer::BlurOp::playback` -- and the interior stores what the
+            // `layer::BlurOp::result_chain` -- and the interior stores what the
             // fill does. Scaled at the alpha as given, the interior of
             // `rgba(0, 0, 0, 0.5)` lay just under 127.5 and stored 127, where
             // a fill stores 128.
