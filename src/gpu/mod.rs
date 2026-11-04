@@ -175,6 +175,34 @@ impl Default for RenderingEngine {
 
 #[allow(dead_code)]
 impl RenderingEngine {
+    /// The engine a canvas of `color_type` rasterizes on, where `gpu` says
+    /// whether it asks for the GPU: the CPU where it does not, where no GPU
+    /// backend is reachable, and where the GPU cannot composite `color_type`.
+    /// Every engine choice goes through this -- the Rust `Canvas`, the
+    /// readback of its pages, and the binding's canvas, whether the engine is
+    /// asked for at construction or set afterwards -- so that none of them
+    /// can make another.
+    ///
+    /// A float canvas that the GPU cannot composite goes to the raster
+    /// backend rather than quietly dropping to eight bits: `colorType` means
+    /// the same thing on both engines, and the canvas reports which one
+    /// answered. Skia's Ganesh Metal and Vulkan backends carry no 32-bit
+    /// float format today, and round a draw's colour to eight bits before
+    /// compositing it in an `F16` one, so this is where an `F16` or `F32`
+    /// canvas changes hands -- and [`Self::can_composite`] probes rather than
+    /// assumes, so a Skia that composites either in float keeps the canvas
+    /// on the GPU.
+    pub fn for_canvas(gpu: bool, color_type: ColorType) -> Self {
+        if !gpu {
+            return Self::CPU;
+        }
+        let engine = Self::default();
+        match engine.can_composite(color_type) {
+            true => engine,
+            false => Self::CPU,
+        }
+    }
+
     pub fn selectable(&self) -> bool {
         match self {
             Self::GPU => Engine::supported(),
