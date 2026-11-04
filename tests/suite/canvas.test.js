@@ -2227,6 +2227,59 @@ describe("colorType", () => {
   // Window's forwarding is deliberately not tested here: constructing a Window opens
   // a real OS window and keeps the GUI event loop alive, which hangs `node --test`.
   // The Canvas-level cases above cover the behaviour the forwarding depends on.
+
+  test("keeps a float canvas on the CPU whichever way the GPU is asked for", () => {
+    // The GPU composites in eight bits, so a float canvas rasterizes on the
+    // CPU. The constructor's option already declined; assigning `gpu` did
+    // not, and an RGBAF32 canvas filled at an alpha of 0.3 read 77/255.
+    const gpuHere = new Canvas(1, 1, { gpu: true }).gpu;
+    const alphaOf = (canvas) => {
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "rgb(200 100 50 / 0.3)";
+      ctx.beginPath();
+      ctx.arc(8, 8, 6, 0, 2 * Math.PI);
+      ctx.fill();
+      const { data } = ctx.getImageData(0, 0, 16, 16, {
+        colorType: "RGBAF32",
+        alphaType: "premultiplied",
+      });
+      return new Float32Array(data.buffer, data.byteOffset, data.length / 4);
+    };
+    for (const colorType of ["RGBAF16", "RGBAF32"]) {
+      const cpu = new Canvas(16, 16, { colorType, gpu: false });
+      const expected = alphaOf(cpu);
+      const asked = {
+        option: new Canvas(16, 16, { colorType, gpu: true }),
+        setter: new Canvas(16, 16, { colorType, gpu: false }),
+        "setter after drawing": new Canvas(16, 16, { colorType }),
+      };
+      asked.setter.gpu = true;
+      asked["setter after drawing"].getContext("2d").fillRect(0, 0, 1, 1);
+      asked["setter after drawing"].getContext("2d").clearRect(0, 0, 1, 1);
+      asked["setter after drawing"].gpu = true;
+      for (const [how, canvas] of Object.entries(asked)) {
+        const what = `${colorType}, asked by the ${how}`;
+        assert.equal(canvas.gpu, false, `${what}: gpu`);
+        assert.equal(canvas.engine.renderer, "CPU", `${what}: renderer`);
+        if (gpuHere)
+          assert.match(canvas.engine.device, /pixel format/, `${what}: device`);
+        assert.deepEqual(alphaOf(canvas), expected, `${what}: pixels`);
+      }
+    }
+    // A centre pixel holds the alpha as written, not on a byte.
+    const centre = alphaOf(new Canvas(16, 16, { colorType: "RGBAF32" }));
+    assert.equal(centre[(8 * 16 + 8) * 4 + 3], Math.fround(0.3));
+  });
+
+  test("reads gpu back as set on an eight-bit canvas where a GPU is available", () => {
+    const canvas = new Canvas(4, 4);
+    const gpuHere = new Canvas(1, 1, { gpu: true }).gpu;
+    canvas.gpu = false;
+    assert.equal(canvas.gpu, false);
+    canvas.gpu = true;
+    assert.equal(canvas.gpu, gpuHere);
+    assert.equal(canvas.engine.renderer, gpuHere ? "GPU" : "CPU");
+  });
 });
 
 describe("the page option", () => {
