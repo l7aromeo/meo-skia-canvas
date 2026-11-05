@@ -226,13 +226,6 @@ impl Default for RenderingEngine {
 /// has a recording context, Graphite where it has a recorder, and the CPU
 /// otherwise. A surface made from a canvas's own (`Canvas::new_surface`)
 /// answers as that canvas does.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the page's reads do not dispatch on Graphite pages yet"
-    )
-)]
 pub(crate) fn engine_of(canvas: &Canvas) -> RenderingEngine {
     #[cfg(any(feature = "metal", feature = "vulkan"))]
     if canvas.recording_context().is_some() {

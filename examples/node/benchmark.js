@@ -50,13 +50,17 @@ const H = 900;
 const DEPTHS = ["RGBA8888", "RGBAF16", "RGBAF32"];
 const BYTES = { RGBA8888: 4, RGBAF16: 8, RGBAF32: 16 };
 
-// The pages every drawing case runs on: the default, and the two where 7.0's
+// The pages every drawing case runs on: the default; the two where 7.0's
 // accepted costs live -- an eight-bit wide-gamut page, whose colours are held
-// exactly in their own space, and a half-float one.
+// exactly in their own space, and a half-float one; and sRGB in each float
+// format, which against the default is what a float colorType costs. A float
+// page draws on the CPU whichever engine is asked for.
 const SPACES = [
   ["srgb", {}],
   ["p3", { colorSpace: "display-p3" }],
   ["p3-f16", { colorSpace: "display-p3", colorType: "RGBAF16" }],
+  ["srgb-f16", { colorType: "RGBAF16" }],
+  ["srgb-f32", { colorType: "RGBAF32" }],
 ];
 const ENGINES = [
   ["cpu", { gpu: false }],

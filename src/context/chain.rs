@@ -42,6 +42,7 @@ use crate::{
         kept::ChainInput,
         layer::ExactColour,
     },
+    gpu::{RenderingEngine, engine_of},
     node::utils::color_in_canvas_space,
     pixels::PixelColorSpace,
     started,
@@ -736,12 +737,24 @@ pub(crate) fn clear_unless_zeroed(surface: &mut Surface) {
 /// held before is never read. Any other layer is let go after its run, to
 /// Skia's resource cache, which keeps it only while it fits the cache's budget
 /// -- see [`pool`].
+///
+/// A Graphite page's layer is in memory, made as a CPU page's is, and never
+/// kept: its chains take the CPU's route, whose steps read the layer where it
+/// lies. A layer the page made would be a Graphite texture, which nothing on
+/// that route reads.
 fn layer_surface(
     canvas: &SkCanvas,
     depth: Depth,
     drawn: IRect,
 ) -> Option<(Surface, Option<pool::Key>)> {
     let info = layer_info(canvas, depth, drawn);
+    match engine_of(canvas) {
+        RenderingEngine::Graphite => {
+            return started::raster(&info, None, None)
+                .map(|raster| (raster, None));
+        }
+        RenderingEngine::GPU | RenderingEngine::CPU => {}
+    }
     let key = pool::key(canvas, &info);
     if let Some(mut kept) = key.as_ref().and_then(pool::take) {
         // Cleared whole, not only where the chains read: a pass whose target
@@ -1086,20 +1099,20 @@ type Gpu = gpu::RecordingContext;
 #[cfg(not(any(feature = "metal", feature = "vulkan")))]
 enum Gpu {}
 
-/// Whether `canvas` draws on the GPU.
-#[cfg(any(feature = "metal", feature = "vulkan"))]
+/// Whether `canvas` draws on Ganesh, whose layers and placement a chain on
+/// it takes. A Graphite page's chains take the CPU's: their layers are in
+/// memory -- see [`layer_surface`] -- so they are placed as the CPU's are and
+/// kept as the CPU's are.
 pub(crate) fn is_on_gpu(canvas: &SkCanvas) -> bool {
-    canvas.recording_context().is_some()
+    match engine_of(canvas) {
+        RenderingEngine::GPU => true,
+        RenderingEngine::CPU | RenderingEngine::Graphite => false,
+    }
 }
 
-/// Whether `canvas` draws on the GPU: never, in a build without a backend.
-#[cfg(not(any(feature = "metal", feature = "vulkan")))]
-pub(crate) fn is_on_gpu(_: &SkCanvas) -> bool {
-    false
-}
-
-/// Whether chains on `canvas` may share a layer: on Metal, and on no other
-/// backend.
+/// Whether chains on `canvas` may share a layer: on Ganesh's Metal backend,
+/// and on no other. A Graphite page has no recording context, and its chains,
+/// on the CPU's route, share no more than the CPU's do.
 ///
 /// Ganesh merges the draws of chains sharing a layer into one op where it
 /// can -- `FillRRectOp` combines any two compatible rounded rectangles into
@@ -1861,7 +1874,39 @@ mod tests {
         exact_blur, filtered, offset_tint, rounded_once, shadow_composed,
         shadowed, tint, tint_colour, tinted_alpha, worked_on,
     };
+    #[cfg(all(meo_graphite, feature = "metal"))]
+    use crate::{context::page::ExportOptions, gpu::graphite};
     use crate::{prelude::*, started};
+    #[cfg(all(meo_graphite, feature = "metal"))]
+    use skia_safe::IRect;
+
+    #[cfg(all(meo_graphite, feature = "metal"))]
+    #[test]
+    fn a_graphite_page_s_chains_work_on_layers_in_memory() {
+        // A chain on a Graphite page takes the CPU's route: its layer is in
+        // main memory, where the route's steps read it, and it is placed as
+        // the CPU's layers are. One the page made would be a Graphite
+        // texture, which none of those steps reads.
+        if !graphite::supported() {
+            eprintln!("skipped: no Graphite context on this machine");
+            return;
+        }
+        let info = ImageInfo::new(
+            (16, 16),
+            ColorType::RGBAF32,
+            AlphaType::Premul,
+            ColorSpace::new_srgb(),
+        );
+        let mut page = graphite::make_surface(&info, &ExportOptions::default())
+            .expect("a Graphite page");
+        let canvas = page.canvas();
+        assert!(!super::is_on_gpu(canvas), "placed as the CPU's");
+        let (mut layer, key) =
+            super::layer_surface(canvas, Depth::Floats, IRect::from_wh(8, 8))
+                .expect("a layer");
+        assert!(layer.peek_pixels().is_some(), "a layer in main memory");
+        assert!(key.is_none(), "a layer in main memory is never kept");
+    }
 
     #[test]
     fn a_raster_surface_is_made_of_zeros() {
