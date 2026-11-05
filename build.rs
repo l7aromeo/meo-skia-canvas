@@ -22,6 +22,29 @@ fn main() {
     }
 
     brotli_command_table();
+    graphite_bindings();
+}
+
+/// What this script prints where the patched Graphite bindings are in the
+/// build. The npm build's CI step looks for it, so that a gate which never
+/// turns on cannot pass for one that is off by design.
+const GRAPHITE_BINDINGS_NOTICE: &str =
+    "meo_graphite: the patched Graphite bindings are in this build";
+
+/// Turns on `cfg(meo_graphite)` where the skia-bindings in the build carries
+/// the Graphite bindings `containers/rust-skia-graphite-bindings.patch` adds.
+///
+/// Only that patched skia-bindings prints `meo_graphite_bindings`, which Cargo
+/// hands this script as `DEP_SKIA_MEO_GRAPHITE_BINDINGS` through its
+/// `links = "skia"`. A build against crates.io's skia-bindings never sees it,
+/// so the code calling those bindings is never compiled there, and no feature
+/// a dependent can turn on reaches it.
+fn graphite_bindings() {
+    println!("cargo:rustc-check-cfg=cfg(meo_graphite)");
+    if env::var_os("DEP_SKIA_MEO_GRAPHITE_BINDINGS").is_some() {
+        println!("cargo:rustc-cfg=meo_graphite");
+        println!("cargo:warning={GRAPHITE_BINDINGS_NOTICE}");
+    }
 }
 
 // UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around

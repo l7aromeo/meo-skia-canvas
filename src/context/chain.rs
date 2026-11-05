@@ -399,6 +399,9 @@ impl Drawn {
         #[cfg(test)]
         SHARED_LAYERS.with(|layers| layers.set(layers.get() + 1));
         let context = gpu_of(&mut surface);
+        // Made just before, so in main memory it is zeros already -- see
+        // [`clear_unless_zeroed`].
+        let zeroed = surface.peek_pixels().is_some();
         let offscreen = surface.canvas();
         // Only what the chains read is cleared: the rows and columns the
         // CPU's layer starts at the device's origin with lie before it, are
@@ -407,7 +410,9 @@ impl Drawn {
             offscreen.save();
             offscreen
                 .clip_irect(plan.region.with_offset((-at.left, -at.top)), None);
-            offscreen.clear(Color::TRANSPARENT);
+            if !zeroed {
+                offscreen.clear(Color::TRANSPARENT);
+            }
             offscreen.restore();
         }
         let origin = Matrix::translate((-at.left as f32, -at.top as f32));
@@ -504,8 +509,8 @@ fn padded(
 ) -> Option<Image> {
     let info = image.image_info().with_dimensions(worked.size());
     let mut surface = make_surface(context, &info)?;
+    clear_unless_zeroed(&mut surface);
     let canvas = surface.canvas();
-    canvas.clear(Color::TRANSPARENT);
     let at = (region.left - worked.left, region.top - worked.top);
     canvas.draw_image(image, (at.0 as f32, at.1 as f32), None);
     Some(surface.image_snapshot())
@@ -651,6 +656,25 @@ fn placed(
         region.bottom,
     );
     (region, drawn)
+}
+
+/// Clears `surface`, made just before by Skia -- never one wrapped around
+/// pixels of our own -- to transparent where its pixels may hold anything
+/// else. One whose pixels are in main memory holds nothing but zero bits
+/// already, by Skia's guarantee (Skia M156): `SkSurfaces::Raster`, which a
+/// raster canvas's `new_surface` also ends in (`SkBitmapDevice.cpp:651-652`),
+/// allocates them through `SkMallocPixelRef::MakeAllocate`
+/// (`SkSurface_Raster.cpp:214-219`), which callocs them
+/// (`SkMallocPixelRef.cpp:47`), and documents them as "zeroed before use"
+/// (`include/core/SkSurface.h:61-62`). Zero bits are transparent in every
+/// colour type -- +0.0 in a float one -- which is what a clear writes, so
+/// clearing such a surface again only writes the same bytes; on a float
+/// layer through Skia's raster pipeline, 12% of an 8-bit drop shadow's draw.
+/// A GPU target's texture may be a scratch one used before, and is cleared.
+pub(crate) fn clear_unless_zeroed(surface: &mut Surface) {
+    if surface.peek_pixels().is_none() {
+        surface.canvas().clear(Color::TRANSPARENT);
+    }
 }
 
 /// A layer of `drawn`'s size for `canvas`, made by the canvas's own device
@@ -1235,10 +1259,10 @@ fn filtered(
     };
     let info = image.image_info();
     let mut surface = make_surface(context, info)?;
+    clear_unless_zeroed(&mut surface);
     let mut paint = Paint::default();
     paint.set_color_filter(filter);
     let canvas = surface.canvas();
-    canvas.clear(Color::TRANSPARENT);
     canvas.draw_image(image, (0, 0), Some(&paint));
     Some(surface.image_snapshot())
 }
@@ -1355,7 +1379,7 @@ fn shadow_composed(
     let floats = raster.image_info().with_color_type(ColorType::RGBAF32);
     let on_floats = |draw: &dyn Fn(&SkCanvas)| {
         let mut surface = started::raster(&floats, None, None)?;
-        surface.canvas().clear(Color::TRANSPARENT);
+        clear_unless_zeroed(&mut surface);
         draw(surface.canvas());
         Some(surface.image_snapshot())
     };
@@ -1701,10 +1725,10 @@ fn imaged(
     let scale = Matrix::scale((layer.scale_x().abs(), layer.scale_y().abs()));
     let filter = filter.with_local_matrix(&scale)?;
     let mut surface = make_surface(context, image.image_info())?;
+    clear_unless_zeroed(&mut surface);
     let mut paint = Paint::default();
     paint.set_image_filter(filter).set_alpha_f(gain);
     let canvas = surface.canvas();
-    canvas.clear(Color::TRANSPARENT);
     canvas.draw_image(image, (0, 0), Some(&paint));
     Some(surface.image_snapshot())
 }
@@ -1725,18 +1749,96 @@ fn to_raster(context: Option<&Gpu>, image: &Image) -> Option<Image> {
 
 #[cfg(test)]
 mod tests {
+    use std::env::consts::ARCH;
+
     use skia_safe::{
         AlphaType, Canvas as SkCanvas, Color, Color4f, ColorSpace, ColorType,
         Data, FilterMode, Image, ImageInfo, Matrix, MipmapMode, Paint,
         PathBuilder, PictureRecorder, Rect, SamplingOptions, Surface, Vector,
-        image::CachingHint,
+        image::CachingHint, named_primaries, named_transfer_fn,
     };
 
     use super::{
         Depth, REFUSE_PLACED, Step, apply, blurred_on_cpu, exact_blur,
-        filtered, rounded_once, shadow_composed, shadowed, tint, worked_on,
+        filtered, offset_tint, rounded_once, shadow_composed, shadowed, tint,
+        worked_on,
     };
     use crate::{prelude::*, started};
+
+    #[test]
+    fn a_raster_surface_is_made_of_zeros() {
+        // What `clear_unless_zeroed` leaves a raster surface on: every one
+        // made holds nothing but zero bits, in each colour type a chain
+        // makes, small and past the allocator's large sizes, and where it
+        // takes the memory a surface filled with white just let go -- which
+        // a surface allocated but not zeroed would show.
+        let (mut made, mut reused) = (0, 0);
+        for colour in [
+            ColorType::RGBA8888,
+            ColorType::BGRA8888,
+            ColorType::RGBAF16,
+            ColorType::RGBAF32,
+            ColorType::Alpha8,
+        ] {
+            for size in [(3, 2), (59, 56), (600, 400)] {
+                let info =
+                    ImageInfo::new(size, colour, AlphaType::Premul, None);
+                let mut white =
+                    started::raster(&info, None, None).expect("a surface");
+                white.canvas().clear(Color::WHITE);
+                let was = white.peek_pixels().expect("pixels").addr() as usize;
+                drop(white);
+                let mut fresh =
+                    started::raster(&info, None, None).expect("a surface");
+                let pixels = fresh.peek_pixels().expect("pixels");
+                reused += usize::from(pixels.addr() as usize == was);
+                let bytes = pixels.bytes().expect("bytes");
+                assert!(
+                    bytes.iter().all(|&b| b == 0),
+                    "{colour:?} {size:?} made holding something"
+                );
+                made += 1;
+            }
+        }
+        assert_eq!(made, 5 * 3);
+        assert!(reused > 0, "no surface took the memory one let go");
+    }
+
+    #[test]
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn a_gpu_target_is_cleared_whatever_it_holds() {
+        // A GPU target can hold what Skia's scratch texture held before it,
+        // so `clear_unless_zeroed` clears it, whatever is there: a target
+        // filled with white reads nothing but zeros after it. Without a GPU
+        // there is no target to ask.
+        use crate::{context::page::ExportOptions, gpu::RenderingEngine};
+        if !RenderingEngine::GPU.selectable() {
+            return;
+        }
+        let info = ImageInfo::new(
+            (64, 48),
+            ColorType::RGBA8888,
+            AlphaType::Premul,
+            ColorSpace::new_srgb(),
+        );
+        let mut page = RenderingEngine::GPU
+            .make_surface(&info, &ExportOptions::default())
+            .expect("a GPU page");
+        let mut context = super::gpu_of(&mut page).expect("its context");
+        let mut target =
+            super::make_surface(Some(&mut context), &info).expect("a target");
+        assert!(target.peek_pixels().is_none(), "a target in main memory");
+        target.canvas().clear(Color::WHITE);
+        super::clear_unless_zeroed(&mut target);
+        let mut bytes = vec![0u8; info.compute_min_byte_size()];
+        assert!(target.read_pixels(
+            &info,
+            &mut bytes,
+            info.min_row_bytes(),
+            (0, 0)
+        ));
+        assert!(bytes.iter().all(|&b| b == 0), "left holding white");
+    }
 
     /// A drop shadow in black, moved by `(dx, dy)` and blurred by `sigma`.
     fn shadow(dx: f32, dy: f32, sigma: f32) -> Step {
@@ -1763,6 +1865,124 @@ mod tests {
         right: 160.0,
         bottom: 100.0,
     };
+
+    /// How many alphas [`a_tint_into_floats_is_one_product_a_channel`]
+    /// tints at a time: a 256 by 256 image of them.
+    const SWEPT_SIDE: i32 = 256;
+
+    #[test]
+    fn a_tint_into_floats_is_one_product_a_channel() {
+        // What Skia's raster pipeline makes of `offset_tint` over a
+        // premultiplied F32 image holding nothing but an alpha, against one
+        // product a channel in Rust: the tint's alpha times the image's,
+        // then each colour times that. The other order is counted beside
+        // it, as the control a sweep that cannot tell them apart would
+        // fail. Run on every machine CI builds on: Skia picks its stages
+        // at run time on x86.
+        let n = (SWEPT_SIDE * SWEPT_SIDE) as usize;
+        // Every byte's alpha, a dense spread of the floats a blur leaves,
+        // and the ends: zero, the smallest normal and subnormal, one and
+        // the float under it.
+        let mut alphas: Vec<f32> =
+            (0..=255).map(|v| v as f32 / 255.0).collect();
+        let mut x = 0x9E37_79B9u32;
+        while alphas.len() < n - 6 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            alphas.push((x >> 8) as f32 / (1u32 << 24) as f32);
+        }
+        alphas.extend([
+            0.0,
+            f32::MIN_POSITIVE,
+            f32::from_bits(1),
+            1.0,
+            1.0f32.next_down(),
+            0.5,
+        ]);
+        let pixels: Vec<f32> =
+            alphas.iter().flat_map(|&a| [0.0, 0.0, 0.0, a]).collect();
+        let bytes: Vec<u8> =
+            pixels.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let (mut compared, mut missed, mut missed_other) = (0usize, 0, 0);
+        for space in [
+            ColorSpace::new_srgb(),
+            ColorSpace::new_srgb_linear(),
+            ColorSpace::new_cicp(
+                named_primaries::CicpId::SMPTE_EG_432_1,
+                named_transfer_fn::CicpId::IEC61966_2_1,
+            )
+            .expect("Display P3"),
+        ] {
+            let info = ImageInfo::new(
+                (SWEPT_SIDE, SWEPT_SIDE),
+                ColorType::RGBAF32,
+                AlphaType::Premul,
+                Some(space),
+            );
+            let image = started::raster_from_data(
+                &info,
+                Data::new_copy(&bytes),
+                info.min_row_bytes(),
+            )
+            .expect("an image");
+            // Placed colours, a byte over 255, and some that are not.
+            let colours = (0..=255u8)
+                .step_by(17)
+                .map(|v| {
+                    let c = f32::from(v) / 255.0;
+                    [c, 1.0 - c, c / 3.0]
+                })
+                .chain([[0.1, 0.7, 0.999_999], [1e-30, 0.5, 2.0 / 3.0]]);
+            for rgb in colours {
+                for tint_alpha in
+                    [1.0, 0.5, 0.3, 1.0 / 255.0, 254.0 / 255.0, 0.7]
+                {
+                    let tinted = filtered(
+                        None,
+                        &image,
+                        &offset_tint(rgb, tint_alpha),
+                        1.0,
+                    )
+                    .expect("tinted");
+                    let mut got = vec![0f32; n * 4];
+                    assert!(tinted.read_pixels(
+                        &info,
+                        &mut got,
+                        info.min_row_bytes(),
+                        (0, 0),
+                        CachingHint::Disallow,
+                    ));
+                    for (px, &a) in got.as_chunks::<4>().0.iter().zip(&alphas) {
+                        let alpha = tint_alpha * a;
+                        let want = [
+                            rgb[0] * alpha,
+                            rgb[1] * alpha,
+                            rgb[2] * alpha,
+                            alpha,
+                        ];
+                        let other = [
+                            rgb[0] * tint_alpha * a,
+                            rgb[1] * tint_alpha * a,
+                            rgb[2] * tint_alpha * a,
+                            alpha,
+                        ];
+                        let bits = |p: &[f32; 4]| p.map(f32::to_bits);
+                        missed += usize::from(bits(px) != bits(&want));
+                        missed_other += usize::from(bits(px) != bits(&other));
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "tint sweep on {}: {compared} pixels, {missed} off one product a \
+             channel, {missed_other} off the other order",
+            ARCH
+        );
+        assert!(missed_other > 0, "the control: the orders differ somewhere");
+        assert_eq!(missed, 0, "{missed} of {compared} off");
+    }
 
     #[test]
     fn a_shadow_s_chain_works_on_its_blur_past_the_page() {
