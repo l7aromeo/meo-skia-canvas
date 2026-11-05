@@ -11,17 +11,20 @@
 //
 // `env` is the justfile's `dotenv-command`, so every recipe on macOS and Linux
 // builds skia-bindings offline from this tree, and on Windows, which has no
-// patches, as skia-bindings always has. It only names the directory -- it runs
-// on every `just` invocation, `just --list` included, so it must never
-// download. `prepare` is what downloads, and `ensure-deps` runs it.
+// patches, as skia-bindings always has. It names the directory and holds the
+// tree for the `just` that ran it -- see `hold` -- and it runs on every `just`
+// invocation, `just --list` included, so it must never download. `prepare` is
+// what downloads, and `ensure-deps` runs it.
 //
 // The tree is rust-skia at the tag of the skia-bindings version in Cargo.lock,
 // whose Skia submodule is pinned by that tag, with Skia's own DEPS synced and gn
 // fetched at the revision `bin/fetch-gn` names. It lives once per version and
 // patch list under `$XDG_CACHE_HOME/meo-skia-canvas`, so a new version or a changed
 // patch gets a new directory and a stale one cannot be reused. Once a new one
-// is ready, the others are removed unless a worktree of this repository still
-// builds from one -- the cache is shared by every worktree on the machine.
+// is ready, the others are removed unless something still uses one -- the
+// cache is shared by every worktree on the machine: a worktree whose patch
+// list names it, a skia-bindings out-dir in a worktree's target that was built
+// from it, or a `just` holding it -- see `treesToKeep`.
 //
 // Every tree for a version holds the same checkout, dependencies and gn, and
 // differs from the others only in the patches applied to tracked files. So a
@@ -370,11 +373,73 @@ function worktreeTreeName(worktree) {
 }
 
 /**
+ * The names of the trees a skia-bindings out-dir in `worktree`'s target was
+ * built from: each `output` that skia-bindings' build script wrote names its
+ * source in a `cargo:rerun-if-changed=` line, and one under `cache` names the
+ * tree. A target holds an out-dir per configuration it has built, and keeps
+ * linking against it, so its tree is in use whatever the worktree's patch
+ * list names now. Both `debug`-style profiles and a target triple's are read.
+ *
+ * Only that line is read. The `ninja: Entering directory` line names the
+ * out-dir under the worktree's own target, not the source, and the compile
+ * lines name the source by a path relative to the out-dir -- both are ninja's
+ * progress output rather than anything cargo acts on, and a worktree whose
+ * directory reads like a tree name would match a looser search. The
+ * `rerun-if-changed` line is absolute, is what cargo watches, and is
+ * anchored here on the cache's own path.
+ */
+export function treesBuiltFrom(worktree, cache = cacheRoot()) {
+  const prefixes = [cache, existsSync(cache) ? realpathSync(cache) : cache].map(
+    (dir) => `cargo:rerun-if-changed=${dir}${sep}`,
+  );
+  const names = new Set();
+  const target = join(worktree, "target");
+  const listed = (dir) => {
+    try {
+      return readdirSync(dir, { withFileTypes: true }).filter((e) =>
+        e.isDirectory(),
+      );
+    } catch (error) {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return [];
+      throw error;
+    }
+  };
+  // `target/<profile>/build`, or `target/<triple>/<profile>/build`.
+  const builds = listed(target).flatMap((first) => [
+    join(target, first.name, "build"),
+    ...listed(join(target, first.name)).map((second) =>
+      join(target, first.name, second.name, "build"),
+    ),
+  ]);
+  for (const build of builds) {
+    for (const outDir of listed(build)) {
+      if (!outDir.name.startsWith("skia-bindings-")) continue;
+      let text;
+      try {
+        text = readFileSync(join(build, outDir.name, "output"), "utf8");
+      } catch (error) {
+        if (error.code === "ENOENT") continue;
+        throw error;
+      }
+      for (const line of text.split("\n")) {
+        const prefix = prefixes.find((p) => line.startsWith(p));
+        if (!prefix) continue;
+        const name = line.slice(prefix.length).split(sep)[0];
+        if (name.startsWith("skia-")) names.add(name);
+      }
+    }
+  }
+  return names;
+}
+
+/**
  * The names of the trees some worktree of the repository at `root` builds
  * from, or null when they cannot all be known: the worktrees cannot be
- * listed, or one whose own script is there names no tree. A worktree whose
- * checkout is gone, or that predates the script and has no lock or patch to
- * name a tree by, names none.
+ * listed, one whose own script is there names no tree, or one's target cannot
+ * be read. A worktree builds from the tree its own script names and from each
+ * tree an out-dir in its target was built from -- see `treesBuiltFrom`. A
+ * worktree whose checkout is gone, or that predates the script and has no lock
+ * or patch to name a tree by, names none of the first kind.
  */
 export function treesInUse(root = ROOT) {
   let listing;
@@ -397,6 +462,7 @@ export function treesInUse(root = ROOT) {
     try {
       const name = worktreeTreeName(worktree);
       if (name) names.add(name);
+      for (const built of treesBuiltFrom(worktree)) names.add(built);
     } catch {
       // Unknown is not unused: a tree removed from under a worktree costs it
       // a fresh one, and one left behind costs only disk.
@@ -404,6 +470,90 @@ export function treesInUse(root = ROOT) {
     }
   }
   return names;
+}
+
+/** The directory under `cache` holding `hold`'s markers, one per tree. */
+function holdsDir(cache) {
+  return join(cache, "holds");
+}
+
+/**
+ * When the process `pid` started, as `ps` prints it, or "" where that cannot
+ * be asked. A marker records it so that a holder's PID used again by another
+ * process is not taken for the holder.
+ */
+function startTime(pid) {
+  if (process.platform === "win32") return "";
+  try {
+    return execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return "";
+  }
+}
+
+/** Whether the process `pid`, started at `started` where known, still runs. */
+function running(pid, started) {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    // EPERM is a process that exists and is not ours to signal.
+    if (error.code !== "EPERM") return false;
+  }
+  return started === "" || startTime(pid) === started;
+}
+
+/**
+ * Holds the tree `name` under `cache` for as long as the process `pid` runs:
+ * `env` holds its tree for the `just` it is the `dotenv-command` of, which is
+ * its parent, so every recipe of that `just` -- and a shell that exported its
+ * output -- builds from a tree `prepare` in another worktree will not remove.
+ * Nothing releases a hold; it ends when its holder does.
+ */
+export function hold(name, pid = process.ppid, cache = cacheRoot()) {
+  const dir = join(holdsDir(cache), name);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, String(pid)), `${startTime(pid)}\n`);
+}
+
+/**
+ * The names of the trees under `cache` some running process holds -- see
+ * `hold` -- removing the markers of holders that have ended.
+ */
+export function treesHeld(cache = cacheRoot()) {
+  const names = new Set();
+  let trees;
+  try {
+    trees = readdirSync(holdsDir(cache));
+  } catch (error) {
+    if (error.code === "ENOENT") return names;
+    throw error;
+  }
+  for (const name of trees) {
+    const dir = join(holdsDir(cache), name);
+    for (const pid of readdirSync(dir)) {
+      const marker = join(dir, pid);
+      if (running(Number(pid), readFileSync(marker, "utf8").trim()))
+        names.add(name);
+      else rmSync(marker, { force: true });
+    }
+    if (!names.has(name)) rmSync(dir, { recursive: true, force: true });
+  }
+  return names;
+}
+
+/**
+ * The names of the trees under `cache` that `prepare` keeps: those some
+ * worktree of the repository at `root` builds from (`treesInUse`) and those a
+ * running build holds (`treesHeld`). Null when the first cannot be known.
+ */
+export function treesToKeep(root = ROOT, cache = cacheRoot()) {
+  const inUse = treesInUse(root);
+  if (inUse === null) return null;
+  for (const name of treesHeld(cache)) inUse.add(name);
+  return inUse;
 }
 
 /**
@@ -690,7 +840,7 @@ function prepare() {
   renameSync(partial, tree);
 
   // This checkout is one of the worktrees, so the new tree is kept with them.
-  removeSuperseded(cacheRoot(), treesInUse());
+  removeSuperseded(cacheRoot(), treesToKeep());
   return sourceDir(tree);
 }
 
@@ -761,8 +911,18 @@ if (
 
   const command = process.argv[2];
   if (command === "env") {
-    if (patches().length > 0 && !usesLocalSkia())
+    if (patches().length > 0 && !usesLocalSkia()) {
       console.log(`SKIA_SOURCE_DIR=${sourceDir()}`);
+      // A hold that cannot be written leaves the tree as unprotected as it was
+      // before holds existed, which is no reason to stop the recipe.
+      try {
+        hold(treeName());
+      } catch (error) {
+        console.error(
+          `skia-source: ${treeName()} is not held: ${error.message}`,
+        );
+      }
+    }
   } else if (command === "dir") {
     console.log(sourceDir());
   } else if (command === "prepare") {

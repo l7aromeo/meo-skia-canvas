@@ -19,6 +19,9 @@ pub(crate) mod completion;
 pub mod owner;
 /// Flushing a GPU playback every so many layers it renders offscreen.
 pub(crate) mod pacing;
+/// An eight-bit GPU page unpremultiplied on the GPU, to the CPU table's byte.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+pub(crate) mod unpremultiply;
 
 /// A marker making its holder `!Send`, for state that belongs to one thread.
 ///

@@ -105,8 +105,12 @@ cache holds no tree for the version, and otherwise derived from one -- copied
 copy-on-write, its sources restored by git and checked against the tag and
 the commits Skia's DEPS pins, then patched -- in seconds, with nothing
 downloaded. A tree that fails a check is named on stderr and passed over. Once a new tree
-is ready the others are removed, except any a worktree of the repository still
-locks: the cache is shared by every worktree on the machine. A bare
+is ready the others are removed, except any still in use, since the cache is
+shared by every worktree on the machine. A tree is in use when a worktree's own
+patch list names it, when a skia-bindings out-dir in a worktree's target was
+built from it, or when a `just` holds it. `env`, the justfile's
+`dotenv-command`, holds its tree for the `just` that ran it, so a recipe keeps
+its tree while it runs even if the worktree's patch list changes under it. A bare
 `cargo build` or `bun run build` outside `just` sets nothing, downloads the
 prebuilt, and builds a binary with the timeout in it. On Linux, where no
 prebuilt carries `freetype` and skia-bindings builds Skia from its own unpatched
