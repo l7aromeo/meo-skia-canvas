@@ -1851,12 +1851,21 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
       ]) {
         const family = `ParagraphOrder${name}${order === "upright first" ? "U" : "L"}`;
         FontLibrary.use(family, files);
-        for (const [label, slant, want] of [
-          ["an upright", UPRIGHT, upright],
-          ["an oblique", OBLIQUE, leans],
-          ["an italic", ITALIC, leans],
+        const angled = (obliqueAngle) => ({
+          fontStyle: { slant: OBLIQUE, obliqueAngle },
+        });
+        for (const [label, style, want] of [
+          ["an upright", slanted(UPRIGHT), upright],
+          ["an oblique", slanted(OBLIQUE), leans],
+          ["an italic", slanted(ITALIC), leans],
+          ["a 10deg oblique", angled(10), leans],
+          [
+            "a -14deg oblique",
+            angled(-14),
+            paragraph("ParagraphOrderUpright", [["IH", angled(-14)]]),
+          ],
         ]) {
-          if (!same(paragraph(family, [["IH", slanted(slant)]]), want))
+          if (!same(paragraph(family, [["IH", style]]), want))
             wrong.push(
               `${name}, ${order}: ${label} range draws the face that is`,
             );
@@ -1872,6 +1881,23 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
       )
     )
       wrong.push("an upright face alone: an italic range is skewed");
+    // A family with an italic face beside its oblique one keeps the italic
+    // face for an italic range: only a family without one falls back.
+    const RALEWAY_ITALIC =
+      "tests/assets/fonts/Raleway/Raleway-Italic-VariableFont_wght.ttf";
+    FontLibrary.use("ParagraphOrderItalicAlone", [RALEWAY_ITALIC]);
+    FontLibrary.use("ParagraphOrderMixed", [
+      `${R}/Recursive-oblique-flag-subset.ttf`,
+      UP,
+      RALEWAY_ITALIC,
+    ]);
+    if (
+      !same(
+        paragraph("ParagraphOrderMixed", [["IH", slanted(ITALIC)]]),
+        paragraph("ParagraphOrderItalicAlone", [["IH", slanted(ITALIC)]]),
+      )
+    )
+      wrong.push("with an italic face: an italic range draws the italic face");
     assert.deepEqual(wrong, []);
   });
 

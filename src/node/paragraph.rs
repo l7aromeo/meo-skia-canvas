@@ -1018,7 +1018,7 @@ fn parse_text_style<'a>(
         style.font_families().iter().map(str::to_string).collect();
     let font_style = style.font_style();
     if let Some(slanted) = FontLibrary::with_shared(|lib| {
-        lib.slanted(&families, font_style.slant())
+        lib.slanted(&families, font_style.slant(), oblique)
     }) {
         if let Some(names) = &slanted.names {
             style.set_font_families(names);

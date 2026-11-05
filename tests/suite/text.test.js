@@ -2394,6 +2394,20 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
           ["", upright, "upright"],
           ["oblique ", leans, "leaning"],
           ["italic ", leans, "leaning"],
+          // An oblique of a smaller angle still takes the face that leans
+          // its way; one of zero or a negative angle takes the upright face,
+          // sheared to the angle, which no leaning face matches.
+          ["oblique 10deg ", leans, "leaning"],
+          [
+            "oblique 0deg ",
+            pixels("oblique 0deg 200px OrderUpright"),
+            "upright",
+          ],
+          [
+            "oblique -14deg ",
+            pixels("oblique -14deg 200px OrderUpright"),
+            "upright, sheared back,",
+          ],
         ]) {
           if (!pixels(`${style}200px ${family}`).equals(want))
             wrong.push(

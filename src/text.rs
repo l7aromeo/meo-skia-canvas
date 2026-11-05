@@ -2540,7 +2540,14 @@ fn fill_text_style(
         // a family has one its platform reports upright -- see
         // `FontLibrary::slanted`.
         let leaning = SharedFontRegistry::with_shared(|library| {
-            library.slanted(&names, font_style_for(style).slant())
+            library.slanted(
+                &names,
+                font_style_for(style).slant(),
+                match style.slant {
+                    TextSlant::Oblique(angle) => Some(angle.degrees()),
+                    _ => None,
+                },
+            )
         });
         as_oblique = leaning.as_ref().is_some_and(|slanted| slanted.as_oblique);
         match leaning.and_then(|slanted| slanted.names) {
@@ -2811,7 +2818,7 @@ mod tests {
         context2d::FontStretch,
         font::{
             FontAxisTag, FontLibrary, FontVariation, INSTANCED_POSITIONS,
-            variation_axes,
+            ObliqueAngle, variation_axes,
         },
         node::oblique::{IGNORE_ONE_PAINT, PAINT_COMPARISONS},
         started,
@@ -2868,6 +2875,13 @@ mod tests {
             drawn_at("CrateOrderUpright", &[UPRIGHT], TextSlant::Upright);
         let leans =
             drawn_at("CrateOrderFlagged", &[FLAGGED], TextSlant::Upright);
+        let oblique = |degrees| {
+            TextSlant::Oblique(ObliqueAngle::new(degrees).expect("an angle"))
+        };
+        // A negative oblique matches no face that leans forward: the upright
+        // face, sheared back.
+        let back =
+            drawn_at("CrateOrderUprightBack", &[UPRIGHT], oblique(-14.0));
         assert_ne!(upright, leans, "the two faces draw differently");
         let mut wrong = Vec::new();
         for (order, files) in [
@@ -2879,6 +2893,8 @@ mod tests {
                 (TextSlant::Upright, &upright),
                 (TextSlant::OBLIQUE, &leans),
                 (TextSlant::Italic, &leans),
+                (oblique(10.0), &leans),
+                (oblique(-14.0), &back),
             ] {
                 if &drawn_at(&family, &files, slant) != want {
                     wrong.push(format!("{order}: {slant:?}"));

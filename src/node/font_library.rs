@@ -664,11 +664,12 @@ pub(crate) struct Slanted {
     /// [`oblique_alias`], or `None` where the style's own stand.
     pub(crate) names: Option<Vec<String>>,
     /// Whether an italic is laid out as an oblique: where the first of the
-    /// style's families this library holds has no italic face and a face
-    /// that hides its lean, which CSS Fonts 4 section 5.2 falls back to and
+    /// style's families this library holds has no italic face and a face its
+    /// tables flag oblique, which CSS Fonts 4 section 5.2 falls back to and
     /// draws as it is. SkParagraph skews a run italic wherever the style asks
-    /// for italic and the face is not, so a face that already leans would be
-    /// leaned twice.
+    /// for italic and the face does not report italic, so a face that leans
+    /// already -- reported upright by CoreText, or oblique by FreeType --
+    /// would be leaned twice.
     pub(crate) as_oblique: bool,
 }
 
@@ -676,13 +677,16 @@ pub(crate) struct Slanted {
 struct FamilySlants {
     /// Whether the library holds the family at all.
     registered: bool,
-    /// Whether one of its faces hides its lean.
-    hides: bool,
-    /// Whether such a face ties with an upright face of the family, and no
-    /// face of the family reports the slant asked for.
+    /// Whether one of its faces is flagged oblique by its own tables -- see
+    /// [`designed_oblique_angle`].
+    leans: bool,
+    /// Whether a face that [hides its lean](hides_its_lean) ties with an
+    /// upright face of the family, and no face of the family reports the
+    /// slant asked for.
     needs_alias: bool,
-    /// Whether a face of the family reports itself italic.
-    reports_italic: bool,
+    /// Whether the family has an italic face: one reporting italic that its
+    /// tables do not flag oblique.
+    has_italic: bool,
 }
 
 pub struct FontLibrary {
@@ -1784,12 +1788,13 @@ impl FontLibrary {
 
     /// How a style asking for `slant` in `names`, its families as
     /// [`collection_names`](Self::collection_names) gave them, is laid out
-    /// where one of those families has a face that [hides its
-    /// lean](hides_its_lean) -- see [`Slanted`]; `None` where none does, or
-    /// `slant` is upright.
+    /// where one of those families has a face its tables flag oblique -- see
+    /// [`Slanted`]; `None` where none does, or `slant` is upright, or it is an
+    /// oblique of `oblique_degrees` at zero or below.
     ///
-    /// Skia cannot pick such a face for a slanted request when it ties with
-    /// an upright face of the family, since it scores the two alike and
+    /// Skia cannot pick a face that [hides its lean](hides_its_lean) for a
+    /// slanted request when it ties with an upright face of the family, since
+    /// it scores the two alike and
     /// [`in_registration_order`](Self::in_registration_order) puts the
     /// upright one first. So a family with a tie and no face reporting
     /// `slant` is asked for after its [`oblique_alias`]: CSS Fonts 4 section
@@ -1797,13 +1802,22 @@ impl FontLibrary {
     /// back from italic to oblique before it synthesises. The family stays in
     /// the list behind its alias, for any glyph its oblique faces lack. A
     /// family whose faces report their slants -- RecursiveStatic's, or any
-    /// on FreeType -- is left as it was.
+    /// on FreeType -- keeps its names.
+    ///
+    /// An oblique of zero or a negative angle matches no face that leans
+    /// forward, by the same section, and is the upright face sheared back --
+    /// which is what Skia's matcher gives the family as it is.
+    /// `oblique_degrees` is the angle an oblique asks for, `None` for the
+    /// default 14deg.
     pub(crate) fn slanted(
         &self,
         names: &[String],
         slant: Slant,
+        oblique_degrees: Option<f32>,
     ) -> Option<Slanted> {
-        if slant == Slant::Upright {
+        let leans_back = slant == Slant::Oblique
+            && oblique_degrees.is_some_and(|d| d <= 0.0);
+        if slant == Slant::Upright || leans_back {
             return None;
         }
         let facts = |name: &String| {
@@ -1818,34 +1832,38 @@ impl FontLibrary {
                 })
                 .map(|(font, _)| font)
                 .collect();
-            let hiding: Vec<&&Typeface> =
-                faces.iter().filter(|face| hides_its_lean(face)).collect();
-            let ties = hiding.iter().any(|hidden| {
-                faces.iter().any(|face| {
-                    !hides_its_lean(face)
-                        && designed_oblique_angle(face).is_none()
-                        && face.font_style() == hidden.font_style()
-                })
-            });
+            let ties = faces.iter().filter(|face| hides_its_lean(face)).any(
+                |hidden| {
+                    faces.iter().any(|face| {
+                        designed_oblique_angle(face).is_none()
+                            && face.font_style() == hidden.font_style()
+                    })
+                },
+            );
             let reports = |wanted| {
                 faces.iter().any(|face| face.font_style().slant() == wanted)
             };
             FamilySlants {
                 registered: !faces.is_empty(),
-                hides: !hiding.is_empty(),
+                leans: faces
+                    .iter()
+                    .any(|face| designed_oblique_angle(face).is_some()),
                 needs_alias: ties && !reports(slant),
-                reports_italic: reports(Slant::Italic),
+                has_italic: faces.iter().any(|face| {
+                    face.font_style().slant() == Slant::Italic
+                        && designed_oblique_angle(face).is_none()
+                }),
             }
         };
         let families: Vec<FamilySlants> = names.iter().map(facts).collect();
-        if !families.iter().any(|family| family.hides) {
+        if !families.iter().any(|family| family.leans) {
             return None;
         }
         let as_oblique = slant == Slant::Italic
             && families
                 .iter()
                 .find(|family| family.registered)
-                .is_some_and(|family| family.hides && !family.reports_italic);
+                .is_some_and(|family| family.leans && !family.has_italic);
         let names =
             families.iter().any(|family| family.needs_alias).then(|| {
                 names
@@ -1891,7 +1909,11 @@ impl FontLibrary {
     pub fn resolve(&mut self, mut spec: FontSpec) -> Option<ResolvedFont> {
         spec.collection_names = self.collection_names(&spec.families);
         if let Some(names) = self
-            .slanted(&spec.collection_names, spec.style().slant())
+            .slanted(
+                &spec.collection_names,
+                spec.style().slant(),
+                spec.oblique_degrees,
+            )
             .and_then(|slanted| slanted.names)
         {
             spec.collection_names = names;
