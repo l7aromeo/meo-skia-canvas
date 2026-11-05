@@ -175,7 +175,16 @@ describe("skia-source env writes a line just and a shell read back whole", () =>
         "show:\n" +
         '    @node -e "process.stdout.write(process.env.SKIA_SOURCE_DIR)"\n',
     );
-    const read = spawnSync("just", ["show"], { cwd: dir, encoding: "utf8" });
+    // just loads a dotenv-command's line only for a variable not set already,
+    // so one this process inherited -- every CI job that builds Skia sets
+    // SKIA_SOURCE_DIR -- would be read back in place of the line.
+    const env = { ...process.env };
+    delete env.SKIA_SOURCE_DIR;
+    const read = spawnSync("just", ["show"], {
+      cwd: dir,
+      env,
+      encoding: "utf8",
+    });
     assert.equal(read.status, 0, read.stderr);
     assert.equal(read.stdout, expected);
   });
