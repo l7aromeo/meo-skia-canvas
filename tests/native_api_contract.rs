@@ -3113,25 +3113,25 @@ fn a_lossless_animated_webp_codes_every_frame_as_vp8l() -> Result<()> {
     let webp = canvas.to_buffer(ImageFormat::Webp, &lossless(None))?;
     assert_eq!(webp_image_tags(&webp), [*b"VP8L", *b"VP8L"]);
 
-    // The pixels are held on the first frame only. `Image::frame(1)` of this
-    // file fails with `InvalidConversion` at every quality, lossy as well, on
-    // a second frame that adds alpha to an opaque first one, where libwebp
-    // and ffmpeg decode it: a defect of the decode, not of what is written,
-    // which the tags above check on both frames.
+    // The second frame is written as the rectangle that changed, transparent
+    // around it, so it holds alpha after an opaque first one: decoded as its
+    // own alpha, not the first frame's.
     let image = Image::from_encoded(&webp).context("it decodes")?;
     assert_eq!(image.frame_count(), 2);
-    let wanted = canvas.to_buffer(
-        ImageFormat::Raw,
-        &EncodeOptions {
-            page: Some(0),
-            ..EncodeOptions::default()
-        },
-    )?;
-    assert_eq!(
-        avif_frame_pixels(&image, 0)?,
-        wanted,
-        "the first frame exactly"
-    );
+    for frame in 0..2 {
+        let wanted = canvas.to_buffer(
+            ImageFormat::Raw,
+            &EncodeOptions {
+                page: Some(frame),
+                ..EncodeOptions::default()
+            },
+        )?;
+        assert_eq!(
+            avif_frame_pixels(&image, frame)?,
+            wanted,
+            "frame {frame} exactly"
+        );
+    }
     Ok(())
 }
 
