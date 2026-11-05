@@ -996,8 +996,7 @@ fn fourier<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
                         array::from_fn(|c| within_reach(sums[c], lo[c], hi[c]))
                     }
                     None => sums,
-                }
-                .map(positive_zero);
+                };
             }
         },
     );
@@ -1139,6 +1138,90 @@ pub(crate) fn reference(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Diagnostic, not for merging: every layer of a search whose FFT blur
+    /// leaves -0.0, with `positive_zero` not applied, reported by failing.
+    #[test]
+    fn diagnose_fft_negative_zeros() {
+        let mut found = Vec::new();
+        let (mut layers, mut values) = (0usize, 0usize);
+        for side in (24..=200).step_by(8) {
+            for &sigma in &[5.0f32, 5.5, 6.0, 8.0] {
+                for level in [1.0f32, 0.5, 0.2] {
+                    for (fx, fy) in [(0.25, 0.25), (0.1, 0.4), (0.5, 0.1)] {
+                        let (w, h) = (side, side * 3 / 4);
+                        let (x0, y0) = (
+                            (w as f32 * fx) as usize,
+                            (h as f32 * fy) as usize,
+                        );
+                        let (x1, y1) =
+                            ((x0 + w / 3).min(w), (y0 + h / 3).min(h));
+                        let mut px = vec![0f32; w * h * 4];
+                        let mut plane = vec![0f32; w * h];
+                        for y in y0..y1 {
+                            for x in x0..x1 {
+                                let i = (y * w + x) * 4;
+                                px[i..i + 4].copy_from_slice(&[
+                                    0.4 * level,
+                                    0.4 * level,
+                                    0.4 * level,
+                                    level,
+                                ]);
+                                plane[y * w + x] = level;
+                            }
+                        }
+                        let neg = |v: &f32| *v == 0.0 && v.is_sign_negative();
+                        let rgba = blur(px, w, h, sigma, sigma);
+                        let alpha: Vec<usize> = rgba
+                            .chunks(4)
+                            .enumerate()
+                            .filter(|(_, p)| neg(&p[3]))
+                            .map(|(i, _)| i)
+                            .collect();
+                        let any = rgba.iter().filter(|v| neg(v)).count();
+                        let p64 = blur_plane::<f64>(
+                            plane.clone(),
+                            w,
+                            h,
+                            sigma,
+                            sigma,
+                        )
+                        .iter()
+                        .filter(|v| neg(v))
+                        .count();
+                        let p32 = blur_plane::<f32>(plane, w, h, sigma, sigma)
+                            .iter()
+                            .filter(|v| neg(v))
+                            .count();
+                        layers += 1;
+                        values += w * h * 6;
+                        if !alpha.is_empty() || any > 0 || p64 > 0 || p32 > 0 {
+                            found.push(format!(
+                                "{w}x{h} sigma {sigma} level {level} rect {x0},{y0}..{x1},{y1}: rgba alpha {:?} any {any}, f64 plane {p64}, f32 plane {p32}",
+                                &alpha[..alpha.len().min(4)]
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(target_arch = "x86_64")]
+        let features = format!(
+            "avx {} avx2 {} fma {} sse4.1 {}",
+            std::is_x86_feature_detected!("avx"),
+            std::is_x86_feature_detected!("avx2"),
+            std::is_x86_feature_detected!("fma"),
+            std::is_x86_feature_detected!("sse4.1")
+        );
+        #[cfg(not(target_arch = "x86_64"))]
+        let features = String::from("-");
+        panic!(
+            "DIAG {} ({features}): {} of {layers} layers, {values} values, leave -0.0:\n{}",
+            std::env::consts::ARCH,
+            found.len(),
+            found.join("\n")
+        );
+    }
 
     #[test]
     fn a_positive_zero_changes_nothing_but_a_negative_zero() {
