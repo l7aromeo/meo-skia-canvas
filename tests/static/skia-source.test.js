@@ -1293,9 +1293,11 @@ const fetch = () => { throw new Error("test: this prepare would fetch"); };
 // A bound well past any test's work, so that a lock nobody takes over fails the test rather than hanging it.
 console.log(prepare({ root: process.env.ROOT, cache: process.env.CACHE, list: [${JSON.stringify(PATCH)}], fetch, wait: 10, at }));
 `;
-  let lockTree, treeName;
+  let lockTree, treeName, PATCHES;
   beforeEach(async () => {
-    ({ lockTree, treeName } = await import(pathToFileURL(SCRIPT).href));
+    ({ lockTree, treeName, PATCHES } = await import(
+      pathToFileURL(SCRIPT).href
+    ));
   });
 
   /** A cache holding a tree to derive from, and a root whose one patch changes `src/a.cc`. */
@@ -1390,6 +1392,29 @@ console.log(prepare({ root: process.env.ROOT, cache: process.env.CACHE, list: [$
 
   test("a prepare alone makes the tree and leaves no lock", async (t) => {
     const env = setup(t);
+    const a = start(env, "A");
+    await a.done;
+    assert.equal(a.code, 0, a.stderr);
+    const tree = assertOneTree(env);
+    assert.equal(printed(a), join(tree, "rust-skia", "skia-bindings", "skia"));
+  });
+
+  // A root outside a repository has no worktrees to list, so `prepare`
+  // removes nothing after it; in a repository it removes every tree no
+  // worktree names, and each worktree names the tree of this platform's own
+  // patches. A prepare given another list removed the tree it had just made
+  // and printed its path all the same.
+  test("a prepare given a list of its own keeps the tree it made, in a repository", async (t) => {
+    const env = setup(t);
+    for (const [path, content] of Object.entries(
+      patchFiles(PATCHES, "default").files,
+    )) {
+      mkdirSync(join(env.root, path, ".."), { recursive: true });
+      writeFileSync(join(env.root, path), content);
+    }
+    git(env.root, "init", "--quiet");
+    git(env.root, "add", "--all");
+    git(env.root, "commit", "--quiet", "--message", "root");
     const a = start(env, "A");
     await a.done;
     assert.equal(a.code, 0, a.stderr);

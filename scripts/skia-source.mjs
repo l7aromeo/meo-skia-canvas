@@ -949,8 +949,13 @@ export function prepare({
     unlock();
   }
 
-  // This checkout is one of the worktrees, so the new tree is kept with them.
-  removeSuperseded(cache, treesToKeep(root, cache));
+  // The worktrees name the trees of their own platform's patches, this
+  // checkout among them, so a tree made from another `list` is none of
+  // theirs: it is kept by name, or it would be removed as soon as it was
+  // made, and the path returned would name nothing.
+  const keep = treesToKeep(root, cache);
+  keep?.add(name);
+  removeSuperseded(cache, keep);
   return sourceDir(tree);
 }
 
