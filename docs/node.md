@@ -374,8 +374,10 @@ await canvas.toFile("mosaic.png");
 
 ## Benchmarks
 
-Measured on **2026-08-12**, Apple M4 Pro (14 cores) · macOS 26.6 · Node 26.4.0, against
-`canvas@3.2.3`, `@napi-rs/canvas@1.0.5`, `canvaskit-wasm@0.41.1` and `skia-canvas@3.0.8`.
+Measured on **2026-08-12**, Apple M4 Pro (14 cores) · macOS 26.6 · Node 26.4.0, with this package
+as it stood before 5.0.0 (4.2.0-rc.2), against `canvas@3.2.3`, `@napi-rs/canvas@1.0.5`,
+`canvaskit-wasm@0.41.1` and `skia-canvas@3.0.8`. Nothing here has been re-run since, the startup
+figures included.
 
 The harness is samizdatco's [canvas-benchmarks], run unmodified apart from adding this fork as its
 own entry so upstream stays in the comparison. Each test is written once against a library-agnostic
@@ -409,6 +411,8 @@ claiming otherwise: this fork changed correctness, not hot paths. Where it diffe
 libraries, it differed for the same reasons upstream did.
 
 ### Startup
+
+From the same 2026-08-12 run, with this package before 5.0.0.
 
 |                 | first import |
 | --------------- | ------------ |
