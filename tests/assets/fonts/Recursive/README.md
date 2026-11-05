@@ -1,6 +1,6 @@
 # Recursive fixtures
 
-Five files from Recursive, `Recursive[CASL,CRSV,MONO,slnt,wght].ttf` from
+Six files from Recursive, `Recursive[CASL,CRSV,MONO,slnt,wght].ttf` from
 github.com/google/fonts, under the SIL Open Font License in `OFL.txt`. Each
 holds only the glyphs the oblique tests draw, and each was made with
 `hb-subset` at `CASL=0,MONO=0,CRSV=0,wght=400`:
@@ -16,6 +16,12 @@ holds only the glyphs the oblique tests draw, and each was made with
 The last is Recursive instanced at `slnt` -12 and re-flagged, not a shipping
 face. It stands in for a family with a true oblique face, which no font in
 this tree has.
+
+- `Recursive-oblique-flag-subset.ttf`: `Recursive-oblique12-subset.ttf` with
+  its `post` `italicAngle` set to 0, and its table checksums and
+  `checkSumAdjustment` recomputed. Only `fsSelection` bit 9 tells it from the
+  upright face. CoreText reports it upright, as DirectWrite reports the
+  oblique12 face.
 
 - `Recursive-upright-strikeout-subset.ttf`: `Recursive-upright-subset.ttf`
   with one value changed, `OS/2` `yStrikeoutSize` from 72 to 144, twice the

@@ -134,6 +134,7 @@ are added, and the CSS strings read the math functions and every length unit.
 ### Fixed
 
 - **A `blur()` of 5px or more in `ctx.filter` on a float canvas, followed by a colour function or `drop-shadow()`, cannot turn a pixel it leaves at zero alpha into NaN.** ([#550](https://github.com/l7aromeo/meo-skia-canvas/pull/550), [#549](https://github.com/l7aromeo/meo-skia-canvas/issues/549))
+- **A family two of whose faces the platform reports in the same style, such as an upright face and one flagged oblique on Windows, keeps both, and plain text draws the upright one; the face loaded second replaced the first.** ([#555](https://github.com/l7aromeo/meo-skia-canvas/issues/555))
 - **A `getImageData` read of a GPU canvas on macOS whose pixel copy the GPU discarded is read again, or reported as an error, rather than handed back as zeros or stale pixels, and a copy kept for repeat reads is kept only once the GPU ran it.** ([#533](https://github.com/l7aromeo/meo-skia-canvas/issues/533))
 - **An export from a GPU canvas on macOS whose pixel copy the GPU discarded is read again, or reported as an error, rather than handed back as zeros or stale pixels.** ([#519](https://github.com/l7aromeo/meo-skia-canvas/issues/519))
 - **A float canvas stays on the CPU when `canvas.gpu = true` is assigned, as it does when `gpu: true` is passed to the constructor; assigned, it went to the GPU and drew in eight bits, so an `RGBAF32` fill at an alpha of 0.3 read back 77/255.** ([#515](https://github.com/l7aromeo/meo-skia-canvas/issues/515))
