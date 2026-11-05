@@ -1,5 +1,5 @@
 const assert = require("assert");
-const { execFileSync, spawnSync } = require("child_process");
+const { execFileSync, spawn, spawnSync } = require("child_process");
 const { createHash } = require("crypto");
 const {
   existsSync,
@@ -11,6 +11,7 @@ const {
   realpathSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } = require("fs");
 const { tmpdir } = require("os");
@@ -1267,5 +1268,252 @@ describe("skia-source names a tree's cache key", () => {
       lock.replace(/(name = "skia-bindings"\nversion = ")[^"]+/, "$19.9.9"),
     );
     assert.notEqual(cacheKey(r), edited);
+  });
+});
+
+// Two worktrees running `just` while the tree they name is missing run two
+// prepares of it at once (#566). Each test derives from a local tree and
+// refuses to fetch, so a prepare that would have fetched fails at once.
+describe("skia-source prepares a tree once when two prepares race for it", () => {
+  const VERSION = "0.1.0";
+  const PATCH = "containers/ours.patch";
+  const RUNNER = `
+const { prepare } = await import(process.env.SCRIPT_URL);
+const { existsSync, writeFileSync } = await import("node:fs");
+const { join } = await import("node:path");
+const { GATES: gates, ID: id } = process.env;
+const stops = (process.env.STOPS ?? "").split(",");
+const nap = new Int32Array(new SharedArrayBuffer(4));
+const at = (step) => {
+  writeFileSync(join(gates, id + "." + step), "");
+  if (!stops.includes(step)) return;
+  while (!existsSync(join(gates, id + "." + step + ".go"))) Atomics.wait(nap, 0, 0, 10);
+};
+const fetch = () => { throw new Error("test: this prepare would fetch"); };
+// A bound well past any test's work, so that a lock nobody takes over fails the test rather than hanging it.
+console.log(prepare({ root: process.env.ROOT, cache: process.env.CACHE, list: [${JSON.stringify(PATCH)}], fetch, wait: 10, at }));
+`;
+  let lockTree, treeName;
+  beforeEach(async () => {
+    ({ lockTree, treeName } = await import(pathToFileURL(SCRIPT).href));
+  });
+
+  /** A cache holding a tree to derive from, and a root whose one patch changes `src/a.cc`. */
+  function setup(t) {
+    const dir = scratch(t);
+    const cache = join(dir, "cache");
+    mkdirSync(cache);
+    preparedTree(dir, cache, `skia-${VERSION}-base`, VERSION);
+    const root = join(dir, "root");
+    mkdirSync(join(root, "containers"), { recursive: true });
+    writeFileSync(
+      join(root, "Cargo.lock"),
+      `[[package]]\nname = "skia-bindings"\nversion = "${VERSION}"\n`,
+    );
+    writeFileSync(join(root, "Cargo.toml"), '[package]\nname = "root"\n');
+    writeFileSync(
+      join(root, PATCH),
+      [
+        "--- a/skia-bindings/skia/src/a.cc",
+        "+++ b/skia-bindings/skia/src/a.cc",
+        "@@ -1 +1 @@",
+        "-pristine",
+        "+ours",
+        "",
+      ].join("\n"),
+    );
+    const gates = join(dir, "gates");
+    mkdirSync(gates);
+    const runner = join(dir, "runner.mjs");
+    writeFileSync(runner, RUNNER);
+    return { cache, root, gates, runner };
+  }
+
+  /** A prepare in a process of its own, paused at each of `stops` until released. */
+  function start(env, id, stops = []) {
+    const child = spawn(process.execPath, [env.runner], {
+      env: {
+        ...process.env,
+        SCRIPT_URL: pathToFileURL(SCRIPT).href,
+        ROOT: env.root,
+        CACHE: env.cache,
+        GATES: env.gates,
+        ID: id,
+        STOPS: stops.join(","),
+        GIT_ALLOW_PROTOCOL: "file",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const run = { id, stdout: "", stderr: "", code: null, pid: child.pid };
+    child.stdout.on("data", (d) => (run.stdout += d));
+    child.stderr.on("data", (d) => (run.stderr += d));
+    run.done = new Promise((resolve) =>
+      child.on("exit", (code) => resolve((run.code = code))),
+    );
+    return run;
+  }
+  const nap = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  /** Waits until `test()` holds, or `ms` pass. */
+  async function until(test, ms = 20000) {
+    const end = Date.now() + ms;
+    while (!test() && Date.now() < end) await nap(10);
+    return test();
+  }
+  const reached = (env, id, step) =>
+    existsSync(join(env.gates, `${id}.${step}`));
+  const release = (env, id, step) =>
+    writeFileSync(join(env.gates, `${id}.${step}.go`), "");
+
+  /** The tree `prepare` made from the root's one patch: ready, patched once, with nothing else in it, and nothing left beside it. */
+  function assertOneTree(env) {
+    const name = treeName(env.root, [PATCH]);
+    const tree = join(env.cache, name);
+    assert.ok(existsSync(join(tree, ".ready")), `${name} is not ready`);
+    assert.deepEqual(readdirSync(tree).sort(), [".ready", "rust-skia"]);
+    assert.equal(
+      readFileSync(
+        join(tree, "rust-skia", "skia-bindings", "skia", "src", "a.cc"),
+        "utf8",
+      ),
+      "ours\n",
+    );
+    assert.ok(!existsSync(`${tree}.partial`), "a partial is left");
+    const locks = join(env.cache, "locks");
+    assert.deepEqual(
+      existsSync(locks) ? readdirSync(locks) : [],
+      [],
+      "a lock is left",
+    );
+    return tree;
+  }
+  const printed = (run) => run.stdout.trim().split("\n").pop();
+
+  test("a prepare alone makes the tree and leaves no lock", async (t) => {
+    const env = setup(t);
+    const a = start(env, "A");
+    await a.done;
+    assert.equal(a.code, 0, a.stderr);
+    const tree = assertOneTree(env);
+    assert.equal(printed(a), join(tree, "rust-skia", "skia-bindings", "skia"));
+  });
+
+  test("two prepares started together make the tree once, and both use it", async (t) => {
+    const env = setup(t);
+    const [a, b] = [start(env, "A"), start(env, "B")];
+    await Promise.all([a.done, b.done]);
+    assert.equal(a.code, 0, a.stderr);
+    assert.equal(b.code, 0, b.stderr);
+    assertOneTree(env);
+    assert.equal(printed(a), printed(b));
+    // One of them made it; the other waited and made nothing.
+    assert.equal([a, b].filter((run) => /derived/.test(run.stderr)).length, 1);
+  });
+
+  for (const step of ["derived", "patched"]) {
+    test(`a prepare started while another is ${step === "derived" ? "between its derive and its patches" : "between its patches and its rename"} waits for it`, async (t) => {
+      const env = setup(t);
+      const a = start(env, "A", [step]);
+      assert.ok(await until(() => reached(env, "A", step)), a.stderr);
+      const b = start(env, "B");
+      // B waits, saying for whom, or -- without a lock -- runs on through A's directory.
+      await until(() => /waiting for/.test(b.stderr) || b.code !== null, 5000);
+      release(env, "A", step);
+      await Promise.all([a.done, b.done]);
+      assert.equal(a.code, 0, a.stderr);
+      assert.equal(b.code, 0, b.stderr);
+      assert.match(b.stderr, new RegExp(`waiting for ${a.pid}`));
+      // and then uses A's tree, making nothing of its own.
+      assert.doesNotMatch(b.stderr, /derived|removing|patching/);
+      assertOneTree(env);
+      assert.equal(printed(a), printed(b));
+    });
+  }
+
+  test("a lock whose holder has ended is taken over", async (t) => {
+    const env = setup(t);
+    const ended = spawn(process.execPath, ["-e", ""]);
+    await new Promise((resolve) => ended.on("exit", resolve));
+    const name = treeName(env.root, [PATCH]);
+    mkdirSync(join(env.cache, "locks"));
+    writeFileSync(
+      join(env.cache, "locks", name),
+      `${ended.pid}\nMon Jan  1 00:00:00 2001\n`,
+    );
+    const a = start(env, "A");
+    await a.done;
+    assert.equal(a.code, 0, a.stderr);
+    assert.match(a.stderr, new RegExp(`took over .*${ended.pid}`));
+    assertOneTree(env);
+  });
+
+  test("a lock whose PID now runs another process is taken over", async (t) => {
+    const env = setup(t);
+    const name = treeName(env.root, [PATCH]);
+    mkdirSync(join(env.cache, "locks"));
+    // This test's own PID, alive, but not started when the lock says.
+    writeFileSync(
+      join(env.cache, "locks", name),
+      `${process.pid}\nMon Jan  1 00:00:00 2001\n`,
+    );
+    const a = start(env, "A");
+    await a.done;
+    assert.equal(a.code, 0, a.stderr);
+    assert.match(a.stderr, new RegExp(`took over .*${process.pid}`));
+    assertOneTree(env);
+  });
+
+  test("a lock its holder ended before writing is taken over once it is old", async (t) => {
+    const env = setup(t);
+    const lock = join(env.cache, "locks", treeName(env.root, [PATCH]));
+    mkdirSync(join(env.cache, "locks"));
+    writeFileSync(lock, "");
+    const old = new Date(Date.now() - 60 * 1000);
+    utimesSync(lock, old, old);
+    const a = start(env, "A");
+    await a.done;
+    assert.equal(a.code, 0, a.stderr);
+    assert.match(a.stderr, /took over/);
+    assertOneTree(env);
+  });
+
+  test("a wait for a running holder ends at its bound, naming the holder", (t) => {
+    const env = setup(t);
+    const name = treeName(env.root, [PATCH]);
+    const unlock = lockTree(env.cache, name);
+    let waited;
+    try {
+      // In a process of its own, so that a wait with no bound fails this test at its timeout rather than hanging it.
+      waited = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `const { lockTree } = await import(${JSON.stringify(pathToFileURL(SCRIPT).href)});
+           lockTree(${JSON.stringify(env.cache)}, ${JSON.stringify(name)}, { wait: 0.3, poll: 0.05 });`,
+        ],
+        { encoding: "utf8", timeout: 10000 },
+      );
+    } finally {
+      unlock();
+    }
+    assert.notEqual(waited.signal, "SIGTERM", "the wait did not end");
+    assert.notEqual(waited.status, 0);
+    assert.match(
+      waited.stderr,
+      new RegExp(`still being prepared by ${process.pid}`),
+    );
+    lockTree(env.cache, name)();
+    assert.deepEqual(readdirSync(join(env.cache, "locks")), []);
+  });
+
+  test("a tree an earlier prepare left unfinished is made again", async (t) => {
+    const env = setup(t);
+    const tree = join(env.cache, treeName(env.root, [PATCH]));
+    mkdirSync(join(tree, "rust-skia"), { recursive: true });
+    writeFileSync(join(tree, "left.txt"), "an interrupted prepare's\n");
+    const a = start(env, "A");
+    await a.done;
+    assert.equal(a.code, 0, a.stderr);
+    assertOneTree(env);
   });
 });

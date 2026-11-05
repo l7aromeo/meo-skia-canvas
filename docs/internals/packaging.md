@@ -127,7 +127,14 @@ version and a digest of the platform's patches: fetched, about 1 GB, when the
 cache holds no tree for the version, and otherwise derived from one -- copied
 copy-on-write, its sources restored by git and checked against the tag and
 the commits Skia's DEPS pins, then patched -- in seconds, with nothing
-downloaded. A tree that fails a check is named on stderr and passed over. Once a new tree
+downloaded. A tree that fails a check is named on stderr and passed over. One
+prepare makes a tree at a time: it holds `locks/<tree>` in the cache, with its
+PID and start time, from the removal of the tree's `.partial` to its rename, so
+a second `just` naming the same tree waits for the first -- saying for which
+process, for 30 minutes at most -- and then uses the tree it made. A lock whose
+holder has ended, or whose PID now runs a process started at another time, is
+taken over. A tree directory with no `.ready`, which only a prepare that ended
+early leaves, is removed and made again. Once a new tree
 is ready the others are removed, except any still in use, since the cache is
 shared by every worktree on the machine. A tree is in use when a worktree's own
 patch list names it, when a skia-bindings out-dir in a worktree's target was
