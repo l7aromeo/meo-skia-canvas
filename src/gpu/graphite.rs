@@ -29,10 +29,14 @@
 
 use std::fmt;
 
+#[cfg(all(test, meo_graphite, feature = "metal"))]
+use objc2::rc::Retained;
 use serde_json::Value;
 use skia_safe::{Canvas, IPoint, ImageInfo, Surface};
 
 use crate::context::page::ExportOptions;
+#[cfg(all(test, meo_graphite, feature = "metal"))]
+use crate::gpu::metal::RecordingQueue;
 
 #[cfg(all(meo_graphite, feature = "metal"))]
 mod metal;
@@ -118,11 +122,8 @@ pub(crate) fn make_surface(
 /// Whether `surface` is a Graphite page: one with a recorder rather than a
 /// recording context. Says nothing about which thread's context made it.
 #[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "`gpu::completion` does not dispatch on Graphite pages yet"
-    )
+    not(any(test, feature = "metal", feature = "vulkan")),
+    expect(dead_code, reason = "only a GPU backend's reads are confirmed")
 )]
 pub(crate) fn owns(surface: &mut Surface) -> bool {
     engine::owns(surface)
@@ -138,11 +139,8 @@ pub(crate) fn owns(surface: &mut Surface) -> bool {
 /// [`GraphiteRead::NoContext`]: a Graphite page reached there was made on
 /// another thread, and is refused rather than retried.
 #[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "`gpu::completion` does not dispatch on Graphite pages yet"
-    )
+    not(any(test, feature = "metal", feature = "vulkan")),
+    expect(dead_code, reason = "only a GPU backend's reads are confirmed")
 )]
 pub(crate) fn commit(wait: bool) -> Result<(), GraphiteRead> {
     engine::commit(wait)
@@ -151,11 +149,8 @@ pub(crate) fn commit(wait: bool) -> Result<(), GraphiteRead> {
 /// Where a confirmation begins on this thread's queue, `None` where the
 /// thread holds no context.
 #[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "`gpu::completion` does not dispatch on Graphite pages yet"
-    )
+    not(any(test, feature = "metal", feature = "vulkan")),
+    expect(dead_code, reason = "only a GPU backend's reads are confirmed")
 )]
 pub(crate) fn mark() -> Option<Mark> {
     engine::mark()
@@ -169,11 +164,8 @@ pub(crate) fn mark() -> Option<Mark> {
 /// Graphite's own reads and submits report success whether or not their
 /// buffers ran, so this is the only word on whether a page's draws did.
 #[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "`gpu::completion` does not dispatch on Graphite pages yet"
-    )
+    not(any(test, feature = "metal", feature = "vulkan")),
+    expect(dead_code, reason = "only a GPU backend's reads are confirmed")
 )]
 pub(crate) fn confirm(since: Option<Mark>) -> Result<(), String> {
     engine::confirm(since)
@@ -189,11 +181,8 @@ pub(crate) fn confirm(since: Option<Mark>) -> Result<(), String> {
 /// [`confirm`]. `Surface::read_pixels` does not read a Graphite surface at
 /// all.
 #[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "`gpu::completion` does not dispatch on Graphite pages yet"
-    )
+    not(any(test, feature = "metal", feature = "vulkan")),
+    expect(dead_code, reason = "only a GPU backend's reads are confirmed")
 )]
 pub(crate) fn read_raw(
     surface: &mut Surface,
@@ -203,6 +192,13 @@ pub(crate) fn read_raw(
     at: impl Into<IPoint>,
 ) -> bool {
     engine::read_raw(surface, info, dst, row_bytes, at.into())
+}
+
+/// This thread's queue of ours, `None` where it holds no context, for a test
+/// to arm failures on.
+#[cfg(all(test, meo_graphite, feature = "metal"))]
+pub(crate) fn queue() -> Option<Retained<RecordingQueue>> {
+    engine::queue()
 }
 
 /// Draws `draw` on a page of `info` on a Graphite context made for this call
@@ -261,40 +257,40 @@ mod absent {
     pub(crate) enum Mark {}
 
     #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called only by `super::owns`")
+        not(any(test, feature = "metal", feature = "vulkan")),
+        expect(dead_code, reason = "only a GPU backend's reads are confirmed")
     )]
     pub(super) fn owns(_surface: &mut Surface) -> bool {
         false
     }
 
     #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called only by `super::commit`")
+        not(any(test, feature = "metal", feature = "vulkan")),
+        expect(dead_code, reason = "only a GPU backend's reads are confirmed")
     )]
     pub(super) fn commit(_wait: bool) -> Result<(), GraphiteRead> {
         Err(GraphiteRead::NotBuilt)
     }
 
     #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called only by `super::mark`")
+        not(any(test, feature = "metal", feature = "vulkan")),
+        expect(dead_code, reason = "only a GPU backend's reads are confirmed")
     )]
     pub(super) fn mark() -> Option<Mark> {
         None
     }
 
     #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called only by `super::confirm`")
+        not(any(test, feature = "metal", feature = "vulkan")),
+        expect(dead_code, reason = "only a GPU backend's reads are confirmed")
     )]
     pub(super) fn confirm(_since: Option<Mark>) -> Result<(), String> {
         Ok(())
     }
 
     #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called only by `super::read_raw`")
+        not(any(test, feature = "metal", feature = "vulkan")),
+        expect(dead_code, reason = "only a GPU backend's reads are confirmed")
     )]
     pub(super) fn read_raw(
         _surface: &mut Surface,

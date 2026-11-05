@@ -2554,10 +2554,13 @@ impl Tile {
         let repeat = self.served_at == Some(self.depth);
         if !repeat {
             self.served_at = Some(self.depth);
-            return read_off_gpu(&mut self.surface, page, |surface| {
-                read_converted_on_cpu(surface, info, pixels, row_bytes, at)
-            })
-            .map_or(Checked::Discarded, Checked::Read);
+            return Checked::off_gpu(read_off_gpu(
+                &mut self.surface,
+                page,
+                |surface| {
+                    read_converted_on_cpu(surface, info, pixels, row_bytes, at)
+                },
+            ));
         }
 
         if !self.surface.image_snapshot().is_texture_backed() {
@@ -2572,11 +2575,12 @@ impl Tile {
         match read_off_gpu(&mut self.surface, page, |surface| {
             copied(surface, info, pixels, row_bytes, at)
         }) {
-            Some((read, raster)) => {
+            Ok(Some((read, raster))) => {
                 self.raster = raster;
                 Checked::Read(read)
             }
-            None => Checked::Discarded,
+            Ok(None) => Checked::Discarded,
+            Err(why) => Checked::Refused(why),
         }
     }
 }
@@ -3484,14 +3488,16 @@ impl RecordingSurface {
                             tile.confirmed = true;
                         }
                     }
-                    let served = self.read_from_tiles(
+                    match self.read_from_tiles(
                         dst_info, crop, pixels, page_size, &wanted, page.id,
-                    );
-                    if let Checked::Read(served) = served {
-                        return Ok(served);
+                    ) {
+                        Checked::Read(served) => return Ok(served),
+                        Checked::Refused(why) => return Err(why),
+                        Checked::Declined | Checked::Discarded => {}
                     }
                 }
                 Checked::Discarded => {}
+                Checked::Refused(why) => return Err(why),
             }
             self.tiles.clear();
         }
@@ -3534,10 +3540,10 @@ impl RecordingSurface {
     ) -> Result<(), String> {
         for _ in 0..DRAW_ATTEMPTS {
             self.update(page, opts, engine);
-            let ran = self
-                .surface
-                .as_mut()
-                .is_none_or(|surface| draws_ran(surface, page.id));
+            let ran = match self.surface.as_mut() {
+                Some(surface) => draws_ran(surface, page.id)?,
+                None => true,
+            };
             if ran {
                 return Ok(());
             }
@@ -3580,13 +3586,16 @@ impl RecordingSurface {
                 Checked::Read(read) => return Ok(read),
                 // `copy_pixels` confirms the draws and its own copy.
                 Checked::Declined => {
-                    if let Checked::Read(read) =
-                        self.copy_pixels(dst_info, src, pixels, engine, page.id)
+                    match self
+                        .copy_pixels(dst_info, src, pixels, engine, page.id)
                     {
-                        return Ok(read);
+                        Checked::Read(read) => return Ok(read),
+                        Checked::Refused(why) => return Err(why),
+                        Checked::Declined | Checked::Discarded => {}
                     }
                 }
                 Checked::Discarded => {}
+                Checked::Refused(why) => return Err(why),
             }
             self.restart();
         }
@@ -4001,12 +4010,13 @@ impl RecordingSurface {
             ) {
                 Checked::Read(read) => read,
                 Checked::Discarded => continue,
+                Checked::Refused(why) => return Err(why),
                 Checked::Declined => {
                     match read_off_gpu(&mut composed, page, |composed| {
                         read_converted_on_cpu(
                             composed, dst_info, pixels, row_bytes, at,
                         )
-                    }) {
+                    })? {
                         Some(read) => read,
                         None => continue,
                     }
@@ -4071,9 +4081,10 @@ impl RecordingSurface {
                 )
             });
             match read {
-                Some(true) => return Checked::Read(true),
-                None => return Checked::Discarded,
-                Some(false) => {}
+                Ok(Some(true)) => return Checked::Read(true),
+                Ok(None) => return Checked::Discarded,
+                Err(why) => return Checked::Refused(why),
+                Ok(Some(false)) => {}
             }
             // A GPU surface refuses destination formats that the same pixels
             // answer for once they are in main memory -- `BGR101010x` is the
@@ -4094,11 +4105,12 @@ impl RecordingSurface {
         match read_off_gpu(surface, page, |surface| {
             copied(surface, dst_info, pixels, row_bytes, origin)
         }) {
-            Some((read, raster)) => {
+            Ok(Some((read, raster))) => {
                 self.raster = raster;
                 Checked::Read(read)
             }
-            None => Checked::Discarded,
+            Ok(None) => Checked::Discarded,
+            Err(why) => Checked::Refused(why),
         }
     }
 }
@@ -5083,7 +5095,7 @@ impl Page {
                 return Ok(image);
             };
             surface.canvas().draw_image(&image, (0, 0), None);
-            if draws_ran(&mut surface, self.id) {
+            if draws_ran(&mut surface, self.id)? {
                 return Ok(surface.image_snapshot());
             }
         }

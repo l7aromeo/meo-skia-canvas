@@ -17,6 +17,17 @@
 //! code reads a buffer's `commandQueue` back. Every method of the protocol is
 //! forwarded all the same, so that the object is a queue to anything that
 //! sends it one.
+//!
+//! Graphite's Metal backend, whose contexts are made on a queue of ours too,
+//! reports a buffer's failure no more than Ganesh does. It makes every buffer
+//! through `MtlCommandBuffer::createNewMTLCommandBuffer` (`skia/src/gpu/
+//! graphite/mtl/MtlCommandBuffer.mm`, lines 66 to 86), which sends
+//! `commandBufferWithDescriptor:` or, where `@available` says the system is
+//! older than macOS 11, `commandBufferWithUnretainedReferences`; this queue
+//! hands out and holds a buffer for both. Its other uses of the queue are to
+//! keep it (`MtlGraphiteUtils.mm`, lines 43 to 45, and `MtlQueueManager.mm`,
+//! line 31, which passes it to each buffer it makes) and to name it to a GPU
+//! capture (`MtlQueueManager.mm`, line 73).
 
 // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
 // Re-check: cargo test a_discarded_early_buffer_fails_the_read
