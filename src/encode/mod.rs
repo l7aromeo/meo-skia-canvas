@@ -288,7 +288,8 @@ pub(crate) struct SequenceSpec {
     /// How an AVIF samples chroma. Ignored by every other format, none of
     /// which offers the choice.
     pub chroma: ChromaSampling,
-    /// Whether an AVIF is coded with no loss. Ignored elsewhere.
+    /// Whether a WebP or an AVIF is coded with no loss, as
+    /// `export::lossless_for` decides it. Ignored by every other format.
     pub lossless: bool,
     /// How deep the frames are, which the formats that can write more than
     /// eight bits a channel need before the first one arrives.
