@@ -7,9 +7,9 @@ faster are one Changed entry in each changelog, and their figures are under
 
 `just bench` runs [`examples/node/benchmark.js`](../examples/node/benchmark.js) through the Node
 binding and [`examples/rust/benchmark.rs`](../examples/rust/benchmark.rs) through the crate, over the
-same cases in the same order: drawing on the CPU and the GPU on sRGB, Display P3 and half-float
-Display P3 pages, decoding and encoding every format, animations, PDF and SVG export, pixel reads,
-antialiasing and memory. Each writes a dated Markdown and JSON report to `target/bench/` with the
+same cases in the same order: drawing on the CPU and the GPU on sRGB, Display P3, half-float
+Display P3 and half-float and 32-bit float sRGB pages, decoding and encoding every format,
+animations, PDF and SVG export, pixel reads, antialiasing and memory. Each writes a dated Markdown and JSON report to `target/bench/` with the
 median, p10 and p90 of every case and the binary, commit, machine and load it was taken on, and the
 two line up row by row, so their ratio is what the binding costs. `just bench-npm` and
 `just bench-crate` run one; `--quick` runs every case once as a smoke test, and `--only PREFIX` the
