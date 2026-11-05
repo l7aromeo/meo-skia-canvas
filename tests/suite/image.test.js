@@ -206,6 +206,98 @@ describe("an SVG containing text", () => {
     assert.ok((await drawn("SvgOrderL")).equals(upright), "flagged first");
   });
 
+  test("a document's italic and oblique text take a family's oblique face whatever order it came in", async () => {
+    // The flagged face ties with the upright one in Skia's matcher where the
+    // platform reports it upright, so a slanted `font-style` is sent to the
+    // family's oblique faces by name, as canvas text is. RecursiveStatic, whose
+    // oblique face reports itself, is the control. Skia's SVG text synthesises
+    // no slant, so every face is drawn as it is.
+    const R = "tests/assets/fonts/Recursive";
+    const UP = `${R}/Recursive-upright-subset.ttf`;
+    const draw = async (body) => {
+      const svg =
+        `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300">` +
+        body +
+        `</svg>`;
+      const image = await loadImage(
+        "data:image/svg+xml;base64," + Buffer.from(svg).toString("base64"),
+      );
+      const ctx = new Canvas(300, 300).getContext("2d");
+      ctx.drawImage(image, 0, 0);
+      return Buffer.from(ctx.getImageData(0, 0, 300, 300).data);
+    };
+    const text = (family, attrs = "") =>
+      draw(
+        `<text x="60" y="250" font-size="200" font-family="${family}"${attrs} fill="#000">IH</text>`,
+      );
+    FontLibrary.use("SvgSlantUpright", [UP]);
+    const upright = await text("SvgSlantUpright");
+    const wrong = [];
+    for (const [name, leaning] of [
+      ["Flagged", `${R}/Recursive-oblique-flag-subset.ttf`],
+      ["Oblique12", `${R}/Recursive-oblique12-subset.ttf`],
+    ]) {
+      FontLibrary.use(`SvgSlant${name}Alone`, [leaning]);
+      const leans = await text(`SvgSlant${name}Alone`);
+      for (const [order, files] of [
+        ["upright first", [UP, leaning]],
+        ["leaning first", [leaning, UP]],
+      ]) {
+        const family = `SvgSlant${name}${order === "upright first" ? "U" : "L"}`;
+        FontLibrary.use(family, files);
+        for (const [style, want, face] of [
+          ["normal", upright, "upright"],
+          ["italic", leans, "leaning"],
+          ["oblique", leans, "leaning"],
+        ]) {
+          if (!(await text(family, ` font-style="${style}"`)).equals(want))
+            wrong.push(`${name}, ${order}: ${style} draws the ${face} face`);
+        }
+        // Inherited, and stated in `style`, the same.
+        const inherited = await draw(
+          `<g font-style="italic"><text x="60" y="250" font-size="200" font-family="${family}" fill="#000">IH</text></g>`,
+        );
+        if (!inherited.equals(leans))
+          wrong.push(
+            `${name}, ${order}: an inherited italic draws the leaning face`,
+          );
+        if (!(await text(family, ` style="font-style:oblique"`)).equals(leans))
+          wrong.push(
+            `${name}, ${order}: a style declaration draws the leaning face`,
+          );
+        // And an upright span inside slanted text goes back to the upright face.
+        const back = await draw(
+          `<text x="60" y="250" font-size="200" font-family="${family}" font-style="italic" fill="#000"><tspan font-style="normal">IH</tspan></text>`,
+        );
+        if (!back.equals(upright))
+          wrong.push(
+            `${name}, ${order}: a normal span in italic text draws the upright face`,
+          );
+      }
+    }
+    // A family with an italic face beside the tie keeps it for italic.
+    const RALEWAY_ITALIC =
+      "tests/assets/fonts/Raleway/Raleway-Italic-VariableFont_wght.ttf";
+    FontLibrary.use("SvgSlantItalicAlone", [RALEWAY_ITALIC]);
+    FontLibrary.use("SvgSlantMixed", [
+      `${R}/Recursive-oblique-flag-subset.ttf`,
+      UP,
+      RALEWAY_ITALIC,
+    ]);
+    if (
+      !(await text("SvgSlantMixed", ' font-style="italic"')).equals(
+        await text("SvgSlantItalicAlone", ' font-style="italic"'),
+      )
+    )
+      wrong.push("with an italic face: italic draws the italic face");
+    // The family's oblique faces cannot be named by a document.
+    const alias =
+      "meo-skia-canvas private family: oblique faces of SvgSlantFlaggedU";
+    if ((await text(alias)).equals(await text("SvgSlantFlaggedAlone")))
+      wrong.push("the alias reaches the oblique face by name");
+    assert.deepEqual(wrong, []);
+  });
+
   test("renders when the family cannot be resolved", async () => {
     // The trigger is a family that does not resolve, not an absent one: this
     // killed the process for a document naming any font the machine lacks.

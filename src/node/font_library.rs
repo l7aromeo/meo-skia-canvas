@@ -673,6 +673,17 @@ pub(crate) struct Slanted {
     pub(crate) as_oblique: bool,
 }
 
+/// A family whose slanted styles go to its [`oblique_alias`], and for which
+/// slants -- see [`FontLibrary::oblique_families`].
+pub(crate) struct ObliqueFamily {
+    /// The family as it was registered.
+    pub(crate) name: String,
+    /// Whether an italic style is sent to the alias.
+    pub(crate) italic: bool,
+    /// Whether an oblique style is sent to the alias.
+    pub(crate) oblique: bool,
+}
+
 /// What [`FontLibrary::slanted`] needs to know of one family.
 struct FamilySlants {
     /// Whether the library holds the family at all.
@@ -778,7 +789,19 @@ fn private_alias(claimed: &str) -> String {
 /// typed name reaches this one. A caller registering under such a name
 /// itself is [`private_alias`]'s deliberate non-guard.
 pub(crate) fn oblique_alias(family: &str) -> String {
-    private_alias(&format!("oblique faces of {family}"))
+    private_alias(&format!("{OBLIQUE_ALIAS_LEAD}{family}"))
+}
+
+/// What every [`oblique_alias`] begins with after [`PRIVATE_ALIAS_PREFIX`].
+const OBLIQUE_ALIAS_LEAD: &str = "oblique faces of ";
+
+/// Whether `name` spells an [`oblique_alias`], which an SVG document is not
+/// let name -- see `written_family` in `image`. A claimed family's private
+/// alias stays reachable there, where a test asks for it by name to show the
+/// registration holds.
+pub(crate) fn is_oblique_alias(name: &str) -> bool {
+    name.strip_prefix(PRIVATE_ALIAS_PREFIX)
+        .is_some_and(|rest| rest.starts_with(OBLIQUE_ALIAS_LEAD))
 }
 
 /// The name a generic family's faces are registered under in a collection,
@@ -1400,6 +1423,13 @@ impl FontLibrary {
                 }
             }
         }
+        // And each face its tables flag oblique under its family's
+        // `oblique_alias`, which the document is rewritten to where a slanted
+        // `font-style` needs it -- see `oblique_families`.
+        for (font, family) in self.oblique_faces() {
+            dyn_mgr
+                .register_typeface(font, Some(oblique_alias(&family).as_str()));
+        }
 
         // Every family the document names, resolved through the system
         // manager and registered here under that same name.
@@ -1879,6 +1909,33 @@ impl FontLibrary {
                     .collect()
             });
         Some(Slanted { names, as_oblique })
+    }
+
+    /// Each registered family whose slanted styles [`slanted`](Self::slanted)
+    /// sends to its [`oblique_alias`], with the slants it does it for: the
+    /// table an SVG document's `font-style` is rewritten against, where a
+    /// family and a slant reach Skia's matcher with no style to rewrite.
+    pub(crate) fn oblique_families(&self) -> Vec<ObliqueFamily> {
+        let mut families: Vec<ObliqueFamily> = Vec::new();
+        for (font, alias) in &self.fonts {
+            let name = alias.clone().unwrap_or_else(|| font.family_name());
+            if families.iter().any(|family| family.name == name) {
+                continue;
+            }
+            let sent = |slant| {
+                self.slanted(std::slice::from_ref(&name), slant, None)
+                    .is_some_and(|slanted| slanted.names.is_some())
+            };
+            let (italic, oblique) = (sent(Slant::Italic), sent(Slant::Oblique));
+            if italic || oblique {
+                families.push(ObliqueFamily {
+                    name,
+                    italic,
+                    oblique,
+                });
+            }
+        }
+        families
     }
 
     /// The name a registered family is filed under, where `name` is that

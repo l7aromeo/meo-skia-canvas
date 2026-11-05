@@ -6,6 +6,7 @@ use skia_safe::{
     AlphaType, Color4f, ColorSpace, ColorType, Data, Font, FontHinting,
     FontMgr, FontStyle, FourByteTag, Image as SkImage, ImageInfo,
     Size as SkSize, Typeface, codec,
+    font_style::Slant,
     svg::{self, FontSize, Length, LengthUnit, TypedNode},
 };
 
@@ -14,7 +15,11 @@ use crate::{
     css,
     decode::bmp::space_of,
     error::Error,
-    font_library::FontLibrary as SharedFonts,
+    font::caseless,
+    font_library::{
+        FontLibrary as SharedFonts, ObliqueFamily, is_oblique_alias,
+        oblique_alias, unmatched_name,
+    },
     geometry::Size,
     pixels::{ImageData, PixelColorSpace, PixelExportOptions},
     start_skia, started,
@@ -741,10 +746,17 @@ impl Svg {
         SharedFonts::with_shared(|lib| {
             let generics = lib.generic_families();
             let claimed = lib.claimed_families();
+            let obliques = lib.oblique_families();
             // The families first: the manager is built to answer them, so it
             // cannot be built before they are known. See `families_named`.
             let wanted = families_named(xml, &generics, &claimed);
-            Self::parse_dom(xml, lib.font_mgr(&wanted), &generics, &claimed)
+            Self::parse_dom(
+                xml,
+                lib.font_mgr(&wanted),
+                &generics,
+                &claimed,
+                &obliques,
+            )
         })
     }
 
@@ -761,9 +773,10 @@ impl Svg {
         font_mgr: FontMgr,
         generics: &[(String, String)],
         claimed: &[(String, String)],
+        obliques: &[ObliqueFamily],
     ) -> Result<svg::Dom, Error> {
         let rewritten =
-            text_position_lengths_in_px(xml, generics, claimed, &font_mgr);
+            rewrite_text(xml, generics, claimed, obliques, &font_mgr);
         let bytes = rewritten.as_deref().unwrap_or(xml);
         svg::Dom::from_bytes(bytes, font_mgr).map_err(|_| Error::DecodeImage {
             reason: "could not parse SVG XML".to_string(),
@@ -1068,6 +1081,89 @@ struct Cascade {
     font_size: f32,
     /// The `font-family` in effect, which decides what `ex` is worth.
     family: Option<String>,
+    /// The `font-family` in effect as the document states it, before any
+    /// rewrite: the family a slanted `font-style` is matched against -- see
+    /// [`ObliqueFamily`].
+    stated_family: Option<String>,
+    /// The `font-style` in effect, as the slant Skia asks its font manager
+    /// for.
+    slant: Slant,
+    /// The `font-family` Skia reads in effect once the rewrite is applied.
+    written_family: Option<String>,
+}
+
+/// The slant a `font-style` value asks a family's faces for, or `None` for
+/// `inherit` and any value this does not read, which leave the inherited slant
+/// in place.
+///
+/// The keywords Skia's SVG parser reads, `SkSVGFontStyle`'s three, and
+/// `oblique <angle>`. An oblique of zero or a negative angle asks for the
+/// upright face: CSS Fonts 4 section 5.2 matches it against no face that leans
+/// forward, and shears the upright one -- so it is not sent to the family's
+/// oblique faces.
+fn font_style_slant(value: &str) -> Option<Slant> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("normal") {
+        return Some(Slant::Upright);
+    }
+    if value.eq_ignore_ascii_case("italic") {
+        return Some(Slant::Italic);
+    }
+    let rest = value
+        .get(..OBLIQUE.len())
+        .filter(|word| word.eq_ignore_ascii_case(OBLIQUE))
+        .map(|_| &value[OBLIQUE.len()..])?;
+    if rest.is_empty() {
+        return Some(Slant::Oblique);
+    }
+    if !rest.starts_with(|c: char| c.is_ascii_whitespace()) {
+        return None;
+    }
+    match css::parse_angle(rest)? {
+        angle if angle > 0.0 => Some(Slant::Oblique),
+        _ => Some(Slant::Upright),
+    }
+}
+
+/// The `font-style` keyword for an oblique, which an angle may follow.
+const OBLIQUE: &str = "oblique";
+
+/// The `font-family` an element whose family is `stated` and whose slant is
+/// `slant` is written with: its family's [`oblique_alias`] where `obliques`
+/// sends that slant there, and otherwise what [`family_substitution`] makes
+/// of it.
+///
+/// Skia's SVG text asks its font manager for the family and style an element
+/// computes, and the manager's matcher scores a face its platform reports
+/// upright alike with the upright face of its family, for every slant -- see
+/// `FontLibrary::slanted`. So a slanted element is sent to the family's
+/// oblique faces by name, as canvas text is. A stated name that spells an
+/// [`oblique_alias`] is written as [`unmatched_name`], so that a document
+/// cannot ask for those faces by name.
+fn written_family(
+    stated: &str,
+    slant: Slant,
+    generics: &[(String, String)],
+    claimed: &[(String, String)],
+    obliques: &[ObliqueFamily],
+) -> String {
+    let name = stated.trim().trim_matches(['"', '\''].as_slice()).trim();
+    let sent = obliques.iter().find(|family| {
+        caseless::eq(&family.name, name)
+            && match slant {
+                Slant::Italic => family.italic,
+                Slant::Oblique => family.oblique,
+                Slant::Upright => false,
+            }
+    });
+    match sent {
+        Some(family) if !stated.contains(',') => oblique_alias(&family.name),
+        // A family's oblique faces, which a document cannot name.
+        _ if is_oblique_alias(name) => unmatched_name(name),
+        _ => family_substitution(stated, generics, claimed)
+            .map(str::to_string)
+            .unwrap_or_else(|| stated.trim().to_string()),
+    }
 }
 
 /// The value of `font-size` an element states, from `style` or the attribute.
@@ -1569,10 +1665,21 @@ pub(crate) fn families_named(
 /// on any offset that does not fall inside the input. None of those is
 /// expected; the point is that the failure is refusal rather than a
 /// half-rewritten document.
+#[cfg(test)]
 fn text_position_lengths_in_px(
     xml: &[u8],
     generics: &[(String, String)],
     claimed: &[(String, String)],
+    font_mgr: &FontMgr,
+) -> Option<Vec<u8>> {
+    rewrite_text(xml, generics, claimed, &[], font_mgr)
+}
+
+fn rewrite_text(
+    xml: &[u8],
+    generics: &[(String, String)],
+    claimed: &[(String, String)],
+    obliques: &[ObliqueFamily],
     font_mgr: &FontMgr,
 ) -> Option<Vec<u8>> {
     // Not UTF-8, so this cannot reason about the bytes. The Neon binding
@@ -1592,6 +1699,9 @@ fn text_position_lengths_in_px(
     let mut cascade = vec![Cascade {
         font_size: CSS_INITIAL_FONT_SIZE,
         family: None,
+        stated_family: None,
+        slant: Slant::Upright,
+        written_family: None,
     }];
     let mut depth_of_root = None;
 
@@ -1630,6 +1740,10 @@ fn text_position_lengths_in_px(
         let mut own_family = inherited.family.clone();
         let mut style_value: Option<String> = None;
         let mut size_attribute: Option<(Range<usize>, String)> = None;
+        // Where the element states its family -- the attribute, or a `style`
+        // declaration, which wins -- and the slant it computes to.
+        let mut family_attribute: Option<String> = None;
+        let mut own_slant = inherited.slant;
 
         for attribute in element.attributes() {
             let attribute = attribute.ok()?;
@@ -1650,10 +1764,30 @@ fn text_position_lengths_in_px(
                     own_family = family_substitution(raw, generics, claimed)
                         .map(str::to_string)
                         .or_else(|| Some(raw.trim().to_string()));
+                    family_attribute = Some(raw.to_string());
+                }
+                "font-style" => {
+                    own_slant = font_style_slant(raw).unwrap_or(own_slant);
                 }
                 _ => {}
             }
         }
+        if let Some(slant) =
+            style_declaration(style_value.as_deref(), "font-style")
+                .and_then(font_style_slant)
+        {
+            own_slant = slant;
+        }
+        let styled_family =
+            style_declaration(style_value.as_deref(), "font-family")
+                .map(str::to_string);
+        let stated_family = styled_family
+            .clone()
+            .or_else(|| family_attribute.clone())
+            .or_else(|| inherited.stated_family.clone());
+        let written = stated_family.as_deref().map(|stated| {
+            written_family(stated, own_slant, generics, claimed, obliques)
+        });
 
         // A `font-family` in the `style` attribute wins over the attribute
         // form, as CSS says and as Skia does, so it decides both what a
@@ -1707,16 +1841,21 @@ fn text_position_lengths_in_px(
             let range = borrowed_range(text, raw)?;
 
             let converted = if key == "style" {
-                // Only the family is substituted; the rest of the declaration
+                // Only the family is rewritten; the rest of the declaration
                 // is passed through as written.
                 style_declaration(Some(raw), "font-family")
-                    .and_then(|family| {
-                        family_substitution(family, generics, claimed)
-                            .map(|concrete| (family, concrete))
-                    })
-                    .map(|(family, concrete)| raw.replacen(family, concrete, 1))
+                    .zip(written.as_deref())
+                    .filter(|(family, written)| family.trim() != *written)
+                    .map(|(family, written)| raw.replacen(family, written, 1))
             } else if key == "font-family" {
-                family_substitution(raw, generics, claimed).map(str::to_string)
+                // A family stated in `style` too is the one Skia reads, so
+                // the attribute is left as it is.
+                written
+                    .as_deref()
+                    .filter(|written| {
+                        styled_family.is_none() && raw.trim() != *written
+                    })
+                    .map(str::to_string)
             } else if positioned && TEXT_POSITION_ATTRIBUTES.contains(&key) {
                 position_list_in_px(raw)
                     .or_else(|| relative_list_in_px(raw, own_size, ex_ratio))
@@ -1727,6 +1866,24 @@ fn text_position_lengths_in_px(
             };
             let Some(converted) = converted else { continue };
             splices.push((range, converted));
+        }
+
+        // An element that states no family inherits the one written above
+        // it, which is the wrong one where its own `font-style` changes what
+        // its family is written as: an italic span in an upright paragraph,
+        // or an upright one in an italic paragraph whose family went to its
+        // oblique faces. It is given the family it computes to.
+        if styled_family.is_none()
+            && family_attribute.is_none()
+            && written.is_some()
+            && written != inherited.written_family
+        {
+            let name = borrowed_range(text, element.name().as_ref())?;
+            let family = written.clone().unwrap_or_default();
+            splices.push((
+                name.end..name.end,
+                format!(" font-family=\"{family}\""),
+            ));
         }
 
         // The root is given a `font-size` where it states none, so that the
@@ -1751,6 +1908,9 @@ fn text_position_lengths_in_px(
             cascade.push(Cascade {
                 font_size: own_size,
                 family: own_family,
+                stated_family,
+                slant: own_slant,
+                written_family: written,
             });
         }
     }
@@ -3312,6 +3472,83 @@ mod tests {
         assert!(
             !states_the_initial_size(rewritten(r##" style="font-size:20""##)),
             "and so does one stating it in a declaration"
+        );
+    }
+
+    /// A slanted element in a family whose slanted styles go to its oblique
+    /// faces is written with the family's `oblique_alias`; an upright
+    /// element below it is written back to the family; and what is not such
+    /// a family, a list, or one of the library's own names is not.
+    #[test]
+    fn a_slanted_element_is_written_with_its_familys_oblique_faces() {
+        let obliques = [ObliqueFamily {
+            name: "Tied".to_string(),
+            italic: true,
+            oblique: true,
+        }];
+        let rewritten = |body: &str| {
+            let xml = format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" font-size="16">{body}</svg>"##
+            );
+            rewrite_text(xml.as_bytes(), &[], &[], &obliques, &FontMgr::new())
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or(xml)
+        };
+        let alias = oblique_alias("Tied");
+
+        let italic = rewritten(
+            r##"<text font-family="Tied" font-style="italic">hi</text>"##,
+        );
+        assert!(
+            italic.contains(&format!(r#"font-family="{alias}""#)),
+            "an italic element is written with the alias: {italic}"
+        );
+        let declared = rewritten(
+            r##"<text style="font-family:Tied;font-style:oblique">hi</text>"##,
+        );
+        assert!(
+            declared.contains(&format!("font-family:{alias}")),
+            "and a declaration: {declared}"
+        );
+        let nested = rewritten(
+            r##"<g font-family="Tied"><text font-style="italic">a<tspan font-style="normal">b</tspan></text></g>"##,
+        );
+        assert!(
+            nested.contains(&format!(r#"<text font-family="{alias}""#))
+                && nested.contains(r#"<tspan font-family="Tied""#),
+            "an inherited family is written per slant: {nested}"
+        );
+        let upright = rewritten(r##"<text font-family="Tied">hi</text>"##);
+        assert!(!upright.contains(&alias), "upright stays: {upright}");
+        let angled = rewritten(
+            r##"<text font-family="Tied" style="font-style:oblique 10deg">hi</text>"##,
+        );
+        assert!(
+            angled.contains(&format!("font-family=\"{alias}\"")),
+            "an oblique of a positive angle goes to the alias: {angled}"
+        );
+        for back in ["oblique -14deg", "oblique 0deg"] {
+            let backwards = rewritten(&format!(
+                r##"<text font-family="Tied" style="font-style:{back}">hi</text>"##
+            ));
+            assert!(
+                !backwards.contains(&alias),
+                "{back} is the upright face sheared: {backwards}"
+            );
+        }
+        let listed = rewritten(
+            r##"<text font-family="Tied, serif" font-style="italic">hi</text>"##,
+        );
+        assert!(!listed.contains(&alias), "a list is left alone: {listed}");
+        let other = rewritten(
+            r##"<text font-family="Other" font-style="italic">hi</text>"##,
+        );
+        assert!(!other.contains("private family"), "another family: {other}");
+        let typed =
+            rewritten(&format!(r##"<text font-family="{alias}">hi</text>"##));
+        assert!(
+            typed.contains(&unmatched_name(&alias)),
+            "a typed private name goes unmatched: {typed}"
         );
     }
 
