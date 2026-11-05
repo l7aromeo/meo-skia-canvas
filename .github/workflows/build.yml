@@ -1,5 +1,27 @@
 name: Compile binaries
+# Dispatched for a release, and run without uploading anywhere else, so that a
+# change breaking only the release build fails within a day of landing rather
+# than at the next release's preparation. Only a dispatch can upload: on the
+# other two events `inputs` is empty, and every upload step below asks for a
+# dispatch by name rather than trusting an empty input to read as false.
 on:
+  # What the release build compiles from that no other workflow builds: the
+  # Linux build containers and their patches, the Skia tree and its check, the
+  # dependency pins, the build script, and this file. `paths:` is the right
+  # filter here, where check-workflow-gates refuses it for ci, rust-ci and docs:
+  # no ruleset requires this workflow's checks, so a run it skips leaves
+  # nothing waiting.
+  pull_request:
+    paths:
+      - "containers/**"
+      - "scripts/skia-source.mjs"
+      - "scripts/check-patched-skia.mjs"
+      - "Cargo.lock"
+      - "build.rs"
+      - ".github/workflows/build.yml"
+  # Daily against `main`, off the hour, which GitHub's own scheduler crowds.
+  schedule:
+    - cron: "17 4 * * *"
   workflow_dispatch:
     inputs:
       platforms:
@@ -22,14 +44,16 @@ on:
         default: true
         type: boolean
 
-# Queued, never cancelled. The jobs below upload to the release for the tag they
-# were dispatched at, with `--clobber`, and the published package pins the
-# sha256 of those assets -- so two runs overlapping on one tag can replace a
-# binary that installs are already verifying against. Waiting is the safe
-# failure; cancelling a run mid-upload is not.
+# Queued, never cancelled, except on a pull request. The jobs below upload to
+# the release for the tag they were dispatched at, with `--clobber`, and the
+# published package pins the sha256 of those assets -- so two runs overlapping
+# on one tag can replace a binary that installs are already verifying against.
+# Waiting is the safe failure; cancelling a run mid-upload is not. A pull
+# request's run uploads nothing, so a newer push to it cancels the older run
+# rather than queueing behind an hour of builds nobody will read.
 concurrency:
   group: build-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Least privilege by default, elevated on the jobs that need it. Every job here
 # happens to need `contents: write` today -- the three build legs upload assets,
@@ -41,7 +65,8 @@ permissions:
 
 jobs:
   mac:
-    if: ${{ inputs.platforms == 'all' || inputs.platforms == 'mac' }}
+    # `inputs.platforms` is empty outside a dispatch, which builds everything.
+    if: ${{ (inputs.platforms || 'all') == 'all' || inputs.platforms == 'mac' }}
     runs-on: macos-15
     # Uploads the built binary to the release.
     permissions:
@@ -138,13 +163,13 @@ jobs:
         run: bun run test:suite
 
       - name: Add to release
-        if: ${{ inputs.upload }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.upload }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bun run upload
 
   windows:
-    if: ${{ inputs.platforms == 'all' || inputs.platforms == 'windows' }}
+    if: ${{ (inputs.platforms || 'all') == 'all' || inputs.platforms == 'windows' }}
     strategy:
       fail-fast: false
       matrix:
@@ -265,13 +290,13 @@ jobs:
         run: bun run test:suite
 
       - name: Add to release
-        if: ${{ inputs.upload }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.upload }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bun run upload
 
   linux:
-    if: ${{ inputs.platforms == 'all' || inputs.platforms == 'linux' }}
+    if: ${{ (inputs.platforms || 'all') == 'all' || inputs.platforms == 'linux' }}
     strategy:
       fail-fast: false
       matrix:
@@ -384,14 +409,21 @@ jobs:
         env:
           SERVER: ${{ github.server_url }}
           REPO: ${{ github.repository }}
-          REF: ${{ github.ref_name }}
-        # Only `vendor/{freetype,zlib}` are needed to build, so they are
+          SHA: ${{ github.sha }}
+        # The commit the run is for, fetched by its hash: on a pull request
+        # that is the merge commit `actions/checkout` gives the other legs,
+        # which no branch names, and on any event it is the commit the run
+        # started at, wherever its ref has moved since. Only
+        # `vendor/{freetype,zlib}` are needed to build, so they are
         # initialised explicitly rather than recursing over every
         # submodule. `vendor/{freetype,zlib}` get symlinked into
         # rust-skia's static-deps tree by the next step.
         run: |
-          git clone --depth 1 --branch "$REF" "${SERVER}/${REPO}" skia-canvas
+          git init -q skia-canvas
           cd skia-canvas
+          git remote add origin "${SERVER}/${REPO}"
+          git fetch --depth 1 origin "$SHA"
+          git checkout -q --detach FETCH_HEAD
           git submodule update --init --depth 1 vendor/freetype vendor/zlib
 
       - name: Checkout and patch rust-skia
@@ -589,13 +621,13 @@ jobs:
         run: cd skia-canvas && MEO_SKIA_CANVAS_BINARY="$PWD/lib/skia.node" bun run test:suite
 
       - name: Add to release
-        if: ${{ inputs.upload }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.upload }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cd skia-canvas && bun run upload
 
       - name: Add AWS layer to release
-        if: ${{ inputs.upload && matrix.libc == 'glibc' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.upload && matrix.libc == 'glibc' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -649,7 +681,7 @@ jobs:
     needs: linux
     # The layer it loads is one the linux job uploaded, which a run without
     # uploads never posts.
-    if: ${{ inputs.upload && (inputs.platforms == 'all' || inputs.platforms == 'linux') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.upload && (inputs.platforms == 'all' || inputs.platforms == 'linux') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Reads an asset off a release that is still a draft, and a draft is invisible

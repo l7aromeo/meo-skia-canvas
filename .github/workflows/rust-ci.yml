@@ -27,15 +27,26 @@ permissions:
   contents: read
 
 jobs:
-  # Whether anything in `paths/rust-ci.txt` moved, for both triggers, in git's
-  # pathspec spelling. `:(glob)` keeps `*` from crossing a directory separator, so
-  # `docs/rust.md` stays the single page it names.
+  # What moved, for both triggers, in git's pathspec spelling, as three answers:
+  #
+  # - `relevant`: anything in `paths/rust-ci.txt`. The jobs that read Markdown
+  #   -- the changelog and licence checks -- run on this.
+  # - `native`: the same less its Markdown. Every job that reads no Markdown
+  #   runs on this, the macOS ones among them, so a pull request changing only
+  #   prose starts none of them.
+  # - `doctests`: anything in `paths/doctests.txt`, the Markdown compiled into
+  #   the crate as doctests, which `test` runs.
+  #
+  # `:(glob)` keeps `*` from crossing a directory separator and lets `**/`
+  # match no directory at all, so `**/*.md` is every Markdown file in the tree.
   changes:
     name: changes
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       relevant: ${{ steps.scan.outputs.relevant }}
+      native: ${{ steps.scan.outputs.native }}
+      doctests: ${{ steps.scan.outputs.doctests }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -51,22 +62,36 @@ jobs:
           # reports all zeros, and one rewritten by a force-push may name a
           # commit this clone does not have. Run everything rather than guess.
           if [ -z "$BASE" ] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
-            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            printf '%s=true\n' relevant native doctests >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # The pathspecs live beside this workflow rather than in it, so the
           # check that guards them reads the same copy. `mapfile` keeps one
           # spec per element, which `$(...)` word-splitting would not.
           mapfile -t SPECS < <(grep -vE '^[[:space:]]*(#|$)' ".github/workflows/paths/rust-ci.txt")
-          moved=$(git diff --name-only "$BASE" "$HEAD" -- "${SPECS[@]}")
-          if [ -n "$moved" ]; then
-            echo "relevant=true" >> "$GITHUB_OUTPUT"
-            echo "changed files this workflow covers:"
-            echo "$moved"
-          else
-            echo "relevant=false" >> "$GITHUB_OUTPUT"
-            echo "nothing this workflow covers has moved"
-          fi
+          mapfile -t DOCTESTS < <(grep -vE '^[[:space:]]*(#|$)' ".github/workflows/paths/doctests.txt")
+          # An empty list would reach `git diff` as no pathspec at all, which
+          # means every file, so it is refused rather than read as "anything".
+          scan() {
+            local name=$1 moved
+            shift
+            if [ "$#" -eq 0 ]; then
+              echo "::error::\`$name\` has no pathspecs to scan"
+              exit 1
+            fi
+            moved=$(git diff --name-only "$BASE" "$HEAD" -- "$@")
+            if [ -n "$moved" ]; then
+              echo "$name=true" >> "$GITHUB_OUTPUT"
+              echo "$name: moved"
+              echo "$moved"
+            else
+              echo "$name=false" >> "$GITHUB_OUTPUT"
+              echo "$name: nothing moved"
+            fi
+          }
+          scan relevant "${SPECS[@]}"
+          scan native "${SPECS[@]}" ':(glob,exclude)**/*.md'
+          scan doctests "${DOCTESTS[@]}"
 
   # rustfmt.toml uses nightly-only options (imports_granularity,
   # wrap_comments, ...), so the formatting is defined by *nightly*
@@ -74,7 +99,7 @@ jobs:
   # version-fragile, so the format check must run on nightly.
   fmt:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.native == 'true'
     name: fmt (nightly)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -113,7 +138,7 @@ jobs:
   # so the matrix waits seconds for this on an ordinary run.
   skia-source:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.native == 'true'
     name: skia source (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -149,7 +174,7 @@ jobs:
 
   clippy:
     needs: [changes, skia-source]
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.native == 'true'
     name: clippy ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -263,7 +288,7 @@ jobs:
   # found it once restored.
   graphite-bindings:
     needs: [changes, skia-source]
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.native == 'true'
     name: graphite bindings (patched, Metal)
     runs-on: macos-latest
     timeout-minutes: 60
@@ -296,9 +321,18 @@ jobs:
           node scripts/check-cargo-lock.mjs
           git diff --exit-code
 
+  # Runs the doctests too, so a change to the Markdown they are compiled from
+  # runs it without the native jobs. `skia-source` is then skipped, and is
+  # not needed: it only primes the cache, and the action below prepares the
+  # tree itself on a miss. Neither skipped nor succeeded, it stops this job as
+  # it always has.
   test:
     needs: [changes, skia-source]
-    if: needs.changes.outputs.relevant == 'true'
+    if: >-
+      !cancelled()
+      && contains(fromJSON('["success", "skipped"]'), needs.skia-source.result)
+      && (needs.changes.outputs.native == 'true'
+          || needs.changes.outputs.doctests == 'true')
     name: test (freetype,fetch)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -353,7 +387,7 @@ jobs:
   # WOFF2 decoding, which the font fixtures in tests/assets need.
   binding:
     needs: [changes, skia-source]
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.native == 'true'
     name: binding (Rust + JS on a fresh build)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -537,7 +571,7 @@ jobs:
   # building one.
   release-tests:
     needs: [changes, skia-source]
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.native == 'true'
     name: release tests (Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -575,7 +609,7 @@ jobs:
 
   msrv:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.native == 'true'
     name: msrv (from Cargo.toml)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -628,7 +662,7 @@ jobs:
   # tree that leaks. Pinned with the fmt job -- bump both together.
   public-api:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.native == 'true'
     name: public API (no leaked types)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -723,7 +757,7 @@ jobs:
   # job's build.
   parity:
     needs: [changes, skia-source]
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.native == 'true'
     name: parity (crate and npm surfaces agree)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -762,7 +796,7 @@ jobs:
 
   docs:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.native == 'true'
     name: docs (rustdoc)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -816,7 +850,7 @@ jobs:
   # that actually happens.
   doc-anchors:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.native == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

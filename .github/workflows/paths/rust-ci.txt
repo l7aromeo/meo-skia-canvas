@@ -27,6 +27,13 @@ Cargo.lock
 # The `licenses` job checks the counts this file states against the graph
 # `Cargo.lock` resolves, so an edit to either has to run it.
 THIRD-PARTY-NOTICES.md
+# The `changelog` job checks these three, and `test` compiles the crate's
+# page as doctests (`paths/doctests.txt`). Being Markdown, none of them starts
+# a job that reads no Markdown.
+CHANGELOG.md
+CHANGELOG-crate.md
+CHANGELOG-npm.md
+docs/readme/crate.md
 
 # The patches name the tree every source build compiles from -- Skia's and
 # rust-skia's alike -- and the action restores it, so a change to either

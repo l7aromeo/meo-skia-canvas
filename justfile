@@ -1113,13 +1113,16 @@ release-npm *bump="patch":
     gh release create "${TAG}" -R "${REPO}" ${PRERELEASE} --draft --generate-notes \
         --title "${TAG} — Node addon"
 
-    # build.yml is dispatch-only. No push, tag or release event starts it, so creating the
-    # release is not enough on its own and this step used to be left to whoever remembered
-    # it. Dispatched against the tag, not main, so the binaries come from exactly what was
-    # released rather than from whatever landed on main while the build was queued.
+    # Only a dispatch of build.yml uploads. No push, tag or release event starts it, and its
+    # own triggers -- a pull request changing what it builds from, and a daily run on main --
+    # build without posting anything, so creating the release is not enough on its own.
+    # Dispatched against the tag, not main, so the binaries come from exactly what was
+    # released rather than from whatever landed on main while the build was queued. The run
+    # is looked up by that event and tag, since a pull request's or the schedule's run of
+    # build.yml can be the newest one.
     gh workflow run build.yml -R "${REPO}" --ref "${TAG}"
     sleep 10
-    RUN=$(gh run list -R "${REPO}" --workflow=build.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+    RUN=$(gh run list -R "${REPO}" --workflow=build.yml --event workflow_dispatch --branch "${TAG}" --limit 1 --json databaseId --jq '.[0].databaseId')
 
     echo ""
     echo "Draft release ${TAG} created; binaries building in run ${RUN}."

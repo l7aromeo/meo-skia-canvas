@@ -1,0 +1,8 @@
+# The Markdown compiled into the crate as doctests, as git pathspecs.
+#
+# Read by rust-ci.yml's `changes` job, which runs `test` when one of these
+# moves even though nothing else the native jobs read has, and by
+# `just check-workflow-gates`. A page is compiled this way by a
+# `#[doc = include_str!(...)]` under `#[cfg(doctest)]`; `src/lib.rs` holds the
+# one there is.
+docs/readme/crate.md

@@ -1,0 +1,47 @@
+name: Retry starved jobs
+
+# Re-runs, once, a run in which GitHub cancelled a job because no hosted runner
+# took it -- which macOS jobs meet most, after 15 to 30 minutes queued -- and
+# nothing else failed. `.github/scripts/retry-starved.mjs` decides, from the
+# run and its jobs as the API reports them, and says why it does or does not;
+# its tests replay runs recorded from this repository.
+#
+# `workflow_run` runs this file as it stands on the default branch, with the
+# default branch checked out, whichever run it reacts to. A pull request -- a
+# fork's included -- therefore cannot change what runs here with
+# `actions: write`, and a change to this file or the script takes effect only
+# once it has merged.
+on:
+  workflow_run:
+    # Workflow names, not files, so a renamed workflow drops out of this list
+    # silently. These are the ones with macOS jobs, and the gated ones.
+    workflows: [CI, Rust CI, Docs, Compile binaries]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  retry:
+    # The script asks all of this again of the run as it is now. Repeated
+    # here so that the runs it would refuse anyway -- a re-run, a superseded
+    # run, a green one -- skip without taking a runner.
+    if: >-
+      github.event.workflow_run.run_attempt == 1
+      && github.event.workflow_run.conclusion != 'cancelled'
+      && github.event.workflow_run.conclusion != 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # `rerun-failed-jobs` needs it, and reading the run's jobs needs read.
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Re-run the jobs no runner took
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: node .github/scripts/retry-starved.mjs "$RUN_ID"

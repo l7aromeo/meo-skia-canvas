@@ -1,0 +1,90 @@
+{
+  "run": {
+    "conclusion": "cancelled",
+    "event": "pull_request",
+    "id": 42093953670,
+    "name": "CI",
+    "path": ".github/workflows/ci.yml",
+    "run_attempt": 1
+  },
+  "jobs": [
+    {
+      "completed_at": "2026-11-05T19:26:58Z",
+      "conclusion": "success",
+      "id": 127478987192,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "changes",
+      "runner_id": 1000036301,
+      "runner_name": "GitHub Actions 1000036301",
+      "started_at": "2026-11-05T19:26:50Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:28:30Z",
+      "conclusion": "success",
+      "id": 127479080810,
+      "labels": [
+        "windows-latest"
+      ],
+      "name": "Test (windows, Node 24)",
+      "runner_id": 1000036313,
+      "runner_name": "GitHub Actions 1000036313",
+      "started_at": "2026-11-05T19:27:01Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:32:20Z",
+      "conclusion": "cancelled",
+      "id": 127479080837,
+      "labels": [
+        "macos-latest"
+      ],
+      "name": "Test (macos, Node 24)",
+      "runner_id": 0,
+      "runner_name": "",
+      "started_at": "2026-11-05T19:26:58Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:27:28Z",
+      "conclusion": "success",
+      "id": 127479080868,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "Test (linux, Node 22)",
+      "runner_id": 1000036314,
+      "runner_name": "GitHub Actions 1000036314",
+      "started_at": "2026-11-05T19:27:06Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:27:27Z",
+      "conclusion": "success",
+      "id": 127479080969,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "Test (linux, Node 24)",
+      "runner_id": 1000036315,
+      "runner_name": "GitHub Actions 1000036315",
+      "started_at": "2026-11-05T19:27:01Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:32:33Z",
+      "conclusion": "failure",
+      "id": 127482035881,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "ci",
+      "runner_id": 1000036351,
+      "runner_name": "GitHub Actions 1000036351",
+      "started_at": "2026-11-05T19:32:29Z",
+      "status": "completed"
+    }
+  ]
+}

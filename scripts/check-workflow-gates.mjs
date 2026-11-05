@@ -28,14 +28,7 @@ import { execFileSync } from "child_process";
 import { readFileSync } from "fs";
 import { parse } from "yaml";
 
-// Workflow file -> the job id whose context a ruleset should require.
-// A workflow absent from here is not gated and is not checked; adding one is
-// a deliberate act, because requiring a context is.
-const GATED = {
-  "ci.yml": "ci",
-  "rust-ci.yml": "rust-ci",
-  "docs.yml": "docs",
-};
+import { GATED } from "./workflow-aggregates.mjs";
 
 const DIR = ".github/workflows";
 
@@ -56,7 +49,7 @@ const DIR = ".github/workflows";
 const MUST_COVER = {
   "rust-ci.txt": {
     reason:
-      "they compile into the Rust build, pin what it builds against, patch the Skia it builds, or state what links",
+      "they compile into the Rust build, pin what it builds against, patch the Skia it builds, state what links, or are what the changelog check reads",
     specs: [
       ":(glob)**/*.rs",
       "Cargo.toml",
@@ -64,7 +57,15 @@ const MUST_COVER = {
       "rustfmt.toml",
       "THIRD-PARTY-NOTICES.md",
       ":(glob)containers/*.patch",
+      "CHANGELOG.md",
+      "CHANGELOG-crate.md",
+      "CHANGELOG-npm.md",
+      "docs/readme/crate.md",
     ],
+  },
+  "doctests.txt": {
+    reason: "the crate compiles them as doctests",
+    specs: ["docs/readme/crate.md"],
   },
   "docs.txt": {
     reason: "the published reference is generated from them",
@@ -76,8 +77,16 @@ const MUST_COVER = {
     specs: [":(glob)**/*.md", "scripts/check-markdown-links.mjs"],
   },
   "ci.txt": {
+    // Less their Markdown: a font's licence notes under `tests/assets` are
+    // prose the matrix never reads, and the `format` job checks them.
     reason: "the packaging and install path is exercised through them",
-    specs: [":(glob)lib/**", ":(glob)tests/**", "package.json", "bun.lock"],
+    specs: [
+      ":(glob)lib/**",
+      ":(glob)tests/**",
+      "package.json",
+      "bun.lock",
+      ":(glob,exclude)**/*.md",
+    ],
   },
 };
 
@@ -148,6 +157,16 @@ export function auditWorkflow(file, aggregateId, text) {
       `${file} has no job \`${aggregateId}\`, which is the context a ruleset ` +
         `requires for this workflow`,
     ];
+  }
+
+  // The context a ruleset requires is the job's `name`, which defaults to its
+  // id. `GATED` names the id, and `.github/scripts/retry-starved.mjs` finds the
+  // aggregate among a run's jobs by that same string, so the two must agree.
+  if (aggregate.name !== undefined && aggregate.name !== aggregateId) {
+    problems.push(
+      `${file}: \`${aggregateId}\` is named \`${aggregate.name}\`, so the ` +
+        `context it reports is not the one \`GATED\` names`,
+    );
   }
 
   // `always()` is what makes the aggregate report when a dependency skipped.
@@ -251,6 +270,20 @@ function selfTest() {
   );
   check("a workflow with no jobs is named", "w.yml", "g", "on: push\n", 1);
   check(
+    "an aggregate named other than its id is named",
+    "w.yml",
+    "g",
+    gate("a, b").replace("  g:\n", "  g:\n    name: gate\n"),
+    1,
+  );
+  check(
+    "an aggregate named as its id passes",
+    "w.yml",
+    "g",
+    gate("a, b").replace("  g:\n", "  g:\n    name: g\n"),
+    0,
+  );
+  check(
     "a single needs written as a scalar is understood",
     "w.yml",
     "g",
@@ -314,12 +347,13 @@ function selfTest() {
   );
   trigger("a bare event name passes", "on: push\n", 0);
 
-  const n = 20;
+  const n = 22;
   if (bad === 0) {
     console.log(
       `self-test: ${n} cases, an uncovered job, a phantom dependency, a ` +
-        `missing always(), a required path outside a list and a trigger's own ` +
-        `path filter are each caught, and a complete workflow passes`,
+        `missing always(), an aggregate named other than its id, a required ` +
+        `path outside a list and a trigger's own path filter are each ` +
+        `caught, and a complete workflow passes`,
     );
   }
   return bad;

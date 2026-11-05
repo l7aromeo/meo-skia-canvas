@@ -1,0 +1,272 @@
+{
+  "run": {
+    "conclusion": "success",
+    "event": "push",
+    "id": 42101318652,
+    "name": "Rust CI",
+    "path": ".github/workflows/rust-ci.yml",
+    "run_attempt": 1
+  },
+  "jobs": [
+    {
+      "completed_at": "2026-11-05T20:14:53Z",
+      "conclusion": "success",
+      "id": 127504547931,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "changes",
+      "runner_id": 1000036435,
+      "runner_name": "GitHub Actions 1000036435",
+      "started_at": "2026-11-05T20:14:44Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T20:17:32Z",
+      "conclusion": "success",
+      "id": 127505483742,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "docs (rustdoc)",
+      "runner_id": 1000036439,
+      "runner_name": "GitHub Actions 1000036439",
+      "started_at": "2026-11-05T20:15:46Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T20:16:23Z",
+      "conclusion": "success",
+      "id": 127505483778,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "skia source (Linux)",
+      "runner_id": 1000036441,
+      "runner_name": "GitHub Actions 1000036441",
+      "started_at": "2026-11-05T20:16:16Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T20:25:21Z",
+      "conclusion": "success",
+      "id": 127505483782,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "changelog (every shipped tag has a section)",
+      "runner_id": 1000036455,
+      "runner_name": "GitHub Actions 1000036455",
+      "started_at": "2026-11-05T20:25:11Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T20:22:42Z",
+      "conclusion": "success",
+      "id": 127505483799,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "msrv (from Cargo.toml)",
+      "runner_id": 1000036449,
+      "runner_name": "GitHub Actions 1000036449",
+      "started_at": "2026-11-05T20:21:54Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T20:16:15Z",
+      "conclusion": "success",
+      "id": 127505483822,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "doc-anchors",
+      "runner_id": 1000036440,
+      "runner_name": "GitHub Actions 1000036440",
+      "started_at": "2026-11-05T20:16:06Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T20:25:09Z",
+      "conclusion": "success",
+      "id": 127505483888,
+      "labels": [
+        "macos-latest"
+      ],
+      "name": "skia source (macOS)",
+      "runner_id": 1000036454,
+      "runner_name": "GitHub Actions 1000036454",
+      "started_at": "2026-11-05T20:24:59Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T20:26:54Z",
+      "conclusion": "success",
+      "id": 127505483969,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "public API (no leaked types)",
+      "runner_id": 1000036450,
+      "runner_name": "GitHub Actions 1000036450",
+      "started_at": "2026-11-05T20:22:44Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T20:30:49Z",
+      "conclusion": "success",
+      "id": 127505484069,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "licenses (notices match what links)",
+      "runner_id": 1000036470,
+      "runner_name": "GitHub Actions 1000036470",
+      "started_at": "2026-11-05T20:30:32Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T20:31:15Z",
+      "conclusion": "success",
+      "id": 127505484338,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "fmt (nightly)",
+      "runner_id": 1000036472,
+      "runner_name": "GitHub Actions 1000036472",
+      "started_at": "2026-11-05T20:31:02Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T20:50:33Z",
+      "conclusion": "success",
+      "id": 127511050744,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "test (freetype,fetch)",
+      "runner_id": 1000036473,
+      "runner_name": "GitHub Actions 1000036473",
+      "started_at": "2026-11-05T20:31:17Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T20:56:50Z",
+      "conclusion": "success",
+      "id": 127511050757,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "release tests (Linux)",
+      "runner_id": 1000036508,
+      "runner_name": "GitHub Actions 1000036508",
+      "started_at": "2026-11-05T20:44:36Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T20:41:07Z",
+      "conclusion": "success",
+      "id": 127511050771,
+      "labels": [
+        "macos-latest"
+      ],
+      "name": "graphite bindings (patched, Metal)",
+      "runner_id": 1000036458,
+      "runner_name": "GitHub Actions 1000036458",
+      "started_at": "2026-11-05T20:26:57Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T21:19:48Z",
+      "conclusion": "success",
+      "id": 127511050804,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "binding (Rust + JS on a fresh build)",
+      "runner_id": 1000036512,
+      "runner_name": "GitHub Actions 1000036512",
+      "started_at": "2026-11-05T20:45:09Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T21:06:20Z",
+      "conclusion": "success",
+      "id": 127511050839,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "parity (crate and npm surfaces agree)",
+      "runner_id": 1000036522,
+      "runner_name": "GitHub Actions 1000036522",
+      "started_at": "2026-11-05T20:48:09Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T21:04:52Z",
+      "conclusion": "success",
+      "id": 127511050882,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "clippy linux (vulkan,window,node-addon,fetch)",
+      "runner_id": 1000036515,
+      "runner_name": "GitHub Actions 1000036515",
+      "started_at": "2026-11-05T20:46:32Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T20:58:33Z",
+      "conclusion": "success",
+      "id": 127511050918,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "clippy features off",
+      "runner_id": 1000036513,
+      "runner_name": "GitHub Actions 1000036513",
+      "started_at": "2026-11-05T20:45:20Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T21:05:57Z",
+      "conclusion": "success",
+      "id": 127511050938,
+      "labels": [
+        "macos-latest"
+      ],
+      "name": "clippy macos (metal,window,node-addon,fetch)",
+      "runner_id": 1000036548,
+      "runner_name": "GitHub Actions 1000036548",
+      "started_at": "2026-11-05T20:52:39Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T21:00:49Z",
+      "conclusion": "success",
+      "id": 127511050943,
+      "labels": [
+        "macos-latest"
+      ],
+      "name": "clippy macos (metal,vulkan,window)",
+      "runner_id": 1000036559,
+      "runner_name": "GitHub Actions 1000036559",
+      "started_at": "2026-11-05T20:56:51Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T21:24:37Z",
+      "conclusion": "success",
+      "id": 127540407604,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "rust-ci",
+      "runner_id": 1000036625,
+      "runner_name": "GitHub Actions 1000036625",
+      "started_at": "2026-11-05T21:24:33Z",
+      "status": "completed"
+    }
+  ]
+}
