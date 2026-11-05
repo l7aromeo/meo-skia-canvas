@@ -76,6 +76,8 @@ Everything a browser canvas does, and then:
   `interpolate`, 3D projection, vector textures and dash markers.
 - **The full CSS filter set**, plus CanvasKit's `ColorFilter`, `ImageFilter`, `MaskFilter`, `Shader`
   and `ColorMatrix`.
+- **Exact blurs**: a `blur()` or `drop-shadow()` filter is the exact Gaussian blur of what it
+  filters, where a browser approximates it.
 - **Typography**: wrapped multi-line text, per-line metrics, variable-font axes, OpenType features,
   and `Paragraph` for rich text with mixed styles and hit-testing.
 - **Threaded rendering and I/O** off the main thread.
