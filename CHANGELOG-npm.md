@@ -58,9 +58,9 @@ system colours are added, and the CSS strings read the math functions and every 
 
 ### Breaking
 
-- **`lossless: true` beside a `quality` below 1 is a `RangeError`, for AVIF as for WebP.** ([#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
+- **`lossless: true` beside a `quality` below 1 is a `RangeError`, for AVIF as for WebP.** ([#582](https://github.com/l7aromeo/meo-skia-canvas/pull/582), [#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
   Pass one or the other: AVIF ignored the quality.
-- **`lossless: false` keeps a WebP lossy at a `quality` of 1.** ([#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
+- **`lossless: false` keeps a WebP lossy at a `quality` of 1.** ([#582](https://github.com/l7aromeo/meo-skia-canvas/pull/582), [#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
   Leave `lossless` out to keep the lossless WebP a `quality` of 1 writes.
 - **A `Paragraph` style's text shadows paint the first listed on top.** ([#399](https://github.com/l7aromeo/meo-skia-canvas/pull/399))
   Reverse the list to keep a drawing as it was.
@@ -277,7 +277,7 @@ system colours are added, and the CSS strings read the math functions and every 
 
 ### Added
 
-- **`lossless: true` writes a lossless WebP, still or animated, as a `quality` of 1 does.** ([#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
+- **`lossless: true` writes a lossless WebP, still or animated, as a `quality` of 1 does.** ([#582](https://github.com/l7aromeo/meo-skia-canvas/pull/582), [#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
 - **`just bench` runs the npm and crate benchmarks over the same cases and writes a dated report of each.** ([#470](https://github.com/l7aromeo/meo-skia-canvas/pull/470), [#468](https://github.com/l7aromeo/meo-skia-canvas/issues/468))
 - **CSS Color 4's system colours.** ([#331](https://github.com/l7aromeo/meo-skia-canvas/pull/331))
 - **`color-mix()`, CSS Color 5's mix of colours.** ([#331](https://github.com/l7aromeo/meo-skia-canvas/pull/331))

@@ -64,9 +64,9 @@ read the math functions and every length unit.
 
 ### Breaking
 
-- **`EncodeOptions::lossless` is an `Option<bool>`, `None` meaning each format's own rule.** ([#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
+- **`EncodeOptions::lossless` is an `Option<bool>`, `None` meaning each format's own rule.** ([#582](https://github.com/l7aromeo/meo-skia-canvas/pull/582), [#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
   Write `lossless: Some(true)` where you wrote `lossless: true`, and leave it out where you wrote `false`.
-- **`lossless: Some(true)` beside a quality below 1.0 is refused, for AVIF as for WebP.** ([#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
+- **`lossless: Some(true)` beside a quality below 1.0 is refused, for AVIF as for WebP.** ([#582](https://github.com/l7aromeo/meo-skia-canvas/pull/582), [#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
   Pass one or the other: AVIF ignored the quality.
 - **`EncodeOptions::quality` is an `Option<f32>`, `None` meaning each format's own default.** ([#456](https://github.com/l7aromeo/meo-skia-canvas/pull/456), [#444](https://github.com/l7aromeo/meo-skia-canvas/issues/444))
   Write `quality: Some(0.8)` where you wrote `quality: 0.8`.
@@ -255,7 +255,7 @@ read the math functions and every length unit.
 
 ### Added
 
-- **`EncodeOptions::lossless` writes a lossless WebP, still or animated, as a quality of 1.0 does.** ([#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
+- **`EncodeOptions::lossless` writes a lossless WebP, still or animated, as a quality of 1.0 does.** ([#582](https://github.com/l7aromeo/meo-skia-canvas/pull/582), [#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
 - **`just bench` runs the npm and crate benchmarks over the same cases and writes a dated report of each.** ([#470](https://github.com/l7aromeo/meo-skia-canvas/pull/470), [#468](https://github.com/l7aromeo/meo-skia-canvas/issues/468))
 - **CSS Color 4's system colours.** ([#331](https://github.com/l7aromeo/meo-skia-canvas/pull/331))
 - **`color-mix()` in the CSS colours the crate reads.** ([#331](https://github.com/l7aromeo/meo-skia-canvas/pull/331))
