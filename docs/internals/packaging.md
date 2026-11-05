@@ -59,14 +59,17 @@ density 2 after one at density 1 -- had its edges covered by up to 128 levels
 otherwise than on a fresh context.
 
 Both also carry `containers/rust-skia-graphite-bindings.patch`, which is not a
-Skia patch: it adds to rust-skia's own sources the three Graphite bindings
-that a Graphite engine for float pages needs -- a caching `ImageProvider`, without which a
-Recorder drops every raster image; `ContextOptions::fInternalMultisampleCount`;
-and reading a Graphite image back through the Context. Applying it to the tree
-changes nothing a build compiles. A build takes the patched crates only through
-the `.cargo/config.toml` that `node scripts/skia-source.mjs cargo-patch` writes,
-which points `[patch.crates-io]` at the tree's skia-bindings, skia-safe and
-skia-svg-macros, and `cargo-patch --remove` takes it away.
+Skia patch: it adds to rust-skia's own sources the three Graphite bindings that
+a Graphite engine for float pages needs -- a caching `ImageProvider`, without
+which a Recorder drops every raster image;
+`ContextOptions::fInternalMultisampleCount`; and reading a Graphite image back
+through the Context. That engine is built but selected for no canvas:
+`RenderingEngine::for_canvas` asks only for the default engine, Ganesh. Applying
+the patch to the tree changes nothing a build compiles. A build takes the
+patched crates only through the `.cargo/config.toml` that
+`node scripts/skia-source.mjs cargo-patch` writes, which points
+`[patch.crates-io]` at the tree's skia-bindings, skia-safe and skia-svg-macros,
+and `cargo-patch --remove` takes it away.
 
 - **The gate.** The patched skia-bindings alone prints `meo_graphite_bindings`,
   which `graphite_bindings` in `build.rs` reads through `links = "skia"` and
