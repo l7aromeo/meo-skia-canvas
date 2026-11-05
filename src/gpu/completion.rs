@@ -706,6 +706,10 @@ pub(crate) mod seam {
 
 #[cfg(all(test, any(feature = "metal", feature = "vulkan")))]
 mod tests {
+    use std::time::Duration;
+
+    use skia_safe::gpu::PurgeResourceOptions;
+
     use super::{
         DECLINED, DISCARDED, PARALLEL_TASK_BYTES, rows_per_task, seam,
     };
@@ -713,7 +717,7 @@ mod tests {
         Canvas, CanvasOptions, Context2D, EncodeOptions, Error, FillRule,
         ImageFormat, PixelColorSpace, PixelDepth, PixelExportOptions,
         RgbaLinear, canvas::EngineKind,
-        context::page::PARALLEL_UNPREMULTIPLY_PIXELS,
+        context::page::PARALLEL_UNPREMULTIPLY_PIXELS, gpu::RenderingEngine,
     };
 
     /// The width the task size was measured at gets the rows measured best
@@ -1041,6 +1045,145 @@ mod tests {
             whole.pixels() == parts.as_slice(),
             "the whole read differs from its parts"
         );
+    }
+
+    /// The context's cache as a read leaves it once Skia has had back the
+    /// buffers handed out for reads: how many resources it holds, and how
+    /// many bytes of them are free for another use.
+    fn settled() -> (usize, usize) {
+        let mut usage = None;
+        RenderingEngine::GPU.with_direct_context(|context| {
+            usage = context.map(|context| {
+                // Unmaps the buffers of reads already copied out, and purges
+                // nothing used in the past hour.
+                context.perform_deferred_cleanup(
+                    Duration::from_secs(3600),
+                    PurgeResourceOptions::ScratchResourcesOnly,
+                );
+                (
+                    context.resource_cache_usage().resource_count,
+                    context.resource_cache_purgeable_bytes(),
+                )
+            });
+        });
+        usage.expect("a GPU canvas has a context on its thread")
+    }
+
+    /// The smallest buffer `GrResourceProvider::createBuffer` makes for a
+    /// cached buffer: `MIN_SIZE` in `src/gpu/ganesh/GrResourceProvider.cpp`,
+    /// under the skia-bindings crate, which bins every smaller request up to
+    /// it.
+    const MIN_CACHED_BUFFER_BYTES: usize = 1 << 12;
+
+    /// A read leaves its transfer buffer in the context's cache, and the next
+    /// read of the same size takes it rather than making another.
+    #[test]
+    fn a_read_leaves_its_transfer_buffer_for_the_next() {
+        let (width, height) = (64.0, 48.0);
+        // 2,048 bytes, a size no read here has asked for before.
+        let (part_width, part_height) = (32.0, 16.0);
+        let Some((mut canvas, _)) = drawn(width, height) else {
+            return;
+        };
+        let premultiplied = PixelExportOptions {
+            premultiplied: true,
+            ..PixelExportOptions::default()
+        };
+        // A pixel drawn first, so that each read reaches the GPU rather than
+        // pixels already read back.
+        let mut read = |width: f32, height: f32| {
+            let ctx = canvas.context();
+            ctx.fill_rect(0.0, 0.0, 1.0, 1.0);
+            ctx.get_image_data_as(0.0, 0.0, width, height, premultiplied)
+                .expect("a read");
+        };
+        // Whatever else reads of the page leave in the cache is there before
+        // the part is read.
+        read(width, height);
+        read(width, height);
+        let (_, purgeable) = settled();
+        read(part_width, part_height);
+        let kept = settled();
+        // A read of a new size also leaves a purgeable resource of the read's
+        // own bytes, with or without a transfer buffer kept; the buffer is at
+        // least the smallest Skia bins to.
+        assert!(
+            kept.1 >= purgeable + MIN_CACHED_BUFFER_BYTES,
+            "the read kept no buffer: {purgeable} purgeable bytes, then {}",
+            kept.1
+        );
+        read(part_width, part_height);
+        assert_eq!(settled(), kept, "the next read made another buffer");
+    }
+
+    /// A read through a transfer buffer an earlier read left holds what its
+    /// own copy wrote, whether the buffer was last used on the same page or
+    /// another, and after a read of another size has taken one from another
+    /// size's bin.
+    #[test]
+    fn a_reused_transfer_buffer_holds_its_own_read() {
+        let (width, height) = (64.0, 48.0);
+        // 4,800 bytes, binned to 6,144, where 64x48 is 12,288 in a bin of
+        // its own.
+        let (part_width, part_height) = (40.0, 30.0);
+        let mut pages =
+            [Canvas::new(width, height), Canvas::new(width, height)];
+        if pages[0].engine_kind() != EngineKind::Gpu {
+            return;
+        }
+        let premultiplied = PixelExportOptions {
+            premultiplied: true,
+            ..PixelExportOptions::default()
+        };
+        let before = DECLINED.get();
+        for round in 0u8..6 {
+            for (which, canvas) in pages.iter_mut().enumerate() {
+                let shade = 40 * round + 20 * which as u8 + 10;
+                let expected = [shade, 255 - shade, 128, 255];
+                let ctx = canvas.context();
+                ctx.set_fill_style(RgbaLinear::from_srgb8(
+                    shade,
+                    255 - shade,
+                    128,
+                    1.0,
+                ));
+                ctx.fill_rect(0.0, 0.0, width, height);
+                if round % 2 == 1 {
+                    let part = ctx
+                        .get_image_data_as(
+                            0.0,
+                            0.0,
+                            part_width,
+                            part_height,
+                            premultiplied,
+                        )
+                        .expect("a part");
+                    assert!(
+                        part.pixels()
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .all(|p| *p == expected),
+                        "round {round}, page {which}: the part holds pixels \
+                         that are not its own"
+                    );
+                }
+                let whole = ctx
+                    .get_image_data_as(0.0, 0.0, width, height, premultiplied)
+                    .expect("a whole read");
+                assert!(
+                    whole
+                        .pixels()
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .all(|p| *p == expected),
+                    "round {round}, page {which}: the read holds pixels that \
+                     are not its own"
+                );
+            }
+        }
+        assert_eq!(DECLINED.get(), before, "Skia declined a read");
     }
 
     #[test]
