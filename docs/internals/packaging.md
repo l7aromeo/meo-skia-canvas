@@ -58,6 +58,33 @@ path at another scale -- an export at density 1 after one at density 3, or at
 density 2 after one at density 1 -- had its edges covered by up to 128 levels
 otherwise than on a fresh context.
 
+Both also carry `containers/rust-skia-graphite-bindings.patch`, which is not a
+Skia patch: it adds to rust-skia's own sources the three Graphite bindings a
+float page's Graphite engine needs -- a caching `ImageProvider`, without which a
+Recorder drops every raster image; `ContextOptions::fInternalMultisampleCount`;
+and reading a Graphite image back through the Context. Applying it to the tree
+changes nothing a build compiles. A build takes the patched crates only through
+the `.cargo/config.toml` that `node scripts/skia-source.mjs cargo-patch` writes,
+which points `[patch.crates-io]` at the tree's skia-bindings, skia-safe and
+skia-svg-macros, and `cargo-patch --remove` takes it away.
+
+- **The gate.** The patched skia-bindings alone prints `meo_graphite_bindings`,
+  which `graphite_bindings` in `build.rs` reads through `links = "skia"` and
+  turns into `cfg(meo_graphite)`. Code calling the bindings sits behind that
+  cfg, so a build against crates.io's skia-bindings -- every published crate
+  build -- compiles none of it, and no feature a dependent can turn on reaches
+  it. The crate's float canvases draw on the CPU until rust-skia binds these
+  itself.
+- **The lock.** With the config, Cargo drops those three packages' registry
+  source and checksum from `Cargo.lock`. A build that takes the patch restores
+  the lock afterwards, and `just check-cargo-lock`, in `precommit` and `ci`,
+  refuses one left changed.
+- **What CI holds.** Every `rust-ci.yml` job but one builds without the config,
+  and the clippy job asserts skia-bindings resolved from crates.io. The
+  `graphite bindings (patched, Metal)` job builds with it, runs
+  `tests/graphite_bindings.rs`, and greps for the notice `build.rs` prints when
+  the cfg turns on, so a gate that never opens cannot pass as one that is shut.
+
 Published Windows binaries are built against rust-skia's prebuilt Skia, which
 carries none of these patches, so on Windows the atlas can move a pixel and a
 curve is drawn by what the context drew before.
@@ -66,9 +93,9 @@ curve is drawn by what the context drew before.
 `scripts/skia-source.mjs env`, sets `SKIA_SOURCE_DIR` for every recipe on macOS
 and Linux and on Windows not at all, and `ensure-deps` prepares the tree it
 names: rust-skia at the Cargo.lock tag, Skia's DEPS and gn, and the platform's
-patches from `PATCHES` applied with `-F0` -- the three above on macOS, and on
-Linux `containers/skia-brotli-sources.patch`, the atlas-size cap and the
-triangulation tolerance. The brotli
+patches from `PATCHES` applied with `-F0` -- the four above on macOS, and on
+Linux `containers/skia-brotli-sources.patch`, the atlas-size cap, the
+triangulation tolerance and the Graphite bindings. The brotli
 patch adds the two sources Skia's build list leaves out since M156, without
 which a `freetype` build fails to link on `kCmdLut` and
 `BrotliDecoderEnsureStaticInit`. It is
