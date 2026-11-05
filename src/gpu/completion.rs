@@ -1159,7 +1159,11 @@ mod tests {
                         )
                         .expect("a part");
                     assert!(
-                        part.pixels().chunks_exact(4).all(|p| p == expected),
+                        part.pixels()
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .all(|p| *p == expected),
                         "round {round}, page {which}: the part holds pixels \
                          that are not its own"
                     );
@@ -1168,7 +1172,12 @@ mod tests {
                     .get_image_data_as(0.0, 0.0, width, height, premultiplied)
                     .expect("a whole read");
                 assert!(
-                    whole.pixels().chunks_exact(4).all(|p| p == expected),
+                    whole
+                        .pixels()
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .all(|p| *p == expected),
                     "round {round}, page {which}: the read holds pixels that \
                      are not its own"
                 );
