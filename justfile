@@ -1,18 +1,19 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-# On macOS and Linux every recipe builds skia-bindings from a patched Skia
-# source tree: this prints `SKIA_SOURCE_DIR=<dir>` there and nothing on
-# Windows, and just loads it into every recipe's environment, shebang recipes
-# included. An exported variable cannot be left unset on Windows, and
-# skia-bindings reads an empty `SKIA_SOURCE_DIR` as a source directory. The
+# On macOS, Linux and Windows every recipe builds skia-bindings from a patched
+# Skia source tree: this prints `SKIA_SOURCE_DIR=<dir>`, quoted where the
+# directory needs it, and just loads it into every recipe's environment,
+# shebang recipes included. skia-bindings reads an empty `SKIA_SOURCE_DIR` as a
+# source directory, so a platform without patches gets no line at all. The
 # tree itself is prepared by `ensure-skia-source`, because this runs on every
 # invocation and must not download. It also holds the tree for as long as this
 # `just` runs, so a `prepare` in another worktree does not remove it -- `hold`
 # in scripts/skia-source.mjs. A variable already set in the environment wins. Which patches each platform's tree carries is `PATCHES` in
 # scripts/skia-source.mjs; macOS's are the one below and the atlas-size cap
 # and triangulation tolerance noted there, Linux's the brotli build-list fix
-# and the same two, and both the Graphite bindings, which a build takes only
-# through `node scripts/skia-source.mjs cargo-patch`.
+# and the same two, Windows's the same two and the DirectWrite oblique fix, and
+# all three the Graphite bindings, which a build takes only through
+# `node scripts/skia-source.mjs cargo-patch`.
 #
 # UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
 # Re-check: node --test tests/suite/metal-compile.test.js, against a binary built without SKIA_SOURCE_DIR
@@ -104,12 +105,11 @@ ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards ch
 # Installs when node_modules is missing *or* no longer matches bun.lock, which
 # a rebase or merge can move under a warm worktree. scripts/install-deps.mjs
 # says how it tells, and why it is not a `test -d`.
-# The patched Skia tree `dotenv-command` names, made once into the cache on
-# macOS and Linux, from a tree already there where one will do. Nothing on Windows, where skia-bindings builds as it always
-# has.
+# The patched Skia tree `dotenv-command` names, made once into the cache, from
+# a tree already there where one will do.
 [private]
 ensure-skia-source:
-    @{{ if os() == "windows" { "true" } else { "node scripts/skia-source.mjs prepare >/dev/null" } }}
+    @node scripts/skia-source.mjs prepare >/dev/null
 
 [private]
 ensure-deps: ensure-skia-source

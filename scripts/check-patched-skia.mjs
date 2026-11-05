@@ -62,13 +62,30 @@ export const PATCHED = {
     TRIANGULATION,
   ],
   linux: [ATLAS_SIZE, TRIANGULATION],
+  win32: [
+    ATLAS_SIZE,
+    TRIANGULATION,
+    {
+      // containers/skia-dwrite-oblique.patch
+      file: "src/ports/SkTypeface_win_dw.cpp",
+      marker: "fsSelection.field.Oblique",
+    },
+  ],
 };
 
-/** The ninja line that names `file` compiled, capturing the path it gave. */
+/**
+ * The ninja line that names `file` compiled, capturing the path it gave: with
+ * either separator, since one on Windows may give `\`.
+ */
 function compiledLine(file) {
-  const escaped = file.replace(/[./]/g, (c) => `\\${c}`);
-  return new RegExp(`compile (\\S+\\/${escaped})`);
+  const escaped = file
+    .split("/")
+    .map((part) => part.replace(/\./g, "\\."))
+    .join("[\\\\/]");
+  return new RegExp(`compile (\\S+[\\\\/]${escaped})`);
 }
+// A CRLF line end needs nothing here: `$` in multiline mode matches before
+// `\r` as before `\n`, both being line terminators to JavaScript.
 const NINJA_DIR = /^ninja: Entering directory `(.*)'$/m;
 
 const FROM_SOURCE = ["STARTING OFFLINE BUILD", "STARTING A FULL BUILD"];
@@ -87,7 +104,9 @@ export function refusal(output, patched) {
     const compiled = output.match(compiledLine(file))?.[1];
     if (!compiled) return `ninja did not compile ${file}`;
     if (!ninja) return "the output does not say where ninja ran";
-    const path = resolve(ninja, compiled);
+    // `/` resolves on every platform, where `\` is a separator on Windows
+    // alone.
+    const path = resolve(ninja, compiled.replaceAll("\\", "/"));
     if (!existsSync(path)) return `the compiled ${path} is gone`;
     if (!readFileSync(path, "utf8").includes(marker))
       return `${path} is not the patched source`;
@@ -135,8 +154,21 @@ function cases(root, patched) {
       ({ file }, i) => `[${i + 1}/${patched.length}] compile ${relative(file)}`,
     ),
   ].join("\n");
+  const crlf = good.replaceAll("\n", "\r\n");
+  const backslashed = good.replace(
+    /compile (\S+)/g,
+    (_, path) => `compile ${path.replaceAll("/", "\\")}`,
+  );
   return [
     [files, good, true, "an offline build of every patched file"],
+    [files, crlf, true, "an offline build with CRLF line ends"],
+    [files, backslashed, true, "an offline build naming files with `\\`"],
+    ...patched.map(({ file }) => [
+      { ...files, [file]: "unpatched" },
+      crlf,
+      false,
+      `an offline build with CRLF line ends of an unpatched ${file}`,
+    ]),
     [
       files,
       good.replace("STARTING OFFLINE BUILD", "STARTING A FULL BUILD"),

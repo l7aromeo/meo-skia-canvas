@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// The Skia source tree macOS and Linux builds compile from, with this
-// platform's patches from `PATCHES` applied.
+// The Skia source tree macOS, Linux and Windows builds compile from, with
+// this platform's patches from `PATCHES` applied.
 //
 //   node scripts/skia-source.mjs env       `SKIA_SOURCE_DIR=<dir>` on a platform with patches, nothing elsewhere
 //   node scripts/skia-source.mjs dir       the directory, prepared or not
@@ -9,12 +9,11 @@
 // Against a local rust-skia checkout (`just use-local-skia`) both `env` and
 // `prepare` do nothing: skia-bindings builds the checkout's own Skia.
 //
-// `env` is the justfile's `dotenv-command`, so every recipe on macOS and Linux
-// builds skia-bindings offline from this tree, and on Windows, which has no
-// patches, as skia-bindings always has. It names the directory and holds the
-// tree for the `just` that ran it -- see `hold` -- and it runs on every `just`
-// invocation, `just --list` included, so it must never download. `prepare` is
-// what downloads, and `ensure-deps` runs it.
+// `env` is the justfile's `dotenv-command`, so every recipe on a platform with
+// patches builds skia-bindings offline from this tree. It names the directory
+// and holds the tree for the `just` that ran it -- see `hold` -- and it runs on
+// every `just` invocation, `just --list` included, so it must never download.
+// `prepare` is what downloads, and `ensure-deps` runs it.
 //
 // The tree is rust-skia at the tag of the skia-bindings version in Cargo.lock,
 // whose Skia submodule is pinned by that tag, with Skia's own DEPS synced and gn
@@ -82,8 +81,7 @@ const ATLAS_SIZE = join("containers", "skia-atlas-size.patch");
 // to three times coarser, that a later draw of it then took, so under 4x MSAA
 // the same draw covered its edges by up to two samples' worth -- 128 levels --
 // according to what the context had drawn before. The patch reuses an entry only at the draw's own
-// tolerance. Published Windows binaries use rust-skia's prebuilt Skia, which
-// has no patches, and keep this as they keep the atlas above.
+// tolerance.
 const TRIANGULATION = join("containers", "skia-triangulation-tolerance.patch");
 // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
 // Re-check: look in rust-skia's skia-safe/src/gpu/graphite for an `ImageProvider`, `fInternalMultisampleCount` and the image form of `asyncRescaleAndReadPixels`; once all three are bound, drop this patch and build against crates.io's
@@ -161,6 +159,25 @@ export const PATCHES = {
     TRIANGULATION,
     GRAPHITE_BINDINGS,
     ASYNC_TRANSFER_REUSE,
+  ],
+  // No brotli patch: the published Windows build has no `freetype`, so
+  // nothing links brotli, and a `freetype` build here takes build.rs's own
+  // fix for it as one outside this script does.
+  win32: [
+    ATLAS_SIZE,
+    TRIANGULATION,
+    GRAPHITE_BINDINGS,
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+    // Re-check: node scripts/test.mjs tests/suite/text.test.js on Windows, against a binary built from a tree prepared without this patch; "an oblique face of the angle's sign is drawn as it is" draws the upright face sheared for a positive angle
+    //
+    // Skia's DirectWrite port takes a face's slant from DirectWrite alone
+    // (`DWriteFontTypeface::GetStyle`), and DirectWrite reports a face
+    // flagged oblique only by `OS/2` `fsSelection` bit 9 as NORMAL. Skia's
+    // FreeType port reads the bit itself and reports the face oblique, so on
+    // Windows such a face matched as its family's upright one: an oblique
+    // request got the upright face sheared rather than the oblique face CSS
+    // Fonts 4 matches. The patch reads the bit as the FreeType port does.
+    join("containers", "skia-dwrite-oblique.patch"),
   ],
 };
 
@@ -633,6 +650,14 @@ function git(cwd, ...args) {
 }
 
 /**
+ * The file `bin/fetch-gn` writes gn to on `platform`: `gn.exe` on Windows,
+ * which skia-bindings then runs as `bin/gn`, and `gn` elsewhere.
+ */
+export function gnName(platform = process.platform) {
+  return platform === "win32" ? "gn.exe" : "gn";
+}
+
+/**
  * Why the tree at `tree` is not a whole preparation of rust-skia `version`,
  * or `null` when it is: its checkout at the version's tag, Skia's gn in
  * place, every dependency DEPS pins checked out at its pin and unedited, and
@@ -641,7 +666,12 @@ function git(cwd, ...args) {
  * What it does not check is the tracked sources, which a patched tree has
  * changed on purpose: [`restoredRefusal`] does, once they are restored.
  */
-export function baseRefusal(tree, version, created = []) {
+export function baseRefusal(
+  tree,
+  version,
+  created = [],
+  platform = process.platform,
+) {
   const ready = join(tree, READY);
   if (!existsSync(ready) || readFileSync(ready, "utf8").trim() !== version)
     return `it is not a finished tree for ${version}`;
@@ -650,7 +680,7 @@ export function baseRefusal(tree, version, created = []) {
   const tag = git(checkout, "rev-parse", `refs/tags/${version}^{commit}`);
   if (!head || head !== tag) return `its checkout is not at the ${version} tag`;
   const skia = sourceDir(tree);
-  if (!existsSync(join(skia, "bin", "gn"))) return "it has no gn";
+  if (!existsSync(join(skia, "bin", gnName(platform)))) return "it has no gn";
   let pins;
   try {
     pins = JSON.parse(
@@ -890,6 +920,19 @@ function fetchTree(partial, checkout) {
   );
 }
 
+/**
+ * `name=value` as one line of the dotenv format just reads `env`'s output in,
+ * and that `eval "export $(...)"` reads in a shell: bare where the value holds
+ * nothing either treats specially, and otherwise in single quotes, each quote
+ * inside written as `'\''`. Unquoted, a backslash starts an escape -- just
+ * refused `C:\Users\...` at the `\U`, failing every recipe on Windows -- and
+ * a space ends the value.
+ */
+export function dotenvLine(name, value) {
+  if (!/[\s\\'"$#`]/.test(value)) return `${name}=${value}`;
+  return `${name}='${value.replaceAll("'", "'\\''")}'`;
+}
+
 // Run as a command, not when a test imports `retry`. Both sides resolved, as
 // `import.meta.url` is: under /tmp on macOS the two spellings differ.
 if (
@@ -912,7 +955,7 @@ if (
   const command = process.argv[2];
   if (command === "env") {
     if (patches().length > 0 && !usesLocalSkia()) {
-      console.log(`SKIA_SOURCE_DIR=${sourceDir()}`);
+      console.log(dotenvLine("SKIA_SOURCE_DIR", sourceDir()));
       // A hold that cannot be written leaves the tree as unprotected as it was
       // before holds existed, which is no reason to stop the recipe.
       try {

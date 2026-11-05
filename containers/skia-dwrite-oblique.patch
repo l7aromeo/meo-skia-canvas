@@ -1,0 +1,21 @@
+--- a/skia-bindings/skia/src/ports/SkTypeface_win_dw.cpp
++++ b/skia-bindings/skia/src/ports/SkTypeface_win_dw.cpp
+@@ -58,6 +58,18 @@
+         case DWRITE_FONT_STYLE_OBLIQUE: slant = SkFontStyle::kOblique_Slant; break;
+         case DWRITE_FONT_STYLE_ITALIC: slant = SkFontStyle::kItalic_Slant; break;
+         default: SkASSERT(false); break;
++    }
++
++    // OS/2::fsSelection bit 9 indicates oblique, as the FreeType port reads it.
++    // DirectWrite reports a face flagged only by this bit as NORMAL, which
++    // left it matching as the upright face of its family.
++    {
++        AutoTDWriteTable<SkOTTableOS2> os2(fontFace);
++        if (os2.fExists && os2.fSize >= sizeof(SkOTTableOS2_V0) &&
++            os2->version.v4.fsSelection.field.Oblique)
++        {
++            slant = SkFontStyle::kOblique_Slant;
++        }
+     }
+ 
+     [&weight, &width, &slant, fontFace]() -> void {
