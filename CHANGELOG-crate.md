@@ -246,7 +246,7 @@ read the math functions and every length unit.
 - **Word spacing reaches every space.** ([#380](https://github.com/l7aromeo/meo-skia-canvas/pull/380))
 - **Centred and right-aligned text counts a trailing space.** ([#380](https://github.com/l7aromeo/meo-skia-canvas/pull/380))
 - **An animated GIF is the same file on any machine.** ([#407](https://github.com/l7aromeo/meo-skia-canvas/pull/407))
-- **`Image::frame` returns a frame of an animated WebP that holds alpha after an opaque first frame; it failed with `InvalidConversion`.** ([#586](https://github.com/l7aromeo/meo-skia-canvas/issues/586))
+- **`Image::frame` returns a frame of an animated WebP that holds alpha after an opaque first frame; it failed with `InvalidConversion`.** ([#589](https://github.com/l7aromeo/meo-skia-canvas/pull/589), [#586](https://github.com/l7aromeo/meo-skia-canvas/issues/586))
 
 ### Added
 

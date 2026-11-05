@@ -268,7 +268,7 @@ are added, and the CSS strings read the math functions and every length unit.
 - **Centred and right-aligned text counts a trailing space.** ([#380](https://github.com/l7aromeo/meo-skia-canvas/pull/380))
 - **A path drawn on the GPU covers each pixel as it would in a flush of its own.** ([#410](https://github.com/l7aromeo/meo-skia-canvas/pull/410))
 - **An animated GIF is the same file on any machine.** ([#407](https://github.com/l7aromeo/meo-skia-canvas/pull/407))
-- **`Image.frame()` returns a frame of an animated WebP that holds alpha after an opaque first frame; it threw `InvalidConversion`.** ([#586](https://github.com/l7aromeo/meo-skia-canvas/issues/586))
+- **`Image.frame()` returns a frame of an animated WebP that holds alpha after an opaque first frame; it threw `InvalidConversion`.** ([#589](https://github.com/l7aromeo/meo-skia-canvas/pull/589), [#586](https://github.com/l7aromeo/meo-skia-canvas/issues/586))
 
 ### Added
 
