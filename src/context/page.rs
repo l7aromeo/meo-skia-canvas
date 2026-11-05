@@ -10599,7 +10599,9 @@ mod tests {
     /// files as the shadow's group, holding the pattern's draw, and the
     /// draw, each asking for an image filter; 7, those under `source-in`
     /// and no shadow, which a page files in two groups each, one inside the
-    /// other, asking for none.
+    /// other, asking for none; 8, rects under a CSS `drop-shadow()`, which a
+    /// page joins into one blurred op and a GPU playback plays as chains
+    /// sharing layers -- see `layer::play_shared_chains`.
     fn paced_draws(ctx: &mut Context2D, scene: usize, n: usize) {
         let colour = RgbaLinear::new_premultiplied(0.05, 0.1, 0.35, 0.6);
         let shadow =
@@ -10616,6 +10618,9 @@ mod tests {
                 ctx.set_shadow_offset(3.0, 3.0);
             }
             4 | 5 | 7 => {}
+            8 => ctx
+                .set_filter_css("drop-shadow(3px 3px 2px rgb(20 60 200 / 0.6))")
+                .expect("a filter"),
             _ => ctx.set_image_filter(Some(&shadow)),
         }
         if scene == 7 {
@@ -10666,7 +10671,7 @@ mod tests {
     }
 
     /// The scenes of [`paced_draws`].
-    const PACED_SCENES: usize = 8;
+    const PACED_SCENES: usize = 9;
 
     /// The page the periodic flush is pinned on: small enough to read in
     /// one tile, and dense enough that every draw overlaps others.
@@ -10724,8 +10729,13 @@ mod tests {
     /// group as well, and a page of pattern fills every so many of the
     /// layers each is filed as: three under a shadow, the shadow's group
     /// and the two image-filtered draws, and two under `source-in`, its two
-    /// groups. Twice the draws make twice the flushes, within one, and a
-    /// page of a few never flushes before its read.
+    /// groups. Rects under a CSS `drop-shadow()`, each a group whose chain
+    /// shares layers with the others', flush every so many groups, and the
+    /// flushes fall among the chains, no more than that many between two:
+    /// counted after the whole run, they came out the same in number with
+    /// every chain before the first. Twice the draws make twice the flushes,
+    /// within one,
+    /// and a page of a few never flushes before its read.
     #[test]
     fn a_gpu_playback_flushes_every_so_many_offscreen_layers() {
         let per = pacing::LAYERS_PER_FLUSH;
@@ -10733,6 +10743,14 @@ mod tests {
             let (_, page, engine) = paced(scene, n, true, None, false);
             let flushes = pacing::tests::flushes(page);
             assert!(!flushes.is_empty(), "scene {scene}: no playback paced");
+            // Where the flushes fall, which their count does not say: a run
+            // of chains sharing layers played whole, its flushes counted only
+            // after it, holds every chain's tasks in the one flush before.
+            let most = pacing::tests::most_chains(page);
+            assert!(
+                most.iter().all(|&most| most <= per),
+                "scene {scene}: {most:?} chains between two flushes"
+            );
             (flushes.iter().sum::<usize>(), engine)
         };
         for scene in 0..PACED_SCENES {
