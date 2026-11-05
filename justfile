@@ -6,8 +6,9 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 # included. An exported variable cannot be left unset on Windows, and
 # skia-bindings reads an empty `SKIA_SOURCE_DIR` as a source directory. The
 # tree itself is prepared by `ensure-skia-source`, because this runs on every
-# invocation and must not download. A variable already set in the environment
-# wins. Which patches each platform's tree carries is `PATCHES` in
+# invocation and must not download. It also holds the tree for as long as this
+# `just` runs, so a `prepare` in another worktree does not remove it -- `hold`
+# in scripts/skia-source.mjs. A variable already set in the environment wins. Which patches each platform's tree carries is `PATCHES` in
 # scripts/skia-source.mjs; macOS's are the one below and the atlas-size cap
 # and triangulation tolerance noted there, Linux's the brotli build-list fix
 # and the same two, and both the Graphite bindings, which a build takes only

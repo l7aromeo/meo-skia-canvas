@@ -32,6 +32,8 @@ use std::{
 };
 const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+use crate::gpu::unpremultiply as gpu_unpremultiply;
 use crate::{
     canvas::{DEFAULT_TEXT_CONTRAST, DEFAULT_TEXT_GAMMA},
     color::{
@@ -2615,7 +2617,7 @@ fn copied(
 /// alpha's reciprocal, held at one, and scaled back with ties to even.
 /// `unpremultiplying_matches_the_raster_pipeline` holds it to that pipeline
 /// for all 65,536 pairs. Alpha 0 gives 0, as the pipeline does.
-fn unpremultiply_table() -> &'static [[u8; 256]; 256] {
+pub(crate) fn unpremultiply_table() -> &'static [[u8; 256]; 256] {
     static TABLE: OnceLock<Box<[[u8; 256]; 256]>> = OnceLock::new();
     TABLE.get_or_init(|| {
         let scale = 1.0 / f32::from(u8::MAX);
@@ -2690,33 +2692,37 @@ fn unpremultiply_into(from: &[u8], to: &mut [u8]) {
 }
 
 /// Reads `surface` into `pixels` as `info` describes, with any conversion
-/// made on the CPU.
+/// made by this crate rather than by Skia's GPU readback.
 ///
 /// On a raster surface that is `read_pixels` itself. On a GPU surface the
 /// pixels come back as the surface holds them, which converts nothing, and
-/// are converted here. Do not hand the conversion back to the GPU: its
-/// readback unpremultiplies by rounding down, so a premultiplied 64 at an
-/// alpha of 128 comes back 127 where the raster path and Chrome 153 give
-/// 128, and a repeated read of the same state, served from a raster copy,
-/// gives 128 -- the answer would depend on how many times it was asked.
+/// are converted here. Do not hand the conversion to the GPU's readback: it
+/// unpremultiplies by rounding down, so a premultiplied 64 at an alpha of 128
+/// comes back 127 where the raster path and Chrome 153 give 128, and a
+/// repeated read of the same state, served from a raster copy, gives 128 --
+/// the answer would depend on how many times it was asked.
 ///
 /// A read that differs from the surface only in wanting unpremultiplied
-/// pixels, which is what `getImageData` asks of an eight-bit canvas, reads
-/// premultiplied pixels and unpremultiplies them through
-/// [`unpremultiply_table`] as they are written: from the buffer the GPU's
+/// pixels, which is what `getImageData` asks of an eight-bit canvas, is
+/// unpremultiplied through [`unpremultiply_table`]. On a Ganesh page, for a
+/// read of at least `gpu::unpremultiply::MIN_PASS_PIXELS`, the table is looked
+/// up on the GPU, by a pass drawn into a target of its own whose bytes are
+/// then read as they stand -- see `gpu::unpremultiply`. Where the pass is not
+/// drawn, the read takes premultiplied pixels and the table
+/// converts them on the CPU as they are written: from the buffer the GPU's
 /// copy lands in straight into the destination where the read is
 /// [`read_checked`]'s, and in the destination after the surface writes it
 /// otherwise. Anything else goes through Skia's CPU conversion from a copy.
-/// On Apple silicon a whole read of a translucent 1200x900 page after a draw
-/// takes 916 to 950 microseconds in release; written as a copy and then a
-/// second pass over the destination it took 1117 to 1147. The table costs
-/// about 0.7 nanoseconds a pixel on one thread over pixels of varied alpha --
-/// 334 to 367 microseconds for 800x600 -- shared across threads from
-/// [`PARALLEL_UNPREMULTIPLY_PIXELS`], a task of rows at a time, as
-/// `gpu::completion::PARALLEL_TASK_BYTES` describes. The same arithmetic in
-/// `f32`, four lanes at a time with one divide a pixel, gives the table's
-/// bytes for all 65,536 pairs and took twice as long: widening and narrowing
-/// the pixels costs more than the table's three loads.
+///
+/// On the CPU the table costs about 0.7 nanoseconds a pixel on one thread over
+/// pixels of varied alpha -- 334 to 367 microseconds for 800x600 -- shared
+/// across threads from [`PARALLEL_UNPREMULTIPLY_PIXELS`], a task of rows at a
+/// time, as `gpu::completion::PARALLEL_TASK_BYTES` describes. Written as a copy
+/// and then a second pass over the destination, a whole read of a translucent
+/// 1200x900 page took 1117 to 1147 microseconds against 916 to 950 in one
+/// pass. The same arithmetic in `f32`, four lanes at a time with one divide a
+/// pixel, gives the table's bytes for all 65,536 pairs and took twice as long:
+/// widening and narrowing the pixels costs more than the table's three loads.
 fn read_converted_on_cpu(
     surface: &mut Surface,
     info: &ImageInfo,
@@ -2773,7 +2779,7 @@ fn read_converted_checked(
 /// handed the surface, the layout to read in, the destination, its row
 /// bytes, the origin and how the rows are to be converted as they are
 /// written, and is called once.
-fn read_converted(
+pub(crate) fn read_converted(
     surface: &mut Surface,
     info: &ImageInfo,
     pixels: &mut [u8],
@@ -2811,6 +2817,24 @@ fn read_converted(
         // destination after.
         let premultiplied = info.with_alpha_type(AlphaType::Premul);
         let area = info.width() as usize * info.height() as usize;
+        // On a GPU page a read of at least `MIN_PASS_PIXELS` is converted on
+        // the GPU into a target of its own, whose bytes are read as they
+        // stand; the rows below are for a smaller read and for a page the
+        // pass cannot take.
+        #[cfg(any(feature = "metal", feature = "vulkan"))]
+        if area >= gpu_unpremultiply::MIN_PASS_PIXELS
+            && let Some(mut target) =
+                gpu_unpremultiply::unpremultiplied(surface, &premultiplied, at)
+        {
+            return read(
+                &mut target,
+                &premultiplied,
+                pixels,
+                row_bytes,
+                (0, 0),
+                None,
+            );
+        }
         let rows = Rows {
             into: unpremultiply_into,
             in_place: unpremultiply_row,
