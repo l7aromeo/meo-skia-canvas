@@ -175,8 +175,42 @@ jobs:
       - name: Install Ninja and just
         run: choco install ninja just
 
+      # skia-bindings compiles Skia with clang-cl from LLVM_HOME or
+      # `C:\Program Files\LLVM`, and bindgen needs libclang from the same
+      # place; without one it falls back to MSVC's `cl`. Installed only where
+      # the image does not carry it.
+      - name: Use LLVM
+        shell: bash
+        run: |
+          if [ -x "/c/Program Files/LLVM/bin/clang-cl.exe" ]; then
+            "/c/Program Files/LLVM/bin/clang-cl.exe" --version | head -1
+          else
+            choco install llvm --no-progress
+          fi
+
+      # The patched Skia tree the Windows build compiles from -- rust-skia at
+      # the Cargo.lock tag, Skia's DEPS and gn, and Windows's patches from
+      # `PATCHES` in scripts/skia-source.mjs. `just build-release` prepares it
+      # when the cache misses; skia-source names it by version and patch
+      # digest, so the key follows the lock and the same patches. Only the
+      # source is cached: Skia itself is compiled on every run, as on macOS.
+      - name: Cache the Skia source
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/meo-skia-canvas
+          key: skia-source-win32-${{ hashFiles('Cargo.lock', 'containers/skia-atlas-size.patch', 'containers/skia-triangulation-tolerance.patch', 'containers/rust-skia-graphite-bindings.patch') }}
+
       - name: Build module
         run: just build-release
+
+      # The macOS job's check, for Windows's patches: rust-skia's prebuilt
+      # Skia, or a build from an unpatched tree, links and passes every test
+      # that does not land a path where the atlas moves a pixel or draw a curve
+      # at two scales. scripts/check-patched-skia.mjs refuses a build that
+      # downloaded, or whose `AtlasPathRenderer.cpp` or
+      # `TriangulatingPathRenderer.cpp` is not the patched one.
+      - name: Check Skia was built from the patched source
+        run: node scripts/check-patched-skia.mjs target/release/build
 
       - name: Test the module
         env:

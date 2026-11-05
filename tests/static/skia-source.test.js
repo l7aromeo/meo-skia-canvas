@@ -20,6 +20,9 @@ const { describe, test, mock, beforeEach, afterEach } = require("node:test");
 
 const SCRIPT = join(__dirname, "..", "..", "scripts", "skia-source.mjs");
 
+/** The file `bin/fetch-gn` writes on this platform. */
+const GN = process.platform === "win32" ? "gn.exe" : "gn";
+
 // What a cold cache meets: googlesource answers a burst of fetches with 429s
 // that clear within a minute, so each network step of `prepare` is tried
 // again after a wait, and says which try failed and why.
@@ -116,6 +119,79 @@ describe("skia-source refuses an empty SKIA_SOURCE_DIR", () => {
     });
     assert.equal(run.status, 0, run.stderr);
     assert.match(run.stdout, /skia-bindings[/\\]skia\n$/);
+  });
+});
+
+// `env`'s line is read twice: by just, as its `dotenv-command`, and in a
+// shell by `eval "export $(node scripts/skia-source.mjs env)"`. Printed bare, a
+// Windows path failed the first -- just's dotenv parser took `\U` in
+// `C:\Users\...` as an escape and refused the line, so every recipe failed
+// before it ran -- and a path with a space failed both.
+describe("skia-source env writes a line just and a shell read back whole", () => {
+  let dotenvLine;
+  beforeEach(async () => {
+    ({ dotenvLine } = await import(pathToFileURL(SCRIPT).href));
+  });
+
+  const paths = [
+    ["an ordinary path, bare", "/Users/me/.cache/x", "V=/Users/me/.cache/x"],
+    [
+      "a Windows path, quoted",
+      "C:\\Users\\runneradmin\\.cache\\x",
+      "V='C:\\Users\\runneradmin\\.cache\\x'",
+    ],
+    ["a path with a space, quoted", "/a b/x", "V='/a b/x'"],
+    ["a quote inside, closed and escaped", "/it's/x", "V='/it'\\''s/x'"],
+    ["a dollar, quoted", "/a$HOME/x", "V='/a$HOME/x'"],
+  ];
+  for (const [what, value, line] of paths)
+    test(what, () => assert.equal(dotenvLine("V", value), line));
+
+  /** `env`'s line for a cache under `base`, and the directory it names. */
+  function envAt(base) {
+    const run = spawnSync(process.execPath, [SCRIPT, "env"], {
+      env: { ...process.env, XDG_CACHE_HOME: base, SKIA_SOURCE_DIR: undefined },
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 0, run.stderr);
+    const dir = spawnSync(process.execPath, [SCRIPT, "dir"], {
+      env: { ...process.env, XDG_CACHE_HOME: base, SKIA_SOURCE_DIR: undefined },
+      encoding: "utf8",
+    }).stdout.trim();
+    return { line: run.stdout.trim(), dir };
+  }
+
+  test("just reads back the directory under a cache path with a space and a quote", (t) => {
+    const which = spawnSync("just", ["--version"], { encoding: "utf8" });
+    if (which.status !== 0) return t.skip("just is not installed");
+    const dir = scratch(t);
+    const base = join(dir, "it's a cache");
+    const { line, dir: expected } = envAt(base);
+    assert.match(line, /^SKIA_SOURCE_DIR=/);
+    writeFileSync(join(dir, "line"), `${line}\n`);
+    writeFileSync(
+      join(dir, "justfile"),
+      "set dotenv-command := \"node -e \\\"process.stdout.write(require('fs').readFileSync('line', 'utf8'))\\\"\"\n" +
+        "show:\n" +
+        '    @node -e "process.stdout.write(process.env.SKIA_SOURCE_DIR)"\n',
+    );
+    const read = spawnSync("just", ["show"], { cwd: dir, encoding: "utf8" });
+    assert.equal(read.status, 0, read.stderr);
+    assert.equal(read.stdout, expected);
+  });
+
+  test("a shell reads back the directory under a cache path with a space and a quote", (t) => {
+    if (process.platform === "win32")
+      return t.skip("no POSIX shell to trust on Windows; just reads it there");
+    const dir = scratch(t);
+    const { line, dir: expected } = envAt(join(dir, "it's a cache"));
+    const read = spawnSync(
+      "sh",
+      ["-c", 'eval "export $LINE"; printf %s "$SKIA_SOURCE_DIR"'],
+      { env: { ...process.env, LINE: line }, encoding: "utf8" },
+    );
+    assert.equal(read.status, 0, read.stderr);
+    assert.equal(read.stdout, expected);
   });
 });
 
@@ -576,7 +652,7 @@ function preparedTree(dir, cache, name, version, { patched = true } = {}) {
     join(source, "third_party", "externals", "dep"),
   );
   mkdirSync(join(source, "bin"), { recursive: true });
-  writeFileSync(join(source, "bin", "gn"), "gn\n");
+  writeFileSync(join(source, "bin", GN), "gn\n");
   if (patched) writeFileSync(join(source, "src", "a.cc"), "patched\n");
   writeFileSync(join(tree, ".ready"), `${version}\n`);
   return {
@@ -592,9 +668,9 @@ function preparedTree(dir, cache, name, version, { patched = true } = {}) {
 // tree for a version holds the same checkout and dependencies and differs only
 // in the patches applied to tracked files.
 describe("skia-source derives a tree from another of its version", () => {
-  let derive, patchCreates, copyTree;
+  let derive, patchCreates, copyTree, baseRefusal;
   beforeEach(async () => {
-    ({ derive, patchCreates, copyTree } = await import(
+    ({ derive, patchCreates, copyTree, baseRefusal } = await import(
       pathToFileURL(SCRIPT).href
     ));
   });
@@ -612,7 +688,7 @@ describe("skia-source derives a tree from another of its version", () => {
       readFileSync(join(source, "src", "a.cc"), "utf8"),
       "pristine\n",
     );
-    assert.equal(readFileSync(join(source, "bin", "gn"), "utf8"), "gn\n");
+    assert.equal(readFileSync(join(source, "bin", GN), "utf8"), "gn\n");
     assert.equal(
       readFileSync(
         join(source, "third_party", "externals", "dep", "dep.c"),
@@ -675,7 +751,7 @@ describe("skia-source derives a tree from another of its version", () => {
       },
       /has been edited/,
     ],
-    ["no gn", ({ source }) => rmSync(join(source, "bin", "gn"))],
+    ["no gn", ({ source }) => rmSync(join(source, "bin", GN))],
     [
       "a DEPS Python cannot read",
       ({ source }) => {
@@ -737,6 +813,29 @@ describe("skia-source derives a tree from another of its version", () => {
     const partial = join(cache, "skia-1.0.0-bbbb.partial");
     assert.equal(derive(cache, partial, "1.0.0", ["NEW"]), null);
     assert.match(said.join("\n"), /NEW exists, which a patch creates/);
+  });
+
+  // `bin/fetch-gn` writes `gn.exe` on Windows. Looked for as `bin/gn` there,
+  // every Windows tree read as unfinished, and none was ever derived from.
+  test("gn is looked for under the name fetch-gn gives it on each platform", (t) => {
+    const dir = scratch(t);
+    const { tree, source } = preparedTree(
+      dir,
+      join(dir, "cache"),
+      "skia-1.0.0-aaaa",
+      "1.0.0",
+    );
+    const bin = join(source, "bin");
+    const only = (name) => {
+      for (const gn of ["gn", "gn.exe"]) rmSync(join(bin, gn), { force: true });
+      writeFileSync(join(bin, name), "gn\n");
+    };
+    only("gn.exe");
+    assert.equal(baseRefusal(tree, "1.0.0", [], "win32"), null);
+    assert.equal(baseRefusal(tree, "1.0.0", [], "darwin"), "it has no gn");
+    only("gn");
+    assert.equal(baseRefusal(tree, "1.0.0", [], "win32"), "it has no gn");
+    assert.equal(baseRefusal(tree, "1.0.0", [], "linux"), null);
   });
 
   test("a tree for another version is not considered", (t) => {
