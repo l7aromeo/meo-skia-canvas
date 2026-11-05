@@ -7,7 +7,7 @@ use neon::prelude::*;
 use parking_lot::RwLock;
 use rayon::prelude::*;
 use skia_safe::{
-    AlphaType, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
+    AlphaType, Bitmap, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
     ColorSpace, ColorType, Data, Document, IRect, ISize, Image as SkImage,
     ImageInfo, M44, Matrix, Paint, Path, Picture, PictureRecorder,
     PixelGeometry, Pixmap, Point, Rect, Size, Surface, SurfaceProps,
@@ -68,7 +68,7 @@ use crate::{
             Checked, DRAW_ATTEMPTS, Rows, discarded, draws_ran,
             read_after_draws, read_checked, read_off_gpu,
         },
-        owner, pacing,
+        engine_of, graphite, owner, pacing,
     },
     node::{
         canvas::BoxedCanvas,
@@ -2551,6 +2551,35 @@ impl Tile {
             ));
         }
 
+        // A Graphite tile as the page's is read -- see
+        // `RecordingSurface::copy_pixels`.
+        match engine_of(self.surface.canvas()) {
+            RenderingEngine::Graphite => {
+                if self.served_at != Some(self.depth) {
+                    self.served_at = Some(self.depth);
+                    return read_converted_checked(
+                        &mut self.surface,
+                        info,
+                        pixels,
+                        row_bytes,
+                        at,
+                        page,
+                    );
+                }
+                let (checked, raster) = graphite_copied(
+                    &mut self.surface,
+                    info,
+                    pixels,
+                    row_bytes,
+                    at,
+                    page,
+                );
+                self.raster = raster;
+                return checked;
+            }
+            RenderingEngine::GPU | RenderingEngine::CPU => {}
+        }
+
         let repeat = self.served_at == Some(self.depth);
         if !repeat {
             self.served_at = Some(self.depth);
@@ -2612,6 +2641,128 @@ fn copied(
             (read, Some(raster))
         }
         None => (surface.read_pixels(info, pixels, row_bytes, at), None),
+    }
+}
+
+/// `surface` read from its origin into `pixels` as `info` lays them out,
+/// inside [`read_after_draws`], which confirms the read:
+/// `Surface::read_pixels`, which converts on the CPU for a raster surface and
+/// in Skia's read for Ganesh, except on a Graphite page, which it does not read
+/// at all. That is read in its own format by `graphite::read_raw` and converted
+/// on the CPU -- see [`read_converted`].
+fn read_unconfirmed(
+    surface: &mut Surface,
+    info: &ImageInfo,
+    pixels: &mut [u8],
+    row_bytes: usize,
+) -> bool {
+    match engine_of(surface.canvas()) {
+        RenderingEngine::Graphite => read_converted(
+            surface,
+            info,
+            pixels,
+            row_bytes,
+            (0, 0),
+            |s, i, p, r, a, rows| {
+                let read = graphite::read_raw(s, i, p, r, a);
+                if let Some(rows) = rows.filter(|_| read) {
+                    let height = i.height() as usize;
+                    rows.convert_in_place(p, r, i.min_row_bytes(), height);
+                }
+                read
+            },
+        ),
+        RenderingEngine::GPU | RenderingEngine::CPU => {
+            surface.read_pixels(info, pixels, row_bytes, (0, 0))
+        }
+    }
+}
+
+/// The whole of `surface`, a Graphite page, in main memory: read in its own
+/// format by [`read_checked`], whose own wait confirms the draws before the
+/// read and the copy out, into an image of its own info. Neither of the ways
+/// a Ganesh texture comes back reads one: `make_raster_image` with no context
+/// declines it, and `Surface::read_pixels` reads no Graphite surface at all.
+/// `Err` with what the read made of it where nothing confirmed was read:
+/// [`Checked::Discarded`] where the GPU did not run the draws, so that the
+/// caller draws again, and the refusal otherwise. `page` is the page the
+/// draws belong to, which only the test seam reads.
+fn graphite_raster(
+    surface: &mut Surface,
+    page: usize,
+) -> Result<SkImage, Checked> {
+    surface_copy(surface, |surface, info, pixels, row_bytes| {
+        read_checked(surface, info, pixels, row_bytes, (0, 0), page, None)
+    })
+}
+
+/// [`graphite_raster`] for a read made inside [`read_after_draws`], which
+/// commits a Graphite page's draws before the read and confirms them and the
+/// copy after it: read by `graphite::read_raw` alone, so that a discarded
+/// read is drawn again, as `read_after_draws` does, rather than refused.
+fn graphite_raster_unconfirmed(surface: &mut Surface) -> Option<SkImage> {
+    surface_copy(surface, |surface, info, pixels, row_bytes| {
+        Checked::Read(graphite::read_raw(
+            surface,
+            info,
+            pixels,
+            row_bytes,
+            (0, 0),
+        ))
+    })
+    .ok()
+}
+
+/// The whole of `surface` in an image of its own info in main memory, its
+/// pixels written by `read` where they lie: `Err` with what `read` made of
+/// it where it read nothing.
+fn surface_copy(
+    surface: &mut Surface,
+    read: impl FnOnce(&mut Surface, &ImageInfo, &mut [u8], usize) -> Checked,
+) -> Result<SkImage, Checked> {
+    let info = surface.image_info();
+    let mut bitmap = Bitmap::new();
+    if !bitmap.try_alloc_pixels_info(&info, None) {
+        return Err(Checked::Read(false));
+    }
+    let row_bytes = bitmap.row_bytes();
+    let read = match bitmap.peek_pixels().as_mut().and_then(Pixmap::bytes_mut) {
+        Some(pixels) => read(surface, &info, pixels, row_bytes),
+        None => Checked::Read(false),
+    };
+    match read {
+        Checked::Read(true) => {
+            bitmap.set_immutable();
+            started::raster_from_bitmap(&bitmap).ok_or(Checked::Read(false))
+        }
+        other => Err(other),
+    }
+}
+
+/// `at` of `surface`, a Graphite page, read into `pixels` as `info` lays it
+/// out through a copy of the whole page in main memory -- see
+/// [`graphite_raster`] -- and the copy: Skia's CPU conversion from the page's
+/// own format, which is what [`read_converted`] keeps every conversion to.
+fn graphite_copied(
+    surface: &mut Surface,
+    info: &ImageInfo,
+    pixels: &mut [u8],
+    row_bytes: usize,
+    at: (i32, i32),
+    page: usize,
+) -> (Checked, Option<SkImage>) {
+    match graphite_raster(surface, page) {
+        Ok(raster) => {
+            let read = raster.read_pixels(
+                info,
+                pixels,
+                row_bytes,
+                at,
+                CachingHint::Disallow,
+            );
+            (Checked::Read(read), Some(raster))
+        }
+        Err(checked) => (checked, None),
     }
 }
 
@@ -2698,13 +2849,16 @@ fn unpremultiply_into(from: &[u8], to: &mut [u8]) {
 /// Reads `surface` into `pixels` as `info` describes, with any conversion
 /// made by this crate rather than by Skia's GPU readback.
 ///
-/// On a raster surface that is `read_pixels` itself. On a GPU surface the
-/// pixels come back as the surface holds them, which converts nothing, and
-/// are converted here. Do not hand the conversion to the GPU's readback: it
-/// unpremultiplies by rounding down, so a premultiplied 64 at an alpha of 128
-/// comes back 127 where the raster path and Chrome 153 give 128, and a
-/// repeated read of the same state, served from a raster copy, gives 128 --
-/// the answer would depend on how many times it was asked.
+/// On a raster surface that is `read_pixels` itself. On a GPU surface,
+/// Ganesh's or Graphite's, the pixels come back as the surface holds them,
+/// which converts nothing, and are converted here. Do not hand the conversion
+/// to the GPU's readback: it unpremultiplies by rounding down, so a
+/// premultiplied 64 at an alpha of 128 comes back 127 where the raster path
+/// and Chrome 153 give 128, and a repeated read of the same state, served
+/// from a raster copy, gives 128 -- the answer would depend on how many times
+/// it was asked. Graphite's own read to unpremultiplied bytes lands a level
+/// off the CPU's conversion of the same floats in 2304 of 65536 bytes of a
+/// 256 by 64 `F32` page of colours and alphas each its own.
 ///
 /// A read that differs from the surface only in wanting unpremultiplied
 /// pixels, which is what `getImageData` asks of an eight-bit canvas, is
@@ -2798,8 +2952,16 @@ pub(crate) fn read_converted(
         Option<Rows>,
     ) -> bool,
 ) -> bool {
-    if surface.recording_context().is_none() {
-        return read(surface, info, pixels, row_bytes, at, None);
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+    // Re-check: cargo test graphite_s_own_unpremultiplied_read_is_a_level_off
+    // in a `metal`, `skia-safe/graphite` build after `skia-source.mjs
+    // cargo-patch`, which fails once Graphite's read to unpremultiplied bytes
+    // rounds as Skia's CPU conversion does.
+    match engine_of(surface.canvas()) {
+        RenderingEngine::CPU => {
+            return read(surface, info, pixels, row_bytes, at, None);
+        }
+        RenderingEngine::GPU | RenderingEngine::Graphite => {}
     }
     let native = surface.image_info().with_dimensions(info.dimensions());
     if &native == info {
@@ -3134,7 +3296,9 @@ pub struct RecordingSurface {
     depth: usize,
     matte: Option<Matte>,
     msaa: Option<usize>,
-    gpu: Option<bool>,
+    /// The engine the surface and tiles were made for: a page moving between
+    /// any two of them, the CPU and Graphite among them, makes them again.
+    engine: Option<RenderingEngine>,
     color_space: ColorSpace,
     density: f32,
     /// What the layers open on the page have drawn so far, outermost first,
@@ -3185,7 +3349,7 @@ impl Default for RecordingSurface {
             depth: 0,
             matte: None,
             msaa: None,
-            gpu: None,
+            engine: None,
             color_space: ColorSpace::new_srgb(),
             density: 0.0,
             layers: Vec::new(),
@@ -3430,9 +3594,7 @@ impl RecordingSurface {
         crop: IRect,
         pixels: &mut [u8],
     ) -> Result<bool, String> {
-        if self.is_config_stale(opts)
-            || self.gpu != Some(matches!(engine, RenderingEngine::GPU))
-        {
+        if self.is_config_stale(opts) || self.engine != Some(*engine) {
             // The configuration decides how a tile is allocated, so adopt it
             // before any are, and drop what was composited under the old one.
             self.tiles.clear();
@@ -3440,7 +3602,7 @@ impl RecordingSurface {
             self.raster = None;
             self.served_at = None;
             self.depth = 0;
-            self.gpu = Some(matches!(engine, RenderingEngine::GPU));
+            self.engine = Some(*engine);
             self.color_space = opts.surface_color_space.clone();
             self.density = opts.density;
             self.matte = opts.matte.clone();
@@ -3510,8 +3672,7 @@ impl RecordingSurface {
         opts: &ExportOptions,
         engine: &RenderingEngine,
     ) -> bool {
-        let gpu_toggled =
-            self.gpu != Some(matches!(engine, RenderingEngine::GPU));
+        let engine_changed = self.engine != Some(*engine);
         let page_size = page.scaled_dimensions(opts.density);
         let resized = self
             .surface
@@ -3519,7 +3680,7 @@ impl RecordingSurface {
             .map(|surface| surface.image_info().dimensions() != page_size)
             .unwrap_or(true);
 
-        gpu_toggled || resized
+        engine_changed || resized
     }
 
     fn is_config_stale(&self, opts: &ExportOptions) -> bool {
@@ -3607,8 +3768,9 @@ impl RecordingSurface {
     /// draws not yet confirmed are, and is made by [`read_checked`], whose
     /// own wait confirms them and the copy. Every other read -- a current
     /// CPU copy, a repeat read, which copies the whole page, a format the GPU
-    /// surface refuses, or a raster surface -- is `copy_pixels`', which
-    /// confirms any copy it takes off the GPU itself.
+    /// surface refuses, a raster surface, or a Graphite page, every read of
+    /// which `copy_pixels` makes through `read_checked` -- is `copy_pixels`',
+    /// which confirms any copy it takes off the GPU itself.
     fn checked_pixels(
         &mut self,
         dst_info: &ImageInfo,
@@ -3659,7 +3821,7 @@ impl RecordingSurface {
 
         // start from scratch if invalidated
         if reconfigure || recreate {
-            self.gpu = Some(matches!(engine, RenderingEngine::GPU));
+            self.engine = Some(*engine);
             self.color_space = opts.surface_color_space.clone();
             self.density = opts.density;
             self.matte = opts.matte.clone();
@@ -3751,6 +3913,17 @@ impl RecordingSurface {
             return None;
         }
 
+        // A Graphite page's snapshot is a texture neither of the downloads
+        // below reads: it comes back through `read_checked`, and a read not
+        // confirmed is no snapshot to file.
+        match engine {
+            RenderingEngine::Graphite => {
+                return self.surface.as_mut().and_then(|surface| {
+                    graphite_raster(surface, page.id).ok()
+                });
+            }
+            RenderingEngine::GPU | RenderingEngine::CPU => {}
+        }
         let image = self
             .surface
             .as_mut()
@@ -3813,9 +3986,14 @@ impl RecordingSurface {
         // layer into a texture it sizes up to a bucket of the surface's, and
         // a raster the page's size is not that bucket: an exact blur read
         // from rasters came out a level from the layers closed, at 8 of
-        // 4800 bytes. The GPU replays -- see `Self::read_overlaid`.
-        if surface.recording_context().is_some() {
-            return Ok(false);
+        // 4800 bytes. The GPU replays -- see `Self::read_overlaid`. So does a
+        // Graphite page, whose surface the rasters' composition here, read
+        // through `Surface::read_pixels`, would not read.
+        match engine_of(surface.canvas()) {
+            RenderingEngine::GPU | RenderingEngine::Graphite => {
+                return Ok(false);
+            }
+            RenderingEngine::CPU => {}
         }
         let page_bytes = surface.image_info().compute_min_byte_size();
         if open.len().saturating_mul(page_bytes) > LAYER_RASTER_BUDGET {
@@ -3980,8 +4158,14 @@ impl RecordingSurface {
         // and what the layer composites rounds by that bucket: an exact blur
         // in a layer read 227 at one pixel on a surface 20, 30 or 32 wide,
         // and 228 at 16, 33 or 60. The page is composed whole there, as it
-        // is once the layer closes.
-        let whole = whole || surface.recording_context().is_some();
+        // is once the layer closes. A Graphite page is too: whether its
+        // layers round by their texture's size as Ganesh's do is not
+        // measured, and whole is what the page does once the layer closes.
+        let whole = whole
+            || match engine_of(surface.canvas()) {
+                RenderingEngine::GPU | RenderingEngine::Graphite => true,
+                RenderingEngine::CPU => false,
+            };
         let (info, at) = match whole {
             true => (page_info, origin),
             false => (page_info.with_dimensions(dst_info.dimensions()), (0, 0)),
@@ -4011,16 +4195,37 @@ impl RecordingSurface {
                 Checked::Read(read) => read,
                 Checked::Discarded => continue,
                 Checked::Refused(why) => return Err(why),
-                Checked::Declined => {
-                    match read_off_gpu(&mut composed, page, |composed| {
-                        read_converted_on_cpu(
-                            composed, dst_info, pixels, row_bytes, at,
+                // A Graphite page from a copy of it in main memory, which
+                // `read_converted_on_cpu` would not take off the GPU.
+                Checked::Declined => match engine_of(composed.canvas()) {
+                    RenderingEngine::Graphite => {
+                        match graphite_copied(
+                            &mut composed,
+                            dst_info,
+                            pixels,
+                            row_bytes,
+                            at,
+                            page,
                         )
-                    })? {
-                        Some(read) => read,
-                        None => continue,
+                        .0
+                        {
+                            Checked::Read(read) => read,
+                            Checked::Discarded => continue,
+                            Checked::Refused(why) => return Err(why),
+                            Checked::Declined => false,
+                        }
                     }
-                }
+                    RenderingEngine::GPU | RenderingEngine::CPU => {
+                        match read_off_gpu(&mut composed, page, |composed| {
+                            read_converted_on_cpu(
+                                composed, dst_info, pixels, row_bytes, at,
+                            )
+                        })? {
+                            Some(read) => read,
+                            None => continue,
+                        }
+                    }
+                },
             };
             return match read {
                 true => Ok(()),
@@ -4066,6 +4271,30 @@ impl RecordingSurface {
         let Some(surface) = self.surface.as_mut() else {
             return Checked::Read(false);
         };
+
+        // A Graphite page as Ganesh's below, read through `read_checked`
+        // since nothing else reads one: the first read at a state straight
+        // from the surface, and a second, or a format the surface refuses,
+        // from a copy of the whole page.
+        match engine {
+            RenderingEngine::Graphite => {
+                if self.served_at != Some(self.depth) {
+                    self.served_at = Some(self.depth);
+                    match read_converted_checked(
+                        surface, dst_info, pixels, row_bytes, origin, page,
+                    ) {
+                        Checked::Read(false) => {}
+                        other => return other,
+                    }
+                }
+                let (checked, raster) = graphite_copied(
+                    surface, dst_info, pixels, row_bytes, origin, page,
+                );
+                self.raster = raster;
+                return checked;
+            }
+            RenderingEngine::GPU | RenderingEngine::CPU => {}
+        }
 
         // The first read at a given state goes straight to the surface, and
         // only a second one is worth a copy of the whole page. On the CPU
@@ -4943,8 +5172,13 @@ impl Page {
         // unchanged canvas again -- keeps it. Only an export that follows
         // further drawing replays, which is work it was going to do for those
         // layers anyway.
-        let multisampled = matches!(engine, RenderingEngine::GPU)
-            && !matches!(options.msaa, Some(0 | 1));
+        // A Graphite page takes its sample count from its context, not from
+        // `options.msaa` -- see `gpu::graphite::make_surface` -- so it draws
+        // the same whatever the export asks.
+        let multisampled = match engine {
+            RenderingEngine::GPU => !matches!(options.msaa, Some(0 | 1)),
+            RenderingEngine::CPU | RenderingEngine::Graphite => false,
+        };
         let (cache_image, cache_depth) = {
             let (id, depth) = self.cache_key();
             let (image, depth) = PageCache::get(id, options, depth);
@@ -5043,6 +5277,21 @@ impl Page {
         engine: RenderingEngine,
     ) -> Result<SkImage, String> {
         let img_dims = self.scaled_dimensions(options.density);
+
+        // A Graphite page comes into main memory first, in its own format,
+        // and is converted there, on the CPU: neither download below reads a
+        // Graphite texture, and the CPU is where every conversion of a read
+        // is made -- see `read_converted`. Read unconfirmed, since the caller
+        // confirms it -- see `Self::read_composited`.
+        let (image, engine) = match engine {
+            RenderingEngine::Graphite => (
+                graphite_raster_unconfirmed(surface).ok_or_else(|| {
+                    "Could not read the page back from the GPU".to_string()
+                })?,
+                RenderingEngine::CPU,
+            ),
+            RenderingEngine::GPU | RenderingEngine::CPU => (image, engine),
+        };
 
         // The surface holds the canvas's space; an encoder tags with whatever
         // the image carries. Converting here is what makes a requested output
@@ -5221,7 +5470,7 @@ impl Page {
 
         let (read, filing) = match converting || caching {
             false => (
-                surface.read_pixels(dst_info, &mut buffer, stride, (0, 0)),
+                read_unconfirmed(surface, dst_info, &mut buffer, stride),
                 None,
             ),
             true => {
@@ -5282,7 +5531,7 @@ impl Page {
         let read = |surface: &mut Surface| {
             let stride = info.min_row_bytes();
             let mut buffer: Vec<u8> = vec![0; checked_byte_size(info)?];
-            match surface.read_pixels(info, &mut buffer, stride, (0, 0)) {
+            match read_unconfirmed(surface, info, &mut buffer, stride) {
                 true => Ok(buffer),
                 false => Err(format!(
                     "Could not read pixels into destination format ({:?} / \
@@ -10610,6 +10859,372 @@ mod tests {
                      bytes differ"
                 );
             }
+        }
+    }
+
+    /// Graphite pages, read as the CPU reads: in the page's own format, and
+    /// converted on the CPU. Each test is skipped where no Graphite context
+    /// can be made.
+    #[cfg(all(meo_graphite, feature = "metal"))]
+    mod graphite_reads {
+        use super::*;
+        use crate::gpu::engine_of;
+
+        /// The page's width: one tile -- see [`TILE`].
+        const WIDE: i32 = 256;
+
+        /// A `WIDE` by 16 page, each pixel a premultiplied colour of its own
+        /// at an alpha of its own: among them pixels that Graphite's own
+        /// read to unpremultiplied bytes rounds to a level off Skia's CPU
+        /// conversion of the same floats, in 2304 of 65536 bytes of a 256
+        /// by 64 page.
+        fn distinct(side: (i32, i32)) -> PageRecorder {
+            let (w, h) = side;
+            let info = ImageInfo::new(
+                (w, h),
+                ColorType::RGBAF32,
+                AlphaType::Premul,
+                ColorSpace::new_srgb(),
+            );
+            let bytes: Vec<u8> = (0..(w * h) as usize)
+                .flat_map(|i| {
+                    let a = ((i % 256) as f32 + 0.5) / 256.0;
+                    let c = ((i / 256 * 37 + i * 13) % 256) as f32 / 255.0;
+                    [c * a, (1.0 - c) * a, 0.5 * a, a]
+                })
+                .flat_map(f32::to_ne_bytes)
+                .collect();
+            let image = started::raster_from_data(
+                &info,
+                Data::new_copy(&bytes),
+                info.min_row_bytes(),
+            )
+            .expect("an image");
+            let mut recorder =
+                PageRecorder::new(Rect::from_wh(w as f32, h as f32));
+            recorder.append(|canvas, _| {
+                let mut copy = Paint::default();
+                copy.set_blend_mode(BlendMode::Src);
+                canvas.draw_image(&image, (0, 0), Some(&copy));
+            });
+            recorder
+        }
+
+        fn float_page(
+            color_type: ColorType,
+            alpha_type: AlphaType,
+        ) -> ExportOptions {
+            ExportOptions {
+                surface_color_type: ColorType::RGBAF32,
+                color_type,
+                alpha_type,
+                ..ExportOptions::default()
+            }
+        }
+
+        /// `crop` of the page in its own floats, read off Graphite.
+        fn floats(recorder: &mut PageRecorder, crop: IRect) -> Vec<u8> {
+            recorder
+                .pixels(
+                    crop,
+                    float_page(ColorType::RGBAF32, AlphaType::Premul),
+                    RenderingEngine::Graphite,
+                )
+                .expect("the floats")
+        }
+
+        /// `floats`, `size` of them, as Skia's CPU converts them to
+        /// unpremultiplied bytes.
+        fn on_the_cpu(mut floats: Vec<u8>, size: (i32, i32)) -> Vec<u8> {
+            let native = ImageInfo::new(
+                size,
+                ColorType::RGBAF32,
+                AlphaType::Premul,
+                ColorSpace::new_srgb(),
+            );
+            let bytes = ImageInfo::new(
+                size,
+                ColorType::RGBA8888,
+                AlphaType::Unpremul,
+                ColorSpace::new_srgb(),
+            );
+            let mut out = vec![0u8; bytes.compute_min_byte_size()];
+            assert!(
+                Pixmap::new(&native, &mut floats, native.min_row_bytes())
+                    .expect("a pixmap")
+                    .read_pixels(
+                        &bytes,
+                        &mut out,
+                        bytes.min_row_bytes(),
+                        (0, 0)
+                    )
+            );
+            out
+        }
+
+        fn bytes(recorder: &mut PageRecorder, crop: IRect) -> Vec<u8> {
+            recorder
+                .pixels(
+                    crop,
+                    float_page(ColorType::RGBA8888, AlphaType::Unpremul),
+                    RenderingEngine::Graphite,
+                )
+                .expect("the bytes")
+        }
+
+        fn graphite() -> bool {
+            let there = RenderingEngine::Graphite.selectable();
+            if !there {
+                eprintln!("skipped: no Graphite context on this machine");
+            }
+            there
+        }
+
+        #[test]
+        fn graphite_s_own_unpremultiplied_read_is_a_level_off() {
+            // What `read_converted` works around on a Graphite page: its own
+            // read to unpremultiplied bytes rounds some a level off Skia's
+            // CPU conversion of the same floats, where its premultiplied read
+            // agrees. Fails once Graphite's read agrees too, which says the
+            // conversion could go back to the read.
+            if !graphite() {
+                return;
+            }
+            let size = (256, 64);
+            let mut recorder = distinct(size);
+            let opts = float_page(ColorType::RGBAF32, AlphaType::Premul);
+            let page = recorder.page();
+            let mut surface = RecordingSurface::default();
+            surface.update(&page, &opts, &RenderingEngine::Graphite);
+            let surface = surface.surface.as_mut().expect("a Graphite page");
+            let mut read = |color_type, alpha_type| {
+                let info = ImageInfo::new(
+                    size,
+                    color_type,
+                    alpha_type,
+                    ColorSpace::new_srgb(),
+                );
+                let mut pixels = vec![0u8; info.compute_min_byte_size()];
+                assert_eq!(
+                    read_checked(
+                        surface,
+                        &info,
+                        &mut pixels,
+                        info.min_row_bytes(),
+                        (0, 0),
+                        page.id,
+                        None,
+                    ),
+                    Checked::Read(true)
+                );
+                pixels
+            };
+            let floats = read(ColorType::RGBAF32, AlphaType::Premul);
+            let own = read(ColorType::RGBA8888, AlphaType::Unpremul);
+            let premultiplied = read(ColorType::RGBA8888, AlphaType::Premul);
+            let want = on_the_cpu(floats.clone(), size);
+            let off = own.iter().zip(&want).filter(|(a, b)| a != b).count();
+            assert!(off > 0, "Graphite's unpremultiplied read agrees now");
+            assert!(
+                own.iter().zip(&want).all(|(&a, &b)| a.abs_diff(b) <= 1),
+                "off by a level at most"
+            );
+            // The control: premultiplied, the two agree.
+            let native = ImageInfo::new(
+                size,
+                ColorType::RGBAF32,
+                AlphaType::Premul,
+                ColorSpace::new_srgb(),
+            );
+            let bytes = ImageInfo::new(
+                size,
+                ColorType::RGBA8888,
+                AlphaType::Premul,
+                ColorSpace::new_srgb(),
+            );
+            let mut held = floats;
+            let mut cpu = vec![0u8; bytes.compute_min_byte_size()];
+            assert!(
+                Pixmap::new(&native, &mut held, native.min_row_bytes())
+                    .expect("a pixmap")
+                    .read_pixels(
+                        &bytes,
+                        &mut cpu,
+                        bytes.min_row_bytes(),
+                        (0, 0)
+                    )
+            );
+            assert!(premultiplied == cpu, "premultiplied, Graphite agrees");
+        }
+
+        #[test]
+        fn a_graphite_page_s_read_is_converted_on_the_cpu() {
+            if !graphite() {
+                return;
+            }
+            let mut recorder = distinct((WIDE, 16));
+            let crop = IRect::from_wh(WIDE, 16);
+            let want = on_the_cpu(floats(&mut recorder, crop), (WIDE, 16));
+            // Twice: the second at the same state from a copy of the tile.
+            for read in ["first", "second"] {
+                assert!(bytes(&mut recorder, crop) == want, "the {read} read");
+            }
+        }
+
+        #[test]
+        fn a_repeated_graphite_read_is_served_from_a_copy() {
+            if !graphite() {
+                return;
+            }
+            // A crop inside one tile, and one across tiles, which the page
+            // serves.
+            let mut recorder = distinct((WIDE + 8, 16));
+            let inside = IRect::from_wh(16, 16);
+            for _ in 0..2 {
+                bytes(&mut recorder, inside);
+            }
+            assert!(
+                recorder
+                    .surface
+                    .tiles
+                    .values()
+                    .any(|tile| tile.raster.is_some()),
+                "a tile keeps a copy for a repeated read"
+            );
+            let across = IRect::from_xywh(WIDE - 4, 0, 8, 16);
+            let want = on_the_cpu(floats(&mut recorder, across), (8, 16));
+            for read in ["first", "second", "third"] {
+                assert!(
+                    bytes(&mut recorder, across) == want,
+                    "the {read} read"
+                );
+            }
+            assert!(
+                recorder.surface.raster.is_some(),
+                "the page keeps a copy for a repeated read"
+            );
+        }
+
+        #[test]
+        fn a_graphite_read_inside_a_layer_is_converted_on_the_cpu() {
+            if !graphite() {
+                return;
+            }
+            let mut recorder = distinct((WIDE, 16));
+            let mut half = Paint::default();
+            half.set_alpha_f(0.5);
+            recorder.open_layer(LayerRec {
+                paint: Some(half),
+                ..LayerRec::default()
+            });
+            recorder.append(|canvas, _| {
+                let colour = Color4f::new(0.8, 0.2, 0.4, 0.6);
+                canvas.draw_rect(
+                    Rect::from_xywh(10.0, 2.0, 100.0, 9.0),
+                    &Paint::new(colour, None),
+                );
+            });
+            let crop = IRect::from_xywh(4, 0, 120, 16);
+            let want = on_the_cpu(floats(&mut recorder, crop), (120, 16));
+            assert!(bytes(&mut recorder, crop) == want, "inside the layer");
+        }
+
+        #[test]
+        fn a_page_moving_between_the_cpu_and_graphite_is_made_again() {
+            if !graphite() {
+                return;
+            }
+            let mut recorder = distinct((16, 16));
+            let page = recorder.page();
+            let opts = float_page(ColorType::RGBAF32, AlphaType::Premul);
+            let mut surface = RecordingSurface::default();
+            for engine in [
+                RenderingEngine::CPU,
+                RenderingEngine::Graphite,
+                RenderingEngine::CPU,
+            ] {
+                surface.update(&page, &opts, &engine);
+                let made = surface.surface.as_mut().expect("a surface");
+                assert_eq!(engine_of(made.canvas()), engine);
+            }
+        }
+
+        #[test]
+        fn a_graphite_page_s_snapshot_is_in_main_memory() {
+            if !graphite() {
+                return;
+            }
+            let mut recorder = distinct((16, 16));
+            let want = floats(&mut recorder, IRect::from_wh(16, 16));
+            let page = recorder.page();
+            let opts = float_page(ColorType::RGBAF32, AlphaType::Premul);
+            let mut surface = RecordingSurface::default();
+            surface.update(&page, &opts, &RenderingEngine::Graphite);
+            let snapshot = surface
+                .snapshot_if_valid(&page, &opts, &RenderingEngine::Graphite)
+                .expect("a snapshot");
+            assert!(!snapshot.is_texture_backed(), "in main memory");
+            let info = snapshot.image_info();
+            let mut got = vec![0u8; info.compute_min_byte_size()];
+            assert!(snapshot.read_pixels(
+                info,
+                &mut got,
+                info.min_row_bytes(),
+                (0, 0),
+                CachingHint::Disallow,
+            ));
+            assert!(got == want, "the snapshot is the page");
+        }
+
+        #[test]
+        fn a_graphite_page_exports_from_main_memory() {
+            if !graphite() {
+                return;
+            }
+            let mut recorder = distinct((16, 16));
+            let crop = IRect::from_wh(16, 16);
+            let want_floats = floats(&mut recorder, crop);
+            let want_bytes = on_the_cpu(want_floats.clone(), (16, 16));
+            let opts = ExportOptions {
+                single_use: true,
+                ..float_page(ColorType::RGBAF32, AlphaType::Premul)
+            };
+            let page = recorder.page();
+            let image = page
+                .composite(&opts, RenderingEngine::Graphite)
+                .expect("an export");
+            assert!(!image.is_texture_backed(), "in main memory");
+            let info = image.image_info();
+            let mut got = vec![0u8; info.compute_min_byte_size()];
+            assert!(image.read_pixels(
+                info,
+                &mut got,
+                info.min_row_bytes(),
+                (0, 0),
+                CachingHint::Disallow,
+            ));
+            assert!(got == want_floats, "the export is the page");
+            // Read into bytes straight off the composited surface, converted
+            // on the CPU.
+            let into = ImageInfo::new(
+                (16, 16),
+                ColorType::RGBA8888,
+                AlphaType::Unpremul,
+                ColorSpace::new_srgb(),
+            );
+            let read = page
+                .composite_into(&opts, RenderingEngine::Graphite, &into)
+                .expect("a read of the composited page");
+            assert!(read == want_bytes, "the composited read");
+            // And into another space, converted on the CPU after the read.
+            let linear = ExportOptions {
+                color_space: ColorSpace::new_srgb_linear(),
+                ..opts.clone()
+            };
+            let image = page
+                .composite(&linear, RenderingEngine::Graphite)
+                .expect("an export in another space");
+            assert!(!image.is_texture_backed(), "in main memory");
         }
     }
 }
