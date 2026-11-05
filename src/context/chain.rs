@@ -180,37 +180,137 @@ pub(crate) fn apply(
 }
 
 /// What a chain leaves, before it is composited: the image its last step
-/// made, the device region the image covers under `rest`, and `rest`, the
-/// part of the canvas's transform the layer was not drawn in.
+/// made, the device region it covers under `rest`, and `rest`, the part of
+/// the canvas's transform the layer was not drawn in.
+///
+/// The image holds the part `inked` of the region, in the region's own
+/// pixels, and every pixel of the region outside it is transparent black:
+/// the whole region, unless whoever made the result counted -- see
+/// [`Self::with_inked`]. A blur works on its reach of [`REACH_SIGMAS`]
+/// sigmas past what it reads, and what it leaves rounds to zero long before
+/// that: of the 124 by 89 pixels a 40px sans-serif "Ag" under `blur(3px)`
+/// works on with CoreText, 62 by 54 are inked.
 #[derive(Clone)]
 pub(crate) struct Outcome {
     image: Image,
     region: IRect,
     rest: Matrix,
+    inked: IRect,
 }
 
 impl Outcome {
-    /// Draws the image back onto `canvas` at its place, through `paint` less
-    /// its alpha, which the last step already took: unresampled where the
-    /// rest of the transform is the identity, which every
+    /// The result of a chain whose `image` covers all of `region` under
+    /// `rest`.
+    pub(crate) fn whole(image: Image, region: IRect, rest: Matrix) -> Self {
+        let inked = IRect::from_wh(image.width(), image.height());
+        Self {
+            image,
+            region,
+            rest,
+            inked,
+        }
+    }
+
+    /// The result of a chain covering `region` under `rest` whose pixels
+    /// are transparent black outside `inked`, in the region's own pixels,
+    /// and `image` inside it. Where `inked` is empty `image` is the whole
+    /// region, transparent.
+    pub(crate) fn with_inked(
+        image: Image,
+        region: IRect,
+        rest: Matrix,
+        inked: IRect,
+    ) -> Self {
+        debug_assert!(
+            match inked.is_empty() {
+                true => image.dimensions() == region.size(),
+                false => {
+                    image.dimensions() == inked.size()
+                        && IRect::intersect(
+                            &IRect::from_size(region.size()),
+                            &inked,
+                        ) == Some(inked)
+                }
+            },
+            "an image that is not what is inked"
+        );
+        Self {
+            image,
+            region,
+            rest,
+            inked,
+        }
+    }
+
+    /// Draws the result back onto `canvas` at its place, through `paint`
+    /// less its alpha, which the last step already took: unresampled where
+    /// the rest of the transform is the identity, which every
     /// scale-and-translate playback leaves it. `canvas`'s clip, not the
     /// chain's, decides what of it shows.
+    ///
+    /// Unresampled and through a paint under which a transparent pixel
+    /// leaves the canvas as it is -- see [`leaves_transparent_alone`] -- only
+    /// what is inked is drawn, since the rest would change no byte. Otherwise
+    /// the whole region is: resampled, an edge pixel is filtered with the
+    /// transparent pixels beside it, and a blend such as `lighter` is not
+    /// held to the plain source-over the trim is shown exact for.
     pub(crate) fn composite(&self, canvas: &SkCanvas, paint: &Paint) {
-        let sampling = match self.rest.is_identity() {
-            true => SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
-            false => SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
-        };
         let mut paint = paint.clone();
         paint.set_alpha_f(1.0);
+        let nearest =
+            SamplingOptions::new(FilterMode::Nearest, MipmapMode::None);
+        let trimmed = self.rest.is_identity()
+            && trims_composite()
+            && leaves_transparent_alone(&paint);
+        let (image, at, sampling) = match trimmed {
+            true => {
+                #[cfg(test)]
+                TRIMMED.set(TRIMMED.get() + 1);
+                if self.inked.is_empty() {
+                    return;
+                }
+                let at =
+                    self.inked.with_offset((self.region.left, self.region.top));
+                (self.image.clone(), at, nearest)
+            }
+            false => {
+                let Some(image) = self.whole_image() else {
+                    return;
+                };
+                let sampling = match self.rest.is_identity() {
+                    true => nearest,
+                    false => SamplingOptions::new(
+                        FilterMode::Linear,
+                        MipmapMode::None,
+                    ),
+                };
+                (image, self.region, sampling)
+            }
+        };
         canvas.save();
         canvas.set_matrix(&self.rest.into());
         canvas.draw_image_with_sampling_options(
-            &self.image,
-            (self.region.left as f32, self.region.top as f32),
+            &image,
+            (at.left as f32, at.top as f32),
             sampling,
             Some(&paint),
         );
         canvas.restore();
+    }
+
+    /// The image of the whole region: the one held where it is that, and
+    /// otherwise the inked part with transparent black around it. `None`
+    /// where no surface could be made for it.
+    fn whole_image(&self) -> Option<Image> {
+        match self.image.dimensions() == self.region.size() {
+            true => Some(self.image.clone()),
+            false => padded(
+                None,
+                &self.image,
+                self.inked,
+                IRect::from_size(self.region.size()),
+            ),
+        }
     }
 
     /// The bytes the image holds.
@@ -228,8 +328,54 @@ impl Outcome {
             image: self.image.clone(),
             region: self.region.with_offset(by),
             rest: self.rest,
+            inked: self.inked,
         })
     }
+}
+
+/// Whether drawing a transparent black pixel through `paint` leaves the
+/// pixel under it as it is: a plain source-over, with no colour filter,
+/// shader or mask filter to turn nothing into something. Source-over adds
+/// the destination scaled by one less the source's alpha, which for an
+/// alpha of zero is the destination itself, bit for bit, in Skia's raster
+/// blitters (Skia M156, `src/opts/SkBlitRow_opts.h`): the NEON row scales a
+/// byte by 255 less the alpha and rounds its division by 255, and the x86
+/// rows by 256 less it, shifted down by 8. A blend such as
+/// `copy` or `destination-in` clears what a transparent pixel covers, so
+/// every pixel is drawn there.
+fn leaves_transparent_alone(paint: &Paint) -> bool {
+    paint.as_blend_mode() == Some(BlendMode::SrcOver)
+        && paint.color_filter().is_none()
+        && paint.shader().is_none()
+        && paint.mask_filter().is_none()
+        && paint.image_filter().is_none()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether a result is kept and composited as what is inked where it
+    /// may be: off, the coverage route keeps its whole image and
+    /// [`Outcome::composite`] draws the whole region, the reference the
+    /// trimmed composite is held to.
+    pub(crate) static TRIMS_COMPOSITE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(true) };
+    /// How many composites on this thread drew only what is inked.
+    pub(crate) static TRIMMED: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Whether a result is kept and composited as what is inked where it may
+/// be: [`TRIMS_COMPOSITE`]; always outside a test.
+#[cfg(test)]
+pub(crate) fn trims_composite() -> bool {
+    TRIMS_COMPOSITE.get()
+}
+
+/// Whether a result is kept and composited as what is inked where it may
+/// be: always outside a test.
+#[cfg(not(test))]
+pub(crate) fn trims_composite() -> bool {
+    true
 }
 
 /// Runs the chain [`apply`] does, up to the composite. `None` where nothing
@@ -487,11 +633,7 @@ impl Drawn {
             false => None,
         };
         if let Some(kept) = input.as_ref().and_then(ChainInput::kept) {
-            return Some(Outcome {
-                image: kept,
-                region: worked,
-                rest,
-            });
+            return Some(Outcome::whole(kept, worked, rest));
         }
         let last = steps.len().saturating_sub(1);
         for (i, step) in steps.iter().enumerate() {
@@ -532,11 +674,7 @@ impl Drawn {
         if let Some(input) = input {
             input.keep(image.clone());
         }
-        Some(Outcome {
-            image,
-            region: worked,
-            rest,
-        })
+        Some(Outcome::whole(image, worked, rest))
     }
 }
 
@@ -566,11 +704,7 @@ impl Outcome {
         let image = started::raster(&info, None, None)
             .expect("a surface")
             .image_snapshot();
-        Self {
-            image,
-            region: IRect::from_wh(side, side),
-            rest: Matrix::new_identity(),
-        }
+        Self::whole(image, IRect::from_wh(side, side), Matrix::new_identity())
     }
 }
 
@@ -1863,22 +1997,75 @@ mod tests {
     use std::env::consts::ARCH;
 
     use skia_safe::{
-        AlphaType, Canvas as SkCanvas, Color, Color4f, ColorSpace, ColorType,
-        Data, FilterMode, Image, ImageInfo, Matrix, MipmapMode, Paint,
-        PathBuilder, PictureRecorder, Rect, SamplingOptions, Surface, Vector,
-        color_filters, image::CachingHint, named_primaries, named_transfer_fn,
+        AlphaType, BlendMode as SkBlendMode, Canvas as SkCanvas, Color,
+        Color4f, ColorSpace, ColorType, Data, FilterMode, IRect, Image,
+        ImageInfo, Matrix, MipmapMode, Paint, PathBuilder, PictureRecorder,
+        Rect, SamplingOptions, Surface, Vector, color_filters,
+        image::{CachingHint, RequiredProperties},
+        named_primaries, named_transfer_fn,
     };
 
     use super::{
-        Depth, REFUSE_PLACED, Step, apply, blurred_alpha, blurred_on_cpu,
-        exact_blur, filtered, offset_tint, rounded_once, shadow_composed,
-        shadowed, tint, tint_colour, tinted_alpha, worked_on,
+        Depth, Outcome, REFUSE_PLACED, Step, TRIMMED, TRIMS_COMPOSITE, apply,
+        blurred_alpha, blurred_on_cpu, exact_blur, filtered, offset_tint,
+        rounded_once, shadow_composed, shadowed, tint, tint_colour,
+        tinted_alpha, worked_on,
     };
     #[cfg(all(meo_graphite, feature = "metal"))]
     use crate::{context::page::ExportOptions, gpu::graphite};
     use crate::{prelude::*, started};
-    #[cfg(all(meo_graphite, feature = "metal"))]
-    use skia_safe::IRect;
+
+    #[test]
+    fn a_result_kept_as_its_inked_part_composites_as_the_whole() {
+        // A result inked only at its centre, kept as that part and as the
+        // whole image, composited onto a painted page: the same bytes under
+        // a blend a transparent pixel leaves alone, drawn from the inked
+        // part, and under ones where it clears what it covers, `copy` and
+        // `destination-in`, drawn from the whole region padded back. The
+        // canvas reaches those two through a layer of their own, so only a
+        // result composited directly can tell.
+        let info = ImageInfo::new_n32_premul((12, 10), None);
+        let mut source = started::raster(&info, None, None).expect("a surface");
+        let inked = IRect::new(4, 3, 8, 7);
+        source.canvas().draw_rect(
+            Rect::from(inked),
+            &Paint::new(Color4f::new(0.8, 0.4, 0.2, 0.75), None),
+        );
+        let image = source.image_snapshot();
+        let region = IRect::new(5, 6, 17, 16);
+        let identity = Matrix::new_identity();
+        let whole = Outcome::whole(image.clone(), region, identity);
+        let part = image
+            .make_subset(None, inked, RequiredProperties { mipmapped: false })
+            .expect("a subset");
+        let kept = Outcome::with_inked(part, region, identity, inked);
+        let page = |outcome: &Outcome, blend: SkBlendMode, trims: bool| {
+            TRIMS_COMPOSITE.set(trims);
+            let info = ImageInfo::new_n32_premul((24, 20), None);
+            let mut page = started::raster(&info, None, None).expect("a page");
+            page.canvas().clear(Color::from_argb(255, 30, 140, 200));
+            let mut paint = Paint::default();
+            paint.set_blend_mode(blend);
+            let before = TRIMMED.get();
+            outcome.composite(page.canvas(), &paint);
+            TRIMS_COMPOSITE.set(true);
+            let mut bytes = vec![0u8; 24 * 20 * 4];
+            assert!(page.read_pixels(&info, &mut bytes, 24 * 4, (0, 0)));
+            (bytes, TRIMMED.get() - before)
+        };
+        for (blend, trimmed) in [
+            (SkBlendMode::SrcOver, 1),
+            (SkBlendMode::Src, 0),
+            (SkBlendMode::DstIn, 0),
+        ] {
+            let (want, _) = page(&whole, blend, false);
+            let (got, trims) = page(&kept, blend, true);
+            assert!(got == want, "{blend:?}: a byte moved");
+            assert_eq!(trims, trimmed, "{blend:?}");
+            let (padded, _) = page(&kept, blend, false);
+            assert!(padded == want, "{blend:?}: padded back, a byte moved");
+        }
+    }
 
     #[cfg(all(meo_graphite, feature = "metal"))]
     #[test]

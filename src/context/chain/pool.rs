@@ -1,4 +1,5 @@
-//! GPU chain layers kept for the next run rather than made again.
+//! GPU chain layers kept for the next run rather than made again, and CPU
+//! coverage planes kept for the rest of a playback.
 //!
 //! A chain on the GPU draws into a layer the page's size -- see
 //! [`placed`](super::placed) -- and Skia makes it unbudgeted
@@ -31,6 +32,19 @@
 //! at its next GPU use once the layer has gone unused for [`KEPT_FOR`], and
 //! until then holds at most [`KEPT`] layers of the largest page it drew: at
 //! 6000 by 4000 and four samples, 960 MB at eight bits and 1.9 GB in `F16`.
+//!
+//! The coverage route's planes on the CPU -- see
+//! [`coverage`](super::coverage) -- are kept too, but only while a
+//! [`PlaneScope`] is open. A plane runs from the device's origin to the far
+//! corner of what its draw reads, nearly the page. Made afresh for every
+//! blurred draw, it is a large allocation each time, zeroed -- which macOS's
+//! allocator does with `madvise` for a block of that size -- and let go
+//! after: making and dropping one a draw takes 35% of the samples of playing
+//! 50 runs of 40px "Ag" under `blur(3px)` that find their results kept. One
+//! plane of each kind, as large as the page, is kept for the rest of the
+//! outermost open plane scope and let go when it closes, so a thread holds
+//! none between playbacks; a draw that takes it clears what it reads, then
+//! cuts what it draws where its own plane would have ended.
 
 use std::{
     cell::RefCell,
@@ -40,9 +54,11 @@ use std::{
 
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 use skia_safe::gpu::DirectContextId;
-use skia_safe::{Canvas as SkCanvas, ImageInfo, Surface, SurfaceProps};
+use skia_safe::{
+    Canvas as SkCanvas, ColorType, ISize, ImageInfo, Surface, SurfaceProps,
+};
 
-use crate::context::layer::MAX_RUN_LAYERS;
+use crate::context::{chain::coverage::Plane, layer::MAX_RUN_LAYERS};
 
 /// How many layers a thread keeps: as many as a run holds open at once, so
 /// that a run of chains like the last finds every layer it needs.
@@ -83,6 +99,10 @@ struct Pool {
     scopes: Vec<(usize, Option<usize>)>,
     /// The layers kept, oldest first, with when each was let go.
     kept: Vec<(Key, Surface, Instant)>,
+    /// How many [`PlaneScope`]s are open.
+    plane_scopes: usize,
+    /// The coverage planes kept for the open plane scopes, one of each kind.
+    planes: Vec<(Plane, Surface)>,
 }
 
 thread_local! {
@@ -93,14 +113,16 @@ thread_local! {
 /// was made with, for as long as it is held, so that chain layers for that
 /// canvas are kept -- see the module's documentation. Opened by the code that
 /// made the surface; scopes nest.
-pub(crate) struct LayerScope(PhantomData<*const ()>);
+///
+/// A layer scope is a [`PlaneScope`] too.
+pub(crate) struct LayerScope(PhantomData<*const ()>, PlaneScope);
 
 impl LayerScope {
     /// Opens a scope for `canvas`, whose surface was made with `msaa`.
     pub(crate) fn open(canvas: &SkCanvas, msaa: Option<usize>) -> Self {
         let at = address(canvas);
         POOL.with_borrow_mut(|pool| pool.scopes.push((at, msaa)));
-        Self(PhantomData)
+        Self(PhantomData, PlaneScope::open())
     }
 }
 
@@ -109,6 +131,34 @@ impl Drop for LayerScope {
         POOL.with_borrow_mut(|pool| {
             pool.scopes.pop();
         });
+    }
+}
+
+/// A playback onto pixels on this thread, for as long as it is held: the
+/// coverage planes its draws make are kept until the outermost scope closes
+/// -- see the module's documentation. Opened where a page is played onto
+/// pixels; scopes nest.
+pub(crate) struct PlaneScope(PhantomData<*const ()>);
+
+impl PlaneScope {
+    /// Opens a scope on this thread.
+    pub(crate) fn open() -> Self {
+        POOL.with_borrow_mut(|pool| pool.plane_scopes += 1);
+        Self(PhantomData)
+    }
+}
+
+impl Drop for PlaneScope {
+    fn drop(&mut self) {
+        let planes = POOL.with_borrow_mut(|pool| {
+            pool.plane_scopes -= 1;
+            match pool.plane_scopes {
+                0 => std::mem::take(&mut pool.planes),
+                _ => Vec::new(),
+            }
+        });
+        // Let go outside the borrow, which a surface's release does not need.
+        drop(planes);
     }
 }
 
@@ -182,7 +232,82 @@ pub(crate) fn keep(key: Key, mut surface: Surface) {
 /// Lets go every layer this thread keeps. Called by the idle release, before
 /// the thread's context goes.
 pub(crate) fn release() {
-    POOL.with_borrow_mut(|pool| pool.kept.clear());
+    POOL.with_borrow_mut(|pool| {
+        pool.kept.clear();
+        pool.planes.clear();
+    });
+}
+
+/// A coverage plane of kind `plane` this thread keeps that a draw needing
+/// `size` of `info`'s colour type, alpha type and space, made with `props`,
+/// can take, taken out of the pool: one in main memory, made alike and at
+/// least as large. `None` where none is kept.
+///
+/// What it held is still in it: the caller clears what it reads.
+pub(crate) fn take_plane(
+    plane: Plane,
+    info: &ImageInfo,
+    props: &SurfaceProps,
+    size: ISize,
+) -> Option<Surface> {
+    if !keeps_planes() {
+        return None;
+    }
+    POOL.with_borrow_mut(|pool| {
+        let at = pool.planes.iter_mut().position(|(kind, surface)| {
+            let own = surface.image_info();
+            *kind == plane
+                && own.color_type() == info.color_type()
+                && own.alpha_type() == info.alpha_type()
+                && own.color_space() == info.color_space()
+                && surface.props() == props
+                && own.width() >= size.width
+                && own.height() >= size.height
+        })?;
+        #[cfg(test)]
+        PLANES_TAKEN.set(PLANES_TAKEN.get() + 1);
+        Some(pool.planes.swap_remove(at).1)
+    })
+}
+
+/// Keeps `surface`, a coverage plane of kind `plane` in main memory, for the
+/// rest of the outermost open [`PlaneScope`], in place of any of its kind
+/// kept before. Let go at once where no plane scope is open.
+pub(crate) fn keep_plane(plane: Plane, mut surface: Surface) {
+    debug_assert!(
+        surface.image_info().color_type() != ColorType::Unknown
+            && surface.peek_pixels().is_some(),
+        "a coverage plane not in main memory"
+    );
+    if !keeps_planes() {
+        return;
+    }
+    let before = POOL.with_borrow_mut(|pool| {
+        if pool.plane_scopes == 0 {
+            return Some(surface);
+        }
+        let before = pool
+            .planes
+            .iter()
+            .position(|(kind, _)| *kind == plane)
+            .map(|at| pool.planes.swap_remove(at).1);
+        pool.planes.push((plane, surface));
+        before
+    });
+    drop(before);
+}
+
+/// Whether this thread keeps coverage planes: [`KEEP_PLANES`] in a test,
+/// always otherwise.
+#[cfg(test)]
+pub(crate) fn keeps_planes() -> bool {
+    KEEP_PLANES.get()
+}
+
+/// Whether this thread keeps coverage planes: always outside a test.
+#[cfg(not(test))]
+pub(crate) fn keeps_planes() -> bool {
+    true
 }
 
 impl Pool {
@@ -222,6 +347,15 @@ thread_local! {
     /// draws it more slowly than that.
     pub(crate) static KEPT_FOR_HERE: std::cell::Cell<Duration> =
         const { std::cell::Cell::new(KEPT_FOR) };
+
+    /// Whether coverage planes are kept on this thread, so that a test can
+    /// draw the same page with every plane made afresh.
+    pub(crate) static KEEP_PLANES: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(true) };
+
+    /// How many kept coverage planes draws on this thread have taken.
+    pub(crate) static PLANES_TAKEN: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
