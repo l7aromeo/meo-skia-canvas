@@ -2,9 +2,13 @@
 //! cannot composite.
 //!
 //! Ganesh's Metal backend has no 32-bit float format, so an `F32` page that
-//! asks for the GPU rasterizes on the CPU. Graphite's Metal backend composites
-//! one in float, and faster. Which pages it takes is
-//! [`RenderingEngine::for_canvas`]'s decision; this module is the engine.
+//! asks for the GPU rasterizes on the CPU. Graphite's Metal backend blends one
+//! in float, and faster, but narrows the colour of every draw it shades to a
+//! half float on the way: Skia's SkSL generator for Metal writes each half as
+//! an MSL `half`, the fragment output included. So no canvas is routed to it --
+//! which pages it would take is [`RenderingEngine::for_canvas`]'s decision, and
+//! [`RenderingEngine::can_composite`] refuses it `F32` while a draw does not
+//! keep its colour. This module is the engine.
 //!
 //! The engine is built where `meo_graphite` is set and the backend is Metal.
 //! The cfg is set only by the patched skia-bindings that carries the bindings
@@ -21,6 +25,7 @@
 //! its caller, so that one place can decide them for every engine.
 //!
 //! [`RenderingEngine::for_canvas`]: super::RenderingEngine::for_canvas
+//! [`RenderingEngine::can_composite`]: super::RenderingEngine::can_composite
 
 use std::fmt;
 

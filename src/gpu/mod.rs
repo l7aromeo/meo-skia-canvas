@@ -171,8 +171,26 @@ const SIXTY_LAYERS: f32 = 0.303_08;
 ///
 /// Chosen to separate the two outcomes the probe sees, not tuned: an engine
 /// that rounds each draw's source to eight bits lands at 0.36078 or beyond,
-/// and one compositing in float, half floats included, within 0.002.
+/// and one compositing in float, half floats included, within 0.002. It
+/// measures blending, not whether one draw keeps its colour -- that is
+/// [`HELD_BY_F32_ONLY`]'s.
 const FLOAT_COMPOSITING: f32 = 0.01;
+
+/// A colour channel an `F32` page holds and an `F16` one cannot: 0.1, which
+/// as an `f32` is 0.100000001490116, and whose nearest half float is
+/// 0.0999755859375. One opaque draw of it, read back from an `F32` page, has
+/// these bits exactly where the draw kept its colour in float, and the half's
+/// where any step of the draw narrowed it to 16 bits.
+const HELD_BY_F32_ONLY: f32 = 0.1;
+
+/// The side of the page [`HELD_BY_F32_ONLY`] is drawn on: one pixel of it is
+/// drawn, so the draw does not cover the page. Graphite turns an unclipped
+/// opaque fill that covers its whole target into a clear of it, and "nothing
+/// has to be rendered at all" (`Device::drawGeometry`,
+/// `src/gpu/graphite/Device.cpp`, lines 1844 to 1853, under the skia-bindings
+/// crate), so the colour reaches the attachment without a shader: on a
+/// one-pixel page it reads back 0.1 exactly, and the probe would see nothing.
+const CLEAR_FREE: i32 = 2;
 
 /// The rasterizer a page is drawn on.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -182,7 +200,10 @@ pub enum RenderingEngine {
     /// Ganesh, Skia's GPU backend for everything it can composite: Metal on
     /// macOS, Vulkan elsewhere.
     GPU,
-    /// Graphite on Metal, for the float pages Ganesh cannot composite.
+    /// Graphite on Metal, the engine for the float pages Ganesh cannot
+    /// composite, once it keeps them in float. [`Self::for_canvas`] never
+    /// chooses it, and on this Skia [`Self::can_composite`] refuses it every
+    /// float format as well.
     ///
     /// Present on every build, so that a match over the engines reads the
     /// same with and without it; built only where `meo_graphite` is set on
@@ -243,7 +264,7 @@ impl RenderingEngine {
     /// float format today, and round a draw's colour to eight bits before
     /// compositing it in an `F16` one, so this is where an `F16` or `F32`
     /// canvas changes hands -- and [`Self::can_composite`] probes rather than
-    /// assumes, so a Skia that composites either in float keeps the canvas
+    /// assumes, so a Skia that keeps either in float keeps the canvas
     /// on the GPU.
     pub fn for_canvas(gpu: bool, color_type: ColorType) -> Self {
         if !gpu {
@@ -267,16 +288,20 @@ impl RenderingEngine {
     /// Whether this engine can composite a page in `color_type`.
     ///
     /// Every engine composites eight-bit formats. A float format is asked
-    /// once per engine and remembered: sixty layers at alpha 0.006 are drawn
-    /// on a one-pixel page in `color_type` and read back -- see
-    /// [`Self::composited`] -- and the answer is judged by the format.
+    /// once per engine and remembered, the first time a canvas of that format
+    /// asks for the GPU: sixty layers at alpha 0.006 are drawn on a one-pixel
+    /// page in `color_type` and read back -- see [`Self::composited`] -- and
+    /// the answer is judged by the format.
     ///
-    /// - `F32` is taken where the page composites in float at all, landing
-    ///   within [`FLOAT_COMPOSITING`] of the arithmetic. An engine that rounds
-    ///   the source to eight bits lands at least 0.05 away. Graphite lands
-    ///   0.00002 away, against the CPU's 0.0000002: a hundred times the CPU's
-    ///   error, and still about a tenth of one `F16` step (0.00024 at this
-    ///   alpha), so finer than any narrower float page could store.
+    /// - `F32` is taken where the page blends in float, landing within
+    ///   [`FLOAT_COMPOSITING`] of the arithmetic, and where one draw keeps its
+    ///   colour in float -- see [`Self::keeps_f32_colour`], asked once per
+    ///   engine with the first `F32` question and remembered. The first alone
+    ///   measures blending: an engine that rounds the source to eight bits
+    ///   lands at least 0.05 away, and Graphite lands 0.00002 away, against the
+    ///   CPU's 0.0000002. Yet Graphite on Metal narrows the colour of every
+    ///   draw it shades to a half float, which blending sixty constant layers
+    ///   cannot show and one draw does, so on this Skia it is refused `F32`.
     /// - `F16` is taken only where the page lands no further from the
     ///   arithmetic than the CPU's own `F16` page does, since the CPU holds the
     ///   same format and is what the canvas gets otherwise. Graphite's
@@ -306,7 +331,9 @@ impl RenderingEngine {
         };
         let error = (alpha - SIXTY_LAYERS).abs();
         match color_type {
-            ColorType::RGBAF32 => error < FLOAT_COMPOSITING,
+            ColorType::RGBAF32 => {
+                error < FLOAT_COMPOSITING && self.keeps_f32_colour()
+            }
             _ => Self::CPU
                 .composited(color_type)
                 .is_some_and(|cpu| error <= (cpu - SIXTY_LAYERS).abs()),
@@ -327,28 +354,19 @@ impl RenderingEngine {
     /// 0.006 leaves them 0.074 apart -- which is what says the loss is the
     /// source and not the accumulation. It is not the paint slot -- a colour
     /// arriving through a shader rounds identically -- so no shader or
-    /// runtime effect escapes it. Graphite composites F32 to 0.30310 against
-    /// the CPU's 0.30308, and F16 to 0.30420 against the CPU's 0.30298.
+    /// runtime effect escapes it. Graphite blends F32 to 0.30310 against the
+    /// CPU's 0.30308, and F16 to 0.30420 against the CPU's 0.30298 -- what
+    /// this measures is blending, which happens at the attachment's own
+    /// precision, and not whether one draw keeps its colour.
     fn composited(&self, color_type: ColorType) -> Option<f32> {
         static ALPHAS: [[OnceLock<Option<f32>>; 2]; 3] =
             [const { [const { OnceLock::new() }; 2] }; 3];
-        let engine = match self {
-            Self::CPU => 0,
-            Self::GPU => 1,
-            Self::Graphite => 2,
-        };
         let format = match color_type {
             ColorType::RGBAF32 => 1,
             _ => 0,
         };
-        *ALPHAS[engine][format].get_or_init(|| {
-            let info = ImageInfo::new(
-                (1, 1),
-                color_type,
-                AlphaType::Premul,
-                Some(ColorSpace::new_srgb()),
-            );
-            let draw = |canvas: &Canvas| {
+        *ALPHAS[self.index()][format].get_or_init(|| {
+            let pixel = self.drawn_pixel(color_type, 1, |canvas| {
                 let mut paint = Paint::default();
                 paint.set_anti_alias(false);
                 paint.set_color4f(
@@ -360,34 +378,117 @@ impl RenderingEngine {
                     canvas
                         .draw_rect(Rect::from_xywh(0.0, 0.0, 1.0, 1.0), &paint);
                 }
-            };
-            let read = ImageInfo::new(
-                (1, 1),
-                ColorType::RGBAF32,
-                AlphaType::Premul,
-                Some(ColorSpace::new_srgb()),
-            );
-            let mut pixels = [0u8; 16];
-            match self {
-                // `Surface::read_pixels` does not read a Graphite page.
-                Self::Graphite => {
-                    graphite::probe(&info, draw, &read, &mut pixels).ok()?
-                }
-                Self::CPU | Self::GPU => {
-                    let mut surface = self
-                        .make_surface(&info, &ExportOptions::default())
-                        .ok()?;
-                    draw(surface.canvas());
-                    let stride = read.min_row_bytes();
-                    surface
-                        .read_pixels(&read, &mut pixels, stride, (0, 0))
-                        .then_some(())?
-                }
-            }
-            Some(f32::from_le_bytes([
-                pixels[12], pixels[13], pixels[14], pixels[15],
-            ]))
+            })?;
+            Some(pixel[3])
         })
+    }
+
+    /// Whether one opaque draw of [`HELD_BY_F32_ONLY`] on one pixel of an
+    /// `F32` page [`CLEAR_FREE`] pixels square reads back with that `f32`'s
+    /// bits exactly; asked once per engine, with the first `F32` question
+    /// [`Self::can_composite`] is asked, and remembered. False where the
+    /// engine cannot make or read the page.
+    ///
+    /// The CPU keeps it. Graphite on Metal does not: the pixel reads back
+    /// 0.0999755859375, the half float nearest 0.1, because Skia's SkSL
+    /// generator for Metal writes every half as an MSL `half` -- the fragment
+    /// output is `half4 sk_FragColor` and every texture is sampled as
+    /// `texture2d<half>` -- and it reads no setting that would widen them.
+    /// Blending happens at the attachment's precision, so the sixty-layer
+    /// probe cannot see it.
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+    // Re-check: cargo test graphite_is_refused_f32_while_metal_draws_half
+    // with the patched Graphite bindings; it fails once a Graphite F32 draw
+    // keeps its colour
+    //
+    // `SkSLMetalCodeGenerator.cpp` declares `half4 sk_FragColor
+    // [[color(0)]]` (line 3291) and reads no `fForceHighPrecision`, which
+    // the GLSL, SPIR-V and WGSL generators honour. Worked around by refusing
+    // `F32` on Graphite here, so no canvas reaches it; keeping F32 on Graphite
+    // needs that generator patched, which #558 tracks.
+    fn keeps_f32_colour(&self) -> bool {
+        static KEPT: [OnceLock<bool>; 3] = [const { OnceLock::new() }; 3];
+        *KEPT[self.index()].get_or_init(|| {
+            let pixel =
+                self.drawn_pixel(ColorType::RGBAF32, CLEAR_FREE, |canvas| {
+                    let mut paint = Paint::default();
+                    paint.set_anti_alias(false);
+                    paint.set_color4f(
+                        Color4f::new(
+                            HELD_BY_F32_ONLY,
+                            HELD_BY_F32_ONLY,
+                            HELD_BY_F32_ONLY,
+                            1.0,
+                        ),
+                        &ColorSpace::new_srgb(),
+                    );
+                    canvas.clear(Color::TRANSPARENT);
+                    canvas
+                        .draw_rect(Rect::from_xywh(0.0, 0.0, 1.0, 1.0), &paint);
+                });
+            pixel.is_some_and(|pixel| {
+                pixel[..3].iter().all(|channel| {
+                    channel.to_bits() == HELD_BY_F32_ONLY.to_bits()
+                })
+            })
+        })
+    }
+
+    /// The premultiplied `F32` channels of the top-left pixel `draw` leaves on
+    /// a `side` by `side` sRGB page of this engine in `color_type`, or `None`
+    /// where the engine cannot make or read the page.
+    fn drawn_pixel(
+        &self,
+        color_type: ColorType,
+        side: i32,
+        draw: impl FnOnce(&Canvas),
+    ) -> Option<[f32; 4]> {
+        let info = ImageInfo::new(
+            (side, side),
+            color_type,
+            AlphaType::Premul,
+            Some(ColorSpace::new_srgb()),
+        );
+        let read = ImageInfo::new(
+            (1, 1),
+            ColorType::RGBAF32,
+            AlphaType::Premul,
+            Some(ColorSpace::new_srgb()),
+        );
+        let mut pixels = [0u8; 16];
+        match self {
+            // `Surface::read_pixels` does not read a Graphite page.
+            Self::Graphite => {
+                graphite::probe(&info, draw, &read, &mut pixels).ok()?
+            }
+            Self::CPU | Self::GPU => {
+                let mut surface =
+                    self.make_surface(&info, &ExportOptions::default()).ok()?;
+                draw(surface.canvas());
+                let stride = read.min_row_bytes();
+                surface
+                    .read_pixels(&read, &mut pixels, stride, (0, 0))
+                    .then_some(())?
+            }
+        }
+        let channel = |i: usize| {
+            f32::from_le_bytes([
+                pixels[4 * i],
+                pixels[4 * i + 1],
+                pixels[4 * i + 2],
+                pixels[4 * i + 3],
+            ])
+        };
+        Some([channel(0), channel(1), channel(2), channel(3)])
+    }
+
+    /// This engine's slot in the probes' per-engine caches.
+    fn index(&self) -> usize {
+        match self {
+            Self::CPU => 0,
+            Self::GPU => 1,
+            Self::Graphite => 2,
+        }
     }
 
     pub fn make_surface(
@@ -612,23 +713,69 @@ mod tests {
         }
     }
 
-    /// Graphite takes `F32`, where it composites in float, and not `F16`,
-    /// where it lands further from the arithmetic than the CPU's `F16`.
+    /// The CPU keeps one draw's `F32` colour to the bit, so the probe that
+    /// refuses Graphite `F32` passes the engine that does keep it.
+    #[test]
+    fn the_cpu_keeps_a_drawn_f32_colour_to_the_bit() {
+        assert!(RenderingEngine::CPU.keeps_f32_colour());
+        assert_eq!(
+            RenderingEngine::CPU
+                .drawn_pixel(ColorType::RGBAF32, CLEAR_FREE, |canvas| {
+                    let mut paint = Paint::default();
+                    paint.set_color4f(
+                        Color4f::new(HELD_BY_F32_ONLY, 0.0, 0.0, 1.0),
+                        &ColorSpace::new_srgb(),
+                    );
+                    canvas
+                        .draw_rect(Rect::from_xywh(0.0, 0.0, 1.0, 1.0), &paint);
+                })
+                .map(|pixel| pixel[0].to_bits()),
+            Some(HELD_BY_F32_ONLY.to_bits())
+        );
+    }
+
+    /// Graphite takes neither float format on Metal. It blends `F32` in float,
+    /// within [`FLOAT_COMPOSITING`] of the arithmetic, yet narrows one draw's
+    /// colour to a half float, so it is refused `F32`; and its `F16` lands
+    /// further from the arithmetic than the CPU's `F16`.
     #[cfg(all(meo_graphite, feature = "metal"))]
     #[test]
-    fn graphite_takes_f32_and_leaves_f16_to_the_cpu() {
+    fn graphite_is_refused_f32_while_metal_draws_half() {
         assert!(RenderingEngine::Graphite.selectable());
         let error = |engine: RenderingEngine, color_type| {
             (engine.composited(color_type).expect("a reading") - SIXTY_LAYERS)
                 .abs()
         };
-        // Further than the CPU in `F32` and taken all the same, which is the
-        // case a rule of "no worse than the CPU" would refuse.
+        // Blending alone would take it: within the tolerance, if further from
+        // the arithmetic than the CPU.
+        assert!(
+            error(RenderingEngine::Graphite, ColorType::RGBAF32)
+                < FLOAT_COMPOSITING
+        );
         assert!(
             error(RenderingEngine::Graphite, ColorType::RGBAF32)
                 > error(RenderingEngine::CPU, ColorType::RGBAF32)
         );
-        assert!(RenderingEngine::Graphite.can_composite(ColorType::RGBAF32));
+        // One draw does not keep its colour: it comes back as the half float
+        // nearest 0.1. 0.1 is 1.6 times 2^-4, and a half's ten-bit mantissa
+        // holds 1.6 to 1638/1024, so the half is 1638 / 2^14.
+        let nearest_half = 1638.0 / f32::from(1u16 << 14);
+        assert_eq!(
+            RenderingEngine::Graphite
+                .drawn_pixel(ColorType::RGBAF32, CLEAR_FREE, |canvas| {
+                    let mut paint = Paint::default();
+                    paint.set_color4f(
+                        Color4f::new(HELD_BY_F32_ONLY, 0.0, 0.0, 1.0),
+                        &ColorSpace::new_srgb(),
+                    );
+                    canvas
+                        .draw_rect(Rect::from_xywh(0.0, 0.0, 1.0, 1.0), &paint);
+                })
+                .map(|pixel| pixel[0]),
+            Some(nearest_half)
+        );
+        assert!(!RenderingEngine::Graphite.keeps_f32_colour());
+        assert!(!RenderingEngine::Graphite.can_composite(ColorType::RGBAF32));
         for color_type in [ColorType::RGBAF16, ColorType::RGBAF16Norm] {
             // In float, so a tolerance alone would take it.
             assert!(
