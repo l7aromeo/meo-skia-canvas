@@ -30,8 +30,12 @@ libstdc++ is the one that hides: it was invisible behind glibc until glibc was
 fixed. gcc-toolset links its own newer libstdc++ statically and leaves only
 baseline symbols dynamic, which is what keeps the number low -- that behaviour
 is load-bearing, not incidental. `build.yml` asserts both after every Linux
-build, and a separate job loads the published Lambda layer and renders through
-it.
+build, then loads that build in AlmaLinux 8 and renders through it, and a
+separate job loads the published Lambda layer and renders through it. Each of
+those loads, and each job's test step, names the binary the job built, and the
+two loads fail if the addon they loaded is any other file: an installed
+platform package outranks `lib/skia.node`, so a bare `require` tests the
+published binary instead.
 
 ## Skia is built from a patched source
 
