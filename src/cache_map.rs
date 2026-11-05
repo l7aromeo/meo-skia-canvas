@@ -11,14 +11,20 @@
 //! against an adversary who can choose keys to collide.
 //!
 //! So these maps are for keys the crate builds from fonts and styles, not
-//! for keys taken from untrusted input as such: a map keyed by bytes an
-//! outside party chooses -- a URL, a request, the contents of a file being
-//! decoded -- stays a `std` map with SipHash. The one exception is a map
-//! that holds no more than a fixed number of keys which are themselves
-//! SipHash digests of such input, taken with keys chosen at random, as the
-//! runs kept for drawing in `node::typography` are: what such a key will be
-//! cannot be worked out ahead, and a collision among them costs at most a
-//! probe through that many entries.
+//! for keys taken from untrusted input as such. What decides the hash for a
+//! key made from bytes an outside party chooses -- a URL, a request, the
+//! contents of a file being decoded, a drawn input's pixels -- is what a
+//! collision can cost:
+//!
+//! - Where a collision lengthens a probe that later lookups pay -- runs sharing
+//!   a hash chained one behind another, as the runs kept for drawing in
+//!   `node::typography` are -- or where an entry a key finds is taken without
+//!   checking it, the hash is SipHash with keys chosen at random: a `std` map,
+//!   or digests taken that way.
+//! - Where the entries are bounded and one is taken only once what it was made
+//!   from is the new input byte for byte, as the results of `context::kept`
+//!   are, these hashers' seeding per process is enough: a collision forced from
+//!   outside costs that comparison and a miss, never a wrong answer.
 
 use std::{
     borrow::Borrow,

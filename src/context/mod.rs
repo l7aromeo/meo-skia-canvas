@@ -33,6 +33,7 @@ pub(crate) mod exact_blur;
 pub(crate) mod exact_blur_gpu;
 pub(crate) mod faint;
 pub(crate) mod fold;
+pub(crate) mod kept;
 pub mod layer;
 pub mod page;
 pub(crate) mod run_mask;
